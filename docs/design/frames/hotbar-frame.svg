@@ -1,0 +1,49 @@
+<svg viewBox="0 0 360 130" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Hotbar tactical corner-bracket frame</title>
+<desc>A wide dark panel outline with four glowing forged-steel corner brackets and a faint full-perimeter hairline, each bracket elbow marked by a small beveled rivet chip.</desc>
+<defs>
+<linearGradient id="bracketGrad" x1="0" y1="0" x2="1" y2="1">
+  <stop offset="0%" stop-color="#1B3A47"/>
+  <stop offset="45%" stop-color="#4FA8D8"/>
+  <stop offset="58%" stop-color="#9EDBF5"/>
+  <stop offset="100%" stop-color="#2C5A6E"/>
+</linearGradient>
+<filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+  <feGaussianBlur stdDeviation="2.6"/>
+</filter>
+</defs>
+
+<!-- faint full-perimeter hairline -->
+<rect x="4" y="4" width="352" height="122" fill="none" stroke="#2D3744" stroke-width="1" opacity="0.65"/>
+
+<!-- glow pass (blurred duplicate behind the crisp brackets) -->
+<g opacity="0.55" filter="url(#softGlow)" fill="#4FA8D8">
+  <polygon points="14,14 56,14 56,19 19,19 19,56 14,56"/>
+  <polygon points="346,14 304,14 304,19 341,19 341,56 346,56"/>
+  <polygon points="14,116 56,116 56,111 19,111 19,74 14,74"/>
+  <polygon points="346,116 304,116 304,111 341,111 341,74 346,74"/>
+</g>
+
+<!-- crisp forged-steel brackets -->
+<g fill="url(#bracketGrad)">
+  <polygon points="14,14 56,14 56,19 19,19 19,56 14,56"/>
+  <polygon points="346,14 304,14 304,19 341,19 341,56 346,56"/>
+  <polygon points="14,116 56,116 56,111 19,111 19,74 14,74"/>
+  <polygon points="346,116 304,116 304,111 341,111 341,74 346,74"/>
+</g>
+
+<!-- beveled rivet chip at each elbow -->
+<g>
+  <polygon points="19,19 24,16 27,19 24,22" fill="#0D1117"/>
+  <polygon points="19.6,19 23.6,16.8 26,19 23.6,21.2" fill="#9EDBF5" opacity="0.55"/>
+
+  <polygon points="341,19 336,16 333,19 336,22" fill="#0D1117"/>
+  <polygon points="340.4,19 336.4,16.8 334,19 336.4,21.2" fill="#9EDBF5" opacity="0.55"/>
+
+  <polygon points="19,111 24,114 27,111 24,108" fill="#0D1117"/>
+  <polygon points="19.6,111 23.6,113.2 26,111 23.6,108.8" fill="#9EDBF5" opacity="0.55"/>
+
+  <polygon points="341,111 336,114 333,111 336,108" fill="#0D1117"/>
+  <polygon points="340.4,111 336.4,113.2 334,111 336.4,108.8" fill="#9EDBF5" opacity="0.55"/>
+</g>
+</svg>

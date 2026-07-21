@@ -1,0 +1,10 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <!-- POSTURE — cracked shield, amber/gold fracture-glow -->
+  <path d="M50 8 L76 20 L74 52 Q74 76 50 92 Q26 76 26 52 L24 20 Z" fill="#5C4310"/>
+  <path d="M50 12 L71 22 L69 51 Q69 72 50 86 Q31 72 31 51 L29 22 Z" fill="#C79522"/>
+  <!-- fracture crack through shield -->
+  <polyline points="46,14 52,30 44,40 54,52 42,64 50,82" fill="none" stroke="#3A2A08" stroke-width="2.2" stroke-linecap="round"/>
+  <polyline points="46,14 52,30 44,40 54,52 42,64 50,82" fill="none" stroke="#FFE08A" stroke-width="1" stroke-linecap="round" opacity="0.9"/>
+  <!-- chip broken off the rim -->
+  <path d="M69 51 Q74 52 74 46 L71 44 Q68 47 69 51 Z" fill="#0D1117"/>
+</svg>

@@ -1,0 +1,16 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <!-- QI — fractured spirit-shard cluster, frost-blue crack-glow -->
+  <polygon points="50,8 66,38 58,58 42,58 34,38" fill="#1F4A55"/>
+  <polygon points="50,12 62,38 55,55 45,55 38,38" fill="#A3E0EB"/>
+  <!-- chip -->
+  <polygon points="55,20 60,26 54,28 52,22" fill="#0D1117"/>
+  <!-- internal crack -->
+  <polyline points="50,14 48,30 53,36 47,46 51,54" fill="none" stroke="#E8FBFF" stroke-width="1.4" stroke-linecap="round" opacity="0.9"/>
+  <!-- lower shard fragment -->
+  <polygon points="42,60 58,60 54,78 46,78" fill="#163A43"/>
+  <polygon points="44,60 56,60 53,74 47,74" fill="#7FC9D8"/>
+  <!-- floating energy fragments -->
+  <polygon points="20,50 26,44 30,50 26,56" fill="#A3E0EB" opacity="0.75"/>
+  <polygon points="76,60 81,55 85,60 81,65" fill="#A3E0EB" opacity="0.6"/>
+  <polygon points="68,30 72,26 75,31 72,35" fill="#E8FBFF" opacity="0.8"/>
+</svg>
