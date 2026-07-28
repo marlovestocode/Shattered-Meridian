@@ -88,12 +88,11 @@ Constants.Debug = {
 	-- request's Player.UserId server-side -- never from being hidden or from Studio-gating. See
 	-- DevMenuSystem.lua's header for the full authorization contract.
 	DevMenu = {
-		-- Roblox UserIds allowed to open the dev menu and use its actions. Empty by default (fails
-		-- closed -- nobody is authorized until this is explicitly populated). Add your own UserId
-		-- (and any testers') here, e.g. [123456789] = true. Never guess or invent a UserId.
-		AuthorizedUserIds = {
-			[3888090557] = true,
-		} :: { [number]: boolean },
+		-- AuthorizedUserIds moved to ServerScriptService/Server/Config/AdminConfig.lua. Everything in
+		-- this file replicates to every client, so the roster of privileged accounts was readable by
+		-- anyone with an instance explorer. Authorization never rested on that list being secret
+		-- (DevMenuSystem re-checks server-side and always has), but publishing it bought nothing.
+		-- DevMenuClient now asks the server whether to start instead of reading a local list.
 
 		-- Seconds a dev-menu status message (DevMenuClient.lua) stays visible before auto-clearing.
 		StatusClearDelaySeconds = 3,
@@ -692,20 +691,12 @@ Constants.CharacterCreation = {
 		Hollowborn = { MeridianFlow = 3, Vitality = -1 },
 	} :: { [string]: { [string]: number } },
 
-	-- DEPRECATED -- superseded by the three-layer RaceEpithets/RaceWorldLines/RaceCostLines below
-	-- (docs/design/intro-redesign-handoff.md Phase C). Kept only until the Onboarding rebuild
-	-- (Phase E) migrates RaceSelect.lua's last reference off it, the same "keep it compiling until
-	-- the sweep lands" contract Tokens.lua's own deprecated aliases follow. Do not add a fifth race
-	-- here -- extend the three tables below instead.
-	RaceHooks = {
-		Human = "No starting lean -- the choice is entirely yours.",
-		Firmborn = "Starts leaning toward sustained defense (Posture).",
-		Rivenkin = "Starts leaning toward harder, faster strikes (Might).",
-		Hollowborn = "Starts leaning toward a deeper energy well, at the cost of a thinner body "
-			.. "(Meridian Flow, less Vitality).",
-	} :: { [string]: string },
+	-- RaceHooks (deprecated) removed: it was retained only until "the Onboarding rebuild (Phase E)
+	-- migrates RaceSelect.lua's last reference off it." Phase E has landed and a full-tree search
+	-- finds zero remaining readers, so the table is gone rather than left as a second, staler answer
+	-- to the same question the three tables below now own.
 
-	-- Three-layer replacement for RaceHooks above (docs/design/intro-redesign-figma-spec.md's Origin
+	-- Three-layer replacement for the former RaceHooks (docs/design/intro-redesign-figma-spec.md's Origin
 	-- card + docs/design/intro-redesign-handoff.md Phase C/E's progressive-disclosure card). Every
 	-- unselected Origin card shows Name + Epithet + WorldLine + CostLine; the selected card also
 	-- expands to the real per-attribute numbers (RacePrefills), which these three deliberately never
@@ -902,10 +893,10 @@ Constants.BugReport = {
 	StorageRetryMaxAttempts = 3,
 	StorageRetryBaseBackoffSeconds = 1,
 
-	-- Versioned DataStore names -- the first DataStoreService usage in this codebase, so a version
-	-- suffix is established here as the convention for any future schema change.
-	DataStoreName = "BugReports_v1",
-	OrderedDataStoreName = "BugReportsByTime_v1",
+	-- DataStore names moved to ServerScriptService/Server/Config/StorageConfig.lua (they replicated
+	-- to clients from here, where they are useless to legitimate code and pure reconnaissance
+	-- otherwise). The version-suffix convention this table established lives on there. Retry/backoff
+	-- tuning above stays here -- only the store identifiers moved.
 
 	-- Seconds a submission confirmation/error message stays visible before the form auto-clears its
 	-- status line -- same idea as Constants.Debug.DevMenu.StatusClearDelaySeconds.
@@ -931,14 +922,10 @@ Constants.Moderation = {
 	StorageRetryMaxAttempts = 3,
 	StorageRetryBaseBackoffSeconds = 1,
 
-	-- Versioned, separate from BugReport's own DataStore -- a ban record and a bug report share
-	-- nothing schema-wise and have no reason to share a store.
-	BanDataStoreName = "PlayerBans_v1",
+	-- BanDataStoreName moved to Server/Config/StorageConfig.lua -- see the note in Constants.BugReport
+	-- above for why every DataStore name left this file.
 
-	-- Suspected-cheater manual flagging -- its own store, separate from Ban's: a flag is reversible
-	-- (RemoveAsync on Unflag) where a ban is permanent-by-default, and the two have no reason to
-	-- share a schema or a key namespace.
-	SuspectedCheaterDataStoreName = "SuspectedCheaters_v1",
+	-- SuspectedCheaterDataStoreName moved to Server/Config/StorageConfig.lua, same reasoning.
 }
 
 -- Custom shift-lock camera tunables (Client/Camera/ShiftLockCamera.lua) -- combat-philosophy.md's

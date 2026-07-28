@@ -3,10 +3,13 @@
 	DevMenuSystem.lua
 
 	Owns: server-side authorization and request handling for whitelist-gated developer tooling
-	(Constants.Debug.DevMenu). Every request re-checks
-	Constants.Debug.DevMenu.AuthorizedUserIds[player.UserId] itself, regardless of what the client
-	believes -- DevMenuClient.lua's own whitelist read is a local-only UX convenience (skip
-	connecting input for a non-dev), never trusted as authorization. Unlike Logger.lua, this System
+	(Constants.Debug.DevMenu for tunables; Server/Config/AdminConfig.lua for the whitelist itself).
+	Every request re-checks AdminConfig.AuthorizedUserIds[player.UserId] itself, regardless of what
+	the client believes. That list deliberately lives in a server-only module rather than in
+	Constants.lua, which replicates -- see AdminConfig.lua's own header. DevMenuClient.lua therefore
+	no longer holds a local copy to gate itself with; it asks this System instead, over the
+	GetSidebarStats RemoteFunction it already calls at startup, and a rejection from any handler here
+	is the authorization answer. Unlike Logger.lua, this System
 	is NOT Studio-gated -- Constants.Debug.DevMenu's own header is explicit that dev tooling is
 	meant to work in live servers too; safety comes entirely from the whitelist plus this System's
 	own re-check on every request, never from RunService:IsStudio() or from being hidden.
@@ -40,6 +43,7 @@ local HitboxTuning = require(script.Parent.Parent.Combat.HitboxTuning)
 local FlightTuning = require(script.Parent.Parent.DevMenu.FlightTuning)
 local BugReportSystem = require(script.Parent.BugReportSystem)
 local ModerationSystem = require(script.Parent.ModerationSystem)
+local AdminConfig = require(script.Parent.Parent.Config.AdminConfig)
 
 local DevMenuSystem = {}
 
@@ -59,8 +63,10 @@ local DevMenuConfig = Constants.Debug.DevMenu
 -- per-Heartbeat polling remote) would be the kind of case that legitimately earns its own bucket.
 local rateLimiter = RateLimiter.New(Constants.NetworkBudget.MaxRemoteCallsPerSecondPerPlayer)
 
+-- Reads Server/Config/AdminConfig.lua, not Constants -- the whitelist deliberately lives in a
+-- server-only module so it never replicates to clients. See AdminConfig.lua's own header.
 local function isAuthorized(player: Player): boolean
-	return DevMenuConfig.AuthorizedUserIds[player.UserId] == true
+	return AdminConfig.AuthorizedUserIds[player.UserId] == true
 end
 
 -- Shared auth + rate-limit precondition, unifying what every one of the 15 (now 17) handlers below

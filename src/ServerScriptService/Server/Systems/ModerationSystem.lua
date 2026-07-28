@@ -44,6 +44,7 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
+local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
 
 local ModerationSystem = {}
 
@@ -468,8 +469,8 @@ local function attachChannel(channel: Instance): ()
 end
 
 function ModerationSystem.Init(): ()
-	banStore = DataStoreService:GetDataStore(Config.BanDataStoreName)
-	suspicionStore = DataStoreService:GetDataStore(Config.SuspectedCheaterDataStoreName)
+	banStore = DataStoreService:GetDataStore(StorageConfig.BanDataStoreName)
+	suspicionStore = DataStoreService:GetDataStore(StorageConfig.SuspectedCheaterDataStoreName)
 
 	-- Backgrounded, not called inline -- this module boots FIRST in Main.server.lua's whole sequence
 	-- (see this module's own header), so a synchronous ListKeysAsync page-through here would delay

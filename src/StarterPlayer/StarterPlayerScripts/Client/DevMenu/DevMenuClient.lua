@@ -5,9 +5,11 @@
 	Owns: the local player's dev-menu UX -- keybind toggle (resolved through
 	Client/Input/KeybindManager.lua rather than a hardcoded key, same as CombatClient.lua) and
 	translating the DevMenu screen's SpawnDummyRequested/SpawnBotRequested signals into
-	NetworkBridge RemoteFunction calls. The whitelist read below is a LOCAL-ONLY convenience (skip
-	connecting input for a non-dev so the menu never even appears) -- never trusted as real
-	authorization. DevMenuSystem.lua re-checks Constants.Debug.DevMenu.AuthorizedUserIds
+	NetworkBridge RemoteFunction calls. This module holds NO copy of the admin whitelist: it asks the
+	server whether to start at all (see requestServerAuthorization below), because that list lives in
+	ServerScriptService/Server/Config/AdminConfig.lua and no longer replicates to clients. Gating here
+	remains a UX convenience either way -- skip connecting input for a non-dev so the menu never even
+	appears -- and is never trusted as real authorization: DevMenuSystem.lua re-checks the whitelist
 	server-side on every request regardless of what this module decides, per
 	luau-coding-standards.md's server/client split rule.
 
@@ -417,16 +419,36 @@ local function invokeAndReport(handle: DevMenuHandle, invoke: () -> unknown, des
 	setStatus(handle, message)
 end
 
-function DevMenuClient.Start(handle: DevMenuHandle): ()
+-- Asks the SERVER whether this client may run the dev menu, replacing a former local read of
+-- Constants.Debug.DevMenu.AuthorizedUserIds. That list now lives in
+-- ServerScriptService/Server/Config/AdminConfig.lua and no longer replicates -- see that file's
+-- header for why publishing the admin roster to every client was worth removing.
+--
+-- Deliberately reuses the existing DevMenu_GetSidebarStats RemoteFunction rather than adding an
+-- "am I an admin" remote: every DevMenuSystem handler already runs the same
+-- checkDevMenuPreconditions gate and rejects unauthorized callers identically, so a rejection here
+-- IS the authorization answer -- and this is a call startDevMenu() already makes for the sidebar
+-- header anyway. The extra round-trip is one per join, admin or not.
+--
+-- Yields (InvokeServer), which is exactly why Start() below runs it inside task.spawn: Start() is
+-- called synchronously partway through Main.client.lua's boot sequence, and blocking here would
+-- stall every client module after it for every player in the game.
+local function requestServerAuthorization(): boolean
+	local ok, resultOrError = pcall(function()
+		return NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.GetSidebarStats):InvokeServer()
+	end)
+	if not ok then
+		logger:debug("DevMenu authorization check errored", { errorMessage = tostring(resultOrError) })
+		return false
+	end
+	local result = resultOrError :: Types.DevMenuSidebarStatsResult?
+	return result ~= nil and result.Success == true
+end
+
+local function startDevMenu(handle: DevMenuHandle): ()
 	local localPlayer = Players.LocalPlayer
 	local sidebar = handle.Sidebar
 	local content = handle.Content
-
-	-- Local-only UX gate -- see file header. Never trusted as authorization.
-	if Constants.Debug.DevMenu.AuthorizedUserIds[localPlayer.UserId] ~= true then
-		logger:debug("DevMenuClient not started: local player not on whitelist", { userId = localPlayer.UserId })
-		return
-	end
 
 	logger:info("DevMenuClient.Start called", { userId = localPlayer.UserId })
 
@@ -1157,6 +1179,28 @@ function DevMenuClient.Start(handle: DevMenuHandle): ()
 	end)
 
 	logger:debug("DevMenuClient bindings connected")
+end
+
+-- Public entry point, called once from Main.client.lua's boot sequence.
+--
+-- Returns immediately and does the real work on its own thread, because the authorization check is
+-- now a server round-trip (see requestServerAuthorization above) and Main.client.lua calls this
+-- synchronously with several more client modules queued behind it -- BugReportClient and
+-- AnnouncementClient among them, both of which every player needs. Blocking the boot sequence on a
+-- dev-tooling handshake would delay real gameplay UI for everyone to gate a menu almost nobody can
+-- open.
+--
+-- Consequence worth knowing: for an authorized admin, the DevMenuToggle keybind binds one round-trip
+-- after join rather than instantly, so a keypress in the first few hundred milliseconds of a session
+-- does nothing. Acceptable for dev tooling; the alternative was keeping the whitelist replicated.
+function DevMenuClient.Start(handle: DevMenuHandle): ()
+	task.spawn(function()
+		if not requestServerAuthorization() then
+			logger:debug("DevMenuClient not started: server did not authorize this client")
+			return
+		end
+		startDevMenu(handle)
+	end)
 end
 
 return DevMenuClient

@@ -1,0 +1,43 @@
+--!strict
+--[[
+	StorageConfig.lua
+
+	Owns: every DataStore/OrderedDataStore NAME this game persists to, in one place.
+
+	Lives under ServerScriptService/Server/Config/ rather than ReplicatedStorage/Shared/Constants.lua
+	for the same reason AdminConfig.lua does: these names were replicated to every client, where they
+	are useless to legitimate code (DataStoreService is server-only -- a client cannot open a store
+	even knowing its exact name) and are pure reconnaissance for anyone else. Moving them out costs
+	nothing and removes the disclosure. See AdminConfig.lua's header for the fuller reasoning.
+
+	Naming convention, established by BugReport (the first DataStoreService usage in this codebase)
+	and followed by every store since: a version suffix on every name, bumped on any schema change
+	that isn't backward-compatible, so a migration can read the old store and write the new one
+	rather than corrupting live records in place.
+
+	Does not own: retry/backoff policy, autosave cadence, page sizes, or any other persistence
+	TUNING -- those stay in Constants.lua alongside the rest of each System's tunables, because they
+	are ordinary numbers a designer or engineer may want to adjust and they disclose nothing. Only the
+	store IDENTIFIERS moved here. Also does not own the DataStore calls themselves; each owning System
+	(PlayerDataSystem, BugReportSystem, ModerationSystem) still opens and uses its own store.
+]]
+
+local StorageConfig = {}
+
+-- Canonical player-progression persistence (Server/Systems/PlayerDataSystem.lua) -- the single
+-- DataStore-backed owner every other System's player-state reads/writes eventually route through.
+StorageConfig.PlayerDataStoreName = "PlayerProfiles_v5"
+
+-- Bug reports (Server/Systems/BugReportSystem.lua). The ordered store exists purely to index reports
+-- by submission time for the dev menu's Reports tab; the main store holds the records themselves.
+StorageConfig.BugReportDataStoreName = "BugReports_v1"
+StorageConfig.BugReportOrderedDataStoreName = "BugReportsByTime_v1"
+
+-- Moderation (Server/Systems/ModerationSystem.lua). Two separate stores, deliberately: a ban record
+-- and a suspected-cheater flag share no schema, and a flag is reversible (RemoveAsync on Unflag)
+-- where a ban is permanent by default. Both are also separate from BugReport's store above -- a ban
+-- and a bug report have no reason to share a key namespace.
+StorageConfig.BanDataStoreName = "PlayerBans_v1"
+StorageConfig.SuspectedCheaterDataStoreName = "SuspectedCheaters_v1"
+
+return StorageConfig

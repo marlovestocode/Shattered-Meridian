@@ -32,6 +32,9 @@
 				"Combat": {
 					"$path": "src/ServerScriptService/Server/Combat"
 				},
+				"Config": {
+					"$path": "src/ServerScriptService/Server/Config"
+				},
 				"DevMenu": {
 					"$path": "src/ServerScriptService/Server/DevMenu"
 				},

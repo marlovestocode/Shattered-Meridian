@@ -78,6 +78,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
+local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
 
 local PlayerDataSystem = {}
 
@@ -594,7 +595,7 @@ local function runAutosaveLoop(): ()
 end
 
 function PlayerDataSystem.Init(): ()
-	dataStore = DataStoreService:GetDataStore(Config.DataStoreName)
+	dataStore = DataStoreService:GetDataStore(StorageConfig.PlayerDataStoreName)
 
 	Players.PlayerAdded:Connect(onPlayerAdded)
 	Players.PlayerRemoving:Connect(onPlayerRemoving)

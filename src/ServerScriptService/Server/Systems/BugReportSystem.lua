@@ -34,6 +34,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
+local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
 
 local BugReportSystem = {}
 
@@ -451,8 +452,8 @@ local function seedOpenReportCount(): ()
 end
 
 function BugReportSystem.Init(): ()
-	mainStore = DataStoreService:GetDataStore(Config.DataStoreName)
-	orderedStore = DataStoreService:GetOrderedDataStore(Config.OrderedDataStoreName)
+	mainStore = DataStoreService:GetDataStore(StorageConfig.BugReportDataStoreName)
+	orderedStore = DataStoreService:GetOrderedDataStore(StorageConfig.BugReportOrderedDataStoreName)
 
 	-- Backgrounded, not called inline -- Main.server.lua's boot sequence is a straight-line chain of
 	-- System.Init() calls with no task.spawn of its own, so a synchronous full-OrderedDataStore
