@@ -130,6 +130,43 @@ function Movement.IsMoving(state: CombatState): boolean
 	return humanoid.MoveDirection.Magnitude >= Constants.Combat.MovementInputMagnitudeThreshold
 end
 
+-- Force-ends any in-flight Dash/Slide burst the moment its owner stops being in a state where
+-- committed movement is legal -- stunned, posture-broken, ragdolled, or pinned as the air-combo
+-- attacker. Returns true if it actually ended something (callers log/act on the transition).
+--
+-- This is a real defensive exploit fix, not tidiness. ComputeDesiredWalkSpeed evaluates the Dash and
+-- Slide tiers ABOVE the hit-slow tier, and consults stunExpiry/postureBrokenExpiry only inside the
+-- Sprint branch, so a burst that was legal when it started kept its full multiplier through a hit
+-- that landed a frame later: press Slide, get hit, and the resolver still returned base * 2.0 for the
+-- rest of the window. Constants.Combat.HitSlowMultiplier is documented as "the 'can't just run away'
+-- factor" and was defeatable on reaction for the price of one movement cooldown. Nothing else in the
+-- codebase cleared these two fields either -- only resetTransientCombatState (respawn) and
+-- setActiveAction (starting a different action) ever zeroed them.
+--
+-- Ends the windows rather than merely reordering the resolver tiers: reordering would restore the
+-- burst the instant the slow/stun lapsed, so a hit would pause the escape instead of cancelling it.
+-- Deliberately does NOT touch the cooldown fields -- the burst is being taken away, but it was still
+-- spent, so it must not become free to re-press.
+function Movement.EndMovementBursts(state: CombatState, now: number): boolean
+	local vitals = state.Vitals
+	local interrupted = now < vitals.stunExpiry
+		or now < vitals.postureBrokenExpiry
+		or now < vitals.ragdollExpiry
+		or now < state.AirCombo.airComboChaseExpiry
+	if not interrupted then
+		return false
+	end
+
+	local movement = state.Movement
+	if movement.dashWindowExpiry == 0 and movement.slideWindowExpiry == 0 then
+		return false
+	end
+
+	movement.dashWindowExpiry = 0
+	movement.slideWindowExpiry = 0
+	return true
+end
+
 -- The single, unified WalkSpeed resolver: given a player's current combat/movement state, returns
 -- the one speed that should be in effect this tick. Every effect that wants to drive WalkSpeed
 -- (air-combo chase lock, dash burst, hit-slow clip, sprint) is composed HERE in a fixed priority

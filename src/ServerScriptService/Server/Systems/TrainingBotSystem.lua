@@ -262,11 +262,23 @@ local function onTrainingBotKilled(botModel: Model, ownerPlayer: Player, killerP
 	})
 
 	task.delay(Constants.Debug.TrainingBot.RespawnDelay, function()
-		if not ownerPlayer.Parent then
-			return -- owner left before the respawn timer elapsed
-		end
-
+		-- Despawn the dead bot's model UNCONDITIONALLY, before the owner-left check below -- only the
+		-- RESPAWN is conditional on the owner still being here, never the cleanup.
+		--
+		-- Ordering matters and this used to leak: this handler clears botAIStates[botModel] up front
+		-- (so a second kill can't double-schedule), which means onPlayerRemoving's own sweep over
+		-- botAIStates no longer sees this bot and cannot clean it up either. With the despawn sitting
+		-- below an early `return` for a departed owner, a player who disconnected inside the
+		-- RespawnDelay window left the model permanently orphaned -- along with BotCombat's botStates
+		-- entry, botsByOwner (retaining the departed Player as a live dict key), BotAnimator's
+		-- tracksByBot entry, and, if the bot died mid-block, a per-bot RunService.Heartbeat connection
+		-- that goes on reasserting animation weight on a dead track forever. Nothing else in the
+		-- codebase would ever have collected it.
 		CombatSystem.DespawnTrainingBot(botModel)
+
+		if not ownerPlayer.Parent then
+			return -- owner left before the respawn timer elapsed; the despawn above still ran
+		end
 
 		local newModel, failureReason = CombatSystem.SpawnTrainingBot(ownerPlayer, aiState.spawnCFrame)
 		if not newModel then

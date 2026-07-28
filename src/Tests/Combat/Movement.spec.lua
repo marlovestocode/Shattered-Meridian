@@ -410,4 +410,83 @@ return function()
 			expect(state.Movement.sprinting).to.equal(false)
 		end)
 	end)
+
+	-- Regression coverage for the "a slide/dash escapes a hit" defensive exploit -- see
+	-- Movement.EndMovementBursts' own header. ComputeDesiredWalkSpeed ranks the Dash and Slide tiers
+	-- above hit-slow, so without this cancellation a burst that began a frame before a hit kept its
+	-- full multiplier and HitSlowMultiplier ("the can't just run away factor") was defeatable on
+	-- reaction.
+	describe("Movement.EndMovementBursts", function()
+		local now = 100
+
+		it("leaves an active slide alone when nothing is interrupting", function()
+			local state = makeState({ slideWindowExpiry = now + 1 })
+			expect(Movement.EndMovementBursts(state, now)).to.equal(false)
+			expect(state.Movement.slideWindowExpiry).to.equal(now + 1)
+		end)
+
+		for _, case in ipairs({
+			{ Field = "stunExpiry", Label = "stunned" },
+			{ Field = "postureBrokenExpiry", Label = "posture-broken" },
+			{ Field = "ragdollExpiry", Label = "ragdolled" },
+		}) do
+			it(`ends an active slide when the player is {case.Label}`, function()
+				local state = makeState({ slideWindowExpiry = now + 1, [case.Field] = now + 1 })
+				expect(Movement.EndMovementBursts(state, now)).to.equal(true)
+				expect(state.Movement.slideWindowExpiry).to.equal(0)
+			end)
+
+			it(`ends an active dash when the player is {case.Label}`, function()
+				local state = makeState({ dashWindowExpiry = now + 1, [case.Field] = now + 1 })
+				expect(Movement.EndMovementBursts(state, now)).to.equal(true)
+				expect(state.Movement.dashWindowExpiry).to.equal(0)
+			end)
+		end
+
+		it("ends an active burst while pinned as the air-combo attacker", function()
+			local state = makeState({ dashWindowExpiry = now + 1, airComboChaseExpiry = now + 1 })
+			expect(Movement.EndMovementBursts(state, now)).to.equal(true)
+			expect(state.Movement.dashWindowExpiry).to.equal(0)
+		end)
+
+		it("drops the burst's speed tier immediately, falling through to hit-slow", function()
+			-- The end-to-end property the fix exists for: before it, this same state resolved to
+			-- base * SlideSpeedMultiplier (a faster-than-normal escape) despite the player having just
+			-- been hit and stunned.
+			local state = makeState({
+				slideWindowExpiry = now + 1,
+				stunExpiry = now + 1,
+				hitSlowExpiry = now + 1,
+			})
+			Movement.EndMovementBursts(state, now)
+			-- Bare BaseWalkSpeed, no BonusWalkSpeed term: the fixture has humanoid = nil, so
+			-- ComputeDesiredWalkSpeed's attribute reads are skipped and bonus/multiplier stay 0/1 --
+			-- the same convention the ComputeDesiredWalkSpeed tests above already use.
+			local base = Constants.Combat.BaseWalkSpeed
+			expect(Movement.ComputeDesiredWalkSpeed(state, now)).to.equal(base * Constants.Combat.HitSlowMultiplier)
+		end)
+
+		it("does not refund the cooldown -- the burst was still spent", function()
+			local state = makeState({
+				slideWindowExpiry = now + 1,
+				slideCooldownExpiry = now + 5,
+				movementCooldownExpiry = now + 5,
+				stunExpiry = now + 1,
+			})
+			Movement.EndMovementBursts(state, now)
+			expect(state.Movement.slideCooldownExpiry).to.equal(now + 5)
+			expect(state.Movement.movementCooldownExpiry).to.equal(now + 5)
+		end)
+
+		it("reports no work done when no burst is active, even while interrupted", function()
+			local state = makeState({ stunExpiry = now + 1 })
+			expect(Movement.EndMovementBursts(state, now)).to.equal(false)
+		end)
+
+		it("is idempotent across repeated ticks", function()
+			local state = makeState({ slideWindowExpiry = now + 1, stunExpiry = now + 2 })
+			expect(Movement.EndMovementBursts(state, now)).to.equal(true)
+			expect(Movement.EndMovementBursts(state, now)).to.equal(false)
+		end)
+	end)
 end

@@ -807,6 +807,21 @@ local function clearSuspendedReferencesTo(goneAttackerPlayer: Player): ()
 	end
 end
 
+-- Drops a departing player from every OTHER player's recentOpponents map -- the same reverse-scan
+-- shape as clearLockOnReferencesTo/clearSuspendedReferencesTo above, and the one that was missing.
+--
+-- Functionally the stale entries were harmless (refreshInCombatFromProximity looks the opponent up in
+-- combatStates, finds nil, and continues), but they are real retention: a recentOpponents key is a
+-- strong reference to a departed Player instance and everything it transitively holds. Entries are
+-- otherwise only evicted when NEW opponents arrive and push the oldest out
+-- (Constants.Combat.MaxTrackedOpponents), so a player who stops fighting keeps their stale set for
+-- the rest of the server's life. On a long-running server with heavy churn that never releases.
+local function clearRecentOpponentReferencesTo(gonePlayer: Player): ()
+	for _, state in pairs(combatStates) do
+		state.recentOpponents[gonePlayer] = nil
+	end
+end
+
 local function confirmDeath(player: Player, state: CombatState): ()
 	if state.deathConfirmed then
 		return
@@ -2615,6 +2630,13 @@ local function onHeartbeat(deltaTime: number): ()
 		-- dash burst, hit-slow clip, and sprint -- can never race a stale restore into clobbering
 		-- one another. See Movement.ComputeDesiredWalkSpeed for the priority order. Only writes the
 		-- property when it actually needs to change.
+		-- Cancel any committed Dash/Slide burst whose owner just got stunned/posture-broken/ragdolled
+		-- BEFORE resolving WalkSpeed below -- otherwise the burst's own tier outranks the hit-slow tier
+		-- and a hit fails to stop an escape. See Movement.EndMovementBursts' own header.
+		if Movement.EndMovementBursts(state, now) then
+			logger:debug("Movement burst interrupted", { player = player.Name, userId = player.UserId })
+		end
+
 		if state.humanoid then
 			local desiredWalkSpeed = Movement.ComputeDesiredWalkSpeed(state, now)
 			if state.humanoid.WalkSpeed ~= desiredWalkSpeed then
@@ -2938,6 +2960,7 @@ local function onPlayerRemoving(player: Player): ()
 
 	clearLockOnReferencesTo(player)
 	clearSuspendedReferencesTo(player)
+	clearRecentOpponentReferencesTo(player)
 	combatStates[player] = nil
 	attackRateLimiter:Clear(player)
 	defensiveRateLimiter:Clear(player)

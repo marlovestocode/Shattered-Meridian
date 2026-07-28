@@ -692,6 +692,22 @@ end
 -- to the player and let their own held WASD immediately fight the still-active AlignPosition, same
 -- "float down, never reach them" class of bug HoldAloft's own header describes for a live body that
 -- isn't gravity-cancelled/controller-quieted). No-op if the character isn't currently ragdolled.
+--
+-- It DOES, however, restore the Humanoid's saved PlatformStand/AutoRotate/GettingUp before dropping
+-- the entry, and that is load-bearing rather than cosmetic. `active[character]` is the only record
+-- of the pre-ragdoll values (enterRagdoll captures them there), so clearing it without restoring
+-- destroyed them -- and enterRigidHold, which the caller invokes immediately afterward via HoldAloft,
+-- snapshots `humanoid.PlatformStand` fresh. It therefore recorded the RAGDOLLED value (true) as
+-- though it were the player's normal state, and exitRigidHold faithfully restored `true` when the
+-- hold ended, leaving the player permanently limp -- unable to walk until they died or an admin ran
+-- ResetCombatState, since ChangeState(GettingUp) cannot override a true PlatformStand. Restoring
+-- here means the ragdoll -> rigid-hold transition carries the ORIGINAL pre-ragdoll state forward
+-- instead of laundering the ragdoll's own state into it.
+--
+-- Safe despite the header's warning above, because this is not exitRagdoll's full reversal: network
+-- ownership deliberately stays server-side, and the caller (AirCombo's air-tech path) re-applies
+-- enterRigidHold's quieting synchronously in the same frame with no yield in between, so no physics
+-- step observes the momentarily-restored controller.
 function RagdollController.RecoverJointsOnly(character: Model): ()
 	local entry = active[character]
 	if not entry then
@@ -705,6 +721,16 @@ function RagdollController.RecoverJointsOnly(character: Model): ()
 			motor.Enabled = true
 		end
 	end
+
+	local humanoid = entry.humanoid
+	if humanoid.Parent then
+		humanoid.PlatformStand = entry.savedPlatformStand
+		humanoid.AutoRotate = entry.savedAutoRotate
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.GettingUp, true)
+		-- No ChangeState(GettingUp) here, unlike exitRagdoll -- standing the body up is exactly what
+		-- this function exists NOT to do; the caller is about to re-pin it.
+	end
+
 	active[character] = nil
 end
 
