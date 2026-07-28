@@ -1,0 +1,19 @@
+<svg viewBox="0 0 28 28" width="28" height="28" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Attribute stepper decrement glyph</title>
+<desc>A 9x2 pixel bar with 1px rounded ends, centered in the stepper button's 28x28 box, drawn in currentColor so the button owns the color and its disabled state.</desc>
+
+<!-- SCALE: 1 SVG unit = 1 CSS pixel, in the BUTTON's 28x28 box rather than the icon set's 100x100
+     box, because the glyph's optical centering inside the button is part of the asset. A 9x2 bar
+     dropped into a 100-unit box would have to be re-centered by hand at integration time.
+
+     currentColor rather than a literal hex: the design drives this from the button's own color
+     ([text-sub] normally, 20% opacity when disabled). Baking #8a7fa0 in would make the disabled
+     state impossible without a second asset.
+
+     rx=1 on a 2px-tall bar is the only rounded thing in this chrome. It is in the design and it is
+     right here: at 2px tall a butt-ended bar reads as a 9x2 rectangle of grit rather than as a
+     deliberate minus sign. This is the exception, not license to round anything else.
+
+     See frames/hex-lattice-tile.svg for this batch's comment-style note. -->
+<rect x="9.5" y="13" width="9" height="2" rx="1" fill="currentColor"/>
+</svg>

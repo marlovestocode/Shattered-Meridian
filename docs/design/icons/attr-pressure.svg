@@ -1,0 +1,33 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Pressure attribute glyph</title>
+<desc>An open chevron driving downward onto a horizontal plane that buckles into a V directly beneath its point, with the plane's left arm broken clear of the impact, in the Pressure mauve.</desc>
+
+<!-- See attr-vitality.svg for the full six-glyph system.
+
+     OUTPUT FAMILY, half two. Pressure is outgoing POSTURE damage, which is not "how hard you hit"
+     but "how much of their guard you take." So unlike Might, the wedge here is not the whole story;
+     the surface it lands on is, and that surface is drawn giving way. This is the most direct
+     statement of the game's own fracture language anywhere in the six.
+
+     Deliberately a matched pair with Might rather than an unrelated mark. Might and Pressure ARE
+     siblings in the combat model, health damage against posture damage, per
+     Constants.AttributeEffects; making their glyphs a pair is the design being accurate, not the
+     set being lazy. They stay tellable apart by axis (horizontal against vertical), weight (solid
+     against outline), support (floating against landed), and hue (bronze against mauve). -->
+
+<!-- The plane was carried at 0.8px in the first cut and went pale at 16px, leaving the chevron
+     floating over almost nothing. Both parts now sit at 1px, and the chevron is wider, so the whole
+     mark holds the same weight as its five siblings on the 16px raster proof. -->
+
+<!-- driving chevron, left open so it never reads as Might's solid head -->
+<path d="M 24,10 L 50,50 L 76,10"
+      fill="none" stroke="#9868a0" stroke-width="6.25" stroke-linejoin="miter" stroke-linecap="butt"/>
+
+<!-- the plane, buckling into a V under the point. The left arm stops at 30 and the buckle picks up
+     at 40: that 10-unit (1.6px) gap is this glyph's one break, placed on the failing side rather
+     than on the wedge that causes it. -->
+<g stroke="#9868a0" stroke-width="6.25" stroke-linejoin="miter" stroke-linecap="butt">
+  <line x1="8" y1="74" x2="30" y2="74"/>
+  <polyline points="40,74 50,88 60,74 92,74" fill="none"/>
+</g>
+</svg>

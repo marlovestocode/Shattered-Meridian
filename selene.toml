@@ -1,0 +1,11 @@
+std = "roblox+testez"
+
+# Generate roblox.yml locally with `selene generate-roblox-std` before first lint --
+# the generated std file is machine-specific output, not checked in.
+#
+# The `+testez` segment chains testez.toml (checked in, alongside this file) onto the generated
+# Roblox std so `describe`/`it`/`expect`/`beforeEach`/... resolve in src/Tests/**/*.spec.lua.
+# Without it, selene reported every spec's TestEZ globals as undefined_variable -- 1158 errors
+# across the suite, which drowned real findings and made `selene src/` useless as a gate (the
+# production tree under src/ReplicatedStorage, src/ServerScriptService and src/StarterPlayer is,
+# and should stay, 0 errors / 0 warnings).

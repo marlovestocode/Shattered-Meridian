@@ -1,0 +1,29 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Fractured qi shard icon</title>
+<desc>A cluster of frost-blue spirit-shards, the main shard split by a layered glowing fracture.</desc>
+<defs>
+<linearGradient id="qiGrad" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0%" stop-color="#153138"/>
+<stop offset="45%" stop-color="#5FB6C8"/>
+<stop offset="58%" stop-color="#CFF5FB"/>
+<stop offset="100%" stop-color="#2D6270"/>
+</linearGradient>
+<filter id="qiGlow" x="-50%" y="-50%" width="200%" height="200%">
+<feGaussianBlur stdDeviation="3"/>
+</filter>
+<filter id="qiGlowSoft" x="-50%" y="-50%" width="200%" height="200%">
+<feGaussianBlur stdDeviation="1.2"/>
+</filter>
+</defs>
+
+<polygon points="50,8 66,38 58,58 42,58 34,38" fill="#12282D"/>
+<polygon points="50,12 62,38 55,55 45,55 38,38" fill="url(#qiGrad)"/>
+
+<polyline points="50,14 48,30 53,36 47,46 51,54" fill="none" stroke="#7FD9EA" stroke-width="4.2" stroke-linecap="round" opacity="0.35" filter="url(#qiGlow)"/>
+<polyline points="50,14 48,30 53,36 47,46 51,54" fill="none" stroke="#CFF5FB" stroke-width="2" stroke-linecap="round" opacity="0.55" filter="url(#qiGlowSoft)"/>
+<polyline points="50,14 48,30 53,36 47,46 51,54" fill="none" stroke="#F5FEFF" stroke-width="0.8" stroke-linecap="round" opacity="0.95"/>
+
+<polygon points="42,60 58,60 54,78 46,78" fill="#0F262B"/>
+<polygon points="44,60 56,60 53,74 47,74" fill="url(#qiGrad)"/>
+
+</svg>

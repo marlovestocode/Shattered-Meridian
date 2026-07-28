@@ -1,0 +1,26 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Fortitude attribute glyph</title>
+<desc>A rampart trapezoid planted on a wide base, broken once across its top edge, holding a level chord and a dim body of fill below it, forming Vitality's pool-family twin in the Fortitude blue.</desc>
+
+<!-- See attr-vitality.svg for the full six-glyph system: the 6.25 units per pixel grid, the three
+     pairs, the one-break signature, and the white-mask export note.
+
+     WHY A TRAPEZOID, AND WHY WIDER AT THE BOTTOM. Fortitude is posture capacity, which is to say
+     staying standing. Its pool-family twin Vitality is a rhombus balanced on a single point; this
+     is its opposite, a mass planted on a wide footing. The base being wider than the top is also
+     what keeps it clear of the brief's no-shields line: a shield narrows and points downward, this
+     spreads and sits down. -->
+
+<!-- No fill below the chord, and the vessel drawn large in the box. See attr-vitality.svg for why
+     both of those changed after the 16px raster proof; the two pool glyphs have to move together
+     or they stop reading as a pair. -->
+
+<!-- rampart: top edge 30,18 to 70,18; base 14,82 to 86,82. The break is centered in the top edge,
+     walked from 30 to 44, stopped, and resumed from 56 to 70. That break is roughly a third of the
+     top edge, which is what it takes to still register at 16px. -->
+<path d="M 44,18 L 30,18 L 14,82 L 86,82 L 70,18 L 56,18"
+      fill="none" stroke="#6890a8" stroke-width="6.25" stroke-linejoin="miter" stroke-linecap="butt"/>
+
+<!-- level chord, inset from the sloped walls -->
+<line x1="26" y1="54" x2="74" y2="54" stroke="#6890a8" stroke-width="6.25" stroke-linecap="butt"/>
+</svg>

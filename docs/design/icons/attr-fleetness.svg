@@ -1,0 +1,30 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Fleetness attribute glyph</title>
+<desc>Three parallel shear strokes raked to the right at uneven lengths, the middle and longest one snapped through at its midpoint, reading as displacement rather than as a runner, in the Fleetness green.</desc>
+
+<!-- See attr-vitality.svg for the full six-glyph system.
+
+     THE ODD PAIR, half two; MeridianFlow is the other. Fleetness is movement speed plus the
+     Dash / Sprint / Slide cooldown trim, so the mark is displacement itself, not a body that moves.
+     Three raked strokes: universally legible as speed, and the only glyph in the set with no
+     enclosed area at all, which is what makes it unmistakable at 16px beside five marks that all
+     enclose something.
+
+     RAKE MATCHES MIGHT. All three strokes lean right at the same run-to-rise of about 0.55, the
+     same direction Might's wedge travels. Movement and force point the same way in this set;
+     nothing in the six ever travels left.
+
+     UNEVEN LENGTHS ON PURPOSE. Three equal strokes read as a hatching swatch or a signal-strength
+     meter. Staggering them medium, long, short makes it read as motion trailing off. -->
+
+<!-- Scaled up slightly against the 16px raster proof so the three strokes span the box the same way
+     the other five marks do. This one and Might were already the strongest reads at real size; the
+     change is only about matching their footprint to the rest of the set. -->
+<g stroke="#508870" stroke-width="6.25" stroke-linecap="butt">
+  <line x1="14" y1="74" x2="38" y2="30"/>
+  <!-- longest stroke, snapped through at its midpoint: the one break -->
+  <line x1="44" y1="80" x2="55.3" y2="59.4"/>
+  <line x1="59.7" y1="51.6" x2="71" y2="31"/>
+  <line x1="74" y1="68" x2="90" y2="39"/>
+</g>
+</svg>

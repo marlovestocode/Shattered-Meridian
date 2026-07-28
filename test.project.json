@@ -1,0 +1,74 @@
+{
+	"name": "ShatteredMeridianTests",
+	"tree": {
+		"$className": "DataModel",
+		"ReplicatedStorage": {
+			"Shared": {
+				"$path": "src/ReplicatedStorage/Shared"
+			},
+			"Packages": {
+				"$path": "Packages"
+			},
+			"DevPackages": {
+				"$path": "DevPackages"
+			}
+		},
+		"StarterPlayer": {
+			"StarterPlayerScripts": {
+				"Client": {
+					"$className": "Folder",
+					"Combat": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Combat"
+					},
+					"FX": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/FX"
+					}
+				}
+			}
+		},
+		"ServerScriptService": {
+			"Server": {
+				"$className": "Folder",
+				"Combat": {
+					"$path": "src/ServerScriptService/Server/Combat"
+				},
+				"DevMenu": {
+					"$path": "src/ServerScriptService/Server/DevMenu"
+				},
+				"Systems": {
+					"$className": "Folder",
+					"CombatSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/CombatSystem.lua"
+					},
+					"DevMenuSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/DevMenuSystem.lua"
+					},
+					"TrainingBotSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/TrainingBotSystem.lua"
+					},
+					"BugReportSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/BugReportSystem.lua"
+					},
+					"AdminActionSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/AdminActionSystem.lua"
+					},
+					"ModerationSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/ModerationSystem.lua"
+					},
+					"PlayerDataSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/PlayerDataSystem.lua"
+					},
+					"CharacterCreationSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/CharacterCreationSystem.lua"
+					},
+					"RespawnSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/RespawnSystem.lua"
+					}
+				}
+			},
+			"Tests": {
+				"$path": "src/Tests"
+			}
+		}
+	}
+}

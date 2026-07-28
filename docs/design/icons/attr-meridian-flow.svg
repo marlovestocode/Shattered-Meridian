@@ -1,0 +1,41 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Meridian Flow attribute glyph</title>
+<desc>A single pointy-top hexagonal node with three spokes running off it at uneven angles, the lowest spoke severed from the node it should feed, in the Meridian Flow violet.</desc>
+
+<!-- See attr-vitality.svg for the full six-glyph system.
+
+     CANON. world-bible.md: the Meridian is the original unified qi meridian network, torn apart at
+     the setting's founding event, and the Meridian Particle is a surviving FRAGMENT of that network
+     carried in every qi-user. So this glyph is a network node, not a flame or a spiral: one
+     surviving cell of a lattice that used to be continuous, with a line running off toward
+     something no longer connected. That severed spoke is both this glyph's one-break signature and
+     its lore statement, which is why it is the lowest spoke rather than an arbitrary one. It reads
+     as the connection inward that the Shattering cost.
+
+     Constants.AttributeEffects notes Qi is inert today ("not active yet"), so nothing here should
+     imply a live system. A disconnected node is exactly the right picture of a dormant one.
+
+     HEX ORIENTATION. Pointy-top, 38 wide by 44 tall, the same 0.86 width-to-height ratio as
+     frames/hex-lattice-tile.svg's hexagon. This glyph and the panel's lattice fill are the same
+     shape at two scales, so the attribute that means "the network" and the surface that IS the
+     network read as one idea. That is the only cross-reference in the set, and it is intentional. -->
+
+<!-- SIZED OFF A 16px RASTER PROOF, not off how it looked at 64px. The first cut used a smaller hex
+     with longer, thinner (0.8px) spokes and it was the worst of the six at real size: the node's
+     interior hole closed up to almost nothing and the spokes blurred into the body, leaving a
+     violet smudge. The hex is now larger with a genuinely open center, and the spokes are shorter
+     and carry the same 1px weight as the node, so nothing in the mark is thinner than the grid can
+     resolve. -->
+
+<!-- node: pointy-top hexagon centered at 50,50, 44 wide by 52 tall -->
+<polygon points="50,24 72,37 72,63 50,76 28,63 28,37"
+         fill="none" stroke="#7868b8" stroke-width="6.25" stroke-linejoin="miter"/>
+
+<!-- spokes: short, and at the same weight as the node so neither one mushes into the other -->
+<g stroke="#7868b8" stroke-width="6.25" stroke-linecap="butt">
+  <line x1="28" y1="37" x2="12" y2="28"/>
+  <line x1="72" y1="50" x2="92" y2="50"/>
+  <!-- severed: begins at 84 rather than at the node's own bottom vertex of 76 -->
+  <line x1="50" y1="84" x2="50" y2="95"/>
+</g>
+</svg>

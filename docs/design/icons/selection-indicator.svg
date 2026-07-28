@@ -1,0 +1,37 @@
+<svg viewBox="0 0 28 28" width="28" height="28" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Origin card selection indicator (selected state)</title>
+<desc>A 16x16 ring at 1px in violet accent containing a 6x6 filled dot, with a soft 6px bloom behind the dot, drawn inside a 28x28 box so the bloom has bleed room instead of clipping at the ring's own edge.</desc>
+
+<!-- SCALE: 1 SVG unit = 1 CSS pixel. The RING is the design's 16x16 element and occupies 6..22 on
+     both axes. The extra 6px of margin on every side exists only so the dot's bloom can fall off to
+     zero inside the artboard. Export the whole 28x28: cropping to 16x16 clips the glow into a hard
+     square edge, which is the single most common way this kind of asset gets ruined on the way to a
+     texture.
+
+     THIS FILE IS THE SELECTED STATE ONLY. Unselected is not a second asset; it is the same ring
+     with its stroke in [text-dim] (#4a4460) and both the dot and the bloom absent. The design fades
+     the dot in over 0.2s, so the dot and bloom have to be independently addressable at runtime
+     anyway.
+
+     Circles, in a house style whose Shape Language says to avoid perfect rounded shapes: this is
+     deliberate. It is a radio control, and a chamfered or faceted radio reads as decoration rather
+     than as a state you can trust. The surrounding card carries the angular language; the control
+     inside it stays a control.
+
+     See frames/hex-lattice-tile.svg for this batch's comment-style note. -->
+
+<defs>
+  <filter id="dotBloom" x="-150%" y="-150%" width="400%" height="400%">
+    <feGaussianBlur stdDeviation="2.2"/>
+  </filter>
+</defs>
+
+<!-- bloom: the CSS box-shadow 0 0 6px [qi] sitting behind the dot -->
+<circle cx="14" cy="14" r="3" fill="#9a88c8" opacity="0.85" filter="url(#dotBloom)"/>
+
+<!-- ring: 16px outer diameter with a 1px stroke, so r = 7.5 -->
+<circle cx="14" cy="14" r="7.5" fill="none" stroke="#9a88c8" stroke-width="1"/>
+
+<!-- dot: 6x6 -->
+<circle cx="14" cy="14" r="3" fill="#9a88c8"/>
+</svg>

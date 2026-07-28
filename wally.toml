@@ -1,0 +1,22 @@
+[package]
+name = "shattered-meridian/game"
+version = "0.1.0"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+
+[dependencies]
+# Locked UI framework per ui-ux-philosophy.md -- do not swap without revisiting that decision.
+Fusion = "elttob/fusion@0.3.0"
+
+[dev-dependencies]
+# Test framework for src/Tests -- run headlessly via run-in-roblox (see aftman.toml), never shipped
+# to a live server realm.
+TestEZ = "roblox/testez@0.4.1"
+
+# After `wally install`, always run:
+#   rojo sourcemap default.project.json -o sourcemap.json
+#   wally-package-types --sourcemap sourcemap.json Packages/
+# Wally's generated link files (Packages/Fusion.lua etc.) only `return require(...)` -- luau-lsp
+# can't chase `export type` declarations through that indirection, so every package's types show
+# as "Unknown type" until wally-package-types patches the link file to re-export them directly.
+# wally install overwrites that patch, so it has to be re-run after every install.

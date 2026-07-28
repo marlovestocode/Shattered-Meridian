@@ -1,0 +1,37 @@
+# Rojo build/sync output
+*.rbxlx
+sourcemap.json
+
+# Wally-installed packages -- regenerate with `wally install`, don't hand-edit
+/Packages/*
+!/Packages/.gitkeep
+/ServerPackages/*
+!/ServerPackages/.gitkeep
+/DevPackages/*
+!/DevPackages/.gitkeep
+
+# Toolchain caches
+.stylua-cache/
+
+# Generated Selene standard library -- machine-specific output of
+# `selene generate-roblox-std`, regenerated locally before first lint. selene.toml's own comment
+# already stated this was not checked in; it just was never listed here.
+roblox.yml
+
+# Hand-rolled source backup that predates this repository having any git history. Superseded by
+# version control itself -- delete it once you're satisfied the history covers what it held.
+src.zip
+
+# Toolchain binaries -- versions are pinned in aftman.toml, install via `aftman install`
+# rather than committing platform-specific executables.
+rojo.exe
+wally.exe
+selene.exe
+stylua.exe
+wally-package-types.exe
+run-in-roblox.exe
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/

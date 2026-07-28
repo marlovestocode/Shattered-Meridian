@@ -1,0 +1,66 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Battle-worn dagger health icon</title>
+<desc>A crimson dagger with a single glowing crack running down the center of the blade, small broken shards floating away from the edge, and a blade that seats into the crossguard, grip, and pommel below.</desc>
+<defs>
+<linearGradient id="bladeGrad" x1="0" y1="0" x2="1" y2="0">
+<stop offset="0%" stop-color="#5C1519"/>
+<stop offset="45%" stop-color="#C43038"/>
+<stop offset="58%" stop-color="#E85A5F"/>
+<stop offset="100%" stop-color="#8A2228"/>
+</linearGradient>
+<linearGradient id="gripGrad" x1="0" y1="0" x2="1" y2="0">
+<stop offset="0%" stop-color="#1A0507"/>
+<stop offset="50%" stop-color="#3A0E12"/>
+<stop offset="100%" stop-color="#1A0507"/>
+</linearGradient>
+<filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+<feGaussianBlur stdDeviation="3.5"/>
+</filter>
+<filter id="softGlowMid" x="-50%" y="-50%" width="200%" height="200%">
+<feGaussianBlur stdDeviation="1.4"/>
+</filter>
+</defs>
+
+<!-- Slight left tilt (2026-07-24 design tweak): reads as a blade caught mid-swing rather than
+     standing perfectly upright/static. Rotated as one group around the icon's own center so every
+     layer (blade, crack glow, shards, crossguard, grip, pommel) stays aligned to itself. -->
+<g transform="rotate(-10 50 50)">
+<!-- Outline pass (2026-07-24): the outer silhouette layer of blade/crossguard/pommel darkened to
+     near-black (#1A0507, already this file's own darkest grip tone) and widened so the icon reads
+     as one crisp, high-contrast shape at small hotbar size instead of a soft maroon-on-maroon edge
+     that only separated from the bright blade gradient, not from an arbitrary busy background. -->
+<polygon points="50,6 60,32 57,63 50,75 43,63 40,32" fill="#1A0507"/>
+<polygon points="50,11 56,32 53,59 50,67 47,59 44,32" fill="url(#bladeGrad)"/>
+
+<polyline points="50,11 48.2,19.1 51.9,24.6 47.2,33.6 50.9,40.8 46.3,48 50,55.3 48.2,61.6 50,67" fill="none" stroke="#FF6B6B" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" opacity="0.35" filter="url(#softGlow)"/>
+
+<polyline points="50,11 48.2,19.1 51.9,24.6 47.2,33.6 50.9,40.8 46.3,48 50,55.3 48.2,61.6 50,67" fill="none" stroke="#FFA8A8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" opacity="0.55" filter="url(#softGlowMid)"/>
+
+<polyline points="50,11 48.2,19.1 51.9,24.6 47.2,33.6 50.9,40.8 46.3,48 50,55.3 48.2,61.6 50,67" fill="none" stroke="#FFE8E8" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
+
+<g opacity="0.85">
+<polygon points="66,21 71,18 70,23 66,24.5" fill="#0D1117"/>
+<polygon points="66.5,21.3 69.8,19.3 69.2,22.6 66.7,23.4" fill="#C43038" opacity="0.5"/>
+</g>
+<g opacity="0.85">
+<polygon points="33,34 27,33 28,39 33,38.3" fill="#0D1117"/>
+<polygon points="33,34.5 28,33.6 28.9,37.9 33,37.2" fill="#C43038" opacity="0.5"/>
+</g>
+<g opacity="0.75">
+<polygon points="63,58 68,62 63,64 60,59" fill="#0D1117"/>
+<polygon points="63,58.9 66.6,61.8 63,63.3 61.3,59.6" fill="#C43038" opacity="0.5"/>
+</g>
+
+<polygon points="27,76 73,76 69,83 50,80 31,83" fill="#1A0507"/>
+<polygon points="29,76 71,76 68,81.5 50,79 32,81.5" fill="#5C171C"/>
+<polygon points="29,76 71,76 70,78 50,77.5 30,78" fill="#8A2A30"/>
+
+<rect x="45.5" y="82" width="9" height="14" rx="1.5" fill="url(#gripGrad)"/>
+<line x1="46" y1="86" x2="54" y2="86" stroke="#0D1117" stroke-width="1"/>
+<line x1="46" y1="90" x2="54" y2="90" stroke="#0D1117" stroke-width="1"/>
+<line x1="47" y1="83" x2="47" y2="95" stroke="#5C171C" stroke-width="0.7" opacity="0.6"/>
+
+<polygon points="43,96 57,96 55,100 45,100" fill="#1A0507"/>
+<polygon points="44,96.3 56,96.3 54.5,99.3 45.5,99.3" fill="#6B1E24"/>
+</g>
+</svg>

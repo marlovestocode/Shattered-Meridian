@@ -1,0 +1,65 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Vitality attribute glyph</title>
+<desc>A rhombus vessel outline with one deliberate break in its upper-right edge, holding a level chord and a dim body of fill below it, forming the pool family's closed-vessel-with-a-measured-level mark in the Vitality red.</desc>
+
+<!-- THE SIX ATTRIBUTE GLYPHS ARE ONE SYSTEM. Read this block once; the other five carry only their
+     own specifics and point back here.
+
+     COMMENT STYLE: XML forbids a double hyphen inside a comment, so these use single hyphens for
+     prose breaks and name design tokens in brackets, [qi] and [text-dim], rather than with their
+     CSS leading double hyphen. See frames/hex-lattice-tile.svg for why that matters in this repo.
+
+     SCALE. The viewBox is the icon set's standard 100x100, matching health/qi/posture.svg, but
+     every coordinate here is snapped to a 6.25-unit grid because these render at 16px:
+     100 / 16 = 6.25, so 6.25 units is exactly 1 rendered pixel. Primary strokes are 6.25 (1px) and
+     secondary detail is 5 (0.8px), the same 1px / 0.8px pair the rest of this redesign's chrome
+     uses (corner brackets at 1px, the divider diamond at 0.8px). Nothing is finer than 0.8px,
+     because 16px cannot resolve it.
+
+     FAMILIES. These are not six unrelated marks; they are three pairs, because the stat block
+     itself is three pairs (Constants.AttributeEffects):
+       POOL     Vitality and Fortitude. Closed outline, level chord, dim fill below it. They differ
+                by vessel: a rhombus balanced on a point (fragile) against a rampart planted on a
+                wide base (stable).
+       OUTPUT   Might and Pressure. Both a wedge. They differ by axis and weight: solid, horizontal,
+                travelling right for outgoing health damage, against an open outline driving down
+                into a surface that gives, for outgoing posture damage.
+       ODD      MeridianFlow and Fleetness. The network node and the shear lines. These two are
+                deliberately unlike everything else because they are unlike everything else
+                mechanically.
+
+     SIGNATURE. Each glyph carries exactly ONE break in one line, roughly 1.3px at render size. That
+     is this project's fracture language (health/qi/posture.svg's crack, hotbar-frame's chamfer)
+     compressed to the smallest gesture that still survives 16px. One break, never two: a second
+     would read as a broken icon rather than as a broken world.
+
+     SILHOUETTES, checked against each other at 16px: rhombus, rampart, spoked hex, right arrowhead,
+     down chevron on a notched line, diagonal hatch. No two share an outline.
+
+     COLOR AND EXPORT. Authored in the attribute's own hex so the file is a truthful spec you can
+     open in a browser. For upload, prefer exporting a WHITE version of each and tinting via
+     ImageColor3, the same discipline as ChamferedSurface.lua's masks and VitalIcon.lua's
+     IconAssetId branch. Six white masks survive a palette change; six colored PNGs do not.
+
+     NOT LITERAL, per the brief: no heart, no shield, no boot anywhere in the set. -->
+
+<!-- NO FILL BELOW THE CHORD. An earlier revision carried a dim body of fill under the level, which
+     looked correct at 64px and turned into a smudge in the middle of the mark at 16px, exactly
+     where the outline and the chord already are. A rasterized 16px proof settled it: outline plus
+     one crisp chord reads as a measured vessel; outline plus chord plus fill reads as mud. Same
+     removal was applied to Fortitude for the same reason.
+
+     The vessel is also drawn large in the box, corners at 8 and 92 rather than 14 and 86. Under-
+     filling the 16px box was the other thing the proof exposed: the marks sat visibly lighter than
+     the 10px abbreviation beside them, which is the one thing the brief says they must not do. -->
+
+<!-- vessel: rhombus with points at 50,8 / 92,50 / 50,92 / 8,50, drawn as an open path so the
+     upper-right edge carries the break. The edge is walked from 50,8 out to 56.7,14.7, stops, and
+     resumes at 64.3,22.3 to continue on to 92,50. -->
+<path d="M 64.3,22.3 L 92,50 L 50,92 L 8,50 L 50,8 L 56.7,14.7"
+      fill="none" stroke="#b06868" stroke-width="6.25" stroke-linejoin="miter" stroke-linecap="butt"/>
+
+<!-- level chord, sitting just below center and inset from the vessel wall so it never collides
+     with the outline stroke -->
+<line x1="27" y1="60" x2="73" y2="60" stroke="#b06868" stroke-width="6.25" stroke-linecap="butt"/>
+</svg>

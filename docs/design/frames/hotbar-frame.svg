@@ -1,0 +1,73 @@
+<svg viewBox="0 0 360 130" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Hotbar tactical corner-bracket frame (cut-corner revision)</title>
+<desc>A wide dark panel with a true chamfered (45-degree cut-corner) outline, matching the live in-game Hotbar panel's ChamferedSurface.lua silhouette, plus four forged-steel corner brackets whose own outer tips are nibbled with a matching smaller chamfer so the bracket-scale cut visually echoes the panel-scale cut. A bright diagonal accent marks each of the panel's four real cut corners; a faint full-perimeter hairline (now itself chamfered, not a plain rectangle) traces the rest of the edge; each bracket elbow keeps its beveled rivet chip.</desc>
+<defs>
+<linearGradient id="bracketGrad" x1="0" y1="0" x2="1" y2="1">
+  <stop offset="0%" stop-color="#1B3A47"/>
+  <stop offset="45%" stop-color="#4FA8D8"/>
+  <stop offset="58%" stop-color="#9EDBF5"/>
+  <stop offset="100%" stop-color="#2C5A6E"/>
+</linearGradient>
+<filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+  <feGaussianBlur stdDeviation="2.6"/>
+</filter>
+</defs>
+
+<!-- NOTE 2026-07-24: the comments in this file previously used the repo's Luau double-hyphen style,
+     which XML forbids inside a comment. That made this file unparseable as SVG (browsers, Inkscape
+     and every rasterizer reject it), so it could never actually have been exported. Rewritten with
+     single hyphens. No geometry, color or opacity value was touched in that fix. The separate
+     question of this asset's steel-blue palette now being off-spec against the violet/bronze
+     redesign is called out in the handoff notes, not silently changed here.
+
+     True chamfered panel outline (perimeter hairline), replacing the old plain rect, since the live
+     panel's own shape (Client/UI/ChamferedSurface.lua) is a cut-corner silhouette rather than a
+     rectangle. The chamfer is proportioned to read the same way at this illustrative scale as the
+     real 8px cut does against a 40 to 52px in-game tile. -->
+<path d="M 20,4 L 340,4 L 356,20 L 356,110 L 340,126 L 20,126 L 4,110 L 4,20 Z"
+      fill="none" stroke="#2D3744" stroke-width="1" opacity="0.65"/>
+
+<!-- bright accent on each of the panel's four real cut corners. Borders section: "higher importance:
+     brighter edge highlight." Calls out the chamfer as a deliberate forged seam rather than an
+     incidental miter. -->
+<g stroke="#4FA8D8" stroke-width="1.4" opacity="0.8" stroke-linecap="round">
+  <line x1="4" y1="20" x2="20" y2="4"/>
+  <line x1="340" y1="4" x2="356" y2="20"/>
+  <line x1="4" y1="110" x2="20" y2="126"/>
+  <line x1="340" y1="126" x2="356" y2="110"/>
+</g>
+
+<!-- glow pass (blurred duplicate behind the crisp brackets). Each bracket's own outer tip is now
+     nibbled with a small chamfer instead of a sharp square corner, so it echoes the panel's cut
+     language at bracket scale instead of implying a square corner that no longer exists underneath
+     it in-game. -->
+<g opacity="0.55" filter="url(#softGlow)" fill="#4FA8D8">
+  <polygon points="19,14 56,14 56,19 19,19 19,56 14,56 14,19"/>
+  <polygon points="341,14 304,14 304,19 341,19 341,56 346,56 346,19"/>
+  <polygon points="19,116 56,116 56,111 19,111 19,74 14,74 14,111"/>
+  <polygon points="341,116 304,116 304,111 341,111 341,74 346,74 346,111"/>
+</g>
+
+<!-- crisp forged-steel brackets -->
+<g fill="url(#bracketGrad)">
+  <polygon points="19,14 56,14 56,19 19,19 19,56 14,56 14,19"/>
+  <polygon points="341,14 304,14 304,19 341,19 341,56 346,56 346,19"/>
+  <polygon points="19,116 56,116 56,111 19,111 19,74 14,74 14,111"/>
+  <polygon points="341,116 304,116 304,111 341,111 341,74 346,74 346,111"/>
+</g>
+
+<!-- beveled rivet chip at each elbow (inner elbow corner, unaffected by the outer-tip nibble above) -->
+<g>
+  <polygon points="19,19 24,16 27,19 24,22" fill="#0D1117"/>
+  <polygon points="19.6,19 23.6,16.8 26,19 23.6,21.2" fill="#9EDBF5" opacity="0.55"/>
+
+  <polygon points="341,19 336,16 333,19 336,22" fill="#0D1117"/>
+  <polygon points="340.4,19 336.4,16.8 334,19 336.4,21.2" fill="#9EDBF5" opacity="0.55"/>
+
+  <polygon points="19,111 24,114 27,111 24,108" fill="#0D1117"/>
+  <polygon points="19.6,111 23.6,113.2 26,111 23.6,108.8" fill="#9EDBF5" opacity="0.55"/>
+
+  <polygon points="341,111 336,114 333,111 336,108" fill="#0D1117"/>
+  <polygon points="340.4,111 336.4,113.2 334,111 336.4,108.8" fill="#9EDBF5" opacity="0.55"/>
+</g>
+</svg>

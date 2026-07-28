@@ -1,0 +1,9 @@
+# Pins the studio toolchain so every machine (and CI) runs the same versions.
+# Run `aftman install` to sync. See development-workflow.md for how tooling changes get reviewed.
+[tools]
+rojo = "rojo-rbx/rojo@7.6.1"
+wally = "UpliftGames/wally@0.3.2"
+selene = "Kampfkarren/selene@0.31.0"
+stylua = "JohnnyMorganz/stylua@2.5.2"
+wally-package-types = "JohnnyMorganz/wally-package-types@1.6.2"
+run-in-roblox = "rojo-rbx/run-in-roblox@0.3.0"

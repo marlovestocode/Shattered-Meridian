@@ -1,0 +1,30 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Might attribute glyph</title>
+<desc>A solid arrowhead wedge travelling right, trailed by a short line that stops just short of reaching it, in the Might bronze.</desc>
+
+<!-- See attr-vitality.svg for the full six-glyph system.
+
+     OUTPUT FAMILY, half one. Might is outgoing HEALTH damage: the heavy, committed one. It is the
+     only glyph in the set carrying a solid fill as its primary form, and that weight is the point.
+     Beside its five siblings it should feel like the one with mass behind it.
+
+     A CHEVRON, NOT A TRIANGLE. The back edge is notched in to 54,50, so the mark is an arrowhead
+     with two arms rather than a filled pie slice. A solid triangle at 16px is a blob; two arms of
+     roughly 1.5px meeting at a point still reads as a direction.
+
+     Distinguished from its twin, Pressure, by axis, weight and support: this one is solid,
+     horizontal, and floats free, while that one is an open outline, vertical, and lands on a
+     surface. -->
+
+<!-- BACK NOTCH DEEPENED TO 62,50 after the 16px raster proof. With a shallower notch this glyph
+     carried visibly more ink than its five siblings and dominated the stat list, which is wrong for
+     a set of peers even when the attribute itself is the heavy one. The deeper notch thins both
+     arms and brings the total ink back in line while keeping the solid fill that is this glyph's
+     whole identity. -->
+
+<!-- wedge -->
+<polygon points="42,18 90,50 42,82 62,50" fill="#b89060"/>
+
+<!-- trailing line, stopping 10 units (1.6px) short of the wedge's back corners: the one break -->
+<line x1="8" y1="50" x2="32" y2="50" stroke="#b89060" stroke-width="6.25" stroke-linecap="butt"/>
+</svg>

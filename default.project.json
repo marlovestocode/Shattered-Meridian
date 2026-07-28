@@ -1,0 +1,66 @@
+{
+	"name": "ShatteredMeridian",
+	"tree": {
+		"$className": "DataModel",
+		"Players": {
+			"$properties": {
+				"CharacterAutoLoads": false
+			}
+		},
+		"ReplicatedStorage": {
+			"Shared": {
+				"$path": "src/ReplicatedStorage/Shared"
+			},
+			"Packages": {
+				"$path": "Packages"
+			}
+		},
+		"ServerScriptService": {
+			"Server": {
+				"$path": "src/ServerScriptService/Server"
+			}
+		},
+		"StarterPlayer": {
+			"$properties": {
+				"EnableMouseLockOption": false
+			},
+			"StarterCharacterScripts": {
+				"$path": "src/StarterPlayer/StarterCharacterScripts"
+			},
+			"StarterPlayerScripts": {
+				"Client": {
+					"$path": "src/StarterPlayer/StarterPlayerScripts/Client"
+				}
+			}
+		},
+		"Workspace": {
+			"Onboarding": {
+				"$className": "Folder",
+				"WakingThresholdSpawn": {
+					"$className": "SpawnLocation",
+					"$properties": {
+						"Position": { "Vector3": [0, 1000, 0] },
+						"Size": { "Vector3": [8, 1, 8] },
+						"Anchored": true,
+						"CanCollide": true,
+						"Transparency": 1,
+						"Enabled": false,
+						"Neutral": true
+					}
+				},
+				"MedianParadiseArrivalSpawn": {
+					"$className": "SpawnLocation",
+					"$properties": {
+						"Position": { "Vector3": [0, 5, 0] },
+						"Size": { "Vector3": [8, 1, 8] },
+						"Anchored": true,
+						"CanCollide": true,
+						"Transparency": 1,
+						"Enabled": true,
+						"Neutral": true
+					}
+				}
+			}
+		}
+	}
+}

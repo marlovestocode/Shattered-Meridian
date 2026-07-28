@@ -1,0 +1,27 @@
+<svg viewBox="0 0 60 69" width="60" height="69" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Hex lattice pattern tile</title>
+<desc>The single 60x69 repeat unit of the panel-fill lattice: one pointy-top hexagon outline in violet accent, hairline weight, no fill, fully contained inside the tile so the repeat is seamless with no stroke crossing a tile edge.</desc>
+
+<!-- COMMENT STYLE, read once and applied to every file in this batch: XML forbids a double hyphen
+     anywhere inside a comment, so these use single hyphens for prose breaks and name the design
+     tokens in brackets - [qi], [bronze], [border-lit] - rather than with their CSS leading double
+     hyphen. This is not a style preference; docs/design/frames/hotbar-frame.svg was an unparseable
+     SVG for exactly this reason (the repo's Luau comment habit leaking into XML) until it was
+     corrected in the same pass that added this file.
+
+     SCALE: 1 SVG unit = 1 CSS pixel, not the icon set's 100x100 box. This asset's whole job is to
+     tile at an EXACT pixel pitch; a 100-unit box would put the repeat pitch on a fractional pixel
+     and the lattice would visibly beat against itself.
+
+     SEAMLESSNESS: the hexagon spans x 2..58, y 2..67 inside a 60x69 tile, so a 2px margin surrounds
+     it on every side and no stroke ever crosses a tile boundary. That also means this is a grid of
+     discrete hexagons rather than a joined honeycomb; the separation is the design's own read, not
+     an approximation of one.
+
+     THE STROKE IS AUTHORED AT FULL OPACITY ON PURPOSE. The design uses this at 2.5% opacity, but
+     that fade belongs to the consumer (ImageTransparency on the ImageLabel), not to the baked
+     pixels. Baking 2.5% in would produce a PNG with roughly six usable alpha levels and no headroom
+     left to tune it. -->
+<polygon points="30,2 58,17 58,52 30,67 2,52 2,17"
+         fill="none" stroke="#9a88c8" stroke-width="0.6" stroke-linejoin="miter"/>
+</svg>

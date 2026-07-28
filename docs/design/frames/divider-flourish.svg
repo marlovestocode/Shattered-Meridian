@@ -1,0 +1,36 @@
+<svg viewBox="0 0 240 16" width="240" height="16" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Origin screen header divider flourish</title>
+<desc>A centered 6x6 square outline rotated 45 degrees into a diamond in violet accent, flanked by two 1px rules that each fade from fully transparent at the outer edge to the lit border tint as they approach the diamond.</desc>
+
+<!-- SCALE: 1 SVG unit = 1 CSS pixel. The rules are 1px and the diamond stroke is 0.8px; a 100-unit
+     box would express both as fractions of an arbitrary scale and lose the one thing that matters
+     about this asset, which is that it is built entirely from hairlines at literal pixel weights.
+     The 240 width is illustrative only. The real rules are flex-1 and stretch to fill the header;
+     the diamond and the roughly 10px of clearance either side of it are the fixed part.
+
+     The Y centerline is 8. Both rules sit at y=8 with a 1px stroke, so they occupy exactly the
+     7.5..8.5 band and land crisp on the pixel grid at 1x.
+
+     See hex-lattice-tile.svg for this batch's comment-style note. -->
+
+<defs>
+  <!-- transparent at the far outer end, [border-lit] (#b4a0dc at 32%) as it reaches the diamond -->
+  <linearGradient id="ruleLeft" gradientUnits="userSpaceOnUse" x1="0" y1="8" x2="110" y2="8">
+    <stop offset="0" stop-color="#b4a0dc" stop-opacity="0"/>
+    <stop offset="1" stop-color="#b4a0dc" stop-opacity="0.32"/>
+  </linearGradient>
+  <linearGradient id="ruleRight" gradientUnits="userSpaceOnUse" x1="240" y1="8" x2="130" y2="8">
+    <stop offset="0" stop-color="#b4a0dc" stop-opacity="0"/>
+    <stop offset="1" stop-color="#b4a0dc" stop-opacity="0.32"/>
+  </linearGradient>
+</defs>
+
+<line x1="0" y1="8" x2="110" y2="8" stroke="url(#ruleLeft)" stroke-width="1"/>
+<line x1="240" y1="8" x2="130" y2="8" stroke="url(#ruleRight)" stroke-width="1"/>
+
+<!-- 6x6 square rotated 45 degrees about the centerline, giving a diamond 8.49px across the points.
+     With the 0.8px stroke that is roughly 9.3px of vertical bite out of a 16px band, which is why
+     the flourish needs its own row rather than sitting inline with text. -->
+<rect x="117" y="5" width="6" height="6" transform="rotate(45 120 8)"
+      fill="none" stroke="#9a88c8" stroke-width="0.8" stroke-linejoin="miter"/>
+</svg>

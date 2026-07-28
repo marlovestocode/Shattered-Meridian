@@ -1,0 +1,41 @@
+<svg viewBox="0 0 64 64" width="64" height="64" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Shared radial bloom sprite</title>
+<desc>A white radial falloff from opaque center to fully transparent edge, authored as a pure alpha ramp so one uploaded texture can stand in for every box-shadow bloom in the interface once tinted per use.</desc>
+
+<!-- NOT IN THE FIGMA FILE. Added because the redesign leans on CSS box-shadow in five separate
+     places and Roblox has no box-shadow at all:
+       0 0  5px [attr]55    the origin card's per-stat bar fill
+       0 0  6px [qi]        the selection dot (see icons/selection-indicator.svg)
+       0 0  6px [attr]44    the attributes screen's stat track fill
+       0 0 24px [qi] at 20% the enabled CONTINUE button
+       0 0 40px [qi] at 6%  the selected origin card
+     plus the two 60px-blur ambient bloom circles sitting behind the panel. Every one of those is
+     the same shape at a different size and tint, so they are one asset, not six.
+
+     Authored SOLID WHITE with all information carried in the alpha channel, exactly the way
+     Client/UI/ChamferedSurface.lua authors its masks and for the same reason: a white source means
+     whatever ImageColor3 a caller tints toward is exactly the color that renders, regardless of
+     Roblox's compositing order. Callers set ImageColor3 to the bloom's hue and ImageTransparency to
+     its strength; ScaleType stays Stretch and the label is simply sized to the bloom's diameter.
+
+     The stop ramp approximates a gaussian rather than a linear falloff. A linear radial gradient in
+     Roblox reads as a visible hard-edged disc at these low opacities, which is the usual reason
+     hand-rolled glow sprites end up looking like stickers.
+
+     See hex-lattice-tile.svg for this batch's comment-style note. -->
+
+<defs>
+  <radialGradient id="bloom" cx="0.5" cy="0.5" r="0.5">
+    <stop offset="0.00" stop-color="#ffffff" stop-opacity="1"/>
+    <stop offset="0.15" stop-color="#ffffff" stop-opacity="0.85"/>
+    <stop offset="0.30" stop-color="#ffffff" stop-opacity="0.60"/>
+    <stop offset="0.45" stop-color="#ffffff" stop-opacity="0.38"/>
+    <stop offset="0.60" stop-color="#ffffff" stop-opacity="0.20"/>
+    <stop offset="0.75" stop-color="#ffffff" stop-opacity="0.08"/>
+    <stop offset="0.88" stop-color="#ffffff" stop-opacity="0.02"/>
+    <stop offset="1.00" stop-color="#ffffff" stop-opacity="0"/>
+  </radialGradient>
+</defs>
+
+<circle cx="32" cy="32" r="32" fill="url(#bloom)"/>
+</svg>

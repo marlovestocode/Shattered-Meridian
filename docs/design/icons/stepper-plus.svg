@@ -1,0 +1,11 @@
+<svg viewBox="0 0 28 28" width="28" height="28" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Attribute stepper increment glyph</title>
+<desc>A 9x9 pixel plus built from two 2px-thick bars with 1px rounded ends, centered in the stepper button's 28x28 box, drawn in currentColor so the button owns the color and its disabled state.</desc>
+
+<!-- Matched pair with stepper-minus.svg: same 28x28 button box, same 1 unit = 1 px authoring, same
+     currentColor contract, same 2px bar weight and rx=1 cap. The horizontal bar here is identical
+     to the minus glyph's bar, so the plus is literally the minus with a vertical sibling added.
+     That is what makes the two buttons read as one control rather than as two icons. -->
+<rect x="9.5" y="13" width="9" height="2" rx="1" fill="currentColor"/>
+<rect x="13" y="9.5" width="2" height="9" rx="1" fill="currentColor"/>
+</svg>

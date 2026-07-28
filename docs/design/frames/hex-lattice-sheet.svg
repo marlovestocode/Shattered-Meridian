@@ -1,0 +1,30 @@
+<svg viewBox="0 0 240 276" width="240" height="276" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Hex lattice tiled sheet (4x4 repeat)</title>
+<desc>A 4-column by 4-row expansion of the 60x69 hex lattice tile into a single 240x276 sheet, built from a userSpaceOnUse pattern so the repeat pitch is exact, intended for export to a Roblox ImageLabel running ScaleType.Tile.</desc>
+
+<!-- WHY A SHEET AND NOT JUST THE 60x69 TILE. Roblox's ScaleType.Tile resamples the source texture
+     at every repeat. A 60x69 source repeated across an 800px panel is roughly 13x9 resampling
+     passes over a texture whose only content is a 0.6px line, and the line dissolves. Repeating a
+     240x276 sheet instead cuts that to about 3x2 passes and the hairline survives. The sheet is
+     itself seamless (each tile's hexagon is fully inset), so TileSize can be either 240x276
+     (recommended) or 60x69 with no difference in the pattern itself, only in how much resampling
+     damage it takes.
+
+     EXPORT: render this at 2x, giving a 480x552 px PNG, and set TileSize = UDim2.fromOffset(240,
+     276). The 2x supersample puts the 0.6px stroke on roughly 1.2 device pixels in the source,
+     which is what stops it vanishing when the GPU minifies it back down. Exporting at 1x gives a
+     stroke thinner than one texel and Roblox's mip chain will eat it.
+
+     OPACITY: authored at full stroke opacity. The design's 2.5% is applied at runtime via
+     ImageTransparency (about 0.975) plus ImageColor3, never baked into the PNG. See
+     hex-lattice-tile.svg for the reasoning and for this batch's comment-style note. -->
+
+<defs>
+  <pattern id="hexLattice" patternUnits="userSpaceOnUse" x="0" y="0" width="60" height="69">
+    <polygon points="30,2 58,17 58,52 30,67 2,52 2,17"
+             fill="none" stroke="#9a88c8" stroke-width="0.6" stroke-linejoin="miter"/>
+  </pattern>
+</defs>
+
+<rect x="0" y="0" width="240" height="276" fill="url(#hexLattice)"/>
+</svg>

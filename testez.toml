@@ -1,0 +1,67 @@
+# Selene standard-library extension declaring TestEZ's spec-scope globals, chained onto the
+# generated Roblox std via selene.toml's `std = "roblox+testez"`.
+#
+# TestEZ (roblox/testez@0.4.1, a dev-dependency per wally.toml) injects these into every spec's
+# environment at run time via TestBootstrap, so they are never `require`d and selene cannot infer
+# them from the source. Declared here rather than as per-file `-- selene: allow(...)` pragmas so a
+# new spec file gets correct linting automatically instead of needing a pragma header.
+#
+# Scoped deliberately to the assertion/structure API the suite in src/Tests actually uses -- adding
+# a global here should be a decision, not a reflex, so an accidental typo'd call still lints as an
+# error rather than silently resolving.
+
+[selene]
+base = "roblox"
+name = "testez"
+
+# --- Suite structure ---
+[describe]
+args = [{ type = "string" }, { type = "function" }]
+
+[describeSKIP]
+args = [{ type = "string" }, { type = "function" }]
+
+[describeFOCUS]
+args = [{ type = "string" }, { type = "function" }]
+
+[it]
+args = [{ type = "string" }, { type = "function" }]
+
+[itSKIP]
+args = [{ type = "string" }, { type = "function" }]
+
+[itFOCUS]
+args = [{ type = "string" }, { type = "function" }]
+
+[itFIXME]
+args = [{ type = "string" }, { type = "function" }]
+
+# --- Lifecycle hooks ---
+[beforeAll]
+args = [{ type = "function" }]
+
+[beforeEach]
+args = [{ type = "function" }]
+
+[afterAll]
+args = [{ type = "function" }]
+
+[afterEach]
+args = [{ type = "function" }]
+
+# --- Assertions ---
+# `expect(value)` returns TestEZ's chainable matcher object (.to.equal, .to.be.ok, .never.to...),
+# so the return value is an opaque table rather than a declared shape.
+[expect]
+args = [{ type = "any" }]
+method = false
+
+[expect.extend]
+args = [{ type = "table" }]
+
+# FIXME/skip markers usable inside an `it` body.
+[FIXME]
+args = [{ type = "string", required = false }]
+
+[SKIP]
+args = []
