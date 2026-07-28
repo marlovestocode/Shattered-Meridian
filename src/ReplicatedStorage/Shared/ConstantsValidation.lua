@@ -112,6 +112,60 @@ function ConstantsValidation.ValidateWeapon(weaponId: string, weaponData: unknow
 	return basicOk and heavyOk and finisherOk
 end
 
+-- Every Heavy stage's Cooldown must be strictly under the Heavy combo's reset window, or that
+-- weapon's later stages are unreachable.
+--
+-- The Heavy string is THROW-based (CombatSystem.lua's resetHeavyComboIfLapsed reads comboExpiry),
+-- so if stage N's Cooldown outlives the window, comboIndex is always back to 0 by the time the next
+-- Heavy is legal and stage N+1 can never be selected. This shipped: Primary's Heavy1 Cooldown was
+-- 3.00 against a 1.5s window, making Heavy2 (21 damage / 25 posture) permanently dead data, while
+-- Secondary chained fine at 0.58 -- a silent, weapon-asymmetric power gap that no test caught
+-- because both weapons' data was individually well-formed. It is a RELATIONSHIP between two
+-- constants, which is exactly the class of drift this module exists to catch.
+local function validateHeavyComboReachability(
+	weaponId: string,
+	weaponData: unknown,
+	heavyComboResetSeconds: unknown
+): boolean
+	if typeof(weaponData) ~= "table" or typeof(heavyComboResetSeconds) ~= "number" then
+		return false
+	end
+	local stages = (weaponData :: { [string]: unknown }).Stages :: { [string]: unknown }?
+	if typeof(stages) ~= "table" then
+		return false
+	end
+	local heavyStages = stages.Heavy
+	if typeof(heavyStages) ~= "table" then
+		return false
+	end
+	local heavyArray = heavyStages :: { { [string]: unknown } }
+	-- A single-stage Heavy category has no stage 2 to strand, so no relationship to enforce.
+	if #heavyArray < 2 then
+		return true
+	end
+
+	local ok = true
+	for stageIndex, definition in ipairs(heavyArray) do
+		local cooldown = definition.Cooldown
+		if typeof(cooldown) == "number" and cooldown >= (heavyComboResetSeconds :: number) then
+			logger:error(
+				"Heavy combo stage is unreachable: this stage's Cooldown is at or above "
+					.. "Constants.Combat.HeavyComboResetSeconds, so the combo window always lapses before the "
+					.. "next Heavy is legal and later stages can never be selected. Either lower this "
+					.. "Cooldown or raise HeavyComboResetSeconds above it.",
+				{
+					weaponId = weaponId,
+					stageIndex = stageIndex,
+					cooldown = cooldown,
+					heavyComboResetSeconds = heavyComboResetSeconds,
+				}
+			)
+			ok = false
+		end
+	end
+	return ok
+end
+
 -- Runs once at CombatSystem.Init(), before any remote is created -- a failure here means Init()
 -- aborts entirely (no remotes, no handlers) rather than letting the first real attack request hit
 -- nil arithmetic deep in hit resolution. Takes the live Constants.Combat table directly (rather than
@@ -185,6 +239,22 @@ function ConstantsValidation.ValidateCombatConstants(combatConstants: { [string]
 		logger:error("Constants.Combat.Hitboxes.MaxPartsPerQuery missing/invalid", {})
 	end
 
+	local heavyComboResetOk = typeof(combatConstants.HeavyComboResetSeconds) == "number"
+		and (combatConstants.HeavyComboResetSeconds :: number) > 0
+	if not heavyComboResetOk then
+		logger:error("Constants.Combat.HeavyComboResetSeconds missing/invalid", {})
+	end
+	-- Only meaningful once both the weapons and the window itself are known well-formed -- otherwise
+	-- this would report a second, confusing failure for data the checks above already rejected.
+	local heavyReachabilityOk = true
+	if primaryOk and secondaryOk and heavyComboResetOk then
+		local primaryReachable =
+			validateHeavyComboReachability("Primary", weaponsTable.Primary, combatConstants.HeavyComboResetSeconds)
+		local secondaryReachable =
+			validateHeavyComboReachability("Secondary", weaponsTable.Secondary, combatConstants.HeavyComboResetSeconds)
+		heavyReachabilityOk = primaryReachable and secondaryReachable
+	end
+
 	local ok = primaryOk
 		and secondaryOk
 		and defaultWeaponOk
@@ -196,6 +266,8 @@ function ConstantsValidation.ValidateCombatConstants(combatConstants: { [string]
 		and maxTrackedOpponentsOk
 		and sweepSubstepsOk
 		and maxPartsPerQueryOk
+		and heavyComboResetOk
+		and heavyReachabilityOk
 	if ok then
 		local primaryWeapon = weaponsTable.Primary :: { Stages: { Basic: { unknown }, Heavy: { unknown } } }
 		local secondaryWeapon = weaponsTable.Secondary :: { Stages: { Basic: { unknown }, Heavy: { unknown } } }

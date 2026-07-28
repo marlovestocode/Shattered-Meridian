@@ -1527,10 +1527,31 @@ Constants.Combat = {
 
 	-- How long a combo chain (consecutive attacks within this window of each other) stays alive
 	-- before resetting to stage 1. Per-stage timing/damage/cooldown now live in Hitboxes.Basic/
-	-- Heavy below, not here -- see that table's header for why. Reused as the reset window for the
-	-- basic finisher combo below (CombatState.basicComboExpiry) as well as the Heavy throw-combo.
+	-- Heavy below, not here -- see that table's header for why. This is the BASIC finisher combo's
+	-- window (CombatState.basicComboExpiry) and the client's post-attack jump lockout; the Heavy
+	-- throw-combo has its own window below -- see HeavyComboResetSeconds for why they had to split.
 	ComboResetSeconds = 1.5,
-	MaxComboStacks = 5,
+	-- MaxComboStacks (was 5) removed: CombatSystem.lua's advanceComboIndex now wraps the throw-combo
+	-- counter over the weapon's own authored stage count instead of clamping it at a fixed ceiling
+	-- unrelated to that count. See that function's own header for why the clamp was a stage lockout
+	-- rather than a bound.
+
+	-- The HEAVY throw-combo's own reset window (CombatState.comboExpiry), deliberately separate from
+	-- ComboResetSeconds above rather than sharing it.
+	--
+	-- Sharing it was a silent, weapon-asymmetric bug: the Heavy combo is THROW-based, so stage 2 is
+	-- only reachable if the window outlives stage 1's own Cooldown. Primary's Heavy1 Cooldown is 3.00
+	-- against a 1.5s shared window, so resetHeavyComboIfLapsed always zeroed comboIndex before the
+	-- cooldown cleared and Primary could NEVER throw Heavy2 -- 21 damage / 25 posture of unreachable
+	-- data. Secondary (DaggerHeavy1 Cooldown 0.58 < 1.5) chained fine, so one weapon had a working
+	-- two-stage Heavy string and the other silently didn't.
+	--
+	-- Set above the slowest authored Heavy Cooldown (Primary's 3.00) so the second stage is reachable
+	-- on every weapon, but only just -- the remaining ~0.5s means continuing the Heavy string is a
+	-- deliberate, timed follow-up rather than something that happens automatically whenever the
+	-- cooldown happens to clear. Raising a Heavy Cooldown above this value silently re-breaks that
+	-- weapon's stage 2; ConstantsValidation asserts the relationship so it can't regress quietly.
+	HeavyComboResetSeconds = 3.5,
 
 	-- The basic (M1) finisher combo: land this many basic hits in a row (within ComboResetSeconds of
 	-- each other) and the next M1 becomes the Finisher (Hitboxes.Finisher below) instead of a normal
@@ -1625,7 +1646,23 @@ Constants.Combat = {
 		Normal = {
 			-- Grounded, not holding space: no launch/ragdoll, just a heavier finishing blow -- extra
 			-- hitstun on top of the swing's own damage/posture so the 4th hit still feels conclusive.
-			ExtraStunSeconds = 0.6,
+			--
+			-- MUST stay meaningfully above Constants.Combat.HitStunDuration (0.6) or this variant does
+			-- nothing at all. resolveHitAgainstTarget applies it as
+			-- `math.max(stunExpiry, now + ExtraStunSeconds)` AFTER the ordinary hit path has already set
+			-- `stunExpiry = now + HitStunDuration` -- it's a FLOOR, not an addition. At the previous 0.6
+			-- the two were identical, so the max was a no-op and a "Normal" finisher was mechanically a
+			-- Basic3 that happened to deal more damage. That made the variant choice fake: holding jump
+			-- for the Uppercut was unconditionally correct, since Uppercut bought a 2.5s ragdoll and
+			-- Normal bought nothing.
+			--
+			-- 1.1 gives Normal +0.5s of lockout over an ordinary hit. Deliberately far short of
+			-- Uppercut's 2.5s ragdoll, because the two variants buy different things and should trade
+			-- off rather than rank: Uppercut removes more agency but launches the target away and ends
+			-- your pressure, Normal keeps them grounded and in front of you. Stun (unlike ragdoll) does
+			-- not gate BlockStart -- see ACTION_GATES -- so the target can still guard the follow-up,
+			-- which is what keeps this inside "everything is defendable."
+			ExtraStunSeconds = 1.1,
 		},
 	},
 
@@ -1866,7 +1903,16 @@ Constants.Combat = {
 		PostureDamage = 10,
 		Cooldown = 4,
 		ArcDegrees = 100,
-		MaxTargets = 3,
+		-- 1, NOT the 3 every other multi-target hitbox uses -- DashPunch is a LAUNCHER, and both
+		-- weapons' own Finishers already establish the rule this now follows ("a launcher commits to
+		-- one foe, not a crowd-clear", see each Finisher's MaxTargets = 1). At 3 this was the single
+		-- worst agency violation in the game: applyAirCombo tracks exactly ONE airComboTarget
+		-- (CombatState.AirCombo.airComboTarget), so victims 2 and 3 were launched, ragdolled and
+		-- HoldAloft-pinned at HoverHeight for the full AirborneSeconds while findAirComboAttacker
+		-- matched none of them -- their air-tech returned "NotJuggled" and they had no input that did
+		-- anything at all. Fixing the count is the correct fix rather than teaching the air combo to
+		-- track N victims: juggling three people at once was never the intent.
+		MaxTargets = 1,
 	},
 
 	-- DashHit's own HitboxAttackDefinition -- the plain forward dash's own attack
@@ -2196,7 +2242,12 @@ Constants.Combat = {
 	-- HitboxResolver additionally gates rendering on RunService:IsStudio() so this flag flipping
 	-- true can't accidentally ship visible hitboxes in a live server -- on for active Studio
 	-- playtesting; flip back to false before anything resembling a real deployment.
-	DebugHitboxes = true,
+	-- Off by default now: at 3 SweepSubsteps x ~7 samples per swing this creates ~21 Parts (plus 21
+	-- Debris:AddItem calls) per swing, ~48 instance create/destroy per second per attacking player,
+	-- which dominates any Studio MicroProfiler capture and makes a performance baseline meaningless.
+	-- Turn it on deliberately while working on hitbox shape/reach/timing, then turn it back off
+	-- before profiling anything.
+	DebugHitboxes = false,
 
 	-- Swept melee hitbox geometry/scheduling -- shared regardless of which weapon (Weapons below) is
 	-- equipped. Per-weapon Basic/Heavy/Finisher stage arrays live in Constants.Combat.Weapons, not
@@ -2411,41 +2462,65 @@ Constants.Combat = {
 				Basic = {
 					{
 						DebugName = "Dagger1",
-						WindupSeconds = 0.06,
-						ActiveSeconds = 0.12,
-						RecoverySeconds = 0.15,
+						-- 0.16, up from 0.06. Secondary's own header promises "~75% of Primary's windup",
+						-- but Primary's Basics were retuned 0.08 -> 0.31 in a live playtest pass and
+						-- Secondary was never brought along, leaving it at ~20% of Primary rather than 75%.
+						-- The result was a de facto true unparryable: a 60ms windup, over a network, against
+						-- a 30Hz hitbox sampler, cannot be reacted to at all, which combat-philosophy.md's
+						-- Balance Principle 3 forbids without an explicit telegraphed cost. It also made
+						-- Feint (legal only inside windup) mechanically nonexistent on this weapon.
+						--
+						-- The added windup is funded mostly out of RecoverySeconds rather than bolted onto
+						-- the front, so the total timeline barely moves (0.33 -> 0.35) and Secondary keeps
+						-- its fast tempo and its roughly-75%-of-Primary cooldown ratio. What changed is the
+						-- SHAPE of the swing: more of it is readable telegraph, less is endlag. The
+						-- trade-off is a shorter whiff-punish window, accepted because an unreactable
+						-- attack is the worse failure. Cooldown stays exactly Windup+Active+Recovery, the
+						-- invariant this table's header states and every stage here already satisfied.
+						-- Kept strictly under DaggerFinisher's 0.22 so the finisher remains the most
+						-- telegraphed swing in the kit, as every other weapon's finisher is.
+						--
+						-- Still owed: a live Studio playtest pass on these three stages, the same one
+						-- Primary's Basics got when they moved 0.08 -> 0.31.
+						WindupSeconds = 0.16,
+						ActiveSeconds = 0.11,
+						RecoverySeconds = 0.08,
 						-- Z cut ~35% same as Primary above -- see Basic1's own comment for why.
 						Size = Vector3.new(5, 6.5, 3.75),
 						Offset = CFrame.new(0, 0, -1.875),
 						Damage = 6,
-						PostureDamage = 9,
-						Cooldown = 0.33,
-						ArcDegrees = 100,
-						MaxTargets = 3,
-					},
-					{
-						DebugName = "Dagger2",
-						WindupSeconds = 0.07,
-						ActiveSeconds = 0.12,
-						RecoverySeconds = 0.16,
-						Size = Vector3.new(5, 6.5, 3.75),
-						Offset = CFrame.new(0, 0, -1.875),
-						Damage = 7,
 						PostureDamage = 9,
 						Cooldown = 0.35,
 						ArcDegrees = 100,
 						MaxTargets = 3,
 					},
 					{
+						DebugName = "Dagger2",
+						-- See Dagger1's WindupSeconds header for why this rose from 0.07 and why the
+						-- recovery fell to pay for it. Cooldown stays Windup+Active+Recovery.
+						WindupSeconds = 0.17,
+						ActiveSeconds = 0.11,
+						RecoverySeconds = 0.09,
+						Size = Vector3.new(5, 6.5, 3.75),
+						Offset = CFrame.new(0, 0, -1.875),
+						Damage = 7,
+						PostureDamage = 9,
+						Cooldown = 0.37,
+						ArcDegrees = 100,
+						MaxTargets = 3,
+					},
+					{
 						DebugName = "Dagger3",
-						WindupSeconds = 0.08,
-						ActiveSeconds = 0.13,
-						RecoverySeconds = 0.19,
+						-- See Dagger1's WindupSeconds header for why this rose from 0.08 and why the
+						-- recovery fell to pay for it. Cooldown stays Windup+Active+Recovery.
+						WindupSeconds = 0.18,
+						ActiveSeconds = 0.12,
+						RecoverySeconds = 0.11,
 						Size = Vector3.new(5.5, 6.5, 4.25),
 						Offset = CFrame.new(0, 0, -2.125),
 						Damage = 8,
 						PostureDamage = 11,
-						Cooldown = 0.40,
+						Cooldown = 0.41,
 						ArcDegrees = 110,
 						MaxTargets = 3,
 					},

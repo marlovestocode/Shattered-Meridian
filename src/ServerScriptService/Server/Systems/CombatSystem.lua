@@ -714,6 +714,25 @@ local function selectAttackDefinition(
 	return stages[stageIndex]
 end
 
+-- Advances a throw-based (Heavy) combo counter, wrapping over however many stages are actually
+-- authored for that weapon+category rather than clamping at a fixed ceiling.
+--
+-- This replaces `math.min(comboIndex + 1, Constants.Combat.MaxComboStacks)`, which was a real
+-- lockout rather than a bound: MaxComboStacks (5) had no relationship to the authored stage count
+-- (2 for both weapons' Heavy), so once a sustained string saturated the counter at 5 it STAYED at 5,
+-- and selectAttackDefinition's own wrap mapped that one fixed index to one fixed stage forever
+-- (((5-1) % 2) + 1 = 1). A player chaining Heavies past the fifth throw silently lost access to
+-- stage 2 for the rest of the string. Wrapping over #stages keeps the counter bounded (its whole
+-- purpose) while guaranteeing the cycle stays a cycle for any stage count, including future ones.
+local function advanceComboIndex(weaponId: Types.WeaponId, isHeavy: boolean, comboIndex: number): number
+	local weapon = if weaponId == "Primary"
+		then Constants.Combat.Weapons.Primary
+		else Constants.Combat.Weapons.Secondary
+	local stages = if isHeavy then weapon.Stages.Heavy else weapon.Stages.Basic
+	assert(#stages > 0, "CombatSystem: no hitbox stages configured for this attack category")
+	return (comboIndex % #stages) + 1
+end
+
 -- Combo-lapse-reset: shared shape for the throw-based (Heavy) combo counter, used identically by a
 -- real player's handleAttackRequest and a bot's RequestBotAttack -- both read comboIndex/comboExpiry
 -- the same way (CombatState and BotState both have these two fields with the same meaning).
@@ -1755,10 +1774,13 @@ local function commitAndThrowAttack(
 
 	if isHeavy then
 		resetHeavyComboIfLapsed(state, now)
-		local nextComboIndex = math.min(state.comboIndex + 1, Constants.Combat.MaxComboStacks)
+		local nextComboIndex = advanceComboIndex(state.equippedWeaponId, true, state.comboIndex)
 		definition = selectAttackDefinition(state.equippedWeaponId, true, nextComboIndex)
 		state.comboIndex = nextComboIndex
-		state.comboExpiry = now + Constants.Combat.ComboResetSeconds
+		-- HeavyComboResetSeconds, not ComboResetSeconds -- the Heavy string is throw-based, so its
+		-- window has to outlive the stage's own Cooldown or stage 2 is unreachable. See that
+		-- constant's own header.
+		state.comboExpiry = now + Constants.Combat.HeavyComboResetSeconds
 	else
 		resetBasicComboIfLapsed(state, now)
 		local stageIndex = state.basicComboLanded + 1
@@ -3182,13 +3204,18 @@ function CombatSystem.RequestBotAttack(botModel: Model, isHeavy: boolean): boole
 	end
 
 	resetHeavyComboIfLapsed(state, now)
-	local nextComboIndex = math.min(state.comboIndex + 1, Constants.Combat.MaxComboStacks)
 	-- Bots always fight with the default weapon -- see handleSwapWeaponRequest's own comment for
 	-- why bot weapon-switching is out of scope.
+	local nextComboIndex = advanceComboIndex(Constants.Combat.Weapons.Default, isHeavy, state.comboIndex)
 	local definition = selectAttackDefinition(Constants.Combat.Weapons.Default, isHeavy, nextComboIndex)
 
 	state.comboIndex = nextComboIndex
-	state.comboExpiry = now + Constants.Combat.ComboResetSeconds
+	-- Unlike a player (whose Basic string is landing-based via basicComboLanded), a bot drives BOTH
+	-- categories off this one throw-based counter, so the window has to match whichever category was
+	-- just thrown -- otherwise a bot's Heavy string hits exactly the same unreachable-stage-2 problem
+	-- Primary's did. See Constants.Combat.HeavyComboResetSeconds' own header.
+	state.comboExpiry = now
+		+ (if isHeavy then Constants.Combat.HeavyComboResetSeconds else Constants.Combat.ComboResetSeconds)
 
 	local readyAgainAt = now + definition.Cooldown
 	if isHeavy then
