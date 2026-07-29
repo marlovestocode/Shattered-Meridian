@@ -42,7 +42,7 @@
 	below).
 
 	Does not own: post-kill rewards -- AbsorbSystem/RewardSystem own what a confirmed kill grants
-	(CombatSystem.OnPlayerKilled is the hook they listen to, not a call this module makes outward).
+	(GameplayEvents.OnPlayerKilled is the hook they listen to, not a call this module makes outward).
 	Does not own Qi -- no System owns that resource yet (see ClientState.lua), so this System
 	neither tracks nor sends it. Does not own art/ability behavior, bloodline power, or any combat
 	balance beyond first-pass technical tunables -- see Constants.Combat.Hitboxes' header comment.
@@ -99,7 +99,7 @@
 	existence, since TrainingBotSystem.lua never required it and still doesn't). A bot is a private
 	sparring partner: owned by the player who spawned it, it only ever targets that one player and
 	vice versa. Bots do NOT auto-respawn here the way dummies do -- death fires
-	CombatSystem.OnTrainingBotKilled (aliased from BotCombat.lua, which now actually fires it) and
+	GameplayEvents.OnTrainingBotKilled (BotCombat.lua is what fires it) and
 	TrainingBotSystem.lua (which owns the preset/weight data needed to recreate one) decides
 	whether/how to respawn.
 
@@ -153,6 +153,7 @@ local FeedbackPayload = require(script.Parent.Parent.Combat.FeedbackPayload)
 local DummyCombat = require(script.Parent.Parent.Combat.DummyCombat)
 local BotCombat = require(script.Parent.Parent.Combat.BotCombat)
 local AirCombo = require(script.Parent.Parent.Combat.AirCombo)
+local GameplayEvents = require(script.Parent.Parent.Events.GameplayEvents)
 
 local RemoteNames = Constants.Combat.RemoteNames
 
@@ -160,37 +161,22 @@ local logger = Logger.scope("CombatSystem")
 
 local CombatSystem = {}
 
--- Fired (victim: Player, killer: Player?) once per confirmed death, after this System's own state
--- is already updated -- see the header's kill-confirmation section. `killer` is nil for a death
--- this System didn't attribute to a specific attacker (environmental, or ApplyServerDamage callers
--- that don't pass one).
-CombatSystem.OnPlayerKilled = Instance.new("BindableEvent")
-
--- Fired (botModel: Model, ownerPlayer: Player, killerPlayer: Player?) once per confirmed training
--- bot death -- same shape/reasoning as OnPlayerKilled above. CombatSystem does not auto-respawn a
--- bot the way it does a training dummy; TrainingBotSystem.lua (which owns the preset/weight
--- bookkeeping this System doesn't have) decides whether/how to respawn. Aliased from BotCombat.lua
--- (the SAME BindableEvent Instance, not a new one) since bot lifecycle -- and therefore who actually
--- Fires this -- moved there; TrainingBotSystem.lua's existing
--- `CombatSystem.OnTrainingBotKilled.Event:Connect(...)` keeps working unchanged.
-CombatSystem.OnTrainingBotKilled = BotCombat.OnTrainingBotKilled
-
--- Fired (botModel: Model) from despawnBot, unconditionally, for every path a bot's model stops
--- being tracked -- cap eviction (SpawnTrainingBot), the explicit DespawnTrainingBot API, all of it.
--- Separate from OnTrainingBotKilled: that event means "this bot died" and TrainingBotSystem.lua
--- reacts to it by scheduling a RESPAWN, which is exactly wrong for a silent cap-eviction (it would
--- respawn the just-evicted bot, which would then immediately re-evict whatever took its slot).
--- TrainingBotSystem.lua subscribes to this one purely to drop its own botAIStates bookkeeping for
--- the despawned model -- without it, an evicted bot's AI-state entry is never cleaned up and is
--- iterated forever by the Heartbeat-driven decision loop. Aliased from BotCombat.lua, same reasoning
--- as OnTrainingBotKilled above.
-CombatSystem.OnTrainingBotDespawned = BotCombat.OnTrainingBotDespawned
-
--- Fired (deltaTime: number) at the end of every onHeartbeat tick below -- lets other server-internal
--- Systems (TrainingBotSystem's AI decision loop) piggyback on this System's single Heartbeat
--- connection instead of opening a second one, matching the reasoning HitboxResolver's own header
--- documents for why it doesn't open its own.
-CombatSystem.OnHeartbeatTick = Instance.new("BindableEvent")
+-- OnPlayerKilled / OnTrainingBotKilled / OnTrainingBotDespawned / OnHeartbeatTick were public
+-- BindableEvent fields here. They now live in Server/Events/GameplayEvents.lua, which this System
+-- publishes through (confirmDeath -> FirePlayerKilled, onHeartbeat -> FireHeartbeatTick; BotCombat.lua
+-- fires the two bot signals itself).
+--
+-- The point is the dependency direction, not tidiness: anything wanting to hear about a death had to
+-- require this 3400-line module -- which pulls in ten Server/Combat/ siblings and creates two dozen
+-- remotes -- purely to reach one event, and software-architecture.md's progression flow queues nine
+-- more such subscribers (RewardSystem, ProgressionSystem, MeridianSystem, TierSystem,
+-- BloodlineSystem, ArtSystem, AchievementSystem, RivalrySystem, BountySystem). Publishing through a
+-- neutral registry means none of them ever require this file, and -- the rule that keeps progression
+-- out of this monolith -- a progression system needing a new fact about a kill adds a field to
+-- GameplayEvents' payload, never a require here and never an outward call from here.
+--
+-- No aliases were left behind: every consumer (RespawnSystem, TrainingBotSystem) moved in the same
+-- change, so a second name for the same signal would only invite new code to pick the wrong one.
 
 -- CombatState/DummyState/BotState live in Server/Combat/CombatTypes.lua, shared only among
 -- CombatSystem.lua and its own Server/Combat/ siblings -- see that file's header. Aliased locally
@@ -869,7 +855,7 @@ local function confirmDeath(player: Player, state: CombatState): ()
 		sendFeedback(killerPlayer, payload)
 	end
 
-	CombatSystem.OnPlayerKilled:Fire(player, killerPlayer)
+	GameplayEvents.FirePlayerKilled(player, killerPlayer)
 end
 
 --
@@ -2699,7 +2685,7 @@ local function onHeartbeat(deltaTime: number): ()
 		return nil
 	end)
 
-	CombatSystem.OnHeartbeatTick:Fire(deltaTime)
+	GameplayEvents.FireHeartbeatTick(deltaTime)
 end
 
 --

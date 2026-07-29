@@ -60,6 +60,7 @@ local Movement = require(script.Parent.Movement)
 local BotAnimator = require(script.Parent.BotAnimator)
 local CombatantLabel = require(script.Parent.CombatantLabel)
 local FeedbackPayload = require(script.Parent.FeedbackPayload)
+local GameplayEvents = require(script.Parent.Parent.Events.GameplayEvents)
 
 local logger = Logger.scope("BotCombat")
 
@@ -68,19 +69,11 @@ local BotCombat = {}
 type CombatState = CombatTypes.CombatState
 type BotState = CombatTypes.BotState
 
--- Fired (botModel: Model, ownerPlayer: Player, killerPlayer: Player?) once per confirmed training
--- bot death. CombatSystem.lua aliases this under its own public CombatSystem.OnTrainingBotKilled
--- name (same Instance, just re-exported) so TrainingBotSystem.lua's existing
--- `CombatSystem.OnTrainingBotKilled.Event:Connect(...)` keeps working unchanged -- see this file's
--- header for why ownership of *firing* it moved here alongside the rest of bot lifecycle.
-local OnTrainingBotKilled = Instance.new("BindableEvent")
-BotCombat.OnTrainingBotKilled = OnTrainingBotKilled
-
--- Fired (botModel: Model) from despawnBot, unconditionally, for every path a bot's model stops being
--- tracked -- cap eviction, the explicit DespawnBot API, all of it. CombatSystem.lua aliases this the
--- same way as OnTrainingBotKilled above.
-local OnTrainingBotDespawned = Instance.new("BindableEvent")
-BotCombat.OnTrainingBotDespawned = OnTrainingBotDespawned
+-- Bot lifecycle signals are published through Server/Events/GameplayEvents.lua rather than owned as
+-- public BindableEvent fields here (and re-exported by CombatSystem.lua, which is how
+-- TrainingBotSystem.lua used to reach them). See that module's header: a subscriber should not have
+-- to require the publisher -- or, as was the case here, require a 3400-line module that merely
+-- re-exported the publisher's field -- just to hear that a bot died.
 
 -- Injected access to CombatSystem.lua's own private world -- see this file's header for the full
 -- reasoning on why these three stay callbacks instead of a back-reference require.
@@ -146,7 +139,7 @@ local function despawnBot(model: Model): ()
 	end
 
 	model:Destroy()
-	OnTrainingBotDespawned:Fire(model)
+	GameplayEvents.FireTrainingBotDespawned(model)
 end
 
 local function confirmBotDeath(botModel: Model, state: BotState): ()
@@ -176,7 +169,7 @@ local function confirmBotDeath(botModel: Model, state: BotState): ()
 		hooks.SendFeedback(killerPlayer, payload)
 	end
 
-	OnTrainingBotKilled:Fire(botModel, state.ownerPlayer, killerPlayer)
+	GameplayEvents.FireTrainingBotKilled(botModel, state.ownerPlayer, killerPlayer)
 end
 
 local function createTrainingBot(ownerPlayer: Player, spawnCFrame: CFrame): BotState

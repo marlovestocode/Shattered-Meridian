@@ -13,14 +13,18 @@
 	(CombatSystem.confirmDummyDeath) and bots (TrainingBotSystem, off CombatSystem.
 	OnTrainingBotKilled) already own their own respawn paths and are untouched by this.
 
-	Triggered off CombatSystem.OnPlayerKilled -- the documented outward hook for exactly this
+	Triggered off GameplayEvents.OnPlayerKilled -- the documented outward hook for exactly this
 	("CombatSystem.OnPlayerKilled is the hook they listen to, not a call this module makes outward",
-	CombatSystem.lua's header), and until now a signal with no listeners at all. That hook is the
-	right one specifically because CombatSystem fires it from confirmDeath for EVERY death, not just
-	PvP kills: an environmental/fall/void death runs the same path with no killer attribution (see
-	confirmDeath's own header), so routing respawn through it covers every way a player can die
-	without this module needing its own duplicate Humanoid.Died wiring to go stale alongside
-	CombatSystem's.
+	CombatSystem.lua's header). That hook is the right one specifically because CombatSystem fires it
+	from confirmDeath for EVERY death, not just PvP kills: an environmental/fall/void death runs the
+	same path with no killer attribution (see confirmDeath's own header), so routing respawn through
+	it covers every way a player can die without this module needing its own duplicate Humanoid.Died
+	wiring to go stale alongside CombatSystem's.
+
+	That signal used to be a public BindableEvent field ON CombatSystem, which meant this module
+	required a 3400-line combat monolith -- pulling in ten Server/Combat/ siblings and two dozen
+	remotes -- to reach one event it only ever listened to. It now requires
+	Server/Events/GameplayEvents.lua instead and has no dependency on CombatSystem at all.
 
 	Deliberately a new System rather than a few lines inside CombatSystem or CharacterCreation
 	System: software-architecture.md's "don't fold new responsibilities into an existing system's
@@ -43,7 +47,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local CombatSystem = require(ServerScriptService.Server.Systems.CombatSystem)
+local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 
 local RespawnSystem = {}
 
@@ -102,7 +106,7 @@ function RespawnSystem.Init(): ()
 	-- Fires from CombatSystem.confirmDeath for every death, PvP or environmental -- see this file's
 	-- header. killerPlayer is nil for a non-attributed death and is only logged here; who killed whom
 	-- is RewardSystem/AbsorbSystem's concern off the same signal, not this module's.
-	CombatSystem.OnPlayerKilled.Event:Connect(function(player: Player, killerPlayer: Player?)
+	GameplayEvents.OnPlayerKilled(function(player: Player, killerPlayer: Player?)
 		local generation = bumpGeneration(player)
 		logger:debug("Respawn scheduled", {
 			player = player.Name,

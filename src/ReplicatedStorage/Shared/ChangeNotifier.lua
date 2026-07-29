@@ -13,8 +13,8 @@
 	project's dependency-direction rule that gameplay depends on infrastructure, never the reverse.
 
 	Uses a BindableEvent as the underlying fire mechanism -- this project's own established
-	server-internal signal/pub-sub primitive (see CombatSystem.OnPlayerKilled/OnTrainingBotKilled/
-	OnTrainingBotDespawned/OnHeartbeatTick for the existing convention this matches) -- rather than
+	server-internal signal/pub-sub primitive (see Server/Events/GameplayEvents.lua, which wraps the
+	same primitive for cross-System gameplay signals, for the existing convention this matches) -- rather than
 	inventing a second notification shape. A caller subscribes once (Instance.Changed.Event:Connect(
 	...)), typically at Init time, and calls Update(player, liveValue) every tick thereafter; Update
 	only fires Changed on an actual transition, mirroring the exact "write only on change" contract

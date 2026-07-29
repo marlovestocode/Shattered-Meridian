@@ -28,7 +28,7 @@
 
 	Respawn: CombatSystem.lua does not auto-respawn a bot the way it does a training dummy (it has
 	no preset/weight data to recreate one with) -- this System listens for
-	CombatSystem.OnTrainingBotKilled and decides whether/how to respawn, after
+	GameplayEvents.OnTrainingBotKilled and decides whether/how to respawn, after
 	Constants.Debug.TrainingBot.RespawnDelay, at the same spawn point with the same preset.
 
 	Does not own: hit resolution, vitals, or any combat mechanic (CombatSystem.lua); authorization
@@ -43,6 +43,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local CombatSystem = require(script.Parent.CombatSystem)
+local GameplayEvents = require(script.Parent.Parent.Events.GameplayEvents)
 
 local logger = Logger.scope("TrainingBotSystem")
 
@@ -315,9 +316,13 @@ local function onTrainingBotDespawned(botModel: Model): ()
 end
 
 function TrainingBotSystem.Init(): ()
-	CombatSystem.OnHeartbeatTick.Event:Connect(runBotDecisionTick)
-	CombatSystem.OnTrainingBotKilled.Event:Connect(onTrainingBotKilled)
-	CombatSystem.OnTrainingBotDespawned.Event:Connect(onTrainingBotDespawned)
+	-- Subscribed through Server/Events/GameplayEvents.lua, not through CombatSystem's former public
+	-- BindableEvent fields. This module still requires CombatSystem for the RequestBot*/SpawnBot
+	-- command surface it drives bots with -- that dependency is real and stays -- but hearing that a
+	-- bot died is no longer part of it.
+	GameplayEvents.OnHeartbeatTick(runBotDecisionTick)
+	GameplayEvents.OnTrainingBotKilled(onTrainingBotKilled)
+	GameplayEvents.OnTrainingBotDespawned(onTrainingBotDespawned)
 	Players.PlayerRemoving:Connect(onPlayerRemoving)
 
 	logger:info("TrainingBotSystem.Init() complete")

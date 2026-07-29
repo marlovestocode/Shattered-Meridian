@@ -35,6 +35,9 @@
 				"Config": {
 					"$path": "src/ServerScriptService/Server/Config"
 				},
+				"Events": {
+					"$path": "src/ServerScriptService/Server/Events"
+				},
 				"DevMenu": {
 					"$path": "src/ServerScriptService/Server/DevMenu"
 				},
