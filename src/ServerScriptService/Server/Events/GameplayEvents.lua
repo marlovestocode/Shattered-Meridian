@@ -48,6 +48,25 @@
 	(TrainingBotSystem). It carries facts; every consumer decides its own response independently.
 	It also owns no client-facing surface -- these never cross the client boundary, which is
 	NetworkBridge's job.
+
+	SUBSCRIBER INVENTORY. docs/architecture/2026-08-audit.md section 5.1 asked for this list to exist
+	before the progression spine lands, so ordering assumptions live in one readable place instead of
+	archaeology across N Init() functions. Keep it current when you add a subscriber -- it is
+	documentation, not runtime machinery, and nothing enforces it but this sentence.
+
+	  PlayerKilled     -> RespawnSystem (new body), CombatSystem (its own kill-feed remote),
+	                      RivalrySystem (standings), BountySystem (auto-claim), MeridianSystem (XP)
+	  MeridianXPAwarded-> TierSystem (promotion check)
+	  TierChanged      -> QiSystem (recompute the Max Qi ceiling for the new tier)
+	  TrainingBotKilled-> TrainingBotSystem (respawn scheduling)
+	  TrainingBotDespawned -> TrainingBotSystem, BotCombat (per-bot AI state cleanup)
+	  HeartbeatTick    -> QiSystem (passive regen)
+
+	ORDERING. BindableEvents fire subscribers in connection order, which is Main.server.lua's Init()
+	order -- but no subscriber above depends on running before or after any other, and new ones should
+	keep it that way. Where an ordering dependency is genuinely real, express it as a chain of distinct
+	signals (PlayerKilled -> MeridianXPAwarded -> TierChanged below is exactly that: each publisher
+	fires only after its own state is already consistent), never as an assumption about boot order.
 ]]
 
 local GameplayEvents = {}
@@ -73,6 +92,58 @@ end
 
 function GameplayEvents.OnPlayerKilled(handler: (victim: Player, killer: Player?) -> ()): RBXScriptConnection
 	return playerKilledSignal.Event:Connect(handler)
+end
+
+--
+-- Progression
+--
+
+-- Fired once per successful Meridian XP grant, AFTER PlayerDataSystem.Transform has already
+-- committed the new total to the canonical profile -- so a subscriber reading the profile inside its
+-- handler sees `newTotal`, never the pre-award value. A failed award (profile not loaded, invalid
+-- amount) fires nothing at all.
+--
+-- This exists so TierSystem can react to "this player's XP moved" WITHOUT subscribing to
+-- PlayerKilled and racing MeridianSystem for the same profile: a kill is not the only thing that can
+-- ever move Meridian XP (RewardSystem/AchievementSystem will both grant it), and a promotion check
+-- keyed on the kill rather than on the grant would silently miss every one of those future sources.
+-- Subscribe to the state change, not to one of the things that causes it.
+local meridianXpAwardedSignal = Instance.new("BindableEvent")
+
+function GameplayEvents.FireMeridianXPAwarded(player: Player, amount: number, newTotal: number, reason: string?): ()
+	meridianXpAwardedSignal:Fire(player, amount, newTotal, reason)
+end
+
+function GameplayEvents.OnMeridianXPAwarded(handler: (
+	player: Player,
+	amount: number,
+	newTotal: number,
+	reason: string?
+) -> ()): RBXScriptConnection
+	return meridianXpAwardedSignal.Event:Connect(handler)
+end
+
+-- Fired once per confirmed tier change, after TierSystem has already persisted the new tier. Carries
+-- `previousTier` because a single large grant can cross more than one threshold at once (see
+-- TierSystem.Evaluate) -- a subscriber that assumes `newTier == previousTier + 1` is wrong, and the
+-- payload is shaped so it never has to guess.
+--
+-- Deliberately a signal rather than TierSystem calling QiSystem directly: Max Qi is priced off tier
+-- (QiConstants.MaxQiByTier), so a tier-up MUST raise the ceiling -- but that is Qi's concern to
+-- implement, not the tier ladder's to know about. QiSystem.RefreshFromProfile was written for
+-- exactly this hook and documents itself as waiting for it. Every future tier-priced system
+-- (ArtSystem gating, AbsorbSystem) subscribes here the same way instead of TierSystem growing a
+-- require of each one.
+local tierChangedSignal = Instance.new("BindableEvent")
+
+function GameplayEvents.FireTierChanged(player: Player, newTier: number, previousTier: number): ()
+	tierChangedSignal:Fire(player, newTier, previousTier)
+end
+
+function GameplayEvents.OnTierChanged(
+	handler: (player: Player, newTier: number, previousTier: number) -> ()
+): RBXScriptConnection
+	return tierChangedSignal.Event:Connect(handler)
 end
 
 --

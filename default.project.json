@@ -48,16 +48,55 @@
 						"Neutral": true
 					}
 				},
-				"MedianParadiseArrivalSpawn": {
-					"$className": "SpawnLocation",
-					"$properties": {
-						"Position": { "Vector3": [0, 5, 0] },
-						"Size": { "Vector3": [8, 1, 8] },
-						"Anchored": true,
-						"CanCollide": true,
-						"Transparency": 1,
-						"Enabled": true,
-						"Neutral": true
+				"ArrivalSpawns": {
+					"$className": "Folder",
+					"Human": {
+						"$className": "SpawnLocation",
+						"$properties": {
+							"Position": { "Vector3": [0, 5, 0] },
+							"Size": { "Vector3": [8, 1, 8] },
+							"Anchored": true,
+							"CanCollide": true,
+							"Transparency": 1,
+							"Enabled": true,
+							"Neutral": true
+						}
+					},
+					"Firmborn": {
+						"$className": "SpawnLocation",
+						"$properties": {
+							"Position": { "Vector3": [40, 5, 0] },
+							"Size": { "Vector3": [8, 1, 8] },
+							"Anchored": true,
+							"CanCollide": true,
+							"Transparency": 1,
+							"Enabled": true,
+							"Neutral": true
+						}
+					},
+					"Rivenkin": {
+						"$className": "SpawnLocation",
+						"$properties": {
+							"Position": { "Vector3": [80, 5, 0] },
+							"Size": { "Vector3": [8, 1, 8] },
+							"Anchored": true,
+							"CanCollide": true,
+							"Transparency": 1,
+							"Enabled": true,
+							"Neutral": true
+						}
+					},
+					"Hollowborn": {
+						"$className": "SpawnLocation",
+						"$properties": {
+							"Position": { "Vector3": [120, 5, 0] },
+							"Size": { "Vector3": [8, 1, 8] },
+							"Anchored": true,
+							"CanCollide": true,
+							"Transparency": 1,
+							"Enabled": true,
+							"Neutral": true
+						}
 					}
 				}
 			}

@@ -7,6 +7,12 @@
 	NetworkBridge.lua for remote payload wiring built on top of these types.
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+-- AnimationTimeline is a leaf module (no requires of its own -- see its own header), so pulling its
+-- Clip type in here for AttackStartedPayload.Animations below cannot create a require cycle the way
+-- pulling in a module that itself requires Types.lua would.
+local AnimationTimeline = require(ReplicatedStorage.Shared.AnimationTimeline)
+
 local Types = {}
 
 export type Faction = "Celestial" | "Demonic" | "Unbound"
@@ -25,6 +31,10 @@ export type Tier = number
 export type RaceId = "Human" | "Firmborn" | "Rivenkin" | "Hollowborn"
 export type BloodlineId = string
 export type ArtId = string
+-- Same "opaque string, content-driven roster" reasoning as BloodlineId/ArtId above -- see
+-- Shared/Emotes/EmoteDefinitions.lua for the actual (open-ended, always-growing) roster this keys
+-- into.
+export type EmoteId = string
 
 -- The six chargen attributes (Constants.CharacterCreation), a named record rather than a
 -- `{ [string]: number }` dict -- every consumer (validation, the Attributes screen, Confirmation's
@@ -62,6 +72,47 @@ export type PlayerProfile = {
 	qiDeviationRisk: number,
 	factionStanding: number,
 	hasAscended: boolean,
+	-- Meridian XP (MeridianSystem.lua) -- the core progression currency, "Tier gates are earned
+	-- through Meridian XP from PvP wins" (progression-systems.md). Unlike Qi (QiSystem.lua),
+	-- deliberately persisted here: Meridian XP is permanent progression, not a per-session/per-fight
+	-- resource that resets on rejoin the way Qi does.
+	meridianXp: number,
+	-- Emote System (Server/Systems/EmoteUnlockService.lua) -- every EmoteId this player has ever
+	-- unlocked, a SET (value always `true`) rather than an array for O(1) HasUnlocked lookups on the
+	-- request-play hot path. A brand-new profile starts with every Shared/Emotes/EmoteDefinitions.lua
+	-- entry whose Unlock.Type == "Default" already present (PlayerDataSystem.CreateDefaultProfile) --
+	-- EmoteUnlockService additionally backfills this set on every profile load so an OLDER save that
+	-- predates a newly-authored Default emote still ends up with it, without needing its own
+	-- migration entry per new emote.
+	unlockedEmoteIds: { [EmoteId]: true },
+	-- Emote System (Server/Systems/EmoteSystem.lua) -- an ORDERED array (unlike unlockedEmoteIds
+	-- above), one EmoteId per wheel slot. Length is driven by EmoteConstants.LoadoutSize, never
+	-- hardcoded elsewhere. RequestSetLoadoutSlot only ever writes an EmoteId the player has already
+	-- unlocked (EmoteUnlockService.HasUnlocked), so a stale/locked entry can only appear here through
+	-- an edge case outside this pass's scope (EmoteConstants.LoadoutSize shrinking, or an emote being
+	-- retired) -- EmoteSystem.handleRequestPlay's own HasUnlocked check is what makes such an entry
+	-- unplayable regardless, so a stale slot degrades to "does nothing when pressed," never a way to
+	-- play an emote the player doesn't actually own.
+	emoteLoadout: { EmoteId },
+	-- Settings System (Server/Systems/SettingsSystem.lua, Client/Input/KeybindManager.lua) -- see
+	-- PlayerSettings' own header below for why this is a SPARSE override map, not a full snapshot.
+	settings: PlayerSettings,
+}
+
+-- Cross-server ownership claim on one player's DataStore record (PlayerDataSystem.lua's loadProfile/
+-- saveProfile) -- guards the "server hop lands inside the other server's autosave window" race
+-- (2026-08 performance audit): without this, server A's PlayerRemoving-triggered save and server B's
+-- load for the SAME player can overlap, and whichever SetAsync lands last silently wins regardless of
+-- which one actually has the more recent data. JobId is game.JobId (globally unique per real Roblox
+-- server; empty string in Studio outside a published place, which makes this check ineffective for
+-- purely-local Studio testing -- see loadProfile's own header). LockedAt is os.time() (Unix seconds,
+-- comparable across different server PROCESSES, unlike os.clock() which is per-process monotonic and
+-- meaningless compared across servers) -- read by PlayerDataSystem.IsLockHeldByOther against
+-- Constants.PlayerData.LockStaleAfterSeconds so a server that crashed without releasing its lock
+-- (never ran PlayerRemoving/BindToClose) doesn't block a rejoin forever.
+export type PlayerDataLock = {
+	JobId: string,
+	LockedAt: number,
 }
 
 -- Persisted wrapper around PlayerProfile (PlayerDataSystem.lua, software-architecture.md's
@@ -71,9 +122,24 @@ export type PlayerProfile = {
 -- deliberately does NOT appear on PlayerProfile itself, since every other System's public API
 -- already types against the bare in-memory shape and has no reason to know or care what schema
 -- version it was loaded from.
+--
+-- WriteGeneration/Lock are likewise record-level concerns, not part of the versioned PlayerProfile
+-- payload -- deliberately NOT threaded through PlayerDataSystem.MigrateRecord/the Migrations table
+-- (which only ever transforms raw.Profile, see Migrations[1]/[2]'s own bodies): an older record
+-- simply lacks both fields, and every reader already treats a missing WriteGeneration as 0 and a
+-- missing Lock as unlocked, the same "a field this file's own decode step doesn't recognize yet just
+-- defaults safely" contract DecodeProfile already applies to every PlayerProfile field. WriteGeneration
+-- is a monotonic counter bumped on every successful saveProfile -- PlayerDataSystem.ComputeSaveWrite
+-- compares the generation this server loaded against whatever is CURRENTLY stored at save time and
+-- refuses the write (rather than silently overwriting) if a newer generation already exists, the
+-- second, independent line of defense against the same cross-server race Lock above guards against
+-- (Lock should prevent this from ever actually triggering in practice; this is the backstop for the
+-- rare case a lock went stale while its holder was still legitimately alive).
 export type StoredPlayerProfile = {
 	SchemaVersion: number,
 	Profile: PlayerProfile,
+	WriteGeneration: number,
+	Lock: PlayerDataLock?,
 }
 
 -- Every server System/Manager conforms to this lifecycle so Main.server.lua can boot them
@@ -91,6 +157,15 @@ export type SystemModule = {
 -- per-player state is NOT here -- that never leaves CombatSystem.lua, per software-architecture.md's
 -- "no system reaches into another system's internals directly."
 
+-- "GroundSlam" is distinct from "Hit" specifically so it never re-triggers the once-per-swing Hit
+-- reaction machinery (damage number, hit-flash, hit-stop, PredictionMirror) a SECOND time for the
+-- same landed swing -- see CombatFeedbackPayload.FinisherVariant's own header for what it exists to
+-- carry and why the ordinary "Hit" event for that same swing can't carry it itself.
+-- "ObjectStun" is sent to BOTH the attacker and the victim the moment a move's Object Stun
+-- resolves (Server/Combat/ObjectStunResolver.lua reported an impact and CombatSystem applied it) --
+-- the only Kind whose payload carries a whole sub-table of its own (ObjectStunFeedback below),
+-- because a wall slam has presentation state nothing else here does: which surface class was hit,
+-- where and which way it faced, and the two authored clips to play.
 export type CombatFeedbackKind =
 	"Hit"
 	| "Blocked"
@@ -98,16 +173,108 @@ export type CombatFeedbackKind =
 	| "PostureBreak"
 	| "Death"
 	| "Disarmed"
-	-- A successful air-tech escape (CombatSystem.lua's handleAirTechRequest) -- sent to both the
-	-- escaping victim and the punished attacker, same "both sides get the same payload" shape as
-	-- "Parried" above.
-	| "AirTechEscaped"
+	| "GroundSlam"
+	| "ObjectStun"
+
+-- The presentation half of a resolved Object Stun -- everything a client needs to play the impact
+-- and nothing it doesn't. Deliberately NOT the whole ObjectStunConfig: the detection gates, the
+-- cooldowns and the follow-up's entire definition are server concerns the client has no business
+-- receiving, and shipping them would put an authored move's full data on the wire on every slam.
+export type ObjectStunFeedback = {
+	-- "Wall" / "Floor" / "Ceiling" / "Prop" -- mirrors ObjectStunResolver.SurfaceKind, kept as a
+	-- plain string here for the same leaf-module reason HitboxShapeId is a separate copy: this file
+	-- requires nothing, and a server-only resolver has no business being a network-type dependency.
+	Surface: string,
+	-- Plays on the victim / the attacker respectively; "" means the author didn't set one.
+	VictimAnimationId: string,
+	AttackerAnimationId: string,
+	SoundId: string,
+	EffectColor: Color3,
+	CameraShakeScale: number,
+	ImpactPosition: Vector3,
+	-- Points out of the struck surface -- lets a client aim impact particles away from the wall
+	-- rather than into it.
+	ImpactNormal: Vector3,
+	StunSeconds: number,
+}
 
 export type CombatVitalsPayload = {
 	Health: number,
 	MaxHealth: number,
 	Posture: number,
 	MaxPosture: number,
+}
+
+-- Server (QiSystem.lua) -> owning client only, mirrors CombatVitalsPayload's shape for the same
+-- reason: a resource bar with a current/max pair. See QiSystem.lua's own header for the
+-- immediate-on-Spend/throttled-on-passive-regen replication rule this payload rides on.
+export type QiUpdatePayload = {
+	Qi: number,
+	MaxQi: number,
+}
+
+-- Server (MeridianSystem.lua) -> owning client only. A single running total, not a current/max
+-- pair -- Meridian XP has no cap the way Qi/Health/Posture do (progression-systems.md: it's the
+-- resource TierSystem's tier-up checks read against a threshold, not a per-fight resource that
+-- depletes and refills).
+export type MeridianXPUpdatePayload = {
+	MeridianXP: number,
+}
+
+-- Server (TierSystem.lua) -> owning client only. Carries the tier's IDENTITY plus the XP window it
+-- occupies, deliberately NOT a progress fraction: MeridianXPUpdatePayload above already replicates
+-- the running XP total on every grant, so a client holding both can compute its own progress bar
+-- fill from two numbers it already has, and that bar moves on every kill instead of only when a tier
+-- changes. Sending a precomputed fraction here would mean either a second remote fired per kill or a
+-- bar that visibly sticks between promotions.
+--
+-- This is not a violation of ClientState.lua's "never computed here" rule, and the split is the
+-- point: the server stays authoritative over tier IDENTITY (Tier/TierName are persisted profile
+-- state, and TierSystem's never-demote rule means they are genuinely not derivable from XP alone),
+-- while the fill percentage is pure presentation arithmetic over values the server already sent.
+export type TierUpdatePayload = {
+	Tier: number,
+	TierName: string,
+	-- Cumulative XP at which this tier began, and at which the next one begins. TierNextXP is nil at
+	-- the top of the ladder -- see TierSystem.GetTierWindow's header on why nil rather than a
+	-- repeated or fabricated number.
+	TierFloorXP: number,
+	TierNextXP: number?,
+	-- Set ONLY on a real promotion, nil on the initial post-load sync. A client uses its presence to
+	-- tell "this is your tier" apart from "you just earned this" without tracking its own previous
+	-- value; a promotion crossing two thresholds at once reports the tier actually left behind, not
+	-- Tier minus one (TierSystem.Evaluate's header).
+	PreviousTier: number?,
+}
+
+-- One row of the Notoriety bounty board (BountySystem.lua). Carries the target's name and UserId,
+-- never the Player instance -- a remote can't usefully hand an instance to a client that may not
+-- have it, and nothing client-side should hold a reference it could retain past the player leaving.
+-- Reward is Meridian XP, the only progression resource a bounty pays (see BountyConstants.lua's
+-- header on why there is no currency here).
+export type BountyBoardEntry = {
+	BountyId: string,
+	TargetName: string,
+	TargetUserId: number,
+	TargetTier: number,
+	Streak: number,
+	Reward: number,
+}
+
+-- Server (BountySystem.lua) -> ALL clients, fired only when the board actually changes. The bounty
+-- board is deliberately global information -- the whole point of a Notoriety bounty is that everyone
+-- can see who is running away with the server.
+export type BountyBoardUpdatePayload = {
+	Entries: { BountyBoardEntry },
+}
+
+-- Server (BountySystem.lua) -> the marked player ONLY. Sent on being marked, on the reward growing
+-- as the streak continues, and once more with Marked = false when the mark ends (claimed, expired,
+-- or an unattributed death). Reward/Streak are nil exactly when Marked is false.
+export type BountyMarkedPayload = {
+	Marked: boolean,
+	Reward: number?,
+	Streak: number?,
 }
 
 export type CombatFeedbackPayload = {
@@ -127,6 +294,50 @@ export type CombatFeedbackPayload = {
 	-- PlayHitReaction reuses the same trailing-digit stage extraction PlaySwing already uses for
 	-- the attacker's own swing animation). Not consumed for any gameplay/hit decision.
 	AttackDebugName: string?,
+	-- True only for Kind == "Parried" when the parried hit was a CONTINUATION hit against an already-
+	-- tracked air-combo target (never the opening DashPunch itself, which stays a plain punish with no
+	-- launch -- see AirCombo.SwitchPriority's own header, Server/Combat/AirCombo.lua, for the full
+	-- mechanic this flags): the parrier (TargetUserId) seizes attacker priority and starts juggling
+	-- whoever they just parried (AttackerUserId), who becomes the new held victim, with a guaranteed
+	-- extra Constants.Combat.AirCombo.ParryHoldExtensionSeconds added to the hold. Additive/read-only,
+	-- like BlockStartedPayload's own ParryWindowOpened -- consumed client-side by
+	-- PredictionMirror.OnMyParrySeizedAirComboPriority (the new attacker's own mirrored air-combo
+	-- window) and OnMyAttackParried's own priority-loss clear (the old attacker's) -- see
+	-- CombatClient.lua's Parried feedback handler.
+	AirComboPriorityShift: boolean?,
+	-- Non-nil in two cases, both meaning "watch TargetUserId for a ground-impact payoff"
+	-- (Client/FX/SlamImpactVFX.lua):
+	--   - Kind == "Hit", when the landing attack actually was a finisher AND its knockback actually
+	--     applied (i.e. the same conditions HitResolution.ApplyFinisherPhysics/CombatSystem.lua's own
+	--     finisher block already gate on: not blocked, and the target survived the hit -- a lethal
+	--     finisher never launches, see ApplyFinisherPhysics's own "Health <= 0" guard). Read-only echo
+	--     of the same already-server-authoritative variant AttackStartedPayload.FinisherVariant
+	--     carries at throw time, just threaded onto the RESOLVED hit instead. Covers the M1 combo's
+	--     own Downslam/Uppercut and the standalone AirSlam attack (always "Downslam").
+	--   - Kind == "GroundSlam", sent by AirCombo.lua's own MaxHits slam finisher (always "Downslam")
+	--     via a SECOND, separate event -- the landed swing's own "Hit" event was already sent before
+	--     AirCombo.Apply ever runs (reaching that code path at all requires the swing's own
+	--     finisherVariant to be nil), so it structurally cannot carry this. See AirComboTarget.
+	--     onGroundSlam's own header (CombatTypes.lua) for the full mechanism.
+	-- Not consumed for any gameplay/hit decision -- purely presentation, like AirComboPriorityShift
+	-- above.
+	FinisherVariant: FinisherVariant?,
+	-- Set only alongside FinisherVariant == "Downslam" (both origins above). True when
+	-- RagdollController.SlamToGround's own clearance math (Constants.Combat.Ragdoll.
+	-- SlamImmediateImpactDropStuds) determined the target had essentially no room to fall -- the
+	-- common "already standing on the ground" case. Client/FX/SlamImpactVFX.BeginWatch uses this to
+	-- skip its own fall-then-arrest velocity poll entirely and fire the impact directly instead: that
+	-- poll is Heartbeat-rate (~60Hz) over REPLICATED physics state, and a clamped-to-near-zero slam can
+	-- fall and fully arrest within a single physics step -- often faster than the poll can sample it,
+	-- sometimes faster than the network even sends the transient velocity at all. The server already
+	-- knows definitively via this exact calculation, so it says so instead of leaving the client to
+	-- guess at something it may structurally be unable to observe. False (or nil) means a genuine,
+	-- observable fall -- the existing poll-based detection, which already works reliably for that case.
+	ImmediateGroundImpact: boolean?,
+	-- Set only for Kind == "ObjectStun" -- see ObjectStunFeedback above. Not consumed for any
+	-- gameplay/hit decision (the server already applied the stun, damage and pin before sending
+	-- this); purely presentation, like FinisherVariant and AirComboPriorityShift.
+	ObjectStun: ObjectStunFeedback?,
 }
 
 -- Which weapon a player currently fights with (Constants.Combat.Weapons) -- CombatSystem.lua's
@@ -162,6 +373,35 @@ export type AttackStartedPayload = {
 	CooldownSeconds: number?,
 	WeaponId: WeaponId?,
 	FinisherVariant: FinisherVariant?,
+	-- Additive, both nil for every weapon-stage/standalone throw AND for a CombatSystem.
+	-- ThrowCustomMove throw (see Animations below, which now owns that case). Still set by the ONE
+	-- remaining caller that hasn't moved onto Animations: CombatSystem's Object Stun follow-up throw
+	-- (scheduleObjectStunFollowUp), whose own single AnimationId field has no multi-clip timeline
+	-- counterpart to project through -- see CombatAnimator.PlayExplicitAnimation, which this pair of
+	-- fields lets the client play directly instead of inferring a clip from DebugName's trailing
+	-- digit. AnimationTrackName is a stable Animator track key, distinct from AnimationId (the
+	-- rbxassetid:// itself) so PlayExplicitAnimation can cache and reuse one loaded AnimationTrack
+	-- rather than reloading it every throw.
+	AnimationId: string?,
+	AnimationTrackName: string?,
+	-- Additive, nil for every weapon-stage/standalone/follow-up throw. Non-nil -- EVEN WHEN THE ARRAY
+	-- ITSELF IS EMPTY -- if and only if this swing came from CombatSystem.ThrowCustomMove: a Move
+	-- Creation System move's full authored AnimationTimeline.Clip list (MoveDefinition.Animations),
+	-- or -- for a move that only ever set the original single-clip AnimationId -- that id projected
+	-- onto a one-clip list by the same AnimationTimeline.FromLegacyAnimationId helper
+	-- MoveRegistryManager.Validate and PreviewViewport's own preview already use, so the editor's
+	-- preview and the real throw can never schedule two different sequences from the same authored
+	-- data. Resolved client-side by CombatAnimator.PlayCustomMoveTimeline via AnimationTimeline.
+	-- Resolve, against THIS payload's own WindupSeconds/ActiveSeconds/RecoverySeconds -- one shared
+	-- pure scheduler, never a second copy of the resolution logic.
+	--
+	-- Non-nil is deliberately the ONLY signal CombatClient.lua's attack-started handler needs to know
+	-- "this throw is a CustomMove, never fall back to ConfirmSwing's DebugName-trailing-digit
+	-- inference." A custom move's DebugName is always its MoveId (MoveTypes.ToHitboxAttackDefinition),
+	-- an admin-authored slug+suffix with no relationship whatsoever to the M1 combo stage numbering
+	-- that inference exists to read -- gating on "AnimationId happened to be non-empty" instead (the
+	-- bug this field replaces) let a MoveId ending in "3" silently play the M1 combo's third swing.
+	Animations: { AnimationTimeline.Clip }?,
 }
 
 -- Sent to the acting player only, the moment CombatSystem accepts a Dash (after every validation
@@ -208,28 +448,35 @@ export type BlockStartedPayload = {
 	ParryWindowSeconds: number,
 }
 
--- Which client-predictable request a Combat_ActionRejected event refers to -- exactly the six
--- actions CombatClient plays optimistic local feedback for at press time (Basic/Heavy share one
--- prediction slot, "Swing" -- see Constants.Combat.Prediction). Matches the prediction/feedback the
--- client recorded at press time so it knows what to roll back. Sprint's entry is the visual-only
--- kind: CombatSystem.lua's handleSprintStart plays no PredictionMirror slot (WalkSpeed's own
--- server-authoritative gate is what actually decides whether sprinting takes effect), but the
+-- Which client-predictable request a Combat_ActionRejected event refers to -- six of these seven
+-- actions are the ones CombatClient plays optimistic local feedback for at press time (Basic/Heavy
+-- share one prediction slot, "Swing" -- see Constants.Combat.Prediction), matching the prediction/
+-- feedback the client recorded at press time so it knows what to roll back. Sprint's entry is the
+-- visual-only kind: CombatSystem.lua's handleSprintStart plays no PredictionMirror slot (WalkSpeed's
+-- own server-authoritative gate is what actually decides whether sprinting takes effect), but the
 -- client still optimistically plays a running animation/VFX/FOV zoom on keydown, so a genuine
 -- reject (e.g. Ragdolled) still needs a rollback signal the same as every other predicted action --
--- see CombatClient's Combat_ActionRejected handler.
-export type RejectedActionKind = "Basic" | "Heavy" | "Dash" | "BlockStart" | "Slide" | "Sprint"
+-- see CombatClient's Combat_ActionRejected handler. "CustomMove" is the odd one out -- the admin-only
+-- hotbar live-fire request (CombatSystem.lua's handleFireHotbarMoveRequest) has no client-side
+-- prediction at all (the swing only ever plays off the server-confirmed Combat_AttackStarted echo,
+-- same as MoveEditorSystem.TestFireMove), so there is nothing to roll back -- this entry exists
+-- purely so a genuine reject (NotAuthorized/CooldownActive/MoveNotFound/...) reaches the requesting
+-- admin at all instead of being swallowed silently, reusing this existing channel rather than
+-- inventing a second one.
+export type RejectedActionKind = "Basic" | "Heavy" | "Dash" | "BlockStart" | "Slide" | "Sprint" | "CustomMove"
 
--- Sent to the acting player only, when a Basic/Heavy/Dash/BlockStart/Slide/Sprint request is
--- genuinely rejected -- the rollback counterpart of the AttackStartedPayload/
+-- Sent to the acting player only, when a Basic/Heavy/Dash/BlockStart/Slide/Sprint/CustomMove request
+-- is genuinely rejected -- the rollback counterpart of the AttackStartedPayload/
 -- MovementPerformedPayload/BlockStartedPayload/SlidePerformedPayload confirm echoes (Sprint has no
 -- confirm echo of its own -- see RemoteNames.MovementPerformed's header -- so its rollback is the
--- ONLY server->client signal tied to a SprintStart request at all). NEVER fired for the
--- too-early-but-buffered attack pseudo-reject (the buffered press still produces its confirm echo
--- when it flushes) and never for Stop actions (always honored). Reason is the same reject-reason
--- string logRejected records server-side ("Stunned", "DashCooldownActive", ...) -- diagnostic only:
--- the client's rollback needs only Action and logs Reason for debugging. PredictionMirror does NOT
--- parse it -- it self-corrects from the feedback stream plus the OnPredictionPending horizon (see
--- CombatClient's Combat_ActionRejected handler).
+-- ONLY server->client signal tied to a SprintStart request at all; CustomMove is the same way, see
+-- RejectedActionKind's own header). NEVER fired for the too-early-but-buffered attack pseudo-reject
+-- (the buffered press still produces its confirm echo when it flushes) and never for Stop actions
+-- (always honored). Reason is the same reject-reason string logRejected records server-side
+-- ("Stunned", "DashCooldownActive", ...) -- diagnostic only: the client's rollback needs only Action
+-- and logs Reason for debugging. PredictionMirror does NOT parse it -- it self-corrects from the
+-- feedback stream plus the OnPredictionPending horizon (see CombatClient's Combat_ActionRejected
+-- handler).
 export type ActionRejectedPayload = {
 	Action: RejectedActionKind,
 	Reason: string,
@@ -315,6 +562,200 @@ export type CombatSnapshot = {
 	-- current or future system can consult (unlike Attacking above, which is narrowly scoped to a
 	-- single swing/dash's own commitment window).
 	InCombat: boolean,
+	-- True while CombatState.Vitals.ragdollExpiry is still in the future -- the same field
+	-- ACTION_GATES.Ragdoll already gates Basic/Heavy/Dash/etc. on privately (CombatSystem.lua).
+	-- Added for EmoteSystem (Server/Systems/EmoteSystem.lua), which needs to reject/interrupt an
+	-- emote while a player is physically ragdolled without reaching into CombatState directly.
+	Ragdolled: boolean,
+	-- True while CombatState.AirCombo.airComboHeldExpiry is still in the future -- the same field
+	-- ACTION_GATES.HeldAloft already gates most actions on privately. Same EmoteSystem consumer as
+	-- Ragdolled above.
+	HeldAloft: boolean,
+}
+
+-- The twelve hitbox shapes an authored move may use. Structurally identical BY CONSTRUCTION to
+-- Shared/HitboxShapes.lua's own ShapeId union -- the same deliberate two-copies arrangement
+-- MoveEditor/Types.lua's SectionId and Components/SectionIcon.lua's SectionIconGlyphKind already
+-- use, and for the same reason: this file is a leaf that requires nothing (see its own header), and
+-- HitboxShapes.lua is a leaf geometry module with no business depending on the network-boundary
+-- type file. HitboxShapes.SHAPE_SPECS is the RUNTIME authority (a shape with no spec there simply
+-- does not exist); this union is the compile-time mirror of its keys.
+export type HitboxShapeId =
+	"Box"
+	| "Sphere"
+	| "Cone"
+	| "Cylinder"
+	| "Capsule"
+	| "Disc"
+	| "Wedge"
+	| "Pyramid"
+	| "Arc"
+	| "Beam"
+	| "Blade"
+	| "Slice"
+
+-- Every measurement any shape reads, always fully populated. Mirrors HitboxShapes.Dimensions for
+-- the same reason HitboxShapeId mirrors ShapeId above. Which of these a given shape actually
+-- consumes is HitboxShapes.FieldsFor(shape) -- nothing here implies a shape reads all eight.
+export type HitboxDimensions = {
+	Width: number,
+	Height: number,
+	Depth: number,
+	Length: number,
+	Thickness: number,
+	Radius: number,
+	InnerRadius: number,
+	AngleDegrees: number,
+}
+
+-- Which classes of world geometry an Object Stun may trigger against. Four independent booleans
+-- rather than one enum because they are genuinely independent choices -- a wall-slam move wants
+-- Walls only, a ground-spike wants Floors only, a "smash them through the scenery" move wants Props
+-- regardless of orientation. Walls/Floors/Ceilings are decided from the impact surface's own
+-- NORMAL; Props is decided from the hit PART instead (unanchored, or carrying the config's
+-- RequirePartTag) and takes priority over the orientation classes, so a crate reads as a prop
+-- whichever face of it was struck. See Server/Combat/ObjectStunResolver.lua's classifySurface.
+export type ObjectStunSurfaces = {
+	Walls: boolean,
+	Floors: boolean,
+	Ceilings: boolean,
+	Props: boolean,
+}
+
+-- The optional second attack an Object Stun chains into once the target is pinned. This is what
+-- makes "hit them, knock them into a wall, wall-stun them, then immediately follow up" authorable
+-- as ONE move instead of bespoke code per move.
+--
+-- Deliberately carries its OWN full hitbox/timing/damage block rather than inheriting the parent
+-- move's: a follow-up is a different attack (a close-range punish into a pinned target, typically
+-- far tighter and faster than the launcher that set it up), and inheriting the parent's geometry
+-- would make the common case -- a big sweeping launcher into a small precise punish -- inexpressible.
+export type ObjectStunFollowUp = {
+	Enabled: boolean,
+	-- Seconds after the object impact before the follow-up is thrown. 0 is legal (immediate).
+	DelaySeconds: number,
+	-- Plays on the ATTACKER when the follow-up throws. "" = none, the same wired-but-unauthored
+	-- convention Constants.Combat.AnimationIds already uses.
+	AnimationId: string,
+
+	WindupSeconds: number,
+	ActiveSeconds: number,
+	RecoverySeconds: number,
+	Damage: number,
+	PostureDamage: number,
+	MaxTargets: number,
+
+	Shape: HitboxShapeId,
+	Dimensions: HitboxDimensions,
+	-- Relative to the ATTACKER's root at the moment the follow-up throws, exactly like the parent
+	-- move's own Offset -- not relative to the pinned victim. Combined with TeleportAttacker below
+	-- (which first puts the attacker at a known distance from the victim), that is what makes a
+	-- follow-up land reliably rather than depending on where the attacker happened to drift.
+	Offset: CFrame,
+	OffsetRotation: Vector3,
+
+	-- Closes the gap before throwing: repositions the attacker TeleportDistanceStuds from the pinned
+	-- victim, facing them. Off by default -- a teleport is a strong, very visible effect an author
+	-- should opt into rather than discover.
+	TeleportAttacker: boolean,
+	TeleportDistanceStuds: number,
+
+	-- The follow-up's own knockback, independent of the parent move's -- typically what peels the
+	-- victim back off the surface. Same shape as HitboxAttackDefinition.Knockback below.
+	Knockback: {
+		UpVelocity: number,
+		HorizontalVelocity: number,
+		RagdollSeconds: number,
+		StartsAirCombo: boolean?,
+	}?,
+}
+
+-- A move-authored reaction to KNOCKING A TARGET INTO something -- not to a target merely being near
+-- something. See MoveTypes.lua's own header for where this sits in the authored-move schema and
+-- Server/Combat/ObjectStunResolver.lua for the runtime.
+--
+-- The causation problem is the entire design. A naive "is there a wall behind them" check fires
+-- constantly for anyone fighting with their back to a building, which makes the mechanic feel random
+-- rather than earned. Four independent, separately-authorable gates together answer "did THIS move
+-- put them there":
+--
+--   * RequiredClearanceStuds -- at the moment the hit lands there must be NO qualifying surface
+--     closer than this along the direction the target is about to be thrown. A target already
+--     against the wall cannot be "knocked into" it; the watch is refused outright.
+--   * MinTravelStuds -- the target must actually be carried at least this far from where they stood
+--     when hit, before any impact counts.
+--   * MinImpactSpeed -- how fast they must still be moving on contact, ruling out drifting gently
+--     into a surface at the tail of a spent knockback.
+--   * MaxImpactAngleDegrees -- how head-on the contact must be (between travel direction and the
+--     surface's inward normal), ruling out scraping ALONG a wall.
+--
+-- MaxTravelSeconds bounds how long the resolver keeps watching after the hit; past it the watch is
+-- dropped untriggered, so a target knocked back, recovering, and walking into a wall five seconds
+-- later never sets it off.
+export type ObjectStunConfig = {
+	Enabled: boolean,
+
+	-- Detection ---------------------------------------------------------------------------------
+	Surfaces: ObjectStunSurfaces,
+	-- Only trigger on anchored geometry. On by default: unanchored debris absorbs an impact rather
+	-- than stopping the target, so slamming someone into a loose crate reads wrong. Turn it off
+	-- (with Surfaces.Props on) for a move that is specifically about smashing through scenery.
+	RequireAnchored: boolean,
+	-- CollectionService tag the hit part, or an ancestor of it, must carry. "" = no requirement (the
+	-- default). The escape hatch for a level designer to mark exactly which scenery is slam-worthy
+	-- without the combat code knowing anything about the map.
+	RequirePartTag: string,
+	-- Rejects impacts against parts smaller than this on their smallest axis -- a lamp post or a
+	-- railing should not stop a launched body the way a wall does.
+	MinSurfaceExtentStuds: number,
+	-- How far ahead of the target the resolver probes each tick, on top of the distance they will
+	-- cover this frame. Roughly a body's own half-depth: enough that contact registers on the frame
+	-- it happens rather than after the physics solver has stopped them dead and erased the evidence.
+	ProbeDistanceStuds: number,
+	RequiredClearanceStuds: number,
+	MinTravelStuds: number,
+	MinImpactSpeed: number,
+	MaxImpactAngleDegrees: number,
+	MaxTravelSeconds: number,
+
+	-- Outcome -----------------------------------------------------------------------------------
+	StunSeconds: number,
+	-- How long the target stays DOWN, measured from the moment the drop that ends a pin actually
+	-- lands -- NOT the total. The full physical sequence is PinSeconds + this, and CombatSystem's own
+	-- onObjectStunImpact is what adds them together for the ragdoll and the action lockout alike.
+	RagdollSeconds: number,
+	BonusDamage: number,
+	BonusPostureDamage: number,
+	-- Bounces the target back off the surface at this speed. 0 = they stay where they hit, which is
+	-- the right answer whenever PinSeconds is doing the work instead.
+	ReboundVelocity: number,
+	-- Holds the target against the surface this long -- the "stuck in the wall" beat a follow-up
+	-- needs in order to land at all. 0 = no pin.
+	--
+	-- The pin is the FIRST of two beats: when it expires the body is peeled off the surface and
+	-- slammed into the floor (CombatSystem.dropFromSurface / RagdollController.SlamToGround),
+	-- which is what gives the reaction its ground-impact payoff instead of ending with the target
+	-- sliding quietly down the wall. Set it to 0 for a move that should leave them where they hit,
+	-- with no drop at all.
+	PinSeconds: number,
+	-- Plays on the TARGET at impact ("" = none) -- the wall-stun reaction clip.
+	VictimAnimationId: string,
+	-- Plays on the ATTACKER at impact ("" = none) -- the "they landed it" beat, separate from the
+	-- follow-up's own animation, which plays later.
+	AttackerAnimationId: string,
+	SoundId: string,
+	EffectColor: Color3,
+	-- Multiplies the impact's client-side camera reaction. 0 disables it.
+	CameraShakeScale: number,
+
+	-- Limits ------------------------------------------------------------------------------------
+	-- Per attacker, per move: how long before this move may trigger another object stun at all.
+	-- Stops a fast multi-hit move chain-stunning one target against the same wall.
+	CooldownSeconds: number,
+	-- Per throw: how many distinct targets one swing may object-stun. 1 for almost everything.
+	MaxTriggersPerMove: number,
+
+	FollowUp: ObjectStunFollowUp?,
 }
 
 -- One stage of a melee swing's hitbox (Constants.Combat.Weapons[weaponId].Stages.Basic/Heavy
@@ -351,6 +792,56 @@ export type HitboxAttackDefinition = {
 	-- Optional cap on distinct targets a single swing can land a hit on. nil = unlimited (every
 	-- valid target the box overlaps gets hit, still capped at one hit each).
 	MaxTargets: number?,
+	-- Additive, all three nil for every hand-authored Constants.lua definition (Box is the implicit
+	-- default, matching every attack that predates the Move Creation System). Set only by
+	-- MoveRegistryManager.ToHitboxAttackDefinition (MoveTypes.lua) for an authored custom move.
+	--
+	-- Box and Sphere remain SPECIAL: for those two, Size/Radius are populated and
+	-- HitboxResolver.performSample runs the original exact GetPartBoundsInBox/GetPartBoundsInRadius
+	-- query with no narrow-phase filtering at all, byte-identical to what it always did. Every OTHER
+	-- shape leaves both nil and is resolved entirely through Dimensions -- a broadphase oriented-box
+	-- query (HitboxShapes.BoundingBox) whose results are then filtered by HitboxShapes.ContainsPoint.
+	-- That split is why widening this union could not regress a single existing attack.
+	Shape: HitboxShapeId?,
+	Radius: number?,
+	-- Present for every Move Creation System move (all twelve shapes read their measurements from
+	-- it), nil for every hand-authored definition. See HitboxDimensions above.
+	Dimensions: HitboxDimensions?,
+	-- Additive, nil for every hand-authored Constants.lua definition (today's finishers apply
+	-- knockback through the separate FinisherVariant/RagdollController path, not this field).
+	-- Set only by MoveRegistryManager.ToHitboxAttackDefinition for a custom move that authors
+	-- simple knockback -- see onSwingHitCandidate's hit-confirmed branch in CombatSystem.lua.
+	Knockback: {
+		UpVelocity: number,
+		HorizontalVelocity: number,
+		RagdollSeconds: number,
+		-- Additive, nil/false for every existing knockback-authoring caller. When true, the hit
+		-- unlocks aerial-combo continuation via AirCombo.Apply -- see MoveTypes.MoveKnockback.
+		-- StartsAirCombo's own header for the full reasoning; this field only exists so
+		-- MoveTypes.ToHitboxAttackDefinition's Knockback passthrough stays a straight field-for-field
+		-- copy instead of needing a rebuild.
+		StartsAirCombo: boolean?,
+	}?,
+	-- Additive, nil for every hand-authored Constants.lua definition and every existing standalone
+	-- attack (DashPunch/DashHit/AirSlam) -- those all stay body-relative swings. Set only by
+	-- MoveRegistryManager.ToHitboxAttackDefinition for a Move Creation System move authored as a
+	-- projectile: when present, CombatSystem.ThrowCustomMove routes through
+	-- HitboxResolver.StartProjectile instead of the ordinary StartSwing -- see that function's own
+	-- header for how Speed/MaxRange interact with WindupSeconds/ActiveSeconds/MaxTargets.
+	Projectile: {
+		Speed: number, -- studs per second
+		MaxRange: number, -- studs -- travel stops at this distance even if ActiveSeconds hasn't elapsed
+	}?,
+	-- Additive, nil for every hand-authored definition and for any custom move that doesn't author
+	-- one. Set only by MoveRegistryManager.ToHitboxAttackDefinition. Rides on this struct (rather
+	-- than being looked up from MoveRegistryManager at hit time) for exactly the reason Knockback
+	-- does: CombatSystem's per-hit path is generic over HitboxAttackDefinition and never sees a
+	-- MoveDefinition, so anything a landed hit must react to has to travel with the definition.
+	-- Consumed by CombatSystem's applyCustomMoveKnockback, which hands it to
+	-- Server/Combat/ObjectStunResolver.Watch. Always nil on an Object Stun's own follow-up
+	-- definition -- see MoveTypes.FollowUpToHitboxAttackDefinition for why chaining stops at one
+	-- level.
+	ObjectStun: ObjectStunConfig?,
 }
 
 -- Result of DevMenu_SpawnDummy (a RemoteFunction, not a RemoteEvent -- the client needs to know
@@ -401,6 +892,36 @@ export type KeybindAction =
 	-- toggle, the same "never fires a remote" carve-out this file already documents for
 	-- "ShiftLock".
 	| "OpenBugReport"
+	-- Opens the Move Creation System's editor screen (Client/MoveEditor/MoveEditorClient.lua via
+	-- Client/UI/Screens/MoveEditor/init.lua) -- admin-only, same "client-side convenience toggle,
+	-- server re-checks authorization regardless" contract as "DevMenuToggle" above. Fires no combat
+	-- remote of its own (opening the screen is free; every actual action inside it goes through
+	-- MoveEditorSystem's own gated RemoteFunctions).
+	| "OpenMoveEditor"
+	-- The 5 hotbar slots (Client/UI/Screens/HUD/init.lua's Panel "Hotbar") -- fire whatever MoveId is
+	-- currently bound to that slot (Client/Combat/HotbarBindings.lua, admin-local, no persistence)
+	-- via Combat_RequestFireHotbarMove. Unlike every other action above, these have no server-side
+	-- gameplay meaning of their own -- CombatSystem.lua's handleFireHotbarMoveRequest re-checks
+	-- AdminConfig.AuthorizedUserIds regardless of what a client fires, so a non-admin pressing 1-5
+	-- (or a client with nothing bound to that slot) simply does nothing. Named per-slot rather than
+	-- one "HotbarSlot" action carrying a slot number -- Types.Keybind has no payload slot, and this
+	-- keeps Rebind/Matches working identically to every other single-key action in this union.
+	| "HotbarSlot1"
+	| "HotbarSlot2"
+	| "HotbarSlot3"
+	| "HotbarSlot4"
+	| "HotbarSlot5"
+	-- Held to open the radial emote wheel (Client/Emotes/EmoteWheelClient.lua via Client/UI/Screens/
+	-- EmoteWheel/init.lua) -- releasing confirms whichever segment the mouse is nearest to, Escape/
+	-- right-click cancels without confirming. Fires no combat remote of its own -- Client/Emotes/
+	-- EmoteController.RequestPlay (this feature's Phase 1 client entry point) is what actually sends
+	-- the play request once EmoteWheelClient resolves a confirmed segment.
+	| "EmoteWheel"
+	-- Opens the player-facing Settings panel (Client/UI/Screens/Settings/init.lua via
+	-- Client/Settings/SettingsClient.lua) -- same "client-side convenience toggle, fires no combat
+	-- remote of its own" shape as "OpenBugReport" above, and unlike "DevMenuToggle"/"OpenMoveEditor"
+	-- there is no authorization check at all, admin or otherwise: every player gets this panel.
+	| "SettingsToggle"
 
 -- Exactly one of KeyCode/UserInputType is populated -- KeyCode for ordinary keyboard keys,
 -- UserInputType for inputs with no KeyCode equivalent (Roblox only reports mouse buttons via
@@ -408,6 +929,25 @@ export type KeybindAction =
 export type Keybind = {
 	KeyCode: Enum.KeyCode?,
 	UserInputType: Enum.UserInputType?,
+}
+
+-- Which input category a Keybind override applies to (Settings System) -- a keyboard bind and a
+-- gamepad bind for the same KeybindAction are independent, see KeybindManager.lua's own header.
+export type KeybindDevice = "Keyboard" | "Gamepad"
+
+-- Persisted player preferences (Server/Systems/SettingsSystem.lua, Client/Settings/
+-- SettingsClient.lua, Client/Input/KeybindManager.lua). Keybinds/GamepadKeybinds are deliberately
+-- SPARSE override maps, not a full snapshot of every KeybindAction -- an action absent from either
+-- map simply stays at its Constants.Keybinds.Defaults/GamepadDefaults value, the same "only store
+-- what actually differs" contract that keeps a stale/renamed/retired KeybindAction from ever
+-- corrupting a saved profile (PlayerDataSystem.DecodeSettings drops any key that isn't a live,
+-- rebindable KeybindAction rather than trusting the stored shape). Flat and open to new keys by
+-- construction -- a future toggle (e.g. a camera-shake or gore-filter preference) is just one more
+-- field here, never a reason to introduce a second settings table.
+export type PlayerSettings = {
+	Keybinds: { [KeybindAction]: Keybind },
+	GamepadKeybinds: { [KeybindAction]: Keybind },
+	Autorun: boolean,
 }
 
 -- Training bots (Server/Systems/TrainingBotSystem.lua) -- AI-controlled practice opponents,
@@ -453,92 +993,40 @@ export type DevMenuActionResult = {
 	Reason: string?,
 }
 
--- Hitbox timing tuning (Server/Combat/HitboxTuning.lua, DevMenu_ListHitboxStages/
--- DevMenu_AdjustHitboxTiming/DevMenu_ResetHitboxStage) -- a Studio-only LIVE tuning tool, not part
--- of the combat trust model: it lets an authorized admin nudge a swing's real
--- Windup/Active/RecoverySeconds while playtesting and immediately feel the result, without
--- restarting the session -- see HitboxTuning.lua's own header for why an in-place Constants
--- mutation takes effect on the very next (or even an already in-flight) swing. "Finisher" is a
--- single stage (not an array), so StageIndex is 0 for it; Basic/Heavy use a 1-based array index.
-export type HitboxStageCategory = "Basic" | "Heavy" | "Finisher"
-export type HitboxTimingField = "WindupSeconds" | "ActiveSeconds" | "RecoverySeconds"
-
-export type HitboxStageInfo = {
-	WeaponId: WeaponId,
-	Category: HitboxStageCategory,
-	StageIndex: number,
-	DebugName: string,
-	WindupSeconds: number,
-	ActiveSeconds: number,
-	RecoverySeconds: number,
-}
-
--- Result of DevMenu_ListHitboxStages -- every tunable stage across both weapons, in a stable order
--- (HitboxTuning.ListStages), fetched ONCE by DevMenuClient.lua and cached client-side; every later
--- Adjust/Reset response (DevMenuHitboxStageResult below) only ever carries back the ONE stage that
--- changed, never a full re-fetch.
-export type DevMenuListHitboxStagesResult = {
+-- Result of DevMenu_GetHitboxDebug / DevMenu_SetHitboxDebug (Server/Combat/HitboxDebugState.lua) --
+-- same request/response reasoning as DevMenuActionResult above, carrying back the current/updated
+-- Enabled value so the client can refresh its Toggle without a second round trip.
+export type DevMenuHitboxDebugResult = {
 	Success: boolean,
-	Stages: { HitboxStageInfo }?,
+	Enabled: boolean?,
 	Reason: string?,
 }
 
--- Result of DevMenu_AdjustHitboxTiming / DevMenu_ResetHitboxStage -- same request/response
--- reasoning as DevMenuSpawnDummyResult, carrying back the ONE updated stage's new values so the
--- client can refresh its display without a second round trip.
-export type DevMenuHitboxStageResult = {
+-- Result of DevMenu_RollEmote (Server/Systems/EmoteUnlockService.lua's RollEmote, always against the
+-- "RareEmotes" pool -- see DevMenuSystem.handleRollEmote) -- a whitelist-gated one-shot test trigger
+-- for the Emote System's roll path, not a general-purpose "roll any pool" remote; there is still no
+-- client-facing way to roll an arbitrary pool. EmoteId is populated only on a genuine grant, mirroring
+-- RollEmote's own (boolean, string?, string?) return -- never set for "AllOwned"/"PoolEmpty"/etc.
+export type DevMenuRollEmoteResult = {
 	Success: boolean,
-	Stage: HitboxStageInfo?,
+	EmoteId: string?,
 	Reason: string?,
 }
 
--- Standalone-attack live tuning (Server/Combat/HitboxTuning.lua's ListStandaloneAttacks/
--- AdjustStandaloneField/ResetStandaloneAttack, DevMenu_ListStandaloneAttacks/
--- DevMenu_AdjustStandaloneField/DevMenu_ResetStandaloneAttack) -- the same live-tuning idea as
--- HitboxStageInfo above, for the attacks that AREN'T a weapon combo stage (DashPunch/DashHit,
--- CombatSystem.lua's handleDashRequest; AirSlam, handleAirSlamRequest) and so don't fit that type's
--- (WeaponId, Category, StageIndex) key -- these are keyed by name instead. Also exposes
--- OffsetForwardStuds, which the weapon-stage tool deliberately does NOT (HitboxTuning.lua's own
--- header: "Scoped to TIMING only") -- these attacks' hand-tracked hitbox position (HitboxResolver.
--- SwingConfig.AttackerTrackedPart) was exactly what needed hands-on playtesting to dial in, so this
--- tool's scope is deliberately wider than the weapon-stage one.
-export type StandaloneAttackName = "DashPunch" | "DashHit" | "AirSlam"
-export type HitboxStandaloneField = "WindupSeconds" | "ActiveSeconds" | "RecoverySeconds" | "OffsetForwardStuds"
-
-export type HitboxStandaloneInfo = {
-	Name: StandaloneAttackName,
-	DebugName: string,
-	WindupSeconds: number,
-	ActiveSeconds: number,
-	RecoverySeconds: number,
-	-- Studs the hitbox is nudged forward from its tracked-part origin (positive = further in front
-	-- of the attacker) -- see HitboxTuning.lua's offsetForwardStuds for the CFrame<->number
-	-- conversion, and that function's own header for why it assumes a pure-translation Offset.
-	OffsetForwardStuds: number,
-}
-
--- Result of DevMenu_ListStandaloneAttacks -- both tunable attacks, fetched ONCE by
--- DevMenuClient.lua and cached client-side, same "fetch once, cache, patch from Adjust/Reset
--- responses" shape as DevMenuListHitboxStagesResult.
-export type DevMenuListStandaloneAttacksResult = {
-	Success: boolean,
-	Attacks: { HitboxStandaloneInfo }?,
-	Reason: string?,
-}
-
--- Result of DevMenu_AdjustStandaloneField / DevMenu_ResetStandaloneAttack -- same
--- request/response reasoning as DevMenuHitboxStageResult.
-export type DevMenuStandaloneAttackResult = {
-	Success: boolean,
-	Attack: HitboxStandaloneInfo?,
-	Reason: string?,
-}
+-- Live hitbox timing/full-field tuning for hand-authored attacks (every weapon Basic/Heavy/Finisher
+-- stage, plus DashPunch/DashHit/AirSlam) moved out of DevMenu entirely -- it's now the Move Editor's
+-- "Default" moves section (Server/Combat/DefaultMoveRegistry.lua, projected as a
+-- Shared/MoveTypes.MoveDefinition with Category == "Default"; see that module's own header). No
+-- dedicated Types.lua shapes remain for it -- MoveEditorListResult/MoveEditorMoveResult
+-- (Shared/MoveTypes.lua) already cover the request/response shape.
 
 -- Live flight-tuning field names (Server/DevMenu/FlightTuning.lua, DevMenu_ListFlightTuning/
 -- DevMenu_AdjustFlightTuning/DevMenu_ResetFlightTuning) -- a CURATED subset of Constants.Flight's own
--- fields worth exposing to hands-on playtesting, same scoping call HitboxTuning.lua makes for
--- Windup/Active/RecoverySeconds rather than a general Constants editor. Deliberately excludes fields
--- with no "feel" ambiguity to dial in (e.g. DefaultCollideMode, the AnimationIds/Sound tables).
+-- fields worth exposing to hands-on playtesting, a deliberately scoped-down editor rather than a
+-- general Constants one (unlike Server/Combat/DefaultMoveRegistry.lua's now-full-field Default-move
+-- editor, movement feel has no MoveRegistryManager.Validate-style clamp table to reuse). Deliberately
+-- excludes fields with no "feel" ambiguity to dial in (e.g. DefaultCollideMode, the AnimationIds/
+-- Sound tables).
 export type FlightTuningFieldName =
 	"CruiseSpeed"
 	| "BoostSpeedMultiplier"
@@ -564,7 +1052,7 @@ export type FlightTuningInfo = {
 
 -- Result of DevMenu_ListFlightTuning -- every tunable field, fetched ONCE by DevMenuClient.lua and
 -- cached client-side, same "fetch once, cache, patch from Adjust/Reset responses" shape as
--- DevMenuListHitboxStagesResult.
+-- DevMenuListBugReportsResult below.
 export type DevMenuListFlightTuningResult = {
 	Success: boolean,
 	Fields: { FlightTuningInfo }?,
@@ -585,7 +1073,29 @@ export type DevMenuFlightTuningResult = {
 -- derived server-side in BugReportSystem.Submit -- never accepted as client-sent values, even
 -- though they're not gameplay-critical, because "server owns truth" applies here too.
 export type BugReportCategory = "Bug" | "Exploit" | "Suggestion" | "Other"
-export type BugReportStatus = "Open" | "Resolved" | "Dismissed"
+-- "InProgress" sits between Open and the two terminal states so an admin can flag "someone is
+-- actively working this" distinct from the untouched backlog -- BugReportSystem.GetOpenCount's
+-- Open-vs-not-Open counting (ComputeOpenCountDelta) already generalizes to any non-Open status
+-- without needing its own change.
+export type BugReportStatus = "Open" | "InProgress" | "Resolved" | "Dismissed"
+-- Admin-settable severity, lowest to highest -- never set by the reporter (BugReportSystem.Submit
+-- always starts a new record at Constants.BugReport.DefaultPriority), only ever re-triaged by an
+-- admin via BugReportSystem.SetPriority.
+export type BugReportPriority = "Low" | "Normal" | "High" | "Urgent"
+
+-- One internal triage note on a report (BugReportSystem.AddNote) -- admin-to-admin coordination
+-- ("assigning to X", "confirmed on live, escalating"), never shown to the reporter. There is no
+-- reply-to-reporter delivery path anywhere in this codebase (no mailbox/notification system a
+-- since-logged-off player could read later), so this is deliberately scoped to internal use only,
+-- not a first half of a two-way conversation. Text is filtered the same way Description is at
+-- Submit time.
+export type BugReportNote = {
+	Id: string,
+	AuthorUserId: number,
+	AuthorName: string,
+	Text: string,
+	CreatedAt: number,
+}
 
 export type BugReportRecord = {
 	Id: string, -- HttpService:GenerateGUID(false); also the DataStore key in both stores
@@ -604,6 +1114,15 @@ export type BugReportRecord = {
 	Status: BugReportStatus,
 	StatusUpdatedAt: number?,
 	StatusUpdatedByUserId: number?,
+	-- Admin-settable triage fields, added alongside the original Submit-time fields above. All three
+	-- default to "no admin has touched this yet" (Priority = Constants.BugReport.DefaultPriority,
+	-- AssignedAdminUserId/Name nil, Notes {}) both for a freshly Submitted record and for
+	-- decodeRecord reading an OLDER record written before these fields existed -- see that
+	-- function's own comment in BugReportSystem.lua.
+	Priority: BugReportPriority,
+	AssignedAdminUserId: number?,
+	AssignedAdminName: string?,
+	Notes: { BugReportNote },
 }
 
 -- Result of BugReport_Submit (RemoteFunction -- same "client needs an immediate answer" shape as
@@ -636,12 +1155,40 @@ export type DevMenuUpdateBugReportStatusResult = {
 	Report: BugReportRecord?,
 }
 
+-- Shared result shape for every OTHER bug-report triage mutation (DevMenu_AddBugReportNote/
+-- SetBugReportPriority/AssignBugReport) -- same {Success, Reason, Report} contract as
+-- DevMenuUpdateBugReportStatusResult above, factored out once a third and fourth near-identical
+-- Result type would otherwise exist for no functional difference.
+export type DevMenuBugReportMutationResult = {
+	Success: boolean,
+	Reason: string?,
+	Report: BugReportRecord?,
+}
+
 -- Teleportation / character-utility / server-wide admin actions -- every one of these reuses
 -- DevMenuActionResult (defined above) for its RemoteFunction result, the same "nothing about the
 -- result differs enough to warrant a near-identical type" reasoning that comment already gives for
 -- SetTargetHealth/Godmode/Flight/FlightCollide. ShutdownServer's first (arming) press also returns
 -- DevMenuActionResult with Reason = "ConfirmationRequired" -- not a distinct type, just another
 -- Reason string for DevMenuClient.lua to special-case in its own describeX function.
+
+-- Result of DevMenu_GetServerVersionInfo (RemoteFunction, Server/Systems/VersionWatchSystem.lua) --
+-- fetched once at DevMenuClient.Start(), same "fetch-once, cache client-side" shape as
+-- DevMenuHitboxDebugResult/DevMenuSidebarStatsResult above. BootPlaceVersion is THIS server's own
+-- game.PlaceVersion, fixed for its whole lifetime. LatestKnownPlaceVersion is the highest
+-- PlaceVersion any server (this one included) has reported booting with, via a shared DataStore
+-- counter that only ever ratchets upward -- see VersionWatchSystem.lua's own header for why that
+-- self-reported max is enough to detect a publish with no external tooling. NewerVersionAvailable
+-- is true only once LatestKnownPlaceVersion is strictly greater than BootPlaceVersion; nil/false
+-- otherwise (before the first DataStore round trip resolves, or the ordinary case of no newer
+-- version existing).
+export type DevMenuServerVersionInfoResult = {
+	Success: boolean,
+	Reason: string?,
+	BootPlaceVersion: number?,
+	LatestKnownPlaceVersion: number?,
+	NewerVersionAvailable: boolean?,
+}
 
 -- Broadcast Announcement (DevMenu_Announcement, a RemoteEvent fired to EVERY client -- see that
 -- remote's own header in Constants.lua). "Warning" is used for the Shutdown Server countdown;
@@ -716,15 +1263,20 @@ export type DevMenuSidebarStatsResult = {
 }
 
 -- First-time-player onboarding / character creation (Server/Systems/CharacterCreationSystem.lua,
--- Client/Onboarding/OnboardingClient.lua). A first-time player is detected purely by
--- `profile.raceId == nil` -- no new boolean flag on PlayerProfile -- so these three types are the
--- entire network surface this feature needs.
+-- Client/Onboarding/OnboardingClient.lua, Client/Intro/IntroClient.lua). A first-time player is
+-- detected purely by `profile.raceId == nil` -- no new boolean flag on PlayerProfile -- so these
+-- three types cover every REQUEST/RESPONSE this feature needs. CharacterCreation_AwakeningComplete
+-- (Constants.CharacterCreation.RemoteNames.AwakeningComplete) is the one additional remote this
+-- feature uses and deliberately has no type here -- it's a payload-less, fire-and-forget
+-- RemoteEvent (see CharacterCreationSystem.lua's own header for the trust reasoning), so there's
+-- nothing for a type to describe.
 
--- Result of CharacterCreation_GetOnboardingState (RemoteFunction, no payload). Client/Main.client.lua
--- calls this before UI.Mount() -- see that file's own header for the boot-order reasoning. This is
--- also the request that triggers this SESSION's first Player:LoadCharacter() call (StarterPlayer.
--- CharacterAutoLoads = false, default.project.json) for every player, onboarding or not; see
--- CharacterCreationSystem.lua's header for the full contract.
+-- Result of CharacterCreation_GetOnboardingState (RemoteFunction, no payload). Client/Intro/
+-- IntroClient.lua calls this (via OnboardingClient.FetchOnboardingState) before UI.Mount() -- see
+-- Main.client.lua's own header for the boot-order reasoning. This is also the request that triggers
+-- this SESSION's first Player:LoadCharacter() call (StarterPlayer.CharacterAutoLoads = false,
+-- default.project.json) for every player, onboarding or not; see CharacterCreationSystem.lua's
+-- header for the full contract.
 export type CharacterCreationOnboardingStateResult = {
 	NeedsOnboarding: boolean,
 }
@@ -748,6 +1300,102 @@ export type CharacterCreationFinalizePayload = {
 export type CharacterCreationFinalizeResult = {
 	Success: boolean,
 	Reason: string?,
+}
+
+-- Emote System (Shared/Emotes/EmoteDefinitions.lua + EmoteRegistry.lua, Server/Systems/
+-- EmoteUnlockService.lua + EmoteSystem.lua, Client/FX/EmoteAnimator.lua + Client/Emotes/
+-- EmoteController.lua). Phase 1 of 2 -- this is the full data/server/client backend; the radial
+-- wheel UI (a later session) is pure presentation on top of it, per this pass's own binding
+-- requirement that the system underneath work with zero UI.
+--
+-- An open-ended, always-growing content roster (EmoteId stays an opaque string, like BloodlineId/
+-- ArtId above) rather than a small fixed set like RaceId -- a live game keeps authoring new emotes
+-- for years, the same reasoning EmoteConstants.lua's own header gives for staying out of
+-- Constants.lua.
+export type EmoteCategory = "Social" | "Greeting" | "Reaction" | "Dance" | "Sitting" | "Rare"
+
+-- How a player comes to own a given emote. "Default" is granted to every profile at creation (and
+-- backfilled onto older profiles -- see EmoteUnlockService.lua); every other value is granted only
+-- through EmoteUnlockService.GrantEmote/RollEmote, called by whatever future system owns that
+-- condition (AchievementSystem for "Achievement", a quest system for "Quest", a live-ops system for
+-- "Event", a store for "Purchase") -- EmoteUnlockService itself stays agnostic to which caller fires
+-- which type, per its own header.
+export type EmoteUnlockType = "Default" | "Achievement" | "Roll" | "Quest" | "Event" | "Purchase"
+
+-- Carried on both EmoteDefinition.Unlock (what's required to earn this emote) and as GrantEmote's
+-- own `source` argument (what actually granted it, for logging/auditing) -- the same shape serves
+-- both directions since a grant should always be traceable back to a requirement it satisfied.
+-- Id names a specific achievement/quest/event id (meaningful only for "Achievement"/"Quest"/
+-- "Event"); Pool names a EmoteConstants.RollPools key (meaningful only for "Roll"). Both stay nil
+-- for "Default"/"Purchase", which need neither.
+export type EmoteUnlockRequirement = {
+	Type: EmoteUnlockType,
+	Id: string?,
+	Pool: string?,
+}
+
+-- One emote's full authored data (Shared/Emotes/EmoteDefinitions.lua's `{ [EmoteId]: EmoteDefinition
+-- }` table) -- pure content, no Instance/Player coupling, so it's requirable and testable from a
+-- plain TestEZ spec (Shared/Emotes/EmoteRegistry.lua's own header). AnimationId/Icon follow
+-- Constants.Combat.AnimationIds' own "wired but unauthored" convention: an empty string means no
+-- real asset exists yet, never a guessed/placeholder id (this codebase never fabricates one -- see
+-- that constant's own header). Duration is nil for a Loop == true emote (Sit/Dance -- stopped only
+-- by RequestPlay/death/interruption, never on a timer); non-nil for a one-shot (Wave, Bow, ...),
+-- which EmoteSystem uses to schedule the automatic stop.
+export type EmoteDefinition = {
+	Id: EmoteId,
+	DisplayName: string,
+	Description: string?,
+	AnimationId: string,
+	Icon: string,
+	Category: EmoteCategory,
+	Loop: boolean,
+	Duration: number?,
+	-- True if playing this emote should zero the player's WalkSpeed for its duration (Constants.
+	-- Attributes.EmoteMovementLocked, read by Server/Combat/Movement.lua's ComputeDesiredWalkSpeed) --
+	-- a seated/dancing pose reads as broken if the player can still slide around mid-animation.
+	MovementLocked: boolean,
+	-- False rejects RequestPlay outright while Types.CombatSnapshot.InCombat is true (EmoteSystem.lua)
+	-- -- a seated/dancing pose has no place mid-skirmish; a quick social gesture (Wave, Taunt) is
+	-- allowed to carry into a lingering in-combat window.
+	CombatAllowed: boolean,
+	-- True interrupts an in-progress emote the instant the player's Health drops below what it was
+	-- when the emote started (EmoteSystem's own OnHeartbeatTick subscriber) -- taking a hit should
+	-- break a vulnerable pose like Sit/Dance; a passing Wave/Point has nothing to protect and stays
+	-- false.
+	CancelOnDamage: boolean,
+	Unlock: EmoteUnlockRequirement,
+}
+
+-- Sent to the acting player only, the moment EmoteSystem accepts Emote_RequestPlay (RemoteEvent).
+export type EmoteStartedPayload = {
+	EmoteId: EmoteId,
+}
+
+-- Sent to the acting player only, whenever EmoteSystem.StopEmote actually ends a currently-playing
+-- emote (natural duration expiry, a new RequestPlay superseding it, death, or the heartbeat
+-- interruption guard) -- the one authoritative stop signal, mirroring EmoteStartedPayload's shape.
+export type EmoteStoppedPayload = {
+	EmoteId: EmoteId,
+}
+
+-- Payload of Emote_UnlockedUpdated (RemoteEvent, server -> owning client only) -- fired once on join
+-- (EmoteUnlockService's own PlayerDataSystem.OnProfileLoaded hook) and again on every successful
+-- GrantEmote/RollEmote for that player. An array, not the profile's own `{ [EmoteId]: true }` set
+-- shape -- ClientState.Bootstrap is what turns this into the set shape the wheel UI actually wants
+-- to query (O(1) "is this unlocked"), the same "wire format vs. client-state shape can differ"
+-- latitude CombatVitalsPayload's own current/max pair already takes versus how NumberFormatting.lua
+-- might render it.
+export type EmoteUnlockedUpdatePayload = {
+	EmoteIds: { EmoteId },
+}
+
+-- Payload of Emote_LoadoutUpdated (RemoteEvent, server -> owning client only) -- fired once on join
+-- and again on every successful RequestSetLoadoutSlot. Ordered array, length == EmoteConstants.
+-- LoadoutSize, mirroring Types.PlayerProfile.emoteLoadout's own shape exactly (this IS that field,
+-- replicated).
+export type EmoteLoadoutUpdatePayload = {
+	Loadout: { EmoteId },
 }
 
 return Types

@@ -76,6 +76,9 @@ Constants.Debug = {
 			CharacterCreationSystem = true,
 			OnboardingClient = true,
 			ChamferedSurface = true,
+			HotbarMoveClient = true,
+			SettingsClient = true,
+			SettingsSystem = true,
 		},
 		-- Per (scope, level, message) cap, keyed off the static message text so a log site that
 		-- fires every frame can't flood Output even at Trace -- see Logger.lua's rate limiter.
@@ -133,6 +136,16 @@ Constants.Debug = {
 		ShutdownConfirmWindowSeconds = 10,
 		ShutdownDelaySeconds = 10,
 
+		-- Instant Restart Server admin action -- same two-press server-armed confirm SHAPE as
+		-- ShutdownConfirmWindowSeconds above (DevMenuSystem.handleInstantRestartServer), but a
+		-- DISTINCT, independently-tunable window (same "own constant even where two happen to
+		-- match today" convention BanConfirmWindowSeconds/ResetPlayerDataConfirmWindowSeconds
+		-- already establish): unlike Shutdown Server's ShutdownDelaySeconds countdown-warned kick,
+		-- the second press here kicks immediately, no delay -- for an admin who just published a
+		-- place update and wants THIS server cycled onto it right away rather than waiting out a
+		-- countdown.
+		InstantRestartConfirmWindowSeconds = 10,
+
 		-- Ban Player admin action (Players tab roster row) -- UNLIKE ShutdownConfirmWindowSeconds
 		-- above, this arm/confirm window is enforced ENTIRELY client-side (DevMenu/init.lua's
 		-- playerRosterRow): a first press just shows "press again to confirm" and starts this local
@@ -142,6 +155,14 @@ Constants.Debug = {
 		-- state backs this window -- the server still authorizes/executes every Ban request on its own
 		-- merits regardless of how the client arrived at sending it.
 		BanConfirmWindowSeconds = 4,
+
+		-- Reset Player Data admin action (Players tab roster row) -- same permanent/DataStore-backed
+		-- reasoning as BanConfirmWindowSeconds above (arguably more severe: a wipe has no reversal
+		-- path at all, where an admin can still un-ban or let a ban expire), so it gets the same
+		-- two-press arm/confirm treatment. Kept as its own independently-tunable constant even though
+		-- it starts equal to BanConfirmWindowSeconds -- same reasoning Constants.Combat.AirCombo's
+		-- own tunables stay separate numbers even where two of them happen to match today.
+		ResetPlayerDataConfirmWindowSeconds = 4,
 
 		RemoteNames = {
 			SpawnDummy = "DevMenu_SpawnDummy",
@@ -157,27 +178,18 @@ Constants.Debug = {
 			-- Toggles Collide mode for an already-flying target (Client/DevMenu/FlightPhysics.lua) --
 			-- see AdminActionSystem.SetFlightCollide's own header.
 			SetTargetFlightCollide = "DevMenu_SetTargetFlightCollide",
-			-- Live flight-feel tuner (Server/DevMenu/FlightTuning.lua) -- same fetch-once/adjust/reset
-			-- shape as ListHitboxStages/AdjustHitboxTiming/ResetHitboxStage above, scoped to
-			-- Constants.Flight's own tunables instead of hitbox timing.
+			-- Live flight-feel tuner (Server/DevMenu/FlightTuning.lua) -- fetch-once/adjust/reset
+			-- shape, scoped to Constants.Flight's own tunables. The equivalent live-tuner remotes for
+			-- hand-authored attack timing/hitbox fields moved out of DevMenu entirely -- see the
+			-- comment just below this block.
 			ListFlightTuning = "DevMenu_ListFlightTuning",
 			AdjustFlightTuning = "DevMenu_AdjustFlightTuning",
 			ResetFlightTuning = "DevMenu_ResetFlightTuning",
-			-- Live hitbox-timing tuner (Server/Combat/HitboxTuning.lua) -- ListHitboxStages fetches
-			-- every tunable Basic/Heavy/Finisher stage across both weapons once; AdjustHitboxTiming
-			-- nudges one stage's Windup/Active/RecoverySeconds by a signed delta; ResetHitboxStage
-			-- restores that stage's captured file-default values. See HitboxTuning.lua's own header.
-			ListHitboxStages = "DevMenu_ListHitboxStages",
-			AdjustHitboxTiming = "DevMenu_AdjustHitboxTiming",
-			ResetHitboxStage = "DevMenu_ResetHitboxStage",
-			-- Same live-tuning idea as the three above, for DashPunch/DashHit specifically -- see
-			-- HitboxTuning.lua's own "Standalone attacks" section header for why these need their
-			-- own remotes rather than reusing ListHitboxStages/AdjustHitboxTiming/ResetHitboxStage
-			-- (they aren't a weapon combo stage, and this tool ALSO exposes OffsetForwardStuds,
-			-- which the weapon-stage tool deliberately doesn't).
-			ListStandaloneAttacks = "DevMenu_ListStandaloneAttacks",
-			AdjustStandaloneField = "DevMenu_AdjustStandaloneField",
-			ResetStandaloneAttack = "DevMenu_ResetStandaloneAttack",
+			-- Live hitbox timing/full-field tuning for hand-authored (Basic/Heavy/Finisher weapon
+			-- stages, DashPunch/DashHit/AirSlam) attacks moved out of DevMenu entirely -- it's now the
+			-- Move Editor's "Default" moves section (Server/Combat/DefaultMoveRegistry.lua,
+			-- Constants.MoveEditor.RemoteNames.ListDefaultMoves/UpdateDefaultMoveDraft/
+			-- ResetDefaultMove below).
 			-- Bug report triage (DevMenu/init.lua's "Reports" tab) -- handlers live in
 			-- DevMenuSystem.lua but call straight into BugReportSystem.ListReports/UpdateStatus, the
 			-- same "gate here, compute there" split as every other admin action above. The PUBLIC
@@ -186,6 +198,17 @@ Constants.Debug = {
 			-- call it, no whitelist check.
 			ListBugReports = "DevMenu_ListBugReports",
 			UpdateBugReportStatus = "DevMenu_UpdateBugReportStatus",
+			-- Triage mutations added alongside UpdateBugReportStatus above -- same "gate here,
+			-- compute in BugReportSystem" split, same admin-only home rather than
+			-- Constants.BugReport.RemoteNames (that table is reserved for the PUBLIC submit remote
+			-- only).
+			AddBugReportNote = "DevMenu_AddBugReportNote",
+			SetBugReportPriority = "DevMenu_SetBugReportPriority",
+			AssignBugReport = "DevMenu_AssignBugReport",
+			-- Teleports the requesting admin to wherever the report's reporter currently is IN THIS
+			-- SERVER -- see DevMenuSystem.handleJumpToReporter's own header for why this doesn't
+			-- reuse TeleportToTarget's lock-on resolution.
+			JumpToReporter = "DevMenu_JumpToReporter",
 			-- Teleportation -- all three apply to the requesting admin's own position/the resolved
 			-- lock-on target's position (see resolveActionTarget), no player-select UI, same
 			-- reasoning as every other admin action above.
@@ -203,6 +226,13 @@ Constants.Debug = {
 			-- unconditionally for every player since the banner it drives isn't admin-only.
 			BroadcastAnnouncement = "DevMenu_BroadcastAnnouncement",
 			ShutdownServer = "DevMenu_ShutdownServer",
+			-- Same two-press server-armed shape as ShutdownServer above, no countdown delay on
+			-- confirm -- see InstantRestartConfirmWindowSeconds's own comment above.
+			InstantRestartServer = "DevMenu_InstantRestartServer",
+			-- Passive "a newer version has been published" fetch (Server/Systems/
+			-- VersionWatchSystem.lua) -- fetch-once-on-open, same shape as GetHitboxDebug/
+			-- GetSidebarStats below.
+			GetServerVersionInfo = "DevMenu_GetServerVersionInfo",
 			Announcement = "DevMenu_Announcement",
 			-- Player roster ("Players" tab) -- fetch-on-open (the admin presses Refresh/opens the tab),
 			-- not pushed on a timer/change, same trade-off ListBugReports already accepts: a stale
@@ -219,6 +249,12 @@ Constants.Debug = {
 			KickPlayer = "DevMenu_KickPlayer",
 			BanPlayer = "DevMenu_BanPlayer",
 			MutePlayer = "DevMenu_MutePlayer",
+			-- Wipes a target's SAVED progression data back to a fresh profile
+			-- (PlayerDataSystem.ResetProfile) -- deliberately grouped here with Kick/Ban/Mute above,
+			-- not owned by ModerationSystem, but sharing their exact "explicit UserId from a roster
+			-- row, never the lock-on target" reasoning: a data wipe is irreversible, at least as
+			-- severe as Ban. See DevMenuSystem.lua's handleResetTargetPlayerData.
+			ResetTargetPlayerData = "DevMenu_ResetTargetPlayerData",
 			-- Reversible manual cheater-flag toggle (see ModerationSystem.lua's FlagSuspectedCheater/
 			-- UnflagSuspectedCheater) -- same explicit-UserId-from-a-roster-row targeting as
 			-- KickPlayer/BanPlayer/MutePlayer above, never the lock-on target.
@@ -227,8 +263,32 @@ Constants.Debug = {
 			-- RemoteFunction rather than folding into ListPlayers/ListBugReports, since neither of
 			-- those two remotes' existing callers need the other's count.
 			GetSidebarStats = "DevMenu_GetSidebarStats",
+			-- Runtime hitbox-visualization toggle (Server/Combat/HitboxDebugState.lua) -- server-wide,
+			-- not per-player (a rendered debug Part is a real Workspace object every nearby player
+			-- already sees), works in Studio AND a published server. Get is fetched once on DevMenu
+			-- open (Admin tab) the same "fetch-once, cache client-side" shape as GetSidebarStats.
+			GetHitboxDebug = "DevMenu_GetHitboxDebug",
+			SetHitboxDebug = "DevMenu_SetHitboxDebug",
+			-- One-shot test trigger for the Emote System's roll path (Server/Systems/
+			-- EmoteUnlockService.lua's RollEmote, "RareEmotes" pool only) -- see DevMenuSystem.
+			-- handleRollEmote. Not a general-purpose "roll any pool" remote; this exists purely so a
+			-- human tester can exercise GrantEmote/RollEmote end to end before AchievementSystem/a
+			-- future quest or live-ops system calls RollEmote for real.
+			RollEmote = "DevMenu_RollEmote",
 		},
 	},
+}
+
+-- Server publish-version watchdog (Server/Systems/VersionWatchSystem.lua) -- grouped under Debug
+-- the same way TrainingDummy/TrainingBot below are: this is dev/ops-facing tooling (the Admin tab's
+-- passive version-mismatch banner), not a gameplay tunable. Just the one number: how often a live
+-- server re-bumps/re-reads the shared "highest booted version" DataStore key, so a long-lived server
+-- eventually learns about a publish that happened after it started without needing a restart of its
+-- own to find out. Minutes, not seconds -- this is advisory information for an admin deciding
+-- whether to restart, not anything time-critical, so there's no reason to spend DataStore budget
+-- polling it aggressively.
+Constants.Debug.VersionWatch = {
+	RefreshIntervalSeconds = 300,
 }
 
 -- Training dummy tunables -- CombatSystem.lua owns the dummy's actual combat behavior (it's a
@@ -414,6 +474,13 @@ Constants.Attributes = {
 	-- effect is a direct Transparency write on every BasePart/Decal (CombatSystem.
 	-- SetPlayerInvisible), not something Movement.lua or any per-frame resolver reads.
 	Invisible = "Invisible",
+	-- Emote System (Server/Systems/EmoteSystem.lua) -- set/cleared directly on the emoting
+	-- character's Humanoid while a MovementLocked emote (Types.EmoteDefinition.MovementLocked) is
+	-- playing/stopping/cancelled. Same "external system freezes movement without touching
+	-- CombatState" shape as Frozen/Flying above -- Movement.ComputeDesiredWalkSpeed reads this
+	-- directly, at the same top priority tier, rather than EmoteSystem writing into CombatState
+	-- (which it has no ownership of).
+	EmoteMovementLocked = "EmoteMovementLocked",
 }
 
 -- Default keybind per Types.KeybindAction -- Client/Input/KeybindManager.lua clones this into its
@@ -464,6 +531,34 @@ Constants.Keybinds = {
 		-- binds above, there's low risk of an accidental press mid-combat, and it's unclaimed
 		-- elsewhere in this table.
 		OpenBugReport = { KeyCode = Enum.KeyCode.F8 },
+		-- Move Creation System editor toggle -- unbound elsewhere in this table, sits next to
+		-- DevMenuToggle's Equals key in the same "secondary system action" row of the keyboard.
+		-- Admin-only (MoveEditorClient.lua's own authorization round-trip, same as DevMenuToggle).
+		OpenMoveEditor = { KeyCode = Enum.KeyCode.Minus },
+		-- The 5 hotbar slots (see Types.KeybindAction's own header) -- the obvious number-row keys,
+		-- unclaimed elsewhere in this table (BasicAttack/HeavyAttack/Block/etc. all live on letters or
+		-- the mouse).
+		HotbarSlot1 = { KeyCode = Enum.KeyCode.One },
+		HotbarSlot2 = { KeyCode = Enum.KeyCode.Two },
+		HotbarSlot3 = { KeyCode = Enum.KeyCode.Three },
+		HotbarSlot4 = { KeyCode = Enum.KeyCode.Four },
+		HotbarSlot5 = { KeyCode = Enum.KeyCode.Five },
+		-- Held to open the radial emote wheel (Client/Emotes/EmoteWheelClient.lua) -- B is unclaimed
+		-- elsewhere in this table and sits comfortably under the same hand already on WASD, away from
+		-- the mouse-driven combat cluster (BasicAttack/Feint on the mouse buttons, Block/HeavyAttack on
+		-- F/R) the wheel's own mouse-steered selection needs to stay clear of.
+		EmoteWheel = { KeyCode = Enum.KeyCode.B },
+		-- Opens the Settings panel (Client/Settings/SettingsClient.lua). Deliberately NOT Escape: this
+		-- repo never disables Roblox's own native Escape/Menu overlay, and layering a persistent panel
+		-- toggle onto that same key would open both at once every press -- see OpenBugReport's
+		-- ButtonSelect comment below for the same conflict already avoided on the gamepad side. Was
+		-- O ("Options", the obvious mnemonic) until a Studio playtest showed the I/O/P cluster never
+		-- reaching UserInputService at all on at least one dev machine -- not consumed with
+		-- gameProcessed=true, simply absent -- so the toggle was unreachable with no in-game way to
+		-- rebind it (the rebind UI lives behind this very key). K is unclaimed elsewhere in this
+		-- table, sits on the home row, and is verified to register; players who prefer O can rebind
+		-- it in the panel itself.
+		SettingsToggle = { KeyCode = Enum.KeyCode.K },
 	} :: { [Types.KeybindAction]: Types.Keybind },
 
 	-- Gamepad defaults -- a SEPARATE table, not a wider Keybind, so a player can have a keyboard
@@ -505,12 +600,25 @@ Constants.Keybinds = {
 		-- player-facing feature here. Needs a real controller playtest: Share/View/Touchpad-click
 		-- behavior varies slightly by controller family.
 		OpenBugReport = { KeyCode = Enum.KeyCode.ButtonSelect },
+		-- DPadDown -- this genre's conventional "hold for a quick-select wheel" gamepad slot.
+		-- DPadRight is already SwapWeapon above; DPadUp/DPadLeft are the only other unclaimed D-pad
+		-- directions among the KeyCode values in this table, so DPadDown is free with no live
+		-- conflict to check for.
+		EmoteWheel = { KeyCode = Enum.KeyCode.DPadDown },
+		-- DPadUp -- the last unclaimed D-pad direction (DPadRight is SwapWeapon, DPadDown is
+		-- EmoteWheel above) and a natural "open a menu" convention on its own. Unlike DevMenuToggle/
+		-- HotbarSlot1-5 below, Settings is NOT admin-only, so it earns a real gamepad default rather
+		-- than staying keyboard-only.
+		SettingsToggle = { KeyCode = Enum.KeyCode.DPadUp },
 		-- DevMenuToggle deliberately has NO gamepad default -- admin-only, keyboard already covers
 		-- it, and exposing a stray always-live single-button dev-menu toggle to every controller
 		-- user isn't something to do by default. KeybindManager.Matches simply never matches for an
 		-- action with no bound gamepad input. Value type is Keybind? (unlike Defaults' Keybind
 		-- above), honestly reflecting that this map is deliberately partial -- every consumer that
-		-- reads it must nil-check.
+		-- reads it must nil-check. HotbarSlot1-5 are absent for the same admin-only reasoning -- there
+		-- are no unclaimed face/shoulder/D-pad buttons left in this genre's own convention family
+		-- (see every KeyCode above) to spare for a five-way admin-only picker, and keyboard already
+		-- covers the one audience (admins running the Move Editor) that needs it.
 	} :: { [Types.KeybindAction]: Types.Keybind? },
 
 	-- Double-tapping W (Roblox's own built-in forward-movement key, not a rebindable
@@ -523,26 +631,67 @@ Constants.Keybinds = {
 	DoubleTapDashWindowSeconds = 0.3,
 }
 
+-- Settings System (Server/Systems/SettingsSystem.lua, Client/Settings/SettingsClient.lua) --
+-- persists Types.PlayerSettings (rebound keybind overrides + Autorun) through PlayerDataSystem and
+-- restores them into Client/Input/KeybindManager.lua on join. Kept as its own table rather than
+-- folded into Constants.Keybinds above -- that table is static DEFAULT-binding content this file
+-- already owns per its own header; this one is remote-name/networking config for a feature built
+-- on top of it, the same "distinct feature, distinct table" split Constants.PlayerData's own header
+-- draws against Constants.BugReport.
+Constants.Settings = {
+	RemoteNames = {
+		-- RemoteFunction, no payload -- fetched once by SettingsClient.Start() (same "client needs an
+		-- immediate, race-free answer at boot" reasoning as CharacterCreation_GetOnboardingState)
+		-- rather than a server push on PlayerDataSystem.OnProfileLoaded: a push fired before this
+		-- client has connected its own listener (a real risk here -- IntroClient/LoadingClient both
+		-- block Main.client.lua well past the moment a profile can finish loading server-side) would
+		-- be silently lost with no corrective resync, unlike Combat_VitalsUpdated's own continuously-
+		-- refreshed value. A request/response round trip has no such window: it always reflects
+		-- whatever PlayerDataSystem already has loaded by the time this client asks.
+		GetSettings = "Settings_GetSettings",
+		-- Fire-and-forget persistence writes -- the client has already applied each of these locally
+		-- (KeybindManager.Rebind/RebindGamepad/ResetToDefaults/ResetGamepadToDefaults, or its own
+		-- Autorun toggle) before firing, so there is nothing for the server to echo back; these exist
+		-- purely to make the change durable across sessions.
+		UpdateKeybind = "Settings_UpdateKeybind",
+		ResetKeybinds = "Settings_ResetKeybinds",
+		UpdateAutorun = "Settings_UpdateAutorun",
+	},
+	-- Same call-budget reasoning as Constants.Rivalry.QueryMaxCallsPerSecond -- a rebind/toggle write
+	-- costs nothing gameplay-wise but should still never be free spam.
+	MaxCallsPerSecondPerPlayer = 4,
+	-- Same "named duration, not a magic number at the call site" convention as
+	-- Constants.Debug.DevMenu.StatusClearDelaySeconds/Constants.BugReport.ConfirmationClearDelaySeconds
+	-- -- Client/Settings/SettingsClient.lua's own status line (e.g. "Keybinds reset to defaults.").
+	StatusClearDelaySeconds = 3,
+}
+
 -- Canonical player-progression persistence (Server/Systems/PlayerDataSystem.lua) -- the single
 -- DataStore-backed owner every other System's player-state reads/writes eventually route through
 -- (engineering-standards.md's "one serialized entry point per player's data"). Mirrors
--- Constants.BugReport's own shape/naming below (retry/backoff pair, versioned DataStore name) --
--- this table existing separately from Constants.BugReport, despite both being DataStore config,
--- is deliberate: BugReportSystem is a fire-and-forget public feature with its own unrelated
--- tuning (cooldowns, page size), where PlayerDataSystem is the load-bearing progression spine
--- every other gameplay System depends on, with its own distinct tuning surface (autosave
--- cadence, schema version, load-failure messaging) that has nothing to do with bug reports.
+-- Constants.BugReport's own shape/naming below (retry/backoff pair, tuning surface) -- this table
+-- existing separately from Constants.BugReport, despite both being DataStore config, is
+-- deliberate: BugReportSystem is a fire-and-forget public feature with its own unrelated tuning
+-- (cooldowns, page size), where PlayerDataSystem is the load-bearing progression spine every
+-- other gameplay System depends on, with its own distinct tuning surface (autosave cadence,
+-- schema version, load-failure messaging) that has nothing to do with bug reports.
+--
+-- Does NOT own the DataStore name itself -- that identifier lives solely in the server-only
+-- Server/Config/StorageConfig.lua (StorageConfig.PlayerDataStoreName), never here, so it can
+-- never replicate to clients (pure reconnaissance otherwise -- see StorageConfig.lua's own
+-- header). This table used to carry its own DataStoreName field alongside StorageConfig's; that
+-- was a leftover twin from the move to StorageConfig.lua that nothing ever read, and it was
+-- deleted rather than kept "just in case" -- a dead field with a header comment that reads as
+-- authoritative is a trap, not a convenience.
 Constants.PlayerData = {
-	-- Versioned DataStore name -- same convention Constants.BugReport.DataStoreName established as
-	-- this codebase's first DataStoreService usage.
-	DataStoreName = "PlayerProfiles_v5",
-
 	-- Current on-disk schema version (Types.StoredPlayerProfile.SchemaVersion) -- PlayerDataSystem.
 	-- MigrateRecord walks a stored record forward from whatever version it was saved at toward this
-	-- number. Only version 1 has ever existed, so there are no registered migrations yet -- see
-	-- PlayerDataSystem.lua's Migrations table for the (currently empty) skeleton that future schema
-	-- changes register into.
-	SchemaVersion = 1,
+	-- number. Bumped 1 -> 2 for the Emote System's unlockedEmoteIds/emoteLoadout fields
+	-- (Types.PlayerProfile) -- PlayerDataSystem.lua's Migrations[1] is the first real entry that
+	-- table has ever needed, backfilling both fields onto any record saved before this pass. Bumped
+	-- 2 -> 3 for the Settings System's `settings` field (Types.PlayerProfile) --
+	-- PlayerDataSystem.lua's Migrations[2] backfills it onto any record saved before this pass.
+	SchemaVersion = 3,
 
 	-- A brand-new profile's starting Tier -- Tier 1 is the bottom of TierSystem's nine-tier ladder
 	-- (progression-systems.md), the correct starting point for a player who has never played before.
@@ -582,13 +731,94 @@ Constants.PlayerData = {
 	-- against a single stuck retry loop hanging the whole shutdown indefinitely.
 	ShutdownSaveTimeoutSeconds = 25,
 
-	-- Player-facing kick messages for the two distinct load-failure modes PlayerDataSystem.lua
-	-- distinguishes (engineering-standards.md: DataStore failures are "expected-but-rare... not
-	-- edge cases to ignore," and the safe fallback for either is "never fabricate a profile that
-	-- could overwrite real save data on next write," not a generic message that hides which one
-	-- happened).
+	-- Cross-server session lock (Types.PlayerDataLock, PlayerDataSystem.lua's loadProfile/saveProfile)
+	-- -- see that type's own header for the race it closes. A foreign lock older than this is treated
+	-- as abandoned (its holding server crashed/died without ever running PlayerRemoving/BindToClose,
+	-- so it will never release it itself) rather than blocking a rejoin forever. Sized for the
+	-- crash-recovery case specifically, not routine dirty-mutation frequency: the lock is claimed
+	-- once at load and released once at the final save, never refreshed mid-session (see
+	-- loadProfile's own header for why periodic refresh isn't needed -- Roblox never routes a second
+	-- PlayerAdded for an already-connected player to a different server, so a live server's lock is
+	-- never actually contended; only a genuine crash leaves one dangling). 300s is generous enough to
+	-- absorb the ordinary "hop lands before the leaving server's save completes" race (which the
+	-- retry loop below resolves in low single-digit seconds) while not punishing a post-crash rejoin
+	-- with an excessive wait.
+	LockStaleAfterSeconds = 300,
+
+	-- How many times loadProfile retries a REFUSED lock claim (a live foreign lock, not a DataStore
+	-- call failure -- DataStoreRetry's own retry already covers that separately, inside each attempt
+	-- here) before giving up and kicking with LockHeldKickMessage, backed off by
+	-- LockClaimRetryBackoffSeconds between attempts. Sized to comfortably outlast the ordinary "hop
+	-- lands before the leaving server's own PlayerRemoving save completes" race -- a leave-triggered
+	-- save is one DataStore round trip, typically well under either backoff window.
+	LockClaimMaxAttempts = 3,
+	LockClaimRetryBackoffSeconds = 2,
+
+	-- Player-facing kick messages for the load-failure modes PlayerDataSystem.lua distinguishes
+	-- (engineering-standards.md: DataStore failures are "expected-but-rare... not edge cases to
+	-- ignore," and the safe fallback for any of them is "never fabricate a profile that could
+	-- overwrite real save data on next write," not a generic message that hides which one happened).
 	LoadFailureKickMessage = "Failed to load your character data. Please rejoin in a moment.",
 	CorruptDataKickMessage = "Your save data could not be read. Please contact support if this persists.",
+	-- Every retry in the claim loop above still found a live foreign lock -- almost always means the
+	-- OTHER server hasn't finished this player's own leave-save yet (a slow hop), rarely a genuinely
+	-- stuck lock; either way the correct move is asking the player to wait a moment and rejoin, not
+	-- risking two servers writing the same profile at once.
+	LockHeldKickMessage = "Your character data is still finishing up on another server. Please wait a moment and rejoin.",
+	-- The WriteGeneration backstop (Types.StoredPlayerProfile's own header) tripped during a session
+	-- that had already passed the lock claim -- this server's copy of the profile can no longer be
+	-- trusted to save safely, so it kicks rather than let further play accumulate on data that will
+	-- never reach disk.
+	StaleSessionKickMessage = "Your data was saved from another server session. Please rejoin.",
+}
+
+-- RivalrySystem (Server/Systems/RivalrySystem.lua) -- the query remotes are what make rivalry
+-- standing actually reachable by a client rather than an internal-only leaderboard
+-- (docs/architecture/2026-08-audit.md section 7.3).
+Constants.Rivalry = {
+	RemoteNames = {
+		GetTopRivals = "Rivalry_GetTopRivals",
+		GetStandingAgainst = "Rivalry_GetStandingAgainst",
+	},
+	-- Default page size for GetTopRivals when the caller doesn't request a specific limit -- small
+	-- enough for a HUD/menu leaderboard panel to render without its own pagination.
+	DefaultLeaderboardLimit = 10,
+	-- Read-only query remotes, but still rate-limited for the same reason every other public remote
+	-- in this codebase is (performance-optimization.md's call-budget rule) -- a modified client
+	-- looping either remote costs nothing gameplay-wise but is still free spam otherwise.
+	QueryMaxCallsPerSecond = 4,
+}
+
+-- Qi (Server/Systems/QiSystem.lua) -- just the remote name lives here, per NetworkBridge.lua's own
+-- convention that remote names live in each domain's Constants.* table. Every actual Qi tuning
+-- number (Max Qi curve, regen, Qi Conflict matrix) lives in Shared/QiConstants.lua instead -- see
+-- that file's own header for why Qi specifically earned a dedicated tuning module rather than a
+-- table here.
+Constants.Qi = {
+	RemoteNames = {
+		QiUpdated = "Progression_QiUpdated",
+	},
+}
+
+-- Meridian XP (Server/Systems/MeridianSystem.lua) -- the core progression currency
+-- (project-vision.md/progression-systems.md: "Tier gates are earned through Meridian XP from PvP
+-- wins"). MeridianSystem is the one system in this table whose balance number lives here rather
+-- than a dedicated tuning module -- it's a single scalar, not a growing data surface the way Qi's
+-- tuning is (see Shared/QiConstants.lua's own header for why that one earned its own file).
+Constants.Meridian = {
+	RemoteNames = {
+		XPUpdated = "Progression_MeridianXPUpdated",
+	},
+	-- Flat Meridian XP awarded to the killer on every confirmed PvP kill (GameplayEvents.
+	-- OnPlayerKilled). Still deliberately NOT scaled by the victim's tier -- but the reason has
+	-- changed now that TierSystem exists and TierSystem.GetTier makes a live tier gap readable
+	-- (docs/architecture/2026-08-audit.md section 7.2's underdog-scaling proposal is no longer
+	-- gated on anything). It stays flat because scaling it is a BALANCE decision that wants the
+	-- ladder's real pacing observed first: TierConstants.Tiers is priced in kills against this exact
+	-- number (see that table's own pacing note), so changing this and the scaling rule in the same
+	-- pass would retune the whole ladder blind. Scale it deliberately, against playtest data, not as
+	-- a side effect of the tier gap becoming available.
+	BaseXPPerKill = 25,
 }
 
 -- Start Menu / server-hop (Server/Systems/ServerHopSystem.lua, Client/StartMenu/StartMenuClient.lua
@@ -601,6 +831,13 @@ Constants.StartMenu = {
 	RemoteNames = {
 		RequestTeleport = "StartMenu_RequestTeleport",
 	},
+	-- ServerHopSystem's own `pendingByPlayer` guard only rejects a concurrent duplicate invoke (a
+	-- second call racing one already in flight) -- it does nothing about a client that waits for
+	-- each TeleportAsync to fail/return and immediately fires another, which a rate limiter closes
+	-- the same way every other public remote in this codebase (BugReportSystem's
+	-- SubmitMaxCallsPerSecond, Constants.Settings.MaxCallsPerSecondPerPlayer) already does for its
+	-- own handler.
+	RequestTeleportMaxCallsPerSecond = 1,
 	-- Studio-only dev convenience, gated by RunService:IsStudio() at the call site (StartMenuClient.
 	-- lua) -- ordinary Play Solo has nothing for TeleportAsync to actually teleport INTO (there's no
 	-- second server), so leaving the real Start Menu up would strand every Studio playtest on a
@@ -736,15 +973,16 @@ Constants.CharacterCreation = {
 	} :: { [string]: string },
 
 	-- Plain-language one-line effect shown under each attribute on the Attributes screen (screen 2).
-	-- MeridianFlow's is explicit that Qi is inert today (no live QiSystem yet -- see
-	-- QiDeviationSystem.lua/progression-systems.md) so the player isn't told a live mechanic exists
-	-- when it doesn't. Fleetness is deliberately scoped to movement + Dash/Sprint/Slide cooldown trim
-	-- ONLY -- combat-philosophy.md's attack-speed/combo-timing/parry-window feel stays
-	-- attribute-invariant, so this copy never implies otherwise.
+	-- MeridianFlow's now reflects a live mechanic -- QiSystem.lua (Shared/QiConstants.lua's
+	-- MaxQiPerMeridianFlowPoint/RegenPerSecondPerMeridianFlowPoint) actually reads this attribute,
+	-- so the "(not active yet)" caveat that used to sit here would now be stale, not honest.
+	-- Fleetness is deliberately scoped to movement + Dash/Sprint/Slide cooldown trim ONLY --
+	-- combat-philosophy.md's attack-speed/combo-timing/parry-window feel stays attribute-invariant,
+	-- so this copy never implies otherwise.
 	AttributeEffects = {
 		Vitality = "Max Health",
 		Fortitude = "Max Posture + regen",
-		MeridianFlow = "Max Qi + regen (not active yet)",
+		MeridianFlow = "Max Qi + regen",
 		Might = "Outgoing health damage",
 		Pressure = "Outgoing posture damage",
 		Fleetness = "Movement speed + Dash/Sprint/Slide cooldown trim",
@@ -755,12 +993,33 @@ Constants.CharacterCreation = {
 	-- another player's name). CharacterCreationSystem.ValidateDisplayName enforces length/charset;
 	-- server-side TextService:FilterStringAsync/GetNonChatStringForBroadcastAsync (same call site
 	-- pattern as BugReportSystem.Submit) runs after that, and Denylist is a final studio-authored
-	-- blocklist checked in addition to the moderation filter. Empty by design at this pass -- real
-	-- content to fill in before shipping, never fabricated here.
+	-- blocklist checked in addition to the moderation filter.
 	DisplayName = {
 		MinLength = 3,
 		MaxLength = 20,
-		Denylist = {} :: { string },
+		-- Staff/authority IMPERSONATION terms specifically -- a genuinely different concern from the
+		-- profanity/harassment content TextService:FilterStringAsync above already exists to catch
+		-- (and is this codebase's compliant, always-up-to-date source of truth for that). A name like
+		-- "Admin" or "RobloxSupport" isn't profane, so the moderation filter has no reason to touch
+		-- it, but it lets a player pose as staff to scam/mislead others in-game -- a distinct, real
+		-- abuse vector this denylist exists specifically to close. ValidateDisplayName checks
+		-- substring containment, case-insensitively, against `name:lower()` -- every term here is
+		-- already lowercase for that reason, and deliberately spelled out in FULL (never a short
+		-- fragment like "mod" or "gm") to keep false-positive collisions with legitimate names low --
+		-- "mod"/"gm" alone would reject real names that merely happen to contain those letters in
+		-- sequence (e.g. "Sigmund" contains "gm"), where a full word like "moderator" essentially
+		-- never appears by coincidence inside an unrelated name.
+		Denylist = {
+			"admin",
+			"administrator",
+			"moderator",
+			"gamemaster",
+			"developer",
+			"roblox",
+			"official staff",
+			"game staff",
+			"support staff",
+		} :: { string },
 		-- NameEntry.lua's "Suggest" button (docs/design/intro-redesign-handoff.md's designer
 		-- direction: "blank-field paralysis is the biggest drop-off point in any chargen flow").
 		-- Real, curated names, not placeholder text -- every one already satisfies MinLength/MaxLength
@@ -788,17 +1047,32 @@ Constants.CharacterCreation = {
 	RemoteNames = {
 		GetOnboardingState = "CharacterCreation_GetOnboardingState",
 		Finalize = "CharacterCreation_Finalize",
+		-- Fire-and-forget RemoteEvent (Client/Intro/IntroClient.lua -> CharacterCreationSystem.lua),
+		-- sent once the local player's get-up AnimationTrack finishes playing. This is what ends the
+		-- isolation (Frozen/Godmode/Invisible) handleGetOnboardingState below applies -- see
+		-- CharacterCreationSystem.lua's own header for why a client-reported "I'm done" signal is an
+		-- acceptable trust level here (one-shot, low-stakes, same tier as GetOnboardingState/
+		-- spawnedThisSession) rather than duplicating an animation-length timer server-side too.
+		AwakeningComplete = "CharacterCreation_AwakeningComplete",
 	},
 
-	-- Named Workspace instances CharacterCreationSystem.lua resolves via WaitForChild --
-	-- default.project.json has no Workspace tree (Rojo can't author Workspace geometry in this repo),
-	-- so these are references to Studio/place-file content a human must place; see this feature's own
-	-- delivery notes for exactly what each needs to be. ThresholdSpawn is an isolated "Waking
-	-- Threshold" pocket space outside SafeZones/ContestedZones/VoidFractureZones/Territories (a
-	-- first-time player is frozen there for the cinematic + creator); ArrivalSpawn is the real
-	-- Median Paradise entry point chargen teleports (PivotTo) the player to once Finalize succeeds.
+	-- Named Workspace instances CharacterCreationSystem.lua resolves via WaitForChild.
+	-- default.project.json DOES author this Workspace tree (see its own "Onboarding" node) --
+	-- ThresholdSpawn is an isolated "Waking Threshold" pocket space outside SafeZones/
+	-- ContestedZones/VoidFractureZones/Territories (a first-time player is frozen there for the
+	-- lying-down cinematic + creator); each entry in ArrivalSpawnPaths is a race-specific arrival
+	-- point chargen teleports (PivotTo) the player to once Finalize succeeds -- "world" here means a
+	-- race-keyed zone in this same place, not a separate Roblox Place (WorldSystem.lua/
+	-- TerritorySystem.lua already use "world"/"region" this way; nothing in this repo has
+	-- multi-place teleport infra, and CharacterCreation_Finalize picks the entry keyed by the
+	-- SERVER-VALIDATED raceId, which is what keeps this server-authoritative without needing any).
 	ThresholdSpawnPath = { "Onboarding", "WakingThresholdSpawn" },
-	ArrivalSpawnPath = { "Onboarding", "MedianParadiseArrivalSpawn" },
+	ArrivalSpawnPaths = {
+		Human = { "Onboarding", "ArrivalSpawns", "Human" },
+		Firmborn = { "Onboarding", "ArrivalSpawns", "Firmborn" },
+		Rivenkin = { "Onboarding", "ArrivalSpawns", "Rivenkin" },
+		Hollowborn = { "Onboarding", "ArrivalSpawns", "Hollowborn" },
+	} :: { [string]: { string } },
 
 	-- Cinematic timing (Client/Onboarding/OnboardingClient.lua + UI/Screens/Onboarding/Cinematic.lua).
 	-- The intro plays for CinematicDurationSeconds unless held-skipped first. Cut from 19s/6 lines to
@@ -818,6 +1092,14 @@ Constants.CharacterCreation = {
 	-- direction: "telling the player they may leave before giving them a reason to stay is
 	-- backwards").
 	SkipHintRevealSeconds = 4,
+
+	-- Per-remote call budgets, same convention as Constants.BugReport.SubmitMaxCallsPerSecond/
+	-- Constants.Settings.MaxCallsPerSecondPerPlayer -- GetOnboardingState's own WaitForProfile yield
+	-- and Finalize's TextService:FilterStringAsync yield are both real server work a modified client
+	-- could otherwise spam ahead of (or during, before) the existing spawnedThisSession/
+	-- finalizingPlayers in-flight guards.
+	GetOnboardingStateMaxCallsPerSecond = 2,
+	FinalizeMaxCallsPerSecond = 2,
 }
 
 -- Precomputed per-race, per-field allocation floor -- see AttributeBudget's own comment above for
@@ -850,6 +1132,95 @@ do
 	Constants.CharacterCreation.AttributeFloors = floors :: { [string]: { [string]: number } }
 end
 
+-- Cinematic intro / awakening sequence (Client/Intro/IntroClient.lua + IntroCamera.lua +
+-- VisionEffects.lua + BlackScreen.lua). A DISTINCT table from Constants.CharacterCreation despite
+-- sharing one player flow -- CharacterCreation owns race/attribute/name validation and the
+-- Threshold<->arrival teleport, this table owns purely the CAMERA/FX/animation staging wrapped
+-- around it (ground pose -> cinematic pan -> [character creation] -> black screen -> teleport ->
+-- first-person reveal -> get-up -> greeting), the same "distinct tuning surface, distinct table"
+-- split Constants.BugReport/Constants.CharacterCreation's own headers already establish for each
+-- other.
+Constants.Intro = {
+	-- Placeholder ids -- no lying-down/get-up clips have been authored yet (explicitly deferred by
+	-- the user this pass). Reuses the SAME already-user-supplied placeholder Constants.Flight.
+	-- AnimationIds shares across its own six unauthored slots, rather than fabricating a new id --
+	-- this codebase never guesses an asset id (see CombatAudio.lua/VitalIcon.lua's headers). Swap
+	-- either line to a real id later with no code change.
+	AnimationIds = {
+		LyingDown = "rbxassetid://125167812303491",
+		GetUp = "rbxassetid://125167812303491",
+	} :: { [string]: string },
+
+	-- Camera staging (IntroCamera.lua). Every angle is in DEGREES (converted to radians at the one
+	-- call site that needs it) -- easier to eyeball/retune than raw radians, matching this table's
+	-- role as the thing a later in-Studio pass will actually adjust by feel.
+	Camera = {
+		-- Ground-level lying POV the cinematic opens on (and the first-person anchor after teleport
+		-- returns to) -- a shallow height above the character's own root position (roughly chest/eye
+		-- height while prone) looking steeply up, the same "point the camera at the sky" framing the
+		-- pre-rework OnboardingClient.pointCameraAtSky established (now owned here instead).
+		GroundHeightOffset = 1.5,
+		GroundLookAngleDegrees = -78,
+		-- The held overhead composition the cinematic pans up INTO, timed against the cinematic's
+		-- own elapsed/duration fraction (Constants.CharacterCreation.CinematicDurationSeconds) --
+		-- see IntroCamera.UpdateCinematicProgress. Held through character creation once reached.
+		OverheadHeightOffset = 22,
+		OverheadLookAngleDegrees = 80,
+		-- Slow ambient yaw drift, held for the WHOLE cinematic + overhead-hold window -- same
+		-- "a static shot reads as frozen/broken, not deliberate" reasoning pointCameraAtSky's own
+		-- comment gave for its identical drift.
+		OverheadYawDriftDegreesPerSecond = 2,
+		-- Symmetric ease-in-out exponent for the ground->overhead position/pitch lerp (2 = a
+		-- standard smoothstep-shaped ease, not linear).
+		PanEasingPower = 2,
+		-- First-person eye anchor height above the character's root once teleported into the arrival
+		-- world, still lying down -- deliberately close to GroundHeightOffset (same lying pose) but
+		-- its own number since the two moments aren't guaranteed to want an identical height once a
+		-- real LyingDown clip exists.
+		FirstPersonEyeHeightOffset = 1,
+		-- Get-up camera follow: eases from the first-person lying anchor (still looking up) to a
+		-- level, standing eye-height view over this many seconds -- tuned against the placeholder
+		-- clip's own arbitrary length for now; retune once GetUp is a real authored animation with a
+		-- real length to match.
+		GetUpFollowDurationSeconds = 1.8,
+		GetUpFollowStandingHeightOffset = 5,
+	},
+
+	-- First-person blur/blink reveal (VisionEffects.lua) -- a Lighting.ColorCorrectionEffect +
+	-- BlurEffect pair, same asset-free approach and DipBrightness/DipSaturation/*Seconds shape as
+	-- Constants.FX.Stun/Death, extended into a multi-stage sequence: an instant blackout snap (timed
+	-- under BlackScreen's own opaque UI cover, so the snap itself is never seen), two partial
+	-- "eyes cracking open" reveals each followed by a quick re-dip ("blink") back toward the
+	-- blackout values, then one final ease to fully neutral.
+	Vision = {
+		BlackoutBrightness = -0.75,
+		BlackoutSaturation = -0.9,
+		BlackoutBlurSize = 48,
+		-- How long the blackout holds (BlackScreen still opaque) before the reveal begins.
+		BlackHoldSeconds = 1,
+
+		Reveal1Brightness = -0.35,
+		Reveal1Saturation = -0.5,
+		Reveal1BlurSize = 18,
+		Reveal1DurationSeconds = 0.9,
+		Blink1DurationSeconds = 0.16,
+
+		Reveal2Brightness = -0.12,
+		Reveal2Saturation = -0.2,
+		Reveal2BlurSize = 5,
+		Reveal2DurationSeconds = 0.8,
+		Blink2DurationSeconds = 0.16,
+
+		FinalClearDurationSeconds = 0.6,
+	},
+
+	-- Greeting banner (reuses UI/Components/PostureBreakBanner.lua's generic StatusBanner directly --
+	-- no new banner component). How long it holds before IntroClient.lua clears it.
+	Greeting = {
+		HoldSeconds = 3.5,
+	},
+}
+
 -- Player respawn after death (Server/Systems/RespawnSystem.lua). Players.CharacterAutoLoads is
 -- false (default.project.json), so Roblox never re-spawns anyone on its own -- CharacterCreation
 -- System.lua owns only this SESSION'S FIRST Player:LoadCharacter() call, and every death after that
@@ -874,8 +1245,28 @@ Constants.Respawn = {
 Constants.BugReport = {
 	Categories = { "Bug", "Exploit", "Suggestion", "Other" } :: { Types.BugReportCategory },
 
+	-- Every valid Status value, in triage order -- BugReportSystem derives its STATUS_SET
+	-- validation table from this the same way it already derives CATEGORY_SET from Categories
+	-- above, and the admin Reports tab's status filter/selector both iterate this instead of
+	-- hand-listing the four strings a second time.
+	Statuses = { "Open", "InProgress", "Resolved", "Dismissed" } :: { Types.BugReportStatus },
+
+	-- Admin-settable severity, lowest to highest -- BugReportSystem.SetPriority validates against
+	-- this set; the Reports tab's priority selector iterates it the same way it iterates Statuses
+	-- above.
+	Priorities = { "Low", "Normal", "High", "Urgent" } :: { Types.BugReportPriority },
+
+	-- Default Priority for a freshly Submitted report -- an admin re-triages from here. Nothing
+	-- about the reporter's chosen Category auto-escalates this (an Exploit report isn't assumed
+	-- more urgent than a Suggestion just by category); that judgment call stays with the admin.
+	DefaultPriority = "Normal" :: Types.BugReportPriority,
+
 	DescriptionMinLength = 10,
 	DescriptionMaxLength = 1000,
+
+	-- Internal triage note length cap (BugReportSystem.AddNote) -- short by design, a coordination
+	-- breadcrumb, not a second description field.
+	NoteMaxLength = 300,
 
 	-- Anti-spam: a player may only successfully submit once per this many seconds
 	-- (BugReportSystem's own per-player cooldown tracking, distinct from the generic
@@ -926,6 +1317,163 @@ Constants.Moderation = {
 	-- above for why every DataStore name left this file.
 
 	-- SuspectedCheaterDataStoreName moved to Server/Config/StorageConfig.lua, same reasoning.
+}
+
+-- Move Creation System (Server/Combat/MoveRegistryManager.lua, Server/Systems/MoveEditorSystem.lua,
+-- Client/UI/Screens/MoveEditor/) -- an in-game, admin-gated editor for authoring new combat moves
+-- as data (MoveTypes.MoveDefinition) rather than hand-written Constants.lua tables + bespoke
+-- server/client code per move. Same "own DataStore config, own tuning surface" split
+-- Constants.BugReport/Constants.PlayerData already establish -- CustomMoveDataStoreName itself
+-- lives in Server/Config/StorageConfig.lua, never here (see that file's own header).
+Constants.MoveEditor = {
+	-- v2 (2026-08-12) added, all additively: the twelve-shape Dimensions bag (Shared/HitboxShapes.
+	-- lua) alongside the original Size/Radius, Offset rotation, the multi-clip animation timeline
+	-- (Shared/AnimationTimeline.lua), and the Object Stun block (Types.ObjectStunConfig). No
+	-- migration pass exists or is needed -- MoveRegistryManager.Validate reconstructs every v2 field
+	-- from a v1 record's own values (Dimensions from Size/Radius, a one-clip timeline from
+	-- AnimationId, no Object Stun), so a v1 record loads and behaves exactly as it always did. The
+	-- version is bumped anyway, per PlayerDataSystem's own convention, so a future BREAKING change
+	-- has a real boundary to branch on.
+	SchemaVersion = 2,
+
+	-- DataStore retry/backoff -- same shape/values as every other StorageRetry* pair in this file,
+	-- all feeding Shared/DataStoreRetry.lua (see that module's header).
+	StorageRetryMaxAttempts = 3,
+	StorageRetryBaseBackoffSeconds = 1,
+
+	-- Client-side debounce (MoveEditorClient.lua) between a PropertyEditor field edit and the
+	-- UpdateDraft RemoteFunction call it triggers -- long enough that rapidly clicking a NumericField
+	-- stepper doesn't fire one round trip per click, short enough that the live 3D preview and the
+	-- in-memory registry both still feel instantaneous to the admin editing it.
+	DraftDebounceSeconds = 0.15,
+
+	-- Per-field authoring bounds for the Object Stun block (Types.ObjectStunConfig), and the
+	-- starting values a freshly-enabled Object Stun gets. ONE table read by three consumers that
+	-- must not disagree: MoveRegistryManager.Validate clamps against Limits, PropertyEditor's own
+	-- ObjectStunEditor renders NumericField Min/Max from the same Limits, and both the editor and
+	-- the validator build a brand-new config from Defaults -- so a value the UI lets an admin type
+	-- can never be one the server silently rewrites.
+	--
+	-- The equivalent tables for the other two new sub-schemas deliberately live with their own
+	-- modules instead (HitboxShapes.FIELD_SPECS, AnimationTimeline.Limits) because those modules own
+	-- geometry/scheduling semantics that the bounds are part of. Object Stun has no such module on
+	-- the shared side -- its runtime is server-only -- so its bounds live here with the rest of the
+	-- editor's configuration.
+	ObjectStun = {
+		Limits = {
+			MinSurfaceExtentStuds = { Min = 0, Max = 20 },
+			ProbeDistanceStuds = { Min = 0.5, Max = 12 },
+			RequiredClearanceStuds = { Min = 0, Max = 40 },
+			MinTravelStuds = { Min = 0, Max = 60 },
+			MinImpactSpeed = { Min = 0, Max = 200 },
+			MaxImpactAngleDegrees = { Min = 5, Max = 90 },
+			MaxTravelSeconds = { Min = 0.1, Max = 6 },
+			StunSeconds = { Min = 0, Max = 8 },
+			RagdollSeconds = { Min = 0, Max = 8 },
+			BonusDamage = { Min = 0, Max = 200 },
+			BonusPostureDamage = { Min = 0, Max = 200 },
+			ReboundVelocity = { Min = 0, Max = 150 },
+			PinSeconds = { Min = 0, Max = 6 },
+			CameraShakeScale = { Min = 0, Max = 4 },
+			CooldownSeconds = { Min = 0, Max = 30 },
+			MaxTriggersPerMove = { Min = 1, Max = 10 },
+			FollowUpDelaySeconds = { Min = 0, Max = 3 },
+			FollowUpTeleportDistanceStuds = { Min = 2, Max = 20 },
+			-- The follow-up's own timing/damage reuse the parent move's own clamp band rather than
+			-- getting a second, subtly-different one -- see MoveRegistryManager's CLAMP_MIN/MAX_
+			-- SECONDS and CLAMP_MIN/MAX_DAMAGE, which the follow-up validator calls directly.
+			FollowUpMaxTargets = { Min = 1, Max = 20 },
+		},
+
+		-- What "Enable Object Stun" starts as: a wall-slam that requires a real launch (three studs
+		-- of clearance behind the target at the moment of the hit, four studs actually travelled, a
+		-- solid 35 studs/second on contact, within 55 degrees of head-on), pins them briefly, and
+		-- deals a modest bonus. Deliberately conservative on the causation gates -- the first time
+		-- an author enables this, it should fire when they slam someone into a wall and stay quiet
+		-- otherwise, because a mechanic that triggers spuriously on the first try reads as broken.
+		Defaults = {
+			Surfaces = { Walls = true, Floors = false, Ceilings = false, Props = false },
+			RequireAnchored = true,
+			RequirePartTag = "",
+			MinSurfaceExtentStuds = 3,
+			ProbeDistanceStuds = 2.5,
+			RequiredClearanceStuds = 3,
+			MinTravelStuds = 4,
+			MinImpactSpeed = 35,
+			MaxImpactAngleDegrees = 55,
+			MaxTravelSeconds = 1.5,
+
+			StunSeconds = 1.2,
+			RagdollSeconds = 0.8,
+			BonusDamage = 8,
+			BonusPostureDamage = 12,
+			ReboundVelocity = 0,
+			PinSeconds = 0.6,
+			VictimAnimationId = "",
+			AttackerAnimationId = "",
+			SoundId = "",
+			EffectColor = Color3.fromRGB(255, 180, 90),
+			CameraShakeScale = 1,
+
+			CooldownSeconds = 2,
+			MaxTriggersPerMove = 1,
+		},
+
+		-- What "Enable Follow-Up" starts as: a fast, tight, close-range punish into the pinned
+		-- target, thrown a quarter-second after impact. Small Box rather than the parent move's own
+		-- shape for the reason Types.ObjectStunFollowUp's header gives -- a follow-up is a different
+		-- attack, not a repeat of the launcher.
+		FollowUpDefaults = {
+			DelaySeconds = 0.25,
+			AnimationId = "",
+			WindupSeconds = 0.1,
+			ActiveSeconds = 0.15,
+			RecoverySeconds = 0.25,
+			Damage = 12,
+			PostureDamage = 10,
+			MaxTargets = 1,
+			Shape = "Box",
+			OffsetX = 0,
+			OffsetY = 0,
+			OffsetZ = -3,
+			TeleportAttacker = false,
+			TeleportDistanceStuds = 5,
+		},
+	},
+
+	-- Admin-only, same trust model as Constants.Debug.DevMenu -- every RemoteFunction below is
+	-- gated by MoveEditorSystem's own checkMoveEditorPreconditions (AdminConfig.AuthorizedUserIds +
+	-- a dedicated rate-limit bucket), mirroring DevMenuSystem.lua's own checkDevMenuPreconditions.
+	RemoteNames = {
+		ListMoves = "MoveEditor_ListMoves",
+		GetMove = "MoveEditor_GetMove",
+		UpdateDraft = "MoveEditor_UpdateDraft",
+		SaveMove = "MoveEditor_SaveMove",
+		DeleteMove = "MoveEditor_DeleteMove",
+		TestFireMove = "MoveEditor_TestFireMove",
+		SpawnPreviewDummy = "MoveEditor_SpawnPreviewDummy",
+		-- "Default" moves (every hand-authored weapon Basic/Heavy/Finisher stage plus DashPunch/
+		-- DashHit/AirSlam) -- Server/Combat/DefaultMoveRegistry.lua's live Constants-mutating sibling
+		-- to ListMoves/UpdateDraft above, formerly DevMenu's "Hitbox Timing"/"Standalone Attacks"
+		-- Tuning-tab tools. No DeleteMove/TestFireMove equivalent exists for a Default move -- see
+		-- DefaultMoveRegistry.lua's own header for why (never deletable, no TestFireMove dispatch
+		-- path). SaveDefaultMove DOES persist -- unlike a hand-copy-to-Constants.lua-only edit, an
+		-- admin's live-tuned Default move value survives a server restart via a small
+		-- DataStore-backed override record (MoveEditorSystem.lua's own header) keyed by MoveId, kept
+		-- in the SAME DataStore as custom moves (StorageConfig.CustomMoveDataStoreName) under a
+		-- "DefaultOverride_<MoveId>" key so it never collides with a "Move_<MoveId>" custom-move
+		-- record.
+		ListDefaultMoves = "MoveEditor_ListDefaultMoves",
+		UpdateDefaultMoveDraft = "MoveEditor_UpdateDefaultMoveDraft",
+		SaveDefaultMove = "MoveEditor_SaveDefaultMove",
+		ResetDefaultMove = "MoveEditor_ResetDefaultMove",
+		-- Fire-and-forget (RemoteEvent, not RemoteFunction -- no response needed): tells the server
+		-- the admin's own editor screen just opened/closed, so it can freeze/unfreeze their character
+		-- via the existing AdminActionSystem.SetFrozen (the same mechanism/Humanoid Attribute an
+		-- admin's own "Frozen" DevMenu toggle already uses) -- editing a move's numbers shouldn't
+		-- leave the admin's own character walking around or swinging mid-edit.
+		SetEditorOpen = "MoveEditor_SetEditorOpen",
+	},
 }
 
 -- Custom shift-lock camera tunables (Client/Camera/ShiftLockCamera.lua) -- combat-philosophy.md's
@@ -1221,6 +1769,16 @@ Constants.FX = {
 		-- ShiftLockCrosshair/ParryReadyGlint) -- deflection reads as steel, distinct from the
 		-- white/gold/red impact colours above so the "armed" tell can't be mistaken for a landed hit.
 		ParryWindowColor = Color3.fromRGB(120, 200, 255),
+		-- ONLY read by FlashHold (the ParryWindow tell) -- the one-shot Flash (Hit/Parry/PostureBreak)
+		-- stays an instant pop, deliberately: those react to an impact that already happened, and a
+		-- fast snap is what reads as "contact, right now" (same reasoning as Animation.Combat's
+		-- SwingFadeSeconds comment). FlashHold is different: it opens on every parry-armed block press,
+		-- not just a landed hit, so an instant full-opacity pop-in fired that often reads as a flicker/
+		-- twitch rather than a clean reveal. Easing it in over a short window instead lets it read as a
+		-- deliberate "guard tightening into a parry stance" rather than a jarring on/off snap -- part of
+		-- the parry-feel pass that also retimed CombatAnimator's ParryFlashFadeSeconds for the same
+		-- reason (see that constant's own comment).
+		HoldFadeInSeconds = 0.08,
 	},
 
 	-- Floating combat-feedback numbers (Client/UI/Screens/CombatFeedback/init.lua).
@@ -1339,6 +1897,138 @@ Constants.FX = {
 		DefaultColor = Color3.fromRGB(150, 140, 130),
 	},
 
+	-- Ground-impact payoff for a Downslam finisher (Client/FX/SlamImpactVFX.lua) -- a particle burst +
+	-- physical debris chunks + an expanding shockwave ring, fired once the client's own local watch of
+	-- the replicated ragdoll (RagdollController.SlamToGround has no ground-contact event of its own --
+	-- see that function's header) detects the body's downward fall actually arresting. Purely local
+	-- presentation, same as every other table in Constants.FX -- see SlamImpactVFX.lua's own header
+	-- for the full detection mechanism.
+	SlamImpact = {
+		-- A body must first be observed falling at least this fast (studs/s, downward) before an
+		-- "arrest" is trusted as a real ground contact -- without this gate, the first Heartbeat tick
+		-- or two after the slam lands (before the server's own -SlamDownVelocity has replicated to
+		-- this client) would read as an instant, false "already landed" arrest.
+		FastFallSpeedThreshold = 20,
+		-- Downward speed (studs/s) at/under which a previously-fast-falling body counts as having hit
+		-- the ground -- Roblox's own physics resolver stops a falling part hard on contact well before
+		-- it would ever coast down to an exact zero, so this stays comfortably above 0 rather than
+		-- waiting for a stop that may never exactly happen.
+		ImpactArrestSpeedThreshold = 4,
+		-- Upper bound (seconds) SlamImpactVFX.BeginWatch keeps polling before giving up with no VFX --
+		-- covers the target dying/despawning mid-fall, falling into the void, or landing somewhere that
+		-- never reads as a clean arrest. Comfortably longer than Finisher.Downslam.KnockdownSeconds
+		-- (1.25) so a normal slam always has time to resolve before this fires.
+		MaxWatchSeconds = 2.5,
+		-- Fixed settle delay BeginWatch uses instead of polling when the server already reported the
+		-- impact as immediate (Types.CombatFeedbackPayload.ImmediateGroundImpact -- see Constants.
+		-- Combat.Ragdoll.SlamImmediateImpactDropStuds for why the server can know this and the client's
+		-- own polling structurally can't). Not a detection window -- there's nothing left to detect --
+		-- just enough of a beat for the ragdoll's own collapse to visibly begin before the ground VFX
+		-- bursts, so the two don't look like they fired in the wrong order.
+		ImmediateImpactDelaySeconds = 0.06,
+		-- Raycast straight down from the detected impact point to find the actual ground BasePart/
+		-- Terrain voxel hit -- this is the "color/mesh of what they were slammed on." StartHeightStuds
+		-- lifts the origin above the body's own root position (so the ray doesn't start already inside
+		-- the ground or the ragdoll's own geometry); DistanceStuds is how far down it searches.
+		GroundRaycastStartHeightStuds = 3,
+		GroundRaycastDistanceStuds = 12,
+
+		-- Reuses MovementDust's own dust-puff sprite (Constants.FX.MovementDust.Texture) rather than a
+		-- second copy -- see that field's own header for why THAT specific texture, not Roblox's
+		-- default 4-point-sparkle ParticleEmitter texture, is the only dust sprite this codebase has
+		-- actually sourced. A slam impact reuses the SAME sprite as footstep dust (both read as "kicked
+		-- up ground material"), just a much bigger one-shot burst.
+		Particle = {
+			PoolMaxSize = 6,
+			BurstCount = 45,
+			Speed = NumberRange.new(8, 18),
+			SpreadAngle = Vector2.new(60, 60),
+			LifetimeSeconds = 0.7,
+			SizeSequence = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 0.6),
+				NumberSequenceKeypoint.new(0.35, 1.4),
+				NumberSequenceKeypoint.new(1, 0.2),
+			}),
+			TransparencySequence = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 0.1),
+				NumberSequenceKeypoint.new(1, 1),
+			}),
+			CarrierPartSize = Vector3.new(0.2, 0.2, 0.2),
+		},
+
+		-- Physical debris chunks -- pooled, non-anchored (real gravity + launch velocity/spin carry
+		-- them outward and tumbling), but CanCollide/CanQuery/CanTouch = false like every other
+		-- cosmetic Part this FX library spawns (MovementVFX's dust carrier, FlightVFX's ring): a chunk
+		-- that could physically collide with players or geometry would be a gameplay-affecting side
+		-- effect (a stray hitbox, a ledge to stand on) for a purely cosmetic flourish, and full
+		-- rigid-body collision on client-only instances this short-lived costs more than it buys. They
+		-- fade out and release well before the missing ground collision would ever read as "falling
+		-- through the floor."
+		Debris = {
+			PoolMaxSize = 20,
+			Count = 10,
+			LifetimeSeconds = 0.9,
+			FadeOutSeconds = 0.25,
+			-- Outward horizontal speed and upward pop, randomized per chunk within these ranges.
+			OutwardSpeed = NumberRange.new(10, 24),
+			UpwardSpeed = NumberRange.new(6, 16),
+			AngularSpeed = NumberRange.new(-8, 8),
+			-- Rock-family chunk size (roughly cubic, jittered per axis for a jagged look).
+			RockSize = NumberRange.new(0.5, 1.4),
+			-- Wood-family chunk size -- long and thin (a splinter/plank shard); X is the long axis.
+			WoodLongSize = NumberRange.new(1.2, 2.6),
+			WoodThinSize = NumberRange.new(0.15, 0.35),
+			-- Soft-family (dirt/sand/snow/mud) clump size -- small round clods, smaller than a rock
+			-- chunk.
+			SoftSize = NumberRange.new(0.35, 0.8),
+		},
+
+		-- Impact shockwave ring -- same expanding-flat-ring shape/pattern as FlightVFX's own rings
+		-- (Constants.FX.FlightLandingRing), but its OWN pool: a flight landing and a slam finisher are
+		-- different enough moments that sharing FlightVFX's pool would mean a flurry of one competing
+		-- with the other for pool slots.
+		Ring = {
+			PoolMaxSize = 6,
+			StartSize = Vector3.new(0.2, 0.5, 0.5),
+			StartTransparency = 0.1,
+			MaxRadiusStuds = 14,
+			ExpandDurationSeconds = 0.45,
+		},
+
+		-- Ground-material classification, purely for debris CHUNK SHAPE (jagged blocky rubble vs.
+		-- elongated plank splinters vs. round soft clumps) -- the debris' actual Material/Color always
+		-- comes directly from the raycast-detected ground hit (see SlamImpactVFX.lua), never a fixed
+		-- per-family value, so this table only decides silhouette, never color. Mirrors the same
+		-- material roster MovementDust.ColorByFloorMaterial above already curates (this codebase's
+		-- approved "natural terrain materials" list) rather than inventing a second one that can drift
+		-- from it. An unlisted material falls back to DefaultDebrisKind below, same "broader than the
+		-- literal list, never silently blank" reasoning ColorByFloorMaterial's own header gives.
+		DebrisKindByFloorMaterial = {
+			[Enum.Material.Grass] = "Soft",
+			[Enum.Material.LeafyGrass] = "Soft",
+			[Enum.Material.Sand] = "Soft",
+			[Enum.Material.Snow] = "Soft",
+			[Enum.Material.Mud] = "Soft",
+			[Enum.Material.Wood] = "Wood",
+			[Enum.Material.WoodPlanks] = "Wood",
+			[Enum.Material.Concrete] = "Rock",
+			[Enum.Material.Pavement] = "Rock",
+			[Enum.Material.Asphalt] = "Rock",
+			[Enum.Material.Rock] = "Rock",
+			[Enum.Material.Slate] = "Rock",
+			[Enum.Material.Basalt] = "Rock",
+			[Enum.Material.Cobblestone] = "Rock",
+			[Enum.Material.Granite] = "Rock",
+			[Enum.Material.Limestone] = "Rock",
+			[Enum.Material.Sandstone] = "Rock",
+			[Enum.Material.Marble] = "Rock",
+			[Enum.Material.Ice] = "Rock",
+			[Enum.Material.Ground] = "Rock",
+			[Enum.Material.Plastic] = "Rock",
+		} :: { [Enum.Material]: string },
+		DefaultDebrisKind = "Rock",
+	},
+
 	-- Local-only stun screen dip (Client/FX/StunEffect.lua) -- a ColorCorrectionEffect brightness/
 	-- saturation tween played when the local player's OWN attack gets parried (CombatSystem.lua's
 	-- resolveHitAgainstTarget sets attackerState.stunExpiry to Constants.Combat.StunDuration on a
@@ -1356,6 +2046,29 @@ Constants.FX = {
 		DipSaturation = -0.3,
 		EaseInSeconds = 0.08,
 		EaseOutSeconds = 0.35,
+	},
+
+	-- Local-only death screen dip (Client/FX/DeathEffect.lua) -- a ColorCorrectionEffect brightness/
+	-- saturation pull played on the LOCAL player's own screen for the death-to-respawn window
+	-- (Client/Combat/CombatClient.lua's Kind == "Death" branch, gated to payload.TargetUserId being
+	-- the local player -- the killer's own client receives the identical Death feedback payload and
+	-- must never see their own screen dip for a kill they threw). Same asset-free ColorCorrectionEffect
+	-- approach as Stun above (no VFX/particle asset to spend on this yet -- see that table's own
+	-- header), but HELD rather than a fixed-duration one-shot: DeathEffect.Play()/Clear() are two
+	-- explicit calls (no internal ease-out timer here) because the real duration is "however long
+	-- this life's corpse-viewing window lasts" -- CombatClient.lua clears it off the new character's
+	-- own CharacterAdded, not a client-side timer, so a respawn that lands early or late never
+	-- desyncs the dip from reality. Deeper than Stun's brief lockout tell (a full death beat, not a
+	-- momentary one) but still restrained per docs/ui-ux-philosophy.md's Critical States rule and
+	-- combat-philosophy.md's "a setback, not a session-ender" framing -- darkens and desaturates
+	-- without blacking out the screen, so the ragdolled corpse (RagdollController.lua's confirmDeath
+	-- deliberately leaves it limp -- see that module's header) stays visible to look at rather than
+	-- obscured.
+	Death = {
+		DipBrightness = -0.25,
+		DipSaturation = -0.55,
+		EaseInSeconds = 0.35,
+		EaseOutSeconds = 0.45,
 	},
 
 	-- Combat/flight animation-track fade times and the shared cross-rig priority weight -- were THREE
@@ -1389,7 +2102,17 @@ Constants.FX = {
 			-- wants a blend, not a cut.
 			LocomotionFadeSeconds = 0.2,
 			BlockHoldFadeSeconds = 0.1,
-			ParryFlashFadeSeconds = 0.03,
+			-- Deliberately NOT as fast as Dash/Slide's 0.03 below despite looking like the same "one-shot
+			-- accent" shape -- those two play PREDICTED, at the instant of input (CombatAnimator.
+			-- PlayPredictedDash/PlayPredictedSlide), so a hard snap reads as "immediate response to my
+			-- press." ParryFlash never gets that prediction (CombatAnimator.PlayParryFlash's own header:
+			-- parry availability is server-cooldown-gated state the client can't guess) -- it only ever
+			-- plays after a full round trip, landing on top of a BlockHold pose that already eased in
+			-- BLOCK_HOLD_FADE_TIME ago. A 0.03s snap arriving unpredictably late, on top of an already-
+			-- settled pose, reads as a jarring second pop instead of a responsive first one. Blending it
+			-- in over roughly BlockHoldFadeSeconds' own timescale instead lets the parry-armed pose read
+			-- as the guard stance settling further, not a new, disconnected flinch.
+			ParryFlashFadeSeconds = 0.12,
 			DashFadeSeconds = 0.03,
 			SlideFadeSeconds = 0.03,
 			HitReactionFadeSeconds = 0.05,
@@ -1417,8 +2140,9 @@ Constants.FX = {
 -- exactly the kind of duplicated tunable engineering-standards.md's "one source of truth per
 -- value" exists to prevent. Retuning DashPunch's timing now automatically keeps the front-dash
 -- commitment lock in sync -- no separate number to remember to update.
--- Windup/Active dialed in via the dev menu's live Standalone Attacks tuner (Server/Combat/
--- HitboxTuning.lua) and copied back here as the new file defaults -- Windup=0.4 means the punch
+-- Windup/Active dialed in via the (since moved into the Move Editor's "Default" moves section)
+-- live attack tuner (Server/Combat/DefaultMoveRegistry.lua) and copied back here as the new file
+-- defaults -- Windup=0.4 means the punch
 -- now visibly winds up for a beat AFTER the front-lunge movement burst itself has already finished
 -- (DashFrontDurationSeconds is still 0.28, shorter than this Windup), rather than the hitbox
 -- riding along for virtually the whole dash the way the original 0.02/0.26 split did. Recovery
@@ -1453,8 +2177,9 @@ local DashHitRecoverySeconds = 0.08
 -- front of the hand (-0.25, matching the Weapons hitboxes' own front-loaded convention below). Paired
 -- with each definition's Size.Z shrinking from 7 to 4.25 (half-reach 2.125) to match -- the box is
 -- now front-loaded instead of hand-centered. A tuning number per combat-philosophy.md's Tuning
--- process -- adjust freely after a playtest (CLAMP_MIN/MAX_OFFSET_STUDS in HitboxTuning.lua already
--- cover a much wider range than this for the dev-menu live tuner).
+-- process -- adjust freely after a playtest (MoveRegistryManager's own CLAMP_MIN/MAX_OFFSET_STUDS,
+-- reused by Server/Combat/DefaultMoveRegistry.lua's Validate-backed ApplyEdit, already cover a much
+-- wider range than this for the Move Editor's live Default-move tuner).
 local HandTrackedOffset = CFrame.new(0, 0, -2.375)
 
 -- CombatSystem's first-pass technical tunables (software-architecture.md's CombatSystem
@@ -1629,6 +2354,19 @@ Constants.Combat = {
 		Downslam = {
 			SlamDownVelocity = 140,
 			KnockdownSeconds = 1.25,
+			-- Angular velocity (rad/sec) biasing the ragdoll's tumble face-first into the ground, so a
+			-- downslam reads as a genuine face-plant instead of a random/back-first drop -- the
+			-- downward-launch counterpart of Uppercut's own LaunchBackwardSpin above (Server/Combat/
+			-- RagdollController.SlamToGround applies this the same way LaunchAndRagdoll applies
+			-- LaunchBackwardSpin: a bias on the ragdoll's angular velocity at launch, never a forced
+			-- CFrame snap -- see that function's own header for why a snap is off the table entirely
+			-- for a ballsocket-jointed ragdoll). Tuned noticeably higher than LaunchBackwardSpin (6):
+			-- Uppercut's tumble has the whole ~2.5s of RagdollSeconds hangtime to settle into its
+			-- backward bias before landing, where a downslam's SlamDownVelocity (140 studs/s) drives
+			-- the target into the floor almost immediately -- the rotation needs to develop much
+			-- faster to read as a deliberate pitch rather than a body that was still mid-tumble when
+			-- it hit.
+			FaceDownSpin = 9,
 		},
 		Normal = {
 			-- Grounded, not holding space: no launch/ragdoll, just a heavier finishing blow -- extra
@@ -1893,12 +2631,13 @@ Constants.Combat = {
 		-- 1, NOT the 3 every other multi-target hitbox uses -- DashPunch is a LAUNCHER, and both
 		-- weapons' own Finishers already establish the rule this now follows ("a launcher commits to
 		-- one foe, not a crowd-clear", see each Finisher's MaxTargets = 1). At 3 this was the single
-		-- worst agency violation in the game: applyAirCombo tracks exactly ONE airComboTarget
-		-- (CombatState.AirCombo.airComboTarget), so victims 2 and 3 were launched, ragdolled and
-		-- HoldAloft-pinned at HoverHeight for the full AirborneSeconds while findAirComboAttacker
-		-- matched none of them -- their air-tech returned "NotJuggled" and they had no input that did
-		-- anything at all. Fixing the count is the correct fix rather than teaching the air combo to
-		-- track N victims: juggling three people at once was never the intent.
+		-- worst agency violation in the game: AirCombo.Apply tracks exactly ONE airComboTarget
+		-- (CombatState.AirCombo.airComboTarget), so victims 2 and 3 were held aloft at HoverHeight for
+		-- the full AirborneSeconds with no continuation hit ever able to land on them (only the ONE
+		-- tracked victim ever gets a fresh Basic hit or a follow-up hold refresh) -- they'd just hang
+		-- there until the hold's own timer lapsed, with no attacker action able to affect them either
+		-- way. Fixing the count is the correct fix rather than teaching the air combo to track N
+		-- victims: juggling three people at once was never the intent.
 		MaxTargets = 1,
 	},
 
@@ -1973,15 +2712,19 @@ Constants.Combat = {
 	},
 
 	-- Air combo: a DashPunch that connects (unmitigated -- Block stops it, same rule as every
-	-- finisher) launches BOTH the target AND the attacker into the air together
-	-- (CombatSystem.lua's applyAirCombo). While CombatState.airComboExpiry hasn't lapsed, the
-	-- attacker's own subsequent Basic (M1) hits landing on that SAME target continue the
-	-- juggle -- refreshing the hold below -- up to MaxHits total, at which point the final hit slams
-	-- them into the ground for bonus damage instead of holding them up again. PLAYER TARGETS ONLY for
-	-- this pass (bots/dummies just take a plain DashPunch hit, no launch) -- CombatState.airComboTarget
-	-- is typed Player? specifically to keep this first pass simple; extending to bots/dummies would
-	-- need a wider target type and is deliberately out of scope here.
+	-- finisher) holds BOTH the target AND the attacker in the air together (AirCombo.Apply). While
+	-- CombatState.airComboExpiry hasn't lapsed, the attacker's own subsequent Basic (M1) hits landing
+	-- on that SAME target continue the juggle -- refreshing the hold below -- up to MaxHits total, at
+	-- which point the final hit slams them into the ground for bonus damage instead of holding them
+	-- up again. A real player target stays LIVE the whole sequence (full Motor6D/Humanoid control,
+	-- Block/Parry-capable -- see AirCombo.lua's own header); a training-dummy target stays fully
+	-- ragdolled, no defend concept to preserve. Bot targets never reach this at all -- bots can't be
+	-- juggled (CombatState.airComboTarget is typed Player?, never a bot).
 	AirCombo = {
+		-- Dummy-target only, as of this pass -- a real player target stays live-held from impact (no
+		-- launch velocity/tumble at all, see AirCombo.Apply's own header for why); a training dummy
+		-- still gets this pop + backward spin to sell the hit landing before RagdollController.
+		-- HoldAloft's own AlignPosition takes over.
 		LaunchHorizontalVelocity = 4,
 		LaunchBackwardSpin = 4,
 		-- How long both combatants stay locked into the sequence per launch or hold-refresh --
@@ -1997,6 +2740,17 @@ Constants.Combat = {
 		-- landed hit ate more of the old, tighter budget than intended; the target is fully ragdolled/
 		-- held the whole time regardless; a bit more slack costs the defender nothing extra.
 		AirborneSeconds = 1.8,
+		-- Guaranteed EXTRA hold time (on top of AirborneSeconds, not a replacement for it) a
+		-- priority-switch parry grants -- see AirCombo.SwitchPriority's own header (Server/Combat/
+		-- AirCombo.lua). A continuation-hit Parry against an already-tracked air-combo target flips
+		-- who's attacking instead of just ending the sequence; this is the reward for pulling off that
+		-- harder, correctly-timed defensive read, on top of the punish/disarm resolveHitAgainstTarget's
+		-- Parry branch already applies to the (now-victim) attacker. Deliberately does not apply to
+		-- parrying the OPENING DashPunch itself -- that stays a plain punish with no launch, see
+		-- SwitchPriority's own call site (CombatSystem.lua's resolveHitAgainstTarget) for the exact
+		-- isTrackedContinuation gate. A rally of back-and-forth priority-switch parries can chain
+		-- indefinitely, each one re-adding this same bonus on top of the base window.
+		ParryHoldExtensionSeconds = 2,
 		-- How high above their hit-time position the TARGET rises and then STOPS -- a fixed world
 		-- position (RagdollController.HoldAloft pins them there via AlignPosition), not a launch
 		-- velocity + gravity estimate. This replaced a velocity/FloatGravityFraction-based float
@@ -2083,42 +2837,12 @@ Constants.Combat = {
 		SlamDownVelocity = 85,
 		SlamKnockdownSeconds = 1.25,
 		SlamBonusDamage = 6,
-
-		-- Air-tech escape (double-tap-W while held as someone ELSE's air-combo target -- see
-		-- CombatState.airTechWindowExpiry/CombatSystem.lua's handleAirTechRequest). Closes the "target
-		-- genuinely cannot act for the whole sequence" gap MaxHits' own header used to describe as
-		-- accepted-by-design: combat-philosophy.md's "no true unblockable/unparryable without a
-		-- telegraphed cost" means the juggle itself needs a real counter, not just a short duration.
-		-- How long the window stays open after each launch/re-launch (opened fresh on the DashPunch
-		-- launch AND every continuation hit, applyAirCombo's own openAirTechWindow calls) -- a
-		-- Sekiro-grade precision window, not a generous one: roughly comparable to
-		-- ParryWindowSeconds (0.35) but its own tunable, since teching a full air combo is a
-		-- stronger payoff (converts the juggle into a suspended, Block-capable mutual exchange +
-		-- an attacker punish) than a plain parry.
-		TechWindowSeconds = 0.3,
-		-- Cooldown after a GENUINELY MISTIMED air-tech attempt (a request that arrived while truly
-		-- juggled, but outside TechWindowSeconds) -- prevents spamming the remote hoping to land the
-		-- window by luck. Also applied on a SUCCESSFUL tech (see handleAirTechRequest) -- a free,
-		-- infinitely-repeatable escape + attacker punish on every single juggle attempt would make
-		-- DashPunch's own cooldown and chase commitment worthless.
-		TechCooldownSeconds = 2,
-		-- How long a successfully-teched target stays suspended (un-ragdolled but still held aloft
-		-- next to the attacker, via RagdollController.HoldAloft's live-body treatment) before the
-		-- exchange auto-resolves if neither side acts -- see CombatState.airComboSuspendedUntil's own
-		-- header for the full state machine. Deliberately the SAME value as AirborneSeconds above (a
-		-- fresh full window, not a fraction of it, since this is a distinct exchange rather than a
-		-- continuation of the original juggle timing) -- can't reference that key directly from
-		-- within this same table literal, so kept as its own number; retune both together if either
-		-- changes.
-		SuspendedSeconds = 1.8,
-		-- The suspended victim's own one-shot counter-punch (CombatSystem.lua's
-		-- handleSuspendedCounterPunchRequest), thrown only while the attacker isn't mid-swing ("only
-		-- if the attacker is not hitting them"). Sized between a Basic1 and a Basic3 -- a real payoff
-		-- for winning the exchange, not a throwaway tap. Still fully parryable/blockable by the
-		-- attacker (HitResolution.ClassifyDefense runs against it exactly like any other hit) --
-		-- everything stays parryable, including this.
-		SuspendedCounterDamage = 10,
-		SuspendedCounterPostureDamage = 14,
+		-- Same face-down tumble bias as Finisher.Downslam.FaceDownSpin (see that field's own header for
+		-- the mechanism) -- kept as its own independently-tunable number rather than a shared reference
+		-- since this slam's own SlamDownVelocity (85) already differs from Finisher.Downslam's (140),
+		-- the same "each context keeps its own copy even where values happen to start equal" reasoning
+		-- Constants.Debug.DevMenu's confirm-window constants already document.
+		FaceDownSpin = 9,
 	},
 
 	-- Every combat animation id, named once here so a player's own client
@@ -2151,7 +2875,7 @@ Constants.Combat = {
 		-- single Q-press-forward (DashHit) or a bare movement dash already plays. CombatAnimator.lua's
 		-- PlayPredictedDash/ConfirmDash pick this one specifically via viaDoubleTapForward/
 		-- DashFrontCommitmentSeconds -- see those functions' own headers.
-		DashPunch = "rbxassetid://93292051604189",
+		DashPunch = "rbxassetid://74610110553864",
 		-- The new Slide ability (Movement.ApplySlide/CombatSystem.lua's handleSlideRequest) -- a
 		-- single clip, unlike Dash's four directional ones, since Slide never steers: it always plays
 		-- this one animation in whatever direction the player was already sprinting.
@@ -2166,8 +2890,8 @@ Constants.Combat = {
 		-- HitGeneric -> no flinch, PostureBreakStagger -> no stagger, Feint -> the cancelled swing
 		-- just stops with no distinct recoil pose) exactly as before these slots were listed. Drop a
 		-- rbxassetid in and the wired path lights up with no code change.
-		Heavy1 = "rbxassetid://123661407769898",
-		Heavy2 = "rbxassetid://123661407769898",
+		Heavy1 = "rbxassetid://83363364108102",
+		Heavy2 = "rbxassetid://83363364108102",
 		-- The standalone AirSlam attack's ground-slam clip (Constants.Combat.AirSlam,
 		-- CombatSystem.lua's throwAirSlam) -- always thrown with FinisherVariant = "Downslam", so this
 		-- is the one slot that resolves it (see finisherTrackName in CombatAnimator.lua).
@@ -2201,6 +2925,20 @@ Constants.Combat = {
 	-- assuming they drifted apart independently.
 	CombatEngagementRange = 20,
 
+	-- Radius (studs) CombatSystem.lua's broadcastParryWindowOpened uses to decide who receives the
+	-- Combat_ParryWindowOpened tell -- deliberately NOT CombatEngagementRange above. That value
+	-- answers "close enough to still plausibly be fighting THIS combatant"; this one answers "close
+	-- enough to plausibly SEE this combatant's highlight," which is a render-distance question, not a
+	-- combat-relevance one -- a spectator or a third party closing in on the fight should still get
+	-- the tell even though they're not a tracked recentOpponent of anyone involved. Sized well past
+	-- LockOnRange/CombatEngagementRange for exactly that reason. Was an unfiltered FireAllClients
+	-- before this constant existed (docs/architecture/2026-07-audit.md Tier 2.1, 2026-08-audit.md
+	-- §4.1): every parry-window open replicated to every connected client regardless of distance,
+	-- ~25 inbound calls/sec/client at 30 players duelling against a documented 4/sec budget
+	-- (MaxRemoteCallsPerSecondPerPlayer, this file's Networking section) -- the only O(players^2)
+	-- broadcast shape in the combat system.
+	ParryTellBroadcastRadius = 140,
+
 	-- Cap on CombatState.recentOpponents -- a small, fixed-size set of "who I've actually traded
 	-- with lately," not an unbounded fight history. HitResolution.StampRecentOpponent evicts the
 	-- OLDEST entry (lowest timestamp) once this many are already tracked, before adding a new one.
@@ -2224,16 +2962,17 @@ Constants.Combat = {
 	-- that module's own comment at the use site. Roughly root-to-head height for a standard R15 rig.
 	FeedbackHeadOffset = Vector3.new(0, 3, 0),
 
-	-- Studio-only visualization of sampled hitbox poses (temporary, non-colliding, non-queryable
-	-- Parts) -- see Server/Combat/HitboxResolver.lua. Never affects hit logic even when on, and
-	-- HitboxResolver additionally gates rendering on RunService:IsStudio() so this flag flipping
-	-- true can't accidentally ship visible hitboxes in a live server -- on for active Studio
-	-- playtesting; flip back to false before anything resembling a real deployment.
-	-- Off by default now: at 3 SweepSubsteps x ~7 samples per swing this creates ~21 Parts (plus 21
+	-- Visualization of sampled hitbox poses (temporary, non-colliding, non-queryable Parts) -- see
+	-- Server/Combat/HitboxResolver.lua's renderDebugHitbox. Never affects hit logic even when on.
+	-- Only the BOOT-TIME default now -- Server/Combat/HitboxDebugState.lua owns the live value an
+	-- authorized admin can flip at runtime, in Studio OR a published server, via DevMenuSystem.lua's
+	-- GetHitboxDebug/SetHitboxDebug remotes, so this constant no longer needs editing/republishing
+	-- to see hitboxes; it only decides what a fresh server starts with.
+	-- Off by default: at 3 SweepSubsteps x ~7 samples per swing this creates ~21 Parts (plus 21
 	-- Debris:AddItem calls) per swing, ~48 instance create/destroy per second per attacking player,
-	-- which dominates any Studio MicroProfiler capture and makes a performance baseline meaningless.
-	-- Turn it on deliberately while working on hitbox shape/reach/timing, then turn it back off
-	-- before profiling anything.
+	-- which dominates any Studio MicroProfiler capture and makes a performance baseline meaningless,
+	-- and would visibly spam every nearby player's Workspace in a live server. Turn it on
+	-- deliberately (via the live toggle) while working on hitbox shape/reach/timing.
 	DebugHitboxes = false,
 
 	-- Swept melee hitbox geometry/scheduling -- shared regardless of which weapon (Weapons below) is
@@ -2245,6 +2984,12 @@ Constants.Combat = {
 		-- Hard cap on samples taken in a single swing, independent of ActiveSeconds -- guards
 		-- against a misconfigured (too-long) ActiveSeconds turning into an unbounded per-swing cost.
 		MaxSamplesPerSwing = 20,
+		-- Same purpose as MaxSamplesPerSwing above, but for the Move Creation System's projectile
+		-- engine (HitboxResolver.StartProjectile/performProjectileSample) -- a much higher ceiling
+		-- since a projectile's own ActiveSeconds is expected to cover multiple real seconds of
+		-- flight (a melee swing's ActiveSeconds is a fraction of a second), not because projectiles
+		-- are sampled any more densely (same SampleRate cadence) or need to be.
+		MaxSamplesPerProjectile = 300,
 		-- Extra distance (studs) added past a hit candidate's root position when re-checking line of
 		-- sight for a swing-confirmed overlap, so standing flush against a thin wall doesn't produce
 		-- a false "blocked" reading from floating-point edge contact.
@@ -2253,13 +2998,20 @@ Constants.Combat = {
 		-- for swing candidates, instead of scanning every connected player -- see that function's
 		-- own header for the scalability reasoning (performance-optimization.md: cost should scale
 		-- with local combat density, not total server population). Sized generously past the
-		-- farthest actual hitbox reach across every weapon (every melee stage's Offset sits at
-		-- exactly -Size.Z/2, so the box is flush against the root and extends its full Size.Z
-		-- forward -- the biggest is Primary Heavy2's Size.Z=5.75, i.e. ~5.75 studs) since this list is
-		-- only the roster HitboxResolver's per-sample box query narrows further -- being a little generous here
-		-- costs nothing (arc/LOS/distance are all re-validated downstream), being too tight would
-		-- risk missing a legitimately reachable target.
-		MaxCandidateRadius = 20,
+		-- farthest actual hitbox reach across every weapon AND every Move Creation System shape --
+		-- since this list is only the roster HitboxResolver's per-sample box query narrows further,
+		-- being a little generous here costs nothing (arc/LOS/distance are all re-validated
+		-- downstream), being too tight would silently drop a legitimately reachable target no matter
+		-- how correctly its shape's own geometry was authored.
+		--
+		-- 220 (2026-08-12, "much larger hitboxes"): comfortably past the largest reach
+		-- Shared/HitboxShapes.lua's own FIELD_SPECS now allow (a Length- or Radius-driven shape can
+		-- reach up to 200 studs -- see HitboxShapes.Reach and those fields' own Max) plus the
+		-- attacker's own Offset (up to 10 studs forward, MoveRegistryManager's
+		-- CLAMP_MAX_OFFSET_STUDS) and some slack for in-swing movement. Every hand-authored
+		-- Constants.lua attack still tops out at a few studs, same as the comment this replaced
+		-- noted -- this ceiling exists for the Move Creation System's own shapes, not those.
+		MaxCandidateRadius = 220,
 		-- Sub-samples interpolated between the previous and current main sample pose (CFrame:Lerp)
 		-- so a fast-moving/rotating hitbox still catches a target it swept past between two
 		-- SampleRate ticks -- see HitboxResolver.performSample, the only reader. Was a module-local
@@ -2284,6 +3036,100 @@ Constants.Combat = {
 			Color = Color3.fromRGB(255, 64, 64),
 			Transparency = 0.6,
 		},
+
+		-- Fraction of a candidate PART's own smallest extent used as the narrow-phase slack margin
+		-- (HitboxShapes.ContainsPoint's `margin`) when filtering a broadphase result for one of the
+		-- ten non-Box/Sphere shapes -- see HitboxResolver.performSample's shape branch. The
+		-- broadphase hands back whole parts but the narrow-phase tests a single point (the part's
+		-- centre), so a part overlapping the volume by a sliver would otherwise read as a miss.
+		-- Half the smallest extent is exactly "the part's own inscribed radius", i.e. treat the part
+		-- as the largest sphere that fits inside it -- generous enough that grazing contact counts,
+		-- tight enough that a shape's authored silhouette still means something.
+		--
+		-- Box and Sphere never reach this: their broadphase query IS their volume, so they keep the
+		-- original exact behaviour with no margin concept at all (HitboxShapes.IsExactBroadphase).
+		NarrowPhaseMarginFraction = 0.5,
+	},
+
+	-- Object Stun (Server/Combat/ObjectStunResolver.lua) -- the runtime constants that are NOT
+	-- per-move authorable. Everything an author tunes per move lives on the move itself
+	-- (Types.ObjectStunConfig); these are the physical/engine facts the resolver needs regardless of
+	-- which move is being watched, kept here per luau-coding-standards.md's "no magic numbers in
+	-- system logic" rather than as module-locals in the resolver.
+	ObjectStun = {
+		-- |normal.Y| past which a surface is classified Floor (positive) or Ceiling (negative)
+		-- rather than Wall. 0.7 is ~45 degrees: a ramp steeper than 45 degrees reads, and behaves,
+		-- as a wall to a body thrown into it.
+		SurfaceNormalYThreshold = 0.7,
+		-- Hard ceiling on how long a single watch can live, independent of the move's own
+		-- MaxTravelSeconds -- a safety net against a watch leaking if a target is somehow never
+		-- resolved (network ownership change mid-flight, a root part destroyed between ticks).
+		MaxWatchSeconds = 8,
+		-- Hard cap on simultaneously tracked watches server-wide. A watch is one shape cast per tick;
+		-- this bounds the worst case in a large brawl where many moves with Object Stun land at
+		-- once. Past it, new watches are declined (the move still hits normally, it just doesn't get
+		-- the object-stun reaction) rather than degrading everyone's frame time.
+		MaxActiveWatches = 48,
+		-- How far BEHIND the target each probe starts, on top of the probe sphere's own radius. A
+		-- shape cast reports nothing at all when it BEGINS already intersecting geometry, so a sweep
+		-- started at the target's own centre would go blind against precisely the surface the target
+		-- is already touching -- the one the clearance gate exists to find. Backing the sweep off by
+		-- the full body radius plus this margin turns that case back into an ordinary hit at a short
+		-- distance. The offset is added to the cast's length as well, so the distance probed AHEAD of
+		-- the target is unchanged by it.
+		ProbePaddingStuds = 0.25,
+		-- Clamps on the radius ObjectStunResolver.probeRadiusFor derives from the TARGET'S OWN root
+		-- part (both probes sweep a sphere of the target's body rather than a centre line -- see that
+		-- module's header). A rig with an unusual root part must not be able to produce either a
+		-- probe that degenerates back into a ray (a tiny NPC root) or one that swallows a room (a
+		-- boss authored with an oversized root).
+		MinProbeRadiusStuds = 0.5,
+		MaxProbeRadiusStuds = 4,
+		-- Hard ceiling on how far ahead a single tick may probe, INCLUDING the distance the target
+		-- covers this frame (speed * deltaTime). deltaTime is not bounded: one long frame multiplied
+		-- by a launch speed would otherwise sweep tens of studs and report a collision with a wall the
+		-- target is nowhere near yet. Well clear of the authored ceiling on ProbeDistanceStuds
+		-- (Constants.MoveEditor.ObjectStun.Limits caps it at 12) plus a frame of ordinary travel, so
+		-- this only ever bites on a genuine hitch.
+		MaxProbeDistanceStuds = 24,
+		-- Fraction of the PREVIOUS tick's speed below which this tick counts as the target having
+		-- been ARRESTED -- something stopped them, rather than a knockback decaying normally. On such
+		-- a tick, and only then, a sweep that found nothing is re-asked as a direct overlap test:
+		-- a body driven into a surface ends up intersecting it, which is exactly the state a shape
+		-- cast cannot see out of. Gated this tightly because the overlap test is a spatial query the
+		-- ordinary ticks of a flight have no reason to pay for.
+		ArrestSpeedFraction = 0.25,
+		-- The pin (ObjectStunConfig.PinSeconds) holds the target this far off the impact surface
+		-- along its normal, so a body pinned against a wall isn't half-buried in it.
+		PinSurfaceGapStuds = 1.5,
+		-- AlignPosition tuning for that pin, passed straight to RagdollController.HoldAloft. Stiffer
+		-- and faster than the air combo's own hover hold (Constants.Combat.AirCombo) on purpose: a
+		-- body embedded in a wall should look STUCK, arriving instantly and not drifting, whereas an
+		-- air-combo victim should float with some give.
+		PinMaxSpeed = 120,
+		PinResponsiveness = 60,
+
+		-- The DROP that ends a pin. Previously the pin simply expired and the body was let go, which
+		-- read as the target quietly sliding down the wall -- the release was the least interesting
+		-- moment of a mechanic whose entire point is a hard impact. Instead the release hands the body
+		-- to RagdollController.SlamToGround, the same function the Downslam finisher and the air
+		-- combo's own slam finisher use, so the reaction lands as one sequence -- smashed into the
+		-- surface, held against it, then driven into the floor -- and inherits Client/FX/
+		-- SlamImpactVFX's full ground-impact payoff (dust, debris, shockwave, shake, hit-stop) rather
+		-- than needing a second impact effect written for it.
+		--
+		-- Deliberately gentler than either of those two (Finisher.Downslam is 140, the air combo's is
+		-- 85): both of those ARE the finisher, whereas this is the tail of a reaction whose headline
+		-- beat already happened against the surface. SlamToGround clamps it to the clearance the target
+		-- actually has anyway (resolveSlamScale), so a target pinned low against a wall takes the floor
+		-- rather than punching through it.
+		DropDownVelocity = 70,
+		-- Same face-down pitch bias Constants.Combat.Finisher.Downslam.FaceDownSpin documents (see that
+		-- field's own header for the mechanism and for why a pitch, unlike a velocity, still reads on a
+		-- body with no room left to fall). Its own number rather than a reference to that one, per the
+		-- same "each context keeps its own copy even where the values start equal" convention that
+		-- field already establishes.
+		DropFaceDownSpin = 9,
 	},
 
 	-- Two weapon loadout slots (combat-philosophy.md's "Established systems" list names "weapon
@@ -2390,12 +3236,20 @@ Constants.Combat = {
 						DebugName = "Heavy1",
 						WindupSeconds = 0.600,
 						ActiveSeconds = 0.22,
-						RecoverySeconds = 0.35,
+						-- 0.55, up from 0.35 (docs/architecture/2026-08-audit.md section 6.1/3.4) -- funds the
+						-- Cooldown cut below out of a longer whiff/block punish window instead of a free
+						-- reduction, so a missed Heavy1 stays risky.
+						RecoverySeconds = 0.55,
 						Size = Vector3.new(7, 6.5, 5.5),
 						Offset = CFrame.new(0, 0, -2.75),
 						Damage = 12,
 						PostureDamage = 22,
-						Cooldown = 3.00,
+						-- 1.37, down from 3.00 -- restores the "Cooldown == Windup+Active+Recovery" invariant
+						-- Secondary's own Heavy string already follows (DaggerHeavy1.Cooldown ~= its own
+						-- timeline). At 3.00 the target had ~2.4s of fully free action before Heavy2 could even
+						-- be thrown -- reachable (D4) but not landable against any attentive opponent. Matching
+						-- the timeline here closes that gap the same way Secondary's combo already works.
+						Cooldown = 1.37,
 						ArcDegrees = 120,
 						MaxTargets = 4,
 					},
@@ -2568,10 +3422,160 @@ Constants.Combat = {
 		BallSocketUpperAngle = 45,
 		BallSocketTwistLowerAngle = -45,
 		BallSocketTwistUpperAngle = 45,
+		-- Rotational friction (stud * mass * stud / s^2) on every ragdoll ball socket. A frictionless
+		-- socket has nothing to bleed energy into, so a limb that gets kicked by a landing impact keeps
+		-- swinging on essentially forever -- the "spaghetti flail that never settles" look. Friction is
+		-- what makes a ragdoll come to REST at a natural pose within a second or so of landing instead
+		-- of twitching for its whole knockdown window. Deliberately modest: too high reads as a stiff
+		-- mannequin that barely reacts to the hit at all. Dropped to zero during the recovery blend
+		-- (RecoverBlendSeconds below) so it never fights the limbs' own return to rest pose.
+		BallSocketFrictionTorque = 15,
+		-- Elasticity every ragdoll part is forced to for as long as it's limp, overriding whatever its
+		-- material (or the ground/terrain/grass it lands on) would otherwise contribute -- Roblox
+		-- resolves a collision's bounce from BOTH surfaces' Elasticity (weighted by ElasticityWeight,
+		-- Average by default), so a real material's non-zero default was enough, at the speeds a
+		-- finisher launch or a wall-drop actually lands at, to visibly bounce/launch a body back off
+		-- the ground it just fell onto -- which is what read as "flying" on landing, distinct from the
+		-- mid-air launch itself. RagdollElasticityWeight is set far above any ordinary surface's own
+		-- weight (Roblox materials default to 1) specifically so this zero wins the combine regardless
+		-- of what the character lands on.
+		RagdollElasticity = 0,
+		RagdollElasticityWeight = 100,
+		-- Hard ceiling (studs/s) on any linear velocity RagdollController writes onto a body. Nothing
+		-- authored today comes close (the biggest is Finisher.Downslam's 140), so this never bites on a
+		-- tuned move -- it exists so an authored Move Creation System knockback (Types.
+		-- HitboxAttackDefinition.Knockback is designer-editable at runtime via the Move Editor) can't
+		-- fat-finger a body clean off the map. A ragdoll that leaves the play space can't be recovered
+		-- into anything meaningful, so this is a containment guard, not a feel knob.
+		MaxLaunchSpeed = 250,
+		-- Smooth recovery ("blend") -- how long the body spends physically folding back to its rest pose
+		-- BEFORE the Motor6Ds are re-enabled, instead of snapping there in one frame. Re-enabling a
+		-- Motor6D instantly teleports its limb from wherever physics left it to wherever the animation
+		-- says it should be; from a sprawled ragdoll that is a large, very visible pop on every client.
+		-- During this window each joint gets an AlignOrientation easing it back toward the pose captured
+		-- at ragdoll time while the socket's own cone/twist limits tighten toward zero, so by the time
+		-- the motors come back the limbs are already within a few degrees of where the motors would put
+		-- them and the handoff is invisible. All of it is real physics on a server-owned assembly, so it
+		-- replicates to every client -- a script-side Motor6D.Transform lerp would NOT (Transform is
+		-- evaluated per-client by each Animator, so a server write to it is never seen by anyone else).
+		--
+		-- Long enough to read as "picking myself up," short enough that it never eats into the authored
+		-- RagdollSeconds/KnockdownSeconds an attacker is counting on: the blend runs AFTER that window
+		-- expires, so it is added lockout, which is why it stays well under a quarter second of feel.
+		RecoverBlendSeconds = 0.35,
+		-- AlignOrientation.Responsiveness the per-joint recovery drives ramp UP to across the blend
+		-- (eased in as alpha^2 from 0, so the fold-back starts as a gentle gather rather than an
+		-- immediate yank the instant the window opens). Higher = limbs snap to rest pose sooner within
+		-- the blend; lower = a looser, more gradual gather that may not fully arrive before the motors
+		-- re-enable.
+		RecoverJointResponsiveness = 30,
+		-- Same ramp, for the single AlignOrientation that brings the root assembly (HRP + LowerTorso)
+		-- back upright during the blend. Softer than the joints' own value on purpose: this rotates the
+		-- heaviest part of the body and the CAMERA follows it, so an aggressive gain here reads as the
+		-- view being wrenched upright. Yaw is preserved (the body stands up facing wherever it landed),
+		-- only pitch/roll are corrected.
+		RecoverUprightResponsiveness = 20,
+		-- What the ball sockets' cone/twist limits tighten TO by the end of the blend (degrees, from
+		-- BallSocketUpperAngle/BallSocketTwist*Angle above). Not zero -- a hard 0 makes the solver fight
+		-- itself against unavoidable float error on the last step -- just small enough that the residual
+		-- error the motors have to absorb on re-enable is below what the eye can catch.
+		RecoverEndAngle = 5,
+		-- Settle-aware recovery (RagdollController.isSettled / Update). A knockdown's authored window
+		-- is "how long they're down", but a real launch spends much of that window still IN THE AIR --
+		-- a timer-only recovery therefore opened the stand-up blend mid-flight, so the body folded
+		-- itself upright while still travelling and landed neatly on its feet, which reads as the
+		-- knockback being shrugged off. Recovery now additionally waits for the body to actually stop
+		-- moving. Speed (studs/s) at or below which a limp body counts as done moving: comfortably
+		-- above the residual jitter a settled ragdoll keeps from its own ball-socket friction, well
+		-- below any speed a body is still meaningfully travelling at.
+		RecoverSettleSpeed = 6,
+		-- Hard cap on that extra wait, measured from the authored window's own expiry. Bounds the one
+		-- failure mode the wait introduces -- a body that never comes to rest (knocked into a
+		-- bottomless fall, onto a conveyor, into geometry the solver keeps nudging) would otherwise
+		-- stay limp forever. Long enough to cover a full finisher launch's remaining hangtime, short
+		-- enough that a caller mirroring this module's timer (see RagdollController.RemainingSeconds)
+		-- never drifts by a gameplay-relevant amount.
+		RecoverSettleMaxSeconds = 0.75,
 		-- Below this horizontal distance between the air-combo hold position and the face-toward
 		-- point, ensureFaceOrientation skips re-aligning rather than pointing at a near-zero look
 		-- vector (the degenerate "target directly overhead" case).
 		FaceAlignToleranceStuds = 0.05,
+		-- ensureFaceOrientation's AlignOrientation eases toward its face-point at this Responsiveness
+		-- (RigidityEnabled = false, MaxTorque = math.huge -- same soft-constraint pairing HoldAloft's
+		-- own AlignPosition already uses for position) instead of snapping instantly. A rigid lock read
+		-- fine for the ORIGINAL air-combo design (only ever a small correction -- an attacker already
+		-- entering roughly facing the target they just DashPunched), but AirCombo.SwitchPriority can
+		-- now re-point a body that was facing ANY direction a moment ago (the new victim was mid-swing,
+		-- not necessarily aligned with the new attacker) -- an instant, potentially large re-facing
+		-- whips the third-person camera (which follows the character's own back) around with it,
+		-- reading as the camera lurching to stare at whoever's now attacking instead of smoothly
+		-- panning to keep watching the player's own back through the turn.
+		--
+		-- 50, not the original 10 -- a SwitchPriority re-facing is routinely close to a full 180 (the
+		-- parrier and the puncher were facing each other, so each now needs to reverse), and 10 was
+		-- tuned only against the ORIGINAL design's small corrections. At that gain a big turn crawled
+		-- so slowly it read as "doesn't turn to face the opponent at all" rather than a smooth pan --
+		-- indistinguishable, over the few seconds someone actually watches it, from stuck facing the
+		-- old direction. MaxTorque is already math.huge (uncapped authority), so raising Responsiveness
+		-- doesn't fight that -- it's purely how quickly the constraint spends that authority. 50 still
+		-- reads as a deliberate turn, not a snap, for the ORIGINAL small-correction case, while actually
+		-- completing a big SwitchPriority re-facing within a fraction of a second instead of many.
+		FaceOrientationResponsiveness = 50,
+		-- Ground-aware slam clamping (RagdollController.SlamToGround / resolveGroundClearance) -- fixes
+		-- "the downslam launches the target INTO THE AIR instead of into the floor." A slam writes its
+		-- DownVelocity onto EVERY BasePart, and AirSlam only ever requires the ATTACKER to be airborne
+		-- (Constants.Combat.AirSlam / CombatSystem.isAirborneForAirSlam), so the overwhelmingly common
+		-- downslam target is someone STANDING ON THE GROUND -- feet already in contact with the floor.
+		-- Injecting a large downward velocity into a body that has nowhere to fall drives every part
+		-- through the floor surface on the very first physics step (at 140 studs/s that's 2.33 studs per
+		-- 1/60s step, deeper than the parts are tall), and Roblox's penetration recovery then ejects them
+		-- back out hard -- each ball-socketed limb resolving in its own direction, which is precisely what
+		-- read as the body rocketing upward and flipping the instant it was hit. A slam only has anywhere
+		-- to GO if there's real clearance beneath the target, so the applied speed is scaled to that.
+		--
+		-- How far down resolveGroundClearance looks for a floor. A miss (nothing within range -- slammed
+		-- out over a void or off a cliff) means there's nothing to hit and so nothing to clamp against:
+		-- the full authored DownVelocity applies unscaled.
+		SlamGroundCheckDistance = 512,
+		-- The clamp itself: usable drop distance / this = the fastest the body may travel without
+		-- outrunning the solver's ability to resolve contact. 1/15s is roughly four physics steps of
+		-- headroom, so even at the clamped speed a part covers well under its own height per step. A
+		-- target with a full 12-stud air-combo HoverHeight beneath them still clears the authored 140
+		-- outright (12 / (1/15) = 180) and slams at full force -- this only ever bites on a target who
+		-- genuinely has no room to fall.
+		SlamPenetrationGuardSeconds = 1 / 15,
+		-- Floor on the clamped result, so a slam on an already-grounded target still reads as a real
+		-- physical pop rather than a silent collapse -- the ragdoll itself, independent of whether
+		-- Client/FX/SlamImpactVFX.BeginWatch's own detection catches it (see
+		-- SlamImmediateImpactDropStuds below for that half of the story). First pass shipped this at a
+		-- bare 25 -- just past Constants.FX.SlamImpact.FastFallSpeedThreshold (20 studs/s) -- and it
+		-- read as barely any hit at all (RagdollController.SlamToGround's own FaceDownSpin is
+		-- deliberately NOT gated by this same clearance clamp, so the pitch was never the missing
+		-- piece; the velocity floor was). 50 is still well clear of the tunnel-through-the-floor regime
+		-- the SlamPenetrationGuardSeconds clamp above exists to avoid (0.83 studs of travel per physics
+		-- step, versus a HumanoidRootPart's own ~2-stud height, and the Ragdoll collision group /
+		-- buildRagdollJoints' pose-capture fix already removed the two mechanisms -- self-collision
+		-- explosion and rest-pose joint snapping -- that actually caused a grounded slam to eject
+		-- upward in the first place, so this floor is no longer fighting those). Purely a feel tunable
+		-- -- raise or lower freely.
+		SlamMinDownVelocity = 50,
+		-- Usable-drop distance (studs, from resolveSlamScale's own clearance math) at or below which
+		-- RagdollController.SlamToGround reports the impact as IMMEDIATE rather than something the
+		-- client should watch for. This exists because Client/FX/SlamImpactVFX.BeginWatch's own
+		-- fall-then-arrest detection is a Heartbeat-rate poll (~60Hz) of REPLICATED velocity, and a
+		-- clamped-to-near-zero slam (the common case: a target already standing on the ground, which
+		-- is most Downslam finishers and most standalone AirSlams) travels its entire clamped drop and
+		-- fully arrests within a SINGLE physics step -- often within a single Heartbeat interval, and
+		-- sometimes within a single network replication snapshot, meaning the transient fast-falling
+		-- velocity the poll is looking for may never be sampled, or may never even be sent to the
+		-- client at all. No amount of client-side polling can reliably catch a transition that fast --
+		-- the server already knows definitively (via this exact clearance calculation) that contact is
+		-- essentially instantaneous, so it says so directly instead of making the client guess. A
+		-- target with real height on them (a genuine multi-frame fall) stays well above this and keeps
+		-- using the existing velocity-poll detection, which works fine for that case. 1.5 is comfortably
+		-- inside "no meaningful fall to observe" (SlamPenetrationGuardSeconds's own 1/15s guard already
+		-- caps a body at this range to a few studs/sec) while staying well clear of a genuine short hop.
+		SlamImmediateImpactDropStuds = 1.5,
 	},
 
 	-- CombatAudio.lua's registered sound effects -- SoundId/Volume named once here so the client
@@ -2621,6 +3625,7 @@ Constants.Combat = {
 		RequestLockOn = "Combat_RequestLockOn",
 		VitalsUpdated = "Combat_VitalsUpdated",
 		FeedbackEvent = "Combat_FeedbackEvent",
+		KillFeed = "Combat_KillFeed",
 		LockOnChanged = "Combat_LockOnChanged",
 		AttackStarted = "Combat_AttackStarted",
 		-- Server -> acting client, fired the moment a Dash is accepted -- the movement counterpart of
@@ -2638,13 +3643,14 @@ Constants.Combat = {
 		-- landed). The client uses it to suppress the jump on the 4th hit so pressing Space triggers
 		-- the Uppercut instead of a jump -- see CombatSystem.lua's syncFinisherReady and CombatClient.
 		ComboStateChanged = "Combat_ComboStateChanged",
-		-- Server -> acting client, fired when a Basic/Heavy/Dash/Slide/BlockStart/Sprint request is GENUINELY
-		-- rejected (never for the too-early-but-buffered pseudo-reject, and never for Stop actions,
-		-- which are always honored) -- the rollback signal for the client's predicted action-start
-		-- feedback (Constants.Combat.Prediction above; Sprint's feedback is visual-only -- see
-		-- Types.RejectedActionKind's own header). Network budget: server->client, fires at most
-		-- once per rejected request, so its rate is upper-bounded by the client->server rate limiters
-		-- (NetworkBudget) -- it can never exceed what the client was already allowed to send.
+		-- Server -> acting client, fired when a Basic/Heavy/Dash/Slide/BlockStart/Sprint/CustomMove
+		-- request is GENUINELY rejected (never for the too-early-but-buffered pseudo-reject, and never
+		-- for Stop actions, which are always honored) -- the rollback signal for the client's
+		-- predicted action-start feedback (Constants.Combat.Prediction above; Sprint's feedback is
+		-- visual-only, and CustomMove has no prediction to roll back at all -- see
+		-- Types.RejectedActionKind's own header for both). Network budget: server->client, fires at
+		-- most once per rejected request, so its rate is upper-bounded by the client->server rate
+		-- limiters (NetworkBudget) -- it can never exceed what the client was already allowed to send.
 		ActionRejected = "Combat_ActionRejected",
 		-- Client -> server, a one-shot toggle between Constants.Combat.Weapons.Primary/Secondary --
 		-- see handleSwapWeaponRequest. No payload: there are exactly two slots, so "swap" always
@@ -2658,21 +3664,23 @@ Constants.Combat = {
 		-- while it's still in its WindupSeconds telegraph. See CombatSystem.lua's handleFeintRequest
 		-- and Types.FeintPerformedPayload's own header for the full mechanic.
 		RequestFeint = "Combat_RequestFeint",
+		-- Client -> server, admin-only: fires whatever Move-Editor-authored move the local admin has
+		-- bound to a hotbar slot (Client/Combat/HotbarBindings.lua) against real, live combat
+		-- (whatever/whoever they're actually fighting), not MoveEditorSystem.TestFireMove's own
+		-- preview dummy. Payload is the MoveId string. Unlike every remote above, acceptance is
+		-- ADDITIONALLY gated on AdminConfig.AuthorizedUserIds (CombatSystem.lua's
+		-- handleFireHotbarMoveRequest) -- CombatSystem.ThrowCustomMove itself has no admin check of
+		-- its own (see that function's header), so this handler owns it, the same "caller gates,
+		-- callee just throws" split TestFireMove/MoveEditorSystem already established for the other
+		-- caller. Fire-and-forget like every other RequestX remote here; a genuine reject echoes back
+		-- over ActionRejected below (Action = "CustomMove") rather than being silently dropped.
+		RequestFireHotbarMove = "Combat_RequestFireHotbarMove",
 		-- Server -> acting client, fired the moment a Feint is accepted -- the Feint counterpart of
 		-- MovementPerformed/SlidePerformed, carrying the shortened commitment (Types.
 		-- FeintPerformedPayload.RecoverySeconds) so PredictionMirror can collapse its own mirrored
 		-- attackEndsAt down to the real, shorter value instead of staying conservatively locked out
 		-- for the cancelled swing's original (longer) commitment.
 		FeintPerformed = "Combat_FeintPerformed",
-		-- Client -> server, the double-tap-forward air-tech attempt while held aloft in someone
-		-- ELSE's air combo (CombatState.airComboTarget is tracked on the ATTACKER's own state -- see
-		-- that field's header, there's no direct "my attacker" pointer on the victim's side). A
-		-- distinct action from Block/Parry (Combat_RequestBlockStart is unusable here --
-		-- ACTION_GATES.BlockStart.Ragdoll = true blocks it outright while ragdolled/held) and from
-		-- Dash (CombatClient branches to THIS remote instead of RequestDash when the local player's
-		-- own PredictionMirror says they're currently held). See CombatSystem.lua's
-		-- handleAirTechRequest.
-		RequestAirTech = "Combat_RequestAirTech",
 		-- Server -> owning client, fired when CombatState.inCombatUntil (see that field's own header)
 		-- transitions true/false -- same "fire on transition, not per-tick" shape as ComboStateChanged/
 		-- WeaponChanged, so the HUD's combat-state badge (Components/CombatStateBadge.lua) gets exactly

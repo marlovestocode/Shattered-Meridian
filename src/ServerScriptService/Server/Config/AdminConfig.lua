@@ -31,6 +31,10 @@ local AdminConfig = {}
 -- here, e.g. [123456789] = true. Never guess or invent a UserId.
 AdminConfig.AuthorizedUserIds = {
 	[3888090557] = true,
+	[10258838914] = true,
+	[4689336404] = true,
+	[1785892535] = true,
+	[88478367] = true,
 } :: { [number]: boolean }
 
 return AdminConfig

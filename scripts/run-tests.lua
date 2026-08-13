@@ -22,6 +22,21 @@ local modulesToLoad = {
 	ServerScriptService.Server.Systems.PlayerDataSystem,
 	ServerScriptService.Server.Systems.CharacterCreationSystem,
 	ServerScriptService.Server.Systems.RespawnSystem,
+	-- EmoteSystem.lua has no dedicated spec that requires it (only its pure/no-profile sibling
+	-- EmoteUnlockService.lua does) -- same "nothing else would catch a broken require path" gap this
+	-- list already exists to close for CombatSystem/DevMenuSystem/TrainingBotSystem above.
+	ServerScriptService.Server.Systems.EmoteSystem,
+	-- SettingsSystem.lua has no dedicated spec either -- same reasoning as EmoteSystem above; its own
+	-- pure logic lives entirely in PlayerDataSystem's EncodeSettings/DecodeSettings, already covered.
+	ServerScriptService.Server.Systems.SettingsSystem,
+	-- MoveEditorSystem.lua has no dedicated spec (its pure logic lives in MoveRegistryManager.Validate
+	-- and DefaultMoveRegistry, both already covered) and was not even MOUNTED in test.project.json
+	-- until now -- so nothing anywhere caught a broken require path in the one module that owns the
+	-- Move Editor's auth gate, DataStore encode/decode and every one of its twelve remotes. Adding it
+	-- here is the same cheap insurance EmoteSystem/SettingsSystem above already take. A real spec for
+	-- its encode/decode round trip still wants writing; that needs its file-local helpers exported
+	-- first, the way BugReportSystem.ValidateCategory already is.
+	ServerScriptService.Server.Systems.MoveEditorSystem,
 }
 for _, moduleScript in ipairs(modulesToLoad) do
 	local ok, errorMessage = pcall(require, moduleScript)

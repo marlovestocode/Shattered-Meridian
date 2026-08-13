@@ -1,0 +1,100 @@
+--!strict
+--[[
+	EmoteConstants.lua
+
+	Owns: every Emote-system tunable number, lookup table, and Remote name -- deliberately its own
+	dedicated Shared module rather than a Constants.Emote sub-table, the same reasoning QiConstants.
+	lua's own header gives for Qi: Emote content (per-emote definitions live alongside this in
+	Shared/Emotes/, unlock pools, loadout sizing) is a growing data surface a live game keeps adding
+	to for years, and folding it into Constants.lua would only grow that file's already-flagged
+	"holds content, not tunables" problem (docs/architecture/2026-08-audit.md section 5) further.
+
+	Does not own: any individual emote's own authored data (Id/DisplayName/AnimationId/Category/
+	Unlock/...) -- that's Shared/Emotes/EmoteDefinitions.lua. This file owns only the numbers/lookups
+	every consumer of that data needs alongside it (loadout sizing, roll pools, remote names,
+	animation fade timing, network budget, and the two runtime allow-lists -- Categories/UnlockTypes
+	-- Shared/Emotes/EmoteRegistry.lua's Validate checks an EmoteDefinition against, since Types.
+	EmoteCategory/EmoteUnlockType are compile-time-only unions with no runtime membership check of
+	their own, the same "a Types.lua union needs a matching runtime array somewhere" gap Constants.
+	CharacterCreation.RaceIds already fills for Types.RaceId).
+]]
+
+local EmoteConstants = {}
+
+-- Number of slots in a player's emoteLoadout (Types.PlayerProfile.emoteLoadout) -- the radial wheel
+-- UI (a later session) is required to read this length rather than hardcoding 8 anywhere, so
+-- retuning the wheel's size is a single-number change here, not a UI + data migration.
+EmoteConstants.LoadoutSize = 8
+
+-- Server-owned RemoteEvent names (Server/Systems/EmoteSystem.lua creates every one of these via
+-- NetworkBridge.CreateRemoteEvent at boot) -- same per-subsystem RemoteNames sub-table convention as
+-- Constants.Meridian/Constants.Rivalry/Constants.Qi, and the same "Emote_" prefix style those use
+-- ("Combat_", "Progression_", ...).
+EmoteConstants.RemoteNames = {
+	-- Client -> server. Payload: emoteId (string). See EmoteSystem.lua's handleRequestPlay for the
+	-- full validation order.
+	RequestPlay = "Emote_RequestPlay",
+	-- Server -> the ACTING player's own client only (never FireAllClients) -- Roblox replicates the
+	-- played AnimationTrack to every OTHER client for free the instant that one client's own
+	-- Animator plays it, the same contract Combat_AttackStarted already relies on; see
+	-- Client/FX/EmoteAnimator.lua's own header. Payload: Types.EmoteStartedPayload/
+	-- EmoteStoppedPayload.
+	Started = "Emote_Started",
+	Stopped = "Emote_Stopped",
+	-- Client -> server. Payload: slotIndex (number, 1-based), emoteId (string).
+	RequestSetLoadoutSlot = "Emote_RequestSetLoadoutSlot",
+	-- Server -> owning client only, fired once on join and again on every successful mutation.
+	-- Payload: Types.EmoteLoadoutUpdatePayload / Types.EmoteUnlockedUpdatePayload.
+	LoadoutUpdated = "Emote_LoadoutUpdated",
+	UnlockedUpdated = "Emote_UnlockedUpdated",
+}
+
+-- Per-player-per-second call budget for EmoteSystem's two client-originated remotes (RequestPlay/
+-- RequestSetLoadoutSlot) -- EACH gets its OWN independent RateLimiter.New() instance built from this
+-- same number (CombatSystem.lua's attackRateLimiter/defensiveRateLimiter/utilityRateLimiter
+-- precedent: independent buckets from one shared constant, so a burst against one action can never
+-- starve the other), rather than sharing Constants.NetworkBudget.MaxRemoteCallsPerSecondPerPlayer --
+-- an emote press is a cosmetic/social action, not combat-critical, and earns its own named budget
+-- the same reasoning Constants.Rivalry.QueryMaxCallsPerSecond already documents for a different
+-- non-combat-critical remote pair.
+EmoteConstants.MaxRequestsPerSecondPerPlayer = 4
+
+-- Client/FX/EmoteAnimator.lua's fade timing -- mirrors Constants.FX.Animation.Combat/Flight's own
+-- OneShot/Loop split: a one-shot gesture (Wave, Bow, ...) fades in snappy; a looping sustained pose
+-- (Sit, Dance) crossfades a little softer, since it's a held state, not a discrete beat.
+EmoteConstants.AnimationFade = {
+	OneShotFadeSeconds = 0.1,
+	LoopFadeSeconds = 0.25,
+	-- Applied when an emote is cut short (a new RequestPlay superseding it, death, the heartbeat
+	-- interruption guard, or a duration-expiry stop) rather than fading in -- softer than either
+	-- play-side fade above so an interrupted emote melts toward idle instead of popping, the same
+	-- reasoning Constants.Combat.Prediction.RollbackFadeSeconds documents for a mispredicted combat
+	-- swing.
+	StopFadeSeconds = 0.15,
+}
+
+-- The runtime allow-list Shared/Emotes/EmoteRegistry.lua's Validate checks Types.EmoteCategory
+-- against -- see this file's own header for why a compile-time union alone can't gate an untrusted
+-- table at runtime.
+EmoteConstants.Categories = { "Social", "Greeting", "Reaction", "Dance", "Sitting", "Rare" }
+
+-- Same reasoning as Categories above, for Types.EmoteUnlockType.
+EmoteConstants.UnlockTypes = { "Default", "Achievement", "Roll", "Quest", "Event", "Purchase" }
+
+-- A brand-new profile's starting emoteLoadout (PlayerDataSystem.CreateDefaultProfile) -- the 8
+-- starter Default-unlock emotes (Shared/Emotes/EmoteDefinitions.lua), in the order a new player
+-- should see them on the wheel. Deliberately a plain literal, not "every Default emote in whatever
+-- order pairs() happens to iterate" -- loadout order is a real UX choice, and pairs() over a dict
+-- has no defined order to begin with.
+EmoteConstants.DefaultLoadout = { "Wave", "Bow", "Laugh", "Taunt", "Sit", "Cheer", "Point", "Dance" }
+
+-- Named unlock pools -- EmoteUnlockService.RollEmote reads these by poolId. Each entry is a list of
+-- EmoteIds a roll draws uniformly from, excluding whatever the rolling player already owns. Kept
+-- here (not alongside the emote's own data in EmoteDefinitions.lua) since a pool is a GROUPING of
+-- emotes, not a property of any single one -- an emote can be named in more than one pool without
+-- EmoteDefinitions.lua itself needing to know which pools include it.
+EmoteConstants.RollPools = {
+	RareEmotes = { "CelestialBow" },
+} :: { [string]: { string } }
+
+return EmoteConstants

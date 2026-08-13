@@ -22,6 +22,15 @@
 					},
 					"FX": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/FX"
+					},
+					"UI": {
+						"$className": "Folder",
+						"Screens": {
+							"$className": "Folder",
+							"EmoteWheel": {
+								"$path": "src/StarterPlayer/StarterPlayerScripts/Client/UI/Screens/EmoteWheel"
+							}
+						}
 					}
 				}
 			}
@@ -69,6 +78,36 @@
 					},
 					"RespawnSystem": {
 						"$path": "src/ServerScriptService/Server/Systems/RespawnSystem.lua"
+					},
+					"BountySystem": {
+						"$path": "src/ServerScriptService/Server/Systems/BountySystem.lua"
+					},
+					"RivalrySystem": {
+						"$path": "src/ServerScriptService/Server/Systems/RivalrySystem.lua"
+					},
+					"MeridianSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/MeridianSystem.lua"
+					},
+					"QiSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/QiSystem.lua"
+					},
+					"TierSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/TierSystem.lua"
+					},
+					"EmoteUnlockService": {
+						"$path": "src/ServerScriptService/Server/Systems/EmoteUnlockService.lua"
+					},
+					"EmoteSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/EmoteSystem.lua"
+					},
+					"VersionWatchSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/VersionWatchSystem.lua"
+					},
+					"SettingsSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/SettingsSystem.lua"
+					},
+					"MoveEditorSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/MoveEditorSystem.lua"
 					}
 				}
 			},

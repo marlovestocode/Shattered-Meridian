@@ -26,7 +26,10 @@ local StorageConfig = {}
 
 -- Canonical player-progression persistence (Server/Systems/PlayerDataSystem.lua) -- the single
 -- DataStore-backed owner every other System's player-state reads/writes eventually route through.
-StorageConfig.PlayerDataStoreName = "PlayerProfiles_v5"
+-- Bumped v5 -> v6 as a deliberate full-population wipe (every player gets a fresh
+-- CreateDefaultProfile on next join), not a schema-incompatible change -- see PlayerDataSystem.
+-- MigrateRecord for the separate mechanism that actually exists for THAT case.
+StorageConfig.PlayerDataStoreName = "PlayerProfiles_v6"
 
 -- Bug reports (Server/Systems/BugReportSystem.lua). The ordered store exists purely to index reports
 -- by submission time for the dev menu's Reports tab; the main store holds the records themselves.
@@ -39,5 +42,16 @@ StorageConfig.BugReportOrderedDataStoreName = "BugReportsByTime_v1"
 -- and a bug report have no reason to share a key namespace.
 StorageConfig.BanDataStoreName = "PlayerBans_v1"
 StorageConfig.SuspectedCheaterDataStoreName = "SuspectedCheaters_v1"
+
+-- Move Creation System (Server/Systems/MoveEditorSystem.lua) -- one key per authored move
+-- ("Move_<MoveId>") plus a small fixed-key index record ("MoveIndex") listing every MoveId, since
+-- DataStore has no native "list all keys" and the authored-move count is small (tens, not
+-- thousands) -- see MoveEditorSystem.lua's own header for the full persistence shape.
+StorageConfig.CustomMoveDataStoreName = "CustomMoves_v1"
+
+-- Server publish-version watchdog (Server/Systems/VersionWatchSystem.lua) -- a single small store
+-- holding one fixed key, the highest game.PlaceVersion any server has ever reported booting with.
+-- See that module's own header for why this is enough to detect a publish with no external tooling.
+StorageConfig.ServerVersionDataStoreName = "ServerVersionWatch_v1"
 
 return StorageConfig
