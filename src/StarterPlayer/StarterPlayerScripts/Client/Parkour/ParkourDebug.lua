@@ -313,6 +313,11 @@ local function buildReadout(context: ParkourContext, machine: Machine): string
 				tostring(ledge.HasHangSpace)
 			)
 		)
+	elseif not ledge.Allowed then
+		-- The refusal EnvironmentProbe.probeLedge deliberately preserves: an edge was found and rejected
+		-- on a designer tag, which looks identical to open air unless the overlay says otherwise. This is
+		-- the readout that answers "why won't it grab THIS wall".
+		table.insert(lines, string.format("ledge       refused (tag) on %s", tostring(ledge.Instance)))
 	else
 		table.insert(lines, "ledge       none")
 	end

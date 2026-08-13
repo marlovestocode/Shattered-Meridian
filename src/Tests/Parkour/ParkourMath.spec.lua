@@ -126,6 +126,38 @@ return function()
 		end)
 	end)
 
+	describe("ParkourMath.EaseOutCubic", function()
+		it("pins both endpoints", function()
+			expectClose(ParkourMath.EaseOutCubic(0), 0)
+			expectClose(ParkourMath.EaseOutCubic(1), 1)
+		end)
+
+		it("is past the halfway mark at the halfway point -- it eases OUT, not in", function()
+			-- The property the ledge grab actually depends on, and the one that distinguishes this from
+			-- TraversalEase (which is exactly 0.5 at t=0.5). If this ever drops to or below 0.5 the curve
+			-- has been turned back into a smoothstep and the grab regains the hesitation it was written to
+			-- remove.
+			expect(ParkourMath.EaseOutCubic(0.5) > 0.5).to.equal(true)
+			expectClose(ParkourMath.EaseOutCubic(0.5), 0.875)
+		end)
+
+		it("clamps rather than extrapolating outside [0, 1]", function()
+			-- A frame-time spike drives alpha past 1 routinely; extrapolating there would overshoot the
+			-- hang pose and snap back.
+			expectClose(ParkourMath.EaseOutCubic(-5), 0)
+			expectClose(ParkourMath.EaseOutCubic(5), 1)
+		end)
+
+		it("never decreases across its domain", function()
+			local previous = -1
+			for step = 0, 20 do
+				local value = ParkourMath.EaseOutCubic(step / 20)
+				expect(value >= previous).to.equal(true)
+				previous = value
+			end
+		end)
+	end)
+
 	describe("ParkourMath.DownhillDirection", function()
 		it("points the way the normal leans, not the opposite way", function()
 			local fallLine = ParkourMath.DownhillDirection(Vector3.new(0.5, 1, 0).Unit)

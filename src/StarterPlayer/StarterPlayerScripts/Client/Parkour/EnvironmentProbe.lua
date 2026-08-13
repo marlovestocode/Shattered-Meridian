@@ -16,6 +16,11 @@
 	   anywhere to land," and a short upward ray answers "is there anywhere to stand." Six rays worst
 	   case for a complete obstacle description, and the common case (nothing ahead) is one.
 
+	   The ledge search is the one probe that deliberately spends more than the minimum, and castSphere
+	   below states the reason: it is the only probe whose question is "is the player reaching for
+	   something roughly over there," and answering that with a zero-width line is how a grab the player
+	   is certain they made gets reported as open air.
+
 	2. CACHED AND SCHEDULED, NOT UNCONDITIONAL. Each probe family carries its own refresh interval
 	   (ParkourConstants.Probe.*IntervalSeconds) and its last result. A state declares which probes it
 	   actually depends on (ParkourTypes.StateDefinition.Probes) and those are forced fresh every
@@ -207,6 +212,30 @@ local function castRay(origin: Vector3, direction: Vector3): RaycastResult?
 	end
 	rayBudgetUsed += 1
 	return Workspace:Raycast(origin, direction, params)
+end
+
+-- The swept-sphere counterpart, on the same budget and with the same refusal semantics. Used by
+-- exactly one probe -- the ledge face search -- because it is the only one whose question is "is the
+-- player reaching for something roughly over there" rather than "what is exactly along this line."
+--
+-- A ray answers the second question and is the right tool everywhere else in this file. It is the
+-- wrong tool on its own for a grab: it demands the root's centre line intersect the wall, so half a
+-- stud of lateral drift past a pillar's corner, or a grab attempted while the camera is still
+-- swinging, is a miss on geometry the player was plainly reaching for. One spherecast covers a
+-- Ledge.GrabProbeRadius-wide corridor instead.
+--
+-- It does NOT replace the ray -- see tryLedgeDirection for the order the two run in and the engine
+-- behavior that forces it.
+local function castSphere(origin: Vector3, radius: number, direction: Vector3): RaycastResult?
+	local params = raycastParams
+	if not params then
+		return nil
+	end
+	if rayBudgetUsed >= PROBE.MaxRaysPerFrame then
+		return nil
+	end
+	rayBudgetUsed += 1
+	return Workspace:Spherecast(origin, radius, direction, params)
 end
 
 -- True when this probe family's cached result is still inside its refresh interval and the caller
@@ -461,48 +490,59 @@ local function clearLedge(now: number): ()
 	ledge.Allowed = true
 end
 
--- Finds a grabbable edge ahead of an airborne character: a wall face within reach, whose top edge
--- sits inside a band around head height. Two rays -- forward for the face, then down from just past
--- and above the face for the lip -- plus one upward check for somewhere to end up.
-local function probeLedge(rootPart: BasePart, facingDirection: Vector3, now: number): ()
-	local flatFacing = ParkourMath.Flatten(facingDirection)
-	if flatFacing.Magnitude < 1e-3 then
-		clearLedge(now)
-		return
-	end
-	local forward = flatFacing.Unit
-	local headPosition = rootPart.Position + UP * (rootPart.Size.Y * 0.5)
-
+-- One direction's worth of the ledge search: find a wall face along `forward`, find the lip above
+-- that face, and check the lip sits inside the (sweep-widened) grab band. Fills `ledge` and returns
+-- true on success; on failure it leaves `ledge` untouched so the caller can try another direction
+-- without having to save and restore anything, and returns the part that refused on permissions --
+-- if any -- so the caller can report WHY nothing was grabbable rather than just that nothing was.
+local function tryLedgeDirection(
+	headPosition: Vector3,
+	forward: Vector3,
+	sweep: number,
+	now: number
+): (boolean, BasePart?)
+	-- RAY FIRST, SPHERE SECOND, and the order is load-bearing rather than an optimization.
+	--
+	-- A spherecast whose sphere is ALREADY overlapping geometry at its origin returns nil, not a
+	-- distance-zero hit (asserted against the real engine in Tests/Parkour/LedgeProbeGeometry.spec).
+	-- The head is a Ledge.GrabProbeRadius-wide sphere's worth of clearance away from a wall the
+	-- character is pressed against, so sphere-first would report open air in exactly the situation the
+	-- old single ray handled perfectly: hugging the face. Leading with the ray keeps that case exact and
+	-- keeps the common "wall straight ahead" grab at its original one-cast cost; the sphere is then
+	-- purely additive, spent only when the narrow instrument found nothing usable.
+	--
+	-- "Nothing usable" includes a hit too far off vertical to be a FACE -- a ray that skims over the lip
+	-- and lands on a sloped roof behind it, say. Such a normal has no meaningful horizontal component,
+	-- and ParkourMath.HangPosition backs the pose off ALONG that component, so accepting it places the
+	-- character inside the wall they meant to hang on rather than off its face.
 	local faceHit = castRay(headPosition, forward * LEDGE.GrabReachDistance)
-	if not faceHit then
-		clearLedge(now)
-		return
+	if not faceHit or ParkourMath.SurfaceTilt(faceHit.Normal) > LEDGE.MaxFaceTiltDegrees then
+		faceHit = castSphere(headPosition, LEDGE.GrabProbeRadius, forward * LEDGE.GrabReachDistance)
+	end
+	if not faceHit or ParkourMath.SurfaceTilt(faceHit.Normal) > LEDGE.MaxFaceTiltDegrees then
+		return false, nil
 	end
 
 	local permissions = ParkourTagging.GetPermissions(faceHit.Instance, now)
 	if permissions.Ignored or not permissions.LedgeGrabbable then
-		clearLedge(now)
-		ledge.Allowed = false
-		ledge.Instance = faceHit.Instance
-		return
+		return false, faceHit.Instance
 	end
 
-	-- The lip: scan down from above the head band, just past the wall face.
-	local scanTop = headPosition.Y + LEDGE.GrabBandAboveHead
+	-- The lip: scan down from above the head band, just past the wall face. Both the top of the scan
+	-- and the band it is measured against are stretched upward by `sweep` -- see probeLedge below.
+	local scanTop = headPosition.Y + LEDGE.GrabBandAboveHead + sweep
 	local scanOrigin = Vector3.new(faceHit.Position.X, scanTop, faceHit.Position.Z) + forward * 0.3
-	local scanLength = LEDGE.GrabBandAboveHead + LEDGE.GrabBandBelowHead
+	local scanLength = LEDGE.GrabBandAboveHead + sweep + LEDGE.GrabBandBelowHead
 	local lipHit = castRay(scanOrigin, Vector3.new(0, -scanLength, 0))
 	if not lipHit then
-		clearLedge(now)
-		return
+		return false, nil
 	end
 
 	-- The lip must genuinely be an EDGE within the grab band, not the top of something far below or
 	-- a ceiling far above -- both of which the scan can legitimately land on.
 	local relativeHeight = lipHit.Position.Y - headPosition.Y
-	if relativeHeight > LEDGE.GrabBandAboveHead or relativeHeight < -LEDGE.GrabBandBelowHead then
-		clearLedge(now)
-		return
+	if relativeHeight > LEDGE.GrabBandAboveHead + sweep or relativeHeight < -LEDGE.GrabBandBelowHead then
+		return false, nil
 	end
 
 	local standCheck = castRay(lipHit.Position + UP * 0.3, UP * LEDGE.StandClearanceHeight)
@@ -524,6 +564,69 @@ local function probeLedge(rootPart: BasePart, facingDirection: Vector3, now: num
 	ledge.HasHangSpace = hangCheck == nil
 	ledge.Instance = lipHit.Instance
 	ledge.Allowed = true
+	return true, nil
+end
+
+-- Finds a grabbable edge ahead of an airborne character: a wall face within reach, whose top edge
+-- sits inside a band around head height.
+--
+-- TWO THINGS MAKE THIS DIFFERENT FROM A SINGLE FORWARD PROBE, and both exist because the naive
+-- version fails on grabs the player is certain they made:
+--
+--   * THE BAND IS SWEPT, not static. A static 4.2-stud window is stepped straight over by a fast
+--     fall: at 90 studs/s and 45fps the head moves 2 studs a frame, and the lip that was above the
+--     band on one sample is below it on the next. Stretching the top of the band by the distance
+--     covered since the last sample asks the honest question -- "was this edge inside the band at any
+--     point during the interval" -- instead of sampling a continuous fall at discrete points and
+--     calling the gaps absence. The stretch is upward only: an edge that has already passed BELOW the
+--     band was offered on an earlier frame and declined by geometry, not missed.
+--
+--   * IT SEARCHES UP TO TWO DIRECTIONS. Travel first, because that is where the body is going and it
+--     is the direction a wall-jump departure or an arcing fall wants measured. Facing second, and only
+--     when the two have genuinely diverged, because that is where the PLAYER is reaching -- strafing
+--     sideways along a face while looking at it (shift lock, or any state that has taken AutoRotate)
+--     points travel along the wall and facing at it, and travel-only reports open air the whole way
+--     past a ledge the player is staring straight at.
+local function probeLedge(rootPart: BasePart, travelDirection: Vector3, verticalSpeed: number, now: number): ()
+	local headPosition = rootPart.Position + UP * (rootPart.Size.Y * 0.5)
+
+	-- Measured against the last time this probe looked (which clearLedge stamps too, so it is a real
+	-- "time since we last knew" rather than only a frame time) and clamped at both ends: the floor is
+	-- there so a first sample after a long gap does not sweep the whole map, the ceiling is
+	-- Ledge.GrabSweepMaxStuds' own reasoning about what still reads as catching yourself.
+	local sinceLastSample = if ledge.SampledAt > 0 then math.clamp(now - ledge.SampledAt, 0, 0.1) else 0
+	local sweep = math.clamp(math.max(-verticalSpeed, 0) * sinceLastSample, 0, LEDGE.GrabSweepMaxStuds)
+
+	local facing = ParkourMath.SafeUnit(ParkourMath.Flatten(rootPart.CFrame.LookVector), Vector3.zero)
+	local travel = ParkourMath.SafeUnit(ParkourMath.Flatten(travelDirection), Vector3.zero)
+	local primary = if travel.Magnitude > 0 then travel else facing
+	if primary.Magnitude < 1e-3 then
+		clearLedge(now)
+		return
+	end
+
+	local found, refusedInstance = tryLedgeDirection(headPosition, primary, sweep, now)
+	if
+		not found
+		and facing.Magnitude > 0
+		and ParkourMath.ApproachAngle(primary, facing) > LEDGE.GrabDirectionSplitDegrees
+	then
+		local facingFound, facingRefused = tryLedgeDirection(headPosition, facing, sweep, now)
+		found = facingFound
+		refusedInstance = refusedInstance or facingRefused
+	end
+	if found then
+		return
+	end
+
+	clearLedge(now)
+	if refusedInstance then
+		-- Preserved rather than reset to the permissive default, same as probeWall's own refusal path: a
+		-- state explaining why it will not grab, and the debug overlay showing that explanation, need
+		-- "an edge the designer marked unusable" to be distinguishable from "no edge here."
+		ledge.Allowed = false
+		ledge.Instance = refusedInstance
+	end
 end
 
 --
@@ -608,7 +711,7 @@ function EnvironmentProbe.Update(context: ParkourContext, request: ProbeRequest)
 		if ground.Grounded and not wantLedge then
 			clearLedge(now)
 		else
-			probeLedge(rootPart, travelDirection, now)
+			probeLedge(rootPart, travelDirection, context.VerticalVelocity, now)
 		end
 	elseif ground.Grounded and not wantLedge then
 		clearLedge(now)

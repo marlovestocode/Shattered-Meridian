@@ -470,6 +470,18 @@ function ParkourMath.TraversalEase(alpha: number): number
 	return t * t * (3 - 2 * t)
 end
 
+-- Cubic ease-OUT: fastest at the start, settling at the end. Its own function rather than a second
+-- caller of TraversalEase above because the two describe opposite events and the difference is
+-- legible in play. A vault is a LAUNCH -- symmetric smoothstep, easing in, because a launch that
+-- begins at full speed reads as being shoved. A ledge grab is a CATCH: the hands arrive at the lip
+-- the instant contact is made and the body settles underneath them, and easing INTO that reads as a
+-- hesitation before the character decides to grab. Used by States/LedgeHanging.lua for the pull into
+-- the hang pose.
+function ParkourMath.EaseOutCubic(alpha: number): number
+	local inverse = 1 - math.clamp(alpha, 0, 1)
+	return 1 - inverse * inverse * inverse
+end
+
 -- Re-exported so the parkour modules have one import for their easing needs rather than requiring
 -- FlightMath directly alongside this module -- see the file header for why the implementation
 -- itself is not duplicated.

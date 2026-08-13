@@ -288,6 +288,48 @@ return function()
 			expect(ParkourConstants.Roll.DurationSeconds < ceiling).to.equal(true)
 		end)
 
+		it("keeps the ledge grab's attach pull short enough to read as a catch", function()
+			-- The pull into the hang pose is dead time for the player: inputs do not open until it lands
+			-- (States/LedgeHanging.Update). Past roughly a sixth of a second that stops reading as the
+			-- character catching something and starts reading as input lag, which is the exact complaint
+			-- the blend was added to fix -- so making it longer to smooth out a rough-looking grab would
+			-- trade one clunk for a worse one.
+			local ledge = ParkourConstants.Ledge
+			expect(ledge.AttachMinSeconds > 0).to.equal(true)
+			expect(ledge.AttachMinSeconds <= ledge.AttachMaxSeconds).to.equal(true)
+			expect(ledge.AttachMaxSeconds <= 0.16).to.equal(true)
+		end)
+
+		it("keeps even the furthest legal grab moving at a speed the eye can follow", function()
+			-- The cap does not truncate the blend -- alpha still runs 0 to 1 -- it makes the pull travel
+			-- FASTER, so the thing worth bounding is the implied speed of the worst case rather than
+			-- whether AttachSpeed alone could cover it. Worst case is a lip at the bottom of the band
+			-- (dropping the root by the band depth plus the hang offset) at the far edge of the reach.
+			-- Past roughly 60 studs/s that stops being a pull and becomes the single-frame relocation the
+			-- whole blend exists to replace, so widening the grab band or the reach without revisiting
+			-- AttachMaxSeconds is caught here.
+			local ledge = ParkourConstants.Ledge
+			local worstCase = Vector3.new(
+				ledge.GrabReachDistance,
+				ledge.GrabBandBelowHead + math.abs(ledge.HangVerticalOffset),
+				0
+			).Magnitude
+			expect(worstCase / ledge.AttachMaxSeconds <= 60).to.equal(true)
+			-- And the near case still has to be visible: at least a couple of frames of motion on a 30fps
+			-- client, or the cheapest grabs go back to popping.
+			expect(ledge.AttachMinSeconds >= 1 / 30).to.equal(true)
+		end)
+
+		it("keeps the blanket re-grab lockout far below the same-ledge one", function()
+			-- The blanket window exists only to let the release push clear the body off the face; the long
+			-- window is what stops the dropped edge being re-caught. Collapsing them back into one number
+			-- is what made dropping down a stepped face feel like the system had stopped responding, so
+			-- the two are asserted to be genuinely different orders of delay.
+			local ledge = ParkourConstants.Ledge
+			expect(ledge.RegrabAnyLedgeSeconds > 0).to.equal(true)
+			expect(ledge.RegrabAnyLedgeSeconds < ledge.RegrabLockoutSeconds * 0.5).to.equal(true)
+		end)
+
 		it("keeps the slide's own speed band inside the validator's reported-speed ceiling", function()
 			-- A slide that can legitimately exceed MaxReportedSpeed means an honest player on a big hill
 			-- gets their own movement rejected by the server. Raising Slide.MaxSpeed without raising the

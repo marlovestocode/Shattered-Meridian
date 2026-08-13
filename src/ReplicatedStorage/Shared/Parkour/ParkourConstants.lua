@@ -316,26 +316,73 @@ ParkourConstants.Ledge = {
 	-- out of a jump shouldn't snap onto a ledge they're about to clear anyway.
 	MaxVerticalSpeedToGrab = 12,
 	-- How far ahead the grab probe reaches, and the vertical band (relative to the character's head)
-	-- an edge must fall within to be grabbable.
-	GrabReachDistance = 2.8,
-	GrabBandAboveHead = 1.2,
+	-- an edge must fall within to be grabbable. Reach is measured from the ROOT's centre, so roughly a
+	-- stud of it is spent crossing the character's own torso before it reaches open air.
+	GrabReachDistance = 3.4,
+	-- Asymmetric on purpose, and the asymmetry is about how far the grab MOVES you. An edge above the
+	-- head puts the hang pose within a few tenths of a stud of where the character already is (the lip
+	-- is HangVerticalOffset above the hanging root), so reaching further up costs the player nothing;
+	-- an edge below the head yanks them down by nearly the whole band on top of that offset, and a
+	-- generous lower band is how a grab starts feeling like being swallowed by the wall.
+	GrabBandAboveHead = 1.8,
 	GrabBandBelowHead = 2.4,
+	-- Radius of the spherecast that finds the wall face. Lateral forgiveness, in one cast: see
+	-- EnvironmentProbe.tryLedgeDirection for why a zero-width ray from the root's centre line is the
+	-- wrong instrument for "is the player reaching for this".
+	GrabProbeRadius = 0.7,
+	-- How far the top of the grab band stretches UPWARD to cover the ground a fast fall covers between
+	-- two probe samples. Without it the band is a 4.2-stud window that a terminal-velocity fall steps
+	-- straight over at any frame rate below ~60, and the grab that "didn't register" was never offered.
+	-- Capped rather than unbounded: past a couple of studs the resulting pull upward stops reading as
+	-- catching yourself and starts reading as being teleported.
+	GrabSweepMaxStuds = 2.5,
+	-- How far apart travel and facing must be before the probe spends a second cast on facing as well.
+	-- Below this they are the same question asked twice.
+	GrabDirectionSplitDegrees = 22,
+	-- How far off vertical a surface may tilt and still count as a grabbable FACE. Guards the hang
+	-- pose: ParkourMath.HangPosition backs the character off along the face's horizontal normal, and a
+	-- near-horizontal "face" (the top of the lip itself, which a spherecast can legitimately clip)
+	-- has no horizontal normal to back off along -- so the pose collapses into the wall.
+	MaxFaceTiltDegrees = 38,
 	-- Where the character's root ends up relative to the grabbed edge while hanging.
 	HangVerticalOffset = -2.4,
 	HangHorizontalOffset = -0.85,
 	-- How long a hang can be held before the character drops automatically. Hanging is a transition,
 	-- not a resting place.
 	MaxHangSeconds = 6,
-	-- Grip window before the climb input is accepted -- a tiny settle so a grab reads as a grab
-	-- rather than instantly teleporting the character onto the ledge.
-	GripSettleSeconds = 0.12,
+	-- THE PULL INTO THE HANG POSE, and why it is a speed rather than a duration.
+	--
+	-- The root is anchored for the whole hang, so without a blend the grab is a single-frame CFrame
+	-- write: the character teleports up to ~4 studs into the pose, instantly, with a rotation snap on
+	-- top of it. That teleport is what a grab "feeling clunky" actually is -- there is no motion to
+	-- read, just a discontinuity.
+	--
+	-- A fixed duration cannot fix it, because the distance varies by an order of magnitude: a grab made
+	-- with the hands already at the lip moves a few tenths of a stud, one caught at the far edge of the
+	-- reach (or pulled UP to a lip the sweep above let the player catch on the way past) moves several.
+	-- One number short enough for the near case pops in the far one; one long enough for the far case
+	-- turns the near one to mush. So the pull runs at a SPEED, floored and capped -- near grabs resolve
+	-- in a frame or two, far ones get long enough to read as a snatch.
+	AttachSpeed = 30,
+	AttachMinSeconds = 0.05,
+	AttachMaxSeconds = 0.14,
 	ClimbDurationSeconds = 0.6,
 	-- Momentum granted on top after a climb-up. Low on purpose -- a climb is the slow option; the
 	-- fast option was to not fall short.
 	ClimbExitSpeed = 12,
 	-- Lockout after voluntarily dropping from a ledge, so the same edge isn't re-grabbed on the next
-	-- frame of the resulting fall.
+	-- frame of the resulting fall. Scoped to the edge that was dropped (see LedgeHanging's own
+	-- isBlockedLedge) rather than to ledges in general: descending a stepped face by dropping from
+	-- one lip to the next is a legitimate and good way to move, and a blanket half-second of deafness
+	-- to every edge in the world is what made it feel like the system had stopped responding.
 	RegrabLockoutSeconds = 0.45,
+	-- The blanket half of the same lockout, kept short. Long enough that the release push has moved
+	-- the body clear of the face before anything can be caught again, short enough to be invisible.
+	RegrabAnyLedgeSeconds = 0.15,
+	-- How close a candidate edge has to be to the dropped one to count as the same edge. A wall face
+	-- is usually several parts, so an instance test alone lets a drop re-grab the neighbouring block
+	-- half a stud sideways -- which strands the player exactly where they asked to leave.
+	RegrabIgnoreRadius = 3.5,
 	-- Headroom needed above the ledge for the climb to be legal (nothing to stand on/in = no climb).
 	StandClearanceHeight = 5.2,
 	StandClearanceRadius = 1.4,
@@ -494,7 +541,13 @@ ParkourConstants.Slope = {
 -- lowest-priority probes to the next frame instead. This is what keeps the system honest during a
 -- 20-player fight -- see EnvironmentProbe.lua's own header for the scheduling.
 ParkourConstants.Probe = {
-	MaxRaysPerFrame = 14,
+	-- Raised from 14 when the ledge probe learned to search a second direction and to fall back to a
+	-- ray when its spherecast comes back degenerate: a falling frame's honest worst case (ground 1 +
+	-- obstacle 6 + walls 2 + ledge 8) now sits at 17, and a ceiling that starts too low silently
+	-- starves the LAST probe in EnvironmentProbe's ordering -- which, while airborne, is the ledge
+	-- search itself. This is a per-frame budget for ONE locally-controlled character, not a server
+	-- cost; the number is a guard against a runaway probe, not a figure anyone is close to paying.
+	MaxRaysPerFrame = 18,
 	-- Refresh intervals per probe family. A probe whose result is still within its interval is
 	-- reused from cache rather than re-cast. Ground is every frame (it gates everything); walls and
 	-- obstacles are cheaper to run at ~30Hz while not already using them, and are forced to every
@@ -522,7 +575,7 @@ ParkourConstants.Assists = {
 	CoyoteTime = true,
 	JumpBuffer = true,
 	-- Automatic vault/hop detection while running at an obstacle (vs. requiring an explicit input).
-	AutoVault = true,
+	AutoVault = false,
 	-- Automatic ledge grab while falling past a grabbable edge.
 	LedgeAssist = true,
 	-- Smoothing of sub-StepMaxHeight geometry so small clutter never interrupts a sprint.
@@ -594,11 +647,11 @@ ParkourConstants.AnimationIds = {
 	SlideLoop = "rbxassetid://94692413714016",
 	SlideEnd = "rbxassetid://94692413714016",
 	VaultHop = "rbxassetid://125167812303491",
-	VaultOver = "rbxassetid://125167812303491",
-	Mantle = "rbxassetid://125167812303491",
-	LedgeHang = "rbxassetid://125167812303491",
-	LedgeClimb = "rbxassetid://125167812303491",
-	WallRunLeft = "rbxassetid://81052858593471",
+	VaultOver = "rbxassetid://126138799180188",
+	Mantle = "rbxassetid://126138799180188",
+	LedgeHang = "rbxassetid://83474290053648",
+	LedgeClimb = "rbxassetid://126138799180188",
+	WallRunLeft = "rbxassetid://70828439233197",
 	WallRunRight = "rbxassetid://86594988194527",
 	WallJump = "rbxassetid://125167812303491",
 	Roll = "rbxassetid://125167812303491",
@@ -613,7 +666,7 @@ ParkourConstants.AnimationIds = {
 -- the player does not get locked into an animation").
 ParkourConstants.Animation = {
 	FadeInSeconds = 0.08,
-	FadeOutSeconds = 0.1,
+	FadeOutSeconds = 0.2,
 	-- Movement clips sit at Movement priority so a combat swing (Action priority, CombatAnimator's
 	-- own tracks) always visually wins -- the concrete mechanism behind "parkour animations must not
 	-- fight combat animations."

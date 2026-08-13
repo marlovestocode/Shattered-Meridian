@@ -20,6 +20,15 @@
 	hang actually hold, and it is why the pose does not drift or vibrate the way a constraint-held one
 	would against the wall it is pressed into.
 
+	THE COST OF ANCHORING, and what this file does about it: an anchored root goes exactly where its
+	CFrame is written, instantly. So the naive grab -- write the hang pose on the first frame -- is a
+	teleport of up to several studs plus a rotation snap, and no amount of tuning the thresholds around
+	it will stop that from reading as clunky, because the problem is that nothing MOVES. The grab
+	instead runs in two beats: Enter stops the fall dead at the point of contact (on the detection
+	frame, not the one after it), and Update eases the body from there into the pose over a window
+	scaled to how far it actually has to travel. That window doubles as the grip settle -- inputs open
+	when the pull lands -- so the time the player cannot act is time they can see being used.
+
 	The design's "make the system smart enough to determine ... whether there is enough space for the
 	character to stand after climbing it" is enforced at the probe level (LedgeProbe.HasStandingSpace)
 	and consumed here: an edge with nothing to stand on can still be HUNG from -- that is a legitimate
@@ -46,7 +55,34 @@ local hangCFrame = CFrame.identity
 local edgePosition = Vector3.zero
 local wallNormal = Vector3.new(0, 0, -1)
 local hasStandingSpace = false
-local regrabUntil = 0
+local grabbedInstance: BasePart? = nil
+
+-- THE PULL INTO THE POSE. Where the body was on the frame the grab landed, when that frame was, and
+-- how long the pull it starts should take. See Enter for why all three are captured there and
+-- Ledge.AttachSpeed for why the duration is derived from a distance rather than authored flat.
+local attachFrom = CFrame.identity
+local attachBeganAt = 0
+local attachSeconds = 0
+
+-- The edge the last voluntary drop let go of, and the two windows that keep it from being caught
+-- again on the way down: a short blanket one that covers every edge while the release push is still
+-- moving the body clear of the face, and a long one scoped to THIS edge. See isBlockedLedge below.
+local regrabAnyUntil = 0
+local regrabSameUntil = 0
+local regrabInstance: BasePart? = nil
+local regrabEdge = Vector3.zero
+
+-- Whether a candidate edge is the one the player just chose to let go of. Identity is tested two ways
+-- because neither is sufficient alone: the Instance catches a re-grab of the same part, and the
+-- radius catches the same physical lip built out of a DIFFERENT part -- which is most lips, since a
+-- wall face of any size is several blocks -- where an instance test alone lets the drop re-grab the
+-- neighbour half a stud sideways and strand the player exactly where they asked to leave.
+local function isBlockedLedge(probe: ParkourTypes.LedgeProbe): boolean
+	if regrabInstance ~= nil and probe.Instance == regrabInstance then
+		return true
+	end
+	return (probe.EdgePosition - regrabEdge).Magnitude <= LEDGE.RegrabIgnoreRadius
+end
 
 local LedgeHanging: ParkourTypes.StateDefinition = {
 	Id = "LedgeHanging",
@@ -72,7 +108,7 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		if context.Ground.Grounded then
 			return false, "Grounded"
 		end
-		if context.Now < regrabUntil then
+		if context.Now < regrabAnyUntil then
 			return false, "RegrabLockout"
 		end
 		if context.VerticalVelocity > LEDGE.MaxVerticalSpeedToGrab then
@@ -95,6 +131,12 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		if not context.Ledge.HasHangSpace then
 			return false, "NoHangSpace"
 		end
+		-- Tested LAST because it is the only refusal that needs the probe's own fields to be meaningful
+		-- (an unfound ledge has a stale EdgePosition), and because it is the narrowest: everything above
+		-- refuses a class of situations, this refuses exactly one edge for a fraction of a second.
+		if context.Now < regrabSameUntil and isBlockedLedge(context.Ledge) then
+			return false, "SameLedgeLockout"
+		end
 		return true, nil
 	end,
 
@@ -105,7 +147,7 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		-- This is the difference between a hang and a mantle. Catching a ledge is a DECISION POINT --
 		-- climb, drop, or hold -- and a decision made by an input the player aimed at something else is
 		-- not a decision. Jumping at a wall means pressing jump within a fraction of a second of contact,
-		-- so without this the buffered jump survived the 0.12s grip settle and fired the climb on the
+		-- so without this the buffered jump outlived the pull into the pose and fired the climb on the
 		-- next frame: the player never saw a hang, only a slower mantle they did not ask for. Same for a
 		-- slide press carried in from sliding off a roof, which would drop them the instant they caught
 		-- the edge they were reaching for.
@@ -119,6 +161,7 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		edgePosition = context.Ledge.EdgePosition
 		wallNormal = ParkourMath.SafeUnit(ParkourMath.Flatten(context.Ledge.WallNormal), Vector3.new(0, 0, -1))
 		hasStandingSpace = context.Ledge.HasStandingSpace
+		grabbedInstance = context.Ledge.Instance
 		context.AnimationVariant = "Hang"
 		-- Published for States/LedgeClimbing.lua -- see ParkourContext.LedgeAnchorPosition's own header
 		-- for why the climb cannot simply re-probe for the edge it is already holding.
@@ -133,6 +176,30 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		local position =
 			ParkourMath.HangPosition(edgePosition, wallNormal, LEDGE.HangVerticalOffset, LEDGE.HangHorizontalOffset)
 		hangCFrame = CFrame.lookAt(position, position - wallNormal)
+
+		-- THE GRAB BITES ON THE FRAME IT IS DETECTED, not the frame after.
+		--
+		-- StateMachine.Update applies at most one transition and returns, so this state's Update does not
+		-- run until the NEXT frame -- meaning without this block the frame that decided to grab still
+		-- commits the outgoing Falling state's command, and the character falls for one more frame under
+		-- ordinary gravity before the anchor engages. At a fast fall that is a stud or two of visible
+		-- overshoot past the lip followed by a correction back up to it, which is precisely the "it
+		-- doesn't catch when I press it" the grab is accused of. Writing the motor here is the same
+		-- technique StateSupport.HandOff uses for the opposite edge of a transition, and for the same
+		-- ordering reason -- see that function's own header.
+		--
+		-- Target is the CURRENT pose, not the hang pose: this frame's job is to stop the fall dead where
+		-- contact happened. Update takes over next frame and eases from here to hangCFrame.
+		attachFrom = context.RootPart.CFrame
+		attachBeganAt = context.Now
+		attachSeconds = math.clamp(
+			(position - attachFrom.Position).Magnitude / math.max(LEDGE.AttachSpeed, 1e-3),
+			LEDGE.AttachMinSeconds,
+			LEDGE.AttachMaxSeconds
+		)
+		context.Motor.Mode = "Kinematic"
+		context.Motor.TargetCFrame = attachFrom
+		context.Motor.DesiredSpeed = 0
 
 		-- A caught ledge cancels the fall outright: the drop is over, and letting the severity survive
 		-- would apply a hard-landing momentum cost to the eventual climb-up, several seconds later,
@@ -151,12 +218,27 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 	Update = function(context: ParkourContext): ParkourTypes.TransitionResult
 		local motor = context.Motor
 		motor.Mode = "Kinematic"
-		motor.TargetCFrame = hangCFrame
 		motor.DesiredSpeed = 0
 
-		-- A short settle before inputs are accepted, so a grab reads as a grab rather than as the
-		-- character teleporting straight through the hang and onto the ledge.
-		if context.StateElapsed < LEDGE.GripSettleSeconds then
+		-- The root is ANCHORED for the whole hang, so whatever goes in TargetCFrame is where the body
+		-- instantaneously is. Writing hangCFrame directly -- which this used to do -- therefore teleports
+		-- the character up to several studs and spins them to face the wall inside a single frame. That
+		-- discontinuity IS the clunk: there is no motion for the eye to follow, so the grab reads as the
+		-- character being relocated rather than as them catching something.
+		--
+		-- Interpolating the whole CFrame rather than just the position matters as much: CFrame:Lerp
+		-- slerps the rotation, so the turn to face the wall happens over the same window as the reach
+		-- instead of snapping on frame one.
+		local attachAlpha = math.clamp((context.Now - attachBeganAt) / math.max(attachSeconds, 1e-3), 0, 1)
+		motor.TargetCFrame = attachFrom:Lerp(hangCFrame, ParkourMath.EaseOutCubic(attachAlpha))
+
+		-- Inputs open the moment the pull lands. This replaces a flat grip-settle window, and the
+		-- difference is not the duration -- they are within a few hundredths of each other -- it is that
+		-- the window is now spent on something visible. A fixed delay in front of a teleport is dead
+		-- time the player experiences as lag; the same delay spent watching the body swing into the pose
+		-- is the grab itself. It also means a near-instant grab (hands already at the lip) is actionable
+		-- in a frame or two rather than always costing the far case's settle.
+		if attachAlpha < 1 then
 			return nil
 		end
 
@@ -189,7 +271,10 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		if nextState == "LedgeClimbing" then
 			return
 		end
-		regrabUntil = context.Now + LEDGE.RegrabLockoutSeconds
+		regrabAnyUntil = context.Now + LEDGE.RegrabAnyLedgeSeconds
+		regrabSameUntil = context.Now + LEDGE.RegrabLockoutSeconds
+		regrabInstance = grabbedInstance
+		regrabEdge = edgePosition
 		context.LedgeAnchorPosition = nil
 		context.LedgeAnchorNormal = nil
 		-- Released with a small push away from the wall so the character falls clear of the face
