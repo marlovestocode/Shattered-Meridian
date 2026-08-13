@@ -34,6 +34,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local AnimationTimeline = require(ReplicatedStorage.Shared.AnimationTimeline)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
+local EditorTokens = require(script.Parent.EditorTokens)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Parent.Components.Button)
 local Toggle = require(script.Parent.Parent.Parent.Components.Toggle)
@@ -84,9 +85,13 @@ local AnimationTimelineEditorModule = {}
 -- on this codebase's own "promote on the second consumer, to the module that already owns it" rule:
 -- these are existing accents applied to a timeline concept, not a new palette entry.
 AnimationTimelineEditorModule.Phases = {
-	{ Name = "Windup", Color = Tokens.Color.TextDisabled },
-	{ Name = "Active", Color = Tokens.Color.AccentPrimary },
-	{ Name = "Recovery", Color = Tokens.Color.AccentSecondary },
+	-- Violet/crimson/blue, from EditorTokens.Phase rather than picked here: the Figma Make reference
+	-- gives each phase a fixed hue and reuses it on every surface that shows a phase (this editor's
+	-- bands, the frame timeline's segments, the preview's phase tabs, the stat cards' left borders).
+	-- These were grey/violet/bronze when this file was the only such surface.
+	{ Name = "Windup", Color = EditorTokens.Phase.Windup },
+	{ Name = "Active", Color = EditorTokens.Phase.Active },
+	{ Name = "Recovery", Color = EditorTokens.Phase.Recovery },
 } :: { { Name: string, Color: Color3 } }
 
 local function clipColor(index: number): Color3

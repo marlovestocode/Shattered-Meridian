@@ -89,6 +89,7 @@ local ObjectStunEditor = require(script.Parent.ObjectStunEditor)
 local StatsPanel = require(script.Parent.StatsPanel)
 local MoveStats = require(ReplicatedStorage.Shared.MoveStats)
 local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
+local FrameTimeline = require(script.Parent.FrameTimeline)
 local Dropdown = require(script.Parent.Parent.Parent.Components.Dropdown)
 
 local Children = Fusion.Children
@@ -147,9 +148,6 @@ local HOTBAR_SLOT_BUTTON_SIZE = Tokens.Control.StepButtonSize
 -- removes the magic number entirely.
 -- The Timing section's to-scale phase widget. Two stacked bars -- see the phaseBar build for why
 -- cooldown is its own bar rather than a fourth segment.
-local PHASE_BAR_HEIGHT = 14
-local PHASE_BAR_GAP = 4
-local COOLDOWN_BAR_HEIGHT = 6
 
 local TOOLBAR_ROW_HEIGHT = Tokens.Control.RowHeight
 local TOOLBAR_HEIGHT = TOOLBAR_ROW_HEIGHT * 2 + Tokens.Space.XS
@@ -678,93 +676,11 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 		}),
 	})
 
-	-- The move's phases, drawn to scale, so an author can SEE that their 0.05s windup is a third the
-	-- length of the recovery instead of working it out from four separate numbers.
-	--
-	-- TWO bars, not one four-segment bar. Cooldown is measured from the moment the move STARTS, not
-	-- from the end of recovery (MoveStats.Project: `cycleSeconds = math.max(Cooldown, totalDuration)`)
-	-- -- so appending it as a fourth segment would draw an idle gap that does not exist whenever
-	-- Cooldown is shorter than the move itself, which is true of the very defaults a new move is
-	-- created with (0.65s of phases vs a 0.60s cooldown). Drawn as its own bar underneath and
-	-- normalised to the same span, the real relationship is legible instead: when the cooldown bar is
-	-- shorter than the phase bar above it, the cooldown is doing nothing at all.
-	local phaseSpanSeconds = scope:Computed(function(use)
-		local d = use(props.Draft)
-		if not d then
-			return 1
-		end
-		return math.max(d.WindupSeconds + d.ActiveSeconds + d.RecoverySeconds, d.Cooldown, 0.001)
-	end)
-
-	local phaseBandChildren: { Instance } = {
-		scope:New "UIListLayout" {
-			FillDirection = Enum.FillDirection.Horizontal,
-			SortOrder = Enum.SortOrder.LayoutOrder,
-		},
-	}
-	for index, phase in ipairs(AnimationTimelineEditor.Phases) do
-		local phaseName = phase.Name
-		table.insert(
-			phaseBandChildren,
-			scope:New "Frame" {
-				Name = phaseName .. "Band",
-				LayoutOrder = index,
-				BackgroundColor3 = phase.Color,
-				BorderSizePixel = 0,
-				Size = scope:Computed(function(use)
-					local d = use(props.Draft)
-					if not d then
-						return UDim2.fromScale(0, 1)
-					end
-					local seconds = if phaseName == "Windup"
-						then d.WindupSeconds
-						elseif phaseName == "Active" then d.ActiveSeconds
-						else d.RecoverySeconds
-					return UDim2.fromScale(seconds / use(phaseSpanSeconds), 1)
-				end),
-			}
-		)
-	end
-
-	local phaseBar = scope:New "Frame" {
-		Name = "PhaseBar",
-		Size = UDim2.new(1, 0, 0, PHASE_BAR_HEIGHT + PHASE_BAR_GAP + COOLDOWN_BAR_HEIGHT),
-		BackgroundTransparency = 1,
-		LayoutOrder = 3,
-
-		[Children] = {
-			scope:New "Frame" {
-				Name = "Phases",
-				Size = UDim2.new(1, 0, 0, PHASE_BAR_HEIGHT),
-				BackgroundColor3 = Tokens.Wash.TrackBase.Color,
-				BackgroundTransparency = Tokens.Wash.TrackBase.Transparency,
-				BorderSizePixel = 0,
-
-				[Children] = phaseBandChildren,
-			},
-			scope:New "Frame" {
-				Name = "CooldownTrack",
-				Position = UDim2.fromOffset(0, PHASE_BAR_HEIGHT + PHASE_BAR_GAP),
-				Size = UDim2.new(1, 0, 0, COOLDOWN_BAR_HEIGHT),
-				BackgroundColor3 = Tokens.Wash.TrackBase.Color,
-				BackgroundTransparency = Tokens.Wash.TrackBase.Transparency,
-				BorderSizePixel = 0,
-
-				[Children] = scope:New "Frame" {
-					Name = "CooldownFill",
-					Size = scope:Computed(function(use)
-						local d = use(props.Draft)
-						if not d then
-							return UDim2.fromScale(0, 1)
-						end
-						return UDim2.fromScale(d.Cooldown / use(phaseSpanSeconds), 1)
-					end),
-					BackgroundColor3 = Tokens.Color.AccentPrimaryBright,
-					BorderSizePixel = 0,
-				},
-			},
-		},
-	}
+	-- The reference design's frame-timeline card (see FrameTimeline.lua). Replaces the two-bar
+	-- phase+cooldown strip that used to be built inline here; that element's own reasoning about why
+	-- Cooldown must not be drawn as a fourth segment is preserved and expanded in that module's
+	-- header, which is where it belongs now.
+	local phaseBar = FrameTimeline.Build(scope, props.Draft, 3)
 
 	-- Fed to Section's `summary` slot -- the same numbers the bar draws, stated. use(), never peek():
 	-- a peek inside a Computed reads without subscribing, which would freeze this at its first value.
