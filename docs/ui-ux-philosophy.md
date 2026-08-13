@@ -861,9 +861,19 @@ don't force a Handle onto an always-on Screen just for uniformity, and don't ret
   fire real events), Menu/Inventory/Progression/Lobby screens (need `PlayerDataSystem`,
   `BloodlineManager`, `ArtTreeManager`, `FactionManager` to hold real data). Building any of these
   now would mean fabricating data no server System produces yet -- see this doc's Framework
-  section above on server-owns-truth. Level and "character information" in the Player Status
-  Display are the same story: `TierSystem`/`PlayerDataSystem` are still empty `Init()`s, so
-  there's no real tier/name to show yet.
+  section above on server-owns-truth. "Character information" in the Player Status Display is the
+  same story.
+- **Built since: the Player Status Display's "Level" entry**, which this list previously deferred on
+  the grounds that `TierSystem` was an empty `Init()`. It no longer is. `Server/Systems/TierSystem.lua`
+  owns the nine-tier ladder (`Shared/TierConstants.lua` holds every threshold and name), promotes off
+  `GameplayEvents.MeridianXPAwarded`, persists through `PlayerDataSystem`, and replicates tier
+  identity plus the tier's XP window over `Progression_TierUpdated`. `Components/TierBadge.lua`
+  renders it at the head of the hotbar -- numeral, name, and a meter it fills from the replicated
+  window against `ClientState.MeridianXP`, so the meter advances on every kill rather than only on a
+  promotion. That last bit of arithmetic is the one deliberate carve-out from "never computed on the
+  client": the server stays authoritative over tier IDENTITY (which its never-demote rule makes
+  genuinely underivable from XP alone), and only the fill percentage is computed locally -- see
+  `Types.TierUpdatePayload`'s own header for the full reasoning.
 - **Shape language -- true cut-corner panels are implemented, not every surface opts in:** see the
   "Built: true cut-corner tile/panel shape" bullet above (`Client/UI/ChamferedSurface.lua`).
   Surfaces that haven't opted into `Chamfered`/haven't been given the treatment yet (Menus' Root
