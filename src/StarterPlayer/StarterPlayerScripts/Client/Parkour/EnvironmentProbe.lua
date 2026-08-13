@@ -594,7 +594,12 @@ end
 --     when the two have genuinely diverged, because that is where the PLAYER is reaching -- strafing
 --     sideways along a face while looking at it (shift lock, or any state that has taken AutoRotate)
 --     points travel along the wall and facing at it, and travel-only reports open air the whole way
---     past a ledge the player is staring straight at.
+--     past a ledge the player is staring straight at. But travel stops being tried at all once it has
+--     diverged from facing past GrabDirectionMaxSplitDegrees -- past that point it is not a strafe
+--     along a face the player is looking at, it is the player moving substantially AWAY from where
+--     they are looking (a shift-lock backpedal, most often), and searching it is how falling near a
+--     wall behind the player's back auto-grabs an edge they never reached for. See that constant's own
+--     header.
 --
 -- THE PRIMARY DIRECTION DELIBERATELY STOPS AT `moveIntent` AND DOES NOT FALL BACK TO FACING, unlike
 -- every other direction this file computes (probeObstacle/probeWall both go MoveDirection -> facing,
@@ -633,12 +638,19 @@ local function probeLedge(
 		return
 	end
 
-	local found, refusedInstance = tryLedgeDirection(headPosition, primary, sweep, now)
-	if
-		not found
-		and facing.Magnitude > 0
-		and ParkourMath.ApproachAngle(primary, facing) > LEDGE.GrabDirectionSplitDegrees
-	then
+	-- How far primary has drifted from facing decides BOTH of the two-direction search's questions:
+	-- whether facing is worth trying as a second cast (GrabDirectionSplitDegrees, below), and -- new --
+	-- whether primary is worth trying AT ALL (GrabDirectionMaxSplitDegrees). Past the max, primary is
+	-- travel/moveIntent pointed substantially behind the character rather than a strafe along a face
+	-- they're looking at, and searching it is how a backpedal auto-grabs a wall the player never looked
+	-- at. See GrabDirectionMaxSplitDegrees's own header.
+	local divergence = if facing.Magnitude > 0 then ParkourMath.ApproachAngle(primary, facing) else 0
+
+	local found, refusedInstance = false, nil
+	if divergence <= LEDGE.GrabDirectionMaxSplitDegrees then
+		found, refusedInstance = tryLedgeDirection(headPosition, primary, sweep, now)
+	end
+	if not found and facing.Magnitude > 0 and divergence > LEDGE.GrabDirectionSplitDegrees then
 		local facingFound, facingRefused = tryLedgeDirection(headPosition, facing, sweep, now)
 		found = facingFound
 		refusedInstance = refusedInstance or facingRefused

@@ -65,6 +65,27 @@ local Mantling: ParkourTypes.StateDefinition = {
 				OBSTACLE.MaxApproachAngleDegrees
 			)
 		then
+			return false, "NotApproachingObstacle"
+		end
+		-- A SECOND, independent gate on top of the one above -- this one is why a backpedal into a wall
+		-- behind the character no longer mantles it. Under shift lock (Client/Camera/ShiftLockCamera.lua)
+		-- WASD is camera-relative, so travel direction and facing (RootPart.CFrame.LookVector) are
+		-- decoupled: holding S walks the character backward into whatever is behind them while the
+		-- camera, and therefore the character's own facing, still points the other way entirely. The
+		-- check above only asks "is the character's MOTION headed into this obstacle," which a backpedal
+		-- satisfies -- it genuinely is closing on the wall, just not the wall the player is looking at.
+		-- This asks the other half of "forward": is the character's FACING also headed into it. Both
+		-- degenerate to the same question when they're not shift-locked (AutoRotate keeps facing and
+		-- travel equal) or standing still facing the wall (TravelDirection's own fallback already lands
+		-- on LookVector), so this never refuses a normal forward mantle -- it only refuses the ones that
+		-- were never actually forward.
+		if
+			not StateSupport.IsMovingToward(
+				context.RootPart.CFrame.LookVector,
+				context.Obstacle.Normal,
+				OBSTACLE.MaxApproachAngleDegrees
+			)
+		then
 			return false, "NotFacingObstacle"
 		end
 		local classification = StateSupport.ClassifyObstacle(context)

@@ -351,6 +351,15 @@ ParkourConstants.Ledge = {
 	-- How far apart travel and facing must be before the probe spends a second cast on facing as well.
 	-- Below this they are the same question asked twice.
 	GrabDirectionSplitDegrees = 22,
+	-- The other end of that same comparison: past this many degrees of divergence, travel is not a
+	-- strafe-along-the-face anymore, it is the character moving substantially AWAY from where they are
+	-- looking -- a backpedal into a wall behind them, most commonly, since shift lock
+	-- (Client/Camera/ShiftLockCamera.lua) makes travel and facing fully independent. That is motion,
+	-- not a reach, so travel is not even tried as a search direction past this threshold -- only facing
+	-- is, which correctly finds nothing behind the character and leaves the fall uninterrupted. Set
+	-- short of 180 (dead backward) so it still catches a wide "reaching over your shoulder" turn, but
+	-- comfortably past GrabDirectionSplitDegrees so it never fights that check for the same case.
+	GrabDirectionMaxSplitDegrees = 100,
 	-- How far off vertical a surface may tilt and still count as a grabbable FACE. Guards the hang
 	-- pose: ParkourMath.HangPosition backs the character off along the face's horizontal normal, and a
 	-- near-horizontal "face" (the top of the lip itself, which a spherecast can legitimately clip)

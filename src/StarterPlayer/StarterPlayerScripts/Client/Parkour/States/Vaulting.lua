@@ -79,6 +79,21 @@ local Vaulting: ParkourTypes.StateDefinition = {
 				OBSTACLE.MaxApproachAngleDegrees
 			)
 		then
+			return false, "NotApproachingObstacle"
+		end
+		-- A SECOND, independent gate -- see Mantling.CanEnter's identical check for the full reasoning.
+		-- Short version: under shift lock, travel direction is camera-relative and can point straight
+		-- backward while the character's own facing (RootPart.CFrame.LookVector) points somewhere else
+		-- entirely, so a backpedal into a wall behind the player satisfies the "moving toward it" check
+		-- above without the player ever having looked at it. This is what stops a vault from firing
+		-- backward -- both this and the check above have to agree the obstacle is ahead.
+		if
+			not StateSupport.IsMovingToward(
+				context.RootPart.CFrame.LookVector,
+				context.Obstacle.Normal,
+				OBSTACLE.MaxApproachAngleDegrees
+			)
+		then
 			return false, "NotFacingObstacle"
 		end
 		local classification = StateSupport.ClassifyObstacle(context)
