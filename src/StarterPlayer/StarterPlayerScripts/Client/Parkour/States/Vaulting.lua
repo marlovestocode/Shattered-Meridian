@@ -68,6 +68,19 @@ local Vaulting: ParkourTypes.StateDefinition = {
 		if not StateSupport.WithinTraversalRange(context) then
 			return false, "ObstacleOutOfRange"
 		end
+		-- LIVE check, not the frozen ObstacleProbe.TravelDirection -- see Mantling.CanEnter's identical
+		-- gate and StateSupport.IsMovingToward's own header for why this has to read current input
+		-- rather than trust that the obstacle's cached geometry still describes where the player is
+		-- headed.
+		if
+			not StateSupport.IsMovingToward(
+				StateSupport.TravelDirection(context),
+				context.Obstacle.Normal,
+				OBSTACLE.MaxApproachAngleDegrees
+			)
+		then
+			return false, "NotFacingObstacle"
+		end
 		local classification = StateSupport.ClassifyObstacle(context)
 		if classification.Action ~= "Vault" and classification.Action ~= "Hop" then
 			-- Surface the classifier's own reason verbatim rather than a generic refusal -- this is the
@@ -88,7 +101,10 @@ local Vaulting: ParkourTypes.StateDefinition = {
 
 		local rootPart = context.RootPart
 		startCFrame = rootPart.CFrame
-		travelDirection = StateSupport.TravelDirection(context)
+		-- The FROZEN direction the probe actually cast along to find this obstacle -- see
+		-- Mantling.Enter's identical read and ObstacleProbe.TravelDirection's own header. Falls back to
+		-- a live read only in the defensive case where the probe field is somehow still zero.
+		travelDirection = ParkourMath.SafeUnit(context.Obstacle.TravelDirection, StateSupport.TravelDirection(context))
 
 		local probe = context.Obstacle
 		-- Distance from the root's centre down to the soles, so the path can be authored in terms of

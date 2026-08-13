@@ -159,6 +159,14 @@ export type ObstacleProbe = {
 	-- World position of the top surface directly above the near face -- the anchor point every
 	-- traversal path is built from.
 	TopPosition: Vector3,
+	-- The (flattened, unit) direction EnvironmentProbe.probeObstacle actually cast along to find this
+	-- obstacle -- frozen at probe time, not re-derived. TopPosition, Depth and Normal above are all
+	-- geometry measured along this exact vector, so a traversal state that built its path from a
+	-- freshly-recomputed direction instead (StateSupport.TravelDirection, which can legitimately
+	-- disagree by the time Enter runs -- a reversed key, MoveIntent leading MoveDirection right at the
+	-- commit threshold) would be describing a curve toward geometry that was found somewhere else. See
+	-- States/Mantling.lua and States/Vaulting.lua Enter for the consumer. Zero when Found is false.
+	TravelDirection: Vector3,
 	-- Whether there is somewhere to land on the far side (vault) and somewhere to stand on top
 	-- (mantle). Both are probed, both are needed, and they are different questions.
 	HasLandingSpace: boolean,

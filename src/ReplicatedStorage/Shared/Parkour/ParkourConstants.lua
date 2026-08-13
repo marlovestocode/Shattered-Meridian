@@ -276,6 +276,18 @@ ParkourConstants.Obstacle = {
 	-- obstacle within reach.
 	MantleMaxReach = 3.4,
 
+	-- How far off dead-on the character's CURRENT travel direction may sit from the obstacle's inward
+	-- face normal and still be allowed to vault/mantle it. This is a LIVE check, deliberately separate
+	-- from ObstacleProbe.TravelDirection (the frozen direction the obstacle was originally found
+	-- along) -- it exists to catch the case where the probe's cached obstacle is still sitting there
+	-- but the player's own input has since diverged from it (let go and reversed, a strafe that walked
+	-- past the wall's edge), which is what let a mantle or vault fire backward or sideways into
+	-- geometry the character was no longer actually approaching. 65 degrees is wide enough to allow a
+	-- real diagonal sprint into a corner (which this system should still catch) while refusing anything
+	-- past roughly "running along the wall" -- 90 degrees would be dead sideways, and this sits well
+	-- short of that.
+	MaxApproachAngleDegrees = 65,
+
 	-- Clearance required on the FAR side of a vaultable obstacle before the vault is allowed --
 	-- vertical drop room and a horizontal footprint for the character to land in. Without this
 	-- check, vaulting a wall with a wall right behind it drops the character inside geometry.

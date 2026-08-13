@@ -60,6 +60,30 @@ function StateSupport.HasMoveIntent(context: ParkourContext): boolean
 	return context.MoveIntent.Magnitude >= LOCOMOTION.InputMagnitudeThreshold
 end
 
+-- THE SHARED "AM I ACTUALLY GOING TOWARD THE THING I'M ABOUT TO INTERACT WITH" GATE.
+--
+-- `travelDirection` and `outwardNormal` need not be flat or unit already -- both are flattened and
+-- normalized here, so every caller can hand in a raw probe field without its own SafeUnit dance. A
+-- degenerate outward normal (the zero vector -- should not happen for a real hit, but a caller should
+-- never crash on a bad probe) refuses rather than passing, which is the correct default: "cannot tell
+-- whether you're facing it" is not "yes."
+--
+-- Written once because the same question recurs everywhere a traversal is offered on obstacle/probe
+-- geometry that was found on a DIFFERENT frame than the one deciding whether to commit to it: a
+-- mantle or vault found the obstacle on one cast, then re-evaluates CanEnter on live input that has
+-- had a probe interval's worth of time to diverge (the player let go, reversed, or is now merely
+-- grazing the obstacle's side rather than closing on its face). Three independently-written angle
+-- checks in Mantling/Vaulting/wherever comes next would be three chances for the threshold, the sign
+-- convention, or the flattening to quietly disagree -- see this file's own header on why that bar is
+-- what earns a helper a place here.
+function StateSupport.IsMovingToward(travelDirection: Vector3, outwardNormal: Vector3, maxAngleDegrees: number): boolean
+	local into = ParkourMath.SafeUnit(ParkourMath.Flatten(outwardNormal), Vector3.zero) * -1
+	if into.Magnitude < 1e-3 then
+		return false
+	end
+	return ParkourMath.ApproachAngle(travelDirection, into) <= maxAngleDegrees
+end
+
 -- The direction the character should be treated as travelling: its actual movement direction while
 -- it has one, falling back to held input, then to facing. Three fallbacks rather than one because
 -- each covers a real case -- a character sliding with no input still has a travel direction, a

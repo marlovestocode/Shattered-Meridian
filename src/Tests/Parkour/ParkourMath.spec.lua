@@ -542,4 +542,41 @@ return function()
 			expectClose(ParkourMath.TraversalEase(0.5), 0.5)
 		end)
 	end)
+
+	describe("ParkourMath.PrimaryReachDirection", function()
+		-- The direction EnvironmentProbe.probeLedge searches along for an automatic ledge grab. Its
+		-- whole reason to exist is refusing the LAST fallback every other direction helper in this
+		-- framework takes (facing/LookVector) -- see its own header for why an automatic, no-button
+		-- probe is the one place that step stops being reasonable.
+		it("prefers genuine measured movement over held input", function()
+			local result = ParkourMath.PrimaryReachDirection(Vector3.new(0, 0, -1), Vector3.new(1, 0, 0))
+			expectClose(result.Z, -1)
+			expectClose(result.X, 0)
+		end)
+
+		it("falls back to held input when there is no measured movement", function()
+			local result = ParkourMath.PrimaryReachDirection(Vector3.zero, Vector3.new(1, 0, 0))
+			expectClose(result.X, 1)
+		end)
+
+		it("returns the zero vector rather than facing when NEITHER is present", function()
+			-- The property this function exists for: a free-falling character with zero horizontal
+			-- velocity and no held input gets nothing to search along, even though the character is
+			-- still facing SOME direction. Without this, a passive fall next to a wall the camera
+			-- happens to point at reads as a reach for it.
+			expect(ParkourMath.PrimaryReachDirection(Vector3.zero, Vector3.zero)).to.equal(Vector3.zero)
+		end)
+
+		it("flattens both inputs -- this is a planar question", function()
+			local result = ParkourMath.PrimaryReachDirection(Vector3.new(0, -50, -1), Vector3.zero)
+			expect(result.Y).to.equal(0)
+			expectClose(result.Magnitude, 1)
+		end)
+
+		it("never returns a NaN vector for a near-zero measured direction", function()
+			local result = ParkourMath.PrimaryReachDirection(Vector3.new(1e-9, 0, 0), Vector3.new(0, 0, -1))
+			expect(result.X == result.X).to.equal(true)
+			expectClose(result.Z, -1)
+		end)
+	end)
 end

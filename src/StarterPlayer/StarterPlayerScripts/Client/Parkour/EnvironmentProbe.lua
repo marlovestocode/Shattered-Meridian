@@ -98,6 +98,7 @@ local obstacle: ObstacleProbe = {
 	Depth = math.huge,
 	Normal = UP,
 	TopPosition = Vector3.zero,
+	TravelDirection = Vector3.zero,
 	HasLandingSpace = false,
 	HasStandingSpace = false,
 	Instance = nil,
@@ -311,6 +312,7 @@ local function clearObstacle(now: number): ()
 	obstacle.Distance = math.huge
 	obstacle.Height = 0
 	obstacle.Depth = math.huge
+	obstacle.TravelDirection = Vector3.zero
 	obstacle.HasLandingSpace = false
 	obstacle.HasStandingSpace = false
 	obstacle.Instance = nil
@@ -371,6 +373,12 @@ local function probeObstacle(rootPart: BasePart, travelDirection: Vector3, speed
 	obstacle.Found = true
 	obstacle.Distance = horizontalDistance
 	obstacle.Normal = hit.Normal
+	-- Frozen here rather than left for a caller to re-derive: `forward` is the exact vector every
+	-- other field on this table (Normal, TopPosition, Depth below) was measured along, and a state
+	-- that rebuilt its own travel direction independently at Enter -- from live input that has had a
+	-- probe interval's worth of time to change -- would be pairing this frame's geometry with a
+	-- different frame's intent. See ObstacleProbe.TravelDirection's own header.
+	obstacle.TravelDirection = forward
 	obstacle.Instance = hit.Instance
 	obstacle.VaultAllowed = permissions.Vaultable
 	obstacle.MantleAllowed = permissions.Mantleable
@@ -587,7 +595,26 @@ end
 --     sideways along a face while looking at it (shift lock, or any state that has taken AutoRotate)
 --     points travel along the wall and facing at it, and travel-only reports open air the whole way
 --     past a ledge the player is staring straight at.
-local function probeLedge(rootPart: BasePart, travelDirection: Vector3, verticalSpeed: number, now: number): ()
+--
+-- THE PRIMARY DIRECTION DELIBERATELY STOPS AT `moveIntent` AND DOES NOT FALL BACK TO FACING, unlike
+-- every other direction this file computes (probeObstacle/probeWall both go MoveDirection -> facing,
+-- via EnvironmentProbe.Update's own composite). Those probes only matter once the player has already
+-- chosen to act -- moving, or standing at an obstacle they are about to enter a state against. A ledge
+-- grab fires with NO button and NO state entry decision at all; it is Committed the instant CanEnter
+-- agrees. Letting its search direction fall all the way back to "wherever the camera happens to be
+-- pointed" means a character in genuine free-fall next to a wall -- zero measured velocity, zero held
+-- input, camera merely orbited toward the face because that is where the player was last looking --
+-- gets snatched out of a fall they never asked to interrupt. Facing is still exactly right as the
+-- SECOND direction above (a player actively strafing while looking at a wall has real MoveDirection,
+-- so it never reaches this fallback at all); it is only the fallback of last resort that this function
+-- refuses to take.
+local function probeLedge(
+	rootPart: BasePart,
+	moveDirection: Vector3,
+	moveIntent: Vector3,
+	verticalSpeed: number,
+	now: number
+): ()
 	local headPosition = rootPart.Position + UP * (rootPart.Size.Y * 0.5)
 
 	-- Measured against the last time this probe looked (which clearLedge stamps too, so it is a real
@@ -598,8 +625,9 @@ local function probeLedge(rootPart: BasePart, travelDirection: Vector3, vertical
 	local sweep = math.clamp(math.max(-verticalSpeed, 0) * sinceLastSample, 0, LEDGE.GrabSweepMaxStuds)
 
 	local facing = ParkourMath.SafeUnit(ParkourMath.Flatten(rootPart.CFrame.LookVector), Vector3.zero)
-	local travel = ParkourMath.SafeUnit(ParkourMath.Flatten(travelDirection), Vector3.zero)
-	local primary = if travel.Magnitude > 0 then travel else facing
+	-- See ParkourMath.PrimaryReachDirection's own header for why this stops at moveIntent rather than
+	-- also falling back to `facing` the way every other direction in this file does.
+	local primary = ParkourMath.PrimaryReachDirection(moveDirection, moveIntent)
 	if primary.Magnitude < 1e-3 then
 		clearLedge(now)
 		return
@@ -711,7 +739,11 @@ function EnvironmentProbe.Update(context: ParkourContext, request: ProbeRequest)
 		if ground.Grounded and not wantLedge then
 			clearLedge(now)
 		else
-			probeLedge(rootPart, travelDirection, context.VerticalVelocity, now)
+			-- Raw MoveDirection/MoveIntent, NOT the `travelDirection` composite above -- that composite
+			-- already folded in the facing fallback for the obstacle/wall probes, and probeLedge's own
+			-- header explains why an automatic, no-button grab is the one place that fallback has to stop
+			-- before it reaches facing.
+			probeLedge(rootPart, context.MoveDirection, context.MoveIntent, context.VerticalVelocity, now)
 		end
 	elseif ground.Grounded and not wantLedge then
 		clearLedge(now)

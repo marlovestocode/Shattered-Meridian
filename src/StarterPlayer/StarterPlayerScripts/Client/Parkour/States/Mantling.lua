@@ -53,6 +53,20 @@ local Mantling: ParkourTypes.StateDefinition = {
 		if not StateSupport.WithinTraversalRange(context) then
 			return false, "ObstacleOutOfRange"
 		end
+		-- LIVE check, not the frozen ObstacleProbe.TravelDirection -- this is specifically here to catch
+		-- the case where the frozen direction is stale: the obstacle was found while approaching it, but
+		-- the player's own input has since diverged (let go and backed away, turned to strafe past it),
+		-- and without this the mantle would still fire on cached geometry the character is no longer
+		-- actually walking into. See StateSupport.IsMovingToward's own header.
+		if
+			not StateSupport.IsMovingToward(
+				StateSupport.TravelDirection(context),
+				context.Obstacle.Normal,
+				OBSTACLE.MaxApproachAngleDegrees
+			)
+		then
+			return false, "NotFacingObstacle"
+		end
 		local classification = StateSupport.ClassifyObstacle(context)
 		if classification.Action ~= "Mantle" then
 			return false, classification.Reason
@@ -63,7 +77,13 @@ local Mantling: ParkourTypes.StateDefinition = {
 	Enter = function(context: ParkourContext): ()
 		local rootPart = context.RootPart
 		startCFrame = rootPart.CFrame
-		travelDirection = StateSupport.TravelDirection(context)
+		-- The FROZEN direction the probe actually cast along to find this obstacle, not a fresh call to
+		-- StateSupport.TravelDirection here. TopPosition/Normal/Depth below were all measured along
+		-- ObstacleProbe.TravelDirection -- recomputing independently at Enter is exactly what let a
+		-- mantle build its curve and its facing CFrame from a direction that disagreed with the geometry
+		-- it was climbing, which is what "doesn't face forward properly" actually was. Falls back to a
+		-- live read only in the defensive case where the probe field is somehow still zero.
+		travelDirection = ParkourMath.SafeUnit(context.Obstacle.TravelDirection, StateSupport.TravelDirection(context))
 		context.AnimationVariant = "Mantle"
 
 		local footOffset = EnvironmentProbe.GetFootOffset()

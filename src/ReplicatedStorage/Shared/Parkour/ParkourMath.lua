@@ -489,4 +489,21 @@ function ParkourMath.EaseAlpha(ratePerSecond: number, deltaTime: number): number
 	return FlightMath.EaseAlpha(ratePerSecond, deltaTime)
 end
 
+-- The direction an AUTOMATIC, no-button probe is allowed to reach in: genuine measured movement first,
+-- a held direction second, and -- deliberately -- nothing beyond that. Every other direction fallback
+-- chain in this framework (StateSupport.TravelDirection, EnvironmentProbe's own obstacle/wall probes)
+-- ends at facing, and rightly so: those only matter once the player has already committed to something,
+-- either by moving or by being about to enter a state through their own input. A ledge grab is
+-- Committed the instant CanEnter agrees, with no input at all, so letting IT fall back to "wherever the
+-- camera happens to be pointed" turns a pure vertical fall next to a wall the player is merely looking
+-- at into an unrequested grab. Returns the zero vector when neither signal is present, which every
+-- caller treats as "nothing to reach for right now."
+function ParkourMath.PrimaryReachDirection(moveDirection: Vector3, moveIntent: Vector3): Vector3
+	local travel = ParkourMath.SafeUnit(ParkourMath.Flatten(moveDirection), Vector3.zero)
+	if travel.Magnitude > 0 then
+		return travel
+	end
+	return ParkourMath.SafeUnit(ParkourMath.Flatten(moveIntent), Vector3.zero)
+end
+
 return ParkourMath
