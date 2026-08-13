@@ -111,6 +111,13 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
 local EmoteRegistry = require(ReplicatedStorage.Shared.Emotes.EmoteRegistry)
+-- Only for EquipSlotCount, the bound DecodeProfile validates a persisted art slot index against --
+-- this module owns no art rules of its own beyond "a slot outside the real hotbar isn't a slot."
+local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
+-- Read for exactly one purpose: CreateDefaultParkourSettings below, so the shipped defaults for the
+-- Parkour System's persisted preferences come from that feature's own constants table rather than
+-- being duplicated as literals in this file.
+local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
 
 local PlayerDataSystem = {}
@@ -196,6 +203,10 @@ function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProf
 		tier = Config.DefaultTier,
 		bloodlineIds = {},
 		artMastery = {},
+		-- Art System (Types.PlayerProfile's own header) -- empty, not a seeded starter slot, for the
+		-- same reason ArtConstants.StartingArtIds is empty: an art is earned, and there is nothing to
+		-- equip until the player unlocks one.
+		equippedArts = {},
 		corruption = 0,
 		qiDeviationRisk = 0,
 		factionStanding = 0,
@@ -209,14 +220,21 @@ function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProf
 		emoteLoadout = table.clone(EmoteConstants.DefaultLoadout),
 		-- Settings System (Types.PlayerSettings' own header) -- a brand-new profile starts with no
 		-- overrides at all (every action still resolves through Constants.Keybinds.Defaults/
-		-- GamepadDefaults) and Autorun off.
-		settings = { Keybinds = {}, GamepadKeybinds = {}, Autorun = false },
+		-- GamepadDefaults), Autorun off, and the Parkour System's own preferences at whatever
+		-- Shared/Parkour/ParkourConstants.lua currently ships as the defaults.
+		settings = {
+			Keybinds = {},
+			GamepadKeybinds = {},
+			Autorun = false,
+			Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
+		},
 	}
 end
 
 -- Deep-enough copy of a PlayerProfile -- every field is either a primitive, a flat array of
--- strings (bloodlineIds), or a flat dict of numbers (artMastery), so a one-level table.clone on
--- each nested container is sufficient; there is no third level of nesting anywhere in this shape.
+-- strings (bloodlineIds), or a flat dict (artMastery's id -> number, equippedArts' slot -> id), so a
+-- one-level table.clone on each nested container is sufficient; there is no third level of nesting
+-- anywhere in this shape.
 -- This is what GetProfile/WaitForProfile hand back instead of the live table -- see this file's
 -- header, design decision 3, for why that's load-bearing for Transform being the only mutation
 -- path.
@@ -234,6 +252,7 @@ function PlayerDataSystem.CopyProfile(profile: Types.PlayerProfile): Types.Playe
 		tier = profile.tier,
 		bloodlineIds = table.clone(profile.bloodlineIds),
 		artMastery = table.clone(profile.artMastery),
+		equippedArts = table.clone(profile.equippedArts),
 		corruption = profile.corruption,
 		qiDeviationRisk = profile.qiDeviationRisk,
 		factionStanding = profile.factionStanding,
@@ -245,6 +264,10 @@ function PlayerDataSystem.CopyProfile(profile: Types.PlayerProfile): Types.Playe
 			Keybinds = table.clone(profile.settings.Keybinds),
 			GamepadKeybinds = table.clone(profile.settings.GamepadKeybinds),
 			Autorun = profile.settings.Autorun,
+			-- One more level of nesting than this function's own header describes -- the Parkour block
+			-- is a flat table of primitives inside `settings`, so a table.clone of it is still a
+			-- sufficient copy, and Transform remains the only path that can mutate the live profile.
+			Parkour = table.clone(profile.settings.Parkour),
 		},
 	}
 end
@@ -337,25 +360,90 @@ local function decodeKeybindOverrides(raw: unknown): { [Types.KeybindAction]: Ty
 	return overrides
 end
 
+-- The Parkour System's own preference block, freshly built from whatever Shared/Parkour/
+-- ParkourConstants.lua currently ships as the default. Read from that module rather than duplicated
+-- as literals here, so "what does the game do out of the box" stays a one-file answer -- the same
+-- single-source-of-truth rule the rest of that constants table is held to. Exported because
+-- Migrations[4] below and DecodeSettings both need it, and because a spec should be able to assert
+-- that a decoded record matches the shipped defaults without re-listing them.
+function PlayerDataSystem.CreateDefaultParkourSettings(): Types.ParkourSettings
+	local assists = ParkourConstants.Assists
+	return {
+		Enabled = ParkourConstants.Enabled,
+		CameraEffects = true,
+		CoyoteTime = assists.CoyoteTime,
+		JumpBuffer = assists.JumpBuffer,
+		AutoVault = assists.AutoVault,
+		LedgeAssist = assists.LedgeAssist,
+		StepAssist = assists.StepAssist,
+		SprintMode = "Hold" :: Types.SprintMode,
+	}
+end
+
+-- Field-by-field rather than a pass-through of the stored table, for the same reason EncodeProfile
+-- below is: a stale or hand-edited record must not be able to introduce a key this build doesn't
+-- know about, and a missing key must resolve to the shipped default rather than to nil (which would
+-- read as "off" for every boolean and silently disable a player's assists on load).
+local function decodeParkourSettings(raw: unknown): Types.ParkourSettings
+	local defaults = PlayerDataSystem.CreateDefaultParkourSettings()
+	if typeof(raw) ~= "table" then
+		return defaults
+	end
+	local rawTable = raw :: { [string]: any }
+	local function boolean(key: string, fallback: boolean): boolean
+		local value = rawTable[key]
+		return if typeof(value) == "boolean" then value else fallback
+	end
+	return {
+		Enabled = boolean("Enabled", defaults.Enabled),
+		CameraEffects = boolean("CameraEffects", defaults.CameraEffects),
+		CoyoteTime = boolean("CoyoteTime", defaults.CoyoteTime),
+		JumpBuffer = boolean("JumpBuffer", defaults.JumpBuffer),
+		AutoVault = boolean("AutoVault", defaults.AutoVault),
+		LedgeAssist = boolean("LedgeAssist", defaults.LedgeAssist),
+		StepAssist = boolean("StepAssist", defaults.StepAssist),
+		SprintMode = if rawTable.SprintMode == "Toggle" then "Toggle" :: Types.SprintMode else defaults.SprintMode,
+	}
+end
+
 -- Exported for the same reason every other pure encode/decode function in this file is (TestEZ
 -- coverage with no live Player/DataStore) -- see file header.
 function PlayerDataSystem.EncodeSettings(settings: Types.PlayerSettings): { [string]: any }
+	local parkour = settings.Parkour
 	return {
 		Keybinds = encodeKeybindOverrides(settings.Keybinds),
 		GamepadKeybinds = encodeKeybindOverrides(settings.GamepadKeybinds),
 		Autorun = settings.Autorun,
+		-- Explicit field list, never the live table itself -- same defensive posture as EncodeProfile.
+		-- Every field is already a DataStore-safe primitive, so there is nothing to convert.
+		Parkour = {
+			Enabled = parkour.Enabled,
+			CameraEffects = parkour.CameraEffects,
+			CoyoteTime = parkour.CoyoteTime,
+			JumpBuffer = parkour.JumpBuffer,
+			AutoVault = parkour.AutoVault,
+			LedgeAssist = parkour.LedgeAssist,
+			StepAssist = parkour.StepAssist,
+			SprintMode = parkour.SprintMode,
+		},
 	}
 end
 
 function PlayerDataSystem.DecodeSettings(raw: unknown): Types.PlayerSettings
 	if typeof(raw) ~= "table" then
-		return { Keybinds = {}, GamepadKeybinds = {}, Autorun = false }
+		return {
+			Keybinds = {},
+			GamepadKeybinds = {},
+			Autorun = false,
+			Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
+		}
 	end
 	local rawTable = raw :: { [string]: any }
 	return {
 		Keybinds = decodeKeybindOverrides(rawTable.Keybinds),
 		GamepadKeybinds = decodeKeybindOverrides(rawTable.GamepadKeybinds),
 		Autorun = if typeof(rawTable.Autorun) == "boolean" then rawTable.Autorun else false,
+		Parkour = decodeParkourSettings(rawTable.Parkour),
 	}
 end
 
@@ -376,6 +464,7 @@ function PlayerDataSystem.EncodeProfile(profile: Types.PlayerProfile): { [string
 		tier = profile.tier,
 		bloodlineIds = profile.bloodlineIds,
 		artMastery = profile.artMastery,
+		equippedArts = profile.equippedArts,
 		corruption = profile.corruption,
 		qiDeviationRisk = profile.qiDeviationRisk,
 		factionStanding = profile.factionStanding,
@@ -417,6 +506,30 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		for artId, rank in pairs(rawTable.artMastery) do
 			if typeof(artId) == "string" and typeof(rank) == "number" then
 				artMastery[artId] = rank
+			end
+		end
+	end
+
+	-- equippedArts is a dict keyed by SLOT INDEX (Types.PlayerProfile's own header), and this decode
+	-- carries the one genuinely non-obvious step in this whole function: a DataStore round trip is a
+	-- JSON round trip, and JSON has no integer keys -- `{ [4] = "art" }` comes back as
+	-- `{ ["4"] = "art" }`. So both forms are accepted and normalized back to a number here, rather
+	-- than trusting typeof(slot) == "number" (which would silently drop every slot on the first
+	-- reload and hand the player an empty hotbar with no error anywhere). Out-of-range and
+	-- non-integer slots are dropped per-entry, the same way bloodlineIds/artMastery above drop a
+	-- single bad entry instead of discarding the whole field.
+	local equippedArts: { [number]: Types.ArtId } = {}
+	if typeof(rawTable.equippedArts) == "table" then
+		for slot, artId in pairs(rawTable.equippedArts :: { [any]: any }) do
+			local slotNumber = if typeof(slot) == "number" then slot else tonumber(slot)
+			if
+				typeof(artId) == "string"
+				and slotNumber ~= nil
+				and slotNumber == math.floor(slotNumber)
+				and slotNumber >= 1
+				and slotNumber <= ArtConstants.EquipSlotCount
+			then
+				equippedArts[slotNumber] = artId
 			end
 		end
 	end
@@ -501,6 +614,7 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		tier = if typeof(rawTable.tier) == "number" then rawTable.tier else Config.DefaultTier,
 		bloodlineIds = bloodlineIds,
 		artMastery = artMastery,
+		equippedArts = equippedArts,
 		corruption = if typeof(rawTable.corruption) == "number" then rawTable.corruption else 0,
 		qiDeviationRisk = if typeof(rawTable.qiDeviationRisk) == "number" then rawTable.qiDeviationRisk else 0,
 		factionStanding = if typeof(rawTable.factionStanding) == "number" then rawTable.factionStanding else 0,
@@ -555,6 +669,45 @@ Migrations[2] = function(raw: { [string]: any }): { [string]: any }
 		local profileTable = profile :: { [string]: any }
 		if profileTable.settings == nil then
 			profileTable.settings = { Keybinds = {}, GamepadKeybinds = {}, Autorun = false }
+		end
+	end
+	return raw
+end
+
+-- v3 -> v4: backfills Types.PlayerProfile's `equippedArts` (which art sits in each hotbar slot) onto
+-- any record saved before this pass -- same "only touch an already-table Profile, only fill in a
+-- genuinely missing field" shape as Migrations[1]/[2] above. An empty table is the honest backfill
+-- rather than an auto-equip of whatever the player already has unlocked: which art goes in which
+-- slot is a player decision this System has no basis to make for them.
+Migrations[3] = function(raw: { [string]: any }): { [string]: any }
+	local profile = raw.Profile
+	if typeof(profile) == "table" then
+		local profileTable = profile :: { [string]: any }
+		if profileTable.equippedArts == nil then
+			profileTable.equippedArts = {}
+		end
+	end
+	return raw
+end
+
+-- v4 -> v5: backfills Types.PlayerSettings' `Parkour` sub-table (the Parkour System's own
+-- preferences) onto any record saved before this pass -- same "only touch an already-table Profile,
+-- only fill in a genuinely missing field" shape as Migrations[1]/[2]/[3] above, one level deeper
+-- because the field lives inside `settings` rather than on the profile itself.
+--
+-- Backfilled with the SHIPPED DEFAULTS (via createDefaultParkourSettings, which reads
+-- ParkourConstants) rather than with an empty table or with everything switched off: an existing
+-- player's first login after the update should give them the same movement every new player gets,
+-- not a silently degraded version of it. DecodeSettings' own defensive decode already handles
+-- anything short of a fully-missing field (a partially-populated table from a future rollback), so
+-- this only has to cover the genuinely-absent case.
+Migrations[4] = function(raw: { [string]: any }): { [string]: any }
+	local profile = raw.Profile
+	if typeof(profile) == "table" then
+		local profileTable = profile :: { [string]: any }
+		local settings = profileTable.settings
+		if typeof(settings) == "table" and (settings :: { [string]: any }).Parkour == nil then
+			(settings :: { [string]: any }).Parkour = PlayerDataSystem.CreateDefaultParkourSettings()
 		end
 	end
 	return raw

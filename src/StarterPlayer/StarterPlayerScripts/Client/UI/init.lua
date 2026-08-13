@@ -79,7 +79,9 @@ function UI.Mount(): UIHandles
 	-- "no keybind/driver yet" and nothing in it had real content -- both stopped being true when
 	-- BountyMenu was wired to live BountySystem data; see Menus/init.lua's header for what IS still
 	-- outstanding there, namely routing that key through Types.KeybindAction so it's rebindable.)
-	Menus.Mount(scope, playerGui)
+	-- clientState is passed through so CharacterTab/EmotesTab can read the HUD-wide fields they don't
+	-- duplicate (see Menus/init.lua's header on that split).
+	Menus.Mount(scope, playerGui, clientState)
 	logger:debug("Menus mounted")
 
 	local deathFeed = DeathFeed.Mount(scope, playerGui)

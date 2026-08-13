@@ -47,7 +47,29 @@ local RemoteNames = Constants.Settings.RemoteNames
 -- Constants.Rivalry.QueryMaxCallsPerSecond gives for its own single shared limiter.
 local rateLimiter = RateLimiter.New(Constants.Settings.MaxCallsPerSecondPerPlayer)
 
-local DEFAULT_SETTINGS: Types.PlayerSettings = { Keybinds = {}, GamepadKeybinds = {}, Autorun = false }
+local DEFAULT_SETTINGS: Types.PlayerSettings = {
+	Keybinds = {},
+	GamepadKeybinds = {},
+	Autorun = false,
+	Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
+}
+
+-- The closed set of Types.ParkourSettings fields a client may write, and the value type each one
+-- accepts. A single remote carries a field name (see Constants.Settings.RemoteNames.UpdateParkour's
+-- own header for why one remote rather than eight), which makes the field name untrusted input --
+-- so it is validated against this table exactly the way isRebindableAction below validates a keybind
+-- action. A field absent from here cannot be written no matter what a client sends, which also means
+-- retiring a preference is a deletion here rather than a hole in the validation.
+local PARKOUR_SETTING_TYPES: { [string]: "boolean" | "SprintMode" } = {
+	Enabled = "boolean",
+	CameraEffects = "boolean",
+	CoyoteTime = "boolean",
+	JumpBuffer = "boolean",
+	AutoVault = "boolean",
+	LedgeAssist = "boolean",
+	StepAssist = "boolean",
+	SprintMode = "SprintMode",
+}
 
 -- See file header -- structurally valid AND not a hotbar slot. Constants.Keybinds.Defaults is a
 -- complete map of every currently-known KeybindAction (KeybindManager.lua's own header), so
@@ -178,6 +200,62 @@ local function handleUpdateAutorun(player: Player, rawEnabled: unknown): ()
 	logger:debug("Autorun persisted", { player = player.Name, enabled = rawEnabled })
 end
 
+-- Parkour preference write. Same shape as handleUpdateAutorun above -- validate, persist through
+-- PlayerDataSystem.Transform, log -- with the extra step of validating the field NAME against
+-- PARKOUR_SETTING_TYPES first, since this remote's payload includes which field to write.
+--
+-- Note what this handler deliberately does NOT do: it never tells any other System that movement
+-- preferences changed. The client has already applied the change locally (SettingsClient pushes it
+-- straight into ParkourController) before firing this, exactly as it does for a rebind, so this
+-- exists purely to make the change durable. The server has no behavior keyed off these preferences --
+-- every one of them is client-side feel -- which is why persisting them is the whole job.
+local function handleUpdateParkour(player: Player, rawField: unknown, rawValue: unknown): ()
+	if rateLimiter:IsLimited(player) then
+		return
+	end
+	if typeof(rawField) ~= "string" then
+		logger:debug("UpdateParkour rejected: non-string field", { player = player.Name })
+		return
+	end
+	local field = rawField :: string
+	local expectedType = PARKOUR_SETTING_TYPES[field]
+	if not expectedType then
+		logger:debug("UpdateParkour rejected: unknown field", { player = player.Name, field = field })
+		return
+	end
+
+	local value: any
+	if expectedType == "boolean" then
+		if typeof(rawValue) ~= "boolean" then
+			logger:debug("UpdateParkour rejected: expected boolean", { player = player.Name, field = field })
+			return
+		end
+		value = rawValue
+	else
+		if rawValue ~= "Hold" and rawValue ~= "Toggle" then
+			logger:debug("UpdateParkour rejected: invalid SprintMode", { player = player.Name })
+			return
+		end
+		value = rawValue
+	end
+
+	local transformed = PlayerDataSystem.Transform(player, function(profile)
+		-- Defensive: a profile loaded from a record that predates the Parkour block and somehow missed
+		-- Migrations[4] would have no table to write into. Backfilling here rather than erroring keeps
+		-- one stale record from making the whole Settings panel non-functional for that player.
+		if typeof(profile.settings.Parkour) ~= "table" then
+			profile.settings.Parkour = PlayerDataSystem.CreateDefaultParkourSettings()
+		end
+		(profile.settings.Parkour :: { [string]: any })[field] = value
+	end)
+	if not transformed then
+		logger:warn("UpdateParkour: Transform failed (profile not loaded)", { player = player.Name })
+		return
+	end
+
+	logger:debug("Parkour setting persisted", { player = player.Name, field = field })
+end
+
 local function onPlayerRemoving(player: Player): ()
 	rateLimiter:Clear(player)
 end
@@ -194,6 +272,9 @@ function SettingsSystem.Init(): ()
 
 	local updateAutorunRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateAutorun)
 	updateAutorunRemote.OnServerEvent:Connect(handleUpdateAutorun)
+
+	local updateParkourRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateParkour)
+	updateParkourRemote.OnServerEvent:Connect(handleUpdateParkour)
 
 	Players.PlayerRemoving:Connect(onPlayerRemoving)
 

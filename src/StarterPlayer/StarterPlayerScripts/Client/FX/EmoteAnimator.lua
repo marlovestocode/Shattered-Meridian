@@ -13,11 +13,22 @@
 	animation itself, only for deciding whether playing it was legal, which Server/Systems/
 	EmoteSystem.lua already owns and this module never touches.
 
-	Every entry in Shared/Emotes/EmoteDefinitions.lua currently authors AnimationId = "" (this
+	Entries in Shared/Emotes/EmoteDefinitions.lua without a clip yet author AnimationId = "" (this
 	codebase never fabricates a plausible-looking asset id -- see Constants.Combat.AnimationIds' own
 	header for the precedent) -- every play/preload path below already degrades safely to a no-op for
 	an empty id, the same way CombatAnimator's own Heavy1/Heavy2 slots do until a real clip is
-	supplied.
+	supplied. Note that `AnimationId ~= ""` is a load-bearing test on BOTH sides of the wire, not just
+	a local optimisation here: Server/Systems/EmoteSystem.lua derives the same hasClip() predicate from
+	the same content to decide whether an emote's length is owned by this client's track or by its
+	authored Duration, which is why a prefix-only "rbxassetid://" placeholder is a bug in that data
+	rather than a harmless stand-in.
+
+	WHY THIS MODULE REPORTS BACK. AnimationTrack.Length is client-only, so this is the one place that
+	can know when an emote's animation is genuinely over. SetFinishedCallback below routes that moment
+	to EmoteController -> Emote_NotifyFinished, which is what ends a clip-bearing one-shot emote
+	server-side. Before that existed, the server ended every emote at the hand-authored Duration
+	instead, so an emote whose real clip ran longer than that number was visibly guillotined
+	mid-motion -- see EmoteSystem.lua's WHAT ENDS A ONE-SHOT EMOTE header.
 
 	DOMINANT_WEIGHT / per-Heartbeat reassert: reuses the exact mechanism (and the exact shared
 	Constants.FX.Animation.DominantWeight value) CombatAnimator.lua's own header documents at length
@@ -53,6 +64,13 @@ local ONE_SHOT_FADE_TIME = EmoteConstants.AnimationFade.OneShotFadeSeconds
 local LOOP_FADE_TIME = EmoteConstants.AnimationFade.LoopFadeSeconds
 local STOP_FADE_TIME = EmoteConstants.AnimationFade.StopFadeSeconds
 
+-- How far an authored Duration may sit from the real clip length before Play() warns. A file-local
+-- rather than an EmoteConstants entry on purpose: it is a diagnostic threshold for a log line, not a
+-- number anyone retunes for feel, and nothing outside this file reads it. Loose enough that ordinary
+-- rounding in an authored number stays quiet, tight enough that a stale placeholder (a 2-second
+-- Duration against a 5-second clip) is called out by name.
+local DURATION_DRIFT_TOLERANCE = 0.25
+
 -- Built once at module load, keyed by EmoteId -- skips any entry whose AnimationId is still "" (see
 -- this file's header), the same guard CombatAnimator's own animationTemplates loop applies.
 local animationTemplates: { [string]: Animation } = {}
@@ -80,6 +98,22 @@ local tracks: { [string]: AnimationTrack } = {}
 local currentTrack: AnimationTrack? = nil
 local weightConnection: RBXScriptConnection? = nil
 local stoppedConnection: RBXScriptConnection? = nil
+
+-- Set once by Client/Emotes/EmoteController.lua's Start(). Invoked with the EmoteId whenever a
+-- one-shot track reaches its own NATURAL end (never when Stop() cut it short) -- see SetFinished's
+-- own header for why this module, and only this module, can detect that.
+local finishedCallback: ((emoteId: string) -> ())? = nil
+
+-- Registers the "this emote's animation actually finished" hook. This module is the only place in
+-- the codebase that can raise that signal at the right moment: AnimationTrack.Length exists on the
+-- client only (the server never loads the clip at all), so the authored Duration in EmoteDefinitions
+-- .lua is the server's ONLY other estimate of when an emote ends -- and a hand-authored number is
+-- guaranteed to drift from whatever clip an artist actually uploads. Routing the real end back
+-- through EmoteController -> Emote_NotifyFinished is what lets Server/Systems/EmoteSystem.lua stop a
+-- clip-bearing emote when the animation is genuinely over instead of at a stale guess.
+function EmoteAnimator.SetFinishedCallback(callback: (emoteId: string) -> ()): ()
+	finishedCallback = callback
+end
 
 local function stopWeightReassert(): ()
 	if weightConnection then
@@ -132,9 +166,9 @@ function EmoteAnimator.BindCharacter(character: Model): ()
 	end
 end
 
--- Plays `emoteId`'s track, if one is loaded -- a silent no-op otherwise (every entry in
--- EmoteDefinitions.lua currently has AnimationId = "", so this is the expected path until real clips
--- are supplied). Stops whatever emote was previously playing first -- EmoteSystem's own re-trigger
+-- Plays `emoteId`'s track, if one is loaded -- for an entry whose AnimationId is still "" there is no
+-- track to load, which stays an expected, non-error path until a real clip is supplied for it.
+-- Stops whatever emote was previously playing first -- EmoteSystem's own re-trigger
 -- semantics (Server/Systems/EmoteSystem.lua's header) already guarantee at most one emote is ever
 -- active per player at a time, so this is defense in depth, not load-bearing.
 function EmoteAnimator.Play(emoteId: string): ()
@@ -142,14 +176,39 @@ function EmoteAnimator.Play(emoteId: string): ()
 
 	local track = tracks[emoteId]
 	if not track then
+		-- Reported as an immediate natural finish, not just logged. For an emote whose AnimationId is
+		-- still "" the server never accepts the notification anyway (it falls back to the authored
+		-- Duration -- see EmoteSystem.handleNotifyFinished's own clip guard), but for a clip-bearing
+		-- emote whose LoadAnimation call failed in BindCharacter this is what keeps the server from
+		-- holding the emote (and, for a MovementLocked one, a zeroed WalkSpeed) all the way to
+		-- EmoteConstants.MaxOneShotSeconds waiting for an animation that is never going to play.
 		logger:debug("Play: no track loaded (no animation authored yet, or never bound)", { emoteId = emoteId })
+		if finishedCallback then
+			finishedCallback(emoteId)
+		end
 		return
 	end
 
 	local definition = EmoteRegistry.Get(emoteId)
-	local fadeTime = if definition and definition.Loop then LOOP_FADE_TIME else ONE_SHOT_FADE_TIME
+	local isLoop = definition ~= nil and definition.Loop
+	local fadeTime = if isLoop then LOOP_FADE_TIME else ONE_SHOT_FADE_TIME
 	track:Play(fadeTime, DOMINANT_WEIGHT)
 	currentTrack = track
+
+	-- Dev-time only. The authored Duration and the real clip are two independent numbers nothing else
+	-- forces to agree, and a disagreement is invisible in play except as an emote that ends at the
+	-- wrong moment -- exactly the bug Emote_NotifyFinished now prevents from mattering. Length is 0
+	-- until the asset finishes loading, so a cold first play legitimately skips this.
+	if not isLoop and definition and definition.Duration and track.Length > 0 then
+		local drift = track.Length - definition.Duration
+		if math.abs(drift) > DURATION_DRIFT_TOLERANCE then
+			logger:warn("Authored Duration disagrees with the real clip length -- retune EmoteDefinitions", {
+				emoteId = emoteId,
+				authoredDuration = definition.Duration,
+				actualClipLength = track.Length,
+			})
+		end
+	end
 
 	-- See this file's header -- a single Play()-time weight isn't reliable for a track that needs to
 	-- hold dominance for its own duration against Roblox's own re-asserting default Animate script.
@@ -159,10 +218,17 @@ function EmoteAnimator.Play(emoteId: string): ()
 		end
 	end)
 
+	-- Reaching here means the track ended on its OWN -- Stop() disconnects this watch BEFORE it calls
+	-- track:Stop(), so an induced stop (a superseding emote, the server's Emote_Stopped echo) never
+	-- runs this and never reports a finish the server would then act on twice.
 	stoppedConnection = track.Stopped:Connect(function()
-		if currentTrack == track then
-			stopWeightReassert()
-			currentTrack = nil
+		if currentTrack ~= track then
+			return
+		end
+		stopWeightReassert()
+		currentTrack = nil
+		if finishedCallback then
+			finishedCallback(emoteId)
 		end
 	end)
 end

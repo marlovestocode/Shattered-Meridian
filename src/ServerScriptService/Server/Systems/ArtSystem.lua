@@ -14,9 +14,10 @@
 
 	UNLOCKED IS "HAS A MASTERY ENTRY". PlayerProfile.artMastery is a { [ArtId]: number } that has
 	existed since the baseline schema, and presence of a key is what marks an art unlocked -- mastery
-	0 means unlocked but never used. That avoids a second parallel field, and more importantly avoids
-	a PlayerDataSystem schema migration: nothing about a profile's shape changes to support this
-	System, so every existing save keeps loading unchanged.
+	0 means unlocked but never used. That avoids a second parallel "unlocked" field carrying the same
+	fact. (This paragraph used to add that the whole System therefore needed no schema migration at
+	all. That stopped being true when equipping landed: PlayerProfile.equippedArts is a genuinely new
+	field with its own Migrations[3] entry -- see below. Unlocking still needs none.)
 
 	EARNED, NEVER GRANTED. An unlock request is validated server-side against exactly the same
 	CanUnlock rules the client uses to grey out a row -- the client's version is a rendering
@@ -26,6 +27,18 @@
 
 	QI IS CHARGED BEFORE THE MOVE RESOLVES, and a refused spend refuses the whole use -- see UseArt.
 	That ordering is what makes the cost real rather than cosmetic.
+
+	EQUIPPING IS PERSISTED, AND IT IS WHAT MAKES AN ART REACHABLE. Unlocking an art earns it;
+	equipping it to one of the ArtConstants.EquipSlotCount hotbar slots is what puts it under a key.
+	Types.PlayerProfile.equippedArts holds that binding, so it survives a rejoin -- unlike
+	Client/Combat/HotbarBindings.lua, the admin-local, session-scoped binding the Move Editor writes,
+	which this replicates INTO on the client (CharacterMenuClient.lua) rather than replacing. The two
+	coexist by the same last-write-wins rule that module already documents.
+
+	CanUse vs. UseArt is a deliberate split, not a duplicate. CombatSystem asks CanUse before it
+	commits a swing, so an art refused for a COMBAT reason (mid-attack, stunned, on cooldown) costs
+	no Qi; UseArt is called only once the throw is actually happening, and re-checks everything
+	itself rather than trusting that the caller asked first.
 ]]
 
 local Players = game:GetService("Players")
@@ -67,6 +80,43 @@ function ArtSystem.IsUnlocked(player: Player, artId: string): boolean
 		return false
 	end
 	return profile.artMastery[artId] ~= nil
+end
+
+-- Which art sits in each of this player's hotbar slots. Always a fresh table (GetProfile already
+-- hands back a copy) so a caller can hold onto it without aliasing the live profile.
+function ArtSystem.GetEquipped(player: Player): { [number]: string }
+	local profile = PlayerDataSystem.GetProfile(player)
+	if not profile then
+		return {}
+	end
+	return profile.equippedArts
+end
+
+-- Whether `slot` is a real hotbar slot. Its own named check rather than an inline comparison because
+-- both the equip path and the fire path need the identical bound, and a slot index arrives from a
+-- client in both cases.
+function ArtSystem.IsValidSlot(slot: number): boolean
+	return typeof(slot) == "number" and slot == math.floor(slot) and slot >= 1 and slot <= ArtConstants.EquipSlotCount
+end
+
+-- Why `player` can't throw `artId` right now, or nil if they can. Deliberately does NOT spend
+-- anything -- this is the question CombatSystem asks BEFORE committing a swing, so that a throw
+-- refused for a combat reason (mid-attack, stunned, on cooldown) costs no Qi. UseArt below is the
+-- one that charges, and it re-checks all of this itself rather than trusting that a caller asked
+-- first.
+function ArtSystem.CanUse(player: Player, artId: string): string?
+	local move = ArtTreeManager.GetArt(artId)
+	if not move then
+		return "UnknownArt"
+	end
+	if not ArtSystem.IsUnlocked(player, artId) then
+		return "NotUnlocked"
+	end
+	local art = move.Art :: MoveTypes.MoveArtBinding
+	if art.QiCost > 0 and QiSystem.GetQi(player) < art.QiCost then
+		return "NotEnoughQi"
+	end
+	return nil
 end
 
 -- Why `player` can't unlock `artId` right now, or nil if they can. Returns a REASON rather than a
@@ -121,12 +171,16 @@ end
 local function buildStatePayload(player: Player): Types.ArtStatePayload
 	local profile = PlayerDataSystem.GetProfile(player)
 	local mastery: { [string]: number } = {}
+	local equipped: { [number]: string } = {}
 	if profile then
 		for artId, value in pairs(profile.artMastery) do
 			mastery[artId] = value
 		end
+		for slot, artId in pairs(profile.equippedArts) do
+			equipped[slot] = artId
+		end
 	end
-	return { Mastery = mastery }
+	return { Mastery = mastery, Equipped = equipped }
 end
 
 local function sendArtState(player: Player): ()
@@ -157,6 +211,37 @@ function ArtSystem.Unlock(player: Player, artId: string): string?
 	end
 
 	logger:info("Art unlocked", { player = player.Name, artId = artId })
+	sendArtState(player)
+	return nil
+end
+
+-- Binds `artId` to `slot` for `player`, or clears the slot when artId is nil. Returns nil on
+-- success, a reason string otherwise.
+--
+-- Only an UNLOCKED art may be equipped -- the same "earned, never granted" rule Unlock enforces,
+-- applied a second time here because equip is its own client-reachable entry point and must not
+-- become a back door to holding an art the player never unlocked. Clearing a slot needs no such
+-- check: removing something is always legal.
+--
+-- Last write wins, with no cross-slot conflict rejection: the same art in two slots is harmless
+-- (just redundant), which is the identical contract Client/Combat/HotbarBindings.lua already
+-- documents for the client-side binding this mirrors into.
+function ArtSystem.Equip(player: Player, slot: number, artId: string?): string?
+	if not ArtSystem.IsValidSlot(slot) then
+		return "InvalidSlot"
+	end
+	if artId ~= nil and not ArtSystem.IsUnlocked(player, artId) then
+		return "NotUnlocked"
+	end
+
+	local committed = PlayerDataSystem.Transform(player, function(profile)
+		profile.equippedArts[slot] = artId
+	end)
+	if not committed then
+		return "ProfileNotLoaded"
+	end
+
+	logger:info("Art equipped", { player = player.Name, slot = slot, artId = artId or "<cleared>" })
 	sendArtState(player)
 	return nil
 end
@@ -265,6 +350,25 @@ local function handleUnlockArt(player: Player, rawArtId: unknown): Types.ArtActi
 	return { Success = true }
 end
 
+local function handleEquipArt(player: Player, rawSlot: unknown, rawArtId: unknown): Types.ArtActionResult
+	if requestRateLimiter:IsLimited(player) then
+		return { Success = false, Reason = "RateLimited" }
+	end
+	if typeof(rawSlot) ~= "number" then
+		return { Success = false, Reason = "InvalidSlot" }
+	end
+	-- nil is the legitimate "clear this slot" payload; anything else non-string is malformed.
+	if rawArtId ~= nil and typeof(rawArtId) ~= "string" then
+		return { Success = false, Reason = "InvalidArtId" }
+	end
+
+	local refusal = ArtSystem.Equip(player, rawSlot :: number, rawArtId :: string?)
+	if refusal then
+		return { Success = false, Reason = refusal }
+	end
+	return { Success = true }
+end
+
 local function onProfileLoaded(player: Player): ()
 	sendArtState(player)
 end
@@ -277,6 +381,12 @@ function ArtSystem.Init(): ()
 
 	local unlockRemote = NetworkBridge.CreateRemoteFunction(ArtConstants.RemoteNames.UnlockArt)
 	unlockRemote.OnServerInvoke = handleUnlockArt
+
+	-- A RemoteFunction, not a fire-and-forget RemoteEvent, for the same reason UnlockArt is one: the
+	-- panel has to be able to say WHY an equip was refused. A silently-ignored equip would leave the
+	-- client showing an art in a slot the server never accepted.
+	local equipRemote = NetworkBridge.CreateRemoteFunction(ArtConstants.RemoteNames.EquipArt)
+	equipRemote.OnServerInvoke = handleEquipArt
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(onProfileLoaded)
 	Players.PlayerRemoving:Connect(function(player: Player)

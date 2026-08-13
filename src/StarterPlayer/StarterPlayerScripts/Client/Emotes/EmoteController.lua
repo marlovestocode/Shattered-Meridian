@@ -15,6 +15,14 @@
 	immediately if a Character already exists at Start() time (a mid-session script reload/relog
 	case), then rebind on every subsequent CharacterAdded (a respawn needs a fresh Animator).
 
+	FINISH REPORTING. One thing does flow client -> server without being a player input:
+	Emote_NotifyFinished, fired from the EmoteAnimator.SetFinishedCallback hook wired in Start()
+	below. AnimationTrack.Length exists on the client only, so this client is the only side that can
+	tell the server when a one-shot emote's animation is ACTUALLY over rather than when a
+	hand-authored EmoteDefinitions.Duration guessed it would be. This is a report, not a command --
+	EmoteSystem re-validates it against its own active emote and still enforces its own ceiling, per
+	that file's own STOP SCHEDULING header.
+
 	No client-side prediction: unlike combat's Basic/Heavy/Dash (Client/Combat/PredictionMirror.lua),
 	an emote press has no gameplay outcome to predict ahead of the round trip, and per-frame input
 	lag on a purely cosmetic/social action isn't worth the rollback machinery that buys combat its
@@ -43,6 +51,7 @@ local localPlayer = Players.LocalPlayer
 
 local requestPlayRemote: RemoteEvent? = nil
 local requestSetLoadoutSlotRemote: RemoteEvent? = nil
+local notifyFinishedRemote: RemoteEvent? = nil
 
 -- Fires the client->server play request -- the one entry point a future wheel UI calls when the
 -- player picks a slot. Does nothing else locally: EmoteAnimator.Play only ever runs off the server's
@@ -71,6 +80,19 @@ end
 function EmoteController.Start(): ()
 	requestPlayRemote = NetworkBridge.GetRemoteEvent(EmoteConstants.RemoteNames.RequestPlay)
 	requestSetLoadoutSlotRemote = NetworkBridge.GetRemoteEvent(EmoteConstants.RemoteNames.RequestSetLoadoutSlot)
+	notifyFinishedRemote = NetworkBridge.GetRemoteEvent(EmoteConstants.RemoteNames.NotifyFinished)
+
+	-- The one report of "this emote's animation is genuinely over" -- fires only on a NATURAL track
+	-- end (EmoteAnimator.SetFinishedCallback's own header explains why the client is the only side
+	-- that can know that), never when the server's own Emote_Stopped echo cut the track short, so this
+	-- can't bounce a stop the server already performed back at it.
+	EmoteAnimator.SetFinishedCallback(function(emoteId: string)
+		if not notifyFinishedRemote then
+			return
+		end
+		logger:debug("Emote animation finished naturally", { emoteId = emoteId })
+		notifyFinishedRemote:FireServer(emoteId)
+	end)
 
 	local startedRemote = NetworkBridge.GetRemoteEvent(EmoteConstants.RemoteNames.Started)
 	startedRemote.OnClientEvent:Connect(function(payload: Types.EmoteStartedPayload)

@@ -120,6 +120,22 @@ function EmoteRegistry.Validate(definition: unknown): (boolean, string?)
 	if raw.Duration ~= nil and typeof(raw.Duration) ~= "number" then
 		return false, "InvalidDuration"
 	end
+	-- A non-loop emote MUST carry a positive Duration, even though (per EmoteDefinitions.lua's own
+	-- DURATION IS NOT THE LENGTH OF THE ANIMATION header) it no longer times a clip-bearing entry.
+	-- Two distinct traps this closes, both of which present as "the emote ends instantly":
+	-- EmoteSystem's `definition.Duration or 0` fallback turns a nil Duration on a CLIPLESS one-shot
+	-- into an expiry that has already passed, stopping it on the very next heartbeat; and a zero or
+	-- negative number does the same thing explicitly. Neither is ever the intent, and neither is
+	-- visible in the data as anything other than a missing field.
+	if not raw.Loop and (typeof(raw.Duration) ~= "number" or (raw.Duration :: number) <= 0) then
+		return false, "MissingDuration"
+	end
+	-- The mirror of the above -- a Loop emote is stopped only by RequestPlay/death/interruption
+	-- (Types.EmoteDefinition's own contract), so a Duration on one is authored intent that nothing
+	-- will ever honour. Better rejected than silently ignored.
+	if raw.Loop and raw.Duration ~= nil then
+		return false, "UnexpectedDuration"
+	end
 	if typeof(raw.MovementLocked) ~= "boolean" then
 		return false, "InvalidMovementLocked"
 	end

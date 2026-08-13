@@ -5,7 +5,11 @@
 	Owns: the neutral-game movement resolution CombatSystem.lua's request handlers delegate into --
 	Dash's state mutation, Slide's state mutation, Sprint's state mutation, and the single unified
 	WalkSpeed priority resolver (dash > slide > hit-slow > sprint > base) onHeartbeat calls every
-	tick. A pure/state-mutation
+	tick -- plus, since the Parkour System, the two functions that turn that resolver's instantaneous
+	answer into one with real acceleration: SmoothWalkSpeed (ramps toward the resolved target instead
+	of snapping) and ComputeParkourSpeedFloor (the decaying momentum carry a finished parkour action
+	leaves behind). Both are additive to the tier logic rather than changes to it -- see each one's own
+	header. A pure/state-mutation
 	helper under Server/Combat/, the same role HitboxResolver/RagdollController play for their own
 	concerns -- CombatSystem.lua still owns combatStates, request validation (rate limit/alive/
 	stunned/posture-broken/commitment lock), logging, and remote-firing; this module only ever
@@ -21,6 +25,12 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Constants = require(ReplicatedStorage.Shared.Constants)
+-- The Parkour System's tuning table (Shared/Parkour/ParkourConstants.lua). Required here rather than
+-- duplicating its acceleration/momentum-carry numbers into Constants.Combat: the client-side movement
+-- framework and this resolver have to agree on the same acceleration curve, and two copies of that
+-- pair would silently diverge on the first retune. Pure data with no Instance dependency, so it costs
+-- this module nothing and keeps it headlessly testable.
+local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local CombatTypes = require(script.Parent.CombatTypes)
 
 type CombatState = CombatTypes.CombatState
@@ -243,6 +253,15 @@ end
 --   3. EmoteMovementLocked (Server/Systems/EmoteSystem.lua) -- same tier as Frozen/Flying: a
 --      MovementLocked emote is a deliberate full stop, not something any tier below should peek
 --      through.
+--   3b. ParkourVelocityOwned (Server/Systems/ParkourSystem.lua) -- same tier and same reasoning as
+--      Flying immediately above: the client-side parkour framework is driving this character's
+--      velocity directly (a slide, wall-run, vault, mantle, ledge climb, roll or wall-jump the server
+--      has accepted), and a raised WalkSpeed underneath that fights the drive rather than riding
+--      along with it. Placed BELOW Frozen/Flying/Emote (an admin lockdown, an admin flight and a
+--      deliberate emote stop all outrank a movement action) and ABOVE air-combo-chase only because it
+--      can never actually coexist with it -- ParkourSystem refuses to grant ownership while
+--      RootControlLocked is set, and the client's own controller parks in its AerialCombat state for
+--      the same signal, so the two are mutually exclusive by construction on both sides.
 --   4. Air-combo chase/held -- RagdollController.HoldAloft currently owns this player's positioning
 --      via a server-side AlignPosition, whether as the DashPunch ATTACKER (airComboChaseExpiry) or
 --      as a live-held VICTIM (airComboHeldExpiry -- AirCombo.Apply); a player-commanded WalkSpeed
@@ -282,6 +301,16 @@ function Movement.ComputeDesiredWalkSpeed(state: CombatState, now: number): numb
 	-- a lingering hit-slow window can still peek through. EmoteSystem sets/clears this Attribute
 	-- directly on the emoting character's Humanoid; this module owns no emote state of its own.
 	if state.humanoid and state.humanoid:GetAttribute(Constants.Attributes.EmoteMovementLocked) == true then
+		return 0
+	end
+
+	-- Parkour System (Server/Systems/ParkourSystem.lua) -- see this function's own priority list for
+	-- why this sits here. The client's movement framework is driving velocity directly for the
+	-- duration of an accepted action; WalkSpeed must stand down entirely or the two fight for the same
+	-- body, which is the exact failure this whole integration exists to prevent. ParkourSystem clears
+	-- the Attribute on the action's End report AND expires it on its own timer, so a client that
+	-- disconnects mid-slide cannot leave a character pinned at zero.
+	if state.humanoid and state.humanoid:GetAttribute(Constants.Attributes.ParkourVelocityOwned) == true then
 		return 0
 	end
 
@@ -335,6 +364,7 @@ function Movement.ComputeDesiredWalkSpeed(state: CombatState, now: number): numb
 	if now < state.Vitals.hitSlowExpiry then
 		return base * Constants.Combat.HitSlowMultiplier
 	end
+	local groundSpeed = base
 	if
 		state.Movement.sprinting
 		and not state.blocking
@@ -342,9 +372,97 @@ function Movement.ComputeDesiredWalkSpeed(state: CombatState, now: number): numb
 		and now >= state.Vitals.stunExpiry
 		and now >= state.Vitals.postureBrokenExpiry
 	then
-		return base * Constants.Combat.SprintSpeedMultiplier
+		groundSpeed = base * Constants.Combat.SprintSpeedMultiplier
 	end
-	return base
+
+	-- Parkour momentum carry, applied ONLY to the two free-movement tiers above (sprint and base) and
+	-- never to any tier that returned early. That placement is the whole safety argument for this
+	-- feature's one client-influenced number: a slide's earned speed survives into ordinary running,
+	-- but it cannot peek through hit-slow, a stun, a posture break, a commitment lock, an air-combo
+	-- hold, a freeze or a flight -- so no amount of parkour lets a player outrun the consequences of
+	-- being hit, which is precisely what Constants.Combat.HitSlowMultiplier's own "can't just run away"
+	-- comment exists to guarantee.
+	return math.max(groundSpeed, Movement.ComputeParkourSpeedFloor(state, now))
+end
+
+-- The decaying WalkSpeed floor a just-finished parkour action leaves behind (see
+-- Constants.Attributes.ParkourSpeedFloor). Read from the two Attributes Server/Systems/
+-- ParkourSystem.lua stamps rather than from CombatState, the same "external system, read as an
+-- Attribute" shape Frozen/Flying/EmoteMovementLocked already use -- which is what lets ParkourSystem
+-- integrate with this resolver without ever touching CombatSystem's private state tables.
+--
+-- Decays linearly to zero across ParkourConstants.Locomotion.MomentumCarrySeconds. Linear rather than
+-- exponential on purpose: the player should be able to feel exactly how long they have to spend their
+-- momentum, and an exponential tail leaves a long, imperceptible remainder that reads as the carry
+-- lasting longer than it usefully does.
+--
+-- Hard-capped at SprintSpeed * MomentumCarryMaxMultiplier regardless of what was reported. The
+-- reported speed has already passed Shared/Parkour/ParkourValidation's plausibility checks by the time
+-- it reaches the Attribute; this cap is the second, independent limit on the one number a client can
+-- influence, so even a report that survives validation cannot translate into unbounded ground speed.
+function Movement.ComputeParkourSpeedFloor(state: CombatState, now: number): number
+	local humanoid = state.humanoid
+	if not humanoid then
+		return 0
+	end
+	local floorValue = humanoid:GetAttribute(Constants.Attributes.ParkourSpeedFloor)
+	local expiryValue = humanoid:GetAttribute(Constants.Attributes.ParkourSpeedFloorExpiry)
+	if typeof(floorValue) ~= "number" or typeof(expiryValue) ~= "number" then
+		return 0
+	end
+	local floorSpeed = floorValue :: number
+	local expiry = expiryValue :: number
+	-- NaN guard: an Attribute is a number the server itself wrote, but a NaN here would compare false
+	-- against every bound below and silently return NaN as a WalkSpeed, which pins the character in
+	-- place with no error anywhere.
+	if floorSpeed ~= floorSpeed or expiry ~= expiry then
+		return 0
+	end
+	if now >= expiry or floorSpeed <= 0 then
+		return 0
+	end
+
+	local carrySeconds = ParkourConstants.Locomotion.MomentumCarrySeconds
+	local remaining = math.clamp((expiry - now) / math.max(carrySeconds, 1e-3), 0, 1)
+	local capped = math.min(
+		floorSpeed,
+		ParkourConstants.Locomotion.SprintSpeed * ParkourConstants.Locomotion.MomentumCarryMaxMultiplier
+	)
+	return capped * remaining
+end
+
+-- Ramps `current` WalkSpeed toward `desired` instead of snapping to it -- the acceleration and
+-- deceleration the design asked for ("sprinting, jumping, sliding ... should all influence the
+-- player's velocity instead of completely resetting movement every time a new action begins"),
+-- introduced without changing a single one of ComputeDesiredWalkSpeed's tiers. That separation is
+-- deliberate: the tiers keep deciding WHAT speed is correct, and this decides HOW FAST the property
+-- gets there, so every existing priority argument in this file survives untouched.
+--
+-- Two exceptions snap instantly rather than ramping, and both are correctness rather than feel:
+--   * A desired speed of ZERO. Every zero in ComputeDesiredWalkSpeed is a hard stop with a real
+--     reason behind it -- an admin freeze, a flight, an emote lock, an air-combo hold, parkour owning
+--     velocity. Easing into any of those would leave the character drifting for a fraction of a
+--     second after a lockdown was applied, which is exactly what those tiers exist to prevent.
+--   * A current speed of zero. Coming OUT of one of those stops should be immediate for the same
+--     reason -- a player released from a freeze or an air-combo should be able to move at once, not
+--     accelerate out of it.
+-- Pure arithmetic with no Instance access, so it is unit-testable alongside ComputeDesiredWalkSpeed.
+function Movement.SmoothWalkSpeed(current: number, desired: number, deltaTime: number): number
+	if desired <= 0 or current <= 0 then
+		return desired
+	end
+	if deltaTime <= 0 then
+		return current
+	end
+	local rate = if desired > current
+		then ParkourConstants.Locomotion.WalkSpeedAcceleration
+		else ParkourConstants.Locomotion.WalkSpeedDeceleration
+	local maxStep = rate * deltaTime
+	local gap = desired - current
+	if math.abs(gap) <= maxStep then
+		return desired
+	end
+	return current + maxStep * (if gap > 0 then 1 else -1)
 end
 
 return Movement

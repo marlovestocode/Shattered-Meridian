@@ -24,9 +24,32 @@
 	established idiom for "an effect that should end after N seconds" (CombatState.Vitals.
 	stunExpiry/ragdollExpiry, AirComboState.airComboHeldExpiry, ...) is an expiry timestamp checked on
 	the next tick, never a scheduled callback that could race a manual stop. activeEmotes[player].
-	EndsAt is exactly that: set at start time for a Duration-bearing emote, left nil for a Loop
-	emote, and checked in the SAME OnHeartbeatTick handler that already reads CombatSnapshot for the
-	interruption guard below -- one read of activeEmotes per tick, not two competing timers.
+	EndsAt is exactly that: set at start time for a non-Loop emote, left nil for a Loop emote, and
+	checked in the SAME OnHeartbeatTick handler that already reads CombatSnapshot for the interruption
+	guard below -- one read of activeEmotes per tick, not two competing timers.
+
+	WHAT ENDS A ONE-SHOT EMOTE, and why the authored Duration is no longer it. EndsAt used to be
+	`now + definition.Duration`, which silently truncated any emote whose real animation ran longer
+	than that hand-authored number: the emote's visible length was min(Duration, clip length), and
+	nothing anywhere forced those two to agree. AnimationTrack.Length is a CLIENT-side value (this
+	server never loads the clip at all), so a Duration typed into EmoteDefinitions.lua is only ever a
+	guess about an asset an artist uploads separately -- and a guess that goes stale the moment a clip
+	is swapped, with the only symptom being an emote that visibly cuts off mid-motion.
+
+	So the real stop for a CLIP-BEARING one-shot (definition.AnimationId ~= "") is now the acting
+	client's own Emote_NotifyFinished report, raised when its AnimationTrack actually ends -- see
+	handleNotifyFinished below for how that report is validated, and Client/FX/EmoteAnimator.lua's
+	SetFinishedCallback for why only that side can raise it. EndsAt survives as the safety valve
+	behind it (EmoteConstants.MaxOneShotSeconds, deliberately NOT derived from Duration -- see that
+	constant), covering a client that never reports at all. An emote with NO clip authored yet still
+	falls back to Duration exactly as before: there is no track to finish, so no report is coming.
+
+	This also removes a latency bug that applied even to correctly-authored Durations. The old EndsAt
+	clock started when the SERVER accepted RequestPlay, but the animation didn't begin until the
+	Emote_Started echo reached the client one round trip later -- so every emote lost roughly an RTT
+	off its tail. The client's own track is now what times the emote, so that skew is gone; the
+	residual cost moved to the benign side (the movement lock outlives the animation by the one-way
+	trip of the finish report, rather than the animation being cut short by a full round trip).
 
 	RE-TRIGGER SEMANTICS (RequestPlay while an emote is already active). A LOOPING emote (Sit/Dance)
 	may be freely replaced by another RequestPlay at any time -- StopEmote runs first, then the new
@@ -71,8 +94,11 @@ type ActiveEmote = {
 	-- against this, not against MaxHealth or a delta threshold, so any confirmed damage (however
 	-- small) breaks a vulnerable pose.
 	StartedHealth: number,
-	-- nil for a Loop emote (never auto-stops on its own); os.clock() + Duration for a one-shot --
-	-- see this file's header on why this is a checked expiry, not a task.delay.
+	-- nil for a Loop emote (never auto-stops on its own). For a one-shot this is the LATEST this emote
+	-- may run, not the moment it is expected to end -- see this file's header (WHAT ENDS A ONE-SHOT
+	-- EMOTE): a clip-bearing emote is normally stopped by the client's own Emote_NotifyFinished and
+	-- only falls back to this ceiling if that never arrives, while a clipless one still ends exactly
+	-- at its authored Duration.
 	EndsAt: number?,
 }
 
@@ -131,6 +157,28 @@ local function sendLoadoutUpdated(player: Player): ()
 	local loadout = if profile then profile.emoteLoadout else table.clone(EmoteConstants.DefaultLoadout)
 	local payload: Types.EmoteLoadoutUpdatePayload = { Loadout = loadout }
 	loadoutUpdatedRemote:FireClient(player, payload)
+end
+
+-- Whether this emote has a real animation clip authored yet. The SAME condition Client/FX/
+-- EmoteAnimator.lua uses to decide whether to build a template at all, derived on both sides from the
+-- same static EmoteDefinitions.lua content -- which is what makes it safe for this server to predict
+-- whether an Emote_NotifyFinished report is ever coming for a given emote without asking the client.
+local function hasClip(definition: Types.EmoteDefinition): boolean
+	return definition.AnimationId ~= ""
+end
+
+-- See this file's header (WHAT ENDS A ONE-SHOT EMOTE) for the reasoning behind all three branches.
+local function computeEndsAt(definition: Types.EmoteDefinition, now: number): number?
+	if definition.Loop then
+		return nil
+	end
+	if hasClip(definition) then
+		-- The client's own track times this emote; this is only the backstop.
+		return now + EmoteConstants.MaxOneShotSeconds
+	end
+	-- No clip authored yet -- no track will ever finish, so the authored Duration is the only signal
+	-- available and stays authoritative exactly as it was before.
+	return now + (definition.Duration or 0)
 end
 
 -- The one authoritative stop path -- see this file's header. Safe to call on a player with no active
@@ -222,7 +270,7 @@ local function handleRequestPlay(player: Player, rawEmoteId: unknown): ()
 	activeEmotes[player] = {
 		EmoteId = emoteId,
 		StartedHealth = snapshot.Health,
-		EndsAt = if definition.Loop then nil else now + (definition.Duration or 0),
+		EndsAt = computeEndsAt(definition, now),
 	}
 
 	if definition.MovementLocked then
@@ -235,6 +283,60 @@ local function handleRequestPlay(player: Player, rawEmoteId: unknown): ()
 	end
 
 	logger:debug("Emote started", { player = player.Name, emoteId = emoteId })
+end
+
+-- The acting client reporting that its own AnimationTrack for `rawEmoteId` reached its natural end --
+-- the normal stop for a clip-bearing one-shot emote (see this file's header). Treated as a REPORT
+-- about an emote this server already knows is running, never as a command: the only thing a player
+-- can achieve by firing this is ending their own current emote, which they can already do by playing
+-- another one.
+--
+-- Shares playRateLimiter with RequestPlay rather than taking a third bucket -- unlike the
+-- RequestPlay/RequestSetLoadoutSlot split (two genuinely independent player actions that must not
+-- starve each other), this fires at most once per accepted RequestPlay and is bounded by the same
+-- budget that gates those starts in the first place.
+local function handleNotifyFinished(player: Player, rawEmoteId: unknown): ()
+	if playRateLimiter:IsLimited(player) then
+		return
+	end
+	if typeof(rawEmoteId) ~= "string" then
+		logger:debug("NotifyFinished: non-string emoteId ignored", { player = player.Name })
+		return
+	end
+	local emoteId = rawEmoteId :: string
+
+	local active = activeEmotes[player]
+	if not active then
+		-- Routine, not suspicious: the server may already have stopped this emote (death, the
+		-- interruption guard, a superseding play) in the time the report spent in flight.
+		logger:debug("NotifyFinished ignored: no active emote", { player = player.Name, emoteId = emoteId })
+		return
+	end
+	if active.EmoteId ~= emoteId then
+		logger:debug("NotifyFinished ignored: stale emoteId", {
+			player = player.Name,
+			reported = emoteId,
+			active = active.EmoteId,
+		})
+		return
+	end
+
+	local definition = EmoteRegistry.Get(emoteId)
+	if not definition then
+		return
+	end
+	-- A Loop emote has no natural end, and a clipless one has no track that could have finished --
+	-- in both cases the report is meaningless and accepting it would let a client cut short an emote
+	-- whose length this server is still the sole owner of.
+	if definition.Loop or not hasClip(definition) then
+		logger:debug("NotifyFinished ignored: emote does not end on its own animation", {
+			player = player.Name,
+			emoteId = emoteId,
+		})
+		return
+	end
+
+	EmoteSystem.StopEmote(player)
 end
 
 local function handleRequestSetLoadoutSlot(player: Player, rawSlotIndex: unknown, rawEmoteId: unknown): ()
@@ -343,6 +445,9 @@ function EmoteSystem.Init(): ()
 
 	local requestPlayRemote = NetworkBridge.CreateRemoteEvent(EmoteConstants.RemoteNames.RequestPlay)
 	requestPlayRemote.OnServerEvent:Connect(handleRequestPlay)
+
+	local notifyFinishedRemote = NetworkBridge.CreateRemoteEvent(EmoteConstants.RemoteNames.NotifyFinished)
+	notifyFinishedRemote.OnServerEvent:Connect(handleNotifyFinished)
 
 	local requestSetLoadoutSlotRemote =
 		NetworkBridge.CreateRemoteEvent(EmoteConstants.RemoteNames.RequestSetLoadoutSlot)

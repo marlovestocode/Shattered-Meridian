@@ -4,8 +4,17 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local PlayerDataSystem = require(ServerScriptService.Server.Systems.PlayerDataSystem)
 local Types = require(ReplicatedStorage.Shared.Types)
+-- Read for one purpose: the migration tests below assert that a stale record reaches the CURRENT
+-- schema version, not a hardcoded number. Those assertions used to spell the version out, which meant
+-- every schema bump broke four tests that were never about the new field -- see CURRENT_SCHEMA below.
+local Constants = require(ReplicatedStorage.Shared.Constants)
 
 type PlayerProfile = Types.PlayerProfile
+
+-- What MigrateRecord is expected to walk a stale record forward TO. Read from Constants rather than
+-- written as a literal so a schema bump is a one-line change in Constants plus a new test for the new
+-- migration -- not a hunt for every assertion that happened to name the old number.
+local CURRENT_SCHEMA = Constants.PlayerData.SchemaVersion
 
 -- Pure-logic surface (CreateDefaultProfile/CopyProfile/EncodeProfile/DecodeProfile/MigrateRecord/
 -- ApplyMutation, and the cross-server session-lock/WriteGeneration decision functions
@@ -62,7 +71,7 @@ return function()
 			local migrated = PlayerDataSystem.MigrateRecord(raw)
 			local profile = migrated.Profile :: any
 
-			expect(migrated.SchemaVersion).to.equal(4)
+			expect(migrated.SchemaVersion).to.equal(CURRENT_SCHEMA)
 			-- Empty, not auto-equipped from artMastery: which art goes in which slot is a player
 			-- decision, as Migrations[3]'s own comment states.
 			expect(profile.equippedArts).never.to.equal(nil)
@@ -80,6 +89,123 @@ return function()
 			local profile = migrated.Profile :: any
 
 			expect(profile.equippedArts[1]).to.equal("kept-art")
+		end)
+
+		it("migrates a pre-Parkour v4 record, backfilling the shipped movement defaults", function()
+			-- Backfilled with the DEFAULTS rather than an empty table or everything-off: an existing
+			-- player's first login after the update should give them the same movement every new player
+			-- gets, which is the whole point of Migrations[4] existing rather than letting
+			-- DecodeSettings fill it in later.
+			local raw = {
+				SchemaVersion = 4,
+				Profile = {
+					tier = 6,
+					settings = { Keybinds = {}, GamepadKeybinds = {}, Autorun = true },
+				},
+			}
+			local migrated = PlayerDataSystem.MigrateRecord(raw)
+			local profile = migrated.Profile :: any
+
+			expect(migrated.SchemaVersion).to.equal(CURRENT_SCHEMA)
+			expect(profile.settings.Parkour).never.to.equal(nil)
+			expect(profile.settings.Parkour.Enabled).to.equal(PlayerDataSystem.CreateDefaultParkourSettings().Enabled)
+			expect(profile.settings.Parkour.SprintMode).to.equal("Hold")
+			-- The pre-existing preference must survive the step untouched.
+			expect(profile.settings.Autorun).to.equal(true)
+		end)
+
+		it("does not overwrite an already-present Parkour block on a v4 record", function()
+			local raw = {
+				SchemaVersion = 4,
+				Profile = {
+					tier = 2,
+					settings = {
+						Keybinds = {},
+						GamepadKeybinds = {},
+						Autorun = false,
+						Parkour = { Enabled = false, SprintMode = "Toggle" },
+					},
+				},
+			}
+			local migrated = PlayerDataSystem.MigrateRecord(raw)
+			local profile = migrated.Profile :: any
+
+			expect(profile.settings.Parkour.Enabled).to.equal(false)
+			expect(profile.settings.Parkour.SprintMode).to.equal("Toggle")
+		end)
+	end)
+
+	describe("PlayerDataSystem parkour settings encode/decode", function()
+		it("round-trips every Parkour preference", function()
+			local settings: Types.PlayerSettings = {
+				Keybinds = {},
+				GamepadKeybinds = {},
+				Autorun = true,
+				Parkour = {
+					Enabled = false,
+					CameraEffects = false,
+					CoyoteTime = false,
+					JumpBuffer = true,
+					AutoVault = false,
+					LedgeAssist = true,
+					StepAssist = false,
+					SprintMode = "Toggle",
+				},
+			}
+			local decoded = PlayerDataSystem.DecodeSettings(PlayerDataSystem.EncodeSettings(settings))
+
+			expect(decoded.Parkour.Enabled).to.equal(false)
+			expect(decoded.Parkour.CameraEffects).to.equal(false)
+			expect(decoded.Parkour.CoyoteTime).to.equal(false)
+			expect(decoded.Parkour.JumpBuffer).to.equal(true)
+			expect(decoded.Parkour.AutoVault).to.equal(false)
+			expect(decoded.Parkour.LedgeAssist).to.equal(true)
+			expect(decoded.Parkour.StepAssist).to.equal(false)
+			expect(decoded.Parkour.SprintMode).to.equal("Toggle")
+		end)
+
+		it("falls back to the shipped defaults for a missing Parkour block", function()
+			-- Not to `false` for every boolean, which is what a naive decode would produce -- and which
+			-- would read to a returning player as the game having silently switched their assists off.
+			local defaults = PlayerDataSystem.CreateDefaultParkourSettings()
+			local decoded = PlayerDataSystem.DecodeSettings({ Keybinds = {}, GamepadKeybinds = {}, Autorun = false })
+
+			expect(decoded.Parkour.Enabled).to.equal(defaults.Enabled)
+			expect(decoded.Parkour.CoyoteTime).to.equal(defaults.CoyoteTime)
+			expect(decoded.Parkour.SprintMode).to.equal(defaults.SprintMode)
+		end)
+
+		it("falls back per-field for a partially-populated Parkour block", function()
+			local defaults = PlayerDataSystem.CreateDefaultParkourSettings()
+			local decoded = PlayerDataSystem.DecodeSettings({
+				Keybinds = {},
+				GamepadKeybinds = {},
+				Autorun = false,
+				Parkour = { Enabled = false },
+			})
+
+			expect(decoded.Parkour.Enabled).to.equal(false)
+			expect(decoded.Parkour.AutoVault).to.equal(defaults.AutoVault)
+		end)
+
+		it("rejects a non-string SprintMode rather than storing it", function()
+			local decoded = PlayerDataSystem.DecodeSettings({
+				Keybinds = {},
+				GamepadKeybinds = {},
+				Autorun = false,
+				Parkour = { SprintMode = 42 },
+			})
+			expect(decoded.Parkour.SprintMode).to.equal("Hold")
+		end)
+
+		it("survives a wholly non-table Parkour field", function()
+			local decoded = PlayerDataSystem.DecodeSettings({
+				Keybinds = {},
+				GamepadKeybinds = {},
+				Autorun = false,
+				Parkour = "corrupted",
+			})
+			expect(decoded.Parkour.SprintMode).to.equal("Hold")
 		end)
 	end)
 
@@ -402,9 +528,9 @@ return function()
 
 	describe("PlayerDataSystem.MigrateRecord", function()
 		it("returns an already-current-version record unchanged", function()
-			local raw = { SchemaVersion = 4, Profile = { tier = 3 } }
+			local raw = { SchemaVersion = CURRENT_SCHEMA, Profile = { tier = 3 } }
 			local migrated = PlayerDataSystem.MigrateRecord(raw)
-			expect(migrated.SchemaVersion).to.equal(4)
+			expect(migrated.SchemaVersion).to.equal(CURRENT_SCHEMA)
 			expect((migrated.Profile :: any).tier).to.equal(3)
 		end)
 
@@ -421,7 +547,7 @@ return function()
 				local migrated = PlayerDataSystem.MigrateRecord(raw)
 				local profile = migrated.Profile :: any
 
-				expect(migrated.SchemaVersion).to.equal(4)
+				expect(migrated.SchemaVersion).to.equal(CURRENT_SCHEMA)
 				expect(profile.tier).to.equal(3)
 				expect(next(profile.unlockedEmoteIds)).never.to.equal(nil)
 				expect(profile.unlockedEmoteIds.Wave).to.equal(true)
@@ -460,7 +586,7 @@ return function()
 			local migrated = PlayerDataSystem.MigrateRecord(raw)
 			local profile = migrated.Profile :: any
 
-			expect(migrated.SchemaVersion).to.equal(4)
+			expect(migrated.SchemaVersion).to.equal(CURRENT_SCHEMA)
 			expect(profile.tier).to.equal(5)
 			expect(profile.settings).never.to.equal(nil)
 			expect(next(profile.settings.Keybinds)).to.equal(nil)

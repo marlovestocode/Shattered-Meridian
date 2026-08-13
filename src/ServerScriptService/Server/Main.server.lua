@@ -26,11 +26,13 @@ local BloodlineManager = require(Managers.BloodlineManager)
 local BloodlineSystem = require(Systems.BloodlineSystem)
 local ArtTreeManager = require(Managers.ArtTreeManager)
 local ArtSystem = require(Systems.ArtSystem)
+local CharacterSheetSystem = require(Systems.CharacterSheetSystem)
 local ProgressionSystem = require(Systems.ProgressionSystem)
 local AchievementSystem = require(Systems.AchievementSystem)
 local QiDeviationSystem = require(Systems.QiDeviationSystem)
 local MoveRegistryManager = require(Combat.MoveRegistryManager)
 local CombatSystem = require(Systems.CombatSystem)
+local ParkourSystem = require(Systems.ParkourSystem)
 local AbsorbSystem = require(Systems.AbsorbSystem)
 local RewardSystem = require(Systems.RewardSystem)
 local RespawnSystem = require(Systems.RespawnSystem)
@@ -103,6 +105,14 @@ BloodlineSystem.Init()
 ArtTreeManager.Init()
 ArtSystem.Init()
 
+-- 8b. The character sheet's replication layer -- pure projection of PlayerDataSystem's profile out
+--     to its owning client, so it needs nothing beyond step 3. Boots here, next to the progression
+--     Systems whose own remotes the character menu reads alongside this one, rather than at the
+--     bottom with the UI-facing tools: it subscribes to OnProfileLoaded, and a profile that loads
+--     before this connects would never push its sheet at all (the Init()-time GetPlayers() sweep in
+--     that module is the backstop, not the plan).
+CharacterSheetSystem.Init()
+
 -- 9. ProgressionSystem is an orchestration layer (see software-architecture.md), not a data
 --    owner -- its Init() doesn't need TierSystem/BloodlineSystem/ArtSystem/MeridianSystem
 --    already running, it just needs to exist before any real gameplay event can be routed
@@ -125,6 +135,16 @@ QiDeviationSystem.Init()
 --     is what actually populates it from DataStore) before CombatSystem.Init() runs.
 MoveRegistryManager.Init()
 CombatSystem.Init()
+
+-- 12a. Parkour System -- the server authority for the client-side movement framework. Boots
+--      immediately after CombatSystem because the two share one integration point:
+--      Server/Combat/Movement.ComputeDesiredWalkSpeed (which CombatSystem drives every Heartbeat)
+--      reads the Humanoid Attributes this System stamps. That is a RUNTIME relationship, not an
+--      Init()-time one -- ParkourSystem touches no CombatSystem API at all and would boot correctly
+--      anywhere after step 1 -- so this position is for readability, with one real requirement:
+--      ModerationSystem (step 1) must already be running, since a sustained stream of implausible
+--      movement reports routes into its suspected-cheater flag.
+ParkourSystem.Init()
 
 -- 12b. Emote System -- EmoteUnlockService only needs PlayerDataSystem (step 3), but boots here,
 --      immediately alongside its one dependent, rather than earlier: nothing else in this sequence

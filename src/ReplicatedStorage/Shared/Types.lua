@@ -68,6 +68,19 @@ export type PlayerProfile = {
 	tier: Tier,
 	bloodlineIds: { BloodlineId },
 	artMastery: { [ArtId]: number },
+	-- Art System (Server/Systems/ArtSystem.lua) -- which art is bound to each of the
+	-- ArtConstants.EquipSlotCount hotbar slots. A DICT keyed by slot index, not an ordered array like
+	-- emoteLoadout above, and the difference is deliberate: emote slots are filled left to right from
+	-- a starter loadout, where art slots are filled one at a time as arts are earned, so slot 4 being
+	-- bound while 2 and 3 are empty is the NORMAL early-game state -- an array would have to express
+	-- that as a hole, and `#` over a holed array is undefined in Luau.
+	--
+	-- Only ever written with an art the player has already unlocked (ArtSystem.Equip re-checks
+	-- IsUnlocked server-side regardless of what the client sends). An entry can still go stale if an
+	-- art is later retired from the registry, which costs exactly a slot that does nothing when
+	-- pressed -- ArtSystem.CanUse re-resolves the art at fire time, so a stale slot degrades to
+	-- silence, never to a free cast, the same contract emoteLoadout's own header describes.
+	equippedArts: { [number]: ArtId },
 	corruption: number,
 	qiDeviationRisk: number,
 	factionStanding: number,
@@ -322,6 +335,34 @@ export type ArtActionResult = {
 -- second profile field and a schema migration).
 export type ArtStatePayload = {
 	Mastery: { [ArtId]: number },
+	-- Types.PlayerProfile.equippedArts, replicated (this IS that field) -- slot index -> ArtId, sparse
+	-- by design. Travels on the SAME payload as Mastery rather than earning a second remote: an
+	-- unlock and an equip both change what the Arts panel and the hotbar should show, and splitting
+	-- them would let a client render an equipped art it doesn't yet believe is unlocked.
+	Equipped: { [number]: ArtId },
+}
+
+-- Server (CharacterSheetSystem.lua) -> owning client only. The identity and standing half of a
+-- PlayerProfile -- deliberately ONLY the fields no other System already replicates. Tier/TierName
+-- come over Progression_TierUpdated, Meridian XP over Progression_MeridianXPUpdated, Qi over
+-- Progression_QiUpdated, art mastery over Art_StateUpdated; restating any of those here would give
+-- the client two sources for one fact that update on different schedules (tier moves on every kill,
+-- this sheet only on a profile-level change), and the staler one would win whenever it happened to
+-- arrive last.
+--
+-- Every field is nullable exactly where PlayerProfile's own is: DisplayName/RaceId/Attributes are
+-- nil together for a player who hasn't been through chargen, and Faction is nil while FactionManager
+-- remains a stub.
+export type CharacterSheetPayload = {
+	DisplayName: string?,
+	RaceId: RaceId?,
+	Faction: Faction?,
+	Attributes: AttributeBlock?,
+	BloodlineIds: { BloodlineId },
+	Corruption: number,
+	QiDeviationRisk: number,
+	FactionStanding: number,
+	HasAscended: boolean,
 }
 
 export type CombatFeedbackPayload = {
@@ -969,6 +1010,22 @@ export type KeybindAction =
 	-- remote of its own" shape as "OpenBugReport" above, and unlike "DevMenuToggle"/"OpenMoveEditor"
 	-- there is no authorization check at all, admin or otherwise: every player gets this panel.
 	| "SettingsToggle"
+	-- Opens the player's own character menu (Client/UI/Screens/Menus/init.lua via
+	-- Client/CharacterMenu/CharacterMenuClient.lua) -- the sheet/arts/emotes/bounty hub. Same
+	-- "client-side panel toggle, fires no combat remote of its own, no authorization gate" shape as
+	-- "SettingsToggle" above. This screen used to toggle off a raw UserInputService listener hard-coded
+	-- to M, which is why it alone among the panels couldn't be rebound; it routes through
+	-- KeybindManager like every other action now.
+	| "CharacterMenuToggle"
+	-- The Parkour System's dodge/roll (Client/Parkour/States/Rolling.lua via Client/Parkour/
+	-- ParkourInput.lua). Fires no combat remote of its own -- the parkour framework reports the action
+	-- to Server/Systems/ParkourSystem.lua through its own remote once the roll actually starts, the
+	-- same "the input records an intent, the state machine decides whether it becomes an action" split
+	-- Client/Parkour/InputBuffer.lua's own header describes. Sprint, Slide and jump are deliberately
+	-- NOT new actions here: sprint and slide already have entries above (the parkour framework reads
+	-- the same bindings), and jump has never been a rebindable action at all -- see KeybindManager.lua's
+	-- IsJumpKeyDown carve-out.
+	| "Roll"
 
 -- Exactly one of KeyCode/UserInputType is populated -- KeyCode for ordinary keyboard keys,
 -- UserInputType for inputs with no KeyCode equivalent (Roblox only reports mouse buttons via
@@ -995,7 +1052,40 @@ export type PlayerSettings = {
 	Keybinds: { [KeybindAction]: Keybind },
 	GamepadKeybinds: { [KeybindAction]: Keybind },
 	Autorun: boolean,
+	-- Movement/parkour preferences. A nested table rather than eight more flat fields, unlike Autorun
+	-- above -- these belong to one feature, are surfaced as one Settings section, and are pushed to
+	-- one consumer (Client/Parkour/ParkourController.lua), so grouping them keeps the whole set
+	-- addable/removable in one place. That is a different situation from Autorun, which is a single
+	-- preference belonging to sprint, and this file's own "a future toggle is just one more field
+	-- here" note still governs anything that isn't part of a group like this one.
+	Parkour: ParkourSettings,
 }
+
+-- The player's own movement preferences (Server/Systems/SettingsSystem.lua persists them,
+-- Client/Settings/SettingsClient.lua applies them). Every one of these defaults to whatever
+-- Shared/Parkour/ParkourConstants.lua currently ships as the default, never to a hardcoded second
+-- opinion -- so retuning what the game does out of the box is still a one-file change.
+--
+-- Enabled is a genuine master switch, not a cosmetic one: switching it off releases the character
+-- back to Roblox's stock controller and returns Slide to Client/Combat/CombatClient.lua's own legacy
+-- path. That fallback is exercised rather than theoretical, which is why CombatClient asks
+-- ParkourController.HandlesSlide() rather than assuming either system owns the key.
+--
+-- SprintMode lives here rather than beside Autorun because hold-versus-toggle is a movement-feel
+-- preference of the same family as the assists, even though the sprint mechanic it configures is
+-- owned by CombatClient -- see that module's own sprint section.
+export type ParkourSettings = {
+	Enabled: boolean,
+	CameraEffects: boolean,
+	CoyoteTime: boolean,
+	JumpBuffer: boolean,
+	AutoVault: boolean,
+	LedgeAssist: boolean,
+	StepAssist: boolean,
+	SprintMode: SprintMode,
+}
+
+export type SprintMode = "Hold" | "Toggle"
 
 -- Training bots (Server/Systems/TrainingBotSystem.lua) -- AI-controlled practice opponents,
 -- distinct from the static training dummy (which never acts). ai-design.md's "Training bots"
@@ -1387,8 +1477,16 @@ export type EmoteUnlockRequirement = {
 -- Constants.Combat.AnimationIds' own "wired but unauthored" convention: an empty string means no
 -- real asset exists yet, never a guessed/placeholder id (this codebase never fabricates one -- see
 -- that constant's own header). Duration is nil for a Loop == true emote (Sit/Dance -- stopped only
--- by RequestPlay/death/interruption, never on a timer); non-nil for a one-shot (Wave, Bow, ...),
--- which EmoteSystem uses to schedule the automatic stop.
+-- by RequestPlay/death/interruption, never on a timer); a positive number for a one-shot (Wave,
+-- Bow, ...). Shared/Emotes/EmoteRegistry.lua's Validate enforces both directions.
+--
+-- Duration is NOT the length of the animation, and does not end an emote that has one. A clip-bearing
+-- one-shot is ended by its own AnimationTrack reaching its natural end, reported by the acting client
+-- through Emote_NotifyFinished -- AnimationTrack.Length is client-only, so an authored number here can
+-- never be more than a guess about a separately-uploaded asset, and the two silently disagreeing is
+-- exactly what used to truncate emotes mid-motion. Duration still ends a one-shot with AnimationId ==
+-- "" (no track exists to finish), and remains authored design intent everywhere else. See Server/
+-- Systems/EmoteSystem.lua's WHAT ENDS A ONE-SHOT EMOTE header for the full lifecycle.
 export type EmoteDefinition = {
 	Id: EmoteId,
 	DisplayName: string,

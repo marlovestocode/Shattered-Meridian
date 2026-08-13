@@ -34,6 +34,7 @@ local FlightCamera = require(script.Parent.Camera.FlightCamera)
 local CameraShake = require(script.Parent.FX.CameraShake)
 local FOVOffset = require(script.Parent.FX.FOVOffset)
 local CameraOffsetComposer = require(script.Parent.FX.CameraOffsetComposer)
+local ParkourController = require(script.Parent.Parkour.ParkourController)
 local DevMenuClient = require(script.Parent.DevMenu.DevMenuClient)
 local MoveEditorClient = require(script.Parent.MoveEditor.MoveEditorClient)
 local FlightController = require(script.Parent.DevMenu.FlightController)
@@ -162,6 +163,22 @@ logger:debug("FlightCamera end")
 logger:debug("CameraShake start")
 CameraShake.Start()
 logger:debug("CameraShake end")
+
+-- After CombatClient (which owns sprint and pushes it into the movement framework -- see
+-- ParkourController.lua's own header) and after FOVOffset/CameraOffsetComposer/CameraShake above,
+-- whose named slots Client/Parkour/ParkourCamera.lua composes its speed zoom, slide framing, wall-run
+-- lean and landing dips through. Starting before those three would mean ParkourCamera writing into
+-- compositors that have not bound their render steps yet -- harmless for a frame, but the ordering is
+-- kept explicit here for the same reason every other entry in this file is.
+--
+-- Unconditional for every client. Client/Settings/SettingsClient.RestoreSettings() (already run
+-- further up, before CombatClient) has by this point pushed the player's own persisted movement
+-- preferences in, including the master Parkour toggle -- so a player who has switched parkour off
+-- gets a controller that starts and immediately does nothing, rather than this boot line needing to
+-- know about the setting.
+logger:debug("ParkourController start")
+ParkourController.Start()
+logger:debug("ParkourController end")
 
 logger:debug("DevMenuClient start")
 DevMenuClient.Start(uiHandles.DevMenu)

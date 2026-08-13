@@ -79,6 +79,12 @@ local PredictionMirror = require(script.Parent.PredictionMirror)
 local HotbarMoveClient = require(script.Parent.HotbarMoveClient)
 local Tokens = require(script.Parent.Parent.UI.Tokens)
 local EmoteWheelClient = require(script.Parent.Parent.Emotes.EmoteWheelClient)
+-- The Parkour System's orchestrator. This module reaches into it for exactly two things -- pushing
+-- sprint state (which this module still owns) and asking whether parkour is handling the Slide key --
+-- and ParkourController deliberately does NOT require this module back, so there is no cycle: the
+-- dependency runs combat -> parkour only. See ParkourController.lua's own header for why sprint stays
+-- here rather than moving into that framework.
+local ParkourController = require(script.Parent.Parent.Parkour.ParkourController)
 
 type CombatFeedbackHandle = CombatFeedbackModule.CombatFeedbackHandle
 type DeathFeedHandle = DeathFeedModule.DeathFeedHandle
@@ -125,6 +131,36 @@ function CombatClient.SetAutoSprint(enabled: boolean): ()
 	logger:debug("Auto-sprint setting changed", { enabled = enabled })
 	if onAutoSprintChanged then
 		onAutoSprintChanged()
+	end
+end
+
+-- Hold-to-sprint versus toggle-to-sprint (Types.ParkourSettings.SprintMode), owned by
+-- Client/Settings/SettingsClient.lua and pushed in here, exactly like autoSprintEnabled above and for
+-- the same reason (it can flip from the Settings panel long after Start has run).
+--
+-- Lives in CombatClient rather than in the parkour framework even though it is surfaced under that
+-- feature's Settings section, because sprint itself has always been this module's: it owns the sprint
+-- remotes, the server-side WalkSpeed tier they drive, the running animation, the dust trickle, the FOV
+-- zoom and the Slide gate. Interpreting the sprint KEY somewhere else would mean two modules deciding
+-- whether a player is sprinting -- see ParkourController.lua's own header on why that split is the
+-- thing this integration most needed to avoid.
+local sprintToggleMode = false
+-- Live toggle state, meaningful only while sprintToggleMode is true. Reset whenever the mode changes
+-- so switching modes mid-session can never leave a player stuck sprinting with no key held.
+local sprintToggledOn = false
+local onSprintModeChanged: (() -> ())? = nil
+
+-- Switches between hold-to-sprint (press = on, release = off) and toggle-to-sprint (press = flip).
+function CombatClient.SetSprintMode(mode: Types.SprintMode): ()
+	local nextToggleMode = mode == "Toggle"
+	if sprintToggleMode == nextToggleMode then
+		return
+	end
+	sprintToggleMode = nextToggleMode
+	sprintToggledOn = false
+	logger:debug("Sprint mode changed", { mode = mode })
+	if onSprintModeChanged then
+		onSprintModeChanged()
 	end
 end
 
@@ -462,11 +498,23 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle, deathFeed: Dea
 	-- until movement actually stops and restarts, the direct analogue of the key path's own
 	-- "until they release and re-press Sprint" limitation documented in the Sprint reject branch.
 	local function syncSprint(): ()
-		local intended = sprintKeyHeld or (autoSprintEnabled and autoSprintMoving)
+		-- Three routes into "sprint is intended," resolved in one place: the held key (Hold mode), the
+		-- toggle latch (Toggle mode -- see CombatClient.SetSprintMode), and Autorun. The two sprint-mode
+		-- routes are mutually exclusive by construction (only one of the two flags is ever written,
+		-- depending on the live mode), so they can safely be OR-ed rather than branched on here.
+		local intended = sprintKeyHeld or sprintToggledOn or (autoSprintEnabled and autoSprintMoving)
 		if intended == sprintEngaged then
+			-- Still pushed even on a no-op transition: ParkourController re-reads this every frame and a
+			-- missed push would leave the movement framework's own view of sprint stale for as long as
+			-- the state happened not to change.
+			ParkourController.SetSprinting(intended)
 			return
 		end
 		sprintEngaged = intended
+		-- The Parkour System reads sprint rather than owning it -- see ParkourController.lua's own
+		-- header. Pushed here, in the one place sprint actually changes, so both consumers (MovementVFX
+		-- below and the movement framework) are fed from the same transition.
+		ParkourController.SetSprinting(intended)
 		if intended then
 			-- Client-predicted, same as the request itself -- see CombatAnimator.StartRunning's own
 			-- comment for why this doesn't wait on a server round-trip.
@@ -488,6 +536,10 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle, deathFeed: Dea
 	-- once at boot from the restored profile) re-evaluate against live movement without reaching
 	-- into this closure's locals.
 	onAutoSprintChanged = syncSprint
+	-- Same mechanism for the sprint-mode setting: flipping Hold <-> Toggle clears the toggle latch (see
+	-- SetSprintMode), and this re-evaluates immediately so a player who was mid-toggle-sprint when they
+	-- switched modes stops sprinting right away rather than on their next movement transition.
+	onSprintModeChanged = syncSprint
 
 	local function setJumpEnabled(enabled: boolean): ()
 		if localHumanoid then
@@ -617,6 +669,12 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle, deathFeed: Dea
 		end
 		autoSprintMoving = false
 		sprintEngaged = false
+		-- Both sprint-input latches too: a life that ended mid-sprint must not hand the next one a held
+		-- key or a live toggle it never pressed. Same "respawn ends the per-life state" rule the resets
+		-- above follow.
+		sprintKeyHeld = false
+		sprintToggledOn = false
+		ParkourController.SetSprinting(false)
 	end)
 
 	-- Input: intent only. Every call below is a request; CombatSystem server-side decides what
@@ -809,22 +867,38 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle, deathFeed: Dea
 			logger:debug("Input: SwapWeapon keybind -> swap weapon")
 			fireRequest(requestSwapWeapon, "RequestSwapWeapon")
 		elseif KeybindManager.Matches("Sprint", input) then
-			-- Sprint is a held state (press = sprint on, release in InputEnded below = off), the same
-			-- start/stop shape as Block. The server tracks the intent and only actually raises
-			-- WalkSpeed while combat state permits (see CombatSystem.lua's handleSprintStart).
-			logger:debug("Input: Sprint keybind -> sprint start")
-			sprintKeyHeld = true
+			-- Sprint is a held state in Hold mode (press = sprint on, release in InputEnded below =
+			-- off), the same start/stop shape as Block -- or a flip per press in Toggle mode (see
+			-- CombatClient.SetSprintMode). Either way the server tracks the intent and only actually
+			-- raises WalkSpeed while combat state permits (see CombatSystem.lua's handleSprintStart).
+			logger:debug("Input: Sprint keybind -> sprint start", { toggleMode = sprintToggleMode })
+			if sprintToggleMode then
+				sprintToggledOn = not sprintToggledOn
+			else
+				sprintKeyHeld = true
+			end
 			-- No-ops if Autorun already engaged sprint for this movement -- see syncSprint's own header.
 			syncSprint()
 		elseif KeybindManager.Matches("Slide", input) then
-			-- Slide only fires while sprint is already engaged (this client's own local record --
-			-- sprintEngaged, which is true whether the player is holding the Sprint key or Autorun
-			-- engaged it -- not the server's, which handleSlideRequest independently re-checks) AND
-			-- canSlideLocally() says there's real, non-backward movement input -- see that function's
-			-- own header. A press that fails either check is simply not sent -- pressing C without
-			-- Sprint held, without moving, or while holding S does nothing, same "button does nothing"
-			-- simplicity as an early Dash press.
-			if sprintEngaged and canSlideLocally() then
+			-- TWO SLIDES LIVE HERE, and exactly one of them responds to any given press.
+			--
+			-- When the Parkour System is enabled and bound (the normal case), IT owns the slide: a real
+			-- momentum slide with slope response, a crouch that fits under geometry, and exits into
+			-- jumps/rolls/vaults. Client/Parkour/ParkourInput.lua has already recorded this same press
+			-- into the parkour input buffer, so there is nothing to do here but stay out of the way.
+			--
+			-- When parkour is switched off in Settings, or has not bound a character yet, this legacy
+			-- path runs unchanged -- the WalkSpeed-multiplier Slide the combat layer has always had,
+			-- with its own server request, cooldown and prediction. Keeping it reachable is what makes
+			-- the Settings toggle a genuine fallback rather than a switch that turns sliding off.
+			if ParkourController.HandlesSlide() then
+				logger:debug("Input: Slide keybind -> handled by Parkour System")
+			elseif sprintEngaged and canSlideLocally() then
+				-- Legacy path: Slide only fires while sprint is already engaged (this client's own local
+				-- record -- sprintEngaged, which is true whether the player is holding the Sprint key or
+				-- Autorun engaged it -- not the server's, which handleSlideRequest independently
+				-- re-checks) AND canSlideLocally() says there's real, non-backward movement input -- see
+				-- that function's own header. A press that fails either check is simply not sent.
 				logger:debug("Input: Slide keybind -> slide")
 				logger:debug("FireServer", { action = "RequestSlide" })
 				requestSlide:FireServer()
@@ -941,6 +1015,12 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle, deathFeed: Dea
 			fireRequest(requestBlockStop, "RequestBlockStop")
 			CombatAnimator.StopBlockHold()
 		elseif KeybindManager.Matches("Sprint", input) then
+			-- Release only means anything in Hold mode. In Toggle mode the press already flipped the
+			-- state and the release must not undo it -- returning early rather than guarding
+			-- sprintKeyHeld keeps the two modes' behavior visibly separate.
+			if sprintToggleMode then
+				return
+			end
 			logger:debug("Input: Sprint keybind released -> sprint stop")
 			sprintKeyHeld = false
 			-- Keeps sprint engaged if Autorun still wants it (player released the key but is still

@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local CombatTypes = require(ServerScriptService.Server.Combat.CombatTypes)
 local Movement = require(ServerScriptService.Server.Combat.Movement)
 local Fixtures = require(ServerScriptService.Tests.TestHelpers.Fixtures)
@@ -574,6 +575,223 @@ return function()
 			expect(airborne).to.equal(true)
 			airborne = Movement.ComputeGenuineJumpAirborne(airborne, Enum.HumanoidStateType.Physics)
 			expect(airborne).to.equal(false)
+		end)
+	end)
+
+	-- The Parkour System's two additions to this module. Both need a REAL Humanoid, unlike every
+	-- describe above -- they read Humanoid Attributes, which is deliberately how the Parkour System
+	-- influences this resolver without touching CombatSystem's private state (see
+	-- Constants.Attributes.ParkourVelocityOwned's own header). A bare Instance.new("Humanoid") is
+	-- enough: nothing here reads a property the character rig would supply.
+	describe("Movement -- Parkour System integration", function()
+		local function makeHumanoidState(attributes: { [string]: any }?, overrides: { [string]: any }?): CombatState
+			local humanoid = Instance.new("Humanoid")
+			if attributes then
+				for name, value in attributes do
+					humanoid:SetAttribute(name, value)
+				end
+			end
+			local state = makeState(overrides)
+			state.humanoid = humanoid
+			return state
+		end
+
+		local base = Constants.Combat.BaseWalkSpeed + Constants.Combat.DefaultBonusWalkSpeed
+
+		describe("ComputeDesiredWalkSpeed -- ParkourVelocityOwned tier", function()
+			it("pins WalkSpeed to zero while parkour owns velocity", function()
+				local state = makeHumanoidState({
+					[Constants.Attributes.BonusWalkSpeed] = Constants.Combat.DefaultBonusWalkSpeed,
+					[Constants.Attributes.ParkourVelocityOwned] = true,
+				})
+				expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(0)
+			end)
+
+			it("outranks sprint -- a slide must not have a raised WalkSpeed fighting its drive", function()
+				local state = makeHumanoidState({
+					[Constants.Attributes.ParkourVelocityOwned] = true,
+				}, { sprinting = true })
+				expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(0)
+			end)
+
+			it("has no effect once released", function()
+				local state = makeHumanoidState({
+					[Constants.Attributes.BonusWalkSpeed] = Constants.Combat.DefaultBonusWalkSpeed,
+					[Constants.Attributes.ParkourVelocityOwned] = false,
+				})
+				expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base)
+			end)
+		end)
+
+		describe("ComputeParkourSpeedFloor", function()
+			it("returns zero with no humanoid at all", function()
+				expect(Movement.ComputeParkourSpeedFloor(makeState(), 100)).to.equal(0)
+			end)
+
+			it("returns zero when the attributes were never set", function()
+				expect(Movement.ComputeParkourSpeedFloor(makeHumanoidState(), 100)).to.equal(0)
+			end)
+
+			it("returns the full floor at the instant the carry begins", function()
+				local carry = ParkourConstants.Locomotion.MomentumCarrySeconds
+				local state = makeHumanoidState({
+					[Constants.Attributes.ParkourSpeedFloor] = 30,
+					[Constants.Attributes.ParkourSpeedFloorExpiry] = 100 + carry,
+				})
+				expect(Movement.ComputeParkourSpeedFloor(state, 100)).to.equal(30)
+			end)
+
+			it("decays linearly across the carry window", function()
+				local carry = ParkourConstants.Locomotion.MomentumCarrySeconds
+				local state = makeHumanoidState({
+					[Constants.Attributes.ParkourSpeedFloor] = 30,
+					[Constants.Attributes.ParkourSpeedFloorExpiry] = 100 + carry,
+				})
+				local halfway = Movement.ComputeParkourSpeedFloor(state, 100 + carry * 0.5)
+				expect(math.abs(halfway - 15) < 0.01).to.equal(true)
+			end)
+
+			it("returns zero at and past the expiry", function()
+				local state = makeHumanoidState({
+					[Constants.Attributes.ParkourSpeedFloor] = 30,
+					[Constants.Attributes.ParkourSpeedFloorExpiry] = 100,
+				})
+				expect(Movement.ComputeParkourSpeedFloor(state, 100)).to.equal(0)
+				expect(Movement.ComputeParkourSpeedFloor(state, 200)).to.equal(0)
+			end)
+
+			it("caps an absurd reported floor independently of the network validator", function()
+				local carry = ParkourConstants.Locomotion.MomentumCarrySeconds
+				local cap = ParkourConstants.Locomotion.SprintSpeed
+					* ParkourConstants.Locomotion.MomentumCarryMaxMultiplier
+				local state = makeHumanoidState({
+					[Constants.Attributes.ParkourSpeedFloor] = 100000,
+					[Constants.Attributes.ParkourSpeedFloorExpiry] = 100 + carry,
+				})
+				expect(Movement.ComputeParkourSpeedFloor(state, 100)).to.equal(cap)
+			end)
+
+			it("returns zero for a NaN floor rather than propagating NaN into WalkSpeed", function()
+				-- A NaN WalkSpeed pins the character in place with no error anywhere -- the exact class of
+				-- silent failure worth a guard.
+				local state = makeHumanoidState({
+					[Constants.Attributes.ParkourSpeedFloor] = 0 / 0,
+					[Constants.Attributes.ParkourSpeedFloorExpiry] = 200,
+				})
+				expect(Movement.ComputeParkourSpeedFloor(state, 100)).to.equal(0)
+			end)
+
+			it("returns zero for a non-positive floor", function()
+				local state = makeHumanoidState({
+					[Constants.Attributes.ParkourSpeedFloor] = -5,
+					[Constants.Attributes.ParkourSpeedFloorExpiry] = 200,
+				})
+				expect(Movement.ComputeParkourSpeedFloor(state, 100)).to.equal(0)
+			end)
+		end)
+
+		describe("ComputeDesiredWalkSpeed -- momentum carry placement", function()
+			it("raises the base tier to the carried floor", function()
+				local carry = ParkourConstants.Locomotion.MomentumCarrySeconds
+				local state = makeHumanoidState({
+					[Constants.Attributes.BonusWalkSpeed] = Constants.Combat.DefaultBonusWalkSpeed,
+					[Constants.Attributes.ParkourSpeedFloor] = 40,
+					[Constants.Attributes.ParkourSpeedFloorExpiry] = 100 + carry,
+				})
+				expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(40)
+			end)
+
+			it("never LOWERS a speed the ordinary tiers already granted", function()
+				local carry = ParkourConstants.Locomotion.MomentumCarrySeconds
+				local state = makeHumanoidState({
+					[Constants.Attributes.BonusWalkSpeed] = Constants.Combat.DefaultBonusWalkSpeed,
+					[Constants.Attributes.ParkourSpeedFloor] = 1,
+					[Constants.Attributes.ParkourSpeedFloorExpiry] = 100 + carry,
+				}, { sprinting = true })
+				expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(
+					base * Constants.Combat.SprintSpeedMultiplier
+				)
+			end)
+
+			it("cannot peek through hit-slow -- parkour must never outrun the consequences of a hit", function()
+				-- The single most important placement decision in this integration: the carry is applied
+				-- only to the two free-movement tiers, so every early-returning tier above it (hit-slow,
+				-- stun, posture break, commitment, air-combo hold, freeze, flight) is unaffected.
+				local carry = ParkourConstants.Locomotion.MomentumCarrySeconds
+				local state = makeHumanoidState({
+					[Constants.Attributes.BonusWalkSpeed] = Constants.Combat.DefaultBonusWalkSpeed,
+					[Constants.Attributes.ParkourSpeedFloor] = 46,
+					[Constants.Attributes.ParkourSpeedFloorExpiry] = 100 + carry,
+				}, { hitSlowExpiry = 200 })
+				expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base * Constants.Combat.HitSlowMultiplier)
+			end)
+
+			it("cannot peek through an admin freeze", function()
+				local carry = ParkourConstants.Locomotion.MomentumCarrySeconds
+				local state = makeHumanoidState({
+					[Constants.Attributes.Frozen] = true,
+					[Constants.Attributes.ParkourSpeedFloor] = 46,
+					[Constants.Attributes.ParkourSpeedFloorExpiry] = 100 + carry,
+				})
+				expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(0)
+			end)
+
+			it("cannot peek through an air-combo hold", function()
+				local carry = ParkourConstants.Locomotion.MomentumCarrySeconds
+				local state = makeHumanoidState({
+					[Constants.Attributes.ParkourSpeedFloor] = 46,
+					[Constants.Attributes.ParkourSpeedFloorExpiry] = 100 + carry,
+				}, { airComboHeldExpiry = 200 })
+				expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(0)
+			end)
+		end)
+
+		describe("Movement.SmoothWalkSpeed", function()
+			it("ramps upward at the acceleration rate rather than snapping", function()
+				local result = Movement.SmoothWalkSpeed(10, 27, 0.05)
+				expect(result > 10).to.equal(true)
+				expect(result < 27).to.equal(true)
+			end)
+
+			it("ramps downward at the deceleration rate", function()
+				local result = Movement.SmoothWalkSpeed(40, 18, 0.05)
+				expect(result < 40).to.equal(true)
+				expect(result > 18).to.equal(true)
+			end)
+
+			it("uses a slower rate downward than upward, so earned speed lingers", function()
+				local up = Movement.SmoothWalkSpeed(20, 40, 0.05) - 20
+				local down = 20 - Movement.SmoothWalkSpeed(20, 0.01, 0.05)
+				expect(up > down).to.equal(true)
+			end)
+
+			it("arrives exactly at the target when the gap is within one frame's step", function()
+				expect(Movement.SmoothWalkSpeed(26.99, 27, 0.5)).to.equal(27)
+			end)
+
+			it("snaps instantly to zero -- every hard stop must apply on the frame it is applied", function()
+				-- A freeze, a flight, an emote lock, an air-combo hold or parkour taking velocity all
+				-- resolve to zero, and easing into any of them would leave the character drifting after a
+				-- lockdown.
+				expect(Movement.SmoothWalkSpeed(40, 0, 0.016)).to.equal(0)
+			end)
+
+			it("snaps instantly OUT of zero, so a released player can move at once", function()
+				expect(Movement.SmoothWalkSpeed(0, 27, 0.016)).to.equal(27)
+			end)
+
+			it("holds current for a zero or negative deltaTime rather than dividing by it", function()
+				expect(Movement.SmoothWalkSpeed(20, 27, 0)).to.equal(20)
+				expect(Movement.SmoothWalkSpeed(20, 27, -1)).to.equal(20)
+			end)
+
+			it("converges on the target across repeated frames", function()
+				local speed = 5
+				for _ = 1, 120 do
+					speed = Movement.SmoothWalkSpeed(speed, 27, 1 / 60)
+				end
+				expect(speed).to.equal(27)
+			end)
 		end)
 	end)
 end

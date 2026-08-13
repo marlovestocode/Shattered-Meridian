@@ -39,6 +39,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local SettingsModule = require(script.Parent.Parent.UI.Screens.Settings)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local CombatClient = require(script.Parent.Parent.Combat.CombatClient)
+local ParkourController = require(script.Parent.Parent.Parkour.ParkourController)
 
 type SettingsHandle = SettingsModule.SettingsHandle
 type ListeningState = { Device: Types.KeybindDevice, Action: Types.KeybindAction }
@@ -61,6 +62,39 @@ local SettingsClient = {}
 -- engage sprint through its own single code path (see CombatClient.SetAutoSprint).
 local autorunEnabled = false
 
+-- The live Parkour preference block. Same role as autorunEnabled above -- set by RestoreSettings and
+-- by the panel's own controls, read back by Start to seed the screen -- and, like Autorun, the EFFECT
+-- of each preference is owned elsewhere: Client/Parkour/ParkourController.lua for the movement ones,
+-- Client/Combat/CombatClient.lua for SprintMode (sprint has always been CombatClient's, and driving a
+-- second sprint path from here would desync every one of the things it already owns). This module
+-- only routes.
+local parkourSettings: Types.ParkourSettings = {
+	Enabled = false,
+	CameraEffects = true,
+	CoyoteTime = true,
+	JumpBuffer = true,
+	AutoVault = true,
+	LedgeAssist = true,
+	StepAssist = true,
+	SprintMode = "Hold",
+}
+
+-- Pushes the whole current block to the modules that act on it. Called after any change rather than
+-- having each control call its own consumer, so there is one place the mapping from preference to
+-- consumer lives, and no way for a new preference to be persisted but never applied.
+local function applyParkourSettings(): ()
+	ParkourController.SetEnabled(parkourSettings.Enabled)
+	ParkourController.SetCameraEffectsEnabled(parkourSettings.CameraEffects)
+	ParkourController.SetAssists({
+		CoyoteTime = parkourSettings.CoyoteTime,
+		JumpBuffer = parkourSettings.JumpBuffer,
+		AutoVault = parkourSettings.AutoVault,
+		LedgeAssist = parkourSettings.LedgeAssist,
+		StepAssist = parkourSettings.StepAssist,
+	})
+	CombatClient.SetSprintMode(parkourSettings.SprintMode)
+end
+
 -- Applies every persisted keybind override onto KeybindManager and primes the Autorun loop -- see
 -- file header for why this is a separate, EARLIER phase than Start(handle). A RemoteFunction round
 -- trip (not a server push fired once on PlayerDataSystem.OnProfileLoaded, the way EmoteSystem's own
@@ -82,7 +116,11 @@ function SettingsClient.RestoreSettings(): ()
 		logger:warn("RestoreSettings: GetSettings failed -- using inert defaults", {
 			errorMessage = if not ok then tostring(result) else nil,
 		})
-		settings = { Keybinds = {}, GamepadKeybinds = {}, Autorun = false }
+		-- Parkour is left at this module's own defaults on a failed fetch rather than switched off:
+		-- a settings round trip failing is a transient network problem, and degrading a player's
+		-- movement to the fallback controller because of it would be a far more visible and confusing
+		-- failure than simply running the shipped defaults for the session.
+		settings = { Keybinds = {}, GamepadKeybinds = {}, Autorun = false, Parkour = parkourSettings }
 	end
 
 	if typeof(settings.Keybinds) == "table" then
@@ -99,7 +137,31 @@ function SettingsClient.RestoreSettings(): ()
 	autorunEnabled = settings.Autorun == true
 	CombatClient.SetAutoSprint(autorunEnabled)
 
-	logger:info("Settings restored", { autorun = autorunEnabled })
+	-- Field-by-field rather than assigning the payload wholesale: the server's own decode already
+	-- guarantees a complete block, but this module also has to survive an older server (a rolling
+	-- deploy, a place that hasn't republished) that predates the Parkour block entirely -- in which
+	-- case every field is nil and each one falls back to this module's own default rather than to
+	-- false, which would read as "the player disabled everything."
+	local restoredParkour = settings.Parkour
+	if typeof(restoredParkour) == "table" then
+		local raw = restoredParkour :: { [string]: any }
+		local function boolean(key: string, fallback: boolean): boolean
+			return if typeof(raw[key]) == "boolean" then raw[key] else fallback
+		end
+		parkourSettings = {
+			Enabled = boolean("Enabled", parkourSettings.Enabled),
+			CameraEffects = boolean("CameraEffects", parkourSettings.CameraEffects),
+			CoyoteTime = boolean("CoyoteTime", parkourSettings.CoyoteTime),
+			JumpBuffer = boolean("JumpBuffer", parkourSettings.JumpBuffer),
+			AutoVault = boolean("AutoVault", parkourSettings.AutoVault),
+			LedgeAssist = boolean("LedgeAssist", parkourSettings.LedgeAssist),
+			StepAssist = boolean("StepAssist", parkourSettings.StepAssist),
+			SprintMode = if raw.SprintMode == "Toggle" then "Toggle" else "Hold",
+		}
+	end
+	applyParkourSettings()
+
+	logger:info("Settings restored", { autorun = autorunEnabled, parkour = parkourSettings.Enabled })
 end
 
 local statusGeneration = 0
@@ -150,6 +212,7 @@ function SettingsClient.Start(handle: SettingsHandle): ()
 	handle.KeyboardBindings:set(KeybindManager.GetAll())
 	handle.GamepadBindings:set(KeybindManager.GetAllGamepad())
 	handle.Autorun:set(autorunEnabled)
+	handle.Parkour:set(table.clone(parkourSettings))
 
 	local captureConnection: RBXScriptConnection? = nil
 
@@ -261,6 +324,28 @@ function SettingsClient.Start(handle: SettingsHandle): ()
 
 		local updateAutorunRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateAutorun)
 		updateAutorunRemote:FireServer(enabled)
+	end)
+
+	-- Apply-then-persist, the same order every control in this module uses (see the file header): the
+	-- local session sees the change immediately with no round trip, and the remote exists purely to
+	-- make it durable. The server re-validates the field name and value regardless of what is sent --
+	-- see SettingsSystem's PARKOUR_SETTING_TYPES.
+	handle.ParkourToggled:Connect(function(field: string, enabled: boolean)
+		(parkourSettings :: { [string]: any })[field] = enabled
+		handle.Parkour:set(table.clone(parkourSettings))
+		applyParkourSettings()
+
+		local updateParkourRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateParkour)
+		updateParkourRemote:FireServer(field, enabled)
+	end)
+
+	handle.SprintModeChanged:Connect(function(mode: Types.SprintMode)
+		parkourSettings.SprintMode = mode
+		handle.Parkour:set(table.clone(parkourSettings))
+		applyParkourSettings()
+
+		local updateParkourRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateParkour)
+		updateParkourRemote:FireServer("SprintMode", mode)
 	end)
 
 	logger:debug("SettingsClient bindings connected")

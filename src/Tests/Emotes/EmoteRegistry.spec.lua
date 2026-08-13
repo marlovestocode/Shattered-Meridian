@@ -105,8 +105,40 @@ return function()
 		end)
 
 		it("accepts Duration = nil for a looping emote", function()
-			local ok = EmoteRegistry.Validate(makeDefinition({ Loop = true, Duration = nil }))
+			-- Built by removing the key, NOT via makeDefinition({ Duration = nil }) -- `Duration = nil`
+			-- inside a table constructor simply means the key was never written, so the override loop
+			-- has nothing to copy and the helper's own default Duration = 2 survives. This test used to
+			-- do exactly that and was therefore asserting the opposite of its own name.
+			local candidate = makeDefinition({ Loop = true })
+			candidate.Duration = nil
+			local ok, reason = EmoteRegistry.Validate(candidate)
 			expect(ok).to.equal(true)
+			expect(reason).to.equal(nil)
+		end)
+
+		-- Regression guard for the whole authored roster. The bug this file's Duration rules exist to
+		-- catch (a one-shot whose Duration is missing/zero, a looping entry carrying one) is invisible
+		-- by inspection and only shows up in play as an emote that ends at the wrong moment -- so the
+		-- real content gets run through the same gate an untrusted candidate would be.
+		it("accepts every hand-authored definition in the live roster", function()
+			for id, definition in EmoteRegistry.GetAll() do
+				local ok, reason = EmoteRegistry.Validate(definition)
+				if not ok then
+					error(`{id} failed EmoteRegistry.Validate: {reason}`)
+				end
+			end
+		end)
+
+		-- Guards the "" vs "rbxassetid://" distinction EmoteDefinitions.lua's own header calls out: a
+		-- prefix-only placeholder reads as unauthored to a human but is a non-empty string to every
+		-- `AnimationId ~= ""` guard in the codebase (EmoteAnimator's skip-the-template check,
+		-- EmoteSystem's hasClip), so it silently takes the clip-bearing path with no clip behind it.
+		it("never authors a prefix-only AnimationId placeholder", function()
+			for id, definition in EmoteRegistry.GetAll() do
+				if definition.AnimationId == "rbxassetid://" then
+					error(`{id} has a prefix-only AnimationId placeholder -- use "" for unauthored`)
+				end
+			end
 		end)
 	end)
 
@@ -133,6 +165,33 @@ return function()
 			local ok, reason = EmoteRegistry.Validate(makeDefinition({ Loop = "yes" }))
 			expect(ok).to.equal(false)
 			expect(reason).to.equal("InvalidLoop")
+		end)
+
+		-- The literal "ends way early" trap: EmoteSystem's `definition.Duration or 0` fallback turns a
+		-- missing Duration on a one-shot into an expiry that has already passed, stopping the emote on
+		-- the very next heartbeat tick.
+		it("rejects a one-shot emote with no Duration", function()
+			local candidate = makeDefinition()
+			candidate.Duration = nil
+			local ok, reason = EmoteRegistry.Validate(candidate)
+			expect(ok).to.equal(false)
+			expect(reason).to.equal("MissingDuration")
+		end)
+
+		it("rejects a one-shot emote with a zero or negative Duration", function()
+			local zeroOk, zeroReason = EmoteRegistry.Validate(makeDefinition({ Duration = 0 }))
+			expect(zeroOk).to.equal(false)
+			expect(zeroReason).to.equal("MissingDuration")
+
+			local negativeOk, negativeReason = EmoteRegistry.Validate(makeDefinition({ Duration = -1 }))
+			expect(negativeOk).to.equal(false)
+			expect(negativeReason).to.equal("MissingDuration")
+		end)
+
+		it("rejects a looping emote that carries a Duration", function()
+			local ok, reason = EmoteRegistry.Validate(makeDefinition({ Loop = true, Duration = 3 }))
+			expect(ok).to.equal(false)
+			expect(reason).to.equal("UnexpectedDuration")
 		end)
 
 		it("rejects an unknown Unlock.Type", function()

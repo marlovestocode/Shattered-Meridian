@@ -85,8 +85,13 @@ function FlightPhysics.EnterCollideMode(rootPart: BasePart): ()
 		local orientationDrive = Instance.new("AlignOrientation")
 		orientationDrive.Name = ORIENTATION_DRIVE_NAME
 		orientationDrive.Attachment0 = attachment
+		-- No `RelativeTo` write: that property exists on LinearVelocity/VectorForce above but NOT on
+		-- AlignOrientation, and assigning it throws "RelativeTo is not a valid member of
+		-- AlignOrientation" the moment this rig is built. Latent here rather than reported, because
+		-- Collide mode is admin-only and rarely exercised -- it surfaced when Client/Parkour/
+		-- ParkourMotor.lua modelled its own orientation drive on this one and hit it on the first
+		-- playtest. OneAttachment mode already interprets `CFrame` in world space, so nothing is lost.
 		orientationDrive.Mode = Enum.OrientationAlignmentMode.OneAttachment
-		orientationDrive.RelativeTo = Enum.ActuatorRelativeTo.World
 		orientationDrive.RigidityEnabled = false
 		orientationDrive.MaxTorque = math.huge
 		orientationDrive.CFrame = rootPart.CFrame - rootPart.CFrame.Position

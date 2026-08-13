@@ -37,6 +37,11 @@ local modulesToLoad = {
 	-- its encode/decode round trip still wants writing; that needs its file-local helpers exported
 	-- first, the way BugReportSystem.ValidateCategory already is.
 	ServerScriptService.Server.Systems.MoveEditorSystem,
+	-- ParkourSystem.lua's pure logic lives in Shared/Parkour/ParkourValidation.lua (specced directly),
+	-- so this entry exists for the same reason SettingsSystem's does: nothing else in the suite would
+	-- catch a broken require path or syntax error in the module that owns this feature's two remotes,
+	-- its trust boundary and the Attributes the combat WalkSpeed resolver reads.
+	ServerScriptService.Server.Systems.ParkourSystem,
 }
 for _, moduleScript in ipairs(modulesToLoad) do
 	local ok, errorMessage = pcall(require, moduleScript)

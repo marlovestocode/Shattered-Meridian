@@ -159,6 +159,12 @@ local BotCombat = require(script.Parent.Parent.Combat.BotCombat)
 local AirCombo = require(script.Parent.Parent.Combat.AirCombo)
 local GameplayEvents = require(script.Parent.Parent.Events.GameplayEvents)
 local AdminConfig = require(script.Parent.Parent.Config.AdminConfig)
+-- The permission-and-cost half of the art path (see handleFireHotbarMoveRequest). This direction --
+-- combat asking progression whether a throw is allowed and paid for -- is the one ArtSystem.UseArt's
+-- own header specifies ("the caller owns execution; this System owns permission and cost"), and it
+-- is acyclic: nothing in ArtSystem's require chain (PlayerDataSystem/QiSystem/TierSystem/
+-- ArtTreeManager/MoveRegistryManager) reaches back into this module.
+local ArtSystem = require(script.Parent.ArtSystem)
 
 local RemoteNames = Constants.Combat.RemoteNames
 
@@ -3526,9 +3532,17 @@ local function onHeartbeat(deltaTime: number): ()
 		end
 
 		if state.humanoid then
+			-- Two steps, not one, since the Parkour System: ComputeDesiredWalkSpeed still resolves WHAT
+			-- speed is correct this tick through its existing priority tiers, and SmoothWalkSpeed decides
+			-- how fast the property actually gets there -- which is what gives ordinary running real
+			-- acceleration and deceleration, and what lets a parkour exit's momentum carry read as
+			-- momentum rather than as a step change. Every hard stop (freeze, flight, emote lock,
+			-- air-combo hold, parkour owning velocity) still applies instantly; see SmoothWalkSpeed's own
+			-- header for why those two cases deliberately snap.
 			local desiredWalkSpeed = Movement.ComputeDesiredWalkSpeed(state, now)
-			if state.humanoid.WalkSpeed ~= desiredWalkSpeed then
-				state.humanoid.WalkSpeed = desiredWalkSpeed
+			local nextWalkSpeed = Movement.SmoothWalkSpeed(state.humanoid.WalkSpeed, desiredWalkSpeed, deltaTime)
+			if state.humanoid.WalkSpeed ~= nextWalkSpeed then
+				state.humanoid.WalkSpeed = nextWalkSpeed
 			end
 		end
 
@@ -4397,39 +4411,93 @@ function CombatSystem.ThrowCustomMove(player: Player, moveId: string): (boolean,
 	return true, nil
 end
 
--- Client -> server (Combat_RequestFireHotbarMove), the hotbar's live-fire path -- makes an admin's
--- Move-Editor-authored moves actually playable outside MoveEditorSystem.TestFireMove's own preview
--- dummy, against whatever/whoever the admin is really fighting. This is the ONE thing
--- ThrowCustomMove deliberately does NOT check itself (see that function's own header): every
--- request reaching this handler is re-verified against AdminConfig.AuthorizedUserIds regardless of
--- what the client claims, the same "never trust a client-submitted admin claim" rule
--- MoveEditorSystem.checkMoveEditorPreconditions already enforces for every Move Editor remote -- a
--- non-admin (or a modified client skipping the HUD/keybind gate entirely) firing this remote
--- directly gets the same NotAuthorized rejection either way. Deliberately has NO rate limiter of its
--- own beyond that authorization check: ThrowCustomMove's own checkCommonPreconditions already
--- applies attackRateLimiter (shared with every other attack request) for any call that gets past
--- the admin gate, so a second limiter here would only guard the cheap, non-mutating boolean lookup
--- an unauthorized caller hits before ever reaching ThrowCustomMove -- the same "auth first,
--- unbounded; rate limit only what's authorized" shape MoveEditorSystem.checkMoveEditorPreconditions
--- already established.
+-- Whether `moveId` is currently sitting in one of `player`'s own equipped art slots
+-- (Types.PlayerProfile.equippedArts). The hotbar remote carries a MoveId, not a slot index, so
+-- "which slot did they press" isn't answerable here -- "is this art on their bar at all" is, and
+-- that is the rule worth enforcing: the ArtConstants.EquipSlotCount slots are a real build
+-- constraint, and without this check a modified client could fire every art it has ever unlocked
+-- and the loadout limit would be decorative.
+local function isEquippedArt(player: Player, moveId: string): boolean
+	for _, artId in pairs(ArtSystem.GetEquipped(player)) do
+		if artId == moveId then
+			return true
+		end
+	end
+	return false
+end
+
+-- Client -> server (Combat_RequestFireHotbarMove), the hotbar's live-fire path. TWO independent
+-- routes reach the same ThrowCustomMove, and which one applies is decided by the request itself,
+-- never by anything the client asserts:
+--
+--   1. THE ART PATH (every player). The move is an art the player has equipped
+--      (Types.PlayerProfile.equippedArts, written only by ArtSystem.Equip). This is what makes an
+--      unlocked art actually castable, and it is the reason ArtSystem.UseArt -- which had no caller
+--      at all until now -- exists. Permission and cost stay entirely ArtSystem's (see its header):
+--      CanUse is asked BEFORE the swing commits so an art refused for a combat reason (mid-attack,
+--      stunned, on cooldown) costs no Qi, and UseArt -- the call that actually spends and credits
+--      mastery -- runs only once the throw is committed. Nothing yields between those two, so there
+--      is no window in which the pool could change underneath the decision.
+--   2. THE ADMIN PATH (unchanged). Any Move-Editor-authored move, free, for a user id in
+--      AdminConfig.AuthorizedUserIds -- the Move Editor's own "bind to slot and try it against a
+--      real fight" workflow (Client/Combat/HotbarBindings.lua), which must keep working for moves
+--      that are not arts and carry no Qi cost to charge.
+--
+-- The art path is checked FIRST so that an admin who has genuinely equipped an art plays by the
+-- same rules as everyone else rather than casting their own progression for free; an admin's
+-- non-art bindings still fall through to path 2. A non-admin whose move is neither gets the same
+-- NotAuthorized rejection this handler has always given -- the "never trust a client-submitted
+-- admin claim" rule MoveEditorSystem.checkMoveEditorPreconditions already enforces.
+--
+-- Still no rate limiter of its own: ThrowCustomMove's checkCommonPreconditions already applies
+-- attackRateLimiter to anything that gets past the gates above, and both gates are cheap
+-- non-mutating lookups -- the same "auth first, unbounded; rate limit only what's authorized" shape
+-- as before.
 --
 -- Unlike Basic/Heavy/Dash/BlockStart/Slide, this action has no client-side prediction to roll back
 -- (see Types.RejectedActionKind's own header on "CustomMove") -- a genuine reject still echoes back
--- over the existing Combat_ActionRejected channel purely so the requesting admin learns WHY
--- (NotAuthorized/CooldownActive/MoveNotFound/...) instead of the press silently doing nothing.
+-- over the existing Combat_ActionRejected channel purely so the requester learns WHY
+-- (NotEnoughQi/NotAuthorized/CooldownActive/MoveNotFound/...) instead of the press silently doing
+-- nothing.
 local function handleFireHotbarMoveRequest(player: Player, rawMoveId: unknown): ()
 	logReceived("FireHotbarMove", player)
+
+	if typeof(rawMoveId) ~= "string" then
+		rejectAndNotify("FireHotbarMove", "CustomMove", player, "InvalidMoveId")
+		return
+	end
+	local moveId = rawMoveId :: string
+
+	if isEquippedArt(player, moveId) then
+		local refusal = ArtSystem.CanUse(player, moveId)
+		if refusal then
+			rejectAndNotify("FireHotbarMove", "CustomMove", player, refusal)
+			return
+		end
+
+		local success, reason = CombatSystem.ThrowCustomMove(player, moveId)
+		if not success then
+			rejectAndNotify("FireHotbarMove", "CustomMove", player, reason or "Unknown")
+			return
+		end
+
+		-- The swing is already committed by this point, so a refusal here cannot be handed back to
+		-- the player as a rejection -- CanUse passed a moment ago with no yield in between, which
+		-- leaves a profile unloading mid-frame as the only way to reach this branch. Logged rather
+		-- than swallowed: a free art cast is exactly the kind of thing that should be visible.
+		local spendRefusal = ArtSystem.UseArt(player, moveId)
+		if spendRefusal then
+			logger:warn("Art thrown but not charged", { player = player.Name, artId = moveId, reason = spendRefusal })
+		end
+		return
+	end
 
 	if not AdminConfig.AuthorizedUserIds[player.UserId] then
 		rejectAndNotify("FireHotbarMove", "CustomMove", player, "NotAuthorized")
 		return
 	end
-	if typeof(rawMoveId) ~= "string" then
-		rejectAndNotify("FireHotbarMove", "CustomMove", player, "InvalidMoveId")
-		return
-	end
 
-	local success, reason = CombatSystem.ThrowCustomMove(player, rawMoveId)
+	local success, reason = CombatSystem.ThrowCustomMove(player, moveId)
 	if not success then
 		rejectAndNotify("FireHotbarMove", "CustomMove", player, reason or "Unknown")
 	end

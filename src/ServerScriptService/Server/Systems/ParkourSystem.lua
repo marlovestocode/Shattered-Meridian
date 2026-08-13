@@ -1,0 +1,396 @@
+--!strict
+--[[
+	ParkourSystem.lua
+
+	Owns: the server half of the Parkour System -- the two Parkour_* remotes, the plausibility gate
+	every client action report passes through, the Humanoid Attributes that let the combat layer's
+	WalkSpeed resolver cooperate with client-driven movement, and the expiry timer that guarantees a
+	granted velocity-ownership window always closes.
+
+	THE TRUST MODEL, stated honestly up front. Roblox gives a client network ownership of its own
+	character's unanchored parts; a cheating client can move that character however it likes with or
+	without this system. So this module does NOT claim to prevent movement exploits, and
+	Shared/Parkour/ParkourValidation.lua's own header says the same at more length. What it actually
+	buys, all three of which are real:
+	  1. AGREEMENT. Server/Combat/Movement.ComputeDesiredWalkSpeed runs every server Heartbeat and
+	     would fight a client-driven slide for the same body. The ParkourVelocityOwned Attribute is how
+	     the server stands that resolver down for exactly as long as an accepted action lasts -- and
+	     the expiry below is how it stands back up even if the client never says the action ended.
+	  2. BOUNDED INFLUENCE. Exactly one client-supplied number reaches gameplay: the exit speed that
+	     becomes the ParkourSpeedFloor momentum carry. It is validated here, capped again independently
+	     in Movement.ComputeParkourSpeedFloor, decays to nothing within a second, and is applied only
+	     to the free-movement tiers -- so it can never peek through hit-slow, a stun or a posture break.
+	  3. VISIBILITY. A client producing a sustained stream of impossible claims trips the existing
+	     suspected-cheater path (ModerationSystem's "System"-sourced flag, which Types.SuspicionSource
+	     already reserves for exactly this kind of automated detection) rather than being silently
+	     tolerated.
+
+	Never touches CombatSystem's private state. Every piece of cross-system signalling goes through
+	Humanoid Attributes, the same shape AdminActionSystem's Flying/Frozen and EmoteSystem's
+	EmoteMovementLocked already use to influence that same resolver -- which is why this System needed
+	no change to CombatSystem beyond one call site, and why it can be removed again without unpicking
+	anything.
+
+	Does not own: any movement behavior or decision (Client/Parkour/* owns all of it), the WalkSpeed
+	resolver itself (Server/Combat/Movement.lua), or the tunables (Shared/Parkour/ParkourConstants.lua).
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Constants = require(ReplicatedStorage.Shared.Constants)
+local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
+local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
+local ParkourValidation = require(ReplicatedStorage.Shared.Parkour.ParkourValidation)
+local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
+local Types = require(ReplicatedStorage.Shared.Types)
+local Logger = require(ReplicatedStorage.Shared.Logger)
+
+local ModerationSystem = require(script.Parent.ModerationSystem)
+
+type ActionKind = ParkourTypes.ActionKind
+type ActionReport = ParkourTypes.ActionReport
+type RejectionReason = ParkourTypes.RejectionReason
+
+local logger = Logger.scope("ParkourSystem")
+
+local ParkourSystem = {}
+
+local RemoteNames = ParkourConstants.Network.RemoteNames
+local VALIDATION = ParkourConstants.Validation
+
+-- Per-player server-side view of what that client claims to be doing. Deliberately minimal: this is
+-- bookkeeping for the ownership window and the validator, NOT a mirror of the client's state machine.
+-- The server has no opinion about whether a player is wall-running versus sliding -- only about
+-- whether someone currently owns their velocity, since that is the only thing that changes what the
+-- server itself does.
+type PlayerParkourState = {
+	OpenKind: ActionKind?,
+	OpenStartedAt: number?,
+	OpenStartPosition: Vector3?,
+	-- Wall-clock deadline after which the ownership window is force-closed regardless of the client.
+	OpenExpiresAt: number,
+	LastPerKind: { [string]: number },
+	-- Timestamps of recent rejections, pruned to VALIDATION.RejectionWindowSeconds.
+	Rejections: { number },
+	-- True once this player has been flagged this session, so a sustained stream of bad reports
+	-- produces one flag rather than one per report past the threshold.
+	Flagged: boolean,
+}
+
+local playerStates: { [Player]: PlayerParkourState } = {}
+
+-- Only the rejection remote is held: this System FIRES that one (notifyRejected), where the report
+-- remote is purely subscribed to in Init and never referenced again, so keeping a local for it would
+-- be a variable that exists only for symmetry.
+local rejectedRemote: RemoteEvent? = nil
+
+-- One shared budget across the single remote this System owns. Sized from
+-- ParkourConstants.Network.MaxReportsPerSecondPerPlayer rather than Constants.NetworkBudget's default
+-- 4/s -- see that constant's own header for why a legitimate fast chain genuinely needs more, and why
+-- throttling one would desync the server's view of who owns velocity.
+local rateLimiter = RateLimiter.New(ParkourConstants.Network.MaxReportsPerSecondPerPlayer)
+
+local function getState(player: Player): PlayerParkourState
+	local existing = playerStates[player]
+	if existing then
+		return existing
+	end
+	local created: PlayerParkourState = {
+		OpenKind = nil,
+		OpenStartedAt = nil,
+		OpenStartPosition = nil,
+		OpenExpiresAt = 0,
+		LastPerKind = {},
+		Rejections = {},
+		Flagged = false,
+	}
+	playerStates[player] = created
+	return created
+end
+
+local function getHumanoid(player: Player): Humanoid?
+	local character = player.Character
+	if not character then
+		return nil
+	end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	return humanoid
+end
+
+local function getRootPart(player: Player): BasePart?
+	local character = player.Character
+	if not character then
+		return nil
+	end
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if rootPart and rootPart:IsA("BasePart") then
+		return rootPart
+	end
+	return nil
+end
+
+-- Clears every Attribute this System sets. Called when an action ends, when its window expires, on
+-- respawn and on leave -- every path out of ownership, without exception, because an unreleased
+-- ParkourVelocityOwned pins that player's WalkSpeed at zero for the rest of their life.
+local function releaseOwnership(player: Player): ()
+	local humanoid = getHumanoid(player)
+	if not humanoid then
+		return
+	end
+	humanoid:SetAttribute(Constants.Attributes.ParkourVelocityOwned, false)
+	humanoid:SetAttribute(Constants.Attributes.ParkourState, "")
+end
+
+local function notifyRejected(
+	player: Player,
+	kind: ActionKind,
+	phase: ParkourTypes.ActionPhase,
+	reason: RejectionReason
+): ()
+	local remote = rejectedRemote
+	if not remote then
+		return
+	end
+	remote:FireClient(player, { Kind = kind, Phase = phase, Reason = reason } :: ParkourTypes.ActionRejectedPayload)
+end
+
+-- Records a rejection and flags the player if they have produced enough of them inside the window.
+-- Flagging is deliberately one-way per session (state.Flagged) -- a player who trips the threshold
+-- once has already generated the record a human moderator needs, and re-flagging every subsequent
+-- report would spam the suspicion DataStore for no additional information.
+local function noteRejection(player: Player, state: PlayerParkourState, reason: RejectionReason, now: number): ()
+	table.insert(state.Rejections, now)
+	local count = ParkourValidation.PruneRejections(state.Rejections, now, VALIDATION.RejectionWindowSeconds)
+	if state.Flagged or not ParkourValidation.ShouldFlag(count, VALIDATION.RejectionsBeforeFlag) then
+		return
+	end
+	state.Flagged = true
+	logger:warn("Flagging player for sustained implausible parkour reports", {
+		player = player.Name,
+		userId = player.UserId,
+		rejectionsInWindow = count,
+		lastReason = reason,
+	})
+	-- "System", not "Manual" -- Types.SuspicionSource reserves that member for exactly this: an
+	-- automated detector with no individual admin behind it, hence the nil flaggedByUserId.
+	ModerationSystem.FlagSuspectedCheater(
+		player.UserId,
+		nil,
+		`Parkour: {count} implausible movement reports within {VALIDATION.RejectionWindowSeconds}s (last: {reason})`,
+		"System" :: Types.SuspicionSource
+	)
+end
+
+-- Grants velocity ownership for an accepted Start report.
+local function beginAction(player: Player, state: PlayerParkourState, report: ActionReport, now: number): ()
+	local humanoid = getHumanoid(player)
+	if not humanoid then
+		return
+	end
+
+	state.OpenKind = report.Kind
+	state.OpenStartedAt = now
+	state.OpenStartPosition = report.Position
+	-- The client's own claimed duration, clamped -- ParkourValidation has already refused a duration
+	-- outside the legal range, so this is the belt-and-braces clamp for the nil case (a client that
+	-- sent no duration at all, which is structurally valid).
+	local duration = math.clamp(report.DurationSeconds or VALIDATION.MaxActionSeconds, 0, VALIDATION.MaxActionSeconds)
+	state.OpenExpiresAt = now + duration
+
+	humanoid:SetAttribute(Constants.Attributes.ParkourVelocityOwned, true)
+	humanoid:SetAttribute(Constants.Attributes.ParkourState, report.Kind)
+	-- Any momentum carry from a PREVIOUS action ends the moment a new one begins: the new action is
+	-- now driving velocity directly, and a stale floor would apply the instant it ended, on top of
+	-- whatever the new action's own exit grants.
+	humanoid:SetAttribute(Constants.Attributes.ParkourSpeedFloor, 0)
+	humanoid:SetAttribute(Constants.Attributes.ParkourSpeedFloorExpiry, 0)
+end
+
+-- Closes an ownership window and stamps the momentum carry the action ended with. `reportedSpeed` is
+-- the single client-supplied number that reaches gameplay in this whole feature -- already validated
+-- against VALIDATION.MaxReportedSpeed by the time it arrives here, and capped a second time,
+-- independently, inside Movement.ComputeParkourSpeedFloor.
+local function endAction(player: Player, state: PlayerParkourState, reportedSpeed: number, now: number): ()
+	state.OpenKind = nil
+	state.OpenStartedAt = nil
+	state.OpenStartPosition = nil
+	state.OpenExpiresAt = 0
+
+	local humanoid = getHumanoid(player)
+	if not humanoid then
+		return
+	end
+	humanoid:SetAttribute(Constants.Attributes.ParkourVelocityOwned, false)
+	humanoid:SetAttribute(Constants.Attributes.ParkourState, "")
+
+	local carry = math.clamp(reportedSpeed, 0, VALIDATION.MaxReportedSpeed)
+	humanoid:SetAttribute(Constants.Attributes.ParkourSpeedFloor, carry)
+	humanoid:SetAttribute(
+		Constants.Attributes.ParkourSpeedFloorExpiry,
+		now + ParkourConstants.Locomotion.MomentumCarrySeconds
+	)
+end
+
+local function handleReport(player: Player, rawPayload: unknown): ()
+	if not ParkourConstants.Enabled then
+		return
+	end
+	local now = os.clock()
+	local state = getState(player)
+
+	if rateLimiter:IsLimited(player) then
+		-- Deliberately NOT counted as a rejection toward the cheater flag: hitting a rate limit is
+		-- something a laggy or momentarily-thrashing honest client does, and conflating "too many
+		-- reports" with "physically impossible reports" would flag exactly the players least able to
+		-- do anything about it.
+		logger:debug("Parkour report rate limited", { player = player.Name })
+		return
+	end
+
+	local report, parseError = ParkourValidation.Parse(rawPayload)
+	if not report then
+		local reason = parseError or "MalformedPayload"
+		logger:debug("Parkour report malformed", { player = player.Name, reason = reason })
+		noteRejection(player, state, reason, now)
+		return
+	end
+
+	local rootPart = getRootPart(player)
+	if not rootPart then
+		notifyRejected(player, report.Kind, report.Phase, "NoCharacter")
+		return
+	end
+
+	-- The combat layer's own hold on the body outranks any movement claim. A client reporting a
+	-- wall-run while the server has it ragdolled or air-combo-held is either desynced or lying; either
+	-- way granting velocity ownership would put the parkour framework and RagdollController's
+	-- AlignPosition pin on the same body at once. The client's own controller independently parks in
+	-- its AerialCombat state for the same signal, so an honest client never reaches this branch.
+	local humanoid = getHumanoid(player)
+	if humanoid and humanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true then
+		notifyRejected(player, report.Kind, report.Phase, "CombatRestricted")
+		return
+	end
+
+	local accepted, rejectionReason = ParkourValidation.Validate(report, {
+		Position = rootPart.Position,
+		Now = now,
+		OpenKind = state.OpenKind,
+		OpenStartedAt = state.OpenStartedAt,
+		OpenStartPosition = state.OpenStartPosition,
+		LastSameKindAt = state.LastPerKind[report.Kind] or 0,
+		MinSameKindIntervalSeconds = ParkourConstants.Network.MinSameActionIntervalSeconds,
+	}, {
+		MaxReportedSpeed = VALIDATION.MaxReportedSpeed,
+		MaxVerticalGainStuds = VALIDATION.MaxVerticalGainStuds,
+		MaxTravelSpeed = VALIDATION.MaxTravelSpeed,
+		MaxActionSeconds = VALIDATION.MaxActionSeconds,
+	})
+
+	if not accepted then
+		local reason = rejectionReason or "MalformedPayload"
+		logger:debug("Parkour report rejected", {
+			player = player.Name,
+			kind = report.Kind,
+			phase = report.Phase,
+			reason = reason,
+		})
+		noteRejection(player, state, reason, now)
+		notifyRejected(player, report.Kind, report.Phase, reason)
+		-- A rejected report leaves any open window alone rather than force-closing it: the rejection is
+		-- about THIS claim, and tearing down a window the player is legitimately inside would strand
+		-- their movement mid-action for a claim that may simply have arrived out of order.
+		return
+	end
+
+	state.LastPerKind[report.Kind] = now
+	if report.Phase == "Start" then
+		beginAction(player, state, report, now)
+	else
+		endAction(player, state, report.Speed, now)
+	end
+end
+
+-- Force-closes any ownership window whose deadline has passed. THE reason this System has a Heartbeat
+-- at all, and non-negotiable: without it, a client that disconnects, crashes, or simply drops its End
+-- report mid-slide leaves ParkourVelocityOwned true forever, and Movement.ComputeDesiredWalkSpeed pins
+-- that character's WalkSpeed at zero for the rest of their life with no error anywhere to explain it.
+-- The client's own reported duration (already clamped) is what sets each deadline, so the window is
+-- never shorter than the action legitimately needs.
+local function onHeartbeat(): ()
+	local now = os.clock()
+	for player, state in pairs(playerStates) do
+		if state.OpenKind ~= nil and now >= state.OpenExpiresAt then
+			logger:debug("Parkour ownership window expired without an End report", {
+				player = player.Name,
+				kind = state.OpenKind,
+			})
+			-- Expired rather than ended: no momentum carry is granted, because the client never told us
+			-- what speed it finished with and inventing one would be handing out free speed for a
+			-- dropped packet.
+			endAction(player, state, 0, now)
+		end
+	end
+end
+
+local function onCharacterAdded(player: Player): ()
+	-- A fresh character's Humanoid never carries the previous one's Attributes, but the per-player
+	-- window bookkeeping lives here and does survive a respawn -- so it is cleared explicitly. Without
+	-- this, dying mid-slide would leave an open window pointing at a character that no longer exists,
+	-- and the expiry above would then "end" an action on the new one.
+	local state = getState(player)
+	state.OpenKind = nil
+	state.OpenStartedAt = nil
+	state.OpenStartPosition = nil
+	state.OpenExpiresAt = 0
+	releaseOwnership(player)
+end
+
+local function onPlayerAdded(player: Player): ()
+	getState(player)
+	player.CharacterAdded:Connect(function()
+		onCharacterAdded(player)
+	end)
+	if player.Character then
+		onCharacterAdded(player)
+	end
+end
+
+local function onPlayerRemoving(player: Player): ()
+	playerStates[player] = nil
+	rateLimiter:Clear(player)
+end
+
+function ParkourSystem.Init(): ()
+	local report = NetworkBridge.CreateRemoteEvent(RemoteNames.ReportAction)
+	report.OnServerEvent:Connect(handleReport)
+
+	rejectedRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.ActionRejected)
+
+	Players.PlayerAdded:Connect(onPlayerAdded)
+	Players.PlayerRemoving:Connect(onPlayerRemoving)
+	-- Players who joined before this System booted (a fast rejoin during server start) still need
+	-- their per-player state and character hook -- the same Init()-time sweep every other
+	-- PlayerAdded-driven System in this codebase uses as its backstop.
+	for _, player in Players:GetPlayers() do
+		onPlayerAdded(player)
+	end
+
+	RunService.Heartbeat:Connect(onHeartbeat)
+
+	logger:info("ParkourSystem.Init() complete", { enabled = ParkourConstants.Enabled })
+end
+
+-- Whether this player currently has an accepted, unexpired parkour action open. Exposed for dev
+-- tooling and for any future System that needs to know whether movement owns a body before acting on
+-- it -- nothing in the shipped code calls it yet, and it is a read-only projection, never a way to
+-- reach into this System's state.
+function ParkourSystem.HasOpenAction(player: Player): boolean
+	local state = playerStates[player]
+	return state ~= nil and state.OpenKind ~= nil and os.clock() < state.OpenExpiresAt
+end
+
+return ParkourSystem :: Types.SystemModule

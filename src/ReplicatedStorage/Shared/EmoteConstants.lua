@@ -41,6 +41,13 @@ EmoteConstants.RemoteNames = {
 	-- EmoteStoppedPayload.
 	Started = "Emote_Started",
 	Stopped = "Emote_Stopped",
+	-- Client -> server. Payload: emoteId (string). Fired by Client/Emotes/EmoteController.lua the
+	-- moment the LOCAL AnimationTrack for a one-shot emote reaches its own natural end -- the client
+	-- is the only side that knows a clip's real length (AnimationTrack.Length exists nowhere on the
+	-- server), so it is the only side that can tell the server when the animation is actually over.
+	-- See EmoteSystem.lua's own STOP SCHEDULING header for why this, and not the authored Duration,
+	-- is the primary stop for a clip-bearing emote.
+	NotifyFinished = "Emote_NotifyFinished",
 	-- Client -> server. Payload: slotIndex (number, 1-based), emoteId (string).
 	RequestSetLoadoutSlot = "Emote_RequestSetLoadoutSlot",
 	-- Server -> owning client only, fired once on join and again on every successful mutation.
@@ -58,6 +65,22 @@ EmoteConstants.RemoteNames = {
 -- the same reasoning Constants.Rivalry.QueryMaxCallsPerSecond already documents for a different
 -- non-combat-critical remote pair.
 EmoteConstants.MaxRequestsPerSecondPerPlayer = 4
+
+-- Hard ceiling on how long a CLIP-BEARING one-shot emote may stay active server-side before
+-- EmoteSystem force-stops it regardless of what the client reported. NOT a gameplay number and NOT a
+-- per-emote duration -- it is purely the safety valve behind Emote_NotifyFinished (see that remote's
+-- own header): the client owns the real stop because only it can read AnimationTrack.Length, so the
+-- server needs SOME bound in case that notification never arrives (a client that disconnects
+-- mid-emote, an exploiter who simply never fires it, a track that stops being reported).
+--
+-- Deliberately far above any plausible authored clip rather than derived from the emote's own
+-- authored Duration: deriving it from Duration would reintroduce the exact truncation bug this whole
+-- mechanism exists to remove (a stale 2-second Duration on a real 5-second clip would still guillotine
+-- the animation, just 2 seconds later). The only thing a player can do by withholding the
+-- notification is hold their OWN cosmetic pose (and, for a MovementLocked emote, their own zeroed
+-- WalkSpeed) -- self-inflicted, interruptible by damage/combat/death through the same heartbeat guard
+-- every other emote uses, and bounded here.
+EmoteConstants.MaxOneShotSeconds = 15
 
 -- Client/FX/EmoteAnimator.lua's fade timing -- mirrors Constants.FX.Animation.Combat/Flight's own
 -- OneShot/Loop split: a one-shot gesture (Wave, Bow, ...) fades in snappy; a looping sustained pose

@@ -13,11 +13,27 @@
 	plausible-looking asset id (see Constants.Combat.AnimationIds' own header for the precedent:
 	Heavy1/Heavy2 sit exactly as empty, wired-but-unauthored strings until a real clip is supplied).
 	Every play/preload path already degrades safely on an empty id (Client/FX/EmoteAnimator.lua skips
-	building a template for it, the same way CombatAnimator.lua does). Wave is the one entry with a
-	real clip authored so far -- like every other AnimationId in this codebase (Constants.lua's own
-	Combat.AnimationIds/FlightTuning tables), it MUST carry the "rbxassetid://" content-URI prefix,
-	not just the bare numeric id: Animator:LoadAnimation resolves that prefix as a scheme, so a bare
-	number silently fails to resolve to real keyframe data instead of erroring loudly.
+	building a template for it, the same way CombatAnimator.lua does). Wave/Taunt/Cheer are the
+	entries with a real clip authored so far -- like every other AnimationId in this codebase
+	(Constants.lua's own Combat.AnimationIds/FlightTuning tables), each MUST carry the "rbxassetid://"
+	content-URI prefix, not just the bare numeric id: Animator:LoadAnimation resolves that prefix as a
+	scheme, so a bare number silently fails to resolve to real keyframe data instead of erroring
+	loudly.
+
+	"" means unauthored -- NOT the bare prefix "rbxassetid://". Several entries below used to carry
+	that prefix-only string as their placeholder, which reads as unauthored to a human but is a
+	non-empty string to every `AnimationId ~= ""` guard in the codebase: it slipped past
+	EmoteAnimator's skip-the-template check into a real LoadAnimation call on an id-less URI, and past
+	EmoteSystem's own hasClip() (which decides whether an emote's length is owned by the client's
+	track or by Duration below). Leave an unauthored clip as exactly "".
+
+	DURATION IS NOT THE LENGTH OF THE ANIMATION. For an entry with a real clip, the clip's own length
+	is what ends the emote -- the acting client reports its natural end through Emote_NotifyFinished
+	(Server/Systems/EmoteSystem.lua's WHAT ENDS A ONE-SHOT EMOTE header). Duration only still ends an
+	emote that has no clip authored yet, where there is no track whose end could be reported. It is
+	kept on clip-bearing entries as authored design intent and as the fallback if a clip is ever
+	removed, and Client/FX/EmoteAnimator.lua warns at play time when it drifts from the real clip --
+	but do NOT expect retuning it to change how long an authored emote actually plays.
 
 	Two entries (VictoryPose, CelestialBow) are deliberately LOCKED from the start -- not because
 	they're meant to ship gated forever, but to prove the unlock plumbing (EmoteUnlockService.
@@ -57,7 +73,7 @@ local EmoteDefinitions: { [Types.EmoteId]: Types.EmoteDefinition } = {
 		Id = "Bow",
 		DisplayName = "Bow",
 		Description = "A formal, respectful bow.",
-		AnimationId = "rbxassetid://",
+		AnimationId = "",
 		Icon = "",
 		Category = "Social",
 		Loop = false,
@@ -74,7 +90,7 @@ local EmoteDefinitions: { [Types.EmoteId]: Types.EmoteDefinition } = {
 		Id = "Laugh",
 		DisplayName = "Laugh",
 		Description = "Hearty, mocking laughter.",
-		AnimationId = "rbxassetid://",
+		AnimationId = "",
 		Icon = "",
 		Category = "Reaction",
 		Loop = false,
@@ -159,7 +175,7 @@ local EmoteDefinitions: { [Types.EmoteId]: Types.EmoteDefinition } = {
 		Id = "Dance",
 		DisplayName = "Dance",
 		Description = "Bust a move.",
-		AnimationId = "rbxassetid://",
+		AnimationId = "",
 		Icon = "",
 		Category = "Dance",
 		Loop = true,
@@ -176,7 +192,7 @@ local EmoteDefinitions: { [Types.EmoteId]: Types.EmoteDefinition } = {
 		Id = "VictoryPose",
 		DisplayName = "Victory Pose",
 		Description = "A commanding pose, earned by a first victory.",
-		AnimationId = "rbxassetid://",
+		AnimationId = "",
 		Icon = "",
 		Category = "Rare",
 		Loop = false,
@@ -194,7 +210,7 @@ local EmoteDefinitions: { [Types.EmoteId]: Types.EmoteDefinition } = {
 		Id = "CelestialBow",
 		DisplayName = "Celestial Bow",
 		Description = "An elaborate bow, radiant with Celestial qi.",
-		AnimationId = "rbxassetid://",
+		AnimationId = "",
 		Icon = "",
 		Category = "Rare",
 		Loop = false,

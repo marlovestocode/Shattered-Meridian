@@ -23,6 +23,12 @@
 					"FX": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/FX"
 					},
+					"Input": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Input"
+					},
+					"Parkour": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Parkour"
+					},
 					"UI": {
 						"$className": "Folder",
 						"Screens": {
@@ -114,6 +120,9 @@
 					},
 					"MoveEditorSystem": {
 						"$path": "src/ServerScriptService/Server/Systems/MoveEditorSystem.lua"
+					},
+					"ParkourSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/ParkourSystem.lua"
 					}
 				}
 			},

@@ -79,6 +79,17 @@ Constants.Debug = {
 			HotbarMoveClient = true,
 			SettingsClient = true,
 			SettingsSystem = true,
+			-- Parkour System. ParkourController/ParkourSystem log transitions and rejections; the other
+			-- three are quiet by design (a warning on a failed animation load, a dropped report, a
+			-- kinematic frame with no path) and are listed so those warnings are visible when they do
+			-- fire rather than needing this table edited mid-debugging.
+			ParkourController = true,
+			ParkourSystem = true,
+			ParkourNetwork = true,
+			ParkourAnimator = true,
+			ParkourMotor = true,
+			ParkourInput = true,
+			ParkourDebug = true,
 		},
 		-- Per (scope, level, message) cap, keyed off the static message text so a log site that
 		-- fires every frame can't flood Output even at Trace -- see Logger.lua's rate limiter.
@@ -481,6 +492,30 @@ Constants.Attributes = {
 	-- directly, at the same top priority tier, rather than EmoteSystem writing into CombatState
 	-- (which it has no ownership of).
 	EmoteMovementLocked = "EmoteMovementLocked",
+	-- Parkour System (Server/Systems/ParkourSystem.lua, Client/Parkour/*). Set on a player's own
+	-- Humanoid while the client-side movement framework legitimately owns that character's velocity --
+	-- a slide, wall-run, vault, mantle, ledge climb, roll or wall-jump the server has accepted and not
+	-- yet expired. Movement.ComputeDesiredWalkSpeed reads it directly and pins WalkSpeed to 0 for the
+	-- duration, at the same tier as Flying/Frozen/EmoteMovementLocked and for the identical reason:
+	-- something other than the ordinary ground controller is driving this body, and a raised WalkSpeed
+	-- underneath it fights the drive instead of riding along with it. Same "external system, read as
+	-- an Attribute rather than written into CombatState" shape those three already use, which is what
+	-- lets ParkourSystem stay entirely outside CombatSystem's private state.
+	ParkourVelocityOwned = "ParkourVelocityOwned",
+	-- The momentum a just-finished parkour action handed back, as an absolute WalkSpeed floor, plus the
+	-- timestamp it decays to nothing at. Together these are how a slide's or a vault's earned speed
+	-- survives into ordinary running instead of being erased the instant the action ends -- see
+	-- Movement.ComputeParkourSpeedFloor. Deliberately a FLOOR under the normal tiers rather than a
+	-- replacement for them, so it can only ever preserve speed a player earned and never slow anyone
+	-- down, and deliberately below the hit-slow/stun tiers so it can never be used to outrun a hit.
+	ParkourSpeedFloor = "ParkourSpeedFloor",
+	ParkourSpeedFloorExpiry = "ParkourSpeedFloorExpiry",
+	-- The movement state that player's client last reported (a Types.ParkourActionReport Kind, or the
+	-- empty string for ordinary locomotion). Purely informational: nothing gates on it. It exists
+	-- because Humanoid Attributes replicate to every client for free, so this gives other players'
+	-- clients -- and any future spectator/replay tooling -- a way to know what a remote character is
+	-- doing without this feature adding a broadcast remote of its own.
+	ParkourState = "ParkourState",
 }
 
 -- Default keybind per Types.KeybindAction -- Client/Input/KeybindManager.lua clones this into its
@@ -559,6 +594,18 @@ Constants.Keybinds = {
 		-- table, sits on the home row, and is verified to register; players who prefer O can rebind
 		-- it in the panel itself.
 		SettingsToggle = { KeyCode = Enum.KeyCode.K },
+		-- Opens the character menu (Client/CharacterMenu/CharacterMenuClient.lua). M is the key this
+		-- screen has always opened on -- it was a hard-coded UserInputService check inside the screen
+		-- itself until the panel became the real character hub -- so this entry keeps the key players
+		-- already know while finally making it rebindable like every other action in this table.
+		-- Unclaimed elsewhere here, and far enough from the WASD/mouse combat cluster that an
+		-- accidental mid-fight press is unlikely.
+		CharacterMenuToggle = { KeyCode = Enum.KeyCode.M },
+		-- Parkour dodge/roll (Client/Parkour/States/Rolling.lua). LeftAlt is unclaimed elsewhere in
+		-- this table, sits under the same hand already on WASD (a roll has to be reachable without
+		-- leaving the movement keys, unlike the panel toggles above), and -- unlike every letter key
+		-- left -- carries no risk of colliding with Roblox's own chat-focus behavior on a stray press.
+		Roll = { KeyCode = Enum.KeyCode.LeftAlt },
 	} :: { [Types.KeybindAction]: Types.Keybind },
 
 	-- Gamepad defaults -- a SEPARATE table, not a wider Keybind, so a player can have a keyboard
@@ -610,6 +657,13 @@ Constants.Keybinds = {
 		-- HotbarSlot1-5 below, Settings is NOT admin-only, so it earns a real gamepad default rather
 		-- than staying keyboard-only.
 		SettingsToggle = { KeyCode = Enum.KeyCode.DPadUp },
+		-- Parkour dodge/roll, gamepad side. DPadLeft is the last unclaimed D-pad direction (DPadRight
+		-- is SwapWeapon, DPadDown is EmoteWheel, DPadUp is SettingsToggle above), and every face/
+		-- shoulder button in this genre's convention family is already spoken for above. Not ideal -- a
+		-- roll deserves a face button -- but the alternative is doubling up on Dash's ButtonB, which
+		-- would make two distinct mechanics indistinguishable on a controller. Flagged for a real
+		-- controller playtest, same as OpenBugReport's ButtonSelect note.
+		Roll = { KeyCode = Enum.KeyCode.DPadLeft },
 		-- DevMenuToggle deliberately has NO gamepad default -- admin-only, keyboard already covers
 		-- it, and exposing a stray always-live single-button dev-menu toggle to every controller
 		-- user isn't something to do by default. KeybindManager.Matches simply never matches for an
@@ -656,6 +710,15 @@ Constants.Settings = {
 		UpdateKeybind = "Settings_UpdateKeybind",
 		ResetKeybinds = "Settings_ResetKeybinds",
 		UpdateAutorun = "Settings_UpdateAutorun",
+		-- Parkour System preferences (Types.ParkourSettings) -- one remote carrying a field name plus a
+		-- value, rather than eight single-purpose remotes. That is the opposite of the choice made for
+		-- Autorun above (its own remote, no payload beyond the boolean), and deliberately so: Autorun
+		-- is one settled preference, where the Parkour block is a group expected to grow and shrink as
+		-- that feature is tuned, and a remote per assist would mean a NetworkBridge registration, a
+		-- handler and a client call site for every one. The cost is that the field name becomes
+		-- untrusted input -- handled by SettingsSystem validating it against a closed set, exactly as
+		-- isRebindableAction already does for keybind actions.
+		UpdateParkour = "Settings_UpdateParkour",
 	},
 	-- Same call-budget reasoning as Constants.Rivalry.QueryMaxCallsPerSecond -- a rebind/toggle write
 	-- costs nothing gameplay-wise but should still never be free spam.
@@ -691,7 +754,14 @@ Constants.PlayerData = {
 	-- table has ever needed, backfilling both fields onto any record saved before this pass. Bumped
 	-- 2 -> 3 for the Settings System's `settings` field (Types.PlayerProfile) --
 	-- PlayerDataSystem.lua's Migrations[2] backfills it onto any record saved before this pass.
-	SchemaVersion = 3,
+	-- Bumped 3 -> 4 for the Art System's `equippedArts` field (Types.PlayerProfile), which is what
+	-- makes an unlocked art reachable from the hotbar across sessions -- PlayerDataSystem.lua's
+	-- Migrations[3] backfills an empty slot map onto any record saved before this pass. Bumped 4 -> 5
+	-- for the Parkour System's `settings.Parkour` sub-table (Types.ParkourSettings) --
+	-- PlayerDataSystem.lua's Migrations[4] backfills the shipped defaults onto any record saved before
+	-- this pass, so an existing player's first login after the update has parkour on with every assist
+	-- enabled rather than a half-populated settings table.
+	SchemaVersion = 5,
 
 	-- A brand-new profile's starting Tier -- Tier 1 is the bottom of TierSystem's nine-tier ladder
 	-- (progression-systems.md), the correct starting point for a player who has never played before.
@@ -819,6 +889,32 @@ Constants.Meridian = {
 	-- pass would retune the whole ladder blind. Scale it deliberately, against playtest data, not as
 	-- a side effect of the tier gap becoming available.
 	BaseXPPerKill = 25,
+}
+
+-- Character sheet (Server/Systems/CharacterSheetSystem.lua) -- the read-only replication of the
+-- identity/standing half of a player's own profile to their own client, for the character menu's
+-- Character tab (Client/UI/Screens/Menus/CharacterTab.lua). Remote names only, same as
+-- Constants.Qi above: this feature has no balance surface of its own to tune. It owns no numbers
+-- because it computes nothing -- every value it sends is a field PlayerDataSystem already holds.
+--
+-- Both a push AND a pull, for the same reason BountyMenu needs both: the push keeps an open panel
+-- honest as corruption/standing/faction change, and the pull covers a client that opens the menu
+-- long after its own profile-load push already fired and was dropped on the floor (nothing caches
+-- an unheard RemoteEvent).
+Constants.CharacterSheet = {
+	RemoteNames = {
+		-- Server -> owning client, on profile load and on any later change. Payload:
+		-- Types.CharacterSheetPayload.
+		SheetUpdated = "Character_SheetUpdated",
+		-- Client -> server, no payload, returns Types.CharacterSheetPayload (or nil if the caller's
+		-- profile genuinely isn't loaded yet -- never a fabricated blank sheet, which the panel would
+		-- have no way to tell apart from a real one).
+		GetSheet = "Character_GetSheet",
+	},
+	-- Same per-player query budget Constants.Rivalry/ArtConstants already use for their own read-only
+	-- request remotes, and for the identical reason: a menu open costs one call, so anything beyond a
+	-- few per second is a modified client spinning on it.
+	RequestMaxCallsPerSecond = 4,
 }
 
 -- Start Menu / server-hop (Server/Systems/ServerHopSystem.lua, Client/StartMenu/StartMenuClient.lua

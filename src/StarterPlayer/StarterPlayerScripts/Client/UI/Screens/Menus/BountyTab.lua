@@ -1,9 +1,15 @@
 --!strict
 --[[
-	BountyMenu.lua
+	BountyTab.lua
 
-	Owns: the bounty board panel inside Screens/Menus -- the ranked list of players currently
+	Owns: the bounty board tab inside the character menu -- the ranked list of players currently
 	carrying a Notoriety bounty, what each is worth, and which row is the player themselves.
+
+	Was BountyMenu.lua, when this whole screen WAS the bounty board and nothing else. It is now one
+	tab of four (see Screens/Menus/init.lua), which is why it renders a plain transparent Frame
+	rather than its own Panel: the menu root already draws one border around the tab body, and a
+	second nested one here would double up chrome inside a single card -- the same reasoning
+	Screens/MoveEditor/MoveList.lua's own header gives for not nesting a Panel inside Sidebar's.
 
 	Renders live server data only. This file previously seeded itself with `createDemoBounty`
 	fabricated rows and hand-copied BountySystem's six reward constants into its own `computeReward`
@@ -23,6 +29,14 @@
 	badge also reads -- see ClientState.lua's header on why that one is shared state and this board
 	is not), or any placement action. There is no "place bounty" control here and adding one would be
 	a design change: bounties are server-placed, see BountyConstants.lua's header.
+
+	Keeps its OWN remote wiring, unlike the Character/Arts tabs beside it, which read Values that
+	Client/CharacterMenu/CharacterMenuClient.lua fills from outside. That is a deliberate asymmetry,
+	not an oversight: those two tabs have actions (unlock, equip) whose requests need a driver that
+	owns retry/status/refetch, where this one is a pure read whose two remotes it has always owned
+	and which nothing outside it consumes. Moving it would add an indirection hop with no second
+	consumer to justify it -- the same rule ClientState.lua's own header applies to deciding what
+	belongs in shared state.
 ]]
 
 local Players = game:GetService("Players")
@@ -41,9 +55,21 @@ local logger = Logger.scope("BountyMenu")
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 
-local BountyMenu = {}
+local BountyTab = {}
+
+export type BountyTabProps = {
+	Width: number,
+	Height: number,
+	Visible: Fusion.UsedAs<boolean>,
+	LayoutOrder: number,
+}
 
 local ROW_HEIGHT = 64
+-- Vertical space the "Bounty Board" heading, its one-line subtitle, and the two Space.S gaps around
+-- them take before the scrolling rows begin -- the value the rows' own height subtracts. Named
+-- rather than left as the bare -80 this file used to carry, so the number is attributable to
+-- something rather than being a magic constant.
+local HEADER_ALLOWANCE = 80
 
 -- One board row. `isSelf` drives the only per-row styling decision: the player's own bounty is drawn
 -- in the Danger register the hotbar badge already uses for the same fact, so the two surfaces agree
@@ -108,7 +134,7 @@ local function emptyState(scope: Scope): Frame
 	} :: Frame
 end
 
-function BountyMenu.Mount(scope: Scope, width: number, height: number): Frame
+function BountyTab.Mount(scope: Scope, props: BountyTabProps): Frame
 	local entries: Fusion.Value<{ Types.BountyBoardEntry }> = scope:Value({})
 	local localUserId = Players.LocalPlayer.UserId
 
@@ -171,17 +197,14 @@ function BountyMenu.Mount(scope: Scope, width: number, height: number): Frame
 		return #use(entries) > 0
 	end)
 
-	return Panel(scope, {
-		Name = "BountyMenu",
-		Size = UDim2.fromOffset(width, height),
-		AutomaticSize = Enum.AutomaticSize.None,
-		Children = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.M),
-				PaddingBottom = UDim.new(0, Tokens.Space.M),
-				PaddingLeft = UDim.new(0, Tokens.Space.M),
-				PaddingRight = UDim.new(0, Tokens.Space.M),
-			},
+	return scope:New "Frame" {
+		Name = "BountyTab",
+		Size = UDim2.fromOffset(props.Width, props.Height),
+		BackgroundTransparency = 1,
+		Visible = props.Visible,
+		LayoutOrder = props.LayoutOrder,
+
+		[Fusion.Children] = {
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Left,
@@ -213,14 +236,28 @@ function BountyMenu.Mount(scope: Scope, width: number, height: number): Frame
 
 				[Fusion.Children] = emptyState(scope),
 			},
-			scope:New "Frame" {
+			-- A ScrollingFrame now that this is a full tab rather than a 420px-tall side panel: a
+			-- populated server can carry more marks than fit, and a plain Frame silently clipped the
+			-- overflow. AutomaticCanvasSize means the canvas tracks however many rows exist without
+			-- this file counting them, the same shape Screens/MoveEditor/MoveList.lua uses.
+			scope:New "ScrollingFrame" {
 				Name = "Rows",
-				Size = UDim2.new(1, 0, 1, -80),
+				Size = UDim2.new(1, 0, 1, -HEADER_ALLOWANCE),
 				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				ScrollingDirection = Enum.ScrollingDirection.Y,
+				AutomaticCanvasSize = Enum.AutomaticSize.Y,
+				CanvasSize = UDim2.fromScale(0, 0),
+				ScrollBarThickness = 3,
+				ScrollBarImageColor3 = Tokens.Border.Standard.Color,
+				ScrollBarImageTransparency = Tokens.Border.Standard.Transparency,
 				LayoutOrder = 4,
 				Visible = hasEntries,
 
 				[Fusion.Children] = {
+					scope:New "UIPadding" {
+						PaddingRight = UDim.new(0, Tokens.Space.S),
+					},
 					scope:New "UIListLayout" {
 						FillDirection = Enum.FillDirection.Vertical,
 						HorizontalAlignment = Enum.HorizontalAlignment.Left,
@@ -231,7 +268,7 @@ function BountyMenu.Mount(scope: Scope, width: number, height: number): Frame
 				},
 			},
 		},
-	}) :: Frame
+	} :: Frame
 end
 
-return BountyMenu
+return BountyTab
