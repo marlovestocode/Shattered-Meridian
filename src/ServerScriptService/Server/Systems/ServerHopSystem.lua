@@ -25,12 +25,15 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 
 local ServerHopSystem = {}
 
 local logger = Logger.scope("ServerHopSystem")
 
 local Config = Constants.StartMenu
+
+local rateLimiter = RateLimiter.New(Config.RequestTeleportMaxCallsPerSecond)
 
 local TELEPORT_FAILED_MESSAGE = "Failed to join a server. Try again."
 
@@ -46,6 +49,9 @@ function ServerHopSystem.Init(): ()
 	local requestTeleportRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.RequestTeleport)
 
 	requestTeleportRemote.OnServerInvoke = function(player: Player): (boolean, string?)
+		if rateLimiter:IsLimited(player) then
+			return false, TELEPORT_FAILED_MESSAGE
+		end
 		if pendingByPlayer[player] then
 			logger:warn("Duplicate teleport request ignored", { player = player.Name })
 			return false, TELEPORT_FAILED_MESSAGE
@@ -72,6 +78,7 @@ function ServerHopSystem.Init(): ()
 
 	Players.PlayerRemoving:Connect(function(player: Player)
 		pendingByPlayer[player] = nil
+		rateLimiter:Clear(player)
 	end)
 
 	logger:info("ServerHopSystem.Init() complete")

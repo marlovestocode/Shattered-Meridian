@@ -16,6 +16,15 @@
 	animation is still a future animation/FX module's job; this is a placeholder-quality stand-in
 	for one, not a replacement).
 
+	Also owns translating the SAME Combat_FeedbackEvent's Kind == "Death" case into calls against
+	Screens/DeathFeed's own handle (ShowDeath/ClearDeath) and Client/FX/DeathEffect.lua's screen dip
+	-- gated to the payload's TargetUserId being the local player, since confirmDeath
+	(CombatSystem.lua) sends this exact payload to both the victim and the killer and only the
+	victim's own screen should ever show the overlay or dip. ClearDeath/DeathEffect.Clear() are
+	called from this file's own localPlayer.CharacterAdded handler, the same "respawn ends the
+	per-life presentation state" hook clearLockOnPresentation and bindLocalCharacter's mirror
+	reset already use.
+
 	Logging (Logger.scope("CombatClient"), Studio-only per Logger.lua) covers remote lookups, every
 	input->request mapping, every FireServer call, and every inbound feedback/lock-on/attack-started
 	payload -- see this file's log call sites for the exact fields. None of it is gameplay logic;
@@ -32,6 +41,13 @@
 	for the shipped defaults) rather than hardcoded here -- docs/ui-ux-philosophy.md governs the
 	visual language these actions feed into, not the specific keys, and KeybindManager.lua is what
 	lets those keys be rebound later without touching this module.
+
+	Also owns the HotbarSlot1-5 keybinds (the number row) -- unlike every other action above, these
+	carry no combat request of their own: a press just resolves which of the 5 hotbar slots matched
+	and hands off to Client/Combat/HotbarMoveClient.lua's Fire(slot), the same call
+	Client/UI/Screens/HUD/init.lua's AbilitySlot click handler makes, so the actual remote-call logic
+	lives in exactly one place regardless of which input path triggered it. See HotbarMoveClient.lua's
+	own header for why this is effectively admin-only despite having no admin check of its own here.
 ]]
 
 local Players = game:GetService("Players")
@@ -46,9 +62,11 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local CombatFeedbackModule = require(script.Parent.Parent.UI.Screens.CombatFeedback)
+local DeathFeedModule = require(script.Parent.Parent.UI.Screens.DeathFeed)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local CombatAudio = require(script.Parent.Parent.FX.CombatAudio)
 local StunEffect = require(script.Parent.Parent.FX.StunEffect)
+local DeathEffect = require(script.Parent.Parent.FX.DeathEffect)
 local SwingEffect = require(script.Parent.Parent.FX.SwingEffect)
 local CombatAnimator = require(script.Parent.Parent.FX.CombatAnimator)
 local CameraShake = require(script.Parent.Parent.FX.CameraShake)
@@ -56,10 +74,14 @@ local HitStop = require(script.Parent.Parent.FX.HitStop)
 local HitFlash = require(script.Parent.Parent.FX.HitFlash)
 local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
 local MovementVFX = require(script.Parent.Parent.FX.MovementVFX)
+local SlamImpactVFX = require(script.Parent.Parent.FX.SlamImpactVFX)
 local PredictionMirror = require(script.Parent.PredictionMirror)
+local HotbarMoveClient = require(script.Parent.HotbarMoveClient)
 local Tokens = require(script.Parent.Parent.UI.Tokens)
+local EmoteWheelClient = require(script.Parent.Parent.Emotes.EmoteWheelClient)
 
 type CombatFeedbackHandle = CombatFeedbackModule.CombatFeedbackHandle
+type DeathFeedHandle = DeathFeedModule.DeathFeedHandle
 
 local RemoteNames = Constants.Combat.RemoteNames
 
@@ -70,9 +92,41 @@ local logger = Logger.scope("CombatClient")
 -- Now Constants.Combat.FeedbackHeadOffset -- see that field's own header in Constants.lua.
 local TARGET_HEAD_OFFSET = Constants.Combat.FeedbackHeadOffset
 
+-- Slot number -> KeybindAction, for the hotbar InputBegan branch below -- index-keyed rather than
+-- one elseif per slot, since all 5 branches do exactly the same lookup-and-fire (see
+-- HotbarMoveClient.Fire) with nothing slot-specific about the logic itself.
+local HOTBAR_SLOT_ACTIONS: { Types.KeybindAction } =
+	{ "HotbarSlot1", "HotbarSlot2", "HotbarSlot3", "HotbarSlot4", "HotbarSlot5" }
+
 local CombatClient = {}
 
 local currentLockOnUserId: number? = nil
+
+-- The Autorun setting (Types.PlayerSettings.Autorun), owned by Client/Settings/SettingsClient.lua and
+-- pushed in through CombatClient.SetAutoSprint below. Module-level rather than a Start() parameter
+-- because it can flip at any time from the Settings panel, long after Start has run. Sprint itself
+-- stays entirely CombatClient's concern -- SettingsClient never touches a sprint remote, an
+-- animation, or the FOV/dust fan-out; it only says whether the setting is on.
+local autoSprintEnabled = false
+-- Assigned by Start (to its own syncSprint) so SetAutoSprint can re-evaluate immediately against
+-- live movement state. Nil before Start, which SetAutoSprint tolerates -- the restored value is
+-- simply read on the first movement transition after Start instead.
+local onAutoSprintChanged: (() -> ())? = nil
+
+-- Turns auto-sprint (the Autorun setting) on/off. With it on, sprint engages automatically whenever
+-- there's real movement input and disengages when movement stops, exactly as if the player were
+-- holding the Sprint key -- same request, same running animation, dust and FOV zoom, and Slide stays
+-- available throughout. Holding the Sprint key still works normally alongside it.
+function CombatClient.SetAutoSprint(enabled: boolean): ()
+	if autoSprintEnabled == enabled then
+		return
+	end
+	autoSprintEnabled = enabled
+	logger:debug("Auto-sprint setting changed", { enabled = enabled })
+	if onAutoSprintChanged then
+		onAutoSprintChanged()
+	end
+end
 
 -- Timestamp of the last W (forward-movement) key press, for the dedicated double-tap-W listener
 -- further below -- os.clock() of 0 (module load time) is never within DoubleTapDashWindowSeconds
@@ -143,10 +197,53 @@ local function worldPositionToScreenUDim2(position: Vector3): UDim2?
 	return UDim2.fromScale(screenPoint.X / viewportSize.X, screenPoint.Y / viewportSize.Y)
 end
 
-function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
+function CombatClient.Start(combatFeedback: CombatFeedbackHandle, deathFeed: DeathFeedHandle): ()
 	logger:info("CombatClient.Start called")
 
 	local localPlayer = Players.LocalPlayer
+
+	-- Roblox's own default PlayerModule/ControlModule is left unmanaged by this project the same way
+	-- the default "Animate"/"Health" character scripts are (see StarterCharacterScripts/
+	-- Health.server.lua's own header) -- WASD movement never routes through this file at all, which
+	-- is exactly why PlatformStand/WalkSpeed alone (CombatSystem.lua's confirmDeath, server-side)
+	-- don't stop a dead player from still walking: the stock Animate script's walk/run loop watches
+	-- Humanoid.MoveDirection, and the default ControlModule keeps feeding that from live WASD input
+	-- completely independent of PlatformStand or WalkSpeed. Disabling/enabling the default Controls
+	-- object around the death window is what actually stops that -- see setControlsEnabled below.
+	-- pcall-guarded: PlayerModule is an engine default this project doesn't own or track in source,
+	-- not something to trust blindly (a future Roblox engine change, or a project that later DOES
+	-- replace PlayerModule, must degrade to "no lockout" here rather than erroring this whole module).
+	local playerControls: any = nil
+	do
+		local ok, controlsOrError = pcall(function()
+			local playerScripts = localPlayer:WaitForChild("PlayerScripts")
+			local playerModule = require(playerScripts:WaitForChild("PlayerModule") :: ModuleScript)
+			return (playerModule :: any):GetControls()
+		end)
+		if ok then
+			playerControls = controlsOrError
+		else
+			logger:warn(
+				"PlayerModule Controls unavailable -- dead-player movement lockout degraded",
+				{ errorMessage = tostring(controlsOrError) }
+			)
+		end
+	end
+
+	-- See playerControls' own declaration above. Both directions are pcall-guarded the same way --
+	-- Controls:Disable()/Enable() are engine API this module doesn't own the implementation of.
+	local function setControlsEnabled(enabled: boolean): ()
+		if not playerControls then
+			return
+		end
+		pcall(function()
+			if enabled then
+				playerControls:Enable()
+			else
+				playerControls:Disable()
+			end
+		end)
+	end
 
 	local requestBasicAttack = getRemote(RemoteNames.RequestBasicAttack)
 	local requestHeavyAttack = getRemote(RemoteNames.RequestHeavyAttack)
@@ -159,9 +256,9 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 	local requestLockOn = getRemote(RemoteNames.RequestLockOn)
 	local requestSwapWeapon = getRemote(RemoteNames.RequestSwapWeapon)
 	local requestFeint = getRemote(RemoteNames.RequestFeint)
-	local requestAirTech = getRemote(RemoteNames.RequestAirTech)
 
 	local feedbackEvent = getRemote(RemoteNames.FeedbackEvent)
+	local killFeedEvent = getRemote(RemoteNames.KillFeed)
 	local lockOnChanged = getRemote(RemoteNames.LockOnChanged)
 	local attackStarted = getRemote(RemoteNames.AttackStarted)
 	local blockStarted = getRemote(RemoteNames.BlockStarted)
@@ -246,17 +343,29 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 	-- Local record of whether THIS client's own Sprint key is currently held -- pure local input
 	-- state, not server-echoed (see PredictionMirror.EvaluateSlide's own header for why this is a
 	-- parameter rather than a mirrored field). Set by the Sprint InputBegan/InputEnded branches
-	-- below; the Slide keybind branch only even attempts a press while this is true.
+	-- below. NOT the Slide gate on its own any more -- see sprintEngaged below.
 	local sprintKeyHeld = false
 
+	-- Whether sprint is actually engaged right now, by EITHER route: the held Sprint key above, or
+	-- the Autorun setting (Client/Settings/SettingsClient.lua) auto-engaging it whenever there's real
+	-- movement input. This -- not sprintKeyHeld -- is what Slide gates on and what predictSlide feeds
+	-- PredictionMirror.EvaluateSlide, so a slide works identically whether the player is sprinting by
+	-- holding the key or by having Autorun on. The server re-checks state.sprinting regardless.
+	local sprintEngaged = false
+	-- Whether the local humanoid currently has real movement input, tracked off MoveDirection so
+	-- Autorun can engage/disengage sprint on the movement transition rather than polling per frame.
+	local autoSprintMoving = false
+	-- That MoveDirection subscription, held so it can be dropped and rebound per character.
+	local autoSprintMoveConnection: RBXScriptConnection? = nil
+
 	-- The Slide press: chained off Sprint, so the keybind branch below only calls this while
-	-- sprintKeyHeld is already true. Fires the FX/camera fan-out (dust burst, FOV kick, camera
+	-- sprintEngaged is already true. Fires the FX/camera fan-out (dust burst, FOV kick, camera
 	-- shake) at PREDICT time, same as SwingEffect's own combat punch -- never rolled back on
 	-- reject/timeout (only the animation track is), matching that existing "the FOV punch is
 	-- deliberately never rolled back" precedent.
 	local function predictSlide(): ()
 		local now = os.clock()
-		if mirror:EvaluateSlide(now, sprintKeyHeld) == "Predict" then
+		if mirror:EvaluateSlide(now, sprintEngaged) == "Predict" then
 			CombatAnimator.PlayPredictedSlide()
 			MovementVFX.PlaySlideBurst()
 			FOVOffset.Punch(
@@ -306,6 +415,14 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 	local finisherReady = false
 	local jumpSuppressGeneration = 0
 	local jumpKeyHeld = false
+	-- True from the moment the LOCAL player's own Death feedback arrives (see the Kind == "Death"
+	-- branch below) until their next CharacterAdded (respawn) -- gates the InputBegan handler below so
+	-- a dead player's input does nothing at all: no wasted RequestX remotes for CombatSystem.lua to
+	-- reject server-side, and no optimistic local prediction (swing animation/VFX/FOV punch) playing
+	-- against a corpse the server has already confirmed dead. Server-side state.alive checks already
+	-- make every one of these actions a no-op gameplay-wise; this is purely about not letting a dead
+	-- player's screen/input still DO anything in the meantime.
+	local isLocalPlayerDead = false
 
 	-- Whether the LOCAL player is currently eligible to Slide: real held movement input AND that
 	-- input isn't predominantly BACKWARD relative to facing. Mirrors the server's own
@@ -334,6 +451,43 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 		local isBackward = math.abs(forwardComponent) >= math.abs(rightComponent) and forwardComponent < 0
 		return not isBackward
 	end
+
+	-- The single place sprint is turned on/off, whichever route asked for it (held Sprint key, or the
+	-- Autorun setting reacting to movement). Both routes need the identical four-call fan-out --
+	-- request + running animation + dust trickle + FOV zoom -- so neither one duplicates it.
+	--
+	-- Edge-triggered on purpose: only a real off->on/on->off transition sends anything. That keeps
+	-- Autorun from re-firing RequestSprintStart every time MoveDirection wobbles, and means a sprint
+	-- the server REJECTS (Ragdolled) isn't retried on the next wobble either -- it stays disengaged
+	-- until movement actually stops and restarts, the direct analogue of the key path's own
+	-- "until they release and re-press Sprint" limitation documented in the Sprint reject branch.
+	local function syncSprint(): ()
+		local intended = sprintKeyHeld or (autoSprintEnabled and autoSprintMoving)
+		if intended == sprintEngaged then
+			return
+		end
+		sprintEngaged = intended
+		if intended then
+			-- Client-predicted, same as the request itself -- see CombatAnimator.StartRunning's own
+			-- comment for why this doesn't wait on a server round-trip.
+			fireRequest(requestSprintStart, "RequestSprintStart")
+			CombatAnimator.StartRunning()
+			MovementVFX.SetSprinting(true)
+			FOVOffset.SetContinuous("Sprint", Constants.Camera.Sprint.FOVDelta, Constants.Camera.Sprint.FOVEaseSpeed)
+		else
+			fireRequest(requestSprintStop, "RequestSprintStop")
+			CombatAnimator.StopRunning()
+			MovementVFX.SetSprinting(false)
+			-- Smooth ease-out, not a hard cut -- ClearContinuous is reserved for teardown (see its own
+			-- header); a normal stop should settle back to 0 the same way it eased up to FOVDelta.
+			FOVOffset.SetContinuous("Sprint", 0, Constants.Camera.Sprint.FOVEaseSpeed)
+		end
+	end
+
+	-- Lets CombatClient.SetAutoSprint (called by SettingsClient when the Autorun toggle flips, and
+	-- once at boot from the restored profile) re-evaluate against live movement without reaching
+	-- into this closure's locals.
+	onAutoSprintChanged = syncSprint
 
 	local function setJumpEnabled(enabled: boolean): ()
 		if localHumanoid then
@@ -393,6 +547,26 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 		CombatAnimator.BindCharacter(character)
 		-- Rebind the sprint/slide dust trickle's own humanoid/root-part cache to the new character.
 		MovementVFX.BindCharacter(character)
+
+		-- Autorun's movement watcher, rebound to this character's own Humanoid (the old one's signal
+		-- died with it). MoveDirection is the right source rather than raw WASD/thumbstick polling:
+		-- it already reflects whatever the default ControlModule resolved for this device, so gamepad
+		-- and keyboard both work with no per-device branching, and it's zero while the player is
+		-- input-locked (death, onboarding) so Autorun can't sprint a body that isn't taking input.
+		-- Same MovementInputMagnitudeThreshold canSlideLocally uses, so "moving enough to slide" and
+		-- "moving enough to auto-sprint" can never disagree.
+		if autoSprintMoveConnection then
+			autoSprintMoveConnection:Disconnect()
+		end
+		autoSprintMoving = false
+		autoSprintMoveConnection = humanoidInstance:GetPropertyChangedSignal("MoveDirection"):Connect(function()
+			local moving = humanoidInstance.MoveDirection.Magnitude >= Constants.Combat.MovementInputMagnitudeThreshold
+			if moving == autoSprintMoving then
+				return
+			end
+			autoSprintMoving = moving
+			syncSprint()
+		end)
 	end
 
 	-- Defensively clears the local lock-on regardless of whether the server also sent
@@ -412,6 +586,17 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 	localPlayer.CharacterAdded:Connect(function(character: Model)
 		task.spawn(bindLocalCharacter, character)
 		clearLockOnPresentation()
+		-- Respawn ends the death-to-respawn presentation state, the same "a fresh character resets
+		-- per-life presentation" reasoning as the mirror/jumpSuppressGeneration resets in
+		-- bindLocalCharacter above -- see this file's header and Screens/DeathFeed's own header for
+		-- why this (not a client-side timer) is what actually ends the overlay/dip.
+		deathFeed.ClearDeath()
+		DeathEffect.Clear()
+		-- Also ends the input lockout -- see isLocalPlayerDead's own declaration above.
+		isLocalPlayerDead = false
+		-- Hand WASD back now that there's a live body to move -- see setControlsEnabled's own
+		-- declaration above for why this (not PlatformStand/WalkSpeed) is what actually gated it.
+		setControlsEnabled(true)
 	end)
 	localPlayer.CharacterRemoving:Connect(function()
 		localHumanoid = nil
@@ -422,12 +607,37 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 		MovementVFX.SetSprinting(false)
 		FOVOffset.ClearContinuous("Sprint")
 		sprintKeyHeld = false
+		-- Same defensive reset for Autorun's own state: the watcher's Humanoid is gone, and leaving
+		-- sprintEngaged true would make the next character's first movement a no-op transition
+		-- (syncSprint would think sprint was already running) -- silently costing that life its
+		-- running animation, dust and FOV zoom until the player stopped and started moving again.
+		if autoSprintMoveConnection then
+			autoSprintMoveConnection:Disconnect()
+			autoSprintMoveConnection = nil
+		end
+		autoSprintMoving = false
+		sprintEngaged = false
 	end)
 
 	-- Input: intent only. Every call below is a request; CombatSystem server-side decides what
 	-- actually happens (validates range/facing/cooldowns/state before anything resolves).
 	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
 		if gameProcessed then
+			return
+		end
+		-- Dead players get no combat input at all -- see isLocalPlayerDead's own declaration above.
+		-- Deliberately before the jumpKeyHeld resync below too: there's nothing for a dead player to
+		-- jump-suppress, and re-syncing it here would just be discarded work.
+		if isLocalPlayerDead then
+			return
+		end
+
+		-- The radial emote wheel (Client/Emotes/EmoteWheelClient.lua) suppresses all combat input
+		-- while open -- attacking, feinting, blocking, or dashing mid-wheel would be incoherent (the
+		-- wheel already owns the mouse for its own segment-steering, and confirming an emote is the
+		-- only thing a release should do). IsOpen() is a plain module-level read (safe even before
+		-- that module's own Start() runs), not a Fusion Value -- see its own header.
+		if EmoteWheelClient.IsOpen() then
 			return
 		end
 
@@ -440,6 +650,18 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 		-- same-frame "F" press while Space is still physically held still reads Space as down), so
 		-- there's no need to filter on `input` at all. Feeds tryReenableJump's release gate above.
 		jumpKeyHeld = KeybindManager.IsJumpKeyDown()
+
+		-- Precomputed once per press, same reasoning as jumpKeyHeld above -- resolves to the 1-5 slot
+		-- number the physical press matches (if any) so the elseif branch below can just fire it,
+		-- rather than five nearly-identical `elseif KeybindManager.Matches("HotbarSlotN", input)`
+		-- branches that all do the exact same lookup-and-fire (see HotbarMoveClient.Fire).
+		local hotbarSlot: number? = nil
+		for slotIndex, action in ipairs(HOTBAR_SLOT_ACTIONS) do
+			if KeybindManager.Matches(action, input) then
+				hotbarSlot = slotIndex
+				break
+			end
+		end
 
 		if KeybindManager.Matches("BasicAttack", input) then
 			-- Report whether the jump button (Space or gamepad ButtonA) is held at the click so the
@@ -591,22 +813,18 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 			-- start/stop shape as Block. The server tracks the intent and only actually raises
 			-- WalkSpeed while combat state permits (see CombatSystem.lua's handleSprintStart).
 			logger:debug("Input: Sprint keybind -> sprint start")
-			fireRequest(requestSprintStart, "RequestSprintStart")
-			-- Client-predicted, same as the request itself -- see CombatAnimator.StartRunning's own
-			-- comment for why this doesn't wait on a server round-trip. MovementVFX's dust trickle and
-			-- FOVOffset's continuous zoom follow the identical unconditional-local-predict shape.
-			CombatAnimator.StartRunning()
-			MovementVFX.SetSprinting(true)
-			FOVOffset.SetContinuous("Sprint", Constants.Camera.Sprint.FOVDelta, Constants.Camera.Sprint.FOVEaseSpeed)
 			sprintKeyHeld = true
+			-- No-ops if Autorun already engaged sprint for this movement -- see syncSprint's own header.
+			syncSprint()
 		elseif KeybindManager.Matches("Slide", input) then
-			-- Slide only fires while Sprint is already held (this client's own local record --
-			-- sprintKeyHeld -- not the server's, which handleSlideRequest independently re-checks) AND
+			-- Slide only fires while sprint is already engaged (this client's own local record --
+			-- sprintEngaged, which is true whether the player is holding the Sprint key or Autorun
+			-- engaged it -- not the server's, which handleSlideRequest independently re-checks) AND
 			-- canSlideLocally() says there's real, non-backward movement input -- see that function's
 			-- own header. A press that fails either check is simply not sent -- pressing C without
 			-- Sprint held, without moving, or while holding S does nothing, same "button does nothing"
 			-- simplicity as an early Dash press.
-			if sprintKeyHeld and canSlideLocally() then
+			if sprintEngaged and canSlideLocally() then
 				logger:debug("Input: Slide keybind -> slide")
 				logger:debug("FireServer", { action = "RequestSlide" })
 				requestSlide:FireServer()
@@ -656,7 +874,12 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 			else
 				logger:debug("Lock-on: no nearby target found", { range = Constants.Combat.LockOnRange })
 			end
-		elseif input.KeyCode == Enum.KeyCode.W then
+		elseif hotbarSlot then
+			-- Admin-only in practice (see HotbarMoveClient.lua's own header) -- fires whatever
+			-- Move-Editor-authored move is bound to this slot, or does nothing if the slot is empty.
+			logger:debug("Input: hotbar slot keybind -> fire hotbar move", { slot = hotbarSlot })
+			HotbarMoveClient.Fire(hotbarSlot)
+		elseif input.KeyCode == Enum.KeyCode.E then
 			-- Double-tap-W-to-dash: an alternate trigger for the same Dash request the Dash
 			-- keybind fires (see that branch above), but the ONE trigger that reports
 			-- viaDoubleTapForward = true -- the front-lunge-punch package (DashPunch's hitbox, the
@@ -667,21 +890,12 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 			-- rather than going through KeybindManager.Matches.
 			local now = os.clock()
 			if now - lastWPressTime <= Constants.Keybinds.DoubleTapDashWindowSeconds then
-				-- If the local player is currently held aloft as someone ELSE's air-combo target
-				-- (mirror:IsHeldInAirCombo, a heuristic -- see its own header), this same double-tap-W
-				-- gesture attempts an air-tech escape instead of a Dash: RequestBlockStart is unusable
-				-- while ragdolled/held (ACTION_GATES.BlockStart.Ragdoll), so this is the one input that
-				-- must reach the server even in that state. No predicted animation/rollback -- there's
-				-- nothing to speculatively show (the visible effect, if it lands, is the hold breaking,
-				-- which the physical RagdollController.ClearHold already produces the instant the server
-				-- accepts it) -- same "nothing to predict" shape as Feint.
-				if mirror:IsHeldInAirCombo(now) then
-					logger:debug("Input: Double-tap W -> air-tech (held in air combo)")
-					logger:debug("FireServer", { action = "RequestAirTech" })
-					requestAirTech:FireServer()
-					lastWPressTime = 0
-					return
-				end
+				-- No special case for being held aloft as someone ELSE's air-combo target anymore -- a
+				-- held victim keeps full Block/Parry capability (RequestBlockStart works normally,
+				-- ACTION_GATES.HeldAloft exempts BlockStart) so there's nothing left for double-tap-W to
+				-- do differently while held: this just fires the ordinary Dash request below, which the
+				-- server harmlessly rejects (category "Dash" IS gated by HeldAloft -- a held victim
+				-- can't move) the exact same way it rejects any other blocked action.
 				logger:debug("Input: Double-tap W -> dash")
 				logger:debug("FireServer", { action = "RequestDash", viaDoubleTapForward = true })
 				requestDash:FireServer(true)
@@ -728,13 +942,10 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 			CombatAnimator.StopBlockHold()
 		elseif KeybindManager.Matches("Sprint", input) then
 			logger:debug("Input: Sprint keybind released -> sprint stop")
-			fireRequest(requestSprintStop, "RequestSprintStop")
-			CombatAnimator.StopRunning()
-			MovementVFX.SetSprinting(false)
-			-- Smooth ease-out, not a hard cut -- ClearContinuous is reserved for teardown (see its own
-			-- header); a normal release should settle back to 0 the same way it eased up to FOVDelta.
-			FOVOffset.SetContinuous("Sprint", 0, Constants.Camera.Sprint.FOVEaseSpeed)
 			sprintKeyHeld = false
+			-- Keeps sprint engaged if Autorun still wants it (player released the key but is still
+			-- moving) -- see syncSprint's own header.
+			syncSprint()
 		end
 	end)
 
@@ -760,7 +971,28 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 		if not wasPredicted then
 			SwingEffect.Play(payload.IsHeavy)
 		end
-		CombatAnimator.ConfirmSwing(payload.DebugName, payload.IsHeavy, payload.FinisherVariant)
+		-- A Move Creation System move (CombatSystem.ThrowCustomMove) carries its full authored
+		-- Animations timeline instead of relying on DebugName's trailing-digit inference -- see
+		-- Types.AttackStartedPayload.Animations' own header for why non-nil (even an EMPTY table) is
+		-- itself the "this throw is a CustomMove" signal, not just "did the author set a clip": a
+		-- custom move's DebugName is its MoveId, an admin-authored slug+suffix with no relationship to
+		-- the M1 combo stage numbering ConfirmSwing's inference reads -- gating on AnimationId being
+		-- non-empty instead (the bug this branch replaces) let a MoveId ending in "3" silently play
+		-- the M1 combo's third swing. Every weapon-stage/standalone attack leaves Animations nil and
+		-- falls through unchanged, first to the Object Stun follow-up's own legacy AnimationId/
+		-- AnimationTrackName pair (see CombatAnimator.PlayExplicitAnimation's own header), then to
+		-- ConfirmSwing.
+		if payload.Animations then
+			CombatAnimator.PlayCustomMoveTimeline(payload.Animations, {
+				WindupSeconds = payload.WindupSeconds,
+				ActiveSeconds = payload.ActiveSeconds,
+				RecoverySeconds = payload.RecoverySeconds,
+			}, payload.DebugName)
+		elseif payload.AnimationId and payload.AnimationId ~= "" and payload.AnimationTrackName then
+			CombatAnimator.PlayExplicitAnimation(payload.AnimationId, payload.AnimationTrackName)
+		else
+			CombatAnimator.ConfirmSwing(payload.DebugName, payload.IsHeavy, payload.FinisherVariant)
+		end
 	end)
 
 	-- Block-started hook: fires the moment the server accepts a BlockStart request
@@ -858,15 +1090,26 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 		mirror:OnWeaponChanged()
 	end)
 
-	-- Parry-window-opened hook: broadcast to EVERY client the moment any combatant (player or bot)
-	-- arms a parry window (Constants.Combat.RemoteNames.ParryWindowOpened). Shows the obvious,
-	-- synced-for-all tell -- a bright highlight held on that character for the window duration so an
-	-- attacker can read "they're parry-armed" no matter whose screen it is. A broadcast highlight
-	-- rather than relying on the block/parry ANIMATION replicating (whose weight can lose to the
-	-- default Animate script on remote viewers -- see CombatAnimator's DOMINANT_WEIGHT note).
-	parryWindowOpened.OnClientEvent:Connect(function(character: Instance?)
+	-- Parry-window-opened hook: broadcast to every NEARBY client (server-side
+	-- broadcastToNearbyPlayers, within Constants.Combat.ParryTellBroadcastRadius studs -- no longer
+	-- literally every connected client, see that constant's own header) the moment any combatant
+	-- (player or bot) arms a parry window (Constants.Combat.RemoteNames.ParryWindowOpened). Shows the
+	-- obvious, synced-for-all-nearby-viewers tell -- a bright highlight held on that character for
+	-- the window duration so an attacker can read "they're parry-armed" no matter whose screen it is.
+	-- A broadcast highlight rather than relying on the block/parry ANIMATION replicating (whose
+	-- weight can lose to the default Animate script on remote viewers -- see CombatAnimator's
+	-- DOMINANT_WEIGHT note).
+	--
+	-- durationSeconds is the server's REAL computed window (broadcastParryWindowOpened's own header) --
+	-- for a laggy presser this is Constants.Combat.ParryWindowSeconds PLUS their ping, strictly longer
+	-- than the flat constant. Using the flat constant here used to hold the highlight for exactly
+	-- 0.35s regardless, so it visibly expired before state.Vitals.parryWindowExpiry actually closed on
+	-- any player with non-trivial ping -- a hit landing in that gap still parried even though the
+	-- target no longer looked parry-armed. `or Constants.Combat.ParryWindowSeconds` only guards an
+	-- old/mismatched server build that hasn't sent the second argument yet.
+	parryWindowOpened.OnClientEvent:Connect(function(character: Instance?, durationSeconds: number?)
 		if typeof(character) == "Instance" and character:IsA("Model") then
-			HitFlash.FlashHold(character, "ParryWindow", Constants.Combat.ParryWindowSeconds)
+			HitFlash.FlashHold(character, "ParryWindow", durationSeconds or Constants.Combat.ParryWindowSeconds)
 		end
 	end)
 
@@ -906,7 +1149,71 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 			CombatAnimator.StopRunning()
 			MovementVFX.SetSprinting(false)
 			FOVOffset.SetContinuous("Sprint", 0, Constants.Camera.Sprint.FOVEaseSpeed)
+			-- The visuals above are now gone, so record that sprint is no longer engaged -- otherwise
+			-- syncSprint still believes it is and the next transition that WANTS sprint reads as a
+			-- no-op, leaving the player permanently un-sprinting until movement stops and restarts.
+			-- Safe against re-fire loops because syncSprint is edge-triggered on real transitions, not
+			-- polled: with the Sprint key still held or Autorun still moving, nothing re-sends until
+			-- one of those actually changes -- the same recovery point the key path always had.
+			sprintEngaged = false
 		end
+		-- No branch for Action == "CustomMove" (the hotbar's live-fire request) -- it plays no local
+		-- prediction to roll back in the first place (see Types.RejectedActionKind's own header), so
+		-- the unconditional debug log two lines above this elseif chain is already this reject's
+		-- entire client-side handling.
+	end)
+
+	-- Monotonic per-entry LayoutOrder -- every entry otherwise shares LayoutOrder=0 AND the identical
+	-- Name ("KillFeedEntry"), so display/eviction order fell back to GetChildren()'s own unenforced
+	-- parenting-order tiebreak instead of a stamped, guaranteed ordering.
+	local killFeedEntryCounter = 0
+
+	killFeedEvent.OnClientEvent:Connect(function(payload: { KillerName: string, VictimName: string })
+		local playerGui = localPlayer:WaitForChild("PlayerGui") :: PlayerGui
+		local deathFeedScreen = playerGui:FindFirstChild("DeathFeed")
+		if not deathFeedScreen then
+			return
+		end
+
+		local killFeedList = deathFeedScreen:FindFirstChild("KillFeedList")
+		if not killFeedList then
+			return
+		end
+
+		local entryCount = 0
+		for _, child in ipairs(killFeedList:GetChildren()) do
+			if child:IsA("TextLabel") then
+				entryCount += 1
+			end
+		end
+
+		while entryCount >= 6 do
+			for _, child in ipairs(killFeedList:GetChildren()) do
+				if child:IsA("TextLabel") then
+					child:Destroy()
+					entryCount -= 1
+					break
+				end
+			end
+			if entryCount < 6 then
+				break
+			end
+		end
+
+		killFeedEntryCounter += 1
+
+		local entry = Instance.new("TextLabel")
+		entry.Name = "KillFeedEntry"
+		entry.LayoutOrder = killFeedEntryCounter
+		entry.BackgroundTransparency = 1
+		entry.Text = string.format("%s defeated %s", payload.KillerName, payload.VictimName)
+		entry.TextColor3 = Color3.fromRGB(255, 255, 255)
+		entry.TextSize = 14
+		entry.Font = Enum.Font.GothamMedium
+		entry.Size = UDim2.fromOffset(280, 20)
+		entry.AutomaticSize = Enum.AutomaticSize.Y
+		entry.TextXAlignment = Enum.TextXAlignment.Right
+		entry.Parent = killFeedList
 	end)
 
 	-- Feedback: server-driven presentation only, per this file's header.
@@ -917,6 +1224,41 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 			combatFeedback.LockOnTarget:set(nil)
 		end
 	end)
+
+	-- Downslam ground-impact payoff (Client/FX/SlamImpactVFX.lua) -- fires on the dedicated
+	-- "GroundSlam" event below, a SECOND, later beat than the hit-confirm reactions. Every
+	-- Downslam-variant origin (the M1 finisher's own Downslam, the standalone AirSlam attack, and the
+	-- air-combo's own MaxHits slam finisher) sends this same event once its knockback physics actually
+	-- resolves server-side -- see CombatSystem.lua's sendGroundSlamFeedback for why it's a distinct
+	-- Kind rather than a second "Hit". ImmediateGroundImpact (Types.CombatFeedbackPayload's own header)
+	-- tells SlamImpactVFX.BeginWatch whether to expect an observable fall or an already-resolved one.
+	-- Scoped to a target resolvable to a live Player character (getCharacter(payload.TargetUserId)) --
+	-- a training dummy/bot target has no client-visible Instance to track (see SlamImpactVFX.lua's own
+	-- header).
+	local function beginDownslamWatch(payload: Types.CombatFeedbackPayload): ()
+		if payload.FinisherVariant ~= "Downslam" then
+			return
+		end
+		local slamCharacter = getCharacter(payload.TargetUserId)
+		if not slamCharacter then
+			return
+		end
+		local isLocalAttacker = payload.AttackerUserId == localPlayer.UserId
+		local isLocalTarget = payload.TargetUserId == localPlayer.UserId
+		SlamImpactVFX.BeginWatch(slamCharacter, function()
+			-- Both parties who received this feedback event feel the ground impact -- same
+			-- attacker/victim role split HitStop.FreezeAttacker/FreezeVictim already use for the
+			-- hit-confirm beat. CameraShake.FinisherSlam reuses the same preset FlightController.lua
+			-- already plays for a hard flight landing -- a heavy ground impact, whatever caused it.
+			CameraShake.Shake(Constants.FX.CameraShake.FinisherSlam)
+			if isLocalAttacker then
+				HitStop.FreezeAttacker(true)
+			end
+			if isLocalTarget then
+				HitStop.FreezeVictim(true)
+			end
+		end, payload.ImmediateGroundImpact)
+	end
 
 	feedbackEvent.OnClientEvent:Connect(function(payload: Types.CombatFeedbackPayload)
 		logger:debug("Combat_FeedbackEvent received", {
@@ -947,22 +1289,47 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 			if payload.Kind == "PostureBreak" then
 				mirror:OnMyPostureBroken(nowFeedback)
 			end
-			if payload.Kind == "Hit" then
-				mirror:OnHeldInAirCombo(payload.AttackDebugName, payload.IsHeavy, nowFeedback)
-			end
 		end
 		if payload.Kind == "Parried" and payload.AttackerUserId == localPlayer.UserId then
-			mirror:OnMyAttackParried(nowFeedback)
+			mirror:OnMyAttackParried(nowFeedback, payload.AirComboPriorityShift)
 		end
-		-- I'm the escaping victim (TargetUserId), not the punished attacker -- see
-		-- PredictionMirror.OnAirTechEscaped's own header.
-		if payload.Kind == "AirTechEscaped" and payload.TargetUserId == localPlayer.UserId then
-			mirror:OnAirTechEscaped(nowFeedback)
+		-- The priority-switch redesign's OTHER side: I'm the parrier (TargetUserId), and this parry
+		-- just seized attacker priority over an air-combo sequence (AirCombo.SwitchPriority) -- see
+		-- Types.CombatFeedbackPayload.AirComboPriorityShift's own header.
+		if
+			payload.Kind == "Parried"
+			and payload.AirComboPriorityShift
+			and payload.TargetUserId == localPlayer.UserId
+		then
+			mirror:OnMyParrySeizedAirComboPriority(nowFeedback)
 		end
 
 		if payload.Kind == "Death" then
-			-- DeathFeed isn't wired to real data yet (out of this pass's scope) -- see
-			-- Screens/DeathFeed/init.lua. The event is real and delivered; nothing renders it yet.
+			-- This is the FeedbackEvent-carried Death payload, distinct from the dedicated
+			-- Combat_KillFeed remote handled below (killFeedEvent.OnClientEvent), which is what
+			-- renders into Screens/DeathFeed's KillFeedList -- that part is unchanged. This branch now
+			-- drives the death-to-respawn overlay (Screens/DeathFeed's DeathOverlay) and the matching
+			-- screen dip (Client/FX/DeathEffect.lua), but ONLY on the victim's own screen --
+			-- confirmDeath (CombatSystem.lua) sends this exact payload to BOTH the victim and the
+			-- killer (if any), and the killer's own client must never see their own screen dip or
+			-- overlay for a kill they threw.
+			if payload.TargetUserId == localPlayer.UserId then
+				local killerName: string? = nil
+				if payload.AttackerUserId then
+					local killerPlayer = Players:GetPlayerByUserId(payload.AttackerUserId)
+					killerName = if killerPlayer then killerPlayer.Name else nil
+				end
+				logger:debug("Local death confirmed", { killer = killerName or "none (environmental/other)" })
+				deathFeed.ShowDeath(killerName)
+				DeathEffect.Play()
+				-- Locks out combat input for the rest of this corpse's life -- see isLocalPlayerDead's
+				-- own declaration above. Cleared on the next CharacterAdded (respawn), not on a timer.
+				isLocalPlayerDead = true
+				-- Cuts WASD at the source -- see setControlsEnabled's own declaration above for why
+				-- this, not PlatformStand/WalkSpeed, is what actually stops a dead player from still
+				-- walking/animating.
+				setControlsEnabled(false)
+			end
 			return
 		end
 
@@ -1020,6 +1387,16 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 			return
 		end
 
+		if payload.Kind == "GroundSlam" then
+			-- The air-combo's own MaxHits ground slam -- see this event's own dispatch comment
+			-- (CombatSystem.lua's onGroundSlam hook) for why it's a separate event instead of a
+			-- second "Hit": the landed swing's own "Hit" event for this exchange already ran every
+			-- other reaction (damage number, hit-flash, hit-stop, PredictionMirror) above; this only
+			-- ever needs to start the ground-impact watch, nothing else.
+			beginDownslamWatch(payload)
+			return
+		end
+
 		-- TargetPosition is authoritative when present (e.g. a training dummy, which has no
 		-- TargetUserId to resolve a Player/character from -- see Types.CombatFeedbackPayload's
 		-- header). Player-vs-player feedback doesn't set it, so this falls back to the existing
@@ -1037,6 +1414,66 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 			if targetRoot then
 				position = worldPositionToScreenUDim2(targetRoot.Position + TARGET_HEAD_OFFSET)
 			end
+		end
+
+		if payload.Kind == "ObjectStun" then
+			-- Slammed into world geometry (Server/Combat/ObjectStunResolver.lua). This Kind used to have
+			-- no branch of its own at all: it fell through to the Hit/Blocked tail below, which spawned
+			-- the bonus-damage number and then matched NEITHER branch -- so the most violent thing that
+			-- can happen to a body in this game arrived as a floating number with no shake, no flash, no
+			-- freeze, and none of the presentation the Move Editor lets an author set. Everything the
+			-- server bothers to put on payload.ObjectStun is consumed here.
+			--
+			-- Only the FIRST beat -- the contact with the surface itself. The drop that ends a pin
+			-- arrives later as its own "GroundSlam" event once the server's own slam physics resolve,
+			-- and gets the full SlamImpactVFX ground payoff through beginDownslamWatch above; nothing
+			-- about that second beat belongs here.
+			local stun = payload.ObjectStun
+			if payload.DamageAmount and payload.DamageAmount > 0 then
+				combatFeedback.AddDamageHit({ Amount = payload.DamageAmount, Kind = "Heavy", Position = position })
+			end
+
+			if payload.AttackerUserId == localPlayer.UserId or payload.TargetUserId == localPlayer.UserId then
+				-- CameraShakeScale is the author's own multiplier on this impact's weight (0 disables it
+				-- outright), applied to the same FinisherSlam preset every other heavy body-into-something
+				-- impact already uses -- a wall slam is exactly that, whatever threw them into it. Built as
+				-- a fresh table rather than mutating the preset, which is shared Constants data.
+				local shakeScale = if stun then stun.CameraShakeScale else 1
+				if shakeScale > 0 then
+					local preset = Constants.FX.CameraShake.FinisherSlam
+					CameraShake.Shake({
+						Amplitude = preset.Amplitude * shakeScale,
+						Frequency = preset.Frequency,
+						DurationSeconds = preset.DurationSeconds,
+					})
+				end
+			end
+
+			-- isHeavy = true for both freezes: an object stun has no light variant, it is by construction
+			-- the heaviest contact the move can produce.
+			if payload.AttackerUserId == localPlayer.UserId then
+				HitStop.FreezeAttacker(true)
+				if stun and stun.AttackerAnimationId ~= "" then
+					CombatAnimator.PlayExplicitAnimation(stun.AttackerAnimationId, "ObjectStunAttacker")
+				end
+			end
+			if payload.TargetUserId == localPlayer.UserId then
+				HitStop.FreezeVictim(true)
+				-- stun.VictimAnimationId is deliberately NOT played. A target reaching an object stun is
+				-- ragdolled by definition (that is what carried them into the surface) and the ragdoll owns
+				-- the body -- PlatformStand plus disabled Motor6Ds means an AnimationTrack on it produces
+				-- no visible pose at all. Playing it anyway would look wired while doing nothing; the
+				-- reaction the victim actually sees is the ragdoll itself, the pin, and the drop.
+			end
+
+			-- Flashed in the posture-break colour rather than the plain hit white: this is the same
+			-- register of event -- a body losing control entirely, not a hit landing on one that still has
+			-- it. nil for a bot/dummy target with no TargetUserId, which HitFlash's own contract allows.
+			local stunnedCharacter = getCharacter(payload.TargetUserId)
+			if stunnedCharacter then
+				HitFlash.Flash(stunnedCharacter, "PostureBreak")
+			end
+			return
 		end
 
 		if payload.Kind == "Parried" then
@@ -1131,6 +1568,10 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle): ()
 					HitFlash.Flash(ownCharacter, "Hit")
 				end
 			end
+			-- No ground-impact-VFX dispatch here anymore -- every Downslam-variant origin now sends its
+			-- own dedicated "GroundSlam" event once its knockback physics actually resolves (see
+			-- beginDownslamWatch's own header above), so this "Hit" event calling it too would fire the
+			-- watch a second time for the same landed swing.
 		end
 	end)
 

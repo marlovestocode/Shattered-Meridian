@@ -66,6 +66,18 @@
 
 	Logging (Logger.scope("ShiftLockCamera"), Studio-only per Logger.lua): toggle and engage/
 	disengage transitions and character (re)binds only -- nothing logs at render-step frequency.
+
+	Input suspension (2026-08-10, radial emote wheel): SetInputSuspended(true) tells this module to
+	skip its own per-frame MouseBehavior/yaw writes below without touching `enabled`/`engaged` at all
+	-- CameraOffset easing keeps running regardless, so a shift-locked player's shoulder framing
+	doesn't visibly snap away and back. Client/Emotes/EmoteWheelClient.lua is the one caller today: the
+	wheel needs MouseBehavior at Default for its own mouse-steered selection, and this module's own
+	"re-assert LockCenter every frame while engaged" loop (see this file's header on why once isn't
+	enough) would otherwise silently overwrite that one frame later. This is the same "coordinate with
+	the canonical writer instead of fighting it" contract FOVOffset/CameraOffsetComposer already give
+	other camera-property writers, applied to MouseBehavior specifically since no shared composer
+	exists for that property yet -- a second caller needing the same suspend semantics for a different
+	reason is the point at which generalizing this into one would earn its keep.
 ]]
 
 local Players = game:GetService("Players")
@@ -117,6 +129,11 @@ local flying = false
 -- drives the game-styled crosshair (UI/Components/ShiftLockCrosshair.lua) that replaces the
 -- engine's stock mouse-locked cursor while the default cursor is hidden below.
 local crosshairEngaged: Fusion.Value<boolean>? = nil
+
+-- See this file's header, "Input suspension" section. Read once per render step in onRenderStep
+-- below -- a plain boolean check, not a GetAttribute/remote lookup, so suspending costs nothing on
+-- every OTHER frame this mode isn't engaged anyway.
+local inputSuspended = false
 
 local function setEngaged(nowEngaged: boolean): ()
 	if nowEngaged == engaged then
@@ -195,6 +212,13 @@ local function onRenderStep(_deltaTime: number): ()
 		return
 	end
 
+	-- See this file's header, "Input suspension" section -- skips the MouseBehavior/yaw writes below
+	-- for exactly the window a suspending caller (Client/Emotes/EmoteWheelClient.lua) owns, without
+	-- otherwise touching `engaged` or the CameraOffset easing above.
+	if inputSuspended then
+		return
+	end
+
 	-- Re-asserted every frame while engaged -- see the file header for why once is not enough.
 	UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
 
@@ -263,6 +287,11 @@ end
 local function onCharacterRemoving(): ()
 	humanoid = nil
 	rootPart = nil
+end
+
+-- See this file's header, "Input suspension" section.
+function ShiftLockCamera.SetInputSuspended(suspended: boolean): ()
+	inputSuspended = suspended
 end
 
 -- shiftLockEngaged is CombatFeedback's handle field of the same name (Main.client.lua passes it

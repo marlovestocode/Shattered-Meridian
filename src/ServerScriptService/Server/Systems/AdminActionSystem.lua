@@ -93,10 +93,25 @@ end
 -- (re-applies on a fresh respawn) and ApplyInvisible/SetInvisible below (the first real,
 -- reachable SetInvisible action -- this function was dead code until that pair was wired up; see the
 -- decomposition audit notes this module's header references for the history).
+--
+-- Skips HumanoidRootPart deliberately: it's invisible by design on every rig (Transparency = 1 from
+-- the moment the character loads, R6 or R15), independent of this toggle entirely. Without this
+-- exclusion, clearing Invisible (transparency = 0) force-sets it VISIBLE along with everything else,
+-- and nothing ever puts it back to 1 afterward -- there's no "restore original per-part transparency"
+-- step here, just a blind sweep to 0/1, so the root part is left permanently showing as a solid block
+-- at the character's torso for the rest of the session. Found via the Awakening rework's own
+-- Invisible(true) -> Invisible(false) cycle (Client/Intro/IntroClient.lua's AwakeningComplete signal
+-- is the first real caller to exercise a full round trip on a live player and look closely at the
+-- result) but the bug lives here, not in that feature -- every other SetInvisible caller (DevMenu's
+-- manual toggle) hits the exact same thing.
 local function setCharacterTransparency(character: Model, transparency: number): ()
 	for _, descendant in ipairs(character:GetDescendants()) do
-		if descendant:IsA("BasePart") or descendant:IsA("Decal") then
-			(descendant :: BasePart | Decal).Transparency = transparency
+		if descendant:IsA("BasePart") then
+			if descendant.Name ~= "HumanoidRootPart" then
+				(descendant :: BasePart).Transparency = transparency
+			end
+		elseif descendant:IsA("Decal") then
+			(descendant :: Decal).Transparency = transparency
 		end
 	end
 end
@@ -272,16 +287,50 @@ end
 -- Flying requires a currently-live Humanoid (matches the original CombatSystem.SetPlayerFlying,
 -- which also returned false with no bound Humanoid) -- flight is a live-session toggle, not a
 -- respawn-persistent one, so there is nothing meaningful to apply without a body to apply it to.
+--
+-- Also reasserts network ownership of the target's rootPart -- Roblox's automatic network-ownership
+-- algorithm hands a character's parts to the SERVER the moment PlatformStand flips true (the same
+-- reason RagdollController.lua explicitly calls SetNetworkOwner around its own PlatformStand+
+-- Physics-state usage -- see that module's header: "a bare velocity/CFrame write from the server is
+-- immediately overridden by the owner's own simulation," which is exactly backwards for THIS
+-- feature). Ragdoll WANTS server ownership, because the server drives the joints. Flight is the
+-- opposite: Client/DevMenu/FlightController.lua's CFrame writes (Noclip) or FlightPhysics.lua's
+-- LinearVelocity/AlignOrientation constraints (Collide) are entirely CLIENT-driven, so the flying
+-- player must keep (or reclaim) ownership of their own rootPart. Without this, PlatformStand=true
+-- silently strands the character server-owned: the server's own unowned physics simulation of a
+-- PlatformStand rigid body keeps falling/settling under gravity every replication tick and overrides
+-- whatever the client just wrote, which is exactly "stuck in the ground, not actually flying" rather
+-- than a server error or a rejected request -- nothing here ever throws or returns false, so this
+-- failure mode was invisible to every existing precondition/wiring check.
+--
+-- Explicit ownership on enable (SetNetworkOwner(targetPlayer), pcall-guarded the same way
+-- RagdollController.setNetworkOwner is -- SetNetworkOwner throws on an anchored or otherwise
+-- ungrounded part, and the client's own Anchored write can race this one); automatic ownership on
+-- disable (SetNetworkOwnershipAuto()) so a no-longer-flying character returns to Roblox's normal
+-- distance-based ownership instead of staying hard-pinned to whichever player last flew it.
 function AdminActionSystem.SetFlying(targetPlayer: Player, enabled: boolean): boolean
 	local state = overrideStates[targetPlayer]
 	if not state then
 		return false
 	end
-	local _, humanoid = getLiveHumanoid(targetPlayer)
+	local character, humanoid = getLiveHumanoid(targetPlayer)
 	if not humanoid then
 		return false
 	end
 	AdminActionSystem.ApplyFlying(state, humanoid, enabled)
+
+	local rootPartInstance = character and character:FindFirstChild("HumanoidRootPart")
+	if rootPartInstance and rootPartInstance:IsA("BasePart") then
+		local rootPart = rootPartInstance :: BasePart
+		pcall(function()
+			if enabled then
+				rootPart:SetNetworkOwner(targetPlayer)
+			else
+				rootPart:SetNetworkOwnershipAuto()
+			end
+		end)
+	end
+
 	return true
 end
 

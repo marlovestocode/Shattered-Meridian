@@ -27,7 +27,24 @@ function FeedbackPayload.Build(
 	postureAmount: number?,
 	isHeavy: boolean?,
 	targetPosition: Vector3?,
-	attackDebugName: string?
+	attackDebugName: string?,
+	-- Additive, appended last so every existing positional call site stays valid untouched -- see
+	-- Types.CombatFeedbackPayload.AirComboPriorityShift's own header for what this flags (Kind ==
+	-- "Parried" only).
+	airComboPriorityShift: boolean?,
+	-- Additive, appended last (same "existing positional call site stays valid untouched" reasoning as
+	-- airComboPriorityShift above) -- see Types.CombatFeedbackPayload.FinisherVariant's own header for
+	-- what this flags (Kind == "Hit" only, and only once a caller has already confirmed the finisher's
+	-- knockback actually applied).
+	finisherVariant: Types.FinisherVariant?,
+	-- Additive, appended last (same reasoning again) -- see Types.CombatFeedbackPayload.
+	-- ImmediateGroundImpact's own header for what this flags (Kind == "GroundSlam" only).
+	immediateGroundImpact: boolean?,
+	-- Additive, appended last (same reasoning again). A whole sub-table rather than another run of
+	-- positional scalars -- an Object Stun carries nine presentation values, and appending nine more
+	-- parameters to a builder eleven call sites already pass positionally is exactly how a call site
+	-- ends up silently off by one. See Types.ObjectStunFeedback (Kind == "ObjectStun" only).
+	objectStun: Types.ObjectStunFeedback?
 ): Types.CombatFeedbackPayload
 	return {
 		Kind = kind,
@@ -38,6 +55,10 @@ function FeedbackPayload.Build(
 		PostureAmount = postureAmount,
 		IsHeavy = isHeavy,
 		AttackDebugName = attackDebugName,
+		AirComboPriorityShift = airComboPriorityShift,
+		FinisherVariant = finisherVariant,
+		ImmediateGroundImpact = immediateGroundImpact,
+		ObjectStun = objectStun,
 	}
 end
 

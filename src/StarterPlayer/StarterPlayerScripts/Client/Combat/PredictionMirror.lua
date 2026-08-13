@@ -47,9 +47,13 @@ local CombatDebugNames = require(ReplicatedStorage.Shared.CombatDebugNames)
 export type PredictVerdict = "Predict" | "Buffered" | "NoPredict"
 
 export type PredictedSwing = {
-	-- 1-based Basic stage the next M1 press will throw (mirror of basicComboLanded + 1).
+	-- 1-based Basic stage the next M1 press will throw -- throw-based (mirror of basicSwingIndex),
+	-- NOT landing-based, whenever IsFinisher is false; see PredictedSwing's own function header for
+	-- why these two are now separate mirrored counters, matching the server-side split.
 	StageIndex: number,
-	-- True when StageIndex reached Constants.Combat.BasicComboLength -- the press is the finisher.
+	-- True when the LANDING-based combo count (basicComboLanded) reached
+	-- Constants.Combat.BasicComboLength - 1 -- the press is the finisher. Still purely landing-based,
+	-- unlike StageIndex above -- whiffing can never mispredict a finisher into existence.
 	IsFinisher: boolean,
 }
 
@@ -61,6 +65,9 @@ export type PredictionMirrorInstance = typeof(setmetatable(
 		basicAttackReadyAt: number,
 		heavyAttackReadyAt: number,
 		attackEndsAt: number,
+		-- Throw-based mirror of CombatState.basicSwingIndex -- see PredictedSwing's own header for why
+		-- this is now separate from the landing-based basicComboLanded below.
+		basicSwingIndex: number,
 		basicComboLanded: number,
 		basicComboExpiry: number,
 		parryCooldownExpiry: number,
@@ -75,32 +82,27 @@ export type PredictionMirrorInstance = typeof(setmetatable(
 		movementCooldownExpiry: number,
 		airSlamReadyAt: number,
 		airComboActiveUntil: number,
-		-- Whether the LOCAL player is currently held as an air-combo TARGET by someone else -- fed by
-		-- OnHeldInAirCombo, a heuristic (not authoritative -- CombatClient uses this only to decide
-		-- whether to fire RequestAirTech instead of RequestDash on a double-tap-W; the server's own
-		-- reverse-scan, findAirComboAttacker, is the real gate). See that function's own header.
-		heldInAirComboUntil: number,
-		-- Mirrors CombatState.airComboSuspendedUntil -- set when a Combat_FeedbackEvent "AirTechEscaped"
-		-- arrives with the LOCAL player as its TargetUserId (I successfully teched). While active,
-		-- EvaluateBasic returns NoPredict (the server redirects a Basic press into the suspended
-		-- counter-punch instead of a normal M1 swing, which has no Combat_AttackStarted echo to confirm
-		-- against -- predicting a normal swing animation here would just flash and roll back on
-		-- timeout). A heuristic, not exactly synced to the server's own end conditions (a landed
-		-- counter-punch, a resolved hit, or a timeout) -- left to expire on its own rather than tracked
-		-- precisely; a benign staleness (a few hundred ms of skipped swing prediction after the real
-		-- exchange already ended) is an acceptable tradeoff for not adding more server-echo plumbing.
-		suspendedUntil: number,
 		stunExpiry: number,
 		postureBrokenExpiry: number,
 	},
 	PredictionMirror
 ))
 
+-- Mirrors CombatSystem.lua's own advanceComboIndex formula for the Basic string
+-- ((comboIndex % #stages) + 1), using Constants.Combat.BasicComboLength - 1 in place of #stages --
+-- the mirror has no per-weapon Stages.Basic array to read, but that constant already assumes a
+-- uniform stage count across both weapons (BasicComboLength's own header: "3 normal basic hits ...
+-- + the finisher"), the same assumption IsFinisher's own check already relies on.
+local function nextSwingIndex(current: number): number
+	return (current % (Constants.Combat.BasicComboLength - 1)) + 1
+end
+
 function PredictionMirror.New(): PredictionMirrorInstance
 	local self = {
 		basicAttackReadyAt = 0,
 		heavyAttackReadyAt = 0,
 		attackEndsAt = 0,
+		basicSwingIndex = 0,
 		basicComboLanded = 0,
 		basicComboExpiry = 0,
 		parryCooldownExpiry = 0,
@@ -110,8 +112,6 @@ function PredictionMirror.New(): PredictionMirrorInstance
 		movementCooldownExpiry = 0,
 		airSlamReadyAt = 0,
 		airComboActiveUntil = 0,
-		heldInAirComboUntil = 0,
-		suspendedUntil = 0,
 		stunExpiry = 0,
 		postureBrokenExpiry = 0,
 	}
@@ -124,6 +124,7 @@ function PredictionMirror.Reset(self: PredictionMirrorInstance): ()
 	self.basicAttackReadyAt = 0
 	self.heavyAttackReadyAt = 0
 	self.attackEndsAt = 0
+	self.basicSwingIndex = 0
 	self.basicComboLanded = 0
 	self.basicComboExpiry = 0
 	self.parryCooldownExpiry = 0
@@ -133,8 +134,6 @@ function PredictionMirror.Reset(self: PredictionMirrorInstance): ()
 	self.movementCooldownExpiry = 0
 	self.airSlamReadyAt = 0
 	self.airComboActiveUntil = 0
-	self.heldInAirComboUntil = 0
-	self.suspendedUntil = 0
 	self.stunExpiry = 0
 	self.postureBrokenExpiry = 0
 end
@@ -153,6 +152,15 @@ end
 -- a grounded Basic/Finisher throw -- it has its own cooldown field (airSlamReadyAt, never
 -- basicAttackReadyAt) and never touches the M1 combo counter (it always carries FinisherVariant =
 -- "Downslam" for animation purposes only, not because it's an M1 finisher).
+--
+-- A genuine, non-finisher Basic throw ALSO advances basicSwingIndex AND refreshes basicComboExpiry
+-- here -- the server does both unconditionally at throw time, whiff or not (see CombatState.
+-- basicSwingIndex's own header and CombatSystem.lua's own throw-selection comment: "Refresh the
+-- window so the combo stays alive while the player is actively swinging"). Before basicSwingIndex
+-- existed, OnOwnSwingConnected was the ONLY place that touched basicComboExpiry, which was harmless
+-- because nothing observable depended on the window surviving a whiff -- now that a whiffed string's
+-- STAGE still has to keep cycling, this echo has to refresh the window too, or a whiff-heavy string
+-- would spuriously "lapse" back to stage 1 on the client while the server keeps it alive.
 function PredictionMirror.OnAttackStarted(
 	self: PredictionMirrorInstance,
 	payload: Types.AttackStartedPayload,
@@ -173,8 +181,20 @@ function PredictionMirror.OnAttackStarted(
 		self.basicAttackReadyAt = now + cooldown
 	end
 	if payload.FinisherVariant ~= nil and not isAirSlam then
+		self.basicSwingIndex = 0
 		self.basicComboLanded = 0
 		self.basicComboExpiry = 0
+	elseif not isAirSlam and not payload.IsHeavy then
+		-- Mirrors resetBasicComboIfLapsed's own ordering server-side: if THIS throw itself arrives
+		-- after the window already lapsed (a real pause between presses, not just a whiff), the
+		-- string resets to stage 1 before advancing -- without this, a late throw would blindly
+		-- advance off a stale basicSwingIndex instead of restarting the cycle.
+		if now > self.basicComboExpiry then
+			self.basicSwingIndex = 0
+			self.basicComboLanded = 0
+		end
+		self.basicSwingIndex = nextSwingIndex(self.basicSwingIndex)
+		self.basicComboExpiry = now + Constants.Combat.ComboResetSeconds
 	end
 end
 
@@ -304,9 +324,36 @@ function PredictionMirror.OnResolvedAgainstMe(
 end
 
 -- The local player's own attack got PARRIED (Kind "Parried" with AttackerUserId == me) -- mirror
--- the attacker-side parry punish stun (StunDuration).
-function PredictionMirror.OnMyAttackParried(self: PredictionMirrorInstance, now: number): ()
+-- the attacker-side parry punish stun (StunDuration). wasAirComboPriorityShift true means this
+-- wasn't just a punish -- it also flipped attacker priority to the parrier (AirCombo.SwitchPriority,
+-- Server/Combat/AirCombo.lua), so THIS player isn't attacking anyone anymore; their own mirrored
+-- air-combo window has to end right now rather than linger until its original timeout, or the very
+-- next M1 press would mispredict a standalone swing as a still-active combo continuation
+-- (PredictionMirror.IsInAirCombo).
+function PredictionMirror.OnMyAttackParried(
+	self: PredictionMirrorInstance,
+	now: number,
+	wasAirComboPriorityShift: boolean?
+): ()
 	self.stunExpiry = math.max(self.stunExpiry, now + Constants.Combat.StunDuration)
+	if wasAirComboPriorityShift then
+		self.airComboActiveUntil = 0
+	end
+end
+
+-- The local player's own PARRY just seized air-combo priority (Kind "Parried" with
+-- AirComboPriorityShift == true and TargetUserId == me -- AirCombo.SwitchPriority, Server/Combat/
+-- AirCombo.lua) -- mirror the EXTENDED window (AirborneSeconds + ParryHoldExtensionSeconds, the
+-- guaranteed bonus a priority-switch parry adds on top of the normal continuation window) so the
+-- very next M1 press predicts a combo-continuation swing (IsInAirCombo) instead of a standalone one.
+-- Assigned, not maxed, like OnOwnSwingConnected's own DashPunch-start case -- this player wasn't
+-- necessarily already inside their own mirrored window a moment ago (they may have been the VICTIM
+-- of the very sequence they just seized), so a stale, unrelated airComboActiveUntil must never
+-- survive as a floor under the fresh one.
+function PredictionMirror.OnMyParrySeizedAirComboPriority(self: PredictionMirrorInstance, now: number): ()
+	self.airComboActiveUntil = now
+		+ Constants.Combat.AirCombo.AirborneSeconds
+		+ Constants.Combat.AirCombo.ParryHoldExtensionSeconds
 end
 
 -- The local player's own posture BROKE (Kind "PostureBreak" with TargetUserId == me) -- mirror the
@@ -315,9 +362,10 @@ function PredictionMirror.OnMyPostureBroken(self: PredictionMirrorInstance, now:
 	self.postureBrokenExpiry = math.max(self.postureBrokenExpiry, now + Constants.Combat.PostureBreakDuration)
 end
 
--- Combat_WeaponChanged: a successful swap resets both combo counters server-side
+-- Combat_WeaponChanged: a successful swap resets all three combo counters server-side
 -- (handleSwapWeaponRequest) -- only the basic string matters to this mirror.
 function PredictionMirror.OnWeaponChanged(self: PredictionMirrorInstance): ()
+	self.basicSwingIndex = 0
 	self.basicComboLanded = 0
 	self.basicComboExpiry = 0
 end
@@ -351,6 +399,16 @@ local function effectiveComboLanded(self: PredictionMirrorInstance, now: number)
 	return self.basicComboLanded
 end
 
+-- Same lapse rule, same shared basicComboExpiry window, for the throw-based swing index --
+-- resetBasicComboIfLapsed resets both counters together server-side, so a lapsed string mirrors
+-- back to stage 1 here too, not just an un-armed Finisher.
+local function effectiveSwingIndex(self: PredictionMirrorInstance, now: number): number
+	if now > self.basicComboExpiry then
+		return 0
+	end
+	return self.basicSwingIndex
+end
+
 -- Shared attack-verdict shape for Basic/Heavy: full lockouts say NoPredict; an open gate says
 -- Predict; a gate that opens within the server's own attack input buffer says Buffered (the press
 -- will still throw -- via the buffer flush -- so predicting NOW would play the feedback early and
@@ -371,12 +429,6 @@ local function evaluateAttack(self: PredictionMirrorInstance, readyAt: number, n
 end
 
 function PredictionMirror.EvaluateBasic(self: PredictionMirrorInstance, now: number): PredictVerdict
-	-- While suspended (a successfully-teched air-combo escape), a Basic press redirects server-side
-	-- into the one-shot counter-punch instead of a normal M1 swing -- see suspendedUntil's own
-	-- header for why that has no predicted animation to show here.
-	if now < self.suspendedUntil then
-		return "NoPredict"
-	end
 	return evaluateAttack(self, self.basicAttackReadyAt, now)
 end
 
@@ -385,13 +437,16 @@ function PredictionMirror.EvaluateHeavy(self: PredictionMirrorInstance, now: num
 end
 
 -- Which Basic stage/finisher a press accepted at `now` would throw (commitAndThrowAttack's own
--- stage selection, mirrored) -- what CombatAnimator.PlayPredictedSwing plays.
+-- stage selection, mirrored) -- what CombatAnimator.PlayPredictedSwing plays. Finisher eligibility
+-- stays landing-based (effectiveComboLanded); which stage animation a non-finisher press shows is
+-- now throw-based (effectiveSwingIndex/nextSwingIndex), matching the server-side split -- see
+-- PredictedSwing's own type header.
 function PredictionMirror.PredictedSwing(self: PredictionMirrorInstance, now: number): PredictedSwing
-	local stageIndex = effectiveComboLanded(self, now) + 1
-	return {
-		StageIndex = stageIndex,
-		IsFinisher = stageIndex >= Constants.Combat.BasicComboLength,
-	}
+	local nextLandedStage = effectiveComboLanded(self, now) + 1
+	if nextLandedStage >= Constants.Combat.BasicComboLength then
+		return { StageIndex = nextLandedStage, IsFinisher = true }
+	end
+	return { StageIndex = nextSwingIndex(effectiveSwingIndex(self, now)), IsFinisher = false }
 end
 
 -- The Dash press: its own mirrored cooldown -- the server REJECTS a cooldown-gated Dash rather
@@ -475,44 +530,6 @@ end
 -- juggle would show the wrong swing until the confirm echo's crossfade corrects it.
 function PredictionMirror.IsInAirCombo(self: PredictionMirrorInstance, now: number): boolean
 	return now <= self.airComboActiveUntil
-end
-
--- Mirrors applyAirCombo's own start/continue gate, but for the VICTIM side: a "Hit" feedback
--- landing on me that's Basic-category, non-heavy, non-finisher either STARTS this window
--- (attackDebugName == "DashPunch") or, if I'm already inside one, EXTENDS it -- the same shape
--- OnOwnSwingConnected above uses for the attacker's own airComboActiveUntil. A heuristic, not
--- attacker-scoped: it can't distinguish "attacker A juggled me" from "an unrelated attacker B's
--- ordinary Basic1 landed on me while A's window happened to still be open." That's fine -- this
--- only gates which remote CombatClient FIRES on a double-tap-W; the server's own
--- findAirComboAttacker is the real authority and simply rejects "NotJuggled" if this guessed wrong.
-function PredictionMirror.OnHeldInAirCombo(
-	self: PredictionMirrorInstance,
-	attackDebugName: string?,
-	isHeavy: boolean?,
-	now: number
-): ()
-	if isHeavy or not attackDebugName then
-		return
-	end
-	-- Same "start OR extend" condition as OnOwnSwingConnected above -- collapsed into one branch
-	-- (selene's if_same_then_else) since starting and extending assign the identical expression.
-	if attackDebugName == "DashPunch" or now <= self.heldInAirComboUntil then
-		self.heldInAirComboUntil = now + Constants.Combat.AirCombo.AirborneSeconds
-	end
-end
-
--- Whether the LOCAL player is currently held as an air-combo TARGET by someone else -- see
--- heldInAirComboUntil's own header for the full caveat on this being a heuristic, not an
--- authoritative check.
-function PredictionMirror.IsHeldInAirCombo(self: PredictionMirrorInstance, now: number): boolean
-	return now <= self.heldInAirComboUntil
-end
-
--- Combat_FeedbackEvent "AirTechEscaped" arrived with the LOCAL player as its TargetUserId -- I
--- successfully teched and am now suspended (CombatState.airComboSuspendedUntil, server-side). See
--- suspendedUntil's own header for what this gates.
-function PredictionMirror.OnAirTechEscaped(self: PredictionMirrorInstance, now: number): ()
-	self.suspendedUntil = now + Constants.Combat.AirCombo.SuspendedSeconds
 end
 
 -- Whether a Block press right now would arm a parry window (handleBlockStart's parryAvailable

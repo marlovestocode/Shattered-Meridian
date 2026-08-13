@@ -75,6 +75,13 @@ local function describeBotResult(presetName: string, result: Types.DevMenuSpawnB
 	return "Failed: " .. (result.Reason or "Unknown")
 end
 
+local function describeRollEmoteResult(result: Types.DevMenuRollEmoteResult): string
+	if result.Success then
+		return `Emote rolled: {result.EmoteId or "?"}.`
+	end
+	return "Failed: " .. (result.Reason or "Unknown")
+end
+
 local function describeActionResult(actionLabel: string, result: Types.DevMenuActionResult): string
 	if result.Success then
 		return actionLabel .. " applied."
@@ -95,6 +102,18 @@ local function describeShutdownResult(result: Types.DevMenuActionResult): string
 	return "Failed: " .. (result.Reason or "Unknown")
 end
 
+-- Same special-casing as describeShutdownResult above, for Instant Restart Server's own two-press
+-- confirm (Constants.Debug.DevMenu.InstantRestartConfirmWindowSeconds).
+local function describeInstantRestartResult(result: Types.DevMenuActionResult): string
+	if result.Success then
+		return "Server restarting now."
+	end
+	if result.Reason == "ConfirmationRequired" then
+		return "Press again to restart the server immediately."
+	end
+	return "Failed: " .. (result.Reason or "Unknown")
+end
+
 -- Generation counter guards the delayed clear below against a stale timer stomping a fresher
 -- status message -- e.g. two identical-text results ("Training dummy spawned.") landing within
 -- STATUS_CLEAR_DELAY of each other would otherwise let the first result's timer clear the second's
@@ -102,73 +121,36 @@ end
 -- showing" apart from "a different request that happened to produce the same text").
 local statusGeneration = 0
 
--- Hitbox-timing tuner state -- the one ListHitboxStages fetch (below, in Start) populates this
--- once; every cycle/adjust/reset action after that reads/writes this SAME cached array rather than
--- re-fetching, since every Adjust/Reset response already carries back the one stage that changed
--- (Types.DevMenuHitboxStageResult). 1-based index into hitboxStages; both stay empty/1 (and the
--- section shows its "Loading..." placeholder) for a session where the fetch never resolves.
-local hitboxStages: { Types.HitboxStageInfo } = {}
-local hitboxSelectedIndex = 1
-
--- Standalone-attack tuner state -- same "fetch once, cache, patch from Adjust/Reset responses"
--- shape as hitboxStages/hitboxSelectedIndex above, for DashPunch/DashHit
--- (Types.DevMenuListStandaloneAttacksResult) instead of a weapon's combo stages.
-local standaloneAttacks: { Types.HitboxStandaloneInfo } = {}
-local standaloneSelectedIndex = 1
-
--- Flight-feel tuner state -- same "fetch once, cache, patch from Adjust/Reset responses" shape as
--- hitboxStages/hitboxSelectedIndex above, for Constants.Flight's own curated field set
--- (Types.DevMenuListFlightTuningResult) instead of a weapon's combo stages.
+-- Flight-feel tuner state -- fetch once, cache, patch from Adjust/Reset responses (the only
+-- remaining DevMenu tuning tool of this shape -- Hitbox Timing/Standalone Attacks moved to the Move
+-- Editor's "Default" moves section, see Server/Combat/DefaultMoveRegistry.lua), for Constants.
+-- Flight's own curated field set (Types.DevMenuListFlightTuningResult).
 local flightTuningFields: { Types.FlightTuningInfo } = {}
 local flightTuningSelectedIndex = 1
 
--- Reports tab state -- unlike the three tuner caches above (each keeps exactly one currently-
+-- Reports tab state -- unlike the flight-tuner cache above (which keeps exactly one currently-
 -- selected item), this keeps every fetched report so a status-change response can patch the one
 -- record that changed in place (same "patch from Adjust/Reset response" idea, applied to a list
 -- instead of a single selection) without a full re-fetch.
 local reportRecords: { Types.BugReportRecord } = {}
 
--- Generic 3-decimal number formatter -- used for both hitbox timing (seconds) and standalone
--- offset (studs); the unit suffix is added by each renderer, not this function.
+-- Set once at the top of startDevMenu -- formatReportDisplay needs it to compute
+-- BugReportRowDisplay.IsAssignedToMe (record.AssignedAdminUserId == this admin's own UserId)
+-- without every call site threading the local player through.
+local reportsLocalUserId = 0
+
+-- Generic 3-decimal number formatter -- originally shared by hitbox timing (seconds) and
+-- standalone offset (studs) too (both moved to the Move Editor's "Default" moves section); still
+-- used for the flight-tuner's own value display. The unit suffix is added by each renderer, not
+-- this function.
 local function formatNumber(value: number): string
 	return string.format("%.3f", value)
 end
 
--- Pushes the currently selected cached stage's values onto the handle's display Value -- called
+-- Pushes the currently selected cached field's values onto the handle's display Value -- called
 -- after the initial fetch and after every cycle/adjust/reset. Number->string formatting lives here,
--- not in the screen, per DevMenuHandle.Content.HitboxStageDisplay's own "presentation, not
+-- not in the screen, per DevMenuHandle.Content.FlightTuningDisplay's own "presentation, not
 -- computation" contract.
-local function renderHitboxStage(handle: DevMenuHandle): ()
-	local stage = hitboxStages[hitboxSelectedIndex]
-	if not stage then
-		handle.Content.HitboxStageDisplay:set(nil)
-		return
-	end
-	handle.Content.HitboxStageDisplay:set({
-		TitleText = `{stage.WeaponId} {stage.DebugName}`,
-		WindupText = `Windup: {formatNumber(stage.WindupSeconds)}s`,
-		ActiveText = `Active: {formatNumber(stage.ActiveSeconds)}s`,
-		RecoveryText = `Recovery: {formatNumber(stage.RecoverySeconds)}s`,
-	})
-end
-
--- Same shape as renderHitboxStage above, for the standalone-attack tuner.
-local function renderStandaloneAttack(handle: DevMenuHandle): ()
-	local attack = standaloneAttacks[standaloneSelectedIndex]
-	if not attack then
-		handle.Content.HitboxStandaloneDisplay:set(nil)
-		return
-	end
-	handle.Content.HitboxStandaloneDisplay:set({
-		TitleText = attack.DebugName,
-		WindupText = `Windup: {formatNumber(attack.WindupSeconds)}s`,
-		ActiveText = `Active: {formatNumber(attack.ActiveSeconds)}s`,
-		RecoveryText = `Recovery: {formatNumber(attack.RecoverySeconds)}s`,
-		OffsetText = `Offset: {formatNumber(attack.OffsetForwardStuds)} studs`,
-	})
-end
-
--- Same shape as renderHitboxStage above, for the flight-feel tuner.
 local function renderFlightTuning(handle: DevMenuHandle): ()
 	local field = flightTuningFields[flightTuningSelectedIndex]
 	if not field then
@@ -182,8 +164,7 @@ local function renderFlightTuning(handle: DevMenuHandle): ()
 end
 
 -- Number->string formatting for one report, same "presentation lives in DevMenuClient, the screen
--- only ever renders ready-made strings" boundary as renderHitboxStage/renderStandaloneAttack/
--- renderFlightTuning above.
+-- only ever renders ready-made strings" boundary as renderFlightTuning above.
 local function formatReportContext(record: Types.BugReportRecord): string
 	local positionText = if record.Position
 		then string.format("(%.0f, %.0f, %.0f)", record.Position.X, record.Position.Y, record.Position.Z)
@@ -191,14 +172,34 @@ local function formatReportContext(record: Types.BugReportRecord): string
 	return `PlaceId {record.PlaceId} | Job {record.JobId} | {positionText}`
 end
 
+local function formatReportNote(note: Types.BugReportNote): DevMenuModule.BugReportNoteDisplay
+	return {
+		Id = note.Id,
+		AuthorName = note.AuthorName,
+		Text = note.Text,
+		TimeText = os.date("%Y-%m-%d %H:%M", note.CreatedAt),
+	}
+end
+
 local function formatReportDisplay(record: Types.BugReportRecord): DevMenuModule.BugReportRowDisplay
 	local dateText = os.date("%Y-%m-%d %H:%M", record.CreatedAt)
+	local notesDisplay: { DevMenuModule.BugReportNoteDisplay } = {}
+	for index, note in ipairs(record.Notes) do
+		notesDisplay[index] = formatReportNote(note)
+	end
 	return {
 		Id = record.Id,
 		HeaderText = `[{record.Category}] {record.ReporterName} -- {dateText}`,
 		DescriptionText = record.Description,
 		ContextText = formatReportContext(record),
 		Status = record.Status,
+		Category = record.Category,
+		ReporterName = record.ReporterName,
+		Priority = record.Priority,
+		PriorityText = `Priority: {record.Priority}`,
+		AssignedText = if record.AssignedAdminName then `Claimed by {record.AssignedAdminName}` else "Unassigned",
+		IsAssignedToMe = record.AssignedAdminUserId == reportsLocalUserId,
+		Notes = notesDisplay,
 	}
 end
 
@@ -452,6 +453,10 @@ local function startDevMenu(handle: DevMenuHandle): ()
 
 	logger:info("DevMenuClient.Start called", { userId = localPlayer.UserId })
 
+	-- See reportsLocalUserId's own declaration -- must be set before the Reports tab's eager fetch
+	-- below runs, so the very first render already knows which reports (if any) this admin holds.
+	reportsLocalUserId = localPlayer.UserId
+
 	-- Target tracking for the Admin tab's live display -- resolves exactly the way
 	-- DevMenuSystem.resolveActionTarget does server-side (lock-on target, or self if none),
 	-- reusing the existing Combat_LockOnChanged broadcast rather than adding a new remote.
@@ -503,6 +508,18 @@ local function startDevMenu(handle: DevMenuHandle): ()
 			local result = resultOrError :: Types.DevMenuSpawnBotResult
 			logger:debug("SpawnTrainingBot result received", { success = result.Success, reason = result.Reason })
 			return describeBotResult(presetName, result)
+		end)
+	end)
+
+	content.RollRareEmoteRequested:Connect(function()
+		logger:debug("RollRareEmoteRequested received")
+		invokeAndReport(handle, function()
+			local rollEmoteRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.RollEmote)
+			return rollEmoteRemote:InvokeServer()
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuRollEmoteResult
+			logger:debug("RollEmote result received", { success = result.Success, emoteId = result.EmoteId })
+			return describeRollEmoteResult(result)
 		end)
 	end)
 
@@ -674,6 +691,42 @@ local function startDevMenu(handle: DevMenuHandle): ()
 		end)
 	end)
 
+	content.InstantRestartServerRequested:Connect(function()
+		logger:debug("InstantRestartServerRequested received")
+		invokeAndReport(handle, function()
+			local instantRestartServerRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.InstantRestartServer)
+			return instantRestartServerRemote:InvokeServer()
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuActionResult
+			logger:debug("InstantRestartServer result received", { success = result.Success, reason = result.Reason })
+			return describeInstantRestartResult(result)
+		end)
+	end)
+
+	-- Server-wide, not per-target -- unlike SetGodmodeRequested/SetFrozenRequested/etc. above, there's
+	-- no Humanoid Attribute reflecting truth back, so content.HitboxDebugActive is set directly from
+	-- this call's own result (falling back to the pre-toggle value on failure/error, never silently
+	-- assuming the request succeeded).
+	content.SetHitboxDebugRequested:Connect(function(enabled: boolean)
+		logger:debug("SetHitboxDebugRequested received", { enabled = enabled })
+		invokeAndReport(handle, function()
+			local setHitboxDebugRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.SetHitboxDebug)
+			return setHitboxDebugRemote:InvokeServer(enabled)
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuHitboxDebugResult
+			logger:debug("SetHitboxDebug result received", { success = result.Success, reason = result.Reason })
+			if result.Success and result.Enabled ~= nil then
+				content.HitboxDebugActive:set(result.Enabled)
+			end
+			return describeActionResult(
+				if enabled then "Hitboxes visible" else "Hitboxes hidden",
+				{ Success = result.Success, Reason = result.Reason }
+			)
+		end)
+	end)
+
 	-- Spectate (Client/DevMenu/SpectateController.lua) -- toggles against currentResolvedTarget (the
 	-- SAME resolution setTarget above already tracks for the Admin tab's live display), never a
 	-- second independent resolution. A no-op with a status message if nothing is currently resolved
@@ -752,6 +805,70 @@ local function startDevMenu(handle: DevMenuHandle): ()
 	end
 
 	task.spawn(fetchSidebarStats)
+
+	-- HitboxDebugState is server-wide (not per-target), so unlike Godmode/Frozen/etc. above there's
+	-- no Humanoid Attribute to seed content.HitboxDebugActive from -- fetched once on Start(), same
+	-- eager-fetch trade-off fetchSidebarStats just above accepts.
+	local function fetchHitboxDebugState(): ()
+		local getHitboxDebugRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.GetHitboxDebug)
+		local ok, resultOrError = pcall(function()
+			return getHitboxDebugRemote:InvokeServer()
+		end)
+
+		if not ok then
+			logger:error("GetHitboxDebug request errored", { errorMessage = tostring(resultOrError) })
+			return
+		end
+
+		local result = resultOrError :: Types.DevMenuHitboxDebugResult
+		if not result.Success or result.Enabled == nil then
+			logger:warn("GetHitboxDebug rejected", { reason = result.Reason })
+			return
+		end
+
+		content.HitboxDebugActive:set(result.Enabled)
+		logger:debug("GetHitboxDebug loaded", { enabled = result.Enabled })
+	end
+
+	task.spawn(fetchHitboxDebugState)
+
+	-- Passive "a newer version has been published" banner (Server/Systems/VersionWatchSystem.lua) --
+	-- fetched once on Start(), same eager-fetch trade-off fetchSidebarStats/fetchHitboxDebugState
+	-- above accept. Pre-formats the banner text here (this screen's own "already-computed value in,
+	-- presentation out" rule) rather than handing ContentArea the raw version numbers --
+	-- content.VersionBannerText is left nil (nothing shown) both before this resolves and for the
+	-- ordinary case where no newer version exists.
+	local function fetchServerVersionInfo(): ()
+		local getServerVersionInfoRemote =
+			NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.GetServerVersionInfo)
+		local ok, resultOrError = pcall(function()
+			return getServerVersionInfoRemote:InvokeServer()
+		end)
+
+		if not ok then
+			logger:error("GetServerVersionInfo request errored", { errorMessage = tostring(resultOrError) })
+			return
+		end
+
+		local result = resultOrError :: Types.DevMenuServerVersionInfoResult
+		if not result.Success then
+			logger:warn("GetServerVersionInfo rejected", { reason = result.Reason })
+			return
+		end
+
+		if result.NewerVersionAvailable then
+			content.VersionBannerText:set(
+				`A newer version has been published (this server: v{result.BootPlaceVersion}, latest seen: v{result.LatestKnownPlaceVersion}). Consider restarting.`
+			)
+		end
+		logger:debug("GetServerVersionInfo loaded", {
+			bootPlaceVersion = result.BootPlaceVersion,
+			latestKnownPlaceVersion = result.LatestKnownPlaceVersion,
+			newerVersionAvailable = result.NewerVersionAvailable,
+		})
+	end
+
+	task.spawn(fetchServerVersionInfo)
 
 	local function fetchPlayers(): ()
 		if peek(sidebar.PlayersLoading) then
@@ -836,6 +953,25 @@ local function startDevMenu(handle: DevMenuHandle): ()
 		end)
 	end)
 
+	-- Irreversible -- see Sidebar.lua's own arm/confirm friction (isDataResetArmed) for the
+	-- client-side "are you sure" step; this handler fires only once that's already resolved. No
+	-- reason text (unlike Kick/Ban/SetSuspectedCheater below) -- this is a debug/testing tool with
+	-- no target-facing message, matching MutePlayerRequested's own simplicity above. No re-fetch on
+	-- success either -- none of PlayerRosterRowDisplay's fields (Health/Posture/Ping/Muted/
+	-- SuspectedCheater) are sourced from the wiped profile, so there's nothing stale to refresh.
+	sidebar.ResetPlayerDataRequested:Connect(function(targetUserId: number)
+		logger:debug("ResetPlayerDataRequested received", { targetUserId = targetUserId })
+		invokeAndReport(handle, function()
+			local resetPlayerDataRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.ResetTargetPlayerData)
+			return resetPlayerDataRemote:InvokeServer(targetUserId)
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuActionResult
+			logger:debug("ResetTargetPlayerData result received", { success = result.Success, reason = result.Reason })
+			return describeActionResult("Reset player data", result)
+		end)
+	end)
+
 	sidebar.SetSuspectedCheaterRequested:Connect(function(targetUserId: number, enabled: boolean)
 		logger:debug("SetSuspectedCheaterRequested received", { targetUserId = targetUserId, enabled = enabled })
 		local reason = peek(sidebar.ActionReasonText)
@@ -887,174 +1023,14 @@ local function startDevMenu(handle: DevMenuHandle): ()
 		end)
 	end)
 
-	-- Hitbox timing tuner: fetch every tunable stage ONCE (see hitboxStages' own header) and wire
-	-- the cycle/adjust/reset signals. task.spawn since InvokeServer yields and Start() shouldn't
-	-- stall the rest of the client boot sequence behind it (Main.client.lua's own convention for
-	-- yielding work, e.g. bindLocalCharacter in CombatClient.lua).
-	task.spawn(function()
-		local listRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.ListHitboxStages)
-		local ok, resultOrError = pcall(function()
-			return listRemote:InvokeServer()
-		end)
-		if not ok then
-			logger:error("ListHitboxStages request errored", { errorMessage = tostring(resultOrError) })
-			return
-		end
-		local result = resultOrError :: Types.DevMenuListHitboxStagesResult
-		if not result.Success or not result.Stages then
-			logger:warn("ListHitboxStages rejected", { reason = result.Reason })
-			return
-		end
-		hitboxStages = result.Stages
-		hitboxSelectedIndex = 1
-		renderHitboxStage(handle)
-		logger:debug("ListHitboxStages loaded", { stageCount = #hitboxStages })
-	end)
-
-	content.CycleHitboxStagePrevRequested:Connect(function()
-		if #hitboxStages == 0 then
-			return
-		end
-		hitboxSelectedIndex = if hitboxSelectedIndex <= 1 then #hitboxStages else hitboxSelectedIndex - 1
-		renderHitboxStage(handle)
-	end)
-
-	content.CycleHitboxStageNextRequested:Connect(function()
-		if #hitboxStages == 0 then
-			return
-		end
-		hitboxSelectedIndex = if hitboxSelectedIndex >= #hitboxStages then 1 else hitboxSelectedIndex + 1
-		renderHitboxStage(handle)
-	end)
-
-	content.AdjustHitboxTimingRequested:Connect(function(field: string, delta: number)
-		local stage = hitboxStages[hitboxSelectedIndex]
-		if not stage then
-			return
-		end
-		logger:debug("AdjustHitboxTimingRequested received", { field = field, delta = delta })
-		invokeAndReport(handle, function()
-			local adjustRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.AdjustHitboxTiming)
-			return adjustRemote:InvokeServer(stage.WeaponId, stage.Category, stage.StageIndex, field, delta)
-		end, function(resultOrError)
-			local result = resultOrError :: Types.DevMenuHitboxStageResult
-			if result.Success and result.Stage then
-				hitboxStages[hitboxSelectedIndex] = result.Stage
-				renderHitboxStage(handle)
-				return "Timing updated."
-			end
-			return "Failed: " .. (result.Reason or "Unknown")
-		end)
-	end)
-
-	content.ResetHitboxStageRequested:Connect(function()
-		local stage = hitboxStages[hitboxSelectedIndex]
-		if not stage then
-			return
-		end
-		logger:debug("ResetHitboxStageRequested received")
-		invokeAndReport(handle, function()
-			local resetRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.ResetHitboxStage)
-			return resetRemote:InvokeServer(stage.WeaponId, stage.Category, stage.StageIndex)
-		end, function(resultOrError)
-			local result = resultOrError :: Types.DevMenuHitboxStageResult
-			if result.Success and result.Stage then
-				hitboxStages[hitboxSelectedIndex] = result.Stage
-				renderHitboxStage(handle)
-				return "Stage reset to default."
-			end
-			return "Failed: " .. (result.Reason or "Unknown")
-		end)
-	end)
-
-	-- Standalone-attack tuner: same fetch-once/cycle/adjust/reset wiring as the hitbox-stage tuner
-	-- above, for DashPunch/DashHit instead of a weapon's combo stages.
-	task.spawn(function()
-		local listRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.ListStandaloneAttacks)
-		local ok, resultOrError = pcall(function()
-			return listRemote:InvokeServer()
-		end)
-		if not ok then
-			logger:error("ListStandaloneAttacks request errored", { errorMessage = tostring(resultOrError) })
-			return
-		end
-		local result = resultOrError :: Types.DevMenuListStandaloneAttacksResult
-		if not result.Success or not result.Attacks then
-			logger:warn("ListStandaloneAttacks rejected", { reason = result.Reason })
-			return
-		end
-		standaloneAttacks = result.Attacks
-		standaloneSelectedIndex = 1
-		renderStandaloneAttack(handle)
-		logger:debug("ListStandaloneAttacks loaded", { attackCount = #standaloneAttacks })
-	end)
-
-	content.CycleHitboxStandalonePrevRequested:Connect(function()
-		if #standaloneAttacks == 0 then
-			return
-		end
-		standaloneSelectedIndex = if standaloneSelectedIndex <= 1
-			then #standaloneAttacks
-			else standaloneSelectedIndex - 1
-		renderStandaloneAttack(handle)
-	end)
-
-	content.CycleHitboxStandaloneNextRequested:Connect(function()
-		if #standaloneAttacks == 0 then
-			return
-		end
-		standaloneSelectedIndex = if standaloneSelectedIndex >= #standaloneAttacks
-			then 1
-			else standaloneSelectedIndex + 1
-		renderStandaloneAttack(handle)
-	end)
-
-	content.AdjustHitboxStandaloneRequested:Connect(function(field: string, delta: number)
-		local attack = standaloneAttacks[standaloneSelectedIndex]
-		if not attack then
-			return
-		end
-		logger:debug("AdjustHitboxStandaloneRequested received", { field = field, delta = delta })
-		invokeAndReport(handle, function()
-			local adjustRemote =
-				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.AdjustStandaloneField)
-			return adjustRemote:InvokeServer(attack.Name, field, delta)
-		end, function(resultOrError)
-			local result = resultOrError :: Types.DevMenuStandaloneAttackResult
-			if result.Success and result.Attack then
-				standaloneAttacks[standaloneSelectedIndex] = result.Attack
-				renderStandaloneAttack(handle)
-				return "Attack updated."
-			end
-			return "Failed: " .. (result.Reason or "Unknown")
-		end)
-	end)
-
-	content.ResetHitboxStandaloneRequested:Connect(function()
-		local attack = standaloneAttacks[standaloneSelectedIndex]
-		if not attack then
-			return
-		end
-		logger:debug("ResetHitboxStandaloneRequested received")
-		invokeAndReport(handle, function()
-			local resetRemote =
-				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.ResetStandaloneAttack)
-			return resetRemote:InvokeServer(attack.Name)
-		end, function(resultOrError)
-			local result = resultOrError :: Types.DevMenuStandaloneAttackResult
-			if result.Success and result.Attack then
-				standaloneAttacks[standaloneSelectedIndex] = result.Attack
-				renderStandaloneAttack(handle)
-				return "Attack reset to default."
-			end
-			return "Failed: " .. (result.Reason or "Unknown")
-		end)
-	end)
-
-	-- Flight-feel tuner: same fetch-once/cycle/adjust/reset wiring as the two Hitbox tuners above,
-	-- for Constants.Flight's own curated field set instead of a weapon's combo stages. Adjust fires
-	-- a FRACTIONAL delta straight through (no per-field name needed -- unlike the hitbox tuners,
-	-- there's only ever one number being adjusted for whichever field is currently selected).
+	-- Flight-feel tuner: fetch every tunable field ONCE and wire the cycle/adjust/reset signals.
+	-- task.spawn since InvokeServer yields and Start() shouldn't stall the rest of the client boot
+	-- sequence behind it (Main.client.lua's own convention for yielding work, e.g. bindLocalCharacter
+	-- in CombatClient.lua). The only DevMenu tuning tool left of this shape -- Hitbox Timing/
+	-- Standalone Attacks moved to the Move Editor's "Default" moves section, see
+	-- Client/MoveEditor/MoveEditorClient.lua. Adjust fires a FRACTIONAL delta straight through (no
+	-- per-field name needed -- there's only ever one number being adjusted for whichever field is
+	-- currently selected).
 	task.spawn(function()
 		local listRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.ListFlightTuning)
 		local ok, resultOrError = pcall(function()
@@ -1175,6 +1151,88 @@ local function startDevMenu(handle: DevMenuHandle): ()
 				return "Report status updated."
 			end
 			return "Failed: " .. (result.Reason or "Unknown")
+		end)
+	end)
+
+	-- Triage mutations added alongside UpdateReportStatusRequested above -- same "patch the one
+	-- changed record in place, then re-render" shape, just for a different mutation each.
+	content.SetReportPriorityRequested:Connect(function(reportId: string, newPriority: string)
+		logger:debug("SetReportPriorityRequested received", { id = reportId, priority = newPriority })
+		invokeAndReport(handle, function()
+			local setPriorityRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.SetBugReportPriority)
+			return setPriorityRemote:InvokeServer(reportId, newPriority)
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuBugReportMutationResult
+			if result.Success and result.Report then
+				for index, record in ipairs(reportRecords) do
+					if record.Id == result.Report.Id then
+						reportRecords[index] = result.Report
+						break
+					end
+				end
+				renderReports(handle)
+				return "Report priority updated."
+			end
+			return "Failed: " .. (result.Reason or "Unknown")
+		end)
+	end)
+
+	content.AssignReportRequested:Connect(function(reportId: string, assign: boolean)
+		logger:debug("AssignReportRequested received", { id = reportId, assign = assign })
+		invokeAndReport(handle, function()
+			local assignRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.AssignBugReport)
+			return assignRemote:InvokeServer(reportId, assign)
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuBugReportMutationResult
+			if result.Success and result.Report then
+				for index, record in ipairs(reportRecords) do
+					if record.Id == result.Report.Id then
+						reportRecords[index] = result.Report
+						break
+					end
+				end
+				renderReports(handle)
+				return if assign then "Report claimed." else "Report released."
+			end
+			return "Failed: " .. (result.Reason or "Unknown")
+		end)
+	end)
+
+	content.AddReportNoteRequested:Connect(function(reportId: string, text: string)
+		logger:debug("AddReportNoteRequested received", { id = reportId })
+		invokeAndReport(handle, function()
+			local addNoteRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.AddBugReportNote)
+			return addNoteRemote:InvokeServer(reportId, text)
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuBugReportMutationResult
+			if result.Success and result.Report then
+				for index, record in ipairs(reportRecords) do
+					if record.Id == result.Report.Id then
+						reportRecords[index] = result.Report
+						break
+					end
+				end
+				renderReports(handle)
+				return "Note added."
+			end
+			return "Failed: " .. (result.Reason or "Unknown")
+		end)
+	end)
+
+	-- Unlike the three handlers above, JumpToReporter never mutates the report record itself -- it
+	-- just moves the requesting admin's own character, so there's nothing to patch into
+	-- reportRecords/re-render here.
+	content.JumpToReporterRequested:Connect(function(reportId: string)
+		logger:debug("JumpToReporterRequested received", { id = reportId })
+		invokeAndReport(handle, function()
+			local jumpToReporterRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.JumpToReporter)
+			return jumpToReporterRemote:InvokeServer(reportId)
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuActionResult
+			logger:debug("JumpToReporter result received", { success = result.Success, reason = result.Reason })
+			return describeActionResult("Jump to reporter", result)
 		end)
 	end)
 

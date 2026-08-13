@@ -41,6 +41,8 @@ local SUB_STATE_GROUPS = {
 			slideWindowExpiry = true,
 			slideCooldownExpiry = true,
 			movementCooldownExpiry = true,
+			customMoveLungeWindowExpiry = true,
+			customMoveLungeSpeed = true,
 		},
 	},
 	{
@@ -53,10 +55,7 @@ local SUB_STATE_GROUPS = {
 			airComboHoverPosition = true,
 			airComboChaseOffset = true,
 			airComboChaseExpiry = true,
-			airTechWindowExpiry = true,
-			airTechReadyAt = true,
-			airComboSuspendedUntil = true,
-			airComboSuspendedWithAttacker = true,
+			airComboHeldExpiry = true,
 		},
 	},
 }
@@ -73,6 +72,7 @@ local function makeState(overrides: { [string]: any }?): CombatState
 		humanoid = nil,
 		rootPart = nil,
 		humanoidDiedConnection = nil,
+		humanoidStateChangedConnection = nil,
 
 		alive = true,
 		blocking = false,
@@ -86,12 +86,15 @@ local function makeState(overrides: { [string]: any }?): CombatState
 		basicAttackReadyAt = 0,
 		heavyAttackReadyAt = 0,
 		airSlamReadyAt = 0,
+		customMoveReadyAt = {},
+		genuineJumpAirborne = false,
 		attackEndsAt = 0,
 		activeActionKind = "None",
 		currentSwingWindupEndsAt = 0,
 		swingCancelled = false,
 		comboIndex = 0,
 		comboExpiry = 0,
+		basicSwingIndex = 0,
 		basicComboLanded = 0,
 		basicComboExpiry = 0,
 
@@ -123,6 +126,8 @@ local function makeState(overrides: { [string]: any }?): CombatState
 			slideWindowExpiry = 0,
 			slideCooldownExpiry = 0,
 			movementCooldownExpiry = 0,
+			customMoveLungeWindowExpiry = 0,
+			customMoveLungeSpeed = 0,
 		},
 		AirCombo = {
 			airComboTarget = nil,
@@ -132,10 +137,7 @@ local function makeState(overrides: { [string]: any }?): CombatState
 			airComboHoverPosition = nil,
 			airComboChaseOffset = nil,
 			airComboChaseExpiry = 0,
-			airTechWindowExpiry = 0,
-			airTechReadyAt = 0,
-			airComboSuspendedUntil = 0,
-			airComboSuspendedWithAttacker = nil,
+			airComboHeldExpiry = 0,
 		},
 	}
 	return Fixtures.applyNestedOverrides(state, overrides, SUB_STATE_GROUPS) :: CombatState
@@ -487,6 +489,91 @@ return function()
 			local state = makeState({ slideWindowExpiry = now + 1, stunExpiry = now + 2 })
 			expect(Movement.EndMovementBursts(state, now)).to.equal(true)
 			expect(Movement.EndMovementBursts(state, now)).to.equal(false)
+		end)
+	end)
+
+	-- Regression coverage for the "free Downslam after becoming airborne for any incidental reason"
+	-- exploit -- see CombatState.genuineJumpAirborne's own header (CombatTypes.lua) and this
+	-- function's own header for the full mechanism. CombatSystem.lua's isAirborneForAirSlam used to
+	-- treat Humanoid:GetState() == Freefall (or FloorMaterial == Air) as sufficient on its own to
+	-- throw AirSlam/"Downslam" -- but Freefall is exactly what a player reaches after a DashPunch's
+	-- own dash residue carries them off a ledge, after ordinary hit knockback, after parry recoil, or
+	-- from simply walking off an edge with no jump ever pressed, not just from a genuine jump. These
+	-- tests exercise the pure state-transition decision directly (no live Humanoid instance needed --
+	-- the whole point of extracting it here instead of leaving it inline in CombatSystem.lua's
+	-- StateChanged connection, the same "pure function, thin call site" split HitResolution.
+	-- ApplyParryPunish/ApplyDisarm already use).
+	describe("Movement.ComputeGenuineJumpAirborne", function()
+		it("credits a genuine jump the instant Jumping is entered, regardless of the previous value", function()
+			expect(Movement.ComputeGenuineJumpAirborne(false, Enum.HumanoidStateType.Jumping)).to.equal(true)
+			expect(Movement.ComputeGenuineJumpAirborne(true, Enum.HumanoidStateType.Jumping)).to.equal(true)
+		end)
+
+		it("leaves Freefall alone -- it never CREDITS a jump on its own", function()
+			-- The core regression case: falling off a ledge, DashPunch's own dash residue carrying a
+			-- player over an edge, and ordinary knockback/parry-recoil drift all land the Humanoid in
+			-- Freefall with NO preceding Jumping transition. Without a genuine jump already credited,
+			-- Freefall must never flip the flag true on its own.
+			expect(Movement.ComputeGenuineJumpAirborne(false, Enum.HumanoidStateType.Freefall)).to.equal(false)
+		end)
+
+		it("leaves Freefall alone -- it never REVOKES an already-credited jump either", function()
+			-- The ascent of a genuine jump transitions Jumping -> Freefall on its own past the apex;
+			-- that continuation must not un-credit the jump that's still legitimately in progress.
+			expect(Movement.ComputeGenuineJumpAirborne(true, Enum.HumanoidStateType.Freefall)).to.equal(true)
+		end)
+
+		for _, case in ipairs({
+			{ State = Enum.HumanoidStateType.Landed, Label = "Landed" },
+			{ State = Enum.HumanoidStateType.Running, Label = "Running" },
+			{ State = Enum.HumanoidStateType.RunningNoPhysics, Label = "RunningNoPhysics" },
+			{ State = Enum.HumanoidStateType.GettingUp, Label = "GettingUp" },
+			{ State = Enum.HumanoidStateType.Physics, Label = "Physics (ragdoll/held-aloft)" },
+			{ State = Enum.HumanoidStateType.Swimming, Label = "Swimming" },
+			{ State = Enum.HumanoidStateType.Climbing, Label = "Climbing" },
+			{ State = Enum.HumanoidStateType.Seated, Label = "Seated" },
+		}) do
+			it(`clears an already-credited jump on transition to {case.Label}`, function()
+				expect(Movement.ComputeGenuineJumpAirborne(true, case.State)).to.equal(false)
+			end)
+
+			it(`leaves an uncredited flag false on transition to {case.Label}`, function()
+				expect(Movement.ComputeGenuineJumpAirborne(false, case.State)).to.equal(false)
+			end)
+		end
+
+		it("round-trips a realistic jump-and-land sequence back to false", function()
+			local airborne = false
+			airborne = Movement.ComputeGenuineJumpAirborne(airborne, Enum.HumanoidStateType.Jumping)
+			expect(airborne).to.equal(true)
+			airborne = Movement.ComputeGenuineJumpAirborne(airborne, Enum.HumanoidStateType.Freefall)
+			expect(airborne).to.equal(true)
+			airborne = Movement.ComputeGenuineJumpAirborne(airborne, Enum.HumanoidStateType.Landed)
+			expect(airborne).to.equal(false)
+		end)
+
+		it("round-trips a post-DashPunch ledge fall -- Freefall with no Jumping never credits AirSlam", function()
+			-- The exact bug report scenario: grounded (Running), DashPunch's own dash residue carries
+			-- the player off a ledge (Running -> Freefall directly, no Jumping in between), then they
+			-- land. The flag must stay false through the whole stretch.
+			local airborne = false
+			airborne = Movement.ComputeGenuineJumpAirborne(airborne, Enum.HumanoidStateType.Running)
+			expect(airborne).to.equal(false)
+			airborne = Movement.ComputeGenuineJumpAirborne(airborne, Enum.HumanoidStateType.Freefall)
+			expect(airborne).to.equal(false)
+			airborne = Movement.ComputeGenuineJumpAirborne(airborne, Enum.HumanoidStateType.Landed)
+			expect(airborne).to.equal(false)
+		end)
+
+		it("revokes a stale credit the instant a mid-air ragdoll/hold takes over", function()
+			-- A player genuinely jumped (credited), then got launched into a finisher ragdoll or an
+			-- air-combo hold mid-air (Physics state) -- that airborne stretch is no longer "falling
+			-- from my own jump," it's someone else's knockback/hold, so the credit must not survive
+			-- into whatever happens after the ragdoll/hold ends.
+			local airborne = Movement.ComputeGenuineJumpAirborne(false, Enum.HumanoidStateType.Jumping)
+			expect(airborne).to.equal(true)
+			airborne = Movement.ComputeGenuineJumpAirborne(airborne, Enum.HumanoidStateType.Physics)
+			expect(airborne).to.equal(false)
 		end)
 	end)
 end

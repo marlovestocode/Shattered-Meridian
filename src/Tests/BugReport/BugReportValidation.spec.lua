@@ -82,9 +82,9 @@ return function()
 
 	describe("BugReportSystem.IsValidStatus", function()
 		it("accepts every known status", function()
-			expect(BugReportSystem.IsValidStatus("Open")).to.equal(true)
-			expect(BugReportSystem.IsValidStatus("Resolved")).to.equal(true)
-			expect(BugReportSystem.IsValidStatus("Dismissed")).to.equal(true)
+			for _, status in ipairs(Constants.BugReport.Statuses) do
+				expect(BugReportSystem.IsValidStatus(status)).to.equal(true)
+			end
 		end)
 
 		it("rejects an unknown string", function()
@@ -102,12 +102,36 @@ return function()
 		-- "status transition" coverage available without a live DataStore (UpdateStatus itself is
 		-- Studio-only).
 		it("has no restricted transition graph -- every known status is independently valid as a target", function()
-			local statuses = { "Open", "Resolved", "Dismissed" }
-			for _, _from in ipairs(statuses) do
-				for _, to in ipairs(statuses) do
+			for _, _from in ipairs(Constants.BugReport.Statuses) do
+				for _, to in ipairs(Constants.BugReport.Statuses) do
 					expect(BugReportSystem.IsValidStatus(to)).to.equal(true)
 				end
 			end
+		end)
+	end)
+
+	describe("BugReportSystem.IsValidPriority", function()
+		it("accepts every known priority", function()
+			for _, priority in ipairs(Constants.BugReport.Priorities) do
+				expect(BugReportSystem.IsValidPriority(priority)).to.equal(true)
+			end
+		end)
+
+		it("rejects an unknown string", function()
+			expect(BugReportSystem.IsValidPriority("Critical")).to.equal(false)
+		end)
+
+		it("rejects a non-string value", function()
+			expect(BugReportSystem.IsValidPriority(1)).to.equal(false)
+			expect(BugReportSystem.IsValidPriority(nil)).to.equal(false)
+		end)
+	end)
+
+	describe("BugReportSystem.ComputeOpenCountDelta", function()
+		it("treats InProgress the same as Resolved/Dismissed -- any non-Open status", function()
+			expect(BugReportSystem.ComputeOpenCountDelta("Open", "InProgress")).to.equal(-1)
+			expect(BugReportSystem.ComputeOpenCountDelta("InProgress", "Open")).to.equal(1)
+			expect(BugReportSystem.ComputeOpenCountDelta("InProgress", "Resolved")).to.equal(0)
 		end)
 	end)
 end

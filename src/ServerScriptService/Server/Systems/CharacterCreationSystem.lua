@@ -6,31 +6,61 @@
 	`profile.raceId == nil`, no new boolean flag on PlayerProfile), this SESSION's first
 	`Player:LoadCharacter()` call for EVERY player (Players.CharacterAutoLoads = false, set in
 	default.project.json -- Roblox no longer spawns anyone automatically, so something has to, and
-	this is that something for both onboarding and returning players), freezing a first-time player in
-	the isolated "Waking Threshold" pocket space for the intro cinematic + character creator,
-	attribute/name validation (pure functions, exported for TestEZ -- same "pure logic gets its own
-	export" precedent as PlayerDataSystem.CreateDefaultProfile/BugReportSystem.ValidateCategory), the
-	CharacterCreation_Finalize handler, and the Threshold-to-real-spawn teleport.
+	this is that something for both onboarding and returning players), isolating a first-time player
+	(Frozen + Godmode + Invisible, not damageable or visible to anyone else) in the "Waking Threshold"
+	pocket space for the whole cinematic-intro-through-awakening sequence, attribute/name validation
+	(pure functions, exported for TestEZ -- same "pure logic gets its own export" precedent as
+	PlayerDataSystem.CreateDefaultProfile/BugReportSystem.ValidateCategory), the
+	CharacterCreation_Finalize handler, the race-keyed Threshold-to-arrival-world teleport, and the
+	CharacterCreation_AwakeningComplete handler that ends the isolation once the client's own get-up
+	beat finishes.
+
+	"World" here means a race-keyed arrival zone in this same place (Config.ArrivalSpawnPaths, one
+	Workspace path per RaceId), not a separate Roblox Place -- WorldSystem.lua/TerritorySystem.lua
+	already use "world"/"region" this way, and CharacterCreation_Finalize picks the entry keyed by
+	the SERVER-VALIDATED raceId (never a client-supplied destination), which is what keeps this
+	server-authoritative without needing any multi-place teleport infrastructure this repo doesn't
+	otherwise have.
+
+	Isolation stays on (Frozen + Godmode + Invisible) from handleGetOnboardingState all the way
+	through the client's own black-screen/teleport/first-person-reveal/get-up beats -- NOT just
+	through character creation like before this rework. It's cleared only by
+	CharacterCreation_AwakeningComplete, a fire-and-forget signal the client sends once its own get-up
+	AnimationTrack finishes (Client/Intro/IntroClient.lua). This is a one-shot, low-stakes trust: worst
+	case a modified client ends its own isolation slightly early during a solo, non-competitive beat --
+	the same trust tier as the existing GetOnboardingState/spawnedThisSession guard, and simpler than
+	duplicating an animation-length timer on both sides. awaitingAwakeningPlayers below is what makes
+	sure a client can only ever end its OWN isolation, and only once Finalize has actually granted it.
 
 	Does not own: authorization (this feature has no whitelist -- every player goes through it exactly
 	once, gated only by their own profile's raceId, not an admin check like DevMenuSystem's actions),
-	the cinematic/creator UI itself (Client/Onboarding/OnboardingClient.lua + UI/Screens/Onboarding/*
-	own presentation and the held-input skip/confirm interactions), or Workspace geometry -- the
-	Waking Threshold and the real arrival spawn are Studio/place-file content this module references
-	by name (Constants.CharacterCreation.ThresholdSpawnPath/ArrivalSpawnPath) via WaitForChild, never
-	fabricated here (there is no Workspace tree in default.project.json for Rojo to author).
+	the cinematic/creator UI itself, the intro camera, or the FX/animation staging around the awakening
+	beat (Client/Onboarding/OnboardingClient.lua + UI/Screens/Onboarding/* own the creator screens;
+	Client/Intro/IntroClient.lua + IntroCamera.lua + VisionEffects.lua + BlackScreen.lua own the
+	lying-pose/pan/black-screen/reveal/get-up sequence wrapped around them), the Frozen/Godmode/
+	Invisible primitives themselves (AdminActionSystem.lua owns SetFrozen/SetGodmode/SetInvisible --
+	this module is a legitimate, non-privileged reuse of already-public functions, not a
+	privilege-boundary exception; see AdminActionSystem.SetFrozen's own comment on this), or Workspace
+	geometry -- the Waking Threshold and every per-race arrival spawn are place-file content this
+	module references by name (Constants.CharacterCreation.ThresholdSpawnPath/ArrivalSpawnPaths) via
+	WaitForChild, authored in default.project.json's own Workspace.Onboarding tree rather than
+	fabricated here.
 
 	Boots in Main.server.lua after PlayerDataSystem (WaitForProfile/Transform) and AdminActionSystem
-	(SetFrozen) are already initialized -- see that file's own boot-order comment for this System.
+	(SetFrozen/SetGodmode/SetInvisible) are already initialized -- see that file's own boot-order
+	comment for this System.
 
 	Failure-handling contract (non-negotiable, per this feature's own design review):
 	  - Transform must succeed before any teleport is attempted. A Transform failure returns
-	    Success = false immediately -- no teleport, no unfreeze, so a rare Transform failure can never
-	    silently strand a player half-onboarded (raceId written but never actually moved/unfrozen).
-	  - Once Transform succeeds, the real-spawn Workspace lookup retries via WaitForChild, then falls
-	    back to any SpawnLocation already in the game rather than ever returning Success = true without
-	    completing SOME teleport out of the Threshold.
+	    Success = false immediately -- no teleport, no isolation change, so a rare Transform failure
+	    can never silently strand a player half-onboarded (raceId written but never actually
+	    moved/unfrozen).
+	  - Once Transform succeeds, the real-spawn Workspace lookup (keyed by the validated raceId)
+	    retries via WaitForChild, then falls back to any SpawnLocation already in the game rather than
+	    ever returning Success = true without completing SOME teleport out of the Threshold.
 	  - Success = true is never returned while the player is still physically stuck in the Threshold.
+	  - Isolation is never cleared by Finalize itself anymore -- only by a validated
+	    CharacterCreation_AwakeningComplete, so Success = true no longer implies "no longer isolated."
 ]]
 
 local Players = game:GetService("Players")
@@ -42,6 +72,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 
 local ServerScriptService = game:GetService("ServerScriptService")
 local Systems = ServerScriptService.Server.Systems
@@ -242,11 +273,36 @@ end
 -- client only calls it once.
 local spawnedThisSession: { [Player]: boolean } = {}
 
+-- Closes the double-Finalize race docs/architecture/2026-08-audit.md section 3.3 flagged: the
+-- "already onboarded" check below reads profile.raceId before the yielding
+-- TextService:FilterStringAsync call, and PlayerDataSystem.Transform (after the yield) applied
+-- unconditionally with no re-check. Two concurrent Finalize calls from the same client could both
+-- pass the raceId==nil guard, both yield, and both Transform -- the second silently overwriting the
+-- first. Set/checked synchronously (no yield between the AlreadyOnboarded read and this flag) so a
+-- concurrent second call is rejected here, before it ever reaches validation or the yield -- same
+-- eager-flag-before-yield shape as BugReportSystem.Submit's lastSubmitAt guard.
+local finalizingPlayers: { [Player]: boolean } = {}
+
+-- True from the moment Finalize grants isolation-through-awakening (right after a successful
+-- PivotTo) until a validated CharacterCreation_AwakeningComplete clears it -- what makes
+-- handleAwakeningComplete below "a client can only ever end its own isolation, and only once
+-- Finalize actually granted it" rather than trusting the remote's mere existence. Same small
+-- table-guard shape as finalizingPlayers/spawnedThisSession above.
+local awaitingAwakeningPlayers: { [Player]: boolean } = {}
+
+-- Both handlers below do real yielding server work (WaitForProfile, TextService:
+-- FilterStringAsync) before their own in-flight guards (spawnedThisSession/finalizingPlayers) can
+-- reject a repeat call -- see docs/architecture/2026-08-audit.md sections 3.6.8 (Finalize) and the
+-- matching GetOnboardingState finding. Checked first, synchronously, same convention as every other
+-- public remote's own rateLimiter (BugReportSystem.submitRateLimiter, SettingsSystem's own).
+local getOnboardingStateRateLimiter = RateLimiter.New(Config.GetOnboardingStateMaxCallsPerSecond)
+local finalizeRateLimiter = RateLimiter.New(Config.FinalizeMaxCallsPerSecond)
+
 -- Walks `path` (a list of instance names) down from Workspace via WaitForChild, honoring
 -- Constants.Network.WaitForChildTimeoutSeconds at each step -- returns nil (logged loudly, never
 -- thrown) the instant any segment is missing, rather than assuming Studio content exists. Used for
--- both the Waking Threshold spawn and the real arrival spawn -- see Config.ThresholdSpawnPath/
--- ArrivalSpawnPath's own header for what a human needs to place at each.
+-- both the Waking Threshold spawn and every per-race arrival spawn -- see Config.ThresholdSpawnPath/
+-- ArrivalSpawnPaths' own header for what a human needs to place at each.
 local function resolveNamedInstance(path: { string }): Instance?
 	local current: Instance = Workspace
 	for _, name in ipairs(path) do
@@ -263,19 +319,31 @@ local function resolveNamedInstance(path: { string }): Instance?
 	return current
 end
 
--- Resolves the CFrame to teleport a freshly-onboarded player to: the named ArrivalSpawnPath instance
--- if it exists and is a BasePart, otherwise ANY SpawnLocation already in the game (Roblox's own
--- default spawn-selection fallback), otherwise nil -- see this file's header, failure-handling
+-- Pure "which race maps to which configured Workspace path" lookup -- split out from
+-- resolveArrivalCFrame below specifically so TestEZ can exercise the race->path mapping without a
+-- live Workspace (same "keep the Workspace-resolution part Studio-only, unit-test the pure lookup
+-- underneath it" split PlayerDataSystem.lua's own header documents for its Transform/WaitForProfile
+-- pair vs. its pure CreateDefaultProfile/DecodeProfile section). raceId is Types.RaceId, not
+-- unknown -- every real caller has already run the submitted value through ValidateRaceId first, the
+-- same trust boundary ValidateAttributeBlock's own raceId parameter documents.
+function CharacterCreationSystem.ResolveArrivalSpawnPath(raceId: Types.RaceId): { string }
+	return Config.ArrivalSpawnPaths[raceId]
+end
+
+-- Resolves the CFrame to teleport a freshly-onboarded player to: the named per-race ArrivalSpawnPaths
+-- instance if it exists and is a BasePart, otherwise ANY SpawnLocation already in the game (Roblox's
+-- own default spawn-selection fallback), otherwise nil -- see this file's header, failure-handling
 -- contract: a nil here means handleFinalize must NOT return Success = true, since there is genuinely
 -- nowhere confirmed-safe to put the player.
-local function resolveArrivalCFrame(): CFrame?
-	local named = resolveNamedInstance(Config.ArrivalSpawnPath)
+local function resolveArrivalCFrame(raceId: Types.RaceId): CFrame?
+	local path = CharacterCreationSystem.ResolveArrivalSpawnPath(raceId)
+	local named = resolveNamedInstance(path)
 	if named and named:IsA("BasePart") then
 		return (named :: BasePart).CFrame
 	end
 	if named then
-		logger:error("resolveArrivalCFrame: ArrivalSpawnPath instance exists but is not a BasePart", {
-			fullPath = table.concat(Config.ArrivalSpawnPath, "/"),
+		logger:error("resolveArrivalCFrame: ArrivalSpawnPaths instance exists but is not a BasePart", {
+			fullPath = table.concat(path, "/"),
 			className = named.ClassName,
 		})
 	end
@@ -283,12 +351,15 @@ local function resolveArrivalCFrame(): CFrame?
 	local fallbackSpawn = Workspace:FindFirstChildWhichIsA("SpawnLocation", true)
 	if fallbackSpawn then
 		logger:warn("resolveArrivalCFrame: falling back to an arbitrary SpawnLocation", {
+			raceId = raceId,
 			fallbackName = fallbackSpawn.Name,
 		})
 		return (fallbackSpawn :: SpawnLocation).CFrame
 	end
 
-	logger:error("resolveArrivalCFrame: no ArrivalSpawnPath instance AND no SpawnLocation exists anywhere", {})
+	logger:error("resolveArrivalCFrame: no ArrivalSpawnPaths instance AND no SpawnLocation exists anywhere", {
+		raceId = raceId,
+	})
 	return nil
 end
 
@@ -297,6 +368,11 @@ end
 -- Players.CharacterAutoLoads = false (default.project.json) means nothing else in this codebase spawns anyone.
 local function handleGetOnboardingState(player: Player): Types.CharacterCreationOnboardingStateResult
 	logger:debug("GetOnboardingState received", { player = player.Name, userId = player.UserId })
+
+	if getOnboardingStateRateLimiter:IsLimited(player) then
+		logger:warn("GetOnboardingState rejected: rate limited", { player = player.Name })
+		return { NeedsOnboarding = false }
+	end
 
 	local profile = PlayerDataSystem.WaitForProfile(player)
 	if not profile then
@@ -326,7 +402,13 @@ local function handleGetOnboardingState(player: Player): Types.CharacterCreation
 		end
 
 		player:LoadCharacterAsync()
+		-- Full isolation, not Frozen alone (the gap this rework closes -- see this file's header):
+		-- Godmode so nothing can damage a player mid-cinematic/chargen/awakening, Invisible so no
+		-- other player ever sees them lying prone or mid-reveal. All three are server state mirrored
+		-- via Humanoid Attributes (AdminActionSystem.lua), never a client-side-only illusion.
 		AdminActionSystem.SetFrozen(player, true)
+		AdminActionSystem.SetGodmode(player, true)
+		AdminActionSystem.SetInvisible(player, true)
 		logger:info("First-time player spawned into onboarding", { player = player.Name })
 	else
 		player:LoadCharacterAsync()
@@ -339,9 +421,15 @@ end
 -- CharacterCreation_Finalize handler -- see this file's header for the non-negotiable
 -- failure-handling contract. Order: re-check onboarding is still legitimate -> validate every field
 -- server-side regardless of client checks -> filter the display name -> ONE atomic Transform ->
--- resolve the real spawn -> PivotTo -> unfreeze -> only then Success = true.
+-- resolve the race-keyed arrival spawn -> PivotTo -> grant awaitingAwakeningPlayers (isolation stays
+-- on) -> only then Success = true.
 local function handleFinalize(player: Player, payload: unknown): Types.CharacterCreationFinalizeResult
 	logger:debug("Finalize received", { player = player.Name, userId = player.UserId })
+
+	if finalizeRateLimiter:IsLimited(player) then
+		logger:warn("Finalize rejected: rate limited", { player = player.Name })
+		return { Success = false, Reason = "RateLimited" }
+	end
 
 	if typeof(payload) ~= "table" then
 		return { Success = false, Reason = "InvalidRequest" }
@@ -359,20 +447,34 @@ local function handleFinalize(player: Player, payload: unknown): Types.Character
 		return { Success = false, Reason = "AlreadyOnboarded" }
 	end
 
+	if finalizingPlayers[player] then
+		-- A concurrent Finalize call is already in flight for this player -- see finalizingPlayers'
+		-- own header. Rejected here, synchronously, before this call does any validation work or
+		-- reaches a yield.
+		logger:warn("Finalize rejected: a Finalize call is already in flight", { player = player.Name })
+		return { Success = false, Reason = "AlreadyOnboarded" }
+	end
+	finalizingPlayers[player] = true
+
+	local function finishFinalize(result: Types.CharacterCreationFinalizeResult): Types.CharacterCreationFinalizeResult
+		finalizingPlayers[player] = nil
+		return result
+	end
+
 	local raceId = CharacterCreationSystem.ValidateRaceId(rawPayload.RaceId)
 	if not raceId then
-		return { Success = false, Reason = "InvalidRaceId" }
+		return finishFinalize({ Success = false, Reason = "InvalidRaceId" })
 	end
 
 	local attributes, attributeFailReason =
 		CharacterCreationSystem.ValidateAttributeBlock(rawPayload.Attributes, raceId)
 	if not attributes then
-		return { Success = false, Reason = attributeFailReason or "InvalidAttributes" }
+		return finishFinalize({ Success = false, Reason = attributeFailReason or "InvalidAttributes" })
 	end
 
 	local validatedName, nameFailReason = CharacterCreationSystem.ValidateDisplayName(rawPayload.DisplayName)
 	if not validatedName then
-		return { Success = false, Reason = nameFailReason or "InvalidDisplayName" }
+		return finishFinalize({ Success = false, Reason = nameFailReason or "InvalidDisplayName" })
 	end
 
 	local filterOk, filteredOrError = pcall(function(): string
@@ -385,7 +487,7 @@ local function handleFinalize(player: Player, payload: unknown): Types.Character
 			player = player.Name,
 			errorMessage = tostring(filteredOrError),
 		})
-		return { Success = false, Reason = "FilterFailed" }
+		return finishFinalize({ Success = false, Reason = "FilterFailed" })
 	end
 	local finalDisplayName = filteredOrError :: string
 
@@ -400,7 +502,7 @@ local function handleFinalize(player: Player, payload: unknown): Types.Character
 		logger:error("Finalize: Transform failed -- profile left unonboarded, no teleport attempted", {
 			player = player.Name,
 		})
-		return { Success = false, Reason = "TransformFailed" }
+		return finishFinalize({ Success = false, Reason = "TransformFailed" })
 	end
 
 	local character = player.Character
@@ -408,10 +510,10 @@ local function handleFinalize(player: Player, payload: unknown): Types.Character
 		logger:error("Finalize: Transform succeeded but player has no live character to teleport", {
 			player = player.Name,
 		})
-		return { Success = false, Reason = "NoCharacter" }
+		return finishFinalize({ Success = false, Reason = "NoCharacter" })
 	end
 
-	local arrivalCFrame = resolveArrivalCFrame()
+	local arrivalCFrame = resolveArrivalCFrame(raceId)
 	if not arrivalCFrame then
 		-- Transform already succeeded -- the player IS onboarded on their next join even if this
 		-- particular teleport can't complete right now (a genuine map-configuration problem, not a
@@ -419,35 +521,65 @@ local function handleFinalize(player: Player, payload: unknown): Types.Character
 		-- that didn't happen, per this file's header.
 		logger:error("Finalize: no arrival spawn available anywhere -- player stays in the Threshold", {
 			player = player.Name,
+			raceId = raceId,
 		})
-		return { Success = false, Reason = "NoSpawnAvailable" }
+		return finishFinalize({ Success = false, Reason = "NoSpawnAvailable" })
 	end
 
 	character:PivotTo(arrivalCFrame)
-	AdminActionSystem.SetFrozen(player, false)
+
+	-- Isolation (Frozen + Godmode + Invisible) deliberately stays ON here -- per this file's header,
+	-- Success = true no longer implies "no longer isolated." The client still has the whole
+	-- first-person-reveal/get-up beat left to play (Client/Intro/IntroClient.lua) while the player is
+	-- lying in the arrival world, and isolation must cover that too. awaitingAwakeningPlayers is what
+	-- lets the eventual CharacterCreation_AwakeningComplete clear it, and only for THIS player.
+	awaitingAwakeningPlayers[player] = true
 
 	-- Points future natural respawns (death in normal gameplay) at the real world instead of back into
 	-- the Threshold -- player.RespawnLocation was pointed at the Threshold's own SpawnLocation earlier
 	-- this session (handleGetOnboardingState). Only reassigned if the arrival instance is itself a
 	-- SpawnLocation; otherwise cleared to nil so Roblox's own default spawn-selection takes over,
 	-- rather than leaving the stale Threshold RespawnLocation in place.
-	local arrivalNamed = resolveNamedInstance(Config.ArrivalSpawnPath)
+	local arrivalNamed = resolveNamedInstance(CharacterCreationSystem.ResolveArrivalSpawnPath(raceId))
 	if arrivalNamed and arrivalNamed:IsA("SpawnLocation") then
 		player.RespawnLocation = arrivalNamed :: SpawnLocation
 	else
 		player.RespawnLocation = nil :: any
 	end
 
-	logger:info("Finalize accepted -- player onboarded", {
+	logger:info("Finalize accepted -- player onboarded, isolation held through the awakening beat", {
 		player = player.Name,
 		raceId = raceId,
 		displayName = finalDisplayName,
 	})
-	return { Success = true }
+	return finishFinalize({ Success = true })
+end
+
+-- CharacterCreation_AwakeningComplete handler -- fire-and-forget, no payload, no return value (see
+-- this file's header for the trust reasoning). A RemoteEvent handler is always scoped to its firing
+-- Player, so this can only ever clear the CALLING player's own isolation, never another's -- the
+-- awaitingAwakeningPlayers guard on top of that additionally rejects a call that arrives outside a
+-- real Finalize-granted window (e.g. a replay, or a player who was never mid-onboarding at all)
+-- rather than trusting "this player exists" alone.
+local function handleAwakeningComplete(player: Player): ()
+	if not awaitingAwakeningPlayers[player] then
+		logger:warn("AwakeningComplete received while not awaiting one -- ignored", { player = player.Name })
+		return
+	end
+	awaitingAwakeningPlayers[player] = nil
+
+	AdminActionSystem.SetFrozen(player, false)
+	AdminActionSystem.SetGodmode(player, false)
+	AdminActionSystem.SetInvisible(player, false)
+	logger:info("Awakening complete -- isolation cleared", { player = player.Name })
 end
 
 local function onPlayerRemoving(player: Player): ()
 	spawnedThisSession[player] = nil
+	finalizingPlayers[player] = nil
+	awaitingAwakeningPlayers[player] = nil
+	getOnboardingStateRateLimiter:Clear(player)
+	finalizeRateLimiter:Clear(player)
 end
 
 function CharacterCreationSystem.Init(): ()
@@ -477,6 +609,19 @@ function CharacterCreationSystem.Init(): ()
 		return resultOrError
 	end
 	logger:debug("Handler connected", { remote = Config.RemoteNames.Finalize })
+
+	local awakeningCompleteRemote = NetworkBridge.CreateRemoteEvent(Config.RemoteNames.AwakeningComplete)
+	logger:debug("Remote created", { name = Config.RemoteNames.AwakeningComplete })
+	awakeningCompleteRemote.OnServerEvent:Connect(function(player: Player)
+		local ok, errorMessage = pcall(handleAwakeningComplete, player)
+		if not ok then
+			logger:error(
+				"AwakeningComplete handler errored",
+				{ player = player.Name, errorMessage = tostring(errorMessage) }
+			)
+		end
+	end)
+	logger:debug("Handler connected", { remote = Config.RemoteNames.AwakeningComplete })
 
 	Players.PlayerRemoving:Connect(onPlayerRemoving)
 

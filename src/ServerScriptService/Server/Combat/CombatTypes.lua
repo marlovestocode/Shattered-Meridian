@@ -29,6 +29,11 @@ local Types = require(ReplicatedStorage.Shared.Types)
 -- window fields" a single, reviewable, structurally-enforced step instead of relying on each
 -- action's Duration/Commitment tuning happening to outlast the other's window (the Dash/Slide
 -- overlap this exists to fix).
+-- "CustomMove" (Move Creation System, CombatSystem.ThrowCustomMove) is the ONE, permanent action
+-- kind every authored move routes through, keyed by MoveId (MoveRegistryManager.lua) rather than
+-- earning its own CombatActionKind member per move -- see MoveRegistryManager.lua's own header for
+-- why this is the fix for the closed-union-per-move problem every other standalone attack
+-- (DashPunch/DashHit/AirSlam) still has.
 export type CombatActionKind =
 	"None"
 	| "Basic"
@@ -40,6 +45,7 @@ export type CombatActionKind =
 	| "Slide"
 	| "Feint"
 	| "BlockStart"
+	| "CustomMove"
 
 -- CombatState's own decomposition (2026-07, Chief Architect's follow-up to the AdminOverrideState
 -- extraction): CombatVitalsState/MovementState/AirComboState below are what's left of the original
@@ -190,13 +196,22 @@ export type MovementState = {
 	-- checked by both handlers before their own individual cooldown check -- using either move now
 	-- gates the other at that move's own designed pace, not the cheaper of the two.
 	movementCooldownExpiry: number,
+	-- Move Creation System lunge grant (MoveDefinition.Movement, CombatSystem.ThrowCustomMove ->
+	-- Movement.ApplyCustomMoveLunge) -- reuses the Dash-burst SHAPE (a fixed-speed WalkSpeed window,
+	-- its own priority tier in Movement.ComputeDesiredWalkSpeed) rather than Dash's own state
+	-- fields, since a lunge is authored per-move data, not a fixed neutral-game action. No cooldown
+	-- field of its own -- the move's own Cooldown (CombatState.customMoveReadyAt) already gates how
+	-- often a new lunge can be granted at all, the same way Dash needs no SECOND cooldown beyond
+	-- dashCooldownExpiry. customMoveLungeSpeed is an absolute WalkSpeed (LungeDistanceStuds /
+	-- LungeDurationSeconds), not a multiplier on base like Dash/Slide's own tiers -- an authored
+	-- move specifies how far/how fast directly, there is no "base" lunge speed to scale.
+	customMoveLungeWindowExpiry: number,
+	customMoveLungeSpeed: number,
 }
 
--- The air-combo/air-tech state machine -- the DashPunch-launched juggle sequence (AirCombo.Apply),
--- the double-tap-W air-tech escape (AirCombo.HandleAirTechRequest), and the successfully-teched
--- suspended exchange that follows it (AirCombo.HandleSuspendedCounterPunchRequest/
--- EndSuspendedExchange). By a wide margin the largest, most self-contained cluster of the original
--- CombatState (per both the original decomposition audit and the Chief Architect's own framing) --
+-- The air-combo state machine -- the DashPunch-launched juggle sequence (AirCombo.Apply). By a wide
+-- margin the largest, most self-contained cluster of the original CombatState (per both the
+-- original decomposition audit and the Chief Architect's own framing) --
 -- see AirCombo.CreateState for why this one sub-state gets a constructor of its own, unlike Vitals/
 -- Movement above. Only meaningful on a real player's CombatState -- bots never dash (Movement.lua's
 -- own header: bots never touch Dash/Sprint fields), so a bot can never be the ATTACKER side of an
@@ -247,36 +262,23 @@ export type AirComboState = {
 	-- aren't floating next to each other" (see RagdollController.HoldAloft's own header); this field
 	-- is what actually silences that competing input instead of just aspiring to.
 	airComboChaseExpiry: number,
-	-- Air-tech escape (double-tap-W while held in someone ELSE's air combo -- see AirCombo.
-	-- HandleAirTechRequest). Opened for a short window at every point THIS player is launched/
-	-- re-launched as an air-combo target (AirCombo.Apply's own DashPunch-start and continuation
-	-- branches, via the AirComboTarget adapter's openAirTechWindow), closed on consumption or lapse.
-	-- 0 = no window open.
-	airTechWindowExpiry: number,
-	-- Cooldown after a MISTIMED air-tech attempt (a request made while genuinely juggled, but outside
-	-- airTechWindowExpiry) -- prevents spamming the remote hoping to get lucky. NOT set for a request
-	-- made while not juggled at all (nothing to spam-prevent there -- see HandleAirTechRequest). Also
-	-- set on a SUCCESSFUL tech, so escaping isn't a zero-cost, infinitely-repeatable counter to the
-	-- attacker's own DashPunch/chase investment.
-	airTechReadyAt: number,
-	-- Timestamp until which a SUCCESSFULLY-teched player stays suspended alongside the attacker --
-	-- un-ragdolled (conscious, rigid-held, same live-body treatment RagdollController.HoldAloft
-	-- already gives the attacker) but not yet dropped back to normal footing. While active: Block is
-	-- freely available (Vitals.ragdollExpiry was already cleared by the tech, and this state never
-	-- sets it), and a Basic-attack press redirects to a one-shot counter-punch (handleAttackRequest's
-	-- own interception, mirroring how an ordinary airborne press redirects to AirSlam) instead of the
-	-- grounded M1 string -- gated on the attacker NOT currently mid-swing ("only if the attacker
-	-- isn't hitting them"). Ends on: a landed counter-punch (any outcome), a normal hit resolving
-	-- against this player from anyone (resolveHitAgainstTarget), this window elapsing unresolved
-	-- (onHeartbeat), or either side dying/leaving -- see AirCombo.EndSuspendedExchange. 0 = not
-	-- suspended. Not on BotState/DummyState -- a bot can't be juggled (it's never the air-combo
-	-- attacker's target in the relevant sense) and a dummy never blocks/counter-punches.
-	airComboSuspendedUntil: number,
-	-- Who this player is suspended alongside, while airComboSuspendedUntil is active -- needed
-	-- because a successful tech clears the ATTACKER's own airComboTarget (ending their free-combo
-	-- privilege), so there is no longer a reverse pointer from the attacker's side once the exchange
-	-- becomes mutual. nil whenever airComboSuspendedUntil is 0.
-	airComboSuspendedWithAttacker: Player?,
+	-- The VICTIM-side mirror of airComboChaseExpiry above: timestamp until which THIS player -- as
+	-- the TARGET of someone else's DashPunch juggle -- is held live (RagdollController.HoldAloft's
+	-- liveBodyFacePoint treatment: gravity-cancelled, Motor6D/Humanoid control intact, position
+	-- pinned) rather than ragdolled. Set (via math.max) alongside every HoldAloft call AirCombo.Apply
+	-- makes for a real-player target (the DashPunch-start branch and every continuation hit), zeroed
+	-- alongside every ClearHold on this player's own rootPart. Gates ACTION_GATES.HeldAloft (every
+	-- category except BlockStart/LockOn -- combat-philosophy.md's "everything should be defendable"
+	-- means a held victim keeps the one action that matters, Block/Parry, while staying locked out of
+	-- attacking/repositioning/swapping same as before) and Movement.ComputeDesiredWalkSpeed (pins
+	-- WalkSpeed to 0 for the same reason airComboChaseExpiry does on the attacker's side -- a held
+	-- player's own WASD must not fight the hold). Deliberately separate from Vitals.ragdollExpiry --
+	-- that field stays reserved for a GENUINE incapacitating ragdoll (a finisher/the air-combo's own
+	-- MaxHits slam), which still gates BlockStart too, unlike this one. Not on BotState/DummyState --
+	-- a bot can't be juggled and a dummy has no live-body concept at all (DummyState's own
+	-- AirComboTarget adapter stays fully ragdolled the whole sequence, see AirComboTarget.
+	-- setHeldExpiry's own header).
+	airComboHeldExpiry: number,
 }
 
 -- Internal, mutable per-player state. Never returned directly to a caller -- CombatSystem.
@@ -287,6 +289,12 @@ export type CombatState = {
 	humanoid: Humanoid?,
 	rootPart: BasePart?,
 	humanoidDiedConnection: RBXScriptConnection?,
+	-- Mirrors humanoidDiedConnection's own lifecycle (reconnected onto the fresh Humanoid every
+	-- onCharacterAdded, disconnected in onCharacterRemoving/onPlayerRemoving) -- the server-side
+	-- listener that stamps genuineJumpAirborne below off the replicated Humanoid's own
+	-- HumanoidStateType transitions. See genuineJumpAirborne's own header for why this needs a
+	-- live StateChanged connection instead of a point-in-time GetState() read.
+	humanoidStateChangedConnection: RBXScriptConnection?,
 
 	alive: boolean,
 	blocking: boolean,
@@ -326,9 +334,8 @@ export type CombatState = {
 	-- refreshInCombatFromProximity, called every onHeartbeat tick) -- never itself the in-combat
 	-- signal, inCombatUntil above remains that. Stamped `recentOpponents[otherPlayer] = now`
 	-- (HitResolution.StampRecentOpponent) at the exact same sites that already refresh inCombatUntil
-	-- for a player-vs-player exchange (CombatSystem.lua's resolveHitAgainstTarget, both sides;
-	-- AirCombo.lua's HandleAirTechRequest/HandleSuspendedCounterPunchRequest, both sides), capped at
-	-- Constants.Combat.MaxTrackedOpponents. Deliberately NOT lockOnTarget: lock-on is a
+	-- for a player-vs-player exchange (CombatSystem.lua's resolveHitAgainstTarget, both sides),
+	-- capped at Constants.Combat.MaxTrackedOpponents. Deliberately NOT lockOnTarget: lock-on is a
 	-- player-chosen aiming concept (you can lock someone you've never fought, or unlock mid-duel),
 	-- wrong for "who have I actually traded with lately." Deliberately NOT on BotState -- a bot is a
 	-- Model-keyed BotState, not a Player, so it structurally can't hold a `recentOpponents[Player]`
@@ -355,6 +362,44 @@ export type CombatState = {
 	-- never jump (no movement AI, see Types.TrainingBotWeights' Reposition comment) and a dummy never
 	-- attacks.
 	airSlamReadyAt: number,
+	-- Per-move cooldown for the Move Creation System's CustomMove path (CombatSystem.
+	-- ThrowCustomMove), keyed by MoveId rather than one fixed field per move the way
+	-- basicAttackReadyAt/airSlamReadyAt are -- an authored move's own MoveDefinition.Cooldown has
+	-- no fixed field to live in the way Basic/Heavy/AirSlam's do, since the set of MoveIds is open-
+	-- ended and admin-authored rather than a small fixed roster known at compile time. Not on
+	-- BotState/DummyState: bots never throw a custom move (only MoveEditorSystem.TestFireMove
+	-- reaches ThrowCustomMove, always against the calling admin's own CombatState) and a dummy
+	-- never attacks.
+	customMoveReadyAt: { [string]: number },
+	-- Whether the CURRENT airborne stretch originated from a genuine, deliberate jump input, as
+	-- opposed to becoming airborne for an incidental reason -- DashPunch's own dash residue carrying
+	-- the player off a ledge after the air-combo window already lapsed, ordinary knockback/hitstun,
+	-- parry recoil, a finisher's own launch/ragdoll, or simply walking off a ledge with no jump input
+	-- at all. isAirborneForAirSlam (CombatSystem.lua) used to treat Humanoid:GetState() == Jumping OR
+	-- Freefall (or FloorMaterial == Air) as sufficient on its own to throw the standalone AirSlam
+	-- ("Downslam") attack -- but Freefall/FloorMaterial==Air is true for EVERY one of those incidental
+	-- cases too, not just a real jump, so a player who became airborne any of those other ways got a
+	-- free Downslam on their very next Basic-attack press. This field is what actually distinguishes
+	-- them: set true the instant the server-replicated Humanoid transitions INTO
+	-- Enum.HumanoidStateType.Jumping (humanoidStateChangedConnection above, hooked in
+	-- onCharacterAdded) -- the one HumanoidStateType transition Roblox's own character controller
+	-- fires ONLY from a genuine jump request, never from external velocity/WalkSpeed-driven ground
+	-- movement carrying a player off an edge (that transitions straight to Freefall, skipping Jumping
+	-- entirely) and never from a ragdoll launch (PlatformStand blocks the Humanoid state machine from
+	-- ever reaching Jumping while ragdolled). Cleared back to false the instant that same listener
+	-- observes a transition to any state OTHER than Jumping/Freefall -- landed, ragdolled/Physics,
+	-- held aloft, swimming, climbing, whatever -- so the flag only ever certifies the single unbroken
+	-- stretch between "this player jumped" and "this player stopped being airborne for any reason,"
+	-- never a second, later airborne stretch caused by something else entirely. Freefall itself is
+	-- deliberately left untouched by that listener: it's both the natural continuation of an
+	-- already-credited jump (ascent transitions Jumping -> Freefall on its own, mid-arc) AND the exact
+	-- state produced by every incidental-airborne case above, which is fine precisely because this
+	-- field was never set true for those in the first place. isAirborneForAirSlam now requires this
+	-- field alongside its existing physical checks -- see that function's own header. Reset to false
+	-- on every respawn (resetTransientCombatState) since a fresh spawn starts grounded with no jump in
+	-- flight. Not on BotState/DummyState: bots never jump (no movement AI, see
+	-- Types.TrainingBotWeights' Reposition comment) and a dummy never attacks.
+	genuineJumpAirborne: boolean,
 	-- Timestamp before which the player is "attacking" (windup+active+recovery of their current
 	-- swing, set at throw time to now + Windup+Active+Recovery). This is the single global
 	-- per-player commitment lock: no new attack, block, dash, or parry request is accepted while
@@ -387,13 +432,23 @@ export type CombatState = {
 	currentSwingWindupEndsAt: number,
 	swingCancelled: boolean,
 	-- comboIndex/comboExpiry are the throw-based combo counter for HEAVY attacks (wraps over the
-	-- Heavy stages). The BASIC (M1) combo is separate and landing-based: basicComboLanded counts how
-	-- many basic hits have connected in a row (0-3), and the next M1 becomes the Finisher once it
-	-- reaches Constants.Combat.BasicComboLength - 1 landed hits. Kept apart from comboIndex so a
-	-- whiff can't advance the basic string (only a connect does -- see startAttackSwing's OnHit) and
-	-- so mixing basic/heavy doesn't cross-contaminate the two counters.
+	-- Heavy stages). The BASIC (M1) string splits WHICH STAGE ANIMATION plays from WHETHER THE
+	-- FINISHER IS REACHABLE, deliberately two different counters:
+	--   * basicSwingIndex is throw-based, exactly like Heavy's comboIndex -- it advances on every M1
+	--     press, whiff or not, wrapping over the Basic stages (see selectAttackDefinition/
+	--     advanceComboIndex, both already generic over isHeavy). This is what lets a player see/feel
+	--     stage 2/3 of the string even while whiffing, instead of being stuck replaying stage 1 until
+	--     something connects.
+	--   * basicComboLanded stays landing-based -- it counts how many basic hits have connected in a
+	--     row (0-3), and the next M1 becomes the Finisher once it reaches Constants.Combat.
+	--     BasicComboLength - 1 landed hits. This is the ONE gate that still requires a connect (only a
+	--     connect advances it -- see startAttackSwing's OnHit): the Finisher is a stun/launcher, so
+	--     whiffing must never fast-track it, even now that whiffing DOES advance basicSwingIndex.
+	-- Kept as two separate fields so mixing basic/heavy, or a whiff mid-string, can never
+	-- cross-contaminate "what does the next swing look like" with "am I allowed to launch yet."
 	comboIndex: number,
 	comboExpiry: number,
+	basicSwingIndex: number,
 	basicComboLanded: number,
 	basicComboExpiry: number,
 	-- The finisher-ready value (basicComboLanded >= BasicComboLength - 1) sent to this player's client
@@ -528,14 +583,40 @@ export type BotState = {
 --     which underlying field gets touched -- CombatState.blocking/airComboTarget for a player vs. a
 --     no-op/CombatState.airComboDummyTarget for a dummy (DummyState itself has no `blocking` field
 --     at all -- a dummy never blocks).
---   - `setRagdollExpiry` hides which timer field gets pinned and how -- CombatState.ragdollExpiry
---     via math.max (never SHORTENS an existing lockout) for a player, DummyState.ragdollResetAt via
---     a flat overwrite plus Constants.Debug.TrainingDummy.LaunchResetBufferSeconds for a dummy (a
+--   - `setHeldExpiry` (the DashPunch-start/continuation-hit hold) hides which timer gets pinned and
+--     how -- CombatState.AirCombo.airComboHeldExpiry via math.max for a player (live-body: keeps
+--     Motor6D/Humanoid control, stays Block/Parry-capable -- ACTION_GATES.HeldAloft exempts
+--     BlockStart -- see that field's own header), a no-op for a dummy (AirCombo.Apply branches on
+--     `player ~= nil` to decide live-body vs. ragdoll treatment in the first place, so a dummy's own
+--     implementation is never actually called -- present only so the adapter table literal satisfies
+--     this type under --!strict).
+--   - `setRagdollExpiry` hides which timer field gets pinned for a GENUINE incapacitating ragdoll --
+--     CombatState.Vitals.ragdollExpiry via math.max for a player, DummyState.ragdollResetAt via a
+--     flat overwrite plus Constants.Debug.TrainingDummy.LaunchResetBufferSeconds for a dummy (a
 --     dummy has no lockout to preserve, just a respawn timer, and needs the extra buffer so you see
---     it get up before it resets).
+--     it get up before it resets). Called by AirCombo.Apply's MaxHits slam finisher for EVERY target
+--     regardless of player/dummy (the sequence-ending knockdown is a real ragdoll either way), and by
+--     the dummy-only branch of DashPunch-start/continuation (a dummy has no live-body concept at all,
+--     see setHeldExpiry above).
 --   - `applyDamage` hides the slam-finisher's bonus-damage application -- godmode check +
 --     kill-attribution + sendVitals for a player, a plain TakeDamage for a dummy (no godmode
 --     concept, no vitals stream to sync).
+--   - `onGroundSlam` (optional) fires the instant AirCombo.Apply's MaxHits branch calls
+--     RagdollController.SlamToGround -- the ONE thing the landed hit's own Combat_FeedbackEvent
+--     (already sent by resolveHitAgainstTarget/DummyCombat.ResolveHit before AirCombo.Apply even
+--     runs, since reaching this branch at all requires finisherVariant == nil) structurally cannot
+--     carry: which finisher variant the juggle just ended on. Without a SEPARATE signal, the
+--     client-side ground-impact payoff (Client/FX/SlamImpactVFX.lua, driven off Types.
+--     CombatFeedbackPayload.FinisherVariant == "Downslam") never fires for this slam specifically --
+--     it already works for the M1 finisher's own Downslam and the standalone AirSlam attack, both of
+--     which set FinisherVariant on their one natural feedback event. The player-target adapter
+--     (CombatSystem.lua's resolveHitAgainstTarget) wires this to send that second, distinct
+--     "GroundSlam"-kind event; the dummy-target adapter (DummyCombat.lua) leaves it nil -- a dummy
+--     has no TargetUserId for SlamImpactVFX to resolve a character from, so there's no client-side
+--     watch to trigger regardless (see that module's own header). The bool it's called with is
+--     RagdollController.SlamToGround's own `immediateGroundImpact` return, threaded straight through
+--     onto the GroundSlam feedback payload (Types.CombatFeedbackPayload.ImmediateGroundImpact) --
+--     see that field's own header for why the client needs this told to it rather than inferred.
 -- Player-vs-dummy is still the only two shapes this covers -- a hit against a bot target never
 -- reaches the air-combo state machine at all (BotCombat.lua's ResolveHitAgainstBot doesn't call it;
 -- bots never dash so can never be the ATTACKER side of an air combo either, per CombatState.
@@ -545,17 +626,17 @@ export type AirComboTarget = {
 	humanoid: Humanoid,
 	rootPart: BasePart,
 	-- nil for a dummy (no client of its own) -- forwarded straight into the RagdollController calls
-	-- below, which already accept a nil Player for exactly this case.
+	-- below, which already accept a nil Player for exactly this case. Also what AirCombo.Apply itself
+	-- branches on to pick live-body-hold vs. ragdoll-and-launch treatment for this target.
 	player: Player?,
 	clearBlocking: () -> (),
+	setHeldExpiry: (number) -> (),
 	setRagdollExpiry: (number) -> (),
 	isCurrentAirComboTarget: () -> boolean,
 	setAsAirComboTarget: () -> (),
 	clearAirComboTarget: () -> (),
 	applyDamage: (number) -> (),
-	-- Opens (refreshes) this target's air-tech escape window -- see CombatState.airTechWindowExpiry's
-	-- own header. No-op for a dummy (no client, nothing to request an escape).
-	openAirTechWindow: () -> (),
+	onGroundSlam: ((boolean) -> ())?,
 }
 
 return {}

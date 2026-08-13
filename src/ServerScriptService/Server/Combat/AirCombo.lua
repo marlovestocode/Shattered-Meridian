@@ -2,111 +2,62 @@
 --[[
 	AirCombo.lua
 
-	Owns: the air-combo/air-tech state machine -- the DashPunch-launched juggle sequence (Apply,
+	Owns: the air-combo state machine -- the DashPunch-launched juggle sequence (Apply,
 	CombatState.airComboTarget/airComboDummyTarget/airComboHitCount/airComboExpiry/
-	airComboHoverPosition/airComboChaseOffset/airComboChaseExpiry -- see each field's own header in
-	CombatTypes.lua), ending a successfully-teched suspended exchange cleanly (EndSuspendedExchange),
-	the suspended victim's one-shot counter-punch (HandleSuspendedCounterPunchRequest), and the
-	double-tap-W air-tech escape itself (HandleAirTechRequest). Moved out of CombatSystem.lua (Chief
-	Architect's decomposition audit) as its own Server/Combat/ sibling -- this is, by a wide margin,
-	the most complex state machine CombatSystem.lua used to own directly, and it already had its own
-	dedicated Constants.Combat.AirCombo config table before this extraction (kept associated here:
-	every tunable this module reads lives under that one name).
+	airComboHoverPosition/airComboChaseOffset/airComboChaseExpiry/airComboHeldExpiry -- see each
+	field's own header in CombatTypes.lua). Moved out of CombatSystem.lua (Chief Architect's
+	decomposition audit) as its own Server/Combat/ sibling -- this is, by a wide margin, the most
+	complex state machine CombatSystem.lua used to own directly, and it already had its own dedicated
+	Constants.Combat.AirCombo config table before this extraction (kept associated here: every tunable
+	this module reads lives under that one name).
 
-	Apply and EndSuspendedExchange are pure with respect to CombatSystem.lua's own private world --
-	both take every CombatState/AirComboTarget they touch as explicit parameters and mutate only
-	those, plus RagdollController's own physics calls -- so DummyCombat.lua's ResolveHit can call
-	Apply directly (via the CombatSystem.Init()-registered ApplyAirCombo hook it already had before
-	this extraction; only what THAT hook points to changed) with no new coupling.
-	HandleSuspendedCounterPunchRequest/HandleAirTechRequest are request-handler-shaped, so (matching
-	DummyCombat.lua/BotCombat.lua's own Init-registered Hooks pattern) they reach CombatSystem.lua's
-	private feedback/vitals/posture-break infrastructure and rate limiter through Hooks, registered
-	once via Init before any remote is wired -- see that type's own comment for the full one-way-
-	dependency reasoning.
+	Also owns the priority-switch redesign (SwitchPriority) -- a continuation-hit Parry against an
+	already-tracked air-combo target flips who's attacking instead of just ending the sequence: the
+	parrier becomes the new attacker and starts juggling whoever they just parried, with a guaranteed
+	extra Constants.Combat.AirCombo.ParryHoldExtensionSeconds on top of the normal window. Deliberately
+	excludes a parried OPENING DashPunch, which stays a plain punish with no launch -- see
+	SwitchPriority's own header and its one call site (CombatSystem.lua's resolveHitAgainstTarget) for
+	the exact isTrackedContinuation gate. ReleaseSequence is the shared "cleanly force-end a live
+	sequence" cleanup both SwitchPriority's own third-party guard and CombatSystem.lua's
+	disconnect-handling call sites (releaseAirComboVictimOf/releaseAirComboAttackerOf) build on, so
+	there is exactly one implementation of that cleanup rather than three near-copies.
 
-	Does not own: the reverse-scan helpers that need direct iteration over the COMPLETE combatStates
-	dict (findAirComboAttacker -- "who is currently juggling this victim," clearSuspendedReferencesTo
-	-- "drop every victim suspended with this now-gone attacker") -- those stay in CombatSystem.lua,
-	the only place that owns combatStates itself, and are exposed to this module only through the
-	narrow FindAirComboAttacker hook (a single lookup, not the whole table). Does not own the M1
-	combo/finisher itself, hit classification, or any request gating beyond what
-	HandleAirTechRequest/HandleSuspendedCounterPunchRequest need directly -- CombatSystem.lua's own
-	checkCommonPreconditions/ACTION_GATES stay exactly where they are (air-tech deliberately bypasses
-	them entirely -- see HandleAirTechRequest's own header for why).
+	The victim of a DashPunch juggle stays LIVE the whole sequence (RagdollController.HoldAloft's
+	liveBodyFacePoint treatment, the same non-ragdoll hold the attacker's own body already used) --
+	they keep full Motor6D/Humanoid control and can Block/Parry a continuation swing exactly like any
+	other hit (ClassifyDefense in CombatSystem.lua's resolveHitAgainstTarget runs against it
+	unchanged; a Parry punishes the attacker and simply doesn't extend the hold, a Block eats reduced
+	damage/posture, same as always), they just can't move/attack/dash/swap themselves (ACTION_GATES.
+	HeldAloft) -- "stuck where the game moves them, but never helpless." Retired, as of this pass, in
+	favor of that: the old air-tech escape (a scripted double-tap-W counter that converted a helpless
+	ragdoll into a separate "suspended exchange" state with its own one-shot counter-punch) -- a
+	ragdolled victim needed a bespoke escape hatch because it structurally COULDN'T Block/Parry; a
+	live-held one doesn't need a separate mechanic when the real one already works. A training-dummy
+	target has no defend concept at all (DummyState carries no `blocking` field) and stays fully
+	ragdolled for the whole sequence exactly as before -- see AirCombo.Apply's own header for how it
+	tells the two apart.
+
+	Apply is pure with respect to CombatSystem.lua's own private world -- it takes every
+	CombatState/AirComboTarget it touches as explicit parameters and mutates only those, plus
+	RagdollController's own physics calls -- so DummyCombat.lua's ResolveHit can call it directly (via
+	the CombatSystem.Init()-registered ApplyAirCombo hook) with no new coupling.
+
+	Does not own: the M1 combo/finisher itself, hit classification (HitResolution.ClassifyDefense is
+	what actually lets a held victim Block/Parry a continuation swing -- this module never touches
+	it), or any request gating -- CombatSystem.lua's own checkCommonPreconditions/ACTION_GATES stay
+	exactly where they are.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
-local Types = require(ReplicatedStorage.Shared.Types)
-local Logger = require(ReplicatedStorage.Shared.Logger)
 local CombatTypes = require(script.Parent.CombatTypes)
-local HitResolution = require(script.Parent.HitResolution)
 local RagdollController = require(script.Parent.RagdollController)
-local FeedbackPayload = require(script.Parent.FeedbackPayload)
-
-local logger = Logger.scope("AirCombo")
 
 local AirCombo = {}
 
 type CombatState = CombatTypes.CombatState
 type AirComboTarget = CombatTypes.AirComboTarget
-
--- Same "received/rejected/accepted" trail convention CombatSystem.lua's own request handlers use --
--- reimplemented locally (not shared) since it's a handful of lines with zero state, the same
--- "own tiny logging helpers, don't reach into a sibling for them" choice DevMenuSystem.lua already
--- makes independently of CombatSystem.lua.
-local function logReceived(action: string, player: Player, extra: { [string]: unknown }?): ()
-	local fields: { [string]: unknown } = { player = player.Name, userId = player.UserId, action = action }
-	if extra then
-		for key, value in pairs(extra) do
-			fields[key] = value
-		end
-	end
-	logger:debug("Request received", fields)
-end
-
-local function logRejected(action: string, player: Player, reason: string, extra: { [string]: unknown }?): ()
-	local fields: { [string]: unknown } =
-		{ player = player.Name, userId = player.UserId, action = action, reason = reason }
-	if extra then
-		for key, value in pairs(extra) do
-			fields[key] = value
-		end
-	end
-	logger:debug("Request rejected", fields)
-end
-
-local function logAccepted(action: string, player: Player, extra: { [string]: unknown }?): ()
-	local fields: { [string]: unknown } = { player = player.Name, userId = player.UserId, action = action }
-	if extra then
-		for key, value in pairs(extra) do
-			fields[key] = value
-		end
-	end
-	logger:debug("Request accepted", fields)
-end
-
--- Injected access to CombatSystem.lua's own private world -- see this file's header for why these
--- stay callbacks instead of a back-reference require. Registered once via Init (called from
--- CombatSystem.Init(), before any remote is wired) -- the same pattern DummyCombat.lua/BotCombat.lua
--- already establish, for the same reasoning (every real caller here runs well after boot).
-export type Hooks = {
-	IsDefensiveRateLimited: (Player) -> boolean,
-	GetCombatState: (Player) -> CombatState?,
-	-- "Who is currently juggling this victim" -- CombatSystem.lua's own findAirComboAttacker, which
-	-- needs direct iteration over the complete combatStates dict this module never gets.
-	FindAirComboAttacker: (Player, number) -> (Player?, CombatState?),
-	SendVitals: (Player, CombatState) -> (),
-	SendFeedback: (Player, Types.CombatFeedbackPayload) -> (),
-	TriggerPostureBreak: (Player, CombatState, Player?) -> (),
-}
-
-local hooks: Hooks? = nil
-
-function AirCombo.Init(newHooks: Hooks): ()
-	hooks = newHooks
-end
 
 -- The fresh/cleared shape of a CombatState.AirCombo sub-state -- called from CombatSystem.lua's own
 -- createFreshState (initial construction) and onCharacterAdded's respawn reset (a wholesale
@@ -124,10 +75,7 @@ function AirCombo.CreateState(): CombatTypes.AirComboState
 		airComboHoverPosition = nil,
 		airComboChaseOffset = nil,
 		airComboChaseExpiry = 0,
-		airTechWindowExpiry = 0,
-		airTechReadyAt = 0,
-		airComboSuspendedUntil = 0,
-		airComboSuspendedWithAttacker = nil,
+		airComboHeldExpiry = 0,
 	}
 end
 
@@ -136,26 +84,35 @@ end
 -- resolveHitAgainstTarget/DummyCombat.lua's ResolveHit for any unmitigated (non-Block) Basic-category
 -- hit against a real player or training-dummy target -- never for Heavy or the M1 finisher, see each
 -- call site's own gate. Two shapes:
---   - debugName == "DashPunch": STARTS a new sequence. Launches the target (ragdolled, via the same
---     RagdollController.LaunchAndRagdoll a finisher uses) and holds the attacker's own body (NOT
---     ragdolled -- RagdollController.HoldAloft) at a fixed standoff point near them so they end up
---     together.
+--   - debugName == "DashPunch" OR startsAirCombo: STARTS a new sequence. startsAirCombo is
+--     Types.HitboxAttackDefinition.Knockback.StartsAirCombo, threaded through by name from each call
+--     site's own `definition` -- an authored Move Creation System move opts into the exact same
+--     launcher treatment DashPunch has always had, purely additively (every existing definition's
+--     Knockback is nil or StartsAirCombo-less, so this is always false for them). Holds the target
+--     near a fixed hover point and the attacker's own body (RagdollController.HoldAloft) at a fixed
+--     standoff point near them so they end up together.
 --   - Any other Basic hit landing on the attacker's OWN tracked air-combo target, while
---     airComboExpiry hasn't lapsed: CONTINUES the sequence (re-launches the target, refreshes the
---     window) or, once airComboHitCount reaches Constants.Combat.AirCombo.MaxHits, ENDS it with a
---     ground slam + bonus damage instead of a re-launch.
+--     airComboExpiry hasn't lapsed: CONTINUES the sequence (refreshes both holds/the window) or, once
+--     airComboHitCount reaches Constants.Combat.AirCombo.MaxHits, ENDS it with a ground slam + bonus
+--     damage instead of a re-hold.
 --
 -- Unified across a real player target and a training-dummy target via the `target: AirComboTarget`
 -- adapter (CombatTypes.lua) built by each call site -- see that type's own header for what each
--- closure hides. Player-vs-dummy is still the only two shapes this covers -- a hit against a bot
--- target never reaches this function at all (BotCombat.lua's ResolveHitAgainstBot doesn't call it;
--- bots never dash so can never be the ATTACKER side of an air combo either, per CombatState.
--- airComboTarget's own header).
+-- closure hides. `target.player` (nil for a dummy) is also what THIS function itself branches on to
+-- pick the target's own physical treatment: a real player stays LIVE the whole sequence (HoldAloft's
+-- liveBodyFacePoint treatment -- full Motor6D/Humanoid control, Block/Parry-capable, see this file's
+-- own header for why), a dummy stays fully ragdolled exactly as before (RagdollController.
+-- LaunchAndRagdoll -- no defend concept to preserve, and changing a solo practice target's feel is
+-- out of scope for this pass). Player-vs-dummy is still the only two shapes this covers -- a hit
+-- against a bot target never reaches this function at all (BotCombat.lua's ResolveHitAgainstBot
+-- doesn't call it; bots never dash so can never be the ATTACKER side of an air combo either, per
+-- CombatState.airComboTarget's own header).
 function AirCombo.Apply(
 	attackerPlayer: Player,
 	attackerState: CombatState,
 	target: AirComboTarget,
 	debugName: string,
+	startsAirCombo: boolean,
 	now: number
 ): ()
 	local cfg = Constants.Combat.AirCombo
@@ -187,52 +144,27 @@ function AirCombo.Apply(
 		return
 	end
 
-	if debugName == "DashPunch" then
+	if debugName == "DashPunch" or startsAirCombo then
 		target.setAsAirComboTarget()
-		target.openAirTechWindow()
 		attackerState.AirCombo.airComboHitCount = 1
 		attackerState.AirCombo.airComboExpiry = now + cfg.AirborneSeconds
 
-		-- Vertical motion is owned entirely by HoldAloft below now -- see Constants.Combat.AirCombo.
+		-- Vertical motion is owned entirely by HoldAloft below -- see Constants.Combat.AirCombo.
 		-- HoverHeight's own header for why a launch velocity + gravity estimate got replaced.
-		-- Horizontal pop + tumble spin stay: neither fights a position hold (AlignPosition only
-		-- constrains position, not rotation), and they're what makes entering the hold read as a hit
-		-- landing rather than a teleport.
-		RagdollController.LaunchAndRagdoll(
-			target.model,
-			target.humanoid,
-			target.rootPart,
-			target.player,
-			attackerState.rootPart,
-			0,
-			cfg.LaunchHorizontalVelocity,
-			cfg.LaunchBackwardSpin,
-			cfg.AirborneSeconds
-		)
 		local hoverPosition = target.rootPart.Position + Vector3.new(0, cfg.HoverHeight, 0)
 		attackerState.AirCombo.airComboHoverPosition = hoverPosition
-		RagdollController.HoldAloft(
-			target.rootPart,
-			target.player,
-			hoverPosition,
-			cfg.AirborneSeconds,
-			cfg.HoverRiseSpeed,
-			cfg.HoverResponsiveness
-		)
-		target.setRagdollExpiry(now + cfg.AirborneSeconds)
-		-- A launched target can't keep holding guard while airborne and limp -- same rule a
-		-- finisher's own launch already applies. No-op for a dummy (never blocks).
-		target.clearBlocking()
 
+		-- Standoff offset: how far back + down the attacker's own hold parks them from the target's
+		-- hover point, instead of holding them at the exact same point -- see CombatState.
+		-- airComboChaseOffset's own header. Direction is away from the target, back toward wherever
+		-- the attacker was actually standing when the punch landed (their real approach direction);
+		-- falls back to a fixed world direction on the rare near-zero-distance case (DashPunch's own
+		-- Offset/Size means this essentially never happens in practice) instead of normalizing a
+		-- near-zero vector. Computed BEFORE the target's own hold below (not after, as it used to be)
+		-- so the target's own live-body facing (below) can point at this same fixed point.
 		local attackerRoot = attackerState.rootPart
+		local chaseOffset: Vector3? = nil
 		if attackerRoot then
-			-- Standoff offset: how far back + down the attacker's own hold parks them from the
-			-- target's hover point, instead of holding them at the exact same point -- see
-			-- CombatState.airComboChaseOffset's own header. Direction is away from the target, back
-			-- toward wherever the attacker was actually standing when the punch landed (their real
-			-- approach direction); falls back to a fixed world direction on the rare near-zero-
-			-- distance case (DashPunch's own Offset/Size means this essentially never happens in
-			-- practice) instead of normalizing a near-zero vector.
 			local awayFromTarget = Vector3.new(
 				attackerRoot.Position.X - target.rootPart.Position.X,
 				0,
@@ -242,32 +174,88 @@ function AirCombo.Apply(
 					> Constants.Combat.AirCombo.MinStandoffDirectionMagnitude
 				then awayFromTarget.Unit
 				else Vector3.new(0, 0, 1)
-			local chaseOffset = standoffDirection * cfg.ChaseStandoffDistance
-				- Vector3.new(0, cfg.ChaseBelowTargetOffset, 0)
+			chaseOffset = standoffDirection * cfg.ChaseStandoffDistance - Vector3.new(0, cfg.ChaseBelowTargetOffset, 0)
 			attackerState.AirCombo.airComboChaseOffset = chaseOffset
+		end
 
+		if target.player then
+			-- A real player stays LIVE the whole sequence: HoldAloft's liveBodyFacePoint treatment
+			-- keeps their Motor6D/Humanoid control intact (gravity-cancelled, controller-quieted, only
+			-- their POSITION pinned) instead of ragdolling them -- this is what actually lets them
+			-- Block/Parry a continuation swing (ACTION_GATES.HeldAloft exempts BlockStart; a genuine
+			-- ragdoll structurally couldn't hold a guard at all). No launch-velocity pop/tumble-spin
+			-- here (unlike the dummy branch below) -- an explicit impulse fights the SAME rootPart's
+			-- gravity-cancel VectorForce/AlignPosition the instant HoldAloft below applies them; the
+			-- rise from HoldAloft's own HoverRiseSpeed/HoverResponsiveness alone already reads as a
+			-- launch (see RagdollController.HoldAloft's own header). Faces the attacker's fixed hold
+			-- point (hoverPosition + chaseOffset) so the threat stays readable/blockable in the right
+			-- direction -- the mirror image of the attacker facing the target's hoverPosition below.
+			-- Held-lockout only follows a pin that actually exists -- see HoldAloft's own header on
+			-- why its return value matters: writing this unconditionally (as this file used to)
+			-- freezes a player at WalkSpeed 0/RootControlLocked (ACTION_GATES.HeldAloft) even on a
+			-- call that failed to build any physical constraint holding them up at all.
+			local held = RagdollController.HoldAloft(target.rootPart, target.player, {
+				Position = hoverPosition,
+				DurationSeconds = cfg.AirborneSeconds,
+				MaxSpeed = cfg.HoverRiseSpeed,
+				Responsiveness = cfg.HoverResponsiveness,
+				LiveBodyFacePoint = if chaseOffset
+					then hoverPosition + chaseOffset
+					else attackerRoot and attackerRoot.Position or nil,
+			})
+			if held then
+				target.setHeldExpiry(now + cfg.AirborneSeconds)
+			end
+		else
+			-- Training dummy: no defend concept at all (DummyState has no `blocking` field) -- keep the
+			-- original ragdoll-and-launch treatment. Horizontal pop + tumble spin sell the hit landing
+			-- (AlignPosition only constrains position, not rotation, so neither fights the hold below).
+			RagdollController.LaunchAndRagdoll(
+				target.model,
+				target.humanoid,
+				target.rootPart,
+				target.player,
+				attackerState.rootPart,
+				{
+					UpVelocity = 0,
+					HorizontalVelocity = cfg.LaunchHorizontalVelocity,
+					BackwardSpin = cfg.LaunchBackwardSpin,
+					RagdollSeconds = cfg.AirborneSeconds,
+				}
+			)
+			RagdollController.HoldAloft(target.rootPart, target.player, {
+				Position = hoverPosition,
+				DurationSeconds = cfg.AirborneSeconds,
+				MaxSpeed = cfg.HoverRiseSpeed,
+				Responsiveness = cfg.HoverResponsiveness,
+			})
+			target.setRagdollExpiry(now + cfg.AirborneSeconds)
+		end
+
+		if attackerRoot and chaseOffset then
 			-- The attacker's own hold -- see RagdollController.HoldAloft's own header for why this is
 			-- the SAME mechanism the target's hover uses (a fixed-point AlignPosition pin) rather than
 			-- a separate live-tracking chase: once the target settles, there's nothing left to
 			-- continuously re-track, and holding the attacker to a fixed point too is what avoids the
 			-- "snap up snap up" jerk a per-Heartbeat re-target caused.
-			RagdollController.HoldAloft(
-				attackerRoot,
-				attackerPlayer,
-				hoverPosition + chaseOffset,
-				cfg.AirborneSeconds,
-				cfg.ChaseSpeed,
-				cfg.ChaseResponsiveness,
-				-- liveBodyFacePoint = the target's hover position. Marks this as the attacker's LIVE
-				-- (non-ragdolled) hold: cancels gravity so the soft pin doesn't sag ("float down"),
-				-- quiets the Humanoid so the rise doesn't stutter ("stages of height"), and points the
-				-- attacker at the target so continuation swings keep landing (not "OutsideArc"). See
-				-- RagdollController.HoldAloft.
-				hoverPosition
-			)
+			local attackerHeld = RagdollController.HoldAloft(attackerRoot, attackerPlayer, {
+				Position = hoverPosition + chaseOffset,
+				DurationSeconds = cfg.AirborneSeconds,
+				MaxSpeed = cfg.ChaseSpeed,
+				Responsiveness = cfg.ChaseResponsiveness,
+				-- The target's hover position. Marks this as the attacker's LIVE (non-ragdolled) hold:
+				-- cancels gravity so the soft pin doesn't sag ("float down"), quiets the Humanoid so the
+				-- rise doesn't stutter ("stages of height"), and points the attacker at the target so
+				-- continuation swings keep landing (not "OutsideArc"). See RagdollController.HoldAloft.
+				LiveBodyFacePoint = hoverPosition,
+			})
 			-- See AirComboState.airComboChaseExpiry's own header -- without this, the player's own held
-			-- WASD keeps fighting the hold's pull for the whole window instead of riding along.
-			attackerState.AirCombo.airComboChaseExpiry = now + cfg.AirborneSeconds
+			-- WASD keeps fighting the hold's pull for the whole window instead of riding along. Only set
+			-- when the chase pin actually exists -- see HoldAloft's own header on why its return value
+			-- matters (a failed pin here would otherwise still WalkSpeed-lock the attacker to nothing).
+			if attackerHeld then
+				attackerState.AirCombo.airComboChaseExpiry = now + cfg.AirborneSeconds
+			end
 		end
 		return
 	end
@@ -283,15 +271,29 @@ function AirCombo.Apply(
 		-- Clear the still-active hold first -- a lingering upward AlignPosition pin fighting the
 		-- slam's own downward velocity would read as a weaker slam than intended.
 		RagdollController.ClearHold(target.rootPart, target.player)
-		RagdollController.SlamToGround(
+		local immediateGroundImpact = RagdollController.SlamToGround(
 			target.model,
 			target.humanoid,
+			target.rootPart,
 			target.player,
-			cfg.SlamDownVelocity,
-			cfg.SlamKnockdownSeconds
+			attackerState.rootPart,
+			{
+				DownVelocity = cfg.SlamDownVelocity,
+				FaceDownSpin = cfg.FaceDownSpin,
+				KnockdownSeconds = cfg.SlamKnockdownSeconds,
+			}
 		)
 		target.setRagdollExpiry(now + cfg.SlamKnockdownSeconds)
 		target.clearBlocking()
+
+		-- Fired the instant the slam's own physics actually lands, regardless of whether the bonus
+		-- damage below then kills the target -- a killing slam still physically hits the ground and
+		-- should still show the impact. See AirComboTarget.onGroundSlam's own header (CombatTypes.lua)
+		-- for why this landed hit's own "Hit" feedback event (already sent by the caller before this
+		-- function ever ran) can't carry the signal that triggers SlamImpactVFX itself.
+		if target.onGroundSlam then
+			target.onGroundSlam(immediateGroundImpact)
+		end
 
 		-- Same godmode rule as every other damage source -- see HitResolution.IsGodmode's own header
 		-- (folded into `applyDamage` for a player target; a dummy has no godmode concept at all).
@@ -314,302 +316,264 @@ function AirCombo.Apply(
 		attackerState.AirCombo.airComboHoverPosition = nil
 		attackerState.AirCombo.airComboChaseOffset = nil
 	else
-		-- Keep them locked into the ragdoll/lockout window for the next hit -- no re-launch, no
-		-- velocity touch at all: HoldAloft below already has them settled at the right height, and
-		-- both re-launching and even a zero-velocity "launch" are exactly what ExtendRagdoll avoids by
-		-- touching only the timer.
-		RagdollController.ExtendRagdoll(target.model, cfg.AirborneSeconds)
-		target.setRagdollExpiry(now + cfg.AirborneSeconds)
-		-- Fresh air-tech opportunity on every continuation hit, not just the initial launch.
-		target.openAirTechWindow()
+		-- Keep them locked into the hold/lockout window for the next hit -- no re-launch, no velocity
+		-- touch at all: HoldAloft below already has them settled at the right height. The player
+		-- branch's own setHeldExpiry moved below, alongside the hold it actually depends on -- see
+		-- that HoldAloft call's own comment.
+		if not target.player then
+			-- Dummy only -- extends the RagdollController ragdoll-recovery timer WITHOUT touching
+			-- velocity/constraints/ownership (a live-held player was never registered in that table at
+			-- all, so this would be a harmless no-op for one, but skipping it documents the split).
+			RagdollController.ExtendRagdoll(target.model, cfg.AirborneSeconds)
+			target.setRagdollExpiry(now + cfg.AirborneSeconds)
+		end
 		-- Refresh both holds at their SAME original points -- never freshly-computed ones, see
 		-- AirComboState.airComboHoverPosition/airComboChaseOffset's own headers for why that's what
 		-- keeps the height/spacing fixed across continuation hits instead of ratcheting up.
 		if attackerState.AirCombo.airComboHoverPosition then
-			RagdollController.HoldAloft(
-				target.rootPart,
-				target.player,
-				attackerState.AirCombo.airComboHoverPosition,
-				cfg.AirborneSeconds,
-				cfg.HoverRiseSpeed,
-				cfg.HoverResponsiveness
-			)
+			local targetHeld = RagdollController.HoldAloft(target.rootPart, target.player, {
+				Position = attackerState.AirCombo.airComboHoverPosition,
+				DurationSeconds = cfg.AirborneSeconds,
+				MaxSpeed = cfg.HoverRiseSpeed,
+				Responsiveness = cfg.HoverResponsiveness,
+				-- Live-body facing refresh for a player target only -- see the DashPunch-start branch's
+				-- own comment for why this points at the attacker's fixed hold point. nil for a dummy
+				-- (stays ragdolled -- no facing to maintain).
+				LiveBodyFacePoint = if target.player and attackerState.AirCombo.airComboChaseOffset
+					then attackerState.AirCombo.airComboHoverPosition + attackerState.AirCombo.airComboChaseOffset
+					else nil,
+			})
+			-- Held-lockout only follows a pin that actually exists -- see HoldAloft's own header on why
+			-- its return value matters (a failed refresh here used to keep a player frozen regardless).
+			if targetHeld and target.player then
+				target.setHeldExpiry(now + cfg.AirborneSeconds)
+			end
 		end
 		if
 			attackerState.rootPart
 			and attackerState.AirCombo.airComboHoverPosition
 			and attackerState.AirCombo.airComboChaseOffset
 		then
-			RagdollController.HoldAloft(
-				attackerState.rootPart,
-				attackerPlayer,
-				attackerState.AirCombo.airComboHoverPosition + attackerState.AirCombo.airComboChaseOffset,
-				cfg.AirborneSeconds,
-				cfg.ChaseSpeed,
-				cfg.ChaseResponsiveness,
-				-- liveBodyFacePoint = the target's stored hover position -- same live-body treatment
-				-- (gravity-cancel + rigid hold + face-the-target) as the initial hold above.
-				attackerState.AirCombo.airComboHoverPosition
-			)
-			-- Same refresh as the hold above -- see AirComboState.airComboChaseExpiry's own header.
-			attackerState.AirCombo.airComboChaseExpiry = now + cfg.AirborneSeconds
+			local attackerHeld = RagdollController.HoldAloft(attackerState.rootPart, attackerPlayer, {
+				Position = attackerState.AirCombo.airComboHoverPosition + attackerState.AirCombo.airComboChaseOffset,
+				DurationSeconds = cfg.AirborneSeconds,
+				MaxSpeed = cfg.ChaseSpeed,
+				Responsiveness = cfg.ChaseResponsiveness,
+				-- The target's stored hover position -- same live-body treatment (gravity-cancel + rigid
+				-- hold + face-the-target) as the initial hold above.
+				LiveBodyFacePoint = attackerState.AirCombo.airComboHoverPosition,
+			})
+			-- Same refresh as the hold above -- see AirComboState.airComboChaseExpiry's own header. Same
+			-- HoldAloft-return-value gate as every other WalkSpeed-locking write in this file.
+			if attackerHeld then
+				attackerState.AirCombo.airComboChaseExpiry = now + cfg.AirborneSeconds
+			end
 		end
 		attackerState.AirCombo.airComboExpiry = now + cfg.AirborneSeconds
 	end
 end
 
--- Ends a successfully-teched suspended exchange (CombatState.airComboSuspendedUntil/
--- airComboSuspendedWithAttacker -- see HandleAirTechRequest's own header for how this state is
--- entered) and drops BOTH bodies back to normal footing. Reuses RagdollController.ClearHold on each
--- rootPart -- the same call the ordinary MaxHits-slam end-of-sequence path already uses, which
--- already reverses HoldAloft's live-body treatment (exitRigidHold) and restores network ownership,
--- so nothing new is needed here beyond zeroing the CombatState bookkeeping. Called from
--- CombatSystem.lua's confirmDeath/resolveHitAgainstTarget/onHeartbeat/onBotSwingHitCandidate/
--- clearSuspendedReferencesTo, and from this module's own HandleSuspendedCounterPunchRequest.
--- `attackerState` is nil-safe -- the attacker may have already left/died.
-function AirCombo.EndSuspendedExchange(
-	victimPlayer: Player,
-	victimState: CombatState,
-	attackerPlayer: Player?,
-	attackerState: CombatState?
-): ()
-	if victimState.rootPart then
-		RagdollController.ClearHold(victimState.rootPart, victimPlayer)
+-- Force-ends attackerState's own currently-tracked air-combo sequence, if one is actually live (a
+-- target set AND now <= airComboExpiry) -- releases the held victim's own physical hold + held-
+-- lockout (when victimState is supplied) AND this attacker's own physical chase-hold, then zeroes
+-- every AirCombo field on the attacker's side a live sequence populates. Returns whether a live
+-- sequence actually existed to release (false is a harmless no-op for every caller).
+--
+-- Three call sites share this one implementation instead of three near-copies of the same cleanup:
+--   - CombatSystem.lua's releaseAirComboVictimOf (a disconnecting ATTACKER) -- passes the departing
+--     victim's own CombatState so their hold gets released too.
+--   - CombatSystem.lua's releaseAirComboAttackerOf (a disconnecting VICTIM) -- passes nil for
+--     victimState; the departing victim's own physical/state cleanup is already handled by
+--     onCharacterRemoving/onPlayerRemoving's own lifecycle for THAT player, this call only needs to
+--     fix the attacker's side of the relationship.
+--   - CombatSystem.lua's resolveHitAgainstTarget, as SwitchPriority's own third-party guard: a
+--     parrier who's ABOUT to become the new attacker of one sequence might already be mid-chase as
+--     the attacker of a completely different, unrelated one (Constants.Combat.AirCombo.
+--     airComboChaseExpiry doesn't gate ACTION_GATES.HeldAloft, so a player mid-chase-as-attacker is
+--     still hittable/parryable by someone else) -- that stale sequence has to be force-ended before
+--     SwitchPriority overwrites their AirCombo table, or its own victim would be stranded mid-air
+--     with no attacker left to track them. Resolved in CombatSystem.lua rather than inside
+--     SwitchPriority itself: only that System can look up a stale third party's own CombatState by
+--     Player (this module stays pure w.r.t. CombatSystem's private world -- see this file's own
+--     header and CombatSystem.Init's own comment on why AirCombo.lua takes no lookup hooks).
+function AirCombo.ReleaseSequence(
+	attackerPlayer: Player,
+	attackerState: CombatState,
+	victimState: CombatState?,
+	now: number
+): boolean
+	local heldVictim = attackerState.AirCombo.airComboTarget
+	if not heldVictim or now > attackerState.AirCombo.airComboExpiry then
+		return false
 	end
-	if attackerState and attackerState.rootPart then
+
+	if victimState and victimState.character then
+		RagdollController.Recover(victimState.character)
+		if victimState.rootPart then
+			RagdollController.ClearHold(victimState.rootPart, heldVictim)
+		end
+		victimState.Vitals.ragdollExpiry = 0
+		victimState.AirCombo.airComboHeldExpiry = 0
+	end
+
+	-- The attacker's own physical chase-hold -- harmless to clear even when their character is about
+	-- to be destroyed anyway (a disconnecting attacker), and load-bearing when it isn't (the
+	-- third-party guard above): without this, the stale AlignPosition's own MaxVelocity/
+	-- Responsiveness (tuned for whichever role -- hover or chase -- it was PREVIOUSLY holding) would
+	-- survive into a fresh HoldAloft call's "refresh in place" branch instead of being rebuilt fresh
+	-- for its NEW role, see RagdollController.HoldAloft's own header for that refresh-vs-rebuild split.
+	if attackerState.rootPart then
 		RagdollController.ClearHold(attackerState.rootPart, attackerPlayer)
 	end
-	victimState.AirCombo.airComboSuspendedUntil = 0
-	victimState.AirCombo.airComboSuspendedWithAttacker = nil
-	if attackerState then
-		attackerState.AirCombo.airComboChaseExpiry = 0
-	end
-end
 
--- The suspended victim's own one-shot counter-punch -- redirected here from CombatSystem.lua's
--- handleAttackRequest's Basic-attack path while CombatState.airComboSuspendedUntil is active (see
--- that field's own header). Deliberately NOT hitbox-timed like a real swing: the "target" of this
--- punch is a specific known entity (airComboSuspendedWithAttacker), not found via arc/overlap
--- sampling, so it resolves instantly -- the same "nothing to time a window against" shape the
--- air-tech's own punish already uses. Always ends the suspended exchange afterward regardless of
--- outcome (hit/blocked/parried) -- a one-shot make-or-break moment, not a repeatable option.
-function AirCombo.HandleSuspendedCounterPunchRequest(player: Player, state: CombatState, now: number): ()
-	assert(hooks, "AirCombo.Init must run before any suspended counter-punch request can resolve")
-	local attackerPlayer = state.AirCombo.airComboSuspendedWithAttacker
-	local attackerState = if attackerPlayer then hooks.GetCombatState(attackerPlayer) else nil
-	if not attackerPlayer or not attackerState or not attackerState.alive then
-		-- The attacker already left/died mid-exchange -- just drop the victim back to normal footing.
-		AirCombo.EndSuspendedExchange(player, state, attackerPlayer, attackerState)
-		logRejected("BasicAttack", player, "SuspendedAttackerGone")
-		return
-	end
-
-	-- "Only if the attacker is not hitting them" -- the attacker's own commitment lock is the same
-	-- signal every OTHER action already reads to mean "currently mid-swing."
-	if now < attackerState.attackEndsAt then
-		logRejected("BasicAttack", player, "AttackerStillSwinging")
-		return
-	end
-
-	local attackerHumanoid = attackerState.humanoid
-	if not attackerHumanoid then
-		AirCombo.EndSuspendedExchange(player, state, attackerPlayer, attackerState)
-		logRejected("BasicAttack", player, "AttackerMissingHumanoid")
-		return
-	end
-
-	-- Still fully parryable/blockable by the attacker -- everything stays parryable, including this.
-	local defenseKind = HitResolution.ClassifyDefense(
-		now,
-		attackerState.Vitals.postureBrokenExpiry,
-		attackerState.Vitals.parryWindowExpiry,
-		attackerState.blocking
-	)
-
-	if defenseKind == "Parry" then
-		attackerState.Vitals.parryWindowExpiry = 0
-		HitResolution.ApplyParryPunish(state.Vitals, now)
-		hooks.SendVitals(player, state)
-		local parryPayload = FeedbackPayload.Build("Parried", player, attackerPlayer, nil, nil, false)
-		hooks.SendFeedback(player, parryPayload)
-		hooks.SendFeedback(attackerPlayer, parryPayload)
-	else
-		local damageMultiplier = if defenseKind == "Block" then Constants.Combat.BlockDamageMultiplier else 1
-		local postureMultiplier = if defenseKind == "Block" then Constants.Combat.BlockPostureMultiplier else 1
-		local finalDamage = Constants.Combat.AirCombo.SuspendedCounterDamage * damageMultiplier
-		local finalPosture = Constants.Combat.AirCombo.SuspendedCounterPostureDamage * postureMultiplier
-		if HitResolution.IsGodmode(attackerState) then
-			finalDamage = 0
-			finalPosture = 0
-		end
-
-		local wasPostureBroken = now < attackerState.Vitals.postureBrokenExpiry
-		attackerState.Vitals.posture = math.max(0, attackerState.Vitals.posture - finalPosture)
-		if attackerHumanoid.Health - finalDamage <= 0 then
-			attackerState.pendingKillerUserId = player.UserId
-		end
-		if finalDamage > 0 then
-			attackerHumanoid:TakeDamage(finalDamage)
-		end
-		hooks.SendVitals(attackerPlayer, attackerState)
-
-		local kind: Types.CombatFeedbackKind = if defenseKind == "Block" then "Blocked" else "Hit"
-		local hitPayload = FeedbackPayload.Build(
-			kind,
-			player,
-			attackerPlayer,
-			finalDamage,
-			finalPosture,
-			false,
-			nil,
-			"SuspendedCounter"
-		)
-		hooks.SendFeedback(player, hitPayload)
-		hooks.SendFeedback(attackerPlayer, hitPayload)
-
-		if attackerState.Vitals.posture <= 0 and not wasPostureBroken then
-			hooks.TriggerPostureBreak(attackerPlayer, attackerState, player)
-			hooks.SendVitals(attackerPlayer, attackerState)
-		end
-	end
-
-	state.inCombatUntil = now + Constants.Combat.InCombatDurationSeconds
-	attackerState.inCombatUntil = now + Constants.Combat.InCombatDurationSeconds
-	HitResolution.StampRecentOpponent(state, attackerPlayer, now)
-	HitResolution.StampRecentOpponent(attackerState, player, now)
-
-	AirCombo.EndSuspendedExchange(player, state, attackerPlayer, attackerState)
-	logAccepted("BasicAttack", player, { attack = "SuspendedCounter", defended = defenseKind })
-end
-
--- Double-tap-W air-tech: the victim of someone ELSE's air-combo juggle attempts to break the hold.
--- Deliberately does NOT go through CombatSystem.lua's checkCommonPreconditions/ACTION_GATES -- this
--- is the one action that must work WHILE ragdolled (that's the entire point:
--- combat-philosophy.md's "no true unblockable/unparryable without a telegraphed cost" means the
--- juggle itself needs a real counter). Still rate-limited (the SAME shared defensive budget
--- Dash/BlockStart use, via hooks.IsDefensiveRateLimited) and still requires a live CombatState.
---
--- Not itself a parryable exchange -- a defense against a defenseless state, the same way a Parry's
--- own attacker-punish isn't itself something the attacker can defend against. See
--- HitResolution.ApplyParryPunish's own header for why the punish logic is shared, not duplicated,
--- with a genuine Parry.
-function AirCombo.HandleAirTechRequest(player: Player): ()
-	assert(hooks, "AirCombo.Init must run before any air-tech request can resolve")
-	logReceived("AirTech", player)
-
-	if hooks.IsDefensiveRateLimited(player) then
-		logRejected("AirTech", player, "RateLimited")
-		return
-	end
-	local state = hooks.GetCombatState(player)
-	if not state or not state.alive then
-		logRejected("AirTech", player, "NoCombatState")
-		return
-	end
-
-	local now = os.clock()
-	if now < state.AirCombo.airTechReadyAt then
-		logRejected("AirTech", player, "TechCooldownActive", { remainingSeconds = state.AirCombo.airTechReadyAt - now })
-		return
-	end
-
-	local attackerPlayer, attackerState = hooks.FindAirComboAttacker(player, now)
-	if not attackerPlayer or not attackerState then
-		-- Not actually juggled right now -- nothing to spam-prevent, so no cooldown is set.
-		logRejected("AirTech", player, "NotJuggled")
-		return
-	end
-
-	if now > state.AirCombo.airTechWindowExpiry then
-		-- Genuinely mistimed: was juggled, missed the window. Cooldown applies -- see
-		-- Constants.Combat.AirCombo.TechCooldownSeconds' own header for why.
-		state.AirCombo.airTechReadyAt = now + Constants.Combat.AirCombo.TechCooldownSeconds
-		logRejected("AirTech", player, "MistimedWindow")
-		return
-	end
-
-	-- Success: this is a REAL parry, not a full escape -- convert the hold into a suspended, mutual
-	-- exchange rather than dropping either body. Capture the fixed hold points BEFORE clearing the
-	-- attacker's own air-combo bookkeeping below (those fields are what the points are computed from).
-	local holdPosition = attackerState.AirCombo.airComboHoverPosition
-	local chaseOffset = attackerState.AirCombo.airComboChaseOffset
-	local attackerRootPart = attackerState.rootPart
-	local cfg = Constants.Combat.AirCombo
-
-	-- Un-ragdoll the victim's JOINTS only (ballsocket -> Motor6D reversal) -- ownership/controller
-	-- state stays exactly as a ragdoll left it until the HoldAloft refresh just below re-applies the
-	-- live-body treatment. See RagdollController.RecoverJointsOnly's own header for why the full
-	-- Recover() would break this (hands ownership back to the player mid-hold).
-	if state.character then
-		RagdollController.RecoverJointsOnly(state.character)
-	end
-	-- Refresh the victim's OWN hold with a liveBodyFacePoint now supplied (previously nil, a ragdoll
-	-- hold) -- this is what actually applies enterRigidHold/gravity-cancel/face-orientation, the SAME
-	-- live-body treatment the attacker's own hold already uses, via HoldAloft's existing refresh-in-
-	-- place path (see that function's own header).
-	if state.rootPart and holdPosition and attackerRootPart then
-		RagdollController.HoldAloft(
-			state.rootPart,
-			player,
-			holdPosition,
-			cfg.SuspendedSeconds,
-			cfg.HoverRiseSpeed,
-			cfg.HoverResponsiveness,
-			attackerRootPart.Position
-		)
-	end
-	-- Keep the ATTACKER suspended alongside them too (per design: "keep them in the air suspended
-	-- WITH the attacker," not drop either body) -- refresh their existing hold to the same
-	-- SuspendedSeconds window so it doesn't expire out from under the victim mid-exchange.
-	if attackerRootPart and holdPosition and chaseOffset then
-		RagdollController.HoldAloft(
-			attackerRootPart,
-			attackerPlayer,
-			holdPosition + chaseOffset,
-			cfg.SuspendedSeconds,
-			cfg.ChaseSpeed,
-			cfg.ChaseResponsiveness,
-			holdPosition
-		)
-		attackerState.AirCombo.airComboChaseExpiry = now + cfg.SuspendedSeconds
-	end
-
-	state.Vitals.ragdollExpiry = 0
-	state.AirCombo.airTechWindowExpiry = 0
-	-- A successful tech is NOT free -- see TechCooldownSeconds' own header: a zero-cost, infinitely
-	-- repeatable escape + attacker punish would make the air-combo's own investment (DashPunch
-	-- cooldown, chase commitment) worthless.
-	state.AirCombo.airTechReadyAt = now + Constants.Combat.AirCombo.TechCooldownSeconds
-	state.blocking = false
-	state.AirCombo.airComboSuspendedUntil = now + cfg.SuspendedSeconds
-	state.AirCombo.airComboSuspendedWithAttacker = attackerPlayer
-
-	-- Ends the attacker's FREE auto-combo privilege -- any further attack they throw at this player
-	-- now resolves as a normal swing (arc/LOS/ClassifyDefense all apply), not a guaranteed
-	-- continuation hit against a helpless ragdoll. This is what makes "allowed to Block" meaningful.
 	attackerState.AirCombo.airComboTarget = nil
 	attackerState.AirCombo.airComboHitCount = 0
 	attackerState.AirCombo.airComboExpiry = 0
 	attackerState.AirCombo.airComboHoverPosition = nil
 	attackerState.AirCombo.airComboChaseOffset = nil
+	attackerState.AirCombo.airComboChaseExpiry = 0
 
-	HitResolution.ApplyParryPunish(attackerState.Vitals, now)
-	state.inCombatUntil = now + Constants.Combat.InCombatDurationSeconds
-	attackerState.inCombatUntil = now + Constants.Combat.InCombatDurationSeconds
-	HitResolution.StampRecentOpponent(state, attackerPlayer, now)
-	HitResolution.StampRecentOpponent(attackerState, player, now)
-	hooks.SendVitals(attackerPlayer, attackerState)
+	return true
+end
 
-	local payload = FeedbackPayload.Build("AirTechEscaped", attackerPlayer, player, nil, nil, false)
-	hooks.SendFeedback(attackerPlayer, payload)
-	hooks.SendFeedback(player, payload)
-
-	if attackerState.Vitals.posture <= 0 then
-		hooks.TriggerPostureBreak(attackerPlayer, attackerState, player)
-		hooks.SendVitals(attackerPlayer, attackerState)
+-- Priority switch: a continuation-hit Parry against an already-airborne, already-tracked air-combo
+-- target flips who's attacking instead of just ending the sequence. CombatSystem.lua's Parry branch
+-- in resolveHitAgainstTarget is the ONLY call site, gated on its own isTrackedContinuation check --
+-- never reached for a parried OPENING DashPunch (attackerState.AirCombo.airComboTarget isn't set to
+-- targetPlayer until AFTER a DashPunch already lands, so a parry on the punch itself never satisfies
+-- that gate), which is what keeps a parried opener a plain punish with no launch, per
+-- combat-philosophy.md's confirmed scope for this redesign.
+--
+-- newAttackerPlayer/newAttackerState is the parrier, seizing priority; oldAttackerPlayer/
+-- oldAttackerState is whoever just threw (and had parried) the continuation hit, becoming the new
+-- held victim. Both sides get direct CombatState access (unlike Apply's own `target: AirComboTarget`
+-- adapter) -- the old-attacker side can never be a training dummy (a dummy never attacks, so it can
+-- never be the ATTACKER side of a sequence in the first place, per CombatState.airComboTarget's own
+-- header), so there is no player-vs-dummy ambiguity here for an adapter to abstract over, and the
+-- migration below needs to read AND write the OLD attacker's stored hoverPosition/chaseOffset
+-- anchors directly -- fields the AirComboTarget adapter's fixed shape doesn't expose at all.
+--
+-- Reuses the SAME two fixed anchors (H = the sequence's ORIGINAL airComboHoverPosition, C = its
+-- ORIGINAL airComboChaseOffset) every continuation hit already refreshes onto instead of recomputing
+-- either one -- see those fields' own headers in CombatTypes.lua. A switch swaps WHICH PLAYER'S
+-- ROOTPART IS PINNED TO WHICH POINT (new victim -> H, new attacker -> H + C) rather than moving
+-- either point, which is what keeps a long back-and-forth rally spatially anchored to the original
+-- DashPunch impact instead of ratcheting upward/outward with every trade -- the exact same
+-- "reuse, never recompute" reasoning Apply's own continuation branch already documents.
+--
+-- Every switch adds Constants.Combat.AirCombo.ParryHoldExtensionSeconds on top of the normal
+-- AirborneSeconds window (both sides' timers, so a rally of trades keeps BOTH players airborne
+-- longer with every exchange) -- the reward for the harder, correctly-timed defensive read a
+-- continuation parry requires, on top of the punish/disarm resolveHitAgainstTarget's Parry branch
+-- already applies to the newly-demoted attacker. Caller's responsibility, not this function's: force-
+-- ending any pre-existing, UNRELATED sequence newAttackerState might already be running as an
+-- attacker elsewhere -- see ReleaseSequence's own header for why that guard has to live in
+-- CombatSystem.lua instead of here.
+function AirCombo.SwitchPriority(
+	newAttackerPlayer: Player,
+	newAttackerState: CombatState,
+	oldAttackerPlayer: Player,
+	oldAttackerState: CombatState,
+	now: number
+): ()
+	-- Defensive re-check, mirroring Apply's own continuation gate (`not target.isCurrentAirComboTarget()
+	-- or now > attackerState.AirCombo.airComboExpiry`) -- resolveHitAgainstTarget's own
+	-- isTrackedContinuation already verified this before throwing the switch, but this module never
+	-- trusts a caller-computed invariant it can cheaply re-verify itself.
+	if
+		oldAttackerState.AirCombo.airComboTarget ~= newAttackerPlayer
+		or now > oldAttackerState.AirCombo.airComboExpiry
+	then
+		return
 	end
 
-	logAccepted("AirTech", player, { attacker = attackerPlayer.Name })
+	local oldAttackerCharacter = oldAttackerState.character
+	local oldAttackerHumanoid = oldAttackerState.humanoid
+	local oldAttackerRoot = oldAttackerState.rootPart
+	local newAttackerRoot = newAttackerState.rootPart
+	if not oldAttackerCharacter or not oldAttackerHumanoid or not oldAttackerRoot or not newAttackerRoot then
+		return
+	end
+
+	-- Same corpse guard Apply itself opens with -- a parry punish never deals health damage (only
+	-- posture), but a same-tick death from an unrelated source must never be handed a fresh hold.
+	if oldAttackerHumanoid.Health <= 0 then
+		return
+	end
+
+	-- H/C -- see this function's own header. Both are read directly off the OLD attacker's own
+	-- CombatState (the sequence's existing record of them -- state ownership never moved until this
+	-- migration, see AirComboState's own header on why the ATTACKER side is where these anchors live).
+	local hoverPosition = oldAttackerState.AirCombo.airComboHoverPosition
+	local chaseOffset = oldAttackerState.AirCombo.airComboChaseOffset
+	if not hoverPosition or not chaseOffset then
+		return
+	end
+
+	local cfg = Constants.Combat.AirCombo
+	local extendedExpiry = now + cfg.AirborneSeconds + cfg.ParryHoldExtensionSeconds
+	local extendedDuration = extendedExpiry - now
+
+	-- Old attacker -> new victim: live-held at H, facing the new attacker's own point (H + C) -- the
+	-- SAME live-body treatment (Motor6D/Humanoid control intact, Block/Parry-capable) Apply's own
+	-- DashPunch-start/continuation branches already give a real-player target. math.max, never
+	-- assigned, matching every other airComboHeldExpiry writer (CombatTypes.AirComboState.
+	-- airComboHeldExpiry's own header) -- only when the pin actually exists, same HoldAloft-return
+	-- gate as every other held-lockout write (see HoldAloft's own header for why).
+	local oldAttackerHeld = RagdollController.HoldAloft(oldAttackerRoot, oldAttackerPlayer, {
+		Position = hoverPosition,
+		DurationSeconds = extendedDuration,
+		MaxSpeed = cfg.HoverRiseSpeed,
+		Responsiveness = cfg.HoverResponsiveness,
+		LiveBodyFacePoint = hoverPosition + chaseOffset,
+	})
+	if oldAttackerHeld then
+		oldAttackerState.AirCombo.airComboHeldExpiry =
+			math.max(oldAttackerState.AirCombo.airComboHeldExpiry, extendedExpiry)
+	end
+
+	-- New attacker -> takes over the chase pin at H + C, facing H -- the same live-body chase
+	-- treatment Apply's own attacker-side hold uses. If newAttackerState was itself the held victim a
+	-- moment ago, this is what physically frees their body from that pin (HoldAloft's own
+	-- "refresh-in-place" branch handles a rootPart that's already pinned by rebuilding it fresh for
+	-- this new role -- see ReleaseSequence's own header on why a stale hold's tuning can't just be
+	-- refreshed in place across a role change; a victim's own hold never carries that risk since it's
+	-- being pinned FRESH here regardless).
+	local newAttackerHeld = RagdollController.HoldAloft(newAttackerRoot, newAttackerPlayer, {
+		Position = hoverPosition + chaseOffset,
+		DurationSeconds = extendedDuration,
+		MaxSpeed = cfg.ChaseSpeed,
+		Responsiveness = cfg.ChaseResponsiveness,
+		LiveBodyFacePoint = hoverPosition,
+	})
+
+	-- Full migration -- old attacker's own tracking clears (they're not attacking anyone now); new
+	-- attacker inherits the sequence at hit count 1, mirroring what a genuine DashPunch-start already
+	-- does (every "possession" of the juggle gets the same MaxHits budget).
+	oldAttackerState.AirCombo.airComboTarget = nil
+	oldAttackerState.AirCombo.airComboHitCount = 0
+	oldAttackerState.AirCombo.airComboExpiry = 0
+	oldAttackerState.AirCombo.airComboHoverPosition = nil
+	oldAttackerState.AirCombo.airComboChaseOffset = nil
+	-- Load-bearing, not cosmetic: ClearHold only hands back network ownership, it never touches this
+	-- field (RagdollController.ClearHold's own header) -- without zeroing it here, Movement.
+	-- ComputeDesiredWalkSpeed keeps the old attacker pinned at WalkSpeed 0 for whatever's left of the
+	-- ORIGINAL window even though their own pull just stopped (they're a live-held victim now, with
+	-- airComboHeldExpiry above doing that job instead).
+	oldAttackerState.AirCombo.airComboChaseExpiry = 0
+
+	newAttackerState.AirCombo.airComboTarget = oldAttackerPlayer
+	newAttackerState.AirCombo.airComboHitCount = 1
+	newAttackerState.AirCombo.airComboExpiry = extendedExpiry
+	newAttackerState.AirCombo.airComboHoverPosition = hoverPosition
+	newAttackerState.AirCombo.airComboChaseOffset = chaseOffset
+	-- Same HoldAloft-return gate as the old attacker's own held-lockout above: only WalkSpeed-lock the
+	-- new attacker to a chase pin that actually exists.
+	newAttackerState.AirCombo.airComboChaseExpiry = if newAttackerHeld then extendedExpiry else 0
+	-- Load-bearing: clears ACTION_GATES.HeldAloft (CombatTypes.AirComboState.airComboHeldExpiry's own
+	-- header) so the new attacker -- who may have been the held victim themselves a moment ago -- can
+	-- act immediately instead of waiting out whatever was left of their own stale held-lockout timer.
+	newAttackerState.AirCombo.airComboHeldExpiry = 0
 end
 
 return AirCombo

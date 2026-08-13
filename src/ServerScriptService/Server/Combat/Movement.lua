@@ -118,6 +118,27 @@ function Movement.ApplySlide(state: CombatState, now: number): ()
 	state.blocking = false
 end
 
+-- Move Creation System lunge grant (MoveDefinition.Movement, CombatSystem.ThrowCustomMove) --
+-- reuses the Dash-burst SHAPE (a fixed-speed WalkSpeed window, its own priority tier in
+-- ComputeDesiredWalkSpeed below) via customMoveLungeWindowExpiry/customMoveLungeSpeed, not Dash's
+-- own state fields -- see MovementState.customMoveLungeWindowExpiry's own header. A no-op for a
+-- non-positive distance/duration (an authored move with no real lunge to grant) rather than
+-- setting a zero-length or infinite-speed window. The caller is responsible for legality (this
+-- function only applies the effect, per this file's header); distanceStuds/durationSeconds have
+-- already been clamped by MoveRegistryManager.Validate before reaching here.
+function Movement.ApplyCustomMoveLunge(
+	state: CombatState,
+	now: number,
+	distanceStuds: number,
+	durationSeconds: number
+): ()
+	if distanceStuds <= 0 or durationSeconds <= 0 then
+		return
+	end
+	state.Movement.customMoveLungeWindowExpiry = now + durationSeconds
+	state.Movement.customMoveLungeSpeed = distanceStuds / durationSeconds
+end
+
 -- Whether `state`'s humanoid currently has meaningful held movement input -- the same
 -- Constants.Combat.MovementInputMagnitudeThreshold ResolveDashDirection above already reads,
 -- extracted as its own testable query since handleSlideRequest needs it as a real reject gate
@@ -131,8 +152,10 @@ function Movement.IsMoving(state: CombatState): boolean
 end
 
 -- Force-ends any in-flight Dash/Slide burst the moment its owner stops being in a state where
--- committed movement is legal -- stunned, posture-broken, ragdolled, or pinned as the air-combo
--- attacker. Returns true if it actually ended something (callers log/act on the transition).
+-- committed movement is legal -- stunned, posture-broken, ragdolled, pinned as the air-combo
+-- attacker, or held as someone else's air-combo target (AirCombo.airComboHeldExpiry -- a live-held
+-- DashPunch victim can Block/Parry, per ACTION_GATES.HeldAloft, but still can't move). Returns true
+-- if it actually ended something (callers log/act on the transition).
 --
 -- This is a real defensive exploit fix, not tidiness. ComputeDesiredWalkSpeed evaluates the Dash and
 -- Slide tiers ABOVE the hit-slow tier, and consults stunExpiry/postureBrokenExpiry only inside the
@@ -153,18 +176,58 @@ function Movement.EndMovementBursts(state: CombatState, now: number): boolean
 		or now < vitals.postureBrokenExpiry
 		or now < vitals.ragdollExpiry
 		or now < state.AirCombo.airComboChaseExpiry
+		or now < state.AirCombo.airComboHeldExpiry
 	if not interrupted then
 		return false
 	end
 
 	local movement = state.Movement
-	if movement.dashWindowExpiry == 0 and movement.slideWindowExpiry == 0 then
+	if
+		movement.dashWindowExpiry == 0
+		and movement.slideWindowExpiry == 0
+		and movement.customMoveLungeWindowExpiry == 0
+	then
 		return false
 	end
 
 	movement.dashWindowExpiry = 0
 	movement.slideWindowExpiry = 0
+	-- Move Creation System lunge -- same "burst is taken away, but was still spent" rule as Dash/
+	-- Slide above (this function never touches the move's own cooldown, CombatState.
+	-- customMoveReadyAt).
+	movement.customMoveLungeWindowExpiry = 0
 	return true
+end
+
+-- The pure decision half of CombatState.genuineJumpAirborne (see that field's own header in
+-- CombatTypes.lua for the full exploit list this closes -- AirSlam/"Downslam" used to be throwable
+-- after becoming airborne for ANY reason: DashPunch dash residue over a ledge, ordinary hit
+-- knockback, parry recoil, or an ordinary fall with no jump ever pressed, not just a genuine jump).
+-- CombatSystem.lua's onCharacterAdded wires this to the live Humanoid's own StateChanged signal
+-- (the instance-touching half, which stays there rather than here -- this module's whole reason for
+-- existing is to keep the actual DECISION unit-testable without a live Humanoid, the same "pure
+-- function, thin call site" split HitResolution.ApplyParryPunish/ApplyDisarm already use elsewhere).
+--
+-- Entering Jumping is the ONE HumanoidStateType transition Roblox's own character controller fires
+-- exclusively from a genuine jump request -- never from an external velocity write, never from
+-- WalkSpeed-driven ground movement carrying a player off an edge (that goes straight to Freefall,
+-- skipping Jumping entirely), and never from a ragdoll launch (PlatformStand blocks the Humanoid
+-- state machine from ever reaching Jumping while ragdolled) -- so it's credited unconditionally.
+-- Freefall is deliberately left alone (returns `previous` unchanged): it's both the natural
+-- Jumping -> Freefall apex transition of an already-credited jump AND the exact state every
+-- incidental-airborne case above also produces, which is harmless here specifically because
+-- `previous` was never set true for those cases to begin with. Every OTHER state (Landed, Running,
+-- RunningNoPhysics, GettingUp, Physics/ragdoll, Swimming, Climbing, Seated, whatever) clears the
+-- flag -- the single unbroken "still falling from that one jump" stretch is over the moment the
+-- Humanoid does anything else, so a stale credit from an earlier jump can never outlive it.
+function Movement.ComputeGenuineJumpAirborne(previous: boolean, newState: Enum.HumanoidStateType): boolean
+	if newState == Enum.HumanoidStateType.Jumping then
+		return true
+	end
+	if newState == Enum.HumanoidStateType.Freefall then
+		return previous
+	end
+	return false
 end
 
 -- The single, unified WalkSpeed resolver: given a player's current combat/movement state, returns
@@ -177,20 +240,24 @@ end
 --   1. Frozen (admin-only lock, DevMenuSystem.lua's SetTargetFrozen) -- overrides EVERYTHING,
 --      including Flying, since an admin freeze is meant to be an absolute lockdown.
 --   2. Flying (Client/DevMenu/FlightController.lua) -- above even air-combo-chase, see below.
---   3. Air-combo chase -- RagdollController.HoldAloft currently owns this player's positioning via
---      a server-side AlignPosition (CombatSystem.lua's applyAirCombo); a player-commanded WalkSpeed
---      burst on top of that fights the pull instead of riding along with it, so this is pinned to 0
---      for the window regardless of what's held.
---   4. Dash window    -- a committed neutral burst.
---   5. Slide window   -- a bigger committed burst, chained off Sprint (ApplySlide). Grouped
+--   3. EmoteMovementLocked (Server/Systems/EmoteSystem.lua) -- same tier as Frozen/Flying: a
+--      MovementLocked emote is a deliberate full stop, not something any tier below should peek
+--      through.
+--   4. Air-combo chase/held -- RagdollController.HoldAloft currently owns this player's positioning
+--      via a server-side AlignPosition, whether as the DashPunch ATTACKER (airComboChaseExpiry) or
+--      as a live-held VICTIM (airComboHeldExpiry -- AirCombo.Apply); a player-commanded WalkSpeed
+--      burst on top of either fights the pull instead of riding along with it, so this is pinned to
+--      0 for the window regardless of what's held.
+--   5. Dash window    -- a committed neutral burst.
+--   6. Slide window   -- a bigger committed burst, chained off Sprint (ApplySlide). Grouped
 --                        immediately below Dash since both lock the shared attackEndsAt commitment
 --                        and can therefore never be simultaneously active -- their relative order
 --                        doesn't affect correctness, this just keeps "committed burst movement"
 --                        tiers together above the sustained ones below.
---   6. Hit-slow clip  -- you took an unmitigated hit; the stagger overrides your own locomotion...
---   7. Sprint         -- ...but a raised sprint speed only applies when you're otherwise free to
+--   7. Hit-slow clip  -- you took an unmitigated hit; the stagger overrides your own locomotion...
+--   8. Sprint         -- ...but a raised sprint speed only applies when you're otherwise free to
 --                        move (not blocking, not mid-commitment, not stunned/posture-broken).
---   8. Base -- itself scaled by the admin-only SpeedMultiplier Attribute (default 1) before any of
+--   9. Base -- itself scaled by the admin-only SpeedMultiplier Attribute (default 1) before any of
 --      the tiers above multiply on top of it, the same "per-player Humanoid Attribute" shape
 --      BonusWalkSpeed already uses.
 function Movement.ComputeDesiredWalkSpeed(state: CombatState, now: number): number
@@ -207,6 +274,14 @@ function Movement.ComputeDesiredWalkSpeed(state: CombatState, now: number): numb
 	-- a phantom running sound while flying with Sprint held. Pinning to 0 here closes that off at
 	-- the source instead of trying to silence the built-in sound/animation script directly.
 	if state.humanoid and state.humanoid:GetAttribute(Constants.Attributes.Flying) == true then
+		return 0
+	end
+
+	-- Emote System (Server/Systems/EmoteSystem.lua) -- same top priority tier as Frozen/Flying above:
+	-- a MovementLocked emote (Sit, Dance, ...) should read as a genuine stop, not something Sprint or
+	-- a lingering hit-slow window can still peek through. EmoteSystem sets/clears this Attribute
+	-- directly on the emoting character's Humanoid; this module owns no emote state of its own.
+	if state.humanoid and state.humanoid:GetAttribute(Constants.Attributes.EmoteMovementLocked) == true then
 		return 0
 	end
 
@@ -232,8 +307,20 @@ function Movement.ComputeDesiredWalkSpeed(state: CombatState, now: number): numb
 		end
 	end
 	local base = (Constants.Combat.BaseWalkSpeed + bonus) * speedMultiplier
-	if now < state.AirCombo.airComboChaseExpiry then
+	-- Air-combo chase (the ATTACKER's own hold) and air-combo held (the VICTIM's own hold, see
+	-- AirComboState.airComboHeldExpiry's own header) share this same top WalkSpeed tier -- both are a
+	-- RagdollController.HoldAloft AlignPosition pin, and a player-commanded WalkSpeed burst on top of
+	-- either one fights the pull instead of riding along with it.
+	if now < state.AirCombo.airComboChaseExpiry or now < state.AirCombo.airComboHeldExpiry then
 		return 0
+	end
+	-- Move Creation System lunge -- same commitment tier as Dash/Slide (both share attackEndsAt via
+	-- setActiveAction, so a lunge and a Dash/Slide window can never be simultaneously active; this
+	-- tier's position relative to Dash/Slide below is therefore never actually contested, grouped
+	-- here purely to keep "committed burst movement" tiers together, same reasoning as Slide's own
+	-- comment). Absolute WalkSpeed, not a multiplier on base -- see customMoveLungeSpeed's own header.
+	if now < state.Movement.customMoveLungeWindowExpiry then
+		return state.Movement.customMoveLungeSpeed
 	end
 	if now < state.Movement.dashWindowExpiry then
 		-- Backward gets its own weaker multiplier -- see DashBackSpeedMultiplier's own header.

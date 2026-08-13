@@ -115,10 +115,7 @@ local SUB_STATE_GROUPS = {
 			airComboHoverPosition = true,
 			airComboChaseOffset = true,
 			airComboChaseExpiry = true,
-			airTechWindowExpiry = true,
-			airTechReadyAt = true,
-			airComboSuspendedUntil = true,
-			airComboSuspendedWithAttacker = true,
+			airComboHeldExpiry = true,
 		},
 	},
 }
@@ -130,6 +127,7 @@ local function makeCombatState(overrides: { [string]: any }?): CombatState
 		humanoid = nil,
 		rootPart = nil,
 		humanoidDiedConnection = nil,
+		humanoidStateChangedConnection = nil,
 
 		alive = true,
 		blocking = false,
@@ -143,12 +141,14 @@ local function makeCombatState(overrides: { [string]: any }?): CombatState
 		basicAttackReadyAt = 0,
 		heavyAttackReadyAt = 0,
 		airSlamReadyAt = 0,
+		genuineJumpAirborne = false,
 		attackEndsAt = 0,
 		activeActionKind = "None",
 		currentSwingWindupEndsAt = 0,
 		swingCancelled = false,
 		comboIndex = 0,
 		comboExpiry = 0,
+		basicSwingIndex = 0,
 		basicComboLanded = 0,
 		basicComboExpiry = 0,
 
@@ -189,10 +189,7 @@ local function makeCombatState(overrides: { [string]: any }?): CombatState
 			airComboHoverPosition = nil,
 			airComboChaseOffset = nil,
 			airComboChaseExpiry = 0,
-			airTechWindowExpiry = 0,
-			airTechReadyAt = 0,
-			airComboSuspendedUntil = 0,
-			airComboSuspendedWithAttacker = nil,
+			airComboHeldExpiry = 0,
 		},
 	}
 	return Fixtures.applyNestedOverrides(state, overrides, SUB_STATE_GROUPS) :: CombatState

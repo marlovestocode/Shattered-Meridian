@@ -5,6 +5,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local HitResolution = require(ServerScriptService.Server.Combat.HitResolution)
+local CombatTypes = require(ServerScriptService.Server.Combat.CombatTypes)
 local Fixtures = require(ServerScriptService.Tests.TestHelpers.Fixtures)
 
 local function makeDefinition(overrides: { [string]: any }?): Types.HitboxAttackDefinition
@@ -53,6 +54,54 @@ return function()
 		it("dummy-shaped defender (no parry concept) always resolves None or Block", function()
 			expect(HitResolution.ClassifyDefense(100, 0, nil, false)).to.equal("None")
 		end)
+	end)
+
+	describe("HitResolution.ActionDropsParryWindow", function()
+		it("does not drop the window for BlockStart, the action that arms it", function()
+			expect(HitResolution.ActionDropsParryWindow("BlockStart")).to.equal(false)
+		end)
+
+		it("drops the window for every other committed action kind", function()
+			local kinds: { CombatTypes.CombatActionKind } = {
+				"Basic",
+				"Heavy",
+				"AirSlam",
+				"Dash",
+				"DashPunch",
+				"DashHit",
+				"Slide",
+				"Feint",
+				"CustomMove",
+			}
+			for _, kind in kinds do
+				expect(HitResolution.ActionDropsParryWindow(kind)).to.equal(true)
+			end
+		end)
+
+		it(
+			"regression: a parry-armed defender who commits to a swing classifies the next incoming hit as None, not Parry -- holding Block then attacking must not grant a free, cost-free parry",
+			function()
+				local now = 100
+				local parryWindowExpiry = now + Constants.Combat.ParryWindowSeconds
+				local blocking = true
+
+				-- The defender is still inside their own armed window right up until the moment they
+				-- commit to a swing -- exactly what a "hold Block, then press M1 without releasing"
+				-- press produces server-side.
+				expect(HitResolution.ClassifyDefense(now, 0, parryWindowExpiry, blocking)).to.equal("Parry")
+
+				-- Committing to Basic (or Heavy/AirSlam/Dash/.../CustomMove -- anything but BlockStart)
+				-- must drop the window, mirroring what setActiveAction/RequestBotAttack now do.
+				if HitResolution.ActionDropsParryWindow("Basic") then
+					parryWindowExpiry = 0
+				end
+				blocking = false
+
+				-- A hit landing mid-swing, moments later, must resolve as a genuine, undefended hit --
+				-- not the free parry the unfixed code granted.
+				expect(HitResolution.ClassifyDefense(now + 0.05, 0, parryWindowExpiry, blocking)).to.equal("None")
+			end
+		)
 	end)
 
 	describe("HitResolution.ComputeOutcome", function()

@@ -460,7 +460,26 @@ function BotCombat.ResolveHitAgainstBot(
 	end
 
 	local kind: Types.CombatFeedbackKind = if defenseKind == "Block" then "Blocked" else "Hit"
-	local payload = FeedbackPayload.Build(kind, attackerPlayer, nil, finalDamage, finalPosture, isHeavy, targetPosition)
+	-- finisherVariant echo mirrors resolveHitAgainstTarget's identical gate in CombatSystem.lua: not
+	-- blocked, and the bot's post-damage Health (already applied above) is > 0, matching
+	-- ApplyFinisherPhysics's own "Health <= 0" guard just below.
+	local resolvedFinisherVariant: Types.FinisherVariant? = if finisherVariant
+			and defenseKind ~= "Block"
+			and botState.humanoid.Health > 0
+		then finisherVariant
+		else nil
+	local payload = FeedbackPayload.Build(
+		kind,
+		attackerPlayer,
+		nil,
+		finalDamage,
+		finalPosture,
+		isHeavy,
+		targetPosition,
+		nil,
+		nil,
+		resolvedFinisherVariant
+	)
 	hooks.SendFeedback(attackerPlayer, payload)
 
 	if botState.posture <= 0 and not wasPostureBroken then
@@ -503,11 +522,7 @@ end
 -- one who gets punished for a bot's own attack.
 --
 -- `targetState` is the target's own live CombatState -- always already resolved and non-nil at the
--- one call site (CombatSystem.lua's onBotSwingHitCandidate). Any outside hit resolving against the
--- target that ends a suspended air-tech exchange (see CombatState.airComboSuspendedUntil's own
--- header) is the CALLER's responsibility now, run immediately before this function -- see
--- onBotSwingHitCandidate's own comment for why that stayed in CombatSystem.lua rather than becoming
--- a fourth Hook.
+-- one call site (CombatSystem.lua's onBotSwingHitCandidate).
 function BotCombat.ResolveHitFromBotAgainstPlayer(
 	botState: BotState,
 	targetPlayer: Player,
@@ -597,6 +612,10 @@ function BotCombat.ResolveHitFromBotAgainstPlayer(
 		-- resolver for the same single-writer reasons as that site.
 		targetState.Vitals.stunExpiry = math.max(targetState.Vitals.stunExpiry, now + Constants.Combat.HitStunDuration)
 		targetState.Vitals.hitSlowExpiry = now + Constants.Combat.HitSlowDuration
+		-- Force-end any live dash/slide window before the same-frame write below -- see
+		-- CombatSystem.resolveHitAgainstTarget's identical call for the full rationale
+		-- (docs/architecture/2026-08-audit.md section 3.6.3).
+		Movement.EndMovementBursts(targetState, now)
 		targetHumanoid.WalkSpeed = Movement.ComputeDesiredWalkSpeed(targetState, now)
 	end
 

@@ -19,10 +19,17 @@
 	bot spawn request's preset/weights (never trusted here directly), AdminActionSystem owns the
 	Godmode/Flying/FlightCollide/Frozen/Invisible/SpeedMultiplier/Teleport override actions,
 	CombatSystem.SetPlayerHealth/ResetCombatState own direct health mutation and the "clear cooldowns/
-	combo/vitals-timers without a respawn" action, and ModerationSystem owns Kick/Ban/Mute -- this
-	System only decides *whether* a given request is allowed to reach those, then translates the
-	request/response shape. Uses RemoteFunctions, not RemoteEvents, since the client needs to know
-	immediately whether its request was accepted (see Types.DevMenuSpawnDummyResult/
+	combo/vitals-timers without a respawn" action, ModerationSystem owns Kick/Ban/Mute, and
+	EmoteUnlockService owns granting/rolling emote unlocks (handleRollEmote below is a whitelist-gated
+	test trigger for RollEmote's existing "RareEmotes" pool, not a new unlock mechanism -- see that
+	handler's own header). VersionWatchSystem owns detecting whether a newer place version has been
+	published (handleGetServerVersionInfo below only forwards what it already knows); this System
+	still owns the actual kick-everyone actions themselves (handleShutdownServer's countdown-warned
+	kick, handleInstantRestartServer's immediate one) since only an admin's own button press ever
+	triggers either -- this System only decides *whether* a given request is allowed to reach
+	those, then translates the request/response shape. Uses RemoteFunctions, not RemoteEvents, since
+	the client needs to know immediately whether its request was accepted (see Types.
+	DevMenuSpawnDummyResult/
 	DevMenuSpawnBotResult) -- Announcement is the one deliberate exception (a genuine broadcast to
 	every client, not just the requesting admin), so it's a RemoteEvent instead.
 ]]
@@ -39,11 +46,14 @@ local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local CombatSystem = require(script.Parent.CombatSystem)
 local TrainingBotSystem = require(script.Parent.TrainingBotSystem)
 local AdminActionSystem = require(script.Parent.AdminActionSystem)
-local HitboxTuning = require(script.Parent.Parent.Combat.HitboxTuning)
+local VersionWatchSystem = require(script.Parent.VersionWatchSystem)
 local FlightTuning = require(script.Parent.Parent.DevMenu.FlightTuning)
+local HitboxDebugState = require(script.Parent.Parent.Combat.HitboxDebugState)
 local BugReportSystem = require(script.Parent.BugReportSystem)
 local ModerationSystem = require(script.Parent.ModerationSystem)
+local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local AdminConfig = require(script.Parent.Parent.Config.AdminConfig)
+local EmoteUnlockService = require(script.Parent.EmoteUnlockService)
 
 local DevMenuSystem = {}
 
@@ -115,9 +125,9 @@ local function getRootPart(player: Player, logPrefix: string): (BasePart?, strin
 	return rootPartInstance :: BasePart, nil
 end
 
--- Closed-whitelist string-to-enum lookup, unifying the 8 call sites below that used to each hand-
--- write `if typeof(rawX) == "string" then MAP[rawX] else nil`. Rejects both a non-string and a
--- string outside the given map's known keys in one step -- see HITBOX_CATEGORIES' own comment
+-- Closed-whitelist string-to-enum lookup, unifying the several call sites below that used to each
+-- hand-write `if typeof(rawX) == "string" then MAP[rawX] else nil`. Rejects both a non-string and a
+-- string outside the given map's known keys in one step -- see FLIGHT_TUNING_FIELDS' own comment
 -- below for why the closed-whitelist behavior (not just a typeof check) matters here.
 local function resolveEnum<T>(raw: unknown, map: { [string]: T }): T?
 	if typeof(raw) ~= "string" then
@@ -196,6 +206,35 @@ local function handleSpawnBot(
 	return { Success = true }
 end
 
+-- Whitelist-gated one-shot test trigger for the Emote System's roll path (Server/Systems/
+-- EmoteUnlockService.lua's RollEmote) -- exercises GrantEmote/RollEmote end to end from a human
+-- tester's own button press, since there is still no AchievementSystem/quest/live-ops caller to
+-- trigger it for real (see EmoteUnlockService.RollEmote's own header). Deliberately hardcodes the
+-- "RareEmotes" pool and rolls for the CALLING admin themselves (never a resolved lock-on target --
+-- unlike the Admin tab's actions, this has no meaningful "target," the same "self, no player-select"
+-- shape SpawnDummy/SpawnTrainingBot already use). RollEmote's own signature stays fully generic --
+-- this is just a new caller, not a new unlock mechanism.
+local function handleRollEmote(player: Player): Types.DevMenuRollEmoteResult
+	logger:debug("RollEmote received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "RollEmote")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+
+	local granted, emoteId, rollReason = EmoteUnlockService.RollEmote(player, "RareEmotes", {
+		Type = "Roll",
+		Pool = "RareEmotes",
+	})
+	if not granted then
+		logger:debug("RollEmote rejected", { player = player.Name, reason = rollReason })
+		return { Success = false, Reason = rollReason or "RollFailed" }
+	end
+
+	logger:info("RollEmote accepted", { player = player.Name, emoteId = emoteId })
+	return { Success = true, EmoteId = emoteId }
+end
+
 -- Shared "who is this admin action for" resolution: whichever player the requesting admin
 -- currently has locked on (CombatSystem.GetLockOnTarget), falling back to themselves if nothing's
 -- locked -- reuses the existing lock-on system as the target picker instead of a new player-select
@@ -209,8 +248,8 @@ end
 -- Closed whitelist for handleSetTargetSpeedMultiplier below -- rejects any number outside the exact
 -- preset set BEFORE it ever reaches AdminActionSystem.SetSpeedMultiplier (which re-validates the
 -- same set itself; see that function's own header for why both layers check). Same
--- table-from-array idiom HITBOX_CATEGORIES/HITBOX_TIMING_FIELDS below use, just declared up here
--- since this file's earlier handlers need it too.
+-- table-from-array idiom FLIGHT_TUNING_FIELDS below uses, just declared up here since this file's
+-- earlier handlers need it too.
 local SPEED_MULTIPLIER_PRESETS: { [number]: boolean } = {}
 for _, preset in ipairs(Constants.Debug.DevMenu.SpeedMultiplierPresets) do
 	SPEED_MULTIPLIER_PRESETS[preset] = true
@@ -252,6 +291,19 @@ local function resolveTargetUserId(rawTargetUserId: unknown): (Player?, string?)
 		return nil, "NoTarget"
 	end
 	return target, nil
+end
+
+-- BanPlayer/MutePlayer target OFFLINE UserIds by design (ModerationSystem.BanPlayer/MutePlayer take
+-- a raw UserId, never a Player) -- resolveTargetUserId above can't be reused for them since it
+-- requires Players:GetPlayerByUserId to succeed. This is the same rigor applied to the ID itself:
+-- a real Roblox UserId is always a positive integer, well under 2^53 (Lua's exact-integer float
+-- ceiling). Rejects NaN implicitly -- NaN > 0 is false, same self-inequality property every other
+-- NaN guard in this codebase relies on.
+local function isPlausibleUserId(value: unknown): boolean
+	if typeof(value) ~= "number" then
+		return false
+	end
+	return value > 0 and value < 2 ^ 53 and value == math.floor(value)
 end
 
 local function handleSetTargetHealth(player: Player, rawHealth: unknown): Types.DevMenuActionResult
@@ -586,6 +638,70 @@ local function handleShutdownServer(player: Player): Types.DevMenuActionResult
 	return { Success = true }
 end
 
+-- Instant Restart Server admin action -- same two-press server-armed confirmation shape as
+-- handleShutdownServer above (own module-local armed-until var, so arming one of these two actions
+-- never arms or disarms the other), but the second press kicks IMMEDIATELY, no
+-- ShutdownDelaySeconds countdown wait -- see Constants.Debug.DevMenu.InstantRestartConfirmWindowSeconds's
+-- own header for why this exists as a distinct, faster action alongside Shutdown Server rather than
+-- replacing it: an admin who has just published a place update and wants this server cycled onto it
+-- right away has no reason to sit through a countdown warning meant for a planned maintenance
+-- window.
+local instantRestartArmedUntil: number = 0
+
+local function handleInstantRestartServer(player: Player): Types.DevMenuActionResult
+	logger:debug("InstantRestartServer received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "InstantRestartServer")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+
+	local now = os.clock()
+	if now >= instantRestartArmedUntil then
+		instantRestartArmedUntil = now + DevMenuConfig.InstantRestartConfirmWindowSeconds
+		-- Unconditional Warn-level log, same "under-logging would be a real problem" standard
+		-- ShutdownServer's own arming log applies to itself.
+		logger:warn("InstantRestartServer armed", { player = player.Name, userId = player.UserId })
+		return { Success = false, Reason = "ConfirmationRequired" }
+	end
+
+	instantRestartArmedUntil = 0
+	logger:warn("InstantRestartServer confirmed -- server restarting immediately", {
+		player = player.Name,
+		userId = player.UserId,
+	})
+
+	broadcastAnnouncement("Warning", "Server restarting now for an update.")
+
+	for _, otherPlayer in ipairs(Players:GetPlayers()) do
+		otherPlayer:Kick("Server restarting for an update. Please rejoin.")
+	end
+
+	return { Success = true }
+end
+
+-- Passive "a newer version has been published" fetch (Server/Systems/VersionWatchSystem.lua) --
+-- fetch-once-on-open, same shape as handleGetHitboxDebug/handleGetSidebarStats above. Purely
+-- advisory: never kicks anyone, never announces anything, just reports what VersionWatchSystem
+-- already knows so the Admin tab can show a banner nudging the admin toward Instant Restart/
+-- Shutdown Server above.
+local function handleGetServerVersionInfo(player: Player): Types.DevMenuServerVersionInfoResult
+	logger:debug("GetServerVersionInfo received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "GetServerVersionInfo")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+
+	local bootPlaceVersion, latestKnownPlaceVersion = VersionWatchSystem.GetVersionInfo()
+	return {
+		Success = true,
+		BootPlaceVersion = bootPlaceVersion,
+		LatestKnownPlaceVersion = latestKnownPlaceVersion,
+		NewerVersionAvailable = latestKnownPlaceVersion ~= nil and latestKnownPlaceVersion > bootPlaceVersion,
+	}
+end
+
 -- Player roster ("Players" tab) -- one entry per Players:GetPlayers() at fetch time. Ping comes
 -- straight off Player:GetNetworkPing() (Roblox's own round-trip estimate); Snapshot is whatever
 -- CombatSystem.GetCombatState currently returns for that player (nil only for a brand-new join whose
@@ -684,13 +800,25 @@ local function handleBanPlayer(
 	if not allowed then
 		return { Success = false, Reason = reason :: string }
 	end
-	if typeof(rawTargetUserId) ~= "number" then
+	if not isPlausibleUserId(rawTargetUserId) then
 		return { Success = false, Reason = "InvalidRequest" }
 	end
 	if typeof(rawReason) ~= "string" then
 		return { Success = false, Reason = "InvalidRequest" }
 	end
-	if rawExpiresAt ~= nil and typeof(rawExpiresAt) ~= "number" then
+	-- Finite, future-dated ExpiresAt only -- nil already means "permanent" (ModerationSystem.
+	-- BanPlayer's own contract). Without this, a NaN/inf/past-dated ExpiresAt silently creates a
+	-- ban record ModerationSystem.IsBanned would treat as already-expired or as a no-op, giving the
+	-- admin no indication the ban they just placed does nothing.
+	if
+		rawExpiresAt ~= nil
+		and (
+			typeof(rawExpiresAt) ~= "number"
+			or rawExpiresAt ~= rawExpiresAt
+			or rawExpiresAt <= os.time()
+			or rawExpiresAt == math.huge
+		)
+	then
 		return { Success = false, Reason = "InvalidRequest" }
 	end
 
@@ -732,7 +860,7 @@ local function handleMutePlayer(
 	if not allowed then
 		return { Success = false, Reason = reason :: string }
 	end
-	if typeof(rawTargetUserId) ~= "number" then
+	if not isPlausibleUserId(rawTargetUserId) then
 		return { Success = false, Reason = "InvalidRequest" }
 	end
 	if typeof(rawEnabled) ~= "boolean" then
@@ -742,6 +870,46 @@ local function handleMutePlayer(
 	ModerationSystem.MutePlayer(rawTargetUserId, rawEnabled)
 
 	logger:info("MutePlayer accepted", { player = player.Name, targetUserId = rawTargetUserId, enabled = rawEnabled })
+	return { Success = true }
+end
+
+-- Wipes a target's SAVED progression data back to a fresh profile (PlayerDataSystem.ResetProfile)
+-- -- "Players" tab roster row, explicit-UserId-only targeting (resolveTargetUserId, never
+-- resolveActionTarget's lock-on-or-self picker), same reasoning as KickPlayer/BanPlayer/MutePlayer
+-- above even though this isn't a ModerationSystem action: a data wipe is IRREVERSIBLE, a strictly
+-- higher-stakes action than Kick (undone by rejoining) and arguably higher than Ban (still
+-- reversible/expirable, and the target's progression sits untouched in the DataStore the whole
+-- time it's in effect) -- accidentally applying this to whoever the admin happens to be locked
+-- onto is unacceptable in a way even ResetTargetCombatState's fallback-to-lock-on isn't, since that
+-- action only clears transient per-life combat timers, never persisted progress. Unlike
+-- resolveTargetUserId's other callers, this ALSO requires the target to have a currently-loaded
+-- profile (PlayerDataSystem.ResetProfile's own precondition) -- an offline wipe is out of scope on
+-- purpose, since that would mean a raw DataStore write bypassing the "only Transform/ResetProfile
+-- touch a loaded profile" model this whole System is built around.
+local function handleResetTargetPlayerData(player: Player, rawTargetUserId: unknown): Types.DevMenuActionResult
+	logger:debug("ResetTargetPlayerData received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "ResetTargetPlayerData")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+
+	local target, targetFailureReason = resolveTargetUserId(rawTargetUserId)
+	if not target then
+		return { Success = false, Reason = targetFailureReason }
+	end
+
+	local ok = PlayerDataSystem.ResetProfile(target)
+	if not ok then
+		return { Success = false, Reason = "NoTarget" }
+	end
+
+	-- Unconditional warn, same "under-logging would be a real problem" standard KickPlayer/
+	-- BanPlayer above already apply to every other destructive/DataStore-backed admin action.
+	logger:warn(
+		"ResetTargetPlayerData accepted",
+		{ player = player.Name, targetUserId = target.UserId, target = target.Name }
+	)
 	return { Success = true }
 end
 
@@ -816,33 +984,45 @@ local function handleGetSidebarStats(player: Player): Types.DevMenuSidebarStatsR
 	}
 end
 
--- Closed whitelists for the two string-typed hitbox-tuning params below -- unlike a plain
--- typeof(x) ~= "string" check, this ALSO rejects any string outside the exact known set, which
--- matters here specifically because `field` ultimately selects which table KEY gets written on a
--- live Constants.Combat.Weapons stage (HitboxTuning.AdjustField's `if field == "WindupSeconds" ...`
--- branch) -- an unvalidated arbitrary string could otherwise target the wrong branch or, if that
--- module's own guard were ever loosened, an unrelated field entirely. Same reasoning
--- TrainingBotSystem.ValidatePresetRequest already applies to preset names.
-local HITBOX_CATEGORIES: { [string]: Types.HitboxStageCategory } =
-	{ Basic = "Basic", Heavy = "Heavy", Finisher = "Finisher" }
-local HITBOX_TIMING_FIELDS: { [string]: Types.HitboxTimingField } =
-	{ WindupSeconds = "WindupSeconds", ActiveSeconds = "ActiveSeconds", RecoverySeconds = "RecoverySeconds" }
+-- Fetch-once-on-open (Admin tab) for HitboxDebugState's current value -- same shape as
+-- GetSidebarStats above.
+local function handleGetHitboxDebug(player: Player): Types.DevMenuHitboxDebugResult
+	logger:debug("GetHitboxDebug received", { player = player.Name, userId = player.UserId })
 
--- Same closed-whitelist reasoning as the two above, for the standalone-attack tuning params
--- (handleAdjustStandaloneField/handleResetStandaloneAttack below).
-local STANDALONE_ATTACK_NAMES: { [string]: Types.StandaloneAttackName } =
-	{ DashPunch = "DashPunch", DashHit = "DashHit" }
-local HITBOX_STANDALONE_FIELDS: { [string]: Types.HitboxStandaloneField } = {
-	WindupSeconds = "WindupSeconds",
-	ActiveSeconds = "ActiveSeconds",
-	RecoverySeconds = "RecoverySeconds",
-	OffsetForwardStuds = "OffsetForwardStuds",
-}
+	local allowed, reason = checkDevMenuPreconditions(player, "GetHitboxDebug")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
 
--- Same closed-whitelist reasoning as HITBOX_CATEGORIES/HITBOX_TIMING_FIELDS above, for the flight
--- feel tuner (handleAdjustFlightTuning/handleResetFlightTuning below) -- rejects any string outside
--- FlightTuning.lua's own curated field set before it can be used to pick which Constants.Flight key
--- gets written.
+	return { Success = true, Enabled = HitboxDebugState.IsEnabled() }
+end
+
+-- Server-wide, not per-player -- see HitboxDebugState.lua's own header for why this doesn't go
+-- through AdminActionSystem's overrideStates the way Godmode/Frozen/Invisible do.
+local function handleSetHitboxDebug(player: Player, rawEnabled: unknown): Types.DevMenuHitboxDebugResult
+	logger:debug("SetHitboxDebug received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "SetHitboxDebug")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+	if typeof(rawEnabled) ~= "boolean" then
+		return { Success = false, Reason = "InvalidRequest" }
+	end
+
+	HitboxDebugState.SetEnabled(rawEnabled)
+
+	logger:info("SetHitboxDebug accepted", { player = player.Name, enabled = rawEnabled })
+	return { Success = true, Enabled = rawEnabled }
+end
+
+-- Closed whitelist for the flight-tuning param below -- unlike a plain typeof(x) ~= "string" check,
+-- this ALSO rejects any string outside the exact known set, which matters here specifically because
+-- `field` ultimately selects which table KEY gets written on a live Constants.Flight table. Same
+-- reasoning TrainingBotSystem.ValidatePresetRequest already applies to preset names, scoped to the
+-- flight feel tuner (handleAdjustFlightTuning/handleResetFlightTuning below) -- rejects any string
+-- outside FlightTuning.lua's own curated field set before it can be used to pick which Constants.
+-- Flight key gets written.
 local FLIGHT_TUNING_FIELDS: { [string]: Types.FlightTuningFieldName } = {
 	CruiseSpeed = "CruiseSpeed",
 	BoostSpeedMultiplier = "BoostSpeedMultiplier",
@@ -860,102 +1040,6 @@ local FLIGHT_TUNING_FIELDS: { [string]: Types.FlightTuningFieldName } = {
 	HardLandingSpeedThreshold = "HardLandingSpeedThreshold",
 	SonicBoomSpeedThreshold = "SonicBoomSpeedThreshold",
 }
-
-local function handleListHitboxStages(player: Player): Types.DevMenuListHitboxStagesResult
-	logger:debug("ListHitboxStages received", { player = player.Name, userId = player.UserId })
-
-	local allowed, reason = checkDevMenuPreconditions(player, "ListHitboxStages")
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
-
-	return { Success = true, Stages = HitboxTuning.ListStages() }
-end
-
-local function handleAdjustHitboxTiming(
-	player: Player,
-	rawWeaponId: unknown,
-	rawCategory: unknown,
-	rawStageIndex: unknown,
-	rawField: unknown,
-	rawDelta: unknown
-): Types.DevMenuHitboxStageResult
-	logger:debug("AdjustHitboxTiming received", { player = player.Name, userId = player.UserId })
-
-	local allowed, reason = checkDevMenuPreconditions(player, "AdjustHitboxTiming")
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
-	if rawWeaponId ~= "Primary" and rawWeaponId ~= "Secondary" then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-	local category = resolveEnum(rawCategory, HITBOX_CATEGORIES)
-	if not category then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-	if typeof(rawStageIndex) ~= "number" then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-	local field = resolveEnum(rawField, HITBOX_TIMING_FIELDS)
-	if not field then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-	if typeof(rawDelta) ~= "number" then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-
-	local weaponId = rawWeaponId :: Types.WeaponId
-	local stage = HitboxTuning.AdjustField(weaponId, category, rawStageIndex, field, rawDelta)
-	if not stage then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-
-	logger:info("AdjustHitboxTiming accepted", {
-		player = player.Name,
-		weaponId = weaponId,
-		category = category,
-		stageIndex = rawStageIndex,
-		field = field,
-		delta = rawDelta,
-	})
-	return { Success = true, Stage = stage }
-end
-
-local function handleResetHitboxStage(
-	player: Player,
-	rawWeaponId: unknown,
-	rawCategory: unknown,
-	rawStageIndex: unknown
-): Types.DevMenuHitboxStageResult
-	logger:debug("ResetHitboxStage received", { player = player.Name, userId = player.UserId })
-
-	local allowed, reason = checkDevMenuPreconditions(player, "ResetHitboxStage")
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
-	if rawWeaponId ~= "Primary" and rawWeaponId ~= "Secondary" then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-	local category = resolveEnum(rawCategory, HITBOX_CATEGORIES)
-	if not category then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-	if typeof(rawStageIndex) ~= "number" then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-
-	local weaponId = rawWeaponId :: Types.WeaponId
-	local stage = HitboxTuning.ResetStage(weaponId, category, rawStageIndex)
-	if not stage then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-
-	logger:info(
-		"ResetHitboxStage accepted",
-		{ player = player.Name, weaponId = weaponId, category = category, stageIndex = rawStageIndex }
-	)
-	return { Success = true, Stage = stage }
-end
 
 local function handleListFlightTuning(player: Player): Types.DevMenuListFlightTuningResult
 	logger:debug("ListFlightTuning received", { player = player.Name, userId = player.UserId })
@@ -983,7 +1067,12 @@ local function handleAdjustFlightTuning(
 	if not field then
 		return { Success = false, Reason = "InvalidRequest" }
 	end
-	if typeof(rawDeltaFraction) ~= "number" then
+	-- rawDeltaFraction ~= rawDeltaFraction rejects NaN (the standard self-inequality test) -- without
+	-- it, NaN passes this typeof check, then FlightTuning.AdjustField's own math.clamp leaves a NaN
+	-- unchanged (NaN fails both the < and > comparisons a clamp is built from), permanently poisoning
+	-- the SHARED Constants.Flight[field] value every flying client reads by reference, not just this
+	-- admin's own session.
+	if typeof(rawDeltaFraction) ~= "number" or rawDeltaFraction ~= rawDeltaFraction then
 		return { Success = false, Reason = "InvalidRequest" }
 	end
 
@@ -1018,74 +1107,6 @@ local function handleResetFlightTuning(player: Player, rawField: unknown): Types
 
 	logger:info("ResetFlightTuning accepted", { player = player.Name, field = field })
 	return { Success = true, Field = updated }
-end
-
-local function handleListStandaloneAttacks(player: Player): Types.DevMenuListStandaloneAttacksResult
-	logger:debug("ListStandaloneAttacks received", { player = player.Name, userId = player.UserId })
-
-	local allowed, reason = checkDevMenuPreconditions(player, "ListStandaloneAttacks")
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
-
-	return { Success = true, Attacks = HitboxTuning.ListStandaloneAttacks() }
-end
-
-local function handleAdjustStandaloneField(
-	player: Player,
-	rawName: unknown,
-	rawField: unknown,
-	rawDelta: unknown
-): Types.DevMenuStandaloneAttackResult
-	logger:debug("AdjustStandaloneField received", { player = player.Name, userId = player.UserId })
-
-	local allowed, reason = checkDevMenuPreconditions(player, "AdjustStandaloneField")
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
-	local name = resolveEnum(rawName, STANDALONE_ATTACK_NAMES)
-	if not name then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-	local field = resolveEnum(rawField, HITBOX_STANDALONE_FIELDS)
-	if not field then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-	if typeof(rawDelta) ~= "number" then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-
-	local attack = HitboxTuning.AdjustStandaloneField(name, field, rawDelta)
-	if not attack then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-
-	logger:info(
-		"AdjustStandaloneField accepted",
-		{ player = player.Name, name = name, field = field, delta = rawDelta }
-	)
-	return { Success = true, Attack = attack }
-end
-
-local function handleResetStandaloneAttack(player: Player, rawName: unknown): Types.DevMenuStandaloneAttackResult
-	logger:debug("ResetStandaloneAttack received", { player = player.Name, userId = player.UserId })
-
-	local allowed, reason = checkDevMenuPreconditions(player, "ResetStandaloneAttack")
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
-	local name = resolveEnum(rawName, STANDALONE_ATTACK_NAMES)
-	if not name then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-
-	local attack = HitboxTuning.ResetStandaloneAttack(name)
-	if not attack then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-
-	logger:info("ResetStandaloneAttack accepted", { player = player.Name, name = name })
-	return { Success = true, Attack = attack }
 end
 
 -- Bug report triage ("Reports" tab, DevMenu/init.lua) -- both handlers gate here exactly like
@@ -1136,6 +1157,122 @@ local function handleUpdateBugReportStatus(
 	return { Success = true, Report = updated }
 end
 
+local function handleAddBugReportNote(
+	player: Player,
+	rawReportId: unknown,
+	rawText: unknown
+): Types.DevMenuBugReportMutationResult
+	logger:debug("AddBugReportNote received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "AddBugReportNote")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+	if typeof(rawReportId) ~= "string" then
+		return { Success = false, Reason = "InvalidRequest" }
+	end
+
+	local updated, failReason = BugReportSystem.AddNote(player, rawReportId, rawText)
+	if not updated then
+		return { Success = false, Reason = failReason or "NotFound" }
+	end
+
+	logger:info("AddBugReportNote accepted", { player = player.Name, id = rawReportId })
+	return { Success = true, Report = updated }
+end
+
+local function handleSetBugReportPriority(
+	player: Player,
+	rawReportId: unknown,
+	rawPriority: unknown
+): Types.DevMenuBugReportMutationResult
+	logger:debug("SetBugReportPriority received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "SetBugReportPriority")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+	if typeof(rawReportId) ~= "string" then
+		return { Success = false, Reason = "InvalidRequest" }
+	end
+	if not BugReportSystem.IsValidPriority(rawPriority) then
+		return { Success = false, Reason = "InvalidRequest" }
+	end
+
+	local updated, failReason = BugReportSystem.SetPriority(player, rawReportId, rawPriority :: Types.BugReportPriority)
+	if not updated then
+		return { Success = false, Reason = failReason or "NotFound" }
+	end
+
+	logger:info("SetBugReportPriority accepted", { player = player.Name, id = rawReportId, priority = rawPriority })
+	return { Success = true, Report = updated }
+end
+
+local function handleAssignBugReport(
+	player: Player,
+	rawReportId: unknown,
+	rawAssign: unknown
+): Types.DevMenuBugReportMutationResult
+	logger:debug("AssignBugReport received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "AssignBugReport")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+	if typeof(rawReportId) ~= "string" or typeof(rawAssign) ~= "boolean" then
+		return { Success = false, Reason = "InvalidRequest" }
+	end
+
+	local updated, failReason = BugReportSystem.AssignReport(player, rawReportId, rawAssign)
+	if not updated then
+		return { Success = false, Reason = failReason or "NotFound" }
+	end
+
+	logger:info("AssignBugReport accepted", { player = player.Name, id = rawReportId, assign = rawAssign })
+	return { Success = true, Report = updated }
+end
+
+-- Teleports the requesting admin straight to wherever a report's reporter currently is IN THIS
+-- SERVER -- deliberately does NOT reuse resolveActionTarget/TeleportToTarget's lock-on resolution
+-- (that resolves whoever the admin has locked onto in combat, unrelated to a specific report's
+-- reporter). Players:GetPlayerByUserId only ever returns a live Player on THIS server instance, so
+-- a reporter who submitted from a different server (or has since left) correctly falls through to
+-- "ReporterNotHere" rather than silently no-oping.
+local function handleJumpToReporter(player: Player, rawReportId: unknown): Types.DevMenuActionResult
+	logger:debug("JumpToReporter received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "JumpToReporter")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+	if typeof(rawReportId) ~= "string" then
+		return { Success = false, Reason = "InvalidRequest" }
+	end
+
+	local record, getFailReason = BugReportSystem.GetRecord(rawReportId)
+	if not record then
+		return { Success = false, Reason = getFailReason or "NotFound" }
+	end
+
+	local reporter = Players:GetPlayerByUserId(record.ReporterUserId)
+	if not reporter then
+		return { Success = false, Reason = "ReporterNotHere" }
+	end
+
+	local reporterRootPart, reporterRootPartFailureReason = getRootPart(reporter, "JumpToReporter")
+	if not reporterRootPart then
+		return { Success = false, Reason = reporterRootPartFailureReason }
+	end
+
+	local ok = AdminActionSystem.TeleportToPosition(player, reporterRootPart.Position)
+	if not ok then
+		return { Success = false, Reason = "NoCharacter" }
+	end
+
+	logger:info("JumpToReporter accepted", { player = player.Name, reporter = reporter.Name })
+	return { Success = true }
+end
+
 -- Shared pcall-wrap-and-log-error boilerplate for OnServerInvoke registration, unifying what all 15
 -- remotes below used to hand-duplicate in Init(). `name` feeds the error log message; the handler's
 -- own first parameter is always the requesting Player (every handler above takes one), reused here
@@ -1168,6 +1305,11 @@ function DevMenuSystem.Init(): ()
 	spawnBotRemote.OnServerInvoke = wrapHandler("SpawnTrainingBot", handleSpawnBot)
 	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SpawnTrainingBot })
 
+	local rollEmoteRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.RollEmote)
+	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.RollEmote })
+	rollEmoteRemote.OnServerInvoke = wrapHandler("RollEmote", handleRollEmote)
+	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.RollEmote })
+
 	local setHealthRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetTargetHealth)
 	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetTargetHealth })
 	setHealthRemote.OnServerInvoke = wrapHandler("SetTargetHealth", handleSetTargetHealth)
@@ -1188,21 +1330,6 @@ function DevMenuSystem.Init(): ()
 	setFlightCollideRemote.OnServerInvoke = wrapHandler("SetTargetFlightCollide", handleSetTargetFlightCollide)
 	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetTargetFlightCollide })
 
-	local listHitboxStagesRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ListHitboxStages)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ListHitboxStages })
-	listHitboxStagesRemote.OnServerInvoke = wrapHandler("ListHitboxStages", handleListHitboxStages)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ListHitboxStages })
-
-	local adjustHitboxTimingRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.AdjustHitboxTiming)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.AdjustHitboxTiming })
-	adjustHitboxTimingRemote.OnServerInvoke = wrapHandler("AdjustHitboxTiming", handleAdjustHitboxTiming)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.AdjustHitboxTiming })
-
-	local resetHitboxStageRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ResetHitboxStage)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ResetHitboxStage })
-	resetHitboxStageRemote.OnServerInvoke = wrapHandler("ResetHitboxStage", handleResetHitboxStage)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ResetHitboxStage })
-
 	local listFlightTuningRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ListFlightTuning)
 	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ListFlightTuning })
 	listFlightTuningRemote.OnServerInvoke = wrapHandler("ListFlightTuning", handleListFlightTuning)
@@ -1218,24 +1345,6 @@ function DevMenuSystem.Init(): ()
 	resetFlightTuningRemote.OnServerInvoke = wrapHandler("ResetFlightTuning", handleResetFlightTuning)
 	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ResetFlightTuning })
 
-	local listStandaloneAttacksRemote =
-		NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ListStandaloneAttacks)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ListStandaloneAttacks })
-	listStandaloneAttacksRemote.OnServerInvoke = wrapHandler("ListStandaloneAttacks", handleListStandaloneAttacks)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ListStandaloneAttacks })
-
-	local adjustStandaloneFieldRemote =
-		NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.AdjustStandaloneField)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.AdjustStandaloneField })
-	adjustStandaloneFieldRemote.OnServerInvoke = wrapHandler("AdjustStandaloneField", handleAdjustStandaloneField)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.AdjustStandaloneField })
-
-	local resetStandaloneAttackRemote =
-		NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ResetStandaloneAttack)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ResetStandaloneAttack })
-	resetStandaloneAttackRemote.OnServerInvoke = wrapHandler("ResetStandaloneAttack", handleResetStandaloneAttack)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ResetStandaloneAttack })
-
 	local listBugReportsRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ListBugReports)
 	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ListBugReports })
 	listBugReportsRemote.OnServerInvoke = wrapHandler("ListBugReports", handleListBugReports)
@@ -1246,6 +1355,27 @@ function DevMenuSystem.Init(): ()
 	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.UpdateBugReportStatus })
 	updateBugReportStatusRemote.OnServerInvoke = wrapHandler("UpdateBugReportStatus", handleUpdateBugReportStatus)
 	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.UpdateBugReportStatus })
+
+	local addBugReportNoteRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.AddBugReportNote)
+	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.AddBugReportNote })
+	addBugReportNoteRemote.OnServerInvoke = wrapHandler("AddBugReportNote", handleAddBugReportNote)
+	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.AddBugReportNote })
+
+	local setBugReportPriorityRemote =
+		NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetBugReportPriority)
+	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetBugReportPriority })
+	setBugReportPriorityRemote.OnServerInvoke = wrapHandler("SetBugReportPriority", handleSetBugReportPriority)
+	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetBugReportPriority })
+
+	local assignBugReportRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.AssignBugReport)
+	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.AssignBugReport })
+	assignBugReportRemote.OnServerInvoke = wrapHandler("AssignBugReport", handleAssignBugReport)
+	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.AssignBugReport })
+
+	local jumpToReporterRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.JumpToReporter)
+	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.JumpToReporter })
+	jumpToReporterRemote.OnServerInvoke = wrapHandler("JumpToReporter", handleJumpToReporter)
+	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.JumpToReporter })
 
 	local setFrozenRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetTargetFrozen)
 	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetTargetFrozen })
@@ -1295,6 +1425,12 @@ function DevMenuSystem.Init(): ()
 	shutdownServerRemote.OnServerInvoke = wrapHandler("ShutdownServer", handleShutdownServer)
 	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ShutdownServer })
 
+	local instantRestartServerRemote =
+		NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.InstantRestartServer)
+	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.InstantRestartServer })
+	instantRestartServerRemote.OnServerInvoke = wrapHandler("InstantRestartServer", handleInstantRestartServer)
+	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.InstantRestartServer })
+
 	-- RemoteEvent, not RemoteFunction -- broadcast to every client (Client/Announcement/
 	-- AnnouncementClient.lua, unconditional for every player, not just admins). Created here (not
 	-- inside broadcastAnnouncement) so it exists before any handler could possibly fire it.
@@ -1326,6 +1462,11 @@ function DevMenuSystem.Init(): ()
 	mutePlayerRemote.OnServerInvoke = wrapHandler("MutePlayer", handleMutePlayer)
 	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.MutePlayer })
 
+	local resetPlayerDataRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ResetTargetPlayerData)
+	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ResetTargetPlayerData })
+	resetPlayerDataRemote.OnServerInvoke = wrapHandler("ResetTargetPlayerData", handleResetTargetPlayerData)
+	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ResetTargetPlayerData })
+
 	local setSuspectedCheaterRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetSuspectedCheater)
 	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetSuspectedCheater })
 	setSuspectedCheaterRemote.OnServerInvoke = wrapHandler("SetSuspectedCheater", handleSetSuspectedCheater)
@@ -1335,6 +1476,22 @@ function DevMenuSystem.Init(): ()
 	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.GetSidebarStats })
 	getSidebarStatsRemote.OnServerInvoke = wrapHandler("GetSidebarStats", handleGetSidebarStats)
 	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.GetSidebarStats })
+
+	local getServerVersionInfoRemote =
+		NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.GetServerVersionInfo)
+	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.GetServerVersionInfo })
+	getServerVersionInfoRemote.OnServerInvoke = wrapHandler("GetServerVersionInfo", handleGetServerVersionInfo)
+	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.GetServerVersionInfo })
+
+	local getHitboxDebugRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.GetHitboxDebug)
+	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.GetHitboxDebug })
+	getHitboxDebugRemote.OnServerInvoke = wrapHandler("GetHitboxDebug", handleGetHitboxDebug)
+	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.GetHitboxDebug })
+
+	local setHitboxDebugRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetHitboxDebug)
+	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetHitboxDebug })
+	setHitboxDebugRemote.OnServerInvoke = wrapHandler("SetHitboxDebug", handleSetHitboxDebug)
+	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetHitboxDebug })
 
 	Players.PlayerRemoving:Connect(function(player: Player)
 		rateLimiter:Clear(player)

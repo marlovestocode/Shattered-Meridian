@@ -145,8 +145,12 @@ local ChangeNotifier = require(ReplicatedStorage.Shared.ChangeNotifier)
 local ConstantsValidation = require(ReplicatedStorage.Shared.ConstantsValidation)
 local CombatTypes = require(script.Parent.Parent.Combat.CombatTypes)
 local Movement = require(script.Parent.Parent.Combat.Movement)
+local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local AnimationTimeline = require(ReplicatedStorage.Shared.AnimationTimeline)
+local MoveRegistryManager = require(script.Parent.Parent.Combat.MoveRegistryManager)
 local HitResolution = require(script.Parent.Parent.Combat.HitResolution)
 local HitboxResolver = require(script.Parent.Parent.Combat.HitboxResolver)
+local ObjectStunResolver = require(script.Parent.Parent.Combat.ObjectStunResolver)
 local RagdollController = require(script.Parent.Parent.Combat.RagdollController)
 local BotAnimator = require(script.Parent.Parent.Combat.BotAnimator)
 local FeedbackPayload = require(script.Parent.Parent.Combat.FeedbackPayload)
@@ -154,6 +158,7 @@ local DummyCombat = require(script.Parent.Parent.Combat.DummyCombat)
 local BotCombat = require(script.Parent.Parent.Combat.BotCombat)
 local AirCombo = require(script.Parent.Parent.Combat.AirCombo)
 local GameplayEvents = require(script.Parent.Parent.Events.GameplayEvents)
+local AdminConfig = require(script.Parent.Parent.Config.AdminConfig)
 
 local RemoteNames = Constants.Combat.RemoteNames
 
@@ -244,10 +249,11 @@ local requestSprintStopRemote: RemoteEvent
 local requestLockOnRemote: RemoteEvent
 local requestSwapWeaponRemote: RemoteEvent
 local requestFeintRemote: RemoteEvent
-local requestAirTechRemote: RemoteEvent
+local requestFireHotbarMoveRemote: RemoteEvent
 local vitalsUpdatedRemote: RemoteEvent
 local inCombatChangedRemote: RemoteEvent
 local feedbackEventRemote: RemoteEvent
+local killFeedEventRemote: RemoteEvent
 local lockOnChangedRemote: RemoteEvent
 local attackStartedRemote: RemoteEvent
 local blockStartedRemote: RemoteEvent
@@ -359,6 +365,35 @@ local function sendFeedback(player: Player, payload: Types.CombatFeedbackPayload
 	logger:trace("Feedback sent", { player = player.Name, kind = payload.Kind })
 end
 
+-- A distinct "GroundSlam" feedback event, sent to both parties right when a Downslam-variant
+-- knockback's own physics actually lands the target -- NOT a second "Hit" for the same swing, which
+-- would re-trigger the once-per-swing Hit reaction machinery (damage number, hit-flash, hit-stop,
+-- PredictionMirror) a second time on the client. The one thing it exists to carry is what the landed
+-- swing's OWN "Hit"/"Blocked" event (already sent earlier, before the knockback physics even ran)
+-- structurally cannot: whether the ground contact was immediate (RagdollController.SlamToGround's own
+-- return -- see Types.CombatFeedbackPayload.ImmediateGroundImpact's header) so Client/FX/
+-- SlamImpactVFX.BeginWatch knows whether to expect an observable fall or an already-resolved one.
+-- Shared by every Downslam-variant origin: the M1 finisher's own Downslam, the standalone AirSlam
+-- attack (both via resolveHitAgainstTarget's own finisher-knockback block below), and the air-combo's
+-- own MaxHits slam finisher (via the AirComboTarget.onGroundSlam hook).
+local function sendGroundSlamFeedback(attackerPlayer: Player, targetPlayer: Player, immediateGroundImpact: boolean): ()
+	local payload = FeedbackPayload.Build(
+		"GroundSlam",
+		attackerPlayer,
+		targetPlayer,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		"Downslam",
+		immediateGroundImpact
+	)
+	sendFeedback(attackerPlayer, payload)
+	sendFeedback(targetPlayer, payload)
+end
+
 -- FeedbackPayload.Build (Server/Combat/FeedbackPayload.lua) replaces this file's own former private
 -- buildFeedbackPayload -- promoted to a shared Combat/ sibling once DummyCombat.lua/BotCombat.lua
 -- needed the exact same struct-literal builder for their own resolveHit*/trigger*PostureBreak
@@ -370,12 +405,22 @@ end
 
 -- Fired only after handleAttackRequest has fully accepted a throw (validated, cooldown/attackEndsAt
 -- committed) -- see Types.AttackStartedPayload's header for why this exists and what it isn't for.
+-- animationId/animationTrackName are additive, both nil for every weapon-stage/standalone-attack call
+-- site below -- set only by the Object Stun follow-up throw (scheduleObjectStunFollowUp), whose own
+-- single AnimationId field has no multi-clip timeline counterpart. customMoveAnimations is likewise
+-- additive and nil everywhere except ThrowCustomMove, which is the one caller with a real
+-- AnimationTimeline.Clip list to send -- see Types.AttackStartedPayload.Animations' own header for
+-- why non-nil (not "did AnimationId happen to be set") is what tells CombatClient this throw is a
+-- CustomMove at all.
 local function sendAttackStarted(
 	player: Player,
 	definition: Types.HitboxAttackDefinition,
 	isHeavy: boolean,
 	weaponId: Types.WeaponId,
-	finisherVariant: Types.FinisherVariant?
+	finisherVariant: Types.FinisherVariant?,
+	animationId: string?,
+	animationTrackName: string?,
+	customMoveAnimations: { AnimationTimeline.Clip }?
 ): ()
 	local payload: Types.AttackStartedPayload = {
 		IsHeavy = isHeavy,
@@ -386,6 +431,9 @@ local function sendAttackStarted(
 		CooldownSeconds = definition.Cooldown,
 		WeaponId = weaponId,
 		FinisherVariant = finisherVariant,
+		AnimationId = animationId,
+		AnimationTrackName = animationTrackName,
+		Animations = customMoveAnimations,
 	}
 	attackStartedRemote:FireClient(player, payload)
 end
@@ -401,15 +449,55 @@ local function sendBlockStarted(player: Player, parryWindowOpened: boolean): ()
 	blockStartedRemote:FireClient(player, payload)
 end
 
--- BROADCAST (to every client, not just the blocker) that `character`'s parry window just opened, so
--- each client can show the parry-window tell (a bright highlight) on that combatant -- the "obvious,
--- synced-for-all" tell. Works for a player OR a bot (both are replicated Workspace Models); the
--- highlight is client-adorned so it doesn't depend on the actor's own Animator weight winning on
--- remote viewers the way the block STANCE animation does. Not consumed for any gameplay decision --
--- a purely presentational broadcast, same "presentation, not outcome" contract as the FX layer.
-local function broadcastParryWindowOpened(character: Model): ()
-	parryWindowOpenedRemote:FireAllClients(character)
-	logger:trace("Parry window broadcast", { character = character.Name })
+-- Shared relevance-filtered fan-out: calls `fireToPlayer(player)` for every currently-connected
+-- player whose character's HumanoidRootPart is within `radius` studs of `originPosition` -- the
+-- caller supplies the actual RemoteEvent:FireClient(...) call, since payload shape differs per
+-- broadcast. Iterates Players:GetPlayers() rather than combatStates deliberately: a spectator or a
+-- third party closing in on a fight, with no CombatState of their own, should still see a nearby
+-- tell -- see Constants.Combat.ParryTellBroadcastRadius's own header for why that's a render-
+-- distance question, not a combat-relevance one. Replaces what used to be an unfiltered
+-- FireAllClients on every parry-window open (docs/architecture/2026-07-audit.md Tier 2.1,
+-- 2026-08-audit.md §4.1) -- the only O(players^2) broadcast shape in the combat system, costing
+-- every connected client ~25 inbound calls/sec at 30 players duelling against a 4/sec budget.
+local function broadcastToNearbyPlayers(originPosition: Vector3, radius: number, fireToPlayer: (Player) -> ()): ()
+	for _, player in ipairs(Players:GetPlayers()) do
+		local character = player.Character
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		if rootPart and rootPart:IsA("BasePart") and (rootPart.Position - originPosition).Magnitude <= radius then
+			fireToPlayer(player)
+		end
+	end
+end
+
+-- BROADCAST (to every NEARBY client, not just the blocker -- see broadcastToNearbyPlayers above) that
+-- `character`'s parry window just opened, so each client can show the parry-window tell (a bright
+-- highlight) on that combatant -- the "obvious, synced-for-all" tell. Works for a player OR a bot
+-- (both are replicated Workspace Models); the highlight is client-adorned so it doesn't depend on the
+-- actor's own Animator weight winning on remote viewers the way the block STANCE animation does. Not
+-- consumed for any gameplay decision -- a purely presentational broadcast, same "presentation, not
+-- outcome" contract as the FX layer.
+--
+-- `durationSeconds` is the REAL mechanical window this press armed (state.Vitals.parryWindowExpiry -
+-- now at the moment it was set), not the flat Constants.Combat.ParryWindowSeconds -- a laggy player's
+-- own press extends their real window by their ping (see handleBlockStart's ping-compensation
+-- comment), and that extension is a fact about WHEN the window actually closes, not just about the
+-- presser's own client. Every viewer's highlight -- including the presser's, spectators', and the
+-- attacker's -- needs to hold for exactly this long, or the tell expires while the mechanic is still
+-- live (a hit that still parries even though the target no longer reads as parry-armed). Callers
+-- without a real ping figure (bots) just pass the flat constant.
+local function broadcastParryWindowOpened(character: Model, durationSeconds: number): ()
+	local sourceRootPart = character:FindFirstChild("HumanoidRootPart")
+	if sourceRootPart and sourceRootPart:IsA("BasePart") then
+		broadcastToNearbyPlayers(sourceRootPart.Position, Constants.Combat.ParryTellBroadcastRadius, function(player)
+			parryWindowOpenedRemote:FireClient(player, character, durationSeconds)
+		end)
+	else
+		-- No rootPart to filter by -- shouldn't happen in practice (nothing can open a parry window
+		-- before it has a bound HumanoidRootPart), but fail OPEN (fire to everyone) rather than
+		-- silently dropping a real tell if it ever does.
+		parryWindowOpenedRemote:FireAllClients(character, durationSeconds)
+	end
+	logger:trace("Parry window broadcast", { character = character.Name, durationSeconds = durationSeconds })
 end
 
 -- Fired only after a Dash has been fully accepted (validated, cooldown/commitment committed). The
@@ -467,17 +555,19 @@ end
 -- Re-derives whether this player's own rootPart CFrame is currently being driven authoritatively by
 -- the server (not by their own client) every tick and hands it to rootControlLockedNotifier, which
 -- writes the "RootControlLocked" Humanoid Attribute (wired in Init()) only on a transition. True
--- while a finisher/DashPunch ragdoll is tumbling this player's own body (Vitals.ragdollExpiry), or
+-- while a finisher ragdoll is tumbling this player's own body (Vitals.ragdollExpiry), or
 -- RagdollController.HoldAloft has a rigid AlignOrientation/AlignPosition pin on them as the air-combo
--- attacker (AirCombo.airComboChaseExpiry) -- the exact same two conditions Movement.
--- ComputeDesiredWalkSpeed already treats as "don't let this player's own local input compete with
--- the server," just surfaced to the client's presentation layer too instead of only silencing
--- WalkSpeed.
+-- attacker (AirCombo.airComboChaseExpiry) or as a live-held DashPunch VICTIM (AirCombo.
+-- airComboHeldExpiry) -- the exact same conditions Movement.ComputeDesiredWalkSpeed already treats
+-- as "don't let this player's own local input compete with the server," just surfaced to the
+-- client's presentation layer too instead of only silencing WalkSpeed.
 local function syncRootControlLocked(player: Player, state: CombatState, now: number): ()
 	if not state.humanoid then
 		return
 	end
-	local locked = now < state.Vitals.ragdollExpiry or now < state.AirCombo.airComboChaseExpiry
+	local locked = now < state.Vitals.ragdollExpiry
+		or now < state.AirCombo.airComboChaseExpiry
+		or now < state.AirCombo.airComboHeldExpiry
 	rootControlLockedNotifier:Update(player, locked)
 end
 
@@ -593,13 +683,17 @@ end
 -- Dummies (small, dev-only, MaxActive-capped) and the attacker's own bot(s) (O(1) via
 -- botsByOwner) are cheap enough to keep scanning directly; neither was ever the scalability
 -- concern this addresses.
-local function getSwingCandidates(attackerState: CombatState): { Model }
-	local attackerRoot = attackerState.rootPart
+-- Shared by getSwingCandidates (origin = the attacker's own root position) and
+-- getProjectileCandidates (origin = a fired projectile's own current position, re-queried fresh
+-- every sample as HitboxResolver.Update advances it) -- see getProjectileCandidates' own header
+-- for why a projectile can't reuse the attacker-centered origin a swing uses. The locked-on target
+-- is still fetched directly by key rather than through the radius query, so it's never
+-- distance-filtered from either caller.
+local function gatherCandidatesNear(attackerState: CombatState, origin: Vector3): { Model }
 	local attackerCharacter = attackerState.character
-	if not attackerRoot or not attackerCharacter then
+	if not attackerCharacter then
 		return {}
 	end
-	local origin = attackerRoot.Position
 
 	local lockedModel: Model? = nil
 	local others: { { Model: Model, Distance: number } } = {}
@@ -621,8 +715,24 @@ local function getSwingCandidates(attackerState: CombatState): { Model }
 	overlapParams.FilterType = Enum.RaycastFilterType.Exclude
 	overlapParams.FilterDescendantsInstances = { attackerCharacter }
 
+	-- No MaxParts on this query (unlike HitboxResolver's own box query, which sets one) -- it's an
+	-- Exclude filter, so returning EVERY part in a MaxCandidateRadius-stud sphere (map geometry,
+	-- props, debris, every limb/accessory of every nearby character) rather than just combatants is
+	-- the July/August performance audits' still-open finding (docs/architecture/2026-07-audit.md
+	-- §2.3). Cost here is entirely a function of local map decoration, not something a bare-baseplate
+	-- Studio session will ever surface -- MicroProfiler markers + this trace exist so a real S2 scenario
+	-- (decorated map vs. bare baseplate, per that audit's own §7 instrumentation plan) can be measured
+	-- before deciding whether the fix (a collision-group-filtered Include query, see that finding's own
+	-- recommendation) is actually worth building. Deliberately NOT changing the query shape in this
+	-- pass -- see this repo's 2026-08 performance-audit follow-up plan.
+	debug.profilebegin("CombatSystem.gatherCandidatesNear.RadiusQuery")
 	local nearbyParts =
 		Workspace:GetPartBoundsInRadius(origin, Constants.Combat.Hitboxes.MaxCandidateRadius, overlapParams)
+	debug.profileend()
+	logger:trace("gatherCandidatesNear radius query", {
+		radiusQueryParts = #nearbyParts,
+		radius = Constants.Combat.Hitboxes.MaxCandidateRadius,
+	})
 
 	-- Every character has exactly one part named "HumanoidRootPart" -- filtering to just that name
 	-- (rather than considering every limb/accessory part the radius query returns) means each
@@ -683,6 +793,25 @@ local function getSwingCandidates(attackerState: CombatState): { Model }
 	return ordered
 end
 
+local function getSwingCandidates(attackerState: CombatState): { Model }
+	local attackerRoot = attackerState.rootPart
+	if not attackerRoot then
+		return {}
+	end
+	return gatherCandidatesNear(attackerState, attackerRoot.Position)
+end
+
+-- Same candidate-gathering logic as getSwingCandidates, but centered on the PROJECTILE's own
+-- current position instead of the attacker's root -- a fired projectile (CombatSystem.
+-- ThrowCustomMove's projectile branch) detaches from the attacker entirely and can travel well
+-- beyond Constants.Combat.Hitboxes.MaxCandidateRadius of them, so centering on the attacker would
+-- silently stop finding candidates the moment it flew far enough away. Passed into
+-- HitboxResolver.StartProjectile as ProjectileConfig.GetCandidates, which calls this with the
+-- projectile's own live position every sample.
+local function getProjectileCandidates(attackerState: CombatState, currentPosition: Vector3): { Model }
+	return gatherCandidatesNear(attackerState, currentPosition)
+end
+
 -- Selects which combo-stage definition a throw uses, wrapping comboIndex over however many stages
 -- are authored for this category under the equipped weapon's own Constants.Combat.Weapons[
 -- weaponId].Stages -- adding a stage there is a data-only change, this never needs to change.
@@ -728,13 +857,16 @@ local function resetHeavyComboIfLapsed(state: { comboIndex: number, comboExpiry:
 	end
 end
 
--- Combo-lapse-reset for the landing-based Basic (M1) combo -- CombatState-only, unlike
--- resetHeavyComboIfLapsed above (BotState has no basicComboLanded field: bots never throw the M1
--- finisher, see BotState's own comment). Always zeroes basicComboExpiry too, matching onHeartbeat's
--- proactive reset -- harmless from handleAttackRequest's own lapse check, which always reassigns
--- basicComboExpiry immediately afterward regardless of this helper's outcome.
+-- Combo-lapse-reset for the Basic (M1) combo -- CombatState-only, unlike resetHeavyComboIfLapsed
+-- above (BotState has no basicComboLanded field: bots never throw the M1 finisher, see BotState's
+-- own comment). Resets basicSwingIndex alongside basicComboLanded/basicComboExpiry -- a long enough
+-- pause restarts the visible stage cycle at stage 1 too, not just the Finisher gate, the same
+-- "lapsing means a fresh string" contract for both counters. Always zeroes basicComboExpiry too,
+-- matching onHeartbeat's proactive reset -- harmless from handleAttackRequest's own lapse check,
+-- which always reassigns basicComboExpiry immediately afterward regardless of this helper's outcome.
 local function resetBasicComboIfLapsed(state: CombatState, now: number): ()
 	if now > state.basicComboExpiry then
+		state.basicSwingIndex = 0
 		state.basicComboLanded = 0
 		state.basicComboExpiry = 0
 	end
@@ -773,28 +905,8 @@ local function triggerPostureBreak(targetPlayer: Player, targetState: CombatStat
 	end
 end
 
--- AirCombo.EndSuspendedExchange (Server/Combat/AirCombo.lua) replaces this file's own former
--- private endSuspendedAirComboExchange -- see that module's header. Called from confirmDeath below,
--- resolveHitAgainstTarget, onHeartbeat, onBotSwingHitCandidate, and clearSuspendedReferencesTo just
--- below (all still here -- none of them are air-combo-specific enough to move, they're real-player
--- lifecycle/hit-resolution call SITES that merely trigger it).
-
--- Reverse-scan cleanup for the OTHER direction: if the ATTACKER half of a suspended exchange dies or
--- leaves, the still-suspended VICTIM has no attacker left to resolve against and must be dropped too
--- -- same "never leave a player permanently pinned because the other half of an interaction vanished"
--- reasoning clearLockOnReferencesTo already applies to lock-on. Stays here (not AirCombo.lua) since it
--- needs direct iteration over the complete combatStates dict -- see AirCombo.lua's own "Does not own"
--- header section.
-local function clearSuspendedReferencesTo(goneAttackerPlayer: Player): ()
-	for victimPlayer, victimState in pairs(combatStates) do
-		if victimState.AirCombo.airComboSuspendedWithAttacker == goneAttackerPlayer then
-			AirCombo.EndSuspendedExchange(victimPlayer, victimState, nil, nil)
-		end
-	end
-end
-
 -- Drops a departing player from every OTHER player's recentOpponents map -- the same reverse-scan
--- shape as clearLockOnReferencesTo/clearSuspendedReferencesTo above, and the one that was missing.
+-- shape as clearLockOnReferencesTo above, and the one that was missing.
 --
 -- Functionally the stale entries were harmless (refreshInCombatFromProximity looks the opponent up in
 -- combatStates, finds nil, and continues), but they are real retention: a recentOpponents key is a
@@ -808,6 +920,16 @@ local function clearRecentOpponentReferencesTo(gonePlayer: Player): ()
 	end
 end
 
+-- Forward declaration. confirmDeath below needs to release a live-held air-combo victim when the
+-- DYING player was themselves the ATTACKER of the sequence -- the same cleanup onPlayerRemoving's
+-- disconnect path already applies (releaseAirComboVictimOf, defined further down near that call
+-- site since it depends on AirCombo.ReleaseSequence and the combatStates lookup established by
+-- then). Without this, a victim being juggled by an attacker who dies mid-sequence (killed by a
+-- third party, an environmental hazard, etc. -- anything that isn't the attacker disconnecting)
+-- stays physically pinned by RagdollController.HoldAloft's own independent timer until it lapses on
+-- its own, unable to do anything but wait out a fight that's already over.
+local releaseAirComboVictimOf: (Player, CombatState, number) -> ()
+
 local function confirmDeath(player: Player, state: CombatState): ()
 	if state.deathConfirmed then
 		return
@@ -819,19 +941,63 @@ local function confirmDeath(player: Player, state: CombatState): ()
 	state.Movement.dashWindowExpiry = 0
 	state.Movement.slideWindowExpiry = 0
 	state.Vitals.ragdollExpiry = 0
+	state.basicSwingIndex = 0
 	state.basicComboLanded = 0
 	state.basicComboExpiry = 0
+	-- onHeartbeat's WalkSpeed resolver (Movement.ComputeDesiredWalkSpeed) only runs for
+	-- `state.alive` players (`if not state.alive then continue end`) -- once `state.alive` above
+	-- flips false, nothing ever touches WalkSpeed/JumpPower for this life again, so whatever they
+	-- were AT THE INSTANT OF DEATH (base speed, mid-sprint, mid-dash-burst, ...) is what a dead
+	-- Humanoid was left with indefinitely. A plain (non-finisher) kill never ragdolls at all
+	-- (RagdollController only triggers off finisher physics), so most deaths left a fully-rigged,
+	-- fully-controllable corpse the player could keep walking/jumping around. Zeroing WalkSpeed alone
+	-- isn't enough either: the stock "Animate" LocalScript Roblox inserts into every character
+	-- (StarterCharacterScripts/Health.server.lua's own header explains why "Animate" is deliberately
+	-- left unmanaged) drives its walk/run loop off Humanoid STATE changes, not off WalkSpeed's value
+	-- -- a Humanoid whose state machine is still live keeps replaying whatever locomotion animation
+	-- was last active. PlatformStand = true is the one thing that actually suspends that state
+	-- machine (the exact mechanism RagdollController.enterRagdoll already uses for a finisher
+	-- ragdoll -- see that module's header), so this is set unconditionally here too, not only on a
+	-- finisher kill. Idempotent against an already-ragdolled body: enterRagdoll already set these
+	-- same properties, so a finisher kill just gets them re-asserted, never fought. Every one of
+	-- these resets once, here -- not through the heartbeat resolver, which this state deliberately no
+	-- longer reaches -- and onCharacterAdded (createFreshState) sets fresh values on respawn's
+	-- brand-new Humanoid, so there is nothing to restore later.
+	local humanoid = state.humanoid
+	if humanoid then
+		humanoid.WalkSpeed = 0
+		humanoid.JumpPower = 0
+		humanoid.JumpHeight = 0
+		humanoid.PlatformStand = true
+		humanoid.AutoRotate = false
+		-- pcall-guarded, matching every other ChangeState call in RagdollController.lua -- a
+		-- character can despawn/have its Humanoid destroyed in the same instant it dies, and a
+		-- failed ChangeState must never throw out of death confirmation.
+		pcall(function()
+			humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+		end)
+	end
 	-- Deliberately does NOT RagdollController.Recover here: a body killed mid-ragdoll should stay
 	-- limp for Roblox's own death handling rather than snap upright. The active ragdoll is cleared in
 	-- onCharacterRemoving (before the corpse is replaced) or by RagdollController.Update's timer.
-	-- A SUSPENDED death is different -- that body was never limp-ragdolled (it's rigid-held, see
-	-- AirCombo.HandleAirTechRequest), so dying mid-suspension should drop it normally rather than
-	-- leave a corpse floating in an AlignPosition forever.
-	if state.AirCombo.airComboSuspendedUntil ~= 0 then
-		local suspendedWithPlayer = state.AirCombo.airComboSuspendedWithAttacker
-		local suspendedWithState = if suspendedWithPlayer then combatStates[suspendedWithPlayer] else nil
-		AirCombo.EndSuspendedExchange(player, state, suspendedWithPlayer, suspendedWithState)
+	-- A player killed while HELD as someone else's DashPunch target is different -- that body was
+	-- never limp-ragdolled at all (AirCombo.Apply's live-body hold, see AirComboState.
+	-- airComboHeldExpiry's own header), so it never registered in RagdollController's own ragdoll
+	-- table for RagdollController.Update's timer to eventually recover -- without this, the corpse
+	-- hangs frozen in the AlignPosition hold until the hold's own short AirborneSeconds timer lapses.
+	if state.AirCombo.airComboHeldExpiry ~= 0 and state.rootPart then
+		RagdollController.ClearHold(state.rootPart, player)
+		state.AirCombo.airComboHeldExpiry = 0
 	end
+
+	-- The reverse direction, symmetric with the victim-side cleanup above: if the dying player was
+	-- themselves the ATTACKER of a live air-combo sequence, the victim they were juggling is still
+	-- physically held by RagdollController.HoldAloft's own independent timer, which knows nothing
+	-- about this death -- release them immediately instead of leaving them stranded until that
+	-- hold's own timer eventually expires. onPlayerRemoving's disconnect path already covers this
+	-- for a departing attacker; this covers the same relationship for one who dies while still
+	-- connected. A no-op (AirCombo.ReleaseSequence's own guard) if this player had no live sequence.
+	releaseAirComboVictimOf(player, state, os.clock())
 
 	local killerUserId = state.pendingKillerUserId
 	state.pendingKillerUserId = nil
@@ -847,7 +1013,6 @@ local function confirmDeath(player: Player, state: CombatState): ()
 	})
 
 	clearLockOnReferencesTo(player)
-	clearSuspendedReferencesTo(player)
 
 	local payload = FeedbackPayload.Build("Death", killerPlayer, player, nil, nil, nil)
 	sendFeedback(player, payload)
@@ -908,18 +1073,8 @@ local function resolveHitAgainstTarget(
 	HitResolution.StampRecentOpponent(attackerState, targetPlayer, now)
 	HitResolution.StampRecentOpponent(targetState, attackerPlayer, now)
 
-	-- A real hit resolving against the target ends any suspended air-tech exchange they're currently
-	-- in, regardless of outcome (hit/blocked/parried) and regardless of whether THIS attacker is who
-	-- they were suspended with -- see AirComboState.airComboSuspendedUntil's own header. An outside
-	-- event deciding the encounter is exactly one of the ways that state is meant to resolve.
-	if targetState.AirCombo.airComboSuspendedUntil ~= 0 then
-		local suspendedWithPlayer = targetState.AirCombo.airComboSuspendedWithAttacker
-		local suspendedWithState = if suspendedWithPlayer then combatStates[suspendedWithPlayer] else nil
-		AirCombo.EndSuspendedExchange(targetPlayer, targetState, suspendedWithPlayer, suspendedWithState)
-	end
-
 	local wasPostureBroken = now < targetState.Vitals.postureBrokenExpiry
-	local defenseKind = HitResolution.ClassifyDefense(
+	local defenseKind: HitResolution.DefenseKind = HitResolution.ClassifyDefense(
 		now,
 		targetState.Vitals.postureBrokenExpiry,
 		targetState.Vitals.parryWindowExpiry,
@@ -940,7 +1095,28 @@ local function resolveHitAgainstTarget(
 		HitResolution.ApplyParryPunish(attackerState.Vitals, now)
 		sendVitals(attackerPlayer, attackerState)
 
-		local payload = FeedbackPayload.Build("Parried", attackerPlayer, targetPlayer, nil, nil, isHeavy)
+		-- Priority switch (AirCombo.SwitchPriority, Server/Combat/AirCombo.lua): a continuation-hit
+		-- Parry against an already-airborne, already-tracked air-combo target flips who's attacking
+		-- instead of just letting the sequence lapse passively. Deliberately excludes the OPENING
+		-- DashPunch -- attackerState.AirCombo.airComboTarget isn't set to targetPlayer until AFTER a
+		-- DashPunch already lands, so a parry on the punch itself can never satisfy this gate; that
+		-- stays a plain punish with no launch, per the confirmed scope for this redesign.
+		local isTrackedContinuation = not isHeavy
+			and not finisherVariant
+			and attackerState.AirCombo.airComboTarget == targetPlayer
+			and now <= attackerState.AirCombo.airComboExpiry
+
+		local payload = FeedbackPayload.Build(
+			"Parried",
+			attackerPlayer,
+			targetPlayer,
+			nil,
+			nil,
+			isHeavy,
+			nil,
+			nil,
+			isTrackedContinuation
+		)
 		sendFeedback(attackerPlayer, payload)
 		sendFeedback(targetPlayer, payload)
 
@@ -956,6 +1132,34 @@ local function resolveHitAgainstTarget(
 			local disarmPayload = FeedbackPayload.Build("Disarmed", attackerPlayer, targetPlayer, nil, nil, isHeavy)
 			sendFeedback(attackerPlayer, disarmPayload)
 			sendFeedback(targetPlayer, disarmPayload)
+		end
+
+		if isTrackedContinuation then
+			local oldAttackerCharacter = attackerState.character
+			local oldAttackerRoot = attackerState.rootPart
+			if oldAttackerCharacter and oldAttackerRoot and attackerState.humanoid then
+				-- Third-party guard: targetState (the parrier, about to become the new attacker) might
+				-- already be mid-chase as the ATTACKER of some OTHER, fully unrelated sequence --
+				-- Constants.Combat.AirCombo.airComboChaseExpiry doesn't gate ACTION_GATES.HeldAloft, so
+				-- a player mid-chase-as-attacker is still hittable/parryable by someone else (see that
+				-- field's own header). Force-end it first (AirCombo.ReleaseSequence -- the same
+				-- cleanup releaseAirComboVictimOf below performs for a disconnecting attacker) or
+				-- overwriting targetState.AirCombo inside SwitchPriority would strand that OTHER
+				-- victim mid-air with no attacker left to track them. Resolved here rather than inside
+				-- SwitchPriority itself -- only this System can resolve a stale third party's own
+				-- CombatState by Player; see ReleaseSequence's own header for the full reasoning.
+				if
+					targetState.AirCombo.airComboTarget ~= nil
+					and targetState.AirCombo.airComboTarget ~= attackerPlayer
+					and now <= targetState.AirCombo.airComboExpiry
+				then
+					local staleThirdParty = targetState.AirCombo.airComboTarget
+					local staleThirdPartyState = if staleThirdParty then combatStates[staleThirdParty] else nil
+					AirCombo.ReleaseSequence(targetPlayer, targetState, staleThirdPartyState, now)
+				end
+
+				AirCombo.SwitchPriority(targetPlayer, targetState, attackerPlayer, attackerState, now)
+			end
 		end
 
 		return false
@@ -996,6 +1200,15 @@ local function resolveHitAgainstTarget(
 		-- longer lockout (parry stun, posture break) already in effect.
 		targetState.Vitals.stunExpiry = math.max(targetState.Vitals.stunExpiry, now + Constants.Combat.HitStunDuration)
 		targetState.Vitals.hitSlowExpiry = now + Constants.Combat.HitSlowDuration
+		-- Force-end any live dash/slide window BEFORE resolving the same-frame speed write below --
+		-- ComputeDesiredWalkSpeed's priority order still ranks an active dash/slide above hit-slow, so
+		-- without this a target hit mid-burst would keep the stale boosted speed for this write. This
+		-- previously worked only because onHeartbeat's own per-player scan (which DOES call
+		-- EndMovementBursts) always revisits every player, including this one, later the same tick --
+		-- an implicit ordering dependency across two files, not a guarantee this call site enforced
+		-- itself. See docs/architecture/2026-08-audit.md section 3.6.3 / Movement.EndMovementBursts's
+		-- own header for the D3 fix this closes the last gap in.
+		Movement.EndMovementBursts(targetState, now)
 		-- Same-frame slow, but through the unified resolver rather than a raw
 		-- BaseWalkSpeed*multiplier write: the resolver honors the BonusWalkSpeed attribute and any
 		-- higher-priority speed claim (air-combo chase, dash) that a direct write would
@@ -1013,6 +1226,14 @@ local function resolveHitAgainstTarget(
 	sendVitals(targetPlayer, targetState)
 
 	local kind: Types.CombatFeedbackKind = if defenseKind == "Block" then "Blocked" else "Hit"
+	-- Echoed only once this hit is known to actually launch below (not blocked, and the target's
+	-- post-damage Health is already > 0 above -- ApplyFinisherPhysics's own "Health <= 0" guard is the
+	-- authority this mirrors) -- see Types.CombatFeedbackPayload.FinisherVariant's own header.
+	local resolvedFinisherVariant: Types.FinisherVariant? = if finisherVariant
+			and defenseKind ~= "Block"
+			and targetHumanoid.Health > 0
+		then finisherVariant
+		else nil
 	local payload = FeedbackPayload.Build(
 		kind,
 		attackerPlayer,
@@ -1021,7 +1242,9 @@ local function resolveHitAgainstTarget(
 		finalPosture,
 		isHeavy,
 		nil,
-		definition.DebugName
+		definition.DebugName,
+		nil,
+		resolvedFinisherVariant
 	)
 	sendFeedback(attackerPlayer, payload)
 	sendFeedback(targetPlayer, payload)
@@ -1039,7 +1262,7 @@ local function resolveHitAgainstTarget(
 		local targetCharacter = targetState.character
 		local targetRootPart = targetState.rootPart
 		if targetCharacter and targetRootPart then
-			local ragdollSeconds = HitResolution.ApplyFinisherPhysics(
+			local ragdollSeconds, immediateGroundImpact = HitResolution.ApplyFinisherPhysics(
 				targetCharacter,
 				targetHumanoid,
 				targetRootPart,
@@ -1051,6 +1274,12 @@ local function resolveHitAgainstTarget(
 				targetState.Vitals.ragdollExpiry = math.max(targetState.Vitals.ragdollExpiry, now + ragdollSeconds)
 				-- A launched target can't keep holding guard while airborne and limp.
 				targetState.blocking = false
+				-- See sendGroundSlamFeedback's own header -- covers the M1 finisher's own Downslam and
+				-- the standalone AirSlam attack (both reach here with finisherVariant == "Downslam");
+				-- Uppercut has no ground-impact VFX concept at all.
+				if finisherVariant == "Downslam" then
+					sendGroundSlamFeedback(attackerPlayer, targetPlayer, immediateGroundImpact)
+				end
 			elseif finisherVariant == "Normal" then
 				targetState.Vitals.stunExpiry =
 					math.max(targetState.Vitals.stunExpiry, now + Constants.Combat.Finisher.Normal.ExtraStunSeconds)
@@ -1064,11 +1293,15 @@ local function resolveHitAgainstTarget(
 	-- one on a clean connect -- the plain front-dash's own DashHit attack (handleDashRequest's
 	-- other, non-double-tap front-dash attack) is a DIFFERENT debug name and never matches the
 	-- "DashPunch" check inside applyAirCombo, so it can never start or continue a sequence -- see
-	-- that function's own header for the full DashPunch-only launch condition.
+	-- that function's own header for the full DashPunch-or-StartsAirCombo launch condition. A custom
+	-- Move Creation System move with Knockback.StartsAirCombo set launches exactly the same way --
+	-- startsAirCombo below is nil/false for every non-custom definition (DashPunch's own Knockback
+	-- is always nil, per DefaultMoveRegistry.lua's own header), so this is purely additive.
 	if not isHeavy and not finisherVariant and defenseKind ~= "Block" then
 		local targetCharacter = targetState.character
 		local targetRootPart = targetState.rootPart
 		if targetCharacter and targetRootPart then
+			local startsAirCombo = definition.Knockback ~= nil and definition.Knockback.StartsAirCombo == true
 			-- Player-target adapter for the unified applyAirCombo -- see AirComboTarget's own header
 			-- for what each closure hides. godmode/kill-attribution/vitals all fold into applyDamage
 			-- here since only a real player target has any of those concepts.
@@ -1080,6 +1313,13 @@ local function resolveHitAgainstTarget(
 				clearBlocking = function()
 					targetState.blocking = false
 				end,
+				-- Live-body hold (DashPunch-start/continuation) -- keeps this player Block/Parry-capable
+				-- for the whole juggle. See AirComboState.airComboHeldExpiry's own header.
+				setHeldExpiry = function(expiry: number)
+					targetState.AirCombo.airComboHeldExpiry = math.max(targetState.AirCombo.airComboHeldExpiry, expiry)
+				end,
+				-- A GENUINE incapacitating ragdoll -- only reached by AirCombo.Apply's MaxHits slam
+				-- finisher for a real player target (the sequence-ending knockdown, not the live hold).
 				setRagdollExpiry = function(expiry: number)
 					targetState.Vitals.ragdollExpiry = math.max(targetState.Vitals.ragdollExpiry, expiry)
 				end,
@@ -1092,9 +1332,6 @@ local function resolveHitAgainstTarget(
 				clearAirComboTarget = function()
 					attackerState.AirCombo.airComboTarget = nil
 				end,
-				openAirTechWindow = function()
-					targetState.AirCombo.airTechWindowExpiry = now + Constants.Combat.AirCombo.TechWindowSeconds
-				end,
 				applyDamage = function(amount: number)
 					-- Same godmode rule as every other damage source -- see HitResolution.IsGodmode's own header.
 					if not HitResolution.IsGodmode(targetState) then
@@ -1105,7 +1342,15 @@ local function resolveHitAgainstTarget(
 					end
 					sendVitals(targetPlayer, targetState)
 				end,
-			}, definition.DebugName, now)
+				-- See AirComboTarget.onGroundSlam's own header (CombatTypes.lua) and
+				-- sendGroundSlamFeedback's own header above -- the landed hit's own "Hit" feedback event
+				-- above was already sent with FinisherVariant == nil (reaching this adapter at all
+				-- requires that), so SlamImpactVFX's client-side ground-impact watch would otherwise
+				-- never trigger for the juggle's own finishing slam.
+				onGroundSlam = function(immediateGroundImpact: boolean)
+					sendGroundSlamFeedback(attackerPlayer, targetPlayer, immediateGroundImpact)
+				end,
+			}, definition.DebugName, startsAirCombo, now)
 		end
 	end
 
@@ -1121,6 +1366,146 @@ end
 -- BotCombat.ResolveHitFromBotAgainstPlayer once their own arc/LOS validation passes -- neither
 -- module geometry-queries or schedules a swing itself.
 
+-- Move Creation System knockback (Types.HitboxAttackDefinition.Knockback, set only by
+-- MoveRegistryManager.ToHitboxAttackDefinition for an authored move) -- a simpler, move-data-driven
+-- sibling of the Uppercut/Downslam/Normal FinisherVariant knockback profiles, reusing the exact
+-- same RagdollController.LaunchAndRagdoll call HitResolution.ApplyFinisherPhysics's Uppercut branch
+-- makes. A no-op for every weapon-stage/standalone attack (Knockback is always nil for those) --
+-- called unconditionally after every connected hit in onSwingHitCandidate below rather than
+-- threaded through resolveHitAgainstTarget/DummyCombat.ResolveHit/BotCombat.ResolveHitAgainstBot,
+-- so those three functions (and HitResolution/HitboxResolver) stay purely generic over
+-- HitboxAttackDefinition -- MoveDefinition itself never leaks past MoveRegistryManager.
+-- Forward declaration. The Object Stun impact handler has to be able to throw the authored
+-- follow-up attack, which means calling throwStandaloneAttack -- defined several hundred lines
+-- below, since it depends on onSwingHitCandidate, which in turn depends on the hit-resolution
+-- functions above. applyCustomMoveKnockback (immediately below) needs to hand the handler to
+-- ObjectStunResolver.Watch at that same earlier point, so the two are split: declared here,
+-- assigned once throwStandaloneAttack exists. The alternative -- moving the whole knockback block
+-- below the swing machinery -- would separate it from the hit-resolution code it belongs with.
+local onObjectStunImpact: (ObjectStunResolver.ImpactReport) -> ()
+
+-- Registers a knocked-back target with ObjectStunResolver, so an impact WITH WORLD GEOMETRY caused
+-- by this knockback can be detected over the next second or so. A no-op unless the move actually
+-- authored an Object Stun -- see Types.ObjectStunConfig's own header for the causation model this
+-- hands off to, and note that a refusal here (the target was already against a wall, the move is on
+-- its object-stun cooldown, the resolver is at capacity) is completely normal: the hit itself has
+-- already landed and resolved, this only decides whether the wall-slam reaction is even watched for.
+--
+-- The launch direction handed to the resolver is the SAME one RagdollController.LaunchAndRagdoll
+-- just used, taken from that module's own exported ResolveKnockbackDirection rather than
+-- re-derived here: the clearance probe is only meaningful if it looks along the direction the body
+-- is genuinely about to travel, and this file used to carry its own transcription of that math --
+-- correct only for as long as the two copies stayed identical, in a place where drifting apart
+-- wouldn't fail loudly. It would just quietly aim the causation probe somewhere the target isn't
+-- going, refusing watches that should have been accepted and accepting ones that shouldn't.
+local function watchForObjectStun(
+	definition: Types.HitboxAttackDefinition,
+	hitCharacter: Model,
+	targetRootPart: BasePart,
+	attackerPlayer: Player,
+	attackerState: CombatState,
+	attackerRootPart: BasePart?
+): ()
+	local objectStun = definition.ObjectStun
+	if not objectStun or not objectStun.Enabled then
+		return
+	end
+
+	local launchDirection = RagdollController.ResolveKnockbackDirection(targetRootPart, attackerRootPart)
+
+	local ignore: { Instance } = { hitCharacter }
+	if attackerState.character then
+		table.insert(ignore, attackerState.character)
+	end
+
+	local accepted, reason = ObjectStunResolver.Watch({
+		Target = hitCharacter,
+		TargetRootPart = targetRootPart,
+		AttackerPlayer = attackerPlayer,
+		AttackerRootPart = attackerRootPart,
+		MoveId = definition.DebugName,
+		Config = objectStun,
+		LaunchDirection = launchDirection,
+		-- Per attacker, per move -- what CooldownSeconds is meant to gate.
+		CooldownKey = tostring(attackerPlayer.UserId) .. "|" .. definition.DebugName,
+		-- Per THROW. attackEndsAt was stamped once when this swing was committed and is unique to
+		-- it, so every victim launched by the same swing shares one MaxTriggersPerMove budget while
+		-- the attacker's NEXT throw of the same move gets a fresh one -- which is exactly the
+		-- distinction that field means. No new CombatState bookkeeping needed for it.
+		SwingKey = tostring(attackerPlayer.UserId) .. "|" .. definition.DebugName .. "|" .. tostring(
+			attackerState.attackEndsAt
+		),
+		IgnoreInstances = ignore,
+		OnImpact = function(report: ObjectStunResolver.ImpactReport)
+			onObjectStunImpact(report)
+		end,
+	})
+	if not accepted then
+		logger:debug("Object stun watch declined", {
+			attacker = attackerPlayer.Name,
+			target = hitCharacter.Name,
+			moveId = definition.DebugName,
+			reason = reason,
+		})
+	end
+end
+
+local function applyCustomMoveKnockback(
+	definition: Types.HitboxAttackDefinition,
+	hitCharacter: Model,
+	attackerRootPart: BasePart?,
+	-- Additive, both required for the Object Stun watch this function now also registers -- nil for
+	-- neither caller today (every call site already has both in scope).
+	attackerPlayer: Player,
+	attackerState: CombatState
+): ()
+	local knockback = definition.Knockback
+	if not knockback then
+		return
+	end
+	-- A StartsAirCombo hit is fully owned by AirCombo.Apply instead -- by the time this function is
+	-- ever reached (see this function's own call sites, all AFTER resolveHitAgainstTarget/
+	-- DummyCombat.ResolveHit have already run applyAirCombo), it has already either live-held the
+	-- target (a player, via RagdollController.HoldAloft) or launched+held it (a dummy) using its own
+	-- Constants.Combat.AirCombo-tuned numbers -- the same treatment DashPunch's hit always gets.
+	-- Running this function's own separate LaunchAndRagdoll on top would ragdoll a target AirCombo.
+	-- Apply just pinned into a live hold, corrupting the sequence this same hit was meant to
+	-- start/continue. DashPunch never hits this branch at all (its own Knockback is always nil), so
+	-- this mirrors that precedent instead of inventing a new one.
+	if knockback.StartsAirCombo then
+		return
+	end
+	local humanoid = hitCharacter:FindFirstChildOfClass("Humanoid")
+	local rootPartInstance = hitCharacter:FindFirstChild("HumanoidRootPart")
+	if not humanoid or humanoid.Health <= 0 or not rootPartInstance or not rootPartInstance:IsA("BasePart") then
+		return
+	end
+
+	local targetPlayer = characterToPlayer[hitCharacter]
+	RagdollController.LaunchAndRagdoll(hitCharacter, humanoid, rootPartInstance, targetPlayer, attackerRootPart, {
+		UpVelocity = knockback.UpVelocity,
+		HorizontalVelocity = knockback.HorizontalVelocity,
+		BackwardSpin = 0,
+		RagdollSeconds = knockback.RagdollSeconds,
+	})
+
+	if targetPlayer then
+		local targetState = combatStates[targetPlayer]
+		if targetState then
+			targetState.Vitals.ragdollExpiry =
+				math.max(targetState.Vitals.ragdollExpiry, os.clock() + knockback.RagdollSeconds)
+			targetState.blocking = false
+		end
+	end
+
+	-- Registered immediately AFTER the launch, never before: the clearance probe has to be taken
+	-- from where the target is at the moment they're thrown, and MinTravelStuds is measured from
+	-- that same point. Deliberately outside the StartsAirCombo early-return above -- a hit that
+	-- starts an air combo lifts the target straight up into a hold rather than throwing them
+	-- anywhere, so there is nothing for them to be slammed into.
+	watchForObjectStun(definition, hitCharacter, rootPartInstance, attackerPlayer, attackerState, attackerRootPart)
+end
+
 -- HitboxResolver's OnHit callback for one swing: translates an overlapped Model back into a
 -- Player/CombatState and runs every semantic check the raw geometry query can't (is this actually
 -- a live hostile combatant, still within the definition's arc, with a clear line of sight) before
@@ -1131,19 +1516,30 @@ end
 -- for whether the hit actually dealt damage/posture (true) or was fully avoided via Parry
 -- (false) -- see resolveHitAgainstTarget/resolveHitAgainstBot's own headers for why this is a
 -- second, distinct concept from dedup.
+-- hitOriginRoot/forceNoArc are additive, both nil for every existing melee call site (unchanged
+-- behavior: arc/LOS/knockback all originate from the attacker's own current root). A fired
+-- projectile (onProjectileHitCandidate below) passes its OWN current position's BasePart and
+-- forceNoArc=true instead -- by the time a projectile reaches a target it has fully detached from
+-- the attacker, so an arc check against the THROWER's current facing has no meaningful reading,
+-- and knockback should push away from where the projectile actually struck, not from wherever the
+-- attacker happens to be standing now.
 local function onSwingHitCandidate(
 	attackerPlayer: Player,
 	attackerState: CombatState,
 	definition: Types.HitboxAttackDefinition,
 	isHeavy: boolean,
 	finisherVariant: Types.FinisherVariant?,
-	hitCharacter: Model
+	hitCharacter: Model,
+	hitOriginRoot: BasePart?,
+	forceNoArc: boolean?
 ): (boolean, boolean)
 	local attackerRoot = attackerState.rootPart
 	local attackerCharacter = attackerState.character
 	if not attackerRoot or not attackerCharacter then
 		return false, false
 	end
+	local originRoot = hitOriginRoot or attackerRoot
+	local arcDegrees = if forceNoArc then nil else definition.ArcDegrees
 
 	local dummyState = DummyCombat.GetDummyState(hitCharacter)
 	if dummyState then
@@ -1152,11 +1548,11 @@ local function onSwingHitCandidate(
 		end
 
 		local isValid, rejectReason = HitResolution.IsSwingTargetValid(
-			attackerRoot,
+			originRoot,
 			attackerCharacter,
 			dummyState.rootPart,
 			dummyState.model,
-			definition.ArcDegrees
+			arcDegrees
 		)
 		if not isValid then
 			logger:debug("Hit candidate rejected: " .. (rejectReason or "invalid"), {
@@ -1174,6 +1570,7 @@ local function onSwingHitCandidate(
 		})
 
 		DummyCombat.ResolveHit(attackerPlayer, attackerState, dummyState, definition, isHeavy, finisherVariant)
+		applyCustomMoveKnockback(definition, hitCharacter, originRoot, attackerPlayer, attackerState)
 		-- Deliberately does NOT refresh attackerState.inCombatUntil -- a training dummy never fights
 		-- back (no input of its own, see DummyState's own header), so hitting one is solo practice,
 		-- not "actively fighting somebody." Contrast the bot-hit branch below, which DOES refresh it
@@ -1198,11 +1595,11 @@ local function onSwingHitCandidate(
 		end
 
 		local isValid, rejectReason = HitResolution.IsSwingTargetValid(
-			attackerRoot,
+			originRoot,
 			attackerCharacter,
 			botState.rootPart,
 			botState.model,
-			definition.ArcDegrees
+			arcDegrees
 		)
 		if not isValid then
 			logger:debug("Hit candidate rejected: " .. (rejectReason or "invalid"), {
@@ -1227,6 +1624,9 @@ local function onSwingHitCandidate(
 			isHeavy,
 			finisherVariant
 		)
+		if connected then
+			applyCustomMoveKnockback(definition, hitCharacter, originRoot, attackerPlayer, attackerState)
+		end
 		return true, connected
 	end
 
@@ -1268,13 +1668,8 @@ local function onSwingHitCandidate(
 		return false, false
 	end
 
-	local isValid, rejectReason = HitResolution.IsSwingTargetValid(
-		attackerRoot,
-		attackerCharacter,
-		targetRoot,
-		targetCharacter,
-		definition.ArcDegrees
-	)
+	local isValid, rejectReason =
+		HitResolution.IsSwingTargetValid(originRoot, attackerCharacter, targetRoot, targetCharacter, arcDegrees)
 	if not isValid then
 		logger:debug("Hit candidate rejected: " .. (rejectReason or "invalid"), {
 			attacker = attackerPlayer.Name,
@@ -1299,7 +1694,26 @@ local function onSwingHitCandidate(
 		isHeavy,
 		finisherVariant
 	)
+	if connected then
+		applyCustomMoveKnockback(definition, hitCharacter, originRoot, attackerPlayer, attackerState)
+	end
 	return true, connected
+end
+
+-- HitboxResolver.ProjectileConfig's OnHit callback -- thin wrapper over onSwingHitCandidate,
+-- passing the projectile's OWN current-position Part as the arc/LOS/knockback origin and
+-- forceNoArc=true (see that function's own header for why). Only the dedup-facing `counted` return
+-- matters here -- ProjectileConfig.OnHit is a single-boolean contract, same as SwingConfig.OnHit.
+local function onProjectileHitCandidate(
+	attackerPlayer: Player,
+	attackerState: CombatState,
+	definition: Types.HitboxAttackDefinition,
+	projectileRoot: BasePart,
+	hitCharacter: Model
+): boolean
+	local counted =
+		onSwingHitCandidate(attackerPlayer, attackerState, definition, false, nil, hitCharacter, projectileRoot, true)
+	return counted
 end
 
 -- Shared "is this attacker's swing still worth sampling" builder for HitboxResolver.StartSwing's
@@ -1508,6 +1922,46 @@ local function throwStandaloneAttack(
 	})
 end
 
+-- The projectile counterpart of throwStandaloneAttack -- captures the spawn pose ONCE (the
+-- attacker's current root CFrame * the move's own Offset, at the exact moment of the throw) and
+-- hands off to HitboxResolver.StartProjectile, which advances it independently of the attacker
+-- from here on (the attacker can move, turn, or die after this call returns; the projectile keeps
+-- flying regardless -- see that function's own header). Only reached from
+-- CombatSystem.ThrowCustomMove when definition.Projectile is set -- every hand-authored
+-- weapon-stage/standalone attack stays on throwStandaloneAttack, unchanged.
+local function throwCustomProjectile(
+	attackerPlayer: Player,
+	attackerState: CombatState,
+	definition: Types.HitboxAttackDefinition
+): ()
+	local rootPart = attackerState.rootPart
+	if not rootPart then
+		return
+	end
+
+	local spawnCFrame = rootPart.CFrame * definition.Offset
+	local hitLanded = false
+
+	HitboxResolver.StartProjectile({
+		SpawnCFrame = spawnCFrame,
+		Definition = definition,
+		GetCandidates = function(currentPosition: Vector3)
+			return getProjectileCandidates(attackerState, currentPosition)
+		end,
+		OnHit = function(hitCharacter: Model, projectileRoot: BasePart): boolean
+			local counted =
+				onProjectileHitCandidate(attackerPlayer, attackerState, definition, projectileRoot, hitCharacter)
+			hitLanded = hitLanded or counted
+			return counted
+		end,
+		OnComplete = function()
+			if not hitLanded then
+				logger:debug(definition.DebugName .. " ended with no hits", { player = attackerPlayer.Name })
+			end
+		end,
+	})
+end
+
 -- A bot's swing only ever has one possible target: its owner (a bot is a private sparring
 -- partner, per the file header) -- so this is a trivial single-candidate version of
 -- getSwingCandidates, not a reuse of it (that function's lock-on/multi-target ordering has no
@@ -1569,17 +2023,6 @@ local function onBotSwingHitCandidate(
 		isHeavy = isHeavy,
 	})
 
-	-- An outside hit resolving against the target ends any suspended air-tech exchange they're
-	-- currently in (see AirComboState.airComboSuspendedUntil's own header) -- kept here rather than
-	-- inside BotCombat.ResolveHitFromBotAgainstPlayer since it needs a fresh combatStates[...] lookup
-	-- for the attacker's own state (private to this System) before handing both off to
-	-- AirCombo.EndSuspendedExchange.
-	if targetState.AirCombo.airComboSuspendedUntil ~= 0 then
-		local suspendedWithPlayer = targetState.AirCombo.airComboSuspendedWithAttacker
-		local suspendedWithState = if suspendedWithPlayer then combatStates[suspendedWithPlayer] else nil
-		AirCombo.EndSuspendedExchange(targetPlayer, targetState, suspendedWithPlayer, suspendedWithState)
-	end
-
 	BotCombat.ResolveHitFromBotAgainstPlayer(botState, targetPlayer, targetState, definition, isHeavy)
 	return true
 end
@@ -1629,6 +2072,11 @@ end
 -- weaponSwapReadyAt, etc.) with its own failure handling. Forcing those into this table would
 -- fight the real differences between actions instead of removing genuine duplication -- they stay
 -- inline in each handler, exactly as before.
+-- "CustomMove" (Move Creation System, ThrowCustomMove) is the ONE category every authored move
+-- throws through, regardless of which of ThrowCustomMove's two callers reached it --
+-- MoveEditorSystem.TestFireMove (against the admin's own preview dummy) or this file's own
+-- handleFireHotbarMoveRequest (against real, live combat) -- see CombatTypes.CombatActionKind's own
+-- header.
 export type ActionCategory =
 	"Basic"
 	| "Heavy"
@@ -1639,6 +2087,7 @@ export type ActionCategory =
 	| "SwapWeapon"
 	| "LockOn"
 	| "Feint"
+	| "CustomMove"
 
 -- Every row reproduces today's ACTUAL behavior exactly, transcribed from what each handler
 -- checked before this table existed -- except SwapWeapon's Stun/PostureBroken/Ragdoll, which were
@@ -1663,23 +2112,40 @@ export type ActionCategory =
 -- (Dash/Slide away, weapon-swapping out) for zero risk, not a defensive Block/Parry ATTEMPT, which
 -- is exactly the skill-expression this combat system is built around and can still whiff/fail on
 -- bad timing like any other parry.
-local ACTION_GATES: { [ActionCategory]: { Stun: boolean, PostureBroken: boolean, Ragdoll: boolean, Disarm: boolean } } =
+--
+-- HeldAloft is the SAME row shape as Ragdoll, with one deliberate flip: BlockStart is exempt. It
+-- gates on AirCombo.airComboHeldExpiry -- a DIFFERENT timestamp than Ragdoll's Vitals.ragdollExpiry
+-- -- because the two are no longer the same physical state. A held DashPunch victim keeps full
+-- Motor6D/Humanoid control (RagdollController.HoldAloft's live-body treatment) specifically so they
+-- can Block/Parry; a genuinely ragdolled player (a finisher launch, or the air-combo's own MaxHits
+-- slam) has no guard to raise at all, which is why Ragdoll still gates BlockStart. Every OTHER
+-- category is held to the identical "stuck where the game moves them" rule either way -- attacking,
+-- dashing, sprinting, and swapping weapons stay locked out while held, same as while ragdolled.
+local ACTION_GATES: {
+	[ActionCategory]: { Stun: boolean, PostureBroken: boolean, Ragdoll: boolean, Disarm: boolean, HeldAloft: boolean },
+} =
 	{
-		Basic = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = true },
-		Heavy = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = true },
-		BlockStart = { Stun = false, PostureBroken = true, Ragdoll = true, Disarm = false },
-		Dash = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = false },
+		Basic = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = true, HeldAloft = true },
+		Heavy = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = true, HeldAloft = true },
+		BlockStart = { Stun = false, PostureBroken = true, Ragdoll = true, Disarm = false, HeldAloft = false },
+		Dash = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = false, HeldAloft = true },
 		-- Same row as Dash -- Slide is a movement-only burst (no damage), gated identically.
-		Slide = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = false },
-		SprintStart = { Stun = false, PostureBroken = false, Ragdoll = true, Disarm = false },
-		SwapWeapon = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = false },
-		LockOn = { Stun = false, PostureBroken = false, Ragdoll = false, Disarm = false },
+		Slide = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = false, HeldAloft = true },
+		SprintStart = { Stun = false, PostureBroken = false, Ragdoll = true, Disarm = false, HeldAloft = true },
+		SwapWeapon = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = false, HeldAloft = true },
+		LockOn = { Stun = false, PostureBroken = false, Ragdoll = false, Disarm = false, HeldAloft = false },
 		-- Feint only ever matters while mid-swing, and every one of these three lockouts already ends
 		-- the swing itself via startAttackSwing/throwAirSlam's own IsStillValid before a Feint press
 		-- could reach it -- included here for the same "one table, no hand-duplicated exceptions"
 		-- reason as every other row, not because a live conflict was found. Disarm stays false, same
 		-- reasoning as Block/Dash/Slide -- cancelling your own swing isn't dealing damage.
-		Feint = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = false },
+		Feint = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = false, HeldAloft = true },
+		-- Same row as Basic/Heavy -- a custom move deals real damage, so testing/throwing one while
+		-- locked out by any universal lockout would be misleading (and, if it were ever reachable by
+		-- a non-admin, exploitable). Only MoveEditorSystem.TestFireMove and this file's own
+		-- handleFireHotbarMoveRequest ever reach CombatSystem.ThrowCustomMove -- both admin-gated
+		-- before ever reaching it -- see that function's own header.
+		CustomMove = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = true, HeldAloft = true },
 	}
 
 -- Shared prefix every request handler below starts with: rate-limit check, combatStates[player]
@@ -1717,6 +2183,9 @@ local function checkCommonPreconditions(
 	if gates.Ragdoll and now < state.Vitals.ragdollExpiry then
 		return nil, "Ragdolled"
 	end
+	if gates.HeldAloft and now < state.AirCombo.airComboHeldExpiry then
+		return nil, "HeldAloft"
+	end
 	if gates.Disarm and now < state.Vitals.disarmedUntil then
 		return nil, "Disarmed"
 	end
@@ -1734,6 +2203,17 @@ end
 -- numbers happen to say this week. handleSwapWeaponRequest deliberately does NOT call this -- it
 -- never sets attackEndsAt or opens a movement window (it only CHECKS attackEndsAt and gates on its
 -- own weaponSwapReadyAt cooldown), so there is nothing here for it to tag or clear.
+--
+-- Same structural-guarantee argument applies to parryWindowExpiry: handleBlockStop already clears
+-- it when the block button is released, but every OTHER way of dropping the guard (committing to a
+-- swing/AirSlam/Dash/Slide/CustomMove while still holding Block) only cleared state.blocking, not
+-- the window ClassifyDefense actually keys off of -- see HitResolution.ClassifyDefense, which
+-- checks the parry window BEFORE blocking. Left open, holding Block and then pressing an attack
+-- kept the parry window armed through the whole swing, turning "block then attack" into a strictly
+-- dominant, cost-free parry. Clearing it here, for every kind except the one that arms it, closes
+-- that hole the same unconditional way the dash/slide windows are already closed. The "which kinds
+-- drop the window" rule itself lives in HitResolution.ActionDropsParryWindow (shared with the bot
+-- equivalent, RequestBotAttack below), not duplicated here, so both call sites can never drift.
 local function setActiveAction(state: CombatState, kind: CombatActionKind): ()
 	state.activeActionKind = kind
 	if kind ~= "Dash" and kind ~= "DashPunch" and kind ~= "DashHit" then
@@ -1742,6 +2222,428 @@ local function setActiveAction(state: CombatState, kind: CombatActionKind): ()
 	if kind ~= "Slide" then
 		state.Movement.slideWindowExpiry = 0
 	end
+	if HitResolution.ActionDropsParryWindow(kind) then
+		state.Vitals.parryWindowExpiry = 0
+	end
+end
+
+--
+-- Object Stun resolution. Server/Combat/ObjectStunResolver.lua answered the hard question ("did
+-- this move throw them into that?"); everything below is what the answer MEANS, which is this
+-- System's business alone -- the resolver never learns what a Player, a CombatState, or damage is.
+--
+
+-- Applies the impact's bonus damage/posture and its stun to whichever of the three target kinds
+-- this actually is. Written as one function over the three rather than threaded through
+-- resolveHitAgainstTarget/DummyCombat.ResolveHit/BotCombat.ResolveHitAgainstBot because an object
+-- stun is NOT a hit: no defence classification applies (you cannot block a wall), no combo state
+-- advances, and no attack definition resolved it. Reusing the hit pipeline would mean teaching all
+-- three of those functions about a damage source that skips every rule they exist to enforce.
+--
+-- `downSeconds` is the WHOLE physical sequence, not the authored RagdollSeconds alone: an object stun
+-- is now two beats (PinSeconds held against the surface, then RagdollSeconds down on the floor once
+-- the drop's slam lands), and the action lockout has to span both or the victim is free to act while
+-- their own body is still being driven into the ground. onObjectStunImpact computes it once and hands
+-- the same number to this and to applyObjectStunPhysics, so the lockout and the ragdoll can't drift.
+--
+-- `targetPlayer`/`humanoid` are resolved once by onObjectStunImpact and threaded in rather than
+-- looked up again here: all three of the functions an impact runs through wanted the same two
+-- answers about the same body at the same instant, and re-deriving them per function is both a
+-- repeated FindFirstChildOfClass walk and three chances for them to disagree.
+local function applyObjectStunOutcome(
+	report: ObjectStunResolver.ImpactReport,
+	targetPlayer: Player?,
+	humanoid: Humanoid?,
+	now: number,
+	downSeconds: number
+): ()
+	local config = report.Config
+	if not humanoid or humanoid.Health <= 0 then
+		return
+	end
+
+	if targetPlayer then
+		local targetState = combatStates[targetPlayer]
+		if targetState then
+			if config.BonusDamage > 0 and not HitResolution.IsGodmode(targetState) then
+				if humanoid.Health - config.BonusDamage <= 0 and report.AttackerPlayer then
+					targetState.pendingKillerUserId = report.AttackerPlayer.UserId
+				end
+				humanoid:TakeDamage(config.BonusDamage)
+			end
+			targetState.Vitals.posture = math.max(0, targetState.Vitals.posture - config.BonusPostureDamage)
+			-- math.max'd, never shortened -- the same rule every other writer of these two expiries
+			-- follows (see CombatVitalsState.stunExpiry's own header).
+			targetState.Vitals.stunExpiry = math.max(targetState.Vitals.stunExpiry, now + config.StunSeconds)
+			targetState.Vitals.ragdollExpiry = math.max(targetState.Vitals.ragdollExpiry, now + downSeconds)
+			targetState.blocking = false
+			sendVitals(targetPlayer, targetState)
+		end
+		return
+	end
+
+	local botState = BotCombat.GetLiveBotState(report.Target)
+	if botState then
+		if config.BonusDamage > 0 then
+			humanoid:TakeDamage(config.BonusDamage)
+		end
+		botState.posture = math.max(0, botState.posture - config.BonusPostureDamage)
+		botState.stunExpiry = math.max(botState.stunExpiry, now + config.StunSeconds)
+		botState.blocking = false
+		return
+	end
+
+	local dummyState = DummyCombat.GetDummyState(report.Target)
+	if dummyState then
+		if config.BonusDamage > 0 then
+			humanoid:TakeDamage(config.BonusDamage)
+		end
+		-- A dummy has no stunExpiry to set -- it never acts, so there is nothing to lock out. Its
+		-- posture still drops, since that's what an admin watching a test dummy is reading.
+		dummyState.posture = math.max(0, dummyState.posture - config.BonusPostureDamage)
+	end
+end
+
+-- The second beat of a pinned object stun: once the pin's own window is up, the body comes OFF the
+-- surface and is driven into the floor, instead of simply being let go. Letting go was what the pin
+-- used to do, and it read as the target quietly sliding down the wall -- the quietest possible end to
+-- the loudest thing in the move. Handing the release to RagdollController.SlamToGround (the same
+-- function the Downslam finisher and the air combo's slam finisher already use) turns it into "hit
+-- the wall, stick to it, get dumped on the ground," and the "GroundSlam" feedback below gives that
+-- landing the full Client/FX/SlamImpactVFX payoff -- dust, debris, shockwave, shake, hit-stop --
+-- without a second impact effect being written for it. See Constants.Combat.ObjectStun.
+-- DropDownVelocity for why the slam is deliberately lighter than either of those two finishers.
+--
+-- Runs as the pin's own RagdollController HoldProfile.OnRelease, i.e. the moment RagdollController's
+-- Update lets the body off the surface -- NOT on a task.delay of its own. Those used to be two
+-- independent timers scheduled for the same instant (HoldAloft's internal auto-release and this
+-- function's own delay), which is a race with no winner defined: whichever fired first decided
+-- whether the slam was applied to a body still pinned by an AlignPosition or to a free one. Hanging
+-- it off the release itself means there is exactly one clock, and "the pin has ended" and "the drop
+-- begins" are the same event rather than two that agree by construction.
+--
+-- That also removes the manual pin teardown this function used to open with. The hold is already
+-- gone by the time this runs -- which matters, because an AlignPosition still holding the body at the
+-- surface would fight the downward velocity and read as a much weaker slam than the one authored.
+local function dropFromSurface(report: ObjectStunResolver.ImpactReport): ()
+	local config = report.Config
+	local target = report.Target
+	local rootPart = report.TargetRootPart
+
+	-- Re-checked at the moment of the drop rather than captured up front, same rule
+	-- scheduleObjectStunFollowUp follows: PinSeconds is real time in which the victim can have died,
+	-- respawned, or left, and slamming a replaced body would be writing velocity onto someone else's
+	-- fresh character.
+	if not target.Parent or not rootPart.Parent then
+		return
+	end
+
+	local targetPlayer = characterToPlayer[target]
+	local humanoid = target:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then
+		-- Died while pinned. Don't slam a corpse: confirmDeath deliberately abandons a dead body limp
+		-- rather than animating it further. The pin itself is already off; all that's left is to hand
+		-- the body back to whoever owned it, since the pin was deliberately held server-side (see the
+		-- HoldAloft call in applyObjectStunPhysics) and the ragdoll's own corpse path won't do it.
+		pcall(function()
+			rootPart:SetNetworkOwner(targetPlayer)
+		end)
+		return
+	end
+
+	local immediateGroundImpact =
+		RagdollController.SlamToGround(target, humanoid, rootPart, targetPlayer, report.AttackerRootPart, {
+			DownVelocity = Constants.Combat.ObjectStun.DropDownVelocity,
+			FaceDownSpin = Constants.Combat.ObjectStun.DropFaceDownSpin,
+			-- The authored RagdollSeconds is the time spent DOWN, measured from the landing -- the pin's
+			-- own window came before it and was covered by applyObjectStunPhysics's own ExtendRagdoll.
+			-- The ragdoll entry math.max'es this onto the existing expiry, so a pin longer than the
+			-- drop's knockdown can never shorten the ragdoll on its way through here.
+			KnockdownSeconds = config.RagdollSeconds,
+		})
+
+	-- Reuses the Downslam feedback path wholesale, so this drop gets the identical ground impact
+	-- every other slam in the game already has. Player-vs-player only: SlamImpactVFX resolves the
+	-- body it watches from TargetUserId, which a bot or a training dummy has none of (see that
+	-- module's own header) -- the slam physics above still ran for those targets, it just isn't
+	-- dressed, the same limitation every other slam origin already has against them.
+	if report.AttackerPlayer and targetPlayer then
+		sendGroundSlamFeedback(report.AttackerPlayer, targetPlayer, immediateGroundImpact)
+	end
+end
+
+-- Physically parks the target against the surface they hit: bounces them off it (ReboundVelocity)
+-- or holds them there (PinSeconds) and then drops them (dropFromSurface). The pin is what
+-- buys a follow-up attack something to hit -- without it a slammed body simply slides down the wall
+-- and out of a tight follow-up hitbox before its windup has even finished.
+--
+-- Reuses RagdollController.HoldAloft rather than anchoring the part: that function already owns
+-- every part of doing this safely (network ownership transfer, Humanoid suppression, an
+-- AlignPosition that survives the target's own client fighting it, and a tick-driven auto-release
+-- with a callback for what happens next), which is exactly the same list of problems the air combo's
+-- own hover hold had to solve.
+local function applyObjectStunPhysics(
+	report: ObjectStunResolver.ImpactReport,
+	targetPlayer: Player?,
+	humanoid: Humanoid?,
+	downSeconds: number
+): ()
+	local config = report.Config
+	local rootPart = report.TargetRootPart
+
+	-- The line that makes every reaction below survive long enough to be seen, and the reason the pin
+	-- previously "didn't stick to the wall at all". applyObjectStunOutcome sets Vitals.ragdollExpiry,
+	-- but that field is only this System's own ACTION lockout -- canAct and Movement read it,
+	-- RagdollController never does, so it does not keep the body limp for one extra frame. The PHYSICAL
+	-- ragdoll was still running on whatever timer the launch that threw them into the wall had given
+	-- it, and the whole point of the causation gates is that the impact happens somewhere in the middle
+	-- of that flight, not at the end of it. When that original timer expired mid-pin,
+	-- RagdollController.Update opened the recovery blend: motors back, Humanoid restored, network
+	-- ownership handed to the victim's own client -- and a client simulating its own body walks it
+	-- straight out of a server-side AlignPosition. Extending the real ragdoll to cover the whole
+	-- pin-then-drop sequence is what makes the hold hold.
+	--
+	-- Applied on the rebound path too: a rebounding body has the same problem (it recovers in mid-air
+	-- and lands on its feet mid-knockback), it just had no pin for the symptom to be blamed on.
+	if not RagdollController.ExtendRagdoll(report.Target, downSeconds) then
+		-- The launch's own ragdoll had already run out, or was already folding the body back upright,
+		-- before the target ever reached the surface -- reachable whenever the move's authored knockback
+		-- RagdollSeconds is shorter than the flight it produces, and fatal to everything below, since
+		-- the pin would then be an AlignPosition arguing with a live self-simulating body. Re-ragdoll
+		-- from scratch through RagdollController's own "make this body limp for this long" door, which
+		-- writes no velocity at all -- every velocity this reaction actually wants is written
+		-- immediately after (the rebound, or the pin's own dead stop). This used to be spelled as a
+		-- LaunchAndRagdoll with an all-zero LaunchProfile, which reads like a knockback, turns up in
+		-- every search for one, and additionally stopped the body dead before the writes below had a
+		-- chance to say what it should be doing instead.
+		if humanoid and humanoid.Health > 0 then
+			RagdollController.Ragdoll(report.Target, humanoid, rootPart, targetPlayer, downSeconds)
+		end
+	end
+
+	-- Whole-body writes, never `rootPart.AssemblyLinearVelocity = ...`. A target reaching this function
+	-- is by definition ragdolled (that is what carried it into the wall), and a ragdolled body is
+	-- fourteen separate assemblies -- so a root-only write rebounds or stops the TORSO while every limb
+	-- keeps its full flight velocity, and the ball sockets answer that mismatch by flipping and
+	-- thrashing the body instead of stunning it. See RagdollController.SetBodyVelocity's own header.
+	-- Rebound and pin are ALTERNATIVES, not a pair, and rebound wins when both are authored. The
+	-- editor states this outright ("Pin holds them against the surface... Rebound bounces them back off
+	-- it instead"), but the runtime used to only half-honour it: the velocity write was already an
+	-- if/elseif, yet the pin below ran unconditionally. A move with both set therefore threw the body
+	-- off the surface and simultaneously asked an AlignPosition to hold it there, so the two fought --
+	-- the body escaped the pin (rebound speed exceeds Constants.Combat.ObjectStun.PinMaxSpeed at any
+	-- meaningful rebound), got dragged by it, and the "stun" read as being flung away and tumbling
+	-- rather than as either of the two effects the author actually asked for.
+	--
+	-- Rebound is the one that wins because it is the opt-in: PinSeconds is non-zero by default and
+	-- ReboundVelocity is 0, so an author who raised the rebound is deliberately overriding the pin.
+	local isRebounding = config.ReboundVelocity > 0
+	if isRebounding then
+		RagdollController.SetBodyVelocity(report.Target, report.HitNormal * config.ReboundVelocity)
+	elseif config.PinSeconds > 0 then
+		-- Killed before the pin takes over, so the AlignPosition isn't fighting whatever momentum
+		-- drove them into the wall in the first place.
+		RagdollController.SetBodyVelocity(report.Target, Vector3.zero)
+	end
+
+	if config.PinSeconds > 0 and not isRebounding then
+		-- Stopping a ragdoll takes two writes, not one -- the pin below constrains where the root is,
+		-- never how it is turned, so a body arriving with the tumble its own knockback gave it would
+		-- hang against the wall still spinning, limbs whipping around it. Deliberately NOT done on the
+		-- rebound-only path: a body being thrown back off the surface should keep its tumble, which is
+		-- knockback continuing rather than a stun.
+		RagdollController.SetBodyAngularVelocity(report.Target, Vector3.zero)
+		RagdollController.HoldAloft(
+			rootPart,
+			-- The pin is deliberately held SERVER-side rather than handed back to the victim's own
+			-- client when it releases, and that distinction is load-bearing. ClearHold's last act is
+			-- SetNetworkOwner, and giving the root assembly to the victim's client at release would mean
+			-- dropFromSurface's SlamToGround writes its downward velocity to assemblies that client
+			-- simulates authoritatively -- so the client's own view (a limp body hanging by a wall)
+			-- replicates straight back over the slam, which is the failure RagdollController's
+			-- enterRagdoll documents at length. Nothing is stranded by this: the ragdoll's own exit
+			-- hands ownership back to the player when the knockdown ends.
+			nil,
+			{
+				-- Held off the surface along its own normal so the body reads as pressed against the
+				-- wall rather than buried inside it.
+				Position = report.HitPosition + report.HitNormal * Constants.Combat.ObjectStun.PinSurfaceGapStuds,
+				DurationSeconds = config.PinSeconds,
+				MaxSpeed = Constants.Combat.ObjectStun.PinMaxSpeed,
+				Responsiveness = Constants.Combat.ObjectStun.PinResponsiveness,
+				-- Omitted: this is a RAGDOLLED hold, not a live-body one -- an object-stunned target has
+				-- no swings to keep aimed, and the live-body treatment would fight the ragdoll. See
+				-- HoldAloft's own LiveBodyFacePoint header.
+				LiveBodyFacePoint = nil,
+				-- The pin's release would otherwise just let go, which read as the target quietly
+				-- sliding down the wall -- the quietest possible end to the loudest thing in the move.
+				-- This turns it into the second half of the reaction instead. See dropFromSurface.
+				OnRelease = function()
+					dropFromSurface(report)
+				end,
+			}
+		)
+	end
+end
+
+-- Throws the authored follow-up attack after its own delay. Everything that can have changed during
+-- that delay is re-checked at the moment of the throw, not captured up front: the attacker may have
+-- died, respawned, or left, and the pinned victim may already be gone. A follow-up that finds its
+-- attacker no longer valid simply doesn't happen -- there is nothing to roll back, since the object
+-- stun's own damage and pin already applied independently.
+local function scheduleObjectStunFollowUp(report: ObjectStunResolver.ImpactReport): ()
+	local followUp = report.Config.FollowUp
+	if not followUp or not followUp.Enabled then
+		return
+	end
+	local attackerPlayer = report.AttackerPlayer
+	if not attackerPlayer then
+		return
+	end
+
+	task.delay(followUp.DelaySeconds, function()
+		local attackerState = combatStates[attackerPlayer]
+		if not attackerState or not attackerState.alive then
+			return
+		end
+		local attackerRoot = attackerState.rootPart
+		if not attackerRoot or not attackerState.character or not attackerState.humanoid then
+			return
+		end
+		if attackerState.humanoid.Health <= 0 then
+			return
+		end
+
+		if followUp.TeleportAttacker and report.TargetRootPart.Parent then
+			-- Placed on the OPEN side of the victim -- along the surface normal, i.e. back the way
+			-- they were thrown from -- and turned to face them. Teleporting to a fixed offset from
+			-- the victim without regard to the wall would routinely drop the attacker inside it.
+			local victimPosition = report.TargetRootPart.Position
+			local standPosition = victimPosition + report.HitNormal * followUp.TeleportDistanceStuds
+			attackerRoot.CFrame =
+				CFrame.lookAt(standPosition, Vector3.new(victimPosition.X, standPosition.Y, victimPosition.Z))
+		end
+
+		local definition = MoveTypes.FollowUpToHitboxAttackDefinition(report.MoveId, followUp)
+
+		-- Committed exactly like any other throw: the attacker is locked out for the follow-up's own
+		-- duration and their guard drops. Without this the attacker could act during their own
+		-- follow-up, which no other attack in this System allows.
+		local now = os.clock()
+		attackerState.attackEndsAt = math.max(
+			attackerState.attackEndsAt,
+			now + definition.WindupSeconds + definition.ActiveSeconds + definition.RecoverySeconds
+		)
+		setActiveAction(attackerState, "CustomMove")
+		attackerState.blocking = false
+
+		local animationId = if followUp.AnimationId ~= "" then followUp.AnimationId else nil
+		local animationTrackName = if animationId then "CustomMoveFollowUp_" .. report.MoveId else nil
+		sendAttackStarted(
+			attackerPlayer,
+			definition,
+			false,
+			attackerState.equippedWeaponId,
+			nil,
+			animationId,
+			animationTrackName
+		)
+
+		-- checkSwingCancelled = false: a Feint cancels the swing the PLAYER is currently committing
+		-- to, and a follow-up is scheduled by the world reacting to a slam, not by a press the
+		-- attacker could take back.
+		throwStandaloneAttack(attackerPlayer, attackerState, definition, nil, false)
+	end)
+end
+
+-- Assignment of the forward-declared handler -- see its own declaration above for why this is split.
+-- Ordered outcome -> physics -> feedback -> follow-up deliberately: the damage and stun must land
+-- before the pin takes network ownership of the body, and the follow-up is scheduled last so its
+-- delay is measured from a fully-resolved impact.
+function onObjectStunImpact(report: ObjectStunResolver.ImpactReport): ()
+	local now = os.clock()
+	local config = report.Config
+
+	-- Resolved once, here, and threaded through every function below. Three of them independently
+	-- asked the same two questions about the same body at the same instant (who owns it, and does it
+	-- still have a living Humanoid), which is a repeated instance walk and -- worse -- three separate
+	-- opportunities for the outcome, the physics and the feedback to disagree about what they are
+	-- acting on. dropFromSurface deliberately does NOT take these: it runs a whole PinSeconds later,
+	-- by which time the honest answer can genuinely have changed.
+	local targetPlayer = characterToPlayer[report.Target]
+	local humanoid = report.Target:FindFirstChildOfClass("Humanoid")
+
+	-- The reaction is one sequence of two beats, so the timeline is computed once here and handed to
+	-- both halves rather than each deriving its own. Rebound zeroes the pin because the two are
+	-- alternatives and rebound wins -- see applyObjectStunPhysics. RagdollSeconds is the time spent
+	-- DOWN after the drop lands, which is what makes the total pin + ragdoll rather than either alone.
+	local pinSeconds = if config.ReboundVelocity > 0 then 0 else config.PinSeconds
+	local downSeconds = pinSeconds + config.RagdollSeconds
+
+	-- The positive counterpart to watchForObjectStun's "watch declined" line. Without it the two
+	-- outcomes an author most needs to tell apart -- the stun never triggered, versus it triggered and
+	-- the reaction looked wrong -- are indistinguishable from the server log, which is exactly the
+	-- question that comes up when a wall slam does not read the way it was authored. Logs which
+	-- reaction was actually chosen, since rebound and pin are mutually exclusive (applyObjectStunPhysics).
+	logger:debug("Object stun triggered", {
+		target = report.Target.Name,
+		moveId = report.MoveId,
+		surface = report.Surface,
+		impactSpeed = report.ImpactSpeed,
+		travelStuds = report.TravelStuds,
+		reaction = if config.ReboundVelocity > 0
+			then `rebound {config.ReboundVelocity}`
+			elseif pinSeconds > 0 then `pin {pinSeconds}s then drop`
+			else "none",
+		downSeconds = downSeconds,
+	})
+
+	applyObjectStunOutcome(report, targetPlayer, humanoid, now, downSeconds)
+	applyObjectStunPhysics(report, targetPlayer, humanoid, downSeconds)
+
+	local payload = FeedbackPayload.Build(
+		"ObjectStun",
+		report.AttackerPlayer,
+		targetPlayer,
+		if config.BonusDamage > 0 then config.BonusDamage else nil,
+		if config.BonusPostureDamage > 0 then config.BonusPostureDamage else nil,
+		nil,
+		-- Always populated, unlike an ordinary Hit's: an object stun can land on a dummy or a bot,
+		-- neither of which has a TargetUserId for the client to resolve a position from.
+		report.TargetRootPart.Position,
+		report.MoveId,
+		nil,
+		nil,
+		nil,
+		{
+			Surface = report.Surface,
+			VictimAnimationId = config.VictimAnimationId,
+			AttackerAnimationId = config.AttackerAnimationId,
+			SoundId = config.SoundId,
+			EffectColor = config.EffectColor,
+			CameraShakeScale = config.CameraShakeScale,
+			ImpactPosition = report.HitPosition,
+			ImpactNormal = report.HitNormal,
+			StunSeconds = config.StunSeconds,
+		}
+	)
+	if report.AttackerPlayer then
+		sendFeedback(report.AttackerPlayer, payload)
+	end
+	if targetPlayer and targetPlayer ~= report.AttackerPlayer then
+		sendFeedback(targetPlayer, payload)
+	end
+
+	logger:info("Object stun resolved", {
+		attacker = if report.AttackerPlayer then report.AttackerPlayer.Name else "unknown",
+		target = report.Target.Name,
+		moveId = report.MoveId,
+		surface = report.Surface,
+		bonusDamage = config.BonusDamage,
+		stunSeconds = config.StunSeconds,
+	})
+
+	scheduleObjectStunFollowUp(report)
 end
 
 -- Shared "select the swing, commit cooldown/attackEndsAt, throw it" tail for both
@@ -1767,9 +2669,10 @@ local function commitAndThrowAttack(
 
 	-- Select the swing. The combo stage has to be resolved before the cooldown is committed, since
 	-- cooldown comes from the specific stage this throw uses, not a flat per-category number.
-	-- HEAVY uses the throw-based combo counter (wraps over the Heavy stages). BASIC (M1) uses the
-	-- landing-based finisher combo: the stage is basicComboLanded + 1, and once that reaches
-	-- Constants.Combat.BasicComboLength the swing is the Finisher instead of a normal Basic stage.
+	-- HEAVY uses the throw-based combo counter (wraps over the Heavy stages). BASIC (M1) now ALSO
+	-- picks its stage animation throw-based (basicSwingIndex, whiff or not) -- only whether the
+	-- Finisher is reachable stays landing-based (basicComboLanded, see CombatState's own header for
+	-- why the two are deliberately separate counters).
 	local definition: Types.HitboxAttackDefinition
 	local finisherVariant: Types.FinisherVariant? = nil
 
@@ -1784,16 +2687,18 @@ local function commitAndThrowAttack(
 		state.comboExpiry = now + Constants.Combat.HeavyComboResetSeconds
 	else
 		resetBasicComboIfLapsed(state, now)
-		local stageIndex = state.basicComboLanded + 1
-		if stageIndex >= Constants.Combat.BasicComboLength then
-			-- The finisher. This is only ever reached grounded -- handleAttackRequest intercepts an
-			-- airborne Basic-attack press into the standalone AirSlam attack before combo-stage
-			-- selection ever runs (see Constants.Combat.AirSlam's own header), so the attacker being
-			-- airborne here is no longer a case this function needs to handle. Variant is chosen here:
-			-- holding jump -> Uppercut, else Normal (see HitResolution.SelectFinisherVariant and
-			-- Constants.Combat.Finisher for the full reasoning, including why Downslam no longer comes
-			-- from this path). The basic string is reset now -- the finisher ends it whether or not it
-			-- connects, so the next M1 starts a fresh combo at stage 1.
+		if state.basicComboLanded + 1 >= Constants.Combat.BasicComboLength then
+			-- The finisher. Still gated purely on basicComboLanded (actual landed hits) -- whiffing
+			-- can advance basicSwingIndex all it wants, it can never satisfy this condition, so a
+			-- launcher still can't be fast-tracked (see CombatState.basicComboLanded's own header).
+			-- This is only ever reached grounded -- handleAttackRequest intercepts an airborne
+			-- Basic-attack press into the standalone AirSlam attack before combo-stage selection ever
+			-- runs (see Constants.Combat.AirSlam's own header), so the attacker being airborne here is
+			-- no longer a case this function needs to handle. Variant is chosen here: holding jump ->
+			-- Uppercut, else Normal (see HitResolution.SelectFinisherVariant and Constants.Combat.
+			-- Finisher for the full reasoning, including why Downslam no longer comes from this path).
+			-- The basic string is reset now -- the finisher ends it whether or not it connects, so the
+			-- next M1 starts a fresh combo at stage 1.
 			local equippedWeapon = if state.equippedWeaponId == "Primary"
 				then Constants.Combat.Weapons.Primary
 				else Constants.Combat.Weapons.Secondary
@@ -1801,10 +2706,16 @@ local function commitAndThrowAttack(
 			finisherVariant = HitResolution.SelectFinisherVariant(holdingJump)
 			state.basicComboLanded = 0
 			state.basicComboExpiry = 0
+			state.basicSwingIndex = 0
 		else
-			definition = selectAttackDefinition(state.equippedWeaponId, false, stageIndex)
+			-- Throw-based, exactly like Heavy's own comboIndex above -- advances every press whether
+			-- or not the previous swing connected, so a whiffed string still cycles through stage
+			-- 2/3's animation/feel instead of being stuck replaying stage 1 until something lands.
+			state.basicSwingIndex = advanceComboIndex(state.equippedWeaponId, false, state.basicSwingIndex)
+			definition = selectAttackDefinition(state.equippedWeaponId, false, state.basicSwingIndex)
 			-- Refresh the window so the combo stays alive while the player is actively swinging; a
-			-- landed hit advances basicComboLanded (startAttackSwing's OnHit), a whiff leaves it be.
+			-- landed hit advances basicComboLanded (startAttackSwing's OnHit), a whiff leaves it be --
+			-- see the Finisher gate above.
 			state.basicComboExpiry = now + Constants.Combat.ComboResetSeconds
 		end
 	end
@@ -1858,12 +2769,27 @@ end
 -- at all, so treating Jumping (the initial upward impulse) OR Freefall (already airborne, e.g. off a
 -- ledge with no jump input) as airborne -- FloorMaterial == Air stays as a fallback for any state
 -- this doesn't cover -- is what makes a single, normally-timed jump + click register reliably.
-local function isAirborneForAirSlam(humanoid: Humanoid): boolean
+--
+-- That physical check alone is NOT sufficient to gate AirSlam eligibility, though -- it answers "is
+-- this character currently off the ground," not "did this character get off the ground by actually
+-- jumping." Freefall/FloorMaterial==Air are equally true for a player who ran off a ledge with no
+-- jump input, who's still carrying DashPunch's own dash residue over an edge after the air-combo
+-- window already lapsed, who's drifting from ordinary hit knockback, or who's mid-recovery from a
+-- parry -- every one of those handed a free Downslam on the player's very next Basic-attack press
+-- before this gate existed. `state.genuineJumpAirborne` (CombatTypes.CombatState's own header has the
+-- full mechanism) is the server-observed "this specific airborne stretch actually started with a
+-- Jumping-state transition" signal that closes that gap -- required here IN ADDITION TO the physical
+-- checks below, not instead of them (a stale true flag from three jumps ago should never outlive the
+-- player actually landing in between).
+local function isAirborneForAirSlam(humanoid: Humanoid, state: CombatState): boolean
+	if not state.genuineJumpAirborne then
+		return false
+	end
 	if humanoid.FloorMaterial == Enum.Material.Air then
 		return true
 	end
-	local state = humanoid:GetState()
-	return state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall
+	local humanoidState = humanoid:GetState()
+	return humanoidState == Enum.HumanoidStateType.Jumping or humanoidState == Enum.HumanoidStateType.Freefall
 end
 
 -- Jump + M1 ("AirSlam"): a Basic-attack press made while airborne, at ANY time -- no M1 combo
@@ -1914,17 +2840,13 @@ local function handleAirSlamRequest(player: Player, state: CombatState, now: num
 	throwStandaloneAttack(player, state, definition, "Downslam", true)
 end
 
--- AirCombo.HandleSuspendedCounterPunchRequest (Server/Combat/AirCombo.lua) replaces this file's
--- own former private handleSuspendedCounterPunchRequest -- see that module's header. Called from
--- handleAttackRequest below's own Basic-attack interception while CombatState.airComboSuspendedUntil
--- is active.
-
 local function handleAttackRequest(player: Player, isHeavy: boolean, holdingJump: boolean): ()
 	local action = if isHeavy then "HeavyAttack" else "BasicAttack"
 	local rejectedKind: Types.RejectedActionKind = if isHeavy then "Heavy" else "Basic"
+	local category: ActionCategory = if isHeavy then "Heavy" else "Basic"
 	logReceived(action, player)
 
-	local state, rejectReason = checkCommonPreconditions(player, attackRateLimiter, rejectedKind)
+	local state, rejectReason = checkCommonPreconditions(player, attackRateLimiter, category)
 	if not state then
 		rejectAndNotify(action, rejectedKind, player, rejectReason :: string)
 		return
@@ -1951,23 +2873,14 @@ local function handleAttackRequest(player: Player, isHeavy: boolean, holdingJump
 	-- ACTION_GATES.Basic/Heavy) -- only commitment/cooldown are left to check here.
 	local now = os.clock()
 
-	-- Suspended counter-punch: a Basic-attack press while CombatState.airComboSuspendedUntil is
-	-- active (a successfully-teched air-combo victim, still held aloft next to the attacker)
-	-- redirects here instead of the grounded M1 string or AirSlam -- see
-	-- AirCombo.HandleSuspendedCounterPunchRequest's own header. Heavy is unaffected (only a Basic
-	-- press can throw this, same scoping AirSlam itself uses). Checked BEFORE the AirSlam intercept
-	-- below -- a suspended player also reads as airborne-for-AirSlam (the same HoldAloft-never-clears-
-	-- FloorMaterial reasoning that exemption's own comment documents), so without this check first a
-	-- suspended player's Basic press would be hijacked into an ill-fitting AirSlam instead of the
-	-- intended counter-punch.
-	if not isHeavy and now < state.AirCombo.airComboSuspendedUntil then
-		AirCombo.HandleSuspendedCounterPunchRequest(player, state, now)
-		return
-	end
-
 	-- Jump + M1: route an airborne Basic-attack press to the standalone AirSlam attack instead of
 	-- the grounded M1 string -- see handleAirSlamRequest's/isAirborneForAirSlam's own headers. Heavy
-	-- attacks are unaffected (only a Basic press can throw this).
+	-- attacks are unaffected (only a Basic press can throw this). isAirborneForAirSlam now also
+	-- requires state.genuineJumpAirborne -- being physically off the ground (Freefall/FloorMaterial ==
+	-- Air) is no longer sufficient on its own, since that's equally true after a DashPunch's dash
+	-- residue carries the player off a ledge, ordinary hit knockback, parry recoil, or an ordinary fall
+	-- with no jump ever pressed. See CombatState.genuineJumpAirborne's own header for the full
+	-- mechanism and the exploit list this closes.
 	--
 	-- EXEMPT while the attacker is mid-air-combo (state.airComboTarget OR state.airComboDummyTarget
 	-- still set -- CombatState.airComboDummyTarget's own header: a Model-target training-dummy
@@ -1984,22 +2897,11 @@ local function handleAttackRequest(player: Player, isHeavy: boolean, holdingJump
 	-- (DashPunch) opener followed by M1 into "dash then instantly downslam" instead of an actual
 	-- juggle. A real standalone jump+M1 (both target fields nil) is untouched by this check and still
 	-- routes to AirSlam exactly as before.
-	-- Also exempt a player currently held as the ATTACKER half of a successfully-teched suspended
-	-- exchange (AirCombo.HandleAirTechRequest) -- their own airComboTarget/airComboExpiry are already
-	-- CLEARED at that point (ending the free-combo privilege, see that function's own header), but
-	-- RagdollController.HoldAloft still has their rootPart rigidly pinned aloft (same
-	-- FloorMaterial-never-solid reasoning as the comment above), so without this a suspended
-	-- attacker's next Basic press was hijacked into AirSlam instead of the "resolves as a normal
-	-- swing" behavior the suspended-exchange design comment promises. airComboChaseExpiry is set
-	-- alongside every HoldAloft call made for the attacker side (both the active-juggle AND the
-	-- post-tech-suspended hold) and zeroed alongside every ClearHold on their rootPart, so it's
-	-- already the correct single signal for "my own body is currently held aloft" independent of
-	-- which of the two holds put it there.
 	local inAirCombo = (
 		(state.AirCombo.airComboTarget ~= nil or state.AirCombo.airComboDummyTarget ~= nil)
 		and now <= state.AirCombo.airComboExpiry
 	) or now <= state.AirCombo.airComboChaseExpiry
-	if not isHeavy and not inAirCombo and isAirborneForAirSlam(humanoid) then
+	if not isHeavy and not inAirCombo and isAirborneForAirSlam(humanoid, state) then
 		handleAirSlamRequest(player, state, now)
 		return
 	end
@@ -2013,11 +2915,12 @@ local function handleAttackRequest(player: Player, isHeavy: boolean, holdingJump
 	-- press that quietly queues up and auto-fires the instant the stun clears.
 	local readyAt = if isHeavy then state.heavyAttackReadyAt else state.basicAttackReadyAt
 	if now < readyAt or now < state.attackEndsAt then
-		state.bufferedAttack = {
+		local bufferedAttack: { IsHeavy: boolean, HoldingJump: boolean, ExpiresAt: number } = {
 			IsHeavy = isHeavy,
 			HoldingJump = holdingJump,
 			ExpiresAt = now + Constants.Combat.AttackInputBufferSeconds,
 		}
+		state.bufferedAttack = bufferedAttack
 		logRejected(action, player, if now < readyAt then "CooldownActive" else "AlreadyAttacking", {
 			remainingSeconds = math.max(readyAt, state.attackEndsAt) - now,
 			buffered = true,
@@ -2127,12 +3030,15 @@ local function handleBlockStart(player: Player): ()
 		if ok and typeof(pingValue) == "number" then
 			ping = math.clamp(pingValue, 0, Constants.Combat.ParryPingCompensationMaxSeconds)
 		end
-		state.Vitals.parryWindowExpiry = now + Constants.Combat.ParryWindowSeconds + ping
+		local windowDuration = Constants.Combat.ParryWindowSeconds + ping
+		state.Vitals.parryWindowExpiry = now + windowDuration
 		state.Vitals.parryCooldownExpiry = now + Constants.Combat.ParryCooldownSeconds
 		-- Broadcast the OBVIOUS, synced-for-all tell (bright highlight on this player, visible to
-		-- everyone including their attacker).
+		-- everyone including their attacker) -- carrying the real ping-compensated duration so the
+		-- highlight's hold time matches state.Vitals.parryWindowExpiry exactly (see
+		-- broadcastParryWindowOpened's own header for why the flat constant alone isn't enough).
 		if state.character then
-			broadcastParryWindowOpened(state.character)
+			broadcastParryWindowOpened(state.character, windowDuration)
 		end
 	end
 
@@ -2266,6 +3172,7 @@ local function handleSwapWeaponRequest(player: Player): ()
 	state.equippedWeaponId = newWeaponId
 	state.weaponSwapReadyAt = now + Constants.Combat.Weapons.SwapCooldownSeconds
 	state.comboIndex = 0
+	state.basicSwingIndex = 0
 	state.basicComboLanded = 0
 	state.basicComboExpiry = 0
 
@@ -2498,25 +3405,6 @@ local function handleSlideRequest(player: Player): ()
 	sendSlidePerformed(player, Constants.Combat.SlideCommitmentSeconds)
 end
 
--- Reverse lookup for the air-tech escape below: airComboTarget lives on the ATTACKER's own
--- CombatState (see that field's own header), so there's no direct "who is juggling me" pointer on
--- the victim's side. Same reverse-scan shape as clearLockOnReferencesTo above. Only matches an
--- attacker whose sequence hasn't already lapsed (now <= airComboExpiry) -- a stale/expired
--- airComboTarget from a sequence that already ended naturally shouldn't count as "currently
--- juggled" for tech purposes.
-local function findAirComboAttacker(victimPlayer: Player, now: number): (Player?, CombatState?)
-	for attackerPlayer, attackerState in pairs(combatStates) do
-		if attackerState.AirCombo.airComboTarget == victimPlayer and now <= attackerState.AirCombo.airComboExpiry then
-			return attackerPlayer, attackerState
-		end
-	end
-	return nil, nil
-end
-
--- AirCombo.HandleAirTechRequest (Server/Combat/AirCombo.lua) replaces this file's own former
--- private handleAirTechRequest -- see that module's header. Wired directly to the RequestAirTech
--- remote in CombatSystem.Init() below.
-
 -- Sprint start/stop: a held movement state, not a one-shot action. handleSprintStart just records
 -- the intent (Movement.SetSprinting(state, true)) regardless of current combat state --
 -- onHeartbeat's Movement.ComputeDesiredWalkSpeed decides frame-by-frame whether that intent
@@ -2579,6 +3467,11 @@ local function onHeartbeat(deltaTime: number): ()
 	-- Auto-recover finisher ragdolls whose window has elapsed (RagdollController opens no Heartbeat of
 	-- its own -- same single-tick reasoning as HitboxResolver).
 	RagdollController.Update(now)
+	-- Advance every in-flight object-stun watch (one raycast per watched target per tick, bounded by
+	-- Constants.Combat.ObjectStun.MaxActiveWatches) -- same "no Heartbeat connection of its own"
+	-- reasoning as the two above. Runs AFTER RagdollController so a watch reads the velocity the
+	-- ragdoll physics actually produced this tick rather than last tick's.
+	ObjectStunResolver.Update(deltaTime, now)
 
 	for player, state in pairs(combatStates) do
 		if not state.alive then
@@ -2602,13 +3495,22 @@ local function onHeartbeat(deltaTime: number): ()
 			state.activeActionKind = "None"
 		end
 
-		-- A successfully-teched suspended exchange (AirCombo.HandleAirTechRequest) that neither side
-		-- resolved (no counter-punch landed, no fresh hit landed) within its own window times out here
-		-- -- drops both bodies back to normal footing rather than leaving them suspended forever.
-		if state.AirCombo.airComboSuspendedUntil ~= 0 and now >= state.AirCombo.airComboSuspendedUntil then
-			local suspendedWithPlayer = state.AirCombo.airComboSuspendedWithAttacker
-			local suspendedWithState = if suspendedWithPlayer then combatStates[suspendedWithPlayer] else nil
-			AirCombo.EndSuspendedExchange(player, state, suspendedWithPlayer, suspendedWithState)
+		-- Keeps the ACTION lockout in lockstep with the body's actual physical state, which is the
+		-- entire stated purpose of Vitals.ragdollExpiry (see its own header) and something a single
+		-- timestamp stamped at hit time can no longer deliver on its own. RagdollController's recovery
+		-- now waits for a launched body to stop MOVING before standing it up, rather than for the
+		-- authored window alone -- a body still in the air does not get to its feet mid-flight -- so
+		-- the physical knockdown can outlast the number written here by up to
+		-- Constants.Combat.Ragdoll.RecoverSettleMaxSeconds. Without this the player would be free to
+		-- act, sprint and swing while their own character was still limp and tumbling.
+		--
+		-- Only ever pushed FORWARD (math.max, the rule every writer of this field follows), and only
+		-- while the character is genuinely ragdolled, so this can neither shorten a lockout another
+		-- source set nor keep one alive past the ragdoll it is mirroring.
+		local character = state.character
+		if character and RagdollController.IsRagdolled(character) then
+			state.Vitals.ragdollExpiry =
+				math.max(state.Vitals.ragdollExpiry, now + RagdollController.RemainingSeconds(character, now))
 		end
 
 		-- WalkSpeed is driven by whichever effect currently claims it, computed fresh every tick
@@ -2642,6 +3544,7 @@ local function onHeartbeat(deltaTime: number): ()
 				now >= state.Vitals.stunExpiry
 				and now >= state.Vitals.postureBrokenExpiry
 				and now >= state.Vitals.ragdollExpiry
+				and now >= state.AirCombo.airComboHeldExpiry
 				and now >= state.Vitals.disarmedUntil
 				and now >= state.attackEndsAt
 				and now >= (if buffered.IsHeavy then state.heavyAttackReadyAt else state.basicAttackReadyAt)
@@ -2724,6 +3627,8 @@ local function createMovementState(): CombatTypes.MovementState
 		slideWindowExpiry = 0,
 		slideCooldownExpiry = 0,
 		movementCooldownExpiry = 0,
+		customMoveLungeWindowExpiry = 0,
+		customMoveLungeSpeed = 0,
 	}
 end
 
@@ -2734,6 +3639,7 @@ local function createFreshState(player: Player): CombatState
 		humanoid = nil,
 		rootPart = nil,
 		humanoidDiedConnection = nil,
+		humanoidStateChangedConnection = nil,
 
 		alive = false,
 		blocking = false,
@@ -2747,12 +3653,15 @@ local function createFreshState(player: Player): CombatState
 		basicAttackReadyAt = 0,
 		heavyAttackReadyAt = 0,
 		airSlamReadyAt = 0,
+		customMoveReadyAt = {},
+		genuineJumpAirborne = false,
 		attackEndsAt = 0,
 		activeActionKind = "None",
 		currentSwingWindupEndsAt = 0,
 		swingCancelled = false,
 		comboIndex = 0,
 		comboExpiry = 0,
+		basicSwingIndex = 0,
 		basicComboLanded = 0,
 		basicComboExpiry = 0,
 
@@ -2794,12 +3703,19 @@ local function resetTransientCombatState(state: CombatState): ()
 	state.basicAttackReadyAt = 0
 	state.heavyAttackReadyAt = 0
 	state.airSlamReadyAt = 0
+	state.customMoveReadyAt = {}
+	-- A fresh spawn always starts grounded with no jump in flight -- see this field's own header.
+	-- The humanoidStateChangedConnection listener that maintains it going forward is reconnected onto
+	-- the new Humanoid separately, in onCharacterAdded (mirrors humanoidDiedConnection, a respawn-
+	-- lifecycle concern this function deliberately doesn't own -- see this function's own header).
+	state.genuineJumpAirborne = false
 	state.attackEndsAt = 0
 	state.activeActionKind = "None"
 	state.currentSwingWindupEndsAt = 0
 	state.swingCancelled = false
 	state.comboIndex = 0
 	state.comboExpiry = 0
+	state.basicSwingIndex = 0
 	state.basicComboLanded = 0
 	state.basicComboExpiry = 0
 
@@ -2825,6 +3741,10 @@ local function onCharacterAdded(player: Player, character: Model): ()
 	if state.humanoidDiedConnection then
 		state.humanoidDiedConnection:Disconnect()
 		state.humanoidDiedConnection = nil
+	end
+	if state.humanoidStateChangedConnection then
+		state.humanoidStateChangedConnection:Disconnect()
+		state.humanoidStateChangedConnection = nil
 	end
 
 	local humanoidInstance = character:WaitForChild("Humanoid", Constants.Network.WaitForChildTimeoutSeconds)
@@ -2878,6 +3798,18 @@ local function onCharacterAdded(player: Player, character: Model): ()
 		confirmDeath(player, state)
 	end)
 
+	-- Maintains state.genuineJumpAirborne off this Humanoid's own replicated HumanoidStateType
+	-- transitions -- see that field's own header (CombatTypes.CombatState) for the full mechanism and
+	-- the exploit list this closes (isAirborneForAirSlam gating AirSlam/"Downslam" on Freefall/
+	-- FloorMaterial==Air alone let a player throw it after becoming airborne for ANY reason: DashPunch
+	-- dash residue over a ledge, ordinary hit knockback, parry recoil, or just walking off an edge).
+	-- The actual jump-vs-not-jump DECISION is Movement.ComputeGenuineJumpAirborne, a pure function
+	-- (see its own header) -- this connection is just the live-Instance wiring around it, the same
+	-- "pure function, thin call site" split every other Server/Combat/ sibling already uses.
+	state.humanoidStateChangedConnection = humanoid.StateChanged:Connect(function(_old, new)
+		state.genuineJumpAirborne = Movement.ComputeGenuineJumpAirborne(state.genuineJumpAirborne, new)
+	end)
+
 	sendVitals(player, state)
 end
 
@@ -2891,23 +3823,35 @@ local function onCharacterRemoving(player: Player): ()
 		state.humanoidDiedConnection:Disconnect()
 		state.humanoidDiedConnection = nil
 	end
+	if state.humanoidStateChangedConnection then
+		state.humanoidStateChangedConnection:Disconnect()
+		state.humanoidStateChangedConnection = nil
+	end
 
 	if state.character then
 		-- Clear any active finisher ragdoll before the character is replaced, so RagdollController
 		-- doesn't hold a disabled-motor / server-owned reference to a soon-destroyed character.
 		RagdollController.Recover(state.character)
+		-- Same reasoning one line up, for any in-flight object-stun watch on this character:
+		-- ObjectStunResolver already drops a watch whose root part loses its parent, but a respawn
+		-- REPLACES the character while a watch still holds the old root -- see that module's own
+		-- ClearTarget header.
+		ObjectStunResolver.ClearTarget(state.character)
 		characterToPlayer[state.character] = nil
 	end
 
-	-- If this player was mid-suspended-exchange on EITHER side (the victim who teched, or the
-	-- attacker someone teched against), don't leave the other half permanently pinned -- see
-	-- AirCombo.EndSuspendedExchange/clearSuspendedReferencesTo's own headers.
-	if state.AirCombo.airComboSuspendedUntil ~= 0 then
-		local suspendedWithPlayer = state.AirCombo.airComboSuspendedWithAttacker
-		local suspendedWithState = if suspendedWithPlayer then combatStates[suspendedWithPlayer] else nil
-		AirCombo.EndSuspendedExchange(player, state, suspendedWithPlayer, suspendedWithState)
+	-- If this player was live-held as someone ELSE's DashPunch target, release that hold before the
+	-- character is replaced -- RagdollController.Recover above only reverses a GENUINE ragdoll entry,
+	-- which a live-held player was never registered as (AirComboState.airComboHeldExpiry's own
+	-- header), so without this the departing character's rootPart would carry a dangling AlignPosition
+	-- reference into a soon-destroyed Model.
+	if state.rootPart and state.AirCombo.airComboHeldExpiry ~= 0 then
+		RagdollController.ClearHold(state.rootPart, player)
+		-- ClearHold only hands back network ownership, never touches CombatState (its own header) --
+		-- zeroed here for the same reason confirmDeath's equivalent already does (consistency fix;
+		-- this call site previously left it stale until the hold's own now-moot timer eventually fired).
+		state.AirCombo.airComboHeldExpiry = 0
 	end
-	clearSuspendedReferencesTo(player)
 
 	state.alive = false
 	state.character = nil
@@ -2933,19 +3877,73 @@ local function onPlayerAdded(player: Player): ()
 	end
 end
 
+-- If the departing player was mid-air-combo-juggling someone else (as the ATTACKER), the victim is
+-- still physically held aloft by RagdollController.HoldAloft's own independent timer, which doesn't
+-- know or care that the attacker just left -- without this, a live-held victim (Block/Parry-capable
+-- but unable to move, see AirComboState.airComboHeldExpiry's own header) would be stuck facing an
+-- opponent who no longer exists until that hold's own short timer eventually expires. Releases the
+-- victim immediately instead. Thin wrapper around AirCombo.ReleaseSequence (the shared cleanup this
+-- function's own body used to implement standalone, before SwitchPriority's own third-party guard
+-- needed the identical cleanup too -- see that function's own header) -- this call site is the one
+-- that resolves the victim's own CombatState by Player, since AirCombo.lua itself never touches
+-- combatStates directly.
+-- See docs/architecture/2026-08-audit.md section 3.5.
+function releaseAirComboVictimOf(departingAttacker: Player, attackerState: CombatState, now: number): ()
+	local heldVictim = attackerState.AirCombo.airComboTarget
+	local victimState = if heldVictim then combatStates[heldVictim] else nil
+	if AirCombo.ReleaseSequence(departingAttacker, attackerState, victimState, now) and heldVictim then
+		logger:info("Air-combo hold force-released: attacker left mid-juggle", {
+			attacker = departingAttacker.Name,
+			victim = heldVictim.Name,
+		})
+	end
+end
+
+-- The reverse of releaseAirComboVictimOf above: called when the departing player was mid-air-combo
+-- as the HELD VICTIM (not the attacker) of someone ELSE's live sequence. airComboTarget correctly
+-- identifies the CURRENT attacker even after one or more priority switches (AirCombo.SwitchPriority
+-- migrates the whole tracking relationship wholesale, never leaves a stale reference behind) -- but
+-- until this, nothing released the ATTACKER's own side of that relationship when the VICTIM
+-- specifically is who disconnects (releaseAirComboVictimOf only covers the departing player being
+-- the attacker). No player -> "who's attacking me" index exists, so the only way to find it is a
+-- reverse scan -- same idiom clearLockOnReferencesTo/clearRecentOpponentReferencesTo already use for
+-- their own "who references this departing player" scans.
+local function releaseAirComboAttackerOf(departingVictim: Player, now: number): ()
+	for otherPlayer, otherState in pairs(combatStates) do
+		if otherState.AirCombo.airComboTarget == departingVictim and now <= otherState.AirCombo.airComboExpiry then
+			-- victimState is deliberately nil here: the departing victim's own physical hold/
+			-- airComboHeldExpiry is already handled by onCharacterRemoving/onPlayerRemoving's own
+			-- lifecycle for THEM -- this call only needs to fix the attacker's own side.
+			AirCombo.ReleaseSequence(otherPlayer, otherState, nil, now)
+			logger:info("Air-combo hold force-released: victim left mid-juggle", {
+				attacker = otherPlayer.Name,
+				victim = departingVictim.Name,
+			})
+		end
+	end
+end
+
 local function onPlayerRemoving(player: Player): ()
 	local state = combatStates[player]
 	if state then
 		if state.humanoidDiedConnection then
 			state.humanoidDiedConnection:Disconnect()
 		end
+		if state.humanoidStateChangedConnection then
+			state.humanoidStateChangedConnection:Disconnect()
+		end
 		if state.character then
 			characterToPlayer[state.character] = nil
 		end
+		releaseAirComboVictimOf(player, state, os.clock())
 	end
 
+	-- Unconditional, not elseif'd against the block above -- a player could plausibly have held
+	-- either role (attacker of one sequence, victim of a completely different one) at the exact
+	-- moment they disconnect, per SwitchPriority's own third-party-guard reasoning.
+	releaseAirComboAttackerOf(player, os.clock())
+
 	clearLockOnReferencesTo(player)
-	clearSuspendedReferencesTo(player)
 	clearRecentOpponentReferencesTo(player)
 	combatStates[player] = nil
 	attackRateLimiter:Clear(player)
@@ -3006,6 +4004,13 @@ function CombatSystem.GetCombatState(player: Player): Types.CombatSnapshot?
 		Attacking = now < state.attackEndsAt,
 		Sprinting = state.Movement.sprinting,
 		InCombat = now < state.inCombatUntil,
+		-- Additive projection of the same two ACTION_GATES fields Basic/Heavy/Dash/etc. already read
+		-- privately (state.Vitals.ragdollExpiry / state.AirCombo.airComboHeldExpiry) -- added for
+		-- EmoteSystem, which needs to reject/interrupt an emote under the same physical-helplessness
+		-- conditions combat actions already gate on, without reaching into CombatState internals
+		-- itself (this file's own "no system reaches into another system's internals directly" rule).
+		Ragdolled = now < state.Vitals.ragdollExpiry,
+		HeldAloft = now < state.AirCombo.airComboHeldExpiry,
 	}
 end
 
@@ -3113,6 +4118,17 @@ function CombatSystem.ResetCombatState(targetPlayer: Player): boolean
 		RagdollController.ClearHold(state.rootPart, targetPlayer)
 	end
 
+	-- If targetPlayer is currently someone ELSE's live air-combo victim, the third guard above just
+	-- released THEIR side of that hold -- but the attacker's own CombatState still thinks it's
+	-- mid-sequence (airComboTarget still == targetPlayer) and their own body is still physically
+	-- pinned at the attacker's own chase point. See releaseAirComboAttackerOf's own header. Must run
+	-- BEFORE resetTransientCombatState below, which wipes targetPlayer's own AirCombo table wholesale
+	-- (state.AirCombo = AirCombo.CreateState()) -- the attacker-side fix only needs targetPlayer's
+	-- IDENTITY (as the key another player's airComboTarget might still point at), not their state, so
+	-- ordering relative to that wipe doesn't affect this call, but keeping it here alongside the rest
+	-- of this function's physical-hold cleanup is the clearest place for it.
+	releaseAirComboAttackerOf(targetPlayer, os.clock())
+
 	resetTransientCombatState(state)
 	sendVitals(targetPlayer, state)
 
@@ -3212,6 +4228,14 @@ function CombatSystem.RequestBotAttack(botModel: Model, isHeavy: boolean): boole
 		return false
 	end
 
+	-- Committing to an attack drops an active guard, same as a player's commitAndThrowAttack (see
+	-- that function's own comment) -- without this a bot that just blocked (arming
+	-- state.parryWindowExpiry) and then attacked stayed parry-armed for the whole swing, so a
+	-- player's hit landing on it mid-attack was misclassified as a free parry by
+	-- HitResolution.ClassifyDefense, which checks the window before state.blocking.
+	state.blocking = false
+	state.parryWindowExpiry = 0
+
 	resetHeavyComboIfLapsed(state, now)
 	-- Bots always fight with the default weapon -- see handleSwapWeaponRequest's own comment for
 	-- why bot weapon-switching is out of scope.
@@ -3268,8 +4292,9 @@ function CombatSystem.RequestBotBlockStart(botModel: Model): (boolean, boolean)
 		state.parryCooldownExpiry = now + Constants.Combat.ParryCooldownSeconds
 		BotAnimator.PlayParryFlash(botModel)
 		-- Same OBVIOUS, synced-for-all parry-window tell a player gets -- so a bot reads as a real
-		-- opponent you have to respect the parry of. No ping compensation: a bot has no client/latency.
-		broadcastParryWindowOpened(botModel)
+		-- opponent you have to respect the parry of. No ping compensation: a bot has no client/latency,
+		-- so its real window IS the flat constant.
+		broadcastParryWindowOpened(botModel, Constants.Combat.ParryWindowSeconds)
 	end
 
 	logger:debug("Bot block started", { bot = botModel.Name, parryWindowOpened = parryAvailable })
@@ -3289,6 +4314,127 @@ function CombatSystem.RequestBotBlockStop(botModel: Model): boolean
 	return true
 end
 
+-- Has no RequestX remote or player-facing keybind mapped directly to IT -- both of its callers
+-- (MoveEditorSystem.TestFireMove and this file's own handleFireHotbarMoveRequest, below) are
+-- already gated by their own admin-authorization + rate-limit check before this ever runs, and
+-- neither trusts a client-submitted admin claim: this throw path for a Move Creation System move
+-- (MoveRegistryManager.Get(moveId)) is the ONE routing point every authored move throws through,
+-- keyed by MoveId, rather than earning its own CombatActionKind/RequestX remote per move the way
+-- DashPunch/DashHit/AirSlam each did (see CombatTypes.CombatActionKind's own header for why that
+-- closed-union-per-move pattern doesn't scale to admin-authored content). Reuses
+-- checkCommonPreconditions/ACTION_GATES.CustomMove for the same four universal lockouts Basic/Heavy
+-- respect, the move's own Cooldown via customMoveReadyAt (keyed by MoveId, since the set of MoveIds
+-- is open-ended admin content, not a small fixed roster like airSlamReadyAt's), and then the SAME
+-- throwStandaloneAttack tail DashPunch/DashHit/AirSlam already use -- no new hit-resolution code.
+-- Returns (true, nil) on acceptance or (false, reason) on rejection. Deliberately NOT modified to
+-- add its own admin check -- see handleFireHotbarMoveRequest's own header for why that stays the
+-- caller's job.
+function CombatSystem.ThrowCustomMove(player: Player, moveId: string): (boolean, string?)
+	local state, rejectReason = checkCommonPreconditions(player, attackRateLimiter, "CustomMove")
+	if not state then
+		return false, rejectReason
+	end
+	if not state.character or not state.humanoid or not state.rootPart then
+		return false, "MissingCharacter"
+	end
+	if state.humanoid.Health <= 0 then
+		return false, "HumanoidHealthNonPositive"
+	end
+
+	local now = os.clock()
+	if now < state.attackEndsAt then
+		return false, "AlreadyAttacking"
+	end
+	if now < (state.customMoveReadyAt[moveId] or 0) then
+		return false, "CooldownActive"
+	end
+
+	local move = MoveRegistryManager.Get(moveId)
+	if not move then
+		return false, "MoveNotFound"
+	end
+	local definition = MoveRegistryManager.ToHitboxAttackDefinition(move)
+
+	state.attackEndsAt = now + definition.WindupSeconds + definition.ActiveSeconds + definition.RecoverySeconds
+	setActiveAction(state, "CustomMove")
+	state.customMoveReadyAt[moveId] = now + definition.Cooldown
+	-- Feint eligibility for THIS swing -- same commit shape as commitAndThrowAttack/handleAirSlamRequest.
+	state.currentSwingWindupEndsAt = now + definition.WindupSeconds
+	state.swingCancelled = false
+	-- Same "committing to an attack drops an active guard" rule every other attack enforces.
+	state.blocking = false
+
+	if move.Movement then
+		Movement.ApplyCustomMoveLunge(state, now, move.Movement.LungeDistanceStuds, move.Movement.LungeDurationSeconds)
+	end
+
+	logAccepted("CustomMove", player, {
+		moveId = move.MoveId,
+		attack = definition.DebugName,
+		damage = definition.Damage,
+		postureDamage = definition.PostureDamage,
+	})
+
+	-- The move's own full authored animation surface -- its ordered Animations timeline, or (for a
+	-- move that only ever set the original single-clip AnimationId) that id projected onto a
+	-- one-clip timeline by the SAME AnimationTimeline.FromLegacyAnimationId helper
+	-- MoveRegistryManager.Validate and PreviewViewport's own preview already use -- see this
+	-- function's own header and AnimationTimeline.lua's for why one shared projection is what keeps
+	-- the editor's preview and this real throw from ever disagreeing. Sent even when it resolves to
+	-- an EMPTY list: a non-nil Animations is what tells CombatClient's attack-started handler this
+	-- throw is a CustomMove at all, so it never falls back to ConfirmSwing's DebugName-trailing-digit
+	-- inference -- a MoveId that happens to end in a digit must not play a guessed M1 combo stage. See
+	-- Types.AttackStartedPayload.Animations' own header.
+	local animations = if #move.Animations > 0
+		then move.Animations
+		else AnimationTimeline.FromLegacyAnimationId(move.AnimationId)
+	sendAttackStarted(player, definition, false, state.equippedWeaponId, nil, nil, nil, animations)
+	if move.Projectile then
+		throwCustomProjectile(player, state, definition)
+	else
+		throwStandaloneAttack(player, state, definition, nil, true)
+	end
+	return true, nil
+end
+
+-- Client -> server (Combat_RequestFireHotbarMove), the hotbar's live-fire path -- makes an admin's
+-- Move-Editor-authored moves actually playable outside MoveEditorSystem.TestFireMove's own preview
+-- dummy, against whatever/whoever the admin is really fighting. This is the ONE thing
+-- ThrowCustomMove deliberately does NOT check itself (see that function's own header): every
+-- request reaching this handler is re-verified against AdminConfig.AuthorizedUserIds regardless of
+-- what the client claims, the same "never trust a client-submitted admin claim" rule
+-- MoveEditorSystem.checkMoveEditorPreconditions already enforces for every Move Editor remote -- a
+-- non-admin (or a modified client skipping the HUD/keybind gate entirely) firing this remote
+-- directly gets the same NotAuthorized rejection either way. Deliberately has NO rate limiter of its
+-- own beyond that authorization check: ThrowCustomMove's own checkCommonPreconditions already
+-- applies attackRateLimiter (shared with every other attack request) for any call that gets past
+-- the admin gate, so a second limiter here would only guard the cheap, non-mutating boolean lookup
+-- an unauthorized caller hits before ever reaching ThrowCustomMove -- the same "auth first,
+-- unbounded; rate limit only what's authorized" shape MoveEditorSystem.checkMoveEditorPreconditions
+-- already established.
+--
+-- Unlike Basic/Heavy/Dash/BlockStart/Slide, this action has no client-side prediction to roll back
+-- (see Types.RejectedActionKind's own header on "CustomMove") -- a genuine reject still echoes back
+-- over the existing Combat_ActionRejected channel purely so the requesting admin learns WHY
+-- (NotAuthorized/CooldownActive/MoveNotFound/...) instead of the press silently doing nothing.
+local function handleFireHotbarMoveRequest(player: Player, rawMoveId: unknown): ()
+	logReceived("FireHotbarMove", player)
+
+	if not AdminConfig.AuthorizedUserIds[player.UserId] then
+		rejectAndNotify("FireHotbarMove", "CustomMove", player, "NotAuthorized")
+		return
+	end
+	if typeof(rawMoveId) ~= "string" then
+		rejectAndNotify("FireHotbarMove", "CustomMove", player, "InvalidMoveId")
+		return
+	end
+
+	local success, reason = CombatSystem.ThrowCustomMove(player, rawMoveId)
+	if not success then
+		rejectAndNotify("FireHotbarMove", "CustomMove", player, reason or "Unknown")
+	end
+end
+
 -- Constants validation moved to ReplicatedStorage/Shared/ConstantsValidation.lua
 -- (ValidateCombatConstants/ValidateWeapon/ValidateAttackCategory/ValidateAttackDefinition) -- see
 -- that module's header. Validating Constants.Combat's hand-authored shape has nothing to do with
@@ -3301,9 +4447,11 @@ function CombatSystem.Init(): ()
 		return
 	end
 
-	-- Register this System's own private feedback/vitals/air-combo hooks with DummyCombat.lua/
-	-- BotCombat.lua/AirCombo.lua before anything else -- see each module's own header for why these
-	-- specific closures (and not a back-reference require) are what keeps this a one-way dependency.
+	-- Register this System's own private feedback/vitals hooks with DummyCombat.lua/BotCombat.lua
+	-- before anything else -- see each module's own header for why these specific closures (and not a
+	-- back-reference require) are what keeps this a one-way dependency. AirCombo.lua takes no such
+	-- hooks -- Apply is pure with respect to CombatSystem.lua's own private world (see its own
+	-- header), so DummyCombat.lua reaches it directly via the ApplyAirCombo hook below.
 	DummyCombat.Init({
 		SendFeedback = sendFeedback,
 		ApplyAirCombo = AirCombo.Apply,
@@ -3312,18 +4460,6 @@ function CombatSystem.Init(): ()
 		SendFeedback = sendFeedback,
 		SendVitals = sendVitals,
 		TriggerPlayerPostureBreak = triggerPostureBreak,
-	})
-	AirCombo.Init({
-		IsDefensiveRateLimited = function(player: Player): boolean
-			return defensiveRateLimiter:IsLimited(player)
-		end,
-		GetCombatState = function(player: Player): CombatState?
-			return combatStates[player]
-		end,
-		FindAirComboAttacker = findAirComboAttacker,
-		SendVitals = sendVitals,
-		SendFeedback = sendFeedback,
-		TriggerPostureBreak = triggerPostureBreak,
 	})
 
 	requestBasicAttackRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.RequestBasicAttack)
@@ -3348,8 +4484,8 @@ function CombatSystem.Init(): ()
 	logger:debug("Remote created", { name = RemoteNames.RequestSwapWeapon })
 	requestFeintRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.RequestFeint)
 	logger:debug("Remote created", { name = RemoteNames.RequestFeint })
-	requestAirTechRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.RequestAirTech)
-	logger:debug("Remote created", { name = RemoteNames.RequestAirTech })
+	requestFireHotbarMoveRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.RequestFireHotbarMove)
+	logger:debug("Remote created", { name = RemoteNames.RequestFireHotbarMove })
 
 	vitalsUpdatedRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.VitalsUpdated)
 	logger:debug("Remote created", { name = RemoteNames.VitalsUpdated })
@@ -3357,6 +4493,8 @@ function CombatSystem.Init(): ()
 	logger:debug("Remote created", { name = RemoteNames.InCombatChanged })
 	feedbackEventRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.FeedbackEvent)
 	logger:debug("Remote created", { name = RemoteNames.FeedbackEvent })
+	killFeedEventRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.KillFeed)
+	logger:debug("Remote created", { name = RemoteNames.KillFeed })
 	lockOnChangedRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.LockOnChanged)
 	logger:debug("Remote created", { name = RemoteNames.LockOnChanged })
 	attackStartedRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.AttackStarted)
@@ -3377,6 +4515,19 @@ function CombatSystem.Init(): ()
 	logger:debug("Remote created", { name = RemoteNames.ParryWindowOpened })
 	feintPerformedRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.FeintPerformed)
 	logger:debug("Remote created", { name = RemoteNames.FeintPerformed })
+
+	GameplayEvents.OnPlayerKilled(function(victim: Player, killer: Player?)
+		if killer ~= nil then
+			killFeedEventRemote:FireAllClients({
+				KillerName = killer.Name,
+				VictimName = victim.Name,
+			})
+			logger:trace("Kill feed broadcast sent", {
+				killer = killer.Name,
+				victim = victim.Name,
+			})
+		end
+	end)
 
 	-- Wires each ChangeNotifier's Changed event to the exact remote-fire/Attribute-write/log side
 	-- effect syncFinisherReady/syncRootControlLocked/syncInCombat used to perform inline on a
@@ -3457,10 +4608,10 @@ function CombatSystem.Init(): ()
 	end)
 	logger:debug("Handler connected", { remote = RemoteNames.RequestFeint })
 
-	requestAirTechRemote.OnServerEvent:Connect(function(player: Player)
-		AirCombo.HandleAirTechRequest(player)
+	requestFireHotbarMoveRemote.OnServerEvent:Connect(function(player: Player, rawMoveId: unknown)
+		handleFireHotbarMoveRequest(player, rawMoveId)
 	end)
-	logger:debug("Handler connected", { remote = RemoteNames.RequestAirTech })
+	logger:debug("Handler connected", { remote = RemoteNames.RequestFireHotbarMove })
 
 	Players.PlayerAdded:Connect(onPlayerAdded)
 	Players.PlayerRemoving:Connect(onPlayerRemoving)

@@ -147,10 +147,32 @@ return function()
 			expect(swing.IsFinisher).to.equal(false)
 		end)
 
-		it("advances on own connected swings and flags the finisher stage", function()
+		-- StageIndex is throw-based (advances on every CONFIRMED throw, whiff or not) -- mirrors
+		-- CombatState.basicSwingIndex server-side. IsFinisher stays landing-based (OnOwnSwingConnected)
+		-- -- see the two tests below.
+		it("advances the stage on every confirmed throw, whether or not it connects", function()
+			local mirror = PredictionMirror.New()
+			mirror:OnAttackStarted(basicStarted(nil), T)
+			expect(mirror:PredictedSwing(T + 0.1).StageIndex).to.equal(2)
+			mirror:OnAttackStarted(basicStarted(nil), T + 0.1)
+			expect(mirror:PredictedSwing(T + 0.2).StageIndex).to.equal(3)
+			mirror:OnAttackStarted(basicStarted(nil), T + 0.2)
+			expect(mirror:PredictedSwing(T + 0.3).StageIndex).to.equal(1)
+		end)
+
+		it("never reaches the finisher from throws alone, no matter how many whiffs are confirmed", function()
+			local mirror = PredictionMirror.New()
+			local now = T
+			for _ = 1, 10 do
+				mirror:OnAttackStarted(basicStarted(nil), now)
+				now += 0.1
+			end
+			expect(mirror:PredictedSwing(now).IsFinisher).to.equal(false)
+		end)
+
+		it("flags the finisher once 3 hits have actually landed", function()
 			local mirror = PredictionMirror.New()
 			mirror:OnOwnSwingConnected("Basic1", false, T)
-			expect(mirror:PredictedSwing(T + 0.1).StageIndex).to.equal(2)
 			mirror:OnOwnSwingConnected("Basic2", false, T + 0.2)
 			mirror:OnOwnSwingConnected("Basic3", false, T + 0.4)
 			local swing = mirror:PredictedSwing(T + 0.5)
@@ -162,40 +184,81 @@ return function()
 			local mirror = PredictionMirror.New()
 			mirror:OnOwnSwingConnected("Basic1", false, T)
 			mirror:OnOwnSwingConnected("Basic1", false, T + 0.01)
-			expect(mirror:PredictedSwing(T + 0.1).StageIndex).to.equal(2)
+			mirror:OnOwnSwingConnected("Basic2", false, T + 0.2)
+			-- Two DISTINCT landed stages (Basic1, Basic2) despite Basic1 firing twice -- if the double
+			-- feedback had double-counted, this would already read Finisher one landed hit early.
+			expect(mirror:PredictedSwing(T + 0.3).IsFinisher).to.equal(false)
+			mirror:OnOwnSwingConnected("Basic3", false, T + 0.4)
+			expect(mirror:PredictedSwing(T + 0.5).IsFinisher).to.equal(true)
 		end)
 
 		it("ignores heavy connects even though their names end in digits", function()
 			local mirror = PredictionMirror.New()
 			mirror:OnOwnSwingConnected("Heavy1", true, T)
-			expect(mirror:PredictedSwing(T + 0.1).StageIndex).to.equal(1)
+			mirror:OnOwnSwingConnected("Heavy1", true, T + 0.1)
+			mirror:OnOwnSwingConnected("Heavy1", true, T + 0.2)
+			expect(mirror:PredictedSwing(T + 0.3).IsFinisher).to.equal(false)
 		end)
 
 		it("ignores connects with no trailing digit (finisher/dash-punch)", function()
 			local mirror = PredictionMirror.New()
 			mirror:OnOwnSwingConnected("Finisher", false, T)
 			mirror:OnOwnSwingConnected("DashPunch", false, T)
-			expect(mirror:PredictedSwing(T + 0.1).StageIndex).to.equal(1)
+			expect(mirror:PredictedSwing(T + 0.1).IsFinisher).to.equal(false)
 		end)
 
-		it("lapses back to stage 1 after ComboResetSeconds without a connect", function()
+		it("keeps the stage cycling across a whiffed string (basicComboExpiry refreshed at throw time)", function()
+			local mirror = PredictionMirror.New()
+			mirror:OnAttackStarted(basicStarted(nil), T)
+			-- Wait most (not all) of the window before the next throw -- if OnAttackStarted didn't
+			-- refresh basicComboExpiry, this would already read as lapsed (stage 1) instead of 2.
+			local secondThrowAt = T + Constants.Combat.ComboResetSeconds - 0.1
+			mirror:OnAttackStarted(basicStarted(nil), secondThrowAt)
+			expect(mirror:PredictedSwing(secondThrowAt + 0.05).StageIndex).to.equal(3)
+		end)
+
+		it("lapses the stage back to 1 after ComboResetSeconds with no further throw", function()
+			local mirror = PredictionMirror.New()
+			mirror:OnAttackStarted(basicStarted(nil), T)
+			expect(mirror:PredictedSwing(T + Constants.Combat.ComboResetSeconds + 0.05).StageIndex).to.equal(1)
+		end)
+
+		it("resets to stage 1 if the next throw itself arrives after the window already lapsed", function()
+			local mirror = PredictionMirror.New()
+			mirror:OnAttackStarted(basicStarted(nil), T) -- stage 1 thrown
+			mirror:OnAttackStarted(basicStarted(nil), T + 0.1) -- stage 2 thrown
+			-- A real pause -- past ComboResetSeconds since the last throw's own refreshed expiry --
+			-- before the NEXT throw's own confirm echo arrives.
+			local resumedAt = T + 0.1 + Constants.Combat.ComboResetSeconds + 0.1
+			mirror:OnAttackStarted(basicStarted(nil), resumedAt)
+			-- The resumed throw itself becomes stage 1 (post-lapse-reset advance); the mirror now
+			-- predicts stage 2 for the FOLLOWING press.
+			expect(mirror:PredictedSwing(resumedAt + 0.05).StageIndex).to.equal(2)
+		end)
+
+		it("lapses the finisher gate back to needing 3 fresh landed hits after ComboResetSeconds", function()
 			local mirror = PredictionMirror.New()
 			mirror:OnOwnSwingConnected("Basic2", false, T)
-			expect(mirror:PredictedSwing(T + Constants.Combat.ComboResetSeconds + 0.05).StageIndex).to.equal(1)
+			expect(mirror:PredictedSwing(T + Constants.Combat.ComboResetSeconds + 0.05).IsFinisher).to.equal(false)
 		end)
 
 		it("resets at finisher THROW time, mirroring the server", function()
 			local mirror = PredictionMirror.New()
 			mirror:OnOwnSwingConnected("Basic3", false, T)
 			mirror:OnAttackStarted(basicStarted("Uppercut"), T + 0.1)
-			expect(mirror:PredictedSwing(T + 0.2).StageIndex).to.equal(1)
+			local swing = mirror:PredictedSwing(T + 0.2)
+			expect(swing.StageIndex).to.equal(1)
+			expect(swing.IsFinisher).to.equal(false)
 		end)
 
 		it("resets on weapon swap, mirroring handleSwapWeaponRequest", function()
 			local mirror = PredictionMirror.New()
-			mirror:OnOwnSwingConnected("Basic2", false, T)
+			mirror:OnAttackStarted(basicStarted(nil), T)
+			mirror:OnOwnSwingConnected("Basic2", false, T + 0.1)
 			mirror:OnWeaponChanged()
-			expect(mirror:PredictedSwing(T + 0.1).StageIndex).to.equal(1)
+			local swing = mirror:PredictedSwing(T + 0.2)
+			expect(swing.StageIndex).to.equal(1)
+			expect(swing.IsFinisher).to.equal(false)
 		end)
 	end)
 
@@ -362,13 +425,17 @@ return function()
 
 		it("does not stomp the Basic combo mirror -- AirSlam is fully independent", function()
 			local mirror = PredictionMirror.New()
-			mirror:OnOwnSwingConnected("Basic2", false, T)
+			mirror:OnAttackStarted(basicStarted(nil), T)
+			mirror:OnOwnSwingConnected("Basic2", false, T + 0.05)
 			mirror:OnAttackStarted(airSlamStarted(), T + 0.1)
-			-- The grounded M1 combo count is untouched by an air slam throw (unlike a real M1
-			-- finisher, which resets it) -- still mid-string at stage 3 once the shared commitment
-			-- lock AirSlam's own throw armed (T + 0.1 + 0.87 commitment) clears.
+			-- The grounded M1 combo state (both the landed count and the swing-index cycle) is
+			-- untouched by an air slam throw (unlike a real M1 finisher, which resets both) -- still
+			-- mid-string once the shared commitment lock AirSlam's own throw armed (T + 0.1 + 0.87
+			-- commitment) clears.
 			local afterCommitment = T + 0.1 + 0.35 + 0.22 + 0.3 + 0.05
-			expect(mirror:PredictedSwing(afterCommitment).StageIndex).to.equal(3)
+			local swing = mirror:PredictedSwing(afterCommitment)
+			expect(swing.IsFinisher).to.equal(false)
+			expect(swing.StageIndex).to.equal(2)
 			expect(mirror:EvaluateBasic(afterCommitment)).to.equal("Predict")
 		end)
 

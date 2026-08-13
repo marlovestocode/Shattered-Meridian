@@ -58,7 +58,7 @@ type AirComboTarget = CombatTypes.AirComboTarget
 -- closures on every single hit.
 export type Hooks = {
 	SendFeedback: (Player, Types.CombatFeedbackPayload) -> (),
-	ApplyAirCombo: (Player, CombatState, AirComboTarget, string, number) -> (),
+	ApplyAirCombo: (Player, CombatState, AirComboTarget, string, boolean, number) -> (),
 }
 
 local hooks: Hooks? = nil
@@ -307,6 +307,14 @@ function DummyCombat.ResolveHit(
 	-- attackDebugName (definition.DebugName) is passed through here so PredictionMirror.
 	-- OnOwnSwingConnected on the attacker's own client can see it (mirrored combo landing count,
 	-- air-combo mirror window) -- see resolveHitAgainstTarget's identical call in CombatSystem.lua.
+	-- finisherVariant echo mirrors that same call site's own gate (not blocked -- a dummy hit is
+	-- always resolved as "None" defense, dummies have no block/parry concept -- and the dummy's own
+	-- post-damage Health already reflects `damage` above, matching ApplyFinisherPhysics's own
+	-- "Health <= 0" guard just below).
+	local resolvedFinisherVariant: Types.FinisherVariant? = if finisherVariant
+			and dummyState.humanoid.Health > 0
+		then finisherVariant
+		else nil
 	local payload = FeedbackPayload.Build(
 		"Hit",
 		attackerPlayer,
@@ -315,7 +323,9 @@ function DummyCombat.ResolveHit(
 		postureDamage,
 		isHeavy,
 		targetPosition,
-		definition.DebugName
+		definition.DebugName,
+		nil,
+		resolvedFinisherVariant
 	)
 	hooks.SendFeedback(attackerPlayer, payload)
 
@@ -347,20 +357,27 @@ function DummyCombat.ResolveHit(
 
 	-- Air combo, solo-testable against a dummy -- see AirComboTarget's own header in CombatTypes.lua
 	-- (unified across player/dummy targets). Same Basic-category-only gate the player-target path
-	-- uses (never Heavy, never the M1 finisher, which already has its own launch above).
+	-- uses (never Heavy, never the M1 finisher, which already has its own launch above). startsAirCombo
+	-- mirrors resolveHitAgainstTarget's identical computation in CombatSystem.lua -- see AirCombo.
+	-- Apply's own header for the DashPunch-or-StartsAirCombo launch condition this feeds.
 	if not isHeavy and not finisherVariant then
 		local resetBuffer = Constants.Debug.TrainingDummy.LaunchResetBufferSeconds
+		local startsAirCombo = definition.Knockback ~= nil and definition.Knockback.StartsAirCombo == true
 		-- Dummy-target adapter -- see AirComboTarget's own header for what each closure hides.
 		-- clearBlocking is a no-op (DummyState has no `blocking` field -- a dummy never blocks);
-		-- setRagdollExpiry is a flat overwrite (no math.max) plus the launch-reset buffer, matching
-		-- this function's own finisher-reset scheduling just above; applyDamage is a plain TakeDamage
-		-- (no godmode concept, no vitals stream to sync for a dummy).
+		-- setHeldExpiry is a no-op too -- `player = nil` below is what AirCombo.Apply itself branches
+		-- on to keep a dummy fully ragdolled the whole sequence, so this closure is never actually
+		-- called, it just satisfies the AirComboTarget type; setRagdollExpiry is a flat overwrite (no
+		-- math.max) plus the launch-reset buffer, matching this function's own finisher-reset
+		-- scheduling just above; applyDamage is a plain TakeDamage (no godmode concept, no vitals
+		-- stream to sync for a dummy).
 		hooks.ApplyAirCombo(attackerPlayer, attackerState, {
 			model = dummyState.model,
 			humanoid = dummyState.humanoid,
 			rootPart = dummyState.rootPart,
 			player = nil,
 			clearBlocking = function() end,
+			setHeldExpiry = function() end,
 			setRagdollExpiry = function(expiry: number)
 				dummyState.ragdollResetAt = expiry + resetBuffer
 			end,
@@ -373,12 +390,14 @@ function DummyCombat.ResolveHit(
 			clearAirComboTarget = function()
 				attackerState.AirCombo.airComboDummyTarget = nil
 			end,
-			-- A dummy has no client to request an escape with -- no-op.
-			openAirTechWindow = function() end,
 			applyDamage = function(amount: number)
 				dummyState.humanoid:TakeDamage(amount)
 			end,
-		}, definition.DebugName, os.clock())
+			-- onGroundSlam intentionally omitted (nil) -- a dummy has no TargetUserId for
+			-- SlamImpactVFX.BeginWatch to resolve a live Player character from, so there is no
+			-- client-side ground-impact watch to trigger regardless (see that module's own header on
+			-- why it's scoped to real players only). AirCombo.lua already guards this field as optional.
+		}, definition.DebugName, startsAirCombo, os.clock())
 	end
 end
 

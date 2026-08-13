@@ -8,18 +8,21 @@ local Types = require(ReplicatedStorage.Shared.Types)
 type PlayerProfile = Types.PlayerProfile
 
 -- Pure-logic surface (CreateDefaultProfile/CopyProfile/EncodeProfile/DecodeProfile/MigrateRecord/
--- ApplyMutation) never touches the DataStore or a live Player -- Init() is never called in this
--- spec file, so `dataStore` stays nil and `loadedProfiles` stays empty throughout, same
--- "requiring the module never calls Init()" contract BugReportSystem.spec/ModerationSystem.spec
--- already rely on. Player-KEYED wrappers (IsLoaded/GetProfile/Transform/WaitForProfile) are
--- exercised below using a plain table standing in for Player (same trick RateLimiter.spec.lua
--- already uses) -- valid because every one of those functions only ever uses a Player as an
--- opaque table key or reads `.Name` for a log line (which safely returns nil on a plain table),
--- never anything Player-specific like :Kick() or .UserId. Anything that genuinely needs a live
--- Player/real DataStore (loadProfile/saveProfile/the PlayerAdded-PlayerRemoving wiring/Transform's
--- actual dirty-then-saved round trip) is Studio/live-server verification only, the same
--- already-accepted gap AdminActionSystem.spec.lua/ModerationSystem.spec.lua document for their own
--- Player-keyed state.
+-- ApplyMutation, and the cross-server session-lock/WriteGeneration decision functions
+-- IsLockHeldByOther/ComputeLoadClaim/ComputeLockRelease/ComputeSaveWrite) never touches the
+-- DataStore or a live Player -- Init() is never called in this spec file, so `dataStore` stays nil
+-- and `loadedProfiles` stays empty throughout, same "requiring the module never calls Init()"
+-- contract BugReportSystem.spec/ModerationSystem.spec already rely on. Player-KEYED wrappers
+-- (IsLoaded/GetProfile/Transform/WaitForProfile) are exercised below using a plain table standing in
+-- for Player (same trick RateLimiter.spec.lua already uses) -- valid because every one of those
+-- functions only ever uses a Player as an opaque table key or reads `.Name` for a log line (which
+-- safely returns nil on a plain table), never anything Player-specific like :Kick() or .UserId.
+-- Anything that genuinely needs a live Player/real DataStore (loadProfile/saveProfile -- including
+-- the actual claim-retry-with-backoff loop and the two UpdateAsync round trips those pure functions
+-- above are only the decision logic FOR -- the PlayerAdded-PlayerRemoving wiring, Transform's actual
+-- dirty-then-saved round trip) is Studio/live-server verification only, the same already-accepted
+-- gap AdminActionSystem.spec.lua/ModerationSystem.spec.lua document for their own Player-keyed
+-- state.
 
 return function()
 	describe("PlayerDataSystem.CreateDefaultProfile", function()
@@ -38,6 +41,14 @@ return function()
 			expect(profile.qiDeviationRisk).to.equal(0)
 			expect(profile.factionStanding).to.equal(0)
 			expect(profile.hasAscended).to.equal(false)
+			expect(profile.meridianXp).to.equal(0)
+			expect(profile.unlockedEmoteIds.Wave).to.equal(true)
+			expect(profile.unlockedEmoteIds.VictoryPose).to.equal(nil)
+			expect(#profile.emoteLoadout).to.equal(8)
+			expect(profile.emoteLoadout[1]).to.equal("Wave")
+			expect(next(profile.settings.Keybinds)).to.equal(nil)
+			expect(next(profile.settings.GamepadKeybinds)).to.equal(nil)
+			expect(profile.settings.Autorun).to.equal(false)
 		end)
 	end)
 
@@ -83,6 +94,18 @@ return function()
 			expect(original.artMastery["art-a"]).to.equal(3)
 			expect(original.artMastery["art-b"]).to.equal(nil)
 		end)
+
+		it("mutating the copy's settings.Keybinds never affects the original", function()
+			local original = makeProfile()
+			original.settings.Keybinds.Dash = { KeyCode = Enum.KeyCode.Q }
+			local copy = PlayerDataSystem.CopyProfile(original)
+
+			copy.settings.Keybinds.Dash = { KeyCode = Enum.KeyCode.E }
+			copy.settings.Autorun = true
+
+			expect(original.settings.Keybinds.Dash.KeyCode).to.equal(Enum.KeyCode.Q)
+			expect(original.settings.Autorun).to.equal(false)
+		end)
 	end)
 
 	describe("PlayerDataSystem.EncodeProfile / DecodeProfile round trip", function()
@@ -106,6 +129,11 @@ return function()
 			original.qiDeviationRisk = 0.5
 			original.factionStanding = -10
 			original.hasAscended = true
+			original.unlockedEmoteIds = { Wave = true, VictoryPose = true }
+			original.emoteLoadout = { "Wave", "VictoryPose" }
+			original.settings.Keybinds.Dash = { KeyCode = Enum.KeyCode.E }
+			original.settings.GamepadKeybinds.BasicAttack = { KeyCode = Enum.KeyCode.ButtonX }
+			original.settings.Autorun = true
 
 			local encoded = PlayerDataSystem.EncodeProfile(original)
 			local decoded = PlayerDataSystem.DecodeProfile(42, encoded)
@@ -124,6 +152,114 @@ return function()
 			expect(decodedProfile.qiDeviationRisk).to.equal(0.5)
 			expect(decodedProfile.factionStanding).to.equal(-10)
 			expect(decodedProfile.hasAscended).to.equal(true)
+			expect(decodedProfile.unlockedEmoteIds.Wave).to.equal(true)
+			expect(decodedProfile.unlockedEmoteIds.VictoryPose).to.equal(true)
+			expect(#decodedProfile.emoteLoadout).to.equal(2)
+			expect(decodedProfile.emoteLoadout[1]).to.equal("Wave")
+			expect(decodedProfile.settings.Keybinds.Dash.KeyCode).to.equal(Enum.KeyCode.E)
+			expect(decodedProfile.settings.GamepadKeybinds.BasicAttack.KeyCode).to.equal(Enum.KeyCode.ButtonX)
+			expect(decodedProfile.settings.Autorun).to.equal(true)
+		end)
+	end)
+
+	describe("PlayerDataSystem.DecodeProfile (settings -- defensive decoding)", function()
+		it("defaults to no overrides and Autorun off when settings is missing", function()
+			local decoded = PlayerDataSystem.DecodeProfile(1, {})
+			local profile = decoded :: PlayerProfile
+			expect(next(profile.settings.Keybinds)).to.equal(nil)
+			expect(next(profile.settings.GamepadKeybinds)).to.equal(nil)
+			expect(profile.settings.Autorun).to.equal(false)
+		end)
+
+		it("drops a HotbarSlot override even if one is somehow present in the stored record", function()
+			local decoded = PlayerDataSystem.DecodeProfile(1, {
+				settings = {
+					Keybinds = { HotbarSlot1 = { KeyCode = "Q" } },
+					GamepadKeybinds = {},
+					Autorun = false,
+				},
+			})
+			local profile = decoded :: PlayerProfile
+			expect(profile.settings.Keybinds.HotbarSlot1).to.equal(nil)
+		end)
+
+		it("drops an override for an action that no longer exists", function()
+			local decoded = PlayerDataSystem.DecodeProfile(1, {
+				settings = {
+					Keybinds = { NotARealAction = { KeyCode = "Q" } },
+					GamepadKeybinds = {},
+					Autorun = false,
+				},
+			})
+			local profile = decoded :: PlayerProfile
+			expect((profile.settings.Keybinds :: any).NotARealAction).to.equal(nil)
+		end)
+
+		it("drops a malformed keybind (neither KeyCode nor UserInputType) rather than throwing", function()
+			local decoded = PlayerDataSystem.DecodeProfile(1, {
+				settings = {
+					Keybinds = { Dash = { SomethingElse = true } },
+					GamepadKeybinds = {},
+					Autorun = false,
+				},
+			})
+			local profile = decoded :: PlayerProfile
+			expect(profile.settings.Keybinds.Dash).to.equal(nil)
+		end)
+
+		it("drops an unrecognized KeyCode name rather than throwing", function()
+			local decoded = PlayerDataSystem.DecodeProfile(1, {
+				settings = {
+					Keybinds = { Dash = { KeyCode = "NotARealKeyCode" } },
+					GamepadKeybinds = {},
+					Autorun = false,
+				},
+			})
+			local profile = decoded :: PlayerProfile
+			expect(profile.settings.Keybinds.Dash).to.equal(nil)
+		end)
+
+		it("decodes a valid override correctly", function()
+			local decoded = PlayerDataSystem.DecodeProfile(1, {
+				settings = {
+					Keybinds = { Dash = { KeyCode = "E" } },
+					GamepadKeybinds = {},
+					Autorun = true,
+				},
+			})
+			local profile = decoded :: PlayerProfile
+			expect(profile.settings.Keybinds.Dash.KeyCode).to.equal(Enum.KeyCode.E)
+			expect(profile.settings.Autorun).to.equal(true)
+		end)
+	end)
+
+	describe("PlayerDataSystem.DecodeProfile (unlockedEmoteIds/emoteLoadout defaults)", function()
+		it("falls back to every Default-unlock emote when unlockedEmoteIds is missing", function()
+			local decoded = PlayerDataSystem.DecodeProfile(1, {})
+			local profile = decoded :: PlayerProfile
+			expect(profile.unlockedEmoteIds.Wave).to.equal(true)
+			expect(profile.unlockedEmoteIds.VictoryPose).to.equal(nil)
+		end)
+
+		it("falls back to the starter loadout when emoteLoadout is missing", function()
+			local decoded = PlayerDataSystem.DecodeProfile(1, {})
+			local profile = decoded :: PlayerProfile
+			expect(#profile.emoteLoadout).to.equal(8)
+		end)
+
+		it("filters non-string entries out of a corrupt unlockedEmoteIds table", function()
+			local decoded =
+				PlayerDataSystem.DecodeProfile(1, { unlockedEmoteIds = { Wave = true, Bow = "not-true", [42] = true } })
+			local profile = decoded :: PlayerProfile
+			expect(profile.unlockedEmoteIds.Wave).to.equal(true)
+			expect(profile.unlockedEmoteIds.Bow).to.equal(nil)
+		end)
+
+		it("filters non-string entries out of a corrupt emoteLoadout array", function()
+			local decoded = PlayerDataSystem.DecodeProfile(1, { emoteLoadout = { "Wave", 42, true } })
+			local profile = decoded :: PlayerProfile
+			expect(#profile.emoteLoadout).to.equal(1)
+			expect(profile.emoteLoadout[1]).to.equal("Wave")
 		end)
 	end)
 
@@ -235,9 +371,9 @@ return function()
 
 	describe("PlayerDataSystem.MigrateRecord", function()
 		it("returns an already-current-version record unchanged", function()
-			local raw = { SchemaVersion = 1, Profile = { tier = 3 } }
+			local raw = { SchemaVersion = 3, Profile = { tier = 3 } }
 			local migrated = PlayerDataSystem.MigrateRecord(raw)
-			expect(migrated.SchemaVersion).to.equal(1)
+			expect(migrated.SchemaVersion).to.equal(3)
 			expect((migrated.Profile :: any).tier).to.equal(3)
 		end)
 
@@ -246,12 +382,239 @@ return function()
 			local migrated = PlayerDataSystem.MigrateRecord(raw)
 			expect(migrated.SchemaVersion).never.to.equal(nil)
 		end)
+
+		it(
+			"migrates a pre-Emote-System v1 record all the way to current, backfilling unlockedEmoteIds/emoteLoadout/settings",
+			function()
+				local raw = { SchemaVersion = 1, Profile = { tier = 3 } }
+				local migrated = PlayerDataSystem.MigrateRecord(raw)
+				local profile = migrated.Profile :: any
+
+				expect(migrated.SchemaVersion).to.equal(3)
+				expect(profile.tier).to.equal(3)
+				expect(next(profile.unlockedEmoteIds)).never.to.equal(nil)
+				expect(profile.unlockedEmoteIds.Wave).to.equal(true)
+				expect(#profile.emoteLoadout).to.equal(8)
+				expect(profile.settings).never.to.equal(nil)
+				expect(next(profile.settings.Keybinds)).to.equal(nil)
+				expect(profile.settings.Autorun).to.equal(false)
+			end
+		)
+
+		it("does not overwrite an already-present unlockedEmoteIds/emoteLoadout on a v1 record", function()
+			local raw = {
+				SchemaVersion = 1,
+				Profile = {
+					tier = 1,
+					unlockedEmoteIds = { Wave = true },
+					emoteLoadout = { "Wave" },
+				},
+			}
+			local migrated = PlayerDataSystem.MigrateRecord(raw)
+			local profile = migrated.Profile :: any
+
+			expect(next(profile.unlockedEmoteIds, next(profile.unlockedEmoteIds))).to.equal(nil)
+			expect(#profile.emoteLoadout).to.equal(1)
+		end)
+
+		it("migrates a pre-Settings-System v2 record to v3, backfilling settings", function()
+			local raw = {
+				SchemaVersion = 2,
+				Profile = {
+					tier = 5,
+					unlockedEmoteIds = { Wave = true },
+					emoteLoadout = { "Wave" },
+				},
+			}
+			local migrated = PlayerDataSystem.MigrateRecord(raw)
+			local profile = migrated.Profile :: any
+
+			expect(migrated.SchemaVersion).to.equal(3)
+			expect(profile.tier).to.equal(5)
+			expect(profile.settings).never.to.equal(nil)
+			expect(next(profile.settings.Keybinds)).to.equal(nil)
+			expect(next(profile.settings.GamepadKeybinds)).to.equal(nil)
+			expect(profile.settings.Autorun).to.equal(false)
+		end)
+
+		it("does not overwrite an already-present settings field on a v2 record", function()
+			local raw = {
+				SchemaVersion = 2,
+				Profile = {
+					tier = 1,
+					settings = { Keybinds = { Dash = { KeyCode = "E" } }, GamepadKeybinds = {}, Autorun = true },
+				},
+			}
+			local migrated = PlayerDataSystem.MigrateRecord(raw)
+			local profile = migrated.Profile :: any
+
+			expect(profile.settings.Autorun).to.equal(true)
+			expect(profile.settings.Keybinds.Dash.KeyCode).to.equal("E")
+		end)
+	end)
+
+	-- Cross-server session lock + WriteGeneration -- the 2026-08 performance audit's data-loss finding
+	-- (server A's PlayerRemoving save and server B's load for the same player, via ServerHopSystem's
+	-- TeleportAsync, can genuinely overlap in wall-clock time). Every function below is pure (plain
+	-- values in, no DataStore/Player) -- see PlayerDataSystem.lua's own "Cross-server session lock +
+	-- WriteGeneration" section header for the full design.
+	describe("PlayerDataSystem.IsLockHeldByOther", function()
+		it("is false when there is no lock at all", function()
+			expect(PlayerDataSystem.IsLockHeldByOther(nil, "server-a", 1000, 300)).to.equal(false)
+		end)
+
+		it("is false for a lock already held by the same JobId", function()
+			local lock = { JobId = "server-a", LockedAt = 999 }
+			expect(PlayerDataSystem.IsLockHeldByOther(lock, "server-a", 1000, 300)).to.equal(false)
+		end)
+
+		it("is true for a live lock held by a different JobId", function()
+			local lock = { JobId = "server-b", LockedAt = 999 }
+			expect(PlayerDataSystem.IsLockHeldByOther(lock, "server-a", 1000, 300)).to.equal(true)
+		end)
+
+		it("is false for a foreign lock older than staleAfterSeconds -- treated as abandoned", function()
+			local lock = { JobId = "server-b", LockedAt = 100 }
+			expect(PlayerDataSystem.IsLockHeldByOther(lock, "server-a", 1000, 300)).to.equal(false)
+		end)
+
+		it("is true for a foreign lock exactly at the staleness boundary (not yet stale)", function()
+			local lock = { JobId = "server-b", LockedAt = 700 }
+			-- now(1000) - LockedAt(700) == 300 == staleAfterSeconds -- strictly less-than is what
+			-- still counts as live, so exactly at the boundary is already stale.
+			expect(PlayerDataSystem.IsLockHeldByOther(lock, "server-a", 1000, 300)).to.equal(false)
+		end)
+
+		it("treats a malformed lock shape (missing/wrong-typed fields) as absent, not permanent", function()
+			expect(PlayerDataSystem.IsLockHeldByOther({ JobId = "server-b" }, "server-a", 1000, 300)).to.equal(false)
+			expect(PlayerDataSystem.IsLockHeldByOther({ LockedAt = 999 }, "server-a", 1000, 300)).to.equal(false)
+			expect(PlayerDataSystem.IsLockHeldByOther("not-a-table", "server-a", 1000, 300)).to.equal(false)
+		end)
+	end)
+
+	describe("PlayerDataSystem.ComputeLoadClaim", function()
+		it("claims a lock-only stub for a never-written key (old == nil)", function()
+			local result = PlayerDataSystem.ComputeLoadClaim(nil, "server-a", 1000, 300) :: any
+			expect(result.Lock.JobId).to.equal("server-a")
+			expect(result.Lock.LockedAt).to.equal(1000)
+			expect(result.Profile).to.equal(nil)
+		end)
+
+		it("claims an existing unlocked record without touching Profile/SchemaVersion", function()
+			local old = { SchemaVersion = 3, Profile = { tier = 5 }, WriteGeneration = 2 }
+			local result = PlayerDataSystem.ComputeLoadClaim(old, "server-a", 1000, 300) :: any
+			expect(result.Lock.JobId).to.equal("server-a")
+			expect(result.SchemaVersion).to.equal(3)
+			expect(result.Profile.tier).to.equal(5)
+			expect(result.WriteGeneration).to.equal(2)
+		end)
+
+		it("re-claims (refreshes) a lock already held by the same server", function()
+			local old = { Profile = { tier = 1 }, Lock = { JobId = "server-a", LockedAt = 500 } }
+			local result = PlayerDataSystem.ComputeLoadClaim(old, "server-a", 1000, 300) :: any
+			expect(result.Lock.JobId).to.equal("server-a")
+			expect(result.Lock.LockedAt).to.equal(1000)
+		end)
+
+		it("refuses and returns the record completely untouched when a live foreign lock is held", function()
+			local old = { Profile = { tier = 7 }, Lock = { JobId = "server-b", LockedAt = 999 } }
+			local result = PlayerDataSystem.ComputeLoadClaim(old, "server-a", 1000, 300) :: any
+			expect(result.Lock.JobId).to.equal("server-b")
+			expect(result.Lock.LockedAt).to.equal(999)
+			expect(result.Profile.tier).to.equal(7)
+		end)
+
+		it("claims when a foreign lock has gone stale", function()
+			local old = { Profile = { tier = 1 }, Lock = { JobId = "server-b", LockedAt = 100 } }
+			local result = PlayerDataSystem.ComputeLoadClaim(old, "server-a", 1000, 300) :: any
+			expect(result.Lock.JobId).to.equal("server-a")
+		end)
+
+		it("passes a non-table, non-nil old value through completely untouched", function()
+			local result = PlayerDataSystem.ComputeLoadClaim("corrupt-string-value", "server-a", 1000, 300)
+			expect(result).to.equal("corrupt-string-value")
+		end)
+	end)
+
+	describe("PlayerDataSystem.ComputeLockRelease", function()
+		it("clears a lock held by the given JobId", function()
+			local old = { Profile = { tier = 1 }, Lock = { JobId = "server-a", LockedAt = 500 } }
+			local result = PlayerDataSystem.ComputeLockRelease(old, "server-a") :: any
+			expect(result.Lock).to.equal(nil)
+			expect(result.Profile.tier).to.equal(1)
+		end)
+
+		it("does not touch a lock held by a different JobId", function()
+			local old = { Profile = { tier = 1 }, Lock = { JobId = "server-b", LockedAt = 500 } }
+			local result = PlayerDataSystem.ComputeLockRelease(old, "server-a") :: any
+			expect(result.Lock.JobId).to.equal("server-b")
+		end)
+
+		it("is a no-op when there is no lock at all", function()
+			local old = { Profile = { tier = 1 } }
+			local result = PlayerDataSystem.ComputeLockRelease(old, "server-a") :: any
+			expect(result.Lock).to.equal(nil)
+			expect(result.Profile.tier).to.equal(1)
+		end)
+
+		it("passes a non-table old value through untouched", function()
+			expect(PlayerDataSystem.ComputeLockRelease("corrupt", "server-a")).to.equal("corrupt")
+		end)
+	end)
+
+	describe("PlayerDataSystem.ComputeSaveWrite", function()
+		local encodedProfile = { tier = 9 }
+
+		it("commits and bumps WriteGeneration when nothing else has saved since this server loaded", function()
+			local old = { WriteGeneration = 2 }
+			local record, outcome =
+				PlayerDataSystem.ComputeSaveWrite(old, 2, "server-a", 1000, encodedProfile, 3, false)
+			expect(outcome).to.equal("Saved")
+			expect((record :: any).WriteGeneration).to.equal(3)
+			expect((record :: any).Profile).to.equal(encodedProfile)
+			expect((record :: any).SchemaVersion).to.equal(3)
+		end)
+
+		it("commits generation 1 against a never-written key (old == nil, loadedGeneration 0)", function()
+			local record, outcome =
+				PlayerDataSystem.ComputeSaveWrite(nil, 0, "server-a", 1000, encodedProfile, 3, false)
+			expect(outcome).to.equal("Saved")
+			expect((record :: any).WriteGeneration).to.equal(1)
+		end)
+
+		it(
+			"rejects -- and touches nothing -- when the currently-stored generation is already ahead of what this server loaded",
+			function()
+				-- The core regression this whole mechanism exists to prevent: server A loaded at
+				-- generation 2, server B has since saved (bumping it to 3) -- A's write must be refused,
+				-- not silently overwrite B's newer data.
+				local old = { WriteGeneration = 3, Profile = { tier = 999 }, SchemaVersion = 3 }
+				local record, outcome =
+					PlayerDataSystem.ComputeSaveWrite(old, 2, "server-a", 1000, encodedProfile, 3, false)
+				expect(outcome).to.equal("Rejected")
+				expect((record :: any).WriteGeneration).to.equal(3)
+				expect((record :: any).Profile.tier).to.equal(999)
+			end
+		)
+
+		it("clears the Lock field when releaseLock is true", function()
+			local old = { WriteGeneration = 0 }
+			local record = PlayerDataSystem.ComputeSaveWrite(old, 0, "server-a", 1000, encodedProfile, 3, true)
+			expect((record :: any).Lock).to.equal(nil)
+		end)
+
+		it("refreshes the Lock under this server's JobId when releaseLock is false", function()
+			local old = { WriteGeneration = 0 }
+			local record = PlayerDataSystem.ComputeSaveWrite(old, 0, "server-a", 1000, encodedProfile, 3, false)
+			expect((record :: any).Lock.JobId).to.equal("server-a")
+			expect((record :: any).Lock.LockedAt).to.equal(1000)
+		end)
 	end)
 
 	describe("PlayerDataSystem.ApplyMutation", function()
 		it("applies the mutator and returns true", function()
 			local stored: Types.StoredPlayerProfile =
-				{ SchemaVersion = 1, Profile = PlayerDataSystem.CreateDefaultProfile(1) }
+				{ SchemaVersion = 1, Profile = PlayerDataSystem.CreateDefaultProfile(1), WriteGeneration = 0 }
 			local applied = PlayerDataSystem.ApplyMutation(stored, function(profile)
 				profile.tier = 3
 				profile.corruption = 10
@@ -264,7 +627,7 @@ return function()
 
 		it("returns false and never propagates an error when the mutator throws", function()
 			local stored: Types.StoredPlayerProfile =
-				{ SchemaVersion = 1, Profile = PlayerDataSystem.CreateDefaultProfile(1) }
+				{ SchemaVersion = 1, Profile = PlayerDataSystem.CreateDefaultProfile(1), WriteGeneration = 0 }
 
 			local ok, applied = pcall(function()
 				return PlayerDataSystem.ApplyMutation(stored, function(_profile)

@@ -190,6 +190,31 @@ return function()
 		end)
 	end)
 
+	-- ResolveArrivalSpawnPath is the pure "which race maps to which configured Workspace path" lookup
+	-- split out of resolveArrivalCFrame specifically so it's testable without a live Workspace -- see
+	-- that function's own header. Only the lookup itself is covered here; the WaitForChild resolution
+	-- built on top of it stays Studio/live-server-only, same split as every other Player-keyed section
+	-- of this file.
+	describe("CharacterCreationSystem.ResolveArrivalSpawnPath", function()
+		it("returns a distinct path per race, each ending in that race's own RaceId", function()
+			for _, raceId in ipairs(Constants.CharacterCreation.RaceIds) do
+				local path = CharacterCreationSystem.ResolveArrivalSpawnPath(raceId)
+				expect(path[#path]).to.equal(raceId)
+			end
+		end)
+
+		it("matches Constants.CharacterCreation.ArrivalSpawnPaths exactly, not a re-derived copy", function()
+			for _, raceId in ipairs(Constants.CharacterCreation.RaceIds) do
+				local expectedPath = Constants.CharacterCreation.ArrivalSpawnPaths[raceId]
+				local path = CharacterCreationSystem.ResolveArrivalSpawnPath(raceId)
+				expect(#path).to.equal(#expectedPath)
+				for index, segment in ipairs(expectedPath) do
+					expect(path[index]).to.equal(segment)
+				end
+			end
+		end)
+	end)
+
 	describe("CharacterCreationSystem.ValidateDisplayName", function()
 		it("accepts a plain ASCII name within bounds", function()
 			local name, reason = CharacterCreationSystem.ValidateDisplayName("Wren Ashfall")

@@ -83,10 +83,18 @@ end
 
 local pool = FXPool.New(makeHighlight, resetHighlight, CONFIG.PoolMaxSize)
 
--- Acquires a pooled Highlight, colours it for `kind`, and snaps it visible on `character`. Returns
--- the highlight, or nil if the pool is at cap / the character is gone (both harmless -- the caller
--- just drops the flash). Shared by Flash and FlashHold.
-local function acquireAndShow(character: Model, kind: FlashKind): Highlight?
+-- Acquires a pooled Highlight, colours it for `kind`, and shows it on `character`. Returns the
+-- highlight, or nil if the pool is at cap / the character is gone (both harmless -- the caller just
+-- drops the flash). Shared by Flash and FlashHold.
+--
+-- `fadeInSeconds` (default 0, an instant pop) is deliberately opt-in per-call rather than a
+-- kind-based lookup: Flash's one-shot impact reactions (Hit/Parry/PostureBreak) want the instant pop
+-- unconditionally -- a fast snap reads as "contact, right now," the same reasoning
+-- Constants.FX.Animation.Combat.SwingFadeSeconds' comment gives for one-shot swings. FlashHold's
+-- ParryWindow tell passes Constants.FX.HitFlash.HoldFadeInSeconds explicitly (see that constant's own
+-- header) since it opens on every parry-armed block press, not just a landed hit, and an instant pop
+-- fired that often reads as a flicker rather than a deliberate reveal.
+local function acquireAndShow(character: Model, kind: FlashKind, fadeInSeconds: number?): Highlight?
 	if not character.Parent then
 		return nil
 	end
@@ -98,10 +106,22 @@ local function acquireAndShow(character: Model, kind: FlashKind): Highlight?
 	local color = KIND_COLOR[kind] or CONFIG.HitColor
 	highlight.FillColor = color
 	highlight.OutlineColor = color
-	highlight.FillTransparency = 0.45
-	highlight.OutlineTransparency = 0
 	highlight.Adornee = character
 	highlight.Parent = getHolder()
+	if fadeInSeconds and fadeInSeconds > 0 then
+		-- Start fully transparent and tween in, instead of snapping straight to visible.
+		highlight.FillTransparency = 1
+		highlight.OutlineTransparency = 1
+		local fadeIn = TweenService:Create(
+			highlight,
+			TweenInfo.new(fadeInSeconds, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
+			{ FillTransparency = 0.45, OutlineTransparency = 0 }
+		)
+		fadeIn:Play()
+	else
+		highlight.FillTransparency = 0.45
+		highlight.OutlineTransparency = 0
+	end
 	return highlight
 end
 
@@ -126,11 +146,13 @@ function HitFlash.Flash(character: Model, kind: FlashKind): ()
 	end
 end
 
--- HELD flash for the parry-window tell: stays fully visible for `holdSeconds` (the parry window's
--- duration) so an attacker can read "they're parry-armed" the whole time it matters, THEN fades.
--- Guards the highlight for having been released/destroyed if the character despawned mid-hold.
+-- HELD flash for the parry-window tell: eases in over CONFIG.HoldFadeInSeconds (see that constant's
+-- own header for why this one doesn't want Flash's instant pop), stays fully visible for the rest of
+-- `holdSeconds` (the parry window's duration) so an attacker can read "they're parry-armed" the whole
+-- time it matters, THEN fades. Guards the highlight for having been released/destroyed if the
+-- character despawned mid-hold.
 function HitFlash.FlashHold(character: Model, kind: FlashKind, holdSeconds: number): ()
-	local highlight = acquireAndShow(character, kind)
+	local highlight = acquireAndShow(character, kind, CONFIG.HoldFadeInSeconds)
 	if not highlight then
 		return
 	end

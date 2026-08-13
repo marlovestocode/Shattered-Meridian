@@ -9,9 +9,12 @@
 	Block/Parry, four directional one-shot Dash clips plus the distinct DashPunch clip for a
 	double-tap-W throw specifically, one non-directional Slide clip (chained off
 	Sprint -- see PlayPredictedSlide), three Hit1/2/3 reaction clips played on the DEFENDER when
-	an opponent's Basic1/2/3 lands, and Feint's own swing-cancel (CancelActiveSwing -- stops whatever
+	an opponent's Basic1/2/3 lands, Feint's own swing-cancel (CancelActiveSwing -- stops whatever
 	swing/finisher/AirSlam clip is currently playing, optionally crossfading into a dedicated Feint
-	recoil clip) on their current character's Animator.
+	recoil clip), and a Move Creation System move's full authored animation TIMELINE
+	(PlayCustomMoveTimeline -- an ordered, independently-timed multi-clip schedule resolved by
+	Shared/AnimationTimeline.lua, distinct from the single-clip PlayExplicitAnimation below it) on
+	their current character's Animator.
 	Roblox replicates a played AnimationTrack to every other client automatically once it's loaded
 	and played through the OWNING player's own Animator, so triggering these from this client
 	(CombatClient.lua, reacting to server-confirmed Combat_AttackStarted / held Sprint input) is
@@ -55,6 +58,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local AnimatorUtil = require(ReplicatedStorage.Shared.AnimatorUtil)
 local CombatDebugNames = require(ReplicatedStorage.Shared.CombatDebugNames)
+local AnimationTimeline = require(ReplicatedStorage.Shared.AnimationTimeline)
 local AnimationTrackUtil = require(script.Parent.AnimationTrackUtil)
 
 local logger = Logger.scope("CombatAnimator")
@@ -493,6 +497,216 @@ function CombatAnimator.PlayPredictedAirSlam(): ()
 	predictedSwing = if track then { Track = track, Name = trackName } else nil
 end
 
+-- Dynamically loads (and caches by trackName, into the SAME `tracks` table every static-id clip
+-- lives in -- see BindCharacter's own loop above) a SINGLE Animation whose id isn't known until
+-- runtime, authored well after BindCharacter's own animationTemplates loop already ran. Caching into
+-- `tracks` means it participates in trackExclusiveAction/currentDominantOneShotTrack/DOMINANT_WEIGHT
+-- exactly like any static-id swing -- no parallel bookkeeping needed. Two remaining callers, both a
+-- single legacy clip rather than a multi-clip timeline (see PlayCustomMoveTimeline above for that
+-- case -- the Move Creation System's own swing no longer reaches this function): CombatClient's
+-- Combat_AttackStarted handler for the Object Stun follow-up throw's own AnimationId/
+-- AnimationTrackName pair (INSTEAD OF ConfirmSwing, for the same DebugName-trailing-digit reason
+-- PlayCustomMoveTimeline's own header explains), and its ObjectStun feedback handler for the
+-- Attacker/VictimAnimationId a wall-slam impact authors.
+function CombatAnimator.PlayExplicitAnimation(animationId: string, trackName: string): AnimationTrack?
+	if tracks[trackName] then
+		return playSwingByName(trackName, trackName, nil)
+	end
+
+	local character = currentCharacter
+	local animator = if character then AnimatorUtil.GetOrCreateAnimator(character) else nil
+	if not animator or animationId == "" then
+		return nil
+	end
+
+	local animation = Instance.new("Animation")
+	animation.AnimationId = animationId
+	local ok, trackOrError = pcall(function()
+		return animator:LoadAnimation(animation)
+	end)
+	if not ok then
+		logger:warn(
+			"PlayExplicitAnimation: load failed",
+			{ animationId = animationId, errorMessage = tostring(trackOrError) }
+		)
+		return nil
+	end
+
+	local track = trackOrError :: AnimationTrack
+	-- Core, not the default -- see BindCharacter's own identical Priority comment for why every
+	-- combat clip in this module matches the default character rig's own walk/run priority.
+	track.Priority = Enum.AnimationPriority.Core
+	tracks[trackName] = track
+	return playSwingByName(trackName, trackName, nil)
+end
+
+-- The `tracks` cache key for one custom-move timeline clip -- folds a Move Creation System move's
+-- dynamically-loaded clips into the SAME table every static-id clip and PlayExplicitAnimation's own
+-- dynamic id already live in (see BindCharacter's own loop and PlayExplicitAnimation's own header),
+-- so a timeline clip participates in trackExclusiveAction/DOMINANT_WEIGHT/FreezeActiveCombatTrack
+-- exactly like any other combat track, and BindCharacter's `tracks = {}` on every respawn tears it
+-- down for free -- no parallel cache, no parallel cleanup. Keyed by ClipId AND AnimationId together,
+-- mirroring PreviewViewport's own loadedTracks cache exactly (see that module's header for why BOTH
+-- halves matter: two clips sharing one asset still need independent tracks, and re-pointing a clip at
+-- a different asset loads a fresh one instead of replaying the old one). Prefixed with "CustomMove|"
+-- so this can never collide with a static animationTemplates name (none of which contain "|").
+local function customMoveTrackKey(clip: AnimationTimeline.Clip): string
+	return `CustomMove|{clip.ClipId}|{clip.AnimationId}`
+end
+
+-- The custom-move timeline currently in flight, if any -- CombatAnimator.PlayCustomMoveTimeline
+-- (below) sets this; the persistent Heartbeat evaluator's own custom-move block (see that
+-- evaluator's header) starts/stops each ScheduledClip as `elapsed` crosses its window, the same
+-- syncTimeline idea PreviewViewport's own Play button drives, just against the single shared
+-- evaluator instead of a private per-play connection -- see that evaluator's own comment on why
+-- every other timed/held combat track in this file already works this way instead of spawning its
+-- own coroutine. Reset (dropped, never Stop()ped -- the Animator it belonged to is already gone by
+-- the time a per-life reset runs) on every respawn, same convention as predictedSwing/currentSwingTrack
+-- above.
+local activeCustomMoveTimeline: {
+	Scheduled: { AnimationTimeline.ScheduledClip },
+	Playing: { [string]: AnimationTrack },
+	StartClock: number,
+}? =
+	nil
+registerPerLifeReset(function()
+	activeCustomMoveTimeline = nil
+end)
+
+-- Loads (or returns the cached track for) one custom-move timeline clip -- see customMoveTrackKey's
+-- own header for the cache it shares with every other combat track. pcall because an admin can
+-- author any string into a clip's AnimationId and LoadAnimation throws on a malformed or
+-- inaccessible asset; one bad clip must not take the rest of the timeline down with it, the same
+-- reasoning PreviewViewport's own loadClipTrack gives for its identical pcall.
+local function loadCustomMoveClipTrack(clip: AnimationTimeline.Clip): AnimationTrack?
+	local key = customMoveTrackKey(clip)
+	local existing = tracks[key]
+	if existing then
+		return existing
+	end
+	local character = currentCharacter
+	local animator = if character then AnimatorUtil.GetOrCreateAnimator(character) else nil
+	if not animator then
+		return nil
+	end
+	local animation = Instance.new("Animation")
+	animation.AnimationId = clip.AnimationId
+	local ok, trackOrError = pcall(function()
+		return animator:LoadAnimation(animation)
+	end)
+	if not ok then
+		logger:warn(
+			"PlayCustomMoveTimeline: clip load failed",
+			{ clipId = clip.ClipId, animationId = clip.AnimationId, errorMessage = tostring(trackOrError) }
+		)
+		return nil
+	end
+	local track = trackOrError :: AnimationTrack
+	-- Core, not the default -- see BindCharacter's own identical Priority comment.
+	track.Priority = Enum.AnimationPriority.Core
+	tracks[key] = track
+	return track
+end
+
+-- Plays a Move Creation System move's full authored animation TIMELINE against the REAL character's
+-- Animator -- the runtime counterpart of PreviewViewport's own Play button, driven by the SAME pure
+-- AnimationTimeline.Resolve scheduler so the editor's preview and a real swing can never disagree
+-- about what plays when (see AnimationTimeline.lua's own header). Called from CombatClient's
+-- Combat_AttackStarted handler whenever the payload carries a non-nil Animations list (Types.
+-- AttackStartedPayload.Animations' own header) -- REPLACES ConfirmSwing entirely for that throw, not
+-- layered alongside it: a custom move's DebugName is always its MoveId (MoveTypes.
+-- ToHitboxAttackDefinition), an admin-authored slug+suffix with no relationship to the M1 combo stage
+-- numbering ConfirmSwing's DebugName-trailing-digit inference exists for.
+--
+-- `clips` is the raw authored list straight off the wire -- move.Animations, or that move's legacy
+-- single AnimationId already projected onto a one-clip list server-side by
+-- AnimationTimeline.FromLegacyAnimationId (see CombatSystem.ThrowCustomMove's own header) -- and
+-- `timings` is that same payload's own WindupSeconds/ActiveSeconds/RecoverySeconds, so Resolve here
+-- runs against the EXACT window the server actually scheduled, never a locally-guessed one. An empty
+-- schedule (nothing authored, or every clip disabled/blank) is a legal, silent no-op: still supersedes
+-- whatever the PREVIOUS custom move left playing, but starts nothing new -- see this function's own
+-- caller for why that must never fall back to guessing an animation instead.
+function CombatAnimator.PlayCustomMoveTimeline(
+	clips: { AnimationTimeline.Clip },
+	timings: AnimationTimeline.PhaseTimings,
+	moveId: string
+): ()
+	if activeCustomMoveTimeline then
+		-- A second custom move thrown before the first one's timeline finished -- stop every clip
+		-- STILL genuinely playing rather than let it silently blend into the new move's own clips.
+		-- The per-life reset above instead drops the reference with no Stop() call, since on a
+		-- respawn the Animator it belonged to is already gone; this branch is specifically the
+		-- still-alive-Animator case.
+		for _, track in pairs(activeCustomMoveTimeline.Playing) do
+			if track.IsPlaying then
+				track:Stop(ROLLBACK_FADE_TIME)
+			end
+		end
+		activeCustomMoveTimeline = nil
+	end
+
+	-- A custom move committing to a swing is itself an exclusive combat action -- stop whatever
+	-- dominant one-shot (Dash/Slide) or M1/finisher swing is still running, the same cross-stop
+	-- playSwingByName/playDominantOneShot already give each other.
+	if currentDominantOneShotTrack and currentDominantOneShotTrack.IsPlaying then
+		currentDominantOneShotTrack:Stop(ROLLBACK_FADE_TIME)
+	end
+	if currentSwingTrack and currentSwingTrack.IsPlaying then
+		currentSwingTrack:Stop(ROLLBACK_FADE_TIME)
+	end
+
+	local scheduled = AnimationTimeline.Resolve(clips, timings)
+	logger:debug("PlayCustomMoveTimeline", { moveId = moveId, clipCount = #scheduled })
+	if #scheduled == 0 then
+		return
+	end
+
+	activeCustomMoveTimeline = {
+		Scheduled = scheduled,
+		Playing = {},
+		StartClock = os.clock(),
+	}
+end
+
+-- Starts every scheduled custom-move clip that just became live and releases every one that just
+-- ended -- called from the persistent Heartbeat evaluator below. The exact same idempotent-per-frame
+-- idea as PreviewViewport's own syncTimeline (a clip already in Playing is never re-Played), just
+-- against activeCustomMoveTimeline's real-Animator tracks instead of the preview dummy's. A
+-- "Natural"/LetPlayOut clip (AnimationTimeline.ScheduledClip.LetPlayOut's own header) is deliberately
+-- never Stopped here -- left BOTH running and registered in Playing so PlayCustomMoveTimeline's own
+-- supersede cross-stop (or a respawn) can still release it later, without this per-frame pass ever
+-- cutting it short on its own.
+local function syncCustomMoveTimeline(): ()
+	local timeline = activeCustomMoveTimeline
+	if not timeline then
+		return
+	end
+	local elapsed = os.clock() - timeline.StartClock
+	for _, entry in ipairs(timeline.Scheduled) do
+		local clip = entry.Clip
+		local isLive = elapsed >= entry.StartSeconds and elapsed < entry.StopSeconds
+		local track = timeline.Playing[clip.ClipId]
+		if isLive and not track then
+			local loaded = loadCustomMoveClipTrack(clip)
+			if loaded then
+				loaded.Looped = clip.Looped
+				loaded:Play(clip.FadeInSeconds, clip.Weight, clip.Speed)
+				trackExclusiveAction(loaded)
+				timeline.Playing[clip.ClipId] = loaded
+			end
+		elseif not isLive and track and not entry.LetPlayOut then
+			track:Stop(clip.FadeOutSeconds)
+			timeline.Playing[clip.ClipId] = nil
+		end
+	end
+	if elapsed >= AnimationTimeline.ScheduleEnd(timeline.Scheduled) then
+		-- Every clip has either already stopped itself above or is a LetPlayOut clip left to finish
+		-- on its own -- nothing left for this evaluator to drive. Only the bookkeeping is released;
+		-- see this function's own header for why a LetPlayOut track is never Stopped here.
+		activeCustomMoveTimeline = nil
+	end
+end
+
 -- Confirms (or corrects) a swing from the server's Combat_AttackStarted echo. Two cases:
 --   * a prediction is pending and the confirmed clip MATCHES it -> the predicted track is already
 --     playing at native speed; nothing to do (no visual pop -- this is the common case).
@@ -618,44 +832,73 @@ end
 RunService.Heartbeat:Connect(function()
 	local runningTrack = tracks.Running
 	local walkingTrack = tracks.Walking
-	if not runningTrack and not walkingTrack then
-		return
+	-- Guards only the Running/Walking half below, NOT the Dash/DashPunch/Slide re-assert further
+	-- down -- Running/Walking/Dash/Slide are independently gated per-slot on whether
+	-- Constants.Combat.AnimationIds supplied a non-empty id for that name (see animationTemplates'
+	-- own comment above: an empty id means no template, so tracks[name] stays nil forever). A
+	-- content set that ships Dash/Slide without Running/Walking authored yet is exactly the case
+	-- this file's existing "every play path degrades to its documented no-op/fallback" contract is
+	-- meant to support, so the dash reassert below must not be skipped just because this half has
+	-- nothing to do.
+	if runningTrack or walkingTrack then
+		-- Also silenced while Flying (Client/DevMenu/FlightController.lua/FlightAnimator.lua own the
+		-- character's animation entirely during flight) -- Boost reuses the Sprint keybind and raw
+		-- WASD can still register nonzero MoveDirection mid-flight (PlatformStand suspends
+		-- WalkSpeed-driven movement, not the Humanoid's MoveDirection reporting itself), so without
+		-- this guard the ground-locomotion loop could blend in underneath a Hover/Cruise/Boost
+		-- flight pose.
+		local flying = currentHumanoid ~= nil and currentHumanoid:GetAttribute(Constants.Attributes.Flying) == true
+		local moving = not flying
+			and currentHumanoid ~= nil
+			and currentHumanoid.MoveDirection.Magnitude > LOCOMOTION_THRESHOLD
+		local noAction = combatActionTrackCount == 0
+		local shouldRun = sprintHeld and noAction and moving
+		local shouldWalk = not sprintHeld and noAction and moving
+
+		-- Client/FX/AnimationTrackUtil.lua's shared evaluator -- see that module's own header for
+		-- why this per-Heartbeat Play/AdjustWeight/Stop mechanic is extracted (the exact same shape
+		-- FlightAnimator.lua's Hover/CruiseLoop/BoostLoop pick uses below it). Only the
+		-- StopFadeSeconds per track varies here: a toggle straight to the OTHER locomotion track
+		-- (still moving, Sprint pressed/released) crossfades symmetrically at LOCOMOTION_FADE_TIME;
+		-- a genuine interrupt (stopped moving, or a combat action starting) cuts fast at
+		-- LOCOMOTION_INTERRUPT_FADE_TIME instead.
+		AnimationTrackUtil.DriveDominantLoop({
+			{
+				Track = runningTrack,
+				ShouldPlay = shouldRun,
+				PlayFadeSeconds = LOCOMOTION_FADE_TIME,
+				StopFadeSeconds = if shouldWalk then LOCOMOTION_FADE_TIME else LOCOMOTION_INTERRUPT_FADE_TIME,
+			},
+			{
+				Track = walkingTrack,
+				ShouldPlay = shouldWalk,
+				PlayFadeSeconds = LOCOMOTION_FADE_TIME,
+				StopFadeSeconds = if shouldRun then LOCOMOTION_FADE_TIME else LOCOMOTION_INTERRUPT_FADE_TIME,
+			},
+		}, DOMINANT_WEIGHT)
 	end
 
-	-- Also silenced while Flying (Client/DevMenu/FlightController.lua/FlightAnimator.lua own the
-	-- character's animation entirely during flight) -- Boost reuses the Sprint keybind and raw WASD
-	-- can still register nonzero MoveDirection mid-flight (PlatformStand suspends WalkSpeed-driven
-	-- movement, not the Humanoid's MoveDirection reporting itself), so without this guard the
-	-- ground-locomotion loop could blend in underneath a Hover/Cruise/Boost flight pose.
-	local flying = currentHumanoid ~= nil and currentHumanoid:GetAttribute(Constants.Attributes.Flying) == true
-	local moving = not flying
-		and currentHumanoid ~= nil
-		and currentHumanoid.MoveDirection.Magnitude > LOCOMOTION_THRESHOLD
-	local noAction = combatActionTrackCount == 0
-	local shouldRun = sprintHeld and noAction and moving
-	local shouldWalk = not sprintHeld and noAction and moving
+	-- Dash/DashPunch/Slide one-shot re-assert (see playDominantOneShot below) folded into this same
+	-- persistent evaluator rather than each Play() spawning its own private
+	-- "while track.IsPlaying do Heartbeat:Wait()" coroutine. That per-swing coroutine had no handle
+	-- anything could hold, so BindCharacter's perLifeResetHandlers (see currentDominantOneShotTrack's
+	-- own declaration/header further up this file) couldn't stop it on a mid-swing death -- and its
+	-- only exit condition, track.IsPlaying, is exactly the value this file's own comments already
+	-- document as unreliable on a destroyed character (".Stopped isn't guaranteed to fire when the
+	-- character/Animator is destroyed out from under a still-playing track"). Die mid-dash/mid-
+	-- DashPunch/mid-Slide and the old loop could run forever, resumed every Heartbeat, closing over
+	-- (and so keeping alive) the destroyed character Model for the rest of the session.
+	-- currentDominantOneShotTrack already has a per-life reset (nils to nil on respawn), so
+	-- re-asserting it here inherits that teardown for free -- no separate handle to leak.
+	if currentDominantOneShotTrack and currentDominantOneShotTrack.IsPlaying then
+		currentDominantOneShotTrack:AdjustWeight(DOMINANT_WEIGHT)
+	end
 
-	-- Client/FX/AnimationTrackUtil.lua's shared evaluator -- see that module's own header for why
-	-- this per-Heartbeat Play/AdjustWeight/Stop mechanic is extracted (the exact same shape
-	-- FlightAnimator.lua's Hover/CruiseLoop/BoostLoop pick uses below it). Only the StopFadeSeconds
-	-- per track varies here: a toggle straight to the OTHER locomotion track (still moving, Sprint
-	-- pressed/released) crossfades symmetrically at LOCOMOTION_FADE_TIME; a genuine interrupt
-	-- (stopped moving, or a combat action starting) cuts fast at LOCOMOTION_INTERRUPT_FADE_TIME
-	-- instead.
-	AnimationTrackUtil.DriveDominantLoop({
-		{
-			Track = runningTrack,
-			ShouldPlay = shouldRun,
-			PlayFadeSeconds = LOCOMOTION_FADE_TIME,
-			StopFadeSeconds = if shouldWalk then LOCOMOTION_FADE_TIME else LOCOMOTION_INTERRUPT_FADE_TIME,
-		},
-		{
-			Track = walkingTrack,
-			ShouldPlay = shouldWalk,
-			PlayFadeSeconds = LOCOMOTION_FADE_TIME,
-			StopFadeSeconds = if shouldRun then LOCOMOTION_FADE_TIME else LOCOMOTION_INTERRUPT_FADE_TIME,
-		},
-	}, DOMINANT_WEIGHT)
+	-- Move Creation System custom-move timeline sync -- see syncCustomMoveTimeline's own header for
+	-- why this lives inside the SAME persistent connection as the re-asserts above rather than a
+	-- private per-throw Heartbeat:Connect (the exact class of leak-on-death bug this evaluator was
+	-- already consolidated to avoid -- see this function's own opening comment).
+	syncCustomMoveTimeline()
 end)
 
 -- Held-Block stance -- see CombatClient.lua's Block InputBegan/InputEnded handling for when these
@@ -751,12 +994,9 @@ local function playDominantOneShot(trackName: string, fadeSeconds: number): Anim
 	track:Play(fadeSeconds, DOMINANT_WEIGHT)
 	currentDominantOneShotTrack = track
 	trackExclusiveAction(track)
-	task.spawn(function()
-		while track.IsPlaying do
-			track:AdjustWeight(DOMINANT_WEIGHT)
-			RunService.Heartbeat:Wait()
-		end
-	end)
+	-- Per-Heartbeat weight re-assert happens in the persistent Running/Walking evaluator above
+	-- (see its own comment on currentDominantOneShotTrack), not a private coroutine spawned here --
+	-- assigning currentDominantOneShotTrack just above is what that evaluator picks up.
 	return track
 end
 

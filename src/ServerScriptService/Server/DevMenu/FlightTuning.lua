@@ -127,6 +127,12 @@ function FlightTuning.AdjustField(field: Types.FlightTuningFieldName, deltaFract
 	if not limits then
 		return nil
 	end
+	-- Defense in depth, same tier as the `limits` check above -- DevMenuSystem.handleAdjustFlightTuning
+	-- is the primary NaN gate, but a NaN here would otherwise survive math.clamp unchanged (NaN fails
+	-- both its < and > comparisons) and permanently poison this SHARED Constants.Flight[field] value.
+	if deltaFraction ~= deltaFraction then
+		return nil
+	end
 	local current = Constants.Flight[field]
 	local updated = math.clamp(current * (1 + deltaFraction), limits.Min, limits.Max)
 	Constants.Flight[field] = updated

@@ -28,6 +28,7 @@ local Workspace = game:GetService("Workspace")
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local RagdollController = require(script.Parent.RagdollController)
+local CombatTypes = require(script.Parent.CombatTypes)
 
 local HitResolution = {}
 
@@ -232,6 +233,19 @@ function HitResolution.ApplyDisarm(state: { disarmedUntil: number }, now: number
 	state.disarmedUntil = math.max(state.disarmedUntil, now + Constants.Combat.Disarm.DurationSeconds)
 end
 
+-- Single source of truth for "which committed actions drop an already-armed parry window" --
+-- CombatSystem.lua's setActiveAction (the ONE place activeActionKind is ever written for a player)
+-- calls this rather than hand-rolling "every kind except BlockStart" inline. ClassifyDefense checks
+-- parryWindowExpiry BEFORE blocking, so if a committing action forgot to clear it, holding Block
+-- and then attacking would keep the window armed through the whole swing -- a free, stock-client
+-- parry with no counterplay. Only BlockStart is exempt: that's the one press that's supposed to arm
+-- the window in the first place (see handleBlockStart's own header). RequestBotAttack (the bot
+-- equivalent, which has no activeActionKind/CombatActionKind concept to route through this) applies
+-- the identical unconditional clear inline, since a bot's attack is always a guard-dropping kind.
+function HitResolution.ActionDropsParryWindow(kind: CombatTypes.CombatActionKind): boolean
+	return kind ~= "BlockStart"
+end
+
 -- The standard attacker-side parry punish: posture damage + a stun. Shared by a genuine Parry
 -- (CombatSystem.lua's resolveHitAgainstTarget/resolveHitAgainstBot) and the air-combo tech escape
 -- (handleAirTechRequest), which punishes the attacker "exactly like the existing Parry punish" by
@@ -249,10 +263,9 @@ end
 -- Recent-opponent tracking (proximity InCombat extension)
 --
 
--- The write side of CombatState.recentOpponents (see that field's own header) -- shared by
--- CombatSystem.lua's resolveHitAgainstTarget and AirCombo.lua's HandleAirTechRequest/
--- HandleSuspendedCounterPunchRequest, the same set of sites that already refresh inCombatUntil for
--- a player-vs-player exchange, so the eviction rule can't drift between the two modules. Refreshing
+-- The write side of CombatState.recentOpponents (see that field's own header) -- shared by every
+-- site that already refreshes inCombatUntil for a player-vs-player exchange (CombatSystem.lua's
+-- resolveHitAgainstTarget), so the eviction rule can't drift between call sites. Refreshing
 -- an ALREADY-tracked opponent's timestamp never evicts anything (that slot isn't new); only adding a
 -- genuinely new opponent past Constants.Combat.MaxTrackedOpponents evicts the single OLDEST entry
 -- (lowest timestamp) first -- a small, fixed-size "recently fought" set, not an unbounded history.
@@ -308,8 +321,10 @@ end
 -- `ownerPlayer` is the target's own Player (nil for a dummy) so RagdollController hands network
 -- ownership back to the right place on recovery. Returns the seconds the target is ragdolled (0
 -- for Normal, which never ragdolls) so the caller can match its own action-lockout (ragdollExpiry)
--- to the physical recovery. Skips the launch on a lethal blow -- a corpse should go through
--- Roblox's own death handling, not fight a ragdoll we'd immediately have to recover.
+-- to the physical recovery, and (second return) whether a Downslam's ground contact was immediate --
+-- see RagdollController.SlamToGround's own header -- always false for Uppercut/Normal, which don't
+-- involve a ground-impact VFX concept at all. Skips the launch on a lethal blow -- a corpse should go
+-- through Roblox's own death handling, not fight a ragdoll we'd immediately have to recover.
 function HitResolution.ApplyFinisherPhysics(
 	targetCharacter: Model,
 	targetHumanoid: Humanoid,
@@ -317,40 +332,37 @@ function HitResolution.ApplyFinisherPhysics(
 	ownerPlayer: Player?,
 	variant: Types.FinisherVariant,
 	attackerRoot: BasePart?
-): number
+): (number, boolean)
 	if targetHumanoid.Health <= 0 then
-		return 0
+		return 0, false
 	end
 
 	if variant == "Uppercut" then
 		local cfg = Constants.Combat.Finisher.Uppercut
-		RagdollController.LaunchAndRagdoll(
-			targetCharacter,
-			targetHumanoid,
-			targetRoot,
-			ownerPlayer,
-			attackerRoot,
-			cfg.LaunchUpVelocity,
-			cfg.LaunchHorizontalVelocity,
-			cfg.LaunchBackwardSpin,
-			cfg.RagdollSeconds
-		)
-		return cfg.RagdollSeconds
+		-- Adapts Constants' own field names onto RagdollController.LaunchProfile's canonical shape --
+		-- see that type's own header for why the two aren't required to match by name: a new finisher
+		-- just needs its own small table like this one, never a RagdollController signature change.
+		RagdollController.LaunchAndRagdoll(targetCharacter, targetHumanoid, targetRoot, ownerPlayer, attackerRoot, {
+			UpVelocity = cfg.LaunchUpVelocity,
+			HorizontalVelocity = cfg.LaunchHorizontalVelocity,
+			BackwardSpin = cfg.LaunchBackwardSpin,
+			RagdollSeconds = cfg.RagdollSeconds,
+		})
+		return cfg.RagdollSeconds, false
 	elseif variant == "Downslam" then
 		local cfg = Constants.Combat.Finisher.Downslam
-		RagdollController.SlamToGround(
-			targetCharacter,
-			targetHumanoid,
-			ownerPlayer,
-			cfg.SlamDownVelocity,
-			cfg.KnockdownSeconds
-		)
-		return cfg.KnockdownSeconds
+		local immediateGroundImpact =
+			RagdollController.SlamToGround(targetCharacter, targetHumanoid, targetRoot, ownerPlayer, attackerRoot, {
+				DownVelocity = cfg.SlamDownVelocity,
+				FaceDownSpin = cfg.FaceDownSpin,
+				KnockdownSeconds = cfg.KnockdownSeconds,
+			})
+		return cfg.KnockdownSeconds, immediateGroundImpact
 	end
 
 	-- Normal: no launch/ragdoll. Its only extra effect is hitstun, which the caller applies (it
 	-- needs the target's CombatState -- a dummy has none and simply takes the heavier hit).
-	return 0
+	return 0, false
 end
 
 return HitResolution

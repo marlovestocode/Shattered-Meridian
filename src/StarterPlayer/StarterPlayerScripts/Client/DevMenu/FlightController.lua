@@ -45,6 +45,18 @@
 	SetFlightCollide, admin-only via DevMenuSystem.lua's whitelist) -- this module only ever
 	reacts to its OWN Humanoid's Attributes. Nor the momentum/bank-angle/hover-bob MATH itself
 	(Shared/FlightMath.lua) or the Collide-mode constraint rig (Client/DevMenu/FlightPhysics.lua).
+
+	Root-control lock: the per-frame root-part write in stepFlight (Noclip's direct CFrame write, or
+	Collide's FlightPhysics.SetCommandedVelocity/SetCommandedOrientation pair) is suspended while this
+	client's own Humanoid has its server-set "RootControlLocked" Attribute true (CombatSystem.lua's
+	syncRootControlLocked -- true while a finisher/DashPunch ragdoll is tumbling this body, or
+	RagdollController.HoldAloft has a rigid AlignPosition/AlignOrientation pin on it, e.g. an admin who
+	flew into a fight and got hit or air-combo'd while Flying stayed true). Without this, flight kept
+	driving its own position/orientation writes on every Heartbeat regardless of what else was holding
+	the body, fighting the server's own ragdoll joints or hold constraints for every frame both were
+	active -- the same class of bug Client/Camera/ShiftLockCamera.lua's own yaw write already had, and
+	the exact same server-Attribute-on-Humanoid pattern is reused here (same Attribute name, same
+	watch-and-cache-a-local shape) rather than re-deriving a second mechanism for the same signal.
 ]]
 
 local Players = game:GetService("Players")
@@ -97,6 +109,13 @@ local recentlyFlyingUntil = 0
 -- Edge-triggered (fires once per crossing, not continuously while sustained above threshold) --
 -- see the SonicBoomCooldownSeconds check in stepFlight.
 local sonicBoomLastFireClock = 0
+
+-- Mirrors this character's own Humanoid "RootControlLocked" Attribute -- see this file's header,
+-- "Root-control lock". Cached in a local rather than read fresh every Heartbeat so stepFlight's hot
+-- path is a plain boolean check, not a GetAttribute call every frame -- same reasoning and shape as
+-- ShiftLockCamera.lua's own `rootControlLocked` local. Kept current via GetAttributeChangedSignal in
+-- BindCharacter, alongside the existing Flying/FlyCollide watches.
+local rootControlLocked = false
 
 local raycastParams: RaycastParams? = nil
 
@@ -293,20 +312,28 @@ local function stepFlight(humanoid: Humanoid, rootPart: BasePart, deltaTime: num
 	) * bobBlend
 
 	local collideMode = humanoid:GetAttribute(Constants.Attributes.FlyCollide) == true
-	if collideMode then
-		local bobVelocity = (hoverBobOffset - previousHoverBobOffset) / deltaTime
-		FlightPhysics.SetCommandedVelocity(rootPart, currentVelocity + Vector3.new(0, bobVelocity, 0))
-		FlightPhysics.SetCommandedOrientation(rootPart, CFrame.new(rootPart.Position) * orientationRotation)
-	else
-		local nextPosition = rootPart.Position
-			- Vector3.new(0, previousHoverBobOffset, 0)
-			+ currentVelocity * deltaTime
-			+ Vector3.new(0, hoverBobOffset, 0)
-		-- rootPart is Anchored whenever this (Noclip) branch runs -- see syncCollideMode's own
-		-- header for why that's the fix for gravity/momentum drift, not a per-frame velocity reset:
-		-- an Anchored part is fully kinematic, so this direct CFrame write is the sole authority over
-		-- its position with no physics interaction to fight.
-		rootPart.CFrame = CFrame.new(nextPosition) * orientationRotation
+	-- Server-owned root control always wins -- see this file's header, "Root-control lock". Skips
+	-- ONLY the position/orientation write itself, the same narrow scope ShiftLockCamera.lua's own
+	-- gated yaw write uses: currentVelocity/previousHoverBobOffset keep updating underneath so flight
+	-- resumes smoothly the instant the lock clears, instead of resuming from a frozen, one-Heartbeat-
+	-- stale snapshot, and the rest of this function (landing detection, sonic boom, camera/audio feed)
+	-- stays live rather than pausing wholesale for a lock that's usually brief.
+	if not rootControlLocked then
+		if collideMode then
+			local bobVelocity = (hoverBobOffset - previousHoverBobOffset) / deltaTime
+			FlightPhysics.SetCommandedVelocity(rootPart, currentVelocity + Vector3.new(0, bobVelocity, 0))
+			FlightPhysics.SetCommandedOrientation(rootPart, CFrame.new(rootPart.Position) * orientationRotation)
+		else
+			local nextPosition = rootPart.Position
+				- Vector3.new(0, previousHoverBobOffset, 0)
+				+ currentVelocity * deltaTime
+				+ Vector3.new(0, hoverBobOffset, 0)
+			-- rootPart is Anchored whenever this (Noclip) branch runs -- see syncCollideMode's own
+			-- header for why that's the fix for gravity/momentum drift, not a per-frame velocity reset:
+			-- an Anchored part is fully kinematic, so this direct CFrame write is the sole authority over
+			-- its position with no physics interaction to fight.
+			rootPart.CFrame = CFrame.new(nextPosition) * orientationRotation
+		end
 	end
 	previousHoverBobOffset = hoverBobOffset
 
@@ -430,9 +457,9 @@ local function startFlying(humanoid: Humanoid, character: Model): ()
 	end)
 end
 
--- Watches this character's own Humanoid for the server-set "Flying"/"FlyCollide" Attributes and the
--- native Landed state (post-flight free-fall landing path) -- called once per character spawn
--- (FlightController.Start's own CharacterAdded binding below).
+-- Watches this character's own Humanoid for the server-set "Flying"/"FlyCollide"/"RootControlLocked"
+-- Attributes and the native Landed state (post-flight free-fall landing path) -- called once per
+-- character spawn (FlightController.Start's own CharacterAdded binding below).
 function FlightController.BindCharacter(character: Model): ()
 	FlightController.StopFlying()
 	for _, connection in attributeConnections do
@@ -453,6 +480,18 @@ function FlightController.BindCharacter(character: Model): ()
 	local humanoid = humanoidInstance :: Humanoid
 	local rootPartInstance = character:FindFirstChild("HumanoidRootPart")
 	local rootPart = if rootPartInstance and rootPartInstance:IsA("BasePart") then rootPartInstance else nil
+
+	-- A fresh character's Humanoid never carries over the old one's Attributes -- seed from whatever
+	-- the server has already set (same "read rather than assume" reasoning as the Flying/FlyCollide
+	-- reads below) and keep it live from here on. See this file's header, "Root-control lock", and
+	-- ShiftLockCamera.lua's onCharacterAdded for the identical watch shape on the same Attribute.
+	rootControlLocked = humanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true
+	table.insert(
+		attributeConnections,
+		humanoid:GetAttributeChangedSignal(Constants.Attributes.RootControlLocked):Connect(function()
+			rootControlLocked = humanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true
+		end)
+	)
 
 	FlightAnimator.BindCharacter(character)
 
