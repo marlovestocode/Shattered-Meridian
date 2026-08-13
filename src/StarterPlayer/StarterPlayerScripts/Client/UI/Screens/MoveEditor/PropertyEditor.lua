@@ -90,6 +90,7 @@ local StatsPanel = require(script.Parent.StatsPanel)
 local MoveStats = require(ReplicatedStorage.Shared.MoveStats)
 local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
 local FrameTimeline = require(script.Parent.FrameTimeline)
+local EditorTokens = require(script.Parent.EditorTokens)
 local Dropdown = require(script.Parent.Parent.Parent.Components.Dropdown)
 
 local Children = Fusion.Children
@@ -284,6 +285,48 @@ local function visibleWhen(scope: Scope, layoutOrder: number, visible: UsedAs<bo
 			child,
 		},
 	} :: Frame
+end
+
+-- Windup/Active/Recovery authored in FRAMES, matching the Figma Make reference ("WINDUP (FRAMES)",
+-- stepped by -6/-1/+1/+6). MoveDefinition still stores seconds and HitboxResolver still resolves in
+-- seconds -- this converts at the field boundary only, the same display-unit split
+-- FrameTimeline.lua's own header describes.
+--
+-- Cooldown deliberately stays in SECONDS and keeps its own row. The reference authors the three
+-- PHASES in frames because they are the move's own moment-to-moment shape, but reports cooldown as a
+-- seconds value ("Cooldown 2.5s" on its stat card) -- it is a gap between uses measured from the
+-- move's start, not a span of animation frames, and framing it would invite reading it as a fourth
+-- phase, which is the exact misreading FrameTimeline.lua exists to avoid.
+--
+-- Rounding is one-way-safe: seconds -> frames rounds for display, frames -> seconds divides exactly,
+-- so a value the author never touches is never rewritten by the conversion. A field they DO touch
+-- lands on a whole frame, which is the point of authoring in frames at all.
+local function frameField(
+	scope: Scope,
+	props: PropertyEditorProps,
+	label: string,
+	hint: string,
+	secondsValue: Fusion.UsedAs<number>,
+	maxFrames: number,
+	apply: (MoveDefinition, number) -> ()
+): Instance
+	return NumericField.Mount(scope, {
+		Label = label,
+		Unit = "frames",
+		Hint = hint,
+		Value = scope:Computed(function(use)
+			return EditorTokens.ToFrames(use(secondsValue))
+		end),
+		Min = 1,
+		Max = maxFrames,
+		Steps = { 1, 6 },
+		Decimals = 0,
+		OnChanged = function(frames: number)
+			applyChange(props, function(d)
+				apply(d, frames / EditorTokens.DisplayFPS)
+			end)
+		end,
+	})
 end
 
 local function numericRow(scope: Scope, layoutOrder: number, columns: number, fields: { Instance }): Frame
@@ -698,51 +741,19 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 
 	local timingContent = sectionContent("Timing", "Timing", Copy.Sections.Timing, {
 		phaseBar,
-		numericRow(scope, 3, 2, {
-			NumericField.Mount(scope, {
-				Label = "Windup",
-				Unit = Copy.Field("Timing.Windup").Unit,
-				Hint = Copy.Field("Timing.Windup").Hint,
-				Value = windup,
-				Min = 0.01,
-				Max = 5,
-				Steps = { 0.01, 0.1 },
-				OnChanged = function(v)
-					applyChange(props, function(d)
-						d.WindupSeconds = v
-					end)
-				end,
-			}),
-			NumericField.Mount(scope, {
-				Label = "Active",
-				Unit = Copy.Field("Timing.Active").Unit,
-				Hint = Copy.Field("Timing.Active").Hint,
-				Value = active,
-				Min = 0.01,
-				Max = 500,
-				Steps = { 0.01, 0.1 },
-				OnChanged = function(v)
-					applyChange(props, function(d)
-						d.ActiveSeconds = v
-					end)
-				end,
-			}),
-		}),
-		numericRow(scope, 4, 2, {
-			NumericField.Mount(scope, {
-				Label = "Recovery",
-				Unit = Copy.Field("Timing.Recovery").Unit,
-				Hint = Copy.Field("Timing.Recovery").Hint,
-				Value = recovery,
-				Min = 0.01,
-				Max = 5,
-				Steps = { 0.01, 0.1 },
-				OnChanged = function(v)
-					applyChange(props, function(d)
-						d.RecoverySeconds = v
-					end)
-				end,
-			}),
+		-- One field per row, full width, matching the reference's stacked Timing layout rather than
+		-- the 2-up grid the other numeric sections use -- these three are the section's whole subject
+		-- and the frame timeline directly above is already reading left-to-right across them.
+		frameField(scope, props, "Windup", Copy.Field("Timing.Windup").Hint, windup, 300, function(d, seconds)
+			d.WindupSeconds = seconds
+		end),
+		frameField(scope, props, "Active", Copy.Field("Timing.Active").Hint, active, 3000, function(d, seconds)
+			d.ActiveSeconds = seconds
+		end),
+		frameField(scope, props, "Recovery", Copy.Field("Timing.Recovery").Hint, recovery, 300, function(d, seconds)
+			d.RecoverySeconds = seconds
+		end),
+		numericRow(scope, 4, 1, {
 			NumericField.Mount(scope, {
 				Label = "Cooldown",
 				Unit = Copy.Field("Timing.Cooldown").Unit,

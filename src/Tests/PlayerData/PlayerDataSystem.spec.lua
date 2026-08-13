@@ -50,6 +50,37 @@ return function()
 			expect(next(profile.settings.GamepadKeybinds)).to.equal(nil)
 			expect(profile.settings.Autorun).to.equal(false)
 		end)
+
+		it("migrates a pre-ArtSystem v3 record to v4, backfilling an empty equippedArts", function()
+			local raw = {
+				SchemaVersion = 3,
+				Profile = {
+					tier = 5,
+					artMastery = { ["some-art"] = 4 },
+				},
+			}
+			local migrated = PlayerDataSystem.MigrateRecord(raw)
+			local profile = migrated.Profile :: any
+
+			expect(migrated.SchemaVersion).to.equal(4)
+			-- Empty, not auto-equipped from artMastery: which art goes in which slot is a player
+			-- decision, as Migrations[3]'s own comment states.
+			expect(profile.equippedArts).never.to.equal(nil)
+			expect(next(profile.equippedArts)).to.equal(nil)
+			-- The pre-existing mastery must survive the step untouched.
+			expect(profile.artMastery["some-art"]).to.equal(4)
+		end)
+
+		it("does not overwrite an already-present equippedArts field on a v3 record", function()
+			local raw = {
+				SchemaVersion = 3,
+				Profile = { tier = 2, equippedArts = { [1] = "kept-art" } },
+			}
+			local migrated = PlayerDataSystem.MigrateRecord(raw)
+			local profile = migrated.Profile :: any
+
+			expect(profile.equippedArts[1]).to.equal("kept-art")
+		end)
 	end)
 
 	describe("PlayerDataSystem.CopyProfile", function()
@@ -371,9 +402,9 @@ return function()
 
 	describe("PlayerDataSystem.MigrateRecord", function()
 		it("returns an already-current-version record unchanged", function()
-			local raw = { SchemaVersion = 3, Profile = { tier = 3 } }
+			local raw = { SchemaVersion = 4, Profile = { tier = 3 } }
 			local migrated = PlayerDataSystem.MigrateRecord(raw)
-			expect(migrated.SchemaVersion).to.equal(3)
+			expect(migrated.SchemaVersion).to.equal(4)
 			expect((migrated.Profile :: any).tier).to.equal(3)
 		end)
 
@@ -390,7 +421,7 @@ return function()
 				local migrated = PlayerDataSystem.MigrateRecord(raw)
 				local profile = migrated.Profile :: any
 
-				expect(migrated.SchemaVersion).to.equal(3)
+				expect(migrated.SchemaVersion).to.equal(4)
 				expect(profile.tier).to.equal(3)
 				expect(next(profile.unlockedEmoteIds)).never.to.equal(nil)
 				expect(profile.unlockedEmoteIds.Wave).to.equal(true)
@@ -429,7 +460,7 @@ return function()
 			local migrated = PlayerDataSystem.MigrateRecord(raw)
 			local profile = migrated.Profile :: any
 
-			expect(migrated.SchemaVersion).to.equal(3)
+			expect(migrated.SchemaVersion).to.equal(4)
 			expect(profile.tier).to.equal(5)
 			expect(profile.settings).never.to.equal(nil)
 			expect(next(profile.settings.Keybinds)).to.equal(nil)
