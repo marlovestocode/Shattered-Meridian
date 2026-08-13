@@ -71,6 +71,7 @@ local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local HitboxShapes = require(ReplicatedStorage.Shared.HitboxShapes)
 local AnimationTimeline = require(ReplicatedStorage.Shared.AnimationTimeline)
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
+local MoveStatsGrid = require(script.Parent.MoveStatsGrid)
 local Panel = require(script.Parent.Parent.Parent.Components.Panel)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
 local Tab = require(script.Parent.Parent.Parent.Components.Tab)
@@ -673,6 +674,9 @@ function PreviewViewportModule.Mount(scope: Scope, width: number, height: number
 			-- names "a stepper button's face" as a use, the same recessed-field reading this is)
 			-- instead of floating text directly on the panel background, so the phase/timing readout
 			-- reads as a distinct instrument, not incidental caption text.
+			-- The reference's always-visible at-a-glance readout, beneath the viewport. Distinct from
+			-- the Stats SECTION (StatsPanel.lua) -- see MoveStatsGrid.lua's header on why both exist.
+			MoveStatsGrid.Build(scope, props.Draft, 4),
 			scope:New "Frame" {
 				Name = "PhaseReadout",
 				Size = UDim2.fromOffset(0, 0),
