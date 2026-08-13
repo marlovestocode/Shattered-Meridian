@@ -88,6 +88,8 @@ local AnimationTimelineEditor = require(script.Parent.AnimationTimelineEditor)
 local ObjectStunEditor = require(script.Parent.ObjectStunEditor)
 local StatsPanel = require(script.Parent.StatsPanel)
 local MoveStats = require(ReplicatedStorage.Shared.MoveStats)
+local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
+local Dropdown = require(script.Parent.Parent.Parent.Components.Dropdown)
 
 local Children = Fusion.Children
 local peek = Fusion.peek
@@ -262,6 +264,30 @@ end
 -- Screens/DevMenu/ContentArea.lua's own Godmode/Flight/Collide row already uses
 -- (`UDim2.new(1/N, -Tokens.Space.XS, 0, 0)`), generalized to any column count. See this file's own
 -- header for why a row never needs its own separate Visible prop.
+-- Wraps a child that has no Visible prop of its own in a full-width, auto-height Frame that does.
+-- Components/Dropdown.lua and this file's own TextFieldRow both predate any caller needing to hide
+-- them reactively; giving each its own Visible prop for one call site would widen two shared APIs
+-- where one local wrapper does the same job. Collapses to zero height when hidden, so the section's
+-- UIListLayout closes the gap rather than leaving a hole.
+local function visibleWhen(scope: Scope, layoutOrder: number, visible: UsedAs<boolean>, child: Instance): Frame
+	return scope:New "Frame" {
+		Name = "VisibleWhen",
+		LayoutOrder = layoutOrder,
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		Visible = visible,
+
+		[Children] = {
+			scope:New "UIListLayout" {
+				FillDirection = Enum.FillDirection.Vertical,
+				SortOrder = Enum.SortOrder.LayoutOrder,
+			},
+			child,
+		},
+	} :: Frame
+end
+
 local function numericRow(scope: Scope, layoutOrder: number, columns: number, fields: { Instance }): Frame
 	local cells: { Instance } = {
 		scope:New "UIListLayout" {
@@ -398,6 +424,28 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 		local draft = use(props.Draft)
 		return draft ~= nil and draft.Movement ~= nil
 	end)
+	local hasArt = scope:Computed(function(use)
+		local draft = use(props.Draft)
+		return draft ~= nil and draft.Art ~= nil
+	end)
+	-- Built once from the roster, not per render -- the tree list is static content
+	-- (ArtConstants.ArtTrees) and cannot change while the editor is open.
+	local treeOptions: { { Value: string, Text: string } } = {}
+	for _, tree in ipairs(ArtConstants.ArtTrees) do
+		table.insert(treeOptions, { Value = tree.TreeId, Text = tree.DisplayName })
+	end
+	local artTreeId = fieldValue(props, scope, function(d)
+		return if d.Art then d.Art.TreeId else ArtConstants.ArtTrees[1].TreeId
+	end, ArtConstants.ArtTrees[1].TreeId)
+	local artNode = fieldValue(props, scope, function(d)
+		return if d.Art then d.Art.Node else 1
+	end, 1)
+	local artQiCost = fieldValue(props, scope, function(d)
+		return if d.Art then d.Art.QiCost else 15
+	end, 15)
+	local artRequiredTier = fieldValue(props, scope, function(d)
+		return if d.Art then d.Art.RequiredTier else 1
+	end, 1)
 	local hasKnockback = scope:Computed(function(use)
 		local draft = use(props.Draft)
 		return draft ~= nil and draft.Knockback ~= nil
@@ -490,7 +538,7 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 	-- move switch (that file's own header), so a section content pane still double-checks here rather
 	-- than trusting the nav alone to keep the admin off it.
 	local HIDDEN_FOR_DEFAULT: { [string]: boolean } =
-		{ Movement = true, Knockback = true, Projectile = true, ObjectStun = true }
+		{ Movement = true, Knockback = true, Projectile = true, ObjectStun = true, Art = true }
 
 	-- One ScrollingFrame per section, all mounted up front, Visible-toggled by props.SelectedSection
 	-- -- see this file's own header and ContentArea.lua's `tabContent` precedent.
@@ -1112,6 +1160,133 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 	-- half lives on props.TestSamples. innerWidth (the same width sectionContent sizes its panes to)
 	-- is handed down so the graphs can size themselves in pixels -- a graph is one of the few things
 	-- here that cannot lay itself out from a scale-based parent alone.
+	-- Art -----------------------------------------------------------------------------------------
+	-- The "convert an existing move into an art" surface. Deliberately the LAST authoring section and
+	-- built as a single toggle plus four fields, because that is the whole workflow: everything an
+	-- art DOES was already authored in the sections above it. Flipping Enable writes a
+	-- MoveTypes.MoveArtBinding onto the draft; the move is otherwise untouched, which is exactly why
+	-- an existing, already-tuned move can become an art without being rebuilt.
+	--
+	-- Defaults on enable are the shallowest legal art (node 1, no prerequisite, tier 1, a modest Qi
+	-- cost) rather than empty fields: node 1 is always unlockable, so a designer who flips this and
+	-- saves immediately gets a working entry-level art rather than something gated behind nothing.
+	local artContent = sectionContent("Art", "Art", Copy.Sections.Art, {
+		Toggle(scope, {
+			Label = "Enable as Art",
+			Value = hasArt,
+			LayoutOrder = 3,
+			OnChanged = function(enabled: boolean)
+				applyChange(props, function(d)
+					if enabled then
+						d.Art = {
+							TreeId = ArtConstants.ArtTrees[1].TreeId,
+							Node = 1,
+							QiCost = 15,
+							RequiredTier = 1,
+							Prerequisite = nil,
+						}
+					else
+						d.Art = nil
+					end
+				end)
+			end,
+		}),
+		visibleWhen(
+			scope,
+			4,
+			hasArt,
+			Dropdown.Mount(scope, {
+				Label = "Tree",
+				Options = treeOptions,
+				Value = artTreeId,
+				OnChanged = function(treeId: string)
+					applyChange(props, function(d)
+						if d.Art then
+							d.Art.TreeId = treeId
+							-- A prerequisite only ever refers to an art in the SAME tree
+							-- (ArtTreeManager.AuditPrerequisites treats a cross-tree one as a defect), so
+							-- moving trees clears it rather than silently carrying a now-invalid reference.
+							d.Art.Prerequisite = nil
+						end
+					end)
+				end,
+			})
+		),
+		numericRow(scope, 5, 3, {
+			NumericField.Mount(scope, {
+				Label = "Node",
+				Hint = "Depth in the tree. Node 1 is an entry form and is never gated behind a prerequisite.",
+				Value = artNode,
+				Min = ArtConstants.Limits.Node.Min,
+				Max = ArtConstants.Limits.Node.Max,
+				Steps = { 1 },
+				Decimals = 0,
+				Visible = hasArt,
+				OnChanged = function(v)
+					applyChange(props, function(d)
+						if d.Art then
+							d.Art.Node = v
+						end
+					end)
+				end,
+			}),
+			NumericField.Mount(scope, {
+				Label = "Qi Cost",
+				Hint = "Spent from the caster's pool on every use. 0 is legal.",
+				Value = artQiCost,
+				Min = ArtConstants.Limits.QiCost.Min,
+				Max = ArtConstants.Limits.QiCost.Max,
+				Steps = { 1, 5 },
+				Decimals = 0,
+				Visible = hasArt,
+				OnChanged = function(v)
+					applyChange(props, function(d)
+						if d.Art then
+							d.Art.QiCost = v
+						end
+					end)
+				end,
+			}),
+			NumericField.Mount(scope, {
+				Label = "Required Tier",
+				Hint = "Minimum tier before a player can unlock this art.",
+				Value = artRequiredTier,
+				Min = ArtConstants.Limits.RequiredTier.Min,
+				Max = ArtConstants.Limits.RequiredTier.Max,
+				Steps = { 1 },
+				Decimals = 0,
+				Visible = hasArt,
+				OnChanged = function(v)
+					applyChange(props, function(d)
+						if d.Art then
+							d.Art.RequiredTier = v
+						end
+					end)
+				end,
+			}),
+		}),
+		-- Prerequisite is a free-text MoveId rather than a dropdown of sibling arts, and that is a
+		-- deliberate v1 limit rather than an oversight: this panel only ever holds ONE move (the draft),
+		-- and the list of every other art in the same tree lives in the registry, which this file has no
+		-- reference to and would have to reach through a new remote to read. The server validates the
+		-- value either way -- a self-reference is rejected outright at save, and a prerequisite that is
+		-- missing, in another tree, or not shallower is reported by ArtTreeManager.AuditPrerequisites --
+		-- so a typo costs an unreachable art that an audit names, never a wrongly-granted one.
+		visibleWhen(
+			scope,
+			6,
+			hasArt,
+			TextFieldRow(scope, props, "Prerequisite Art Id", 1, function(d)
+				return if d.Art and d.Art.Prerequisite then d.Art.Prerequisite else ""
+			end, function(d, text)
+				if d.Art then
+					local trimmed = text:match("^%s*(.-)%s*$") or ""
+					d.Art.Prerequisite = if trimmed == "" then nil else trimmed
+				end
+			end)
+		),
+	})
+
 	local statsContent = sectionContent(
 		"Stats",
 		"Stats",
@@ -1391,6 +1566,7 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 			knockbackContent,
 			projectileContent,
 			objectStunContent,
+			artContent,
 			statsContent,
 		},
 	}) :: Frame

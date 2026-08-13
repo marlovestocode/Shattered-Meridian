@@ -107,6 +107,7 @@ local SECTION_ORDER: { { Id: SectionId, Text: string } } = {
 	{ Id = "Knockback", Text = "Knockback" },
 	{ Id = "Projectile", Text = "Projectile" },
 	{ Id = "ObjectStun", Text = "Object Stun" },
+	{ Id = "Art", Text = "Art" },
 	-- Last, and after the optional sub-tables rather than among them: Stats reports on everything
 	-- above it instead of authoring anything of its own -- see MoveEditor/Types.lua's SectionId.
 	{ Id = "Stats", Text = "Stats" },

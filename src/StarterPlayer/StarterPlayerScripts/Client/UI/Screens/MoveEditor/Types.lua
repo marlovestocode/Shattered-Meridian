@@ -39,6 +39,10 @@ export type SectionId =
 	-- by ObjectStunEditor.lua). Like Movement/Knockback/Projectile it is an OPTIONAL sub-table, so it
 	-- gets the same nav status dot and the same hidden-for-a-Default-move treatment they do.
 	| "ObjectStun"
+	-- Promotes this move to an ArtSystem art (MoveTypes.MoveArtBinding). Like the optional
+	-- sub-tables above it is off by default and hidden for a Default move -- a Default move is a
+	-- built-in weapon stage, not something a player unlocks in a tree.
+	| "Art"
 	-- Read-only, unlike every section above it: StatsPanel.lua reports what the move does rather than
 	-- authoring any field of it. Last in the nav for exactly that reason.
 	| "Stats"

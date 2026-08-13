@@ -50,6 +50,7 @@ export type SectionIconGlyphKind =
 	| "Knockback"
 	| "Projectile"
 	| "ObjectStun"
+	| "Art"
 	| "Stats"
 
 export type SectionIconProps = {
@@ -255,6 +256,17 @@ local function StatsGlyph(scope: Scope, color: UsedAs<Color3>): { Instance }
 	}
 end
 
+-- A trunk with two branch nodes -- a tree, which is literally what an art belongs to. Built from
+-- anchoredBar/dot primitives already used above rather than a new shape vocabulary.
+local function ArtGlyph(scope: Scope, color: UsedAs<Color3>): { Instance }
+	return {
+		anchoredBar(scope, THICKNESS, 13, color, Vector2.new(0.5, 1), Vector2.new(0.5, 0.95)),
+		edgeArm(scope, 6, -45, color, Vector2.new(0.5, 0.5)),
+		edgeArm(scope, 6, 45, color, Vector2.new(0.5, 0.5)),
+		throughCenter(scope, 4, 45, color),
+	}
+end
+
 local GLYPH_BUILDERS: { [SectionIconGlyphKind]: (Scope, UsedAs<Color3>) -> { Instance } } = {
 	BasicInfo = BasicInfoGlyph,
 	Hitbox = HitboxGlyph,
@@ -266,6 +278,7 @@ local GLYPH_BUILDERS: { [SectionIconGlyphKind]: (Scope, UsedAs<Color3>) -> { Ins
 	Knockback = KnockbackGlyph,
 	Projectile = ProjectileGlyph,
 	ObjectStun = ObjectStunGlyph,
+	Art = ArtGlyph,
 	Stats = StatsGlyph,
 }
 

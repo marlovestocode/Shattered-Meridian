@@ -168,6 +168,10 @@ Copy.Sections = {
 	ObjectStun = "What happens when this move's knockback drives a target into world geometry -- a wall, the floor, a "
 		.. "pillar. Optional, and the most involved block here: most of it exists to prove the move actually caused "
 		.. "the impact rather than firing for anyone who happened to be near a wall.",
+	Art = "Turns this move into an unlockable art in one of the cultivation trees. Off by default -- a move "
+		.. "stays an ordinary move until you place it in a tree here. Everything you have already authored above "
+		.. "(hitbox, timing, damage, animation) is what the art does; this section only decides where it sits, what "
+		.. "it costs in Qi, and what a player must do to earn it.",
 	Stats = "What this move actually does, computed from the fields you set. Test it on a dummy and the measured "
 		.. "results are drawn against the projection on the same axes.",
 }
