@@ -54,6 +54,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
 local HitboxShapes = require(ReplicatedStorage.Shared.HitboxShapes)
 local AnimationTimeline = require(ReplicatedStorage.Shared.AnimationTimeline)
 
@@ -369,6 +370,67 @@ end
 -- but not a table is a hard reject -- the author clearly intended to author one -- and every field
 -- inside is then clamped against Constants.MoveEditor.ObjectStun.Limits, the same table the
 -- editor's own fields are bounded by.
+-- The Move-Creation-System-to-ArtSystem seam (MoveTypes.MoveArtBinding). nil in, nil out: a move
+-- with no Art block is an ordinary move and always has been, so every pre-existing move and every
+-- v1 DataStore record validates unchanged.
+--
+-- Present, and it is validated STRICTLY on identity but LENIENTLY on numbers -- the same split
+-- validateObjectStun uses. TreeId must name a real ArtConstants.ArtTrees entry (a typo'd tree would
+-- put the art in a tree nothing renders, which is worse than a save failure the author can see),
+-- while Node/QiCost/RequiredTier are clamped into ArtConstants.Limits rather than rejected, so a
+-- designer nudging a field past its bound in the editor gets a sane art instead of a blocked save.
+--
+-- Prerequisite is rejected when it points at the move's own id: an art that requires itself can
+-- never be unlocked, and that is a typo worth surfacing loudly rather than silently dropping. A
+-- prerequisite naming some OTHER art is NOT checked for existence here -- ordering is not
+-- guaranteed (the prerequisite may be authored after its dependant, or live in a record that loads
+-- later), so that check belongs to ArtTreeManager reading the whole registry at once.
+local function validateArt(raw: unknown, moveId: string): (MoveTypes.MoveArtBinding?, string?)
+	if raw == nil then
+		return nil, nil
+	end
+	if typeof(raw) ~= "table" then
+		return nil, "InvalidArt"
+	end
+	local candidate = raw :: { [string]: unknown }
+
+	if not isNonEmptyString(candidate.TreeId) then
+		return nil, "InvalidArtTreeId"
+	end
+	local treeId = candidate.TreeId :: string
+	local treeExists = false
+	for _, tree in ipairs(ArtConstants.ArtTrees) do
+		if tree.TreeId == treeId then
+			treeExists = true
+			break
+		end
+	end
+	if not treeExists then
+		return nil, "UnknownArtTree"
+	end
+
+	local prerequisite: string? = nil
+	if candidate.Prerequisite ~= nil then
+		if not isNonEmptyString(candidate.Prerequisite) then
+			return nil, "InvalidArtPrerequisite"
+		end
+		if candidate.Prerequisite == moveId then
+			return nil, "SelfReferentialArtPrerequisite"
+		end
+		prerequisite = candidate.Prerequisite :: string
+	end
+
+	local limits = ArtConstants.Limits
+	return {
+		TreeId = treeId,
+		Node = clampLimit(candidate.Node, limits.Node, limits.Node.Min),
+		QiCost = clampLimit(candidate.QiCost, limits.QiCost, limits.QiCost.Min),
+		RequiredTier = clampLimit(candidate.RequiredTier, limits.RequiredTier, limits.RequiredTier.Min),
+		Prerequisite = prerequisite,
+	},
+		nil
+end
+
 local function validateObjectStun(raw: unknown): (Types.ObjectStunConfig?, string?)
 	if raw == nil then
 		return nil, nil
@@ -593,6 +655,10 @@ function MoveRegistryManager.Validate(
 	if objectStunError then
 		return nil, objectStunError
 	end
+	local art, artError = validateArt(raw.Art, raw.MoveId :: string)
+	if artError then
+		return nil, artError
+	end
 
 	local validated: MoveTypes.MoveDefinition = {
 		MoveId = raw.MoveId :: string,
@@ -621,6 +687,7 @@ function MoveRegistryManager.Validate(
 		Knockback = knockback,
 		Projectile = projectile,
 		ObjectStun = objectStun,
+		Art = art,
 	}
 	return validated, nil
 end

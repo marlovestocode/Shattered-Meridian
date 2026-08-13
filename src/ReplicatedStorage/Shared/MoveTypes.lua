@@ -136,6 +136,32 @@ export type MoveObjectStunSurfaces = Types.ObjectStunSurfaces
 export type MoveObjectStunFollowUp = Types.ObjectStunFollowUp
 export type MoveObjectStun = Types.ObjectStunConfig
 
+-- Declares a move to BE an art: which tree it sits in, what it costs, and what earns it. Absent on
+-- an ordinary move (an M1 combo stage, a test move, an admin experiment), which is why every field
+-- here is required once the block is present -- a half-authored art is a worse outcome than no art,
+-- since it would appear in a tree the player can see and then behave unpredictably.
+--
+-- This is the entire Move-Creation-System-to-ArtSystem seam. See ArtConstants.lua's header for why
+-- an art is a move rather than a parallel ability object; MoveRegistryManager.Validate clamps every
+-- number below against ArtConstants.Limits.
+export type MoveArtBinding = {
+	-- Which ArtConstants.ArtTrees entry this art belongs to. Validated against the live roster, so a
+	-- tree that is deleted from that table takes its arts out of the catalogue rather than leaving
+	-- them orphaned in a tree nothing can render.
+	TreeId: string,
+	-- Depth in the tree. Node 1 is an entry form and is never gated behind a prerequisite regardless
+	-- of what was authored (ArtSystem enforces that, so no tree can be authored unreachable).
+	Node: number,
+	-- Qi spent per use, through QiSystem.Spend. 0 is legal.
+	QiCost: number,
+	-- Minimum TierSystem tier before this can be unlocked.
+	RequiredTier: number,
+	-- ArtId that must be mastered to ArtConstants.MasteryToUnlockNext first. nil for an entry form.
+	-- An art's own ArtId is its MoveId -- there is no second identity to keep in sync, which is the
+	-- point of building arts on moves.
+	Prerequisite: string?,
+}
+
 export type MoveDefinition = {
 	-- Stable identity -- the DataStore key and the routing key CombatSystem.ThrowCustomMove
 	-- resolves against. Author-assigned once at creation (a slug derived from DisplayName plus a
@@ -206,6 +232,9 @@ export type MoveDefinition = {
 	-- nil (or present with Enabled == false) = this move never reacts to its target hitting
 	-- anything. See MoveObjectStun's own header.
 	ObjectStun: MoveObjectStun?,
+	-- nil = an ordinary move, exactly as every move behaved before ArtSystem existed. Present = this
+	-- move is an art in a tree. See MoveArtBinding's own header.
+	Art: MoveArtBinding?,
 }
 
 -- RemoteFunction result shapes for the Move Creation System's own remotes (Server/Systems/
@@ -301,6 +330,9 @@ function MoveTypes.Clone(move: MoveDefinition): MoveDefinition
 		Knockback = if move.Knockback then table.clone(move.Knockback) else nil,
 		Projectile = if move.Projectile then table.clone(move.Projectile) else nil,
 		ObjectStun = objectStun,
+		-- Flat table.clone is correct here and not an oversight: MoveArtBinding nests nothing, unlike
+		-- ObjectStun (which needs the explicit deep walk above for Surfaces and FollowUp.Dimensions).
+		Art = if move.Art then table.clone(move.Art) else nil,
 	}
 end
 

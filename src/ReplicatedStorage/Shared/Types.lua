@@ -277,6 +277,53 @@ export type BountyMarkedPayload = {
 	Streak: number?,
 }
 
+-- Art system wire shapes (ArtSystem.lua / ArtTreeManager.lua). An art IS a Move Creation System
+-- move that carries a MoveTypes.MoveArtBinding, so these carry only what a catalogue UI needs --
+-- never the move's hitbox geometry, timing or animation data, which no client menu has any use for
+-- and which would make this payload an order of magnitude larger.
+export type ArtCatalogueEntry = {
+	-- An art's ArtId is its MoveId; there is no second identity (ArtConstants.lua's header).
+	ArtId: ArtId,
+	DisplayName: string,
+	Node: number,
+	QiCost: number,
+	RequiredTier: number,
+	Prerequisite: ArtId?,
+	Unlocked: boolean,
+	-- nil when the player can unlock this right now. Otherwise the SAME reason string
+	-- ArtSystem.CanUnlock produced server-side, so the UI renders the real gate rather than
+	-- re-deriving the rules and risking a drift between what it shows and what the server enforces.
+	LockedReason: string?,
+}
+
+export type ArtCatalogueTree = {
+	TreeId: string,
+	DisplayName: string,
+	-- nil = open to every player, which is what makes a starting tree possible while FactionManager
+	-- is still a stub.
+	Faction: Faction?,
+	Description: string,
+	Arts: { ArtCatalogueEntry },
+}
+
+export type ArtCatalogueResult = {
+	Success: boolean,
+	Reason: string?,
+	Trees: { ArtCatalogueTree }?,
+}
+
+export type ArtActionResult = {
+	Success: boolean,
+	Reason: string?,
+}
+
+-- Server (ArtSystem.lua) -> owning client only. Mastery doubles as the unlocked set: a key present
+-- means unlocked, its value is mastery earned (see ArtSystem.lua's header on why that avoids a
+-- second profile field and a schema migration).
+export type ArtStatePayload = {
+	Mastery: { [ArtId]: number },
+}
+
 export type CombatFeedbackPayload = {
 	Kind: CombatFeedbackKind,
 	AttackerUserId: number?,

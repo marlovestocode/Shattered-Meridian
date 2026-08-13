@@ -47,6 +47,9 @@
 				"Events": {
 					"$path": "src/ServerScriptService/Server/Events"
 				},
+				"Managers": {
+					"$path": "src/ServerScriptService/Server/Managers"
+				},
 				"DevMenu": {
 					"$path": "src/ServerScriptService/Server/DevMenu"
 				},
@@ -93,6 +96,9 @@
 					},
 					"TierSystem": {
 						"$path": "src/ServerScriptService/Server/Systems/TierSystem.lua"
+					},
+					"ArtSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/ArtSystem.lua"
 					},
 					"EmoteUnlockService": {
 						"$path": "src/ServerScriptService/Server/Systems/EmoteUnlockService.lua"
