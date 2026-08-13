@@ -302,6 +302,29 @@ Tokens.Type = {
 	-- unreferenced and were deleted outright rather than kept as dead weight.
 }
 
+-- Line-height multipliers, assigned to TextLabel.LineHeight (Roblox's own unit: a multiple of the
+-- font's natural line spacing, where 1 is the property's default and leaves rendering untouched).
+--
+-- Its own table rather than a field on Tokens.Type, for two reasons. Label.lua's single
+-- `Tokens.Type[scale]` lookup stays a one-liner instead of growing a per-step leading branch; and
+-- Components/TrackedLabel.lua -- which lays out ONE TextLabel per character over a horizontal
+-- UIListLayout -- physically cannot express line height at all, so a Tracking-carrying step must
+-- never be handed one it would silently ignore. Keeping leading out of Tokens.Type is what makes
+-- that impossible by construction, the same disjoint-by-design split Label/TrackedLabel's own scale
+-- unions already use.
+--
+-- Two entries, deliberately: leading here is a binary decision (single-line chrome vs. wrapped
+-- prose), not a scale with intermediate steps.
+Tokens.Leading = {
+	-- The default, and the value to omit rather than pass. Single-line chrome, numerals, button
+	-- captions, field labels -- anything that never wraps to a second line.
+	Tight = 1,
+	-- Wrapped explanatory copy: a Section description, a NumericField/Toggle hint, an empty-state
+	-- body. 1.2 is the first value at which two 11px Detail lines stop reading as one 22px block on
+	-- this palette's near-black ground.
+	Prose = 1.2,
+}
+
 -- Motion presets. Two mechanisms, one table, distinguished by suffix.
 --
 -- Pick between them by what's moving, not by taste: a *Spring tracks a continuously-changing live

@@ -112,9 +112,9 @@ local function overflowRow(
 	} :: Frame
 end
 
--- One roster row -- `onKick`/`onBan`/`onMute`/`onFlagSuspected`/`onResetCombatState`/`onTeleportTo`
--- all receive the row's already-known UserId, so the caller never has to thread it back through a
--- shared "currently selected row" piece of state.
+-- One roster row -- `onKick`/`onBan`/`onMute`/`onFlagSuspected`/`onResetPlayerData`/
+-- `onResetCombatState`/`onTeleportTo` all receive the row's already-known UserId, so the caller
+-- never has to thread it back through a shared "currently selected row" piece of state.
 local function playerRosterRow(
 	scope: Scope,
 	display: PlayerRosterRowDisplay,
@@ -123,6 +123,7 @@ local function playerRosterRow(
 	onBan: () -> (),
 	onMute: () -> (),
 	onFlagSuspected: () -> (),
+	onResetPlayerData: () -> (),
 	onResetCombatState: () -> (),
 	onTeleportTo: () -> ()
 ): Frame
@@ -150,6 +151,31 @@ local function playerRosterRow(
 		task.delay(Constants.Debug.DevMenu.BanConfirmWindowSeconds, function()
 			if banArmGeneration == generation then
 				isBanArmed:set(false)
+			end
+		end)
+	end
+
+	-- Reset-Player-Data arm/confirm -- same two-press shape/reasoning as isBanArmed above, its own
+	-- independent Value/generation counter/window constant (ResetPlayerDataConfirmWindowSeconds, not
+	-- BanConfirmWindowSeconds) since this is a DISTINCT action with its own severity, not a Ban
+	-- variant -- a data wipe has no reversal path at all (Ban can still be lifted/expired), so it
+	-- earns the same friction even though the two windows happen to be equal today.
+	local isDataResetArmed = scope:Value(false)
+	local dataResetArmGeneration = 0
+
+	local function onDataResetActivated(): ()
+		if peek(isDataResetArmed) then
+			dataResetArmGeneration += 1
+			isDataResetArmed:set(false)
+			onResetPlayerData()
+			return
+		end
+		dataResetArmGeneration += 1
+		local generation = dataResetArmGeneration
+		isDataResetArmed:set(true)
+		task.delay(Constants.Debug.DevMenu.ResetPlayerDataConfirmWindowSeconds, function()
+			if dataResetArmGeneration == generation then
+				isDataResetArmed:set(false)
 			end
 		end)
 	end
@@ -235,6 +261,18 @@ local function playerRosterRow(
 							isOverflowOpen:set(not peek(isOverflowOpen))
 						end,
 					}),
+					-- Furthest from the low-stakes icons above (LayoutOrder 6, trailing edge) --
+					-- deliberately not grouped with Kick/Ban/Mute/Flag despite sharing Ban's
+					-- arm/confirm mechanism, to reduce misclick risk on this codebase's single most
+					-- destructive admin action (see this file's header + Constants.lua's own
+					-- ResetTargetPlayerData comment for the full severity reasoning).
+					ActionIcon(scope, {
+						Glyph = "ResetData",
+						Text = "Reset Player Data",
+						LayoutOrder = 6,
+						Armed = isDataResetArmed,
+						OnActivated = onDataResetActivated,
+					}),
 				},
 			},
 			overflowRow(scope, isOverflowOpen, 4, onResetCombatState, onTeleportTo),
@@ -299,6 +337,7 @@ function Sidebar.Mount(scope: Scope, width: number, bodyHeight: number): Sidebar
 	local banPlayerRequestedEvent = Instance.new("BindableEvent")
 	local mutePlayerRequestedEvent = Instance.new("BindableEvent")
 	local setSuspectedCheaterRequestedEvent = Instance.new("BindableEvent")
+	local resetPlayerDataRequestedEvent = Instance.new("BindableEvent")
 	local resetPlayerCombatStateRequestedEvent = Instance.new("BindableEvent")
 	local teleportToPlayerRequestedEvent = Instance.new("BindableEvent")
 
@@ -319,6 +358,8 @@ function Sidebar.Mount(scope: Scope, width: number, bodyHeight: number): Sidebar
 				mutePlayerRequestedEvent:Fire(display.UserId, not display.Muted)
 			end, function()
 				setSuspectedCheaterRequestedEvent:Fire(display.UserId, not display.SuspectedCheater)
+			end, function()
+				resetPlayerDataRequestedEvent:Fire(display.UserId)
 			end, function()
 				resetPlayerCombatStateRequestedEvent:Fire(display.UserId)
 			end, function()
@@ -423,6 +464,7 @@ function Sidebar.Mount(scope: Scope, width: number, bodyHeight: number): Sidebar
 		BanPlayerRequested = banPlayerRequestedEvent.Event,
 		MutePlayerRequested = mutePlayerRequestedEvent.Event,
 		SetSuspectedCheaterRequested = setSuspectedCheaterRequestedEvent.Event,
+		ResetPlayerDataRequested = resetPlayerDataRequestedEvent.Event,
 		ResetPlayerCombatStateRequested = resetPlayerCombatStateRequestedEvent.Event,
 		TeleportToPlayerRequested = teleportToPlayerRequestedEvent.Event,
 		BugReportOpenCount = bugReportOpenCount,

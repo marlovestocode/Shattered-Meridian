@@ -65,12 +65,13 @@ export type VitalIconProps = {
 	LayoutOrder: number?,
 	-- A real uploaded texture (see docs/design/icons/). Omit to use the procedural glyph.
 	IconAssetId: string?,
-	-- True for a vital with no owning System yet (Qi -- see HUD/init.lua's header) whose Value/Max
-	-- are permanently placeholder numbers, never real data. Renders a flat, desaturated "not live"
-	-- look (dimmed fill/background, TextDisabled glyph) instead of a full-looking, critical-capable
-	-- gauge, matching AbilitySlot's existing "Locked" appearance for the same not-wired-yet state --
-	-- otherwise this tile is visually indistinguishable from Health/Posture's real data, which risks
-	-- a QA/playtester report of "Qi bar doesn't update" against a vital that was never wired.
+	-- True for a vital with no owning System yet (Qi used this until QiSystem.lua shipped -- see
+	-- HUD/init.lua's header for the current live/not-live split) whose Value/Max are permanently
+	-- placeholder numbers, never real data. Renders a flat, desaturated "not live" look (dimmed
+	-- fill/background, TextDisabled glyph) instead of a full-looking, critical-capable gauge,
+	-- matching AbilitySlot's existing "Locked" appearance for the same not-wired-yet state --
+	-- otherwise this tile is visually indistinguishable from a real vital's data, which risks a
+	-- QA/playtester report of "the bar doesn't update" against one that was never wired at all.
 	Muted: boolean?,
 }
 

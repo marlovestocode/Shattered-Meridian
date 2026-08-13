@@ -22,6 +22,7 @@ local Tokens = require(script.Parent.Parent.Tokens)
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
 local OnChange = Fusion.OnChange
+local peek = Fusion.peek
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
@@ -40,6 +41,11 @@ export type TextFieldProps = {
 	AnchorPoint: UsedAs<Vector2>?,
 	Size: UsedAs<UDim2>?,
 	LayoutOrder: UsedAs<number>?,
+	-- Optional: fires when focus leaves this field, with the field's current text -- for a caller
+	-- (the Move Editor's PropertyEditor) that wants to commit an edit once the admin is done typing
+	-- rather than on every keystroke (the two-way Text binding above already updates live for local
+	-- display; this is only for callers that also need a "done editing" moment).
+	OnFocusLost: ((text: string) -> ())?,
 }
 
 local function TextField(scope: Scope, props: TextFieldProps): TextBox
@@ -75,6 +81,9 @@ local function TextField(scope: Scope, props: TextFieldProps): TextBox
 		end,
 		[OnEvent "FocusLost"] = function()
 			isFocused:set(false)
+			if props.OnFocusLost then
+				props.OnFocusLost(peek(props.Text))
+			end
 		end,
 		[OnChange "Text"] = function(newText: string)
 			local maxLength = props.MaxLength

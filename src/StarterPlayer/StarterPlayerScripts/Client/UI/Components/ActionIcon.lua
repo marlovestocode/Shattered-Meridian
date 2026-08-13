@@ -52,13 +52,21 @@ local peek = Fusion.peek
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
 
-export type ActionIconGlyphKind = "Kick" | "Ban" | "Mute" | "FlagSuspected" | "Overflow"
+export type ActionIconGlyphKind = "Kick" | "Ban" | "Mute" | "FlagSuspected" | "ResetData" | "Overflow"
 
 export type ActionIconProps = {
 	Glyph: ActionIconGlyphKind,
 	-- Accessible label -- see this file's own header. Also becomes this Instance's Name.
 	Text: string,
 	Size: UsedAs<UDim2>?,
+	-- Omit for the common case of a LayoutOrder-flowed tile (every DevMenu/Sidebar.lua roster-row
+	-- caller). A caller placing this tile by absolute anchor instead (MoveEditor/MoveList.lua's
+	-- delete icon, pinned to a row's right edge) MUST pass both of these -- there used to be no way
+	-- to do that at all (neither field existed, so a caller passing them anyway had both silently
+	-- dropped, leaving the tile pinned to its parent's default top-left corner regardless of what it
+	-- computed).
+	Position: UsedAs<UDim2>?,
+	AnchorPoint: UsedAs<Vector2>?,
 	LayoutOrder: UsedAs<number>?,
 	Selected: UsedAs<boolean>?,
 	Armed: UsedAs<boolean>?,
@@ -185,6 +193,66 @@ local function FlagGlyph(scope: Scope, color: UsedAs<Color3>, flagged: boolean):
 	})
 end
 
+-- A trash-can silhouette (handle + lid bar + outlined body + two internal slats) -- the clearest
+-- "this permanently discards something" reading available in this repo's own outline/bar glyph
+-- vocabulary, distinct from BanGlyph's ring-and-slash "blocked" reading (a wipe isn't a block, it's
+-- a deletion) and from every other glyph here, which all represent a TOGGLE, not a one-shot,
+-- irreversible action. Body is outlined (UIStroke), not filled, matching FlagGlyph's own
+-- unflagged/outline treatment -- a filled solid shape reads as "currently active," which a one-shot
+-- action never is.
+local function ResetDataGlyph(scope: Scope, color: UsedAs<Color3>): Frame
+	return glyphFrame(scope, {
+		scope:New "Frame" {
+			Name = "Handle",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.12),
+			Size = UDim2.fromOffset(GLYPH_SIZE * 0.28, GLYPH_THICKNESS),
+			BackgroundColor3 = color,
+			BorderSizePixel = 0,
+			ZIndex = 3,
+		},
+		scope:New "Frame" {
+			Name = "Lid",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.22),
+			Size = UDim2.fromOffset(GLYPH_SIZE * 0.85, GLYPH_THICKNESS),
+			BackgroundColor3 = color,
+			BorderSizePixel = 0,
+			ZIndex = 3,
+		},
+		scope:New "Frame" {
+			Name = "Body",
+			AnchorPoint = Vector2.new(0.5, 0),
+			Position = UDim2.fromScale(0.5, 0.3),
+			Size = UDim2.fromOffset(GLYPH_SIZE * 0.6, GLYPH_SIZE * 0.62),
+			BackgroundTransparency = 1,
+			ZIndex = 3,
+			[Children] = {
+				scope:New "UICorner" { CornerRadius = UDim.new(0, 2) },
+				scope:New "UIStroke" { Color = color, Thickness = GLYPH_THICKNESS * 0.5 },
+				scope:New "Frame" {
+					Name = "SlatLeft",
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					Position = UDim2.fromScale(0.35, 0.5),
+					Size = UDim2.new(0, GLYPH_THICKNESS * 0.5, 0.7, 0),
+					BackgroundColor3 = color,
+					BorderSizePixel = 0,
+					ZIndex = 4,
+				},
+				scope:New "Frame" {
+					Name = "SlatRight",
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					Position = UDim2.fromScale(0.65, 0.5),
+					Size = UDim2.new(0, GLYPH_THICKNESS * 0.5, 0.7, 0),
+					BackgroundColor3 = color,
+					BorderSizePixel = 0,
+					ZIndex = 4,
+				},
+			},
+		},
+	})
+end
+
 -- Three dots ("⋯") -- the overflow popover trigger.
 local function OverflowGlyph(scope: Scope, color: UsedAs<Color3>): Frame
 	local dotSize = GLYPH_SIZE * 0.22
@@ -248,6 +316,8 @@ local function ActionIcon(scope: Scope, props: ActionIconProps): TextButton
 		glyph = MuteGlyph(scope, glyphColor, peek(selected))
 	elseif props.Glyph == "FlagSuspected" then
 		glyph = FlagGlyph(scope, glyphColor, peek(selected))
+	elseif props.Glyph == "ResetData" then
+		glyph = ResetDataGlyph(scope, glyphColor)
 	else
 		glyph = OverflowGlyph(scope, glyphColor)
 	end
@@ -255,6 +325,8 @@ local function ActionIcon(scope: Scope, props: ActionIconProps): TextButton
 	return scope:New "TextButton" {
 		Name = props.Text,
 		Size = props.Size or UDim2.fromOffset(TILE_SIZE, TILE_SIZE),
+		Position = props.Position,
+		AnchorPoint = props.AnchorPoint,
 		LayoutOrder = props.LayoutOrder,
 		AutoButtonColor = false,
 		BackgroundColor3 = backgroundColor,
@@ -263,8 +335,8 @@ local function ActionIcon(scope: Scope, props: ActionIconProps): TextButton
 		-- over this Text, which stays fully transparent so it never visually duplicates the glyph.
 		Text = props.Text,
 		TextTransparency = 1,
-		FontFace = Tokens.Type.Caption.Face,
-		TextSize = Tokens.Type.Caption.Size,
+		FontFace = Tokens.Type.Action.Face,
+		TextSize = Tokens.Type.Action.Size,
 
 		[Out "AbsolutePosition"] = anchorPosition,
 		[Out "AbsoluteSize"] = anchorSize,

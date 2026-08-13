@@ -33,6 +33,7 @@ local Section = require(script.Parent.Parent.Parent.Components.Section)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Parent.Components.Button)
 local Tab = require(script.Parent.Parent.Parent.Components.Tab)
+local Toggle = require(script.Parent.Parent.Parent.Components.Toggle)
 local TextField = require(script.Parent.Parent.Parent.Components.TextField)
 local AbilitySlot = require(script.Parent.Parent.Parent.Components.AbilitySlot)
 local DevMenuTypes = require(script.Parent.Types)
@@ -42,8 +43,6 @@ local peek = Fusion.peek
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type DevMenuTabName = DevMenuTypes.DevMenuTabName
-type HitboxStageDisplayProps = DevMenuTypes.HitboxStageDisplayProps
-type HitboxStandaloneDisplayProps = DevMenuTypes.HitboxStandaloneDisplayProps
 type FlightTuningDisplayProps = DevMenuTypes.FlightTuningDisplayProps
 type BugReportRowDisplay = DevMenuTypes.BugReportRowDisplay
 type ContentAreaHandle = DevMenuTypes.ContentAreaHandle
@@ -51,11 +50,12 @@ type AbilitySlotState = AbilitySlot.AbilitySlotState
 
 local ContentArea = {}
 
--- One "0.080s [-0.1][-0.01][+0.01][+0.1]" row for the hitbox-timing tuner below -- shared by the
--- three timing fields (Windup/Active/Recovery) rather than writing the same row three times.
--- `valueText` is UsedAs<string> (a Fusion Computed bound to HitboxStageDisplay) so it re-renders
--- whenever the selected stage or its values change; `onAdjust(delta)` fires
--- AdjustHitboxTimingRequested for whichever field this particular row is for.
+-- One "0.080s [-0.1][-0.01][+0.01][+0.1]" row -- originally shared by the Hitbox Timing/Standalone
+-- Attacks tuners' Windup/Active/Recovery fields too (both since moved out of DevMenu entirely, into
+-- the Move Editor's "Default" moves section -- see Server/Combat/DefaultMoveRegistry.lua), now only
+-- the Flight Tuning section below still uses this. `valueText` is UsedAs<string> (a Fusion Computed
+-- bound to FlightTuningDisplay) so it re-renders whenever the selected field or its value changes;
+-- `onAdjust(delta)` fires AdjustFlightTuningRequested for whichever field this row is for.
 local function hitboxTimingRow(
 	scope: Scope,
 	layoutOrder: number,
@@ -100,27 +100,289 @@ local function hitboxTimingRow(
 	} :: Frame
 end
 
--- One bug report row (Reports tab) -- a Panel with header/description/context text plus a 3-way
--- Open/Resolved/Dismissed Tab row for triage, same idiom as hitboxTimingRow above (a small
--- file-local builder, not a promoted Components/ primitive, since it's specific to this screen's
--- one call site). `onSetStatus` fires UpdateReportStatusRequested for this report's Id.
+-- Longest a collapsed report's description preview renders before truncating with "..." -- Show
+-- More/Show Less (below) reveals the rest. Purely a display cutoff, not a data limit: `display.
+-- DescriptionText` itself is always the full filtered text DevMenuClient formatted it from.
+local REPORT_DESCRIPTION_PREVIEW_LENGTH = 160
+
+local REPORT_STATUS_OPTIONS = { "Open", "InProgress", "Resolved", "Dismissed" }
+local REPORT_PRIORITY_OPTIONS = { "Low", "Normal", "High", "Urgent" }
+
+-- Every callback a report row can fire, all keyed to this row's own display.Id by the caller (see
+-- reportRows below) -- kept as one table instead of five positional closures now that the Reports
+-- tab does more than the original single triage action.
+export type ReportRowCallbacks = {
+	OnSetStatus: (newStatus: string) -> (),
+	OnSetPriority: (newPriority: string) -> (),
+	OnAssign: (assign: boolean) -> (),
+	OnJumpToReporter: () -> (),
+	OnAddNote: (text: string) -> (),
+}
+
+-- Plain, hand-built TextLabel (not Components/Label.lua) specifically for report body text --
+-- Label.lua's own header is explicit that it has "no fixed width, auto height mode" (Size given
+-- means AutomaticSize.None entirely), which is exactly the combination free-form report
+-- descriptions/notes need to both wrap within the row's width AND grow the row to fit however long
+-- the admin's reply or a reporter's paragraph turns out to be. Native TextLabel supports fixed-width
+-- + AutomaticSize.Y directly, so this stays a thin wrapper rather than a Label.lua change that would
+-- ripple into every other caller's fixed-height assumption.
+local function wrappedBodyText(
+	scope: Scope,
+	text: Fusion.UsedAs<string>,
+	layoutOrder: number,
+	color: Color3?
+): TextLabel
+	return scope:New "TextLabel" {
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		LayoutOrder = layoutOrder,
+		FontFace = Tokens.Type.Body.Face,
+		TextSize = Tokens.Type.Body.Size,
+		TextColor3 = color or Tokens.Color.TextPrimary,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		TextWrapped = true,
+		Text = text,
+	} :: TextLabel
+end
+
+-- One bug report row (Reports tab) -- a Panel with header/badge/description text, an expand toggle
+-- that reveals the full triage surface (status/priority/assign/jump-to-reporter/notes), same idiom
+-- as hitboxTimingRow above (a small file-local builder, not a promoted Components/ primitive, since
+-- it's specific to this screen's one call site).
+--
+-- `expanded`/`noteText` are created fresh each time this function runs, but the row Instance they're
+-- bound into is only rebuilt when scope:ForPairs' own diff (see reportRows below) decides this row's
+-- key actually needs rebuilding -- toggling Show More/Less or typing a note does NOT depend on
+-- reportsDisplay changing, so these Fusion Values keep working as ordinary local UI state for as
+-- long as the row Instance lives, the same way selectedTab/godmodeActive do at the Mount level.
 local function reportRow(
 	scope: Scope,
 	display: BugReportRowDisplay,
 	layoutOrder: number,
-	onSetStatus: (newStatus: string) -> ()
+	callbacks: ReportRowCallbacks
 ): Frame
-	local function statusButton(text: string, status: string, order: number): TextButton
+	local expanded = scope:Value(false)
+	local noteText = scope:Value("")
+
+	local expandButtonText = scope:Computed(function(use)
+		return if use(expanded) then "Show Less" else "Show More"
+	end)
+
+	local previewText = scope:Computed(function(use)
+		if use(expanded) or #display.DescriptionText <= REPORT_DESCRIPTION_PREVIEW_LENGTH then
+			return display.DescriptionText
+		end
+		return string.sub(display.DescriptionText, 1, REPORT_DESCRIPTION_PREVIEW_LENGTH) .. "..."
+	end)
+
+	local badgeText = `{display.Status} | {display.PriorityText} | {display.AssignedText}`
+
+	local function statusButton(status: string, order: number): TextButton
 		return Tab(scope, {
-			Text = text,
+			Text = status,
 			Selected = display.Status == status,
-			Size = UDim2.new(1 / 3, -Tokens.Space.XS, 0, Tokens.Control.StepButtonSize),
+			Size = UDim2.new(1 / #REPORT_STATUS_OPTIONS, -Tokens.Space.XS, 0, Tokens.Control.StepButtonSize),
 			LayoutOrder = order,
 			OnActivated = function()
-				onSetStatus(status)
+				callbacks.OnSetStatus(status)
 			end,
 		})
 	end
+
+	local function priorityButton(priority: string, order: number): TextButton
+		return Tab(scope, {
+			Text = priority,
+			Selected = display.Priority == priority,
+			Size = UDim2.new(1 / #REPORT_PRIORITY_OPTIONS, -Tokens.Space.XS, 0, Tokens.Control.StepButtonSize),
+			LayoutOrder = order,
+			OnActivated = function()
+				callbacks.OnSetPriority(priority)
+			end,
+		})
+	end
+
+	local statusButtons: { Instance } = {}
+	for index, status in ipairs(REPORT_STATUS_OPTIONS) do
+		statusButtons[index] = statusButton(status, index)
+	end
+
+	local priorityButtons: { Instance } = {}
+	for index, priority in ipairs(REPORT_PRIORITY_OPTIONS) do
+		priorityButtons[index] = priorityButton(priority, index)
+	end
+
+	local noteRows: { Instance } = {}
+	if #display.Notes == 0 then
+		noteRows[1] = Label(scope, {
+			Text = "No notes yet.",
+			Scale = "Detail",
+			Color = Tokens.Color.TextSecondary,
+			LayoutOrder = 1,
+		})
+	else
+		for index, note in ipairs(display.Notes) do
+			noteRows[index] = scope:New "Frame" {
+				Name = "Note_" .. note.Id,
+				Size = UDim2.fromScale(1, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				BackgroundTransparency = 1,
+				LayoutOrder = index,
+
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Vertical,
+						Padding = UDim.new(0, 2),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					Label(scope, {
+						Text = `{note.AuthorName} -- {note.TimeText}`,
+						Scale = "Detail",
+						Color = Tokens.Color.TextSecondary,
+						LayoutOrder = 1,
+					}),
+					wrappedBodyText(scope, note.Text, 2),
+				},
+			} :: Frame
+		end
+	end
+
+	local assignButtonText = if display.IsAssignedToMe then "Release Claim" else "Claim Report"
+
+	local detailFrame = scope:New "Frame" {
+		Name = "Detail",
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		-- Non-visible children contribute no layout space to the parent UIListLayout (same trick
+		-- tabContent's own Visible-only-selected-tab comment already documents), so collapsing a row
+		-- costs nothing beyond flipping this one property.
+		Visible = expanded,
+		LayoutOrder = 5,
+
+		[Children] = {
+			scope:New "UIListLayout" {
+				FillDirection = Enum.FillDirection.Vertical,
+				HorizontalAlignment = Enum.HorizontalAlignment.Left,
+				Padding = UDim.new(0, Tokens.Space.XS),
+				SortOrder = Enum.SortOrder.LayoutOrder,
+			},
+			Label(scope, {
+				Text = display.ContextText,
+				Scale = "Detail",
+				Color = Tokens.Color.TextSecondary,
+				LayoutOrder = 1,
+			}),
+			Label(scope, { Text = "Status", Scale = "Detail", Color = Tokens.Color.TextSecondary, LayoutOrder = 2 }),
+			scope:New "Frame" {
+				Name = "StatusRow",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.StepButtonSize),
+				BackgroundTransparency = 1,
+				LayoutOrder = 3,
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						Padding = UDim.new(0, Tokens.Space.XS),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					table.unpack(statusButtons),
+				},
+			},
+			Label(scope, { Text = "Priority", Scale = "Detail", Color = Tokens.Color.TextSecondary, LayoutOrder = 4 }),
+			scope:New "Frame" {
+				Name = "PriorityRow",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.StepButtonSize),
+				BackgroundTransparency = 1,
+				LayoutOrder = 5,
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						Padding = UDim.new(0, Tokens.Space.XS),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					table.unpack(priorityButtons),
+				},
+			},
+			scope:New "Frame" {
+				Name = "AssignRow",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				BackgroundTransparency = 1,
+				LayoutOrder = 6,
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						Padding = UDim.new(0, Tokens.Space.S),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					Button(scope, {
+						Text = assignButtonText,
+						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 1,
+						OnActivated = function()
+							callbacks.OnAssign(not display.IsAssignedToMe)
+						end,
+					}),
+					Button(scope, {
+						Text = "Jump to Reporter",
+						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 2,
+						OnActivated = function()
+							callbacks.OnJumpToReporter()
+						end,
+					}),
+				},
+			},
+			Label(scope, { Text = "Notes", Scale = "Detail", Color = Tokens.Color.TextSecondary, LayoutOrder = 7 }),
+			scope:New "Frame" {
+				Name = "NotesList",
+				Size = UDim2.fromScale(1, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				BackgroundTransparency = 1,
+				LayoutOrder = 8,
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Vertical,
+						Padding = UDim.new(0, Tokens.Space.XS),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					table.unpack(noteRows),
+				},
+			},
+			scope:New "Frame" {
+				Name = "NoteInputRow",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				BackgroundTransparency = 1,
+				LayoutOrder = 9,
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						Padding = UDim.new(0, Tokens.Space.XS),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					TextField(scope, {
+						Text = noteText,
+						PlaceholderText = "Add an internal note...",
+						MaxLength = Constants.BugReport.NoteMaxLength,
+						Size = UDim2.new(0.75, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 1,
+					}),
+					Button(scope, {
+						Text = "Add",
+						Size = UDim2.new(0.25, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 2,
+						OnActivated = function()
+							local text = peek(noteText)
+							if #text > 0 then
+								callbacks.OnAddNote(text)
+								noteText:set("")
+							end
+						end,
+					}),
+				},
+			},
+		},
+	} :: Frame
 
 	return Panel(scope, {
 		Name = "Report_" .. display.Id,
@@ -145,30 +407,17 @@ local function reportRow(
 			-- BodyLarge (sans), where the deprecated Subheading alias already pointed (docs/design/
 			-- intro-redesign-handoff.md Phase F's Subheading sweep).
 			Label(scope, { Text = display.HeaderText, Scale = "BodyLarge", LayoutOrder = 1 }),
-			Label(scope, { Text = display.DescriptionText, Scale = "Body", LayoutOrder = 2 }),
-			Label(scope, {
-				Text = display.ContextText,
-				Scale = "Detail",
-				Color = Tokens.Color.TextSecondary,
-				LayoutOrder = 3,
-			}),
-			scope:New "Frame" {
-				Name = "StatusRow",
-				Size = UDim2.new(1, 0, 0, Tokens.Control.StepButtonSize),
-				BackgroundTransparency = 1,
+			Label(scope, { Text = badgeText, Scale = "Detail", Color = Tokens.Color.TextSecondary, LayoutOrder = 2 }),
+			wrappedBodyText(scope, previewText, 3),
+			Button(scope, {
+				Text = expandButtonText,
+				Size = UDim2.fromOffset(120, Tokens.Control.StepButtonSize),
 				LayoutOrder = 4,
-
-				[Children] = {
-					scope:New "UIListLayout" {
-						FillDirection = Enum.FillDirection.Horizontal,
-						Padding = UDim.new(0, Tokens.Space.XS),
-						SortOrder = Enum.SortOrder.LayoutOrder,
-					},
-					statusButton("Open", "Open", 1),
-					statusButton("Resolved", "Resolved", 2),
-					statusButton("Dismissed", "Dismissed", 3),
-				},
-			},
+				OnActivated = function()
+					expanded:set(not peek(expanded))
+				end,
+			}),
+			detailFrame,
 		},
 	}) :: Frame
 end
@@ -262,9 +511,6 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local flightActive = scope:Value(false)
 	local collideActive = scope:Value(false)
 	local selectedTab: Fusion.Value<DevMenuTabName> = scope:Value("Spawn" :: DevMenuTabName)
-	local hitboxStageDisplay: Fusion.Value<HitboxStageDisplayProps?> = scope:Value(nil :: HitboxStageDisplayProps?)
-	local hitboxStandaloneDisplay: Fusion.Value<HitboxStandaloneDisplayProps?> =
-		scope:Value(nil :: HitboxStandaloneDisplayProps?)
 	local flightTuningDisplay: Fusion.Value<FlightTuningDisplayProps?> = scope:Value(nil :: FlightTuningDisplayProps?)
 
 	-- Ability Slot Preview (Tuning tab, see the Section built below) -- entirely local/fake state,
@@ -281,10 +527,27 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local reportsHasMore = scope:Value(false)
 	local reportsLoading = scope:Value(false)
 
+	-- Filter/search state for the Reports tab -- all four are pure client-local view state, never
+	-- sent to the server: they filter the already-fetched reportsDisplay cache in place (see
+	-- filteredReportsDisplay below), the same "narrow what's already loaded" trade-off the DataStore
+	-- pagination itself forces (ListReports pages chronologically, not by any of these fields, so a
+	-- filter/search that wanted to reach UN-loaded reports would need server-side query support this
+	-- module doesn't have). "All" is the not-filtering sentinel for both Status and Category.
+	local reportsStatusFilter = scope:Value("All")
+	local reportsCategoryFilter = scope:Value("All")
+	local reportsMineOnly = scope:Value(false)
+	local reportsSearchText = scope:Value("")
+
 	local frozenActive = scope:Value(false)
 	local invisibleActive = scope:Value(false)
 	local speedMultiplierActive = scope:Value(1)
 	local spectatingActive = scope:Value(false)
+	-- Server-wide, not per-target -- see Types.lua's HitboxDebugActive header for why this isn't
+	-- watched via a Humanoid Attribute the way Godmode/Flight/Frozen/Invisible above are.
+	local hitboxDebugActive = scope:Value(false)
+	-- Passive "a newer version has been published" banner -- see Types.lua's own VersionBannerText
+	-- header. nil (nothing shown) until DevMenuClient's fetch resolves AND finds a newer version.
+	local versionBannerText: Fusion.Value<string?> = scope:Value(nil :: string?)
 
 	-- Local-only raw input state for Teleport-To-Coordinates/Broadcast-Announcement -- neither is
 	-- exposed on the handle itself (same "screen owns its own raw input, fires already-validated
@@ -300,18 +563,11 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	-- BindableEvent rather than a callback prop.
 	local spawnDummyRequestedEvent = Instance.new("BindableEvent")
 	local spawnBotRequestedEvent = Instance.new("BindableEvent")
+	local rollRareEmoteRequestedEvent = Instance.new("BindableEvent")
 	local setHealthRequestedEvent = Instance.new("BindableEvent")
 	local setGodmodeRequestedEvent = Instance.new("BindableEvent")
 	local setFlightRequestedEvent = Instance.new("BindableEvent")
 	local setFlightCollideRequestedEvent = Instance.new("BindableEvent")
-	local cycleHitboxStagePrevRequestedEvent = Instance.new("BindableEvent")
-	local cycleHitboxStageNextRequestedEvent = Instance.new("BindableEvent")
-	local adjustHitboxTimingRequestedEvent = Instance.new("BindableEvent")
-	local resetHitboxStageRequestedEvent = Instance.new("BindableEvent")
-	local cycleHitboxStandalonePrevRequestedEvent = Instance.new("BindableEvent")
-	local cycleHitboxStandaloneNextRequestedEvent = Instance.new("BindableEvent")
-	local adjustHitboxStandaloneRequestedEvent = Instance.new("BindableEvent")
-	local resetHitboxStandaloneRequestedEvent = Instance.new("BindableEvent")
 	local cycleFlightTuningPrevRequestedEvent = Instance.new("BindableEvent")
 	local cycleFlightTuningNextRequestedEvent = Instance.new("BindableEvent")
 	local adjustFlightTuningRequestedEvent = Instance.new("BindableEvent")
@@ -319,6 +575,10 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local loadFirstReportsRequestedEvent = Instance.new("BindableEvent")
 	local loadMoreReportsRequestedEvent = Instance.new("BindableEvent")
 	local updateReportStatusRequestedEvent = Instance.new("BindableEvent")
+	local addReportNoteRequestedEvent = Instance.new("BindableEvent")
+	local setReportPriorityRequestedEvent = Instance.new("BindableEvent")
+	local assignReportRequestedEvent = Instance.new("BindableEvent")
+	local jumpToReporterRequestedEvent = Instance.new("BindableEvent")
 	local setFrozenRequestedEvent = Instance.new("BindableEvent")
 	local setInvisibleRequestedEvent = Instance.new("BindableEvent")
 	local setSpeedMultiplierRequestedEvent = Instance.new("BindableEvent")
@@ -328,7 +588,9 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local forceRespawnTargetRequestedEvent = Instance.new("BindableEvent")
 	local broadcastAnnouncementRequestedEvent = Instance.new("BindableEvent")
 	local shutdownServerRequestedEvent = Instance.new("BindableEvent")
+	local instantRestartServerRequestedEvent = Instance.new("BindableEvent")
 	local spectateLockedTargetRequestedEvent = Instance.new("BindableEvent")
+	local setHitboxDebugRequestedEvent = Instance.new("BindableEvent")
 
 	local godmodeButtonText = scope:Computed(function(use)
 		return if use(godmodeActive) then "Godmode: On" else "Godmode: Off"
@@ -351,50 +613,16 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local spectateButtonText = scope:Computed(function(use)
 		return if use(spectatingActive) then "Spectating: On" else "Spectate Locked Target"
 	end)
-
-	-- Placeholder text shown before DevMenuClient.lua's initial ListHitboxStages response arrives,
-	-- or if it ever fails -- Computed so every Label below stays bound even while nil.
-	local hitboxTitleText = scope:Computed(function(use)
-		local display = use(hitboxStageDisplay)
-		return if display then display.TitleText else "Loading..."
-	end)
-	local hitboxWindupText = scope:Computed(function(use)
-		local display = use(hitboxStageDisplay)
-		return if display then display.WindupText else "Windup: --"
-	end)
-	local hitboxActiveText = scope:Computed(function(use)
-		local display = use(hitboxStageDisplay)
-		return if display then display.ActiveText else "Active: --"
-	end)
-	local hitboxRecoveryText = scope:Computed(function(use)
-		local display = use(hitboxStageDisplay)
-		return if display then display.RecoveryText else "Recovery: --"
+	-- Empty string (renders nothing) rather than "Loading..." while versionBannerText is nil -- this
+	-- banner is advisory chrome, not a value the admin is waiting on the way the flight tuner's
+	-- fields below are, so silence is the right default for "not loaded yet" AND "no newer version."
+	local versionBannerDisplayText = scope:Computed(function(use)
+		return use(versionBannerText) or ""
 	end)
 
-	-- Same placeholder-until-loaded shape as the four hitboxX Computeds above, for the
-	-- standalone-attack tuner (DashPunch/DashHit).
-	local standaloneTitleText = scope:Computed(function(use)
-		local display = use(hitboxStandaloneDisplay)
-		return if display then display.TitleText else "Loading..."
-	end)
-	local standaloneWindupText = scope:Computed(function(use)
-		local display = use(hitboxStandaloneDisplay)
-		return if display then display.WindupText else "Windup: --"
-	end)
-	local standaloneActiveText = scope:Computed(function(use)
-		local display = use(hitboxStandaloneDisplay)
-		return if display then display.ActiveText else "Active: --"
-	end)
-	local standaloneRecoveryText = scope:Computed(function(use)
-		local display = use(hitboxStandaloneDisplay)
-		return if display then display.RecoveryText else "Recovery: --"
-	end)
-	local standaloneOffsetText = scope:Computed(function(use)
-		local display = use(hitboxStandaloneDisplay)
-		return if display then display.OffsetText else "Offset: --"
-	end)
-
-	-- Same placeholder-until-loaded shape as the Computeds above, for the flight-feel tuner.
+	-- Same placeholder-until-loaded shape used by every DevMenuClient-fed section -- for the
+	-- flight-feel tuner (the last of these tuning tools left in DevMenu; Hitbox Timing/Standalone
+	-- Attacks moved to the Move Editor's "Default" moves section, see this module's own header).
 	local flightTuningTitleText = scope:Computed(function(use)
 		local display = use(flightTuningDisplay)
 		return if display then display.TitleText else "Loading..."
@@ -578,6 +806,21 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 					}),
 				},
 			},
+		}),
+		-- Emote System roll-path test trigger (Phase 2, radial emote wheel) -- exercises
+		-- EmoteUnlockService.GrantEmote/RollEmote end to end from a human tester's own button press,
+		-- since there is still no AchievementSystem/quest/live-ops caller to trigger it for real. See
+		-- DevMenuSystem.handleRollEmote's own header for why this always rolls the "RareEmotes" pool
+		-- specifically, for the calling admin themselves.
+		Section(scope, "Emotes", 3, {
+			Button(scope, {
+				Text = "Roll Rare Emote",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				LayoutOrder = 1,
+				OnActivated = function()
+					rollRareEmoteRequestedEvent:Fire()
+				end,
+			}),
 		}),
 	})
 
@@ -853,133 +1096,40 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 					shutdownServerRequestedEvent:Fire()
 				end,
 			}),
+			-- Faster sibling to Shutdown Server above -- same two-press confirm, no countdown wait
+			-- once confirmed. See Types.lua's InstantRestartServerRequested header.
+			Button(scope, {
+				Text = "Instant Restart Server",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				LayoutOrder = 6,
+				OnActivated = function()
+					instantRestartServerRequestedEvent:Fire()
+				end,
+			}),
+			Label(scope, {
+				Text = versionBannerDisplayText,
+				Scale = "Detail",
+				Color = Tokens.Color.Warning,
+				LayoutOrder = 7,
+			}),
+		}),
+		Section(scope, "Debug Visualization", 6, {
+			-- Server-wide (Server/Combat/HitboxDebugState.lua) -- flipping this shows every sampled
+			-- hitbox pose as a rendered Part to every nearby player, in Studio AND a live server, not
+			-- just the toggling admin. See HitboxDebugState.lua's own header.
+			Toggle(scope, {
+				Label = "Show Hitboxes (Studio + Live)",
+				Value = hitboxDebugActive,
+				LayoutOrder = 1,
+				OnChanged = function(enabled: boolean)
+					setHitboxDebugRequestedEvent:Fire(enabled)
+				end,
+			}),
 		}),
 	})
 
 	local tuningTab = tabContent(scope, "Tuning", selectedTab, scrollSize, {
-		Section(scope, "Hitbox Timing (Live Tune)", 1, {
-			scope:New "Frame" {
-				Name = "HitboxStageSelector",
-				AutomaticSize = Enum.AutomaticSize.XY,
-				BackgroundTransparency = 1,
-				LayoutOrder = 2,
-
-				[Children] = {
-					scope:New "UIListLayout" {
-						FillDirection = Enum.FillDirection.Horizontal,
-						VerticalAlignment = Enum.VerticalAlignment.Center,
-						Padding = UDim.new(0, Tokens.Space.XS),
-						SortOrder = Enum.SortOrder.LayoutOrder,
-					},
-					Button(scope, {
-						Text = "<",
-						Size = UDim2.fromOffset(Tokens.Control.StepButtonSize, Tokens.Control.StepButtonSize),
-						LayoutOrder = 1,
-						OnActivated = function()
-							cycleHitboxStagePrevRequestedEvent:Fire()
-						end,
-					}),
-					Label(scope, {
-						Text = hitboxTitleText,
-						Scale = "Body",
-						Size = UDim2.fromOffset(180, Tokens.Control.StepButtonSize),
-						TextXAlignment = Enum.TextXAlignment.Center,
-						LayoutOrder = 2,
-					}),
-					Button(scope, {
-						Text = ">",
-						Size = UDim2.fromOffset(Tokens.Control.StepButtonSize, Tokens.Control.StepButtonSize),
-						LayoutOrder = 3,
-						OnActivated = function()
-							cycleHitboxStageNextRequestedEvent:Fire()
-						end,
-					}),
-				},
-			},
-			hitboxTimingRow(scope, 3, hitboxWindupText, function(delta: number)
-				adjustHitboxTimingRequestedEvent:Fire("WindupSeconds", delta)
-			end),
-			hitboxTimingRow(scope, 4, hitboxActiveText, function(delta: number)
-				adjustHitboxTimingRequestedEvent:Fire("ActiveSeconds", delta)
-			end),
-			hitboxTimingRow(scope, 5, hitboxRecoveryText, function(delta: number)
-				adjustHitboxTimingRequestedEvent:Fire("RecoverySeconds", delta)
-			end),
-			Button(scope, {
-				Text = "Reset Stage to Default",
-				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
-				LayoutOrder = 6,
-				OnActivated = function()
-					resetHitboxStageRequestedEvent:Fire()
-				end,
-			}),
-		}),
-		Section(scope, "Standalone Attacks (Live Tune)", 2, {
-			scope:New "Frame" {
-				Name = "StandaloneAttackSelector",
-				AutomaticSize = Enum.AutomaticSize.XY,
-				BackgroundTransparency = 1,
-				LayoutOrder = 2,
-
-				[Children] = {
-					scope:New "UIListLayout" {
-						FillDirection = Enum.FillDirection.Horizontal,
-						VerticalAlignment = Enum.VerticalAlignment.Center,
-						Padding = UDim.new(0, Tokens.Space.XS),
-						SortOrder = Enum.SortOrder.LayoutOrder,
-					},
-					Button(scope, {
-						Text = "<",
-						Size = UDim2.fromOffset(Tokens.Control.StepButtonSize, Tokens.Control.StepButtonSize),
-						LayoutOrder = 1,
-						OnActivated = function()
-							cycleHitboxStandalonePrevRequestedEvent:Fire()
-						end,
-					}),
-					Label(scope, {
-						Text = standaloneTitleText,
-						Scale = "Body",
-						Size = UDim2.fromOffset(180, Tokens.Control.StepButtonSize),
-						TextXAlignment = Enum.TextXAlignment.Center,
-						LayoutOrder = 2,
-					}),
-					Button(scope, {
-						Text = ">",
-						Size = UDim2.fromOffset(Tokens.Control.StepButtonSize, Tokens.Control.StepButtonSize),
-						LayoutOrder = 3,
-						OnActivated = function()
-							cycleHitboxStandaloneNextRequestedEvent:Fire()
-						end,
-					}),
-				},
-			},
-			hitboxTimingRow(scope, 3, standaloneWindupText, function(delta: number)
-				adjustHitboxStandaloneRequestedEvent:Fire("WindupSeconds", delta)
-			end),
-			hitboxTimingRow(scope, 4, standaloneActiveText, function(delta: number)
-				adjustHitboxStandaloneRequestedEvent:Fire("ActiveSeconds", delta)
-			end),
-			hitboxTimingRow(scope, 5, standaloneRecoveryText, function(delta: number)
-				adjustHitboxStandaloneRequestedEvent:Fire("RecoverySeconds", delta)
-			end),
-			-- Offset (studs, not seconds) -- the one field this tuner has that the weapon-stage one
-			-- above doesn't (see Types.HitboxStandaloneInfo's own header). Reuses hitboxTimingRow's
-			-- same +-0.01/+-0.1 step buttons -- coarser than ideal for stud increments, but keeps
-			-- the row visually/behaviorally consistent with the three above; the 0.1 step alone is
-			-- a reasonable single-click granularity for nudging a hitbox's reach.
-			hitboxTimingRow(scope, 6, standaloneOffsetText, function(delta: number)
-				adjustHitboxStandaloneRequestedEvent:Fire("OffsetForwardStuds", delta)
-			end),
-			Button(scope, {
-				Text = "Reset Attack to Default",
-				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
-				LayoutOrder = 7,
-				OnActivated = function()
-					resetHitboxStandaloneRequestedEvent:Fire()
-				end,
-			}),
-		}),
-		Section(scope, "Flight Tuning (Live Tune)", 3, {
+		Section(scope, "Flight Tuning (Live Tune)", 1, {
 			scope:New "Frame" {
 				Name = "FlightTuningSelector",
 				AutomaticSize = Enum.AutomaticSize.XY,
@@ -1022,7 +1172,7 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 			-- seconds deltas -- reused verbatim as a component (it's generic: valueText +
 			-- onAdjust(delta)), just fed a different meaning for `delta` here. See
 			-- Server/DevMenu/FlightTuning.lua's own header for why a fractional delta is the one
-			-- deviation from the Hitbox tuners' shape.
+			-- deviation from that row helper's original absolute-seconds shape.
 			hitboxTimingRow(scope, 3, flightTuningValueText, function(delta: number)
 				adjustFlightTuningRequestedEvent:Fire(delta)
 			end),
@@ -1035,7 +1185,7 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 				end,
 			}),
 		}),
-		Section(scope, "Ability Slot Preview (Dev Only)", 4, {
+		Section(scope, "Ability Slot Preview (Dev Only)", 2, {
 			Label(scope, {
 				Text = "Local preview only -- verifies AbilitySlot's state/cooldown/accent-color "
 					.. "rendering ahead of ArtSystem. Not wired to real ability data or the live HUD.",
@@ -1089,18 +1239,107 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 		}),
 	})
 
+	-- Status/Category filter tab rows, and the "Mine Only" toggle -- "All" always leads each option
+	-- list as the not-filtering sentinel. Built as Tab strips (not Components/Toggle.lua) for the
+	-- same reason the Ability Preview state buttons above are Tabs: a row of mutually-exclusive
+	-- Selected chips reads consistently with every other selector already in this file, and
+	-- Toggle.lua's own Label prop claims the full row width (built for a single standalone switch),
+	-- which doesn't fit a strip of several options side by side.
+	local REPORT_STATUS_FILTER_OPTIONS = { "All", "Open", "InProgress", "Resolved", "Dismissed" }
+	local REPORT_CATEGORY_FILTER_OPTIONS = { "All", "Bug", "Exploit", "Suggestion", "Other" }
+
+	local statusFilterButtons: { Instance } = {}
+	for index, status in ipairs(REPORT_STATUS_FILTER_OPTIONS) do
+		statusFilterButtons[index] = Tab(scope, {
+			Text = status,
+			Selected = scope:Computed(function(use)
+				return use(reportsStatusFilter) == status
+			end),
+			Size = UDim2.new(1 / #REPORT_STATUS_FILTER_OPTIONS, -Tokens.Space.XS, 0, Tokens.Control.StepButtonSize),
+			LayoutOrder = index,
+			OnActivated = function()
+				reportsStatusFilter:set(status)
+			end,
+		})
+	end
+
+	local categoryFilterButtons: { Instance } = {}
+	for index, category in ipairs(REPORT_CATEGORY_FILTER_OPTIONS) do
+		categoryFilterButtons[index] = Tab(scope, {
+			Text = category,
+			Selected = scope:Computed(function(use)
+				return use(reportsCategoryFilter) == category
+			end),
+			Size = UDim2.new(1 / #REPORT_CATEGORY_FILTER_OPTIONS, -Tokens.Space.XS, 0, Tokens.Control.StepButtonSize),
+			LayoutOrder = index,
+			OnActivated = function()
+				reportsCategoryFilter:set(category)
+			end,
+		})
+	end
+
+	-- Narrows the already-fetched reportsDisplay cache -- see reportsStatusFilter's own declaration
+	-- above for why this is client-local narrowing rather than a server-side query. Recomputes
+	-- whenever any filter input OR the underlying fetched list changes (every `use()` call below is
+	-- a real dependency), so a fresh fetch or a status/priority patch from DevMenuClient
+	-- automatically re-filters without this module having to know that happened.
+	local filteredReportsDisplay = scope:Computed(function(use)
+		local statusFilter = use(reportsStatusFilter)
+		local categoryFilter = use(reportsCategoryFilter)
+		local mineOnly = use(reportsMineOnly)
+		local searchLower = string.lower(use(reportsSearchText))
+		local all = use(reportsDisplay)
+
+		local filtered: { BugReportRowDisplay } = {}
+		for _, display in ipairs(all) do
+			if statusFilter ~= "All" and display.Status ~= statusFilter then
+				continue
+			end
+			if categoryFilter ~= "All" and display.Category ~= categoryFilter then
+				continue
+			end
+			if mineOnly and not display.IsAssignedToMe then
+				continue
+			end
+			if #searchLower > 0 then
+				local haystack = string.lower(display.ReporterName .. " " .. display.DescriptionText)
+				if not string.find(haystack, searchLower, 1, true) then
+					continue
+				end
+			end
+			table.insert(filtered, display)
+		end
+		return filtered
+	end)
+
 	-- Dynamic list rendering: scope:ForPairs, same primitive CombatFeedback/init.lua's damage-number
 	-- list already uses (see that file's own comment on ForPairs vs. ForValues) -- keyed by
 	-- display.Id (not the source array's own index) so a status-change re-render reuses/updates the
 	-- same row Instance instead of tearing down and rebuilding every row whenever any one of them
-	-- changes. Given admin report volume is low and pages are capped
-	-- (Constants.BugReport.ListPageSize), no virtualization is needed. LayoutOrder is offset past the
-	-- section's own title (1) and toolbar (2) below so rows always sort after both.
-	local reportRows = scope:ForPairs(reportsDisplay, function(_use, innerScope, index, display)
+	-- changes. Fed filteredReportsDisplay rather than the raw reportsDisplay cache -- rows for
+	-- reports the current filter/search hides simply aren't built at all. Given admin report volume
+	-- is low and pages are capped (Constants.BugReport.ListPageSize), no virtualization is needed.
+	-- LayoutOrder is offset past the section's own title/toolbar rows below so rows always sort
+	-- after them.
+	local reportRows = scope:ForPairs(filteredReportsDisplay, function(_use, innerScope, index, display)
 		return display.Id,
-			reportRow(innerScope, display, 10 + index, function(newStatus: string)
-				updateReportStatusRequestedEvent:Fire(display.Id, newStatus)
-			end)
+			reportRow(innerScope, display, 20 + index, {
+				OnSetStatus = function(newStatus: string)
+					updateReportStatusRequestedEvent:Fire(display.Id, newStatus)
+				end,
+				OnSetPriority = function(newPriority: string)
+					setReportPriorityRequestedEvent:Fire(display.Id, newPriority)
+				end,
+				OnAssign = function(assign: boolean)
+					assignReportRequestedEvent:Fire(display.Id, assign)
+				end,
+				OnJumpToReporter = function()
+					jumpToReporterRequestedEvent:Fire(display.Id)
+				end,
+				OnAddNote = function(text: string)
+					addReportNoteRequestedEvent:Fire(display.Id, text)
+				end,
+			})
 	end)
 
 	local loadMoreButtonText = scope:Computed(function(use)
@@ -1113,10 +1352,67 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local reportsTab = tabContent(scope, "Reports", selectedTab, scrollSize, {
 		Section(scope, "Bug Reports", 1, {
 			scope:New "Frame" {
+				Name = "StatusFilterRow",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.StepButtonSize),
+				BackgroundTransparency = 1,
+				LayoutOrder = 2,
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						Padding = UDim.new(0, Tokens.Space.XS),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					table.unpack(statusFilterButtons),
+				},
+			},
+			scope:New "Frame" {
+				Name = "CategoryFilterRow",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.StepButtonSize),
+				BackgroundTransparency = 1,
+				LayoutOrder = 3,
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						Padding = UDim.new(0, Tokens.Space.XS),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					table.unpack(categoryFilterButtons),
+				},
+			},
+			scope:New "Frame" {
+				Name = "SearchAndMineRow",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				BackgroundTransparency = 1,
+				LayoutOrder = 4,
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						VerticalAlignment = Enum.VerticalAlignment.Center,
+						Padding = UDim.new(0, Tokens.Space.S),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					TextField(scope, {
+						Text = reportsSearchText,
+						PlaceholderText = "Search reporter or description...",
+						Size = UDim2.new(0.7, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 1,
+					}),
+					Tab(scope, {
+						Text = "Mine Only",
+						Selected = reportsMineOnly,
+						Size = UDim2.new(0.3, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 2,
+						OnActivated = function()
+							reportsMineOnly:set(not peek(reportsMineOnly))
+						end,
+					}),
+				},
+			},
+			scope:New "Frame" {
 				Name = "ReportsToolbar",
 				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
 				BackgroundTransparency = 1,
-				LayoutOrder = 2,
+				LayoutOrder = 5,
 
 				[Children] = {
 					scope:New "UIListLayout" {
@@ -1196,20 +1492,11 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 		CollideActive = collideActive,
 		SpawnDummyRequested = spawnDummyRequestedEvent.Event,
 		SpawnBotRequested = spawnBotRequestedEvent.Event,
+		RollRareEmoteRequested = rollRareEmoteRequestedEvent.Event,
 		SetHealthRequested = setHealthRequestedEvent.Event,
 		SetGodmodeRequested = setGodmodeRequestedEvent.Event,
 		SetFlightRequested = setFlightRequestedEvent.Event,
 		SetFlightCollideRequested = setFlightCollideRequestedEvent.Event,
-		HitboxStageDisplay = hitboxStageDisplay,
-		CycleHitboxStagePrevRequested = cycleHitboxStagePrevRequestedEvent.Event,
-		CycleHitboxStageNextRequested = cycleHitboxStageNextRequestedEvent.Event,
-		AdjustHitboxTimingRequested = adjustHitboxTimingRequestedEvent.Event,
-		ResetHitboxStageRequested = resetHitboxStageRequestedEvent.Event,
-		HitboxStandaloneDisplay = hitboxStandaloneDisplay,
-		CycleHitboxStandalonePrevRequested = cycleHitboxStandalonePrevRequestedEvent.Event,
-		CycleHitboxStandaloneNextRequested = cycleHitboxStandaloneNextRequestedEvent.Event,
-		AdjustHitboxStandaloneRequested = adjustHitboxStandaloneRequestedEvent.Event,
-		ResetHitboxStandaloneRequested = resetHitboxStandaloneRequestedEvent.Event,
 		FlightTuningDisplay = flightTuningDisplay,
 		CycleFlightTuningPrevRequested = cycleFlightTuningPrevRequestedEvent.Event,
 		CycleFlightTuningNextRequested = cycleFlightTuningNextRequestedEvent.Event,
@@ -1221,6 +1508,10 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 		LoadFirstReportsRequested = loadFirstReportsRequestedEvent.Event,
 		LoadMoreReportsRequested = loadMoreReportsRequestedEvent.Event,
 		UpdateReportStatusRequested = updateReportStatusRequestedEvent.Event,
+		AddReportNoteRequested = addReportNoteRequestedEvent.Event,
+		SetReportPriorityRequested = setReportPriorityRequestedEvent.Event,
+		AssignReportRequested = assignReportRequestedEvent.Event,
+		JumpToReporterRequested = jumpToReporterRequestedEvent.Event,
 		FrozenActive = frozenActive,
 		InvisibleActive = invisibleActive,
 		SpeedMultiplierActive = speedMultiplierActive,
@@ -1233,8 +1524,12 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 		ForceRespawnTargetRequested = forceRespawnTargetRequestedEvent.Event,
 		BroadcastAnnouncementRequested = broadcastAnnouncementRequestedEvent.Event,
 		ShutdownServerRequested = shutdownServerRequestedEvent.Event,
+		InstantRestartServerRequested = instantRestartServerRequestedEvent.Event,
+		VersionBannerText = versionBannerText,
 		SpectatingActive = spectatingActive,
 		SpectateLockedTargetRequested = spectateLockedTargetRequestedEvent.Event,
+		HitboxDebugActive = hitboxDebugActive,
+		SetHitboxDebugRequested = setHitboxDebugRequestedEvent.Event,
 	}
 end
 

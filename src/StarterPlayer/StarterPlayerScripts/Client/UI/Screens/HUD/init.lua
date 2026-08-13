@@ -3,8 +3,9 @@
 	HUD.lua
 
 	Owns: the always-visible combat HUD surface -- the central hotbar (docs/ui-ux-philosophy.md's
-	"Player Status Display" and "Ability System UI" sections): a single horizontal bar --
-	Health/Qi/Posture as icon-tile gauges (VitalIcon.lua) | one thin divider | a row of ability slots
+	"Player Status Display" and "Ability System UI" sections): a single horizontal bar -- the tier
+	readout (TierBadge.lua) | a thin divider | Health/Qi/Posture as icon-tile gauges (VitalIcon.lua) |
+	a thin divider | a row of ability slots
 	(AbilitySlot.lua) -- with a CombatStateBadge unfolding above it the moment
 	CombatState.inCombatUntil goes live (see that component's own header) -- the first real consumer
 	of that server signal. Renders directly from ClientState -- never computes or guesses at a value
@@ -20,15 +21,31 @@
 	still renders in the doc's "Locked" appearance: ArtSystem is still an empty Init(), and
 	CombatSystem's first-pass melee foundation deliberately doesn't define an ability
 	icon/cooldown/resource concept (no arts/abilities exist yet -- see CombatSystem.lua's header),
-	so there's no real per-slot data to show. Health/Qi/Posture above, by contrast: Health and
-	Posture ARE now live (CombatSystem exists and ClientState.Bootstrap() wires them to its
-	Combat_VitalsUpdated remote); Qi stays render-only -- no System owns that resource yet.
+	so there's no real per-slot data to show. Health/Qi/Posture above are all live now: Health and
+	Posture from CombatSystem (ClientState.Bootstrap() wires them to Combat_VitalsUpdated), Qi from
+	QiSystem.lua (Progression_QiUpdated -> ClientState.Qi/MaxQi) -- the Qi VitalIcon lost its Muted
+	prop this pass now that a real System owns the resource behind it.
 	Damage numbers and lock-on UI are also now wired to CombatSystem, but live in the separate
-	Screens/CombatFeedback surface, not this hotbar. Same "waits on the owning System" reasoning
-	applies to Level, character information, and active effects (also named in the Player Status
-	Display list but left out of this hotbar), and to notifications/menus, which still wait on
-	RewardSystem/ProgressionSystem/FactionManager -- see docs/ui-ux-philosophy.md's "Current build
-	status" for the full list and why.
+	Screens/CombatFeedback surface, not this hotbar.
+
+	The Player Status Display's "Level" entry is now real and is the TierBadge at the head of the bar:
+	TierSystem.lua owns the ladder and replicates tier identity plus its XP window, MeridianSystem
+	replicates the running XP total, and the badge fills a meter from the two (see TierBadge.lua and
+	Types.TierUpdatePayload for why that arithmetic is presentation rather than a breach of the
+	server-owns-truth rule). Same "waits on the owning System" reasoning still applies to the rest of
+	that list -- character information and active effects -- and to notifications/menus, which still
+	wait on RewardSystem/ProgressionSystem/FactionManager; see docs/ui-ux-philosophy.md's "Current
+	build status" for what remains and why.
+
+	2026-08-10 (Move Creation System hotbar pass): the five slots are no longer permanently Locked --
+	each now reflects Client/Combat/HotbarBindings.lua's admin-local slot->MoveId binding (Available
+	when bound, Locked when not) and fires the bound move on click via HotbarMoveClient.Fire, the
+	same call CombatClient.lua's HotbarSlot1-5 keybinds make. This is still not the real ArtSystem
+	ability-loadout concept the paragraph above describes -- there is still no icon, resource cost,
+	or cooldown readout, since a Move Creation System move has none of those concepts -- it is
+	specifically the Move Editor's own "test your move against real combat" affordance made
+	reachable from the live HUD, gated end-to-end by CombatSystem.lua's own AdminConfig re-check
+	regardless of what this client renders.
 
 	Mount() returns the bare ScreenGui, not a *Handle table -- this surface is always-on with no
 	open/closed state to expose, one of the two documented Mount() return shapes (see
@@ -50,18 +67,30 @@ local Panel = require(script.Parent.Parent.Components.Panel)
 local VitalIcon = require(script.Parent.Parent.Components.VitalIcon)
 local AbilitySlot = require(script.Parent.Parent.Components.AbilitySlot)
 local CombatStateBadge = require(script.Parent.Parent.Components.CombatStateBadge)
+local TierBadge = require(script.Parent.Parent.Components.TierBadge)
+local BountyMarkedBadge = require(script.Parent.Parent.Components.BountyMarkedBadge)
 local ClientStateModule = require(script.Parent.Parent.State.ClientState)
+local HotbarBindings = require(script.Parent.Parent.Parent.Combat.HotbarBindings)
+local HotbarMoveClient = require(script.Parent.Parent.Parent.Combat.HotbarMoveClient)
 
 local Children = Fusion.Children
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type ClientState = ClientStateModule.ClientState
+type AbilitySlotState = AbilitySlot.AbilitySlotState
 
 local HUD = {}
 
 -- Keybinds are a local input affordance, not gameplay state -- see AbilitySlot.lua's header for
 -- why showing these numbers isn't the kind of data fabrication this file otherwise avoids.
 local ABILITY_KEYBINDS = { "1", "2", "3", "4", "5" }
+
+-- How long TierBadge's promotion flare is held at full before easing back to rest. Longer than
+-- CombatFeedback's parry glint (0.18s) by an order of magnitude, and deliberately so: that cue
+-- acknowledges an input the player just made and must not outlive the exchange, while this one
+-- announces a permanent progression milestone that may have arrived seconds after the kill that
+-- earned it. It still self-clears rather than latching -- a tier-up is a moment, not a mode.
+local TIER_PROMOTION_HOLD_SECONDS = 2.5
 
 -- A horizontal strip of children, auto-sized to its content on both axes so callers never need to
 -- hand-compute a row's pixel width/height (and never need to duplicate a child component's own
@@ -108,14 +137,67 @@ local function Divider(scope: Scope, layoutOrder: number): Frame
 	} :: Frame
 end
 
+-- "Available" whenever a Move-Editor-authored move is bound to this slot (Client/Combat/
+-- HotbarBindings.lua), "Locked" otherwise -- the two existing AbilitySlotState values that already
+-- carry this exact "something is/isn't here" meaning (see AbilitySlot.lua's header), reused rather
+-- than inventing a new state for what is still just "bound vs. not."
+local function stateForBinding(moveId: string?): AbilitySlotState
+	return if moveId then "Available" else "Locked"
+end
+
 function HUD.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientState): ScreenGui
 	local abilitySlots = {}
+	-- One reactive State Value per slot, seeded from whatever's already bound this session (an
+	-- admin who bound a move, then closed and reopened the Move Editor, shouldn't see every slot
+	-- flash back to Locked) and kept live by the HotbarBindings.OnChanged subscription below -- the
+	-- same "screen owns a Fusion Value, an outside module writes into it" shape ClientState.
+	-- Bootstrap already uses for server-reflected state, applied here to a client-local source
+	-- instead.
+	local abilitySlotStates: { Fusion.Value<AbilitySlotState> } = {}
 	for index, keybind in ipairs(ABILITY_KEYBINDS) do
+		local slotState = scope:Value(stateForBinding(HotbarBindings.Get(index)))
+		abilitySlotStates[index] = slotState
 		abilitySlots[index] = AbilitySlot(scope, {
 			LayoutOrder = index,
 			Keybind = keybind,
+			State = slotState,
+			OnActivated = function()
+				HotbarMoveClient.Fire(index)
+			end,
 		})
 	end
+
+	-- Never unsubscribed -- HUD is mounted once for the life of the client session (see this file's
+	-- own header on Mount()'s return shape), the same "connect once, never disconnect" lifetime
+	-- every other HUD-wide listener here already has (ClientState.Bootstrap's own remote handlers).
+	HotbarBindings.OnChanged(function(slot: number, moveId: string?)
+		local slotState = abilitySlotStates[slot]
+		if slotState then
+			slotState:set(stateForBinding(moveId))
+		end
+	end)
+
+	-- The one-shot drive behind TierBadge's promotion flare. The component eases a 0..1 intensity and
+	-- owns no timer of its own (TierBadge.lua's header, same split ParryReadyGlint/CombatFeedback
+	-- already use), so the pulse lives here -- next to ClientState, which is the only thing that knows
+	-- a promotion actually happened rather than a tier merely being synced on login.
+	--
+	-- Generation-guarded exactly like CombatFeedback's parry glint: two promotions in quick
+	-- succession (a single large XP grant crossing two thresholds fires once, but a kill streak can
+	-- genuinely promote twice inside the hold window) each schedule their own reset, and only the most
+	-- recent is allowed to zero the flare, so the earlier one can't cut the fresher one short.
+	local promotionPulse: Fusion.Value<number> = scope:Value(0)
+	local promotionGeneration = 0
+	scope:Observer(clientState.TierPromotion):onChange(function()
+		promotionGeneration += 1
+		local generation = promotionGeneration
+		promotionPulse:set(1)
+		task.delay(TIER_PROMOTION_HOLD_SECONDS, function()
+			if promotionGeneration == generation then
+				promotionPulse:set(0)
+			end
+		end)
+	end)
 
 	return scope:New "ScreenGui" {
 		Name = "HUD",
@@ -163,6 +245,15 @@ function HUD.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientState)
 					Padding = UDim.new(0, 0),
 					SortOrder = Enum.SortOrder.LayoutOrder,
 				},
+				-- Two stacked pills above the bar, both collapsing to true zero height when
+				-- inactive. Marked sits ABOVE in-combat deliberately: being hunted is the rarer and more
+				-- consequential of the two, and a player who is both should read the bounty warning
+				-- first.
+				BountyMarkedBadge(scope, {
+					LayoutOrder = -1,
+					Marked = clientState.BountyMarked,
+					Reward = clientState.BountyReward,
+				}),
 				CombatStateBadge(scope, {
 					LayoutOrder = 0,
 					InCombat = clientState.InCombat,
@@ -174,7 +265,24 @@ function HUD.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientState)
 				-- seam clearance on both sides without the panel reading as loosely padded, matching
 				-- the reference direction's "no wasted padding... tight and compact."
 				Row(scope, 1, Tokens.Space.XS, {
-					Row(scope, 1, Tokens.Space.S, {
+					-- Tier leads the bar, left of the vitals, behind its own divider -- it is the
+					-- slowest-changing and most identity-like thing here (it moves a handful of
+					-- times per account, not per exchange), so it reads as the label the rest of
+					-- the bar belongs to rather than competing with the vitals for the glance
+					-- during a fight. Same Divider treatment that already separates the vitals
+					-- from the ability slots, for the same reason: these are three groups, not
+					-- one undifferentiated strip.
+					TierBadge(scope, {
+						LayoutOrder = 1,
+						Tier = clientState.Tier,
+						TierName = clientState.TierName,
+						TierFloorXP = clientState.TierFloorXP,
+						TierNextXP = clientState.TierNextXP,
+						MeridianXP = clientState.MeridianXP,
+						PromotionPulse = promotionPulse,
+					}),
+					Divider(scope, 2),
+					Row(scope, 3, Tokens.Space.S, {
 						VitalIcon.new(scope, {
 							LayoutOrder = 1,
 							Glyph = "Cross",
@@ -197,10 +305,9 @@ function HUD.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientState)
 							Max = clientState.MaxQi,
 							FillColor = Tokens.VitalColor.Qi,
 							CriticalBelow = 0.2,
-							-- No System owns Qi yet (see this file's header) -- Value/MaxQi are
-							-- permanent placeholders, never real data. Muted renders the doc's
-							-- "not live yet" treatment instead of a full-looking gauge.
-							Muted = true,
+							-- QiSystem.lua now owns this resource (Server/Systems/QiSystem.lua,
+							-- Progression_QiUpdated -> ClientState.Qi/MaxQi) -- no longer Muted as of
+							-- this pass. Renders live exactly like Health/Posture below.
 							-- Uploaded from docs/design/icons/qi.svg's PNG export -- Texture id
 							-- (rbxassetid://125861176852006 is the wrapping Decal, not usable here).
 							IconAssetId = "rbxassetid://139165261554498",
@@ -218,8 +325,8 @@ function HUD.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientState)
 							IconAssetId = "rbxassetid://137723815865371",
 						}),
 					}),
-					Divider(scope, 2),
-					Row(scope, 3, Tokens.Space.XS, abilitySlots),
+					Divider(scope, 4),
+					Row(scope, 5, Tokens.Space.XS, abilitySlots),
 				}),
 			},
 		}) :: Frame,

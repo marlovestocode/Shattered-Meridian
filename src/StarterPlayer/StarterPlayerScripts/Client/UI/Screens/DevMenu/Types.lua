@@ -21,48 +21,50 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 -- selectable values.
 export type DevMenuTabName = "Spawn" | "Admin" | "Tuning" | "Reports"
 
--- What the hitbox-timing tuner section (ContentArea.lua) renders for whichever stage
--- DevMenuClient.lua currently has selected -- pre-formatted strings, not raw numbers, per this
--- screen's "already-computed value in, presentation out" boundary (see init.lua's own header) --
--- DevMenuClient.lua owns number->string formatting, this module only ever displays what it's handed.
-export type HitboxStageDisplayProps = {
-	TitleText: string,
-	WindupText: string,
-	ActiveText: string,
-	RecoveryText: string,
-}
-
--- Same "pre-formatted strings, presentation only" contract as HitboxStageDisplayProps above, for
--- the standalone-attack tuner (DashPunch/DashHit) -- OffsetText is the one field that section has
--- and the weapon-stage one doesn't (see Types.HitboxStandaloneInfo's own header for why).
-export type HitboxStandaloneDisplayProps = {
-	TitleText: string,
-	WindupText: string,
-	ActiveText: string,
-	RecoveryText: string,
-	OffsetText: string,
-}
-
--- Same "pre-formatted strings, presentation only" contract as the two above, for the flight-feel
--- tuner -- a single Value per field (unlike the three-field Windup/Active/Recovery tuners above),
--- since Constants.Flight's tunable fields are each their own independent number, not a trio that's
--- always tuned together.
+-- Pre-formatted strings, not raw numbers, per this screen's "already-computed value in, presentation
+-- out" boundary (see init.lua's own header) -- DevMenuClient.lua owns number->string formatting, this
+-- module only ever displays what it's handed. Used only by the flight-feel tuner now -- the
+-- equivalent hitbox-timing/standalone-attack tuner props this file used to declare (
+-- HitboxStageDisplayProps/HitboxStandaloneDisplayProps) moved out of DevMenu entirely, into the Move
+-- Editor's "Default" moves section (see Server/Combat/DefaultMoveRegistry.lua's own header).
 export type FlightTuningDisplayProps = {
 	TitleText: string,
 	ValueText: string,
 }
 
+-- One internal triage note, already formatted for display -- same "already-computed value in,
+-- presentation out" contract as BugReportRowDisplay below.
+export type BugReportNoteDisplay = {
+	Id: string,
+	AuthorName: string,
+	Text: string,
+	TimeText: string,
+}
+
 -- One bug report, already formatted for display -- same "already-computed value in, presentation
 -- out" contract as HitboxStageDisplayProps above. All number/Vector3/timestamp formatting happens
--- in DevMenuClient.lua; this screen only ever renders ready-made strings. Status is kept as the
--- real value (not pre-formatted) since the "Reports" tab's triage row needs to know which of the
--- three Open/Resolved/Dismissed buttons should render Selected.
+-- in DevMenuClient.lua; this screen only ever renders ready-made strings. Status/Category/Priority
+-- are kept as real values (not pre-formatted) since the "Reports" tab's triage row and its
+-- Status/Category filter row both need to compare against them directly -- the same reasoning
+-- BugReportRowDisplay.Status already used before this comment, extended to the two new fields.
+-- ReporterName is likewise real (not just baked into HeaderText) so the search box can match
+-- against it without re-parsing HeaderText.
 export type BugReportRowDisplay = {
 	Id: string,
 	HeaderText: string,
 	DescriptionText: string,
 	ContextText: string,
-	Status: "Open" | "Resolved" | "Dismissed",
+	Status: "Open" | "InProgress" | "Resolved" | "Dismissed",
+	Category: "Bug" | "Exploit" | "Suggestion" | "Other",
+	ReporterName: string,
+	Priority: "Low" | "Normal" | "High" | "Urgent",
+	PriorityText: string,
+	-- "Unassigned" or "Claimed by <admin name>" -- IsAssignedToMe drives which of Claim/Release the
+	-- row's assign button shows, the same "real boolean alongside its own pre-formatted text" split
+	-- PlayerRosterRowDisplay.Muted uses below.
+	AssignedText: string,
+	IsAssignedToMe: boolean,
+	Notes: { BugReportNoteDisplay },
 }
 
 -- One roster row ("Players" tab) -- already-formatted strings, same "already-computed value in,
@@ -92,9 +94,13 @@ export type SidebarHandle = {
 	PlayersLoading: Fusion.Value<boolean>,
 	RefreshPlayersRequested: RBXScriptSignal,
 	ActionReasonText: Fusion.Value<string>,
-	-- All four fire the row's UserId.
+	-- All five fire the row's UserId.
 	KickPlayerRequested: RBXScriptSignal<number>,
 	BanPlayerRequested: RBXScriptSignal<number>,
+	-- Irreversible -- wipes the target's SAVED progression data, not their live combat state (see
+	-- ResetPlayerCombatStateRequested below for that one). Same "fires the row's UserId only, no
+	-- reason text" shape as KickPlayerRequested/BanPlayerRequested.
+	ResetPlayerDataRequested: RBXScriptSignal<number>,
 	ResetPlayerCombatStateRequested: RBXScriptSignal<number>,
 	TeleportToPlayerRequested: RBXScriptSignal<number>,
 	-- Fires (UserId, enabled) -- enabled is the OPPOSITE of that row's current Muted display, the
@@ -133,20 +139,14 @@ export type ContentAreaHandle = {
 	CollideActive: Fusion.Value<boolean>,
 	SpawnDummyRequested: RBXScriptSignal,
 	SpawnBotRequested: RBXScriptSignal<string>,
+	-- One-shot test trigger for the Emote System's roll path (DevMenu_RollEmote, always against the
+	-- "RareEmotes" pool -- see DevMenuSystem.handleRollEmote). No payload, same fire-and-forget shape
+	-- as SpawnDummyRequested above -- there is still no client-facing way to roll an arbitrary pool.
+	RollRareEmoteRequested: RBXScriptSignal,
 	SetHealthRequested: RBXScriptSignal<number>,
 	SetGodmodeRequested: RBXScriptSignal<boolean>,
 	SetFlightRequested: RBXScriptSignal<boolean>,
 	SetFlightCollideRequested: RBXScriptSignal<boolean>,
-	HitboxStageDisplay: Fusion.Value<HitboxStageDisplayProps?>,
-	CycleHitboxStagePrevRequested: RBXScriptSignal,
-	CycleHitboxStageNextRequested: RBXScriptSignal,
-	AdjustHitboxTimingRequested: RBXScriptSignal<(string, number)>,
-	ResetHitboxStageRequested: RBXScriptSignal,
-	HitboxStandaloneDisplay: Fusion.Value<HitboxStandaloneDisplayProps?>,
-	CycleHitboxStandalonePrevRequested: RBXScriptSignal,
-	CycleHitboxStandaloneNextRequested: RBXScriptSignal,
-	AdjustHitboxStandaloneRequested: RBXScriptSignal<(string, number)>,
-	ResetHitboxStandaloneRequested: RBXScriptSignal,
 	FlightTuningDisplay: Fusion.Value<FlightTuningDisplayProps?>,
 	CycleFlightTuningPrevRequested: RBXScriptSignal,
 	CycleFlightTuningNextRequested: RBXScriptSignal,
@@ -158,6 +158,16 @@ export type ContentAreaHandle = {
 	LoadFirstReportsRequested: RBXScriptSignal,
 	LoadMoreReportsRequested: RBXScriptSignal,
 	UpdateReportStatusRequested: RBXScriptSignal<(string, string)>,
+	-- Triage mutations added alongside UpdateReportStatusRequested above -- all fire the row's Id
+	-- first. SetReportPriorityRequested's second argument is the new BugReportPriority string;
+	-- AssignReportRequested's second argument is the target assign state (true = claim, false =
+	-- release), the same "screen computes the real state flip" contract
+	-- MutePlayerRequested/SetSuspectedCheaterRequested already use. JumpToReporterRequested carries
+	-- only the Id -- the server resolves the reporter's live Player from the stored record.
+	AddReportNoteRequested: RBXScriptSignal<(string, string)>,
+	SetReportPriorityRequested: RBXScriptSignal<(string, string)>,
+	AssignReportRequested: RBXScriptSignal<(string, boolean)>,
+	JumpToReporterRequested: RBXScriptSignal<string>,
 	FrozenActive: Fusion.Value<boolean>,
 	InvisibleActive: Fusion.Value<boolean>,
 	SpeedMultiplierActive: Fusion.Value<number>,
@@ -170,8 +180,23 @@ export type ContentAreaHandle = {
 	ForceRespawnTargetRequested: RBXScriptSignal,
 	BroadcastAnnouncementRequested: RBXScriptSignal<string>,
 	ShutdownServerRequested: RBXScriptSignal,
+	-- Same two-press server-armed confirm shape as ShutdownServerRequested above (see
+	-- DevMenuSystem.handleInstantRestartServer), just with no countdown delay on confirm.
+	InstantRestartServerRequested: RBXScriptSignal,
+	-- Passive "a newer version has been published" banner (DevMenu_GetServerVersionInfo,
+	-- Server/Systems/VersionWatchSystem.lua) -- fetched once on DevMenuClient.Start(), same
+	-- fetch-once contract as HitboxDebugActive below. Already-formatted text (this screen's own
+	-- "already-computed value in, presentation out" rule) -- nil means "nothing to show," both
+	-- before the fetch resolves and for the ordinary case where no newer version exists.
+	VersionBannerText: Fusion.Value<string?>,
 	SpectatingActive: Fusion.Value<boolean>,
 	SpectateLockedTargetRequested: RBXScriptSignal,
+	-- Runtime hitbox-visualization toggle (Server/Combat/HitboxDebugState.lua) -- server-wide, not
+	-- per-target, so unlike Godmode/Flight/Frozen/Invisible above this isn't watched via a Humanoid
+	-- Attribute; DevMenuClient.lua fetches it once (DevMenu_GetHitboxDebug) on Start(), same
+	-- fetch-once contract as BugReportOpenCount/SuspectedCheaterCount above.
+	HitboxDebugActive: Fusion.Value<boolean>,
+	SetHitboxDebugRequested: RBXScriptSignal<boolean>,
 }
 
 return {}

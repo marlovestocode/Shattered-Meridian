@@ -17,6 +17,15 @@
 	caller drives State/IconAssetId/CooldownFraction/CooldownSeconds/ResourceLabel from real
 	ClientState; this component only renders whatever it's given, it doesn't decide it.
 
+	The root instance is a TextButton, not a Frame (2026-08-10, the Move Creation System hotbar
+	pass) -- Client/UI/Screens/HUD/init.lua's five live slots need a real click affordance now that
+	an admin can bind a custom move to one (Client/Combat/HotbarBindings.lua) and fire it by
+	clicking, the same "button does the same thing as its keybind" contract the keybind number in
+	the corner already implies. OnActivated is optional/nil-safe (see AbilitySlotProps below), and
+	every prior call site (the DevMenu Tuning tab preview harness) that never passed it renders and
+	behaves exactly as before -- a TextButton with no OnActivated and blank Text is visually and
+	functionally inert, same as the Frame it replaces.
+
 	AccentColor tints the existing Available/Active border+glow treatment (see strokeColor/the
 	UIGradient below) toward a per-ability hue once a real ability-loadout concept assigns one --
 	falls back to the plain Tokens.Color.AccentPrimary every slot already used when omitted, so this
@@ -53,6 +62,7 @@ local CornerBracket = require(script.Parent.CornerBracket)
 local Label = require(script.Parent.Label)
 
 local Children = Fusion.Children
+local OnEvent = Fusion.OnEvent
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
@@ -82,6 +92,12 @@ export type AbilitySlotProps = {
 	-- Per-ability hue for the Available/Active border+glow (see this file's header). Omit for the
 	-- plain Tokens.Color.AccentPrimary every slot already rendered before this prop existed.
 	AccentColor: UsedAs<Color3>?,
+	-- Fires on a completed click/tap, TextButton's own native Activated semantics -- same optional,
+	-- caller-decides-what-it-means contract as Button.lua/Tab.lua's own OnActivated (this component
+	-- never decides what activating a slot DOES, just that it can be activated). Omitted by every
+	-- pre-hotbar call site (the Tuning tab preview harness has nothing to activate), so leaving this
+	-- nil renders and behaves exactly as before -- see file header.
+	OnActivated: (() -> ())?,
 }
 
 local SLOT_SIZE = Tokens.Control.RowHeight
@@ -147,7 +163,7 @@ local function Reticle(scope: Scope, color: UsedAs<Color3>, transparency: UsedAs
 	} :: Frame
 end
 
-local function AbilitySlot(scope: Scope, props: AbilitySlotProps): Frame
+local function AbilitySlot(scope: Scope, props: AbilitySlotProps): TextButton
 	local state: UsedAs<AbilitySlotState> = props.State or "Locked"
 	local accentColor: UsedAs<Color3> = props.AccentColor or Tokens.Color.AccentPrimary
 	local isChamfered = ChamferedSurface.IsAvailable()
@@ -418,7 +434,7 @@ local function AbilitySlot(scope: Scope, props: AbilitySlotProps): Frame
 		)
 	end
 
-	return scope:New "Frame" {
+	return scope:New "TextButton" {
 		Name = "AbilitySlot" .. props.Keybind,
 		LayoutOrder = props.LayoutOrder,
 		Size = UDim2.fromOffset(SLOT_SIZE, SLOT_SIZE),
@@ -429,9 +445,20 @@ local function AbilitySlot(scope: Scope, props: AbilitySlotProps): Frame
 		BackgroundTransparency = if isChamfered then 1 else backgroundTransparency,
 		BorderSizePixel = 0,
 		ClipsDescendants = true,
+		AutoButtonColor = false,
+		-- Blank, same reasoning as Tab.lua/Sidebar.lua's own navItem -- every visible glyph on this
+		-- tile (keybind number, icon, reticle, ...) is already a purpose-built child above; a native
+		-- Text here would just be an invisible, unstyled second label sitting behind them.
+		Text = "",
+
+		[OnEvent "Activated"] = function()
+			if props.OnActivated then
+				props.OnActivated()
+			end
+		end,
 
 		[Children] = children,
-	} :: Frame
+	} :: TextButton
 end
 
 return AbilitySlot
