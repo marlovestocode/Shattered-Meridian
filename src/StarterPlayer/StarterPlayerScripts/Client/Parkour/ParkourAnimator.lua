@@ -71,10 +71,36 @@ local STATE_CLIPS: { [string]: { Key: string, Looped: boolean, ScalesWithSpeed: 
 -- AnimationVariant). Kept as its own map rather than as extra fields on STATE_CLIPS because these are
 -- resolved at a different moment -- the variant is only known at the instant of the transition, where
 -- STATE_CLIPS is a static property of the state.
-local VARIANT_CLIPS: { [string]: { [string]: string } } = {
-	Vaulting = { Hop = "VaultHop", Vault = "VaultOver" },
-	WallRunning = { Left = "WallRunLeft", Right = "WallRunRight" },
-	Landing = { Soft = "LandSoft", Medium = "LandSoft", Hard = "LandHard" },
+--
+-- Each entry carries its OWN Looped/ScalesWithSpeed rather than borrowing them from STATE_CLIPS. A
+-- variant-driven state need not appear in STATE_CLIPS at all -- WallRunning and Vaulting do not -- and
+-- reading playback flags from an entry that is permanently absent silently yields false for both. That
+-- is exactly how a wall-run came to play its clip once and stop: ParkourConstants.Animation's whole
+-- speed-scaling band (SpeedScaleReferenceSpeed/Min/MaxPlaybackSpeed, authored with a wall-run as its
+-- worked example) described behaviour the resolver could never actually select.
+local VARIANT_CLIPS: {
+	[string]: { Looped: boolean, ScalesWithSpeed: boolean, Clips: { [string]: string } },
+} = {
+	-- One-shot: a vault takes the time the vault takes, so it must not scale with approach speed --
+	-- the clip accompanies a kinematic path and the two would drift apart. See SetMotion's header.
+	Vaulting = {
+		Looped = false,
+		ScalesWithSpeed = false,
+		Clips = { Hop = "VaultHop", Vault = "VaultOver" },
+	},
+	-- Loops for as long as the run lasts, and scales with speed -- a wall-run at 34 should not play at
+	-- the same cadence as one at 20, which is the case ParkourConstants.Animation is written about.
+	WallRunning = {
+		Looped = true,
+		ScalesWithSpeed = true,
+		Clips = { Left = "WallRunLeft", Right = "WallRunRight" },
+	},
+	-- Also present in STATE_CLIPS (as the no-variant fallback); both agree on one-shot, non-scaling.
+	Landing = {
+		Looped = false,
+		ScalesWithSpeed = false,
+		Clips = { Soft = "LandSoft", Medium = "LandSoft", Hard = "LandHard" },
+	},
 }
 
 local animator: Animator? = nil
@@ -94,11 +120,11 @@ local currentScalesWithSpeed = false
 -- the character's motor on the floor, and if the throw repeats every frame the state is never able to
 -- drive the body at all.
 --
--- Sliding is the sharp edge, because it is the ONLY entry in STATE_CLIPS with ScalesWithSpeed = true.
--- SetMotion returns immediately for every other state, so a bad slide clip is the one case where a
--- track operation runs on EVERY frame of the action rather than once at the transition -- which turns
--- "the animation does not play" into "the slide does not move you," with nothing on screen connecting
--- the two.
+-- Sliding and wall-running are the sharp edges, because they are the only two clips with
+-- ScalesWithSpeed = true (Sliding via STATE_CLIPS, WallRunning via VARIANT_CLIPS). SetMotion returns
+-- immediately for every other state, so those two are the cases where a track operation runs on EVERY
+-- frame of the action rather than once at the transition -- which turns "the animation does not play"
+-- into "the slide does not move you," with nothing on screen connecting the two.
 --
 -- A failing track is dropped from the cache and de-activated rather than retried: whatever is wrong
 -- with it will still be wrong next frame, and the module's contract is that a bad asset costs one
@@ -176,19 +202,18 @@ end
 -- Resolves which clip key a state should be playing, given its variant. Returns nil for a state with
 -- no clip of its own, which is the common case (see STATE_CLIPS' own note).
 local function resolveKey(stateId: MovementStateId, variant: string?): (string?, boolean, boolean)
-	local variantMap = VARIANT_CLIPS[stateId]
-	if variantMap and variant then
-		local key = variantMap[variant]
+	local variantEntry = VARIANT_CLIPS[stateId]
+	if variantEntry and variant then
+		local key = variantEntry.Clips[variant]
 		if key then
-			local entry = STATE_CLIPS[stateId]
-			return key, entry ~= nil and entry.Looped, entry ~= nil and entry.ScalesWithSpeed
+			return key, variantEntry.Looped, variantEntry.ScalesWithSpeed
 		end
 	end
 	local entry = STATE_CLIPS[stateId]
 	if entry then
 		return entry.Key, entry.Looped, entry.ScalesWithSpeed
 	end
-	if variantMap then
+	if variantEntry then
 		-- A variant-driven state with no variant resolved yet (the transition frame can legitimately
 		-- reach here before the state's Enter has published one). Playing an arbitrary variant would
 		-- be worse than playing nothing for one frame.
