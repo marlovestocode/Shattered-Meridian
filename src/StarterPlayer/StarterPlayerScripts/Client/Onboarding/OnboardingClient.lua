@@ -2,34 +2,30 @@
 --[[
 	OnboardingClient.lua
 
-	Owns: the entire first-time-player onboarding DRIVE -- calling CharacterCreation_GetOnboardingState,
-	mounting the cinematic + creator UI (only if NeedsOnboarding), driving the held-input skip/
-	held-confirm interactions via its OWN UserInputService listening (deliberately NOT added to
-	Types.KeybindAction/Constants.Keybinds -- this is a one-time session-start interaction, not a
-	permanent rebindable action), staging the cinematic's text reveals, pointing the real Camera at
-	the sky while the cinematic plays, collecting the race/attributes/name selections, and calling
-	CharacterCreation_Finalize in a loop until it succeeds.
+	Owns: driving the character-creation SCREENS -- fetching whether this session's player needs
+	onboarding at all (FetchOnboardingState), mounting the cinematic + creator UI into a scope the
+	caller provides (MountCreator), staging the cinematic's text reveals and its hold-to-skip gesture
+	(RunCinematicStage), wiring Continue/Back/step-rail navigation between the four creator screens
+	(WireNavigation), and the held-confirm gesture + CharacterCreation_Finalize retry loop
+	(RunConfirmationLoop). Every one of these is now an explicit, separately-callable export rather
+	than one internal, top-level Run() -- Client/Intro/IntroClient.lua is the orchestrator that calls
+	each in sequence, interleaving them with the lying pose / camera pan / black screen / teleport /
+	first-person reveal / get-up / greeting banner it owns instead. This module has no idea any of
+	that surrounds it; it only knows how to drive the four creator screens themselves.
 
-	OnboardingClient.Run() is a BLOCKING call from Main.client.lua's perspective: it returns
-	immediately if NeedsOnboarding is false (a returning player), and otherwise does not return until
-	Finalize resolves Success = true. Main.client.lua calls this before UI.Mount() and falls through
-	to the existing boot sequence unchanged once it returns -- see that file's own header.
-
-	Creates its OWN temporary Fusion root scope (Fusion.scoped(Fusion)), separate from UI/init.lua's
-	session-long scope. This is a narrow, temporally-exclusive exception to "nothing else creates its
-	own root scope" (UI/init.lua's header): the two scopes are never alive simultaneously -- this one
-	mounts, runs the full flow, calls scope:doCleanup(), and returns BEFORE UI.Mount() is ever called.
-	There is no handoff, no shared state, and no risk of two root scopes fighting over the same
-	PlayerGui at once.
+	Does NOT create its own Fusion scope anymore (the pre-rework version did -- see MountCreator's own
+	comment for why that narrow exception moved up to IntroClient.lua instead) and does NOT point the
+	camera anywhere (pointCameraAtSky is deleted -- Client/Intro/IntroCamera.lua owns the camera for
+	the whole intro now, including the cinematic stage this module still drives the TEXT/gesture side
+	of).
 
 	Does not own: any validation (CharacterCreationSystem.lua re-validates everything server-side
-	regardless of what this module sends), or the screens' own rendering (UI/Screens/Onboarding/*).
+	regardless of what this module sends), the screens' own rendering (UI/Screens/Onboarding/*), or
+	anything about the sequence around character creation (Client/Intro/IntroClient.lua).
 ]]
 
-local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
@@ -41,6 +37,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local OnboardingScreen = require(script.Parent.Parent.UI.Screens.Onboarding)
 type OnboardingHandle = OnboardingScreen.OnboardingHandle
 type Stage = OnboardingScreen.Stage
+type Scope = Fusion.Scope<typeof(Fusion)>
 
 local peek = Fusion.peek
 
@@ -171,38 +168,34 @@ local function runHoldGesture(
 	return result :: HoldGestureResult
 end
 
---
--- Sky-facing cinematic camera -- Scriptable for the duration of the cinematic (the player is frozen
--- prone server-side with no HUD/input mounted yet), restored to Custom the instant the cinematic
--- ends so the normal camera systems Main.client.lua starts afterward (ShiftLockCamera/FlightCamera)
--- take over cleanly.
---
-
-local function pointCameraAtSky(player: Player): () -> ()
-	local camera = Workspace.CurrentCamera
-	if not camera then
-		return function() end
-	end
-
-	local character = player.Character
-	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
-	local origin = if rootPart and rootPart:IsA("BasePart") then (rootPart :: BasePart).Position else Vector3.zero
-
-	camera.CameraType = Enum.CameraType.Scriptable
-
-	local startClock = os.clock()
-	local connection = RunService.RenderStepped:Connect(function()
-		-- A slow ambient yaw drift while looking almost straight up -- a static shot would read as
-		-- frozen/broken rather than deliberate; docs/ui-ux-philosophy.md's Animation Philosophy calls
-		-- for controlled, intentional motion, not a hard lock.
-		local yaw = (os.clock() - startClock) * 0.05
-		camera.CFrame = CFrame.new(origin) * CFrame.Angles(0, yaw, 0) * CFrame.Angles(-math.rad(78), 0, 0)
+-- Fetches whether the local player needs onboarding, also triggering this SESSION's first
+-- Player:LoadCharacter() server-side (CharacterCreationSystem.handleGetOnboardingState) for every
+-- player, onboarding or not. Returns nil on a request error -- logged here, since a failure here is
+-- a genuine boot problem this module can't meaningfully retry into working; Client/Intro/
+-- IntroClient.lua treats nil the same as "no onboarding needed" and lets the rest of the client boot
+-- sequence proceed rather than hanging forever.
+function OnboardingClient.FetchOnboardingState(): Types.CharacterCreationOnboardingStateResult?
+	local stateRemote = NetworkBridge.GetRemoteFunction(Config.RemoteNames.GetOnboardingState)
+	local ok, resultOrError = pcall(function()
+		return stateRemote:InvokeServer()
 	end)
-
-	return function()
-		connection:Disconnect()
-		camera.CameraType = Enum.CameraType.Custom
+	if not ok then
+		logger:error("GetOnboardingState request errored", { errorMessage = tostring(resultOrError) })
+		return nil
 	end
+	return resultOrError :: Types.CharacterCreationOnboardingStateResult
+end
+
+-- Mounts the cinematic + creator UI into `scope` -- a scope the CALLER owns and tears down (Client/
+-- Intro/IntroClient.lua creates one Fusion.scoped(Fusion) root for the whole intro sequence and
+-- mounts this alongside Client/Intro/BlackScreen.lua under it). This module no longer creates its
+-- own root scope the way the pre-rework version did: that was a narrow, temporally-exclusive
+-- exception to UI/init.lua's "nothing else creates its own root scope" rule, justified because the
+-- whole onboarding flow mounted, ran, and tore down before UI.Mount() ever ran. The exception itself
+-- still holds -- it just belongs to IntroClient.lua now, since IT is the top-level blocking call
+-- Main.client.lua makes before UI.Mount(), the same relationship OnboardingClient.Run() used to have.
+function OnboardingClient.MountCreator(scope: Scope, playerGui: PlayerGui): OnboardingHandle
+	return OnboardingScreen.Mount(scope, playerGui)
 end
 
 --
@@ -215,7 +208,15 @@ end
 
 local CINEMATIC_LINE_COUNT = 4
 
-local function runCinematicStage(handle: OnboardingHandle): ()
+-- Blocks until the cinematic stage ends (played out fully, or hold-to-skipped). `onProgress`, if
+-- given, is called every Heartbeat with the same elapsed/CinematicDurationSeconds fraction (clamped
+-- to [0, 1]) this function already computes for its own text-reveal pacing -- Client/Intro/
+-- IntroCamera.UpdateCinematicProgress is the one caller, so the cinematic's camera pan and its text
+-- reveals are driven off the identical clock rather than two independently-drifting timers.
+function OnboardingClient.RunCinematicStage(
+	handle: OnboardingHandle,
+	onProgress: ((elapsedFraction: number) -> ())?
+): ()
 	local revealInterval = Config.CinematicDurationSeconds / CINEMATIC_LINE_COUNT
 	-- os.clock() is process-wide, not "since this stage started" -- every reveal-timing read below is
 	-- relative to this captured baseline, not raw os.clock().
@@ -231,6 +232,9 @@ local function runCinematicStage(handle: OnboardingHandle): ()
 		-- it on the very next Heartbeat.
 		if elapsed >= Config.SkipHintRevealSeconds and not peek(handle.Cinematic.SkipHintRevealed) then
 			handle.Cinematic.SkipHintRevealed:set(true)
+		end
+		if onProgress then
+			onProgress(math.clamp(elapsed / Config.CinematicDurationSeconds, 0, 1))
 		end
 	end)
 
@@ -252,7 +256,7 @@ end
 -- .Event:Connect (not :Connect directly) on every one of these -- handle.RaceSelect.
 -- ContinueRequested etc. are the raw BindableEvent Instances (see Onboarding/Types.lua's own header
 -- on why), and only their .Event property is the connectable RBXScriptSignal.
-local function wireNavigation(handle: OnboardingHandle): { RBXScriptConnection }
+function OnboardingClient.WireNavigation(handle: OnboardingHandle): { RBXScriptConnection }
 	return {
 		handle.RaceSelect.ContinueRequested.Event:Connect(function()
 			handle.Stage:set("Attributes")
@@ -288,7 +292,7 @@ end
 -- Reason -- now also paired with the Stage that fixes it (docs/design/intro-redesign-handoff.md's
 -- designer direction: "pair each Finalize failure with the jump that fixes it"). nil means there's
 -- no earlier stage that would help (a raw request/filter/server failure -- retrying as-is is the
--- only real remedy), which also means it can never trigger the auto-jump in runConfirmationLoop
+-- only real remedy), which also means it can never trigger the auto-jump in RunConfirmationLoop
 -- below, regardless of how many times it repeats.
 local function describeFinalizeFailure(reason: string?): (string, Stage?)
 	if reason == "InvalidRaceId" then
@@ -323,14 +327,20 @@ local AUTO_JUMP_AFTER_CONSECUTIVE_FAILURES = 2
 -- already happened server-side inside handleFinalize before this client ever sees Success = true
 -- (CharacterCreationSystem.lua's own failure-handling contract requires the PivotTo to complete
 -- before returning success) -- this beat is purely the client holding the reveal a moment longer
--- before tearing the onboarding UI down, not something that needs to race the teleport.
+-- before Client/Intro/IntroClient.lua moves on to the black screen, not something that needs to race
+-- the teleport.
 local SUCCESS_BEAT_SECONDS = 1.2
 
 -- Blocking loop: drives Confirmation's held-commit gesture, calls CharacterCreation_Finalize, and
 -- retries on a Success = false response (showing StatusText) rather than stranding the player --
 -- same reject-and-retry UX BugReportClient.lua establishes for BugReport_Submit. Returns only once
--- Finalize resolves Success = true.
-local function runConfirmationLoop(handle: OnboardingHandle): ()
+-- Finalize resolves Success = true, after holding SUCCESS_BEAT_SECONDS.
+--
+-- `onSuccess`, if given, fires the INSTANT Finalize resolves Success = true -- before the
+-- SUCCESS_BEAT_SECONDS hold -- so a caller can start something meant to run CONCURRENTLY with
+-- Confirmation.lua's own fracture-out (e.g. Client/Intro/IntroClient.lua fading BlackScreen.lua's
+-- cover in) rather than only after this function fully returns.
+function OnboardingClient.RunConfirmationLoop(handle: OnboardingHandle, onSuccess: (() -> ())?): ()
 	local finalizeRemote = NetworkBridge.GetRemoteFunction(Config.RemoteNames.Finalize)
 
 	-- Tracks consecutive Finalize rejections with the SAME Reason, across attempts, regardless of
@@ -387,6 +397,9 @@ local function runConfirmationLoop(handle: OnboardingHandle): ()
 			-- out reactively off this flip; the wait here is the "hold" half of that beat, not
 			-- something the fade animation itself needs to be awaited for.
 			handle.Confirmation.IsSucceeding:set(true)
+			if onSuccess then
+				onSuccess()
+			end
 			task.wait(SUCCESS_BEAT_SECONDS)
 			return
 		end
@@ -414,51 +427,6 @@ local function runConfirmationLoop(handle: OnboardingHandle): ()
 			handle.StepRailNavigateRequested:Fire(fixStage)
 		end
 	end
-end
-
-function OnboardingClient.Run(): ()
-	local player = Players.LocalPlayer
-	local playerGui = player:WaitForChild("PlayerGui") :: PlayerGui
-
-	local stateRemote = NetworkBridge.GetRemoteFunction(Config.RemoteNames.GetOnboardingState)
-	local stateOk, stateResultOrError = pcall(function()
-		return stateRemote:InvokeServer()
-	end)
-	if not stateOk then
-		-- Fails open: this call is also the session's first LoadCharacter trigger server-side (see
-		-- CharacterCreationSystem.lua's header), so a failure here is a genuine boot problem, not
-		-- something this module can meaningfully retry into working. Logged loudly; the rest of
-		-- Main.client.lua's boot sequence still runs rather than hanging forever.
-		logger:error("GetOnboardingState request errored", { errorMessage = tostring(stateResultOrError) })
-		return
-	end
-
-	local stateResult = stateResultOrError :: Types.CharacterCreationOnboardingStateResult
-	if not stateResult.NeedsOnboarding then
-		logger:debug("Returning player -- no onboarding needed")
-		return
-	end
-
-	logger:info("First-time player detected -- running onboarding flow")
-
-	local scope = Fusion.scoped(Fusion)
-	local handle = OnboardingScreen.Mount(scope, playerGui)
-
-	local restoreCamera = pointCameraAtSky(player)
-	runCinematicStage(handle)
-	restoreCamera()
-
-	handle.Stage:set("RaceSelect")
-	local navigationConnections = wireNavigation(handle)
-
-	runConfirmationLoop(handle)
-
-	for _, connection in navigationConnections do
-		connection:Disconnect()
-	end
-	scope:doCleanup()
-
-	logger:info("Onboarding complete -- Fusion scope torn down")
 end
 
 return OnboardingClient

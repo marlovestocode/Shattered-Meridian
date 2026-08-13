@@ -12,12 +12,13 @@
 	AssetPreloader.Run's onProgress callback) and flipping Complete once that call returns; this
 	module only renders whatever it's given.
 
-	DisplayOrder = 20 -- above Screens/Onboarding/init.lua's own ScreenGui (DisplayOrder = 10) and
-	below Screens/StartMenu/init.lua's own (DisplayOrder = 30, the true first thing shown) --
-	headroom for any future transition overlap between any of the three, even though today they're
-	all temporally exclusive: StartMenuClient.Run() returns (or the engine kills the whole script)
-	before LoadingClient.Run() ever starts, and LoadingClient.Run() tears its own scope down before
-	OnboardingClient.Run() -- and therefore Onboarding's own scope -- is ever created.
+	DisplayOrder = 20 -- above Screens/Onboarding/init.lua's own ScreenGui (DisplayOrder = 10, and
+	Client/Intro/BlackScreen.lua's DisplayOrder = 11) and below Screens/StartMenu/init.lua's own
+	(DisplayOrder = 30, the true first thing shown) -- headroom for any future transition overlap
+	between any of them, even though today they're all temporally exclusive: StartMenuClient.Run()
+	returns (or the engine kills the whole script) before LoadingClient.Run() ever starts, and
+	LoadingClient.Run() tears its own scope down before Client/Intro/IntroClient.Run() -- and
+	therefore Onboarding's/BlackScreen's own scope -- is ever created.
 
 	Does not own: what counts as "loaded" or when Complete flips (AssetPreloader.lua/
 	LoadingClient.lua own both).

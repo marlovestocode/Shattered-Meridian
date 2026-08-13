@@ -33,6 +33,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local SoundManager = require(script.Parent.Parent.FX.SoundManager)
 local CombatAnimator = require(script.Parent.Parent.FX.CombatAnimator)
 local FlightAnimator = require(script.Parent.Parent.FX.FlightAnimator)
+local EmoteAnimator = require(script.Parent.Parent.FX.EmoteAnimator)
 
 local logger = Logger.scope("AssetPreloader")
 
@@ -68,11 +69,22 @@ function AssetPreloader.BuildManifest(): { Instance | string }
 	for _, instance in FlightAnimator.GetPreloadInstances() do
 		table.insert(raw, instance)
 	end
+	for _, instance in EmoteAnimator.GetPreloadInstances() do
+		table.insert(raw, instance)
+	end
 	-- The one standalone texture id not owned by a domain module with its own instance-pooling
 	-- concern -- Constants.FX.MovementDust.lua's own header note on why nothing else instances this
 	-- eagerly. Skipped like every other still-unauthored placeholder if ever set back to "".
 	if Constants.FX.MovementDust.Texture ~= "" then
 		table.insert(raw, Constants.FX.MovementDust.Texture)
+	end
+
+	-- The two intro animation ids (Client/Intro/IntroClient.lua's lying-down/get-up clips) -- raw
+	-- content-id strings, same as MovementDust.Texture above, rather than pre-built Animation
+	-- instances: unlike CombatAnimator/FlightAnimator/EmoteAnimator, IntroClient.lua plays each of
+	-- these exactly once per session and has no ongoing pool to be the "one source of truth" for.
+	for _, animationId in pairs(Constants.Intro.AnimationIds) do
+		table.insert(raw, animationId)
 	end
 
 	-- Dedupe by underlying asset id -- Constants.Flight.AnimationIds' six entries currently share one

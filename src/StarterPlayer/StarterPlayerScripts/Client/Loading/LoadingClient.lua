@@ -3,15 +3,15 @@
 	LoadingClient.lua
 
 	Owns: driving the boot-time Loading screen -- creates its OWN temporary Fusion scope (the same
-	narrow, temporally-exclusive exception Client/Onboarding/OnboardingClient.lua's own header
-	documents and justifies), mounts Screens/Loading/init.lua, runs Client/Loading/AssetPreloader.lua's
-	blocking preload pass with a callback that feeds this screen's Progress/Total, flips Complete once
-	that returns, waits for the screen's own fade-out to settle, then tears the scope down.
+	narrow, temporally-exclusive exception Client/Intro/IntroClient.lua's own header documents and
+	justifies), mounts Screens/Loading/init.lua, runs Client/Loading/AssetPreloader.lua's blocking
+	preload pass with a callback that feeds this screen's Progress/Total, flips Complete once that
+	returns, waits for the screen's own fade-out to settle, then tears the scope down.
 
 	LoadingClient.Run() is a BLOCKING call from Main.client.lua's perspective, same as
-	OnboardingClient.Run() -- it does not return until every known asset has been preloaded (or
+	IntroClient.Run() -- it does not return until every known asset has been preloaded (or
 	failed -- see AssetPreloader.lua's own header on why there's no artificial timeout). Unlike
-	OnboardingClient.Run(), which skips entirely for returning players, this ALWAYS runs: asset
+	IntroClient.Run(), which skips entirely for returning players, this ALWAYS runs: asset
 	loading isn't a first-time-player concern.
 
 	Does not own: what counts as an asset or how preloading actually works (AssetPreloader.lua), or

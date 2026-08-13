@@ -3,11 +3,11 @@
 	Cinematic.lua
 
 	Owns: the intro cinematic's staged text reveals + hold-to-skip progress ring, rendered full-
-	screen over the sky-facing camera OnboardingClient.lua points the real Camera at while this stage
-	is active. Purely presentational -- every timing decision (which line is revealed, how far a held
-	skip has progressed, when the skip hint itself becomes visible, when to actually leave this
-	stage) lives in OnboardingClient.lua per this folder's "screen exposes state, client module
-	drives from outside" convention (init.lua's own header); this file only renders whatever
+	screen over the ground-to-overhead panning camera Client/Intro/IntroCamera.lua drives while this
+	stage is active. Purely presentational -- every timing decision (which line is revealed, how far a
+	held skip has progressed, when the skip hint itself becomes visible, when to actually leave this
+	stage) lives in OnboardingClient.RunCinematicStage per this folder's "screen exposes state, client
+	module drives from outside" convention (init.lua's own header); this file only renders whatever
 	RevealIndex/HoldProgress/SkipHintRevealed currently say.
 
 	No panel, no rail, no chrome at all -- per the designer's own direction, the panel's ABSENCE here

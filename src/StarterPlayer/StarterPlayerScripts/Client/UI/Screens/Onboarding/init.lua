@@ -4,26 +4,28 @@
 
 	Owns: the root Screen for first-time-player onboarding -- a ScreenGui plus an active-stage switch
 	between Cinematic/RaceSelect/Attributes/NameEntry/Confirmation (Types.Stage), and the single
-	OnboardingHandle every one of those five screens' props are sliced from. Mounted and torn down
-	entirely by Client/Onboarding/OnboardingClient.lua, which creates its OWN temporary Fusion scope
-	for this -- see that module's own header for why that's a deliberate, narrow exception to
-	UI/init.lua's "nothing else creates its own root scope" rule.
+	OnboardingHandle every one of those five screens' props are sliced from. Mounted by
+	Client/Onboarding/OnboardingClient.MountCreator into a Fusion scope Client/Intro/IntroClient.lua
+	creates and owns -- see that module's own header for why IT (not this module anymore) takes the
+	narrow exception to UI/init.lua's "nothing else creates its own root scope" rule.
 
 	Follows every other multi-screen Screen's "screen exposes state/signals, client module drives
 	from outside" convention (BugReport/init.lua, Screens/DevMenu/init.lua) -- every Fusion.Value and
-	BindableEvent making up OnboardingHandle is created here, but OnboardingClient.lua is the only
-	thing that ever writes Stage/HoldProgress/StatusText/IsSubmitting/IsSucceeding or listens to the
-	*Requested signals; this module only wires the five sub-screens to their slice of the Handle and
-	switches which one is Visible.
+	BindableEvent making up OnboardingHandle is created here, but OnboardingClient.lua's own exported
+	RunCinematicStage/WireNavigation/RunConfirmationLoop are the only things that ever write
+	Stage/HoldProgress/StatusText/IsSubmitting/IsSucceeding or listen to the *Requested signals; this
+	module only wires the five sub-screens to their slice of the Handle and switches which one is
+	Visible.
 
-	Cinematic gets a fully transparent backdrop (the sky-facing camera OnboardingClient.lua points
-	the real Camera at during that stage needs to show through); the four "creator" stages share one
-	dimming backdrop + centered content area, reading as "a system of the world" per
-	docs/ui-ux-philosophy.md's Menu Design section ("larger panels... still maintain the same
-	palette/geometry/typography").
+	Cinematic gets a fully transparent backdrop (Client/Intro/IntroCamera.lua's own Scriptable camera,
+	panning from a ground-level lying POV up into an overhead composition during this stage, needs to
+	show through); the four "creator" stages share one dimming backdrop + centered content area,
+	reading as "a system of the world" per docs/ui-ux-philosophy.md's Menu Design section ("larger
+	panels... still maintain the same palette/geometry/typography").
 
 	Does not own: any remote call, timer, or input handling -- all three live in OnboardingClient.lua
-	exclusively.
+	exclusively (nor the camera, black screen, or FX layered around this whole flow -- Client/Intro/*
+	owns those).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -74,8 +76,8 @@ local function Onboarding(scope: Scope, playerGui: PlayerGui): OnboardingHandle
 	-- Plain Instance.new(...), not scope:New(...) (these are BindableEvents, not GuiObjects) -- each
 	-- one is still registered into `scope` explicitly (a Fusion scope is itself just an array of
 	-- cleanup tasks; an Instance pushed directly into it gets :Destroy()'d the same as anything
-	-- scope:New built) so OnboardingClient.lua's scope:doCleanup() actually destroys these instead of
-	-- leaking them once chargen completes and this whole screen tears down -- unlike BugReport/
+	-- scope:New built) so Client/Intro/IntroClient.lua's own scope:doCleanup() actually destroys
+	-- these instead of leaking them once the whole intro sequence tears down -- unlike BugReport/
 	-- init.lua's own submitRequestedEvent, which never needs this because that screen's scope is the
 	-- session-long one and is never torn down.
 	local raceContinueRequestedEvent = Instance.new("BindableEvent")

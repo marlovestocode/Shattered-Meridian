@@ -116,8 +116,8 @@ local PIP_RAIL_HEIGHT = 36
 local PIP_RAIL_COLLAPSE_WIDTH = 600
 
 local function PipRail(scope: Scope, spent: Fusion.Computed<number>): Frame
-	-- Guarded, not assumed -- OnboardingClient.lua's own pointCameraAtSky treats CurrentCamera as
-	-- possibly nil for the same reason. Falls back to sitting exactly at the collapse threshold
+	-- Guarded, not assumed -- Client/Intro/IntroCamera.lua treats CurrentCamera as possibly nil for
+	-- the same reason. Falls back to sitting exactly at the collapse threshold
 	-- (isCollapsed's strict "<" reads that as "not collapsed"), the same desktop-first default this
 	-- screen already renders with before any real ViewportSize is known.
 	local camera = Workspace.CurrentCamera

@@ -3,8 +3,8 @@
 	StartMenuClient.lua
 
 	Owns: driving the Start Menu -- the very first boot gate, ahead of Client/Loading/LoadingClient.
-	lua and Client/Onboarding/OnboardingClient.lua. Main.client.lua calls StartMenuClient.Run() before
-	either of those.
+	lua and Client/Intro/IntroClient.lua. Main.client.lua calls StartMenuClient.Run() before either
+	of those.
 
 	Same-place server hop, not a separate Roblox Place (see Constants.lua's own Constants.StartMenu
 	header for why): Play invokes Server/Systems/ServerHopSystem.lua's RequestTeleport RemoteFunction,
@@ -21,8 +21,8 @@
 	executes -- there is nothing to hand control back to locally, ever, since nothing on this server
 	is meant to run past the Start Menu for a direct join. A failed request just re-shows the error
 	and waits for another click. This creates its own temporary Fusion scope (Fusion.scoped(Fusion)),
-	the same narrow, temporally-exclusive exception OnboardingClient.lua/LoadingClient.lua's own
-	headers already document and justify -- except this one is never torn down by this module itself
+	the same narrow, temporally-exclusive exception Client/Intro/IntroClient.lua/LoadingClient.lua's
+	own headers already document and justify -- except this one is never torn down by this module itself
 	(the engine does it, by killing the script, on a successful teleport).
 
 	RunService:IsStudio() + Constants.StartMenu.SkipInStudio: ordinary Play Solo has no second server

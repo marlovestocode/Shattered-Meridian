@@ -24,17 +24,22 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local UI = require(script.Parent.UI)
 local StartMenuClient = require(script.Parent.StartMenu.StartMenuClient)
 local LoadingClient = require(script.Parent.Loading.LoadingClient)
-local OnboardingClient = require(script.Parent.Onboarding.OnboardingClient)
+local IntroClient = require(script.Parent.Intro.IntroClient)
 local CombatClient = require(script.Parent.Combat.CombatClient)
+local HotbarMoveClient = require(script.Parent.Combat.HotbarMoveClient)
+local EmoteController = require(script.Parent.Emotes.EmoteController)
+local EmoteWheelClient = require(script.Parent.Emotes.EmoteWheelClient)
 local ShiftLockCamera = require(script.Parent.Camera.ShiftLockCamera)
 local FlightCamera = require(script.Parent.Camera.FlightCamera)
 local CameraShake = require(script.Parent.FX.CameraShake)
 local FOVOffset = require(script.Parent.FX.FOVOffset)
 local CameraOffsetComposer = require(script.Parent.FX.CameraOffsetComposer)
 local DevMenuClient = require(script.Parent.DevMenu.DevMenuClient)
+local MoveEditorClient = require(script.Parent.MoveEditor.MoveEditorClient)
 local FlightController = require(script.Parent.DevMenu.FlightController)
 local BugReportClient = require(script.Parent.BugReport.BugReportClient)
 local AnnouncementClient = require(script.Parent.Announcement.AnnouncementClient)
+local SettingsClient = require(script.Parent.Settings.SettingsClient)
 
 local logger = Logger.scope("Main")
 
@@ -59,7 +64,7 @@ logger:debug("StartMenuClient run end")
 -- cold-load hitch for an asset it assumes is ready. Every CombatAudio.lua/FlightAudio.lua Register()
 -- call has already run by this point (each require() above executes that module's top-level body
 -- immediately, in order), so the full sound registry exists before AssetPreloader.lua ever reads it.
--- See LoadingClient.lua's own header for why this always runs (unlike OnboardingClient.Run() below,
+-- See LoadingClient.lua's own header for why this always runs (unlike IntroClient.Run() below,
 -- which skips for returning players).
 logger:debug("LoadingClient run start")
 LoadingClient.Run()
@@ -69,13 +74,17 @@ logger:debug("LoadingClient run end")
 -- (Server/Systems/CharacterCreationSystem.lua's GetOnboardingState/Finalize) owns this session's
 -- first Player:LoadCharacter() call for every player (Players.CharacterAutoLoads = false (default.project.json)), so
 -- nothing below this line can assume a character (or a finished profile) exists until this returns.
--- OnboardingClient.Run() returns immediately for a returning player (NeedsOnboarding = false) and
--- otherwise blocks until chargen's own CharacterCreation_Finalize call succeeds -- see that module's
--- own header for why it mounts and tears down its OWN temporary Fusion scope rather than using
--- UI.Mount()'s session-long one.
-logger:debug("OnboardingClient run start")
-OnboardingClient.Run()
-logger:debug("OnboardingClient run end")
+-- IntroClient.Run() returns immediately for a returning player (NeedsOnboarding = false) and
+-- otherwise blocks through the whole cinematic-intro-through-awakening sequence -- lying pose,
+-- camera pan, character creation (delegated to Client/Onboarding/OnboardingClient.lua's own
+-- exports), black screen, the server's race-keyed teleport, first-person blur/blink reveal, get-up
+-- animation, and the greeting banner -- see that module's own header for why it mounts and tears
+-- down its OWN temporary Fusion scope rather than using UI.Mount()'s session-long one, and why
+-- camera systems below (ShiftLockCamera/FlightCamera/CameraShake) starting only after this returns
+-- is load-bearing for Client/Intro/IntroCamera.lua's own Scriptable-camera handoff.
+logger:debug("IntroClient run start")
+IntroClient.Run()
+logger:debug("IntroClient run end")
 
 logger:debug("UI mount start")
 local uiHandles = UI.Mount()
@@ -86,9 +95,42 @@ if not uiHandles.CombatFeedback then
 	return
 end
 
+-- Before CombatClient below: CombatClient's own HotbarSlot1-5 input branches and HUD's AbilitySlot
+-- click handlers both call HotbarMoveClient.Fire, so its remote must already be resolved the
+-- instant either one could receive real input.
+logger:debug("HotbarMoveClient start")
+HotbarMoveClient.Start()
+logger:debug("HotbarMoveClient end")
+
+-- Before CombatClient below: a rebound key must already be live in KeybindManager the instant
+-- combat input handling begins -- see SettingsClient.RestoreSettings' own header for why this is a
+-- separate, earlier phase than SettingsClient.Start(uiHandles.Settings) further down (that call only
+-- wires the Settings PANEL's own interactivity, which has no such urgency).
+logger:debug("SettingsClient RestoreSettings start")
+SettingsClient.RestoreSettings()
+logger:debug("SettingsClient RestoreSettings end")
+
 logger:debug("CombatClient start")
-CombatClient.Start(uiHandles.CombatFeedback)
+CombatClient.Start(uiHandles.CombatFeedback, uiHandles.DeathFeed)
 logger:debug("CombatClient end")
+
+-- After UI.Mount() above: UI.Mount() is what calls ClientState.Bootstrap() internally, which is
+-- what resolves the Emote_Started/Emote_Stopped/Emote_UnlockedUpdated/Emote_LoadoutUpdated remotes
+-- EmoteController.Start() below also looks up -- both modules independently WaitForChild the same
+-- already-created remotes, so the ordering itself isn't strictly load-bearing, but keeping this
+-- cluster after UI.Mount() matches CombatClient's own boot position above for the same "gameplay
+-- input modules start once the UI they might eventually surface through exists" reasoning.
+logger:debug("EmoteController start")
+EmoteController.Start()
+logger:debug("EmoteController end")
+
+-- After EmoteController above (this module's own RequestPlay is the only thing EmoteWheelClient is
+-- allowed to call to actually play an emote) and after UI.Mount() (needs both uiHandles.EmoteWheel,
+-- the Screen's own IsOpen/SelectedIndex handle, and uiHandles.ClientState, to read the live loadout
+-- -- neither exists before UI.Mount() returns).
+logger:debug("EmoteWheelClient start")
+EmoteWheelClient.Start(uiHandles.EmoteWheel, uiHandles.ClientState)
+logger:debug("EmoteWheelClient end")
 
 -- Before ShiftLockCamera/FlightCamera/CameraShake below: FOVOffset is the single canonical writer
 -- of camera.FieldOfView that SwingEffect (used inside CombatClient, already started above) and
@@ -125,6 +167,11 @@ logger:debug("DevMenuClient start")
 DevMenuClient.Start(uiHandles.DevMenu)
 logger:debug("DevMenuClient end")
 
+-- Same whitelist-gated, delayed-authorization shape as DevMenuClient above.
+logger:debug("MoveEditorClient start")
+MoveEditorClient.Start(uiHandles.MoveEditor)
+logger:debug("MoveEditorClient end")
+
 -- Unconditional for every client, unlike DevMenuClient above -- the bug report form has no
 -- whitelist gate; every player can open and submit it.
 logger:debug("BugReportClient start")
@@ -136,6 +183,14 @@ logger:debug("BugReportClient end")
 logger:debug("AnnouncementClient start")
 AnnouncementClient.Start(uiHandles.Announcement)
 logger:debug("AnnouncementClient end")
+
+-- Unconditional for every client, same "no whitelist gate" reasoning as BugReportClient above --
+-- every player gets the Settings panel. Only wires the PANEL's own interactivity here; the
+-- KeybindManager restore already happened earlier, before CombatClient started (see
+-- SettingsClient.RestoreSettings' own call site above).
+logger:debug("SettingsClient start")
+SettingsClient.Start(uiHandles.Settings)
+logger:debug("SettingsClient end")
 
 -- Unconditional for every client, not just admins -- see FlightController.lua's own header for
 -- why: it's purely reactive to a server-set Attribute on each player's own Humanoid, so a non-
