@@ -71,7 +71,20 @@ local GRAVITY_CANCEL_NAME = "ParkourGravityCancel"
 -- and the character's own weight fights the drive (a wall-run sags), too high and wall contact
 -- reads as a violent stop rather than a controlled halt.
 local VELOCITY_DRIVE_MAX_FORCE = 90000
-local ORIENTATION_MAX_TORQUE = 60000
+-- Raised from 60000, and the reason is animation rather than tuning taste.
+--
+-- An AlignOrientation commands the whole rotation, upright included, so on paper a Velocity-driven
+-- state can never tip. In practice it can, because the torque it has to win against is not constant: an
+-- animated rig moves real mass away from the root's own axis (a slide clip lays the character out
+-- almost horizontally), and the further that mass swings the longer the lever every collision impulse
+-- gets to push on. 60000 held a neutral pose fine and lost to an animated one -- which is exactly the
+-- shape of the reported bug, a slide that tumbles the character onto their head ONLY once a clip is
+-- attached to it, and never without one.
+--
+-- Still deliberately finite and still non-rigid (see RigidityEnabled below): the goal is to win against
+-- an animation's own mass, not to make the character an immovable object. Wall contact and collision
+-- response stay soft.
+local ORIENTATION_MAX_TORQUE = 280000
 -- How fast commanded facing converges, in the AlignOrientation's own responsiveness units. High
 -- enough that a wall-run's facing snaps along the wall within a couple of frames without the
 -- rigid-mode jitter RigidityEnabled would introduce.
@@ -96,6 +109,40 @@ local activeMode: DriveMode = "Humanoid"
 local capturedHipHeight: number? = nil
 local capturedAutoRotate: boolean? = nil
 local appliedHipHeightDelta = 0
+
+-- THE HUMANOID STATES THIS MODULE STANDS DOWN WHILE IT OWNS THE BODY, and why owning velocity is not
+-- enough on its own.
+--
+-- Roblox's Humanoid runs its own state machine underneath everything this framework does, and two of
+-- its states are not descriptions of what the character is doing -- they are the engine TAKING the
+-- character. FallingDown and Ragdoll drop the body to physics, spin it, and hand it to GettingUp, which
+-- then plays its own animation and rotates the character upright over the better part of a second. From
+-- inside this framework that is indistinguishable from the character spontaneously flipping onto their
+-- head mid-slide, because that is precisely what it looks like.
+--
+-- The trigger is tipping past the Humanoid's own tolerance, and an animated slide reaches it easily:
+-- the clip lays the rig out, the mass swings off the root's axis, one collision impulse tips it, and
+-- the engine calls that a fall. The slide then ends as collateral damage -- a tipped root reads longer
+-- on the ground probe's straight-down cast, contact is "lost", and Sliding hands off to Falling. That
+-- is the whole reported failure, in order: flips onto their head, and the slide will not run down a
+-- slope, and both only ever with a clip attached.
+--
+-- DELIBERATELY JUST THOSE TWO. PlatformStanding is conspicuously absent even though it also suspends
+-- the Humanoid's own movement handling, because this codebase's ragdoll and flight paths both work by
+-- setting Humanoid.PlatformStand (see Server/Combat/RagdollController.beginRagdoll and
+-- Server/Systems/AdminActionSystem.SetFlying) -- disabling the state those depend on entering would be
+-- this module quietly breaking two systems that already have a clean handover with it through the
+-- RootControlLocked/Flying Attributes. GettingUp is absent for a simpler reason: with FallingDown
+-- disabled there is no route into it.
+--
+-- Captured rather than assumed, and restored on release, for the same reason AutoRotate is: these are
+-- legitimately owned by other systems, and writing back a hardcoded `true` would hand them a character
+-- whose states they never set that way.
+local GUARDED_HUMANOID_STATES = {
+	Enum.HumanoidStateType.FallingDown,
+	Enum.HumanoidStateType.Ragdoll,
+}
+local capturedStateEnabled: { [Enum.HumanoidStateType]: boolean }? = nil
 
 -- Reused command struct handed to the states each frame. Reset by BeginFrame, filled by whichever
 -- state is active, committed by Apply. One table for the session -- see EnvironmentProbe.lua's own
@@ -194,16 +241,53 @@ local function setGravityCancel(part: BasePart, enabled: boolean): ()
 	force.Parent = part
 end
 
+-- Announces whether this module currently owns the character's ROTATION, via the Attribute
+-- Client/Camera/ShiftLockCamera.lua watches (see Constants.Attributes.ParkourFacingOwned for why this
+-- is an Attribute rather than a direct call). That module writes root.CFrame to camera yaw EVERY
+-- render step while shift lock is engaged and has no idea parkour exists -- its only other guards are
+-- the combat/flight Attributes -- so for the full duration of a traversal it contested whichever of
+-- this module's two facing mechanisms was live: the AlignOrientation drive in Velocity mode, the
+-- anchored CFrame write in Kinematic mode. Both were being overwritten toward camera yaw every frame
+-- underneath them.
+--
+-- Mirrored in a local so the Attribute is written only on the transitions. The capture path below runs
+-- on EVERY owned frame, and an unguarded SetAttribute there would be a needless property write (and a
+-- needless changed-signal round trip) sixty times a second for the whole traversal.
+local facingOwned = false
+
+local function setFacingOwned(currentHumanoid: Humanoid?, owned: boolean): ()
+	if owned == facingOwned then
+		return
+	end
+	facingOwned = owned
+	if currentHumanoid then
+		currentHumanoid:SetAttribute(Constants.Attributes.ParkourFacingOwned, owned)
+	end
+end
+
 local function captureRestorables(currentHumanoid: Humanoid): ()
+	setFacingOwned(currentHumanoid, true)
 	if capturedHipHeight == nil then
 		capturedHipHeight = currentHumanoid.HipHeight
 	end
 	if capturedAutoRotate == nil then
 		capturedAutoRotate = currentHumanoid.AutoRotate
 	end
+	-- Guarded once per period of ownership, not per frame: SetStateEnabled is a property write with a
+	-- signal behind it, and the whole point of the `capturedStateEnabled == nil` test is that this runs
+	-- on the transition into ownership rather than sixty times a second for its duration.
+	if capturedStateEnabled == nil then
+		local captured: { [Enum.HumanoidStateType]: boolean } = {}
+		for _, stateType in GUARDED_HUMANOID_STATES do
+			captured[stateType] = currentHumanoid:GetStateEnabled(stateType)
+			currentHumanoid:SetStateEnabled(stateType, false)
+		end
+		capturedStateEnabled = captured
+	end
 end
 
 local function restoreRestorables(currentHumanoid: Humanoid): ()
+	setFacingOwned(currentHumanoid, false)
 	if capturedHipHeight ~= nil then
 		currentHumanoid.HipHeight = capturedHipHeight
 		capturedHipHeight = nil
@@ -211,6 +295,13 @@ local function restoreRestorables(currentHumanoid: Humanoid): ()
 	if capturedAutoRotate ~= nil then
 		currentHumanoid.AutoRotate = capturedAutoRotate
 		capturedAutoRotate = nil
+	end
+	local captured = capturedStateEnabled
+	if captured ~= nil then
+		for stateType, wasEnabled in captured do
+			currentHumanoid:SetStateEnabled(stateType, wasEnabled)
+		end
+		capturedStateEnabled = nil
 	end
 	appliedHipHeightDelta = 0
 end
@@ -227,7 +318,17 @@ function ParkourMotor.BindCharacter(_nextCharacter: Model, nextHumanoid: Humanoi
 	activeMode = "Humanoid"
 	capturedHipHeight = nil
 	capturedAutoRotate = nil
+	-- Dropped rather than restored: these belonged to the PREVIOUS character's Humanoid, which is either
+	-- gone or about to be. Leaving the table populated would make the next capture believe the new
+	-- character is already guarded and skip it, so the whole life would run unprotected -- the same
+	-- stale-mirror failure `facingOwned` below is reset for.
+	capturedStateEnabled = nil
 	appliedHipHeightDelta = 0
+	-- A fresh character owns its own rotation until this module takes it again. Written straight to the
+	-- mirror rather than through setFacingOwned because the new Humanoid's Attribute is already unset --
+	-- there is nothing to clear on it, only this module's memory of the PREVIOUS character to reset, and
+	-- a stale `true` here would suppress the next real capture's write.
+	facingOwned = false
 end
 
 -- Hands the body back unconditionally: rig destroyed, anchor cleared, HipHeight/AutoRotate restored.
@@ -247,6 +348,18 @@ function ParkourMotor.Release(): ()
 	if currentHumanoid then
 		restoreRestorables(currentHumanoid)
 	end
+	-- Repeated outside the humanoid guard on purpose (restoreRestorables clears it too, and the setter
+	-- early-outs when it is already false). Release is reached on teardown paths where `humanoid` is
+	-- already nil -- a respawn mid-traversal, most obviously -- and leaving the mirror stuck true there
+	-- would mean the next character's first capture sees "already owned" and never writes the Attribute
+	-- at all, so shift lock would stand its yaw down for that entire life. The
+	-- unrecoverable-without-a-respawn class of failure this function exists to prevent, applied to
+	-- facing. The Attribute itself needs no clearing on this path: it died with the old Humanoid.
+	setFacingOwned(currentHumanoid, false)
+	-- Same reasoning as the setFacingOwned repeat above, for the state guard: on a teardown path where
+	-- `humanoid` is already nil there is nothing to restore the states ON, but the memory of having
+	-- guarded them must not survive into the next character or its first capture is skipped.
+	capturedStateEnabled = nil
 	activeMode = "Humanoid"
 end
 

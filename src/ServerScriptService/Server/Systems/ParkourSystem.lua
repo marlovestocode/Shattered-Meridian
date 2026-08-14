@@ -61,6 +61,19 @@ local ParkourSystem = {}
 local RemoteNames = ParkourConstants.Network.RemoteNames
 local VALIDATION = ParkourConstants.Validation
 
+-- The subset of ParkourConstants.Validation that Shared/Parkour/ParkourValidation.lua reads, built
+-- ONCE at module load and shared by both call sites (Validate and ResolveMomentumCarry). Both run on
+-- every accepted report, so rebuilding this table per report -- as the Validate call site used to --
+-- was pure allocation on a per-action path, and having two copies invited them to drift.
+local VALIDATION_CONFIG: ParkourValidation.ValidationConfig = {
+	MaxReportedSpeed = VALIDATION.MaxReportedSpeed,
+	MaxVerticalGainStuds = VALIDATION.MaxVerticalGainStuds,
+	MaxTravelSpeed = VALIDATION.MaxTravelSpeed,
+	MaxActionSeconds = VALIDATION.MaxActionSeconds,
+	MomentumCarryObservedTolerance = VALIDATION.MomentumCarryObservedTolerance,
+	MomentumCarryObservedSlackStuds = VALIDATION.MomentumCarryObservedSlackStuds,
+}
+
 -- Per-player server-side view of what that client claims to be doing. Deliberately minimal: this is
 -- bookkeeping for the ownership window and the validator, NOT a mirror of the client's state machine.
 -- The server has no opinion about whether a player is wall-running versus sliding -- only about
@@ -213,7 +226,25 @@ end
 -- the single client-supplied number that reaches gameplay in this whole feature -- already validated
 -- against VALIDATION.MaxReportedSpeed by the time it arrives here, and capped a second time,
 -- independently, inside Movement.ComputeParkourSpeedFloor.
-local function endAction(player: Player, state: PlayerParkourState, reportedSpeed: number, now: number): ()
+-- CLOSING A WINDOW AND GRANTING A REWARD ARE TWO DIFFERENT JOBS, and conflating them was a real
+-- exploit. `hadOpenWindow` is what separates them.
+--
+-- ParkourValidation deliberately ACCEPTS an End that matches no open window -- correctly, because the
+-- server expires windows on its own and a slightly-late End is the ordinary, benign case, while
+-- refusing one can only ever strand an honest player's movement. But "this report is not worth
+-- rejecting" was being read as "this report earned a momentum carry," so an End needed no Start at
+-- all to stamp the speed floor. See ParkourConstants.Validation.MomentumCarryObservedTolerance for
+-- the exploit that followed from it.
+--
+-- So: the release half below is unconditional (it must be -- that is the whole reason an unmatched
+-- End is honored), and only the carry half is gated on there having actually been an action.
+local function endAction(
+	player: Player,
+	state: PlayerParkourState,
+	reportedSpeed: number,
+	now: number,
+	hadOpenWindow: boolean
+): ()
 	state.OpenKind = nil
 	state.OpenStartedAt = nil
 	state.OpenStartPosition = nil
@@ -226,7 +257,26 @@ local function endAction(player: Player, state: PlayerParkourState, reportedSpee
 	humanoid:SetAttribute(Constants.Attributes.ParkourVelocityOwned, false)
 	humanoid:SetAttribute(Constants.Attributes.ParkourState, "")
 
-	local carry = math.clamp(reportedSpeed, 0, VALIDATION.MaxReportedSpeed)
+	-- What the server can SEE the body doing, planar only -- the carry governs WalkSpeed, so a fall's
+	-- vertical component must not inflate it. nil when the root can't be read at all, which
+	-- ResolveMomentumCarry treats as "no observed ceiling available."
+	local observedPlanar: number? = nil
+	local rootPart = getRootPart(player)
+	if rootPart then
+		local velocity = rootPart.AssemblyLinearVelocity
+		observedPlanar = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+	end
+
+	local carry =
+		ParkourValidation.ResolveMomentumCarry(reportedSpeed, observedPlanar, hadOpenWindow, VALIDATION_CONFIG)
+	if carry == nil then
+		-- No action was open, so there is no momentum to carry out of one. Deliberately does NOT zero
+		-- an existing floor: a carry stamped by a genuine action that ended moments ago is still
+		-- legitimately running out its MomentumCarrySeconds, and a stray End must not be able to
+		-- cancel it any more than it can grant one.
+		return
+	end
+
 	humanoid:SetAttribute(Constants.Attributes.ParkourSpeedFloor, carry)
 	humanoid:SetAttribute(
 		Constants.Attributes.ParkourSpeedFloorExpiry,
@@ -283,12 +333,7 @@ local function handleReport(player: Player, rawPayload: unknown): ()
 		OpenStartPosition = state.OpenStartPosition,
 		LastSameKindAt = state.LastPerKind[report.Kind] or 0,
 		MinSameKindIntervalSeconds = ParkourConstants.Network.MinSameActionIntervalSeconds,
-	}, {
-		MaxReportedSpeed = VALIDATION.MaxReportedSpeed,
-		MaxVerticalGainStuds = VALIDATION.MaxVerticalGainStuds,
-		MaxTravelSpeed = VALIDATION.MaxTravelSpeed,
-		MaxActionSeconds = VALIDATION.MaxActionSeconds,
-	})
+	}, VALIDATION_CONFIG)
 
 	if not accepted then
 		local reason = rejectionReason or "MalformedPayload"
@@ -310,7 +355,10 @@ local function handleReport(player: Player, rawPayload: unknown): ()
 	if report.Phase == "Start" then
 		beginAction(player, state, report, now)
 	else
-		endAction(player, state, report.Speed, now)
+		-- Read BEFORE endAction clears it. An End earns its momentum carry only if it is closing a
+		-- window this same kind actually opened -- see endAction's own header.
+		local hadOpenWindow = state.OpenKind == report.Kind and state.OpenStartedAt ~= nil
+		endAction(player, state, report.Speed, now, hadOpenWindow)
 	end
 end
 
@@ -330,8 +378,11 @@ local function onHeartbeat(): ()
 			})
 			-- Expired rather than ended: no momentum carry is granted, because the client never told us
 			-- what speed it finished with and inventing one would be handing out free speed for a
-			-- dropped packet.
-			endAction(player, state, 0, now)
+			-- dropped packet. Passed as hadOpenWindow = false for exactly that reason -- there WAS an
+			-- open window (that is why we are here), but it is being torn down rather than completed,
+			-- and only a completed action earns a carry. beginAction already zeroed the floor when this
+			-- window opened, so skipping the stamp leaves it at zero either way.
+			endAction(player, state, 0, now, false)
 		end
 	end
 end

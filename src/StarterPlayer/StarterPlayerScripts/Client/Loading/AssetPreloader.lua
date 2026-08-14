@@ -4,11 +4,18 @@
 
 	Owns: the boot-time "block until every known client asset is ready" gate. Aggregates the
 	instances each domain module already builds for its own purposes (Client/FX/SoundManager.lua's
-	pooled Sound instances, Client/FX/CombatAnimator.lua's and Client/FX/FlightAnimator.lua's
-	Animation templates) plus the one standalone VFX texture id (Constants.FX.MovementDust.Texture),
+	pooled Sound instances, Client/FX/CombatAnimator.lua's, Client/FX/FlightAnimator.lua's and
+	Client/FX/EmoteAnimator.lua's Animation templates), plus the raw content ids for the categories
+	that have no instance to borrow (Client/Parkour/ParkourAnimator.lua's twenty lazily-built clips,
+	Constants.Intro.AnimationIds, Constants.UI.VitalIconIds, Constants.FX.MovementDust.Texture),
 	dedupes them by underlying asset id, and runs ONE ContentProvider:PreloadAsync call across the
 	combined list -- one real progress count across every asset category, not a separate fire-and-
 	forget preload per module.
+
+	MANIFEST COMPLETENESS IS THE WHOLE POINT, and it is what Tests/Loading/AssetPreloader.spec.lua
+	guards. An asset missing from here doesn't fail loudly -- it just cold-loads at first use, which
+	is precisely the hitch the loading screen exists to have already paid. So a new asset category
+	MUST be added here, and the spec asserts the categories that exist today still arrive.
 
 	Deliberately does NOT rebuild Sound/Animation instances from Constants.lua ids itself -- each
 	domain module is already the one source of truth for how its own instances get constructed
@@ -34,6 +41,26 @@ local SoundManager = require(script.Parent.Parent.FX.SoundManager)
 local CombatAnimator = require(script.Parent.Parent.FX.CombatAnimator)
 local FlightAnimator = require(script.Parent.Parent.FX.FlightAnimator)
 local EmoteAnimator = require(script.Parent.Parent.FX.EmoteAnimator)
+local ParkourAnimator = require(script.Parent.Parent.Parkour.ParkourAnimator)
+
+-- SoundManager holds a REGISTRY, not a fixed set -- it only knows about the sounds someone has
+-- Register()ed into it, and these three modules are the ones who do that (CombatAudio at load,
+-- FlightAudio at load, RunAudio at load). None of them is required above for its return value; they
+-- are required for the side effect of their top-level Register() calls.
+--
+-- Requiring them HERE rather than relying on someone else having already done so is the point. That
+-- used to hold only by accident: Client/Main.client.lua requires CombatClient/FlightController/
+-- RunController at the top of its own body, each of which requires one of these, and all of that
+-- happens to run before LoadingClient.Run() reaches this module. Main's own comment asserts that
+-- ordering -- but nothing enforced it. Any one of those three modules switching to a lazy require
+-- would have silently emptied its sounds out of the manifest: no error, no warning, just a cold-load
+-- hitch on the first hit/takeoff/footstep of every session, and no test anywhere to catch it.
+--
+-- Luau caches module results, so requiring them a second time here is free -- it cannot double-
+-- register.
+require(script.Parent.Parent.FX.CombatAudio)
+require(script.Parent.Parent.FX.FlightAudio)
+require(script.Parent.Parent.FX.RunAudio)
 
 local logger = Logger.scope("AssetPreloader")
 
@@ -72,6 +99,11 @@ function AssetPreloader.BuildManifest(): { Instance | string }
 	for _, instance in EmoteAnimator.GetPreloadInstances() do
 		table.insert(raw, instance)
 	end
+	-- Raw id strings rather than instances -- see ParkourAnimator.GetPreloadInstances' own header for
+	-- why that module is the one provider that doesn't keep templates to hand back.
+	for _, assetId in ParkourAnimator.GetPreloadInstances() do
+		table.insert(raw, assetId)
+	end
 	-- The one standalone texture id not owned by a domain module with its own instance-pooling
 	-- concern -- Constants.FX.MovementDust.lua's own header note on why nothing else instances this
 	-- eagerly. Skipped like every other still-unauthored placeholder if ever set back to "".
@@ -85,6 +117,22 @@ function AssetPreloader.BuildManifest(): { Instance | string }
 	-- these exactly once per session and has no ongoing pool to be the "one source of truth" for.
 	for _, animationId in pairs(Constants.Intro.AnimationIds) do
 		table.insert(raw, animationId)
+	end
+
+	-- The HUD's three vital icons (Constants.UI.VitalIconIds -- health/qi/posture). These are the
+	-- most player-visible textures in the game and were the worst-timed gap in this manifest: they
+	-- render the instant the loading screen clears, so an unpreloaded icon pops in blank on the very
+	-- first frame of gameplay.
+	--
+	-- Raw ids rather than a Screens/HUD provider on purpose. This module is deliberately Fusion-free
+	-- (see the header) so it stays requireable without a DataModel; reaching into the UI tree for an
+	-- id would drag Fusion, Tokens and the whole component graph into the preloader's require chain
+	-- to fetch three strings. It also wouldn't work: HUD builds its icons inside HUD.new, which
+	-- UI.Mount() doesn't call until after this gate has already run.
+	for _, textureId in pairs(Constants.UI.VitalIconIds) do
+		if textureId ~= "" then
+			table.insert(raw, textureId)
+		end
 	end
 
 	-- Dedupe by underlying asset id -- Constants.Flight.AnimationIds' six entries currently share one

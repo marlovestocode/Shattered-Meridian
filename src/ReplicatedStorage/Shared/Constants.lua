@@ -24,7 +24,19 @@ local Constants = {}
 -- module is Shared (client+server-safe) while SoundManager.lua is client-only; a client-only module
 -- can depend on Shared, never the other way around. PoolSize is optional (Register() defaults it to
 -- 1) -- only sounds prone to overlapping replays during play (fast combat combos) need to name one.
-export type SoundDefinition = { SoundId: string, Volume: number, PoolSize: number? }
+-- PlaybackRegion is optional and, when supplied, restricts playback to that [start, stop] slice of
+-- the asset in seconds (SoundManager applies it via Sound.PlaybackRegion + PlaybackRegionsEnabled).
+-- It exists so ONE asset containing several distinct sounds -- Constants.Run's stage-2 file, which
+-- opens with a speed whoosh and continues into footsteps -- can be registered as two independent
+-- named sounds instead of needing the audio split into two uploads, and so trimming is done by the
+-- engine rather than by a task.delay stop (which would be both audibly imprecise and one more timer
+-- per play to keep track of).
+export type SoundDefinition = {
+	SoundId: string,
+	Volume: number,
+	PoolSize: number?,
+	PlaybackRegion: NumberRange?,
+}
 -- The one deliberate exception to SoundDefinition's shape -- a continuous loop (Constants.Flight.
 -- Sound.WindLoop, played via SoundManager.PlayLooped) has no single Volume, only a ramped range the
 -- caller eases across every frame (Client/FX/FlightAudio.lua's SetWindIntensity) -- see that
@@ -442,6 +454,18 @@ Constants.NetworkBudget = {
 	-- though the server rejected the swing itself, which could silently eat the next real input
 	-- (e.g. the actual finisher press, or a Dash sharing that same bucket) with zero feedback.
 	MaxAttackCallsPerSecondPerPlayer = 10,
+	-- Defensive/mobility actions get their own budget for exactly the reason the Attack split above
+	-- describes, which was applied to Attack and then never followed through to the other bucket.
+	-- CombatSystem.lua's defensiveRateLimiter gates FOUR distinct actions off one counter -- Feint,
+	-- BlockStart (which is also the parry), Dash and Slide -- and four of those inside one second is
+	-- ordinary defensive play, not abuse: block-tap for a parry, dash out, block again, feint. At 4
+	-- the fifth input was rejected outright rather than buffered (checkCommonPreconditions runs the
+	-- limiter before any buffering), and because CombatClient has already predicted the block stance
+	-- and the dash locally, that rejection rolls the prediction back as a VISIBLE flinch -- strictly
+	-- worse than the "silently eat the next real input with zero feedback" case cited above. Every
+	-- one of the four is independently cooldown-gated server-side, so this budget only ever needs to
+	-- stop a packet flood, never legitimate play.
+	MaxDefensiveCallsPerSecondPerPlayer = 12,
 }
 
 -- Networking-infrastructure tunables -- distinct from NetworkBudget above (that table is about
@@ -502,6 +526,22 @@ Constants.Attributes = {
 	-- an Attribute rather than written into CombatState" shape those three already use, which is what
 	-- lets ParkourSystem stay entirely outside CombatSystem's private state.
 	ParkourVelocityOwned = "ParkourVelocityOwned",
+	-- The ROTATION counterpart to ParkourVelocityOwned above, and unlike every other Attribute in this
+	-- table it is written by the CLIENT, not the server: Client/Parkour/ParkourMotor.lua raises it for
+	-- exactly the window in which it owns the character's facing (the AlignOrientation drive in Velocity
+	-- mode, the anchored CFrame write in Kinematic mode), and Client/Camera/ShiftLockCamera.lua reads it
+	-- to stand its own per-frame yaw write down for the duration. Both ends are on the same client and
+	-- nothing on the server reads it, so client-set (which does not replicate) is exactly right --
+	-- this is one client-side presentation module coordinating with another, which is why it is an
+	-- Attribute rather than a NetworkBridge remote.
+	--
+	-- It exists as an Attribute rather than a direct ParkourMotor -> ShiftLockCamera function call to
+	-- keep the require graph one-directional: the camera folder is not mounted in test.project.json, so
+	-- requiring it from the motor would drag Fusion and the whole camera stack into the parkour state
+	-- registry's load chain and break Tests/Parkour/StateRegistry.spec. Same reactive
+	-- GetAttributeChangedSignal shape ShiftLockCamera already uses for Flying/RootControlLocked, so it
+	-- costs that module a cached boolean and no new dependency in either direction.
+	ParkourFacingOwned = "ParkourFacingOwned",
 	-- The momentum a just-finished parkour action handed back, as an absolute WalkSpeed floor, plus the
 	-- timestamp it decays to nothing at. Together these are how a slide's or a vault's earned speed
 	-- survives into ordinary running instead of being erased the instant the action ends -- see
@@ -516,6 +556,22 @@ Constants.Attributes = {
 	-- clients -- and any future spectator/replay tooling -- a way to know what a remote character is
 	-- doing without this feature adding a broadcast remote of its own.
 	ParkourState = "ParkourState",
+	-- Run System (Server/Combat/Movement.UpdateSprintStage, Client/Movement/RunController.lua). The
+	-- sustained-sprint STAGE this player's server-side state currently resolves to: 0 = not sprinting
+	-- (or sprinting but not actually being granted the sprint speed tier), 1 = ordinary sprint, 2 =
+	-- the sustained "full stride" tier reached after Constants.Combat.SprintStage2ThresholdSeconds of
+	-- unbroken running.
+	--
+	-- Server-written, exactly like every other Attribute in this table except ParkourFacingOwned, and
+	-- for the reason that makes this feature safe: the stage decides a WalkSpeed multiplier, so the
+	-- client must never be the one that decides it. The client only READS this to pick which run clip,
+	-- which footstep sound and which FOV offset to present -- if a client lies to itself about the
+	-- stage it gets a wrong animation and no extra speed at all.
+	--
+	-- An Attribute rather than a remote for the same reason ParkourState above is one: Humanoid
+	-- Attributes replicate to every client for free, so a remote player's own client can pick the
+	-- matching run animation for them with no per-stage broadcast of our own.
+	SprintStage = "SprintStage",
 }
 
 -- Default keybind per Types.KeybindAction -- Client/Input/KeybindManager.lua clones this into its
@@ -1797,6 +1853,33 @@ Constants.Flight = {
 	},
 }
 
+-- UI texture ids, kept HERE rather than inline at the one component that renders them, for exactly
+-- one reason: Client/Loading/AssetPreloader.lua has to be able to read them at BOOT. The HUD's own
+-- module is required before the preload gate, but its ids used to be literals inside HUD.new's body,
+-- and HUD.new isn't called until UI.Mount() -- which runs AFTER the gate. So the three most
+-- player-visible textures in the game were the ones cold-loading at the exact frame the loading
+-- screen cleared. Lifting them to a table the preloader can sweep (the same raw-content-id path
+-- Constants.Intro.AnimationIds already uses) is what makes them preloadable at all.
+--
+-- Not merged into Constants.FX below: these are UI chrome, not impact-feel tunables, and nothing
+-- here is a tunable at all -- it's an asset manifest.
+Constants.UI = {
+	-- Vital gauge icons (Client/UI/Screens/HUD/init.lua, passed to Components/VitalIcon.lua's
+	-- IconAssetId). Each was uploaded from the matching docs/design/icons/*.svg PNG export. Health
+	-- was re-uploaded 2026-07-24 after the left-tilt + bolder-outline pass.
+	--
+	-- These are the TEXTURE ids. Each icon also has a wrapping Decal id, which is NOT usable as an
+	-- ImageLabel.Image and must never be pasted here: health 108335358703553, qi 125861176852006,
+	-- posture 71612968745315. Keeping the rejected ids named in this comment is deliberate -- it's
+	-- the third time someone has had to rediscover which of the two ids Roblox hands back is the
+	-- one an ImageLabel accepts.
+	VitalIconIds = {
+		Health = "rbxassetid://102020098775440",
+		Qi = "rbxassetid://139165261554498",
+		Posture = "rbxassetid://137723815865371",
+	} :: { [string]: string },
+}
+
 -- Client-only impact-feel tunables (Client/FX/CameraShake.lua, HitStop.lua, HitFlash.lua). These
 -- never affect a gameplay OUTCOME -- they're driven exclusively off server-validated
 -- Combat_FeedbackEvent resolutions (CombatClient.lua) and only shape how a confirmed hit LOOKS on
@@ -2227,6 +2310,154 @@ Constants.FX = {
 	},
 }
 
+-- THE RUN SYSTEM'S PRESENTATION TABLE -- everything about how running LOOKS and SOUNDS, in one
+-- place, so retuning the run never means grepping three client modules.
+--
+-- The run is a two-stage sustained sprint. Stage 1 is the ordinary sprint that has always existed;
+-- stage 2 engages after Constants.Combat.SprintStage2ThresholdSeconds of unbroken running and is a
+-- genuinely different gear -- a bigger WalkSpeed multiplier (Constants.Combat.
+-- SprintStage2SpeedMultiplier), its own animation, its own footstep sound, a deeper FOV pull and a
+-- one-shot "kick" at the moment it engages. The STAGE ITSELF is resolved server-side
+-- (Server/Combat/Movement.UpdateSprintStage) and published on the Humanoid as
+-- Constants.Attributes.SprintStage; nothing in this table decides when a stage changes, only what
+-- the client does about it.
+--
+-- Owned by Client/Movement/RunController.lua (the presentation driver) and Client/FX/RunAudio.lua
+-- (the sound registrations). Lives here rather than in ParkourConstants.lua -- which owns movement
+-- NUMBERS -- because this is presentation config in the same category as Constants.Flight.Sound and
+-- Constants.FX, and because RunAudio's definitions need Constants' own SoundDefinition type.
+Constants.Run = {
+	-- FOOTSTEPS. There is no footstep audio in the base game (Roblox's own stock "Running" sound is a
+	-- single looped scuff, not a step cadence), so this is a real system rather than a re-skin: the
+	-- run controller re-derives a step interval every frame from live planar speed and fires a
+	-- one-shot per footfall.
+	--
+	-- Interval-driven rather than animation-marker-driven on purpose. A marker-driven step
+	-- (GetMarkerReachedSignal) is only as reliable as the authored markers in whatever clip is
+	-- currently playing, and this system has to keep working through a placeholder-id stage-2 clip, a
+	-- combat action silencing the run loop, and the parkour framework taking the body over mid-stride.
+	-- Speed-scaled intervals need nothing from the asset and degrade to "slightly wrong cadence"
+	-- instead of "no footsteps at all."
+	Footsteps = {
+		-- Master switch. False silences the whole footstep layer (the run keeps every other cue).
+		Enabled = true,
+		-- Whether to mute Roblox's own stock "Running" Sound on the character (the looped scuff the
+		-- default RbxCharacterSounds script plays out of HumanoidRootPart). On by default because
+		-- leaving it audible under real footsteps reads as two unrelated surfaces at once. Muted per
+		-- life via Volume = 0 rather than destroyed -- the default script owns that Instance, and
+		-- deleting something another script expects to exist is how you get a stream of errors from
+		-- code you don't own.
+		SilenceDefaultRunSound = true,
+
+		-- The speed each stage's authored StepIntervalSeconds is written FOR. The live interval is
+		-- scaled by ReferenceSpeed / currentSpeed, so a player slowed to a crawl (hit-slow, uphill)
+		-- takes slower steps and a downhill momentum carry takes faster ones, without either stage
+		-- needing its own curve.
+		Stage1ReferenceSpeed = 32,
+		Stage2ReferenceSpeed = 48,
+		-- Hard bounds on the scaled interval. The lower bound is what stops a momentum-carry burst
+		-- from turning the cadence into a machine-gun; the upper bound stops a near-stopped player
+		-- from taking one step every two seconds before the run states drop out entirely.
+		MinIntervalSeconds = 0.15,
+		MaxIntervalSeconds = 0.6,
+
+		-- PER-STAGE STEP SOUND. Point these at whatever assets you want -- this is the one place step
+		-- audio is configured, and Client/FX/RunAudio.SetStepSound can additionally swap either at
+		-- runtime without a restart. An empty SoundId is the codebase's standard "not authored yet"
+		-- placeholder: SoundManager.Play already no-ops on it, so shipping with one costs a debug log
+		-- and nothing else.
+		--
+		-- PoolSize 3 because a footstep genuinely can re-trigger before the previous one finishes at
+		-- stage-2 cadence -- the same overlap reasoning Constants.Combat.Sound's hit/block/parry trio
+		-- documents. PitchJitter randomizes each play's PlaybackSpeed by +/- that fraction, which is
+		-- the cheapest possible fix for the "identical sample on a metronome" effect a fixed-interval
+		-- step system otherwise has.
+		Stage1 = {
+			StepIntervalSeconds = 0.33,
+			PitchJitter = 0.07,
+			-- Sliced out of the combined asset: the first second is the speed whoosh (which belongs to
+			-- Stage2Onset below, not to a footfall) and the second after it is a RUN of several steps.
+			-- The region here is ONE step's worth out of that run, not the whole second -- a slice
+			-- containing four footfalls, retriggered every 0.33s, would layer four-step bursts on top of
+			-- each other rather than producing a stride.
+			--
+			-- 1.0 -> 1.25 is a first-pass slice; nudge the start by ear until it lands right on a step
+			-- transient (a start slightly BEFORE the transient just adds a hair of silence, which is
+			-- harmless -- starting slightly after clips the attack, which is what makes a footstep sound
+			-- soft and wrong).
+			Sound = {
+				SoundId = "rbxassetid://76038309546970",
+				Volume = 0.35,
+				PoolSize = 3,
+				PlaybackRegion = NumberRange.new(1.0, 1.25),
+			} :: SoundDefinition,
+		},
+		Stage2 = {
+			StepIntervalSeconds = 0.25,
+			PitchJitter = 0.07,
+			-- PLAYBACK REGION (SoundDefinition.PlaybackRegion) -- the answer to "my stage-2 asset has a
+			-- speed whoosh at the front and then the steps." The asset is laid out as one second of
+			-- whoosh (0 -> 1.0, which belongs to Stage2Onset below) followed by one second of running
+			-- footfalls (1.0 -> 2.0), so this entry takes ONE footfall out of that second, not the whole
+			-- second -- a slice containing the entire run, retriggered every 0.25s, would layer
+			-- multi-step bursts on top of each other rather than producing a stride. SoundManager applies
+			-- it through Sound.PlaybackRegion/PlaybackRegionsEnabled, so the ENGINE does the trimming --
+			-- no task.delay-based "stop it after N seconds," which is both jittery and one more timer to
+			-- leak. Leave it out entirely for an ordinary one-sound-one-file asset.
+			--
+			-- Deliberately the SAME slice Stage1 uses: it's one recording of one surface, so a second
+			-- footfall out of the same run (1.25 -> 1.5, if you want the stages to use distinct samples)
+			-- would differ only by recording noise, and PitchJitter above already breaks the repetition.
+			-- What actually separates the stages is cadence, volume and the onset kick, not the sample.
+			Sound = {
+				SoundId = "rbxassetid://76038309546970",
+				Volume = 0.42,
+				PoolSize = 3,
+				PlaybackRegion = NumberRange.new(1.0, 1.25),
+			} :: SoundDefinition,
+		},
+	},
+
+	-- THE STAGE-2 ONSET KICK -- the one-shot that sells the gear change at the instant the second
+	-- stage engages. Plays once per stage-1 -> stage-2 transition, never on a loop, which is the
+	-- other half of the "speed sound at the beginning, then step sounds" split above.
+	Stage2Onset = {
+		-- The whoosh half of the combined asset -- see Footsteps.Stage2's PlaybackRegion note. The
+		-- whoosh occupies the first second and the footfall run starts at 1.0, so this stops exactly
+		-- there: run it any longer and the gear change ends with a stray footstep layered on top of the
+		-- real stride, which is heard as one step landing twice.
+		Sound = {
+			SoundId = "rbxassetid://74852553291807",
+			Volume = 0.55,
+			PlaybackRegion = NumberRange.new(0, 1.0),
+		} :: SoundDefinition,
+		-- Additional FOV pull layered on top of Constants.Camera.Sprint.FOVDelta while stage 2 is
+		-- engaged (Client/FX/FOVOffset.lua's named-slot composition, so it stacks with the sprint
+		-- slot instead of fighting it). Negative = narrower, matching Sprint's own convention.
+		FOVDelta = -5,
+		FOVEaseSpeed = 4,
+	},
+
+	-- ANIMATION. Stage 1 keeps Constants.Combat.AnimationIds.Running (the clip that has always played
+	-- while sprinting); stage 2 plays Constants.Combat.AnimationIds.RunningStage2 when that id is
+	-- authored and otherwise falls through to stage 1's clip -- the same blank-id fallthrough
+	-- ParkourAnimator uses for its half-authored directional wall-jump pair, so this ships correctly
+	-- either way.
+	Animation = {
+		-- Playback speed for the run loop per stage. Applied on stage CHANGE only, never per frame:
+		-- CombatAnimator.FreezeActiveCombatTrack (hit-stop) drives the same property, and a per-frame
+		-- write here would silently cancel every freeze that landed on a running player.
+		Stage1PlaybackSpeed = 1,
+		-- Slightly hot even when a dedicated stage-2 clip exists -- a full-stride run reads as urgent,
+		-- and this is what makes stage 2 visibly different on day one, before that clip is authored.
+		Stage2PlaybackSpeed = 1.25,
+		-- Crossfade between the two run clips at a stage change. Longer than a combat interrupt cut
+		-- (the two clips are the same character doing the same thing harder, so the transition should
+		-- read as accelerating, not as swapping costumes) and shorter than a settle.
+		StageCrossfadeSeconds = 0.2,
+	},
+}
+
 -- DashPunch's own Windup/Active/Recovery seconds, factored out to local variables so
 -- DashFrontCommitmentSeconds (below, in the main Constants.Combat table) can be DERIVED from
 -- these instead of hand-duplicating their sum -- a Lua table constructor can't reference its own
@@ -2610,6 +2841,47 @@ Constants.Combat = {
 	-- per combat-philosophy.md's Tuning process.
 	SprintSpeedMultiplier = 1.5,
 
+	-- THE SECOND RUN STAGE. Sprint is no longer a single flat tier: hold a genuine, unbroken run for
+	-- SprintStage2ThresholdSeconds and it shifts into a second gear at SprintStage2SpeedMultiplier
+	-- (Server/Combat/Movement.UpdateSprintStage resolves the stage, ComputeDesiredWalkSpeed picks the
+	-- multiplier off it, and Constants.Attributes.SprintStage publishes it to the client for the
+	-- animation/audio/FOV change).
+	--
+	-- 2.0 is a big number for a SUSTAINED tier -- it sits just under DashSpeedMultiplier's 2.2, which
+	-- would normally be an obvious balance problem for a "can't just run away" combat game. It isn't,
+	-- because of what the charge is gated on: the stage-2 clock only accrues while the sprint tier is
+	-- ACTUALLY being granted (moving, not blocking, past the attackEndsAt commitment lock, not
+	-- stunned, not posture-broken) and it decays whenever that stops being true. Every one of those
+	-- happens constantly in a fight -- a single swing, a single block, a single hit -- so seven
+	-- unbroken seconds of stage-1 running is a thing that essentially only happens OUT of combat.
+	-- Stage 2 is therefore a traversal gear, not a combat gear, which is the design intent: the world
+	-- is big, and crossing it should not be the boring part of playing.
+	--
+	-- The one case that deliberately does NOT break the charge is a parkour action (Attributes.
+	-- ParkourVelocityOwned) -- see Movement.ComputeSprintCharge's HOLD branch. Vaulting a wall
+	-- mid-sprint is the system working, not an interruption, and dropping a player out of full stride
+	-- for using the movement system they're supposed to be using would teach exactly the wrong lesson.
+	SprintStage2SpeedMultiplier = 2.0,
+	-- Seconds of unbroken, actually-granted sprint before the second stage engages. Long enough that
+	-- it is never reached inside a fight (see above), short enough that a player crossing open ground
+	-- feels it every single time rather than only on marathon runs.
+	SprintStage2ThresholdSeconds = 7,
+	-- How fast the accrued charge bleeds off once the sprint tier stops being granted, as a multiple
+	-- of the rate it builds at. A decay rather than a hard reset because the alternative punishes
+	-- exactly the wrong thing: a one-frame WalkSpeed gate flicker (a hitch, a doorframe, the instant
+	-- between two movement inputs) would drop a player who has been running for twenty seconds all the
+	-- way back to zero. At 2.0 a full seven-second charge is gone after 3.5 seconds of not running,
+	-- which is long enough to survive a stumble and far too short to bank.
+	SprintChargeDecayMultiplier = 2.0,
+	-- Hysteresis on the second stage: once engaged, it holds until the charge falls below this
+	-- FRACTION of the threshold, rather than dropping the instant the charge dips under it. Without
+	-- this, a single frame in which the sprint tier isn't granted (any of the five gates flickering)
+	-- takes the charge fractionally below the threshold, drops the player to stage 1, and then lets
+	-- them re-cross it a few frames later -- which on the client means the stage-2 onset whoosh and the
+	-- animation crossfade replaying every time the player brushes a wall. 0.6 gives roughly 2.1s of
+	-- non-running slack at the decay rate above: far more than any flicker, far less than a real stop.
+	SprintStage2SustainFraction = 0.6,
+
 	DashSpeedMultiplier = 2.2,
 	-- Seconds the Dash WalkSpeed burst is active -- a quick step, not a sustained evade.
 	DashDurationSeconds = 0.22,
@@ -2876,8 +3148,10 @@ Constants.Combat = {
 		-- + 2 continuations + 1 slam. Capped deliberately small: combat-philosophy.md's "no true
 		-- unblockable/unparryable without a telegraphed cost" -- the sequence itself stays short
 		-- rather than open-ended, the same reasoning that already caps the M1 string at
-		-- BasicComboLength before forcing a Finisher. The target is no longer fully helpless for the
-		-- whole sequence either, as of TechWindowSeconds below -- see that field's own header.
+		-- BasicComboLength before forcing a Finisher. (This previously also pointed at a
+		-- TechWindowSeconds field "below" for the target's escape option; no such field exists
+		-- anywhere in the codebase and no air-tech is implemented, so the short sequence length is
+		-- currently the ONLY thing bounding a victim's helplessness here.)
 		MaxHits = 4,
 		-- The attacker's OWN positioning -- see RagdollController.HoldAloft's header for why a fixed-
 		-- point AlignPosition pin (not a one-time launch velocity, and -- as of this value -- not a
@@ -2958,6 +3232,13 @@ Constants.Combat = {
 		-- playing on a hard interrupt (combat action, or the character stops moving).
 		Walking = "rbxassetid://92817463622620",
 		Running = "rbxassetid://134203885804635",
+		-- The SECOND run stage's own clip (Constants.Attributes.SprintStage == 2). Blank until a real
+		-- full-stride run is authored -- and blank is a supported, shipped state, not a stub: the
+		-- locomotion evaluator falls through to Running above when this has no id, so stage 2 still
+		-- reads as a different gear through Constants.Run.Animation.Stage2PlaybackSpeed, the FOV pull
+		-- and the stage-2 footstep/onset audio. Paste an id here and the clip swaps in with no code
+		-- change, the same wired-but-unauthored convention Constants.Flight.AnimationIds uses.
+		RunningStage2 = "rbxassetid://126596518578942",
 		Uppercut = "rbxassetid://138196103225171",
 		BlockHold = "rbxassetid://105157110369149",
 		ParryFlash = "rbxassetid://71843503021113",
@@ -3006,6 +3287,67 @@ Constants.Combat = {
 	-- regen either -- see StarterCharacterScripts/Health.server.lua and combat-philosophy.md's
 	-- Sekiro-grade reference point).
 	PostureRegenPerSecond = 8,
+
+	-- PASSIVE HEALTH REGEN. A deliberate reversal of a previously-deliberate decision, so it is worth
+	-- stating plainly rather than letting a future reader think it was an oversight: this game
+	-- shipped with NO passive health regen on purpose, and StarterCharacterScripts/Health.server.lua
+	-- exists as an intentionally-empty file purely to stop Roblox inserting its own default regen
+	-- script. That reasoning cited a Sekiro-grade reference point where health is only recovered
+	-- deliberately. Requested and re-affirmed by the repo owner; the suppression of Roblox's default
+	-- script still stands, because that script is an untracked writer of Humanoid.Health outside the
+	-- server's control -- which is a separate problem from whether regen should exist at all. This
+	-- table is the ONE model, and CombatSystem is its one writer.
+	--
+	-- SMART: regen is gated entirely on being out of combat. CombatState.inCombatUntil is refreshed by
+	-- every real exchange AND by proximity to a recent opponent (refreshInCombatFromProximity), so
+	-- circling a live opponent without trading blows does not heal you, and disengaging does not pay
+	-- out until InCombatDurationSeconds after the last exchange. Note this promotes inCombatUntil from
+	-- a purely presentational signal to one with a gameplay consequence -- syncInCombat's own header
+	-- called it presentation-only, and no longer can.
+	--
+	-- SMOOTH: two separate things, both needed, because either alone still reads as janky.
+	--   1. The RATE eases in rather than switching on. Regen begins at StartFractionPerSecond the
+	--      instant combat lapses and eases to FullFractionPerSecond over RampSeconds on a smoothstep
+	--      curve -- so recovery accelerates as safety persists, instead of a cliff where a trickle
+	--      becomes a torrent on one frame. A linear ramp was tried on paper and rejected: its
+	--      derivative is discontinuous at both ends, which is exactly where the eye is looking.
+	--   2. The VALUE is accumulated per tick from deltaTime, never in periodic lumps, and the client
+	--      bar already Springs its fill (Components/VitalIcon.lua), so the throttled
+	--      PassiveVitalsSyncInterval replication renders as continuous motion rather than steps.
+	--      No client change was needed for this, and none should be added.
+	--
+	-- Rates are FRACTIONS OF MAX per second, not flat HP/s, even though MaxHealth is currently a flat
+	-- 100 for every player and the two are therefore identical today. The Attributes screen already
+	-- advertises Vitality as "Max Health" (Constants.CharacterCreation.AttributeEffects) while nothing
+	-- yet reads that attribute -- when it does, a fraction-based rate scales with the larger pool on
+	-- its own and a flat one would quietly become a nerf.
+	HealthRegen = {
+		-- Master switch. Off restores the original no-regen design exactly, with no other edit.
+		Enabled = true,
+
+		-- Rate the moment the in-combat window lapses. Deliberately near-negligible (0.5 HP/s at
+		-- MaxHealth 100) -- this is the foot of the ramp, not a meaningful heal. Its job is to make
+		-- the onset continuous, so nothing visibly "turns on."
+		StartFractionPerSecond = 0.005,
+
+		-- Rate at the top of the ramp (4 HP/s at MaxHealth 100). Chosen against the actual recovery
+		-- it implies rather than by feel alone: from near-death, the ramp contributes ~13 HP over its
+		-- 6 seconds and the remainder arrives at 4 HP/s, so a full refill from ~5 HP takes roughly 28
+		-- seconds of genuinely uncontested time, on top of the 5-second InCombatDurationSeconds wait.
+		-- Fast enough that exploration between fights isn't a limp back to safety; far too slow to
+		-- out-heal any real exchange, which is what keeps this from touching combat balance.
+		FullFractionPerSecond = 0.04,
+
+		-- How long, after the in-combat window lapses, the rate takes to ease from Start to Full.
+		RampSeconds = 6,
+
+		-- Ceiling as a fraction of max health. 1 means passive regen alone can carry a player all the
+		-- way back to full. THE ONE LEVER TO REACH FOR FIRST if this turns out to remove too much
+		-- tension: dropping it to ~0.7 keeps the tedium fix (no limping home at 5 HP) while still
+		-- requiring a deliberate heal to top off, which is much closer to the original design's
+		-- intent than switching regen off wholesale.
+		MaxFractionOfMax = 1,
+	},
 
 	-- Lock-on acquisition range -- deliberately larger than any hitbox's reach so a player can lock
 	-- a target slightly outside melee range and close the distance, per combat-philosophy.md's
@@ -3358,7 +3700,13 @@ Constants.Combat = {
 						Offset = CFrame.new(0, 0, -2.875),
 						Damage = 21,
 						PostureDamage = 25,
-						Cooldown = 3.00,
+						-- 0.84 (= 0.20 + 0.24 + 0.40), down from 3.00 -- the identical fix Heavy1 above
+						-- already received, for the identical reason, in a pass that missed this stage.
+						-- This table's own header requires Cooldown <= the stage's own full timeline, so
+						-- attackEndsAt stays the single binding constraint; at 3.00 the heavy button was
+						-- dead for 2.16s AFTER the swing had visibly ended, with nothing on screen
+						-- explaining why. That reads as unresponsive input, not as a deliberate pause.
+						Cooldown = 0.84,
 						ArcDegrees = 120,
 						MaxTargets = 4,
 					},

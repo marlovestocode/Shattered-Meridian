@@ -246,17 +246,23 @@ function HitResolution.ActionDropsParryWindow(kind: CombatTypes.CombatActionKind
 	return kind ~= "BlockStart"
 end
 
--- The standard attacker-side parry punish: posture damage + a stun. Shared by a genuine Parry
--- (CombatSystem.lua's resolveHitAgainstTarget/resolveHitAgainstBot) and the air-combo tech escape
--- (handleAirTechRequest), which punishes the attacker "exactly like the existing Parry punish" by
--- design -- extracted here rather than left duplicated inline so both call sites can never drift
--- apart. Takes any state table with these two fields (CombatState/BotState both do), same "everything
--- this step touches" reason ApplyDisarm above does. Caller still owns checking posture <= 0 and
--- triggering the posture break + feedback dispatch (those need attackerPlayer/sendVitals/sendFeedback,
--- which differ per call site and aren't worth threading through here as callbacks).
+-- The standard attacker-side parry punish: posture damage + a stun. Called from every genuine Parry
+-- branch -- CombatSystem.lua's resolveHitAgainstTarget (player defender) and BotCombat.lua's two
+-- (bot defender vs. player attacker, player defender vs. bot attacker) -- extracted here rather than
+-- left duplicated inline so those sites can never drift apart. Takes any state table with these two
+-- fields (CombatState.Vitals/BotState both do), same "everything this step touches" reason
+-- ApplyDisarm above does. Caller still owns checking posture <= 0 and triggering the posture break +
+-- feedback dispatch (those need attackerPlayer/sendVitals/sendFeedback, which differ per call site
+-- and aren't worth threading through here as callbacks).
 function HitResolution.ApplyParryPunish(state: { posture: number, stunExpiry: number }, now: number): ()
 	state.posture = math.max(0, state.posture - Constants.Combat.ParryPunishPostureDamage)
-	state.stunExpiry = now + Constants.Combat.StunDuration
+	-- math.max, not a raw assign -- this was the ONE writer of stunExpiry in the codebase that could
+	-- SHORTEN an existing longer lockout, against the extend-never-shorten rule every other writer
+	-- follows (CombatSystem.lua's applyHit/finisher tail, BotCombat.lua, ApplyDisarm above, and
+	-- Constants.Combat.StunDuration's own header all state it). A Normal finisher's ExtraStunSeconds
+	-- (1.1) applied at t=0 was cut back to StunDuration (1.0) by a parry landing a frame later --
+	-- a parry, the harder read, actively REDUCED the attacker's punish.
+	state.stunExpiry = math.max(state.stunExpiry, now + Constants.Combat.StunDuration)
 end
 
 --

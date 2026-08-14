@@ -75,11 +75,39 @@ return function()
 			expect(InputBuffer.ConsumeJump(100)).to.equal(false)
 		end)
 
-		it("honors the JumpBuffer assist being switched off", function()
+		it("still sees a fresh press when the JumpBuffer assist is off", function()
+			-- THE REGRESSION THIS FILE ONCE LOCKED IN. PeekJump used to pass the assist flag as
+			-- BufferLive's `enabled` argument, which short-circuits before reading the timestamp -- so
+			-- switching the assist off returned false for every press at every instant, and this spec
+			-- asserted that as correct.
+			--
+			-- It is not correct, because PeekJump is not only the buffered-jump test: it is the "was
+			-- jump pressed at all" test behind WallJumping/Leaping/LedgeClimbing's CanEnter, the ledge
+			-- climb-up branch and the slide-jump. Turning off one forgiveness toggle deleted all of
+			-- them. The assist chooses the WINDOW; it never decides whether the press happened.
 			InputBuffer.SetAssists(ALL_ASSISTS_OFF)
 			InputBuffer.PressJump(100)
-			expect(InputBuffer.PeekJump(100)).to.equal(false)
-			expect(InputBuffer.ConsumeJump(100)).to.equal(false)
+			expect(InputBuffer.PeekJump(100)).to.equal(true)
+			expect(InputBuffer.ConsumeJump(100)).to.equal(true)
+		end)
+
+		it("stops REMEMBERING a press when the JumpBuffer assist is off", function()
+			-- The other half of the contract above: the assist is off, so a press that has aged past
+			-- the unbuffered delivery window is gone. Sampled at a point that is inside the full
+			-- buffer window and outside the unbuffered one, so this fails if the two are ever
+			-- collapsed into the same number.
+			InputBuffer.SetAssists(ALL_ASSISTS_OFF)
+			InputBuffer.PressJump(100)
+			local stale = 100 + ParkourConstants.Jump.UnbufferedWindowSeconds + 0.001
+			expect(stale < 100 + JUMP_WINDOW).to.equal(true)
+			expect(InputBuffer.PeekJump(stale)).to.equal(false)
+		end)
+
+		it("still honors the full buffer window when the assist is on", function()
+			InputBuffer.SetAssists(ALL_ASSISTS_ON)
+			InputBuffer.PressJump(100)
+			expect(InputBuffer.PeekJump(100 + JUMP_WINDOW - 0.001)).to.equal(true)
+			expect(InputBuffer.PeekJump(100 + JUMP_WINDOW + 0.001)).to.equal(false)
 		end)
 
 		it("uses jump's own window, tighter than the shared action window", function()
@@ -183,6 +211,72 @@ return function()
 			expect(InputBuffer.PeekSlide(100)).to.equal(false)
 			expect(InputBuffer.PeekRoll(100)).to.equal(false)
 			expect(InputBuffer.IsSlideHeld()).to.equal(false)
+		end)
+	end)
+
+	describe("InputBuffer -- double tap", function()
+		local DOUBLE_TAP_WINDOW = ParkourConstants.Jump.DoubleTapSeconds
+
+		it("reports a double tap for two presses inside the window", function()
+			InputBuffer.PressJump(100)
+			InputBuffer.PressJump(100 + DOUBLE_TAP_WINDOW * 0.5)
+			expect(InputBuffer.PeekDoubleJump(100 + DOUBLE_TAP_WINDOW * 0.5)).to.equal(true)
+		end)
+
+		it("does not report one for two presses further apart than the window", function()
+			InputBuffer.PressJump(100)
+			InputBuffer.PressJump(100 + DOUBLE_TAP_WINDOW * 2)
+			expect(InputBuffer.PeekDoubleJump(100 + DOUBLE_TAP_WINDOW * 2)).to.equal(false)
+		end)
+
+		it("does not report one for a single press", function()
+			InputBuffer.PressJump(100)
+			expect(InputBuffer.PeekDoubleJump(100)).to.equal(false)
+		end)
+
+		it("detects the gesture even though the FIRST press was already spent on a jump", function()
+			-- The case the whole two-timestamp arrangement exists for, and the one a naive implementation
+			-- gets wrong: tap one launches an ordinary jump, which clears the jump buffer. Tap two then has
+			-- nothing left to compare itself against unless the raw press history is kept separately.
+			InputBuffer.PressJump(100)
+			InputBuffer.ConsumeJump(100)
+			InputBuffer.PressJump(100.1)
+			expect(InputBuffer.PeekDoubleJump(100.1)).to.equal(true)
+		end)
+
+		it("spends the double tap when the PRESS is consumed by something else", function()
+			-- One press, one action. Without this a chained wall-jump -- which is a stream of presses well
+			-- inside the double-tap window -- would have every kick chased by a leap, flinging the player
+			-- out of the shaft they were climbing.
+			InputBuffer.PressJump(100)
+			InputBuffer.PressJump(100.1)
+			expect(InputBuffer.PeekDoubleJump(100.1)).to.equal(true)
+			InputBuffer.ConsumeJump(100.1)
+			expect(InputBuffer.PeekDoubleJump(100.1)).to.equal(false)
+		end)
+
+		it("spends the underlying press when the double tap is consumed", function()
+			-- The mirror of the above: the second tap of a leap must not still be sitting in the ordinary
+			-- jump buffer, waiting to fire a jump out of whatever state the leap hands to.
+			InputBuffer.PressJump(100)
+			InputBuffer.PressJump(100.1)
+			InputBuffer.ConsumeDoubleJump(100.1)
+			expect(InputBuffer.PeekJump(100.1)).to.equal(false)
+		end)
+
+		it("expires with the shared action window rather than jump's tighter one", function()
+			InputBuffer.PressJump(100)
+			InputBuffer.PressJump(100.1)
+			expect(InputBuffer.PeekDoubleJump(100.1 + ACTION_WINDOW * 0.5)).to.equal(true)
+			expect(InputBuffer.PeekDoubleJump(100.1 + ACTION_WINDOW * 2)).to.equal(false)
+		end)
+
+		it("does not carry press history across a Clear", function()
+			-- A press made before a respawn and one made after it are not a double tap.
+			InputBuffer.PressJump(100)
+			InputBuffer.Clear()
+			InputBuffer.PressJump(100.1)
+			expect(InputBuffer.PeekDoubleJump(100.1)).to.equal(false)
 		end)
 	end)
 

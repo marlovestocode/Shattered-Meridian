@@ -26,6 +26,12 @@
 					"Input": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Input"
 					},
+					"Loading": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Loading"
+					},
+					"Movement": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Movement"
+					},
 					"Parkour": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Parkour"
 					},

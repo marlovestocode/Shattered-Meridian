@@ -14,8 +14,18 @@
 	Roblox's default-script insertion is per name, not all-or-nothing: providing a script literally
 	named "Health" here fills that slot so Roblox doesn't insert its own, while leaving "Animate"
 	unmanaged so Roblox still inserts its own default animation script -- this repo has no reason to
-	reimplement that, and doesn't. Do not add regen logic here; Constants.Combat's PostureRegenPerSecond
-	is the only passive-regen model this game uses (Stamina, the game's other regenerating resource,
-	was removed), and Health is intentionally excluded from it (combat-philosophy.md's Sekiro-grade
-	reference point has no passive health regen).
+	reimplement that, and doesn't.
+
+	DO NOT ADD REGEN LOGIC HERE -- and note that this instruction has survived the game GAINING passive
+	health regen, because the two were never the same question.
+
+	This game now does have passive health regen: Constants.Combat.HealthRegen tunes it,
+	Server/Combat/HealthRegen.lua holds its arithmetic, and CombatSystem's Heartbeat is its one writer.
+	That reverses the original design (which cited a Sekiro-grade reference point with no passive
+	health recovery) at the repo owner's request. What has NOT changed is why this file is empty:
+	Roblox's default script is an untracked writer of Humanoid.Health that runs outside the server's
+	combat pipeline entirely, so it would heal through damage the server had just applied and race the
+	one system that is supposed to own that value. Suppressing it matters MORE now, not less -- with a
+	real regen model in place, a second uncoordinated one would be nearly invisible in testing and
+	would show up only as combat math that quietly doesn't add up.
 ]]

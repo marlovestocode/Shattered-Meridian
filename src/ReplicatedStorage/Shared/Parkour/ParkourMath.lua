@@ -346,6 +346,192 @@ function ParkourMath.WallJumpVelocity(
 	return push + carry + Vector3.new(0, upSpeed * falloff, 0)
 end
 
+-- THE ASSISTED WALL-JUMP'S TRAJECTORY: the launch velocity that carries a body from `startPosition` to
+-- `targetPosition` under gravity, with a deliberate surplus rather than the exact minimum.
+--
+-- Returns the velocity and whether the target is genuinely REACHABLE within the caps -- a caller that
+-- gets false is being handed the best arc available toward the target, not a guarantee of arrival, and
+-- may reasonably choose the plain fixed-push jump instead.
+--
+-- The solve, in the order the numbers depend on each other:
+--   1. Pick the vertical speed. It must be at least enough to reach the target's height plus
+--      `apexClearance` -- v = sqrt(2*g*h) -- so the arc passes OVER the lip of what is being jumped to
+--      rather than into its front face. Floored at `minUpSpeed` so a level or downhill target still
+--      leaves the ground like a jump, and capped at `maxUpSpeed`, which is the single number that stops
+--      a well-placed pair of walls from being an elevator.
+--   2. Solve the flight time from that vertical speed: dy = vy*t - g*t^2/2, a plain quadratic, taking
+--      the LATE root -- the descending arrival. The discriminant cannot go negative, because step 1
+--      chose vy to clear the height with room to spare. The early root (arriving while still rising) is
+--      deliberately not used: it is a much shorter flight, so it demands a far higher horizontal speed
+--      for the same distance, and for anything but a near-level target that speed runs straight into the
+--      horizontal cap and reports an ordinary jump as unreachable. Arriving on the way DOWN is also what
+--      the states downstream want -- States/LedgeHanging refuses a grab from a character still rising
+--      faster than Ledge.MaxVerticalSpeedToGrab, so a rising arrival would land the assist's own target
+--      in a state that then declines to catch it.
+--   3. Horizontal speed is then simply the horizontal distance divided by that time, times
+--      `reachMargin` -- the "a little more than enough" surplus. Landing on the mathematical minimum
+--      means every frame of error is a miss, and on a chained traversal a miss is the whole chain.
+--
+-- Pure, and deliberately unaware of walls, characters and Instances: it takes two points and returns a
+-- velocity, which is what makes the interesting half of the assist testable without a place file.
+function ParkourMath.SolveLaunchVelocity(
+	startPosition: Vector3,
+	targetPosition: Vector3,
+	gravity: number,
+	apexClearance: number,
+	reachMargin: number,
+	minUpSpeed: number,
+	maxUpSpeed: number,
+	maxPlanarSpeed: number
+): (Vector3, boolean)
+	local safeGravity = math.max(gravity, ZERO_EPSILON)
+	local delta = targetPosition - startPosition
+	local rise = delta.Y
+	local planar = ParkourMath.Flatten(delta)
+	local planarDistance = planar.Magnitude
+
+	local requiredApex = math.max(rise + math.max(apexClearance, 0), 0)
+	local requiredUpSpeed = math.sqrt(2 * safeGravity * requiredApex)
+	local upSpeed = math.clamp(math.max(requiredUpSpeed, minUpSpeed), math.min(minUpSpeed, maxUpSpeed), maxUpSpeed)
+
+	-- Whether the cap above actually bit. Reported rather than silently swallowed: a target the vertical
+	-- cap cannot reach is one the caller should know it is only approaching.
+	local verticalReachable = upSpeed >= requiredUpSpeed - ZERO_EPSILON
+
+	local discriminant = upSpeed * upSpeed - 2 * safeGravity * rise
+	if discriminant <= 0 then
+		-- Only reachable when the vertical cap refused the height outright. There is no flight time to
+		-- solve for, so the best available answer is a straight-up-and-along launch at the caps.
+		local direction = ParkourMath.SafeUnit(planar, Vector3.zero)
+		return direction * math.min(maxPlanarSpeed, planarDistance) + Vector3.new(0, upSpeed, 0), false
+	end
+
+	-- The descending arrival -- see step 2 in the header for why the rising one is not an option.
+	-- Always positive: the root exceeds upSpeed whenever `rise` is negative, and is smaller than it
+	-- whenever `rise` is positive, so the sum is positive either way.
+	local flightTime = (upSpeed + math.sqrt(discriminant)) / safeGravity
+	local planarSpeed = (planarDistance / math.max(flightTime, ZERO_EPSILON)) * math.max(reachMargin, 1)
+	local clampedPlanarSpeed = math.min(planarSpeed, maxPlanarSpeed)
+	local direction = ParkourMath.SafeUnit(planar, Vector3.zero)
+	local reachable = verticalReachable and clampedPlanarSpeed >= planarSpeed - ZERO_EPSILON
+
+	return direction * clampedPlanarSpeed + Vector3.new(0, upSpeed, 0), reachable
+end
+
+-- THE CHIMNEY CLIMB'S HEIGHT BUDGET: how far ABOVE the launch a wall-jump across a corridor should aim,
+-- given the gap it has to cross.
+--
+-- Why this is a separate question from SolveLaunchVelocity rather than a target handed to it: between
+-- two facing walls there IS no target position to aim at. The opposite wall is a whole vertical face,
+-- every point of which is a legal place to arrive, and the interesting question is not "how do I get to
+-- that point" but "how high up that face can I get." Aiming level -- which is what a scan for a
+-- concrete target produces, since a ray finds the face at the height it was cast from -- is what makes
+-- a chimney climb impossible: every kick crosses the gap and gains almost nothing, and the player
+-- ping-pongs sideways between two walls forever.
+--
+-- The answer is the APEX ARRIVAL. Spend everything on lift, and buy exactly enough horizontal speed to
+-- be touching the far wall at the moment the climb runs out -- so the highest point of the arc and the
+-- contact with the next wall are the same event. It is optimal (nothing is spent on horizontal speed
+-- beyond what the crossing costs), and it arrives with near-zero vertical speed, which is what lets the
+-- top of a climb become a ledge grab: States/LedgeHanging refuses a character still rising faster than
+-- Ledge.MaxVerticalSpeedToGrab, so an arc that arrived still climbing would sail past the lip it was
+-- trying to catch.
+--
+-- The apex gain is upSpeed^2 / 2g, and reaching the far wall at that moment costs gap*g/upSpeed of
+-- horizontal speed -- INVERSELY proportional to lift, which is the part that is easy to get backwards:
+-- a higher kick is a shorter flight, so a wide gap needs MORE lift to cross at apex, not less. When
+-- that horizontal cost exceeds what the caps allow, the arc has to last longer than a rise-to-apex, so
+-- the aim drops below the apex and the arrival happens on the way down. That is the case this function
+-- solves for in closed form, from the flight time the horizontal cap implies.
+function ParkourMath.CorridorKickHeight(
+	gapDistance: number,
+	gravity: number,
+	upSpeed: number,
+	maxPlanarSpeed: number,
+	reachMargin: number
+): number
+	local safeGravity = math.max(gravity, ZERO_EPSILON)
+	local apexGain = (upSpeed * upSpeed) / (2 * safeGravity)
+	if maxPlanarSpeed <= ZERO_EPSILON or gapDistance <= ZERO_EPSILON then
+		return apexGain
+	end
+
+	-- The shortest flight the horizontal cap can cross this gap in.
+	local requiredFlightTime = (gapDistance * math.max(reachMargin, 1)) / maxPlanarSpeed
+	-- How much longer than a straight rise-to-apex that is. Non-positive means the cap is not binding at
+	-- all and the full apex arrival is affordable.
+	local excess = safeGravity * requiredFlightTime - upSpeed
+	if excess <= 0 then
+		return apexGain
+	end
+
+	-- Flight time as a function of aim height h is (v + sqrt(v^2 - 2gh))/g, so requiring it to be at
+	-- least requiredFlightTime rearranges to h <= (v^2 - excess^2) / 2g. Below zero means even a level
+	-- crossing is past the horizontal cap -- the gap is simply too wide to jump -- and the caller reads
+	-- the zero as "no climb available here."
+	return math.clamp((upSpeed * upSpeed - excess * excess) / (2 * safeGravity), 0, apexGain)
+end
+
+-- How good a wall-jump target a candidate surface is, from 0 (unusable) upward. Three independent
+-- questions, weighted rather than gated, because a target that wins on one and loses on another is a
+-- real and common situation and a chain of hard gates would simply refuse both:
+--   * ALIGNMENT  -- does it lie in the direction the player is asking to go? The dominant term. This is
+--                   what makes the assist feel like it read the player's intent rather than like it
+--                   picked for them.
+--   * PROXIMITY  -- of two equally-aimed surfaces, prefer the nearer. The nearer one is the one the
+--                   player can see themselves reaching, and a chain of short hops is more controllable
+--                   than one long committed flight.
+--   * SQUARENESS -- is the surface's face turned toward the character? A face angled away can be flown
+--                   at but not USED: the arrival glances off instead of becoming the next wall-run.
+--
+-- Returns 0 for anything outside the distance band or under either minimum, so a caller can simply take
+-- the highest score above zero.
+function ParkourMath.WallJumpCandidateScore(
+	fromPosition: Vector3,
+	aimDirection: Vector3,
+	candidatePosition: Vector3,
+	candidateNormal: Vector3,
+	minDistance: number,
+	maxDistance: number,
+	alignmentWeight: number,
+	proximityWeight: number,
+	squarenessWeight: number,
+	minAlignmentDot: number,
+	minSquarenessDot: number
+): number
+	local toCandidate = candidatePosition - fromPosition
+	local distance = toCandidate.Magnitude
+	if distance < minDistance or distance > maxDistance or maxDistance <= minDistance then
+		return 0
+	end
+
+	local aim = ParkourMath.SafeUnit(ParkourMath.Flatten(aimDirection), Vector3.zero)
+	local towardPlanar = ParkourMath.SafeUnit(ParkourMath.Flatten(toCandidate), Vector3.zero)
+	if aim.Magnitude < ZERO_EPSILON or towardPlanar.Magnitude < ZERO_EPSILON then
+		return 0
+	end
+
+	local alignment = aim:Dot(towardPlanar)
+	if alignment < minAlignmentDot then
+		return 0
+	end
+
+	-- The face has to look back at us. Measured against the direction of travel toward it rather than
+	-- against the aim direction, because those diverge for an off-axis candidate and it is the ARRIVAL
+	-- that has to be square, not the intent.
+	local normal = ParkourMath.SafeUnit(ParkourMath.Flatten(candidateNormal), Vector3.zero)
+	if normal.Magnitude < ZERO_EPSILON then
+		return 0
+	end
+	local squareness = normal:Dot(-towardPlanar)
+	if squareness < minSquarenessDot then
+		return 0
+	end
+
+	local proximity = 1 - (distance - minDistance) / (maxDistance - minDistance)
+	return alignment * alignmentWeight + proximity * proximityWeight + squareness * squarenessWeight
+end
+
 -- How severe a landing is, from the height fallen. Three bands rather than a continuous curve
 -- because each band has a genuinely different CONSEQUENCE (nothing / a cosmetic beat / a real
 -- recovery window), and a threshold the design can point at is easier to tune than a formula.
@@ -439,6 +625,33 @@ function ParkourMath.PlaybackSpeed(
 		return 1
 	end
 	return math.clamp(currentSpeed / referenceSpeed, minSpeed, maxSpeed)
+end
+
+-- Seconds between footfalls at a given speed -- the run system's step cadence (Client/Movement/
+-- RunController.lua, tuned by Constants.Run.Footsteps).
+--
+-- The authored interval is the cadence the stage was written FOR, at referenceSpeed; the live
+-- interval scales inversely with actual speed, so a player slowed to a crawl by hit-slow or a steep
+-- climb takes slower steps and one riding a downhill momentum carry takes faster ones. Inverse
+-- rather than PlaybackSpeed's ratio above because these are opposite quantities: a clip plays FASTER
+-- at speed (bigger multiplier), while the gap BETWEEN steps gets shorter (smaller interval).
+--
+-- Clamped at both ends, and both bounds are load-bearing rather than defensive: without the floor a
+-- momentum-carry burst turns the cadence into a buzz, and without the ceiling a near-stationary
+-- player takes one step every several seconds, which reads as broken audio rather than as slow
+-- walking. A non-positive speed or reference speed returns the ceiling, which is the honest answer
+-- for "not moving" and never a division by zero.
+function ParkourMath.StepInterval(
+	currentSpeed: number,
+	referenceSpeed: number,
+	authoredInterval: number,
+	minInterval: number,
+	maxInterval: number
+): number
+	if currentSpeed <= ZERO_EPSILON or referenceSpeed <= ZERO_EPSILON then
+		return maxInterval
+	end
+	return math.clamp(authoredInterval * (referenceSpeed / currentSpeed), minInterval, maxInterval)
 end
 
 -- Momentum handed from one state to the next: a retained fraction of what came in, floored so no

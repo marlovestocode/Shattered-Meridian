@@ -111,6 +111,7 @@ local function makeWallProbe(): WallProbe
 	return {
 		Found = false,
 		Distance = math.huge,
+		Position = Vector3.zero,
 		Normal = UP,
 		Tangent = Vector3.zero,
 		TiltAngle = 90,
@@ -237,6 +238,33 @@ local function castSphere(origin: Vector3, radius: number, direction: Vector3): 
 	end
 	rayBudgetUsed += 1
 	return Workspace:Spherecast(origin, radius, direction, params)
+end
+
+-- The EVENT cast: same params and same tables, a different budget. Used only by the two one-shot scans
+-- at the bottom of this file (the wall-jump target fan and the ledge-climb surface ladder), which run
+-- at the instant a discrete action begins rather than every frame.
+--
+-- Why it does not simply use castRay: those scans arrive at the WORST possible moment for the per-frame
+-- budget. A wall-jump happens on a frame that has already spent its ground, wall and ledge casts, so a
+-- fan sharing MaxRaysPerFrame would be refused outright exactly when it is needed and the assist would
+-- appear to work only when the player was doing nothing else. The costs are also genuinely different in
+-- kind -- see Probe.MaxScanRaysPerEvent's own header.
+--
+-- It still ADDS to rayBudgetUsed, so the per-frame probes that run after a scan degrade to cached
+-- results for that one frame rather than the scan being pretended free.
+local scanBudgetUsed = 0
+
+local function castScanRay(origin: Vector3, direction: Vector3): RaycastResult?
+	local params = raycastParams
+	if not params then
+		return nil
+	end
+	if scanBudgetUsed >= PROBE.MaxScanRaysPerEvent then
+		return nil
+	end
+	scanBudgetUsed += 1
+	rayBudgetUsed += 1
+	return Workspace:Raycast(origin, direction, params)
 end
 
 -- True when this probe family's cached result is still inside its refresh interval and the caller
@@ -437,6 +465,7 @@ local function clearWall(probe: WallProbe, now: number): ()
 	probe.SampledAt = now
 	probe.Found = false
 	probe.Distance = math.huge
+	probe.Position = Vector3.zero
 	probe.Tangent = Vector3.zero
 	probe.TiltAngle = 90
 	probe.Instance = nil
@@ -449,9 +478,36 @@ local function probeWall(
 	rootPart: BasePart,
 	sideDirection: Vector3,
 	travelDirection: Vector3,
+	forwardDirection: Vector3,
+	allowDiagonal: boolean,
 	now: number
 ): ()
 	local hit = castRay(rootPart.Position, sideDirection * WALLRUN.ProbeDistance)
+	-- THE DIAGONAL FALLBACK, and the case it exists for: arriving at a wall HEAD-ON.
+	--
+	-- The side casts run along the character's own right vector, which is the correct instrument for the
+	-- question they were written to answer -- "is there a wall alongside me to run on." It is the wrong
+	-- instrument for the other question the wall probes now have to serve: "is there a wall here to kick
+	-- off." A character flying into a wall face-first has that wall directly in FRONT of them, so both
+	-- side casts run parallel to it and report open air, and States/WallJumping.CanEnter therefore
+	-- refuses -- which is precisely where a chained traversal dies, since flying at the next surface is
+	-- how a player arrives at it.
+	--
+	-- So when a side cast finds nothing, the same side is tried again angled forward. A wall dead ahead
+	-- registers on both sides (the nearer wins in WallJumping's own selection); a wall genuinely off to
+	-- one side registers there and not on the other. It cannot manufacture a spurious wall-RUN out of a
+	-- head-on approach either: the tangent of a wall in front is perpendicular to the travel direction,
+	-- so States/WallRunning's approach-angle gate refuses it exactly as it did before.
+	--
+	-- Only while airborne, and only when the straight cast missed: on the ground this would make walking
+	-- toward a corner register walls beside the character that are not there, and paying two extra casts
+	-- on frames that already found what they needed would be paying for nothing.
+	if not hit and allowDiagonal then
+		local diagonal = ParkourMath.SafeUnit(sideDirection + forwardDirection, Vector3.zero)
+		if diagonal.Magnitude > 0 then
+			hit = castRay(rootPart.Position, diagonal * (WALLRUN.ProbeDistance * WALLRUN.DiagonalProbeScale))
+		end
+	end
 	if not hit then
 		clearWall(probe, now)
 		return
@@ -471,6 +527,7 @@ local function probeWall(
 	probe.SampledAt = now
 	probe.Found = true
 	probe.Distance = hit.Distance
+	probe.Position = hit.Position
 	probe.Normal = hit.Normal
 	probe.TiltAngle = ParkourMath.SurfaceTilt(hit.Normal)
 	probe.Tangent = ParkourMath.WallTangent(hit.Normal, travelDirection)
@@ -683,6 +740,437 @@ local function probeCeiling(rootPart: BasePart, now: number): ()
 end
 
 --
+-- Event scans
+--
+-- Both of the functions below run ONCE, at the moment a discrete action begins, rather than on the
+-- per-frame schedule everything above them obeys. They live here rather than in the states that call
+-- them for the reason stated in this file's header: nothing else in the framework is allowed to cast a
+-- ray, and "except for these two" would be the end of that guarantee. They have their own budget --
+-- see castScanRay.
+--
+
+local wallJumpTarget: ParkourTypes.WallJumpTarget = {
+	Found = false,
+	AimPosition = Vector3.zero,
+	SurfacePosition = Vector3.zero,
+	Normal = UP,
+	Instance = nil,
+	Distance = math.huge,
+	Score = 0,
+	Corridor = false,
+}
+
+-- Rotates a horizontal direction by `yawDegrees` around the world up axis and tilts it up by
+-- `pitchDegrees`. Written as an explicit tangent term rather than a second axis-angle rotation because
+-- the yaw axis is world up and the pitch axis would be the yawed direction's own right vector -- two
+-- rotations that have to be composed in the correct order, where adding a vertical component to an
+-- already-yawed horizontal unit vector is the same answer with nothing to get backwards.
+local function fanDirection(baseDirection: Vector3, yawDegrees: number, pitchDegrees: number): Vector3
+	local yawed = CFrame.fromAxisAngle(UP, math.rad(yawDegrees)) * baseDirection
+	if pitchDegrees == 0 then
+		return ParkourMath.SafeUnit(yawed, baseDirection)
+	end
+	return ParkourMath.SafeUnit(yawed + UP * math.tan(math.rad(pitchDegrees)), baseDirection)
+end
+
+-- THE ASSISTED WALL-JUMP'S EYES: finds the surface the jump should be aimed at, or reports that there
+-- isn't one.
+--
+-- A fan of rays across the open side of the character (the side the push is going anyway), plus a
+-- shorter upward-angled arc so a balcony or a ledge above head height is findable at all -- a purely
+-- horizontal fan only ever finds what is level with the jump, which would make the assist useless for
+-- exactly the ascending chain it is most wanted for.
+--
+-- `excludeInstance`/`excludePosition` are the wall being jumped FROM. Both are needed and neither is
+-- sufficient: the instance catches aiming back at the same part, and the radius catches aiming at the
+-- neighbouring block of the same face, which is most walls -- and which would be the infinite ladder
+-- States/WallRunning.lua's SameWallLockout exists to forbid, rebuilt out of wall-jumps. See
+-- ParkourConstants.WallJump.Assist.SameWallIgnoreRadius.
+--
+-- Returns the shared result table under the same read-immediately contract as every other result in
+-- this file. Never retain it.
+function EnvironmentProbe.FindWallJumpTarget(
+	rootPart: BasePart,
+	aimDirection: Vector3,
+	outwardDirection: Vector3,
+	excludeInstance: BasePart?,
+	excludePosition: Vector3?,
+	now: number
+): ParkourTypes.WallJumpTarget
+	scanBudgetUsed = 0
+	wallJumpTarget.Found = false
+	wallJumpTarget.Score = 0
+	wallJumpTarget.Distance = math.huge
+	wallJumpTarget.Instance = nil
+	wallJumpTarget.Corridor = false
+
+	local ASSIST = ParkourConstants.WallJump.Assist
+	if not ASSIST.Enabled then
+		return wallJumpTarget
+	end
+	local aim = ParkourMath.SafeUnit(ParkourMath.Flatten(aimDirection), Vector3.zero)
+	if aim.Magnitude < 1e-3 then
+		return wallJumpTarget
+	end
+
+	-- Cast from a little above the root's centre, so the fan clears the lip of anything the character is
+	-- currently level with rather than burying itself in the wall's own base.
+	local origin = rootPart.Position + UP * 0.5
+	local bestScore = 0
+
+	-- THE CORRIDOR TEST, run FIRST and short-circuiting the whole ranked scan when it succeeds.
+	--
+	-- Straight out from the wall being kicked off, plus a ray either side to tolerate a shaft that is not
+	-- perfectly square. What it is looking for is not the nearest or best-aimed surface but a specific
+	-- geometric relationship -- a face turned back toward the one behind the character -- because that
+	-- relationship, and only that, is what makes a climb possible rather than a crossing. It takes
+	-- priority over the ranked scan for the same reason: when a player is in a chimney, going UP is what
+	-- they are asking for, whatever else the fan might find off to one side.
+	local outward = ParkourMath.SafeUnit(ParkourMath.Flatten(outwardDirection), Vector3.zero)
+	if outward.Magnitude > 1e-3 then
+		local function considerCorridor(direction: Vector3): boolean
+			local hit = castScanRay(origin, direction * ASSIST.CorridorMaxGap)
+			if not hit then
+				return false
+			end
+			if ParkourTagging.GetPermissions(hit.Instance, now).Ignored then
+				return false
+			end
+			-- Belt and braces against a concave surface curling round in front of itself: the cast points
+			-- away from the wall being kicked off, so this should be unreachable, and a corridor kick that
+			-- did somehow aim back at its own wall would be the free elevator with none of the guards.
+			if excludeInstance ~= nil and hit.Instance == excludeInstance then
+				return false
+			end
+			-- Measured along the OUTWARD axis rather than as a raw hit distance, so an angled side ray
+			-- reports the corridor's true width instead of its own longer hypotenuse -- the gap is what the
+			-- climb's height budget is computed from, and overstating it costs the player lift.
+			local gap = (hit.Position - origin):Dot(outward)
+			if gap < ASSIST.CorridorMinGap or gap > ASSIST.CorridorMaxGap then
+				return false
+			end
+			-- The far face has to look back at the near one. This is the entire definition of a corridor,
+			-- and it is what stops a single wall with something incidental in front of it from reading as a
+			-- shaft to climb.
+			local farNormal = ParkourMath.SafeUnit(ParkourMath.Flatten(hit.Normal), Vector3.zero)
+			if farNormal.Magnitude < 1e-3 or farNormal:Dot(-outward) < ASSIST.CorridorOpposedDot then
+				return false
+			end
+
+			wallJumpTarget.Found = true
+			wallJumpTarget.Corridor = true
+			wallJumpTarget.Score = 0
+			wallJumpTarget.SurfacePosition = hit.Position
+			wallJumpTarget.Normal = hit.Normal
+			wallJumpTarget.Instance = hit.Instance
+			wallJumpTarget.Distance = gap
+			wallJumpTarget.AimPosition = hit.Position + farNormal * ASSIST.TargetOutwardOffset
+			return true
+		end
+
+		if
+			considerCorridor(outward)
+			or considerCorridor(fanDirection(outward, ASSIST.CorridorSplayDegrees, 0))
+			or considerCorridor(fanDirection(outward, -ASSIST.CorridorSplayDegrees, 0))
+		then
+			return wallJumpTarget
+		end
+	end
+
+	local function consider(direction: Vector3): ()
+		local hit = castScanRay(origin, direction * ASSIST.ScanDistance)
+		if not hit then
+			return
+		end
+		local permissions = ParkourTagging.GetPermissions(hit.Instance, now)
+		if permissions.Ignored then
+			return
+		end
+		-- The wall just left, by either test. See this function's own header.
+		if excludeInstance ~= nil and hit.Instance == excludeInstance then
+			return
+		end
+		if excludePosition ~= nil and (hit.Position - excludePosition).Magnitude <= ASSIST.SameWallIgnoreRadius then
+			return
+		end
+
+		local score = ParkourMath.WallJumpCandidateScore(
+			origin,
+			aim,
+			hit.Position,
+			hit.Normal,
+			ASSIST.MinTargetDistance,
+			ASSIST.ScanDistance,
+			ASSIST.AlignmentWeight,
+			ASSIST.ProximityWeight,
+			ASSIST.SquarenessWeight,
+			ASSIST.MinAlignmentDot,
+			ASSIST.MinSquarenessDot
+		)
+		if score <= bestScore then
+			return
+		end
+
+		bestScore = score
+		wallJumpTarget.Found = true
+		wallJumpTarget.Score = score
+		wallJumpTarget.SurfacePosition = hit.Position
+		wallJumpTarget.Normal = hit.Normal
+		wallJumpTarget.Instance = hit.Instance
+		wallJumpTarget.Distance = (hit.Position - origin).Magnitude
+		-- Aimed OUT from the face, so the arrival is beside the surface rather than inside it. Falls back
+		-- to backing off along the ray when the face has no horizontal normal to back off along (a hit on
+		-- something's underside, which the pitched arc can legitimately produce).
+		local faceOutward = ParkourMath.SafeUnit(ParkourMath.Flatten(hit.Normal), -direction)
+		wallJumpTarget.AimPosition = hit.Position + faceOutward * ASSIST.TargetOutwardOffset
+	end
+
+	local yawCount = math.max(ASSIST.ScanRayCount, 1)
+	local yawStep = if yawCount > 1 then (ASSIST.ScanYawSpreadDegrees * 2) / (yawCount - 1) else 0
+	for index = 0, yawCount - 1 do
+		consider(fanDirection(aim, -ASSIST.ScanYawSpreadDegrees + yawStep * index, 0))
+	end
+
+	-- The upward arc is deliberately narrower than the flat fan: something overhead and far off to the
+	-- side is not a jump anyone is asking for, where something overhead and roughly ahead is the whole
+	-- ascending-chain case.
+	local pitchCount = math.max(ASSIST.ScanPitchRayCount, 0)
+	local pitchSpread = ASSIST.ScanYawSpreadDegrees * 0.5
+	local pitchStep = if pitchCount > 1 then (pitchSpread * 2) / (pitchCount - 1) else 0
+	for index = 0, pitchCount - 1 do
+		consider(fanDirection(aim, -pitchSpread + pitchStep * index, ASSIST.ScanPitchDegrees))
+	end
+
+	return wallJumpTarget
+end
+
+local leapTarget: ParkourTypes.LeapTarget = {
+	Found = false,
+	LandingPosition = Vector3.zero,
+	Normal = UP,
+	Instance = nil,
+	Distance = 0,
+}
+
+-- WHERE A LEAP LANDS: the FARTHEST surface along the player's own view direction that the launch caps
+-- can actually reach.
+--
+-- Farthest, not nearest, and that is the whole character of the move rather than an implementation
+-- detail. A leap that picks the near ledge when the player is plainly looking at the far one has
+-- misread them -- and the near ledge was reachable with an ordinary jump anyway, so choosing it makes
+-- the double tap pointless. The scan therefore walks OUTWARD and keeps the last thing that works.
+--
+-- "Works" is three questions, and all three have to be asked here rather than left to the state:
+--   * Is there a floor under this point at all? (a downward cast from above it)
+--   * Is it standable, and is there room to stand? (slope, then a headroom cast)
+--   * Can the launch caps actually get there? (ParkourMath.SolveLaunchVelocity's own reachability,
+--     asked with the same numbers States/Leaping will fly with)
+-- The third is what makes the promise honest. Without it the scan happily returns a rooftop eighty
+-- studs away that the solver then refuses, and the player's double tap produces the fallback hop
+-- instead of the leap they could see themselves making.
+--
+-- The view ray is cast once first, and it does two jobs. It bounds the open-air samples -- a wall across
+-- the courtyard is not a place to land, but the TOP of that wall very much is, and samples beyond it are
+-- inside geometry rather than in the open -- and it is the definition of LOOKING DIRECTLY AT something,
+-- which is what decides whether the player's own footing is allowed to be a target at all. See
+-- Leap.IgnoreNearRadius, and `direct` in consider below.
+--
+-- `groundInstance` is whatever the character is currently standing on (ParkourContext.Ground.Instance),
+-- passed in rather than probed for here because the ground probe has already answered that question this
+-- frame and asking again would be a second opinion that could differ from the first.
+function EnvironmentProbe.FindLeapTarget(
+	rootPart: BasePart,
+	aimDirection: Vector3,
+	groundInstance: BasePart?,
+	now: number
+): ParkourTypes.LeapTarget
+	scanBudgetUsed = 0
+	leapTarget.Found = false
+	leapTarget.Distance = 0
+	leapTarget.Instance = nil
+
+	local LEAP = ParkourConstants.Leap
+	local aim = ParkourMath.SafeUnit(aimDirection, Vector3.zero)
+	if aim.Magnitude < 1e-3 then
+		return leapTarget
+	end
+	local flatAim = ParkourMath.SafeUnit(ParkourMath.Flatten(aim), Vector3.zero)
+	if flatAim.Magnitude < 1e-3 then
+		-- Looking straight up or straight down. There is no planar direction to leap along, and inventing
+		-- one from the body's facing would send the player somewhere they were not looking.
+		return leapTarget
+	end
+
+	local origin = rootPart.Position
+	-- How far the open air extends along the view ray. Anything past this is behind something solid.
+	local blockedAt = LEAP.MaxRange
+	local viewHit = castScanRay(origin, aim * LEAP.MaxRange)
+	local viewHitInstance: BasePart? = nil
+	if viewHit then
+		blockedAt = (viewHit.Position - origin).Magnitude
+		viewHitInstance = viewHit.Instance
+	end
+
+	-- Tests one candidate landing point and records it if it beats what we have. Called in increasing
+	-- distance order, so "beats" is simply "is further" -- hence the comparison on Distance rather than a
+	-- score.
+	--
+	-- `direct` says the player is LOOKING AT this surface rather than merely looking over it: the view ray
+	-- itself landed on it (or on the structure it belongs to). It is the only thing that lets a candidate
+	-- through the near-surface rule below.
+	local function consider(surfaceTop: Vector3, normal: Vector3, instance: BasePart?, direct: boolean): ()
+		if ParkourMath.SlopeAngle(normal) > SLOPE.MaxWalkableAngleDegrees then
+			return
+		end
+		if ParkourTagging.GetPermissions(instance, now).Ignored then
+			return
+		end
+		-- THE NEAR-SURFACE RULE. A downward cast from a point along the view ray finds whatever is under
+		-- that point -- which, on any decent-sized platform, is the platform the player is standing on.
+		-- With "take the farthest" on top of that, the leap's answer to "what am I looking at" became a
+		-- spot on the player's own floor, thirty studs away, that they never asked for and could have
+		-- walked to.
+		--
+		-- Not banned outright, because leaping down your own ramp or along your own roof is legitimate --
+		-- gated on actually looking at the spot. Looking ACROSS a surface (the ray passes over it and hits
+		-- something beyond, or nothing) is not looking at it; looking INTO it is.
+		if not direct then
+			local isOwnFooting = instance ~= nil and instance == groundInstance
+			local isWhereWeAlreadyAre = (surfaceTop - origin).Magnitude <= LEAP.IgnoreNearRadius
+			if isOwnFooting or isWhereWeAlreadyAre then
+				return
+			end
+		end
+		-- Pulled in from wherever the cast happened to meet the surface, along the leap's own direction.
+		-- This is the "perfect ledge jump" in one line: aiming at the exact point found puts the landing
+		-- on the lip, where a stud of error is a miss.
+		local landing = surfaceTop + flatAim * LEAP.LandingInsetStuds
+		local distance = ParkourMath.PlanarSpeed(landing - origin)
+		if distance < LEAP.MinRange or distance <= leapTarget.Distance then
+			return
+		end
+		local headroom = castScanRay(landing + UP * 0.3, UP * LEAP.SurfaceHeadroom)
+		if headroom ~= nil then
+			return
+		end
+		-- Asked with exactly the numbers States/Leaping.Enter will fly with, so a target this function
+		-- offers is one the solver has already agreed to.
+		local _velocity, reachable = ParkourMath.SolveLaunchVelocity(
+			origin,
+			landing,
+			Workspace.Gravity,
+			LEAP.ApexClearance,
+			LEAP.ReachMargin,
+			LEAP.MinUpSpeed,
+			LEAP.MaxUpSpeed,
+			LEAP.MaxPlanarSpeed
+		)
+		if not reachable then
+			return
+		end
+
+		leapTarget.Found = true
+		leapTarget.LandingPosition = landing
+		leapTarget.Normal = normal
+		leapTarget.Instance = instance
+		leapTarget.Distance = distance
+	end
+
+	-- The top of whatever the view ray ran into. Checked FIRST, before the open-air samples, because it
+	-- is the most likely thing the player means: they are looking at a building, and the leap they want
+	-- is onto it. Its own down-cast starts above the hit and a little past it, so it lands on the roof
+	-- rather than skimming the face.
+	if viewHit then
+		local pastFace = viewHit.Position + flatAim * 0.6
+		local roofHit = castScanRay(
+			pastFace + UP * LEAP.SurfaceScanAbove,
+			Vector3.new(0, -(LEAP.SurfaceScanAbove + LEAP.SurfaceScanBelow), 0)
+		)
+		if roofHit then
+			-- Direct by construction: this candidate exists because the view ray ran into the structure it
+			-- belongs to. The roof part and the face the ray hit are usually different instances, which is
+			-- why directness is passed as a fact rather than re-derived from an instance comparison.
+			consider(roofHit.Position, roofHit.Normal, roofHit.Instance, true)
+		end
+	end
+
+	-- Open-air samples, walking outward. Each one asks "if I were above this point, what is underneath
+	-- it" -- which is how a leap across a gap onto a lower roof, or down into a courtyard, is found at
+	-- all. Stops at whatever the view ray hit: past that the samples are inside geometry.
+	local farthestSample = math.min(blockedAt, LEAP.MaxRange)
+	if farthestSample > LEAP.MinRange then
+		local sampleCount = math.max(LEAP.RangeSamples, 1)
+		local step = if sampleCount > 1 then (farthestSample - LEAP.MinRange) / (sampleCount - 1) else 0
+		for index = 0, sampleCount - 1 do
+			local distance = LEAP.MinRange + step * index
+			local samplePoint = origin + aim * distance
+			local floorHit = castScanRay(
+				samplePoint + UP * LEAP.SurfaceScanAbove,
+				Vector3.new(0, -(LEAP.SurfaceScanAbove + LEAP.SurfaceScanBelow), 0)
+			)
+			if floorHit then
+				-- Direct only when this sample landed on the very thing the view ray hit -- i.e. the player
+				-- is looking INTO this surface, not over it. Everything else here is inferred from a
+				-- downward cast, which is exactly the path that used to serve up the player's own floor.
+				consider(
+					floorHit.Position,
+					floorHit.Normal,
+					floorHit.Instance,
+					floorHit.Instance ~= nil and floorHit.Instance == viewHitInstance
+				)
+			end
+		end
+	end
+
+	return leapTarget
+end
+
+-- WHERE A LEDGE CLIMB ACTUALLY ENDS: the real standable surface behind a lip, measured rather than
+-- assumed.
+--
+-- A ladder of downward casts at increasing insets from the edge, taking the first that is both
+-- standable (slope within the walkable limit) and has headroom. Each inset looks both ABOVE the lip's
+-- own height and well below it, because both cases are ordinary geometry: a stepped roof rises behind
+-- its edge, a parapet has a lower walkway behind it, and the old derived end position -- one authored
+-- step in, at the lip's own height -- was floating or buried in every one of them.
+--
+-- Returns found/position/normal. A false means "nothing measurable back there," which is the honest
+-- answer for a railing or a lip on a sloped face; States/LedgeClimbing.lua keeps its derived position
+-- for that case rather than refusing a climb the player already committed to.
+function EnvironmentProbe.FindStandSurface(
+	edgePosition: Vector3,
+	forward: Vector3,
+	now: number
+): (boolean, Vector3, Vector3)
+	scanBudgetUsed = 0
+	local flatForward = ParkourMath.SafeUnit(ParkourMath.Flatten(forward), Vector3.zero)
+	if flatForward.Magnitude < 1e-3 then
+		return false, edgePosition, UP
+	end
+
+	local sampleCount = math.max(LEDGE.ClimbInsetSamples, 1)
+	local insetStep = if sampleCount > 1 then (LEDGE.ClimbInsetMax - LEDGE.ClimbInsetMin) / (sampleCount - 1) else 0
+
+	for index = 0, sampleCount - 1 do
+		local inset = LEDGE.ClimbInsetMin + insetStep * index
+		local scanOrigin = edgePosition + flatForward * inset + UP * LEDGE.ClimbSurfaceScanAbove
+		local hit =
+			castScanRay(scanOrigin, Vector3.new(0, -(LEDGE.ClimbSurfaceScanAbove + LEDGE.ClimbSurfaceScanBelow), 0))
+		if hit then
+			local permissions = ParkourTagging.GetPermissions(hit.Instance, now)
+			if not permissions.Ignored and ParkourMath.SlopeAngle(hit.Normal) <= SLOPE.MaxWalkableAngleDegrees then
+				local headroom = castScanRay(hit.Position + UP * 0.3, UP * LEDGE.ClimbSurfaceHeadroom)
+				if headroom == nil then
+					return true, hit.Position, hit.Normal
+				end
+			end
+		end
+	end
+
+	return false, edgePosition, UP
+end
+
+--
 -- Update
 --
 
@@ -732,8 +1220,20 @@ function EnvironmentProbe.Update(context: ParkourContext, request: ProbeRequest)
 	then
 		local right = ParkourMath.Flatten(rootPart.CFrame.RightVector)
 		right = ParkourMath.SafeUnit(right, Vector3.new(1, 0, 0))
-		probeWall(wallLeft, rootPart, -right, travelDirection, now)
-		probeWall(wallRight, rootPart, right, travelDirection, now)
+		-- The direction the diagonal fallback leans toward. Travel rather than facing, because the case it
+		-- serves is arriving at a surface -- what matters is where the body is GOING, and under shift lock
+		-- facing is the camera rather than the flight. Falls back to facing when there is no travel, which
+		-- is the same composite `travelDirection` above already resolved.
+		local forward = ParkourMath.SafeUnit(ParkourMath.Flatten(travelDirection), Vector3.zero)
+		-- Never during a wall-run, which is the one state that reads these probes as a CONTINUING contact
+		-- rather than as a search. States/WallRunning re-derives its tangent from the live normal every
+		-- frame precisely so a corner ends the run instead of the run clipping through it -- and a fallback
+		-- that answers "the straight cast lost the wall" with a perpendicular wall further ahead would
+		-- swing that tangent ninety degrees and carry the run around the corner, which is the exact
+		-- behavior that file's header rules out.
+		local allowDiagonal = not ground.Grounded and forward.Magnitude > 0 and context.CurrentStateId ~= "WallRunning"
+		probeWall(wallLeft, rootPart, -right, travelDirection, forward, allowDiagonal, now)
+		probeWall(wallRight, rootPart, right, travelDirection, forward, allowDiagonal, now)
 	elseif tooSlowToCare and not wantWalls then
 		clearWall(wallLeft, now)
 		clearWall(wallRight, now)

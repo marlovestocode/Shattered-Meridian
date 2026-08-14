@@ -115,7 +115,20 @@ function StateSupport.GroundTargetSpeed(context: ParkourContext): number
 	if not StateSupport.HasMoveIntent(context) then
 		return 0
 	end
-	local base = if context.SprintHeld then LOCOMOTION.SprintSpeed else LOCOMOTION.WalkSpeed
+	-- Three tiers, not two, since the run system's second stage: the sprint target is whichever of the
+	-- two sprint speeds the SERVER currently has this character in (ParkourContext.SprintStage), not
+	-- whichever one the client would prefer. Reading the stage rather than re-deriving it from a local
+	-- timer is the whole point -- a client-side "I have been running for seven seconds" clock would be
+	-- a second answer to a question the server has already answered, and the two would disagree
+	-- through every stun, block and commitment lock that pauses the server's own charge.
+	local base
+	if not context.SprintHeld then
+		base = LOCOMOTION.WalkSpeed
+	elseif context.SprintStage >= 2 then
+		base = LOCOMOTION.SprintStage2Speed
+	else
+		base = LOCOMOTION.SprintSpeed
+	end
 	local signedSlope = ParkourMath.SignedSlopeAlong(context.Ground.Normal, StateSupport.TravelDirection(context))
 	return base
 		* ParkourMath.SlopeSpeedScale(signedSlope, SLOPE.UphillSpeedPenaltyPerDegree, SLOPE.DownhillSpeedBonusPerDegree)

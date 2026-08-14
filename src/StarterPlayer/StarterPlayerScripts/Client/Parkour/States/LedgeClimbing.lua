@@ -15,6 +15,20 @@
 	see ParkourContext.LedgeAnchorPosition's own header for why the probe cannot see the edge the
 	character is already holding.
 
+	WHERE THE CLIMB ENDS IS MEASURED, NOT DERIVED. The end position used to be the anchor plus one
+	authored step along the climb direction, at the anchor's own height -- which is only correct when the
+	top of the ledge is a flat plane continuing back from the lip at exactly the height the lip was found
+	at. Real geometry rarely is: a parapet has a lower walkway behind it, a stepped roof rises behind its
+	edge, a sloped roof's lip is its lowest point, and a railing has nothing behind it at that height at
+	all. In each of those the derived position was somewhere the character could not stand -- floating
+	over the walkway, buried in the step, hovering off the slope -- and the kinematic path put them there
+	exactly, because that is what kinematic means.
+
+	So Enter now asks EnvironmentProbe.FindStandSurface for the real surface behind the lip and ends
+	there. The derived position survives as the fallback for when nothing is measurable back there (a
+	railing over open air), which is the honest answer rather than refusing a climb the player has
+	already committed to.
+
 	Exit momentum is deliberately low (ParkourConstants.Ledge.ClimbExitSpeed): a climb is the SLOW way
 	up. The fast way was to not fall short in the first place -- keeping the two clearly separated in
 	value is what makes a well-executed jump feel better than a recovered one.
@@ -88,12 +102,26 @@ local LedgeClimbing: ParkourTypes.StateDefinition = {
 		facing = ParkourMath.SafeUnit(-ParkourMath.Flatten(normal), Vector3.new(0, 0, -1))
 
 		local footOffset = EnvironmentProbe.GetFootOffset()
-		-- Standing on top, a step in from the lip -- same reasoning as States/Mantling.lua's own end
-		-- position: ending balanced on the edge itself puts half the character over the drop.
-		endPosition = anchor + facing * 1.2 + Vector3.new(0, footOffset, 0)
+		-- THE MEASURED SURFACE. Standing on top, a step in from the lip -- same reasoning as
+		-- States/Mantling.lua's own end position: ending balanced on the edge itself puts half the
+		-- character over the drop. The step is chosen BY the probe (it walks outward until it finds
+		-- somewhere standable with headroom) rather than authored, and the height comes from the surface
+		-- it actually found rather than from the lip.
+		local found, surfacePosition = EnvironmentProbe.FindStandSurface(anchor, facing, context.Now)
+		if found then
+			endPosition = surfacePosition + Vector3.new(0, footOffset, 0)
+		else
+			-- Nothing measurable behind the lip. Fall back to the derived position -- see this file's
+			-- header for why a climb already committed to is not refused over it.
+			endPosition = anchor + facing * LEDGE.ClimbInsetMin + Vector3.new(0, footOffset, 0)
+		end
+
 		-- Rise first, then step forward: the control point sits above the START, which is what makes a
-		-- climb read as hauling yourself up a face rather than arcing over it like a vault.
-		controlPoint = Vector3.new(startCFrame.Position.X, anchor.Y + footOffset + 0.6, startCFrame.Position.Z)
+		-- climb read as hauling yourself up a face rather than arcing over it like a vault. Its height
+		-- clears whichever is higher, the lip or the surface being climbed onto -- a step up behind the
+		-- edge would otherwise be arced straight into.
+		local clearanceY = math.max(anchor.Y, endPosition.Y - footOffset) + footOffset + 0.6
+		controlPoint = Vector3.new(startCFrame.Position.X, clearanceY, startCFrame.Position.Z)
 	end,
 
 	Update = function(context: ParkourContext): ParkourTypes.TransitionResult

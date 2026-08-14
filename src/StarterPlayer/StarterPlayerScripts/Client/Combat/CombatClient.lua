@@ -85,6 +85,12 @@ local EmoteWheelClient = require(script.Parent.Parent.Emotes.EmoteWheelClient)
 -- dependency runs combat -> parkour only. See ParkourController.lua's own header for why sprint stays
 -- here rather than moving into that framework.
 local ParkourController = require(script.Parent.Parent.Parkour.ParkourController)
+-- The Run System's presentation owner. Same relationship as ParkourController above and for the same
+-- reason: sprint ENGAGEMENT stays owned here (the remotes, hold-vs-toggle, Autorun), and the boolean
+-- is pushed outward to every consumer that needs it -- the parkour framework, the dust trickle, and
+-- now the run controller, which turns it into footsteps, the stage animation and the stage FOV pull.
+-- RunController does not require this module back.
+local RunController = require(script.Parent.Parent.Movement.RunController)
 
 type CombatFeedbackHandle = CombatFeedbackModule.CombatFeedbackHandle
 type DeathFeedHandle = DeathFeedModule.DeathFeedHandle
@@ -330,6 +336,14 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle, deathFeed: Dea
 		end
 	end
 
+	-- Guards the deferred "Buffered" swing prediction below. A press whose gate opens within the
+	-- server's input-buffer window arms a delayed prediction rather than an immediate one; a SECOND
+	-- press inside that same window would otherwise arm a second delayed callback and both would
+	-- fire at gate-open, playing the swing feedback twice for one server-side swing (the server
+	-- buffers only one press). Every arm bumps this, and each callback runs only if it is still the
+	-- newest -- the same generation-stamp pattern beginPrediction uses for its own timeout.
+	local bufferedSwingGeneration = 0
+
 	-- Records a just-played prediction and arms its timeout fallback. Holds the mirror's commitment
 	-- gate closed so a second predictable press during the round-trip can't also predict. If neither
 	-- the confirm echo nor a reject arrives within Prediction.TimeoutSeconds, the predicted feedback
@@ -508,13 +522,17 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle, deathFeed: Dea
 			-- missed push would leave the movement framework's own view of sprint stale for as long as
 			-- the state happened not to change.
 			ParkourController.SetSprinting(intended)
+			-- Same reasoning for the run controller: its footstep loop gates on this every frame.
+			RunController.SetSprinting(intended)
 			return
 		end
 		sprintEngaged = intended
-		-- The Parkour System reads sprint rather than owning it -- see ParkourController.lua's own
-		-- header. Pushed here, in the one place sprint actually changes, so both consumers (MovementVFX
-		-- below and the movement framework) are fed from the same transition.
+		-- The Parkour System and the Run System both read sprint rather than owning it -- see
+		-- ParkourController.lua's and RunController.lua's own headers. Pushed here, in the one place
+		-- sprint actually changes, so every consumer (MovementVFX below, the movement framework, the run
+		-- presentation) is fed from the same transition.
 		ParkourController.SetSprinting(intended)
+		RunController.SetSprinting(intended)
 		if intended then
 			-- Client-predicted, same as the request itself -- see CombatAnimator.StartRunning's own
 			-- comment for why this doesn't wait on a server round-trip.
@@ -599,6 +617,11 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle, deathFeed: Dea
 		CombatAnimator.BindCharacter(character)
 		-- Rebind the sprint/slide dust trickle's own humanoid/root-part cache to the new character.
 		MovementVFX.BindCharacter(character)
+		-- Same lifecycle for the run system: a fresh Humanoid means a fresh SprintStage watcher, a
+		-- reset step clock, and one more attempt at muting the stock character run sound. Bound here,
+		-- alongside the other two, so the whole presentation layer picks up a new life in one place and
+		-- in a known order rather than through three independent CharacterAdded handlers.
+		RunController.BindCharacter(character)
 
 		-- Autorun's movement watcher, rebound to this character's own Humanoid (the old one's signal
 		-- died with it). MoveDirection is the right source rather than raw WASD/thumbstick polling:
@@ -675,6 +698,10 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle, deathFeed: Dea
 		sprintKeyHeld = false
 		sprintToggledOn = false
 		ParkourController.SetSprinting(false)
+		-- The run system's own half of that same reset. Its per-life teardown (the SprintStage watcher,
+		-- the stage FOV pull, the animator's run stage) runs off its own CharacterRemoving handler --
+		-- this is only the sprint INTENT, which lives here.
+		RunController.SetSprinting(false)
 	end)
 
 	-- Input: intent only. Every call below is a request; CombatSystem server-side decides what
@@ -782,11 +809,41 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle, deathFeed: Dea
 				end
 				return
 			end
-			if mirror:EvaluateBasic(now) == "Predict" then
+			local basicVerdict = mirror:EvaluateBasic(now)
+			if basicVerdict == "Predict" then
 				local swing = mirror:PredictedSwing(now)
 				CombatAnimator.PlayPredictedSwing(swing.StageIndex, swing.IsFinisher)
 				SwingEffect.Play(false)
 				beginPrediction("Swing")
+			elseif basicVerdict == "Buffered" then
+				-- The server WILL throw this press when its gate opens (handleAttackRequest buffers
+				-- it, onHeartbeat flushes it), so the swing is coming -- but nothing was shown for it
+				-- until the confirm echo crossed the wire, leaving the whole buffered window visually
+				-- and audibly dead. That window is the TRAILING slice of the previous swing's
+				-- commitment, i.e. exactly where a player mashing a combo presses, so the dead frames
+				-- landed on the most common input in the game.
+				--
+				-- This does NOT predict now -- predicting now is what evaluateAttack's own header
+				-- correctly rejects, since it would play the feedback early and then double it on the
+				-- echo. It schedules the same prediction for the instant the gate actually opens,
+				-- which is when the server's flush throws the swing anyway. Re-evaluated at fire time
+				-- rather than trusted: anything that happened during the wait (a stun, a parry, a
+				-- reject) leaves the verdict non-Predict and the echo drives the visuals instead.
+				bufferedSwingGeneration += 1
+				local generation = bufferedSwingGeneration
+				task.delay(math.max(0, mirror:GateOpensAt(now) - now), function()
+					if generation ~= bufferedSwingGeneration then
+						return
+					end
+					local fireAt = os.clock()
+					if mirror:EvaluateBasic(fireAt) ~= "Predict" then
+						return
+					end
+					local swing = mirror:PredictedSwing(fireAt)
+					CombatAnimator.PlayPredictedSwing(swing.StageIndex, swing.IsFinisher)
+					SwingEffect.Play(false)
+					beginPrediction("Swing")
+				end)
 			end
 			-- Proactively keep Jumping suppressed through this combo string -- see
 			-- suppressJumpThroughCombo's own header for why the reactive-only version left a real
@@ -1228,6 +1285,11 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle, deathFeed: Dea
 			-- left visually "running" with no server-side effect until they release and re-press Sprint.
 			CombatAnimator.StopRunning()
 			MovementVFX.SetSprinting(false)
+			-- And the run presentation's own half: the footstep loop is gated on this intent, so a
+			-- rejected sprint that left it true would keep laying down footsteps for a run the server
+			-- refused. The stage itself needs no rollback here -- the server simply never publishes one
+			-- for a sprint it rejected.
+			RunController.SetSprinting(false)
 			FOVOffset.SetContinuous("Sprint", 0, Constants.Camera.Sprint.FOVEaseSpeed)
 			-- The visuals above are now gone, so record that sprint is no longer engaged -- otherwise
 			-- syncSprint still believes it is and the next transition that WANTS sprint reads as a

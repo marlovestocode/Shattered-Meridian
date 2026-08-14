@@ -500,6 +500,30 @@ return function()
 		end)
 	end)
 
+	describe("ParkourMath.StepInterval", function()
+		it("returns the authored interval at the reference speed", function()
+			expectClose(ParkourMath.StepInterval(27, 27, 0.33, 0.15, 0.6), 0.33)
+		end)
+
+		it("shortens the gap as the character speeds up -- the inverse of PlaybackSpeed's ratio", function()
+			expectClose(ParkourMath.StepInterval(54, 27, 0.33, 0.05, 0.6), 0.165)
+		end)
+
+		it("lengthens the gap as the character slows down", function()
+			expectClose(ParkourMath.StepInterval(13.5, 27, 0.2, 0.05, 0.6), 0.4)
+		end)
+
+		it("clamps at both ends", function()
+			expect(ParkourMath.StepInterval(500, 27, 0.33, 0.15, 0.6)).to.equal(0.15)
+			expect(ParkourMath.StepInterval(0.5, 27, 0.33, 0.15, 0.6)).to.equal(0.6)
+		end)
+
+		it("returns the ceiling for a stopped character or a zero reference, never a division by zero", function()
+			expect(ParkourMath.StepInterval(0, 27, 0.33, 0.15, 0.6)).to.equal(0.6)
+			expect(ParkourMath.StepInterval(27, 0, 0.33, 0.15, 0.6)).to.equal(0.6)
+		end)
+	end)
+
 	describe("ParkourMath.ExitMomentum", function()
 		it("retains the given fraction of entry momentum", function()
 			expectClose(ParkourMath.ExitMomentum(30, 0.5, 0), 15)
@@ -577,6 +601,238 @@ return function()
 			local result = ParkourMath.PrimaryReachDirection(Vector3.new(1e-9, 0, 0), Vector3.new(0, 0, -1))
 			expect(result.X == result.X).to.equal(true)
 			expectClose(result.Z, -1)
+		end)
+	end)
+
+	describe("ParkourMath.SolveLaunchVelocity", function()
+		-- The assisted wall-jump's trajectory. Asserted by SIMULATING the arc rather than by comparing
+		-- against a hand-computed velocity: the property that matters to a player is "does this land on
+		-- the thing it was aimed at," and a test written against the closed-form answer would pass just as
+		-- happily if the closed form itself were wrong. Roblox's own default gravity, so the numbers here
+		-- are the numbers the game actually flies.
+		local GRAVITY = 196.2
+
+		-- Flies the velocity forward in small steps and returns the closest the arc ever passes to the
+		-- target. Fixed step rather than solving for the arrival time, so this stays an independent check
+		-- of the solver rather than a second copy of it.
+		local function closestApproach(start: Vector3, velocity: Vector3, target: Vector3): number
+			local best = math.huge
+			local step = 1 / 240
+			local elapsed = 0
+			while elapsed <= 4 do
+				local position = start + velocity * elapsed - Vector3.new(0, 0.5 * GRAVITY * elapsed * elapsed, 0)
+				best = math.min(best, (position - target).Magnitude)
+				elapsed += step
+			end
+			return best
+		end
+
+		local function solve(start: Vector3, target: Vector3): (Vector3, boolean)
+			return ParkourMath.SolveLaunchVelocity(start, target, GRAVITY, 1.8, 1.09, 34, 62, 72)
+		end
+
+		-- Tolerance on "passes through the target," and it is PROPORTIONAL rather than flat for a reason
+		-- that is the feature itself: the solve deliberately overshoots by ReachMargin, which is a
+		-- fraction of the horizontal speed, so a longer flight overshoots by more studs than a short one
+		-- does. Asserting a flat stud budget would be asserting that the surplus shrinks with distance,
+		-- which is the opposite of what "a little more than enough to reach" means. The constant term is
+		-- just slack for the fixed-step integration below.
+		local function arrivalTolerance(start: Vector3, target: Vector3): number
+			return ParkourMath.PlanarSpeed(target - start) * 0.15 + 0.5
+		end
+
+		it("flies an arc that passes through a target level with the launch", function()
+			local start = Vector3.new(0, 20, 0)
+			local target = Vector3.new(18, 20, 0)
+			local velocity, reachable = solve(start, target)
+			expect(reachable).to.equal(true)
+			expect(closestApproach(start, velocity, target) < arrivalTolerance(start, target)).to.equal(true)
+		end)
+
+		it("flies an arc that reaches a target ABOVE the launch", function()
+			-- The ascending chain -- a wall-jump up to a higher ledge -- and the case a fixed push is
+			-- worst at, since the player has to estimate both how hard and how high.
+			local start = Vector3.new(0, 20, 0)
+			local target = Vector3.new(14, 26, 0)
+			local velocity, reachable = solve(start, target)
+			expect(reachable).to.equal(true)
+			expect(closestApproach(start, velocity, target) < arrivalTolerance(start, target)).to.equal(true)
+		end)
+
+		it("flies an arc that reaches a target BELOW the launch", function()
+			local start = Vector3.new(0, 30, 0)
+			local target = Vector3.new(22, 19, 0)
+			local velocity, reachable = solve(start, target)
+			expect(reachable).to.equal(true)
+			expect(closestApproach(start, velocity, target) < arrivalTolerance(start, target)).to.equal(true)
+		end)
+
+		it("arrives DESCENDING, not still rising", function()
+			-- The states downstream depend on it: States/LedgeHanging refuses a grab from a character
+			-- rising faster than Ledge.MaxVerticalSpeedToGrab, so a rising arrival would deliver the assist
+			-- to a state that then declines to catch it. Checked at the moment the arc first reaches the
+			-- target's height on its way back down.
+			local start = Vector3.new(0, 20, 0)
+			local target = Vector3.new(16, 24, 0)
+			local velocity = solve(start, target)
+			local arrivalTime = (velocity.Y + math.sqrt(velocity.Y * velocity.Y - 2 * GRAVITY * 4)) / GRAVITY
+			local verticalAtArrival = velocity.Y - GRAVITY * arrivalTime
+			expect(verticalAtArrival < 0).to.equal(true)
+		end)
+
+		it("clears the target's height by the requested apex margin on the way", function()
+			-- Not the same assertion as "reaches it": an arc that arrives exactly AT the lip's height
+			-- arrives through the front face of whatever the lip belongs to. The clearance is what makes
+			-- the arrival a landing rather than a collision.
+			local start = Vector3.new(0, 20, 0)
+			local target = Vector3.new(12, 26, 0)
+			local velocity = solve(start, target)
+			local apex = start.Y + (velocity.Y * velocity.Y) / (2 * GRAVITY)
+			expect(apex >= target.Y + 1.7).to.equal(true)
+		end)
+
+		it("gives MORE than the minimum, but not much more", function()
+			-- The design constraint in one test: enough surplus that a frame of error is not a miss, little
+			-- enough that the arc still reads as a jump. Measured as the overshoot past the target at the
+			-- moment the arc returns to the target's height.
+			local start = Vector3.new(0, 20, 0)
+			local target = Vector3.new(20, 20, 0)
+			local velocity = solve(start, target)
+			local flightTime = (2 * velocity.Y) / GRAVITY
+			local travelled = ParkourMath.PlanarSpeed(velocity) * flightTime
+			expect(travelled > 20).to.equal(true)
+			expect(travelled < 20 * 1.2).to.equal(true)
+		end)
+
+		it("reports a target past the vertical cap as unreachable rather than pretending", function()
+			-- What stops a well-placed pair of walls from being an elevator. The caller refuses the assist
+			-- entirely on a false here (States/WallJumping.Enter) and flies the ordinary push instead.
+			local start = Vector3.new(0, 20, 0)
+			local _velocity, reachable = solve(start, Vector3.new(6, 60, 0))
+			expect(reachable).to.equal(false)
+		end)
+
+		it("reports a target past the horizontal cap as unreachable", function()
+			local start = Vector3.new(0, 20, 0)
+			local _velocity, reachable = solve(start, Vector3.new(300, 20, 0))
+			expect(reachable).to.equal(false)
+		end)
+
+		it("never returns a NaN velocity for a degenerate target", function()
+			local start = Vector3.new(0, 20, 0)
+			local velocity = solve(start, start)
+			expect(velocity.X == velocity.X).to.equal(true)
+			expect(velocity.Y == velocity.Y).to.equal(true)
+			expect(velocity.Z == velocity.Z).to.equal(true)
+		end)
+	end)
+
+	describe("ParkourMath.CorridorKickHeight", function()
+		-- The chimney climb's height budget. The property that matters is not any particular number but
+		-- that a kick GAINS height at all -- a corridor jump that aims level is the failure this function
+		-- was written to fix, and it is invisible in a screenshot and obvious in play.
+		local GRAVITY = 196.2
+		local UP_SPEED = 68
+		local APEX_GAIN = (UP_SPEED * UP_SPEED) / (2 * GRAVITY)
+
+		local function height(gap: number, maxPlanar: number?): number
+			return ParkourMath.CorridorKickHeight(gap, GRAVITY, UP_SPEED, maxPlanar or 72, 1.09)
+		end
+
+		it("gains the full apex height across an ordinary corridor", function()
+			-- A gap a player would actually build: the horizontal cap is nowhere near binding, so the whole
+			-- of the lift is available as climb.
+			expectClose(height(10), APEX_GAIN)
+			expect(APEX_GAIN > 11).to.equal(true)
+		end)
+
+		it("gains real height even across a narrow shaft", function()
+			expectClose(height(3), APEX_GAIN)
+		end)
+
+		it("aims LOWER across a gap too wide to cross at apex", function()
+			-- The inverse relationship that is easy to get backwards: arriving at apex is the SHORTEST
+			-- flight, so a wide gap needs a longer one, which means aiming below the apex and arriving on
+			-- the way down. Less climb per kick, but a kick that still happens.
+			local wide = height(24)
+			expect(wide < APEX_GAIN).to.equal(true)
+			expect(wide > 0).to.equal(true)
+		end)
+
+		it("falls monotonically as the gap widens past the affordable point", function()
+			local previous = math.huge
+			for gap = 20, 34, 2 do
+				local current = height(gap)
+				expect(current <= previous).to.equal(true)
+				previous = current
+			end
+		end)
+
+		it("reports no climb at all for a gap past what the horizontal cap can cross", function()
+			expectClose(height(60, 20), 0)
+		end)
+
+		it("never returns a negative height or a NaN", function()
+			local degenerate = height(0)
+			expect(degenerate == degenerate).to.equal(true)
+			expect(degenerate >= 0).to.equal(true)
+			expect(height(-5) >= 0).to.equal(true)
+		end)
+
+		it("is reachable by the solver it feeds -- the two must agree", function()
+			-- The integration that actually matters: States/WallJumping hands this height to
+			-- SolveLaunchVelocity with the up-speed pinned at both ends, and a height the solver then calls
+			-- unreachable would silently drop the assist on exactly the jump it was written for. A small
+			-- safety shave (Assist.CorridorHeightSafetyStuds) exists for the apex case, where the two agree
+			-- to the last decimal place; this asserts the shave is enough.
+			for gap = 4, 26, 2 do
+				local climb = math.max(height(gap) - 0.15, 0)
+				local start = Vector3.new(0, 20, 0)
+				local target = Vector3.new(gap, 20 + climb, 0)
+				local _velocity, reachable =
+					ParkourMath.SolveLaunchVelocity(start, target, GRAVITY, 0, 1.09, UP_SPEED, UP_SPEED, 72)
+				expect(reachable).to.equal(true)
+			end
+		end)
+	end)
+
+	describe("ParkourMath.WallJumpCandidateScore", function()
+		local FROM = Vector3.new(0, 20, 0)
+		local AIM = Vector3.new(0, 0, -1)
+
+		local function score(position: Vector3, normal: Vector3): number
+			return ParkourMath.WallJumpCandidateScore(FROM, AIM, position, normal, 6, 42, 1, 0.45, 0.55, 0.12, 0.3)
+		end
+
+		it("scores a square surface straight ahead above an angled one beside it", function()
+			local ahead = score(Vector3.new(0, 20, -20), Vector3.new(0, 0, 1))
+			local beside = score(Vector3.new(18, 20, -10), Vector3.new(-0.8, 0, 0.6).Unit)
+			expect(ahead > beside).to.equal(true)
+		end)
+
+		it("prefers the nearer of two equally-aimed surfaces", function()
+			local near = score(Vector3.new(0, 20, -12), Vector3.new(0, 0, 1))
+			local far = score(Vector3.new(0, 20, -34), Vector3.new(0, 0, 1))
+			expect(near > far).to.equal(true)
+		end)
+
+		it("refuses anything behind the aim direction", function()
+			expect(score(Vector3.new(0, 20, 20), Vector3.new(0, 0, -1))).to.equal(0)
+		end)
+
+		it("refuses a surface whose face is turned away -- a graze, not a landing", function()
+			-- Geometrically ahead and well inside the distance band, but its normal points along the
+			-- flight rather than back at it: arriving there is a scrape past, not an attach.
+			expect(score(Vector3.new(0, 20, -20), Vector3.new(0, 0, -1))).to.equal(0)
+		end)
+
+		it("refuses anything nearer than the minimum or past the scan distance", function()
+			expect(score(Vector3.new(0, 20, -3), Vector3.new(0, 0, 1))).to.equal(0)
+			expect(score(Vector3.new(0, 20, -80), Vector3.new(0, 0, 1))).to.equal(0)
+		end)
+
+		it("returns zero rather than NaN for a degenerate normal", function()
+			expect(score(Vector3.new(0, 20, -20), Vector3.zero)).to.equal(0)
 		end)
 	end)
 end

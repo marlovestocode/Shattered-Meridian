@@ -35,6 +35,7 @@ local CameraShake = require(script.Parent.FX.CameraShake)
 local FOVOffset = require(script.Parent.FX.FOVOffset)
 local CameraOffsetComposer = require(script.Parent.FX.CameraOffsetComposer)
 local ParkourController = require(script.Parent.Parkour.ParkourController)
+local RunController = require(script.Parent.Movement.RunController)
 local DevMenuClient = require(script.Parent.DevMenu.DevMenuClient)
 local MoveEditorClient = require(script.Parent.MoveEditor.MoveEditorClient)
 local FlightController = require(script.Parent.DevMenu.FlightController)
@@ -179,6 +180,15 @@ logger:debug("CameraShake end")
 logger:debug("ParkourController start")
 ParkourController.Start()
 logger:debug("ParkourController end")
+
+-- After both of the systems that push into it: CombatClient (sprint intent, character binds) and
+-- ParkourController (the live movement state id). Starting it earlier would be harmless -- every one
+-- of its inputs is pushed, so it would simply present nothing until the first push arrives -- but the
+-- order is kept explicit here for the same reason every other entry in this file is. Also after
+-- FOVOffset, whose named-slot composer this module's stage-2 zoom writes into.
+logger:debug("RunController start")
+RunController.Start()
+logger:debug("RunController end")
 
 logger:debug("DevMenuClient start")
 DevMenuClient.Start(uiHandles.DevMenu)

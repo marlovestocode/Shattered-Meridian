@@ -5,7 +5,9 @@
 	Owns: loading and playing the LOCAL player's own combat animations (the three M1 swing stages,
 	the Uppercut/Downslam/Normal finisher variants, the standalone AirSlam attack (jump + M1, always
 	the Downslam clip -- see PlayPredictedAirSlam), a Walking loop for ordinary movement that
-	crossfades into a Running loop for Sprint, a held BlockHold stance + one-shot ParryFlash for
+	crossfades into one of TWO Running loops for Sprint (the run system's stage 1 and stage 2 -- see
+	CombatAnimator.SetRunStage, and Client/Movement/RunController.lua for who decides which), a held
+	BlockHold stance + one-shot ParryFlash for
 	Block/Parry, four directional one-shot Dash clips plus the distinct DashPunch clip for a
 	double-tap-W throw specifically, one non-directional Slide clip (chained off
 	Sprint -- see PlayPredictedSlide), three Hit1/2/3 reaction clips played on the DEFENDER when
@@ -92,6 +94,15 @@ local DASH_FADE_TIME = Constants.FX.Animation.Combat.DashFadeSeconds
 local SLIDE_FADE_TIME = Constants.FX.Animation.Combat.SlideFadeSeconds
 local HIT_REACTION_FADE_TIME = Constants.FX.Animation.Combat.HitReactionFadeSeconds
 local LOCOMOTION_INTERRUPT_FADE_TIME = Constants.FX.Animation.Combat.LocomotionInterruptFadeSeconds
+-- The run system's own three numbers (Constants.Run.Animation) -- the crossfade between the two run
+-- stages' clips, and each stage's playback rate. Kept as their own tunables rather than borrowing
+-- LOCOMOTION_FADE_TIME above even though the crossfade currently happens to equal it: they answer
+-- different questions (walk<->run vs. run<->full stride) and retuning one should never silently move
+-- the other, the same "each context keeps its own copy even where values start equal" convention
+-- Constants.lua's own comments already document.
+local RUN_STAGE_CROSSFADE_TIME = Constants.Run.Animation.StageCrossfadeSeconds
+local RUN_STAGE1_PLAYBACK_SPEED = Constants.Run.Animation.Stage1PlaybackSpeed
+local RUN_STAGE2_PLAYBACK_SPEED = Constants.Run.Animation.Stage2PlaybackSpeed
 -- Fade for rolling back a MISPREDICTED track (the server rejected, or confirmed a different
 -- stage/mode than the client predicted) -- slightly softer than the snappy play-side fades so a
 -- rolled-back swing melts toward idle instead of popping. Already single-sourced from
@@ -233,7 +244,12 @@ function CombatAnimator.BindCharacter(character: Model): ()
 			-- one of OUR OWN combat animations and never plays two-at-once by design, they don't
 			-- fight each other for it.
 			track.Priority = Enum.AnimationPriority.Core
-			if name == "Running" or name == "Walking" or name == "BlockHold" then
+			-- RunningStage2 joins the looped set for the same reason Running does -- it IS the run
+			-- loop, at the second stage. Missing it here was the exact bug that made wall-runs play
+			-- their clip once and stop (see ParkourAnimator's VARIANT_CLIPS header): a sustained
+			-- locomotion track whose Looped flag was never set plays through once and leaves the
+			-- character in a T-pose-adjacent idle for the rest of the run.
+			if name == "Running" or name == "RunningStage2" or name == "Walking" or name == "BlockHold" then
 				track.Looped = true
 			end
 			tracks[name] = track
@@ -814,6 +830,62 @@ function CombatAnimator.StopRunning(): ()
 	sprintHeld = false
 end
 
+-- THE RUN SYSTEM'S TWO STAGES, pushed in by Client/Movement/RunController.lua (which mirrors the
+-- server's own Constants.Attributes.SprintStage -- the stage is never decided on this side).
+--
+-- Stage 2 plays its own clip when Constants.Combat.AnimationIds.RunningStage2 is authored, and
+-- otherwise falls through to the stage-1 Running loop played faster
+-- (Constants.Run.Animation.Stage2PlaybackSpeed) -- the same blank-id fallthrough ParkourAnimator uses
+-- for its own half-authored variant pairs, so this ships correctly whether or not a second run clip
+-- exists yet.
+--
+-- An intent value only, exactly like sprintHeld above: whether either clip actually plays this frame
+-- is re-derived by the evaluator below, never decided here.
+local runStage = 1
+
+function CombatAnimator.SetRunStage(stage: number): ()
+	runStage = stage
+end
+
+-- Whether something OTHER than ordinary locomotion currently owns this character's movement -- set by
+-- RunController from the parkour framework's live state id (a slide, a wall-run, a vault, a ledge
+-- climb, an airborne state).
+--
+-- This is the fix for a real, long-standing conflict rather than a new feature. The eligibility test
+-- below used to be "sprint held AND no combat action AND MoveDirection non-zero", every part of which
+-- stays true throughout a parkour slide, wall-run or vault -- so the Running loop kept playing at
+-- Core priority and DOMINANT_WEIGHT straight over the top of ParkourAnimator's own Movement-priority
+-- slide/wall-run clip, which is why those traversals looked like a character running sideways along a
+-- wall. Combat actions already had a channel for this (combatActionTrackCount); parkour had none,
+-- because at the time this evaluator was written the parkour framework did not exist.
+--
+-- A pushed boolean rather than this module requiring ParkourController: the parkour layer already
+-- pushes its state outward to its own animator/camera/network consumers, and a require in this
+-- direction would drag the whole movement framework into the load chain of a file that only wants to
+-- know one thing.
+local locomotionSuppressed = false
+
+function CombatAnimator.SetLocomotionSuppressed(suppressed: boolean): ()
+	locomotionSuppressed = suppressed
+end
+
+-- The run track (and speed) the playback-rate write below last applied to, so that write happens on a
+-- real change and NOT every frame. Per-frame AdjustSpeed on a locomotion track would silently defeat
+-- CombatAnimator.FreezeActiveCombatTrack: a hit-stop freezes every track's Speed to 0 and restores it
+-- on a timer, and a per-frame writer would undo the freeze on the very next Heartbeat, so a hit
+-- landing on a running player would visibly not freeze.
+--
+-- Reset per life alongside every other piece of per-life state (see perLifeResetHandlers' own
+-- header): the tracks themselves are rebuilt against the new character's Animator, so a remembered
+-- handle to the previous life's track would never match again and the speed would never be
+-- re-applied for the new one.
+local appliedRunSpeedTrack: AnimationTrack? = nil
+local appliedRunSpeed = 0
+registerPerLifeReset(function()
+	appliedRunSpeedTrack = nil
+	appliedRunSpeed = 0
+end)
+
 -- The single, continuously-correct answer to "should Walking/Running be playing THIS frame" --
 -- connected once at module load (not per Sprint-press), so it never needs to be told when an
 -- action started or ended; it just re-derives the right answer every tick from state that's
@@ -831,6 +903,10 @@ end
 -- action starting, or the character actually stopping).
 RunService.Heartbeat:Connect(function()
 	local runningTrack = tracks.Running
+	-- nil whenever Constants.Combat.AnimationIds.RunningStage2 is still blank -- which is the shipped
+	-- default, and the case every branch below is written to handle by falling through to the stage-1
+	-- track rather than by going silent.
+	local runningStage2Track = tracks.RunningStage2
 	local walkingTrack = tracks.Walking
 	-- Guards only the Running/Walking half below, NOT the Dash/DashPunch/Slide re-assert further
 	-- down -- Running/Walking/Dash/Slide are independently gated per-slot on whether
@@ -840,7 +916,7 @@ RunService.Heartbeat:Connect(function()
 	-- this file's existing "every play path degrades to its documented no-op/fallback" contract is
 	-- meant to support, so the dash reassert below must not be skipped just because this half has
 	-- nothing to do.
-	if runningTrack or walkingTrack then
+	if runningTrack or runningStage2Track or walkingTrack then
 		-- Also silenced while Flying (Client/DevMenu/FlightController.lua/FlightAnimator.lua own the
 		-- character's animation entirely during flight) -- Boost reuses the Sprint keybind and raw
 		-- WASD can still register nonzero MoveDirection mid-flight (PlatformStand suspends
@@ -852,22 +928,47 @@ RunService.Heartbeat:Connect(function()
 			and currentHumanoid ~= nil
 			and currentHumanoid.MoveDirection.Magnitude > LOCOMOTION_THRESHOLD
 		local noAction = combatActionTrackCount == 0
-		local shouldRun = sprintHeld and noAction and moving
-		local shouldWalk = not sprintHeld and noAction and moving
+		-- locomotionSuppressed is the parkour framework's veto -- see CombatAnimator.
+		-- SetLocomotionSuppressed's own header for the conflict it closes. Folded into the shared
+		-- `canLocomote` rather than into shouldRun alone because a vault or a wall-run is no more a
+		-- WALK than it is a run.
+		local canLocomote = noAction and moving and not locomotionSuppressed
+		local shouldRun = sprintHeld and canLocomote
+		local shouldWalk = not sprintHeld and canLocomote
+		-- The second run stage only claims its own track when there IS one. With RunningStage2 still
+		-- blank (the shipped default), stage 2 keeps the stage-1 track and is carried entirely by the
+		-- faster playback rate below, plus RunController's own audio/FOV -- so a half-authored content
+		-- set degrades to "the same run, harder" rather than to no run animation at all.
+		local shouldRunStage2 = shouldRun and runStage >= 2 and runningStage2Track ~= nil
+		local shouldRunStage1 = shouldRun and not shouldRunStage2
 
 		-- Client/FX/AnimationTrackUtil.lua's shared evaluator -- see that module's own header for
 		-- why this per-Heartbeat Play/AdjustWeight/Stop mechanic is extracted (the exact same shape
 		-- FlightAnimator.lua's Hover/CruiseLoop/BoostLoop pick uses below it). Only the
-		-- StopFadeSeconds per track varies here: a toggle straight to the OTHER locomotion track
-		-- (still moving, Sprint pressed/released) crossfades symmetrically at LOCOMOTION_FADE_TIME;
-		-- a genuine interrupt (stopped moving, or a combat action starting) cuts fast at
-		-- LOCOMOTION_INTERRUPT_FADE_TIME instead.
+		-- StopFadeSeconds per track varies here, and now across three cases rather than two: a stage
+		-- change between the two run clips crossfades at RUN_STAGE_CROSSFADE_TIME (the two are the
+		-- same action at different intensities, so it should read as accelerating); a toggle to the
+		-- OTHER locomotion track (still moving, Sprint pressed/released) crossfades symmetrically at
+		-- LOCOMOTION_FADE_TIME; a genuine interrupt (stopped moving, a combat action starting, or the
+		-- parkour framework taking the body) cuts fast at LOCOMOTION_INTERRUPT_FADE_TIME.
 		AnimationTrackUtil.DriveDominantLoop({
 			{
 				Track = runningTrack,
-				ShouldPlay = shouldRun,
+				ShouldPlay = shouldRunStage1,
 				PlayFadeSeconds = LOCOMOTION_FADE_TIME,
-				StopFadeSeconds = if shouldWalk then LOCOMOTION_FADE_TIME else LOCOMOTION_INTERRUPT_FADE_TIME,
+				StopFadeSeconds = if shouldRunStage2
+					then RUN_STAGE_CROSSFADE_TIME
+					elseif shouldWalk then LOCOMOTION_FADE_TIME
+					else LOCOMOTION_INTERRUPT_FADE_TIME,
+			},
+			{
+				Track = runningStage2Track,
+				ShouldPlay = shouldRunStage2,
+				PlayFadeSeconds = RUN_STAGE_CROSSFADE_TIME,
+				StopFadeSeconds = if shouldRunStage1
+					then RUN_STAGE_CROSSFADE_TIME
+					elseif shouldWalk then LOCOMOTION_FADE_TIME
+					else LOCOMOTION_INTERRUPT_FADE_TIME,
 			},
 			{
 				Track = walkingTrack,
@@ -876,6 +977,18 @@ RunService.Heartbeat:Connect(function()
 				StopFadeSeconds = if shouldRun then LOCOMOTION_FADE_TIME else LOCOMOTION_INTERRUPT_FADE_TIME,
 			},
 		}, DOMINANT_WEIGHT)
+
+		-- Per-stage playback rate, written only when the track or the rate actually changes -- see
+		-- appliedRunSpeedTrack's own header for why a per-frame write here would break hit-stop.
+		local activeRunTrack = if shouldRunStage2 then runningStage2Track else runningTrack
+		if shouldRun and activeRunTrack then
+			local desiredSpeed = if runStage >= 2 then RUN_STAGE2_PLAYBACK_SPEED else RUN_STAGE1_PLAYBACK_SPEED
+			if activeRunTrack ~= appliedRunSpeedTrack or desiredSpeed ~= appliedRunSpeed then
+				activeRunTrack:AdjustSpeed(desiredSpeed)
+				appliedRunSpeedTrack = activeRunTrack
+				appliedRunSpeed = desiredSpeed
+			end
+		end
 	end
 
 	-- Dash/DashPunch/Slide one-shot re-assert (see playDominantOneShot below) folded into this same

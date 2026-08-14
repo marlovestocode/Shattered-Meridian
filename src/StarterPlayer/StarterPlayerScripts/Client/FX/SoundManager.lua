@@ -21,9 +21,19 @@
 	per play; a fixed round-robin array needs no bookkeeping for "N concurrent overlaps of one short
 	sound."
 
-	Domain-specific modules (CombatAudio.lua, and future ones) own WHICH names exist and WHEN to
-	play them -- this module only owns the name -> Sound Instance registry and playback mechanics.
-	It has no combat/UI/gameplay knowledge of its own.
+	Domain-specific modules (CombatAudio.lua, RunAudio.lua, and future ones) own WHICH names exist and
+	WHEN to play them -- this module only owns the name -> Sound Instance registry and playback
+	mechanics. It has no combat/UI/gameplay knowledge of its own.
+
+	Two capabilities beyond "register a name, play it," both added for the run system's footsteps and
+	both deliberately general rather than run-specific:
+	  * A per-play PlaybackSpeed (Play's optional second argument) -- pitch variation on a repeated
+	    one-shot, without a second registration per variant.
+	  * Reconfigure(), which repoints an existing name at a new definition in place, so a domain
+	    module can offer "change this sound at runtime" without leaking a Sound instance per swap.
+	SoundDefinition.PlaybackRegion (see Constants.lua) rides along with both: one asset containing
+	several distinct sounds can be registered under several names, each restricted to its own slice by
+	the engine rather than by a stop timer.
 
 	2D-only (SoundService-parented) for now -- positional/3D audio (a Sound parented to a world
 	Part) is a different concern nothing has asked for yet; adding it later is a new Register()
@@ -76,8 +86,45 @@ function SoundManager.Register(name: string, definition: SoundDefinition): ()
 		poolSize = 1
 	end
 
+	-- The second wrong-VALUE guard strict typing can't catch, and the one that has actually cost a
+	-- playtest: a SoundId that is a bare asset NUMBER ("76038309546970") rather than a content URL
+	-- ("rbxassetid://76038309546970"). It is a perfectly good string, so nothing in the type system or
+	-- the linter objects; Roblox simply fails to resolve it, and the ONLY signal is a Studio-console
+	-- line ("Failed to load sound <id>: Temp read failed") that is easy to miss under a boot log --
+	-- while this module cheerfully reports every subsequent Play() as succeeding, because :Play() on a
+	-- Sound with an unresolvable id raises nothing. Warned rather than corrected: silently rewriting a
+	-- caller's asset id would hide a genuine typo just as effectively as ignoring it, and this is the
+	-- kind of mistake that should be fixed at the constant.
+	if definition.SoundId ~= "" and not string.match(definition.SoundId, "^rbxassetid://") then
+		logger:warn(
+			"Sound registered with a SoundId that is not a content URL -- Roblox will fail to load it "
+				.. "and every Play() will silently do nothing. Prefix the asset id with 'rbxassetid://'.",
+			{ name = name, soundId = definition.SoundId }
+		)
+	end
+
 	registeredSounds[name] = { definition = definition, poolSize = poolSize, instances = {}, nextIndex = 1 }
 	logger:debug("Sound registered", { name = name, hasSoundId = definition.SoundId ~= "", poolSize = poolSize })
+end
+
+-- Writes a definition's properties onto a live Sound instance. Factored out of instance creation so
+-- Reconfigure (below) can re-apply a NEW definition to instances that already exist -- the two must
+-- agree on exactly which properties a definition controls, or a re-configured sound would keep some
+-- fields from its previous definition.
+--
+-- PlaybackRegion is applied through the PlaybackRegionsEnabled pair rather than assumed: a
+-- definition without one has to actively DISABLE the region, or a Reconfigure that removes a region
+-- would leave the old slice in force on an already-created instance.
+local function applyDefinition(sound: Sound, definition: SoundDefinition): ()
+	sound.SoundId = definition.SoundId
+	sound.Volume = definition.Volume
+	local region = definition.PlaybackRegion
+	if region then
+		sound.PlaybackRegion = region
+		sound.PlaybackRegionsEnabled = true
+	else
+		sound.PlaybackRegionsEnabled = false
+	end
 end
 
 local function getOrCreateInstanceAt(name: string, registered: RegisteredSound, index: number): Sound
@@ -88,8 +135,7 @@ local function getOrCreateInstanceAt(name: string, registered: RegisteredSound, 
 
 	local sound = Instance.new("Sound")
 	sound.Name = if index == 1 then name else `{name}{index}`
-	sound.SoundId = registered.definition.SoundId
-	sound.Volume = registered.definition.Volume
+	applyDefinition(sound, registered.definition)
 	sound.Parent = SoundService
 
 	registered.instances[index] = sound
@@ -101,7 +147,12 @@ end
 -- (never errors) if `name` was never registered, or if it was registered with an empty SoundId
 -- placeholder -- either is a config gap to fix, not a reason to interrupt whatever gameplay moment
 -- triggered this call.
-function SoundManager.Play(name: string): ()
+-- `playbackSpeed` is optional and per-play: pass one to pitch-shift THIS play without changing the
+-- registration (Client/FX/RunAudio.lua's per-footstep jitter is the first user -- a fixed-interval
+-- step system replaying one identical sample reads as a metronome, and a few percent of random pitch
+-- is the cheapest fix there is). Omitting it restores 1, so a pooled instance that was pitched by an
+-- earlier play never leaks that pitch into an unrelated later one.
+function SoundManager.Play(name: string, playbackSpeed: number?): ()
 	local registered = registeredSounds[name]
 	if not registered then
 		logger:warn("Play requested for unregistered sound", { name = name })
@@ -116,8 +167,57 @@ function SoundManager.Play(name: string): ()
 	registered.nextIndex = (registered.nextIndex % registered.poolSize) + 1
 
 	local sound = getOrCreateInstanceAt(name, registered, index)
+	sound.PlaybackSpeed = playbackSpeed or 1
 	sound:Play()
 	logger:debug("Sound played", { name = name, poolIndex = index })
+end
+
+-- Repoints an ALREADY-REGISTERED name at a new definition, in place -- the runtime half of "the step
+-- sounds are configurable." Register() warns and rebuilds on a duplicate name because two call sites
+-- claiming one name is a collision; this is the opposite case, one owner deliberately swapping its
+-- own sound (Client/FX/RunAudio.SetStepSound, so a step sound can be changed live without a rejoin),
+-- so it neither warns nor discards the pooled instances -- it re-applies the definition onto them.
+--
+-- Reusing the instances rather than rebuilding them is what keeps this leak-free: the old Sound
+-- objects are already parented to SoundService and already referenced by the pool, and creating
+-- replacements would strand the originals there forever, one set per swap.
+function SoundManager.Reconfigure(name: string, definition: SoundDefinition): ()
+	local registered = registeredSounds[name]
+	if not registered then
+		logger:warn("Reconfigure requested for unregistered sound", { name = name })
+		return
+	end
+	-- PoolSize is deliberately NOT re-read: it is a property of the pool, which already exists, and
+	-- growing/shrinking it mid-session would mean either orphaning live instances or handing the
+	-- round-robin index a range that no longer matches `instances`. A sound whose overlap
+	-- characteristics change that much is a different registration, not a reconfiguration.
+	registered.definition = definition
+	for _, sound in registered.instances do
+		applyDefinition(sound, definition)
+	end
+	logger:debug("Sound reconfigured", { name = name, hasSoundId = definition.SoundId ~= "" })
+end
+
+-- Silences every pooled instance of `name` at once -- the one-shot counterpart to StopLooped, for a
+-- caller whose sound has stopped being TRUE rather than having finished playing.
+--
+-- Play() is fire-and-forget precisely because a short one-shot has no meaningful stop point: a hit
+-- sound outliving the hit by 200ms is the sound, not a bug. A REPEATING one-shot is different --
+-- Client/FX/RunAudio.lua's footsteps are triggered while a condition holds, so when that condition
+-- ends, any still-playing copies are describing something that is no longer happening. With a pool
+-- of N and a cadence faster than the sample, that is up to N overlapping copies to cut, which is why
+-- this stops the whole pool rather than the last-played slot.
+--
+-- Costs nothing on an already-finished sound (Stop on a non-playing Sound is a no-op), so a caller
+-- may fire it on any edge it likes without checking first.
+function SoundManager.StopAll(name: string): ()
+	local registered = registeredSounds[name]
+	if not registered then
+		return
+	end
+	for _, sound in registered.instances do
+		sound:Stop()
+	end
 end
 
 -- Looped-sound capability (Client/FX/FlightAudio.lua's wind-rush loop is the first user) -- Play()

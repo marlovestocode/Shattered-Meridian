@@ -35,6 +35,8 @@ local SUB_STATE_GROUPS = {
 		SubtableKey = "Movement",
 		Fields = {
 			sprinting = true,
+			sprintChargeSeconds = true,
+			sprintStage = true,
 			dashWindowExpiry = true,
 			dashCooldownExpiry = true,
 			dashIsBackward = true,
@@ -120,6 +122,8 @@ local function makeState(overrides: { [string]: any }?): CombatState
 		},
 		Movement = {
 			sprinting = false,
+			sprintChargeSeconds = 0,
+			sprintStage = 0,
 			dashWindowExpiry = 0,
 			dashCooldownExpiry = 0,
 			dashIsBackward = false,
@@ -792,6 +796,181 @@ return function()
 				end
 				expect(speed).to.equal(27)
 			end)
+		end)
+	end)
+
+	-- THE TWO-STAGE RUN. The mechanic splits into two pure functions (the charge clock and the stage
+	-- resolver) plus one thin Attribute-reading call site, which is exactly the split that makes it
+	-- testable without a live character -- the same reason ComputeDesiredWalkSpeed/SmoothWalkSpeed
+	-- above are separate from CombatSystem's heartbeat.
+	describe("Movement.IsSprintTierActive", function()
+		it("is true for a plain held sprint with nothing else going on", function()
+			expect(Movement.IsSprintTierActive(makeState({ sprinting = true }), 100)).to.equal(true)
+		end)
+
+		it("is false without the held intent", function()
+			expect(Movement.IsSprintTierActive(makeState(), 100)).to.equal(false)
+		end)
+
+		it("is false while blocking, mid-commitment, stunned or posture-broken", function()
+			expect(Movement.IsSprintTierActive(makeState({ sprinting = true, blocking = true }), 100)).to.equal(false)
+			expect(Movement.IsSprintTierActive(makeState({ sprinting = true, attackEndsAt = 200 }), 100)).to.equal(
+				false
+			)
+			expect(Movement.IsSprintTierActive(makeState({ sprinting = true, stunExpiry = 200 }), 100)).to.equal(false)
+			expect(Movement.IsSprintTierActive(makeState({ sprinting = true, postureBrokenExpiry = 200 }), 100)).to.equal(
+				false
+			)
+		end)
+	end)
+
+	describe("Movement.ComputeSprintCharge", function()
+		local threshold = Constants.Combat.SprintStage2ThresholdSeconds
+
+		it("accrues one second of charge per second of running", function()
+			expect(Movement.ComputeSprintCharge(0, 0.5, true, false)).to.equal(0.5)
+			expect(Movement.ComputeSprintCharge(2, 0.25, true, false)).to.equal(2.25)
+		end)
+
+		it("caps the charge at the threshold, so a long run cannot be banked", function()
+			expect(Movement.ComputeSprintCharge(threshold - 0.1, 5, true, false)).to.equal(threshold)
+			expect(Movement.ComputeSprintCharge(threshold, 5, true, false)).to.equal(threshold)
+		end)
+
+		it("decays faster than it builds when the sprint tier is not being granted", function()
+			local decayed = Movement.ComputeSprintCharge(4, 1, false, false)
+			expect(decayed).to.equal(4 - Constants.Combat.SprintChargeDecayMultiplier)
+			expect(decayed < 4).to.equal(true)
+		end)
+
+		it("never decays below zero", function()
+			expect(Movement.ComputeSprintCharge(0.1, 10, false, false)).to.equal(0)
+		end)
+
+		it("HOLDS the charge while a parkour action owns velocity -- a vault mid-run is not a stop", function()
+			-- Neither accruing nor decaying: a wall-run is not running, but it must not cost a player
+			-- the stride they already earned. See Constants.Combat.SprintStage2SpeedMultiplier's header.
+			expect(Movement.ComputeSprintCharge(5, 1, false, true)).to.equal(5)
+			expect(Movement.ComputeSprintCharge(5, 1, true, true)).to.equal(5)
+		end)
+
+		it("holds for a zero or negative deltaTime rather than accruing or decaying off it", function()
+			expect(Movement.ComputeSprintCharge(3, 0, true, false)).to.equal(3)
+			expect(Movement.ComputeSprintCharge(3, -1, false, false)).to.equal(3)
+		end)
+	end)
+
+	describe("Movement.ResolveSprintStage", function()
+		local threshold = Constants.Combat.SprintStage2ThresholdSeconds
+		local sustainFloor = threshold * Constants.Combat.SprintStage2SustainFraction
+
+		it("is stage 0 whenever sprint is not held, whatever the charge", function()
+			expect(Movement.ResolveSprintStage(2, threshold, false)).to.equal(0)
+			expect(Movement.ResolveSprintStage(1, 0, false)).to.equal(0)
+		end)
+
+		it("is stage 1 while sprinting below the threshold", function()
+			expect(Movement.ResolveSprintStage(1, threshold - 0.01, true)).to.equal(1)
+			expect(Movement.ResolveSprintStage(0, 0, true)).to.equal(1)
+		end)
+
+		it("reaches stage 2 only at a full charge", function()
+			expect(Movement.ResolveSprintStage(1, threshold, true)).to.equal(2)
+		end)
+
+		it("holds stage 2 through a dip that a fresh entry would not clear -- the flicker guard", function()
+			-- Entering needs the full threshold; staying only needs SprintStage2SustainFraction of it,
+			-- so one frame of a gate flickering cannot replay the onset whoosh and the clip crossfade.
+			local dipped = (threshold + sustainFloor) / 2
+			expect(Movement.ResolveSprintStage(2, dipped, true)).to.equal(2)
+			expect(Movement.ResolveSprintStage(1, dipped, true)).to.equal(1)
+		end)
+
+		it("drops out of stage 2 once the charge falls below the sustain floor", function()
+			expect(Movement.ResolveSprintStage(2, sustainFloor - 0.01, true)).to.equal(1)
+		end)
+	end)
+
+	describe("Movement.UpdateSprintStage", function()
+		-- MoveDirection is engine-driven and cannot be written on a bare Humanoid, so Movement.IsMoving
+		-- is always false here -- which is exactly the "not accruing" branch these tests need. The
+		-- accrual side is covered directly through ComputeSprintCharge above.
+		it("decays a standing player's charge and drops the stage back to 1", function()
+			local state = makeState({ sprinting = true, sprintChargeSeconds = 7, sprintStage = 2 })
+			local stage = Movement.UpdateSprintStage(state, 100, 3)
+			expect(state.Movement.sprintChargeSeconds < 7).to.equal(true)
+			expect(stage).to.equal(1)
+			expect(state.Movement.sprintStage).to.equal(1)
+		end)
+
+		it("freezes the charge while ParkourVelocityOwned is set", function()
+			local humanoid = Instance.new("Humanoid")
+			humanoid:SetAttribute(Constants.Attributes.ParkourVelocityOwned, true)
+			local state = makeState({
+				humanoid = humanoid,
+				sprinting = true,
+				sprintChargeSeconds = 5,
+				sprintStage = 1,
+			})
+			Movement.UpdateSprintStage(state, 100, 1)
+			expect(state.Movement.sprintChargeSeconds).to.equal(5)
+		end)
+
+		it("does NOT freeze the charge for a lockout, even one that also owns velocity", function()
+			-- Flying with the sprint key held is not running, and the parkour freeze must not be a way
+			-- to preserve a stride across it.
+			local humanoid = Instance.new("Humanoid")
+			humanoid:SetAttribute(Constants.Attributes.ParkourVelocityOwned, true)
+			humanoid:SetAttribute(Constants.Attributes.Flying, true)
+			local state = makeState({
+				humanoid = humanoid,
+				sprinting = true,
+				sprintChargeSeconds = 5,
+				sprintStage = 1,
+			})
+			Movement.UpdateSprintStage(state, 100, 1)
+			expect(state.Movement.sprintChargeSeconds < 5).to.equal(true)
+		end)
+
+		it("resolves stage 0 the moment sprint is released", function()
+			local state = makeState({ sprinting = false, sprintChargeSeconds = 7, sprintStage = 2 })
+			expect(Movement.UpdateSprintStage(state, 100, 1 / 60)).to.equal(0)
+		end)
+	end)
+
+	describe("Movement.ComputeDesiredWalkSpeed run stages", function()
+		local base = Constants.Combat.BaseWalkSpeed
+
+		it("uses the stage-1 multiplier at stage 1", function()
+			local state = makeState({ sprinting = true, sprintStage = 1 })
+			expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base * Constants.Combat.SprintSpeedMultiplier)
+		end)
+
+		it("uses the stage-2 multiplier at stage 2", function()
+			local state = makeState({ sprinting = true, sprintStage = 2 })
+			expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(
+				base * Constants.Combat.SprintStage2SpeedMultiplier
+			)
+		end)
+
+		it("grants no sprint speed at all at stage 2 while the tier's own gates say no", function()
+			-- The stage is not a licence: a stage-2 runner who blocks, swings, is stunned or is
+			-- posture-broken is on base speed like anyone else, which is what keeps the faster tier out
+			-- of a fight entirely. See Constants.Combat.SprintStage2SpeedMultiplier's own header.
+			expect(
+				Movement.ComputeDesiredWalkSpeed(makeState({ sprinting = true, sprintStage = 2, blocking = true }), 100)
+			).to.equal(base)
+			expect(
+				Movement.ComputeDesiredWalkSpeed(
+					makeState({ sprinting = true, sprintStage = 2, stunExpiry = 200 }),
+					100
+				)
+			).to.equal(base)
+		end)
+
+		it("still loses to hit-slow, so stage 2 cannot outrun the consequences of being hit", function()
+			local state = makeState({ sprinting = true, sprintStage = 2, hitSlowExpiry = 200 })
+			expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base * Constants.Combat.HitSlowMultiplier)
 		end)
 	end)
 end

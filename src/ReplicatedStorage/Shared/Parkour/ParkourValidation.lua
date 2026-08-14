@@ -52,6 +52,7 @@ local VALID_KINDS: { [string]: boolean } = {
 	WallRun = true,
 	WallJump = true,
 	LedgeClimb = true,
+	Leap = true,
 	Roll = true,
 }
 
@@ -67,6 +68,9 @@ export type ValidationConfig = {
 	MaxVerticalGainStuds: number,
 	MaxTravelSpeed: number,
 	MaxActionSeconds: number,
+	-- Read only by ResolveMomentumCarry -- see its own header for what they defend against.
+	MomentumCarryObservedTolerance: number,
+	MomentumCarryObservedSlackStuds: number,
 }
 
 -- What the SERVER independently knows, gathered by ParkourSystem before calling in here. Nothing in
@@ -155,7 +159,8 @@ end
 --     regardless of how reasonable its other numbers look.
 --   * Reported speed -- catches the crude "I am moving at 5000" claim.
 --   * Per-kind interval -- catches a stuck or scripted client re-firing one action every frame,
---     more cheaply and more specifically than the shared rate limiter can.
+--     more cheaply and more specifically than the shared rate limiter can. START REPORTS ONLY, and
+--     that restriction is load-bearing rather than a nicety -- see the End-phase note below.
 --   * Duration -- a Start report may not claim an ownership window longer than MaxActionSeconds,
 --     and an End report may not close a window that has been open longer than that (the server
 --     expires those itself; a late End is a symptom, not something to honor).
@@ -181,14 +186,30 @@ function ParkourValidation.Validate(
 		return false, "ImplausibleTravel"
 	end
 
-	if
-		observed.LastSameKindAt > 0
-		and (observed.Now - observed.LastSameKindAt) < observed.MinSameKindIntervalSeconds
-	then
-		return false, "DuplicateAction"
-	end
-
 	if report.Phase == "Start" then
+		-- THE PER-KIND INTERVAL, and why it lives inside the Start branch rather than above the split.
+		--
+		-- It used to run before the phase test, applying to Starts and Ends alike, and that was a real
+		-- and very visible bug rather than an over-strict rule: a Start grants velocity ownership
+		-- (ParkourSystem.beginAction sets ParkourVelocityOwned, which pins the player's WalkSpeed at zero
+		-- in Movement.ComputeDesiredWalkSpeed) and the End is the only thing that gives it back. Any
+		-- action that legitimately ends within MinSameKindIntervalSeconds of starting therefore had its
+		-- RELEASE rejected as a duplicate and left the player frozen where they stood until the server's
+		-- own window expiry rescued them -- most reliably a wall-jump that reaches the ground almost
+		-- immediately, which States/WallJumping.Update ends after 0.05s against a 0.06s interval. That is
+		-- the "sometimes I get stuck when I land" report, and it is not a rate problem at all.
+		--
+		-- A Start is a CLAIM and a claim can be spammed, which is what this check is for. An End is a
+		-- RELEASE: refusing one can never protect anything -- the worst a flood of Ends can do is close
+		-- windows that are already closed -- while granting one always returns the player their own
+		-- movement. There is no version of this check on the End phase that is not strictly harmful.
+		if
+			observed.LastSameKindAt > 0
+			and (observed.Now - observed.LastSameKindAt) < observed.MinSameKindIntervalSeconds
+		then
+			return false, "DuplicateAction"
+		end
+
 		local duration = report.DurationSeconds
 		if duration ~= nil and (duration <= 0 or duration > config.MaxActionSeconds) then
 			return false, "ActionTooLong"
@@ -259,6 +280,56 @@ end
 -- threshold flags, one below does not).
 function ParkourValidation.ShouldFlag(rejectionCount: number, threshold: number): boolean
 	return rejectionCount >= threshold
+end
+
+-- THE MOMENTUM CARRY AN END REPORT HAS EARNED, or nil for "grant nothing." The one client-supplied
+-- number in this feature that reaches gameplay, so it is resolved here -- pure, and specced -- rather
+-- than inline in ParkourSystem where an orchestrator's environment makes it untestable.
+--
+-- Two independent ceilings, because this closes a real exploit rather than guarding a typo.
+--
+-- 1. `hadOpenWindow`. Validate deliberately ACCEPTS an End that matches no open window: the server
+--    expires windows on its own, a slightly-late End is the ordinary benign case, and refusing one
+--    can only strand an honest player's movement. But "not worth rejecting" was being read as
+--    "earned a reward," so an End needed no Start at all to stamp a speed floor. Firing
+--    End{Kind="Slide", Speed=110} on a loop while standing still -- having never performed a parkour
+--    action -- held a permanent WalkSpeed near 59 against a base of 18. Every one of those reports
+--    was accepted, so the suspected-cheater counter never moved either.
+--
+-- 2. `observedPlanarSpeed`, the speed the SERVER can see the body actually travelling. Requiring a
+--    real window alone does not finish the job: an attacker can still cycle Start/End at the rate
+--    limit and claim 110 each time, since a stationary player trivially passes the travel checks.
+--    Comparing the claim against replicated truth is what makes the claim worth something.
+--
+-- The observed check is a CLAMP, never a rejection, and its tolerance is deliberately generous: the
+-- server's view of a client-owned assembly is slightly stale, and an honest slide ending at real
+-- speed must never lose its carry to a network hiccup. A claim inflated enough to matter is off by
+-- far more than this margin. Pass observedPlanarSpeed = nil when the body can't be read at all (no
+-- root part), which falls back to the reported-speed ceiling alone.
+function ParkourValidation.ResolveMomentumCarry(
+	reportedSpeed: number,
+	observedPlanarSpeed: number?,
+	hadOpenWindow: boolean,
+	config: ValidationConfig
+): number?
+	if not hadOpenWindow then
+		return nil
+	end
+
+	local carry = math.clamp(reportedSpeed, 0, config.MaxReportedSpeed)
+
+	if observedPlanarSpeed ~= nil and observedPlanarSpeed == observedPlanarSpeed then
+		-- The self-inequality above is the NaN guard, and it is load-bearing rather than defensive: a
+		-- NaN ceiling would make the comparison below false and pass the raw claim straight through --
+		-- the exact outcome this function exists to prevent.
+		local ceiling = observedPlanarSpeed * config.MomentumCarryObservedTolerance
+			+ config.MomentumCarryObservedSlackStuds
+		if carry > ceiling then
+			return ceiling
+		end
+	end
+
+	return carry
 end
 
 return ParkourValidation

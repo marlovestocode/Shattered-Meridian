@@ -58,6 +58,8 @@ local cooldownUntil = 0
 -- forced slide ignores the "released the key" exit -- there was never a key -- and ends when the
 -- ground flattens out instead.
 local forced = false
+-- When contact was lost, or 0 while the character is grounded. See the grace block in Update.
+local lostContactAt = 0
 
 local Sliding: ParkourTypes.StateDefinition = {
 	Id = "Sliding",
@@ -98,6 +100,7 @@ local Sliding: ParkourTypes.StateDefinition = {
 	Enter = function(context: ParkourContext): ()
 		InputBuffer.ConsumeSlide(context.Now)
 		forced = context.Ground.SlopeAngle >= ParkourConstants.Slope.ForcedSlideAngleDegrees
+		lostContactAt = 0
 
 		slideDirection = StateSupport.TravelDirection(context)
 		-- A FORCED slide starts down the fall line, not along whatever direction the character happened
@@ -132,10 +135,36 @@ local Sliding: ParkourTypes.StateDefinition = {
 	end,
 
 	Update = function(context: ParkourContext): ParkourTypes.TransitionResult
-		-- Airborne mid-slide (slid off an edge). Hand the live momentum to the fall rather than
-		-- dropping it -- sliding off a roof should carry.
-		if not context.Ground.Grounded then
-			return "Falling"
+		-- CONTACT LOSS: ended the slide immediately, which is right for sliding off a roof and wrong for
+		-- everything else.
+		--
+		-- A grounded slide legitimately loses contact for a frame or two all the time -- the crest of a
+		-- ramp, a seam between two parts, a bump -- and, the case that made this urgent, whenever the
+		-- character's own animated mass tips the root far enough that a straight-down cast from its centre
+		-- reads longer than GroundedDistance. That is why a slide down a slope ran fine with no clip
+		-- attached and died within a few frames of entry once one was: nothing about the SLOPE changed,
+		-- the contact test did. (The tipping itself is fought at its source in ParkourMotor -- see
+		-- GUARDED_HUMANOID_STATES and ORIENTATION_MAX_TORQUE there. This is the second line of defence,
+		-- and the one that also covers ordinary uneven terrain.)
+		--
+		-- The grace is gated on the floor still BEING there, not on time alone, which is what keeps
+		-- sliding off an edge instant: over a real drop the floor leaves the band on the very first frame
+		-- (Ground.Distance is measured from the sole and climbs immediately), so this returns Falling with
+		-- the live momentum exactly as before. Only a floor still within arm's reach buys the window, and
+		-- only for SurfaceGraceSeconds of it.
+		local grounded = context.Ground.Grounded
+		if grounded then
+			lostContactAt = 0
+		else
+			local floorStillThere = context.Ground.NearGround and context.Ground.Distance <= SLIDE.SurfaceGraceDistance
+			if not floorStillThere then
+				return "Falling"
+			end
+			if lostContactAt == 0 then
+				lostContactAt = context.Now
+			elseif (context.Now - lostContactAt) > SLIDE.SurfaceGraceSeconds then
+				return "Falling"
+			end
 		end
 
 		local signedSlope = ParkourMath.SignedSlopeAlong(context.Ground.Normal, slideDirection)
@@ -169,10 +198,12 @@ local Sliding: ParkourTypes.StateDefinition = {
 
 		local motor = context.Motor
 		motor.Mode = "Velocity"
-		-- A small constant downward bias keeps the body in contact with the surface across small
-		-- bumps; without it a slide over uneven ground repeatedly goes briefly airborne and the
-		-- grounded check flickers.
-		motor.Velocity = travel * context.Momentum - Vector3.new(0, 8, 0)
+		-- A constant downward bias keeps the body in contact with the surface across small bumps; without
+		-- it a slide over uneven ground repeatedly goes briefly airborne and the grounded check flickers.
+		-- It gets substantially stronger during the grace window above, because the entire point of that
+		-- window is to get contact BACK, and pulling at the cruising value would just spend it drifting.
+		local stickSpeed = if grounded then SLIDE.SurfaceStickSpeed else SLIDE.SurfaceRecoverStickSpeed
+		motor.Velocity = travel * context.Momentum - Vector3.new(0, stickSpeed, 0)
 		motor.CancelGravity = false
 		motor.FaceDirection = travel
 		motor.HipHeightDelta = SLIDE.HipHeightDelta
@@ -212,7 +243,12 @@ local Sliding: ParkourTypes.StateDefinition = {
 
 		-- EXIT 4: the slide is over on its own terms. Four conditions, any of which ends it -- but
 		-- none of them may fire while there is something overhead, or the character stands up inside
-		-- it.
+		-- it, and none may fire mid-grace either: every one of them hands off to a GROUNDED state
+		-- (ResolveGroundedState), and resolving to Walking while the feet are off the floor would put the
+		-- character in a state whose own first act is to notice it is airborne.
+		if not grounded then
+			return nil
+		end
 		if not context.CeilingClear then
 			return nil
 		end
@@ -253,11 +289,38 @@ local Sliding: ParkourTypes.StateDefinition = {
 	Exit = function(context: ParkourContext, nextState: ParkourTypes.MovementStateId): ()
 		cooldownUntil = context.Now + SLIDE.CooldownSeconds
 		forced = false
+		lostContactAt = 0
 
-		-- Traversal and jump exits keep driving the body themselves (kinematic path, or an impulse
-		-- already applied above), so handing off to physics here would fight them. Every other exit
-		-- releases the body with the slide's live momentum.
-		if nextState == "Vaulting" or nextState == "Mantling" or nextState == "Jumping" or nextState == "Rolling" then
+		-- THE SLIDE-JUMP GETS A HAND-OFF, and leaving it out of one was why it didn't work.
+		--
+		-- Jumping used to sit in the early-return list below, on the reasoning that TryJump had
+		-- already applied an impulse and a hand-off would fight it. That reasoning is about the
+		-- VELOCITY field, but the field that mattered was MODE. StateSupport.HandOff is the only thing
+		-- that rewrites Motor.Mode back to "Humanoid", and Jumping.Enter never touches the motor -- so
+		-- skipping the hand-off left the frame's command as the slide's own "Velocity" mode, and
+		-- ParkourController commits that command immediately after the transition. The slide's
+		-- LinearVelocity drive (MaxForce 90000) was therefore commanded to -SurfaceStickSpeed on the
+		-- Y axis on the very frame the jump was launched, which is far more authority than the
+		-- impulse's 50 studs/s survives. The next frame read a negative vertical velocity and fell
+		-- through Jumping -> Falling -> Landing. Sprint, slide, press jump, and the character just
+		-- kept sliding.
+		--
+		-- Handing off with the LIVE post-impulse velocity is the fix: TryJump has already written the
+		-- jump into AssemblyLinearVelocity by this point, so this releases the body to physics
+		-- carrying exactly what the jump gave it. Apply's Humanoid branch re-writes that same value on
+		-- the mode change, which is a no-op, and -- crucially -- tears down the velocity drive instead
+		-- of leaving it commanded.
+		if nextState == "Jumping" then
+			StateSupport.HandOff(context, context.RootPart.AssemblyLinearVelocity)
+			return
+		end
+
+		-- The remaining traversal exits keep driving the body themselves: Vaulting and Mantling are
+		-- kinematic and write their own TargetCFrame in Enter, and Rolling writes its own velocity
+		-- command -- so each overwrites this frame's command before it is committed, and a hand-off
+		-- here would only fight them. Every other exit releases the body with the slide's live
+		-- momentum.
+		if nextState == "Vaulting" or nextState == "Mantling" or nextState == "Rolling" then
 			return
 		end
 		local travel = ParkourMath.SafeUnit(ParkourMath.Flatten(slideDirection), Vector3.zero)

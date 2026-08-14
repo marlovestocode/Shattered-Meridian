@@ -78,6 +78,26 @@
 	other camera-property writers, applied to MouseBehavior specifically since no shared composer
 	exists for that property yet -- a second caller needing the same suspend semantics for a different
 	reason is the point at which generalizing this into one would earn its keep.
+
+	Yaw suspension (2026-08-13, parkour): the "ParkourFacingOwned" Humanoid Attribute skips ONLY the
+	per-frame root.CFrame write below, leaving MouseBehavior, CameraOffset and `enabled`/`engaged`
+	alone. Client/Parkour/ParkourMotor.lua raises it for exactly the window in which it owns the
+	character's rotation -- an AlignOrientation drive during Velocity-mode traversals (wall-run,
+	wall-jump, vault, mantle) and a directly-written anchored CFrame during Kinematic ones (the ledge
+	hang). Without it, both of those fought this module's yaw write every render step for the whole
+	duration of the move: the traversal's own facing was overwritten toward camera yaw every frame,
+	which is what made a shift-locked mantle twitch and a shift-locked ledge hang refuse to hold its
+	pose against the wall.
+
+	Deliberately NOT routed through SetInputSuspended -- that one releases the mouse too, which is
+	right for the emote wheel and wrong here, since a player mid-mantle is still shift-locked and still
+	expects a locked cursor. The two suspensions are independent; either, both, or neither may be
+	active. And deliberately an Attribute rather than a setter like SetInputSuspended's: the parkour
+	folder would otherwise have to require this module, which drags Fusion and the whole camera stack
+	into the parkour state registry's load chain (Client/Camera is not mounted in test.project.json, so
+	Tests/Parkour/StateRegistry.spec would fail outright). Reading it costs the same cached-boolean
+	watch this module already runs for Flying and RootControlLocked, and adds no dependency in either
+	direction -- see Constants.Attributes.ParkourFacingOwned's own note.
 ]]
 
 local Players = game:GetService("Players")
@@ -134,6 +154,15 @@ local crosshairEngaged: Fusion.Value<boolean>? = nil
 -- below -- a plain boolean check, not a GetAttribute/remote lookup, so suspending costs nothing on
 -- every OTHER frame this mode isn't engaged anyway.
 local inputSuspended = false
+
+-- Mirrors this character's own Humanoid "ParkourFacingOwned" Attribute -- see this file's header,
+-- "Yaw suspension" section, and Constants.Attributes.ParkourFacingOwned's own note. Same cached-local
+-- + GetAttributeChangedSignal shape as rootControlLocked/flying above, and cached for the same reason:
+-- onRenderStep reads it every frame and a GetAttribute call there would not be free. Deliberately
+-- separate from `inputSuspended` above, which also releases the mouse -- right for the emote wheel,
+-- wrong for a traversal, since a player mid-mantle is still shift-locked and still expects a locked
+-- cursor.
+local parkourFacingOwned = false
 
 local function setEngaged(nowEngaged: boolean): ()
 	if nowEngaged == engaged then
@@ -232,6 +261,16 @@ local function onRenderStep(_deltaTime: number): ()
 		return
 	end
 
+	-- See this file's header, "Yaw suspension" section -- Client/Parkour/ParkourMotor.lua owns the
+	-- character's rotation for the duration of an owned traversal, and this write would otherwise
+	-- contest it every render step. Grouped with the rootControlLocked/flying guard above rather than
+	-- folded into it because it is a different owner with a different lifetime, and kept AFTER the
+	-- MouseBehavior re-assert because a suspended YAW is not a suspended MODE: the player is still
+	-- shift-locked and still expects a locked cursor while a mantle plays out.
+	if parkourFacingOwned then
+		return
+	end
+
 	-- Flattened with the same degenerate-vector guard CombatSystem.lua's isWithinAttackArc uses --
 	-- a camera pitched straight down has no usable yaw for one frame, so the character just keeps
 	-- its current facing until it does.
@@ -279,6 +318,15 @@ local function onCharacterAdded(character: Model): ()
 	flying = humanoidInstance:GetAttribute(Constants.Attributes.Flying) == true
 	humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.Flying):Connect(function()
 		flying = humanoidInstance:GetAttribute(Constants.Attributes.Flying) == true
+	end)
+
+	-- Same shape again, one owner further out: this one is written by another CLIENT module
+	-- (Client/Parkour/ParkourMotor.lua) rather than by the server, which changes nothing about how it
+	-- is read. Seeded rather than assumed false for the same reason as the two above -- a rapid respawn
+	-- can land this bind after the motor has already taken the new character.
+	parkourFacingOwned = humanoidInstance:GetAttribute(Constants.Attributes.ParkourFacingOwned) == true
+	humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.ParkourFacingOwned):Connect(function()
+		parkourFacingOwned = humanoidInstance:GetAttribute(Constants.Attributes.ParkourFacingOwned) == true
 	end)
 
 	logger:debug("Character bound", { enabled = enabled, rootControlLocked = rootControlLocked })

@@ -133,7 +133,6 @@
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -145,6 +144,7 @@ local ChangeNotifier = require(ReplicatedStorage.Shared.ChangeNotifier)
 local ConstantsValidation = require(ReplicatedStorage.Shared.ConstantsValidation)
 local CombatTypes = require(script.Parent.Parent.Combat.CombatTypes)
 local Movement = require(script.Parent.Parent.Combat.Movement)
+local HealthRegen = require(script.Parent.Parent.Combat.HealthRegen)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local AnimationTimeline = require(ReplicatedStorage.Shared.AnimationTimeline)
 local MoveRegistryManager = require(script.Parent.Parent.Combat.MoveRegistryManager)
@@ -216,7 +216,7 @@ local combatStates: { [Player]: CombatState } = {}
 -- passed through any instance -- see handleBlockStop's own comment for why a rate-limited release
 -- action is a stuck-state bug, not a safe drop.
 local attackRateLimiter = RateLimiter.New(Constants.NetworkBudget.MaxAttackCallsPerSecondPerPlayer)
-local defensiveRateLimiter = RateLimiter.New(Constants.NetworkBudget.MaxRemoteCallsPerSecondPerPlayer)
+local defensiveRateLimiter = RateLimiter.New(Constants.NetworkBudget.MaxDefensiveCallsPerSecondPerPlayer)
 local utilityRateLimiter = RateLimiter.New(Constants.NetworkBudget.MaxRemoteCallsPerSecondPerPlayer)
 
 -- Three independent ChangeNotifier instances (Shared/ChangeNotifier), one per per-player
@@ -617,8 +617,15 @@ end
 -- Re-derives InCombat every tick and hands it to inCombatNotifier, which fires Combat_InCombatChanged
 -- (wired in Init()) only on a true/false transition -- the first real consumer of CombatState.
 -- inCombatUntil (see that field's own header): drives the HUD's combat-state badge (Components/
--- CombatStateBadge.lua). Purely a presentation signal -- no request handler reads inCombatUntil, so
--- this sync has no gameplay side effect.
+-- CombatStateBadge.lua).
+--
+-- THIS SYNC is still purely presentational -- no request handler reads inCombatUntil, and nothing
+-- gameplay-facing depends on the remote it fires. But inCombatUntil ITSELF no longer is: passive
+-- health regen in onHeartbeat gates entirely on that window having lapsed, so the field now has a
+-- real gameplay consequence and, with it, so does refreshInCombatFromProximity. That is intended --
+-- healing while circling a live opponent is exactly what the proximity extension should prevent --
+-- but it does mean a tuning change to InCombatDurationSeconds or CombatEngagementRange is no longer
+-- a badge-only change, and the note that used to sit here saying otherwise would now be wrong.
 local function syncInCombat(player: Player, state: CombatState, now: number): ()
 	local isInCombat = now < state.inCombatUntil
 	inCombatNotifier:Update(player, isInCombat)
@@ -676,19 +683,29 @@ end
 -- startAttackSwing) so deaths/leaves/new lock-on state/dummy despawns mid-swing are always
 -- reflected -- never trusted or cached across samples.
 --
--- Nearby PLAYERS are found via a spatial query (Workspace:GetPartBoundsInRadius, bounded by
--- Constants.Combat.Hitboxes.MaxCandidateRadius) rather than scanning every player on the server --
--- a manual `pairs(combatStates)` scan here was exactly the unbounded cost
--- performance-optimization.md warns against (O(total server players) per sample, per
--- concurrently-attacking combatant, up to MaxSamplesPerSwing times per swing at 30Hz -- growing
--- with total player count even for a 1v1 duel in the corner of a crowded server). This mirrors
--- HitboxResolver.performSample's own overlap-query pattern one step later in the pipeline, so cost
--- now scales with local combat density instead. The locked-on target is fetched directly by key
--- instead of through the radius query, so it's never distance-filtered -- preserves the prior
--- behavior that an already-acquired lock-on target is always offered regardless of range.
--- Dummies (small, dev-only, MaxActive-capped) and the attacker's own bot(s) (O(1) via
--- botsByOwner) are cheap enough to keep scanning directly; neither was ever the scalability
--- concern this addresses.
+-- Nearby PLAYERS are found by scanning combatStates directly and distance-filtering against
+-- Constants.Combat.Hitboxes.MaxCandidateRadius.
+--
+-- This REPLACED a Workspace:GetPartBoundsInRadius spatial query, reversing the reasoning that used
+-- to be written here. That reasoning said a `pairs(combatStates)` scan was "the unbounded cost
+-- performance-optimization.md warns against -- O(total server players) per sample," and that the
+-- query made cost "scale with local combat density instead." The first half is a fair description of
+-- the scan; the second half was simply not true of the query as written. It used an EXCLUDE filter,
+-- which returns every part in the volume -- all map geometry, props, debris, and every limb and
+-- accessory of every character -- so its cost scaled with local map DECORATION, not combat density,
+-- and on a decorated map a 220-stud sphere is thousands of parts. The scan it was avoiding is at
+-- most ~50 iterations of pure arithmetic with no engine call and no large allocation.
+--
+-- Both audits that flagged this kept it open pending a decorated-map measurement. That measurement
+-- isn't needed to make the call, because the query was answering a question this file already had
+-- the answer to: it enumerated world geometry in order to find PLAYERS, and combatStates is already
+-- an exact, complete, player-cap-bounded index of exactly those. See the body for the details.
+--
+-- The locked-on target is still fetched directly by key rather than through the distance filter, so
+-- it's never range-filtered -- preserving the behavior that an already-acquired lock-on target is
+-- always offered. Dummies (small, dev-only, MaxActive-capped) and the attacker's own bot(s) (O(1)
+-- via botsByOwner) are scanned directly, exactly as they always were -- neither ever went through
+-- the spatial query at all, which is itself a hint that the query was only ever doing player lookup.
 -- Shared by getSwingCandidates (origin = the attacker's own root position) and
 -- getProjectileCandidates (origin = a fired projectile's own current position, re-queried fresh
 -- every sample as HitboxResolver.Update advances it) -- see getProjectileCandidates' own header
@@ -717,53 +734,38 @@ local function gatherCandidatesNear(attackerState: CombatState, origin: Vector3)
 		end
 	end
 
-	local overlapParams = OverlapParams.new()
-	overlapParams.FilterType = Enum.RaycastFilterType.Exclude
-	overlapParams.FilterDescendantsInstances = { attackerCharacter }
-
-	-- No MaxParts on this query (unlike HitboxResolver's own box query, which sets one) -- it's an
-	-- Exclude filter, so returning EVERY part in a MaxCandidateRadius-stud sphere (map geometry,
-	-- props, debris, every limb/accessory of every nearby character) rather than just combatants is
-	-- the July/August performance audits' still-open finding (docs/architecture/2026-07-audit.md
-	-- §2.3). Cost here is entirely a function of local map decoration, not something a bare-baseplate
-	-- Studio session will ever surface -- MicroProfiler markers + this trace exist so a real S2 scenario
-	-- (decorated map vs. bare baseplate, per that audit's own §7 instrumentation plan) can be measured
-	-- before deciding whether the fix (a collision-group-filtered Include query, see that finding's own
-	-- recommendation) is actually worth building. Deliberately NOT changing the query shape in this
-	-- pass -- see this repo's 2026-08 performance-audit follow-up plan.
-	debug.profilebegin("CombatSystem.gatherCandidatesNear.RadiusQuery")
-	local nearbyParts =
-		Workspace:GetPartBoundsInRadius(origin, Constants.Combat.Hitboxes.MaxCandidateRadius, overlapParams)
-	debug.profileend()
-	logger:trace("gatherCandidatesNear radius query", {
-		radiusQueryParts = #nearbyParts,
-		radius = Constants.Combat.Hitboxes.MaxCandidateRadius,
-	})
-
-	-- Every character has exactly one part named "HumanoidRootPart" -- filtering to just that name
-	-- (rather than considering every limb/accessory part the radius query returns) means each
-	-- nearby character is only ever classified/deduped once, same assumption onCharacterAdded/
-	-- createTrainingDummy/createTrainingBot already make when they locate this part by name.
-	local consideredPlayers: { [Player]: boolean } = {}
-	for _, part in ipairs(nearbyParts) do
-		if part.Name ~= "HumanoidRootPart" then
+	-- NO SPATIAL QUERY. This used to be an Exclude-filtered Workspace:GetPartBoundsInRadius over a
+	-- MaxCandidateRadius (220-stud) sphere with no MaxParts -- carried as a known-open finding by both
+	-- the July and August performance audits (docs/architecture/2026-07-audit.md §2.3), on the
+	-- reasoning that the fix should be measured on a decorated map before being built.
+	--
+	-- Measuring it turned out to be beside the point, because the query was answering a question the
+	-- server already had the answer to. Look at what the loop below it actually did: it took every
+	-- part the engine returned, kept only those named "HumanoidRootPart", mapped each back to a Player
+	-- through characterToPlayer, and then threw away anything that wasn't in combatStates. In other
+	-- words it used a broadphase over all world geometry to enumerate PLAYERS -- and combatStates is
+	-- already an exact, complete index of exactly those, bounded by the server's player cap (~50).
+	-- Dummies and bots never went through the query at all; they are enumerated from their own
+	-- registries directly, immediately below.
+	--
+	-- An Exclude filter means the engine returns EVERYTHING in the volume -- map geometry, props,
+	-- debris, every limb and accessory of every character -- so on a decorated map this was allocating
+	-- and scanning a multi-thousand-element array. At SampleRate 1/30 for the whole active window of
+	-- every swing, plus once per in-flight projectile, across every attacker on the server.
+	--
+	-- A direct scan is O(players) with zero engine calls and zero large allocations, and is strictly
+	-- cheaper than the spatial query at any population this game supports. The radius still applies,
+	-- as a plain distance test against the same constant -- which is also a slightly TIGHTER filter
+	-- than before, since the old query tested part BOUNDS (a character whose accessory clipped the
+	-- sphere qualified while their root was outside it).
+	debug.profilebegin("CombatSystem.gatherCandidatesNear.PlayerScan")
+	local maxRadius = Constants.Combat.Hitboxes.MaxCandidateRadius
+	local maxRadiusSquared = maxRadius * maxRadius
+	for candidatePlayer, candidateState in pairs(combatStates) do
+		if candidatePlayer == attackerState.player or candidatePlayer == lockOnTarget then
 			continue
 		end
-		local model = part:FindFirstAncestorOfClass("Model")
-		if not model then
-			continue
-		end
-		local candidatePlayer = characterToPlayer[model]
-		if not candidatePlayer or candidatePlayer == attackerState.player or candidatePlayer == lockOnTarget then
-			continue
-		end
-		if consideredPlayers[candidatePlayer] then
-			continue
-		end
-		consideredPlayers[candidatePlayer] = true
-
-		local candidateState = combatStates[candidatePlayer]
-		if not candidateState or not isValidHostileTarget(attackerState, candidateState) then
+		if not isValidHostileTarget(attackerState, candidateState) then
 			continue
 		end
 		local character = candidateState.character
@@ -771,9 +773,17 @@ local function gatherCandidatesNear(attackerState: CombatState, origin: Vector3)
 		if not character or not root then
 			continue
 		end
+		-- Squared comparison: the sort below needs a real distance, but the radius REJECTION doesn't,
+		-- and this runs once per candidate per sample.
+		local offset = root.Position - origin
+		local distanceSquared = offset.X * offset.X + offset.Y * offset.Y + offset.Z * offset.Z
+		if distanceSquared > maxRadiusSquared then
+			continue
+		end
 
-		table.insert(others, { Model = character, Distance = (root.Position - origin).Magnitude })
+		table.insert(others, { Model = character, Distance = math.sqrt(distanceSquared) })
 	end
+	debug.profileend()
 
 	for _, dummyState in ipairs(DummyCombat.GetAliveDummies()) do
 		table.insert(others, { Model = dummyState.model, Distance = (dummyState.rootPart.Position - origin).Magnitude })
@@ -944,6 +954,13 @@ local function confirmDeath(player: Player, state: CombatState): ()
 	state.alive = false
 	state.blocking = false
 	state.Movement.sprinting = false
+	-- The run stage dies with the life that earned it. onHeartbeat stops running for this state the
+	-- moment `state.alive` flips false (see the WalkSpeed note below), so nothing would otherwise ever
+	-- decay this charge back down -- and the Attribute has to be cleared explicitly for the same
+	-- reason: a corpse left publishing SprintStage = 2 tells every client's presentation layer that a
+	-- dead character is mid-sprint.
+	state.Movement.sprintChargeSeconds = 0
+	state.Movement.sprintStage = 0
 	state.Movement.dashWindowExpiry = 0
 	state.Movement.slideWindowExpiry = 0
 	state.Vitals.ragdollExpiry = 0
@@ -976,6 +993,9 @@ local function confirmDeath(player: Player, state: CombatState): ()
 		humanoid.JumpHeight = 0
 		humanoid.PlatformStand = true
 		humanoid.AutoRotate = false
+		-- Same reasoning as the WalkSpeed zero above, for the run stage: the heartbeat resolver that
+		-- would normally publish this no longer runs for a dead state.
+		humanoid:SetAttribute(Constants.Attributes.SprintStage, 0)
 		-- pcall-guarded, matching every other ChangeState call in RagdollController.lua -- a
 		-- character can despawn/have its Humanoid destroyed in the same instant it dies, and a
 		-- failed ChangeState must never throw out of death confirmation.
@@ -1031,7 +1051,7 @@ end
 
 --
 -- Hit resolution -- the pure classify/damage-math/finisher logic that used to be duplicated across
--- the four functions below lives in Server/Combat/HitResolution.lua now (ClassifyDefense/
+-- the four combatant-pairing paths lives in Server/Combat/HitResolution.lua now (ClassifyDefense/
 -- ComputeOutcome/ApplyFinisherPhysics/ApplyPostureBreak) -- see that module's header. Each function
 -- here still owns its own state mutation and feedback/vitals dispatch, since those genuinely
 -- differ per attacker/target combatant-type pairing (who has a client to send feedback to, who can
@@ -2737,7 +2757,8 @@ local function commitAndThrowAttack(
 	-- Deliberately does NOT refresh inCombatUntil here -- throwing a swing isn't "actively fighting
 	-- somebody" on its own (a whiffed swing at nobody shouldn't flag combat). InCombat only refreshes
 	-- from an actual exchange with a real opponent -- see CombatState.inCombatUntil's own header for
-	-- the current trigger list (hit resolution against a player/bot, a parry-punish, an air-tech).
+	-- the current trigger list (hit resolution against a player/bot, a parry-punish). The list used
+	-- to name an air-tech as well; no air-tech exists in this codebase.
 	-- Feint eligibility for THIS swing -- see handleFeintRequest/CombatState.swingCancelled's own
 	-- headers. Reset on every fresh throw so a stale cancellation from a previous swing can never
 	-- carry over onto this one.
@@ -3494,6 +3515,40 @@ local function onHeartbeat(deltaTime: number): ()
 			changed = true
 		end
 
+		-- PASSIVE HEALTH REGEN. Sits beside posture regen because it is the same kind of work on the
+		-- same tick, but the two are gated on completely different things: posture regen resumes the
+		-- moment a posture break expires (it is a combat resource and is MEANT to come back mid-fight),
+		-- while health regen requires being genuinely out of combat.
+		--
+		-- The ramp clock is derived, not stored. `now - state.inCombatUntil` is negative while the
+		-- in-combat window is live and becomes exactly "seconds since combat lapsed" the moment it
+		-- isn't -- so the entire feature needs no new CombatState field, nothing to reset on respawn,
+		-- and nothing that can go stale. ComputeRatePerSecond treats any non-positive value as a hard
+		-- zero, so the in-combat case needs no branch here either.
+		--
+		-- The two extra lockouts are NOT redundant with being out of combat, though they nearly always
+		-- coincide: a ragdoll or stun applied by something other than an exchange (an admin action, a
+		-- future environmental hazard) never touches inCombatUntil, and healing a body the server is
+		-- currently holding limp would look like the regen was ignoring the state the player is
+		-- visibly in. Cheap enough to just always ask.
+		local regenHumanoid = state.humanoid
+		if regenHumanoid and now >= state.Vitals.ragdollExpiry and now >= state.Vitals.stunExpiry then
+			local healed = HealthRegen.ComputeHealedHealth(
+				regenHumanoid.Health,
+				state.Vitals.maxHealth,
+				now - state.inCombatUntil,
+				deltaTime,
+				Constants.Combat.HealthRegen
+			)
+			-- Only ever written when it actually moved. ComputeHealedHealth guarantees it never returns
+			-- a lower value, so this comparison is the "did regen happen" test AND the guard that keeps
+			-- a no-op tick from writing a replicated property 60 times a second per player.
+			if healed > regenHumanoid.Health then
+				regenHumanoid.Health = healed
+				changed = true
+			end
+		end
+
 		-- Bookkeeping only -- nothing gates on activeActionKind itself (attackEndsAt/the window
 		-- fields remain the real timing authority), this just keeps the tag from visibly lingering
 		-- past its own commitment window for anything reading it later (dev tooling, future systems).
@@ -3529,6 +3584,18 @@ local function onHeartbeat(deltaTime: number): ()
 		-- and a hit fails to stop an escape. See Movement.EndMovementBursts' own header.
 		if Movement.EndMovementBursts(state, now) then
 			logger:debug("Movement burst interrupted", { player = player.Name, userId = player.UserId })
+		end
+
+		-- The run stage, advanced BEFORE the WalkSpeed resolve below because that resolve reads the
+		-- stage it produces (Movement.ComputeDesiredWalkSpeed's sprint tier picks its multiplier off
+		-- state.Movement.sprintStage). Published on the Humanoid only when it actually changes -- an
+		-- Attribute write every tick for every player would replicate a property change to every client
+		-- 60 times a second for a value that changes twice a minute. The client reads it purely for
+		-- presentation (Client/Movement/RunController.lua); nothing about the speed depends on the
+		-- write landing.
+		local sprintStage = Movement.UpdateSprintStage(state, now, deltaTime)
+		if state.humanoid and state.humanoid:GetAttribute(Constants.Attributes.SprintStage) ~= sprintStage then
+			state.humanoid:SetAttribute(Constants.Attributes.SprintStage, sprintStage)
 		end
 
 		if state.humanoid then
@@ -3634,6 +3701,8 @@ end
 local function createMovementState(): CombatTypes.MovementState
 	return {
 		sprinting = false,
+		sprintChargeSeconds = 0,
+		sprintStage = 0,
 		dashWindowExpiry = 0,
 		dashCooldownExpiry = 0,
 		dashIsBackward = false,

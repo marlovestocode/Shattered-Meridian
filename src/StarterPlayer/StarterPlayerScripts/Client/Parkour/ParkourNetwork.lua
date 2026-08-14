@@ -63,9 +63,25 @@ local sendTimestamps: { number } = {}
 -- server's own DuplicateAction check.
 local lastSentPerKind: { [string]: number } = {}
 
-local function withinBudget(now: number, kind: ActionKind): boolean
+-- AN END REPORT IS NEVER DROPPED, and this is the client half of the same rule
+-- Shared/Parkour/ParkourValidation.Validate now applies server-side -- see the long note in its Start
+-- branch for the failure this prevents.
+--
+-- The short version: a Start asks the server to stand its WalkSpeed resolver down, and the End is the
+-- only thing that turns it back on. Dropping a Start costs the player an assist. Dropping an End costs
+-- them their movement until the server's own window expiry rescues them, which is most of a second of
+-- standing frozen for no visible reason. A budget exists to stop a thrashing client from spending its
+-- allowance on noise; refusing to hand velocity back is not something worth saving allowance for.
+--
+-- The per-second window below still counts Ends (they are real traffic and the honest measure of what
+-- this client is sending), it just never refuses one.
+local function withinBudget(now: number, kind: ActionKind, phase: ActionPhase): boolean
 	local lastSameKind = lastSentPerKind[kind]
-	if lastSameKind and (now - lastSameKind) < ParkourConstants.Network.MinSameActionIntervalSeconds then
+	if
+		phase == "Start"
+		and lastSameKind
+		and (now - lastSameKind) < ParkourConstants.Network.MinSameActionIntervalSeconds
+	then
 		return false
 	end
 
@@ -81,7 +97,7 @@ local function withinBudget(now: number, kind: ActionKind): boolean
 		sendTimestamps[index] = nil
 	end
 
-	return #sendTimestamps < ParkourConstants.Network.MaxReportsPerSecondPerPlayer
+	return phase == "End" or #sendTimestamps < ParkourConstants.Network.MaxReportsPerSecondPerPlayer
 end
 
 -- Fires one report. Returns whether it was actually sent -- the controller uses that to decide
@@ -100,7 +116,7 @@ local function report(
 		return false
 	end
 	local now = os.clock()
-	if not withinBudget(now, kind) then
+	if not withinBudget(now, kind, phase) then
 		logger:debug("Parkour report dropped by local budget", { kind = kind, phase = phase })
 		return false
 	end

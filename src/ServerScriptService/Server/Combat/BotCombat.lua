@@ -559,8 +559,13 @@ function BotCombat.ResolveHitFromBotAgainstPlayer(
 
 		targetState.Vitals.parryWindowExpiry = 0
 
-		botState.posture = math.max(0, botState.posture - Constants.Combat.ParryPunishPostureDamage)
-		botState.stunExpiry = now + Constants.Combat.StunDuration
+		-- The shared punish, not a hand-rolled copy of it: BotState carries flat posture/stunExpiry
+		-- fields, so it satisfies ApplyParryPunish's duck-typed parameter exactly the way the
+		-- sibling parry branch above already relies on (and the way the ApplyDisarm call a few lines
+		-- below does with this same botState). Inlining it here had already let this site drift from
+		-- the function extracted specifically to stop that drift -- it kept the raw stunExpiry assign
+		-- after the shared one moved to math.max.
+		HitResolution.ApplyParryPunish(botState, now)
 
 		local payload = FeedbackPayload.Build("Parried", nil, targetPlayer, nil, nil, isHeavy)
 		hooks.SendFeedback(targetPlayer, payload)

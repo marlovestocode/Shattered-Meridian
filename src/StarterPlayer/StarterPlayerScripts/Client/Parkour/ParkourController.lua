@@ -38,6 +38,7 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
@@ -55,6 +56,12 @@ local ParkourMotor = require(script.Parent.ParkourMotor)
 local ParkourNetwork = require(script.Parent.ParkourNetwork)
 local StateMachine = require(script.Parent.StateMachine)
 local States = require(script.Parent.States)
+-- The run system's presentation owner (Client/Movement/RunController.lua). Required in THIS direction
+-- -- the framework pushing outward -- for the same reason ParkourAnimator/ParkourCamera are: this
+-- module is the one that knows every other layer exists, and a run system that pulled the state id
+-- back out of here would need its own polling loop and could observe a state one frame stale. The run
+-- system reads it, exactly like the animation, camera, network and debug layers already do.
+local RunController = require(script.Parent.Parent.Movement.RunController)
 
 type ParkourContext = ParkourTypes.ParkourContext
 type MovementStateId = ParkourTypes.MovementStateId
@@ -79,6 +86,7 @@ local ACTION_DURATIONS: { [string]: number } = {
 	WallJump = ParkourConstants.WallJump.ControlLockSeconds + 0.5,
 	LedgeClimb = ParkourConstants.Ledge.ClimbDurationSeconds + 0.5,
 	Roll = ParkourConstants.Roll.DurationSeconds + 0.5,
+	Leap = ParkourConstants.Leap.MaxFlightSeconds + 0.5,
 }
 
 local machine = StateMachine.New("Idle")
@@ -116,7 +124,9 @@ local function buildInitialContext(boundCharacter: Model, boundHumanoid: Humanoi
 		PreviousStateId = "Idle",
 		StateElapsed = 0,
 		MoveIntent = Vector3.zero,
+		AimDirection = boundRoot.CFrame.LookVector,
 		SprintHeld = false,
+		SprintStage = 0,
 		Momentum = 0,
 		MoveDirection = Vector3.zero,
 		Velocity = Vector3.zero,
@@ -166,6 +176,11 @@ local function resolveCombatOwned(boundHumanoid: Humanoid): boolean
 		or boundHumanoid.Health <= 0
 end
 
+-- The action kind the SERVER currently believes is open, as last claimed by a Start report from here.
+-- Declared above reportTransition (its writer) rather than beside releaseStrandedOwnership (its reader)
+-- purely so the assignment below is a local rather than a global.
+local ownedReportKind: ActionKind? = nil
+
 -- Fires the network reports for a transition. Driven off the two states' declared Reports fields
 -- rather than by the states themselves calling the network layer -- which is what keeps every state
 -- module free of any network dependency, and what makes "which actions are reported" answerable by
@@ -190,13 +205,63 @@ local function reportTransition(previousId: MovementStateId, nextId: MovementSta
 			currentRoot.Position,
 			ACTION_DURATIONS[nextKind] or ParkourConstants.Validation.MaxActionSeconds
 		)
+		-- Remembered, and deliberately NOT cleared when the End above is sent: the whole point of the
+		-- watchdog is the case where that End did not take effect, and a kind forgotten the moment it was
+		-- reported is a kind the watchdog can no longer name. It is cleared by the server agreeing --
+		-- see releaseStrandedOwnership.
+		ownedReportKind = nextKind
 	end
+end
+
+-- THE STRANDED-OWNERSHIP WATCHDOG.
+--
+-- A Start report asks the server to stand its WalkSpeed resolver down for the duration of an action
+-- (Constants.Attributes.ParkourVelocityOwned -> Movement.ComputeDesiredWalkSpeed returns 0), and the
+-- End report is the only thing that gives it back. If an End never lands -- dropped by the server's own
+-- rate limiter, lost to a dropped packet, or refused by a validation rule -- the player stands frozen
+-- until the server's window expiry rescues them, which is most of a second of the character simply not
+-- responding. That failure has now been designed out on both sides (ParkourValidation.Validate never
+-- refuses an End; ParkourNetwork never drops one), but "designed out" is a property of the paths we
+-- thought of, and the cost of being wrong is the single worst thing a movement system can do to a
+-- player.
+--
+-- So this is the backstop that does not depend on being right: whenever the framework is in a state
+-- that claims nothing while the server still believes an action is open, it says so again. The server's
+-- own view is the trigger -- the Attribute, not a client-side timer -- so this cannot fire on a
+-- disagreement that does not exist, and it goes quiet the moment the server agrees.
+local lastReleaseAttemptAt = 0
+local OWNERSHIP_RELEASE_RETRY_SECONDS = 0.3
+
+local function releaseStrandedOwnership(currentHumanoid: Humanoid, definition: ParkourTypes.StateDefinition?): ()
+	local kind = ownedReportKind
+	if kind == nil then
+		return
+	end
+	-- An action is genuinely live: the server is supposed to own velocity right now.
+	if definition and definition.Reports then
+		return
+	end
+	if currentHumanoid:GetAttribute(Constants.Attributes.ParkourVelocityOwned) ~= true then
+		ownedReportKind = nil
+		return
+	end
+	if (context.Now - lastReleaseAttemptAt) < OWNERSHIP_RELEASE_RETRY_SECONDS then
+		return
+	end
+	lastReleaseAttemptAt = context.Now
+	logger:debug("Re-sending a parkour End -- the server still believes an action is open", { kind = kind })
+	ParkourNetwork.ReportEnd(kind, context.Momentum, context.RootPart.Position)
 end
 
 local function onTransition(previousId: MovementStateId, nextId: MovementStateId): ()
 	reportTransition(previousId, nextId)
 	ParkourAnimator.OnStateChanged(previousId, nextId, context.AnimationVariant)
 	ParkourCamera.OnStateChanged(previousId, nextId)
+	-- The run system, told the same thing on the same frame as the animator and the camera. This is
+	-- what stops the run loop and the footstep audio from continuing straight through a slide, a
+	-- wall-run, a vault or a fall -- before this, the run presentation asked only "is sprint held and
+	-- is the character moving," which is true throughout all four.
+	RunController.SetParkourState(nextId)
 	if nextId == "Landing" and context.LandingSeverity then
 		ParkourCamera.PlayLanding(context.LandingSeverity)
 	end
@@ -215,6 +280,13 @@ local function step(deltaTime: number): ()
 	context.DeltaTime = deltaTime
 	context.Now = now
 	context.SprintHeld = sprintHeld
+	-- The server's own resolved run stage, read straight off the Humanoid the same way
+	-- resolveCombatOwned reads its four ownership Attributes -- one more read per frame on a value the
+	-- server publishes anyway, rather than a second subscription and a cached mirror to keep in sync.
+	-- Non-number (never set yet, on the first frames of a life) reads as stage 0, which is exactly
+	-- what a character that has not started running yet is.
+	local stageValue = currentHumanoid:GetAttribute(Constants.Attributes.SprintStage)
+	context.SprintStage = if typeof(stageValue) == "number" then stageValue else 0
 	context.Assists = InputBuffer.GetAssists()
 	context.CombatOwned = resolveCombatOwned(currentHumanoid)
 
@@ -229,6 +301,11 @@ local function step(deltaTime: number): ()
 	-- supports gamepad sticks, touch thumbsticks and any future control scheme, with no per-device
 	-- branching, for free.
 	context.MoveIntent = ParkourMath.Flatten(currentHumanoid.MoveDirection)
+	-- Where the player is LOOKING, pitch included -- published here so no state has to reach for the
+	-- camera itself (see ParkourContext.AimDirection). Falls back to the body's own facing if there is
+	-- somehow no camera, which keeps the field always meaningful rather than sometimes zero.
+	local camera = Workspace.CurrentCamera
+	context.AimDirection = if camera then camera.CFrame.LookVector else currentRoot.CFrame.LookVector
 
 	-- Refresh the motor command BEFORE the machine runs, so the active state (and any Exit/Enter the
 	-- transition fires) writes into a clean frame rather than inheriting the last one.
@@ -266,6 +343,11 @@ local function step(deltaTime: number): ()
 	if nextId ~= previousId then
 		onTransition(previousId, nextId)
 	end
+
+	-- After the transition, so it sees the state the frame actually ended in rather than the one it
+	-- started in -- the frame a wall-jump becomes a Falling is exactly the frame its End was sent, and
+	-- therefore the first frame worth checking whether that End took.
+	releaseStrandedOwnership(currentHumanoid, machine:GetCurrentDefinition())
 
 	ParkourAnimator.SetMotion(context.Momentum)
 	ParkourCamera.SetSpeed(context.Momentum)
@@ -342,6 +424,10 @@ function ParkourController.BindCharacter(nextCharacter: Model): ()
 	InputBuffer.Clear()
 
 	machine:ForceTransition("Idle", context)
+	-- The framework is driving again, from Idle. Told explicitly rather than left to the first
+	-- transition, so a life that starts and ends without the machine ever leaving Idle still leaves
+	-- the run system with an accurate view rather than the previous life's last state.
+	RunController.SetParkourState(machine:GetCurrentId())
 	logger:debug("Parkour bound to character")
 end
 
@@ -351,6 +437,10 @@ local function unbind(): ()
 	ParkourAnimator.Unbind()
 	ParkourCamera.Reset()
 	InputBuffer.Clear()
+	-- nil, not "Idle": the framework is no longer driving at all, and the run system's fallback path
+	-- (its own grounded/moving checks, with no parkour veto) is the correct behavior in that case --
+	-- see RunController.SetParkourState.
+	RunController.SetParkourState(nil)
 	character = nil
 	humanoid = nil
 	rootPart = nil
@@ -376,6 +466,12 @@ function ParkourController.SetEnabled(nextEnabled: boolean): ()
 		ParkourAnimator.Reset()
 		ParkourCamera.Reset()
 		InputBuffer.Clear()
+		-- Same nil-not-Idle reasoning as unbind's: with the framework switched off there is no parkour
+		-- opinion for the run system to honor, and leaving a stale state id behind would let the last
+		-- traversal before the toggle suppress the run presentation forever.
+		RunController.SetParkourState(nil)
+	else
+		RunController.SetParkourState(machine:GetCurrentId())
 	end
 	logger:info("Parkour framework toggled", { enabled = enabled })
 end

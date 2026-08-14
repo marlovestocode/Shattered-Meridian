@@ -131,6 +131,34 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		if not context.Ledge.HasHangSpace then
 			return false, "NoHangSpace"
 		end
+		-- THE FACING GATE. Every check above this line is about the EDGE -- whether one exists, whether
+		-- it is grabbable, whether there is room to hang from it. This is the only one about the
+		-- CHARACTER's relationship to it, and it is what stops a grab the player never asked for.
+		--
+		-- It matters more here than anywhere else in the framework because a hang is automatic and
+		-- Committed (see that flag's own note above): no button is pressed, and the instant this
+		-- function returns true the fall is over. The only thing that used to stand between a
+		-- shift-locked player and an edge behind their back was EnvironmentProbe.probeLedge's choice of
+		-- SEARCH DIRECTION -- and a heuristic about where to cast is not a decision about whether to
+		-- commit, because whichever direction found the edge, nothing re-checked it against the
+		-- character afterward. Under shift lock (Client/Camera/ShiftLockCamera.lua) travel is
+		-- camera-relative with AutoRotate off, so a strafe or a backpedal points travel into walls the
+		-- player is not looking at -- and travel is exactly what that primary cast searches.
+		--
+		-- Asked against the WallNormal the probe actually recorded, so it holds no matter which of the
+		-- two casts found the edge, and asked as "is that face in front of me" because facing the wall
+		-- is the pose this state commits to (see Enter, which points the character INTO it). The
+		-- legitimate strafe-past-a-ledge-while-staring-at-it grab passes untouched: that case has facing
+		-- pointed straight at the face, which is the whole reason it reads as a reach.
+		if
+			not StateSupport.IsMovingToward(
+				context.RootPart.CFrame.LookVector,
+				context.Ledge.WallNormal,
+				LEDGE.MaxGrabFacingAngleDegrees
+			)
+		then
+			return false, "NotFacingLedge"
+		end
 		-- Tested LAST because it is the only refusal that needs the probe's own fields to be meaningful
 		-- (an unfound ledge has a stale EdgePosition), and because it is the narrowest: everything above
 		-- refuses a class of situations, this refuses exactly one edge for a fraction of a second.

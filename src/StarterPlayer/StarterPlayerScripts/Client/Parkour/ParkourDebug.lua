@@ -236,7 +236,17 @@ local function buildReadout(context: ParkourContext, machine: Machine): string
 	table.insert(lines, string.format("direction   %s", formatVector(context.MoveDirection)))
 	table.insert(
 		lines,
-		string.format("intent      %s   sprint=%s", formatVector(context.MoveIntent), tostring(context.SprintHeld))
+		-- Both halves of the run, because they answer different questions and are routinely different:
+		-- `sprint` is the player's held intent, `stage` is what the SERVER is currently granting (0 =
+		-- none, 1 = ordinary sprint, 2 = full stride). A held sprint sitting at stage 0 is the visible
+		-- symptom of a gate refusing it -- blocking, a commitment lock, a stun -- which is exactly the
+		-- thing this overlay exists to make legible.
+		string.format(
+			"intent      %s   sprint=%s stage=%d",
+			formatVector(context.MoveIntent),
+			tostring(context.SprintHeld),
+			context.SprintStage
+		)
 	)
 	table.insert(
 		lines,

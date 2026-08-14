@@ -25,6 +25,9 @@
 	    220  LedgeClimbing  -- only reachable from LedgeHanging
 	    210  LedgeHanging   -- catching an edge beats continuing to fall
 	    180  WallJumping    -- kicking off a wall beats staying on it
+	    175  Leaping        -- the double-tap leap, BELOW the wall-jump on purpose: a chimney climb is a
+	                       -- stream of jump presses, every one of them inside the double-tap window, so
+	                       -- a leap that outranked the kick would fling the player out of the shaft
 	    160  WallRunning    -- attaching to a wall beats falling past it
 	    150  Vaulting       -- clearing an obstacle beats running into it
 	    145  Mantling       -- just under Vaulting: when both are viable the faster option wins
@@ -47,6 +50,7 @@ local States: { ParkourTypes.StateDefinition } = {
 	require(script.LedgeClimbing),
 	require(script.LedgeHanging),
 	require(script.WallJumping),
+	require(script.Leaping),
 	require(script.WallRunning),
 	require(script.Vaulting),
 	require(script.Mantling),

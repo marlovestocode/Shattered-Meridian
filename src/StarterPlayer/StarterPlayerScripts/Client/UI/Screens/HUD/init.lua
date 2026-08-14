@@ -61,6 +61,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
+local Constants = require(ReplicatedStorage.Shared.Constants)
 
 local Tokens = require(script.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Parent.Components.Panel)
@@ -291,11 +292,12 @@ function HUD.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientState)
 							Max = clientState.MaxHealth,
 							FillColor = Tokens.VitalColor.Health,
 							CriticalBelow = 0.25,
-							-- Uploaded from docs/design/icons/health.svg's PNG export (see this
-							-- prop's header on VitalIcon.lua) -- re-uploaded 2026-07-24 after the
-							-- left-tilt + bolder-outline pass. Texture id (rbxassetid://108335358703553
-							-- is the wrapping Decal, not usable here).
-							IconAssetId = "rbxassetid://102020098775440",
+							-- Ids live in Constants.UI.VitalIconIds -- with the provenance notes and the
+							-- rejected wrapping-Decal ids -- rather than inline here, so that
+							-- Client/Loading/AssetPreloader.lua can sweep them at BOOT. HUD.new does not
+							-- run until UI.Mount(), which is AFTER the preload gate, so a literal here is
+							-- unreachable at preload time by construction.
+							IconAssetId = Constants.UI.VitalIconIds.Health,
 						}),
 						VitalIcon.new(scope, {
 							LayoutOrder = 2,
@@ -308,9 +310,8 @@ function HUD.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientState)
 							-- QiSystem.lua now owns this resource (Server/Systems/QiSystem.lua,
 							-- Progression_QiUpdated -> ClientState.Qi/MaxQi) -- no longer Muted as of
 							-- this pass. Renders live exactly like Health/Posture below.
-							-- Uploaded from docs/design/icons/qi.svg's PNG export -- Texture id
-							-- (rbxassetid://125861176852006 is the wrapping Decal, not usable here).
-							IconAssetId = "rbxassetid://139165261554498",
+							-- Id in Constants.UI.VitalIconIds, same preload reasoning as Health above.
+							IconAssetId = Constants.UI.VitalIconIds.Qi,
 						}),
 						VitalIcon.new(scope, {
 							LayoutOrder = 3,
@@ -320,9 +321,8 @@ function HUD.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientState)
 							Max = clientState.MaxPosture,
 							FillColor = Tokens.VitalColor.Posture,
 							CriticalBelow = 0.15,
-							-- Uploaded from docs/design/icons/posture.svg's PNG export -- Texture id
-							-- (rbxassetid://71612968745315 is the wrapping Decal, not usable here).
-							IconAssetId = "rbxassetid://137723815865371",
+							-- Id in Constants.UI.VitalIconIds, same preload reasoning as Health above.
+							IconAssetId = Constants.UI.VitalIconIds.Posture,
 						}),
 					}),
 					Divider(scope, 4),

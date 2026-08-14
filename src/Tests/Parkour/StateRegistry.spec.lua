@@ -39,6 +39,7 @@ local EXPECTED_IDS = {
 	"LedgeHanging",
 	"LedgeClimbing",
 	"Rolling",
+	"Leaping",
 	"AerialCombat",
 }
 
@@ -60,6 +61,7 @@ local MUST_REPORT = {
 	WallJumping = "WallJump",
 	LedgeClimbing = "LedgeClimb",
 	Rolling = "Roll",
+	Leaping = "Leap",
 }
 
 local function byId(): { [string]: any }

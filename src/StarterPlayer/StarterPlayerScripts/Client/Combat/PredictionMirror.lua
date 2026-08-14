@@ -412,7 +412,9 @@ end
 -- Shared attack-verdict shape for Basic/Heavy: full lockouts say NoPredict; an open gate says
 -- Predict; a gate that opens within the server's own attack input buffer says Buffered (the press
 -- will still throw -- via the buffer flush -- so predicting NOW would play the feedback early and
--- double it when the echo arrives). A gate further out than the buffer window also says NoPredict:
+-- double it when the echo arrives; CombatClient's Basic branch instead schedules the prediction for
+-- GateOpensAt below, which is neither early nor doubled). A gate further out than the buffer window
+-- also says NoPredict:
 -- the server buffers the press but it expires before the gate opens, producing nothing.
 local function evaluateAttack(self: PredictionMirrorInstance, readyAt: number, now: number): PredictVerdict
 	if isLockedOut(self, now) then
@@ -430,6 +432,16 @@ end
 
 function PredictionMirror.EvaluateBasic(self: PredictionMirrorInstance, now: number): PredictVerdict
 	return evaluateAttack(self, self.basicAttackReadyAt, now)
+end
+
+-- When a Basic press would stop being gated -- the same math evaluateAttack above uses for its
+-- verdict, exposed so a "Buffered" press can schedule its prediction for that exact instant instead
+-- of either predicting early (which evaluateAttack's header rejects) or showing nothing at all until
+-- the server's confirm echo arrives. Read-only; deliberately does not consider isLockedOut, since a
+-- caller acting on a "Buffered" verdict has already passed that check and re-evaluates at fire time
+-- anyway.
+function PredictionMirror.GateOpensAt(self: PredictionMirrorInstance, _now: number): number
+	return math.max(self.basicAttackReadyAt, self.attackEndsAt)
 end
 
 function PredictionMirror.EvaluateHeavy(self: PredictionMirrorInstance, now: number): PredictVerdict

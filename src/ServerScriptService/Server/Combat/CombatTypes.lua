@@ -149,6 +149,22 @@ export type MovementState = {
 	-- Held intent flag (a raised WalkSpeed only actually applies when
 	-- Movement.ComputeDesiredWalkSpeed allows it); set by handleSprintStart/Stop.
 	sprinting: boolean,
+	-- THE RUN SYSTEM'S TWO-STAGE STATE (Movement.UpdateSprintStage, called once per tick from
+	-- CombatSystem.onHeartbeat).
+	--
+	-- sprintChargeSeconds accumulates while the sprint speed tier is ACTUALLY being granted (see
+	-- Movement.IsSprintTierActive) and decays at Constants.Combat.SprintChargeDecayMultiplier times
+	-- that rate while it isn't -- a decay rather than a reset so a one-frame gate flicker can't erase
+	-- a long run. sprintStage is the resolved 0/1/2 that ComputeDesiredWalkSpeed reads for its
+	-- multiplier and CombatSystem publishes as Constants.Attributes.SprintStage for the client's
+	-- animation/audio/FOV presentation.
+	--
+	-- Both live in server state rather than being derived on the client for the reason every
+	-- speed-affecting number in this file does: the stage picks a WalkSpeed multiplier, so a client
+	-- that could influence it could grant itself the faster tier on demand. The client is told the
+	-- answer; it never contributes to it.
+	sprintChargeSeconds: number,
+	sprintStage: number,
 	dashWindowExpiry: number,
 	dashCooldownExpiry: number,
 	-- Whether the CURRENTLY active dashWindowExpiry burst is a backward one (Movement.

@@ -46,6 +46,7 @@ export type MovementStateId =
 	| "LedgeHanging"
 	| "LedgeClimbing"
 	| "Rolling"
+	| "Leaping"
 	| "AerialCombat"
 
 -- How the motor is driving the character this frame. Each state declares one; ParkourMotor.lua is
@@ -64,7 +65,7 @@ export type DriveMode = "Humanoid" | "Velocity" | "Kinematic"
 -- actually take ownership of velocity (and therefore need the server to stand its own WalkSpeed
 -- resolver down) are reportable -- Idle/Walking/Sprinting/Jumping/Falling are ordinary Humanoid
 -- locomotion the server already governs and are deliberately NOT network events.
-export type ActionKind = "Slide" | "Vault" | "Mantle" | "WallRun" | "WallJump" | "LedgeClimb" | "Roll"
+export type ActionKind = "Slide" | "Vault" | "Mantle" | "WallRun" | "WallJump" | "LedgeClimb" | "Roll" | "Leap"
 
 -- What a report is saying about that action.
 export type ActionPhase = "Start" | "End"
@@ -182,6 +183,12 @@ export type ObstacleProbe = {
 export type WallProbe = {
 	Found: boolean,
 	Distance: number,
+	-- Where the side cast actually met the wall. Distance and Normal alone cannot reconstruct this --
+	-- the cast runs along the character's own right vector, which is not the wall's normal for anything
+	-- but a perfectly square approach -- and the assisted wall-jump needs the real contact point to
+	-- refuse aiming back at the face it just left (ParkourConstants.WallJump.Assist.SameWallIgnoreRadius).
+	-- Zero when Found is false.
+	Position: Vector3,
 	Normal: Vector3,
 	-- The horizontal unit vector ALONG the wall, oriented to agree with the character's current
 	-- travel direction -- what a wall-run actually moves along. Zero when Found is false.
@@ -214,6 +221,47 @@ export type LedgeProbe = {
 	SampledAt: number,
 }
 
+-- The surface an assisted wall-jump has decided to aim at. Produced on demand by
+-- EnvironmentProbe.FindWallJumpTarget at the instant of the jump -- not a per-frame probe result, which
+-- is why it is not a field on ParkourContext: nothing between two wall-jumps has any use for it, and a
+-- context field would be a stale answer sitting in scope for the whole life.
+export type WallJumpTarget = {
+	Found: boolean,
+	-- Where the trajectory is actually aimed: out from the surface along its own normal, so the arrival
+	-- is BESIDE the wall (where the wall probes can find it and a wall-run can attach) rather than inside
+	-- it.
+	AimPosition: Vector3,
+	-- The surface hit itself, kept distinct from AimPosition because the two answer different questions:
+	-- this one is what the debug overlay draws and what a same-wall comparison is made against.
+	SurfacePosition: Vector3,
+	Normal: Vector3,
+	Instance: BasePart?,
+	Distance: number,
+	-- ParkourMath.WallJumpCandidateScore's verdict for the chosen candidate. Zero when Found is false,
+	-- and zero for a corridor target, which is selected by geometry rather than by ranking.
+	Score: number,
+	-- True when this is the far wall of a CORRIDOR -- a surface facing back at the one being jumped from.
+	-- The two cases produce completely different jumps (across versus up), so the distinction has to
+	-- survive the trip back to States/WallJumping rather than being re-derived there from the normal.
+	Corridor: boolean,
+}
+
+-- Where a leap has decided to land. Produced on demand by EnvironmentProbe.FindLeapTarget at the moment
+-- of the double tap, for the same reason WallJumpTarget is: nothing between two leaps has any use for
+-- it, and a context field would be a stale answer sitting in scope for the whole life.
+export type LeapTarget = {
+	Found: boolean,
+	-- The point the arc is solved to land on -- already pulled in from the surface's near edge by
+	-- ParkourConstants.Leap.LandingInsetStuds, so the character lands ON the ledge rather than at its
+	-- lip with half of them over the drop.
+	LandingPosition: Vector3,
+	Normal: Vector3,
+	Instance: BasePart?,
+	-- Planar distance from the launch. The debug overlay's readout, and the honest measure of what the
+	-- scan actually chose.
+	Distance: number,
+}
+
 -- Everything a state module is given each frame. One persistent table, mutated in place by the
 -- controller and handed to whichever state is active -- never reallocated, and never retained by a
 -- state past the call it was passed in (see StateMachine.lua's own contract).
@@ -240,10 +288,31 @@ export type ParkourContext = {
 	-- Camera-relative movement intent this frame, already flattened and normalized (magnitude 0 or
 	-- 1). The single input every state reads -- no state polls UserInputService itself.
 	MoveIntent: Vector3,
+	-- Where the player is LOOKING: the camera's own unit look vector, pitch included. Distinct from both
+	-- MoveIntent (where they are asking to go) and RootPart.CFrame.LookVector (where the body is turned,
+	-- which is flat and, outside shift lock, lags the camera entirely).
+	--
+	-- Supplied by the controller rather than read by the state that wants it, because reaching for
+	-- Workspace.CurrentCamera from inside a movement state would put a camera dependency in the one layer
+	-- this framework keeps free of them. Only States/Leaping reads it so far -- the leap is aimed at what
+	-- the player is looking at, including up at a higher ledge or down into a courtyard, which is the one
+	-- question neither of the other two vectors can answer.
+	AimDirection: Vector3,
 	-- Whether sprint is currently engaged, by whichever route (held key, toggle, or Autorun) --
 	-- pushed in from CombatClient.lua, which remains the owner of sprint. See ParkourController.
 	-- SetSprinting.
 	SprintHeld: boolean,
+	-- Which run stage the SERVER currently has this character in: 0 = not sprinting, 1 = ordinary
+	-- sprint, 2 = the sustained full-stride stage reached after Constants.Combat.
+	-- SprintStage2ThresholdSeconds of unbroken running. Mirrored from Constants.Attributes.SprintStage
+	-- by the controller each frame -- the client never resolves it, since the stage decides a WalkSpeed
+	-- multiplier (see Server/Combat/Movement.UpdateSprintStage).
+	--
+	-- Distinct from SprintHeld above, which is the player's INTENT: a player can be holding sprint
+	-- (SprintHeld true) at stage 1, at stage 2, or -- while blocking or mid-commitment -- at a stage
+	-- the server is not currently granting the speed for at all. States that care about how fast the
+	-- character is actually allowed to be must read this, not the intent.
+	SprintStage: number,
 
 	-- Live motion. Momentum is the framework's own authoritative planar speed (states read and
 	-- write it; it is what survives a state transition); Velocity is the character's actual measured

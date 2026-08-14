@@ -20,6 +20,10 @@ local CONFIG: ParkourValidation.ValidationConfig = {
 	MaxVerticalGainStuds = 24,
 	MaxTravelSpeed = 90,
 	MaxActionSeconds = 8,
+	-- Deliberately blunt round numbers, unlike the shipped tuning: a spec asserting a clamp is
+	-- clearer when the arithmetic is obvious at a glance (observed 10 -> ceiling 10*1.5+5 = 20).
+	MomentumCarryObservedTolerance = 1.5,
+	MomentumCarryObservedSlackStuds = 5,
 }
 
 local ORIGIN = Vector3.new(0, 10, 0)
@@ -239,6 +243,37 @@ return function()
 			expect(ParkourValidation.Validate(endReport(), observed(), CONFIG)).to.equal(true)
 		end)
 
+		it("accepts an End arriving INSIDE the per-kind interval -- a release is never a duplicate", function()
+			-- The regression this exists for, and it was a player-visible one rather than a theoretical
+			-- hole. The per-kind interval used to run before the phase split, so it refused Ends as well as
+			-- Starts -- and a Start is what makes ParkourSystem set ParkourVelocityOwned, which pins the
+			-- player's WalkSpeed at zero until the matching End arrives. Any action that legitimately ended
+			-- within the interval of starting therefore had its release refused and left the player frozen
+			-- where they stood until the server's own window expiry rescued them. A wall-jump that reaches
+			-- the ground immediately does exactly that: States/WallJumping.Update ends it after 0.05s,
+			-- against a 0.06s interval.
+			--
+			-- Refusing an End can never protect anything -- the worst a flood of them can do is close
+			-- windows that are already closed -- so there is no version of this check on the End phase that
+			-- is not strictly harmful.
+			local state = observed({
+				LastSameKindAt = 99.99,
+				OpenKind = "Slide",
+				OpenStartedAt = 99.99,
+				OpenStartPosition = ORIGIN,
+			})
+			expect(ParkourValidation.Validate(endReport(), state, CONFIG)).to.equal(true)
+		end)
+
+		it("still refuses a START inside the interval -- the guard itself is intact", function()
+			-- The other half of the same rule: a Start is a CLAIM and claims can be spammed. Asserted
+			-- alongside the End case so a future simplification cannot quietly delete the check by
+			-- "generalizing" the fix above.
+			local accepted, reason = ParkourValidation.Validate(report(), observed({ LastSameKindAt = 99.99 }), CONFIG)
+			expect(accepted).to.equal(false)
+			expect(reason).to.equal("DuplicateAction")
+		end)
+
 		it("accepts an ordinary End for an open window", function()
 			local state = observed({
 				OpenKind = "Slide",
@@ -369,6 +404,64 @@ return function()
 
 		it("flags above the threshold", function()
 			expect(ParkourValidation.ShouldFlag(100, 25)).to.equal(true)
+		end)
+	end)
+
+	describe("ParkourValidation.ResolveMomentumCarry", function()
+		-- THE EXPLOIT THIS CLOSES, stated once here so the cases below read as what they are.
+		--
+		-- An End report that matched no open window was accepted (correctly -- the server expires
+		-- windows itself, and refusing a late End can only strand an honest player), but acceptance was
+		-- also treated as having EARNED the momentum carry. So firing End{Kind="Slide", Speed=110} on a
+		-- loop, while standing still, having never performed a parkour action, held a permanent
+		-- WalkSpeed near 59 against a base of 18 -- and because every report was accepted rather than
+		-- rejected, the suspected-cheater counter never moved either.
+
+		it("grants nothing when no window was open -- the exploit", function()
+			-- Standing still, claiming the maximum. The Speed is inside every other limit, which is
+			-- exactly why nothing else caught this.
+			expect(ParkourValidation.ResolveMomentumCarry(70, 0, false, CONFIG)).to.equal(nil)
+		end)
+
+		it("grants nothing for an unmatched End even at a plausible speed", function()
+			expect(ParkourValidation.ResolveMomentumCarry(20, 18, false, CONFIG)).to.equal(nil)
+		end)
+
+		it("clamps a claim the server cannot see the body making", function()
+			-- The second half of the fix. Requiring a real window is not enough on its own: an attacker
+			-- can still cycle Start/End at the rate limit and claim the maximum each time, since a
+			-- stationary player passes the travel checks trivially. Observed 0 -> the claim collapses to
+			-- the slack alone.
+			expect(ParkourValidation.ResolveMomentumCarry(70, 0, true, CONFIG)).to.equal(5)
+		end)
+
+		it("honors an honest carry that the observed speed corroborates", function()
+			-- A real slide ending at real speed keeps all of it -- 30 is under 40*1.5+5, so the observed
+			-- ceiling never binds. This is the case the tolerance exists to protect.
+			expect(ParkourValidation.ResolveMomentumCarry(30, 40, true, CONFIG)).to.equal(30)
+		end)
+
+		it("leaves generous headroom for a stale observed velocity", function()
+			-- The server's view of a client-owned assembly is replicated and therefore slightly behind.
+			-- A claim modestly above what the server currently sees must survive, or a network hiccup
+			-- costs an honest player their momentum: observed 10 -> ceiling 20, so 18 passes intact.
+			expect(ParkourValidation.ResolveMomentumCarry(18, 10, true, CONFIG)).to.equal(18)
+		end)
+
+		it("still applies the reported-speed ceiling when the body cannot be read", function()
+			-- nil observed (no root part) falls back to the constant ceiling rather than to trust.
+			expect(ParkourValidation.ResolveMomentumCarry(500, nil, true, CONFIG)).to.equal(CONFIG.MaxReportedSpeed)
+		end)
+
+		it("never returns a negative carry", function()
+			expect(ParkourValidation.ResolveMomentumCarry(-50, 30, true, CONFIG)).to.equal(0)
+		end)
+
+		it("does not let a NaN observed speed pass the claim through", function()
+			-- A NaN ceiling makes `carry > ceiling` false, which would silently return the raw claim --
+			-- the one outcome this check exists to prevent. Falls back to the reported ceiling instead.
+			local nan = 0 / 0
+			expect(ParkourValidation.ResolveMomentumCarry(500, nan, true, CONFIG)).to.equal(CONFIG.MaxReportedSpeed)
 		end)
 	end)
 
