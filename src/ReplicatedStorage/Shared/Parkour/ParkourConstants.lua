@@ -734,6 +734,22 @@ ParkourConstants.WallJump = {
 	-- surface and then deliberately throwing short of it -- the falloff's job is done there by the
 	-- solver's own vertical cap and by the fact that a jump can only be aimed at a surface that exists.
 	ChainFalloffMultiplier = 0.86,
+	-- How long the body takes to turn from the facing it kicked off with to the departure direction.
+	-- Deliberately shorter than either ControlLockSeconds below, so the turn is finished and out of
+	-- the way before air control comes back -- a body still rotating while the player starts steering
+	-- reads as two systems fighting over the same rig.
+	--
+	-- Exists because States/WallJumping.Update used to write the departure direction straight into
+	-- MotorCommand.FaceDirection on frame one, which retargets the orientation drive in a single step:
+	-- there are no intermediate frames for the eye to follow, so the character reads as being re-posed
+	-- rather than as pushing off something. Same discontinuity States/LedgeHanging fixed for its grab
+	-- pose, same fix (ease the commanded value, do not touch the drive).
+	FacingEaseSeconds = 0.12,
+	-- How fast air control may turn the jump's planar direction once the ramp opens, in degrees per
+	-- second at FULL authority (the ramp scales this down as it fades in -- see Assist.
+	-- ControlRampStartFraction). Well below a free-fall turn rate: the point is that the back of the
+	-- lock stops being a wall, not that steering becomes instant the moment it is allowed.
+	ControlRampTurnDegreesPerSecond = 260,
 	-- Raised again, from 8, once the chimney climb (Assist.Corridor* below) made a genuinely VERTICAL
 	-- chain possible: a kick gains around 11.8 studs, so eight of them cap the climb at roughly 90 studs
 	-- and a taller shaft would strand the player partway up a wall for no reason they could see. Twelve
@@ -781,11 +797,24 @@ ParkourConstants.WallJump = {
 
 		-- How the fan's hits are ranked. Alignment is how nearly the candidate sits along the direction
 		-- the player is actually asking to go (facing blended with the push away from the wall);
-		-- proximity prefers the nearer of two equally-aimed surfaces, because the nearer one is the one
-		-- the player can see themselves reaching; and squareness prefers a surface whose face is turned
-		-- toward the character, which is what makes the arrival a wall-run or a grab rather than a graze.
+		-- proximity prefers the nearer of two equally-aimed surfaces; and squareness prefers a surface
+		-- whose face is turned toward the character, which is what makes the arrival a wall-run or a
+		-- grab rather than a graze.
+		--
+		-- PROXIMITY NOW DOMINATES (1.4 against alignment's 1), reversing the original ordering, and the
+		-- reversal is the requested behavior rather than a tuning nudge: the jump should go to the
+		-- nearest surface it can actually use, not to the best-aimed one somewhere off in the distance.
+		-- Alignment led at 1 against 0.45, and because MinAlignmentDot is a permissive 0.12, a barely-
+		-- aimed-at wall forty studs out could outscore a well-placed one six studs away -- so the same
+		-- press produced either a short hop or a committed long flight depending on scenery the player
+		-- was not really aiming at, which is most of what made the assist feel unpredictable.
+		--
+		-- Alignment is kept as a real term rather than dropped to a pure nearest-hit search: it is still
+		-- what stops the fan handing the player a surface behind their shoulder just because it is
+		-- close, and MinAlignmentDot still hard-refuses anything genuinely off-intent. The order of the
+		-- two is what changed, not whether both matter.
 		AlignmentWeight = 1,
-		ProximityWeight = 0.45,
+		ProximityWeight = 1.4,
 		SquarenessWeight = 0.55,
 		-- Below this, a candidate is not in the direction the player asked for and is not offered at all,
 		-- whatever else it scores. Expressed as a dot product against the aim direction rather than an
@@ -814,7 +843,16 @@ ParkourConstants.WallJump = {
 		-- fairness -- it is what stops a well-placed pair of walls from being an elevator -- and is set so
 		-- a single assisted jump's own ballistic gain stays inside Validation.MaxVerticalGainStuds. The
 		-- horizontal cap keeps a far target from turning into a launch that outruns the camera.
-		MinUpSpeed = 34,
+		--
+		-- MinUpSpeed raised 34 -> 46 to MATCH WallJump.UpSpeed, and that equality is the whole point
+		-- rather than a coincidence to be tuned away from. At 34 an assisted jump at a level target left
+		-- the wall with noticeably LESS lift than the same jump would have had with no target in sight
+		-- at all -- so two kicks that looked identical arced differently depending on whether the scan
+		-- happened to find something, which is the "inconsistent height" complaint in one number.
+		-- Pinning the floor to the unassisted kick's own lift means the assist can now only ever add
+		-- height, never quietly subtract it, and a jump with nothing to aim at is the baseline rather
+		-- than an outlier.
+		MinUpSpeed = 46,
 		MaxUpSpeed = 62,
 		MaxPlanarSpeed = 72,
 
@@ -857,6 +895,28 @@ ParkourConstants.WallJump = {
 		-- and a solver that answers "unreachable" to a rounding error would silently drop the assist on
 		-- precisely the jump it was written for.
 		CorridorHeightSafetyStuds = 0.15,
+		-- How much of the along-corridor speed a chimney kick keeps. FULL retention, and that is a
+		-- deliberate 1 rather than a fraction someone forgot to tune down.
+		--
+		-- The corridor solve produces lift plus exactly enough planar speed to cross the GAP, and a
+		-- chimney gap is 2.5-8 studs, so its planar component is single digits. It contributes
+		-- essentially nothing along the tunnel. That makes this fraction not a bonus on top of the
+		-- solve's own forward speed -- it IS the forward speed, the whole of it. At WallJump's
+		-- ForwardRetainFraction (0.55, which is what this reused at first) a player wall-running down a
+		-- corridor and jumping lost 45% of their speed on every kick and fell short of everything they
+		-- aimed at, every time.
+		--
+		-- 1 is therefore the NEUTRAL value, not a generous one: it means "you keep the speed you already
+		-- had," which is what a jump along a corridor should obviously do. It cannot be exploited into
+		-- free distance because nothing here ADDS speed -- the along-corridor component is measured from
+		-- the player's own current travel -- and the climb's own limits are untouched: CorridorUpSpeed
+		-- still caps lift, MaxChainWithoutGround still counts, and SameWallCooldownSeconds still forces
+		-- the alternation.
+		--
+		-- Separate from WallJump.ForwardRetainFraction on purpose. That one exists so an ORDINARY
+		-- wall-jump is not a free speed dump, where the fixed push already supplies real forward
+		-- velocity of its own; the two answer different questions and should not be one number.
+		CorridorAlongRetainFraction = 1,
 		-- How long after kicking off a wall that SAME wall stops granting a corridor kick. Without it, a
 		-- player hugging one wall can pump the jump key and take kick after kick off the same face without
 		-- ever crossing to the other one, which is the free elevator every rule in this feature exists to
@@ -872,7 +932,54 @@ ParkourConstants.WallJump = {
 		-- having been taken out of the player's hands -- they can still steer the back half of the flight,
 		-- which is where steering is meaningful anyway.
 		ControlLockSeconds = 0.24,
+
+		-- WHERE THE CONTROL LOCK STOPS BEING ABSOLUTE, as a fraction of whichever ControlLockSeconds
+		-- applies to this jump. Below it the push is fully protected (steering back into the wall you
+		-- just left is what the lock exists to prevent); above it, air-control authority fades in
+		-- linearly to full by the moment the lock ends.
+		--
+		-- The lock used to be strictly binary, and that was the "control comes back abruptly" half of a
+		-- wall-jump feeling rough: nothing, then everything, on one frame. Ramping the last third
+		-- costs the mechanic nothing -- the front of the window is where a steer back into the wall
+		-- would actually undo the push, and by two-thirds through, the character is far enough off the
+		-- face that letting the player start aiming the landing is the point rather than an exploit.
+		ControlRampStartFraction = 0.65,
 	},
+}
+
+-- THE COMBAT GATE: which traversal states are unavailable while the player is in combat
+-- (Constants.Attributes.InCombat, mirrored onto ParkourContext.InCombat).
+--
+-- The rule, stated as the design asked for it: while fighting, a player may still get onto things --
+-- ledge hang, ledge climb, mantle, vault -- and may not use the mobility set. Climbing is
+-- traversal a fight can legitimately involve (getting to higher ground, escaping a corner, chasing
+-- someone onto a roof); wall-runs, wall-jumps and long leaps are repositioning tools that let a
+-- player disengage from an exchange they are losing at a speed no combat action can answer.
+--
+-- Expressed as the BLOCKED set rather than the allowed one, deliberately: a new state added later
+-- defaults to available, which is the safer failure. A new state that should be blocked is one line
+-- here; a new state accidentally missing from an ALLOWED list would silently become unusable in
+-- combat with no error and no obvious cause.
+--
+-- Base locomotion is not listed and must never be: Idle/Walking/Sprinting/Falling/Landing/
+-- AerialCombat are not "parkour actions," they are how a character exists, and blocking any of them
+-- would strand the machine with nowhere legal to be.
+--
+-- SLIDING AND ROLLING ARE THE JUDGMENT CALL in this table, flagged rather than buried. They are
+-- listed because the design named an exhaustive allow-list (hang/climb/mantle/vault) and these are
+-- not on it. But both read as combat moves as much as traversal ones -- a roll in particular is the
+-- genre's standard dodge -- so if combat starts feeling stiff, these two are the first entries to
+-- reconsider, and removing either is a one-line change here rather than anything structural. Note
+-- the combat system has its OWN slide (CombatSystem.handleSlideRequest) which this does not touch;
+-- only the parkour framework's states are gated here.
+ParkourConstants.CombatGate = {
+	BlockedStates = {
+		WallRunning = true,
+		WallJumping = true,
+		Leaping = true,
+		Sliding = true,
+		Rolling = true,
+	} :: { [string]: boolean },
 }
 
 ParkourConstants.Roll = {

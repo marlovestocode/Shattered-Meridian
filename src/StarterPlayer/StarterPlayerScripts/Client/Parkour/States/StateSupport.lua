@@ -218,6 +218,128 @@ function StateSupport.WithinTraversalRange(context: ParkourContext): boolean
 	return context.Obstacle.Found and context.Obstacle.Distance <= commitDistance
 end
 
+-- THE COMBAT GATE, asked once per blocked state's CanEnter. Returns true when this state must refuse
+-- because the player is in combat -- see ParkourConstants.CombatGate.BlockedStates for the roster and
+-- for why the blocked set is the authored one rather than the allowed set.
+--
+-- A helper rather than five inline `if context.InCombat and ... then` checks for the reason this
+-- file's header sets out: five hand-written copies is five chances for one state to disagree about
+-- what "in combat" means, and this framework has already paid for that once with the ledge-grab
+-- cascade below. It also means the answer is greppable and the roster is a data change.
+--
+-- Deliberately NOT enforced inside StateMachine: that module knows nothing about parkour and must
+-- stay that way (it is the reason the state machine is headlessly testable). This is a parkour rule,
+-- so it lives with the parkour states.
+-- Both halves compared against `true` rather than used for their truthiness, so a synthetic context
+-- that predates this field (the state-machine specs build their own) reads as "not in combat" and
+-- this returns a real boolean rather than nil.
+function StateSupport.CombatBlocks(context: ParkourContext, stateId: MovementStateId): boolean
+	return context.InCombat == true and ParkourConstants.CombatGate.BlockedStates[stateId] == true
+end
+
+-- THE ONE ANSWER TO "IS A LEDGE GRAB AVAILABLE RIGHT NOW", and the regrab bookkeeping behind it.
+--
+-- This question was being asked in THREE places with three different answers, which is exactly the
+-- failure mode this file's header sets the bar for. States/LedgeHanging.CanEnter asked the full
+-- version. States/WallJumping.Update's top-out grab restated it but ALSO demanded HasStandingSpace
+-- (refusing a legitimate hang from an edge with nothing above it -- LedgeHanging itself allows
+-- exactly that and only refuses the CLIMB). States/Leaping.Update restated it a third way, matching
+-- neither. And critically, NEITHER route-1 site honored the regrab lockouts at all, because those
+-- lived as file-locals inside LedgeHanging where nothing else could see them -- so dropping off a
+-- ledge and immediately wall-jumping re-caught the very edge the player had just chosen to let go
+-- of, which is the one thing RegrabLockoutSeconds exists to prevent.
+--
+-- Both route-1 sites transition from their own Update, which StateMachine.Update applies WITHOUT
+-- consulting the target's CanEnter (the caller is asserting, not asking) -- so a shared predicate is
+-- the only thing that can keep the asserting sites honest against the asking one. LedgeHanging.
+-- CanEnter now calls this too, so there is exactly one definition and route 1 and route 2 cannot
+-- disagree about what a grabbable ledge is.
+--
+-- `verticalSpeed` is passed in rather than read off the context because the two kinds of caller
+-- genuinely have different truths available: a CanEnter sees only context.VerticalVelocity, while a
+-- velocity-driving state mid-flight (WallJumping, Leaping) is COMMANDING its own integrated
+-- velocity, which the measured context value trails by a frame. Handing each its own is what makes
+-- the top-out grab fire on the frame the arc actually crests rather than one late.
+local regrabAnyUntil = 0
+local regrabSameUntil = 0
+local regrabInstance: BasePart? = nil
+local regrabEdge = Vector3.zero
+
+-- Whether a candidate edge is the one the player just chose to let go of. Identity is tested two ways
+-- because neither is sufficient alone: the Instance catches a re-grab of the same part, and the
+-- radius catches the same physical lip built out of a DIFFERENT part -- which is most lips, since a
+-- wall face of any size is several blocks -- where an instance test alone lets the drop re-grab the
+-- neighbour half a stud sideways and strand the player exactly where they asked to leave.
+local function isBlockedLedge(probe: ParkourTypes.LedgeProbe): boolean
+	if regrabInstance ~= nil and probe.Instance == regrabInstance then
+		return true
+	end
+	return (probe.EdgePosition - regrabEdge).Magnitude <= ParkourConstants.Ledge.RegrabIgnoreRadius
+end
+
+-- Called from States/LedgeHanging.Exit on any exit that is not the climb -- records what was
+-- released and starts both lockout windows. Lives here alongside the predicate that reads it so the
+-- write and the read can never end up on opposite sides of a module boundary again.
+function StateSupport.NoteLedgeReleased(now: number, instance: BasePart?, edgePosition: Vector3): ()
+	local LEDGE = ParkourConstants.Ledge
+	regrabAnyUntil = now + LEDGE.RegrabAnyLedgeSeconds
+	regrabSameUntil = now + LEDGE.RegrabLockoutSeconds
+	regrabInstance = instance
+	regrabEdge = edgePosition
+end
+
+function StateSupport.LedgeGrabAvailable(context: ParkourContext, verticalSpeed: number): (boolean, string?)
+	local LEDGE = ParkourConstants.Ledge
+	if not context.Assists.LedgeAssist then
+		return false, "LedgeAssistDisabled"
+	end
+	if context.Ground.Grounded then
+		return false, "Grounded"
+	end
+	if context.Now < regrabAnyUntil then
+		return false, "RegrabLockout"
+	end
+	if verticalSpeed > LEDGE.MaxVerticalSpeedToGrab then
+		return false, "RisingTooFast"
+	end
+	if not context.Ledge.Found then
+		return false, "NoLedge"
+	end
+	if not context.Ledge.Allowed then
+		return false, "LedgeNotGrabbable"
+	end
+	-- HasStandingSpace is deliberately NOT checked. An edge with nothing above it can still be hung
+	-- from -- that is a legitimate thing to do while deciding where to go -- and only the CLIMB out of
+	-- it is refused, which LedgeHanging.Update owns. WallJumping's own restatement of these
+	-- conditions used to demand it and so silently declined the grab on every overhang.
+	if not context.Ledge.HasHangSpace then
+		return false, "NoHangSpace"
+	end
+	-- THE FACING GATE -- the only condition here about the CHARACTER's relationship to the edge rather
+	-- than about the edge itself, and the one that stops a grab the player never asked for. It matters
+	-- most because a hang is automatic and Committed: no button is pressed, and the instant this
+	-- returns true the fall is over. Asked against the WallNormal the probe recorded, so it holds
+	-- however the edge was found, and asked as "is that face in front of me" because facing the wall
+	-- is the pose LedgeHanging.Enter commits to. See Ledge.MaxGrabFacingAngleDegrees' own comment for
+	-- why the search direction alone was never a substitute for this.
+	if
+		not StateSupport.IsMovingToward(
+			context.RootPart.CFrame.LookVector,
+			context.Ledge.WallNormal,
+			LEDGE.MaxGrabFacingAngleDegrees
+		)
+	then
+		return false, "NotFacingLedge"
+	end
+	-- Tested LAST because it is the only refusal needing the probe's own fields to be meaningful (an
+	-- unfound ledge has a stale EdgePosition), and because it is the narrowest: everything above
+	-- refuses a class of situations, this refuses exactly one edge for a fraction of a second.
+	if context.Now < regrabSameUntil and isBlockedLedge(context.Ledge) then
+		return false, "SameLedgeLockout"
+	end
+	return true, nil
+end
+
 -- os.clock() of the most recent jump produced by ANY route. Lives here rather than in
 -- States/Jumping.lua because this game can launch a jump from three different states -- an ordinary
 -- jump, a slide-jump (which keeps the slide's boosted momentum instead of the jump state's) and a

@@ -516,6 +516,22 @@ Constants.Attributes = {
 	-- directly, at the same top priority tier, rather than EmoteSystem writing into CombatState
 	-- (which it has no ownership of).
 	EmoteMovementLocked = "EmoteMovementLocked",
+	-- Whether this player is currently IN COMBAT (CombatState.inCombatUntil still live) -- written by
+	-- CombatSystem's inCombatNotifier on each true/false edge, alongside the Combat_InCombatChanged
+	-- remote it already fires for the HUD badge. Same "one Attribute the server publishes, read
+	-- directly by whoever needs it" shape as RootControlLocked above.
+	--
+	-- Exists because Client/Parkour needs it and the remote does not suit that consumer: the parkour
+	-- context is rebuilt from Humanoid Attributes every frame (see ParkourController's own
+	-- resolveCombatOwned, which reads four of them), so an Attribute costs one more read on a value
+	-- that is already being maintained, where the remote would mean a second subscription and a cached
+	-- mirror to keep in sync across respawns. Deliberately NOT a replacement for the remote -- the HUD
+	-- badge wants the edge, parkour wants the level.
+	--
+	-- Note this makes InCombat gameplay-affecting in a third place (passive health regen and the
+	-- parkour combat gate now both hang off inCombatUntil), so tuning InCombatDurationSeconds or
+	-- CombatEngagementRange reaches further than it used to. See syncInCombat's own header.
+	InCombat = "InCombat",
 	-- Parkour System (Server/Systems/ParkourSystem.lua, Client/Parkour/*). Set on a player's own
 	-- Humanoid while the client-side movement framework legitimately owns that character's velocity --
 	-- a slide, wall-run, vault, mantle, ledge climb, roll or wall-jump the server has accepted and not
@@ -626,6 +642,17 @@ Constants.Keybinds = {
 		-- DevMenuToggle's Equals key in the same "secondary system action" row of the keyboard.
 		-- Admin-only (MoveEditorClient.lua's own authorization round-trip, same as DevMenuToggle).
 		OpenMoveEditor = { KeyCode = Enum.KeyCode.Minus },
+		-- Opens Roblox's own developer console for an authorized admin (Client/DevMenu/
+		-- DevMenuClient.lua). F7 rather than the engine's own F9: F9 is bound by Roblox itself only for
+		-- accounts with edit access to the place and does nothing for anyone else, so reusing it would
+		-- leave a key that works for some admins and silently not for others.
+		--
+		-- And NOT F6, which is where this first went: F6 is already the parkour debug overlay's raw
+		-- toggle (ParkourConstants.Debug.ToggleKeyCode). That binding is not in this table -- it is
+		-- deliberately raw so it never shows up in the player-facing rebind list -- so nothing here
+		-- flagged the collision, and the two handlers simply both fired on the same press. If another
+		-- "developer tooling" key is ever added, check ParkourConstants.Debug as well as this table.
+		OpenDevConsole = { KeyCode = Enum.KeyCode.F7 },
 		-- The 5 hotbar slots (see Types.KeybindAction's own header) -- the obvious number-row keys,
 		-- unclaimed elsewhere in this table (BasicAttack/HeavyAttack/Block/etc. all live on letters or
 		-- the mouse).
@@ -2550,14 +2577,91 @@ Constants.Combat = {
 	-- so an extreme/spoofed ping can't turn the window into a near-permanent parry.
 	ParryPingCompensationMaxSeconds = 0.12,
 
+	-- THE PARRIED ATTACKER'S OPEN GUARD -- how long after being parried they cannot raise a guard at
+	-- all (ACTION_GATES.GuardOpen rejects BlockStart) or have an already-raised one honored
+	-- (HitResolution.ClassifyDefense suppresses in the same branch posture-break uses).
+	--
+	-- This exists because the parry punish was, measurably, not a punish. The whole reward was
+	-- StunDuration, and ACTION_GATES.BlockStart is exempt from Stun (deliberately -- see its own
+	-- header and Balance principle 1), so a parried attacker's only real lockout was the recovery of
+	-- the swing they had already committed to. Measured against this table's own frame data: the
+	-- earliest a parried attacker can press Block is ActiveSeconds + RecoverySeconds of whatever they
+	-- threw, since handleBlockStart rejects on attackEndsAt and HitboxResolver samples on the first
+	-- active tick. That is 0.36s after a parried Basic1 and 0.77s after a Heavy1 -- so parrying a
+	-- Heavy already bought a free follow-up from the recovery alone, and parrying ANY Basic stage
+	-- bought nothing a human could act inside.
+	--
+	-- 0.60 is sized to cover reaction + one-way latency + the slowest weapon's own WindupSeconds
+	-- (Primary Basic1, 0.31 -- the playtest-confirmed value, see its own comment), so the parrier gets
+	-- EXACTLY ONE guaranteed follow-up. The reaction+latency half of that (~0.25) is an engineering
+	-- estimate, not a measurement from this project -- it is the one soft number here. The design
+	-- degrades gracefully either way: shorter and there is slack to spare, longer and the follow-up
+	-- merely lands on a guard instead of through it. The UPPER bound is hard, though -- past ~0.75 a
+	-- Secondary user's second swing (0.25 + Dagger1 Cooldown 0.35 + Windup 0.16) also lands inside the
+	-- window, which is a combo handed out for one read rather than a conversion.
+	--
+	-- Deliberately FLAT rather than tiered by what was parried. A Basic/Heavy split is the obvious
+	-- shape and it is the wrong one: the split already exists for free in RecoverySeconds, with the
+	-- same sign, so authoring a second one on top would widen the case that already works (Heavy) and
+	-- leave untouched the case that does not (Basic). A flat window is worth the most exactly where
+	-- the punish is currently worth the least.
+	--
+	-- Balance principle 3 ("no true unblockable/unparryable without an explicit telegraphed cost") is
+	-- satisfied by the parry itself being the telegraph: broadcastParryWindowOpened puts a bright,
+	-- everyone-visible highlight on the defender BEFORE the swing lands, and the attacker chose to
+	-- swing into it. Bounded, and non-refreshing -- only a parry writes it, and a parry costs the
+	-- defender ParryCooldownSeconds, so this can never stack into a lockout.
+	GuardOpenSeconds = 0.6,
+
+	-- THE COST OF ATTEMPTING A PARRY, expressed as a guard the player has to actually drop first.
+	--
+	-- handleBlockStart has no re-press guard (it never checked state.blocking), so the dominant
+	-- strategy was to hold Block permanently and re-tap it every ParryCooldownSeconds: continuous
+	-- block mitigation with a parry window covering 0.35/1.2 = 29% of all time, for nothing. That is
+	-- not a decision, which is what handleBlockStart's own "opening a parry window changes no vital
+	-- now that it costs nothing" comment was describing without treating as a problem.
+	--
+	-- Charged on RELEASE rather than on press, so it prices the turtle and not the tapper: a genuine
+	-- tap-to-parry releases while ParryCooldownSeconds still has ~0.85s to run, and math.max makes
+	-- this a no-op there. It only binds once the cooldown has already lapsed under a held guard --
+	-- i.e. exactly the hold-forever-and-re-tap case. To arm a parry you must have had your guard down
+	-- for this long, which is the exposure that makes the attempt a choice.
+	--
+	-- Costs the combo victim Balance principle 1 protects nothing at all, and that is checkable
+	-- rather than asserted: their first Block press comes from an unguarded state and arms normally,
+	-- and for hits 2-4 ParryCooldownSeconds (1.2) already dominates the worst-case inter-hit gap
+	-- (0.48 -- see HitStunDuration's own comment for that derivation). This binds in neutral only.
+	--
+	-- Also the design Server/Systems/TrainingBotSystem.lua's Parry preset was already written to --
+	-- see updateParryWatch, whose bot "stays unguarded and only presses Block reactively... hunting
+	-- parries" and releases immediately when no window opened. Turtle/Block presets correctly lose
+	-- parry access entirely under this, which will look like a regression before it looks like a fix.
+	GuardResetSeconds = 0.3,
+
 	-- Disarm: combat-philosophy.md's "Established systems" list names Block/Parry/Disarm as one
 	-- formal defensive layer (see ParryWindowSeconds' own comment for the Block/Parry merge).
-	-- Deterministic (no RNG, matching every decision this table drives): Parrying a HEAVY attack
-	-- disarms its attacker for DurationSeconds -- Basic pressure keeps its own value untouched
-	-- (only Heavy throws risk this on top of the existing ParryPunishPostureDamage), and Heavy's
-	-- bigger commitment/payoff is the "telegraphed cost" combat-philosophy.md's Balance Principle
-	-- #3 requires before anything bypasses/punishes past the core defensive layer. A disarmed
-	-- player can't throw a Basic or Heavy attack but can still Block/Parry/Dash/Sprint/
+	--
+	-- NOTHING CURRENTLY PRODUCES A DISARM, and that is deliberate rather than an oversight. The whole
+	-- mechanism below it is live and correct -- HitResolution.ApplyDisarm, CombatState/BotState's
+	-- disarmedUntil, the ACTION_GATES Disarm column, the "Disarmed" feedback kind and its client UI --
+	-- but the PREDICATE that used to decide it (HitResolution.ShouldDisarm, "a parried Heavy disarms
+	-- its attacker") has been deleted. It had been shelved in place as `return false and (...)`, which
+	-- is a decision disguised as code: four specs asserted its disabled `false` and so locked the
+	-- shelving in as if it were the intended contract.
+	--
+	-- The reason it was shelved still holds: nothing in this codebase distinguishes an armed
+	-- weapon-swing from a bare-fisted one (Basic AND Heavy both fall back to the same punch-style
+	-- animations -- CombatAnimator.lua's header), so being disarmed while visibly just punching read
+	-- as a bug, correctly. Do NOT revive it as the parry punish's severity axis either -- GuardOpen-
+	-- Seconds above is that axis now, and it does not need a weapon concept to make sense.
+	--
+	-- To bring it back once Heavy attacks (or some other explicit state) genuinely represent wielding
+	-- a weapon: one call site in resolveHitAgainstTarget's Parry branch, guarded on that new state.
+	-- The scoping argument that made it fair is worth preserving: Heavy's bigger commitment/payoff is
+	-- the "telegraphed cost" combat-philosophy.md's Balance Principle #3 requires before anything
+	-- punishes past the core defensive layer, and Basic pressure keeps its own value untouched.
+	--
+	-- A disarmed player can't throw a Basic or Heavy attack but can still Block/Parry/Dash/Sprint/
 	-- LockOn -- see CombatState.disarmedUntil's own comment for why this stays within
 	-- gameplay-philosophy.md's anti-lockout rule. First-pass technical tunable, free to move.
 	Disarm = {

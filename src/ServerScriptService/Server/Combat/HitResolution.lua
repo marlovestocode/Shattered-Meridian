@@ -141,13 +141,29 @@ end
 -- dummies) -- it simply can never classify into that branch, exactly matching what each duplicate
 -- omitted before unification. Order matters: parry beats block, same priority the original
 -- cascades used.
+--
+-- `guardOpenExpiry` is the SECOND full-suppression window, sharing posture-break's branch because it
+-- means the identical thing to this function -- no defense is available -- and differing only in what
+-- opened it (being parried, rather than being broken). Optional so the dummy path and any caller with
+-- no guard-open concept can omit it entirely; nil reads as "never open," never as "open now."
+--
+-- It is checked here IN ADDITION TO the ACTION_GATES.GuardOpen rejection on BlockStart, and the pair
+-- is not redundant. The gate covers the attacker who tries to RAISE a guard after being parried; this
+-- covers the one who was ALREADY holding it when the parry landed, whose state.blocking is true and
+-- whom no request handler will run again before the follow-up arrives. Only the gate would let that
+-- second case block normally; only this would let the first case see a guard stance animate and then
+-- eat the hit anyway, which is a lie to the player rather than a punish.
 function HitResolution.ClassifyDefense(
 	now: number,
 	postureBrokenExpiry: number,
 	parryWindowExpiry: number?,
-	blocking: boolean
+	blocking: boolean,
+	guardOpenExpiry: number?
 ): DefenseKind
 	if now < postureBrokenExpiry then
+		return "None"
+	end
+	if isWindowActive(now, guardOpenExpiry) then
 		return "None"
 	end
 	if isWindowActive(now, parryWindowExpiry) then
@@ -206,24 +222,12 @@ end
 -- Disarm
 --
 
--- Deterministic (no RNG, matching every other decision in this module): a Heavy attack that gets
--- Parried disarms its attacker. Scoped to Heavy specifically -- combat-philosophy.md's "no true
--- unblockable/unparryable without a telegraphed cost" is read here in reverse (a defensive punish
--- bypassing the normal parry-posture-punish-only consequence needs its own telegraphed cost to be
--- fair), and Heavy's bigger commitment/payoff is that cost. Basic pressure keeps its own value
--- untouched by this -- only Heavy throws risk a disarm on top of the existing posture punish.
---
--- TEMPORARILY DISABLED (the leading "false and" short-circuits every call to false) --
--- combat-philosophy.md lists Block/Parry/Disarm as an "Established system," so this stays the
--- single, documented gate rather than being deleted or patched out at each of the 3 call sites,
--- but "Disarm" doesn't make sense yet: nothing in this codebase currently distinguishes an armed
--- weapon-swing from a bare-fisted one (Basic AND Heavy both fall back to the same punch-style
--- animations today -- CombatAnimator.lua's header). Getting disarmed while visibly just punching
--- read as a bug, correctly. Re-enable by deleting "false and" once Heavy attacks (or some other
--- explicit state) actually represent wielding a weapon.
-function HitResolution.ShouldDisarm(defenseKind: DefenseKind, isHeavy: boolean): boolean
-	return false and (defenseKind == "Parry" and isHeavy)
-end
+-- NOTE: there is no ShouldDisarm predicate here anymore, and nothing in the codebase currently
+-- produces a disarm. It was shelved in place as `return false and (...)` -- a decision disguised as
+-- code, whose four specs asserted the disabled `false` and so locked the shelving in as the
+-- contract. Everything BELOW this line is live and staying: the mechanism is fine, it simply has no
+-- trigger until weapons are real. See Constants.Combat.Disarm's own comment for the full reasoning
+-- and for exactly what to add back when they are.
 
 -- Extends (never shortens, via math.max -- mirrors StunDuration's existing extend-don't-shorten
 -- pattern) disarmedUntil by Constants.Combat.Disarm.DurationSeconds. Takes any state table with
@@ -246,15 +250,18 @@ function HitResolution.ActionDropsParryWindow(kind: CombatTypes.CombatActionKind
 	return kind ~= "BlockStart"
 end
 
--- The standard attacker-side parry punish: posture damage + a stun. Called from every genuine Parry
--- branch -- CombatSystem.lua's resolveHitAgainstTarget (player defender) and BotCombat.lua's two
--- (bot defender vs. player attacker, player defender vs. bot attacker) -- extracted here rather than
--- left duplicated inline so those sites can never drift apart. Takes any state table with these two
--- fields (CombatState.Vitals/BotState both do), same "everything this step touches" reason
--- ApplyDisarm above does. Caller still owns checking posture <= 0 and triggering the posture break +
--- feedback dispatch (those need attackerPlayer/sendVitals/sendFeedback, which differ per call site
--- and aren't worth threading through here as callbacks).
-function HitResolution.ApplyParryPunish(state: { posture: number, stunExpiry: number }, now: number): ()
+-- The standard attacker-side parry punish: posture damage, a stun, and the open guard. Called from
+-- every genuine Parry branch -- CombatSystem.lua's resolveHitAgainstTarget (player defender) and
+-- BotCombat.lua's two (bot defender vs. player attacker, player defender vs. bot attacker) --
+-- extracted here rather than left duplicated inline so those sites can never drift apart. Takes any
+-- state table with these three fields (CombatState.Vitals/BotState both do), same "everything this
+-- step touches" reason ApplyDisarm above does. Caller still owns checking posture <= 0 and
+-- triggering the posture break + feedback dispatch (those need attackerPlayer/sendVitals/
+-- sendFeedback, which differ per call site and aren't worth threading through here as callbacks).
+function HitResolution.ApplyParryPunish(
+	state: { posture: number, stunExpiry: number, guardOpenExpiry: number },
+	now: number
+): ()
 	state.posture = math.max(0, state.posture - Constants.Combat.ParryPunishPostureDamage)
 	-- math.max, not a raw assign -- this was the ONE writer of stunExpiry in the codebase that could
 	-- SHORTEN an existing longer lockout, against the extend-never-shorten rule every other writer
@@ -263,6 +270,11 @@ function HitResolution.ApplyParryPunish(state: { posture: number, stunExpiry: nu
 	-- (1.1) applied at t=0 was cut back to StunDuration (1.0) by a parry landing a frame later --
 	-- a parry, the harder read, actively REDUCED the attacker's punish.
 	state.stunExpiry = math.max(state.stunExpiry, now + Constants.Combat.StunDuration)
+	-- The open guard, math.max'd for the same extend-never-shorten reason as the line above it. This
+	-- is what makes the stun mean anything: ACTION_GATES exempts BlockStart from Stun deliberately, so
+	-- without this the punish's entire reward was whatever recovery the attacker's own swing still
+	-- owed. See Constants.Combat.GuardOpenSeconds for the frame-data measurement behind that.
+	state.guardOpenExpiry = math.max(state.guardOpenExpiry, now + Constants.Combat.GuardOpenSeconds)
 end
 
 --

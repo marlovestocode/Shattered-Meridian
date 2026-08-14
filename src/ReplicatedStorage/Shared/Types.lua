@@ -986,6 +986,17 @@ export type KeybindAction =
 	-- remote of its own (opening the screen is free; every actual action inside it goes through
 	-- MoveEditorSystem's own gated RemoteFunctions).
 	| "OpenMoveEditor"
+	-- Opens Roblox's own developer console (the F9 panel) via StarterGui:SetCore("DevConsoleVisible")
+	-- -- Client/DevMenu/DevMenuClient.lua binds it, and only for a client the server has already
+	-- authorized, same admin-only contract as "DevMenuToggle"/"OpenMoveEditor" above. Fires no remote
+	-- of its own; it is a purely local panel toggle like "OpenBugReport".
+	--
+	-- Exists because Roblox only binds its own F9 shortcut for accounts with edit access to the
+	-- place, so a whitelisted admin who is not the place owner or a group member has no way to open
+	-- the console in a live server at all -- and the console is where every server/client log this
+	-- codebase emits through Shared/Logger.lua actually surfaces. SetCore has no such permission
+	-- gate, so binding it ourselves is the whole fix.
+	| "OpenDevConsole"
 	-- The 5 hotbar slots (Client/UI/Screens/HUD/init.lua's Panel "Hotbar") -- fire whatever MoveId is
 	-- currently bound to that slot (Client/Combat/HotbarBindings.lua, admin-local, no persistence)
 	-- via Combat_RequestFireHotbarMove. Unlike every other action above, these have no server-side

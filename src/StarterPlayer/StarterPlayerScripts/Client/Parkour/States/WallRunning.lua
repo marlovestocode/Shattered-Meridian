@@ -44,7 +44,6 @@ type WallProbe = ParkourTypes.WallProbe
 local WALLRUN = ParkourConstants.WallRun
 -- For the automatic ledge grab in Update below, which must restate LedgeHanging.CanEnter's gates
 -- itself -- see that branch's own comment.
-local LEDGE = ParkourConstants.Ledge
 
 -- Which side the active run is on, and everything derived from the wall it is on. Captured at Enter
 -- and refreshed each frame from whichever probe is still finding the same surface.
@@ -146,6 +145,12 @@ local WallRunning: ParkourTypes.StateDefinition = {
 	Reports = "WallRun",
 
 	CanEnter = function(context: ParkourContext): (boolean, string?)
+		-- Asked FIRST, ahead of every geometric check: a refusal the player cannot do anything about
+		-- should be the cheapest one and the one the debug overlay reports, rather than being masked by
+		-- whichever probe happens to also be unsatisfied this frame.
+		if StateSupport.CombatBlocks(context, "WallRunning") then
+			return false, "InCombat"
+		end
 		if context.Ground.Grounded then
 			return false, "Grounded"
 		end
@@ -243,51 +248,42 @@ local WallRunning: ParkourTypes.StateDefinition = {
 		motor.FaceDirection = tangent
 		motor.DesiredSpeed = context.Momentum
 
-		-- A wall-jump is available throughout, and takes priority over everything below -- kicking off
-		-- a wall is the whole point of being on one.
-		if StateSupport.JumpQueued(context) and StateSupport.JumpIntervalElapsed(context.Now) then
-			return "WallJumping"
-		end
-		-- A ledge appearing during the run is a better outcome than the run expiring: running along a
-		-- wall and catching its top edge is one of the chains this system exists to make possible.
+		-- A GRABBABLE LEDGE IS CHECKED BEFORE THE WALL-JUMP, and the order is the point. It used to be
+		-- the other way round, which meant running along a wall toward its top edge and pressing jump
+		-- kicked you off the wall and past the lip instead of catching it -- the same "the kick steals
+		-- the grab" problem States/WallJumping.CanEnter now guards against, in the one place that guard
+		-- cannot reach (this is a route-1 transition; see below).
 		--
-		-- THE GATES ARE RESTATED HERE, for the same reason States/WallJumping.Update restates them and
-		-- explains at length: a transition returned from Update is route 1 in StateMachine.Update,
-		-- which applies it WITHOUT consulting the target's CanEnter. WallJumping's comment claims this
-		-- state "makes the identical call, for the identical reason" -- it didn't, it tested only
-		-- Found and HasStandingSpace, and the three gates it skipped are each a real failure:
-		--
-		--   Allowed        -- a surface tagged ParkourNoLedge was grabbed anyway.
-		--   HasHangSpace   -- HasStandingSpace only measures room ON TOP of the lip. Hanging needs room
-		--                     BELOW it for the feet (Ledge.HangFootClearance). Wall-running past a low
-		--                     wall whose top falls in the grab band produced exactly the failure that
-		--                     constant's own header describes: a character jammed upright into the
-		--                     ground with the state readout saying LedgeHanging -- and LedgeHanging is
-		--                     Kinematic, so it anchors the root there rather than falling out of it.
-		--   vertical speed -- during the rise phase verticalSpeed reaches WallRun.RiseSpeed (13), above
-		--                     Ledge.MaxVerticalSpeedToGrab (12), so the run could snatch an edge it was
-		--                     about to clear right over.
-		--   facing         -- the no-button grab of an edge nobody reached for that
-		--                     Ledge.MaxGrabFacingAngleDegrees exists to refuse.
-		--
-		-- Vertical speed is tested against this state's OWN integrated `verticalSpeed` rather than the
-		-- context's measured one, for the reason WallJumping gives: the constraint is being commanded
-		-- from it, so the measured value trails it by a frame.
-		if
-			context.Assists.LedgeAssist
-			and context.Ledge.Found
-			and context.Ledge.Allowed
-			and context.Ledge.HasStandingSpace
-			and context.Ledge.HasHangSpace
-			and verticalSpeed <= LEDGE.MaxVerticalSpeedToGrab
-			and StateSupport.IsMovingToward(
-				context.RootPart.CFrame.LookVector,
-				context.Ledge.WallNormal,
-				LEDGE.MaxGrabFacingAngleDegrees
-			)
-		then
+		-- Reaching a ledge is also strictly the better outcome: a grab ends the run somewhere, where a
+		-- kick taken at the top of a wall throws the player back into open air having gained nothing.
+		if StateSupport.LedgeGrabAvailable(context, verticalSpeed) then
 			return "LedgeHanging"
 		end
+
+		-- A wall-jump is available throughout, and takes priority over everything below -- kicking off
+		-- a wall is the whole point of being on one.
+		--
+		-- THE COMBAT GATE IS RESTATED HERE because this is a route-1 transition: StateMachine.Update
+		-- applies it without consulting WallJumping.CanEnter, so the gate that file added would simply
+		-- not run. Reachable rather than theoretical -- a run legitimately started out of combat and an
+		-- exchange begins mid-run, at which point the kick must stop being available like any other
+		-- blocked traversal. (The run itself is already ending on its own timer; it is not force-exited
+		-- here, because yanking a player off a wall the instant someone swings at them would be a
+		-- worse experience than letting the run finish.)
+		if
+			StateSupport.JumpQueued(context)
+			and StateSupport.JumpIntervalElapsed(context.Now)
+			and not StateSupport.CombatBlocks(context, "WallJumping")
+		then
+			return "WallJumping"
+		end
+		-- The ledge check that used to sit HERE, below the wall-jump, has moved above it -- see its own
+		-- note up there for why catching the lip has to beat kicking off it. Its conditions were a
+		-- hand-written restatement (route 1 does not consult LedgeHanging.CanEnter) that tested only
+		-- Found and HasStandingSpace, silently skipping Allowed, HasHangSpace, the vertical-speed cap
+		-- and the facing gate; all of it now comes from StateSupport.LedgeGrabAvailable, which
+		-- additionally honors the regrab lockouts this site could never see. See that function's own
+		-- header for what the four independent copies of this cascade had drifted into.
 		return nil
 	end,
 

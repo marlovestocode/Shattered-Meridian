@@ -272,6 +272,25 @@ function PredictionMirror.OnBlockStarted(self: PredictionMirrorInstance, parryWi
 	end
 end
 
+-- The block key was RELEASED. Mirrors the guard reset handleBlockStop charges server-side --
+-- Constants.Combat.GuardResetSeconds pushed onto the same parryCooldownExpiry, with the same
+-- math.max so a release made during a live cooldown never shortens it.
+--
+-- Predicted rather than echoed, unlike OnBlockStarted above, because RequestBlockStop has no
+-- server->client confirm at all (it is deliberately un-rate-limited and always honored -- see
+-- handleBlockStop's own header), so there is nothing to wait for. That makes this the one mirror
+-- write with no confirming event, which is safe here precisely because the server's own rule is
+-- unconditional: every accepted release charges the reset, so a locally-applied copy cannot
+-- disagree with it except by the round-trip it is replacing.
+--
+-- Without it the parry-ready glint (PredictParryAvailable, driving CombatFeedback.FlashParryReady)
+-- would tell a player who has been holding guard that their next press arms a parry, up to
+-- GuardResetSeconds before it actually can -- which is worse than no cue, because it is a cue that
+-- is wrong exactly in the situation the guard reset exists to create.
+function PredictionMirror.OnBlockStopped(self: PredictionMirrorInstance, now: number): ()
+	self.parryCooldownExpiry = math.max(self.parryCooldownExpiry, now + Constants.Combat.GuardResetSeconds)
+end
+
 -- The local player's own swing CONNECTED (Combat_FeedbackEvent Kind "Hit"/"Blocked" with
 -- AttackerUserId == me) -- mirror the landing-based combo advance. Keyed off the stage's trailing
 -- digit (Basic1 landing makes the count 1, etc.) as an ASSIGNMENT rather than an increment, which

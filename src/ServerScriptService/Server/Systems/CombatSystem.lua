@@ -1104,7 +1104,8 @@ local function resolveHitAgainstTarget(
 		now,
 		targetState.Vitals.postureBrokenExpiry,
 		targetState.Vitals.parryWindowExpiry,
-		targetState.blocking
+		targetState.blocking,
+		targetState.Vitals.guardOpenExpiry
 	)
 
 	if defenseKind == "Parry" then
@@ -1151,14 +1152,13 @@ local function resolveHitAgainstTarget(
 			sendVitals(attackerPlayer, attackerState)
 		end
 
-		-- Disarm: a Heavy attack that gets Parried disarms its attacker (Constants.Combat.Disarm) --
-		-- see HitResolution.ShouldDisarm's own comment for why this is scoped to Heavy specifically.
-		if HitResolution.ShouldDisarm(defenseKind, isHeavy) then
-			HitResolution.ApplyDisarm(attackerState.Vitals, now)
-			local disarmPayload = FeedbackPayload.Build("Disarmed", attackerPlayer, targetPlayer, nil, nil, isHeavy)
-			sendFeedback(attackerPlayer, disarmPayload)
-			sendFeedback(targetPlayer, disarmPayload)
-		end
+		-- No disarm branch here anymore. It called HitResolution.ShouldDisarm, which had been shelved
+		-- as `return false and (...)` and so had produced nothing at any of its call sites for as long
+		-- as it existed; the predicate is now deleted outright rather than left as a permanently-false
+		-- call that reads like live behavior. The Disarm MECHANISM is untouched and still correct --
+		-- HitResolution.ApplyDisarm, Vitals.disarmedUntil, ACTION_GATES' Disarm column, the "Disarmed"
+		-- feedback kind and its client UI all remain -- it simply has no trigger until weapons are a
+		-- real concept. See Constants.Combat.Disarm's own comment for what to add back, and where.
 
 		if isTrackedContinuation then
 			local oldAttackerCharacter = attackerState.character
@@ -2147,31 +2147,124 @@ export type ActionCategory =
 -- slam) has no guard to raise at all, which is why Ragdoll still gates BlockStart. Every OTHER
 -- category is held to the identical "stuck where the game moves them" rule either way -- attacking,
 -- dashing, sprinting, and swapping weapons stay locked out while held, same as while ragdolled.
+-- GuardOpen is the newest column and the ONLY one that is true for exactly one row, which is
+-- deliberate on both counts. It gates BlockStart alone because that is the entire mechanic: a player
+-- who was just parried cannot raise a guard for Constants.Combat.GuardOpenSeconds. It is a column
+-- rather than an inline check inside handleBlockStart for this table's own stated reason -- one
+-- table, no hand-duplicated exceptions -- and because rejecting through checkCommonPreconditions is
+-- what makes the refusal HONEST: rejectAndNotify fires the existing Combat_ActionRejected path the
+-- client already rolls the predicted block stance back from, so the player sees their guard refused
+-- instead of seeing it animate and then eating a full hit anyway. It also means the press never
+-- reaches the parry-cooldown write below, so a guard that could never have fired costs nothing.
+--
+-- Note this row does NOT undo BlockStart.Stun's exemption above, and must not be read as reversing
+-- it. The exemption protects a COMBO VICTIM, who has to be able to attempt a defense (Balance
+-- principle 1); GuardOpen punishes an ATTACKER who committed to a swing into a visibly armed guard
+-- and lost. Different populations, different fields, and guardOpenExpiry is written only by a parry
+-- -- which costs the defender their own ParryCooldownSeconds -- so unlike stunExpiry it can never
+-- math.max-refresh its way into a lockout.
 local ACTION_GATES: {
-	[ActionCategory]: { Stun: boolean, PostureBroken: boolean, Ragdoll: boolean, Disarm: boolean, HeldAloft: boolean },
+	[ActionCategory]: {
+		Stun: boolean,
+		PostureBroken: boolean,
+		Ragdoll: boolean,
+		Disarm: boolean,
+		HeldAloft: boolean,
+		GuardOpen: boolean,
+	},
 } =
 	{
-		Basic = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = true, HeldAloft = true },
-		Heavy = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = true, HeldAloft = true },
-		BlockStart = { Stun = false, PostureBroken = true, Ragdoll = true, Disarm = false, HeldAloft = false },
-		Dash = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = false, HeldAloft = true },
+		Basic = {
+			Stun = true,
+			PostureBroken = true,
+			Ragdoll = true,
+			Disarm = true,
+			HeldAloft = true,
+			GuardOpen = false,
+		},
+		Heavy = {
+			Stun = true,
+			PostureBroken = true,
+			Ragdoll = true,
+			Disarm = true,
+			HeldAloft = true,
+			GuardOpen = false,
+		},
+		BlockStart = {
+			Stun = false,
+			PostureBroken = true,
+			Ragdoll = true,
+			Disarm = false,
+			HeldAloft = false,
+			GuardOpen = true,
+		},
+		Dash = {
+			Stun = true,
+			PostureBroken = true,
+			Ragdoll = true,
+			Disarm = false,
+			HeldAloft = true,
+			GuardOpen = false,
+		},
 		-- Same row as Dash -- Slide is a movement-only burst (no damage), gated identically.
-		Slide = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = false, HeldAloft = true },
-		SprintStart = { Stun = false, PostureBroken = false, Ragdoll = true, Disarm = false, HeldAloft = true },
-		SwapWeapon = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = false, HeldAloft = true },
-		LockOn = { Stun = false, PostureBroken = false, Ragdoll = false, Disarm = false, HeldAloft = false },
+		Slide = {
+			Stun = true,
+			PostureBroken = true,
+			Ragdoll = true,
+			Disarm = false,
+			HeldAloft = true,
+			GuardOpen = false,
+		},
+		SprintStart = {
+			Stun = false,
+			PostureBroken = false,
+			Ragdoll = true,
+			Disarm = false,
+			HeldAloft = true,
+			GuardOpen = false,
+		},
+		SwapWeapon = {
+			Stun = true,
+			PostureBroken = true,
+			Ragdoll = true,
+			Disarm = false,
+			HeldAloft = true,
+			GuardOpen = false,
+		},
+		LockOn = {
+			Stun = false,
+			PostureBroken = false,
+			Ragdoll = false,
+			Disarm = false,
+			HeldAloft = false,
+			GuardOpen = false,
+		},
 		-- Feint only ever matters while mid-swing, and every one of these three lockouts already ends
 		-- the swing itself via startAttackSwing/throwAirSlam's own IsStillValid before a Feint press
 		-- could reach it -- included here for the same "one table, no hand-duplicated exceptions"
 		-- reason as every other row, not because a live conflict was found. Disarm stays false, same
 		-- reasoning as Block/Dash/Slide -- cancelling your own swing isn't dealing damage.
-		Feint = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = false, HeldAloft = true },
+		Feint = {
+			Stun = true,
+			PostureBroken = true,
+			Ragdoll = true,
+			Disarm = false,
+			HeldAloft = true,
+			GuardOpen = false,
+		},
 		-- Same row as Basic/Heavy -- a custom move deals real damage, so testing/throwing one while
 		-- locked out by any universal lockout would be misleading (and, if it were ever reachable by
 		-- a non-admin, exploitable). Only MoveEditorSystem.TestFireMove and this file's own
 		-- handleFireHotbarMoveRequest ever reach CombatSystem.ThrowCustomMove -- both admin-gated
 		-- before ever reaching it -- see that function's own header.
-		CustomMove = { Stun = true, PostureBroken = true, Ragdoll = true, Disarm = true, HeldAloft = true },
+		CustomMove = {
+			Stun = true,
+			PostureBroken = true,
+			Ragdoll = true,
+			Disarm = true,
+			HeldAloft = true,
+			GuardOpen = false,
+		},
 	}
 
 -- Shared prefix every request handler below starts with: rate-limit check, combatStates[player]
@@ -2214,6 +2307,9 @@ local function checkCommonPreconditions(
 	end
 	if gates.Disarm and now < state.Vitals.disarmedUntil then
 		return nil, "Disarmed"
+	end
+	if gates.GuardOpen and now < state.Vitals.guardOpenExpiry then
+		return nil, "GuardOpen"
 	end
 
 	return state, nil
@@ -3089,6 +3185,20 @@ local function handleBlockStop(player: Player): ()
 	-- Releasing the block button early cancels any still-open parry window -- dropping your guard
 	-- shouldn't leave a "free" parry chance hanging past the input that was supposed to end it.
 	state.Vitals.parryWindowExpiry = 0
+	-- THE GUARD RESET, and the whole cost of attempting a parry. Charged here, on release, rather
+	-- than on the press -- see Constants.Combat.GuardResetSeconds for why that placement is the
+	-- mechanic and not an implementation detail. Folded onto parryCooldownExpiry rather than given a
+	-- new field because it is literally that field's existing meaning ("when may this player next arm
+	-- a parry"), which also means PredictionMirror already mirrors the right quantity and no
+	-- CombatVitalsState/test-fixture field list has to change for it.
+	--
+	-- math.max, never assigned: a genuine tap-to-parry releases while the full ParryCooldownSeconds
+	-- still has most of its run left, and this must not SHORTEN that. It binds only once the cooldown
+	-- has already lapsed under a continuously-held guard, which is exactly the hold-forever-and-re-tap
+	-- case it exists to price.
+	local now = os.clock()
+	state.Vitals.parryCooldownExpiry =
+		math.max(state.Vitals.parryCooldownExpiry, now + Constants.Combat.GuardResetSeconds)
 	logAccepted("BlockStop", player)
 end
 
@@ -3689,6 +3799,7 @@ local function createVitalsState(): CombatTypes.CombatVitalsState
 		postureBrokenExpiry = 0,
 		parryWindowExpiry = 0,
 		parryCooldownExpiry = 0,
+		guardOpenExpiry = 0,
 		stunExpiry = 0,
 		hitSlowExpiry = 0,
 		disarmedUntil = 0,
@@ -4392,6 +4503,12 @@ function CombatSystem.RequestBotBlockStop(botModel: Model): boolean
 	end
 	state.blocking = false
 	state.parryWindowExpiry = 0
+	-- Same guard reset a real player's release is charged (handleBlockStop) -- a bot that holds a
+	-- continuous guard has to drop it for GuardResetSeconds before it can arm another parry, exactly
+	-- like its owner. This is the change TrainingBotSystem's Turtle/Block presets will visibly feel:
+	-- they hold guard, so they now genuinely lose parry access, which is the correct reading of
+	-- "turtle" and was already how its own Parry preset was written (see updateParryWatch).
+	state.parryCooldownExpiry = math.max(state.parryCooldownExpiry, os.clock() + Constants.Combat.GuardResetSeconds)
 	BotAnimator.StopBlockHold(botModel)
 	logger:debug("Bot block stopped", { bot = botModel.Name })
 	return true
@@ -4685,6 +4802,15 @@ function CombatSystem.Init(): ()
 	inCombatNotifier.Changed.Event:Connect(function(player: Player, isInCombat: boolean)
 		local payload: Types.InCombatPayload = { InCombat = isInCombat }
 		inCombatChangedRemote:FireClient(player, payload)
+		-- Mirrored onto the Humanoid as well as fired down the remote, exactly the way
+		-- rootControlLockedNotifier above does. The remote serves the HUD badge, which wants the EDGE;
+		-- the Attribute serves Client/Parkour's combat gate, which wants the LEVEL every frame and
+		-- already reads four sibling Attributes off this same Humanoid (ParkourController's
+		-- resolveCombatOwned). See Constants.Attributes.InCombat's own comment for why both exist.
+		local state = combatStates[player]
+		if state and state.humanoid then
+			state.humanoid:SetAttribute(Constants.Attributes.InCombat, isInCombat)
+		end
 		logger:debug("In-combat state synced", { player = player.Name, inCombat = isInCombat })
 	end)
 

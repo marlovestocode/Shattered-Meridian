@@ -13,12 +13,20 @@
 	this overlay prints them verbatim. "TooTallToMantle" or "SameWallLockout" answers the question;
 	watching a character fail to vault does not.
 
-	STUDIO-GATED. Start() does nothing outside Studio, and the toggle key is bound raw (F6, from
+	STUDIO OR WHITELISTED ADMIN. The toggle key is bound raw (F6, from
 	ParkourConstants.Debug.ToggleKeyCode) rather than as a rebindable KeybindAction -- deliberately, so
-	it never appears in the player-facing rebind list. This is the same "developer tooling is
-	Studio-only" posture Constants.Debug.Logging takes, and the opposite of Constants.Debug.DevMenu's
-	(which is whitelist-gated precisely because it needs to work in live servers). A movement overlay
-	has no such need: movement is reproducible in Studio, which is where it gets tuned.
+	it never appears in the player-facing rebind list.
+
+	This used to be Studio-ONLY, on the reasoning that movement is reproducible in Studio and so a
+	movement overlay never needs to run live. That turned out to be wrong in the way these arguments
+	usually are: the bugs that matter (a grab that will not fire against real geometry, a wall-jump
+	that falls short, another player's body being treated as terrain) are found while actually playing
+	the game with other people in it, and Studio is exactly where they are not. So it now follows
+	Constants.Debug.DevMenu's whitelist-gated posture instead -- ParkourDebug.SetAuthorized, driven by
+	the same server round-trip that gates the dev menu. Studio access is unchanged and unconditional.
+
+	Granting it is safe to decide client-side because this overlay is strictly READ-ONLY -- see
+	SetAuthorized's own header for the full argument.
 
 	SELF-LIMITING. The adorn pool is capped (ParkourConstants.Debug.MaxAdorns) and the readout refreshes
 	on a timer rather than per frame, so the tool cannot become the performance problem it exists to
@@ -485,23 +493,62 @@ function ParkourDebug.SetEnabled(nextEnabled: boolean): ()
 end
 
 -- Binds the toggle key. Studio only -- see the file header. Idempotent.
+-- Whether an authorized admin is allowed this overlay in a LIVE server. Set by
+-- Client/DevMenu/DevMenuClient.lua once the server has answered its authorization round-trip -- see
+-- SetAuthorized below.
+local authorized = false
+
+-- Whether the toggle key should do anything right now. Studio is unconditional (the overlay is
+-- developer tooling and Studio is a developer); a live server additionally requires the same admin
+-- whitelist the dev menu runs on.
+local function toggleAvailable(): boolean
+	return RunService:IsStudio() or authorized
+end
+
+-- Grants this overlay in a live server. Called from DevMenuClient once (and only once) the server has
+-- confirmed this client is on the AdminConfig whitelist -- the same answer that gates the dev menu
+-- itself, reused rather than re-asked, so there is one authorization round-trip per session and one
+-- roster to maintain.
+--
+-- SAFE TO BE CLIENT-SIDE, and worth stating plainly since this is a flag a client sets on itself:
+-- the overlay is strictly READ-ONLY. It draws EnvironmentProbe's existing result tables and calls
+-- StateMachine.EvaluateAvailability, which is contractually a pure predicate. There is no action
+-- behind it to escalate into -- an attacker who forced this true would gain a heads-up display of
+-- their own client's movement state, which they could compute themselves anyway. Every privileged
+-- ACTION still goes through DevMenuSystem's own server-side check, exactly as before.
+function ParkourDebug.SetAuthorized(value: boolean): ()
+	authorized = value
+	if not value and enabled then
+		ParkourDebug.SetEnabled(false)
+	end
+	logger:debug("Parkour debug authorization changed", { authorized = value })
+end
+
 function ParkourDebug.Start(): ()
 	if started then
 		return
 	end
 	started = true
-	if not RunService:IsStudio() then
-		return
-	end
+	-- The input hook is connected UNCONDITIONALLY and the availability check moved to press time,
+	-- where it used to be an early return here. That ordering is what makes live-server access work at
+	-- all: Start() runs synchronously during the client boot sequence, while SetAuthorized arrives one
+	-- server round-trip later (DevMenuClient deliberately does its authorization check off the boot
+	-- path -- see its own Start header). Gating the CONNECTION on a flag that is still false at boot
+	-- meant an authorized admin could never get the overlay in a live game no matter what happened
+	-- afterwards.
 	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
 		if gameProcessed then
 			return
 		end
-		if input.KeyCode == DEBUG.ToggleKeyCode then
-			ParkourDebug.SetEnabled(not enabled)
+		if input.KeyCode ~= DEBUG.ToggleKeyCode then
+			return
 		end
+		if not toggleAvailable() then
+			return
+		end
+		ParkourDebug.SetEnabled(not enabled)
 	end)
-	logger:info("Parkour debug available", { toggleKey = DEBUG.ToggleKeyCode.Name })
+	logger:info("Parkour debug started", { toggleKey = DEBUG.ToggleKeyCode.Name, studio = RunService:IsStudio() })
 end
 
 return ParkourDebug

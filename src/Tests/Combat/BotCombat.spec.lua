@@ -56,6 +56,7 @@ local function makeBotState(overrides: { [string]: any }?): BotState
 
 		parryWindowExpiry = 0,
 		parryCooldownExpiry = 0,
+		guardOpenExpiry = 0,
 		stunExpiry = 0,
 		postureBrokenExpiry = 0,
 
@@ -86,6 +87,7 @@ local SUB_STATE_GROUPS = {
 			postureBrokenExpiry = true,
 			parryWindowExpiry = true,
 			parryCooldownExpiry = true,
+			guardOpenExpiry = true,
 			stunExpiry = true,
 			hitSlowExpiry = true,
 			disarmedUntil = true,
@@ -166,6 +168,7 @@ local function makeCombatState(overrides: { [string]: any }?): CombatState
 			postureBrokenExpiry = 0,
 			parryWindowExpiry = 0,
 			parryCooldownExpiry = 0,
+			guardOpenExpiry = 0,
 			stunExpiry = 0,
 			hitSlowExpiry = 0,
 			disarmedUntil = 0,

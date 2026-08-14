@@ -144,8 +144,36 @@ local function findScale(instance: Instance, name: string, fallback: number): nu
 	return fallback
 end
 
+-- Whether this instance is part of a CHARACTER -- any Model carrying a Humanoid within the same
+-- ancestor budget the tag walk uses. Players, training bots, training dummies and any future NPC all
+-- match, because a Humanoid is what every one of them has in common and none of them need to be
+-- registered anywhere for this to hold.
+--
+-- Bodies are not terrain. Without this, another player is fully valid parkour geometry: an edge to
+-- ledge-hang from, a surface to mantle, something to vault or wall-run along. That is absurd on its
+-- face, and it is also an exploit -- a stack of teammates becomes a ladder, and a moving one becomes
+-- an elevator with a pulse.
+--
+-- Resolved as Ignored (precedence rule 1) rather than as four separate denials, because "invisible to
+-- parkour" is exactly the intent and every caller already honors Ignored. Note the CAST-level filter
+-- in Client/Parkour/EnvironmentProbe.lua is the primary defence for real Players -- a body between
+-- the probe and a wall would otherwise stop the ray and hide the wall behind it, which no post-hit
+-- rejection can undo. This catches everything that filter has no roster for.
+local function isCharacterPart(instance: Instance): boolean
+	local current: Instance? = instance
+	local depth = 0
+	while current and depth < MAX_ANCESTOR_DEPTH do
+		if current:IsA("Model") and current:FindFirstChildOfClass("Humanoid") ~= nil then
+			return true
+		end
+		current = current.Parent
+		depth += 1
+	end
+	return false
+end
+
 local function resolve(instance: Instance): SurfacePermissions
-	if hasMarker(instance, TAGS.NoParkour) then
+	if isCharacterPart(instance) or hasMarker(instance, TAGS.NoParkour) then
 		return {
 			Ignored = true,
 			Vaultable = false,

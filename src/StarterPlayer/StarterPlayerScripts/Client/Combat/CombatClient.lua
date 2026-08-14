@@ -1071,6 +1071,11 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle, deathFeed: Dea
 			logger:debug("Input: Block keybind released -> block stop")
 			fireRequest(requestBlockStop, "RequestBlockStop")
 			CombatAnimator.StopBlockHold()
+			-- Mirror the guard reset the server charges on every release (handleBlockStop), so the
+			-- parry-ready glint stops claiming a parry is available during it -- see
+			-- PredictionMirror.OnBlockStopped's own header for why this one is predicted outright
+			-- rather than driven off a confirm echo.
+			mirror:OnBlockStopped(os.clock())
 		elseif KeybindManager.Matches("Sprint", input) then
 			-- Release only means anything in Hold mode. In Toggle mode the press already flipped the
 			-- state and the release must not undo it -- returning early rather than guarding
@@ -1624,12 +1629,24 @@ function CombatClient.Start(combatFeedback: CombatFeedbackHandle, deathFeed: Dea
 			-- doubled-feedback the parry is meant to read cleanly past). See SuppressDamageNumbers.
 			combatFeedback.SuppressDamageNumbers(Constants.Combat.ParryWindowSeconds)
 			combatFeedback.SpawnDamageNumber({ Text = "PARRIED", Kind = "Critical", Position = position })
-			-- Only the defender hears the impact -- payload.TargetUserId is who did the
-			-- parrying/blocking (see CombatSystem.lua's resolveHitAgainstTarget). A parried
-			-- hand-to-hand strike (Basic attack, IsHeavy falsy) gets its own sound rather than the
-			-- generic block/parry impact -- see CombatAudio.lua's PlayHandToHandParried header for
-			-- why this isn't a catch-all parry sound.
-			if payload.TargetUserId == localPlayer.UserId then
+			-- BOTH parties hear the impact. This used to be gated on payload.TargetUserId alone (the
+			-- parrier), which meant the player who got parried -- the one the whole beat is happening
+			-- TO -- heard nothing at all: they got the stun effect, the shake and the freeze, but the
+			-- clash itself was silent on their screen, so the single most important thing that just
+			-- happened to them had no audio at all.
+			--
+			-- Ungated rather than duplicated per side because a parry is one shared event with one
+			-- sound, and every other sensory channel on it already treats it that way: the camera
+			-- shake and HitStop.FreezeParry a few lines below fire for attacker OR target, and the
+			-- server sends this exact payload to both (resolveHitAgainstTarget's two sendFeedback
+			-- calls). A bot-vs-player parry delivers only one side of the pair, and that side still
+			-- hears it correctly under this.
+			--
+			-- The Heavy/Basic split is unchanged: a parried hand-to-hand strike (Basic attack, IsHeavy
+			-- falsy) gets its own sound rather than the generic block/parry impact -- see
+			-- CombatAudio.lua's PlayHandToHandParried header for why that isn't a catch-all parry
+			-- sound.
+			if payload.AttackerUserId == localPlayer.UserId or payload.TargetUserId == localPlayer.UserId then
 				if payload.IsHeavy then
 					CombatAudio.PlayBlockImpact()
 				else

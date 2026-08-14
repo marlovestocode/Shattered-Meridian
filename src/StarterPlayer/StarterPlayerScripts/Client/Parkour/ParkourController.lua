@@ -147,6 +147,7 @@ local function buildInitialContext(boundCharacter: Model, boundHumanoid: Humanoi
 		LastWallInstance = nil,
 		LastWallLeftAt = 0,
 		CombatOwned = false,
+		InCombat = false,
 		Assists = InputBuffer.GetAssists(),
 		Motor = ParkourMotor.BeginFrame(),
 		AnimationVariant = nil,
@@ -289,6 +290,12 @@ local function step(deltaTime: number): ()
 	context.SprintStage = if typeof(stageValue) == "number" then stageValue else 0
 	context.Assists = InputBuffer.GetAssists()
 	context.CombatOwned = resolveCombatOwned(currentHumanoid)
+	-- One more Attribute read on this same Humanoid, for the same reason SprintStage above is read
+	-- rather than subscribed to: the server already publishes it (CombatSystem's inCombatNotifier), and
+	-- a cached mirror fed by the Combat_InCombatChanged remote would be a second source of truth to
+	-- keep correct across respawns. Unset (a life that has never fought) reads as false, which is
+	-- exactly right.
+	context.InCombat = currentHumanoid:GetAttribute(Constants.Attributes.InCombat) == true
 
 	local velocity = currentRoot.AssemblyLinearVelocity
 	context.Velocity = velocity

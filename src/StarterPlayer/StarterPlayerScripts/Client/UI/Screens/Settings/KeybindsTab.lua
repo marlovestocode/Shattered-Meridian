@@ -68,6 +68,7 @@ local ACTION_DISPLAY_ORDER = {
 	"OpenBugReport",
 	"OpenMoveEditor",
 	"DevMenuToggle",
+	"OpenDevConsole",
 	"SettingsToggle",
 }
 
@@ -86,6 +87,7 @@ local ACTION_LABELS: { [string]: string } = {
 	OpenBugReport = "Report a Bug",
 	OpenMoveEditor = "Move Editor",
 	DevMenuToggle = "Dev Menu",
+	OpenDevConsole = "Developer Console",
 	SettingsToggle = "Settings",
 }
 

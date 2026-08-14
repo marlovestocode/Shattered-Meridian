@@ -69,6 +69,12 @@ local Sliding: ParkourTypes.StateDefinition = {
 	Reports = "Slide",
 
 	CanEnter = function(context: ParkourContext): (boolean, string?)
+		-- Asked first -- see States/WallRunning.CanEnter's own note on why the combat refusal leads.
+		-- This gates the PARKOUR slide only; combat's own slide (CombatSystem.handleSlideRequest) is a
+		-- separate action with its own server-side gates and is untouched by this.
+		if StateSupport.CombatBlocks(context, "Sliding") then
+			return false, "InCombat"
+		end
 		if not context.Ground.Grounded then
 			return false, "NotGrounded"
 		end
@@ -227,7 +233,15 @@ local Sliding: ParkourTypes.StateDefinition = {
 
 		-- EXIT 2: roll out. Rolling's own CanEnter re-checks its cooldown and allowed-from list, so
 		-- this only has to notice the input.
-		if InputBuffer.PeekRoll(context.Now) then
+		--
+		-- The combat gate is the exception it cannot re-check: this is a route-1 transition, applied
+		-- without consulting Rolling.CanEnter at all (StateMachine.Update -- the caller is asserting,
+		-- not asking), so the gate has to be asked here or a slide would be a way to roll in combat
+		-- that a standing player does not have. The forced-slope entries INTO this state
+		-- (Idle/Walking/Sprinting.Update) are deliberately NOT gated the same way -- a slope too steep
+		-- to stand on takes the character whether they asked or not, and refusing it in combat would
+		-- leave them standing on a surface the framework has already decided is unstandable.
+		if InputBuffer.PeekRoll(context.Now) and not StateSupport.CombatBlocks(context, "Rolling") then
 			context.Momentum *= SLIDE.RollOutRetainFraction
 			return "Rolling"
 		end

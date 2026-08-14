@@ -216,6 +216,7 @@ local function createTrainingBot(ownerPlayer: Player, spawnCFrame: CFrame): BotS
 
 		parryWindowExpiry = 0,
 		parryCooldownExpiry = 0,
+		guardOpenExpiry = 0,
 		stunExpiry = 0,
 		postureBrokenExpiry = 0,
 
@@ -385,8 +386,13 @@ function BotCombat.ResolveHitAgainstBot(
 	attackerState.inCombatUntil = now + Constants.Combat.InCombatDurationSeconds
 
 	local wasPostureBroken = now < botState.postureBrokenExpiry
-	local defenseKind =
-		HitResolution.ClassifyDefense(now, botState.postureBrokenExpiry, botState.parryWindowExpiry, botState.blocking)
+	local defenseKind = HitResolution.ClassifyDefense(
+		now,
+		botState.postureBrokenExpiry,
+		botState.parryWindowExpiry,
+		botState.blocking,
+		botState.guardOpenExpiry
+	)
 
 	if defenseKind == "Parry" then
 		logger:info("Parry detected (bot defender)", {
@@ -408,12 +414,9 @@ function BotCombat.ResolveHitAgainstBot(
 			hooks.SendVitals(attackerPlayer, attackerState)
 		end
 
-		if HitResolution.ShouldDisarm(defenseKind, isHeavy) then
-			HitResolution.ApplyDisarm(attackerState.Vitals, now)
-			local disarmPayload =
-				FeedbackPayload.Build("Disarmed", attackerPlayer, nil, nil, nil, isHeavy, targetPosition)
-			hooks.SendFeedback(attackerPlayer, disarmPayload)
-		end
+		-- No disarm branch -- see the sibling site in CombatSystem.lua's resolveHitAgainstTarget and
+		-- Constants.Combat.Disarm's own comment. The predicate that gated this was permanently false
+		-- and has been deleted; the mechanism it drove is intact and unused.
 
 		return false
 	end
@@ -547,7 +550,8 @@ function BotCombat.ResolveHitFromBotAgainstPlayer(
 		now,
 		targetState.Vitals.postureBrokenExpiry,
 		targetState.Vitals.parryWindowExpiry,
-		targetState.blocking
+		targetState.blocking,
+		targetState.Vitals.guardOpenExpiry
 	)
 
 	if defenseKind == "Parry" then
@@ -574,11 +578,7 @@ function BotCombat.ResolveHitFromBotAgainstPlayer(
 			triggerBotPostureBreak(botState, targetPlayer, hooks.SendFeedback)
 		end
 
-		if HitResolution.ShouldDisarm(defenseKind, isHeavy) then
-			HitResolution.ApplyDisarm(botState, now)
-			local disarmPayload = FeedbackPayload.Build("Disarmed", nil, targetPlayer, nil, nil, isHeavy)
-			hooks.SendFeedback(targetPlayer, disarmPayload)
-		end
+		-- No disarm branch -- see the sibling site above and Constants.Combat.Disarm's own comment.
 
 		return
 	end

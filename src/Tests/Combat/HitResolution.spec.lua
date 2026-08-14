@@ -173,26 +173,90 @@ return function()
 		end)
 	end)
 
-	describe("HitResolution.ShouldDisarm", function()
-		-- Temporarily disabled unconditionally -- see ShouldDisarm's own header in HitResolution.lua:
-		-- nothing in this codebase yet distinguishes an armed weapon-swing from a bare-fisted one, so
-		-- Disarm has nothing meaningful to disarm from right now. These cases (including the
-		-- previously-true "Parry against Heavy" case) all assert false until that distinction exists.
-		it("is false for a Parry against a Heavy attack (disabled pending an armed/unarmed distinction)", function()
-			expect(HitResolution.ShouldDisarm("Parry", true)).to.equal(false)
+	-- HitResolution.ShouldDisarm is GONE, and there is deliberately no replacement describe block for
+	-- it. The four specs that stood here asserted the `false` its shelved `return false and (...)`
+	-- produced, which had the effect of pinning the disabled state in place as a tested contract --
+	-- exactly the thing that made deleting it feel like a behavior change when it never was. Nothing
+	-- produces a disarm today; see Constants.Combat.Disarm's own comment for what to add back, where,
+	-- and what to spec at that point.
+
+	describe("HitResolution.ApplyParryPunish", function()
+		it("takes posture, extends the stun, and opens the guard", function()
+			local now = 100
+			local state = { posture = 80, stunExpiry = 0, guardOpenExpiry = 0 }
+
+			HitResolution.ApplyParryPunish(state, now)
+
+			expect(state.posture).to.equal(80 - Constants.Combat.ParryPunishPostureDamage)
+			expect(state.stunExpiry).to.equal(now + Constants.Combat.StunDuration)
+			expect(state.guardOpenExpiry).to.equal(now + Constants.Combat.GuardOpenSeconds)
 		end)
 
-		it("is false for a Parry against a Basic (non-Heavy) attack", function()
-			expect(HitResolution.ShouldDisarm("Parry", false)).to.equal(false)
+		it("never shortens an already-longer guard-open window", function()
+			local now = 100
+			local farFuture = now + Constants.Combat.GuardOpenSeconds + 5
+			local state = { posture = 80, stunExpiry = 0, guardOpenExpiry = farFuture }
+
+			HitResolution.ApplyParryPunish(state, now)
+
+			expect(state.guardOpenExpiry).to.equal(farFuture)
 		end)
 
-		it("is false for a Block against a Heavy attack", function()
-			expect(HitResolution.ShouldDisarm("Block", true)).to.equal(false)
+		it("floors posture at zero rather than going negative", function()
+			local state = { posture = 5, stunExpiry = 0, guardOpenExpiry = 0 }
+			HitResolution.ApplyParryPunish(state, 100)
+			expect(state.posture).to.equal(0)
+		end)
+	end)
+
+	describe("HitResolution.ClassifyDefense guard-open suppression", function()
+		it("suppresses a held block while the guard is open", function()
+			expect(HitResolution.ClassifyDefense(100, 0, 0, true, 200)).to.equal("None")
 		end)
 
-		it("is false for None against a Heavy attack", function()
-			expect(HitResolution.ShouldDisarm("None", true)).to.equal(false)
+		it("suppresses even an armed parry window while the guard is open", function()
+			-- The attacker who was parried mid-swing may still have had their own window armed. Being
+			-- parried has to beat that, or a trade would hand the loser of the read a free parry back.
+			expect(HitResolution.ClassifyDefense(100, 0, 200, true, 200)).to.equal("None")
 		end)
+
+		it("restores normal defense once the guard-open window has expired", function()
+			expect(HitResolution.ClassifyDefense(100, 0, 0, true, 50)).to.equal("Block")
+			expect(HitResolution.ClassifyDefense(100, 0, 200, false, 50)).to.equal("Parry")
+		end)
+
+		it("treats a zero (never-parried) guard-open as inactive", function()
+			expect(HitResolution.ClassifyDefense(100, 0, 0, true, 0)).to.equal("Block")
+		end)
+
+		it("treats an omitted guard-open as inactive, so the 4-argument callers are unaffected", function()
+			expect(HitResolution.ClassifyDefense(100, 0, 0, true)).to.equal("Block")
+			expect(HitResolution.ClassifyDefense(100, 0, 200, true)).to.equal("Parry")
+		end)
+
+		it(
+			"regression: the parry punish's own guard-open makes the follow-up land -- the whole reason the punish exists",
+			function()
+				-- The measured failure this replaces: ACTION_GATES exempts BlockStart from Stun, so a
+				-- parried attacker's only real lockout was their own swing's recovery, and against every
+				-- Basic stage that recovery (0.36-0.44s) expires before any human follow-up can land.
+				local now = 100
+				local attacker = { posture = 80, stunExpiry = 0, guardOpenExpiry = 0 }
+				HitResolution.ApplyParryPunish(attacker, now)
+
+				-- The parrier's fastest realistic follow-up: reaction + latency + Primary Basic1's own
+				-- playtest-confirmed 0.31 windup. It must NOT be mitigated, however hard they guard.
+				local followUpAt = now + 0.56
+				expect(HitResolution.ClassifyDefense(followUpAt, 0, 0, true, attacker.guardOpenExpiry)).to.equal("None")
+
+				-- And the window has to END -- one guaranteed hit, not a combo. A second swing, gated by
+				-- the first one's own commitment, arrives well outside it and meets a real guard again.
+				local secondSwingAt = now + Constants.Combat.GuardOpenSeconds + 0.1
+				expect(HitResolution.ClassifyDefense(secondSwingAt, 0, 0, true, attacker.guardOpenExpiry)).to.equal(
+					"Block"
+				)
+			end
+		)
 	end)
 
 	describe("HitResolution.StampRecentOpponent", function()

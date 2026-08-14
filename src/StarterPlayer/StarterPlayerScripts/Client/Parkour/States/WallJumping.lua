@@ -14,9 +14,32 @@
 	threshold where it reads as losing control -- is what makes the push actually carry, and therefore
 	what makes chaining require two walls rather than one.
 
+	The lock RAMPS OUT rather than ending on a frame (Assist.ControlRampStartFraction): it used to be
+	strictly binary, so the instant it expired the character went from unsteerable to fully steerable
+	with nothing in between, and that discontinuity is felt as the jump "snapping" back under control.
+	Only the front of the window needs to be absolute -- that is where a steer back into the wall
+	would undo the push -- so authority fades in across the tail and the hand-off to Falling becomes a
+	continuation instead of a switch. It touches the planar direction only; the vertical arc stays
+	ballistic, because air control over lift is a glide, not a jump.
+
+	FACING is eased over its own (shorter) window rather than written to the departure direction on
+	frame one -- see FacingEaseSeconds. The orientation drive goes exactly where it is told, so
+	retargeting it in a single step is a rotation with no intermediate frames: nothing for the eye to
+	follow, so the body reads as re-posed rather than as pushing off something. Exactly the problem,
+	and exactly the fix, that States/LedgeHanging documents for its own grab pose.
+
 	During the lock this state runs in Velocity drive mode and integrates its own gravity, so the arc
 	is a real ballistic arc rather than a floaty constant-velocity glide. It hands off to Falling the
 	moment the lock expires, with the live velocity intact.
+
+	A GRABBABLE LEDGE OUTRANKS THE KICK, enforced in CanEnter rather than left to the priority table.
+	LedgeHanging already sits above this state (210 against 180), but priority only decides the frame
+	where both accept -- and the case that actually bites is the grab being a frame or two out, so the
+	kick fires first and carries the player off the wall past the lip they were reaching for, after
+	which nothing can pre-empt this state because it is Committed. Deferring is safe because it asks
+	the same StateSupport.LedgeGrabAvailable predicate LedgeHanging.CanEnter does, so it only ever
+	declines when the grab would genuinely be taken, and the buffered jump survives to fire the kick
+	next frame if it is not.
 
 	CHAIN FALLOFF (ChainFalloffMultiplier, applied via ParkourMath.WallJumpVelocity) scales both the
 	push and the lift by a compounding factor per wall-jump since the last ground contact. Chaining
@@ -27,11 +50,24 @@
 	the player and lands wherever it lands; between two walls that means every link of a chain is a fresh
 	act of estimation, and one bad estimate ends the line. So on every jump this state asks
 	EnvironmentProbe.FindWallJumpTarget what is actually out there -- a fan of rays across the open side
-	plus a short upward arc -- ranks the hits by how nearly each one lies where the player is asking to
-	go, and, when something qualifies, flies a trajectory SOLVED to land on it
-	(ParkourMath.SolveLaunchVelocity) rather than the fixed push. The surplus in that solve
+	plus a short upward arc -- ranks the hits, and, when something qualifies, flies a trajectory SOLVED
+	to land on it (ParkourMath.SolveLaunchVelocity) rather than the fixed push. The surplus in that solve
 	(Assist.ReachMargin) is deliberate and small: just more than enough to reach, because landing on the
 	mathematical minimum makes every frame of error a miss.
+
+	The ranking prefers the NEAREST usable surface (Assist.ProximityWeight now leads AlignmentWeight),
+	so the jump goes where the player can see themselves landing. Alignment leading meant a barely-
+	aimed-at wall forty studs out could beat a well-placed one six studs away, and the same press
+	produced either a hop or a committed long flight depending on scenery nobody was aiming at.
+
+	A CORRIDOR KICK KEEPS THE SPEED IT ARRIVED WITH. The solved velocity owns two axes -- across the
+	gap, and up -- and in a chimney the gap is small, so its planar component is small too. Assigning
+	it wholesale therefore threw away everything the player had built up: sprinting a narrow tunnel
+	and kicking off a wall collapsed planar speed to single digits, instantly. Travel ALONG the
+	corridor is a third axis the solve has no claim on (sliding down a tunnel does not change the
+	distance to either wall), so that component is decomposed out and re-added at the same
+	ForwardRetainFraction the unassisted kick already uses. The crossing still lands where it was
+	solved to land; the run keeps its momentum.
 
 	Nothing about that removes the chain's limits. The scan refuses to aim back at the wall it just left
 	(by instance AND by radius, since a wall face is usually several parts), the vertical cap bounds a
@@ -57,7 +93,6 @@ type WallProbe = ParkourTypes.WallProbe
 
 local WALLJUMP = ParkourConstants.WallJump
 local ASSIST = WALLJUMP.Assist
-local LEDGE = ParkourConstants.Ledge
 
 -- The velocity being flown this frame, integrated across the control lock.
 local velocity = Vector3.zero
@@ -65,6 +100,13 @@ local velocity = Vector3.zero
 -- by Update for one thing only: how long the control lock holds. A solved arc is a promise, and air
 -- control applied to it immediately is the player steering off a prediction made for them.
 local assisted = false
+
+-- THE FACING EASE. Where the body was pointing on the frame the kick launched, so Update can turn it
+-- toward the departure direction over the lock instead of retargeting the orientation drive to it on
+-- frame one. Same problem States/LedgeHanging solves for its hang pose, same shape of answer: the
+-- discontinuity IS the clunk, because a rotation with no intermediate frames has nothing for the eye
+-- to follow and reads as the character being re-posed rather than as them pushing off something.
+local entryFacing = Vector3.new(0, 0, -1)
 
 -- Whichever side currently has a wall close enough to jump from. Unlike WallRunning's own selection
 -- this does NOT care about approach angle -- pushing off a wall you ran straight into is legitimate
@@ -97,6 +139,10 @@ local WallJumping: ParkourTypes.StateDefinition = {
 	Committed = true,
 
 	CanEnter = function(context: ParkourContext): (boolean, string?)
+		-- Asked first -- see States/WallRunning.CanEnter's own note on why the combat refusal leads.
+		if StateSupport.CombatBlocks(context, "WallJumping") then
+			return false, "InCombat"
+		end
 		if context.Ground.Grounded then
 			return false, "Grounded"
 		end
@@ -112,12 +158,34 @@ local WallJumping: ParkourTypes.StateDefinition = {
 		if not nearestWall(context) then
 			return false, "NoWallToJumpFrom"
 		end
+		-- A GRABBABLE LEDGE BEATS A KICK, and this is the gate that makes that true rather than merely
+		-- implied by priority. LedgeHanging already outranks this state (210 against 180), so route 2
+		-- pre-emption picks it whenever both accept -- but that only settles the case where both
+		-- accept, and the case players actually hit is the one where the grab is a frame or two away
+		-- and the kick fires first, taking them off the wall and past the lip they were reaching for.
+		-- Once WallJumping has started nothing can pre-empt it either, because it is Committed.
+		--
+		-- Refusing here is safe precisely because it asks the SHARED predicate rather than a restated
+		-- copy: this declines only when a grab would genuinely be accepted this frame, so the jump
+		-- input is never eaten in exchange for nothing. The buffered press survives
+		-- (InputBuffer.ConsumeJump is in Enter, which did not run), so if the grab does not materialise
+		-- the very next frame the kick still fires off the same press.
+		--
+		-- Asked against the MEASURED vertical velocity, not an owned one: nothing is commanding a
+		-- velocity at this point -- this is a CanEnter, and the character is in whatever the previous
+		-- state left them in.
+		if StateSupport.LedgeGrabAvailable(context, context.VerticalVelocity) then
+			return false, "LedgeTakesPriority"
+		end
 		return true, nil
 	end,
 
 	Enter = function(context: ParkourContext): ()
 		InputBuffer.ConsumeJump(context.Now)
 		StateSupport.NoteJump(context.Now)
+
+		entryFacing =
+			ParkourMath.SafeUnit(ParkourMath.Flatten(context.RootPart.CFrame.LookVector), Vector3.new(0, 0, -1))
 
 		local wall = nearestWall(context)
 		local normal = if wall then wall.Normal else Vector3.new(0, 0, -1)
@@ -212,7 +280,36 @@ local WallJumping: ParkourTypes.StateDefinition = {
 				ASSIST.MaxPlanarSpeed
 			)
 			if reachable then
-				velocity = solved
+				-- THE ALONG-TUNNEL CARRY, and why a corridor kick is the one solve that gets to keep
+				-- momentum the solver did not compute.
+				--
+				-- SolveLaunchVelocity returns a complete velocity: lift, plus exactly the planar speed
+				-- needed to cross the gap in that flight time. In a corridor the gap is SMALL -- 2.5 to a
+				-- few studs is the normal case -- so that planar speed is correspondingly tiny, and
+				-- assigning it wholesale threw away every bit of speed the player arrived with. Running a
+				-- narrow tunnel at sprint and kicking off a wall dropped planar speed from ~46 studs/s to
+				-- single digits, instantly: the "random" massive slowdown, which is not random at all but
+				-- fires on exactly the jumps that take this branch (and so flickers with whether the
+				-- corridor test qualified that frame).
+				--
+				-- The fix is a decomposition, not a fudge. The solve legitimately owns two axes: the
+				-- OUTWARD one (crossing to the far face) and the vertical one. It has no claim on the
+				-- third -- travel ALONG the corridor -- and re-adding that component costs the arc
+				-- nothing, because sliding down a tunnel does not change the distance to the wall on
+				-- either side of it. So the crossing still lands where it was solved to land, and the
+				-- run keeps its speed.
+				--
+				-- Retained IN FULL (Assist.CorridorAlongRetainFraction, 1) rather than at the ordinary
+				-- kick's ForwardRetainFraction. That distinction is the difference between the fix
+				-- working and not: because the solve contributes ~nothing along the tunnel, the fraction
+				-- here is the entire forward speed rather than a top-up on it, so anything below 1 is a
+				-- straight speed cut on every kick -- which is exactly the "wall-run down a tunnel, jump,
+				-- fall short every time" this is meant to end. See that constant's own comment for why 1
+				-- is the neutral value and not a generous one. A chimney climb from a standstill is
+				-- unchanged either way: there is no along-tunnel component to keep.
+				local travel = ParkourMath.Flatten(StateSupport.TravelDirection(context)) * context.Momentum
+				local alongCorridor = travel - outward * travel:Dot(outward)
+				velocity = solved + alongCorridor * ASSIST.CorridorAlongRetainFraction
 				assisted = true
 			end
 		elseif target.Found and not target.Corridor then
@@ -259,13 +356,55 @@ local WallJumping: ParkourTypes.StateDefinition = {
 		-- Real gravity, integrated here because the LinearVelocity constraint commands all three axes
 		-- and would otherwise hold the character at a constant vertical speed for the whole lock.
 		velocity -= Vector3.new(0, Workspace.Gravity * context.DeltaTime, 0)
+
+		local lockSeconds = if assisted then ASSIST.ControlLockSeconds else WALLJUMP.ControlLockSeconds
+		local lockAlpha = math.clamp(context.StateElapsed / math.max(lockSeconds, 1e-3), 0, 1)
+
+		-- THE CONTROL RAMP, replacing a hard cliff. The lock used to be strictly binary -- zero air
+		-- control for its whole duration, then the full amount on the frame it expired -- so the moment
+		-- steering became available was a visible discontinuity in how the character responded, which
+		-- is the "control comes back abruptly" half of a wall-jump feeling rough. The push is still
+		-- fully protected where it matters (the front of the window, where steering back into the wall
+		-- would undo the whole mechanic -- see this file's header), and authority is faded in across
+		-- the back half so the hand-off to Falling is a continuation rather than a switch.
+		--
+		-- Applied to the PLANAR component only: vertical is the ballistic arc, and letting air control
+		-- touch it would turn a wall-jump into a glide. Blended toward the steer direction rather than
+		-- added to it, so the ramp can never increase total speed -- an assisted arc still arrives
+		-- where it was solved to arrive, just aimable at the end.
+		local steerAuthority = math.max(lockAlpha - ASSIST.ControlRampStartFraction, 0)
+			/ math.max(1 - ASSIST.ControlRampStartFraction, 1e-3)
+		if steerAuthority > 0 and StateSupport.HasMoveIntent(context) then
+			local planar = ParkourMath.Flatten(velocity)
+			local planarSpeed = planar.Magnitude
+			if planarSpeed > 1e-3 then
+				local steered = ParkourMath.SteerDirection(
+					planar.Unit,
+					StateSupport.TravelDirection(context),
+					WALLJUMP.ControlRampTurnDegreesPerSecond * steerAuthority,
+					context.DeltaTime
+				)
+				velocity = steered * planarSpeed + Vector3.new(0, velocity.Y, 0)
+			end
+		end
+
 		context.Momentum = ParkourMath.PlanarSpeed(velocity)
 
 		local motor = context.Motor
 		motor.Mode = "Velocity"
 		motor.Velocity = velocity
 		motor.CancelGravity = true
-		motor.FaceDirection = ParkourMath.Flatten(velocity)
+		-- Eased from the facing the kick started with rather than snapped to the departure direction --
+		-- see entryFacing's own note. Uses the same EaseOutCubic States/LedgeHanging pulls its grab
+		-- with, over a window deliberately shorter than the control lock (FacingEaseSeconds): the turn
+		-- should be finished and out of the way before the player gets steering back, or the two read
+		-- as fighting each other.
+		local facingAlpha = math.clamp(context.StateElapsed / math.max(WALLJUMP.FacingEaseSeconds, 1e-3), 0, 1)
+		local departureFacing = ParkourMath.SafeUnit(ParkourMath.Flatten(velocity), entryFacing)
+		motor.FaceDirection = ParkourMath.SafeUnit(
+			entryFacing:Lerp(departureFacing, ParkourMath.EaseOutCubic(facingAlpha)),
+			departureFacing
+		)
 		motor.DesiredSpeed = context.Momentum
 
 		if context.Ground.Grounded and context.StateElapsed > 0.05 then
@@ -279,35 +418,24 @@ local WallJumping: ParkourTypes.StateDefinition = {
 		-- unavailable for the whole lock -- which is most of the window in which the lip is actually within
 		-- reach -- and the climb tops out by falling back down it.
 		--
-		-- THE CONDITIONS ARE RESTATED HERE RATHER THAN LEFT TO LedgeHanging.CanEnter, and that is not
-		-- duplication for its own sake: a transition a state returns from its own Update is route 1 in
-		-- StateMachine.Update, which applies it WITHOUT consulting the target's CanEnter (the caller is
-		-- asserting, not asking). So the two gates that make an automatic grab something the player asked
-		-- for -- not still rocketing upward, and actually looking at the face -- have to be asked here, or
-		-- this hands out exactly the no-button grab of an edge nobody reached for that
-		-- Ledge.MaxGrabFacingAngleDegrees exists to refuse.
+		-- THE CONDITIONS ARE ASKED OF THE SHARED PREDICATE, not restated here. A transition a state
+		-- returns from its own Update is route 1 in StateMachine.Update, which applies it WITHOUT
+		-- consulting the target's CanEnter (the caller is asserting, not asking) -- so the gates that
+		-- make an automatic grab something the player asked for have to be asked somewhere, and the
+		-- hand-written restatement that used to sit here had already drifted from the real thing in two
+		-- ways: it demanded HasStandingSpace (declining a legitimate hang under any overhang, which
+		-- LedgeHanging itself allows) and it could not see the regrab lockouts at all, so a deliberate
+		-- drop could be undone by the very next kick. See StateSupport.LedgeGrabAvailable's own header.
 		--
 		-- The vertical test is against this state's OWN integrated velocity rather than the context's
-		-- measured one: during the control lock the constraint is being commanded from `velocity`, and the
-		-- measured value trails it by a frame.
-		if
-			context.Assists.LedgeAssist
-			and context.Ledge.Found
-			and context.Ledge.Allowed
-			and context.Ledge.HasStandingSpace
-			and context.Ledge.HasHangSpace
-			and velocity.Y <= LEDGE.MaxVerticalSpeedToGrab
-			and StateSupport.IsMovingToward(
-				context.RootPart.CFrame.LookVector,
-				context.Ledge.WallNormal,
-				LEDGE.MaxGrabFacingAngleDegrees
-			)
-		then
+		-- measured one -- during the control lock the constraint is being commanded from `velocity`, and
+		-- the measured value trails it by a frame. That is exactly why the predicate takes the speed as
+		-- a parameter instead of reading the context itself.
+		if StateSupport.LedgeGrabAvailable(context, velocity.Y) then
 			return "LedgeHanging"
 		end
 
-		local lockSeconds = if assisted then ASSIST.ControlLockSeconds else WALLJUMP.ControlLockSeconds
-		if context.StateElapsed >= lockSeconds then
+		if lockAlpha >= 1 then
 			return "Falling"
 		end
 		return nil

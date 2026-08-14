@@ -64,25 +64,12 @@ local attachFrom = CFrame.identity
 local attachBeganAt = 0
 local attachSeconds = 0
 
--- The edge the last voluntary drop let go of, and the two windows that keep it from being caught
--- again on the way down: a short blanket one that covers every edge while the release push is still
--- moving the body clear of the face, and a long one scoped to THIS edge. See isBlockedLedge below.
-local regrabAnyUntil = 0
-local regrabSameUntil = 0
-local regrabInstance: BasePart? = nil
-local regrabEdge = Vector3.zero
-
--- Whether a candidate edge is the one the player just chose to let go of. Identity is tested two ways
--- because neither is sufficient alone: the Instance catches a re-grab of the same part, and the
--- radius catches the same physical lip built out of a DIFFERENT part -- which is most lips, since a
--- wall face of any size is several blocks -- where an instance test alone lets the drop re-grab the
--- neighbour half a stud sideways and strand the player exactly where they asked to leave.
-local function isBlockedLedge(probe: ParkourTypes.LedgeProbe): boolean
-	if regrabInstance ~= nil and probe.Instance == regrabInstance then
-		return true
-	end
-	return (probe.EdgePosition - regrabEdge).Magnitude <= LEDGE.RegrabIgnoreRadius
-end
+-- The regrab lockout state (which edge the last voluntary drop let go of, and the two windows that
+-- keep it from being caught again on the way down) used to live here as file-locals. It has moved to
+-- States/StateSupport.lua, along with the grab predicate that reads it -- see
+-- StateSupport.LedgeGrabAvailable's own header. Keeping it private here was the actual bug: the two
+-- states that grab a ledge from their own Update (WallJumping's top-out, Leaping's near-miss catch)
+-- could not see it, so a deliberate drop could be undone by the very next wall-jump.
 
 local LedgeHanging: ParkourTypes.StateDefinition = {
 	Id = "LedgeHanging",
@@ -101,71 +88,21 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 	-- machine:ForceTransition, which bypasses CanEnter and commitment alike.
 	Committed = true,
 
+	-- Every condition now lives in StateSupport.LedgeGrabAvailable, shared with the two states that
+	-- grab from their own Update -- see that function's header for what the three independently
+	-- written copies of this cascade had drifted into. The measured-velocity form of the vertical test
+	-- is the right one HERE (this is a CanEnter -- nothing is commanding a velocity this frame);
+	-- WallJumping/Leaping hand it their own integrated value instead.
+	--
+	-- One nuance worth keeping visible because it is easy to reintroduce: HasHangSpace, not
+	-- HasStandingSpace, is what this gate asks for. An edge inside the grab band can still sit too
+	-- close to the floor for a hang to mean anything (the pose would put the character's feet in the
+	-- ground), and refusing that is also what stops a grab from STEALING a mantle -- the mantle band
+	-- (Obstacle.VaultMaxHeight 4.2 to MantleMaxHeight 7.5) overlaps the bottom of the grab band, and
+	-- this state outranks Mantling on priority, so jumping at a chest-high wall would otherwise
+	-- produce a grounded-looking "hang" instead of the climb the player asked for.
 	CanEnter = function(context: ParkourContext): (boolean, string?)
-		if not context.Assists.LedgeAssist then
-			return false, "LedgeAssistDisabled"
-		end
-		if context.Ground.Grounded then
-			return false, "Grounded"
-		end
-		if context.Now < regrabAnyUntil then
-			return false, "RegrabLockout"
-		end
-		if context.VerticalVelocity > LEDGE.MaxVerticalSpeedToGrab then
-			return false, "RisingTooFast"
-		end
-		if not context.Ledge.Found then
-			return false, "NoLedge"
-		end
-		if not context.Ledge.Allowed then
-			return false, "LedgeNotGrabbable"
-		end
-		-- An edge can be geometrically inside the grab band and still sit too close to the ground for a
-		-- hang to mean anything -- the pose would put the character's feet in the floor. Refusing here is
-		-- also what stops a grab from STEALING a mantle: the mantle band (Obstacle.VaultMaxHeight 4.2 to
-		-- MantleMaxHeight 7.5, measured from the foot plane) overlaps the bottom of the grab band, and
-		-- LedgeHanging outranks Mantling on priority, so jumping at a chest-high wall used to produce a
-		-- grounded-looking "hang" instead of the climb the player asked for. A grounded approach to that
-		-- same wall still mantles normally -- ObstacleClassifier refuses outright while airborne, which
-		-- is the deliberate split between the two systems.
-		if not context.Ledge.HasHangSpace then
-			return false, "NoHangSpace"
-		end
-		-- THE FACING GATE. Every check above this line is about the EDGE -- whether one exists, whether
-		-- it is grabbable, whether there is room to hang from it. This is the only one about the
-		-- CHARACTER's relationship to it, and it is what stops a grab the player never asked for.
-		--
-		-- It matters more here than anywhere else in the framework because a hang is automatic and
-		-- Committed (see that flag's own note above): no button is pressed, and the instant this
-		-- function returns true the fall is over. The only thing that used to stand between a
-		-- shift-locked player and an edge behind their back was EnvironmentProbe.probeLedge's choice of
-		-- SEARCH DIRECTION -- and a heuristic about where to cast is not a decision about whether to
-		-- commit, because whichever direction found the edge, nothing re-checked it against the
-		-- character afterward. Under shift lock (Client/Camera/ShiftLockCamera.lua) travel is
-		-- camera-relative with AutoRotate off, so a strafe or a backpedal points travel into walls the
-		-- player is not looking at -- and travel is exactly what that primary cast searches.
-		--
-		-- Asked against the WallNormal the probe actually recorded, so it holds no matter which of the
-		-- two casts found the edge, and asked as "is that face in front of me" because facing the wall
-		-- is the pose this state commits to (see Enter, which points the character INTO it). The
-		-- legitimate strafe-past-a-ledge-while-staring-at-it grab passes untouched: that case has facing
-		-- pointed straight at the face, which is the whole reason it reads as a reach.
-		if
-			not StateSupport.IsMovingToward(
-				context.RootPart.CFrame.LookVector,
-				context.Ledge.WallNormal,
-				LEDGE.MaxGrabFacingAngleDegrees
-			)
-		then
-			return false, "NotFacingLedge"
-		end
-		-- Tested LAST because it is the only refusal that needs the probe's own fields to be meaningful
-		-- (an unfound ledge has a stale EdgePosition), and because it is the narrowest: everything above
-		-- refuses a class of situations, this refuses exactly one edge for a fraction of a second.
-		if context.Now < regrabSameUntil and isBlockedLedge(context.Ledge) then
-			return false, "SameLedgeLockout"
-		end
-		return true, nil
+		return StateSupport.LedgeGrabAvailable(context, context.VerticalVelocity)
 	end,
 
 	Enter = function(context: ParkourContext): ()
@@ -299,10 +236,7 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		if nextState == "LedgeClimbing" then
 			return
 		end
-		regrabAnyUntil = context.Now + LEDGE.RegrabAnyLedgeSeconds
-		regrabSameUntil = context.Now + LEDGE.RegrabLockoutSeconds
-		regrabInstance = grabbedInstance
-		regrabEdge = edgePosition
+		StateSupport.NoteLedgeReleased(context.Now, grabbedInstance, edgePosition)
 		context.LedgeAnchorPosition = nil
 		context.LedgeAnchorNormal = nil
 		-- Released with a small push away from the wall so the character falls clear of the face

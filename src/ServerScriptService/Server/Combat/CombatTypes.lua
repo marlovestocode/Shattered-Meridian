@@ -107,6 +107,17 @@ export type CombatVitalsState = {
 	-- press that's still on this cooldown still starts a plain block, it just can't parry).
 	parryWindowExpiry: number,
 	parryCooldownExpiry: number,
+	-- Timestamp before which this player's guard is OPEN because they were just parried -- they
+	-- cannot raise one (ACTION_GATES.GuardOpen rejects BlockStart) and an already-raised one is not
+	-- honored (HitResolution.ClassifyDefense suppresses in the same branch postureBrokenExpiry uses).
+	-- Written only by HitResolution.ApplyParryPunish, math.max'd like every other expiry here.
+	--
+	-- A SEPARATE FIELD rather than more stunExpiry, because the two must not share a fate: ACTION_
+	-- GATES deliberately exempts BlockStart from Stun so a combo victim can always attempt a defense
+	-- (Balance principle 1), and folding the open guard into stunExpiry would either undo that
+	-- exemption for every ordinary hit or leave the parry punish toothless again. See Constants.
+	-- Combat.GuardOpenSeconds for why the punish needed this at all.
+	guardOpenExpiry: number,
 	-- Universal hit-reaction lockout (Constants.Combat.HitStunDuration on a landed hit,
 	-- StunDuration on a Parry punish) -- gates every action category via ACTION_GATES.Stun except
 	-- BlockStart (see ACTION_GATES' own header for why Block/Parry stays available through a stun).
@@ -572,6 +583,9 @@ export type BotState = {
 
 	parryWindowExpiry: number,
 	parryCooldownExpiry: number,
+	-- See CombatState.Vitals.guardOpenExpiry's own comment -- a bot attacks and gets parried by its
+	-- owner exactly like a real opponent, so it takes the identical punish.
+	guardOpenExpiry: number,
 	stunExpiry: number,
 	postureBrokenExpiry: number,
 

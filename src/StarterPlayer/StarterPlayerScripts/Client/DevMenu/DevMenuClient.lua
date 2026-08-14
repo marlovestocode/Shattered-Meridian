@@ -13,6 +13,17 @@
 	server-side on every request regardless of what this module decides, per
 	luau-coding-standards.md's server/client split rule.
 
+	Also binds "OpenDevConsole" (F6), which opens Roblox's own developer console. It lives here rather
+	than in its own module for one reason: this is already the module that has asked the server
+	whether this client is an admin, so binding it inside startDevMenu gets the console the identical
+	whitelist as the menu for free -- no second authorization path, no new remote, nothing to keep in
+	sync. Roblox's built-in F9 only binds for accounts with edit access to the place, so a whitelisted
+	admin who is neither the owner nor a group member otherwise has no way to read a live server's
+	logs at all; StarterGui:SetCore("DevConsoleVisible") has no such gate. Same "client-side
+	convenience toggle, fires no remote" shape as the DevMenuToggle bind next to it -- and, like it,
+	not real authorization: nothing the console exposes is a privileged ACTION, every one of those
+	still goes through DevMenuSystem's own server-side check.
+
 	Also drives the screen's TargetNameDisplay/GodmodeActive/FlightActive (see watchTarget below):
 	subscribes directly to the existing Combat_LockOnChanged RemoteEvent (the same one
 	CombatClient.lua already listens to for the lock-on reticle) to learn the resolved admin-action
@@ -36,6 +47,7 @@
 ]]
 
 local Players = game:GetService("Players")
+local StarterGui = game:GetService("StarterGui")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -49,6 +61,7 @@ local CombatRemoteNames = Constants.Combat.RemoteNames
 
 local DevMenuModule = require(script.Parent.Parent.UI.Screens.DevMenu)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local ParkourDebug = require(script.Parent.Parent.Parkour.ParkourDebug)
 local SpectateController = require(script.Parent.SpectateController)
 
 type DevMenuHandle = DevMenuModule.DevMenuHandle
@@ -484,6 +497,31 @@ local function startDevMenu(handle: DevMenuHandle): ()
 			local nowOpen = not peek(handle.IsOpen)
 			handle.IsOpen:set(nowOpen)
 			logger:debug("Dev menu toggled", { open = nowOpen })
+		elseif KeybindManager.Matches("OpenDevConsole", input) then
+			-- Roblox's own developer console, opened for an authorized admin. Bound HERE, inside
+			-- startDevMenu, specifically because this function only ever runs after
+			-- requestServerAuthorization returned true -- so the console binding inherits the exact
+			-- same whitelist as the dev menu itself, with no second authorization path to keep in sync
+			-- and no new remote.
+			--
+			-- WHY THIS IS NEEDED AT ALL, since Roblox already ships F9: the engine only binds that
+			-- shortcut for accounts with edit access to the place. A whitelisted admin who is not the
+			-- place owner or a group member gets nothing from it in a live server, which means the one
+			-- place every Shared/Logger.lua line surfaces is unreachable for exactly the people who
+			-- need to read it. SetCore("DevConsoleVisible") carries no such permission gate.
+			--
+			-- pcall'd because SetCore is documented to error if the CoreGui script that registers the
+			-- "DevConsoleVisible" handler has not bound yet -- a real possibility on a very early
+			-- keypress. Failing to open a debug panel must never take down the input handler that also
+			-- owns the dev-menu toggle.
+			local ok, errorMessage = pcall(function()
+				StarterGui:SetCore("DevConsoleVisible", true)
+			end)
+			if ok then
+				logger:debug("Developer console opened")
+			else
+				logger:warn("Developer console could not be opened", { errorMessage = tostring(errorMessage) })
+			end
 		end
 	end)
 
@@ -1257,6 +1295,11 @@ function DevMenuClient.Start(handle: DevMenuHandle): ()
 			logger:debug("DevMenuClient not started: server did not authorize this client")
 			return
 		end
+		-- The parkour debug overlay (F6) runs on this same answer rather than asking for its own --
+		-- one authorization round-trip per session, one whitelist to maintain. Granted here rather
+		-- than inside startDevMenu because it is not part of the menu; it just shares the gate. See
+		-- ParkourDebug.SetAuthorized for why a client-side grant is safe for a read-only overlay.
+		ParkourDebug.SetAuthorized(true)
 		startDevMenu(handle)
 	end)
 end

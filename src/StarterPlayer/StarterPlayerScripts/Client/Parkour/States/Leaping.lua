@@ -55,7 +55,6 @@ local StateSupport = require(script.Parent.StateSupport)
 type ParkourContext = ParkourTypes.ParkourContext
 
 local LEAP = ParkourConstants.Leap
-local LEDGE = ParkourConstants.Ledge
 
 -- The velocity being flown this frame, integrated across the control lock -- the same arrangement
 -- States/WallJumping uses, and for the same reason: the LinearVelocity constraint commands all three
@@ -82,6 +81,10 @@ local Leaping: ParkourTypes.StateDefinition = {
 	Committed = true,
 
 	CanEnter = function(context: ParkourContext): (boolean, string?)
+		-- Asked first -- see States/WallRunning.CanEnter's own note on why the combat refusal leads.
+		if StateSupport.CombatBlocks(context, "Leaping") then
+			return false, "InCombat"
+		end
 		-- JumpQueued rather than a bare buffer read, so the leap honors CombatClient's jump suppression
 		-- exactly like every other launch in this framework -- a player whose jump has been disabled
 		-- through an M1 combo must not be able to double-tap their way out of it.
@@ -176,22 +179,16 @@ local Leaping: ParkourTypes.StateDefinition = {
 
 		-- A leap that falls SHORT of the surface it aimed at can still catch its edge, and that is the
 		-- most valuable thing this state can do with a near miss: the difference between an exciting
-		-- recovery and a long drop. Same conditions, restated for the same reason, as the top-out grab in
-		-- States/WallJumping.Update -- a transition returned from a state's own Update is route 1 in
+		-- recovery and a long drop. Asked of the same shared predicate States/WallJumping.Update's
+		-- top-out grab uses -- a transition returned from a state's own Update is route 1 in
 		-- StateMachine.Update, which does not consult the target's CanEnter, so the gates that make an
-		-- automatic grab something the player asked for have to be asked here.
-		if
-			context.Assists.LedgeAssist
-			and context.Ledge.Found
-			and context.Ledge.Allowed
-			and context.Ledge.HasHangSpace
-			and velocity.Y <= LEDGE.MaxVerticalSpeedToGrab
-			and StateSupport.IsMovingToward(
-				context.RootPart.CFrame.LookVector,
-				context.Ledge.WallNormal,
-				LEDGE.MaxGrabFacingAngleDegrees
-			)
-		then
+		-- automatic grab something the player asked for have to be asked here. This used to be a
+		-- hand-written restatement that matched neither LedgeHanging.CanEnter nor WallJumping's own
+		-- copy; see StateSupport.LedgeGrabAvailable's header for what the three had drifted into.
+		--
+		-- Handed this state's OWN integrated vertical speed, not the context's measured one, for the
+		-- same reason WallJumping does: the constraint is being commanded from `velocity` here.
+		if StateSupport.LedgeGrabAvailable(context, velocity.Y) then
 			return "LedgeHanging"
 		end
 

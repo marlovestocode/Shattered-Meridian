@@ -53,6 +53,13 @@ local Rolling: ParkourTypes.StateDefinition = {
 	Committed = true,
 
 	CanEnter = function(context: ParkourContext): (boolean, string?)
+		-- Asked first -- see States/WallRunning.CanEnter's own note on why the combat refusal leads.
+		-- This is the entry flagged in ParkourConstants.CombatGate's own comment as the most arguable
+		-- one: a roll reads as a dodge as much as a traversal move. Remove "Rolling" from that table if
+		-- combat starts feeling stiff; nothing structural depends on it being listed.
+		if StateSupport.CombatBlocks(context, "Rolling") then
+			return false, "InCombat"
+		end
 		if context.Now < cooldownUntil then
 			return false, "RollCooldown"
 		end

@@ -358,6 +358,16 @@ export type ParkourContext = {
 	-- runs.
 	CombatOwned: boolean,
 
+	-- Whether this player is currently IN COMBAT -- mirrored from the Constants.Attributes.InCombat
+	-- Humanoid Attribute the server publishes, read every frame beside the four CombatOwned reads.
+	--
+	-- Distinct from CombatOwned above, and the distinction matters: CombatOwned means something else is
+	-- DRIVING the body (a ragdoll, a hold, flight, an admin freeze) and parkour must get out of the way
+	-- entirely. InCombat means the player is merely fighting -- they still own their own movement, they
+	-- just are not allowed the full traversal set while doing it. See
+	-- ParkourConstants.CombatGate.BlockedStates for which states that removes and why.
+	InCombat: boolean,
+
 	-- Player-configurable assist flags, resolved once per settings change rather than per frame.
 	Assists: AssistSettings,
 

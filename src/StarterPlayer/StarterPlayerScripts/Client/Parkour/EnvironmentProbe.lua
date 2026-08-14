@@ -45,6 +45,7 @@
 	these same results).
 ]]
 
+local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -154,28 +155,96 @@ local footOffset = 3
 -- Casts made so far this Update. Reset at the top of Update; consulted by castRay below.
 local rayBudgetUsed = 0
 
+-- Reused exclude list handed to the RaycastParams below -- the bound character plus every OTHER
+-- player's character. Rebuilt only when the roster changes (see watchPlayers), never per frame.
+local excludeList: { Instance } = {}
+
+-- PEOPLE ARE NOT TERRAIN. This filter used to contain the local character alone, which meant every
+-- other player in the server was fully solid parkour geometry: you could ledge-hang off someone's
+-- shoulder, mantle them, vault them, and wall-run along a line of them. A post-hit rejection cannot
+-- fix that on its own, either -- a body standing between the probe and a real wall STOPS the ray, so
+-- discarding the hit afterwards would just blind the probe to the wall behind them. The bodies have
+-- to be invisible to the cast itself, which is what this list is for.
+--
+-- ParkourTagging treats anything inside a Humanoid-bearing Model as Ignored as well, and the two are
+-- not redundant: this list covers real Players (whose characters are the common case and whose
+-- lifecycle Players gives us events for), while the tagging check catches every other body -- training
+-- bots, dummies, NPCs -- with no roster to maintain. Belt and braces, cheap in both directions.
+local function rebuildExcludeList(): ()
+	table.clear(excludeList)
+	if boundCharacter then
+		table.insert(excludeList, boundCharacter)
+	end
+	for _, player in Players:GetPlayers() do
+		local otherCharacter = player.Character
+		-- The local player's own character is already in via boundCharacter above; adding it twice is
+		-- harmless but pointless, and skipping it keeps the list's length honest.
+		if otherCharacter and otherCharacter ~= boundCharacter then
+			table.insert(excludeList, otherCharacter)
+		end
+	end
+	local params = raycastParams
+	if params then
+		-- Reassigned rather than mutated in place: FilterDescendantsInstances returns a COPY, so
+		-- table.insert-ing into the property's value does nothing at all. This is the one place the
+		-- list actually reaches the engine.
+		params.FilterDescendantsInstances = excludeList
+	end
+end
+
 -- Rebuilds the shared RaycastParams for a freshly-spawned character. RespectCanCollide is the load-
 -- bearing setting here: every FX part this codebase spawns (MovementVFX dust carriers, HitFlash
 -- highlights, FlightVFX rings, this feature's own debug adorns) is CanCollide = false, so honoring
 -- collidability means none of them can ever be mistaken for vaultable geometry without maintaining a
 -- filter list that would need updating every time a new effect is added.
-local function rebuildParams(character: Model): ()
+local function rebuildParams(): ()
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.FilterDescendantsInstances = { character }
 	params.IgnoreWater = true
 	params.RespectCanCollide = true
 	if PROBE.CollisionGroup ~= "" then
 		params.CollisionGroup = PROBE.CollisionGroup
 	end
 	raycastParams = params
+	rebuildExcludeList()
+end
+
+-- Keeps the exclude list current as players join, leave and respawn. Connected exactly once, from
+-- Start below -- a per-frame rebuild would allocate and re-walk the roster for an answer that changes
+-- a handful of times per session, and a bind-time-only build would go stale the moment anyone else
+-- respawned (leaving their OLD character excluded and their new one solid).
+-- Connections are deliberately not retained. Every one of them is on Players or on a Player, both of
+-- which outlive this module for the whole session, and nothing here ever disconnects -- the watch is
+-- module-lifetime by design (see BindCharacter's own note on why it is connected once and never torn
+-- down with the character). Holding them in a table would be a list nothing ever reads.
+local playersWatched = false
+
+local function watchPlayer(player: Player): ()
+	player.CharacterAdded:Connect(rebuildExcludeList)
+	player.CharacterRemoving:Connect(rebuildExcludeList)
+	rebuildExcludeList()
+end
+
+local function watchPlayers(): ()
+	for _, player in Players:GetPlayers() do
+		watchPlayer(player)
+	end
+	Players.PlayerAdded:Connect(watchPlayer)
+	Players.PlayerRemoving:Connect(rebuildExcludeList)
 end
 
 -- Binds a character and clears every cached result. Called from ParkourController's own character
 -- bind path; safe to call repeatedly.
 function EnvironmentProbe.BindCharacter(character: Model, humanoid: Humanoid, rootPart: BasePart): ()
+	-- The roster watch is connected once, lazily, on the first bind -- module lifetime, not character
+	-- lifetime, which is why it is not in the reset block below and why Unbind leaves it alone. Done
+	-- here rather than through a new public Start() so ParkourController's boot path is unchanged.
+	if not playersWatched then
+		playersWatched = true
+		watchPlayers()
+	end
 	boundCharacter = character
-	rebuildParams(character)
+	rebuildParams()
 	footOffset = rootPart.Size.Y * 0.5 + humanoid.HipHeight
 
 	ground.Grounded = false
