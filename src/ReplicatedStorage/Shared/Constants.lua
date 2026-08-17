@@ -625,11 +625,11 @@ Constants.Attributes = {
 	-- clients -- and any future spectator/replay tooling -- a way to know what a remote character is
 	-- doing without this feature adding a broadcast remote of its own.
 	ParkourState = "ParkourState",
-	-- Run System (Server/Combat/Movement.UpdateSprintStage, Client/Movement/RunController.lua). The
-	-- sustained-sprint STAGE this player's server-side state currently resolves to: 0 = not sprinting
-	-- (or sprinting but not actually being granted the sprint speed tier), 1 = ordinary sprint, 2 =
-	-- the sustained "full stride" tier reached after Constants.Combat.SprintStage2ThresholdSeconds of
-	-- unbroken running.
+	-- Run System (Server/Systems/RunSystem.lua, Client/Movement/RunController.lua). The sustained-run
+	-- STAGE this player's server-side state currently resolves to: 0 = not running (or running but
+	-- not actually being granted the tier), 1/2/3 = the ladder Shared/Run/RunConstants.lua's Stages
+	-- array defines -- that file, not this one, is the single source of truth for the thresholds and
+	-- speeds behind each stage.
 	--
 	-- Server-written, exactly like every other Attribute in this table except ParkourFacingOwned, and
 	-- for the reason that makes this feature safe: the stage decides a WalkSpeed multiplier, so the
@@ -1987,6 +1987,11 @@ Constants.FX = {
 		-- Per-axis math.noise decorrelation offsets so pitch/yaw/roll wander independently instead of
 		-- in lockstep (which would read as a single diagonal jerk rather than a shake).
 		NoiseSeeds = { Pitch = 0, Yaw = 37.2, Roll = 91.7 },
+		-- Extra forward camera translation (studs) CombatFeedbackClient layers on top of whichever
+		-- preset above is already playing, on a landed M1 (Basic weapon-string) attacker hit --
+		-- CameraShake.Shake's own pushForwardStuds parameter. Deliberately tiny -- a felt lunge
+		-- selling the punch landing, not a lasting reposition, and not meant to be consciously seen.
+		M1PushForwardStuds = 0.04,
 	},
 
 	-- Hit-stop (freeze-frame) durations, in seconds. Purely a client-visual pause of the involved
@@ -2393,14 +2398,14 @@ Constants.FX = {
 -- THE RUN SYSTEM'S PRESENTATION TABLE -- everything about how running LOOKS and SOUNDS, in one
 -- place, so retuning the run never means grepping three client modules.
 --
--- The run is a two-stage sustained sprint. Stage 1 is the ordinary sprint that has always existed;
--- stage 2 engages after Constants.Combat.SprintStage2ThresholdSeconds of unbroken running and is a
--- genuinely different gear -- a bigger WalkSpeed multiplier (Constants.Combat.
--- SprintStage2SpeedMultiplier), its own animation, its own footstep sound, a deeper FOV pull and a
--- one-shot "kick" at the moment it engages. The STAGE ITSELF is resolved server-side
--- (Server/Combat/Movement.UpdateSprintStage) and published on the Humanoid as
--- Constants.Attributes.SprintStage; nothing in this table decides when a stage changes, only what
--- the client does about it.
+-- The run is a three-stage sustained sprint (Shared/Run/RunConstants.lua's Stages ladder -- THAT
+-- file, not this one, is the single source of truth for each stage's threshold and speed). Stage 1
+-- is the ordinary sprint that has always existed; stages 2 and 3 each engage after their own
+-- ChargeSeconds of unbroken running and are genuinely different gears -- a bigger WalkSpeed
+-- multiplier, their own animation, their own footstep sound, a deeper FOV pull and a one-shot "kick"
+-- at the moment they engage. The STAGE ITSELF is resolved server-side (Server/Systems/RunSystem.lua,
+-- via Shared/Run/RunLadder.lua) and published on the Humanoid as Constants.Attributes.SprintStage;
+-- nothing in this table decides when a stage changes, only what the client does about it.
 --
 -- Owned by Client/Movement/RunController.lua (the presentation driver) and Client/FX/RunAudio.lua
 -- (the sound registrations). Lives here rather than in ParkourConstants.lua -- which owns movement
@@ -2932,71 +2937,27 @@ Constants.Combat = {
 	-- different call site, not the same number renamed.
 	MinDirectionMagnitude = 0.01,
 
-	-- Neutral-game movement tunables (CombatSystem.lua's handleDashRequest for Dash, and
-	-- handleSprintStart/Stop for Sprint).
+	-- Neutral-game movement tunables (CombatSystem.lua's handleDashRequest for Dash). CombatSystem
+	-- itself is gone (the combat rewrite deleted it) and nothing currently drives Dash's WalkSpeed
+	-- burst through Server/Combat/Movement.ComputeDesiredWalkSpeed as a result -- see
+	-- Server/Systems/RunSystem.lua's own boot-order comment in Main.server.lua for the confirmed
+	-- "nothing wrote WalkSpeed at all" state this left behind.
 	--
 	-- Dash is a single proactive key (no i-frames, a low-stakes spacing tool meant to be used often
 	-- in the neutral game): a quick WalkSpeed burst, limited by its own cooldown + commitment lock,
-	-- not any resource (Stamina is gone). Sprint is the separate sustained-speed hold, limited by
-	-- combat state instead (you can't sprint while blocking, committed to a swing, stunned, or
-	-- posture-broken).
+	-- not any resource (Stamina is gone).
 	--
-	-- Speed ordering by design: effective base < Sprint < Dash, where "effective base" is
-	-- BaseWalkSpeed + BonusWalkSpeed (18 by default today: 10 + 8 -- see those constants' own
-	-- headers) and every tier below multiplies off that same effective base, not the raw
-	-- BaseWalkSpeed alone (so retuning either constant rescales every tier proportionally, e.g.
-	-- today's 18 base -> Sprint 27, Dash ~40). Sprint is a sustained hold; Dash is a brief committed
-	-- burst that covers ground faster than sprint's acceleration, for micro-spacing and closing gaps.
+	-- SPRINT/THE RUN TIER USED TO LIVE HERE TOO (SprintSpeedMultiplier, SprintStage2*) and has fully
+	-- moved out -- Shared/Run/RunConstants.lua now owns every run-stage number (a THREE-stage ladder,
+	-- not the two-stage one these fields used to describe) and Server/Systems/RunSystem.lua is the
+	-- live WalkSpeed authority for it. See RunConstants.lua's own "SEPARATE FROM Constants.Combat ON
+	-- PURPOSE" header for why. There is now exactly one place the run's stage numbers live; retuning
+	-- the run never touches this file. (The fields that used to sit here were dead weight, not a
+	-- second live copy: Server/Combat/Movement.lua's sprint functions that read them had no caller
+	-- left once CombatSystem was deleted, same as Dash's burst above.)
 	--
-	-- Both drive movement purely through a temporary Humanoid.WalkSpeed multiplier applied in
-	-- onHeartbeat's single unified computation (never task.delay, so they never race the hit-slow
-	-- writer for the same property) -- the player's own already-held movement input carries
-	-- direction, so the server computes no displacement and needs no trusted direction from the
-	-- client. Numbers here are first-pass technical tunables, free to move without design ceremony
-	-- per combat-philosophy.md's Tuning process.
-	SprintSpeedMultiplier = 1.5,
-
-	-- THE SECOND RUN STAGE. Sprint is no longer a single flat tier: hold a genuine, unbroken run for
-	-- SprintStage2ThresholdSeconds and it shifts into a second gear at SprintStage2SpeedMultiplier
-	-- (Server/Combat/Movement.UpdateSprintStage resolves the stage, ComputeDesiredWalkSpeed picks the
-	-- multiplier off it, and Constants.Attributes.SprintStage publishes it to the client for the
-	-- animation/audio/FOV change).
-	--
-	-- 2.0 is a big number for a SUSTAINED tier -- it sits just under DashSpeedMultiplier's 2.2, which
-	-- would normally be an obvious balance problem for a "can't just run away" combat game. It isn't,
-	-- because of what the charge is gated on: the stage-2 clock only accrues while the sprint tier is
-	-- ACTUALLY being granted (moving, not blocking, past the attackEndsAt commitment lock, not
-	-- stunned, not posture-broken) and it decays whenever that stops being true. Every one of those
-	-- happens constantly in a fight -- a single swing, a single block, a single hit -- so seven
-	-- unbroken seconds of stage-1 running is a thing that essentially only happens OUT of combat.
-	-- Stage 2 is therefore a traversal gear, not a combat gear, which is the design intent: the world
-	-- is big, and crossing it should not be the boring part of playing.
-	--
-	-- The one case that deliberately does NOT break the charge is a parkour action (Attributes.
-	-- ParkourVelocityOwned) -- see Movement.ComputeSprintCharge's HOLD branch. Vaulting a wall
-	-- mid-sprint is the system working, not an interruption, and dropping a player out of full stride
-	-- for using the movement system they're supposed to be using would teach exactly the wrong lesson.
-	SprintStage2SpeedMultiplier = 2.0,
-	-- Seconds of unbroken, actually-granted sprint before the second stage engages. Long enough that
-	-- it is never reached inside a fight (see above), short enough that a player crossing open ground
-	-- feels it every single time rather than only on marathon runs.
-	SprintStage2ThresholdSeconds = 7,
-	-- How fast the accrued charge bleeds off once the sprint tier stops being granted, as a multiple
-	-- of the rate it builds at. A decay rather than a hard reset because the alternative punishes
-	-- exactly the wrong thing: a one-frame WalkSpeed gate flicker (a hitch, a doorframe, the instant
-	-- between two movement inputs) would drop a player who has been running for twenty seconds all the
-	-- way back to zero. At 2.0 a full seven-second charge is gone after 3.5 seconds of not running,
-	-- which is long enough to survive a stumble and far too short to bank.
-	SprintChargeDecayMultiplier = 2.0,
-	-- Hysteresis on the second stage: once engaged, it holds until the charge falls below this
-	-- FRACTION of the threshold, rather than dropping the instant the charge dips under it. Without
-	-- this, a single frame in which the sprint tier isn't granted (any of the five gates flickering)
-	-- takes the charge fractionally below the threshold, drops the player to stage 1, and then lets
-	-- them re-cross it a few frames later -- which on the client means the stage-2 onset whoosh and the
-	-- animation crossfade replaying every time the player brushes a wall. 0.6 gives roughly 2.1s of
-	-- non-running slack at the decay rate above: far more than any flicker, far less than a real stop.
-	SprintStage2SustainFraction = 0.6,
-
+	-- Numbers here are first-pass technical tunables, free to move without design ceremony per
+	-- combat-philosophy.md's Tuning process.
 	DashSpeedMultiplier = 2.2,
 	-- Seconds the Dash WalkSpeed burst is active -- a quick step, not a sustained evade.
 	DashDurationSeconds = 0.22,
@@ -3545,44 +3506,32 @@ Constants.Combat = {
 					},
 				},
 
+				-- A single swing, not a string -- Heavy intentionally holds exactly one stage (array of
+				-- one, not a bare table) so DefaultMoveRegistry/SwingSequencer's generic per-stage
+				-- machinery still applies with zero special-casing; every Heavy press just keeps
+				-- resolving back to this same stage, the same "one past the end wraps to 1" rule any
+				-- other string follows. There used to be a second stage; it never received an authored
+				-- animation and only added a second, harder-hitting swing on the same telegraph, so it
+				-- was cut rather than finished.
 				Heavy = {
 					{
-						DebugName = "Heavy1",
+						DebugName = "Heavy",
 						WindupSeconds = 0.600,
 						ActiveSeconds = 0.22,
 						-- 0.55, up from 0.35 (docs/architecture/2026-08-audit.md section 6.1/3.4) -- funds the
 						-- Cooldown cut below out of a longer whiff/block punish window instead of a free
-						-- reduction, so a missed Heavy1 stays risky.
+						-- reduction, so a missed Heavy stays risky.
 						RecoverySeconds = 0.55,
 						Size = Vector3.new(7, 6.5, 5.5),
 						Offset = CFrame.new(0, 0, -2.75),
 						Damage = 12,
 						PostureDamage = 22,
 						-- 1.37, down from 3.00 -- restores the "Cooldown == Windup+Active+Recovery" invariant
-						-- Secondary's own Heavy string already follows (DaggerHeavy1.Cooldown ~= its own
-						-- timeline). At 3.00 the target had ~2.4s of fully free action before Heavy2 could even
-						-- be thrown -- reachable (D4) but not landable against any attentive opponent. Matching
-						-- the timeline here closes that gap the same way Secondary's combo already works.
+						-- this table's own header requires, matching Secondary's own Heavy stage
+						-- (DaggerHeavy.Cooldown ~= its own timeline). At 3.00 the heavy button was dead
+						-- ~1.63s AFTER the swing had visibly ended, with nothing on screen explaining why --
+						-- reads as unresponsive input, not a deliberate pause.
 						Cooldown = 1.37,
-						ArcDegrees = 120,
-						MaxTargets = 4,
-					},
-					{
-						DebugName = "Heavy2",
-						WindupSeconds = 0.20,
-						ActiveSeconds = 0.24,
-						RecoverySeconds = 0.40,
-						Size = Vector3.new(8, 6.5, 5.75),
-						Offset = CFrame.new(0, 0, -2.875),
-						Damage = 21,
-						PostureDamage = 25,
-						-- 0.84 (= 0.20 + 0.24 + 0.40), down from 3.00 -- the identical fix Heavy1 above
-						-- already received, for the identical reason, in a pass that missed this stage.
-						-- This table's own header requires Cooldown <= the stage's own full timeline, so
-						-- attackEndsAt stays the single binding constraint; at 3.00 the heavy button was
-						-- dead for 2.16s AFTER the swing had visibly ended, with nothing on screen
-						-- explaining why. That reads as unresponsive input, not as a deliberate pause.
-						Cooldown = 0.84,
 						ArcDegrees = 120,
 						MaxTargets = 4,
 					},
@@ -3687,9 +3636,11 @@ Constants.Combat = {
 					},
 				},
 
+				-- Single-stage, same as Primary's own Heavy above -- see that field's own header for why
+				-- (a cut second stage, not a stub waiting to be authored).
 				Heavy = {
 					{
-						DebugName = "DaggerHeavy1",
+						DebugName = "DaggerHeavy",
 						WindupSeconds = 0.14,
 						ActiveSeconds = 0.17,
 						RecoverySeconds = 0.27,
@@ -3698,19 +3649,6 @@ Constants.Combat = {
 						Damage = 13,
 						PostureDamage = 20,
 						Cooldown = 0.58,
-						ArcDegrees = 120,
-						MaxTargets = 4,
-					},
-					{
-						DebugName = "DaggerHeavy2",
-						WindupSeconds = 0.15,
-						ActiveSeconds = 0.18,
-						RecoverySeconds = 0.30,
-						Size = Vector3.new(6.5, 6.5, 5.25),
-						Offset = CFrame.new(0, 0, -2.625),
-						Damage = 15,
-						PostureDamage = 23,
-						Cooldown = 0.63,
 						ArcDegrees = 120,
 						MaxTargets = 4,
 					},

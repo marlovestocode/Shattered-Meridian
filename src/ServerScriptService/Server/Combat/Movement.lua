@@ -2,25 +2,36 @@
 --[[
 	Movement.lua
 
-	Owns: the neutral-game movement resolution CombatSystem.lua's request handlers delegate into --
-	Dash's state mutation, Slide's state mutation, Sprint's state mutation, and the single unified
-	WalkSpeed priority resolver (dash > slide > hit-slow > sprint > base) onHeartbeat calls every
-	tick -- plus, since the Parkour System, the two functions that turn that resolver's instantaneous
-	answer into one with real acceleration: SmoothWalkSpeed (ramps toward the resolved target instead
-	of snapping) and ComputeParkourSpeedFloor (the decaying momentum carry a finished parkour action
-	leaves behind). Both are additive to the tier logic rather than changes to it -- see each one's own
-	header. A pure/state-mutation
-	helper under Server/Combat/, the same role HitboxResolver/RagdollController play for their own
-	concerns -- CombatSystem.lua still owns combatStates, request validation (rate limit/alive/
-	stunned/posture-broken/commitment lock), logging, and remote-firing; this module only ever
-	receives the CombatState it should read/mutate as a parameter, never reaches into CombatSystem's
-	state tables itself.
+	Owns: the neutral-game movement resolution CombatSystem.lua's request handlers used to delegate
+	into -- Dash's state mutation, Slide's state mutation, and the single unified WalkSpeed priority
+	resolver (dash > slide > hit-slow > base) onHeartbeat used to call every tick -- plus, since the
+	Parkour System, the two functions that turn that resolver's instantaneous answer into one with real
+	acceleration: SmoothWalkSpeed (ramps toward the resolved target instead of snapping) and
+	ComputeParkourSpeedFloor (the decaying momentum carry a finished parkour action leaves behind).
+	Both are additive to the tier logic rather than changes to it -- see each one's own header. A
+	pure/state-mutation helper under Server/Combat/, the same role HitboxResolver/RagdollController
+	play for their own concerns.
+
+	CombatSystem.lua, this module's one caller, was deleted by the combat rewrite, and nothing has
+	replaced it as this module's caller -- see Server/Systems/RunSystem.lua's own boot-order comment
+	in Main.server.lua ("nothing wrote WalkSpeed at all") for the confirmed effect: every function in
+	this file is currently unreachable in play. It stays rather than being deleted outright because
+	Dash/Slide's request handling is expected to be reconnected to a live System the way Sprint's was
+	-- see below.
+
+	Sprint's own state mutation and stage resolution used to live here (SetSprinting,
+	IsSprintTierActive, ComputeSprintCharge, ResolveSprintStage, UpdateSprintStage) and were removed
+	entirely rather than left dead alongside Dash/Slide: Sprint already HAS its replacement --
+	Server/Systems/RunSystem.lua, driven by Shared/Run/RunConstants.lua/RunLadder.lua -- so keeping a
+	second, disconnected copy of the same mechanic here was exactly the "multiple configs for one
+	system" trap Constants.Combat's own former Sprint* fields already were. Dash/Slide have no live
+	replacement yet, so they stay as the record of what a live one needs to do.
 
 	Does not own: whether a request is legal (CombatSystem.lua's shared pre-checks -- rate limit,
-	alive, stunned, posture-broken, ragdolled, commitment lock -- are identical across every request
-	handler, not movement-specific, and stay there), or any remote/network concern. Bots/dummies
-	never touch this module -- neither has dash/sprint fields (CombatTypes.lua's
-	BotState/DummyState), so it's exclusively a real-player CombatState concern.
+	alive, stunned, posture-broken, ragdolled, commitment lock -- were identical across every request
+	handler, not movement-specific, and lived there), or any remote/network concern. Bots/dummies
+	never touch this module -- neither has dash fields (CombatTypes.lua's BotState/DummyState), so
+	it's exclusively a real-player CombatState concern.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -104,127 +115,12 @@ function Movement.ResolveDashDirection(state: CombatState): ("Front" | "Back" | 
 	return if rightComponent >= 0 then "Right" else "Left"
 end
 
--- Sprint is a held intent flag, not a one-shot action -- see ComputeDesiredWalkSpeed for how/when
--- it actually raises WalkSpeed. Trivial, but routed through here so every movement-field write
--- (dash/sprint alike) goes through one module instead of some living here and some in
--- CombatSystem.lua.
---
--- Releasing sprint does NOT zero sprintChargeSeconds -- the charge decays on its own tick (see
--- ComputeSprintCharge), which is what lets a player who let go for half a second to round a corner
--- keep the stage they earned. ResolveSprintStage still drops the STAGE to 0 immediately, so nothing
--- downstream reads a stage the player isn't currently holding.
-function Movement.SetSprinting(state: CombatState, sprinting: boolean): ()
-	state.Movement.sprinting = sprinting
-end
-
---
--- THE TWO-STAGE RUN.
---
--- Sprint used to be one flat WalkSpeed tier. It is now two: an ordinary sprint, and a sustained
--- "full stride" stage that engages after Constants.Combat.SprintStage2ThresholdSeconds of unbroken
--- running and multiplies base speed by SprintStage2SpeedMultiplier instead. The three functions
--- below are the whole of that mechanic -- two pure ones (unit-testable with no Humanoid) and one
--- thin state-mutating call site that CombatSystem.onHeartbeat drives once per tick, the same split
--- ComputeGenuineJumpAirborne/ComputeDesiredWalkSpeed already use in this file.
---
--- Server-authoritative in the strongest sense: the client is never asked, and never tells. It reads
--- the resolved stage off Constants.Attributes.SprintStage purely to decide which animation, which
--- footstep sound and which FOV offset to present.
---
-
--- The exact conditions under which the sprint SPEED TIER is granted -- extracted from
--- ComputeDesiredWalkSpeed's own sprint branch (its only other caller) so the tier and the charge
--- clock can never drift apart. That drift would be invisible and nasty in both directions: a charge
--- that accrues under conditions the tier doesn't honor would hand out stage 2 for standing in a
--- stunlock, and one that stalls under conditions the tier DOES honor would make the second stage
--- unreachable for reasons no player could see.
-function Movement.IsSprintTierActive(state: CombatState, now: number): boolean
-	return state.Movement.sprinting
-		and not state.blocking
-		and now >= state.attackEndsAt
-		and now >= state.Vitals.stunExpiry
-		and now >= state.Vitals.postureBrokenExpiry
-end
-
--- One tick of the charge clock. Pure arithmetic; the caller resolves the two booleans.
---
---   * `held` (a parkour action owns this character's velocity) FREEZES the charge -- neither
---     accruing nor decaying. Vaulting a wall or wall-running mid-sprint is the movement system
---     working as designed, and dropping the player out of full stride for using it would punish
---     exactly the behavior the game wants. It doesn't accrue either, because a nine-second wall-run
---     is not seven seconds of running.
---   * `accruing` (the tier is granted AND the character is genuinely moving) builds toward the
---     threshold and stops there. Capped rather than unbounded so the charge can't be banked: a
---     player who has run for two minutes loses the stage on the same timer as one who has run for
---     eight seconds.
---   * Neither: decay, at Constants.Combat.SprintChargeDecayMultiplier times the build rate. See that
---     constant's header for why this is a decay and not a reset.
-function Movement.ComputeSprintCharge(
-	previousCharge: number,
-	deltaTime: number,
-	accruing: boolean,
-	held: boolean
-): number
-	if deltaTime <= 0 or held then
-		return previousCharge
-	end
-	if accruing then
-		return math.min(previousCharge + deltaTime, Constants.Combat.SprintStage2ThresholdSeconds)
-	end
-	return math.max(previousCharge - deltaTime * Constants.Combat.SprintChargeDecayMultiplier, 0)
-end
-
--- Which stage a given charge amounts to. Takes the PREVIOUS stage because the second stage is
--- hysteretic: crossing INTO it takes a full charge, staying in it only takes
--- Constants.Combat.SprintStage2SustainFraction of one -- see that constant's own header for the
--- flicker this closes (an onset whoosh replaying every time a runner clips a doorframe).
---
--- Stage 0 is "not sprinting at all", which is deliberately keyed off the held intent rather than off
--- the tier gate: a stage that dropped to 0 for the fifth of a second of a swing's commitment lock
--- would make the client tear down and rebuild the entire run presentation mid-fight.
-function Movement.ResolveSprintStage(previousStage: number, chargeSeconds: number, sprinting: boolean): number
-	if not sprinting then
-		return 0
-	end
-	local threshold = Constants.Combat.SprintStage2ThresholdSeconds
-	local sustainFloor = threshold * Constants.Combat.SprintStage2SustainFraction
-	local required = if previousStage >= 2 then sustainFloor else threshold
-	return if chargeSeconds >= required then 2 else 1
-end
-
--- Advances the charge and resolves the stage for one tick, returning the new stage so the caller can
--- publish it. The only Instance-touching part of the mechanic, and it only READS: the three
--- top-priority lockouts (an admin freeze, flight, a movement-locked emote) and the parkour
--- velocity-ownership flag are all Attributes some other system already publishes, read here exactly
--- the way ComputeDesiredWalkSpeed already reads them rather than mirrored into CombatState.
---
--- The lockouts stop the clock rather than freezing it: flying across the map with the sprint key
--- held is not running, and neither is standing in an emote. Only a parkour action gets the freeze.
-function Movement.UpdateSprintStage(state: CombatState, now: number, deltaTime: number): number
-	local movement = state.Movement
-	local humanoid = state.humanoid
-
-	local locked = false
-	local parkourOwned = false
-	if humanoid then
-		locked = humanoid:GetAttribute(Constants.Attributes.Frozen) == true
-			or humanoid:GetAttribute(Constants.Attributes.Flying) == true
-			or humanoid:GetAttribute(Constants.Attributes.EmoteMovementLocked) == true
-		parkourOwned = humanoid:GetAttribute(Constants.Attributes.ParkourVelocityOwned) == true
-	end
-
-	local accruing = not locked and Movement.IsSprintTierActive(state, now) and Movement.IsMoving(state)
-	movement.sprintChargeSeconds =
-		Movement.ComputeSprintCharge(movement.sprintChargeSeconds, deltaTime, accruing, parkourOwned and not locked)
-	movement.sprintStage =
-		Movement.ResolveSprintStage(movement.sprintStage, movement.sprintChargeSeconds, movement.sprinting)
-	return movement.sprintStage
-end
-
--- Commits a Slide: a bigger, committed WalkSpeed burst than Dash, chained off Sprint. Mirrors
--- Movement.ApplyDash exactly (pure effect application -- the caller, handleSlideRequest, is
--- responsible for validating slideCooldownExpiry/state.sprinting/Movement.IsMoving first). No
--- direction to resolve, unlike Dash's 4-way ResolveDashDirection -- Slide always plays its single
+-- Commits a Slide: a bigger, committed WalkSpeed burst than Dash, chained off Sprint (see
+-- MovementState.slideWindowExpiry's own comment for what "chained off Sprint" now needs to read
+-- since that flag no longer lives on CombatState). Mirrors Movement.ApplyDash exactly (pure effect
+-- application -- the caller, handleSlideRequest, is responsible for validating
+-- slideCooldownExpiry/Movement.IsMoving first). No direction to resolve, unlike Dash's 4-way
+-- ResolveDashDirection -- Slide always plays its single
 -- supplied clip in whatever direction the player is already moving (no steering, see this
 -- feature's own scope). Cancels an active block, same rule ApplyDash already enforces.
 function Movement.ApplySlide(state: CombatState, now: number): ()
@@ -382,17 +278,15 @@ end
 --                        and can therefore never be simultaneously active -- their relative order
 --                        doesn't affect correctness, this just keeps "committed burst movement"
 --                        tiers together above the sustained ones below.
---   7. Hit-slow clip  -- you took an unmitigated hit; the stagger overrides your own locomotion...
---   8. Sprint         -- ...but a raised sprint speed only applies when you're otherwise free to
---                        move (not blocking, not mid-commitment, not stunned/posture-broken). ONE
---                        tier, two multipliers: which one applies is decided by the run stage
---                        UpdateSprintStage resolved this same tick (see that function). It stays a
---                        single tier rather than becoming two because stage 2 is not a different
---                        EFFECT that could compete with stage 1 for the property -- it is the same
---                        effect at a different magnitude.
---   9. Base -- itself scaled by the admin-only SpeedMultiplier Attribute (default 1) before any of
+--   7. Hit-slow clip  -- you took an unmitigated hit; the stagger overrides your own locomotion.
+--   8. Base -- itself scaled by the admin-only SpeedMultiplier Attribute (default 1) before any of
 --      the tiers above multiply on top of it, the same "per-player Humanoid Attribute" shape
 --      BonusWalkSpeed already uses.
+--
+-- NO SPRINT TIER HERE. There used to be one (a ninth tier below Hit-slow); it moved out along with
+-- the rest of the run's numbers -- see Shared/Run/RunConstants.lua's own header for why -- and
+-- Server/Systems/RunSystem.lua is now the sole WalkSpeed authority for running, entirely independent
+-- of this resolver.
 function Movement.ComputeDesiredWalkSpeed(state: CombatState, now: number): number
 	-- Admin-only freeze takes ABSOLUTE top priority -- an admin lockdown overrides even Flying.
 	if state.humanoid and state.humanoid:GetAttribute(Constants.Attributes.Frozen) == true then
@@ -478,29 +372,13 @@ function Movement.ComputeDesiredWalkSpeed(state: CombatState, now: number): numb
 	if now < state.Vitals.hitSlowExpiry then
 		return base * Constants.Combat.HitSlowMultiplier
 	end
-	local groundSpeed = base
-	-- The gate is Movement.IsSprintTierActive rather than the five conditions written out here, so the
-	-- charge clock that decides the stage below cannot drift from the tier it feeds -- see that
-	-- function's own header.
-	if Movement.IsSprintTierActive(state, now) then
-		-- Which of the two sprint multipliers applies is a pure read of the stage UpdateSprintStage
-		-- already resolved this tick. Deliberately no charge/threshold arithmetic here: this function
-		-- is called from one place, once per tick, and having it re-derive the stage would mean two
-		-- answers to the same question with a tick of skew between them.
-		local sprintMultiplier = if state.Movement.sprintStage >= 2
-			then Constants.Combat.SprintStage2SpeedMultiplier
-			else Constants.Combat.SprintSpeedMultiplier
-		groundSpeed = base * sprintMultiplier
-	end
-
-	-- Parkour momentum carry, applied ONLY to the two free-movement tiers above (sprint and base) and
-	-- never to any tier that returned early. That placement is the whole safety argument for this
-	-- feature's one client-influenced number: a slide's earned speed survives into ordinary running,
-	-- but it cannot peek through hit-slow, a stun, a posture break, a commitment lock, an air-combo
-	-- hold, a freeze or a flight -- so no amount of parkour lets a player outrun the consequences of
-	-- being hit, which is precisely what Constants.Combat.HitSlowMultiplier's own "can't just run away"
-	-- comment exists to guarantee.
-	return math.max(groundSpeed, Movement.ComputeParkourSpeedFloor(state, now))
+	-- Parkour momentum carry, applied to the base tier and never to any tier that returned early.
+	-- That placement is the whole safety argument for this feature's one client-influenced number: a
+	-- slide's earned speed survives into ordinary ground movement, but it cannot peek through
+	-- hit-slow, a stun, a posture break, a commitment lock, an air-combo hold, a freeze or a flight --
+	-- so no amount of parkour lets a player outrun the consequences of being hit, which is precisely
+	-- what Constants.Combat.HitSlowMultiplier's own "can't just run away" comment exists to guarantee.
+	return math.max(base, Movement.ComputeParkourSpeedFloor(state, now))
 end
 
 -- The decaying WalkSpeed floor a just-finished parkour action leaves behind (see

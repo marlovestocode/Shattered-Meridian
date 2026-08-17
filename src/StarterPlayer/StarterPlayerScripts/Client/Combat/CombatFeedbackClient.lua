@@ -72,6 +72,18 @@ local outcomeGeneration = 0
 -- moves this with it instead of leaving a threshold that outlives its own scale.
 local HEAVY_COMBO_STAGE = math.max(math.ceil(DamageConstants.Combo.MaxStage / 2), 2)
 
+-- Whether `moveId` is a weapon's Basic (M1) string hit. LIVE MoveIds never match the hand-authored
+-- DebugName fields on Constants.Combat.Weapons[...].Stages.Basic ("Basic1", "Dagger1", ...) -- every
+-- attack actually thrown resolves through DefaultMoveRegistry's synthetic scheme instead
+-- (Server/Combat/DefaultMoveRegistry.lua's weaponStageMoveId, restated client-side here the same way
+-- SwingSequencer.lua restates it server-side, per that module's own header on why the coupling is to
+-- the naming convention and not to a shared function). A custom Move-Editor move can never match this
+-- shape (its MoveId is an author-assigned slug), so this also correctly excludes those. Only Basic --
+-- Heavy and Finisher throw the same shake as any other move and get no forward pull (see shakeFor).
+local function isBasicMoveId(moveId: string): boolean
+	return string.match(moveId, "^default:%a+:Basic:%d+$") ~= nil
+end
+
 -- The outcomes that get a banner, and what it says. Deliberately NOT every outcome: a Clean hit is
 -- already fully described by the damage number and the shake, and banner-ing the common case would
 -- train players to ignore the banner exactly when an uncommon one needs reading.
@@ -131,7 +143,16 @@ local function shakeFor(payload: CombatFeedback): ()
 	-- Indexed rather than switched, so a preset renamed in Constants.FX is a nil (no shake) rather
 	-- than a runtime error -- Constants.FX's own "a missing preset degrades to no shake, never to a
 	-- wrong hit" rule, which CameraShake.Shake already tolerates on its own side too.
-	CameraShake.Shake((Constants.FX.CameraShake :: any)[presetName])
+	local preset = (Constants.FX.CameraShake :: any)[presetName]
+
+	-- A landed M1 (Basic weapon-string) hit gets an extra forward lunge layered onto its ordinary
+	-- shake -- Parried is excluded because nothing of the attacker's own swing actually connected.
+	local pushForward: number? = nil
+	if payload.Role == "Attacker" and payload.Kind ~= "Parried" and isBasicMoveId(payload.MoveId) then
+		pushForward = Constants.FX.CameraShake.M1PushForwardStuds
+	end
+
+	CameraShake.Shake(preset, pushForward)
 end
 
 -- Projects the world contact onto the screen. Returns nil when the contact is behind the camera or

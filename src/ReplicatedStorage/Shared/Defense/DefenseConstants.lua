@@ -180,9 +180,20 @@ DefenseConstants.Parry = {
 -- until the markers exist.
 DefenseConstants.ParryAnimationId = "rbxassetid://94883396723007"
 
+-- CLIENT-SIDE PRESENTATION ONLY, unlike ParryAnimationId above: the server never reads this id or
+-- cares how long it plays, since nothing about parry timing lives in it (no ParryStart/ParryClose/
+-- ParryRecoveryEnd markers expected or checked here). DefenseClient.lua plays ParryAnimationId ONCE,
+-- non-looped, on press -- that clip's own markers are still what arms the server's parry window --
+-- and chains into this one, looped, the instant the parry clip finishes (AnimationManager's
+-- OnFinished "Completed" reason), for as long as the block key stays held. So a block press always
+-- shows the parry swing-up first and settles into a held guard pose, whether or not anything was
+-- actually parried; the OUTCOME was already decided server-side by the time this plays at all.
+DefenseConstants.BlockHoldAnimationId = "rbxassetid://103128038437125"
+
 -- Client-side presentation only (DefenseClient.lua) -- how long the block/parry pose crossfades in
--- and out on press/release. Not read by the server: the server's timing authority is the marker
--- times above, never how long the LOCAL blend takes.
+-- and out on press/release, and how the parry-to-hold handoff above blends. Not read by the server:
+-- the server's timing authority is ParryAnimationId's own markers, never how long any LOCAL blend
+-- takes.
 DefenseConstants.Presentation = {
 	BlockAnimationFadeSeconds = 0.15,
 }

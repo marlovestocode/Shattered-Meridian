@@ -15,10 +15,16 @@
 	LoadAnimation call -- that module is the codebase's shared claim/layer arbitrator (see its own
 	header for why four earlier modules each hand-rolling this was the actual bug source: nobody
 	arbitrated who owned the body, a stopped track stayed stopped, and death/reset were nobody's job).
-	This is that module's first real caller: register the clip, then SetClaim/Clear a "Defense" layer
+	This is that module's first real caller: register the clips, then SetClaim/Clear a "Defense" layer
 	on press/release. Bind/Unbind track the character lifecycle exactly like a per-rig manager is
 	meant to; markers and manual track bookkeeping are deliberately NOT reached for here -- the
 	manager owns the AnimationTrack and nothing outside it is supposed to touch one directly.
+
+	A PRESS PLAYS TWO CLIPS IN SEQUENCE, not one: DefenseConstants.ParryAnimationId (the swing-up,
+	whose markers separately arm the server's parry window -- entirely unaffected by this client-side
+	sequencing) plays once, then AnimationManager's OnFinished hands the layer to
+	DefenseConstants.BlockHoldAnimationId on a loop for as long as the key stays down. See
+	setBlockHeld's own comment for the two-phase claim and the guards around the handoff.
 
 	BLOCK AND PARRY SHARE ONE INPUT, as Constants.Keybinds.Defaults.Block has documented since before
 	either existed: a press opens a short parry window, holding past it is a plain block. There is no
@@ -65,10 +71,14 @@ local rootPart: BasePart? = nil
 -- module can close by itself.
 local manager = AnimationManager.new({ Name = "DefenseClient" })
 
--- Registered once, at module load, under a manager-local key rather than the raw asset id -- lets
--- ParryAnimationId change (or land blank, pre-asset) with nothing here needing to change.
+-- Registered once, at module load, under manager-local keys rather than the raw asset ids -- lets
+-- ParryAnimationId/BlockHoldAnimationId change (or land blank, pre-asset) with nothing here needing
+-- to change. Two clips, not one: BLOCK_CLIP is the parry swing-up (plays once), BLOCK_HOLD_CLIP is
+-- the held-guard loop it hands off to -- see setBlockHeld below for the sequencing.
 local BLOCK_CLIP = "Parry"
+local BLOCK_HOLD_CLIP = "BlockHold"
 manager:Register(BLOCK_CLIP, DefenseConstants.ParryAnimationId)
+manager:Register(BLOCK_HOLD_CLIP, DefenseConstants.BlockHoldAnimationId)
 
 local DEFENSE_LAYER = "Defense"
 local BLOCK_SOURCE = "Block"
@@ -94,6 +104,21 @@ local function sendBlocking(blocking: boolean): ()
 	remote:FireServer(blocking)
 end
 
+-- Claims the held-guard loop -- the second half of the press sequence below, and also what a
+-- released-then-instantly-repressed block re-enters through if the parry clip's OnFinished fires
+-- after a fresh press already re-claimed BLOCK_CLIP (the `blockHeld` guard at the call site is what
+-- actually prevents that race; this function only ever runs when it's still wanted).
+local function claimBlockHold(): ()
+	local fadeSeconds = DefenseConstants.Presentation.BlockAnimationFadeSeconds
+	manager:SetClaim(DEFENSE_LAYER, BLOCK_SOURCE, {
+		Clip = BLOCK_HOLD_CLIP,
+		Looped = true,
+		Priority = Enum.AnimationPriority.Action,
+		FadeIn = fadeSeconds,
+		FadeOut = fadeSeconds,
+	})
+end
+
 local function setBlockHeld(held: boolean): ()
 	if held == blockHeld then
 		return
@@ -108,6 +133,16 @@ local function setBlockHeld(held: boolean): ()
 	-- SetClaim(layer, source, nil) clears -- AnimationManager.Register already made BLOCK_CLIP resolve
 	-- to nothing if ParryAnimationId is blank, so a claim with no asset yet is a safe, silent no-op
 	-- rather than something this module needs to guard against separately.
+	--
+	-- TWO-PHASE ON PRESS: BLOCK_CLIP plays ONCE (Looped = false) -- the parry swing-up, whose own
+	-- markers are still what arms the server's parry window, completely unaffected by how this client
+	-- sequences its OWN presentation on top of it. OnFinished only chains into the held-guard loop
+	-- when the reason is "Completed" (the clip actually played out) AND the key is still down --
+	-- either guard alone is not enough: a release mid-swing retires the entry with "Cleared"/
+	-- "Superseded", never "Completed", but a same-frame release-then-repress could otherwise still
+	-- land a stale hold claim after the key had already gone back down, which the blockHeld check
+	-- closes. On release there is nothing to chain: SetClaim(nil) below clears whichever of the two
+	-- clips is currently active.
 	local fadeSeconds = DefenseConstants.Presentation.BlockAnimationFadeSeconds
 	manager:SetClaim(
 		DEFENSE_LAYER,
@@ -115,10 +150,15 @@ local function setBlockHeld(held: boolean): ()
 		if held
 			then {
 				Clip = BLOCK_CLIP,
-				Looped = true,
+				Looped = false,
 				Priority = Enum.AnimationPriority.Action,
 				FadeIn = fadeSeconds,
 				FadeOut = fadeSeconds,
+				OnFinished = function(_clip: string, reason: AnimationManager.FinishReason)
+					if reason == "Completed" and blockHeld then
+						claimBlockHold()
+					end
+				end,
 			}
 			else nil
 	)

@@ -59,24 +59,22 @@ local IDS: { [string]: string } = {
 	-- Primary weapon ------------------------------------------------------------------------------
 	-- The light string. Three stages, thrown in order, wrapping back to 1 -- so these three read as a
 	-- sequence and are worth authoring as one: a clip that ends where the next begins.
-	["default:Primary:Basic:1"] = "82318659005476",
-	["default:Primary:Basic:2"] = "98404078606361",
-	["default:Primary:Basic:3"] = "91462396635095",
-	-- The heavy string. Two stages, much longer windups (0.6s on stage 1) -- a clip here has real room
-	-- to telegraph, which is the whole point of a heavy in this game's defence model: the windup IS the
+	["default:Primary:Basic:1"] = "104588315151150",
+	["default:Primary:Basic:2"] = "78226937952673",
+	["default:Primary:Basic:3"] = "106982083848684",
+	-- The heavy swing. A single stage, much longer windup (0.6s) -- a clip here has real room to
+	-- telegraph, which is the whole point of a heavy in this game's defence model: the windup IS the
 	-- tell a defender parries off.
-	["default:Primary:Heavy:1"] = "",
-	["default:Primary:Heavy:2"] = "",
+	["default:Primary:Heavy:1"] = "83363364108102",
 	-- Thrown only when a full Basic string LANDED (AttackConstants.Finisher.MinComboStage) -- the
 	-- payoff swing, and the one most worth a distinctive clip.
-	["default:Primary:Finisher"] = "",
+	["default:Primary:Finisher"] = "138196103225171",
 
 	-- Secondary weapon ----------------------------------------------------------------------------
 	["default:Secondary:Basic:1"] = "",
 	["default:Secondary:Basic:2"] = "",
 	["default:Secondary:Basic:3"] = "",
 	["default:Secondary:Heavy:1"] = "",
-	["default:Secondary:Heavy:2"] = "",
 	["default:Secondary:Finisher"] = "",
 
 	-- Standalone attacks --------------------------------------------------------------------------

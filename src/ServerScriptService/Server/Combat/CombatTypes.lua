@@ -148,34 +148,19 @@ export type CombatVitalsState = {
 	ragdollExpiry: number,
 }
 
--- Neutral-game movement state (Movement.lua's own ApplyDash/ApplySlide/SetSprinting mutate these;
--- Movement.ComputeDesiredWalkSpeed reads them every Heartbeat tick). Scoped to Sprint/Dash/Slide
--- specifically -- AirSlam's own airSlamReadyAt stays a core CombatState field instead (it's an
--- attack-shaped cooldown structurally identical to basicAttackReadyAt/heavyAttackReadyAt, thrown
+-- Neutral-game movement state (Movement.lua's own ApplyDash/ApplySlide mutate these;
+-- Movement.ComputeDesiredWalkSpeed reads them every Heartbeat tick -- though see that function's own
+-- header: this whole resolver is currently unreachable, kept only as the record of what a live
+-- Dash/Slide System will need to drive). Scoped to Dash/Slide specifically -- Sprint's own state
+-- moved out entirely to Server/Systems/RunSystem.lua, which owns its state independently of
+-- CombatState (see RunSystem.lua/Shared/Run/RunConstants.lua rather than this file for anything
+-- about the run's stages). AirSlam's own airSlamReadyAt stays a core CombatState field instead (it's
+-- an attack-shaped cooldown structurally identical to basicAttackReadyAt/heavyAttackReadyAt, thrown
 -- directly by CombatSystem.lua's own handleAirSlamRequest, and Movement.lua never touches it at
 -- all -- unlike every field below, which Movement.lua's own functions read or write). Not on
--- BotState/DummyState: neither has dash/sprint fields (bots never touch neutral-game movement, a
--- dummy never acts at all) -- see Movement.lua's own header.
+-- BotState/DummyState: neither has dash fields (bots never touch neutral-game movement, a dummy
+-- never acts at all) -- see Movement.lua's own header.
 export type MovementState = {
-	-- Held intent flag (a raised WalkSpeed only actually applies when
-	-- Movement.ComputeDesiredWalkSpeed allows it); set by handleSprintStart/Stop.
-	sprinting: boolean,
-	-- THE RUN SYSTEM'S TWO-STAGE STATE (Movement.UpdateSprintStage, called once per tick from
-	-- CombatSystem.onHeartbeat).
-	--
-	-- sprintChargeSeconds accumulates while the sprint speed tier is ACTUALLY being granted (see
-	-- Movement.IsSprintTierActive) and decays at Constants.Combat.SprintChargeDecayMultiplier times
-	-- that rate while it isn't -- a decay rather than a reset so a one-frame gate flicker can't erase
-	-- a long run. sprintStage is the resolved 0/1/2 that ComputeDesiredWalkSpeed reads for its
-	-- multiplier and CombatSystem publishes as Constants.Attributes.SprintStage for the client's
-	-- animation/audio/FOV presentation.
-	--
-	-- Both live in server state rather than being derived on the client for the reason every
-	-- speed-affecting number in this file does: the stage picks a WalkSpeed multiplier, so a client
-	-- that could influence it could grant itself the faster tier on demand. The client is told the
-	-- answer; it never contributes to it.
-	sprintChargeSeconds: number,
-	sprintStage: number,
 	dashWindowExpiry: number,
 	dashCooldownExpiry: number,
 	-- Whether the CURRENTLY active dashWindowExpiry burst is a backward one (Movement.
@@ -208,9 +193,10 @@ export type MovementState = {
 	-- isn't necessary once the payoff is bounded.
 	dashPunchReadyAt: number,
 	-- Slide (Movement.ApplySlide/CombatSystem.lua's handleSlideRequest) -- mirrors
-	-- dashWindowExpiry/dashCooldownExpiry exactly (a WalkSpeed-burst window + its own cooldown), but
-	-- chained off `sprinting` above rather than its own standalone trigger key: handleSlideRequest
-	-- rejects unless state.Movement.sprinting is already true.
+	-- dashWindowExpiry/dashCooldownExpiry exactly (a WalkSpeed-burst window + its own cooldown).
+	-- Used to chain off a `sprinting` flag this file no longer carries (handleSlideRequest rejected
+	-- unless the player was already sprinting) -- a live Slide handler will need to ask
+	-- Server/Systems/RunSystem.lua's own state for that instead, since Sprint intent lives there now.
 	slideWindowExpiry: number,
 	slideCooldownExpiry: number,
 	-- Shared cooldown BOTH Dash and Slide check and set (in addition to each move's own individual

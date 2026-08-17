@@ -325,11 +325,11 @@ export type ParkourContext = {
 	-- pushed in from CombatClient.lua, which remains the owner of sprint. See ParkourController.
 	-- SetSprinting.
 	SprintHeld: boolean,
-	-- Which run stage the SERVER currently has this character in: 0 = not sprinting, 1 = ordinary
-	-- sprint, 2 = the sustained full-stride stage reached after Constants.Combat.
-	-- SprintStage2ThresholdSeconds of unbroken running. Mirrored from Constants.Attributes.SprintStage
-	-- by the controller each frame -- the client never resolves it, since the stage decides a WalkSpeed
-	-- multiplier (see Server/Combat/Movement.UpdateSprintStage).
+	-- Which run stage the SERVER currently has this character in: 0 = not sprinting, 1/2/3 = the
+	-- ladder Shared/Run/RunConstants.lua's Stages array defines (that file, not this comment, is the
+	-- source of truth for each stage's threshold). Mirrored from Constants.Attributes.SprintStage by
+	-- the controller each frame -- the client never resolves it, since the stage decides a WalkSpeed
+	-- multiplier (see Server/Systems/RunSystem.lua).
 	--
 	-- Distinct from SprintHeld above, which is the player's INTENT: a player can be holding sprint
 	-- (SprintHeld true) at stage 1, at stage 2, or -- while blocking or mid-commitment -- at a stage
