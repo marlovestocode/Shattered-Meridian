@@ -3,9 +3,8 @@
 	DevMenuClient.lua
 
 	Owns: the local player's dev-menu UX -- keybind toggle (resolved through
-	Client/Input/KeybindManager.lua rather than a hardcoded key, same as CombatClient.lua) and
-	translating the DevMenu screen's SpawnDummyRequested/SpawnBotRequested signals into
-	NetworkBridge RemoteFunction calls. This module holds NO copy of the admin whitelist: it asks the
+	Client/Input/KeybindManager.lua rather than a hardcoded key) and translating the DevMenu screen's
+	action signals into NetworkBridge RemoteFunction calls. This module holds NO copy of the admin whitelist: it asks the
 	server whether to start at all (see requestServerAuthorization below), because that list lives in
 	ServerScriptService/Server/Config/AdminConfig.lua and no longer replicates to clients. Gating here
 	remains a UX convenience either way -- skip connecting input for a non-dev so the menu never even
@@ -25,13 +24,13 @@
 	still goes through DevMenuSystem's own server-side check.
 
 	Also drives the screen's TargetNameDisplay/GodmodeActive/FlightActive (see watchTarget below):
-	subscribes directly to the existing Combat_LockOnChanged RemoteEvent (the same one
-	CombatClient.lua already listens to for the lock-on reticle) to learn the resolved admin-action
-	target exactly the way DevMenuSystem.resolveActionTarget resolves it server-side, then watches
-	that target's Humanoid Godmode/Flying Attributes (AdminActionSystem.SetGodmode/SetFlying both
-	mirror their boolean onto a replicated Attribute) the same way
-	Client/DevMenu/FlightController.lua already watches its own Flying attribute. This is real
-	server-replicated state, not a locally-guessed toggle -- no new remote needed.
+	always the local player now -- DevMenuSystem.resolveActionTarget's lock-on lookup (and the
+	Combat_LockOnChanged RemoteEvent it rode in on) was removed alongside the rest of the combat
+	system, so there is no longer a way to resolve an admin action's target to anyone but the calling
+	admin. watchTarget still watches that target's Humanoid Godmode/Flying Attributes
+	(AdminActionSystem.SetGodmode/SetFlying both mirror their boolean onto a replicated Attribute) the
+	same way Client/DevMenu/FlightController.lua already watches its own Flying attribute -- this is
+	real server-replicated state, not a locally-guessed toggle.
 
 	Screens/DevMenu/init.lua's Sidebar/ContentArea split (see that module's own header) means every
 	field this module used to reach as a flat `handle.X` now lives on `handle.Sidebar.X` (the
@@ -57,8 +56,6 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
-local CombatRemoteNames = Constants.Combat.RemoteNames
-
 local DevMenuModule = require(script.Parent.Parent.UI.Screens.DevMenu)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local ParkourDebug = require(script.Parent.Parent.Parkour.ParkourDebug)
@@ -73,20 +70,6 @@ local logger = Logger.scope("DevMenuClient")
 local STATUS_CLEAR_DELAY = Constants.Debug.DevMenu.StatusClearDelaySeconds
 
 local DevMenuClient = {}
-
-local function describeResult(result: Types.DevMenuSpawnDummyResult): string
-	if result.Success then
-		return "Training dummy spawned."
-	end
-	return "Failed: " .. (result.Reason or "Unknown")
-end
-
-local function describeBotResult(presetName: string, result: Types.DevMenuSpawnBotResult): string
-	if result.Success then
-		return `Training bot spawned ({presetName}).`
-	end
-	return "Failed: " .. (result.Reason or "Unknown")
-end
 
 local function describeRollEmoteResult(result: Types.DevMenuRollEmoteResult): string
 	if result.Success then
@@ -347,9 +330,8 @@ local function rebindAttributeConnections(handle: DevMenuHandle, humanoid: Human
 end
 
 -- Watches `targetPlayer` (whichever player DevMenuSystem.resolveActionTarget would currently
--- resolve to -- see setTarget below) for its Godmode/Flying Humanoid Attributes. Called once at
--- Start() (watching the local player, before any lock-on exists) and again every time
--- Combat_LockOnChanged fires with a new resolved target.
+-- resolve to -- see setTarget below, always the local player now) for its Godmode/Flying Humanoid
+-- Attributes. Called once at Start().
 local function watchTarget(handle: DevMenuHandle, targetPlayer: Player): ()
 	if targetCharacterAddedConnection then
 		targetCharacterAddedConnection:Disconnect()
@@ -471,23 +453,16 @@ local function startDevMenu(handle: DevMenuHandle): ()
 	reportsLocalUserId = localPlayer.UserId
 
 	-- Target tracking for the Admin tab's live display -- resolves exactly the way
-	-- DevMenuSystem.resolveActionTarget does server-side (lock-on target, or self if none),
-	-- reusing the existing Combat_LockOnChanged broadcast rather than adding a new remote.
-	local function setTarget(targetUserId: number?): ()
-		local lockedOnPlayer = if targetUserId then Players:GetPlayerByUserId(targetUserId) else nil
-		local resolvedTarget = lockedOnPlayer or localPlayer
-		currentResolvedTarget = resolvedTarget
-		content.TargetNameDisplay:set(if lockedOnPlayer then lockedOnPlayer.Name else "Self")
-		watchTarget(handle, resolvedTarget)
+	-- DevMenuSystem.resolveActionTarget does server-side: always the local player. The lock-on target
+	-- resolution this used to layer on top of (via the Combat_LockOnChanged broadcast) was removed
+	-- alongside the rest of the combat system -- see this file's own header.
+	local function setTarget(): ()
+		currentResolvedTarget = localPlayer
+		content.TargetNameDisplay:set("Self")
+		watchTarget(handle, localPlayer)
 	end
 
-	setTarget(nil)
-
-	local lockOnChangedRemote = NetworkBridge.GetRemoteEvent(CombatRemoteNames.LockOnChanged)
-	lockOnChangedRemote.OnClientEvent:Connect(function(targetUserId: number?)
-		logger:debug("Combat_LockOnChanged received (DevMenu target tracking)", { targetUserId = targetUserId })
-		setTarget(targetUserId)
-	end)
+	setTarget()
 
 	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
 		if gameProcessed then
@@ -525,30 +500,6 @@ local function startDevMenu(handle: DevMenuHandle): ()
 		end
 	end)
 
-	content.SpawnDummyRequested:Connect(function()
-		logger:debug("SpawnDummyRequested received")
-		invokeAndReport(handle, function()
-			local spawnDummyRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.SpawnDummy)
-			return spawnDummyRemote:InvokeServer()
-		end, function(resultOrError)
-			local result = resultOrError :: Types.DevMenuSpawnDummyResult
-			logger:debug("SpawnDummy result received", { success = result.Success, reason = result.Reason })
-			return describeResult(result)
-		end)
-	end)
-
-	content.SpawnBotRequested:Connect(function(presetName: string)
-		logger:debug("SpawnBotRequested received", { preset = presetName })
-		invokeAndReport(handle, function()
-			local spawnBotRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.SpawnTrainingBot)
-			return spawnBotRemote:InvokeServer(presetName)
-		end, function(resultOrError)
-			local result = resultOrError :: Types.DevMenuSpawnBotResult
-			logger:debug("SpawnTrainingBot result received", { success = result.Success, reason = result.Reason })
-			return describeBotResult(presetName, result)
-		end)
-	end)
-
 	content.RollRareEmoteRequested:Connect(function()
 		logger:debug("RollRareEmoteRequested received")
 		invokeAndReport(handle, function()
@@ -558,18 +509,6 @@ local function startDevMenu(handle: DevMenuHandle): ()
 			local result = resultOrError :: Types.DevMenuRollEmoteResult
 			logger:debug("RollEmote result received", { success = result.Success, emoteId = result.EmoteId })
 			return describeRollEmoteResult(result)
-		end)
-	end)
-
-	content.SetHealthRequested:Connect(function(health: number)
-		logger:debug("SetHealthRequested received", { health = health })
-		invokeAndReport(handle, function()
-			local setHealthRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.SetTargetHealth)
-			return setHealthRemote:InvokeServer(health)
-		end, function(resultOrError)
-			local result = resultOrError :: Types.DevMenuActionResult
-			logger:debug("SetTargetHealth result received", { success = result.Success, reason = result.Reason })
-			return describeActionResult("Health", result)
 		end)
 	end)
 
@@ -742,34 +681,12 @@ local function startDevMenu(handle: DevMenuHandle): ()
 		end)
 	end)
 
-	-- Server-wide, not per-target -- unlike SetGodmodeRequested/SetFrozenRequested/etc. above, there's
-	-- no Humanoid Attribute reflecting truth back, so content.HitboxDebugActive is set directly from
-	-- this call's own result (falling back to the pre-toggle value on failure/error, never silently
-	-- assuming the request succeeded).
-	content.SetHitboxDebugRequested:Connect(function(enabled: boolean)
-		logger:debug("SetHitboxDebugRequested received", { enabled = enabled })
-		invokeAndReport(handle, function()
-			local setHitboxDebugRemote =
-				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.SetHitboxDebug)
-			return setHitboxDebugRemote:InvokeServer(enabled)
-		end, function(resultOrError)
-			local result = resultOrError :: Types.DevMenuHitboxDebugResult
-			logger:debug("SetHitboxDebug result received", { success = result.Success, reason = result.Reason })
-			if result.Success and result.Enabled ~= nil then
-				content.HitboxDebugActive:set(result.Enabled)
-			end
-			return describeActionResult(
-				if enabled then "Hitboxes visible" else "Hitboxes hidden",
-				{ Success = result.Success, Reason = result.Reason }
-			)
-		end)
-	end)
-
 	-- Spectate (Client/DevMenu/SpectateController.lua) -- toggles against currentResolvedTarget (the
 	-- SAME resolution setTarget above already tracks for the Admin tab's live display), never a
-	-- second independent resolution. A no-op with a status message if nothing is currently resolved
-	-- (should be unreachable in practice -- setTarget(nil) at Start() already seeds it to the local
-	-- player -- but guarded rather than assumed).
+	-- second independent resolution. currentResolvedTarget is always the local player now (lock-on
+	-- was removed alongside the rest of the combat system -- see setTarget's own header), so this
+	-- always reports "no target locked on" -- left wired rather than deleted, since the guard/status
+	-- shape is still correct for whatever eventually replaces target selection.
 	content.SpectateLockedTargetRequested:Connect(function()
 		logger:debug("SpectateLockedTargetRequested received")
 		if SpectateController.IsSpectating() then
@@ -844,35 +761,9 @@ local function startDevMenu(handle: DevMenuHandle): ()
 
 	task.spawn(fetchSidebarStats)
 
-	-- HitboxDebugState is server-wide (not per-target), so unlike Godmode/Frozen/etc. above there's
-	-- no Humanoid Attribute to seed content.HitboxDebugActive from -- fetched once on Start(), same
-	-- eager-fetch trade-off fetchSidebarStats just above accepts.
-	local function fetchHitboxDebugState(): ()
-		local getHitboxDebugRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.GetHitboxDebug)
-		local ok, resultOrError = pcall(function()
-			return getHitboxDebugRemote:InvokeServer()
-		end)
-
-		if not ok then
-			logger:error("GetHitboxDebug request errored", { errorMessage = tostring(resultOrError) })
-			return
-		end
-
-		local result = resultOrError :: Types.DevMenuHitboxDebugResult
-		if not result.Success or result.Enabled == nil then
-			logger:warn("GetHitboxDebug rejected", { reason = result.Reason })
-			return
-		end
-
-		content.HitboxDebugActive:set(result.Enabled)
-		logger:debug("GetHitboxDebug loaded", { enabled = result.Enabled })
-	end
-
-	task.spawn(fetchHitboxDebugState)
-
 	-- Passive "a newer version has been published" banner (Server/Systems/VersionWatchSystem.lua) --
-	-- fetched once on Start(), same eager-fetch trade-off fetchSidebarStats/fetchHitboxDebugState
-	-- above accept. Pre-formats the banner text here (this screen's own "already-computed value in,
+	-- fetched once on Start(), same eager-fetch trade-off fetchSidebarStats above accepts. Pre-formats
+	-- the banner text here (this screen's own "already-computed value in,
 	-- presentation out" rule) rather than handing ContentArea the raw version numbers --
 	-- content.VersionBannerText is left nil (nothing shown) both before this resolves and for the
 	-- ordinary case where no newer version exists.
@@ -1032,19 +923,6 @@ local function startDevMenu(handle: DevMenuHandle): ()
 				if enabled then "Flag suspected cheater" else "Unflag suspected cheater",
 				result
 			)
-		end)
-	end)
-
-	sidebar.ResetPlayerCombatStateRequested:Connect(function(targetUserId: number)
-		logger:debug("ResetPlayerCombatStateRequested received", { targetUserId = targetUserId })
-		invokeAndReport(handle, function()
-			local resetCombatStateRemote =
-				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.ResetTargetCombatState)
-			return resetCombatStateRemote:InvokeServer(targetUserId)
-		end, function(resultOrError)
-			local result = resultOrError :: Types.DevMenuActionResult
-			logger:debug("ResetTargetCombatState result received", { success = result.Success, reason = result.Reason })
-			return describeActionResult("Reset combat state", result)
 		end)
 	end)
 

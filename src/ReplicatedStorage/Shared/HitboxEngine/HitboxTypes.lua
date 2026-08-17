@@ -1,0 +1,334 @@
+--!strict
+--[[
+	HitboxTypes.lua
+
+	Owns: the hitbox engine's data vocabulary -- what an attack IS as far as this engine is concerned
+	(AttackDefinition), what it answers with (HitReport), and the sanitisers that guarantee neither
+	ever carries a number the geometry math can't survive.
+
+	A FRESH SCHEMA, not Types.HitboxAttackDefinition. That type belongs to the Move Creation System's
+	authoring pipeline -- it carries damage, posture, stun configs, animation ids and editor metadata,
+	because a "move" in that system is the whole gameplay package. This engine resolves geometry and
+	reports contacts; it has no opinion on any of that, and reusing a type that carries it would make
+	the engine look like it did. What is here is the complete set of things you need to know to answer
+	"who is inside this volume right now," and nothing else.
+
+	THE DOMAIN-AGNOSTIC LAYERING, which is the reason ComboStage and PowerLevel are plain numbers:
+	this engine never learns what Qi, a cultivation Tier, a combo counter or even a Player is. It is
+	handed two numbers by whatever calls it and it scales a volume with them. That is the same
+	discipline Server/Combat/ObjectStunResolver.lua keeps (opaque string keys, never a Player), and it
+	is what lets a bot, a dummy and a player go through one code path -- and what lets the progression
+	layer change what "power" means without touching a line of geometry.
+
+	LOCAL SPACE CONVENTION, matching Shared/HitboxShapes.lua's so an author who knows one knows both:
+	origin is (0,0,0), FORWARD is -Z, up is +Y, right is +X.
+	  * REACH shapes (Cone, Beam) grow forward FROM the origin -- the origin is their apex/base and
+	    Length is literally how far in front of the attach point they extend.
+	  * CENTRED shapes (Box, Sphere, Cylinder, Capsule, Arc) straddle the origin, so Offset alone
+	    positions them.
+	Which convention a shape follows is the one thing you cannot infer from the field names, so it is
+	restated in SHAPE_FIELDS below.
+
+	Does not own: the geometry itself (HitboxGeometry.lua), when a hitbox is live
+	(Server/Combat/HitboxEngine/AttackStateMachine.lua), or what a contact MEANS -- there is
+	deliberately no damage, knockback, blocking or status field anywhere in this file.
+]]
+
+local HitboxTypes = {}
+
+-- The shape vocabulary. Seven, not the twelve HitboxShapes.lua offers, and deliberately so: each one
+-- here has an exact analytic containment test and a meaningfully different silhouette in play. The
+-- editor-only shapes (Disc, Wedge, Pyramid, Blade, Slice) existed to give the Move Editor's shape
+-- picker variety; with no editor in this engine's scope, carrying them would mean carrying five more
+-- branches through every geometry function for no attack that needs them.
+export type ShapeKind = "Box" | "Sphere" | "Capsule" | "Cone" | "Cylinder" | "Arc" | "Beam"
+
+-- Where on the attacker the hitbox's local space is anchored. Resolved against the LIVE part every
+-- sample, never baked at swing start -- see AttackDefinition.Offset.
+export type AttachmentPoint = "Root" | "RightHand" | "LeftHand" | "Weapon"
+
+-- One flat measurement bag shared by every shape, rather than a per-shape variant. Same reasoning as
+-- HitboxShapes.Dimensions: it keeps the sanitiser, the scaler and the geometry dispatcher each one
+-- fixed-shape table instead of seven, and a field a shape doesn't use is simply never read by it.
+export type Dimensions = {
+	Width: number,
+	Height: number,
+	Length: number,
+	Radius: number,
+	InnerRadius: number,
+	AngleDegrees: number,
+}
+
+-- How a hitbox grows with the caller's two numbers.
+--
+-- Evaluated ONCE when the Active window opens, unless ChargeSeconds > 0, in which case it is
+-- re-evaluated every sample so the volume grows while the attack is held. Once-per-swing is the
+-- default because a hitbox that silently changes size mid-active-window is unreadable to the player
+-- being hit by it: they cannot learn a range that is different on frame 3 than on frame 1. A charge
+-- attack is the exception that earns it, because the growth is something the ATTACKER visibly chose.
+export type ScalingProfile = {
+	-- Indexed by the ComboStage passed to RequestAttack. Out-of-range stages clamp to the ends rather
+	-- than erroring -- a caller whose combo counter runs past what an attack authored multipliers for
+	-- should get that attack's biggest (or smallest) size, not a crash mid-swing.
+	ComboStageMultipliers: { number },
+	-- Scale added per unit of PowerLevel: the factor is (1 + PowerMultiplierPerUnit * PowerLevel).
+	-- Additive-then-multiplied rather than exponential so a caller feeding a large power number gets
+	-- a large hitbox rather than an astronomical one.
+	PowerMultiplierPerUnit: number,
+	-- Hard ceiling on the COMBINED multiplier. The one number standing between a progression system
+	-- that grants more power than anyone modelled and a hitbox the size of the map.
+	MaxScaleMultiplier: number,
+	-- 0 disables charging entirely (fixed size, evaluated once). Above 0, the volume lerps from the
+	-- base scale to ChargedScaleMultiplier over this many seconds of Active time.
+	ChargeSeconds: number,
+	-- Multiplier reached at full charge. Only read when ChargeSeconds > 0.
+	ChargedScaleMultiplier: number,
+}
+
+export type AttackDefinition = {
+	DebugName: string,
+	Shape: ShapeKind,
+	BaseDimensions: Dimensions,
+	Scaling: ScalingProfile,
+	-- Pose in the attachment part's LOCAL space, composed against that part's live CFrame at every
+	-- single sample. Never baked into a world CFrame at swing start: a baked pose is a hitbox floating
+	-- where the attacker used to be, which is precisely the "hitbox that doesn't stay on the body"
+	-- failure this engine exists to not have.
+	Offset: CFrame,
+	AttachmentPart: AttachmentPoint,
+	WindupSeconds: number,
+	ActiveSeconds: number,
+	RecoverySeconds: number,
+	MaxTargetsPerSwing: number?,
+	-- When true the engine sets the RootControlLocked Humanoid Attribute for the Active window. See
+	-- HitboxEngineConstants.RootControlLockedAttribute -- that Attribute is the whole contract with
+	-- the parkour framework.
+	LocksMovement: boolean,
+}
+
+-- What the engine answers with. Everything a consumer needs to decide what a contact MEANS, and
+-- nothing that presumes an answer.
+export type HitReport = {
+	Attacker: Model,
+	Target: Model,
+	TargetPart: BasePart,
+	Shape: ShapeKind,
+	-- The LIVE, post-scaling dimensions this contact was found with -- not the definition's base
+	-- values. A consumer computing knockback from hitbox size, or a log explaining why a hit landed,
+	-- needs the volume that actually caught the target, which at combo stage 4 is not the authored one.
+	Dimensions: Dimensions,
+	ContactPosition: Vector3,
+	-- Carried straight through from RequestAttack, untouched. The engine scales with them and never
+	-- interprets them; a consumer that DOES know what they mean (a damage layer reading combo stage
+	-- for scaling) gets them back without having to have kept its own record of the swing.
+	ComboStage: number,
+	PowerLevel: number,
+	-- The engine's own clock at the SUBSTEP the contact was found, which on a subdivided frame is
+	-- earlier than the Heartbeat that reported it. Consumers ordering events (who parried first) need
+	-- the substep time, not the frame time.
+	SampleTime: number,
+	-- The originating AttackDefinition's DebugName, copied through unchanged. NOT new data -- the
+	-- engine already reads it for its own hit/swing logging -- only a new place already-known data is
+	-- exposed, and the same kind of opaque passthrough ComboStage and PowerLevel already are.
+	--
+	-- It is here because a consumer that wants to know WHICH attack landed has no other way to ask:
+	-- nothing else on this record is a stable per-move key. The engine still never learns what a
+	-- "move" is; it just stops discarding a string it was already carrying.
+	DebugName: string,
+}
+
+-- Per-field bounds. Upper bounds are generous -- this is a "no NaN, no negative, nothing absurd"
+-- guard, not a balance pass. Judging whether a 40-stud sphere is GOOD is a design question no engine
+-- can answer; refusing to hand math.huge to a bounding-box query is one it must.
+local FIELD_BOUNDS: { [string]: { Min: number, Max: number, Default: number } } = {
+	Width = { Min = 0, Max = 512, Default = 4 },
+	Height = { Min = 0, Max = 512, Default = 4 },
+	Length = { Min = 0, Max = 512, Default = 4 },
+	Radius = { Min = 0, Max = 256, Default = 2 },
+	InnerRadius = { Min = 0, Max = 256, Default = 0 },
+	AngleDegrees = { Min = 0, Max = 360, Default = 90 },
+}
+
+local FIELD_ORDER = { "Width", "Height", "Length", "Radius", "InnerRadius", "AngleDegrees" }
+
+-- Which fields each shape actually reads, and which space convention it uses. Documentation with a
+-- runtime consumer: HitboxEngine logs it when a definition is refused, so an author who sized a Cone
+-- by setting Width is told the field is ignored rather than left wondering why nothing changed.
+local SHAPE_FIELDS: { [ShapeKind]: { Convention: string, Fields: { string } } } = {
+	Box = { Convention = "centred", Fields = { "Width", "Height", "Length" } },
+	Sphere = { Convention = "centred", Fields = { "Radius" } },
+	Capsule = { Convention = "centred", Fields = { "Radius", "Length" } },
+	Cylinder = { Convention = "centred", Fields = { "Radius", "Length" } },
+	Arc = { Convention = "centred", Fields = { "Radius", "InnerRadius", "Height", "AngleDegrees" } },
+	Cone = { Convention = "reach", Fields = { "Length", "AngleDegrees" } },
+	Beam = { Convention = "reach", Fields = { "Radius", "Length" } },
+}
+
+function HitboxTypes.IsShapeKind(value: unknown): boolean
+	return typeof(value) == "string" and SHAPE_FIELDS[value :: ShapeKind] ~= nil
+end
+
+function HitboxTypes.FieldsFor(shape: ShapeKind): { string }
+	local entry = SHAPE_FIELDS[shape]
+	return if entry then entry.Fields else SHAPE_FIELDS.Box.Fields
+end
+
+-- Sanitisation -------------------------------------------------------------------------------------
+--
+-- Spelled as "not (value >= min)" rather than "value < min" throughout, so a NaN fails the test
+-- instead of passing it: every comparison involving NaN is false, so the negated form catches it
+-- while the direct form waves it through. A NaN that reaches the geometry does not error -- it makes
+-- every containment test silently return false, producing an attack that swings and never hits
+-- anything, which is far harder to diagnose than a rejected value.
+
+local function sanitizeNumber(raw: unknown, min: number, max: number, default: number): number
+	if typeof(raw) ~= "number" then
+		return default
+	end
+	local value = raw :: number
+	if value ~= value then
+		return default
+	end
+	if not (value >= min) then
+		return min
+	end
+	if not (value <= max) then
+		return max
+	end
+	return value
+end
+
+function HitboxTypes.DefaultDimensions(): Dimensions
+	return {
+		Width = FIELD_BOUNDS.Width.Default,
+		Height = FIELD_BOUNDS.Height.Default,
+		Length = FIELD_BOUNDS.Length.Default,
+		Radius = FIELD_BOUNDS.Radius.Default,
+		InnerRadius = FIELD_BOUNDS.InnerRadius.Default,
+		AngleDegrees = FIELD_BOUNDS.AngleDegrees.Default,
+	}
+end
+
+function HitboxTypes.SanitizeDimensions(raw: unknown): Dimensions
+	local source: { [string]: unknown } = if typeof(raw) == "table" then raw :: any else {}
+	local result = {} :: any
+	for _, field in FIELD_ORDER do
+		local bounds = FIELD_BOUNDS[field]
+		result[field] = sanitizeNumber(source[field], bounds.Min, bounds.Max, bounds.Default)
+	end
+	-- Enforced after the per-field pass, because it is a relationship between two already-valid
+	-- numbers rather than a bound on either. An Arc whose hub is wider than its rim has an inside-out
+	-- annulus: the radial test can never be satisfied, so the hitbox exists and hits nobody.
+	if result.InnerRadius > result.Radius then
+		result.InnerRadius = result.Radius
+	end
+	return result :: Dimensions
+end
+
+function HitboxTypes.SanitizeScaling(raw: unknown): ScalingProfile
+	local source: { [string]: unknown } = if typeof(raw) == "table" then raw :: any else {}
+
+	local multipliers: { number } = {}
+	local rawMultipliers = source.ComboStageMultipliers
+	if typeof(rawMultipliers) == "table" then
+		for _, entry in ipairs(rawMultipliers :: { unknown }) do
+			table.insert(multipliers, sanitizeNumber(entry, 0, 64, 1))
+		end
+	end
+	-- An empty table is not an error -- it is how an attack says "combo stage does not change my
+	-- size." A single 1.0 makes that explicit downstream so the evaluator never has to special-case
+	-- an empty list.
+	if #multipliers == 0 then
+		multipliers = { 1 }
+	end
+
+	return {
+		ComboStageMultipliers = multipliers,
+		PowerMultiplierPerUnit = sanitizeNumber(source.PowerMultiplierPerUnit, 0, 16, 0),
+		-- Floored at 1: a ceiling below the base size would shrink every hitbox using this profile
+		-- even at combo stage 1 with zero power, which no author setting a "maximum" means.
+		MaxScaleMultiplier = sanitizeNumber(source.MaxScaleMultiplier, 1, 64, 4),
+		ChargeSeconds = sanitizeNumber(source.ChargeSeconds, 0, 30, 0),
+		ChargedScaleMultiplier = sanitizeNumber(source.ChargedScaleMultiplier, 0, 64, 1),
+	}
+end
+
+-- Normalises a caller's definition into one the engine can run without re-checking anything. Returns
+-- (definition, problems) -- `problems` is a list of human-readable notes about what was corrected,
+-- never a failure: a mis-authored attack that swings at a clamped size is better than one that
+-- errors inside a Heartbeat loop, and the notes are what turn "why is this hitbox small" into a
+-- log line. HitboxEngine surfaces them when Debug.Enabled.
+function HitboxTypes.SanitizeDefinition(raw: unknown): (AttackDefinition, { string })
+	local source: { [string]: unknown } = if typeof(raw) == "table" then raw :: any else {}
+	local problems: { string } = {}
+
+	local shape: ShapeKind = "Box"
+	if HitboxTypes.IsShapeKind(source.Shape) then
+		shape = source.Shape :: ShapeKind
+	else
+		table.insert(problems, `Shape {tostring(source.Shape)} is not a ShapeKind; defaulted to Box`)
+	end
+
+	local attachment: AttachmentPoint = "Root"
+	local rawAttachment = source.AttachmentPart
+	if
+		rawAttachment == "Root"
+		or rawAttachment == "RightHand"
+		or rawAttachment == "LeftHand"
+		or rawAttachment == "Weapon"
+	then
+		attachment = rawAttachment :: AttachmentPoint
+	elseif rawAttachment ~= nil then
+		table.insert(problems, `AttachmentPart {tostring(rawAttachment)} is not valid; defaulted to Root`)
+	end
+
+	local dimensions = HitboxTypes.SanitizeDimensions(source.BaseDimensions)
+	local entry = SHAPE_FIELDS[shape]
+	for _, field in FIELD_ORDER do
+		if not table.find(entry.Fields, field) then
+			continue
+		end
+		local bounds = FIELD_BOUNDS[field]
+		-- Only worth a note when the author supplied something the sanitiser had to replace; a field
+		-- simply left unset taking its default is ordinary.
+		local supplied = if typeof(source.BaseDimensions) == "table" then (source.BaseDimensions :: any)[field] else nil
+		if supplied ~= nil and supplied ~= dimensions[field :: any] then
+			table.insert(
+				problems,
+				`BaseDimensions.{field} {tostring(supplied)} clamped to {dimensions[field :: any]} `
+					.. `(bounds {bounds.Min}..{bounds.Max})`
+			)
+		end
+	end
+
+	-- An attack with no Active window can never hit anything, which is almost always a typo rather
+	-- than an intent. Noted, not corrected: an author who genuinely wants a pure-animation entry in
+	-- the same pipeline is entitled to one, and inventing an active window they didn't ask for would
+	-- be the engine deciding gameplay.
+	local activeSeconds = sanitizeNumber(source.ActiveSeconds, 0, 30, 0.1)
+	if activeSeconds <= 0 then
+		table.insert(problems, "ActiveSeconds is 0; this attack can never report a hit")
+	end
+
+	local maxTargets: number? = nil
+	if source.MaxTargetsPerSwing ~= nil then
+		maxTargets = sanitizeNumber(source.MaxTargetsPerSwing, 1, 128, 1)
+	end
+
+	return {
+		DebugName = if typeof(source.DebugName) == "string" then source.DebugName :: string else "UnnamedAttack",
+		Shape = shape,
+		BaseDimensions = dimensions,
+		Scaling = HitboxTypes.SanitizeScaling(source.Scaling),
+		Offset = if typeof(source.Offset) == "CFrame" then source.Offset :: CFrame else CFrame.identity,
+		AttachmentPart = attachment,
+		WindupSeconds = sanitizeNumber(source.WindupSeconds, 0, 30, 0),
+		ActiveSeconds = activeSeconds,
+		RecoverySeconds = sanitizeNumber(source.RecoverySeconds, 0, 30, 0),
+		MaxTargetsPerSwing = maxTargets,
+		LocksMovement = source.LocksMovement == true,
+	},
+		problems
+end
+
+return HitboxTypes

@@ -1,0 +1,428 @@
+--!strict
+-- Covers Server/Combat/Damage/DamageSystem.lua -- the whole stack, end to end.
+--
+-- Driven through the REAL HitboxEngine and the REAL DefenseSystem, on rigs built with Instance.new
+-- exactly as DefenseSystem.spec and HitboxEngine.spec build theirs. The point of this module is that
+-- it prices contacts a live engine found and a live defence layer classified, and a synthetic stand-in
+-- for either would test the wiring rather than the behaviour.
+--
+-- Time is driven through Step(deltaTime, now) on all THREE modules, in the order Main.server.lua
+-- guarantees at runtime: engine, defence, damage. Nothing here sleeps. Init() is deliberately never
+-- called on any of them -- it would connect real Heartbeats racing these synthetic Steps, which is
+-- exactly why Attach() exists separately.
+
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local AttackCatalog = require(ServerScriptService.Server.Combat.AttackCatalog)
+local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
+local DamageSystem = require(ServerScriptService.Server.Combat.Damage.DamageSystem)
+local DefaultMoveRegistry = require(ServerScriptService.Server.Combat.DefaultMoveRegistry)
+local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
+local DefenseSystem = require(ServerScriptService.Server.Combat.Defense.DefenseSystem)
+local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.HitboxEngine)
+local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
+local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
+local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
+
+local FRAME = 1 / 60
+local PARRY_ANIMATION = "rbxassetid://spec-damage-parry"
+local WINDOW_OPEN = 0
+local WINDOW_CLOSE = 0.3
+
+-- The definition thrown by every case carries this as its DebugName, because that is the only key the
+-- damage layer has for looking an attack back up. A DebugName that is not a MoveId resolves to nothing
+-- and the whole layer silently deals zero -- which is itself one of the cases below.
+local MOVE_ID = "default:Primary:Basic:1"
+
+type Dummy = {
+	Model: Model,
+	Root: BasePart,
+	Humanoid: Humanoid,
+	Id: number,
+}
+
+local spawned: { Model } = {}
+
+local function makeDummy(name: string, position: Vector3, lookAt: Vector3?): Dummy
+	local model = Instance.new("Model")
+	model.Name = name
+
+	local root = Instance.new("Part")
+	root.Name = "HumanoidRootPart"
+	root.Size = Vector3.new(2, 2, 1)
+	root.Anchored = true
+	root.CanCollide = false
+	root.CFrame = if lookAt then CFrame.lookAt(position, lookAt) else CFrame.new(position)
+	root.Parent = model
+
+	local humanoid = Instance.new("Humanoid")
+	humanoid.RequiresNeck = false
+	humanoid.Parent = model
+
+	model.PrimaryPart = root
+	model.Parent = Workspace
+	table.insert(spawned, model)
+
+	local id = HitboxEngine.RegisterCombatant(model, root, humanoid)
+	DefenseSystem.RegisterCombatant(model, root, humanoid, PARRY_ANIMATION)
+	return { Model = model, Root = root, Humanoid = humanoid, Id = id }
+end
+
+-- Geometry is the spec's own (big, long-lived, easy to land) while the NAME is a real MoveId. That
+-- split is deliberate and is exactly the seam under test: the engine runs whatever volume it is
+-- handed, and the damage layer prices it from the catalogue by name alone.
+local function makeDefinition(overrides: { [string]: any }?): HitboxTypes.AttackDefinition
+	local base: { [string]: any } = {
+		DebugName = MOVE_ID,
+		Shape = "Box",
+		BaseDimensions = { Width = 4, Height = 6, Length = 6 },
+		Scaling = { ComboStageMultipliers = { 1 }, MaxScaleMultiplier = 8 },
+		Offset = CFrame.new(0, 0, -4),
+		AttachmentPart = "Root",
+		WindupSeconds = 0,
+		ActiveSeconds = 5,
+		RecoverySeconds = 0,
+		LocksMovement = false,
+	}
+	for key, value in overrides or {} do
+		base[key] = value
+	end
+	return (HitboxTypes.SanitizeDefinition(base))
+end
+
+-- A swing that cannot touch anybody: a tiny volume parked 40 studs BEHIND the attacker (+Z is
+-- backward in local space).
+--
+-- Used by the hitstun cases so a defender can be genuinely mid-swing without that swing landing on
+-- anyone. Turning the defender around instead would work geometrically and be wrong for the test:
+-- facing away puts the incoming hit in their rear hemisphere, so the outcome becomes a Backstab rather
+-- than the Clean or Blocked hit the case is actually about.
+local function makeMissingDefinition(): HitboxTypes.AttackDefinition
+	return makeDefinition({
+		Offset = CFrame.new(0, 0, 40),
+		BaseDimensions = { Width = 1, Height = 1, Length = 1 },
+	})
+end
+
+-- One frame, in the order Main.server.lua guarantees.
+local function step(deltaTime: number, now: number): ()
+	HitboxEngine.Step(deltaTime, now)
+	DefenseSystem.Step(deltaTime, now)
+	DamageSystem.Step(deltaTime, now)
+end
+
+-- Authored numbers read from the catalogue rather than hardcoded, so retuning a move in Constants.lua
+-- does not break assertions that are not about its balance.
+local function authored(): (number, number)
+	local entry = AttackCatalog.Get(MOVE_ID) :: any
+	return entry.Profile.Damage, entry.Profile.PostureDamage
+end
+
+-- Publishes a custom move over the Default id, for the cases that need an authored number the shipped
+-- tuning does not happen to provide (a one-hit guard break, a zero-posture move).
+local function overrideMove(fields: { [string]: any }): ()
+	local move = MoveTypes.Clone(DefaultMoveRegistry.Get(MOVE_ID) :: any)
+	for key, value in fields do
+		(move :: any)[key] = value
+	end
+	MoveRegistryManager.Upsert(move)
+end
+
+return function()
+	beforeEach(function()
+		DefenseSystem.Attach()
+		DamageSystem.Attach()
+		ParryWindows.Register(PARRY_ANIMATION, WINDOW_OPEN, WINDOW_CLOSE)
+	end)
+
+	afterEach(function()
+		DamageSystem.Reset()
+		DefenseSystem.Reset()
+		HitboxEngine.Reset()
+		ParryWindows.Reset()
+		MoveRegistryManager.Init()
+		for _, model in spawned do
+			model:Destroy()
+		end
+		table.clear(spawned)
+	end)
+
+	describe("DamageSystem -- a clean hit", function()
+		it("removes the move's authored damage from the defender's health", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local damage = authored()
+			local before = defender.Humanoid.Health
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(defender.Humanoid.Health).to.be.near(before - damage, 1e-3)
+		end)
+
+		it("does not shadow-track health -- Humanoid.Health stays the only authority", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			-- Moved out from under the system entirely. A layer keeping its own pool would overwrite
+			-- this on the next hit; one delegating to TakeDamage subtracts from whatever it finds.
+			defender.Humanoid.Health = 50
+			local damage = authored()
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(defender.Humanoid.Health).to.be.near(50 - damage, 1e-3)
+		end)
+
+		it("deals nothing at all when the attack is not in the catalogue", function()
+			-- The failure mode the DebugName seam exists to prevent, asserted so it stays a known
+			-- outcome rather than a mystery: engine works, defence works, nobody takes damage.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local before = defender.Humanoid.Health
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ DebugName = "not-a-move-id" }), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(defender.Humanoid.Health).to.equal(before)
+		end)
+	end)
+
+	describe("DamageSystem -- guard as the posture pool", function()
+		it("drains guard from a defender who never blocked at all", function()
+			-- THE WHOLE POINT OF GUARD DOUBLING AS POSTURE. DefenseSystem alone only ever moves guard
+			-- while a player is actively blocking, so on its own it cannot touch someone who never
+			-- raises a guard. This is the half that can.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local _, posture = authored()
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			local guard = DefenseSystem.GetGuard(defender.Model)
+			local expected = DefenseConstants.Guard.Max - posture * DamageConstants.Guard.PressurePerPostureDamage
+			expect(guard).to.be.near(expected, 1e-3)
+			expect(DefenseSystem.GetState(defender.Model)).to.equal("Neutral")
+		end)
+
+		it("breaks the guard when the pressure empties it, opening the defender up", function()
+			overrideMove({ PostureDamage = DefenseConstants.Guard.Max + 10 })
+
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			-- The posture break IS the existing guard break -- no new state, no second HUD number.
+			expect(DefenseSystem.GetState(defender.Model)).to.equal("GuardBroken")
+			expect(DefenseSystem.GetGuard(defender.Model)).to.equal(0)
+		end)
+
+		it("charges a blocked hit once, not twice", function()
+			-- DefenseSystem already priced the block through GuardMeter.DrainFor. If this layer drained
+			-- again, blocking would silently cost double what its own tuning says.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			step(FRAME, base + WINDOW_CLOSE + FRAME)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + WINDOW_CLOSE + 2 * FRAME)
+
+			local guard = DefenseSystem.GetGuard(defender.Model)
+			expect(guard).to.be.near(DefenseConstants.Guard.Max - DefenseConstants.Guard.DrainPerPowerLevel, 1e-3)
+		end)
+
+		it("costs a blocking defender no health", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local before = defender.Humanoid.Health
+
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			step(FRAME, base + WINDOW_CLOSE + FRAME)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + WINDOW_CLOSE + 2 * FRAME)
+
+			expect(defender.Humanoid.Health).to.equal(before)
+		end)
+	end)
+
+	describe("DamageSystem -- hitstun", function()
+		it("gates the defender out of attacking", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			local canAttack, reason = DamageSystem.CanAttack(defender.Model, base + FRAME)
+			expect(canAttack).to.equal(false)
+			expect(reason).to.equal("Hitstun")
+		end)
+
+		it("clears on its own once the lockout elapses", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			local after = base + FRAME + DamageConstants.Hitstun.Seconds
+			expect(DamageSystem.CanAttack(defender.Model, after)).to.equal(true)
+		end)
+
+		it("cancels the defender's own in-flight swing", function()
+			-- THE MECHANIC THAT MAKES A COUNTER-HIT A REAL ANSWER. Before it, only a parry cancelled a
+			-- swing, and only the attacker's -- a player struck mid-combo simply kept swinging.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			-- Mid-swing, but swinging at nothing -- so the exchange stays one-directional and this is a
+			-- clean counter-hit rather than a mutual trade.
+			HitboxEngine.RequestAttack(defender.Id, makeMissingDefinition(), 1, 1)
+			expect(HitboxEngine.GetAttackState(defender.Id)).never.to.equal("Idle")
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(HitboxEngine.GetAttackState(defender.Id)).to.equal("Idle")
+		end)
+
+		it("leaves a blocked defender's swing alone", function()
+			-- A block answers the hit, so it must not also cost the defender the swing they were
+			-- throwing. Only a hit that actually got through interrupts.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			step(FRAME, base + WINDOW_CLOSE + FRAME)
+
+			HitboxEngine.RequestAttack(defender.Id, makeMissingDefinition(), 1, 1)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + WINDOW_CLOSE + 2 * FRAME)
+
+			expect(HitboxEngine.GetAttackState(defender.Id)).never.to.equal("Idle")
+		end)
+	end)
+
+	describe("DamageSystem -- a genuine trade", function()
+		it("hitstuns both combatants and cancels both swings, symmetrically", function()
+			-- Two Clean hits in one batch. No arbitration pass produces this: it falls out of applying
+			-- one symmetric per-contact rule twice, which is exactly why this layer needs no Trade
+			-- equivalent of its own. Damage and posture are COSTS, not rewards, so there is nothing
+			-- here two players could farm by trading on purpose.
+			local base = os.clock()
+			local alpha = makeDummy("Alpha", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local beta = makeDummy("Beta", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(alpha.Id, makeDefinition(), 1, 1)
+			HitboxEngine.RequestAttack(beta.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(HitboxEngine.GetAttackState(alpha.Id)).to.equal("Idle")
+			expect(HitboxEngine.GetAttackState(beta.Id)).to.equal("Idle")
+			expect(DamageSystem.IsHitstunned(alpha.Model, base + FRAME)).to.equal(true)
+			expect(DamageSystem.IsHitstunned(beta.Model, base + FRAME)).to.equal(true)
+
+			-- Neither is favoured: both paid the same authored damage.
+			local damage = authored()
+			expect(alpha.Humanoid.Health).to.be.near(beta.Humanoid.Health, 1e-3)
+			expect(alpha.Humanoid.Health).to.be.near(100 - damage, 1e-3)
+		end)
+	end)
+
+	describe("DamageSystem -- combo escalation", function()
+		it("advances on a landed hit", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			expect(DamageSystem.GetComboStage(attacker.Model, base + FRAME)).to.equal(1)
+
+			HitboxEngine.CancelAttack(attacker.Id, "Spec", base + FRAME)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + 2 * FRAME)
+			expect(DamageSystem.GetComboStage(attacker.Model, base + 2 * FRAME)).to.equal(2)
+		end)
+
+		it("grants no credit at all for a blocked hit", function()
+			-- The deliberate call over partial credit: a defender who raises a guard deserves an
+			-- unambiguous answer to "did that work".
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			step(FRAME, base + WINDOW_CLOSE + FRAME)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + WINDOW_CLOSE + 2 * FRAME)
+
+			expect(DamageSystem.GetComboStage(attacker.Model, base + WINDOW_CLOSE + 2 * FRAME)).to.equal(1)
+		end)
+	end)
+
+	describe("DamageSystem -- a parry", function()
+		it("costs the defender no health and no guard", function()
+			-- DefenseSystem has already cancelled the swing and staggered the attacker. This layer
+			-- moves nothing on top of that.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local before = defender.Humanoid.Health
+
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(DefenseSystem.GetState(attacker.Model)).to.equal("Staggered")
+			expect(defender.Humanoid.Health).to.equal(before)
+			expect(DamageSystem.IsHitstunned(defender.Model, base + FRAME)).to.equal(false)
+		end)
+	end)
+
+	describe("DamageSystem.OnApplied", function()
+		it("fires before the health write, so a death is still attributable", function()
+			-- Humanoid:TakeDamage raises Humanoid.Died synchronously, so a subscriber notified
+			-- afterwards would always learn who dealt the killing blow strictly AFTER PlayerDeathSystem
+			-- had already fired the death with no killer. This ordering is what leaves kill attribution
+			-- a pure follow-up in that module rather than a restructuring of this one.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			local healthAtCallback: number? = nil
+			local seenAttacker: Model? = nil
+			local disconnect = DamageSystem.OnApplied(function(outcome, _result)
+				healthAtCallback = defender.Humanoid.Health
+				seenAttacker = outcome.Attacker
+			end)
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			disconnect()
+
+			expect(seenAttacker).to.equal(attacker.Model)
+			expect(healthAtCallback).to.equal(100)
+			expect(defender.Humanoid.Health < 100).to.equal(true)
+		end)
+	end)
+end

@@ -66,7 +66,6 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
-local Constants = require(ReplicatedStorage.Shared.Constants)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local HitboxShapes = require(ReplicatedStorage.Shared.HitboxShapes)
 local AnimationTimeline = require(ReplicatedStorage.Shared.AnimationTimeline)
@@ -93,10 +92,14 @@ export type PreviewViewportProps = {
 	IsOpen: Fusion.Value<boolean>,
 }
 
--- Matches HitboxResolver.lua's own Studio debug-part cosmetics (Constants.Combat.Hitboxes.
--- DebugPart) so this preview reads as "the same hitbox an admin would see in Studio," not a
--- different-looking stand-in.
-local DEBUG_PART = Constants.Combat.Hitboxes.DebugPart
+-- Formerly Constants.Combat.Hitboxes.DebugPart, matching HitboxResolver.lua's own Studio
+-- debug-part cosmetics so this preview read as "the same hitbox an admin would see in Studio."
+-- HitboxResolver.lua (and the rest of core combat) was removed; this is now the only reader, so
+-- the color/transparency are inlined here rather than kept as a shared Constants table for one.
+local DEBUG_PART = {
+	Color = Color3.fromRGB(255, 64, 64),
+	Transparency = 0.6,
+}
 local ORBIT_SENSITIVITY = 0.5
 local ORBIT_MIN_PITCH = -80
 local ORBIT_MAX_PITCH = 80

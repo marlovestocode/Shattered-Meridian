@@ -3,7 +3,31 @@
 	States/LedgeHanging.lua
 
 	Owns: catching and holding a ledge -- the automatic grab while falling past a grabbable edge, the
-	held pose, and the three ways out (climb up, drop, time out).
+	held pose, shimmying along it, and the four ways out (climb up, leap to another ledge, drop, time
+	out).
+
+	THE SHIMMY (Update, once attached) reads lateral MoveIntent against ParkourMath.WallRight(wallNormal)
+	-- a STABLE left/right pair, not WallTangent's travel-oriented one, because a hang has no travel to
+	agree with and "left" must mean the same physical direction all the way through a shimmy regardless
+	of which way the character last happened to be facing. Each frame that clears the input threshold
+	tries ONE step of EnvironmentProbe.ProbeLedgeAt from the candidate new position; a step that finds
+	no continuing edge, or one whose wall normal has diverged past Ledge.ShimmyMaxNormalDivergenceDegrees
+	(a real corner, or simply the end of the wall), is simply not taken -- the character holds at the
+	last position that worked rather than falling or snapping. A committed step re-derives hangCFrame
+	the same way Enter does and lets it ride the rigid drive already running every frame; there is no
+	separate easing to manage because each step is small enough that the drive's own per-physics-step
+	snap already reads as continuous motion, the same way WallRunning's Velocity mode reads as motion
+	from a per-frame commanded value rather than a series of teleports.
+
+	THE LEDGE-TO-LEDGE LEAP (Update, on a directional jump press) is a SEPARATE input from the plain
+	climb below it, and deliberately: press jump alone and this file's original behavior is completely
+	unchanged (climb if there's standing space, drop if there isn't). Press jump WHILE HOLDING A
+	DIRECTION and, if EnvironmentProbe.FindLedgeLeapTarget finds a reachable edge along that aim, this
+	launches States/LedgeLeaping.lua at it instead -- a route-1 hand-off, with the solved velocity
+	written straight into context.Motor on this same frame for the same "the grab bites on the frame
+	it's detected" reason the Enter block below does. Finding nothing is not a refusal of the input: it
+	falls straight through to the ordinary climb/drop check, so a player who holds a direction without
+	genuinely aiming at anything sees no behavior change at all.
 
 	A ledge is a fundamentally different thing from an obstacle, which is why this is not part of
 	States/Mantling.lua: an obstacle is something a GROUNDED character walks into and decides what to
@@ -16,18 +40,24 @@
 	A ledge you can hang from indefinitely is a ledge players use to park, and parking mid-wall in a
 	PvP game is a problem rather than a feature.
 
-	Kinematic: the character is pinned to a computed offset from the edge. Anchoring is what makes a
-	hang actually hold, and it is why the pose does not drift or vibrate the way a constraint-held one
-	would against the wall it is pressed into.
+	Kinematic: the character is pinned to a computed offset from the edge, via
+	Client/Parkour/ParkourMotor.lua's rigid (RigidityEnabled = true) AlignPosition drive -- see that
+	module's own header for why this is a real, unanchored, network-owned assembly and not an anchored
+	CFrame write. Rigid rather than the soft, force-limited drive Velocity mode uses is what makes a
+	hang actually hold without drifting or vibrating against the wall it is pressed into: RigidityEnabled
+	bypasses MaxForce entirely and solves position exactly every physics step, the same "cannot be shoved
+	off its target" guarantee an anchored write gave, without going invisible to every other client the
+	way an anchored write did (see ParkourMotor.lua's header for that failure in full).
 
-	THE COST OF ANCHORING, and what this file does about it: an anchored root goes exactly where its
-	CFrame is written, instantly. So the naive grab -- write the hang pose on the first frame -- is a
-	teleport of up to several studs plus a rotation snap, and no amount of tuning the thresholds around
-	it will stop that from reading as clunky, because the problem is that nothing MOVES. The grab
-	instead runs in two beats: Enter stops the fall dead at the point of contact (on the detection
-	frame, not the one after it), and Update eases the body from there into the pose over a window
-	scaled to how far it actually has to travel. That window doubles as the grip settle -- inputs open
-	when the pull lands -- so the time the player cannot act is time they can see being used.
+	THE COST OF KINEMATIC DRIVE, and what this file does about it: a rigid drive goes exactly where its
+	Position is written, every physics step -- functionally instant, same as the anchored write it
+	replaced. So the naive grab -- write the hang pose on the first frame -- is a teleport of up to
+	several studs plus a rotation snap, and no amount of tuning the thresholds around it will stop that
+	from reading as clunky, because the problem is that nothing MOVES. The grab instead runs in two
+	beats: Enter stops the fall dead at the point of contact (on the detection frame, not the one after
+	it), and Update eases the body from there into the pose over a window scaled to how far it actually
+	has to travel. That window doubles as the grip settle -- inputs open when the pull lands -- so the
+	time the player cannot act is time they can see being used.
 
 	The design's "make the system smart enough to determine ... whether there is enough space for the
 	character to stand after climbing it" is enforced at the probe level (LedgeProbe.HasStandingSpace)
@@ -36,18 +66,31 @@
 	honest behavior rather than pretending the ledge is not there.
 ]]
 
+local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
+local Logger = require(ReplicatedStorage.Shared.Logger)
 
+local EnvironmentProbe = require(script.Parent.Parent.EnvironmentProbe)
 local InputBuffer = require(script.Parent.Parent.InputBuffer)
 local StateSupport = require(script.Parent.StateSupport)
 
 type ParkourContext = ParkourTypes.ParkourContext
 
+-- A LOGGER, unlike this framework's other individual state modules -- ParkourController already logs
+-- every state TRANSITION (which state, from where) at Trace, so a sibling that only ever runs to
+-- completion needs nothing more. This one earns its own scope because the shimmy and the ledge-leap
+-- are both DECISIONS MADE INSIDE a single state's Update, every frame, with no transition to show for
+-- most of them -- "why didn't the shimmy move" or "why did jump climb instead of leap" has no signal
+-- anywhere else to read. Debug level, so it costs nothing with logging off and says something concrete
+-- when it's on.
+local logger = Logger.scope("LedgeHanging")
+
 local LEDGE = ParkourConstants.Ledge
+local LEAP = ParkourConstants.Leap
 
 -- The pose held for the duration of the hang, computed once at Enter. Recomputing it per frame from
 -- a live probe would let the pose creep as the probe's own hit point shifts by fractions of a stud.
@@ -147,7 +190,7 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		-- StateMachine.Update applies at most one transition and returns, so this state's Update does not
 		-- run until the NEXT frame -- meaning without this block the frame that decided to grab still
 		-- commits the outgoing Falling state's command, and the character falls for one more frame under
-		-- ordinary gravity before the anchor engages. At a fast fall that is a stud or two of visible
+		-- ordinary gravity before the rigid drive engages. At a fast fall that is a stud or two of visible
 		-- overshoot past the lip followed by a correction back up to it, which is precisely the "it
 		-- doesn't catch when I press it" the grab is accused of. Writing the motor here is the same
 		-- technique StateSupport.HandOff uses for the opposite edge of a transition, and for the same
@@ -185,11 +228,12 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		motor.Mode = "Kinematic"
 		motor.DesiredSpeed = 0
 
-		-- The root is ANCHORED for the whole hang, so whatever goes in TargetCFrame is where the body
-		-- instantaneously is. Writing hangCFrame directly -- which this used to do -- therefore teleports
-		-- the character up to several studs and spins them to face the wall inside a single frame. That
-		-- discontinuity IS the clunk: there is no motion for the eye to follow, so the grab reads as the
-		-- character being relocated rather than as them catching something.
+		-- The root is RIGIDLY DRIVEN for the whole hang (see this file's header), so whatever goes in
+		-- TargetCFrame is where the body ends up within one physics step. Writing hangCFrame directly --
+		-- which this used to do -- therefore teleports the character up to several studs and spins them
+		-- to face the wall inside a single frame. That discontinuity IS the clunk: there is no motion for
+		-- the eye to follow, so the grab reads as the character being relocated rather than as them
+		-- catching something.
 		--
 		-- Interpolating the whole CFrame rather than just the position matters as much: CFrame:Lerp
 		-- slerps the rotation, so the turn to face the wall happens over the same window as the reach
@@ -205,6 +249,170 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		-- in a frame or two rather than always costing the far case's settle.
 		if attachAlpha < 1 then
 			return nil
+		end
+
+		-- Defaulted every frame BEFORE either mechanic below decides otherwise -- see
+		-- ParkourContext.DebugShimmy/DebugLedgeLeap's own header for why these have to be fresh every
+		-- frame rather than left stale. "Idle" is the honest answer for "fully attached, nothing being
+		-- attempted right now," which is the overwhelming majority of a hang's own lifetime.
+		context.DebugShimmy = "Idle"
+		context.DebugLedgeLeap = "Idle"
+
+		-- THE SHIMMY. Only once fully attached -- shimmying mid pull-in would be steering a position the
+		-- pull is still easing toward, which is a different motion than the pose it is easing FROM.
+		--
+		-- WallRight, not WallTangent: a hang has no travel direction for WallTangent to agree with (its
+		-- own contract returns the zero vector without one), and even if it did, "which way is right"
+		-- must not flip depending on which way the character was last moving before they grabbed on.
+		local wallRight = ParkourMath.WallRight(wallNormal)
+		local lateral = context.MoveIntent:Dot(wallRight)
+		if wallRight.Magnitude > 1e-3 and math.abs(lateral) >= ParkourConstants.Locomotion.InputMagnitudeThreshold then
+			local direction = if lateral > 0 then wallRight else -wallRight
+			local step = direction * LEDGE.ShimmySpeed * context.DeltaTime
+			-- THE HEAD POSITION THE PROBE SEARCHES FROM -- and the thing that was wrong here before.
+			--
+			-- This used to be built from `edgePosition` (the LIP -- the top of the wall face) offset by a
+			-- flat 0.3 studs. But a head is not at the lip: Ledge.HangVerticalOffset pulls the HANGING
+			-- ROOT 2.4 studs below it, and probeLedge's own convention for "head position" -- the one
+			-- every OTHER ledge search in this file already honors -- is the ROOT plus half the rig's own
+			-- height, not some fraction of a stud off the edge. Anchoring the search to the edge instead
+			-- of the actual hanging head put the origin roughly a stud too high: a horizontal cast fired
+			-- from there skims along the TOP of the wall rather than into its face, which finds nothing on
+			-- essentially every real wall -- the shimmy did not move because commitShimmyStep was never
+			-- being reached, straight case or corner case, on any frame.
+			--
+			-- Derived from hangCFrame.Position (the CURRENT, already-correct hang root -- the same value
+			-- the rigid drive is holding the character at this very frame) rather than re-deriving it from
+			-- edgePosition a second, slightly different way.
+			local headPosition = hangCFrame.Position + Vector3.new(0, context.RootPart.Size.Y * 0.5, 0) + step
+
+			-- Commits a shimmy step onto `hit`, re-deriving the hang pose from scratch the way Enter
+			-- does. Shared by the straight case and the corner case below it -- both end up needing to do
+			-- exactly the same thing to exactly the same file-locals once a usable edge is found; the
+			-- only difference between them is HOW that edge was found.
+			local function commitShimmyStep(hit: EnvironmentProbe.LedgeHit): ()
+				edgePosition = hit.EdgePosition
+				wallNormal = ParkourMath.SafeUnit(ParkourMath.Flatten(hit.WallNormal), wallNormal)
+				hasStandingSpace = hit.HasStandingSpace
+				grabbedInstance = hit.Instance
+				local position = ParkourMath.HangPosition(
+					edgePosition,
+					wallNormal,
+					LEDGE.HangVerticalOffset,
+					LEDGE.HangHorizontalOffset
+				)
+				hangCFrame = CFrame.lookAt(position, position - wallNormal)
+				-- Kept current for States/LedgeClimbing.lua, which reads these rather than re-probing the
+				-- edge it is already holding -- see ParkourContext.LedgeAnchorPosition's own header. A
+				-- climb taken after shimmying without this would pull the character up at the ORIGINAL
+				-- grab point instead of wherever they actually shimmied to.
+				context.LedgeAnchorPosition = edgePosition
+				context.LedgeAnchorNormal = wallNormal
+			end
+
+			-- THE STRAIGHT CASE: the wall continues facing the same way. Probed first because it is the
+			-- overwhelmingly common frame -- most of a shimmy is along one flat face -- and because it is
+			-- cheap to rule out before spending a second cast on the corner case below.
+			local straightHit = EnvironmentProbe.ProbeLedgeAt(headPosition, -wallNormal, 0, context.Now)
+			if
+				straightHit
+				and straightHit.HasHangSpace
+				and ParkourMath.ApproachAngle(wallNormal, straightHit.WallNormal)
+					<= LEDGE.ShimmyMaxNormalDivergenceDegrees
+			then
+				commitShimmyStep(straightHit)
+				context.DebugShimmy = "Straight"
+				logger:debug("Shimmy stepped", { via = "Straight" })
+			else
+				-- THE CLIMB-AROUND: the straight probe found nothing usable -- either genuinely nothing,
+				-- or a wall whose normal has diverged too far to be "the same face, continuing." Both read
+				-- identically to a single face's own probe, which cannot express "the surface continues,
+				-- just facing a new way" any more than a single wall-run probe can (see States/
+				-- WallRunning.Update's own corner turn for the identical ambiguity on a run instead of a
+				-- hold). So before refusing the step outright, peek around the corner: a second cast from
+				-- the SAME candidate origin, rotated from "straight into the wall just held" toward "the
+				-- direction being shimmied" by up to Ledge.ShimmyCornerPeekDegrees.
+				--
+				-- ParkourMath.SteerDirection again doing one-shot cone work rather than its usual per-frame
+				-- ramp -- see States/WallJumping.Enter's identical reuse of it for the same reason: called
+				-- with a "rate" of ShimmyCornerPeekDegrees and a "deltaTime" of 1 second, it rotates
+				-- -wallNormal toward `direction` by AT MOST that many degrees in one step, which is exactly
+				-- a bounded peek around the corner rather than an unbounded search.
+				--
+				-- No normal-divergence check on the result -- unlike the straight case, ANY wall the peek
+				-- finds IS the corner by definition; requiring it to still resemble the old wall's normal
+				-- would refuse the exact thing this branch exists to accept.
+				local peekForward = ParkourMath.SteerDirection(-wallNormal, direction, LEDGE.ShimmyCornerPeekDegrees, 1)
+				local cornerHit = EnvironmentProbe.ProbeLedgeAt(headPosition, peekForward, 0, context.Now)
+				if cornerHit and cornerHit.HasHangSpace then
+					commitShimmyStep(cornerHit)
+					context.DebugShimmy = "Corner"
+					logger:debug("Shimmy stepped", { via = "Corner" })
+				else
+					-- A step that found nothing usable, straight or around a corner, is simply not taken
+					-- -- see this file's header. hangCFrame already holds the last position that worked,
+					-- and Update below drives toward exactly that every frame regardless, so there is no
+					-- state to fix here; the log line and the debug annotation exist purely so "why
+					-- isn't the shimmy moving" has an answer on the frame it happens rather than needing
+					-- to be reproduced blind.
+					context.DebugShimmy = "Refused"
+					logger:debug("Shimmy step refused -- no continuing edge", {
+						straightFound = straightHit ~= nil,
+						cornerFound = cornerHit ~= nil,
+					})
+				end
+			end
+		end
+
+		-- LEDGE-TO-LEDGE LEAP: a directional jump press, checked BEFORE the plain climb/drop below so a
+		-- held direction with a real target takes priority -- but only ever a peek here, never a
+		-- consuming read, until a target is actually found and reachable. See this file's header.
+		if StateSupport.JumpQueued(context) and StateSupport.HasMoveIntent(context) then
+			local aim = ParkourMath.SafeUnit(context.AimDirection, context.RootPart.CFrame.LookVector)
+			local target = EnvironmentProbe.FindLedgeLeapTarget(context.RootPart, aim, context.Now)
+			context.DebugLedgeLeap = if target.Found then "Unreachable" else "NoTarget"
+			logger:debug("Ledge leap attempt", { found = target.Found, distance = target.Distance })
+			if target.Found then
+				local solved, reachable = ParkourMath.SolveLaunchVelocity(
+					context.RootPart.Position,
+					target.LandingPosition,
+					Workspace.Gravity,
+					LEAP.ApexClearance,
+					LEAP.ReachMargin,
+					LEAP.MinUpSpeed,
+					LEAP.MaxUpSpeed,
+					LEAP.MaxPlanarSpeed
+				)
+				if reachable then
+					context.DebugLedgeLeap = "Launched"
+					InputBuffer.ConsumeJump(context.Now)
+					-- Written directly into the shared command, not left for States/LedgeLeaping.Enter to
+					-- compute -- Enter runs immediately after this state's own Exit on the SAME frame (see
+					-- StateMachine.applyTransition), and reads this back out rather than re-deriving it,
+					-- the same "the deciding frame writes the motor itself" technique this file's own
+					-- Enter block below uses for the opposite edge of a transition.
+					context.Motor.Mode = "Velocity"
+					context.Motor.Velocity = solved
+					context.Motor.CancelGravity = true
+					context.Motor.FaceDirection = ParkourMath.Flatten(solved)
+					context.Motor.DesiredSpeed = ParkourMath.PlanarSpeed(solved)
+					return "LedgeLeaping"
+				end
+				logger:debug("Ledge leap target found but unreachable -- falling through to climb/drop", {
+					distance = target.Distance,
+				})
+			end
+			-- No target, or not reachable: NOT a refusal of the input. Falls straight through to the
+			-- ordinary climb/drop below, using the same still-unconsumed jump press.
+		elseif StateSupport.JumpQueued(context) then
+			-- Jump WAS pressed but this branch never ran at all -- HasMoveIntent was false. The single
+			-- most useful line for "why does jump always just climb": if this fires every time you press
+			-- space regardless of which direction you're holding, the leap is never even being attempted,
+			-- which points at MoveIntent rather than at the target search.
+			context.DebugLedgeLeap = "NoIntent"
+			logger:debug("Jump pressed with no move intent -- leap not attempted", {
+				moveIntent = tostring(context.MoveIntent),
+			})
 		end
 
 		-- Jump = climb up, when there is somewhere to climb to.
@@ -236,9 +444,18 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		if nextState == "LedgeClimbing" then
 			return
 		end
+		-- Recorded on every OTHER exit, including the leap: a leap that fails to reach its target and
+		-- ends up falling must not instantly re-catch the very ledge it just launched from.
 		StateSupport.NoteLedgeReleased(context.Now, grabbedInstance, edgePosition)
 		context.LedgeAnchorPosition = nil
 		context.LedgeAnchorNormal = nil
+		if nextState == "LedgeLeaping" then
+			-- The launch velocity Update just solved and wrote into context.Motor for this exact frame --
+			-- see that branch's own header. A HandOff here would overwrite it with the ordinary release
+			-- push below, which is right for every other exit and wrong for the one that already knows
+			-- exactly where it's going.
+			return
+		end
 		-- Released with a small push away from the wall so the character falls clear of the face
 		-- rather than scraping down it (and immediately re-satisfying the grab probe).
 		StateSupport.HandOff(context, wallNormal * 4)

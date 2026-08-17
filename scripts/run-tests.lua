@@ -6,16 +6,18 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
--- Load-check: nothing in this test place actually calls require() on CombatSystem.lua/
--- DevMenuSystem.lua/TrainingBotSystem.lua (no spec needs their behavior, only the pure logic
--- extracted into Server/Combat/), so a broken require() path inside them would otherwise go
--- unnoticed until someone opens Studio. Requiring (but never calling .Init() -- that needs a real
--- player/DataStore environment this headless place doesn't have) is enough to catch a syntax error
--- or bad require path, which is the class of mistake a structural refactor risks introducing.
+-- Load-check: nothing in this test place actually calls require() on DevMenuSystem.lua (no spec
+-- needs its behavior, only the pure logic extracted into Server/Combat/), so a broken require()
+-- path inside it would otherwise go unnoticed until someone opens Studio. Requiring (but never
+-- calling .Init() -- that needs a real player/DataStore environment this headless place doesn't
+-- have) is enough to catch a syntax error or bad require path, which is the class of mistake a
+-- structural refactor risks introducing. CombatSystem.lua/TrainingBotSystem.lua were removed
+-- alongside the rest of the combat system; PlayerDeathSystem.lua (their replacement for player-death
+-- detection -- see that module's own header) has no dedicated spec either, so it earns the same
+-- load-check entry for the same reason.
 local modulesToLoad = {
-	ServerScriptService.Server.Systems.CombatSystem,
 	ServerScriptService.Server.Systems.DevMenuSystem,
-	ServerScriptService.Server.Systems.TrainingBotSystem,
+	ServerScriptService.Server.Systems.PlayerDeathSystem,
 	ServerScriptService.Server.Systems.BugReportSystem,
 	ServerScriptService.Server.Systems.AdminActionSystem,
 	ServerScriptService.Server.Systems.ModerationSystem,
@@ -42,6 +44,12 @@ local modulesToLoad = {
 	-- catch a broken require path or syntax error in the module that owns this feature's two remotes,
 	-- its trust boundary and the Attributes the combat WalkSpeed resolver reads.
 	ServerScriptService.Server.Systems.ParkourSystem,
+	-- RunSystem.lua owns Humanoid.WalkSpeed and the run's stage ladder. Its pure arithmetic lives in
+	-- Shared/Run/RunLadder.lua and is covered directly by Tests/Run/RunLadder.spec.lua, so nothing else
+	-- in this place ever require()s the System itself -- the same gap every other entry in this list
+	-- exists to close. A broken require path in the module that writes WalkSpeed would otherwise
+	-- surface as "nobody can move" in a playtest rather than as a failing build.
+	ServerScriptService.Server.Systems.RunSystem,
 }
 for _, moduleScript in ipairs(modulesToLoad) do
 	local ok, errorMessage = pcall(require, moduleScript)

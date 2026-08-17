@@ -15,8 +15,15 @@
 	open/closed flag) -- that belongs as scope-local Values inside the component or Screen that
 	owns the visual, not here.
 
-	Health/MaxHealth/Posture/MaxPosture are wired in Bootstrap() to CombatSystem's
-	Combat_VitalsUpdated remote. Qi/MaxQi are now wired to QiSystem.lua's Progression_QiUpdated
+	Health/MaxHealth and Posture/MaxPosture are wired again, but NOT to the Combat_VitalsUpdated remote
+	they used to read -- that remote's creator (CombatSystem.lua) was removed in the combat teardown
+	and the rebuilt combat stack deliberately created no replacement. They now reflect the two places
+	that genuinely own those numbers today: the local Humanoid for health, and Defense_StateChanged's
+	guard pool for posture (guard IS the posture pool in the rebuilt stack -- DamageConstants.Guard's
+	own header records that decision). See Bootstrap()'s own comment for why reading a replicated
+	Humanoid property here is reflection rather than the optimistic HUD state this file forbids.
+	InCombat has no source in the rebuilt stack and stays false for the whole session. Qi/MaxQi are
+	wired to QiSystem.lua's Progression_QiUpdated
 	remote, MeridianXP to MeridianSystem.lua's Progression_MeridianXPUpdated remote, and
 	Tier/TierName/TierFloorXP/TierNextXP/TierPromotion to TierSystem.lua's Progression_TierUpdated
 	remote -- all of those Systems replicate a real starting value the moment a profile loads (see
@@ -38,10 +45,12 @@
 	own IsOpen.
 ]]
 
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
 local TierConstants = require(ReplicatedStorage.Shared.TierConstants)
 local BountyConstants = require(ReplicatedStorage.Shared.BountyConstants)
@@ -65,7 +74,9 @@ export type TierPromotion = {
 
 export type ClientState = {
 	-- Render-only defaults (a full bar looks correct before real data arrives) -- not balance
-	-- numbers, and not a substitute for real values once TierSystem/CombatSystem exist.
+	-- numbers. Wired in Bootstrap(): Health/MaxHealth from the local Humanoid, Posture/MaxPosture
+	-- from Defense_StateChanged's guard pool. See this file's header for why neither goes through a
+	-- vitals remote anymore.
 	Health: Fusion.Value<number>,
 	MaxHealth: Fusion.Value<number>,
 	Posture: Fusion.Value<number>,
@@ -75,10 +86,8 @@ export type ClientState = {
 	-- Qi is progression/ability resource, not a combat vital.)
 	Qi: Fusion.Value<number>,
 	MaxQi: Fusion.Value<number>,
-	-- Wired in Bootstrap() to CombatSystem's Combat_InCombatChanged remote -- unlike the vitals above,
-	-- this is a boolean transition signal (see CombatState.inCombatUntil's own header), not a
-	-- render-only default: it starts false and only ever reflects a real server-fired transition, so
-	-- there is no "looks correct before real data arrives" concern here the way a full vitals bar has.
+	-- NOT WIRED: the rebuilt combat stack has no notion of "in combat" and publishes nothing that
+	-- would feed it -- permanently false. See Bootstrap()'s own comment.
 	InCombat: Fusion.Value<boolean>,
 	-- Wired in Bootstrap() to MeridianSystem's Progression_MeridianXPUpdated remote
 	-- (Server/Systems/MeridianSystem.lua) -- the core progression currency, not capped like the
@@ -149,56 +158,68 @@ function ClientState.new(scope: Scope): ClientState
 	}
 end
 
--- Runtime check on top of the Types.CombatVitalsPayload annotation, which Luau doesn't enforce at
--- the network boundary -- a malformed payload should be a clear, attributable warn log here, not a
--- confusing error deep inside a Fusion Value:set() call or a silently corrupted HUD bar.
-local function isValidVitalsPayload(payload: unknown): boolean
-	if typeof(payload) ~= "table" then
-		return false
-	end
-	local candidate = payload :: { [string]: unknown }
-	return typeof(candidate.Health) == "number"
-		and typeof(candidate.MaxHealth) == "number"
-		and typeof(candidate.Posture) == "number"
-		and typeof(candidate.MaxPosture) == "number"
-end
-
 function ClientState.Bootstrap(state: ClientState): ()
-	logger:debug("Waiting for Combat_VitalsUpdated remote")
-	local vitalsUpdated = NetworkBridge.GetRemoteEvent(Constants.Combat.RemoteNames.VitalsUpdated)
-	logger:debug("Combat_VitalsUpdated remote found")
-
-	vitalsUpdated.OnClientEvent:Connect(function(payload: Types.CombatVitalsPayload)
-		if not isValidVitalsPayload(payload) then
-			logger:warn("Malformed Combat_VitalsUpdated payload ignored", { payload = tostring(payload) })
+	-- Combat_VitalsUpdated/Combat_InCombatChanged are still not wired here, and never will be:
+	-- CombatSystem.lua, their one creator, was removed in the combat teardown and the rebuilt stack
+	-- deliberately created no replacement. DamageConstants.Network's own header states why -- the
+	-- damage layer publishes ONE event (Combat_Feedback) and adding a vitals push would be a second
+	-- way to describe the same fact. InCombat has no source at all in the rebuilt stack and stays at
+	-- its ClientState.new() default (false) for the whole session.
+	--
+	-- Health and Posture DO update again, from the two places that already own them, with no new
+	-- remote on either side:
+	--
+	--   Health  <- the local Humanoid. Humanoid.Health is the single authority for health in the
+	--             rebuilt stack (DamageSystem calls Humanoid:TakeDamage and keeps no parallel pool --
+	--             see its own header, and StarterCharacterScripts/Health.server.lua's standing rule),
+	--             and it replicates on its own. Reading it here is reflecting server-owned state,
+	--             which is exactly this file's contract -- it is not the "optimistic HUD state" that
+	--             contract exists to forbid, because nothing here computes or predicts it.
+	--
+	--   Posture <- Defense_StateChanged's Guard/GuardMax. GUARD IS THE POSTURE POOL in the rebuilt
+	--             stack; there is deliberately no second meter (DamageConstants.Guard's own header
+	--             records the decision and why). So the HUD's Posture tile renders the guard pool,
+	--             which drains both from blocking (DefenseSystem) and from being hit without a guard
+	--             up (DamageSystem.DrainGuard) -- the two halves that make it behave like posture.
+	local function bindHumanoidHealth(character: Model): ()
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if not humanoid then
 			return
 		end
+		local function push(): ()
+			state.Health:set(humanoid.Health)
+			state.MaxHealth:set(humanoid.MaxHealth)
+		end
+		-- Connected per life and never disconnected: the connections die with the Humanoid they are
+		-- on, which is the whole object being replaced on respawn.
+		humanoid:GetPropertyChangedSignal("Health"):Connect(push)
+		humanoid:GetPropertyChangedSignal("MaxHealth"):Connect(push)
+		push()
+	end
 
-		logger:debug("Vitals payload received", {
-			health = payload.Health,
-			maxHealth = payload.MaxHealth,
-			posture = payload.Posture,
-			maxPosture = payload.MaxPosture,
-		})
+	local localPlayer = Players.LocalPlayer
+	localPlayer.CharacterAdded:Connect(bindHumanoidHealth)
+	if localPlayer.Character then
+		bindHumanoidHealth(localPlayer.Character)
+	end
 
-		state.Health:set(payload.Health)
-		state.MaxHealth:set(payload.MaxHealth)
-		state.Posture:set(payload.Posture)
-		state.MaxPosture:set(payload.MaxPosture)
-	end)
+	logger:debug("Waiting for Defense_StateChanged remote")
+	local defenseStateChanged = NetworkBridge.GetRemoteEvent(DefenseConstants.Network.RemoteNames.StateChanged)
+	logger:debug("Defense_StateChanged remote found")
 
-	logger:debug("Waiting for Combat_InCombatChanged remote")
-	local inCombatChanged = NetworkBridge.GetRemoteEvent(Constants.Combat.RemoteNames.InCombatChanged)
-	logger:debug("Combat_InCombatChanged remote found")
-
-	inCombatChanged.OnClientEvent:Connect(function(payload: Types.InCombatPayload)
-		if typeof(payload) ~= "table" or typeof(payload.InCombat) ~= "boolean" then
-			logger:warn("Malformed Combat_InCombatChanged payload ignored", { payload = tostring(payload) })
+	defenseStateChanged.OnClientEvent:Connect(function(payload: unknown)
+		if typeof(payload) ~= "table" then
+			logger:warn("Malformed Defense_StateChanged payload ignored")
 			return
 		end
-
-		logger:debug("In-combat payload received", { inCombat = payload.InCombat })
-		state.InCombat:set(payload.InCombat)
+		local guard = (payload :: { [string]: unknown }).Guard
+		local guardMax = (payload :: { [string]: unknown }).GuardMax
+		if typeof(guard) ~= "number" or typeof(guardMax) ~= "number" then
+			logger:warn("Malformed Defense_StateChanged payload ignored")
+			return
+		end
+		state.Posture:set(guard :: number)
+		state.MaxPosture:set(guardMax :: number)
 	end)
 
 	logger:debug("Waiting for Progression_QiUpdated remote")

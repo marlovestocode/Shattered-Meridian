@@ -14,10 +14,21 @@
 	they're built.
 
 	Logs its own boot sequence (Logger.lua, Studio-only) under the "Main" scope -- start/end of
-	each phase, and a hard error if UI.Mount() doesn't hand back what CombatClient.Start() needs --
-	so a broken boot shows up immediately in Studio Output instead of silently doing nothing.
+	each phase.
+
+	Character-lifecycle announcement: this file's own localPlayer.CharacterAdded hookup below calls
+	CombatAnimator.BindCharacter/MovementVFX.BindCharacter/RunController.BindCharacter for every new
+	life -- the role Client/Combat/CombatClient.lua's own CharacterAdded handler used to play before
+	the combat system was removed. CombatAnimator's plain Walking/Running locomotion loop (a movement
+	feature, not a combat one -- see that module's own header) has nothing to play without this;
+	Sprint/Dash/Slide's own request-firing is NOT resurrected here, since CombatSystem.lua (their only
+	server-side handler) is gone -- see Server/Combat/Movement.lua's own header on being left
+	deliberately orphaned rather than rewired. AttackInputClient and DefenseClient each bind their OWN
+	AnimationManager per life rather than going through that hookup, which is that module's documented
+	"construct once, Bind() per respawn" shape and not an inconsistency.
 ]]
 
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
@@ -25,8 +36,8 @@ local UI = require(script.Parent.UI)
 local StartMenuClient = require(script.Parent.StartMenu.StartMenuClient)
 local LoadingClient = require(script.Parent.Loading.LoadingClient)
 local IntroClient = require(script.Parent.Intro.IntroClient)
-local CombatClient = require(script.Parent.Combat.CombatClient)
-local HotbarMoveClient = require(script.Parent.Combat.HotbarMoveClient)
+local CombatAnimator = require(script.Parent.FX.CombatAnimator)
+local MovementVFX = require(script.Parent.FX.MovementVFX)
 local EmoteController = require(script.Parent.Emotes.EmoteController)
 local EmoteWheelClient = require(script.Parent.Emotes.EmoteWheelClient)
 local ShiftLockCamera = require(script.Parent.Camera.ShiftLockCamera)
@@ -39,6 +50,9 @@ local RunController = require(script.Parent.Movement.RunController)
 local DevMenuClient = require(script.Parent.DevMenu.DevMenuClient)
 local MoveEditorClient = require(script.Parent.MoveEditor.MoveEditorClient)
 local FlightController = require(script.Parent.DevMenu.FlightController)
+local DefenseClient = require(script.Parent.Defense.DefenseClient)
+local AttackInputClient = require(script.Parent.Combat.AttackInputClient)
+local CombatFeedbackClient = require(script.Parent.Combat.CombatFeedbackClient)
 local BugReportClient = require(script.Parent.BugReport.BugReportClient)
 local AnnouncementClient = require(script.Parent.Announcement.AnnouncementClient)
 local SettingsClient = require(script.Parent.Settings.SettingsClient)
@@ -92,35 +106,35 @@ logger:debug("UI mount start")
 local uiHandles = UI.Mount()
 logger:debug("UI mount end")
 
-if not uiHandles.CombatFeedback then
-	logger:error("UI.Mount() returned no CombatFeedback handle -- CombatClient cannot start")
-	return
-end
-
--- Before CombatClient below: CombatClient's own HotbarSlot1-5 input branches and HUD's AbilitySlot
--- click handlers both call HotbarMoveClient.Fire, so its remote must already be resolved the
--- instant either one could receive real input.
-logger:debug("HotbarMoveClient start")
-HotbarMoveClient.Start()
-logger:debug("HotbarMoveClient end")
-
--- Before CombatClient below: a rebound key must already be live in KeybindManager the instant
--- combat input handling begins -- see SettingsClient.RestoreSettings' own header for why this is a
--- separate, earlier phase than SettingsClient.Start(uiHandles.Settings) further down (that call only
--- wires the Settings PANEL's own interactivity, which has no such urgency).
+-- A rebound key must already be live in KeybindManager the instant any input-driven client module
+-- below could start reacting to a press -- see SettingsClient.RestoreSettings' own header for why
+-- this is a separate, earlier phase than SettingsClient.Start(uiHandles.Settings) further down (that
+-- call only wires the Settings PANEL's own interactivity, which has no such urgency).
 logger:debug("SettingsClient RestoreSettings start")
 SettingsClient.RestoreSettings()
 logger:debug("SettingsClient RestoreSettings end")
 
-logger:debug("CombatClient start")
-CombatClient.Start(uiHandles.CombatFeedback, uiHandles.DeathFeed)
-logger:debug("CombatClient end")
+-- Announces every new life to the presentation-layer modules that used to bind off
+-- Client/Combat/CombatClient.lua's own CharacterAdded handler -- see this file's own header. Covers
+-- both the ordinary respawn path and a Studio play-solo start where a character already exists
+-- before this line runs.
+logger:debug("Character-bind hookup start")
+local function bindCharacterPresentation(character: Model): ()
+	CombatAnimator.BindCharacter(character)
+	MovementVFX.BindCharacter(character)
+	RunController.BindCharacter(character)
+end
+Players.LocalPlayer.CharacterAdded:Connect(bindCharacterPresentation)
+if Players.LocalPlayer.Character then
+	bindCharacterPresentation(Players.LocalPlayer.Character)
+end
+logger:debug("Character-bind hookup end")
 
 -- After UI.Mount() above: UI.Mount() is what calls ClientState.Bootstrap() internally, which is
 -- what resolves the Emote_Started/Emote_Stopped/Emote_UnlockedUpdated/Emote_LoadoutUpdated remotes
 -- EmoteController.Start() below also looks up -- both modules independently WaitForChild the same
 -- already-created remotes, so the ordering itself isn't strictly load-bearing, but keeping this
--- cluster after UI.Mount() matches CombatClient's own boot position above for the same "gameplay
+-- cluster after UI.Mount() matches this file's own boot position above for the same "gameplay
 -- input modules start once the UI they might eventually surface through exists" reasoning.
 logger:debug("EmoteController start")
 EmoteController.Start()
@@ -135,8 +149,8 @@ EmoteWheelClient.Start(uiHandles.EmoteWheel, uiHandles.ClientState)
 logger:debug("EmoteWheelClient end")
 
 -- Before ShiftLockCamera/FlightCamera/CameraShake below: FOVOffset is the single canonical writer
--- of camera.FieldOfView that SwingEffect (used inside CombatClient, already started above) and
--- FlightCamera (started below) both compose through -- see that module's own header.
+-- of camera.FieldOfView that FlightCamera (started below) composes through -- see that module's own
+-- header.
 logger:debug("FOVOffset start")
 FOVOffset.Start()
 logger:debug("FOVOffset end")
@@ -148,7 +162,7 @@ CameraOffsetComposer.Start()
 logger:debug("CameraOffsetComposer end")
 
 logger:debug("ShiftLockCamera start")
-ShiftLockCamera.Start(uiHandles.CombatFeedback.ShiftLockEngaged)
+ShiftLockCamera.Start(uiHandles.ShiftLockEngaged)
 logger:debug("ShiftLockCamera end")
 
 -- Same RenderPriority.Camera + 1 slot as ShiftLockCamera above -- mutually exclusive at runtime
@@ -165,30 +179,59 @@ logger:debug("CameraShake start")
 CameraShake.Start()
 logger:debug("CameraShake end")
 
--- After CombatClient (which owns sprint and pushes it into the movement framework -- see
--- ParkourController.lua's own header) and after FOVOffset/CameraOffsetComposer/CameraShake above,
--- whose named slots Client/Parkour/ParkourCamera.lua composes its speed zoom, slide framing, wall-run
--- lean and landing dips through. Starting before those three would mean ParkourCamera writing into
--- compositors that have not bound their render steps yet -- harmless for a frame, but the ordering is
--- kept explicit here for the same reason every other entry in this file is.
+-- After FOVOffset/CameraOffsetComposer/CameraShake above, whose named slots
+-- Client/Parkour/ParkourCamera.lua composes its speed zoom, slide framing, wall-run lean and landing
+-- dips through. Starting before those three would mean ParkourCamera writing into compositors that
+-- have not bound their render steps yet -- harmless for a frame, but the ordering is kept explicit
+-- here for the same reason every other entry in this file is.
 --
 -- Unconditional for every client. Client/Settings/SettingsClient.RestoreSettings() (already run
--- further up, before CombatClient) has by this point pushed the player's own persisted movement
--- preferences in, including the master Parkour toggle -- so a player who has switched parkour off
--- gets a controller that starts and immediately does nothing, rather than this boot line needing to
--- know about the setting.
+-- further up) has by this point pushed the player's own persisted movement preferences in, including
+-- the master Parkour toggle -- so a player who has switched parkour off gets a controller that starts
+-- and immediately does nothing, rather than this boot line needing to know about the setting.
 logger:debug("ParkourController start")
 ParkourController.Start()
 logger:debug("ParkourController end")
 
--- After both of the systems that push into it: CombatClient (sprint intent, character binds) and
--- ParkourController (the live movement state id). Starting it earlier would be harmless -- every one
--- of its inputs is pushed, so it would simply present nothing until the first push arrives -- but the
--- order is kept explicit here for the same reason every other entry in this file is. Also after
--- FOVOffset, whose named-slot composer this module's stage-2 zoom writes into.
+-- After ParkourController (the live movement state id RunController.SetParkourState reads) and this
+-- file's own character-bind hookup above. Starting it earlier would be harmless -- every one of its
+-- inputs is pushed, so it would simply present nothing until the first push arrives -- but the order
+-- is kept explicit here for the same reason every other entry in this file is. Also after FOVOffset,
+-- whose named-slot composer this module's stage-2 zoom writes into.
 logger:debug("RunController start")
 RunController.Start()
 logger:debug("RunController end")
+
+-- Block and parry input. Unconditional for every client, and deliberately AFTER
+-- SettingsClient.RestoreSettings above -- it reads the Block action through KeybindManager, so a
+-- player who rebound that key must have their override live before the first press can reach this.
+-- Nothing else about its position is load-bearing: it decides nothing locally (see its own header),
+-- so starting it earlier would simply mean sending presses to a server that answers them the same
+-- way.
+logger:debug("DefenseClient start")
+DefenseClient.Start()
+logger:debug("DefenseClient end")
+
+-- Attack input -- the light/heavy strings, the five hotbar slots and the weapon swap. Unconditional
+-- for every client, and deliberately AFTER SettingsClient.RestoreSettings above for exactly the same
+-- reason DefenseClient is: it reads BasicAttack/HeavyAttack/HotbarSlot1-5/SwapWeapon through
+-- KeybindManager, so a player who rebound any of them must have their override live before the first
+-- press can reach this. Replaces the deleted TestAttackHarnessClient, whose own header always said a
+-- real input layer would.
+--
+-- Also after UI.Mount() above, though not for a reason of its own: the HUD's ability slots subscribe
+-- to this module's OnSlotCooldown at mount time, and a subscription made before Start() is fine (the
+-- listener list outlives Start), so this ordering is documented rather than load-bearing.
+logger:debug("AttackInputClient start")
+AttackInputClient.Start()
+logger:debug("AttackInputClient end")
+
+-- Hit presentation -- damage numbers, the outcome banner and the camera shake, driven off the damage
+-- layer's Combat_Feedback event. AFTER UI.Mount(), and that IS load-bearing: it is handed the
+-- CombatFeedback screen's own handle, which does not exist until UI.Mount() returns.
+logger:debug("CombatFeedbackClient start")
+CombatFeedbackClient.Start(uiHandles.CombatFeedback)
+logger:debug("CombatFeedbackClient end")
 
 logger:debug("DevMenuClient start")
 DevMenuClient.Start(uiHandles.DevMenu)
@@ -213,8 +256,8 @@ logger:debug("AnnouncementClient end")
 
 -- Unconditional for every client, same "no whitelist gate" reasoning as BugReportClient above --
 -- every player gets the Settings panel. Only wires the PANEL's own interactivity here; the
--- KeybindManager restore already happened earlier, before CombatClient started (see
--- SettingsClient.RestoreSettings' own call site above).
+-- KeybindManager restore already happened earlier (see SettingsClient.RestoreSettings' own call
+-- site above).
 logger:debug("SettingsClient start")
 SettingsClient.Start(uiHandles.Settings)
 logger:debug("SettingsClient end")

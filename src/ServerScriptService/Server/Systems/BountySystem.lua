@@ -161,7 +161,7 @@ end
 
 -- Broadcast to every client, but ONLY when the board actually changed -- a placement, a claim, or an
 -- expiry. This is not the unfiltered per-event FireAllClients shape docs/architecture/2026-08-audit
--- .md's Tier 2.1 flagged on ParryWindowOpened (which fires on every parry attempt server-wide): a
+-- .md's Tier 2.1 flagged on every parry attempt server-wide: a
 -- board change happens at most once per streak-crossing or streak-ending kill, which is orders of
 -- magnitude rarer, and the board is genuinely global information every player is meant to see. If a
 -- relevance-filtering pass ever lands for 2.1, this does not need to be folded into it.

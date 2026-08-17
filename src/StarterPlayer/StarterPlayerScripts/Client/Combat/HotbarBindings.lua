@@ -14,20 +14,22 @@
 	Written to by exactly one place today (Client/MoveEditor/MoveEditorClient.lua's
 	BindHotbarSlotRequested handler, itself driven by a "Bind to slot" control in
 	Client/UI/Screens/MoveEditor/PropertyEditor.lua's toolbar) and read from two
-	(Client/Combat/HotbarMoveClient.lua to resolve what a keybind/click press should fire, and
-	Client/UI/Screens/HUD/init.lua to reflect Available/Locked per slot) -- a genuine multi-writer-
+	(Client/Combat/AttackInputClient.lua to resolve what a keybind/click press should fire, and
+	Client/UI/Screens/HUD/init.lua to reflect Locked/Available/Cooldown per slot) -- a genuine multi-writer-
 	unnecessary, multi-reader shared module, the same shape Client/Input/KeybindManager.lua already
 	established for "plain Luau module, no Fusion dependency, a changed-callback list for the one
 	reactive consumer that needs one" rather than threading Fusion.Value through three unrelated
 	call sites that don't otherwise need Fusion.
 
-	Does not own: firing the bound move (HotbarMoveClient.lua), rendering the hotbar
+	Does not own: firing the bound move (AttackInputClient.lua), rendering the hotbar
 	(HUD/init.lua), or admin authorization -- nothing here checks whether the local player is
-	actually an admin. That's fine: the only way a MoveId ever reaches Set() is through the
-	Move Editor's own admin-gated UI (which never even starts for a non-admin -- see
-	MoveEditorClient.lua's requestServerAuthorization), and firing a bound move still round-trips
-	through CombatSystem.lua's own AdminConfig re-check regardless of what this module holds -- so
-	a non-admin client with a hand-crafted binding here gains nothing.
+	actually an admin. That's fine, and the rebuilt attack layer keeps the same contract this header
+	always described: the only way a MoveId ever reaches Set() is through the Move Editor's own
+	admin-gated UI (which never even starts for a non-admin -- see MoveEditorClient.lua's
+	requestServerAuthorization), and firing a bound move still round-trips through the server's own
+	AdminConfig re-check regardless of what this module holds (Server/Combat/Attack/
+	AttackRequestSystem.lua's resolveRequest, and AttackTypes.AttackRequest.MoveId's own header) --
+	so a non-admin client with a hand-crafted binding here gains nothing.
 ]]
 
 local HotbarBindings = {}

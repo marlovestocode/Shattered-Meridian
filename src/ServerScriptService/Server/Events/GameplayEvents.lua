@@ -185,17 +185,23 @@ end
 -- Shared tick
 --
 
--- Fired at the end of every CombatSystem heartbeat tick, so a server-internal System that needs
--- per-frame work can piggyback the one existing RunService.Heartbeat connection instead of opening a
--- second one -- performance-optimization.md's server-tick-discipline guidance, and the same
--- reasoning HitboxResolver/RagdollController already follow by being driven from that single tick
--- rather than connecting their own.
+-- Fired every server frame, so a server-internal System that needs per-frame work can piggyback one
+-- shared RunService.Heartbeat connection instead of opening a second one -- performance-
+-- optimization.md's server-tick-discipline guidance.
 --
 -- Subscribe sparingly and keep handlers O(1)-per-entity: everything connected here runs inside the
 -- server's per-frame budget, and there is deliberately no scheduler or priority band yet. Once the
 -- number of subscribers or the per-tick entity count grows (the audit flags ~20 NPCs as the point
 -- worth revisiting), this is the seam a TickScheduler with priority bands would slot into, without
 -- any subscriber changing.
+--
+-- Self-pumped (below), not fired by a caller: this used to fire at the end of CombatSystem's own
+-- Heartbeat loop, which made this module's own "no dependency on any System, safe to require from
+-- anywhere" header claim quietly false for this one signal -- remove CombatSystem (as happened when
+-- the combat system was cut) and every subscriber (QiSystem's passive regen, BountySystem,
+-- EmoteSystem's active-emote monitor) silently stops ticking with no error anywhere. Owning the
+-- RunService.Heartbeat connection here instead is what actually keeps the "neutral hub, no System
+-- dependency" promise -- see this file's own header.
 local heartbeatTickSignal = Instance.new("BindableEvent")
 
 function GameplayEvents.FireHeartbeatTick(deltaTime: number): ()
@@ -205,5 +211,9 @@ end
 function GameplayEvents.OnHeartbeatTick(handler: (deltaTime: number) -> ()): RBXScriptConnection
 	return heartbeatTickSignal.Event:Connect(handler)
 end
+
+game:GetService("RunService").Heartbeat:Connect(function(deltaTime: number)
+	GameplayEvents.FireHeartbeatTick(deltaTime)
+end)
 
 return GameplayEvents

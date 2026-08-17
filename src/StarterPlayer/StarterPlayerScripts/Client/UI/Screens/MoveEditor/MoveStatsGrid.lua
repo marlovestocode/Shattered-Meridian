@@ -109,9 +109,25 @@ local function dimensionText(draft: MoveDefinition?): string
 		return ""
 	end
 	local d = draft.Dimensions
+	if not d then
+		return ""
+	end
+	-- Width/Height/Depth, NOT SizeX/SizeY/SizeZ. Those three names have never existed on
+	-- HitboxShapes.Dimensions (see that module's own Dimensions type and Box's Fields list) -- reading
+	-- them handed string.format three nils and threw "invalid argument #2 to 'format' (number
+	-- expected, got nil)" on every draft change for a Box move, which is every hand-authored attack in
+	-- the game. Nil-guarded as well as renamed: Dimensions only carries the fields the CURRENT shape
+	-- uses, so a draft caught mid-shape-change legitimately has none of them yet, and a stats readout
+	-- must degrade to a dash rather than take the editor's whole reactive graph down with it.
 	if draft.Shape == "Box" then
-		return string.format("X %.1f   Y %.1f   Z %.1f", d.SizeX, d.SizeY, d.SizeZ)
+		if not (d.Width and d.Height and d.Depth) then
+			return "--"
+		end
+		return string.format("W %.1f   H %.1f   D %.1f", d.Width, d.Height, d.Depth)
 	elseif draft.Shape == "Sphere" then
+		if not d.Radius then
+			return "--"
+		end
 		return string.format("R %.1f", d.Radius)
 	end
 	return "see Hitbox section"

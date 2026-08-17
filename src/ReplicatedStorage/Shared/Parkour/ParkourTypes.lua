@@ -47,6 +47,7 @@ export type MovementStateId =
 	| "LedgeClimbing"
 	| "Rolling"
 	| "Leaping"
+	| "LedgeLeaping"
 	| "AerialCombat"
 
 -- How the motor is driving the character this frame. Each state declares one; ParkourMotor.lua is
@@ -57,7 +58,11 @@ export type MovementStateId =
 --                    and jumping all keep working exactly as the engine intends.
 --   * "Velocity"  -- a LinearVelocity constraint drives the assembly at a commanded world velocity,
 --                    with gravity fully or partly cancelled. Real collision still applies.
---   * "Kinematic" -- the root part is anchored and CFrame-driven along an authored path. Exact and
+--   * "Kinematic" -- a rigid (RigidityEnabled = true) AlignPosition drives the root to a commanded
+--                    world position every physics step, exactly, along an authored path. The root
+--                    stays unanchored throughout -- see Client/Parkour/ParkourMotor.lua's own header
+--                    for why an anchored version of this used to exist and why it does not any more
+--                    (an anchored part never replicates to other clients at all). Effectively
 --                    uninterruptible-by-physics, for traversals that MUST land where they claim.
 export type DriveMode = "Humanoid" | "Velocity" | "Kinematic"
 
@@ -262,6 +267,24 @@ export type LeapTarget = {
 	Distance: number,
 }
 
+-- Where a LEDGE-TO-LEDGE leap has decided to land -- produced on demand by EnvironmentProbe.
+-- FindLedgeLeapTarget, the moment States/LedgeHanging.lua's Update sees a directional jump press while
+-- hanging. Sibling to LeapTarget above rather than a reuse of it: that one aims at any surface a
+-- downward cast finds; this one aims specifically at a GRABBABLE EDGE (a wall face plus a lip within
+-- the hang band), because arriving at an ordinary floor from a hang is not the move this searches for
+-- -- the player let go and fell for that, they did not need to aim.
+export type LedgeLeapTarget = {
+	Found: boolean,
+	-- Where the ARC is solved to land: the hang pose at the found edge (ParkourMath.HangPosition), not
+	-- the edge itself -- solving to the lip would fly the character INTO the wall face on arrival
+	-- rather than into the hang.
+	LandingPosition: Vector3,
+	EdgePosition: Vector3,
+	WallNormal: Vector3,
+	Instance: BasePart?,
+	Distance: number,
+}
+
 -- Everything a state module is given each frame. One persistent table, mutated in place by the
 -- controller and handed to whichever state is active -- never reallocated, and never retained by a
 -- state past the call it was passed in (see StateMachine.lua's own contract).
@@ -394,6 +417,21 @@ export type ParkourContext = {
 	-- time a player catches an edge.
 	LedgeAnchorPosition: Vector3?,
 	LedgeAnchorNormal: Vector3?,
+
+	-- DEBUG-ONLY ANNOTATIONS. Nothing in this framework reads any of these three for a gameplay
+	-- decision -- their one consumer is Client/Parkour/ParkourDebug.lua's "LIVE MECHANICS" section,
+	-- which shows the shimmy, the ledge-to-ledge leap and the wall-run corner turn the same way the
+	-- rest of the overlay shows every other refusal reason: verbatim, not inferred from watching the
+	-- character move. All three are refreshed to a fresh value at the TOP of the writing state's own
+	-- Update, every frame that state is active -- never left stale from a previous frame -- so the
+	-- overlay's gate ("only show this row while CurrentStateId is the state that writes it") is always
+	-- reading this frame's answer, not a stranded one from three seconds ago.
+	--
+	-- States/LedgeHanging.lua, every frame it runs:
+	DebugShimmy: ("Idle" | "Straight" | "Corner" | "Refused")?,
+	DebugLedgeLeap: ("Idle" | "NoIntent" | "NoTarget" | "Unreachable" | "Launched")?,
+	-- States/WallRunning.lua, every frame it runs:
+	DebugWallRunPivot: ("Straight" | "Pivoted")?,
 }
 
 -- The player's own movement preferences (Settings System). Mirrors the shape persisted on

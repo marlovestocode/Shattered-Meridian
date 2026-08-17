@@ -4,7 +4,7 @@
 
 	Owns: the ONLY place the parkour framework writes to the character's body. Every state describes
 	what it wants through a ParkourTypes.MotorCommand and this module commits it -- the constraint
-	rig, the anchored CFrame path, the facing, the crouch, and the teardown that puts everything back.
+	rig, the authored path, the facing, the crouch, and the teardown that puts everything back.
 
 	This is the structural answer to the design's "allow movement abilities and combat abilities to
 	coexist without the two systems constantly fighting over character velocity." Fifteen state
@@ -15,21 +15,40 @@
 
 	THREE DRIVE MODES, and what each one is actually for:
 	  * "Humanoid"  -- hands the body back to Roblox's own character controller. The motor's entire
-	                   job here is TEARDOWN: no rig, no anchor, AutoRotate and HipHeight restored.
-	                   Ordinary walking/sprinting/jumping/falling all run this way, which is what
-	                   keeps stairs, slope walking, ladders, seats, and the engine's own jump feeling
+	                   job here is TEARDOWN: no rig, AutoRotate and HipHeight restored. Ordinary
+	                   walking/sprinting/jumping/falling all run this way, which is what keeps
+	                   stairs, slope walking, ladders, seats, and the engine's own jump feeling
 	                   exactly like stock Roblox rather than like a reimplementation of it.
 	  * "Velocity"  -- a LinearVelocity constraint drives the assembly at a commanded world velocity,
 	                   with gravity optionally cancelled. Real collision still applies, so a slide
 	                   into a wall stops at the wall. Used for slide, wall-run, roll, wall-jump.
-	  * "Kinematic" -- the root is ANCHORED and CFrame-driven along an authored path. Used only for
-	                   vault/mantle/ledge-climb, where the traversal must be guaranteed to end exactly
-	                   on top of the thing it claimed it would. Anchoring the local character's root
-	                   for a few hundred milliseconds is the same technique Client/DevMenu/
-	                   FlightController.lua's noclip mode already ships (see syncCollideMode's own
-	                   header for why an unanchored part still accrues a physics step of gravity
-	                   between writes and therefore sags); the exit always unanchors and injects the
-	                   traversal's exit velocity, so the body never lands anchored.
+	  * "Kinematic" -- a RIGID AlignPosition (RigidityEnabled = true) drives the root to a commanded
+	                   world position every physics step, exactly, along an authored path. Used only
+	                   for vault/mantle/ledge-climb/ledge-hang, where the traversal must be guaranteed
+	                   to end exactly on top of the thing it claimed it would.
+	                   NOT anchored, deliberately -- this mode used to anchor the root and write its
+	                   CFrame directly, which drove the local client's own view correctly but is
+	                   invisible to everyone else: Roblox does not replicate CFrame writes on an
+	                   anchored part at all, because anchored parts have no network owner and never
+	                   enter the physics replicator. Every other client watched the traversal freeze
+	                   in place for its whole duration and then jump to the exit position the instant
+	                   the state ended and the root unanchored -- exactly the "went through the wall /
+	                   looks laggy" symptom this rewrite exists to fix. RigidityEnabled bypasses
+	                   MaxForce/MaxVelocity/Responsiveness and solves position exactly every step (the
+	                   same "kinematic-through-a-constraint" guarantee an anchored write gave), but the
+	                   root stays a real, unanchored, network-owned assembly the whole time, so it rides
+	                   the exact replication path ordinary walking and Velocity mode already use for
+	                   free -- see Client/FX/CombatAnimator.lua's own note on animation replicating off
+	                   the OWNING player's Animator for the same "network ownership is what carries it"
+	                   principle, applied here to position instead of a track.
+
+	TAKING THE BODY IS A PAIRED OPERATION. Owning a character means more than driving it: it means
+	holding four things that belong to somebody else -- HipHeight, AutoRotate, two Humanoid states, and
+	(through the ParkourFacingOwned Attribute) Client/Camera/ShiftLockCamera.lua's own per-frame yaw
+	write. captureRestorables takes all four and restoreRestorables puts all four back, and the ONLY
+	thing that says which side of that pair we are on is the `ownsBody` flag -- deliberately not the
+	drive mode, which is a different question with a different answer on the frames where it matters.
+	See that flag's own header for the failure that taught the difference.
 
 	SERVER RELATIONSHIP: this module never writes Humanoid.WalkSpeed. That property belongs to
 	Server/Combat/Movement.ComputeDesiredWalkSpeed, which runs every server Heartbeat and would
@@ -64,6 +83,7 @@ local ParkourMotor = {}
 -- extended to a third rig.
 local ATTACHMENT_NAME = "ParkourAttachment"
 local VELOCITY_DRIVE_NAME = "ParkourVelocityDrive"
+local POSITION_DRIVE_NAME = "ParkourPositionDrive"
 local ORIENTATION_DRIVE_NAME = "ParkourOrientationDrive"
 local GRAVITY_CANCEL_NAME = "ParkourGravityCancel"
 
@@ -109,6 +129,25 @@ local activeMode: DriveMode = "Humanoid"
 local capturedHipHeight: number? = nil
 local capturedAutoRotate: boolean? = nil
 local appliedHipHeightDelta = 0
+
+-- WHETHER THIS MODULE CURRENTLY HOLDS THE BODY'S RESTORABLES, tracked explicitly rather than inferred
+-- from `activeMode`.
+--
+-- These two used to be assumed equivalent: captureRestorables runs for every non-Humanoid frame, and
+-- the restore was gated on `activeMode ~= "Humanoid"`. They are not equivalent, because capture happens
+-- BEFORE the mode branch that assigns activeMode, and that branch can refuse. When it did, the frame
+-- left AutoRotate/HipHeight captured, the guarded Humanoid states disabled and -- worst of all --
+-- ParkourFacingOwned raised, while activeMode still read "Humanoid". The next ordinary walking frame
+-- then found `activeMode == "Humanoid"`, skipped the restore entirely, and nothing ever put any of it
+-- back: Client/Camera/ShiftLockCamera.lua kept its yaw write suspended against an Attribute that would
+-- now never fall, with AutoRotate still false underneath it, so the character could not turn at all for
+-- the rest of the life. That is the reported "locked after a parkour move," and it self-healed only
+-- when some LATER traversal happened to end through the restore path.
+--
+-- One flag, set by the capture and cleared by the restore, makes the pair symmetric by construction: it
+-- is true exactly when there is something to put back, regardless of which mode -- or no mode -- the
+-- frame went on to commit.
+local ownsBody = false
 
 -- THE HUMANOID STATES THIS MODULE STANDS DOWN WHILE IT OWNS THE BODY, and why owning velocity is not
 -- enough on its own.
@@ -168,21 +207,15 @@ local function findAttachment(part: BasePart): Attachment
 	return attachment
 end
 
-local function ensureRig(part: BasePart): ()
-	local attachment = findAttachment(part)
-
-	if not part:FindFirstChild(VELOCITY_DRIVE_NAME) then
-		local drive = Instance.new("LinearVelocity")
-		drive.Name = VELOCITY_DRIVE_NAME
-		drive.Attachment0 = attachment
-		drive.RelativeTo = Enum.ActuatorRelativeTo.World
-		drive.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
-		drive.ForceLimitMode = Enum.ForceLimitMode.Magnitude
-		drive.MaxForce = VELOCITY_DRIVE_MAX_FORCE
-		drive.VectorVelocity = Vector3.zero
-		drive.Parent = part
-	end
-
+-- Shared between Velocity and Kinematic mode -- both need facing control, and both want the same
+-- soft, non-rigid convergence (see RigidityEnabled below). A rigid orientation lock fights every
+-- collision impulse and reads as the character vibrating against a wall; that is exactly as true
+-- mid-vault as it is mid-wall-run, and the Bezier/Lerp paths in the Kinematic states already hold
+-- one fixed facing for their whole duration (see States/Vaulting.lua/Mantling.lua/LedgeClimbing.lua/
+-- LedgeHanging.lua Update -- travelDirection/facing is computed once at Enter, never per frame), so
+-- there is nothing for a soft drive to visibly lag behind once it converges in the first couple of
+-- frames.
+local function ensureOrientationDrive(part: BasePart, attachment: Attachment): ()
 	if not part:FindFirstChild(ORIENTATION_DRIVE_NAME) then
 		local drive = Instance.new("AlignOrientation")
 		drive.Name = ORIENTATION_DRIVE_NAME
@@ -205,8 +238,55 @@ local function ensureRig(part: BasePart): ()
 	end
 end
 
+local function ensureVelocityRig(part: BasePart): ()
+	local attachment = findAttachment(part)
+
+	if not part:FindFirstChild(VELOCITY_DRIVE_NAME) then
+		local drive = Instance.new("LinearVelocity")
+		drive.Name = VELOCITY_DRIVE_NAME
+		drive.Attachment0 = attachment
+		drive.RelativeTo = Enum.ActuatorRelativeTo.World
+		drive.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+		drive.ForceLimitMode = Enum.ForceLimitMode.Magnitude
+		drive.MaxForce = VELOCITY_DRIVE_MAX_FORCE
+		drive.VectorVelocity = Vector3.zero
+		drive.Parent = part
+	end
+
+	ensureOrientationDrive(part, attachment)
+end
+
+-- Built only for Kinematic mode -- see this file's own header for why a RIGID AlignPosition replaces
+-- the anchored CFrame write that used to drive vault/mantle/ledge-climb/ledge-hang.
+local function ensureKinematicRig(part: BasePart): ()
+	local attachment = findAttachment(part)
+
+	if not part:FindFirstChild(POSITION_DRIVE_NAME) then
+		local drive = Instance.new("AlignPosition")
+		drive.Name = POSITION_DRIVE_NAME
+		drive.Attachment0 = attachment
+		drive.Mode = Enum.PositionAlignmentMode.OneAttachment
+		-- Rigid, unlike the velocity drive above: a vault/mantle/climb/hang has to end exactly where
+		-- it claimed it would (see States/Vaulting.lua's own header on clipping the lip / landing on
+		-- top instead of past / catching a corner). RigidityEnabled bypasses MaxForce, MaxVelocity and
+		-- Responsiveness entirely and solves position exactly every physics step -- Roblox's own
+		-- documented mechanism for kinematic-exact motion on a part that still has to stay unanchored
+		-- to replicate. MaxForce/Responsiveness are therefore not set below: the engine ignores both
+		-- while RigidityEnabled is true, and setting numbers that do nothing would just be a second,
+		-- misleading place to look for the tuning that actually lives in the authored path itself
+		-- (ParkourMath.TraversalEase/TraversalPoint and each state's own duration constant).
+		drive.RigidityEnabled = true
+		drive.Position = part.Position
+		drive.Parent = part
+	end
+
+	ensureOrientationDrive(part, attachment)
+end
+
 local function destroyRig(part: BasePart): ()
-	for _, name in { VELOCITY_DRIVE_NAME, ORIENTATION_DRIVE_NAME, GRAVITY_CANCEL_NAME, ATTACHMENT_NAME } do
+	for _, name in
+		{ VELOCITY_DRIVE_NAME, POSITION_DRIVE_NAME, ORIENTATION_DRIVE_NAME, GRAVITY_CANCEL_NAME, ATTACHMENT_NAME }
+	do
 		local instance = part:FindFirstChild(name)
 		if instance then
 			instance:Destroy()
@@ -245,9 +325,9 @@ end
 -- Client/Camera/ShiftLockCamera.lua watches (see Constants.Attributes.ParkourFacingOwned for why this
 -- is an Attribute rather than a direct call). That module writes root.CFrame to camera yaw EVERY
 -- render step while shift lock is engaged and has no idea parkour exists -- its only other guards are
--- the combat/flight Attributes -- so for the full duration of a traversal it contested whichever of
--- this module's two facing mechanisms was live: the AlignOrientation drive in Velocity mode, the
--- anchored CFrame write in Kinematic mode. Both were being overwritten toward camera yaw every frame
+-- the combat/flight Attributes -- so for the full duration of a traversal it contested this module's
+-- own facing mechanism: the same AlignOrientation drive that now backs both Velocity and Kinematic
+-- mode (see ensureOrientationDrive). It was being overwritten toward camera yaw every frame
 -- underneath them.
 --
 -- Mirrored in a local so the Attribute is written only on the transitions. The capture path below runs
@@ -266,6 +346,7 @@ local function setFacingOwned(currentHumanoid: Humanoid?, owned: boolean): ()
 end
 
 local function captureRestorables(currentHumanoid: Humanoid): ()
+	ownsBody = true
 	setFacingOwned(currentHumanoid, true)
 	if capturedHipHeight == nil then
 		capturedHipHeight = currentHumanoid.HipHeight
@@ -286,8 +367,23 @@ local function captureRestorables(currentHumanoid: Humanoid): ()
 	end
 end
 
+-- ORDER IS LOAD-BEARING HERE, and it is the reverse of what it used to be.
+--
+-- setFacingOwned(false) is now the LAST thing this function does, because that write is not private:
+-- Client/Camera/ShiftLockCamera.lua watches ParkourFacingOwned and, on the falling edge, reasserts
+-- `AutoRotate = not engaged` -- deliberately, to repair the case where the player toggled shift lock
+-- DURING a traversal and this module's capture therefore holds a value that is no longer correct (see
+-- that handler's own comment).
+--
+-- With the release first, that repair was still correct and still ran -- and was then immediately
+-- overwritten by the stale `capturedAutoRotate` write below it. Whether the clobber actually lands
+-- depends on the place's SignalBehavior: under Deferred the handler resumes after this function
+-- returns and wins, under Immediate it runs synchronously inside the SetAttribute call and loses. A
+-- correctness property that flips on a place-level engine setting nobody in this repo sets explicitly
+-- is not a property at all, so the order is now the one that is right under both: put every captured
+-- value back FIRST, then hand rotation over, so the compensating handler always runs last and always
+-- has the final say.
 local function restoreRestorables(currentHumanoid: Humanoid): ()
-	setFacingOwned(currentHumanoid, false)
 	if capturedHipHeight ~= nil then
 		currentHumanoid.HipHeight = capturedHipHeight
 		capturedHipHeight = nil
@@ -304,6 +400,8 @@ local function restoreRestorables(currentHumanoid: Humanoid): ()
 		capturedStateEnabled = nil
 	end
 	appliedHipHeightDelta = 0
+	ownsBody = false
+	setFacingOwned(currentHumanoid, false)
 end
 
 -- Binds a freshly-spawned character. Any rig left on a previous character dies with it, so this only
@@ -324,6 +422,10 @@ function ParkourMotor.BindCharacter(_nextCharacter: Model, nextHumanoid: Humanoi
 	-- stale-mirror failure `facingOwned` below is reset for.
 	capturedStateEnabled = nil
 	appliedHipHeightDelta = 0
+	-- Dropped for the same reason capturedStateEnabled above is: it describes the PREVIOUS character, and
+	-- a stale `true` here would make the first Humanoid frame of this life run a restore against values
+	-- that were never captured on this Humanoid.
+	ownsBody = false
 	-- A fresh character owns its own rotation until this module takes it again. Written straight to the
 	-- mirror rather than through setFacingOwned because the new Humanoid's Attribute is already unset --
 	-- there is nothing to clear on it, only this module's memory of the PREVIOUS character to reset, and
@@ -360,6 +462,10 @@ function ParkourMotor.Release(): ()
 	-- `humanoid` is already nil there is nothing to restore the states ON, but the memory of having
 	-- guarded them must not survive into the next character or its first capture is skipped.
 	capturedStateEnabled = nil
+	-- Same again for the ownership flag: on a teardown path where `humanoid` is already nil there is
+	-- nothing to restore, but a flag left true would have the next character's first ordinary frame try
+	-- to restore values belonging to a Humanoid that no longer exists.
+	ownsBody = false
 	activeMode = "Humanoid"
 end
 
@@ -425,7 +531,10 @@ function ParkourMotor.Apply(): boolean
 		return false
 	end
 	if currentHumanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true then
-		if activeMode ~= "Humanoid" then
+		-- `ownsBody` for the same reason the Humanoid branch below asks it: a body that was captured but
+		-- never committed to a mode still has to be handed back when the server takes root control, and
+		-- an activeMode-only test would walk straight past exactly that case.
+		if activeMode ~= "Humanoid" or ownsBody then
 			ParkourMotor.Release()
 		end
 		return false
@@ -433,11 +542,30 @@ function ParkourMotor.Apply(): boolean
 
 	local mode = command.Mode
 
+	-- REFUSED BEFORE ANYTHING IS TAKEN, not partway through taking it. A kinematic frame with no target
+	-- is a state bug (see the Kinematic branch below for what it would otherwise drive toward), and the
+	-- refusal used to sit after captureRestorables had already raised ParkourFacingOwned and disabled the
+	-- guarded Humanoid states -- so the bug's cost was not "one ignored frame" but a body left
+	-- permanently half-owned. Validating first means the refusal is genuinely inert: nothing has been
+	-- captured, nothing has been announced, and the body simply keeps doing what it was doing.
+	if mode == "Kinematic" and command.TargetCFrame == nil then
+		logger:warn("Kinematic motor frame with no TargetCFrame -- ignoring")
+		return false
+	end
+
 	if mode == "Humanoid" then
-		if activeMode ~= "Humanoid" then
-			-- Leaving an owned mode: unanchor first, then hand the traversal's exit velocity to the
-			-- physics engine directly. Order matters -- writing AssemblyLinearVelocity on an anchored
-			-- part is silently discarded, which is what turns a vault into a dead stop.
+		-- `ownsBody` rather than `activeMode` alone: the two can disagree (see that flag's own header),
+		-- and when they do it is precisely the case where a restore is most needed and used to be
+		-- skipped. Cheap to ask on every walking frame -- both are plain locals, and the body below runs
+		-- only on a real hand-back.
+		if activeMode ~= "Humanoid" or ownsBody then
+			-- Leaving an owned mode: hand the traversal's exit velocity to the physics engine directly,
+			-- then tear the rig down, in that order, within this same synchronous frame -- no physics
+			-- step runs between the two, so there is no window for a still-parented drive to reassert
+			-- itself over the velocity this line just wrote. `part.Anchored` is defensive rather than
+			-- load-bearing now: nothing in this module anchors the root any more (see Kinematic below),
+			-- but unconditionally clearing it costs nothing and keeps this a safe catch-all if some
+			-- other system ever left the root anchored underneath this one.
 			if part.Anchored then
 				part.Anchored = false
 			end
@@ -457,7 +585,16 @@ function ParkourMotor.Apply(): boolean
 		if part.Anchored then
 			part.Anchored = false
 		end
-		ensureRig(part)
+		-- Defensive: a stale rigid AlignPosition left over from a Kinematic frame would fight the
+		-- LinearVelocity drive below for control of position. Every real transition already tears this
+		-- down via the Humanoid branch above (StateSupport.HandOff always hands off through a Humanoid
+		-- frame first -- see that function's own header), so this should always be a no-op in practice;
+		-- kept as a guard rather than an assumption for the same reason the Anchored check above is.
+		local stalePositionDrive = part:FindFirstChild(POSITION_DRIVE_NAME)
+		if stalePositionDrive then
+			stalePositionDrive:Destroy()
+		end
+		ensureVelocityRig(part)
 		setGravityCancel(part, command.CancelGravity)
 		local drive = part:FindFirstChild(VELOCITY_DRIVE_NAME)
 		if drive and drive:IsA("LinearVelocity") then
@@ -472,24 +609,28 @@ function ParkourMotor.Apply(): boolean
 		return true
 	end
 
-	-- Kinematic.
-	local target = command.TargetCFrame
-	if not target then
-		-- A kinematic frame with no target is a state bug. Refusing (rather than anchoring the
-		-- character in place with no path) keeps the failure recoverable: the body simply keeps
-		-- whatever it was doing for a frame.
-		logger:warn("Kinematic motor frame with no TargetCFrame -- ignoring")
-		return false
+	-- Kinematic. The target was validated at the top of this function, before ownership was taken --
+	-- see that check for why it cannot live here any more.
+	local target = command.TargetCFrame :: CFrame
+	if part.Anchored then
+		part.Anchored = false
 	end
-	-- The rig is torn down for kinematic mode: an anchored part ignores constraints anyway, and a
-	-- LinearVelocity left parented to an anchored part re-engages the instant the anchor clears, one
-	-- frame before the exit velocity is written.
-	destroyRig(part)
-	if not part.Anchored then
-		part.Anchored = true
+	-- Kinematic never drives through the velocity rig -- a LinearVelocity or gravity-cancel force left
+	-- over from a Velocity-driven frame would be one more thing fighting the rigid position lock below
+	-- for control of the assembly. Same "should always be a no-op, kept as a guard" reasoning as the
+	-- stale-position-drive check in the Velocity branch above.
+	local staleVelocityDrive = part:FindFirstChild(VELOCITY_DRIVE_NAME)
+	if staleVelocityDrive then
+		staleVelocityDrive:Destroy()
 	end
+	setGravityCancel(part, false)
+	ensureKinematicRig(part)
 	currentHumanoid.AutoRotate = false
-	part.CFrame = target
+	local positionDrive = part:FindFirstChild(POSITION_DRIVE_NAME)
+	if positionDrive and positionDrive:IsA("AlignPosition") then
+		positionDrive.Position = target.Position
+	end
+	applyFacing(part, target.LookVector)
 	applyHipHeight(currentHumanoid, command.HipHeightDelta)
 	activeMode = "Kinematic"
 	return true
@@ -497,9 +638,16 @@ end
 
 -- One-shot velocity write, for the impulses that are genuinely instantaneous rather than a mode: a
 -- coyote-time jump (the character is already airborne, so Humanoid:ChangeState cannot produce the
--- jump), a buffered jump fired on the landing frame, and the launch of a slide-jump. Refused while
--- the root is anchored (a kinematic traversal owns the body) and while the server holds root
--- control, for the same reasons Apply refuses.
+-- jump), a buffered jump fired on the landing frame, and the launch of a slide-jump. Refused while a
+-- kinematic traversal owns the body and while the server holds root control, for the same reasons
+-- Apply refuses.
+--
+-- Checked against `activeMode` rather than `part.Anchored` -- Kinematic mode no longer anchors the
+-- root (see this file's own header), so Anchored can no longer stand in for "a kinematic traversal
+-- owns this body" the way it used to. A RigidityEnabled AlignPosition would likely just overwrite
+-- whatever this wrote on the very next physics step anyway, but refusing outright keeps this
+-- function's contract the same as before: a kinematic traversal's ownership of the body cannot be
+-- fought by a stray impulse, full stop, rather than "usually cannot."
 --
 -- Deliberately NOT routed through the per-frame command struct: an impulse is a discrete event that
 -- happens between frames, and expressing it as a frame's worth of commanded velocity would make it
@@ -507,7 +655,7 @@ end
 function ParkourMotor.ApplyImpulse(velocity: Vector3): boolean
 	local part = rootPart
 	local currentHumanoid = humanoid
-	if not part or not currentHumanoid or not part.Parent or part.Anchored then
+	if not part or not currentHumanoid or not part.Parent or activeMode == "Kinematic" then
 		return false
 	end
 	if currentHumanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true then

@@ -14,9 +14,9 @@
 	  1. The debug overlay shows a state at all times. "AerialCombat" is a far better answer to "why
 	     isn't my movement responding" than a blank readout.
 	  2. Entering it runs the normal Exit path of whatever was active, so a wall-run's constraints, a
-	     vault's anchor and a slide's crouch are all released through the same code that releases them
-	     normally -- rather than through a separate emergency teardown that would inevitably drift out
-	     of sync with the states it is tearing down.
+	     vault's rigid position drive and a slide's crouch are all released through the same code that
+	     releases them normally -- rather than through a separate emergency teardown that would
+	     inevitably drift out of sync with the states it is tearing down.
 	  3. Leaving it goes through the normal transition machinery, so the character resumes into
 	     whichever state genuinely fits (Falling if they are in the air after being juggled, Idle if
 	     they were put down) rather than into whatever they were doing before combat interrupted.

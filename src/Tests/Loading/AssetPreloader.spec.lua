@@ -26,6 +26,7 @@ local StarterPlayer = game:GetService("StarterPlayer")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
+local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 
 local Client = StarterPlayer.StarterPlayerScripts.Client
 local AssetPreloader = require(Client.Loading.AssetPreloader)
@@ -135,25 +136,38 @@ return function()
 			end
 		end)
 
-		it("covers combat sounds without depending on Main.client.lua's require order", function()
-			-- SoundManager is a REGISTRY -- it only knows the sounds someone Register()ed. This
-			-- asserts AssetPreloader pulls in the registrars itself, rather than inheriting them by
-			-- luck from whatever else the boot script happened to require first. Requiring this spec
-			-- never loads Main.client.lua, so if AssetPreloader stopped requiring CombatAudio these
-			-- ids would vanish and this test would fail -- which is the entire point.
-			local keys = manifestKeys()
-			expect(keys[Constants.Combat.Sound.Hit.SoundId]).to.equal(true)
-			expect(keys[Constants.Combat.Sound.BlockImpact.SoundId]).to.equal(true)
-			expect(keys[Constants.Combat.Sound.HandToHandParried.SoundId]).to.equal(true)
+		it("covers the defense/parry animation", function()
+			-- DefenseClient.GetPreloadInstances (via Shared/Animation/AnimationManager.GetPreloadIds)
+			-- hands back raw content ids, not Animation instances -- same shape as ParkourConstants'
+			-- own category above.
+			if DefenseConstants.ParryAnimationId ~= "" then
+				expect(manifestKeys()[DefenseConstants.ParryAnimationId]).to.equal(true)
+			end
 		end)
 
 		it("covers run footstep sounds without depending on Main.client.lua's require order", function()
 			-- Same reasoning as combat sounds above, for the newest registrar (RunAudio) -- the one
 			-- most likely to be missed, since it arrived after the preloader was written.
+			-- Iterated rather than naming each stage, so a gear added to the run ladder is covered by
+			-- this test the moment its audio is authored -- the same reason RunAudio builds its own
+			-- registration set by walking these tables instead of hand-listing them.
 			local keys = manifestKeys()
-			expect(keys[Constants.Run.Footsteps.Stage1.Sound.SoundId]).to.equal(true)
-			expect(keys[Constants.Run.Footsteps.Stage2.Sound.SoundId]).to.equal(true)
-			expect(keys[Constants.Run.Stage2Onset.Sound.SoundId]).to.equal(true)
+			for stage, config in Constants.Run.Footsteps.Stages do
+				if config.Sound.SoundId ~= "" then
+					expect(keys[config.Sound.SoundId]).to.equal(true)
+				end
+				-- Guards the shape as well as the manifest: a stage entry missing ReferenceSpeed or
+				-- StepIntervalSeconds would divide by nil inside RunController's cadence, which is a
+				-- crash in a per-frame loop rather than a missing sound.
+				expect(typeof(config.ReferenceSpeed)).to.equal("number")
+				expect(config.StepIntervalSeconds > 0).to.equal(true)
+				expect(stage > 0).to.equal(true)
+			end
+			for _, config in Constants.Run.StageOnset do
+				if config.Sound.SoundId ~= "" then
+					expect(keys[config.Sound.SoundId]).to.equal(true)
+				end
+			end
 		end)
 	end)
 end

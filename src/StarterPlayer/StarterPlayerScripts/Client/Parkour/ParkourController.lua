@@ -25,11 +25,13 @@
 	after physics has stepped -- reading a velocity on RenderStepped means reading last frame's. This
 	also matches Client/DevMenu/FlightController.lua's own loop and the server's own authoritative tick.
 
-	SPRINT IS NOT OWNED HERE. Client/Combat/CombatClient.lua keeps ownership of sprint (its remotes,
-	the server-side WalkSpeed tier, hold-vs-toggle, Autorun) and pushes the resulting boolean in via
-	SetSprinting -- the same shape it already uses to push sprint state into Client/FX/MovementVFX.lua.
-	Two systems deciding whether a player is sprinting is exactly the split ownership this framework
-	exists to avoid.
+	SPRINT IS NOT OWNED HERE. Client/Movement/RunController.lua owns run intent -- the key,
+	hold-versus-toggle, Autorun and the remote that tells the server -- and this module READS it once
+	per frame through RunController.IsSprinting(). A pull rather than a push, and not by preference:
+	this module already requires RunController in order to push its own live state id out to the run
+	presentation, so a setter here would close a require cycle. Two systems deciding whether a player is
+	running is exactly the split ownership this framework exists to avoid; one system deciding and the
+	other reading is the shape that cannot drift.
 
 	Does not own: any movement behavior (the States own that), any raycast (EnvironmentProbe), any
 	write to the character (ParkourMotor), or any validation (the server re-checks everything).
@@ -102,7 +104,6 @@ local character: Model? = nil
 local humanoid: Humanoid? = nil
 local rootPart: BasePart? = nil
 
-local sprintHeld = false
 local wasGrounded = false
 
 -- The single reused context. Every field is overwritten each frame before any state sees it; the
@@ -154,6 +155,9 @@ local function buildInitialContext(boundCharacter: Model, boundHumanoid: Humanoi
 		LandingSeverity = nil,
 		LedgeAnchorPosition = nil,
 		LedgeAnchorNormal = nil,
+		DebugShimmy = nil,
+		DebugLedgeLeap = nil,
+		DebugWallRunPivot = nil,
 	}
 end
 
@@ -280,7 +284,12 @@ local function step(deltaTime: number): ()
 	local now = os.clock()
 	context.DeltaTime = deltaTime
 	context.Now = now
-	context.SprintHeld = sprintHeld
+	-- PULLED, not pushed. Client/Movement/RunController.lua owns run intent (the key, hold-vs-toggle,
+	-- Autorun) and this module already requires it in order to push its own state id out -- so a push
+	-- back would be a require cycle. Reading it here rides the dependency that already exists, and
+	-- removes the window in which a pushed mirror could be a frame stale against the module that
+	-- actually knows the answer.
+	context.SprintHeld = RunController.IsSprinting()
 	-- The server's own resolved run stage, read straight off the Humanoid the same way
 	-- resolveCombatOwned reads its four ownership Attributes -- one more read per frame on a value the
 	-- server publishes anyway, rather than a second subscription and a cached mirror to keep in sync.
@@ -362,6 +371,16 @@ local function step(deltaTime: number): ()
 		ParkourCamera.SetWallSide(if context.AnimationVariant == "Left" then -1 else 1)
 	else
 		ParkourCamera.SetWallSide(0)
+	end
+	-- The mantle's own continuous camera feed -- see ParkourCamera.SetMantleProgress's own header for
+	-- why this is pushed every frame rather than fired once on the transition. StateElapsed over the
+	-- state's authored duration is the SAME alpha States/Mantling.lua's own Update computes for the
+	-- traversal curve -- read from the context rather than re-derived, so the camera and the character's
+	-- actual position can never read two different fractions of the same climb.
+	if nextId == "Mantling" then
+		ParkourCamera.SetMantleProgress(
+			context.StateElapsed / math.max(ParkourConstants.Obstacle.MantleDurationSeconds, 1e-3)
+		)
 	end
 
 	ParkourDebug.Update(context, machine)
@@ -451,12 +470,6 @@ local function unbind(): ()
 	character = nil
 	humanoid = nil
 	rootPart = nil
-end
-
--- Sprint state, pushed in by CombatClient. See the file header for why this is a push rather than
--- this module reading the sprint key itself.
-function ParkourController.SetSprinting(sprinting: boolean): ()
-	sprintHeld = sprinting
 end
 
 -- Player-facing master switch (Settings -> Gameplay -> "Parkour movement"). Disabling releases the

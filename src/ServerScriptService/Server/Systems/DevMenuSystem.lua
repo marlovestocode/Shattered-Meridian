@@ -14,12 +14,9 @@
 	meant to work in live servers too; safety comes entirely from the whitelist plus this System's
 	own re-check on every request, never from RunService:IsStudio() or from being hidden.
 
-	Does not own: what a dev action actually does -- CombatSystem.SpawnTrainingDummy/SpawnTrainingBot
-	own training dummy/bot creation, TrainingBotSystem.ValidatePresetRequest owns validating a
-	bot spawn request's preset/weights (never trusted here directly), AdminActionSystem owns the
+	Does not own: what a dev action actually does -- AdminActionSystem owns the
 	Godmode/Flying/FlightCollide/Frozen/Invisible/SpeedMultiplier/Teleport override actions,
-	CombatSystem.SetPlayerHealth/ResetCombatState own direct health mutation and the "clear cooldowns/
-	combo/vitals-timers without a respawn" action, ModerationSystem owns Kick/Ban/Mute, and
+	ModerationSystem owns Kick/Ban/Mute, and
 	EmoteUnlockService owns granting/rolling emote unlocks (handleRollEmote below is a whitelist-gated
 	test trigger for RollEmote's existing "RareEmotes" pool, not a new unlock mechanism -- see that
 	handler's own header). VersionWatchSystem owns detecting whether a newer place version has been
@@ -28,10 +25,16 @@
 	kick, handleInstantRestartServer's immediate one) since only an admin's own button press ever
 	triggers either -- this System only decides *whether* a given request is allowed to reach
 	those, then translates the request/response shape. Uses RemoteFunctions, not RemoteEvents, since
-	the client needs to know immediately whether its request was accepted (see Types.
-	DevMenuSpawnDummyResult/
-	DevMenuSpawnBotResult) -- Announcement is the one deliberate exception (a genuine broadcast to
-	every client, not just the requesting admin), so it's a RemoteEvent instead.
+	the client needs to know immediately whether its request was accepted -- Announcement is the one
+	deliberate exception (a genuine broadcast to every client, not just the requesting admin), so it's
+	a RemoteEvent instead.
+
+	No longer owns (combat system removed): SpawnDummy/SpawnTrainingBot (training dummy/bot creation
+	lived in CombatSystem.lua/TrainingBotSystem.lua), SetTargetHealth/ResetTargetCombatState (direct
+	health mutation and combat-state reset), and GetHitboxDebug/SetHitboxDebug (toggled
+	Server/Combat/HitboxResolver.lua's debug visualization). resolveActionTarget's lock-on lookup was
+	also CombatSystem's -- every admin action now simply targets whichever player the "Players" tab row
+	names, or the calling admin themselves.
 ]]
 
 local Players = game:GetService("Players")
@@ -43,12 +46,9 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 
-local CombatSystem = require(script.Parent.CombatSystem)
-local TrainingBotSystem = require(script.Parent.TrainingBotSystem)
 local AdminActionSystem = require(script.Parent.AdminActionSystem)
 local VersionWatchSystem = require(script.Parent.VersionWatchSystem)
 local FlightTuning = require(script.Parent.Parent.DevMenu.FlightTuning)
-local HitboxDebugState = require(script.Parent.Parent.Combat.HitboxDebugState)
 local BugReportSystem = require(script.Parent.BugReportSystem)
 local ModerationSystem = require(script.Parent.ModerationSystem)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
@@ -61,8 +61,7 @@ local logger = Logger.scope("DevMenuSystem")
 
 local DevMenuConfig = Constants.Debug.DevMenu
 
--- Own bucket, separate from CombatSystem's -- dev tooling requests shouldn't compete with (or be
--- starved by) a player's combat remote budget, and vice versa. Shared by EVERY handler in this
+-- Own bucket, shared by EVERY handler in this
 -- file, including SetSuspectedCheater/GetSidebarStats: an earlier pass gave those two their own
 -- dedicated instances with no documented technical reason (both are low-frequency, one-shot,
 -- admin-only requests -- GetSidebarStats fires once per DevMenuClient.Start(), SetSuspectedCheater
@@ -79,11 +78,8 @@ local function isAuthorized(player: Player): boolean
 	return AdminConfig.AuthorizedUserIds[player.UserId] == true
 end
 
--- Shared auth + rate-limit precondition, unifying what every one of the 15 (now 17) handlers below
--- used to hand-duplicate: CombatSystem.lua already solved this exact problem for itself with its
--- ACTION_GATES table -- this is the DevMenuSystem equivalent, extracted after that same
--- hand-duplicated-gate failure mode (per CombatSystem.lua's own ACTION_GATES header: "the same
--- failure mode any hand-duplicated gate is one edit away from repeating") showed up here too.
+-- Shared auth + rate-limit precondition, unifying what every one of the handlers below used to
+-- hand-duplicate -- the same failure mode any hand-duplicated gate is one edit away from repeating.
 -- actionName feeds both the "X rejected: ..." log message and the caller's own "X received" debug
 -- line, so callers only need to name their action once. `limiter` defaults to the shared `rateLimiter`
 -- above -- every handler in this file now uses the shared bucket (see that variable's own comment).
@@ -105,11 +101,10 @@ local function checkDevMenuPreconditions(
 	return true, nil
 end
 
--- Shared "does this player have a live character with a HumanoidRootPart" lookup -- byte-for-byte
--- identical between handleSpawnDummy/handleSpawnBot before this was extracted, differing only in
--- the log-message prefix. Both callers treat a missing root part the same way a missing character
--- is treated ("NoCharacter") since neither dev action has anything meaningful to do with a
--- rootPart-less character.
+-- Shared "does this player have a live character with a HumanoidRootPart" lookup, used by every
+-- teleport-flavored action below (TeleportToTarget/BringTarget/JumpToReporter). A missing root part
+-- is treated the same way a missing character is ("NoCharacter") since none of these actions have
+-- anything meaningful to do with a rootPart-less character.
 local function getRootPart(player: Player, logPrefix: string): (BasePart?, string?)
 	local character = player.Character
 	if not character then
@@ -134,76 +129,6 @@ local function resolveEnum<T>(raw: unknown, map: { [string]: T }): T?
 		return nil
 	end
 	return map[raw]
-end
-
-local function handleSpawnDummy(player: Player): Types.DevMenuSpawnDummyResult
-	logger:debug("SpawnDummy received", { player = player.Name, userId = player.UserId })
-
-	local allowed, reason = checkDevMenuPreconditions(player, "SpawnDummy")
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
-
-	local rootPart, rootPartFailureReason = getRootPart(player, "SpawnDummy")
-	if not rootPart then
-		return { Success = false, Reason = rootPartFailureReason }
-	end
-
-	local spawnCFrame = rootPart.CFrame * CFrame.new(0, 0, -Constants.Debug.TrainingDummy.SpawnDistance)
-
-	local model, failureReason = CombatSystem.SpawnTrainingDummy(spawnCFrame)
-	if not model then
-		logger:warn("SpawnDummy failed", { player = player.Name, reason = failureReason })
-		return { Success = false, Reason = failureReason or "SpawnFailed" }
-	end
-
-	logger:info("SpawnDummy accepted", { player = player.Name, dummy = model.Name })
-	return { Success = true }
-end
-
--- Same shape as handleSpawnDummy above, plus a preset-validation step TrainingBotSystem.lua owns
--- (never trust rawPresetName/rawCustomWeights directly -- see that System's ValidatePresetRequest
--- header for the full trust-boundary reasoning) between the rate-limit check and the character
--- check.
-local function handleSpawnBot(
-	player: Player,
-	rawPresetName: unknown,
-	rawCustomWeights: unknown
-): Types.DevMenuSpawnBotResult
-	logger:debug("SpawnTrainingBot received", { player = player.Name, userId = player.UserId })
-
-	local allowed, reason = checkDevMenuPreconditions(player, "SpawnTrainingBot")
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
-
-	local weights, presetName, validationReason =
-		TrainingBotSystem.ValidatePresetRequest(rawPresetName, rawCustomWeights)
-	if not weights or not presetName then
-		logger:debug(
-			"SpawnTrainingBot rejected: invalid preset request",
-			{ player = player.Name, reason = validationReason }
-		)
-		return { Success = false, Reason = validationReason or "InvalidRequest" }
-	end
-
-	local rootPart, rootPartFailureReason = getRootPart(player, "SpawnTrainingBot")
-	if not rootPart then
-		return { Success = false, Reason = rootPartFailureReason }
-	end
-
-	local spawnCFrame = rootPart.CFrame * CFrame.new(0, 0, -Constants.Debug.TrainingBot.SpawnDistance)
-
-	local model, failureReason = CombatSystem.SpawnTrainingBot(player, spawnCFrame)
-	if not model then
-		logger:warn("SpawnTrainingBot failed", { player = player.Name, reason = failureReason })
-		return { Success = false, Reason = failureReason or "SpawnFailed" }
-	end
-
-	TrainingBotSystem.RegisterBot(model, player, presetName, weights, spawnCFrame)
-
-	logger:info("SpawnTrainingBot accepted", { player = player.Name, bot = model.Name, preset = presetName })
-	return { Success = true }
 end
 
 -- Whitelist-gated one-shot test trigger for the Emote System's roll path (Server/Systems/
@@ -235,14 +160,12 @@ local function handleRollEmote(player: Player): Types.DevMenuRollEmoteResult
 	return { Success = true, EmoteId = emoteId }
 end
 
--- Shared "who is this admin action for" resolution: whichever player the requesting admin
--- currently has locked on (CombatSystem.GetLockOnTarget), falling back to themselves if nothing's
--- locked -- reuses the existing lock-on system as the target picker instead of a new player-select
--- UI (Constants.Debug.DevMenu.RemoteNames' own header explains the reasoning). Never trusts a
--- client-supplied target UserId -- there isn't one; the admin locks a target the same way any
--- player locks one (CapsLock), then the action applies to whoever that resolves to server-side.
+-- Shared "who is this admin action for" resolution when no explicit target row was named -- always
+-- the calling admin themselves. Used to resolve lock-on to a combat target
+-- (CombatSystem.GetLockOnTarget) before the combat system was removed; every caller now simply falls
+-- back to `player`, exactly as if nothing were ever locked on.
 local function resolveActionTarget(player: Player): Player
-	return CombatSystem.GetLockOnTarget(player) or player
+	return player
 end
 
 -- Closed whitelist for handleSetTargetSpeedMultiplier below -- rejects any number outside the exact
@@ -255,14 +178,13 @@ for _, preset in ipairs(Constants.Debug.DevMenu.SpeedMultiplierPresets) do
 	SPEED_MULTIPLIER_PRESETS[preset] = true
 end
 
--- Resolves an EXPLICIT target Player by UserId, for the "Players" tab's per-row buttons (Teleport-To/
--- Reset-Combat-State) that need to act on a specific roster row rather than whichever player the
--- admin currently has locked on. `rawTargetUserId` is nil for every existing Admin-tab caller (none
--- of which pass one) -- in that case this returns (nil, nil) so the caller falls back to
--- resolveActionTarget's own lock-on-or-self resolution, exactly preserving those callers' existing
--- behavior. A non-nil id that doesn't currently resolve to a live Player (already left, or a bogus
--- number) returns (nil, "NoTarget") instead of silently falling back -- a row button naming a
--- specific player should never silently retarget onto someone else.
+-- Resolves an EXPLICIT target Player by UserId, for the "Players" tab's per-row buttons that need to
+-- act on a specific roster row rather than falling back to the calling admin. `rawTargetUserId` is
+-- nil for every existing Admin-tab caller (none of which pass one) -- in that case this returns
+-- (nil, nil) so the caller falls back to resolveActionTarget's own self-resolution, exactly
+-- preserving those callers' existing behavior. A non-nil id that doesn't currently resolve to a live
+-- Player (already left, or a bogus number) returns (nil, "NoTarget") instead of silently falling
+-- back -- a row button naming a specific player should never silently retarget onto someone else.
 local function resolveOptionalExplicitTarget(rawTargetUserId: unknown): (Player?, string?)
 	if rawTargetUserId == nil then
 		return nil, nil
@@ -304,27 +226,6 @@ local function isPlausibleUserId(value: unknown): boolean
 		return false
 	end
 	return value > 0 and value < 2 ^ 53 and value == math.floor(value)
-end
-
-local function handleSetTargetHealth(player: Player, rawHealth: unknown): Types.DevMenuActionResult
-	logger:debug("SetTargetHealth received", { player = player.Name, userId = player.UserId })
-
-	local allowed, reason = checkDevMenuPreconditions(player, "SetTargetHealth")
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
-	if typeof(rawHealth) ~= "number" then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-
-	local target = resolveActionTarget(player)
-	local ok = CombatSystem.SetPlayerHealth(target, rawHealth)
-	if not ok then
-		return { Success = false, Reason = "NoTarget" }
-	end
-
-	logger:info("SetTargetHealth accepted", { player = player.Name, target = target.Name, health = rawHealth })
-	return { Success = true }
 end
 
 local function handleSetTargetGodmode(player: Player, rawEnabled: unknown): Types.DevMenuActionResult
@@ -681,7 +582,7 @@ local function handleInstantRestartServer(player: Player): Types.DevMenuActionRe
 end
 
 -- Passive "a newer version has been published" fetch (Server/Systems/VersionWatchSystem.lua) --
--- fetch-once-on-open, same shape as handleGetHitboxDebug/handleGetSidebarStats above. Purely
+-- fetch-once-on-open, same shape as handleGetSidebarStats above. Purely
 -- advisory: never kicks anyone, never announces anything, just reports what VersionWatchSystem
 -- already knows so the Admin tab can show a banner nudging the admin toward Instant Restart/
 -- Shutdown Server above.
@@ -703,14 +604,16 @@ local function handleGetServerVersionInfo(player: Player): Types.DevMenuServerVe
 end
 
 -- Player roster ("Players" tab) -- one entry per Players:GetPlayers() at fetch time. Ping comes
--- straight off Player:GetNetworkPing() (Roblox's own round-trip estimate); Snapshot is whatever
--- CombatSystem.GetCombatState currently returns for that player (nil only for a brand-new join whose
--- own CombatSystem PlayerAdded handler hasn't run yet).
+-- straight off Player:GetNetworkPing() (Roblox's own round-trip estimate); Snapshot is always nil
+-- now that the combat system (its one source) is gone -- see buildRosterEntry's own comment.
 local function buildRosterEntry(target: Player): Types.PlayerRosterEntry
 	return {
 		UserId = target.UserId,
 		Name = target.Name,
-		Snapshot = CombatSystem.GetCombatState(target),
+		-- Always nil now (Combat system removed) -- DevMenuClient.lua's formatRosterEntry already
+		-- renders "HP --"/"Posture --" for a nil Snapshot, the same as it always did for a brand-new
+		-- join, so this degrades safely with no client-side change needed.
+		Snapshot = nil,
 		Ping = target:GetNetworkPing(),
 		Muted = ModerationSystem.IsMuted(target.UserId),
 		SuspectedCheater = ModerationSystem.IsSuspectedCheater(target.UserId),
@@ -731,29 +634,6 @@ local function handleListPlayers(player: Player): Types.DevMenuListPlayersResult
 	end
 
 	return { Success = true, Players = roster }
-end
-
-local function handleResetTargetCombatState(player: Player, rawTargetUserId: unknown): Types.DevMenuActionResult
-	logger:debug("ResetTargetCombatState received", { player = player.Name, userId = player.UserId })
-
-	local allowed, reason = checkDevMenuPreconditions(player, "ResetTargetCombatState")
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
-
-	local explicitTarget, explicitFailureReason = resolveOptionalExplicitTarget(rawTargetUserId)
-	if explicitFailureReason then
-		return { Success = false, Reason = explicitFailureReason }
-	end
-	local target = explicitTarget or resolveActionTarget(player)
-
-	local ok = CombatSystem.ResetCombatState(target)
-	if not ok then
-		return { Success = false, Reason = "NoTarget" }
-	end
-
-	logger:info("ResetTargetCombatState accepted", { player = player.Name, target = target.Name })
-	return { Success = true }
 end
 
 local function handleKickPlayer(player: Player, rawTargetUserId: unknown, rawReason: unknown): Types.DevMenuActionResult
@@ -879,9 +759,9 @@ end
 -- above even though this isn't a ModerationSystem action: a data wipe is IRREVERSIBLE, a strictly
 -- higher-stakes action than Kick (undone by rejoining) and arguably higher than Ban (still
 -- reversible/expirable, and the target's progression sits untouched in the DataStore the whole
--- time it's in effect) -- accidentally applying this to whoever the admin happens to be locked
--- onto is unacceptable in a way even ResetTargetCombatState's fallback-to-lock-on isn't, since that
--- action only clears transient per-life combat timers, never persisted progress. Unlike
+-- time it's in effect) -- accidentally applying this to whoever resolveActionTarget's self-fallback
+-- happens to resolve to is unacceptable in a way that fallback is fine for elsewhere in this file
+-- (every OTHER action it feeds is transient/reversible). Unlike
 -- resolveTargetUserId's other callers, this ALSO requires the target to have a currently-loaded
 -- profile (PlayerDataSystem.ResetProfile's own precondition) -- an offline wipe is out of scope on
 -- purpose, since that would mean a raw DataStore write bypassing the "only Transform/ResetProfile
@@ -984,43 +864,10 @@ local function handleGetSidebarStats(player: Player): Types.DevMenuSidebarStatsR
 	}
 end
 
--- Fetch-once-on-open (Admin tab) for HitboxDebugState's current value -- same shape as
--- GetSidebarStats above.
-local function handleGetHitboxDebug(player: Player): Types.DevMenuHitboxDebugResult
-	logger:debug("GetHitboxDebug received", { player = player.Name, userId = player.UserId })
-
-	local allowed, reason = checkDevMenuPreconditions(player, "GetHitboxDebug")
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
-
-	return { Success = true, Enabled = HitboxDebugState.IsEnabled() }
-end
-
--- Server-wide, not per-player -- see HitboxDebugState.lua's own header for why this doesn't go
--- through AdminActionSystem's overrideStates the way Godmode/Frozen/Invisible do.
-local function handleSetHitboxDebug(player: Player, rawEnabled: unknown): Types.DevMenuHitboxDebugResult
-	logger:debug("SetHitboxDebug received", { player = player.Name, userId = player.UserId })
-
-	local allowed, reason = checkDevMenuPreconditions(player, "SetHitboxDebug")
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
-	if typeof(rawEnabled) ~= "boolean" then
-		return { Success = false, Reason = "InvalidRequest" }
-	end
-
-	HitboxDebugState.SetEnabled(rawEnabled)
-
-	logger:info("SetHitboxDebug accepted", { player = player.Name, enabled = rawEnabled })
-	return { Success = true, Enabled = rawEnabled }
-end
-
 -- Closed whitelist for the flight-tuning param below -- unlike a plain typeof(x) ~= "string" check,
 -- this ALSO rejects any string outside the exact known set, which matters here specifically because
--- `field` ultimately selects which table KEY gets written on a live Constants.Flight table. Same
--- reasoning TrainingBotSystem.ValidatePresetRequest already applies to preset names, scoped to the
--- flight feel tuner (handleAdjustFlightTuning/handleResetFlightTuning below) -- rejects any string
+-- `field` ultimately selects which table KEY gets written on a live Constants.Flight table, scoped to
+-- the flight feel tuner (handleAdjustFlightTuning/handleResetFlightTuning below) -- rejects any string
 -- outside FlightTuning.lua's own curated field set before it can be used to pick which Constants.
 -- Flight key gets written.
 local FLIGHT_TUNING_FIELDS: { [string]: Types.FlightTuningFieldName } = {
@@ -1111,8 +958,8 @@ end
 
 -- Bug report triage ("Reports" tab, DevMenu/init.lua) -- both handlers gate here exactly like
 -- every action above, then delegate to BugReportSystem's public API. BugReportSystem itself has no
--- admin-authorization notion of its own; it trusts these two callers the same way CombatSystem
--- trusts DevMenuSystem for SpawnTrainingDummy/SpawnTrainingBot.
+-- admin-authorization notion of its own; it trusts these two callers the same way every other
+-- delegated-to System in this file does.
 local function handleListBugReports(player: Player, rawCursorMode: unknown): Types.DevMenuListBugReportsResult
 	logger:debug("ListBugReports received", { player = player.Name, userId = player.UserId })
 
@@ -1295,25 +1142,10 @@ local function wrapHandler<Result, Args...>(name: string, handler: (Player, Args
 end
 
 function DevMenuSystem.Init(): ()
-	local remote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SpawnDummy)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SpawnDummy })
-	remote.OnServerInvoke = wrapHandler("SpawnDummy", handleSpawnDummy)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SpawnDummy })
-
-	local spawnBotRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SpawnTrainingBot)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SpawnTrainingBot })
-	spawnBotRemote.OnServerInvoke = wrapHandler("SpawnTrainingBot", handleSpawnBot)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SpawnTrainingBot })
-
 	local rollEmoteRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.RollEmote)
 	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.RollEmote })
 	rollEmoteRemote.OnServerInvoke = wrapHandler("RollEmote", handleRollEmote)
 	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.RollEmote })
-
-	local setHealthRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetTargetHealth)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetTargetHealth })
-	setHealthRemote.OnServerInvoke = wrapHandler("SetTargetHealth", handleSetTargetHealth)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetTargetHealth })
 
 	local setGodmodeRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetTargetGodmode)
 	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetTargetGodmode })
@@ -1442,11 +1274,6 @@ function DevMenuSystem.Init(): ()
 	listPlayersRemote.OnServerInvoke = wrapHandler("ListPlayers", handleListPlayers)
 	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ListPlayers })
 
-	local resetCombatStateRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ResetTargetCombatState)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ResetTargetCombatState })
-	resetCombatStateRemote.OnServerInvoke = wrapHandler("ResetTargetCombatState", handleResetTargetCombatState)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ResetTargetCombatState })
-
 	local kickPlayerRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.KickPlayer)
 	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.KickPlayer })
 	kickPlayerRemote.OnServerInvoke = wrapHandler("KickPlayer", handleKickPlayer)
@@ -1482,16 +1309,6 @@ function DevMenuSystem.Init(): ()
 	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.GetServerVersionInfo })
 	getServerVersionInfoRemote.OnServerInvoke = wrapHandler("GetServerVersionInfo", handleGetServerVersionInfo)
 	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.GetServerVersionInfo })
-
-	local getHitboxDebugRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.GetHitboxDebug)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.GetHitboxDebug })
-	getHitboxDebugRemote.OnServerInvoke = wrapHandler("GetHitboxDebug", handleGetHitboxDebug)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.GetHitboxDebug })
-
-	local setHitboxDebugRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetHitboxDebug)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetHitboxDebug })
-	setHitboxDebugRemote.OnServerInvoke = wrapHandler("SetHitboxDebug", handleSetHitboxDebug)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetHitboxDebug })
 
 	Players.PlayerRemoving:Connect(function(player: Player)
 		rateLimiter:Clear(player)

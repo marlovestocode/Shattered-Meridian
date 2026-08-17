@@ -5,9 +5,8 @@
 	Owns: legality/validation for playing an emote, the one authoritative start/stop lifecycle
 	(activeEmotes below), the Humanoid movement-lock Attribute an emote sets while it plays, the
 	player's loadout (Types.PlayerProfile.emoteLoadout), and every Remote this feature exposes
-	(EmoteConstants.RemoteNames). Boots after PlayerDataSystem, EmoteUnlockService, and CombatSystem
-	-- see Main.server.lua's own numbered boot-order comments for exactly why each has to exist
-	first.
+	(EmoteConstants.RemoteNames). Boots after PlayerDataSystem and EmoteUnlockService -- see
+	Main.server.lua's own numbered boot-order comments for exactly why each has to exist first.
 
 	Phase 1 of 2 -- this is the full backend; the radial wheel UI (a later session) is pure
 	presentation on top of it. That's a binding requirement, not just a convenient split: everything
@@ -21,12 +20,10 @@
 	for free. This file never loads or plays an AnimationTrack itself.
 
 	STOP SCHEDULING. A non-loop emote's automatic stop is NOT a task.delay -- this codebase's own
-	established idiom for "an effect that should end after N seconds" (CombatState.Vitals.
-	stunExpiry/ragdollExpiry, AirComboState.airComboHeldExpiry, ...) is an expiry timestamp checked on
-	the next tick, never a scheduled callback that could race a manual stop. activeEmotes[player].
+	established idiom for "an effect that should end after N seconds" is an expiry timestamp checked
+	on the next tick, never a scheduled callback that could race a manual stop. activeEmotes[player].
 	EndsAt is exactly that: set at start time for a non-Loop emote, left nil for a Loop emote, and
-	checked in the SAME OnHeartbeatTick handler that already reads CombatSnapshot for the interruption
-	guard below -- one read of activeEmotes per tick, not two competing timers.
+	checked in the OnHeartbeatTick handler below -- one read of activeEmotes per tick.
 
 	WHAT ENDS A ONE-SHOT EMOTE, and why the authored Duration is no longer it. EndsAt used to be
 	`now + definition.Duration`, which silently truncated any emote whose real animation ran longer
@@ -62,10 +59,17 @@
 
 	Does not own: which emotes a player has UNLOCKED (Server/Systems/EmoteUnlockService.lua) --
 	RequestPlay/RequestSetLoadoutSlot both defer to EmoteUnlockService.HasUnlocked rather than reading
-	Types.PlayerProfile.unlockedEmoteIds directly. Does not own combat/movement state itself --
-	CombatSystem.GetCombatState is the only read this file performs of that state, and Server/Combat/
-	Movement.lua's ComputeDesiredWalkSpeed (not this file) is what actually zeroes WalkSpeed once the
-	EmoteMovementLocked Attribute is set.
+	Types.PlayerProfile.unlockedEmoteIds directly. Does not own movement state itself --
+	Server/Combat/Movement.lua's ComputeDesiredWalkSpeed (not this file) is what actually zeroes
+	WalkSpeed once the EmoteMovementLocked Attribute is set.
+
+	No longer gated on combat state (combat system removed): RequestPlay/the active-emote monitor
+	below used to read CombatSystem.GetCombatState and reject/interrupt an emote for being dead,
+	stunned, posture-broken, ragdolled, held aloft, mid-swing, or (for a non-CombatAllowed emote)
+	simply in combat, and CancelOnDamage used to compare live Health against the emote's starting
+	Health. None of that state exists anymore, so none of it gates emotes -- an emote now only ever
+	stops via its own EndsAt expiry, the client's Emote_NotifyFinished report, or an explicit
+	StopEmote call.
 ]]
 
 local Players = game:GetService("Players")
@@ -82,7 +86,6 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local EmoteUnlockService = require(script.Parent.EmoteUnlockService)
-local CombatSystem = require(script.Parent.CombatSystem)
 
 local logger = Logger.scope("EmoteSystem")
 
@@ -90,10 +93,6 @@ local EmoteSystem = {}
 
 type ActiveEmote = {
 	EmoteId: Types.EmoteId,
-	-- Health at the moment this emote started -- CancelOnDamage compares the LIVE snapshot's Health
-	-- against this, not against MaxHealth or a delta threshold, so any confirmed damage (however
-	-- small) breaks a vulnerable pose.
-	StartedHealth: number,
 	-- nil for a Loop emote (never auto-stops on its own). For a one-shot this is the LATEST this emote
 	-- may run, not the moment it is expected to end -- see this file's header (WHAT ENDS A ONE-SHOT
 	-- EMOTE): a clip-bearing emote is normally stopped by the client's own Emote_NotifyFinished and
@@ -237,39 +236,9 @@ local function handleRequestPlay(player: Player, rawEmoteId: unknown): ()
 		EmoteSystem.StopEmote(player)
 	end
 
-	local snapshot = CombatSystem.GetCombatState(player)
-	if not snapshot then
-		logger:debug("RequestPlay rejected: NoCombatState", { player = player.Name, emoteId = emoteId })
-		return
-	end
-
-	if
-		not snapshot.Alive
-		or snapshot.Stunned
-		or snapshot.PostureBroken
-		or snapshot.Ragdolled
-		or snapshot.HeldAloft
-		or snapshot.Attacking
-		or (not definition.CombatAllowed and snapshot.InCombat)
-	then
-		logger:debug("RequestPlay rejected: RestrictedState", {
-			player = player.Name,
-			emoteId = emoteId,
-			alive = snapshot.Alive,
-			stunned = snapshot.Stunned,
-			postureBroken = snapshot.PostureBroken,
-			ragdolled = snapshot.Ragdolled,
-			heldAloft = snapshot.HeldAloft,
-			attacking = snapshot.Attacking,
-			inCombat = snapshot.InCombat,
-		})
-		return
-	end
-
 	local now = os.clock()
 	activeEmotes[player] = {
 		EmoteId = emoteId,
-		StartedHealth = snapshot.Health,
 		EndsAt = computeEndsAt(definition, now),
 	}
 
@@ -402,29 +371,6 @@ local function onHeartbeatTick(): ()
 		end
 
 		if active.EndsAt and now >= active.EndsAt then
-			EmoteSystem.StopEmote(player)
-			continue
-		end
-
-		local snapshot = CombatSystem.GetCombatState(player)
-		if not snapshot then
-			EmoteSystem.StopEmote(player)
-			continue
-		end
-
-		if
-			not snapshot.Alive
-			or snapshot.Stunned
-			or snapshot.PostureBroken
-			or snapshot.Ragdolled
-			or snapshot.HeldAloft
-			or snapshot.Attacking
-		then
-			EmoteSystem.StopEmote(player)
-			continue
-		end
-
-		if definition.CancelOnDamage and snapshot.Health < active.StartedHealth then
 			EmoteSystem.StopEmote(player)
 			continue
 		end

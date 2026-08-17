@@ -124,7 +124,14 @@ local Rolling: ParkourTypes.StateDefinition = {
 
 	Exit = function(context: ParkourContext, nextState: ParkourTypes.MovementStateId): ()
 		context.Momentum = ParkourMath.ExitMomentum(context.Momentum, ROLL.ExitRetainFraction, 0)
+		-- Vaulting and Mantling get a hand-off like every other exit, and used to get an early return on
+		-- the belief that they write their own motor command in Enter. Neither does -- both write it from
+		-- Update, which does not run until the frame after the transition -- so the early return left the
+		-- ROLL's velocity command committed for the first frame of the traversal. See States/Sliding.lua's
+		-- own Exit for the full version of this note and the bug it describes; this is the same mistake in
+		-- the same shape, and the same fix.
 		if nextState == "Vaulting" or nextState == "Mantling" then
+			StateSupport.HandOff(context, context.RootPart.AssemblyLinearVelocity)
 			return
 		end
 		local travel = ParkourMath.SafeUnit(ParkourMath.Flatten(rollDirection), Vector3.zero)

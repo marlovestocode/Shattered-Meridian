@@ -88,6 +88,26 @@ function ParkourCamera.SetSpeed(planarSpeed: number): ()
 	FOVOffset.SetContinuous(CAMERA.SpeedFOVSlot, CAMERA.SpeedFOVMaxDelta * excess, CAMERA.SpeedFOVEaseSpeed)
 end
 
+-- THE MANTLE'S CONTINUOUS CAMERA FEED. Pushed every frame the state is active (ParkourController's
+-- own frame, alongside SetSpeed/SetWallSide), with `alpha` the climb's own 0..1 progress -- the exact
+-- same fraction States/Mantling.lua's Update already computes for the traversal curve, so the camera
+-- and the character's actual motion are reading off the same clock rather than two independently
+-- authored timings that can drift out of sync.
+--
+-- Shaped with a sine bump (0 at the start, peak at the climb's midpoint, back to 0 at the top) rather
+-- than eased toward a held target: a pull-up has an effort in the MIDDLE, not at either end -- the
+-- reach and the final step up are the calm parts, the moment the character's weight is fully hanging
+-- off their arms is not. Ending exactly at 0 as alpha reaches 1 is what lets the climb hand off to
+-- ordinary locomotion with nothing left to clear.
+function ParkourCamera.SetMantleProgress(alpha: number): ()
+	if not effectsEnabled then
+		return
+	end
+	local clamped = math.clamp(alpha, 0, 1)
+	local shape = math.sin(math.pi * clamped)
+	FOVOffset.SetContinuous(CAMERA.MantleFOVSlot, CAMERA.MantleClimbFOVDelta * shape, CAMERA.MantleClimbFOVEaseSpeed)
+end
+
 -- Called on every state transition. One entry point rather than a function per effect, so the
 -- "which effects belong to which state" mapping is visible in one place and a new state cannot
 -- accidentally inherit the previous one's camera treatment.
@@ -108,7 +128,10 @@ function ParkourCamera.OnStateChanged(previous: MovementStateId, next: MovementS
 		CameraShake.Shake(SHAKE.SlideStart)
 	end
 
-	if next == "Vaulting" or next == "Mantling" then
+	-- Vault only. See ParkourConstants.Camera's "MANTLE GETS ITS OWN TREATMENT" note for why Mantling
+	-- was pulled out of this branch -- its camera feed is continuous (SetMantleProgress below), pushed
+	-- every frame for the climb's whole duration, not a one-shot here.
+	if next == "Vaulting" then
 		FOVOffset.Punch(
 			CAMERA.VaultFOVSlot,
 			CAMERA.VaultFOVPunchDelta,
@@ -116,6 +139,13 @@ function ParkourCamera.OnStateChanged(previous: MovementStateId, next: MovementS
 			CAMERA.VaultFOVPunchBackSeconds
 		)
 		CameraShake.Shake(SHAKE.Vault)
+	end
+	-- The climb's continuous feed cannot be relied on to reach 0 on its own: a mantle can end early
+	-- (falling off a narrow ledge mid-climb -- see that state's own Update) or be interrupted (combat
+	-- taking the body), and SetMantleProgress is only ever pushed while the state is actually current.
+	-- Cleared here, on every exit, the same way Sliding's own slideDrop is.
+	if previous == "Mantling" then
+		FOVOffset.SetContinuous(CAMERA.MantleFOVSlot, 0, CAMERA.MantleClimbFOVEaseSpeed)
 	end
 
 	if next == "WallJumping" then
@@ -177,6 +207,7 @@ function ParkourCamera.SetEffectsEnabled(enabled: boolean): ()
 	end
 	FOVOffset.SetContinuous(CAMERA.SpeedFOVSlot, 0, CAMERA.SpeedFOVEaseSpeed)
 	FOVOffset.SetContinuous(CAMERA.SlideFOVSlot, 0, CAMERA.SlideFOVEaseSpeed)
+	FOVOffset.SetContinuous(CAMERA.MantleFOVSlot, 0, CAMERA.MantleClimbFOVEaseSpeed)
 	slideDrop = 0
 	landingDip = 0
 	targetTilt = 0
@@ -189,6 +220,7 @@ function ParkourCamera.Reset(): ()
 	FOVOffset.ClearContinuous(CAMERA.SpeedFOVSlot)
 	FOVOffset.ClearContinuous(CAMERA.SlideFOVSlot)
 	FOVOffset.ClearContinuous(CAMERA.VaultFOVSlot)
+	FOVOffset.ClearContinuous(CAMERA.MantleFOVSlot)
 	CameraOffsetComposer.ClearContinuous(CAMERA.OffsetSlot)
 	slideDrop = 0
 	landingDip = 0

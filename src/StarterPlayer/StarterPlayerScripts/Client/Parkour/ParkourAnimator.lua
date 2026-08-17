@@ -2,8 +2,11 @@
 --[[
 	ParkourAnimator.lua
 
-	Owns: selecting, playing and interrupting the movement clips that go with each parkour state --
-	driven by the state id, its variant (wall-run left vs. right, hop vs. vault), and live speed.
+	Owns: selecting the movement clip that goes with each parkour state -- driven by the state id, its
+	variant (wall-run left vs. right, hop vs. vault), and live speed -- and pushing it onto this
+	module's own claim on Shared/Animation/AnimationManager.lua's "Parkour" layer. Playing, crossfading,
+	loop repair, freeze handling and death gating are ANIMATIONMANAGER'S job now, not this module's --
+	see MIGRATION below.
 
 	DRIVEN BY THE STATE MACHINE, NOT PARALLEL TO IT. The design was explicit: "make the animation
 	system work together with the movement system rather than having parkour animations operate
@@ -13,13 +16,29 @@
 	transition and SetMotion every frame, and the clip is a pure function of what the state machine
 	already decided. There is no second opinion here that could drift out of sync with the first.
 
-	INTERRUPTIBLE BY CONSTRUCTION. At most ONE parkour track is playing at any moment, and a state
-	change stops it before starting the next -- so the framework can never leave a player locked in an
-	animation ("animations should be interruptible when necessary so the player does not get locked
-	into an animation when they need to transition into another movement action or combat"). There is
-	no queue, no "wait for this to finish," and no clip whose length gates a transition.
+	MIGRATION (this module used to hand-roll its own `tracks` dict, `getTrack`, `stopActive` and
+	`protectedTrackCall`, and drive AnimationTrack:Play/Stop/AdjustSpeed directly -- exactly the
+	four-modules-each-reimplementing-the-same-five-mechanics problem AnimationManager.lua's own header
+	describes). Client/Defense/DefenseClient.lua was the first caller to migrate; this module follows
+	its pattern: one manager constructed at module scope, clips registered once via RegisterMany, and
+	every state transition expressed as a SetClaim on a dedicated "Parkour" layer/source pair rather
+	than a manual Play/Stop pair. "At most one parkour track plays at a time" -- true before, and still
+	true now -- is enforced structurally by that layer being this module's only claim on it, not by a
+	local `activeTrack` variable this module has to maintain by hand. Client/FX/CombatAnimator.lua has
+	NOT migrated yet (it still separately manages Walking/Running with its own Heartbeat evaluator), so
+	this manager arbitrates only among its own claims for now -- the same known, pre-existing gap
+	AnimationManager's own header describes, not something this module closes by itself. There is
+	therefore no shared "Locomotion" layer here: "Parkour" coordinates with nothing outside this module
+	yet, which is the honest state of the migration rather than an implied one.
 
-	PRIORITY IS THE COMBAT BOUNDARY. Every clip here loads at Enum.AnimationPriority.Movement, while
+	INTERRUPTIBLE BY CONSTRUCTION. A state change replaces this module's claim before the layer
+	resolves the next one, which AnimationManager turns into a genuine crossfade -- so the framework
+	can never leave a player locked in an animation ("animations should be interruptible when necessary
+	so the player does not get locked into an animation when they need to transition into another
+	movement action or combat"). There is no queue, no "wait for this to finish," and no clip whose
+	length gates a transition.
+
+	PRIORITY IS THE COMBAT BOUNDARY. Every clip here claims at Enum.AnimationPriority.Movement, while
 	Client/FX/CombatAnimator.lua's swings/blocks/dashes load at Core (see that file's own note on why
 	it had to match the default rig's own cycle). Movement sits BELOW Core, so a combat action always
 	visually wins over a parkour clip without either module needing to coordinate with the other --
@@ -28,39 +47,49 @@
 
 	A missing or placeholder animation id degrades to no clip playing, never an error -- the same
 	tolerance Constants.Flight/Constants.Intro's own placeholder AnimationIds tables already rely on,
-	which is what lets this ship before the real clips exist.
+	which is what lets this ship before the real clips exist. AnimationManager.Register already treats
+	an empty id as "not registered," so a SetClaim for an unauthored key is a safe, silent no-op here
+	exactly as it is in DefenseClient.
 
 	Does not own: any combat animation (CombatAnimator.lua), the decision to change state
-	(StateMachine.lua), or any character binding beyond its own Animator lookup.
+	(StateMachine.lua), or any AnimationTrack mechanics (arbitration, crossfade, loop repair, freeze
+	handling, the death gate -- all AnimationManager.lua's).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local AnimatorUtil = require(ReplicatedStorage.Shared.AnimatorUtil)
+local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
-local Logger = require(ReplicatedStorage.Shared.Logger)
 
 type MovementStateId = ParkourTypes.MovementStateId
-
-local logger = Logger.scope("ParkourAnimator")
 
 local ANIMATION = ParkourConstants.Animation
 local IDS = ParkourConstants.AnimationIds
 
 local ParkourAnimator = {}
 
+-- ONE manager for the local player's whole lifetime, bound/unbound per life -- the same shape
+-- DefenseClient.lua's own manager uses. Clips registered once at module load under the SAME keys
+-- STATE_CLIPS/VARIANT_CLIPS below already use, so resolveKey's output can be handed to SetClaim
+-- directly with no second name mapping to keep in sync.
+local manager = AnimationManager.new({ Name = "ParkourAnimator" })
+manager:RegisterMany(IDS)
+
+-- This module's own exclusive slot on the body and its one claim source. A dedicated layer rather
+-- than sharing one with anything else -- see this file's header on why "Locomotion" does not exist
+-- yet: CombatAnimator has not migrated, so there is nothing today for "Parkour" to arbitrate against
+-- except itself.
+local PARKOUR_LAYER = "Parkour"
+local PARKOUR_SOURCE = "Parkour"
+
 -- Client/Loading/AssetPreloader.lua's boot-time preload pass gets RAW CONTENT-ID STRINGS from this
 -- module, not pre-built Animation instances -- deliberately unlike CombatAnimator/FlightAnimator/
 -- EmoteAnimator's own GetPreloadInstances(), which hand back the very template instances they
--- already keep.
---
--- Those three build their templates once at module load, so exposing them costs nothing. This module
--- has no template table to expose: getTrack() below builds each Animation lazily on first use, for a
--- documented reason (see its own header -- most lives never touch most of these clips, so a respawn
--- stays cheap). Returning instances here would mean constructing all twenty eagerly and throwing
--- that reasoning away just to satisfy the preloader.
+-- already keep. AnimationManager pools its own template Instances internally and does not hand them
+-- out (the same reason DefenseClient.GetPreloadInstances also returns raw ids), so ids are the only
+-- thing this module has to preload with.
 --
 -- A raw id string is a first-class manifest entry -- ContentProvider:PreloadAsync takes content ids
 -- directly, and AssetPreloader's own dedupe keys a string as itself -- so this warms the exact same
@@ -70,17 +99,8 @@ local ParkourAnimator = {}
 -- WHY IT MATTERS: without this, every parkour clip cold-loaded on FIRST USE -- i.e. mid-vault,
 -- mid-wall-run, mid-ledge-grab. That is the worst possible moment to pay a fetch, and it was the
 -- single largest gap in the manifest (twenty slots, eight ids the manifest never otherwise saw).
---
--- Empty-id slots are skipped, the same "" convention every other provider applies. Dedupe is left to
--- AssetPreloader (several slots deliberately share one placeholder id).
 function ParkourAnimator.GetPreloadInstances(): { string }
-	local ids: { string } = {}
-	for _, assetId in pairs(IDS) do
-		if assetId ~= "" then
-			table.insert(ids, assetId)
-		end
-	end
-	return ids
+	return manager:GetPreloadIds()
 end
 
 -- BLEND TIMES ARE PER CLIP, and every entry in both maps below states which of the three profiles it
@@ -239,113 +259,14 @@ local VARIANT_CLIPS: {
 		},
 	}
 
-local animator: Animator? = nil
-local tracks: { [string]: AnimationTrack } = {}
-local activeTrack: AnimationTrack? = nil
-local activeKey: string? = nil
--- The OUTGOING clip's own fade-out, remembered so stopActive can honor it. It has to be a property of
--- the clip being stopped rather than of the one starting -- a wall-jump leaves slowly whatever replaces
--- it -- and by the time stopActive runs, the entry it came from is out of scope.
-local activeFadeOut = ANIMATION.FadeOutSeconds
 -- Last speed SetMotion was told about, so a clip that scales with speed can be STARTED at the right
 -- cadence instead of playing its first frames at 1x and being corrected a frame later. That correction
 -- is small and constant, which is exactly the kind of thing that reads as the animation not being
 -- attached to the movement.
 local lastPlanarSpeed = 0
--- Declared up here rather than beside SetMotion (its only reader) because protectedTrackCall below
--- has to be able to clear it when it de-activates a failing track.
+-- Whether the CURRENTLY CLAIMED clip scales with speed, so SetMotion knows whether this frame's speed
+-- feed means anything. Set by OnStateChanged, alongside the claim itself.
 local currentScalesWithSpeed = false
-
--- Runs one AnimationTrack operation such that it CANNOT take the movement frame down with it.
---
--- This is load-bearing, not defensive habit. Every entry point in this module is called from inside
--- ParkourController.step, which runs under a single pcall whose failure handler calls
--- ParkourMotor.Release() -- and Release destroys the LinearVelocity rig that a Velocity-driven state
--- is being driven by. So an error thrown by a track operation does not merely lose a clip: it drops
--- the character's motor on the floor, and if the throw repeats every frame the state is never able to
--- drive the body at all.
---
--- Sliding and wall-running are the sharp edges, because they are the only two clips with
--- ScalesWithSpeed = true (Sliding via STATE_CLIPS, WallRunning via VARIANT_CLIPS). SetMotion returns
--- immediately for every other state, so those two are the cases where a track operation runs on EVERY
--- frame of the action rather than once at the transition -- which turns "the animation does not play"
--- into "the slide does not move you," with nothing on screen connecting the two.
---
--- A failing track is dropped from the cache and de-activated rather than retried: whatever is wrong
--- with it will still be wrong next frame, and the module's contract is that a bad asset costs one
--- warning and no clip -- never movement.
-local function protectedTrackCall<T...>(key: string, what: string, operation: (T...) -> (), ...: T...): boolean
-	local ok, errorMessage = pcall(operation, ...)
-	if ok then
-		return true
-	end
-	logger:warn(
-		"Parkour animation operation failed -- dropping the clip, movement continues",
-		{ key = key, operation = what, errorMessage = tostring(errorMessage) }
-	)
-	tracks[key] = nil
-	if activeKey == key then
-		activeTrack = nil
-		activeKey = nil
-		activeFadeOut = ANIMATION.FadeOutSeconds
-		currentScalesWithSpeed = false
-	end
-	return false
-end
-
--- Loads (and caches) the track for a clip key. Loading lazily rather than preloading the whole set at
--- bind time keeps a respawn cheap -- most lives never touch most of these clips -- and every failure
--- path returns nil so a bad asset id costs one warning rather than breaking movement.
-local function getTrack(key: string): AnimationTrack?
-	local existing = tracks[key]
-	if existing then
-		return existing
-	end
-	local currentAnimator = animator
-	if not currentAnimator then
-		return nil
-	end
-	local assetId = IDS[key]
-	if not assetId or assetId == "" then
-		return nil
-	end
-
-	local animation = Instance.new("Animation")
-	animation.Name = `Parkour_{key}`
-	animation.AnimationId = assetId
-
-	local ok, trackOrError = pcall(function()
-		return currentAnimator:LoadAnimation(animation)
-	end)
-	if not ok then
-		logger:warn("Failed to load parkour animation", { key = key, errorMessage = tostring(trackOrError) })
-		return nil
-	end
-	local track = trackOrError :: AnimationTrack
-	tracks[key] = track
-	-- Setting Priority is itself a property write on a possibly-broken track, so it goes through the
-	-- same protection as Play/Stop/AdjustSpeed rather than sitting unguarded between two pcalls.
-	if not protectedTrackCall(key, "SetPriority", function()
-		track.Priority = ANIMATION.Priority
-	end) then
-		return nil
-	end
-	return track
-end
-
-local function stopActive(): ()
-	local track = activeTrack
-	local key = activeKey
-	local fadeOut = activeFadeOut
-	if track and key then
-		protectedTrackCall(key, "Stop", function()
-			track:Stop(fadeOut)
-		end)
-	end
-	activeTrack = nil
-	activeKey = nil
-	activeFadeOut = ANIMATION.FadeOutSeconds
-end
 
 -- Resolves which clip key a state should be playing, given its variant. Returns nil for a state with
 -- no clip of its own, which is the common case (see STATE_CLIPS' own note).
@@ -387,37 +308,23 @@ local function resolveKey(stateId: MovementStateId, variant: string?): (string?,
 	return nil, false, false, ANIMATION.FadeInSeconds, ANIMATION.FadeOutSeconds
 end
 
--- Called on every state transition. Stops whatever was playing and starts whatever the new state
--- wants, or nothing.
+-- Called on every state transition. Pushes this module's claim to match whatever the new state wants,
+-- or clears it for a state with no clip. AnimationManager.SetClaim/resolveLayer own the crossfade
+-- (Clear retires the outgoing entry with its OWN fade-out before the new claim starts -- see
+-- AnimationManager.lua's `retire`/`start`), the same "outgoing clip leaves at its own pace" behavior
+-- this module used to implement by hand via activeFadeOut.
 function ParkourAnimator.OnStateChanged(_previous: MovementStateId, next: MovementStateId, variant: string?): ()
 	local key, looped, scalesWithSpeed, fadeIn, fadeOut = resolveKey(next, variant)
-	if key == activeKey then
-		return
-	end
-	-- Stopped BEFORE the new one plays, which is what makes this a crossfade rather than a cut:
-	-- AnimationTrack:Stop with a fade keeps the outgoing clip playing at falling weight, so for the
-	-- length of the two fades both clips are live and the character blends between them. The outgoing
-	-- clip's OWN fade-out governs (activeFadeOut, captured when it started) -- a wall-jump leaves slowly
-	-- whatever replaces it, and a fall loop leaves at its own pace whatever it hands to.
-	stopActive()
 	currentScalesWithSpeed = scalesWithSpeed
 	if not key then
+		manager:Clear(PARKOUR_LAYER, PARKOUR_SOURCE)
 		return
 	end
-	local track = getTrack(key)
-	if not track then
-		return
-	end
-	-- Activated BEFORE the play attempt so protectedTrackCall can find and clear it if the play throws
-	-- -- otherwise a failed clip would be left marked active and SetMotion would keep poking it every
-	-- frame, which is precisely the per-frame failure this protection exists to stop.
-	activeTrack = track
-	activeKey = key
-	activeFadeOut = fadeOut
 	-- Started AT the right playback speed rather than at 1x and corrected on the next frame. The
 	-- correction was a visible hitch at the start of every slide and wall-run: the clip's opening frames
 	-- played at the wrong cadence and then jumped, which reads as the animation being bolted on rather
-	-- than driven by the movement.
+	-- than driven by the movement. Passed as the claim's own Speed -- AnimationManager.start reads it
+	-- straight into track:Play's own speed argument.
 	local playbackSpeed = if scalesWithSpeed
 		then ParkourMath.PlaybackSpeed(
 			lastPlanarSpeed,
@@ -426,10 +333,14 @@ function ParkourAnimator.OnStateChanged(_previous: MovementStateId, next: Moveme
 			ANIMATION.MaxPlaybackSpeed
 		)
 		else 1
-	protectedTrackCall(key, "Play", function()
-		track.Looped = looped
-		track:Play(fadeIn, 1, playbackSpeed)
-	end)
+	manager:SetClaim(PARKOUR_LAYER, PARKOUR_SOURCE, {
+		Clip = key,
+		Looped = looped,
+		FadeIn = fadeIn,
+		FadeOut = fadeOut,
+		Priority = ANIMATION.Priority,
+		Speed = playbackSpeed,
+	})
 end
 
 -- Per-frame speed feed, so a looping movement clip plays at a cadence that matches how fast the
@@ -444,49 +355,42 @@ function ParkourAnimator.SetMotion(planarSpeed: number): ()
 	if not currentScalesWithSpeed then
 		return
 	end
-	local track = activeTrack
-	local key = activeKey
-	if not track or not key then
-		return
-	end
 	local speed = ParkourMath.PlaybackSpeed(
 		planarSpeed,
 		ANIMATION.SpeedScaleReferenceSpeed,
 		ANIMATION.MinPlaybackSpeed,
 		ANIMATION.MaxPlaybackSpeed
 	)
-	-- The one track operation that runs EVERY frame rather than once per transition, and therefore the
-	-- one where an unprotected throw stops being a lost animation and becomes lost movement. See
-	-- protectedTrackCall's own header.
-	protectedTrackCall(key, "AdjustSpeed", function()
-		track:AdjustSpeed(speed)
-	end)
+	-- The one call that runs EVERY frame rather than once per transition. AnimationManager.SetSpeed is
+	-- itself pcall-protected against a broken track (see its own header on why ParkourController.step's
+	-- surrounding pcall makes that load-bearing rather than defensive habit), and no-ops cleanly when
+	-- this layer currently has nothing active -- a stale speed feed left over from a transition frame
+	-- cannot poke a track that no longer exists.
+	manager:SetSpeed(PARKOUR_LAYER, speed)
 end
 
--- Rebuilds against a fresh character's Animator. Tracks from the previous life die with that
--- character's Animator, so the cache is dropped wholesale rather than reused.
+-- Rebuilds against a fresh character's Animator (AnimationManager.Bind resolves it internally --
+-- Client/AnimatorUtil.lua's lookup is no longer this module's own concern). Bind() ends the previous
+-- life's claims/tracks itself (Unbind() runs first thing inside it), so nothing here needs a separate
+-- reset beyond this module's own local speed-scaling flag.
 function ParkourAnimator.BindCharacter(character: Model): ()
-	stopActive()
-	tracks = {}
 	currentScalesWithSpeed = false
-	animator = AnimatorUtil.GetOrCreateAnimator(character)
-	if not animator then
-		logger:warn("BindCharacter: no Humanoid/Animator available", { character = character.Name })
-	end
+	manager:Bind(character)
 end
 
--- Hard stop, for character teardown or the framework being switched off. Distinct from
--- OnStateChanged(x, "Idle") because there may be no state to change to -- the character may already
--- be gone.
+-- Hard stop, for the framework being switched off mid-life. Distinct from Unbind: the character (and
+-- its Animator) are still alive, only this module's own claim needs to go, so this drops the layer
+-- rather than tearing down the whole manager.
 function ParkourAnimator.Reset(): ()
-	stopActive()
+	manager:ClearLayer(PARKOUR_LAYER)
 	currentScalesWithSpeed = false
 end
 
+-- Hard stop for character teardown, distinct from Reset above: the character (and its Animator) are
+-- going away too, so every track this manager holds is stopped and destroyed, not just this layer's.
 function ParkourAnimator.Unbind(): ()
-	ParkourAnimator.Reset()
-	tracks = {}
-	animator = nil
+	manager:Unbind()
+	currentScalesWithSpeed = false
 end
 
 return ParkourAnimator

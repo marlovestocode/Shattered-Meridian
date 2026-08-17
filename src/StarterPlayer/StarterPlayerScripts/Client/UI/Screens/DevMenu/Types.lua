@@ -97,11 +97,9 @@ export type SidebarHandle = {
 	-- All five fire the row's UserId.
 	KickPlayerRequested: RBXScriptSignal<number>,
 	BanPlayerRequested: RBXScriptSignal<number>,
-	-- Irreversible -- wipes the target's SAVED progression data, not their live combat state (see
-	-- ResetPlayerCombatStateRequested below for that one). Same "fires the row's UserId only, no
+	-- Irreversible -- wipes the target's SAVED progression data. Same "fires the row's UserId only, no
 	-- reason text" shape as KickPlayerRequested/BanPlayerRequested.
 	ResetPlayerDataRequested: RBXScriptSignal<number>,
-	ResetPlayerCombatStateRequested: RBXScriptSignal<number>,
 	TeleportToPlayerRequested: RBXScriptSignal<number>,
 	-- Fires (UserId, enabled) -- enabled is the OPPOSITE of that row's current Muted display, the
 	-- same "screen computes the real state flip, never tracks its own separate toggle" pattern
@@ -130,20 +128,17 @@ export type ContentAreaHandle = {
 	-- stacked, only one Visible at a time), sized and positioned by init.lua's own Body row layout.
 	Root: Frame,
 
-	-- "Self" or the resolved lock-on target's name -- mirrors DevMenuSystem.resolveActionTarget's
-	-- own resolution exactly (see DevMenuClient.lua's watchTarget), so an admin always knows who
-	-- Set Health/Godmode/Flight is about to hit before pressing it. Read by init.lua's own Header.
+	-- "Self" -- mirrors DevMenuSystem.resolveActionTarget's own resolution exactly (see
+	-- DevMenuClient.lua's watchTarget), so an admin always knows who Godmode/Flight is about to hit
+	-- before pressing it. Read by init.lua's own Header.
 	TargetNameDisplay: Fusion.Value<string>,
 	GodmodeActive: Fusion.Value<boolean>,
 	FlightActive: Fusion.Value<boolean>,
 	CollideActive: Fusion.Value<boolean>,
-	SpawnDummyRequested: RBXScriptSignal,
-	SpawnBotRequested: RBXScriptSignal<string>,
 	-- One-shot test trigger for the Emote System's roll path (DevMenu_RollEmote, always against the
-	-- "RareEmotes" pool -- see DevMenuSystem.handleRollEmote). No payload, same fire-and-forget shape
-	-- as SpawnDummyRequested above -- there is still no client-facing way to roll an arbitrary pool.
+	-- "RareEmotes" pool -- see DevMenuSystem.handleRollEmote). No payload, fire-and-forget -- there is
+	-- still no client-facing way to roll an arbitrary pool.
 	RollRareEmoteRequested: RBXScriptSignal,
-	SetHealthRequested: RBXScriptSignal<number>,
 	SetGodmodeRequested: RBXScriptSignal<boolean>,
 	SetFlightRequested: RBXScriptSignal<boolean>,
 	SetFlightCollideRequested: RBXScriptSignal<boolean>,
@@ -185,18 +180,12 @@ export type ContentAreaHandle = {
 	InstantRestartServerRequested: RBXScriptSignal,
 	-- Passive "a newer version has been published" banner (DevMenu_GetServerVersionInfo,
 	-- Server/Systems/VersionWatchSystem.lua) -- fetched once on DevMenuClient.Start(), same
-	-- fetch-once contract as HitboxDebugActive below. Already-formatted text (this screen's own
-	-- "already-computed value in, presentation out" rule) -- nil means "nothing to show," both
-	-- before the fetch resolves and for the ordinary case where no newer version exists.
+	-- fetch-once contract as BugReportOpenCount/SuspectedCheaterCount above. Already-formatted text
+	-- (this screen's own "already-computed value in, presentation out" rule) -- nil means "nothing to
+	-- show," both before the fetch resolves and for the ordinary case where no newer version exists.
 	VersionBannerText: Fusion.Value<string?>,
 	SpectatingActive: Fusion.Value<boolean>,
 	SpectateLockedTargetRequested: RBXScriptSignal,
-	-- Runtime hitbox-visualization toggle (Server/Combat/HitboxDebugState.lua) -- server-wide, not
-	-- per-target, so unlike Godmode/Flight/Frozen/Invisible above this isn't watched via a Humanoid
-	-- Attribute; DevMenuClient.lua fetches it once (DevMenu_GetHitboxDebug) on Start(), same
-	-- fetch-once contract as BugReportOpenCount/SuspectedCheaterCount above.
-	HitboxDebugActive: Fusion.Value<boolean>,
-	SetHitboxDebugRequested: RBXScriptSignal<boolean>,
 }
 
 return {}

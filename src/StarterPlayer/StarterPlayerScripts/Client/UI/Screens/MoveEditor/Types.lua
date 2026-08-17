@@ -65,12 +65,15 @@ export type MoveEditorHandle = {
 	-- being created yet. This is the SAME Fusion.Value both panels render from, so they can never
 	-- drift out of sync with each other.
 	Draft: Fusion.Value<MoveTypes.MoveDefinition?>,
+	-- "Test on Dummy" (TestFireMove/SpawnPreviewDummy, and the Combat_FeedbackEvent listener that used
+	-- to append to TestSamples below) was removed alongside the rest of the combat system -- there is
+	-- no server-side handler left to fire a move at a dummy with. LastTestResultText/TestSamples stay
+	-- part of this handle (StatsPanel.lua still reads them as pure display), they just never receive a
+	-- new value anymore.
 	LastTestResultText: Fusion.Value<string>,
-	-- Every hit observed since the last test-fire, appended by MoveEditorClient.lua from the same
-	-- Combat_FeedbackEvent payloads that already drive LastTestResultText above, and read by
-	-- StatsPanel.lua as the OBSERVED series it plots against the move's own computed one. A plain
-	-- accumulating array rather than a rolling window: a test fire is a deliberate, bounded action, and
-	-- the panel's own "Clear" button is what resets it -- see StatsPanel's own header.
+	-- Read by StatsPanel.lua as the OBSERVED series it plots against the move's own computed one. A
+	-- plain accumulating array rather than a rolling window: a test fire is a deliberate, bounded
+	-- action, and the panel's own "Clear" button is what resets it -- see StatsPanel's own header.
 	TestSamples: Fusion.Value<{ MoveStats.TestSample }>,
 
 	NewMoveRequested: RBXScriptSignal,
@@ -81,7 +84,6 @@ export type MoveEditorHandle = {
 	-- (UpdateDraft/SaveMove both take a full MoveDefinition), so this mirrors that instead of
 	-- exposing one signal per field.
 	DraftFieldChanged: RBXScriptSignal<MoveTypes.MoveDefinition>,
-	TestFireRequested: RBXScriptSignal,
 	SaveRequested: RBXScriptSignal,
 	-- Fired by PropertyEditor.lua's toolbar when the current Draft's Category == "Default" (in place
 	-- of SaveRequested, which its toolbar hides for a Default move -- see that file's own header) --

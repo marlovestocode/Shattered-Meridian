@@ -267,6 +267,25 @@ function ParkourMath.WallTangent(wallNormal: Vector3, travelDirection: Vector3):
 	return if tangent:Dot(flatTravel.Unit) >= 0 then tangent else -tangent
 end
 
+-- The horizontal unit vector along a wall, STABLE regardless of which way the character is travelling
+-- -- the raw half of the cross product WallTangent above flips by travel agreement. Two different
+-- questions want two different answers here: a wall-RUN needs "which way am I already going" (that's
+-- WallTangent), where a ledge SHIMMY needs "which way is left and which is right, independent of
+-- anything the character happens to be doing this frame" -- a player who reverses direction mid-shimmy
+-- must not have left and right swap on them. Same degenerate-input contract as WallTangent (the zero
+-- vector for a horizontal "wall", i.e. a floor or ceiling).
+function ParkourMath.WallRight(wallNormal: Vector3): Vector3
+	local flatNormal = ParkourMath.Flatten(wallNormal)
+	if flatNormal.Magnitude < ZERO_EPSILON then
+		return Vector3.zero
+	end
+	local tangent = UP:Cross(flatNormal.Unit)
+	if tangent.Magnitude < ZERO_EPSILON then
+		return Vector3.zero
+	end
+	return tangent.Unit
+end
+
 -- Angle (degrees, 0-180) between the direction of travel and a wall's tangent. Small means running
 -- ALONG the wall (a legal wall-run entry); large means running INTO it (not a wall-run, possibly a
 -- vault or a mantle). Returns 180 -- maximally disqualifying -- for a degenerate tangent, so a

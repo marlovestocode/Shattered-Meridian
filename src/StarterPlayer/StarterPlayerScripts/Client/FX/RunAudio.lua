@@ -10,7 +10,7 @@
 
 	Three sounds, and the split between them is the point:
 	  * RunStepStage1 / RunStepStage2 -- one shot per footfall, at whichever stage is engaged.
-	  * RunStage2Onset -- one shot at the INSTANT the second stage engages, never repeated.
+	  * RunStage<n>Onset -- one shot at the INSTANT stage n engages, never repeated. No stage 1 entry.
 
 	That split is what solves the "my stage-2 file opens with a speed whoosh and then continues into
 	footsteps" problem. Registered as two independent names pointing at the same asset with different
@@ -18,7 +18,7 @@
 	plays per footfall -- with the engine doing the trimming (Sound.PlaybackRegion), not a stop timer.
 	Point them at two separate assets instead and nothing here changes; the region is optional.
 
-	Pitch jitter (Constants.Run.Footsteps.Stage1/Stage2.PitchJitter) is applied per play rather than
+	Pitch jitter (Constants.Run.Footsteps.Stages[n].PitchJitter) is applied per play rather than
 	baked into the registration, because a fixed-interval step system replaying one identical sample
 	is instantly recognizable as a metronome. It's a few percent -- enough to break the pattern, not
 	enough to read as a different surface.
@@ -42,21 +42,30 @@ local RunAudio = {}
 
 local RUN_CONFIG = Constants.Run
 
-local STEP_SOUND_NAMES = { [1] = "RunStepStage1", [2] = "RunStepStage2" }
-local STAGE2_ONSET_SOUND_NAME = "RunStage2Onset"
+-- DERIVED FROM THE CONFIG, not hand-listed alongside it. Both tables used to be literal maps naming
+-- stage 1 and stage 2, which meant adding a third gear was an edit here as well as in Constants --
+-- and an edit that, if forgotten, fails silently as a stage with no sound rather than loudly as an
+-- error. Building the names by iterating Constants.Run.Footsteps.Stages makes the config the single
+-- place a stage exists.
+local STEP_SOUND_NAMES: { [number]: string } = {}
+local STEP_PITCH_JITTER: { [number]: number } = {}
+local ONSET_SOUND_NAMES: { [number]: string } = {}
 
 -- Registered at load, exactly like FlightAudio's own set -- registration is what puts these in
 -- SoundManager.GetPreloadInstances, which Client/Loading/AssetPreloader.lua sweeps at boot so the
 -- first footstep of a session doesn't pay CDN streaming latency mid-stride.
-SoundManager.Register(STEP_SOUND_NAMES[1], RUN_CONFIG.Footsteps.Stage1.Sound)
-SoundManager.Register(STEP_SOUND_NAMES[2], RUN_CONFIG.Footsteps.Stage2.Sound)
-SoundManager.Register(STAGE2_ONSET_SOUND_NAME, RUN_CONFIG.Stage2Onset.Sound)
+for stage, config in RUN_CONFIG.Footsteps.Stages do
+	local name = `RunStepStage{stage}`
+	STEP_SOUND_NAMES[stage] = name
+	STEP_PITCH_JITTER[stage] = config.PitchJitter
+	SoundManager.Register(name, config.Sound)
+end
 
--- Per-stage jitter fraction, read once rather than per step -- these are static config.
-local STEP_PITCH_JITTER = {
-	[1] = RUN_CONFIG.Footsteps.Stage1.PitchJitter,
-	[2] = RUN_CONFIG.Footsteps.Stage2.PitchJitter,
-}
+for stage, config in RUN_CONFIG.StageOnset do
+	local name = `RunStage{stage}Onset`
+	ONSET_SOUND_NAMES[stage] = name
+	SoundManager.Register(name, config.Sound)
+end
 
 -- One shared generator rather than math.random's global state, so footstep jitter can never perturb
 -- an unrelated caller's random sequence (or be perturbed by one) -- the same isolation reason
@@ -76,10 +85,21 @@ function RunAudio.PlayStep(stage: number): ()
 	SoundManager.Play(name, playbackSpeed)
 end
 
--- The gear-change kick. Called exactly once per stage-1 -> stage-2 transition by RunController; this
--- module does no transition detection of its own.
-function RunAudio.PlayStage2Onset(): ()
-	SoundManager.Play(STAGE2_ONSET_SOUND_NAME)
+-- The gear-change kick for the stage being ENTERED. Called exactly once per upward stage transition
+-- by RunController; this module does no transition detection of its own.
+--
+-- Silent for a stage with no authored onset rather than falling back to another stage's. That is the
+-- opposite of PlayStep's fallback above, and deliberately: a missing footstep is a hole in a
+-- continuous texture and any step is better than none, where a missing onset is a one-shot that simply
+-- should not fire -- stage 1 has no onset at all by design (see Constants.Run.StageOnset's header),
+-- and borrowing stage 2's whoosh for it would fire a gear-change sound every time a player tapped the
+-- run key.
+function RunAudio.PlayStageOnset(stage: number): ()
+	local name = ONSET_SOUND_NAMES[stage]
+	if not name then
+		return
+	end
+	SoundManager.Play(name)
 end
 
 -- Cuts every run sound currently playing -- called by RunController the moment the run genuinely ends
@@ -94,15 +114,18 @@ end
 -- (SoundDefinition.PlaybackRegion) is the real fix for that; this is the guarantee that holds
 -- regardless of what asset someone points these names at.
 function RunAudio.StopRunSounds(): ()
-	SoundManager.StopAll(STEP_SOUND_NAMES[1])
-	SoundManager.StopAll(STEP_SOUND_NAMES[2])
-	-- The onset whoosh too: it announces entering full stride, so it has nothing to say once the run
-	-- is over.
-	SoundManager.StopAll(STAGE2_ONSET_SOUND_NAME)
+	for _, name in STEP_SOUND_NAMES do
+		SoundManager.StopAll(name)
+	end
+	-- The onset whooshes too: each announces entering a gear, so none of them has anything to say once
+	-- the run is over.
+	for _, name in ONSET_SOUND_NAMES do
+		SoundManager.StopAll(name)
+	end
 end
 
 -- Runtime swap for either stage's step sound, so step audio can be changed without an edit-and-
--- rejoin cycle (Constants.Run.Footsteps.Stage1/Stage2.Sound remains the shipped default and the
+-- rejoin cycle (Constants.Run.Footsteps.Stages[n].Sound remains the shipped default and the
 -- thing to edit for a permanent change). Routed through SoundManager.Reconfigure rather than
 -- Register so the existing pooled instances are repointed instead of orphaned -- see that function's
 -- own header.
@@ -116,10 +139,15 @@ function RunAudio.SetStepSound(stage: number, definition: Constants.SoundDefinit
 	logger:info("Run step sound changed", { stage = stage, soundId = definition.SoundId })
 end
 
--- Same, for the stage-2 onset whoosh.
-function RunAudio.SetStage2OnsetSound(definition: Constants.SoundDefinition): ()
-	SoundManager.Reconfigure(STAGE2_ONSET_SOUND_NAME, definition)
-	logger:info("Run stage-2 onset sound changed", { soundId = definition.SoundId })
+-- Same, for a given stage's onset whoosh.
+function RunAudio.SetStageOnsetSound(stage: number, definition: Constants.SoundDefinition): ()
+	local name = ONSET_SOUND_NAMES[stage]
+	if not name then
+		logger:warn("SetStageOnsetSound called with a stage that has no onset", { stage = stage })
+		return
+	end
+	SoundManager.Reconfigure(name, definition)
+	logger:info("Run stage onset sound changed", { stage = stage, soundId = definition.SoundId })
 end
 
 -- Silences Roblox's own stock "Running" Sound on a freshly-bound character.

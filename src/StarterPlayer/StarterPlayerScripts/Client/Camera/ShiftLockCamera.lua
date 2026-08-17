@@ -326,7 +326,23 @@ local function onCharacterAdded(character: Model): ()
 	-- can land this bind after the motor has already taken the new character.
 	parkourFacingOwned = humanoidInstance:GetAttribute(Constants.Attributes.ParkourFacingOwned) == true
 	humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.ParkourFacingOwned):Connect(function()
-		parkourFacingOwned = humanoidInstance:GetAttribute(Constants.Attributes.ParkourFacingOwned) == true
+		local nowOwned = humanoidInstance:GetAttribute(Constants.Attributes.ParkourFacingOwned) == true
+		parkourFacingOwned = nowOwned
+		-- Parkour just handed rotation back. ParkourMotor.restoreRestorables writes Humanoid.AutoRotate
+		-- back to whatever it captured at the MOMENT parkour first took ownership -- but if this player
+		-- toggled shift lock at any point DURING that traversal, setEngaged (below) already wrote a
+		-- newer AutoRotate underneath it that the capture never saw, and the restore just clobbered that
+		-- with the stale one. The failure mode is exactly "stops turning to face movement": disengaging
+		-- shift lock mid-traversal restores AutoRotate to the shift-locked `false` it captured, and with
+		-- `engaged` now false this module's own per-frame yaw write (below) is ALSO not running to
+		-- compensate -- so nothing rotates the character at all until the next parkour move happens to
+		-- fix it by accident. Reasserting here, from the CURRENT `engaged` rather than a snapshot, is
+		-- what keeps the two independent capture/restore systems from being able to disagree. Skipped
+		-- while something else legitimately owns the body (root-control lock, flight), same guard as the
+		-- per-frame yaw write below -- this module has no business asserting AutoRotate over either.
+		if not nowOwned and not rootControlLocked and not flying then
+			humanoidInstance.AutoRotate = not engaged
+		end
 	end)
 
 	logger:debug("Character bound", { enabled = enabled, rootControlLocked = rootControlLocked })

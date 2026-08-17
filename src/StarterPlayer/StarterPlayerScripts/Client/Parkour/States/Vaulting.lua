@@ -9,11 +9,13 @@
 
 	WHY KINEMATIC. A vault has to end on the far side of the thing it claimed it would clear. Driving
 	it with velocity and hoping the arc works out fails in exactly the cases players notice -- clipping
-	the lip, landing on top instead of past, catching a corner -- so the root is anchored and CFrame-
-	driven along a quadratic Bezier whose control point sits above the obstacle's top edge. The result
-	is an arc that is guaranteed to clear, at the cost of a few hundred milliseconds where physics does
-	not apply. ParkourMotor.Apply's own header covers the anchoring technique and its precedent in this
-	codebase.
+	the lip, landing on top instead of past, catching a corner -- so the root is driven by a rigid
+	(RigidityEnabled = true) AlignPosition along a quadratic Bezier whose control point sits above the
+	obstacle's top edge. The result is an arc that is guaranteed to clear, at the cost of a few hundred
+	milliseconds where ordinary collision response does not apply to the ROOT's own position (the rig
+	stays unanchored and real physics still applies to everything else, which is what lets this
+	traversal replicate to other clients the same way ordinary walking does). ParkourMotor.Apply's own
+	header covers the rigid-constraint technique and why it replaced an anchored CFrame write.
 
 	Committed, so nothing can steal the character mid-traversal. The one thing that CAN cut it short is
 	the framework itself handing the body to combat (ParkourController checks that before the machine

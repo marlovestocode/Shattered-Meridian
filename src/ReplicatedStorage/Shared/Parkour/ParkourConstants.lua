@@ -50,21 +50,21 @@ ParkourConstants.Enabled = true
 ParkourConstants.Locomotion = {
 	WalkSpeed = 18,
 	SprintSpeed = 27,
-	-- The SECOND run stage's speed (Constants.Combat.SprintStage2SpeedMultiplier 2.0 x the same
-	-- effective base 18), reached after Constants.Combat.SprintStage2ThresholdSeconds of unbroken
-	-- running -- see that constant's own header for why a sustained tier this fast is safe.
+	-- THERE IS DELIBERATELY NO PER-STAGE SPEED HERE any more. SprintStage2Speed used to sit at this
+	-- spot, hand-kept in agreement with the server's own multiplier -- which meant the run ladder's size
+	-- was baked into this file as well as into the resolver, and a third gear needed a fourth constant.
 	--
-	-- Mirrored here for the same reason SprintSpeed above is: the framework's own target-speed
-	-- reporting (States/StateSupport.GroundTargetSpeed) has to agree with what the server's WalkSpeed
-	-- resolver is actually granting, or the debug overlay and every future consumer of DesiredSpeed
-	-- describe a run that isn't happening. Retune Constants.Combat's multiplier and this moves with it.
+	-- States/StateSupport.GroundTargetSpeed now multiplies WalkSpeed above by
+	-- Shared/Run/RunLadder.SpeedMultiplier(stage), which is the SAME function the server resolves
+	-- WalkSpeed through -- so the framework's belief about ground speed cannot drift from what is
+	-- actually being granted, and adding a gear is a change to Shared/Run/RunConstants.lua alone.
 	--
 	-- Everything downstream that keys off momentum -- the slide's entry speed, the wall-run's minimum,
-	-- the vault's speed floor -- becomes easier to reach at this speed, which is intended: reaching
-	-- full stride SHOULD open up the traversal moves. Nothing needed retuning for it, because every
-	-- one of those thresholds is a MINIMUM, and the validator's own ceilings (Validation.
-	-- MaxReportedSpeed 110, MaxTravelSpeed 140) sit far above even a stage-2 downhill slide.
-	SprintStage2Speed = 36,
+	-- the vault's speed floor -- becomes easier to reach at the upper gears, which is intended: reaching
+	-- full stride SHOULD open up the traversal moves. Every one of those thresholds is a MINIMUM, so
+	-- none of them needed retuning. The validator's ceilings DID -- see Validation.MaxReportedSpeed's
+	-- own header for why a 110 sized against a 36-stud top gear becomes a live reject risk against an
+	-- 81-stud one.
 
 	-- How fast momentum climbs toward the target speed on the ground. Deliberately high enough that
 	-- a standing start still feels immediate (0 -> 27 in ~0.32s) -- the "extremely responsive" bar
@@ -290,6 +290,26 @@ ParkourConstants.Leap = {
 	-- States/Leaping.CanEnter additionally requires the character to have touched the ground since the
 	-- last one -- together those are what keep it from being a flight system.
 	CooldownSeconds = 0.9,
+}
+
+-- Ledge-to-ledge leap: the search geometry for States/LedgeLeaping.lua, taken from States/
+-- LedgeHanging.lua's Update on a directional jump press while hanging. A composite move -- the launch
+-- itself is solved with THESE SAME Leap numbers above (ApexClearance/ReachMargin/MinUpSpeed/
+-- MaxUpSpeed/MaxPlanarSpeed), not a parallel set, so it flies with the same feel as the ordinary leap;
+-- only the SEARCH that finds a target of its own is distinct, because it is hunting for a grabbable
+-- edge rather than any old surface -- see EnvironmentProbe.FindLedgeLeapTarget's own header for why
+-- that search is simpler than FindLeapTarget's.
+ParkourConstants.LedgeLeap = {
+	-- Shorter reach than the ordinary leap's 96/12: this is a targeted move between two known holds,
+	-- not a cross-the-courtyard traversal, and a shorter range keeps the search cheap enough to run
+	-- from a held pose every time the player presses jump with a direction held, rather than only on a
+	-- double tap.
+	MaxRange = 40,
+	MinRange = 4,
+	-- Fewer samples than FindLeapTarget's 5: this search has no floor-cast/headroom/own-footing
+	-- machinery to also pay for, so each sample is a single resolveLedgeAt call rather than two casts,
+	-- and the search can afford to look at a comparable density over a shorter range for less budget.
+	RangeSamples = 4,
 }
 
 -- Slide: a momentum CONTINUATION, not a separate scripted move. Entry requires real speed, the
@@ -622,6 +642,31 @@ ParkourConstants.Ledge = {
 	-- -- which is also how jumping at a mantle-height wall stole the mantle and turned it into a grab.
 	-- Same reasoning as WallRun.MinGroundClearance: hanging one stud off the floor is just standing.
 	HangFootClearance = 0.5,
+
+	-- THE SHIMMY: lateral movement along a held ledge (States/LedgeHanging.lua's Update, once the pull-
+	-- in has landed). Deliberately slower than any grounded movement -- a hang is a controlled, effortful
+	-- hold, and a shimmy that raced along at running speed would stop reading as one.
+	ShimmySpeed = 6,
+	-- How far the new wall's normal may diverge from the CURRENT one before a STRAIGHT shimmy step (the
+	-- ordinary case: the wall continues facing the same way) is accepted. Past this, the straight probe
+	-- either found nothing or found a wall that has genuinely turned -- and it is the SECOND case, not
+	-- an error, that ShimmyCornerPeekDegrees below exists to catch.
+	ShimmyMaxNormalDivergenceDegrees = 20,
+	-- THE CLIMB-AROUND: when the straight probe fails, how far around the corner the shimmy peeks
+	-- before giving up. A single wall face's own probe cannot express "the surface continues, just
+	-- facing a new way" -- it can only report found-or-not -- so a real corner and a genuine dead end
+	-- look identical to the straight check above, exactly the same ambiguity States/WallRunning.Update
+	-- resolves for a RUN by re-selecting a wall in the travel direction. A held pose has no travel to
+	-- re-select with, so the equivalent here is a probe cast rotated partway from "straight into the
+	-- wall just held" toward "the direction being shimmied" -- the same diagonal-cast idiom
+	-- EnvironmentProbe.probeWall already uses for a wall approached too near head-on for its own
+	-- straight cast to find.
+	--
+	-- 100 rather than a plain 90 so a slightly-more-than-square exterior corner (the common case for
+	-- authored geometry, which is rarely a mathematically perfect right angle) still peeks far enough
+	-- around to find the new face. Short of 180 on purpose: past that the peek would be searching back
+	-- toward where the character came from, which is not a corner, it is the same wall.
+	ShimmyCornerPeekDegrees = 100,
 }
 
 ParkourConstants.WallRun = {
@@ -761,6 +806,23 @@ ParkourConstants.WallJump = {
 	-- the climb ends when the walls do. This number is the backstop, not the mechanism.
 	MaxChainWithoutGround = 12,
 	MinIntervalSeconds = 0.12,
+	-- HOW FAR THE UNASSISTED KICK MAY BE STEERED off the pure wall-normal push, in degrees, toward
+	-- wherever the player is aiming (facing blended with travel -- see States/WallJumping.Enter's own
+	-- `aim` computation, which this reuses rather than restating).
+	--
+	-- Only the UNASSISTED case ever reads this: an assisted jump already flies a trajectory SOLVED to
+	-- land on a real target, which is a strictly more precise answer to "where is this jump aimed" than
+	-- a direction blend could ever be. This constant exists for the case that solve declines -- open
+	-- air, a cliff edge, a rooftop with nothing in range -- which used to mean the kick's direction was
+	-- ENTIRELY the wall's own normal (plus whatever momentum happened to carry along the wall), no
+	-- matter where the player was looking. A player kicking off a wall while looking thirty degrees to
+	-- one side got launched dead-on regardless.
+	--
+	-- Bounded well short of 90: past a certain angle "steering the kick" stops being a kick and starts
+	-- being a slide along the face, which is what States/WallRunning already owns. 55 keeps the push
+	-- recognizably a push -- always more away-from-the-wall than along-it -- while still being a
+	-- meaningfully different departure than the old fixed-normal one for anyone actually aiming.
+	MaxAimSteerDegrees = 55,
 
 	-- THE ASSIST: what turns a wall-jump from "a push away from this wall" into "a jump AT the next
 	-- surface." On every wall-jump the framework casts a short fan of rays across the open side, ranks
@@ -1153,11 +1215,33 @@ ParkourConstants.Camera = {
 	VaultFOVPunchOutSeconds = 0.09,
 	VaultFOVPunchBackSeconds = 0.24,
 
+	-- MANTLE GETS ITS OWN TREATMENT, deliberately not Vault's punch-and-shake.
+	--
+	-- Both used to fire through the same "next == Vaulting or next == Mantling" branch, on the
+	-- reasoning that both are traversals. But a vault is a LAUNCH -- 0.42s, ends past the obstacle in
+	-- open air -- and a punch-and-recover that front-loads its whole effect into the first quarter
+	-- second is the right shape for that: the camera event and the character event both happen at
+	-- once, right at the start. A mantle is a CLIMB -- 0.55s, spent with the character pressed against
+	-- the wall's face the entire time (see States/Mantling.lua's own Enter comment: "the character
+	-- lifts up the face of the wall") -- so a punch that resolves in under a quarter second leaves the
+	-- camera doing NOTHING for the back half of a motion that is still very much in progress. That
+	-- mismatch -- a discrete camera event front-loaded onto a longer continuous one -- is what reads as
+	-- the camera being disconnected from the climb rather than part of it.
+	--
+	-- So Mantle gets a CONTINUOUS feed instead (ParkourCamera.SetMantleProgress, pushed every frame the
+	-- state is active, the same shape SetSpeed/SetWallSide already use for their own per-frame
+	-- effects), shaped to rise and fall across the climb's own duration rather than snapping once at
+	-- the start. No shake: a controlled pull-up is effort, not impact, and CameraShake's presets are
+	-- reserved for the moments that actually are one (Vault, WallJump, a hard landing, slide-start).
+	MantleClimbFOVDelta = -1.5,
+	MantleClimbFOVEaseSpeed = 5,
+
 	-- Named FOVOffset/CameraOffsetComposer slot keys this feature owns. Named here so no two parkour
 	-- modules can typo the same slot into two slots.
 	SpeedFOVSlot = "ParkourSpeed",
 	SlideFOVSlot = "ParkourSlide",
 	VaultFOVSlot = "ParkourVault",
+	MantleFOVSlot = "ParkourMantle",
 	OffsetSlot = "Parkour",
 }
 
@@ -1315,17 +1399,28 @@ ParkourConstants.Network = {
 -- server's view of it in agreement -- not to prevent all movement exploits, which is not achievable
 -- for a client-authoritative character and would be dishonest to claim.
 ParkourConstants.Validation = {
-	-- Ceiling on any reported planar speed. Must stay comfortably above the fastest legitimate chain --
-	-- which is a slide at Slide.MaxSpeed down a steep face -- or an honest player on a big hill gets
-	-- their own movement rejected. src/Tests/Parkour/StateRegistry.spec.lua asserts the relationship
+	-- Ceiling on any reported planar speed. Must stay comfortably above the fastest legitimate chain or
+	-- an honest player on a big hill gets their own movement rejected -- which the player experiences
+	-- as their character sticking and stuttering, since a rejected Start drops the framework straight
+	-- back to ordinary locomotion. src/Tests/Parkour/StateRegistry.spec.lua asserts the relationship
 	-- rather than leaving it to whoever next retunes the slide to remember.
-	MaxReportedSpeed = 110,
+	--
+	-- RAISED FROM 110 FOR THE THIRD RUN GEAR. There are now two candidates for "fastest legitimate
+	-- claim", not one: a slide at Slide.MaxSpeed (80, unchanged) down a steep face, and simply RUNNING
+	-- at the top gear, which Shared/Run/RunConstants.lua puts at 81 studs per second. Every action
+	-- report carries the framework's live momentum, so a stage-3 runner starting any traversal at all
+	-- now reports a number that used to be reachable only by a committed downhill slide. At 110 the
+	-- margin over an ordinary top-gear run was 1.36x, against the ~3x this constant was written to
+	-- have; 140 restores that headroom against the new ceiling rather than leaving an honest player one
+	-- hill away from the reject path.
+	MaxReportedSpeed = 140,
 	-- Ceiling on vertical gain attributable to a single action.
 	MaxVerticalGainStuds = 24,
 	-- Ceiling on how far a character may have moved between an action's start report and its end
 	-- report, per second of elapsed time. Above MaxReportedSpeed with headroom, since a slide that
-	-- accelerates throughout can legitimately average close to its peak.
-	MaxTravelSpeed = 140,
+	-- accelerates throughout can legitimately average close to its peak. Moved with MaxReportedSpeed
+	-- above so that relationship survives the retune.
+	MaxTravelSpeed = 180,
 	-- An action window can never be claimed longer than this, regardless of kind -- backstop against
 	-- a client claiming a permanent "I own my velocity" window and never ending it.
 	MaxActionSeconds = 8,

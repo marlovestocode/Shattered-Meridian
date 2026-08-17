@@ -523,14 +523,20 @@ export type SlidePerformedPayload = {
 	DurationSeconds: number,
 }
 
--- Sent to the acting player only, the moment CombatSystem accepts a BlockStart request -- the
--- block counterpart of AttackStartedPayload/MovementPerformedPayload. ParryWindowOpened reflects
--- whether this particular press was off the parry cooldown (Constants.Combat.ParryCooldownSeconds)
--- and therefore actually armed a timed parry window, vs. a plain block while still on cooldown --
--- state the client has no other way to know, since parryAvailable is computed server-side only
--- (CombatSystem.lua's handleBlockStart). Lets CombatAnimator play a parry-flash synced to the
--- server's real parryWindowExpiry instead of guessing from raw input. Not consumed for any
--- gameplay/hit decision.
+-- SUPERSEDED, AND ORPHANED SINCE THE COMBAT TEARDOWN. Nothing produces or consumes this: its writer
+-- (CombatSystem.lua's handleBlockStart) and its reader (CombatAnimator's parry flash) are both
+-- deleted, and the constant its second field mirrored (Constants.Combat.ParryWindowSeconds) has been
+-- retired with the rest of that system's parry config.
+--
+-- The replacement is Shared/Defense/DefenseConstants.Network.RemoteNames.StateChanged, which carries
+-- the live DefenseState and guard rather than a one-shot "did a window open" boolean -- and the
+-- window length is no longer a number anyone sends, because it now comes from markers authored on
+-- the animation asset (Shared/Defense/ParryWindows.lua).
+--
+-- Kept rather than deleted only because it is one member of a dead FAMILY (AttackStartedPayload/
+-- MovementPerformedPayload/SlidePerformedPayload are equally orphaned), and retiring one of four
+-- would leave the set less coherent than it is now. They should go together, with whatever rebuilds
+-- the attack layer.
 export type BlockStartedPayload = {
 	ParryWindowOpened: boolean,
 	ParryWindowSeconds: number,

@@ -624,17 +624,35 @@ local function clearLedge(now: number): ()
 	ledge.Allowed = true
 end
 
--- One direction's worth of the ledge search: find a wall face along `forward`, find the lip above
--- that face, and check the lip sits inside the (sweep-widened) grab band. Fills `ledge` and returns
--- true on success; on failure it leaves `ledge` untouched so the caller can try another direction
--- without having to save and restore anything, and returns the part that refused on permissions --
--- if any -- so the caller can report WHY nothing was grabbable rather than just that nothing was.
-local function tryLedgeDirection(
+-- The result of a single-direction ledge search, as plain values rather than a mutated singleton --
+-- see resolveLedgeAt's own header for why this exists separately from the `ledge` result table.
+export type LedgeHit = {
+	EdgePosition: Vector3,
+	WallNormal: Vector3,
+	HasStandingSpace: boolean,
+	HasHangSpace: boolean,
+	Instance: BasePart?,
+}
+
+-- ONE DIRECTION'S WORTH OF THE LEDGE SEARCH, as a pure function of its inputs: find a wall face along
+-- `forward`, find the lip above that face, and check the lip sits inside the (sweep-widened) grab
+-- band. Returns the hit on success; on failure returns nil so the caller can try another direction
+-- without having to save or restore anything, plus the part that refused on permissions -- if any --
+-- so the caller can report WHY nothing was grabbable rather than just that nothing was.
+--
+-- FACTORED OUT OF THE SCHEDULED PROBE DELIBERATELY, so it has a second caller: EnvironmentProbe.
+-- ProbeLedgeAt below, which States/LedgeHanging.lua's shimmy calls AD HOC, every frame, from an origin
+-- and direction it chooses itself rather than the move/facing search probeLedge runs. A shimmy
+-- continuation check happening to route through the SAME `ledge` singleton the scheduled Ledge probe
+-- writes would mean two callers fighting over one result table within the same frame -- the ad hoc
+-- check would either stomp the scheduled probe's answer or be stomped by it, depending on which ran
+-- last. Returning values instead of mutating shared state is what makes a second caller safe at all.
+local function resolveLedgeAt(
 	headPosition: Vector3,
 	forward: Vector3,
 	sweep: number,
 	now: number
-): (boolean, BasePart?)
+): (LedgeHit?, BasePart?)
 	-- RAY FIRST, SPHERE SECOND, and the order is load-bearing rather than an optimization.
 	--
 	-- A spherecast whose sphere is ALREADY overlapping geometry at its origin returns nil, not a
@@ -654,12 +672,12 @@ local function tryLedgeDirection(
 		faceHit = castSphere(headPosition, LEDGE.GrabProbeRadius, forward * LEDGE.GrabReachDistance)
 	end
 	if not faceHit or ParkourMath.SurfaceTilt(faceHit.Normal) > LEDGE.MaxFaceTiltDegrees then
-		return false, nil
+		return nil, nil
 	end
 
 	local permissions = ParkourTagging.GetPermissions(faceHit.Instance, now)
 	if permissions.Ignored or not permissions.LedgeGrabbable then
-		return false, faceHit.Instance
+		return nil, faceHit.Instance
 	end
 
 	-- The lip: scan down from above the head band, just past the wall face. Both the top of the scan
@@ -669,14 +687,14 @@ local function tryLedgeDirection(
 	local scanLength = LEDGE.GrabBandAboveHead + sweep + LEDGE.GrabBandBelowHead
 	local lipHit = castRay(scanOrigin, Vector3.new(0, -scanLength, 0))
 	if not lipHit then
-		return false, nil
+		return nil, nil
 	end
 
 	-- The lip must genuinely be an EDGE within the grab band, not the top of something far below or
 	-- a ceiling far above -- both of which the scan can legitimately land on.
 	local relativeHeight = lipHit.Position.Y - headPosition.Y
 	if relativeHeight > LEDGE.GrabBandAboveHead + sweep or relativeHeight < -LEDGE.GrabBandBelowHead then
-		return false, nil
+		return nil, nil
 	end
 
 	local standCheck = castRay(lipHit.Position + UP * 0.3, UP * LEDGE.StandClearanceHeight)
@@ -690,15 +708,51 @@ local function tryLedgeDirection(
 		ParkourMath.HangPosition(lipHit.Position, faceHit.Normal, LEDGE.HangVerticalOffset, LEDGE.HangHorizontalOffset)
 	local hangCheck = castRay(hangPosition, Vector3.new(0, -(footOffset + LEDGE.HangFootClearance), 0))
 
+	return {
+		EdgePosition = lipHit.Position,
+		WallNormal = faceHit.Normal,
+		HasStandingSpace = standCheck == nil,
+		HasHangSpace = hangCheck == nil,
+		Instance = lipHit.Instance,
+	},
+		nil
+end
+
+-- Thin wrapper around resolveLedgeAt that fills the shared `ledge` result table -- the scheduled
+-- probe's own contract, unchanged from before the factoring above. Fills `ledge` and returns true on
+-- success; on failure it leaves `ledge` untouched so the caller can try another direction without
+-- having to save and restore anything.
+local function tryLedgeDirection(
+	headPosition: Vector3,
+	forward: Vector3,
+	sweep: number,
+	now: number
+): (boolean, BasePart?)
+	local hit, refusedInstance = resolveLedgeAt(headPosition, forward, sweep, now)
+	if not hit then
+		return false, refusedInstance
+	end
 	ledge.SampledAt = now
 	ledge.Found = true
-	ledge.EdgePosition = lipHit.Position
-	ledge.WallNormal = faceHit.Normal
-	ledge.HasStandingSpace = standCheck == nil
-	ledge.HasHangSpace = hangCheck == nil
-	ledge.Instance = lipHit.Instance
+	ledge.EdgePosition = hit.EdgePosition
+	ledge.WallNormal = hit.WallNormal
+	ledge.HasStandingSpace = hit.HasStandingSpace
+	ledge.HasHangSpace = hit.HasHangSpace
+	ledge.Instance = hit.Instance
 	ledge.Allowed = true
 	return true, nil
+end
+
+-- PUBLIC: a single ad hoc ledge search from a caller-chosen origin and direction, touching NO shared
+-- state -- see resolveLedgeAt's own header for why this had to be a second entry point rather than a
+-- second caller of the scheduled probe. `sweep` is 0 for every current caller (a shimmy or a leap
+-- moves at a speed slow enough, and samples often enough, that the sweep widening the FALLING probe
+-- needs is not needed here); accepted as a parameter anyway rather than hardcoded so a future caller
+-- with the same "moving fast between samples" problem does not have to duplicate resolveLedgeAt to get
+-- it.
+function EnvironmentProbe.ProbeLedgeAt(headPosition: Vector3, forward: Vector3, sweep: number, now: number): LedgeHit?
+	local hit = resolveLedgeAt(headPosition, forward, sweep, now)
+	return hit
 end
 
 -- Finds a grabbable edge ahead of an airborne character: a wall face within reach, whose top edge
@@ -1020,6 +1074,96 @@ local leapTarget: ParkourTypes.LeapTarget = {
 	Instance = nil,
 	Distance = 0,
 }
+
+local ledgeLeapTarget: ParkourTypes.LedgeLeapTarget = {
+	Found = false,
+	LandingPosition = Vector3.zero,
+	EdgePosition = Vector3.zero,
+	WallNormal = UP,
+	Instance = nil,
+	Distance = 0,
+}
+
+-- Finds a grabbable edge along the player's own aim -- the ledge-to-ledge leap's target search, run at
+-- the moment States/LedgeHanging.lua's Update sees a directional jump press while hanging.
+--
+-- DELIBERATELY SIMPLER THAN FindLeapTarget ABOVE, and the scoping is honest rather than accidental.
+-- That scan solves a harder problem (any surface, found via a downward cast, with a whole "is this my
+-- own footing" exclusion because a floor cast routinely lands on the floor the player is already
+-- standing on) that does not apply here: a hang has no footing to exclude, and this is not searching
+-- for a floor, it is searching for a WALL FACE WITH A LIP -- resolveLedgeAt's own job, reused rather
+-- than reinvented. So this walks the aim ray outward and asks resolveLedgeAt the same question at each
+-- sample point, taking the FARTHEST one that is both a real ledge and reachable by the same launch
+-- solver Leaping.Enter already trusts (Constants.Leap.ApexClearance/ReachMargin/etc -- deliberately
+-- the SAME numbers, not a parallel set, because the arc should feel like the same move whether it is
+-- launched at an ordinary surface or at another ledge).
+--
+-- Farthest rather than nearest for the same reason FindLeapTarget's own header gives: the near ledge is
+-- usually the one just released, or one an ordinary drop-and-catch already reaches, so choosing it
+-- would make the whole move pointless.
+function EnvironmentProbe.FindLedgeLeapTarget(
+	rootPart: BasePart,
+	aimDirection: Vector3,
+	now: number
+): ParkourTypes.LedgeLeapTarget
+	scanBudgetUsed = 0
+	ledgeLeapTarget.Found = false
+	ledgeLeapTarget.Distance = 0
+	ledgeLeapTarget.Instance = nil
+
+	local LEDGE_LEAP = ParkourConstants.LedgeLeap
+	local LEAP = ParkourConstants.Leap
+	local flatAim = ParkourMath.SafeUnit(ParkourMath.Flatten(aimDirection), Vector3.zero)
+	if flatAim.Magnitude < 1e-3 then
+		-- Looking straight up or down: no planar direction to search along, and inventing one from the
+		-- body's own facing would aim the search somewhere the player was not looking.
+		return ledgeLeapTarget
+	end
+
+	local origin = rootPart.Position
+	local sampleCount = math.max(LEDGE_LEAP.RangeSamples, 1)
+	local step = if sampleCount > 1 then (LEDGE_LEAP.MaxRange - LEDGE_LEAP.MinRange) / (sampleCount - 1) else 0
+
+	for index = 0, sampleCount - 1 do
+		local distance = LEDGE_LEAP.MinRange + step * index
+		local samplePoint = origin + flatAim * distance
+		local hit, _refused = resolveLedgeAt(samplePoint, flatAim, 0, now)
+		if hit and hit.HasHangSpace then
+			local landing = ParkourMath.HangPosition(
+				hit.EdgePosition,
+				hit.WallNormal,
+				LEDGE.HangVerticalOffset,
+				LEDGE.HangHorizontalOffset
+			)
+			local landingDistance = ParkourMath.PlanarSpeed(landing - origin)
+			-- Farthest wins, so a nearer sample already found this frame is not overwritten by a
+			-- further one that solves worse -- see the header on why farthest is the right default at
+			-- all.
+			if landingDistance > ledgeLeapTarget.Distance then
+				local _velocity, reachable = ParkourMath.SolveLaunchVelocity(
+					origin,
+					landing,
+					Workspace.Gravity,
+					LEAP.ApexClearance,
+					LEAP.ReachMargin,
+					LEAP.MinUpSpeed,
+					LEAP.MaxUpSpeed,
+					LEAP.MaxPlanarSpeed
+				)
+				if reachable then
+					ledgeLeapTarget.Found = true
+					ledgeLeapTarget.LandingPosition = landing
+					ledgeLeapTarget.EdgePosition = hit.EdgePosition
+					ledgeLeapTarget.WallNormal = hit.WallNormal
+					ledgeLeapTarget.Instance = hit.Instance
+					ledgeLeapTarget.Distance = landingDistance
+				end
+			end
+		end
+	end
+
+	return ledgeLeapTarget
+end
 
 -- WHERE A LEAP LANDS: the FARTHEST surface along the player's own view direction that the launch caps
 -- can actually reach.

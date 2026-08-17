@@ -116,7 +116,7 @@ export type CombatVitalsState = {
 	-- GATES deliberately exempts BlockStart from Stun so a combo victim can always attempt a defense
 	-- (Balance principle 1), and folding the open guard into stunExpiry would either undo that
 	-- exemption for every ordinary hit or leave the parry punish toothless again. See Constants.
-	-- Combat.GuardOpenSeconds for why the punish needed this at all.
+	-- Shared/Defense/DefenseConstants.Stagger for why the punish needed this at all.
 	guardOpenExpiry: number,
 	-- Universal hit-reaction lockout (Constants.Combat.HitStunDuration on a landed hit,
 	-- StunDuration on a Parry punish) -- gates every action category via ACTION_GATES.Stun except

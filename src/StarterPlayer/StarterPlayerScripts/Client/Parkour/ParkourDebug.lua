@@ -3,15 +3,46 @@
 	ParkourDebug.lua
 
 	Owns: the development overlay for this framework -- visualized probes, and a live readout of state,
-	velocity, direction, surface, angles, available actions and the REASON each unavailable action is
-	unavailable.
+	velocity, direction, surface, angles, available actions, the REASON each unavailable action is
+	unavailable, and (new) what the shimmy, the ledge-to-ledge leap and the wall-run corner turn are
+	doing on the current frame.
 
-	The reason column is the point of this whole file. The design named the exact failure it exists to
+	THE REASON COLUMN IS THE POINT OF THIS WHOLE FILE. The design named the exact failure it exists to
 	fix: "this will make it much easier to debug situations where the player sees an obstacle but the
 	system does not detect it correctly." Every refusal in the framework carries a stable string --
 	ObstacleClassifier's classifications, every StateDefinition.CanEnter's second return value -- and
 	this overlay prints them verbatim. "TooTallToMantle" or "SameWallLockout" answers the question;
 	watching a character fail to vault does not.
+
+	REBUILT AS A REAL PANEL (2026-08-15), not a monospace text blob. The prior version was one giant
+	TextLabel string, rebuilt from scratch every ReadoutIntervalSeconds and printed as ~40 lines of
+	Code-font text with no grouping, no color and no hierarchy -- readable if you already knew what you
+	were looking for, and a wall of noise if you didn't. This version is built from Client/UI's own
+	component library (Panel/Section/Label/Divider, Tokens-driven) -- the same primitives every other
+	developer- and player-facing surface in this codebase uses -- so it gets real section grouping, a
+	color language that means something (green = working, amber = attempted-but-not-committed, muted =
+	inactive), and a scrollable body that never runs off the bottom of a smaller viewport. See
+	docs/ui-ux-philosophy.md for the palette/type/shape rules this borrows rather than reinvents.
+
+	FUSION, BUT OUTSIDE UI.Mount()'s TREE. This overlay is dev-only, toggled per-session with F6, and
+	has no business being part of the always-mounted player-facing UI tree -- so it follows the same
+	carve-out Client/Intro/IntroClient.lua's own header documents for Onboarding: its own
+	Fusion.scoped(Fusion) root, created on enable and torn down with scope:doCleanup() on disable,
+	never alive at the same time as anything else's scope because nothing else needs to know it exists.
+
+	ROWS ARE PRE-ALLOCATED, NOT REBUILT PER REFRESH. Every section has a FIXED shape -- STATE and
+	SURFACES are always the same number of lines, and AVAILABLE ACTIONS/RECENT TRANSITIONS are sized
+	ONCE, on the first Update() call after the panel mounts, from the real registered-state count and
+	ParkourConstants.Debug.TransitionHistory. Refreshing therefore means pushing new strings into
+	existing Fusion Values (row.Text:set(...), row.Color:set(...)), not destroying and recreating ~40
+	Instances ten times a second -- the same "reactive leaf values on a fixed tree" shape every other
+	Fusion component in this codebase already uses for a fast-changing readout.
+
+	LIVE MECHANICS is the new section: the shimmy, the ledge-to-ledge leap and the wall-run corner turn
+	are all DECISIONS a single state's Update makes every frame, most of which produce no state
+	transition to show in RECENT TRANSITIONS -- "why didn't the shimmy move" had no answer anywhere in
+	the overlay before this. Backed by three ParkourContext fields (DebugShimmy/DebugLedgeLeap/
+	DebugWallRunPivot) the writing states refresh every frame they run -- see that type's own header.
 
 	STUDIO OR WHITELISTED ADMIN. The toggle key is bound raw (F6, from
 	ParkourConstants.Debug.ToggleKeyCode) rather than as a rebindable KeybindAction -- deliberately, so
@@ -33,8 +64,8 @@
 	diagnose -- a real risk for an overlay that draws a dozen rays every frame at 60Hz.
 
 	Does not own: any probe (it reads EnvironmentProbe's own live result tables), any state decision
-	(it reads StateMachine's availability query, which is contractually side-effect free), or anything
-	that affects gameplay in any way.
+	(it reads StateMachine's availability query, which is contractually side-effect free), the design
+	tokens it renders through (Client/UI/Tokens.lua), or anything that affects gameplay in any way.
 ]]
 
 local Players = game:GetService("Players")
@@ -43,6 +74,7 @@ local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
@@ -52,8 +84,17 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local EnvironmentProbe = require(script.Parent.EnvironmentProbe)
 local StateMachine = require(script.Parent.StateMachine)
 
+local Tokens = require(script.Parent.Parent.UI.Tokens)
+local Panel = require(script.Parent.Parent.UI.Components.Panel)
+local Label = require(script.Parent.Parent.UI.Components.Label)
+local Section = require(script.Parent.Parent.UI.Components.Section)
+local TrackedLabel = require(script.Parent.Parent.UI.Components.TrackedLabel)
+
+local Children = Fusion.Children
+
 type ParkourContext = ParkourTypes.ParkourContext
 type Machine = StateMachine.Machine
+type Scope = Fusion.Scope<typeof(Fusion)>
 
 local logger = Logger.scope("ParkourDebug")
 
@@ -65,16 +106,15 @@ local started = false
 local enabled = DEBUG.StartEnabled
 local lastReadoutAt = 0
 
+--
+-- Adorns -- UNCHANGED from the prior version. These draw directly into Workspace and have nothing to
+-- do with the readout's own presentation; the "much better design" ask is about the thing a developer
+-- READS, not the colored line segments already doing their job in the 3D view.
+--
+
 local adornFolder: Folder? = nil
 local adornPool: { Part } = {}
 local adornsUsedThisFrame = 0
-
-local screenGui: ScreenGui? = nil
-local readoutLabel: TextLabel? = nil
-
---
--- Adorns
---
 
 local function getAdornFolder(): Folder
 	local existing = adornFolder
@@ -154,132 +194,394 @@ local function hideUnusedAdorns(): ()
 end
 
 --
--- Readout
+-- The panel
 --
 
-local function ensureReadout(): TextLabel?
-	local existing = readoutLabel
-	if existing and existing.Parent then
-		return existing
-	end
+local function formatVector(vector: Vector3): string
+	return string.format("%.1f, %.1f, %.1f", vector.X, vector.Y, vector.Z)
+end
+
+-- One reactive line of the readout: a mono-scale Label whose text and color are pushed from outside
+-- (Update, below) rather than recomputed reactively -- the same imperative-push-into-a-Fusion-Value
+-- shape every other fast-changing readout in this codebase uses (e.g. TierBadge's meter fill), because
+-- the SOURCE of truth here is a plain-old-Lua context table refreshed on a timer, not a Fusion
+-- Computed graph.
+type Row = {
+	Instance: TextLabel,
+	Text: Fusion.Value<string>,
+	Color: Fusion.Value<Color3>,
+}
+
+local function makeRow(scope: Scope, order: number): Row
+	local text = scope:Value("")
+	local color: Fusion.Value<Color3> = scope:Value(Tokens.Color.TextPrimary)
+	-- No Size passed, deliberately: Label.lua's own AutomaticSize logic (see its header) only auto-
+	-- sizes HEIGHT when a Size is given (AutomaticSize.None, i.e. a fixed-at-zero row, since these are
+	-- single-line and never call AutoHeight either) -- omitting Size entirely is what gets
+	-- AutomaticSize.XY instead, auto-fitting both axes to the text. A row shrink-wrapping to its own
+	-- text width is harmless here: every row sits inside a vertical UIListLayout with nothing anchored
+	-- to its far edge, and the mono font's own internal %-14s-style padding is what keeps the COLUMNS
+	-- lined up, not the container width.
+	local instance = Label(scope, {
+		Text = text,
+		Scale = "Numeral",
+		Color = color,
+		LayoutOrder = order,
+	})
+	return { Instance = instance, Text = text, Color = color }
+end
+
+local function setRow(row: Row, text: string, color: Color3): ()
+	row.Text:set(text)
+	row.Color:set(color)
+end
+
+-- Fixed section sizes, known without a live context -- see this file's header on why AVAILABLE
+-- ACTIONS/RECENT TRANSITIONS are the two sections that CANNOT be sized until the first real frame.
+local STATE_ROW_COUNT = 8
+local SURFACE_ROW_COUNT = 9
+local MECHANICS_ROW_COUNT = 3
+
+type Handles = {
+	Scope: Scope,
+	StateRows: { Row },
+	SurfaceRows: { Row },
+	MechanicsRows: { Row },
+	-- Built once, on the first Update() call after mounting -- see BuildDynamicSections below.
+	ActionRows: { Row },
+	TransitionRows: { Row },
+	ActionsBody: Instance,
+	TransitionsBody: Instance,
+	DynamicSectionsBuilt: boolean,
+}
+
+local handles: Handles? = nil
+
+-- Builds the fixed-shape shell: header, and the three sections whose row count never depends on live
+-- data (STATE/SURFACES/LIVE MECHANICS). AVAILABLE ACTIONS and RECENT TRANSITIONS are mounted as EMPTY
+-- sections here and populated by buildDynamicSections below, the first time real data exists to size
+-- them from.
+local function mountPanel(): Handles?
 	local localPlayer = Players.LocalPlayer
 	local playerGui = localPlayer:FindFirstChildOfClass("PlayerGui")
 	if not playerGui then
 		return nil
 	end
 
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "ParkourDebug"
-	gui.ResetOnSpawn = false
-	-- FALSE, not true. IgnoreGuiInset = true anchors the overlay to the raw top-left of the screen,
-	-- which is where Roblox draws its OWN topbar (logo, menu, chat) -- so the first two lines of the
-	-- readout rendered underneath it and could not be read at all. Those two lines are the title and
-	-- the `state` line: the single most important thing the overlay exists to report was the one thing
-	-- permanently hidden. Left like this it actively misleads, because the next legible mention of a
-	-- state is the AVAILABLE ACTIONS list, which answers a completely different question (see the
-	-- ACTIVE marker below). Respecting the inset places the whole readout below the topbar on every
-	-- device without hardcoding its height.
-	gui.IgnoreGuiInset = false
-	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	gui.Parent = playerGui
-	screenGui = gui
+	local scope = Fusion.scoped(Fusion)
 
-	local label = Instance.new("TextLabel")
-	label.Name = "Readout"
-	label.AnchorPoint = Vector2.new(0, 0)
-	label.Position = UDim2.fromOffset(12, 12)
-	-- Height grows with the content rather than being a fixed 520: the readout's length varies with how
-	-- many probes hit and how many transitions are in the history, and a fixed box silently clipped the
-	-- oldest transitions off the bottom -- the exact rows most useful for working out how the machine
-	-- got where it is.
-	label.AutomaticSize = Enum.AutomaticSize.Y
-	label.Size = UDim2.fromOffset(430, 0)
-	label.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
-	label.BackgroundTransparency = 0.25
-	label.BorderSizePixel = 0
-	label.Font = Enum.Font.Code
-	label.TextSize = 13
-	label.TextColor3 = Color3.fromRGB(225, 232, 240)
-	label.TextXAlignment = Enum.TextXAlignment.Left
-	label.TextYAlignment = Enum.TextYAlignment.Top
-	label.Text = ""
-	label.Parent = gui
-	readoutLabel = label
-	return label
-end
+	local stateRows: { Row } = {}
+	for order = 1, STATE_ROW_COUNT do
+		table.insert(stateRows, makeRow(scope, order))
+	end
+	local surfaceRows: { Row } = {}
+	for order = 1, SURFACE_ROW_COUNT do
+		table.insert(surfaceRows, makeRow(scope, order))
+	end
+	local mechanicsRows: { Row } = {}
+	for order = 1, MECHANICS_ROW_COUNT do
+		table.insert(mechanicsRows, makeRow(scope, order))
+	end
 
-local function formatVector(vector: Vector3): string
-	return string.format("%.1f, %.1f, %.1f", vector.X, vector.Y, vector.Z)
-end
+	local actionsBody = scope:New "Frame" {
+		Name = "ActionsBody",
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		LayoutOrder = 1,
 
-local lines: { string } = {}
+		[Children] = scope:New "UIListLayout" {
+			FillDirection = Enum.FillDirection.Vertical,
+			Padding = UDim.new(0, 2),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		},
+	}
+	local transitionsBody = scope:New "Frame" {
+		Name = "TransitionsBody",
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		LayoutOrder = 1,
 
-local function buildReadout(context: ParkourContext, machine: Machine): string
-	table.clear(lines)
+		[Children] = scope:New "UIListLayout" {
+			FillDirection = Enum.FillDirection.Vertical,
+			Padding = UDim.new(0, 2),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		},
+	}
 
 	-- Derived from the constant rather than written out, so retuning ToggleKeyCode can never leave the
 	-- overlay advertising a key that no longer opens it.
-	table.insert(lines, string.format("PARKOUR DEBUG  (%s to toggle)", DEBUG.ToggleKeyCode.Name))
-	table.insert(
-		lines,
+	local headerTitle = TrackedLabel(scope, {
+		Text = "PARKOUR DEBUG",
+		Scale = "Action",
+		Color = Tokens.Color.AccentPrimaryBright,
+	})
+	local headerSubtitle = Label(scope, {
+		Text = string.format("%s to toggle -- read-only, affects nothing", DEBUG.ToggleKeyCode.Name),
+		Scale = "Detail",
+		Color = Tokens.Color.TextSecondary,
+	})
+
+	local body = scope:New "ScrollingFrame" {
+		Name = "Body",
+		Size = UDim2.new(1, 0, 1, -44),
+		Position = UDim2.fromOffset(0, 44),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 6,
+		ScrollBarImageColor3 = Tokens.Color.AccentPrimary,
+		ScrollBarImageTransparency = 0.4,
+		CanvasSize = UDim2.fromOffset(0, 0),
+		-- The PROPERTY is named AutomaticCanvasSize; its VALUE type is Enum.AutomaticSize (the same
+		-- enum GuiObject.AutomaticSize itself uses) -- there is no separate Enum.AutomaticCanvasSize.
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+
+		[Children] = {
+			scope:New "UIListLayout" {
+				FillDirection = Enum.FillDirection.Vertical,
+				Padding = UDim.new(0, Tokens.Space.S),
+				SortOrder = Enum.SortOrder.LayoutOrder,
+			},
+			Section(scope, "State", 1, {
+				stateRows[1].Instance,
+				stateRows[2].Instance,
+				stateRows[3].Instance,
+				stateRows[4].Instance,
+				stateRows[5].Instance,
+				stateRows[6].Instance,
+				stateRows[7].Instance,
+				stateRows[8].Instance,
+			}),
+			Section(scope, "Surfaces", 2, {
+				surfaceRows[1].Instance,
+				surfaceRows[2].Instance,
+				surfaceRows[3].Instance,
+				surfaceRows[4].Instance,
+				surfaceRows[5].Instance,
+				surfaceRows[6].Instance,
+				surfaceRows[7].Instance,
+				surfaceRows[8].Instance,
+				surfaceRows[9].Instance,
+			}),
+			Section(
+				scope,
+				"Live Mechanics",
+				3,
+				{ mechanicsRows[1].Instance, mechanicsRows[2].Instance, mechanicsRows[3].Instance },
+				"The shimmy, the ledge-to-ledge leap and the wall-run corner turn -- decisions made every frame with no state transition to show elsewhere.",
+				nil,
+				true -- emphasis: this is the section this whole redesign exists to add
+			),
+			Section(
+				scope,
+				"Available Actions",
+				4,
+				{ actionsBody },
+				"Could this be ENTERED right now -- not what is running."
+			),
+			Section(scope, "Recent Transitions", 5, { transitionsBody }),
+		},
+	}
+
+	-- No local kept for this: nothing after this point needs to reach back into the ScreenGui itself
+	-- (teardown goes through scope:doCleanup(), not an explicit :Destroy() on any one Instance).
+	scope:New "ScreenGui" {
+		Name = "ParkourDebug",
+		ResetOnSpawn = false,
+		-- FALSE, not true -- see this file's prior header note on why IgnoreGuiInset=true hid the two
+		-- most important lines of the readout underneath Roblox's own topbar. Unchanged by the redesign.
+		IgnoreGuiInset = false,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		Parent = playerGui,
+
+		[Children] = Panel(scope, {
+			Name = "Root",
+			Position = UDim2.fromOffset(12, 12),
+			-- Fixed width, height relative to the viewport minus a margin -- adapts to any screen size
+			-- rather than a hardcoded pixel height clipping on a smaller display, and the internal
+			-- ScrollingFrame is what makes clipping harmless even so: nothing is ever unreachable, only
+			-- scrolled.
+			Size = UDim2.new(0, 460, 1, -24),
+			CornerAccent = true,
+
+			Children = {
+				scope:New "Frame" {
+					Name = "Header",
+					Size = UDim2.new(1, 0, 0, 40),
+					BackgroundTransparency = 1,
+
+					[Children] = {
+						scope:New "UIListLayout" {
+							FillDirection = Enum.FillDirection.Vertical,
+							Padding = UDim.new(0, 2),
+							SortOrder = Enum.SortOrder.LayoutOrder,
+						},
+						headerTitle,
+						headerSubtitle,
+					},
+				},
+				body,
+			},
+		}),
+	}
+
+	return {
+		Scope = scope,
+		StateRows = stateRows,
+		SurfaceRows = surfaceRows,
+		MechanicsRows = mechanicsRows,
+		ActionRows = {},
+		TransitionRows = {},
+		ActionsBody = actionsBody,
+		TransitionsBody = transitionsBody,
+		DynamicSectionsBuilt = false,
+	} :: any
+end
+
+-- Builds AVAILABLE ACTIONS and RECENT TRANSITIONS once real data exists to size them from -- see
+-- mountPanel's own header for why these two can't be built up front like every other section.
+local function buildDynamicSections(current: Handles, context: ParkourContext, machine: Machine): ()
+	local scope = current.Scope
+	local availability = machine:EvaluateAvailability(context)
+
+	local actionRows: { Row } = {}
+	for order = 1, #availability do
+		local row = makeRow(scope, order)
+		row.Instance.Parent = current.ActionsBody
+		table.insert(actionRows, row)
+	end
+	current.ActionRows = actionRows
+
+	local transitionRows: { Row } = {}
+	for order = 1, DEBUG.TransitionHistory do
+		local row = makeRow(scope, order)
+		row.Instance.Parent = current.TransitionsBody
+		table.insert(transitionRows, row)
+	end
+	current.TransitionRows = transitionRows
+
+	current.DynamicSectionsBuilt = true
+end
+
+--
+-- Color language for the readout. Three tiers, matching docs/ui-ux-philosophy.md's own instruction
+-- that color communicate information instantly rather than decoratively:
+--   Positive  -- this is working / found / available / just succeeded.
+--   Warning   -- attempted and not (yet) satisfied -- not an error, just "nothing happened this frame."
+--   TextSecondary / TextDisabled -- inactive, not found, or not currently relevant.
+--
+
+local function foundColor(found: boolean): Color3
+	return if found then Tokens.Color.Positive else Tokens.Color.TextSecondary
+end
+
+local function shimmyColor(outcome: string?): Color3
+	if outcome == "Straight" or outcome == "Corner" then
+		return Tokens.Color.Positive
+	elseif outcome == "Refused" then
+		return Tokens.Color.Warning
+	end
+	return Tokens.Color.TextSecondary
+end
+
+local function leapColor(outcome: string?): Color3
+	if outcome == "Launched" then
+		return Tokens.Color.Positive
+	elseif outcome == "NoTarget" or outcome == "Unreachable" or outcome == "NoIntent" then
+		return Tokens.Color.Warning
+	end
+	return Tokens.Color.TextSecondary
+end
+
+local function pivotColor(outcome: string?): Color3
+	if outcome == "Pivoted" then
+		return Tokens.Color.Positive
+	end
+	return Tokens.Color.TextSecondary
+end
+
+local function refreshReadout(context: ParkourContext, machine: Machine): ()
+	local current = handles
+	if not current then
+		return
+	end
+	if not current.DynamicSectionsBuilt then
+		buildDynamicSections(current, context, machine)
+	end
+
+	local state = current.StateRows
+	setRow(
+		state[1],
 		string.format(
 			"state       %s   (prev %s, %.2fs)",
 			context.CurrentStateId,
 			context.PreviousStateId,
 			context.StateElapsed
-		)
+		),
+		Tokens.Color.AccentPrimaryBright
 	)
-	table.insert(
-		lines,
-		string.format(
-			"drive       %s",
-			machine:GetCurrentDefinition() and (machine:GetCurrentDefinition() :: any).Drive or "?"
-		)
+	local definition = machine:GetCurrentDefinition()
+	setRow(
+		state[2],
+		string.format("drive       %s", if definition then definition.Drive else "?"),
+		Tokens.Color.TextPrimary
 	)
-	table.insert(lines, string.format("momentum    %.1f    measured %.1f", context.Momentum, context.PlanarSpeed))
-	table.insert(
-		lines,
-		string.format("velocity    %s  (vert %.1f)", formatVector(context.Velocity), context.VerticalVelocity)
+	setRow(
+		state[3],
+		string.format("momentum    %.1f    measured %.1f", context.Momentum, context.PlanarSpeed),
+		Tokens.Color.TextPrimary
 	)
-	table.insert(lines, string.format("direction   %s", formatVector(context.MoveDirection)))
-	table.insert(
-		lines,
-		-- Both halves of the run, because they answer different questions and are routinely different:
-		-- `sprint` is the player's held intent, `stage` is what the SERVER is currently granting (0 =
-		-- none, 1 = ordinary sprint, 2 = full stride). A held sprint sitting at stage 0 is the visible
-		-- symptom of a gate refusing it -- blocking, a commitment lock, a stun -- which is exactly the
-		-- thing this overlay exists to make legible.
+	setRow(
+		state[4],
+		string.format("velocity    %s  (vert %.1f)", formatVector(context.Velocity), context.VerticalVelocity),
+		Tokens.Color.TextPrimary
+	)
+	setRow(state[5], string.format("direction   %s", formatVector(context.MoveDirection)), Tokens.Color.TextPrimary)
+	setRow(
+		state[6],
 		string.format(
 			"intent      %s   sprint=%s stage=%d",
 			formatVector(context.MoveIntent),
 			tostring(context.SprintHeld),
 			context.SprintStage
-		)
+		),
+		Tokens.Color.TextPrimary
 	)
-	table.insert(
-		lines,
-		string.format("rays used   %d / %d", EnvironmentProbe.GetLastRayCount(), ParkourConstants.Probe.MaxRaysPerFrame)
+	setRow(
+		state[7],
+		string.format("rays used   %d / %d", EnvironmentProbe.GetLastRayCount(), ParkourConstants.Probe.MaxRaysPerFrame),
+		Tokens.Color.TextSecondary
 	)
-	table.insert(lines, string.format("combat owns %s", tostring(context.CombatOwned)))
-	table.insert(lines, "")
+	setRow(
+		state[8],
+		string.format("combat owns %s", tostring(context.CombatOwned)),
+		if context.CombatOwned then Tokens.Color.Warning else Tokens.Color.TextSecondary
+	)
 
+	local surface = current.SurfaceRows
 	local ground = context.Ground
-	table.insert(
-		lines,
+	setRow(
+		surface[1],
 		string.format(
 			"ground      %s  dist %.2f  slope %.1fdeg  standable=%s",
 			tostring(ground.Grounded),
 			ground.Distance,
 			ground.SlopeAngle,
 			tostring(ground.Standable)
-		)
+		),
+		foundColor(ground.Grounded)
 	)
-	table.insert(lines, string.format("surface     %s  friction x%.2f", ground.Material.Name, ground.FrictionScale))
+	setRow(
+		surface[2],
+		string.format("surface     %s  friction x%.2f", ground.Material.Name, ground.FrictionScale),
+		Tokens.Color.TextSecondary
+	)
 
 	local obstacle = context.Obstacle
 	if obstacle.Found then
-		table.insert(
-			lines,
+		setRow(
+			surface[3],
 			string.format(
 				"obstacle    h %.2f  d %.2f  dist %.2f  land=%s stand=%s",
 				obstacle.Height,
@@ -287,25 +589,28 @@ local function buildReadout(context: ParkourContext, machine: Machine): string
 				obstacle.Distance,
 				tostring(obstacle.HasLandingSpace),
 				tostring(obstacle.HasStandingSpace)
-			)
+			),
+			Tokens.Color.Positive
 		)
-		table.insert(
-			lines,
+		setRow(
+			surface[4],
 			string.format(
 				"            vaultTag=%s mantleTag=%s  part=%s",
 				tostring(obstacle.VaultAllowed),
 				tostring(obstacle.MantleAllowed),
 				if obstacle.Instance then obstacle.Instance.Name else "-"
-			)
+			),
+			Tokens.Color.TextSecondary
 		)
 	else
-		table.insert(lines, "obstacle    none")
+		setRow(surface[3], "obstacle    none", Tokens.Color.TextSecondary)
+		setRow(surface[4], "", Tokens.Color.TextSecondary)
 	end
 
-	for label, probe in { L = context.WallLeft, R = context.WallRight } do
+	local function setWallRow(row: Row, label: string, probe: ParkourTypes.WallProbe): ()
 		if probe.Found then
-			table.insert(
-				lines,
+			setRow(
+				row,
 				string.format(
 					"wall %s      dist %.2f  tilt %.1fdeg  approach %.1fdeg  runnable=%s",
 					label,
@@ -313,73 +618,125 @@ local function buildReadout(context: ParkourContext, machine: Machine): string
 					probe.TiltAngle,
 					ParkourMath.ApproachAngle(context.MoveDirection, probe.Tangent),
 					tostring(probe.WallRunAllowed)
-				)
+				),
+				foundColor(probe.WallRunAllowed)
 			)
 		else
-			table.insert(lines, string.format("wall %s      none", label))
+			setRow(row, string.format("wall %s      none", label), Tokens.Color.TextSecondary)
 		end
 	end
+	setWallRow(surface[5], "L", context.WallLeft)
+	setWallRow(surface[6], "R", context.WallRight)
 
 	local ledge = context.Ledge
 	if ledge.Found then
-		table.insert(
-			lines,
+		setRow(
+			surface[7],
 			string.format(
 				"ledge       at %s  stand=%s  hang=%s",
 				formatVector(ledge.EdgePosition),
 				tostring(ledge.HasStandingSpace),
 				tostring(ledge.HasHangSpace)
-			)
+			),
+			Tokens.Color.Positive
 		)
 	elseif not ledge.Allowed then
 		-- The refusal EnvironmentProbe.probeLedge deliberately preserves: an edge was found and rejected
-		-- on a designer tag, which looks identical to open air unless the overlay says otherwise. This is
-		-- the readout that answers "why won't it grab THIS wall".
-		table.insert(lines, string.format("ledge       refused (tag) on %s", tostring(ledge.Instance)))
+		-- on a designer tag, which looks identical to open air unless the overlay says otherwise.
+		setRow(
+			surface[7],
+			string.format("ledge       refused (tag) on %s", tostring(ledge.Instance)),
+			Tokens.Color.Warning
+		)
 	else
-		table.insert(lines, "ledge       none")
+		setRow(surface[7], "ledge       none", Tokens.Color.TextSecondary)
 	end
-	table.insert(lines, string.format("ceiling     clear=%s", tostring(context.CeilingClear)))
-	table.insert(
-		lines,
-		string.format("chains      wallRun %d  wallJump %d", context.WallRunChain, context.WallJumpChain)
+	setRow(
+		surface[8],
+		string.format("ceiling     clear=%s", tostring(context.CeilingClear)),
+		foundColor(context.CeilingClear)
 	)
-	table.insert(lines, "")
-	table.insert(lines, "AVAILABLE ACTIONS  (could this be ENTERED right now -- not what is running)")
+	setRow(
+		surface[9],
+		string.format("chains      wallRun %d  wallJump %d", context.WallRunChain, context.WallJumpChain),
+		Tokens.Color.TextSecondary
+	)
 
-	-- The active state gets ACTIVE rather than its CanEnter answer. EvaluateAvailability asks every
-	-- registered state "could you be entered right now", and it asks that of the RUNNING state too --
-	-- which routinely answers no for a perfectly good reason. A live slide reports
-	-- "Sliding no NoSlideInput" the moment the buffered press expires (the hold is what continues it;
-	-- the press is what starts it), and read on its own that line says the exact opposite of the truth.
-	-- Costing a reader that misreading is worse than the line is worth, so the running state is labelled
-	-- as what it is.
+	-- LIVE MECHANICS. Gated on which state is actually running: DebugShimmy/DebugLedgeLeap only mean
+	-- anything while LedgeHanging is current, DebugWallRunPivot only while WallRunning is -- see
+	-- ParkourContext's own header for why the fields themselves don't need resetting to express this
+	-- (they're refreshed every frame the writing state runs, and simply not read otherwise).
+	local mechanics = current.MechanicsRows
+	local hanging = context.CurrentStateId == "LedgeHanging"
+	local wallRunning = context.CurrentStateId == "WallRunning"
+	if hanging then
+		setRow(
+			mechanics[1],
+			string.format("shimmy       %s", context.DebugShimmy or "Idle"),
+			shimmyColor(context.DebugShimmy)
+		)
+		setRow(
+			mechanics[2],
+			string.format("ledge leap   %s", context.DebugLedgeLeap or "Idle"),
+			leapColor(context.DebugLedgeLeap)
+		)
+	else
+		setRow(mechanics[1], "shimmy       -- (not hanging)", Tokens.Color.TextDisabled)
+		setRow(mechanics[2], "ledge leap   -- (not hanging)", Tokens.Color.TextDisabled)
+	end
+	if wallRunning then
+		setRow(
+			mechanics[3],
+			string.format("wall pivot   %s", context.DebugWallRunPivot or "Straight"),
+			pivotColor(context.DebugWallRunPivot)
+		)
+	else
+		setRow(mechanics[3], "wall pivot   -- (not wall-running)", Tokens.Color.TextDisabled)
+	end
+
+	-- AVAILABLE ACTIONS. The active state gets ACTIVE rather than its CanEnter answer --
+	-- EvaluateAvailability asks every registered state "could you be entered right now," and it asks
+	-- that of the RUNNING state too, which routinely answers no for a perfectly good reason: a live
+	-- slide reports "Sliding no NoSlideInput" the moment the buffered press expires (the hold is what
+	-- continues it; the press is what starts it), and read on its own that line says the exact
+	-- opposite of the truth. The running state is labelled as what it is instead.
 	local currentId = machine:GetCurrentId()
-	for _, record in machine:EvaluateAvailability(context) do
-		if record.Id == currentId then
-			table.insert(lines, string.format("  %-14s ACTIVE", record.Id))
+	local availability = machine:EvaluateAvailability(context)
+	for index, row in current.ActionRows do
+		local record = availability[index]
+		if not record then
+			setRow(row, "", Tokens.Color.TextDisabled)
+		elseif record.Id == currentId then
+			setRow(row, string.format("  %-14s ACTIVE", record.Id), Tokens.Color.AccentPrimaryBright)
 		else
-			table.insert(
-				lines,
+			setRow(
+				row,
 				string.format(
 					"  %-14s %s  %s",
 					record.Id,
 					if record.Available then "YES" else " no",
 					record.Reason or ""
-				)
+				),
+				if record.Available then Tokens.Color.Positive else Tokens.Color.TextSecondary
 			)
 		end
 	end
 
-	table.insert(lines, "")
-	table.insert(lines, "RECENT TRANSITIONS")
+	-- RECENT TRANSITIONS. Newest first, oldest rows blank once there is less history than row slots
+	-- (the common case for the first few seconds of any session).
 	local history = machine:GetHistory()
-	for index = #history, 1, -1 do
-		local entry = history[index]
-		table.insert(lines, string.format("  %s -> %s  (%s)", entry.From, entry.To, entry.Route))
+	for index, row in current.TransitionRows do
+		local entry = history[#history - index + 1]
+		if entry then
+			setRow(
+				row,
+				string.format("  %s -> %s  (%s)", entry.From, entry.To, entry.Route),
+				Tokens.Color.TextSecondary
+			)
+		else
+			setRow(row, "", Tokens.Color.TextSecondary)
+		end
 	end
-
-	return table.concat(lines, "\n")
 end
 
 --
@@ -459,10 +816,10 @@ function ParkourDebug.Update(context: ParkourContext, machine: Machine): ()
 		return
 	end
 	lastReadoutAt = context.Now
-	local label = ensureReadout()
-	if label then
-		label.Text = buildReadout(context, machine)
+	if not handles then
+		handles = mountPanel()
 	end
+	refreshReadout(context, machine)
 end
 
 function ParkourDebug.IsEnabled(): boolean
@@ -484,11 +841,10 @@ function ParkourDebug.SetEnabled(nextEnabled: boolean): ()
 	for _, part in adornPool do
 		part.Transparency = 1
 	end
-	local gui = screenGui
-	if gui then
-		gui:Destroy()
-		screenGui = nil
-		readoutLabel = nil
+	local current = handles
+	if current then
+		current.Scope:doCleanup()
+		handles = nil
 	end
 end
 

@@ -334,6 +334,37 @@ return function()
 		end)
 	end)
 
+	describe("ParkourMath.WallRight", function()
+		local wallNormal = Vector3.new(1, 0, 0)
+
+		it("returns a horizontal unit vector along the wall", function()
+			local right = ParkourMath.WallRight(wallNormal)
+			expectClose(right.Magnitude, 1)
+			expectClose(right.Y, 0)
+			expectClose(right:Dot(wallNormal), 0)
+		end)
+
+		-- THE PROPERTY THAT MAKES IT THE RIGHT TOOL FOR A SHIMMY, and the whole reason it exists
+		-- alongside WallTangent rather than reusing it: calling it twice with the SAME normal must give
+		-- the SAME answer, with nothing else to agree with -- unlike WallTangent, which needs a travel
+		-- direction and would return the zero vector without one.
+		it("is stable across repeated calls with no travel direction involved", function()
+			local first = ParkourMath.WallRight(wallNormal)
+			local second = ParkourMath.WallRight(wallNormal)
+			expect(first).to.equal(second)
+		end)
+
+		it("returns zero for a horizontal surface, which has no usable tangent", function()
+			expect(ParkourMath.WallRight(Vector3.new(0, 1, 0))).to.equal(Vector3.zero)
+		end)
+
+		it("flips for the opposite wall normal, same as WallTangent's two tangents do", function()
+			local right = ParkourMath.WallRight(wallNormal)
+			local opposite = ParkourMath.WallRight(-wallNormal)
+			expectClose(right:Dot(opposite), -1)
+		end)
+	end)
+
 	describe("ParkourMath.ApproachAngle", function()
 		it("is zero when travelling exactly along the tangent", function()
 			expectClose(ParkourMath.ApproachAngle(Vector3.new(0, 0, 1), Vector3.new(0, 0, 1)), 0)

@@ -54,10 +54,13 @@
 	AirSlam, not admin-authored).
 
 	Does not own: the live in-memory registry itself, the MoveDefinition schema, or the Validate
-	allow-list (MoveRegistryManager.lua), the actual swing/hit resolution (CombatSystem.
-	ThrowCustomMove, via the same throwStandaloneAttack tail every other standalone attack uses), the
-	admin whitelist (Server/Config/AdminConfig.lua), or Default-move field mutation/reset itself
-	(DefaultMoveRegistry.lua).
+	allow-list (MoveRegistryManager.lua), the admin whitelist (Server/Config/AdminConfig.lua), or
+	Default-move field mutation/reset itself (DefaultMoveRegistry.lua).
+
+	No longer owns (combat system removed): TestFireMove/SpawnPreviewDummy, the two admin actions that
+	used to throw a move at (or spawn) a training dummy via CombatSystem.ThrowCustomMove/
+	SpawnTrainingDummy. Move creation/editing/saving/validation/listing -- this module's actual core
+	responsibility, per the header above -- is untouched by that removal.
 ]]
 
 local Players = game:GetService("Players")
@@ -76,7 +79,6 @@ local AdminConfig = require(script.Parent.Parent.Config.AdminConfig)
 
 local MoveRegistryManager = require(script.Parent.Parent.Combat.MoveRegistryManager)
 local DefaultMoveRegistry = require(script.Parent.Parent.Combat.DefaultMoveRegistry)
-local CombatSystem = require(script.Parent.CombatSystem)
 local AdminActionSystem = require(script.Parent.AdminActionSystem)
 
 local MoveEditorSystem = {}
@@ -575,7 +577,7 @@ local function handleGetMove(player: Player, rawMoveId: unknown): MoveTypes.Move
 end
 
 -- In-memory only -- no DataStore write, see this file's header for why this is what makes an edit
--- "take effect immediately" for TestFireMove.
+-- take effect immediately in MoveRegistryManager's live registry.
 local function handleUpdateDraft(player: Player, rawMove: unknown): MoveTypes.MoveEditorMoveResult
 	logger:debug("UpdateDraft received", { player = player.Name, userId = player.UserId })
 	local allowed, reason = checkMoveEditorPreconditions(player, "UpdateDraft")
@@ -762,70 +764,6 @@ local function handleResetDefaultMove(player: Player, rawMoveId: unknown): MoveT
 	return { Success = true, Move = reset }
 end
 
--- One preview dummy per admin session, lazily spawned and reused -- TestFireMove is expected to be
--- clicked repeatedly while iterating on a move, and spawning a fresh dummy every click would litter
--- Workspace. Cleared on PlayerRemoving below; if the dummy itself is destroyed (e.g. a "Reset
--- Dummy" DevMenu action happened to target it), the next TestFireMove/SpawnPreviewDummy call just
--- spawns a replacement.
-local previewDummyByAdmin: { [Player]: Model } = {}
-
-local function resolvePreviewDummy(player: Player): (Model?, string?)
-	local existing = previewDummyByAdmin[player]
-	if existing and existing.Parent then
-		return existing, nil
-	end
-
-	local character = player.Character
-	local rootPartInstance = character and character:FindFirstChild("HumanoidRootPart")
-	if not rootPartInstance or not rootPartInstance:IsA("BasePart") then
-		return nil, "NoCharacter"
-	end
-
-	local spawnCFrame = rootPartInstance.CFrame * CFrame.new(0, 0, -Constants.Debug.TrainingDummy.SpawnDistance)
-	local model, failureReason = CombatSystem.SpawnTrainingDummy(spawnCFrame)
-	if not model then
-		return nil, failureReason or "SpawnFailed"
-	end
-
-	previewDummyByAdmin[player] = model
-	return model, nil
-end
-
-local function handleSpawnPreviewDummy(player: Player): Types.DevMenuSpawnDummyResult
-	logger:debug("SpawnPreviewDummy received", { player = player.Name, userId = player.UserId })
-	local allowed, reason = checkMoveEditorPreconditions(player, "SpawnPreviewDummy")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
-	local _, failureReason = resolvePreviewDummy(player)
-	if failureReason then
-		return { Success = false, Reason = failureReason }
-	end
-	return { Success = true }
-end
-
-local function handleTestFireMove(player: Player, rawMoveId: unknown): MoveTypes.MoveEditorActionResult
-	logger:debug("TestFireMove received", { player = player.Name, userId = player.UserId })
-	local allowed, reason = checkMoveEditorPreconditions(player, "TestFireMove")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
-	if typeof(rawMoveId) ~= "string" then
-		return { Success = false, Reason = "InvalidMoveId" }
-	end
-
-	local _, spawnFailureReason = resolvePreviewDummy(player)
-	if spawnFailureReason then
-		return { Success = false, Reason = spawnFailureReason }
-	end
-
-	local success, throwReason = CombatSystem.ThrowCustomMove(player, rawMoveId)
-	if not success then
-		return { Success = false, Reason = throwReason }
-	end
-	return { Success = true }
-end
-
 -- Freezes/unfreezes the admin's own character while their editor screen is open/closed -- reuses
 -- AdminActionSystem.SetFrozen (the exact mechanism/Humanoid Attribute an admin's own "Frozen"
 -- DevMenu toggle already drives, checked at TOP priority in Movement.ComputeDesiredWalkSpeed)
@@ -977,9 +915,9 @@ local function loadDefaultMoveOverrides(): ()
 	logger:info("loadDefaultMoveOverrides complete", { loadedCount = loadedCount })
 end
 
--- Assumes MoveRegistryManager.Init() has already run (Main.server.lua calls it before
--- CombatSystem.Init(), which in turn is required before this System's own Init() -- see that
--- file's boot-order comments) -- this function only POPULATES the already-initialized registry.
+-- Assumes MoveRegistryManager.Init() has already run (Main.server.lua calls it before this System's
+-- own Init() -- see that file's boot-order comments) -- this function only POPULATES the
+-- already-initialized registry.
 function MoveEditorSystem.Init(): ()
 	mainStore = DataStoreService:GetDataStore(StorageConfig.CustomMoveDataStoreName)
 
@@ -1000,12 +938,6 @@ function MoveEditorSystem.Init(): ()
 
 	local deleteRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.DeleteMove)
 	deleteRemote.OnServerInvoke = wrapHandler("DeleteMove", handleDeleteMove)
-
-	local testFireRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.TestFireMove)
-	testFireRemote.OnServerInvoke = wrapHandler("TestFireMove", handleTestFireMove)
-
-	local spawnDummyRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.SpawnPreviewDummy)
-	spawnDummyRemote.OnServerInvoke = wrapHandler("SpawnPreviewDummy", handleSpawnPreviewDummy)
 
 	local listDefaultMovesRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.ListDefaultMoves)
 	listDefaultMovesRemote.OnServerInvoke = wrapHandler("ListDefaultMoves", handleListDefaultMoves)
@@ -1032,7 +964,6 @@ function MoveEditorSystem.Init(): ()
 
 	Players.PlayerRemoving:Connect(function(player: Player)
 		rateLimiter:Clear(player)
-		previewDummyByAdmin[player] = nil
 	end)
 
 	logger:info("MoveEditorSystem.Init() complete")

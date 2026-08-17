@@ -65,6 +65,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Types = require(ReplicatedStorage.Shared.Types)
 local HitboxShapes = require(ReplicatedStorage.Shared.HitboxShapes)
+local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local AnimationTimeline = require(ReplicatedStorage.Shared.AnimationTimeline)
 
 local MoveTypes = {}
@@ -518,6 +519,205 @@ function MoveTypes.FollowUpToHitboxAttackDefinition(
 		Projectile = nil,
 		ObjectStun = nil,
 	}
+end
+
+-- The engine projection -------------------------------------------------------------------------
+--
+-- ToHitboxAttackDefinition above targets Types.HitboxAttackDefinition -- the DELETED combat system's
+-- schema, which fused geometry and damage into one struct. Everything below targets the rebuilt
+-- Server/Combat/HitboxEngine, whose AttackDefinition deliberately carries no damage field at all (see
+-- HitboxTypes.lua's own header). So one authored move now projects onto TWO values: the geometry the
+-- engine runs, and the damage numbers the layer above it applies.
+--
+-- Both projections are kept. The legacy one still has live callers in the Move Editor's own pipeline;
+-- deleting it is that pipeline's cleanup, not this seam's.
+
+-- What the damage layer needs from an authored move, and nothing the engine already has. Lives here
+-- rather than in Shared/Damage/DamageTypes.lua because it is produced here -- a type defined where it
+-- is consumed would make this file depend on the damage layer, which would stop the Move Creation
+-- System from being usable without one.
+export type DamageProfile = {
+	Damage: number,
+	PostureDamage: number,
+	Knockback: MoveKnockback?,
+}
+
+-- The Move Creation System authors twelve shapes; the engine understands seven. The five extra were
+-- deliberately dropped from the engine's vocabulary because none has an exact analytic containment
+-- test (HitboxTypes.lua's own header says so), so a move authored in one of them has to land on
+-- something.
+--
+-- Disc maps to Cylinder rather than falling back to Box, because a disc genuinely IS a thin cylinder
+-- -- radius and thickness carry across with no reinterpretation, and turning a round shockwave into a
+-- square one would be a silent gameplay change rather than an approximation. The other four (Wedge,
+-- Blade, Slice, Pyramid) have no honest analogue and take Box, which is the bounding volume of each:
+-- generous rather than wrong, and reported so the author finds out.
+local ENGINE_SHAPE_BY_MOVE_SHAPE: { [string]: HitboxTypes.ShapeKind } = {
+	Box = "Box",
+	Sphere = "Sphere",
+	Cone = "Cone",
+	Arc = "Arc",
+	Beam = "Beam",
+	Cylinder = "Cylinder",
+	Capsule = "Capsule",
+	Disc = "Cylinder",
+	Wedge = "Box",
+	Blade = "Box",
+	Slice = "Box",
+	Pyramid = "Box",
+}
+
+-- Per-AUTHORED-shape measurement mapping. Keyed by the move's own shape rather than the engine's,
+-- because that is what says which fields were actually authored -- two move shapes projecting onto
+-- one engine shape (Box) do not read the same source fields.
+--
+-- The one rename that runs through all of this: HitboxShapes calls a box's forward extent `Depth` and
+-- HitboxTypes calls it `Length`. HitboxShapes ALSO has a separate `Length` (a reach measurement, for
+-- Cone/Beam/Cylinder/Capsule/Blade/Pyramid), so the two vocabularies genuinely disagree about one
+-- field name rather than merely spelling it differently -- which is exactly the sort of thing a hand-
+-- written field list catches and a generic table copy would silently get wrong.
+local function engineDimensionsFor(shape: string, source: MoveDimensions): HitboxTypes.Dimensions
+	local dimensions = HitboxTypes.DefaultDimensions()
+
+	if shape == "Box" or shape == "Wedge" then
+		dimensions.Width = source.Width
+		dimensions.Height = source.Height
+		dimensions.Length = source.Depth
+	elseif shape == "Sphere" then
+		dimensions.Radius = source.Radius
+	elseif shape == "Cone" then
+		dimensions.Length = source.Length
+		dimensions.AngleDegrees = source.AngleDegrees
+	elseif shape == "Arc" then
+		dimensions.Radius = source.Radius
+		dimensions.InnerRadius = source.InnerRadius
+		dimensions.Height = source.Height
+		dimensions.AngleDegrees = source.AngleDegrees
+	elseif shape == "Beam" or shape == "Cylinder" or shape == "Capsule" then
+		dimensions.Length = source.Length
+		dimensions.Radius = source.Radius
+	elseif shape == "Disc" then
+		-- The thickness IS the cylinder's length. InnerRadius is dropped: the engine's Cylinder is
+		-- solid, so an authored ring becomes a filled disc -- larger, never smaller, so a hit that
+		-- would have landed still lands.
+		dimensions.Radius = source.Radius
+		dimensions.Length = source.Thickness
+	elseif shape == "Blade" then
+		-- A blade tapers from Height at the hilt to Width at the tip; a box cannot taper, so it takes
+		-- the widest measurement in each axis and is generous at the tip.
+		dimensions.Width = math.max(source.Width, source.Thickness)
+		dimensions.Height = source.Height
+		dimensions.Length = source.Length
+	elseif shape == "Slice" then
+		dimensions.Width = source.Width
+		dimensions.Height = source.Height
+		dimensions.Length = source.Thickness
+	elseif shape == "Pyramid" then
+		-- Widens from a point to Width x Height at Length ahead. The box is that far end extruded all
+		-- the way back to the origin, so it is widest-case near the attacker.
+		dimensions.Width = source.Width
+		dimensions.Height = source.Height
+		dimensions.Length = source.Length
+	end
+
+	return dimensions
+end
+
+-- Projects an authored move onto the pair the rebuilt combat stack consumes: the geometry
+-- HitboxEngine runs, and the damage numbers the layer above it applies.
+--
+-- Returns (definition, profile, notes). `notes` is a list of human-readable corrections, never a
+-- failure -- the same contract HitboxTypes.SanitizeDefinition already established, and for the same
+-- reason: a move that swings at an approximated shape is better than one that errors, and the note is
+-- what turns "why is this hitbox square" into a log line.
+--
+-- Pure. No clock, no Instances, no registry lookup -- AttackCatalog owns resolving a MoveId to a
+-- MoveDefinition, and this owns nothing but the reshaping, so the whole thing is table-driven
+-- testable.
+function MoveTypes.ToEngineAttackDefinition(
+	move: MoveDefinition
+): (HitboxTypes.AttackDefinition, DamageProfile, { string })
+	local notes: { string } = {}
+
+	local authoredShape: string = move.Shape
+	local engineShape = ENGINE_SHAPE_BY_MOVE_SHAPE[authoredShape]
+	if not engineShape then
+		engineShape = "Box"
+		table.insert(notes, `Shape {tostring(authoredShape)} is not an authored shape; projected as Box`)
+	elseif engineShape ~= authoredShape then
+		table.insert(
+			notes,
+			`Shape {authoredShape} has no engine equivalent; projected as {engineShape}. `
+				.. `See MoveTypes.ENGINE_SHAPE_BY_MOVE_SHAPE for what that approximation keeps.`
+		)
+	end
+
+	local definition: HitboxTypes.AttackDefinition = {
+		-- Always the MoveId, never separately authored -- the same rule ToHitboxAttackDefinition keeps,
+		-- and now load-bearing rather than merely tidy: HitReport.DebugName is what the damage layer
+		-- looks an attack back up in AttackCatalog by, so a DebugName that was not a MoveId would break
+		-- the round trip.
+		DebugName = move.MoveId,
+		Shape = engineShape,
+		BaseDimensions = engineDimensionsFor(authoredShape, move.Dimensions),
+		-- FLAT, because nothing in the Move Creation System authors a growth curve today: there is no
+		-- editor field for combo-stage scaling, power scaling or charge time. A projected move is
+		-- therefore the same size at combo stage 4 as at stage 1. This function is the seam a future
+		-- Move Editor pass hangs those fields off; it is not a rewrite when that day comes.
+		Scaling = {
+			ComboStageMultipliers = { 1 },
+			PowerMultiplierPerUnit = 0,
+			MaxScaleMultiplier = 1,
+			ChargeSeconds = 0,
+			ChargedScaleMultiplier = 1,
+		},
+		Offset = move.Offset,
+		-- Authored offsets are root-relative (MoveDefinition.Offset's own comment), which is exactly
+		-- what AttachmentPart "Root" means to the engine. A move authored against a hand or a weapon
+		-- would need an authored attachment field, which the editor does not have.
+		AttachmentPart = "Root",
+		WindupSeconds = move.WindupSeconds,
+		ActiveSeconds = move.ActiveSeconds,
+		RecoverySeconds = move.RecoverySeconds,
+		MaxTargetsPerSwing = move.MaxTargets,
+		-- Not authored anywhere in the Move Creation System, and false is the safe default: taking root
+		-- control away from a player is something a move should have to ask for, and a projection that
+		-- granted it by default would hand every authored move a movement lock its author never chose.
+		LocksMovement = false,
+	}
+
+	-- AUTHORED FIELDS WITH NOWHERE TO GO YET, reported rather than dropped in silence. Each of these
+	-- belonged to a subsystem the combat teardown removed and the rebuild has not reached. An author
+	-- who ticked one of them is entitled to know it currently does nothing, and a note is the whole
+	-- reason this function returns one -- a projection that quietly discards intent is how a move ends
+	-- up "subtly wrong for a month," which is the exact failure the parry plan's fail-closed rule
+	-- exists to prevent.
+	if move.Projectile then
+		table.insert(notes, "Projectile is authored but ignored: the engine has no projectile path; thrown as melee")
+	end
+	if move.Movement then
+		table.insert(notes, "Movement lunge is authored but ignored: no rebuilt system consumes it yet")
+	end
+	if move.ObjectStun then
+		table.insert(
+			notes,
+			"ObjectStun is authored but ignored: ObjectStunResolver has no live caller since the teardown"
+		)
+	end
+	if move.ArcDegrees then
+		-- The old system gated a hit on the attacker's facing arc IN ADDITION to the hitbox. The engine
+		-- has no facing gate at all -- containment is the whole test -- so an authored arc no longer
+		-- narrows anything, and a move relying on it to avoid hitting behind the attacker now can.
+		table.insert(notes, "ArcDegrees is authored but ignored: the engine gates on containment only, never on facing")
+	end
+
+	local profile: DamageProfile = {
+		Damage = move.Damage,
+		PostureDamage = move.PostureDamage,
+		Knockback = move.Knockback,
+	}
+
+	return definition, profile, notes
 end
 
 return MoveTypes

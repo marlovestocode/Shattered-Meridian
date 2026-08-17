@@ -20,6 +20,9 @@
 					"Combat": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Combat"
 					},
+					"Defense": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Defense"
+					},
 					"FX": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/FX"
 					},
@@ -67,14 +70,11 @@
 				},
 				"Systems": {
 					"$className": "Folder",
-					"CombatSystem": {
-						"$path": "src/ServerScriptService/Server/Systems/CombatSystem.lua"
-					},
 					"DevMenuSystem": {
 						"$path": "src/ServerScriptService/Server/Systems/DevMenuSystem.lua"
 					},
-					"TrainingBotSystem": {
-						"$path": "src/ServerScriptService/Server/Systems/TrainingBotSystem.lua"
+					"PlayerDeathSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/PlayerDeathSystem.lua"
 					},
 					"BugReportSystem": {
 						"$path": "src/ServerScriptService/Server/Systems/BugReportSystem.lua"
@@ -129,6 +129,9 @@
 					},
 					"ParkourSystem": {
 						"$path": "src/ServerScriptService/Server/Systems/ParkourSystem.lua"
+					},
+					"RunSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/RunSystem.lua"
 					}
 				}
 			},

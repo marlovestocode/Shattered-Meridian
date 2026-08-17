@@ -52,18 +52,23 @@
 	independently forgettable. See MoveTypes.Clone's own header for the depth it covers.
 
 	Category == "Default" (Server/Combat/DefaultMoveRegistry.lua's reserved sentinel, see MoveTypes.
-	lua's own header) changes this panel's chrome in four ways: DisplayName/Category/AnimationId
+	lua's own header) changes this panel's chrome in three ways: DisplayName/Category/AnimationId
 	render read-only (a plain Label sits where a TextField normally would -- see TextFieldRow's own
 	`isReadOnly` param; MoveId/Author were never editable fields here to begin with, so nothing
 	further is needed for those two); the toolbar shows BOTH Save (OnSave persists the move's current
 	live values to a DataStore override, same button/handler shape a custom move's Save uses) AND
 	"Reset to Default" (OnReset both live-reverts AND clears that override -- see MoveEditorSystem.
-	lua's own header) side by side, rather than Save being replaced; Test on Dummy hides entirely
-	(TestFireMove has no dispatch path for a Default move -- an admin can already test it by attacking
-	in-game); and Movement/Knockback/Projectile's section content additionally hides even if
-	SelectedSection still points at one of them (their nav items are already hidden by Sidebar.lua,
-	but selection persists across a move switch by design -- see that file's header -- so this panel
-	double-checks rather than trust the nav alone).
+	lua's own header) side by side, rather than Save being replaced; and Movement/Knockback/
+	Projectile's section content additionally hides even if SelectedSection still points at one of
+	them (their nav items are already hidden by Sidebar.lua, but selection persists across a move
+	switch by design -- see that file's header -- so this panel double-checks rather than trust the
+	nav alone).
+
+	"Test on Dummy" (TestFireMove/SpawnPreviewDummy) was removed alongside the rest of the combat
+	system -- there is no server-side handler left to fire a move at a dummy with. StatsPanel/
+	LastTestResultText below are left wired (see this file's own use of them further down): they are
+	pure display, fed only by whatever handle.TestSamples holds, and now simply never receive a new
+	sample -- no dead remote call to clean up on their side.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -106,7 +111,6 @@ export type PropertyEditorProps = {
 	LastTestResultText: UsedAs<string>,
 	SelectedSection: UsedAs<SectionId>,
 	OnFieldChanged: (MoveDefinition) -> (),
-	OnTestFire: () -> (),
 	OnSave: () -> (),
 	-- Default-move-only, fires ALONGSIDE OnSave (not instead of it) when the current Draft's
 	-- Category == "Default" -- see file header.
@@ -1324,24 +1328,6 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 								VerticalAlignment = Enum.VerticalAlignment.Center,
 								Padding = UDim.new(0, Tokens.Space.S),
 								SortOrder = Enum.SortOrder.LayoutOrder,
-							},
-							-- TestFireMove has no dispatch path for a Default move (Server/Combat/
-							-- DefaultMoveRegistry.lua's own header) -- an admin can already test one by
-							-- attacking in-game, so this hides entirely rather than sitting there
-							-- disabled. Button.lua has no Visible prop of its own, so wrapped in a plain
-							-- Frame -- the same idiom TextFieldRow above uses.
-							scope:New "Frame" {
-								Name = "TestOnDummySlot",
-								Size = UDim2.fromOffset(140, Tokens.Control.RowHeight),
-								BackgroundTransparency = 1,
-								LayoutOrder = 1,
-								Visible = isCustomMove,
-
-								[Children] = Button(scope, {
-									Text = "Test on Dummy",
-									Size = UDim2.fromOffset(140, Tokens.Control.RowHeight),
-									OnActivated = props.OnTestFire,
-								}),
 							},
 							-- Save is always visible (both Custom and Default moves persist).
 							scope:New "Frame" {

@@ -13,9 +13,9 @@
 	file's own header for why those two navigation axes live in one merged column instead of two.
 
 	Owns the actual state every panel below reads/writes: IsOpen, StatusText, MovesDisplay, Draft,
-	LastTestResultText, plus the six BindableEvents that make up MoveEditorHandle (Types.lua). This
+	LastTestResultText, plus the BindableEvents that make up MoveEditorHandle (Types.lua). This
 	root constructs Sidebar/PropertyEditor/PreviewViewport directly and wires them with plain
-	closures (OnNew/OnSelect/OnDelete/OnFieldChanged/OnTestFire/OnSave/OnReset) -- unlike DevMenu's own
+	closures (OnNew/OnSelect/OnDelete/OnFieldChanged/OnSave/OnReset) -- unlike DevMenu's own
 	Sidebar/ContentArea split, those three panels get no BindableEvent handle of their own, since
 	this root constructs all three itself and is never called before they exist. Only THIS screen's
 	own outer Mount crosses the "not created yet" boundary Client/MoveEditor/MoveEditorClient.lua
@@ -104,7 +104,6 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.M
 	local selectMoveRequestedEvent = Instance.new("BindableEvent")
 	local deleteMoveRequestedEvent = Instance.new("BindableEvent")
 	local draftFieldChangedEvent = Instance.new("BindableEvent")
-	local testFireRequestedEvent = Instance.new("BindableEvent")
 	local saveRequestedEvent = Instance.new("BindableEvent")
 	local resetRequestedEvent = Instance.new("BindableEvent")
 	local bindHotbarSlotRequestedEvent = Instance.new("BindableEvent")
@@ -148,9 +147,6 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.M
 			-- here (before the network round trip even starts) is what makes an edit feel instant.
 			draft:set(newDraft)
 			draftFieldChangedEvent:Fire(newDraft)
-		end,
-		OnTestFire = function()
-			testFireRequestedEvent:Fire()
 		end,
 		OnSave = function()
 			saveRequestedEvent:Fire()
@@ -278,7 +274,6 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.M
 		SelectMoveRequested = selectMoveRequestedEvent.Event,
 		DeleteMoveRequested = deleteMoveRequestedEvent.Event,
 		DraftFieldChanged = draftFieldChangedEvent.Event,
-		TestFireRequested = testFireRequestedEvent.Event,
 		SaveRequested = saveRequestedEvent.Event,
 		ResetRequested = resetRequestedEvent.Event,
 		HotbarBindings = hotbarBindings,

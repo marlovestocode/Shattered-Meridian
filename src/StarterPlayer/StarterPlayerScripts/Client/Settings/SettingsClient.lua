@@ -5,14 +5,13 @@
 	Owns: the local player's Settings UX -- restoring persisted Types.PlayerSettings into
 	Client/Input/KeybindManager.lua at boot, the panel's own open/close keybind (KeybindManager.
 	Matches("SettingsToggle", ...), same pattern DevMenuClient.lua/BugReportClient.lua already use),
-	translating the Settings screen's RebindClicked/ResetKeybindsClicked/AutorunToggled signals into
-	real KeybindManager calls + the matching Settings_* persistence remote, and forwarding the Autorun
-	setting to Client/Combat/CombatClient.lua.
+	and translating the Settings screen's RebindClicked/ResetKeybindsClicked/AutorunToggled signals
+	into real KeybindManager calls + the matching Settings_* persistence remote.
 
 	TWO-PHASE BOOT, not one Start() like most driver modules -- see RestoreSettings' own header for
-	why. RestoreSettings() must run BEFORE Client/Combat/CombatClient.lua starts reading keybinds (a
-	rebound key must already be live the instant combat input handling begins), where Start(handle)
-	only wires the PANEL's own interactivity and can boot alongside every other driver module late in
+	why. RestoreSettings() must run BEFORE any input-driven client module starts reading keybinds (a
+	rebound key must already be live the instant real input could land), where Start(handle) only
+	wires the PANEL's own interactivity and can boot alongside every other driver module late in
 	Main.client.lua's sequence -- there is nothing time-sensitive about when the Settings SCREEN
 	itself becomes clickable. Both phases share KeybindManager as their hand-off: RestoreSettings
 	applies every persisted override to it; Start(handle) reads the resulting (already-merged)
@@ -20,11 +19,17 @@
 	caching or re-fetching the raw settings payload a second time.
 
 	Does not own: whether a rebind/reset/toggle is actually legal to persist (Server/Systems/
-	SettingsSystem.lua re-validates everything server-side regardless of what this module sends), the
-	panel itself (UI/Screens/Settings/init.lua) -- this module only drives that screen's handle from
-	outside, the same "screen exposes state/signals, client module drives from outside" pattern
-	DevMenuClient.lua already uses -- or what Autorun actually DOES: auto-sprint lives in
-	CombatClient.lua next to the rest of sprint, and this module only pushes the boolean over.
+	SettingsSystem.lua re-validates everything server-side regardless of what this module sends), or
+	the panel itself (UI/Screens/Settings/init.lua) -- this module only drives that screen's handle
+	from outside, the same "screen exposes state/signals, client module drives from outside" pattern
+	DevMenuClient.lua already uses.
+
+	Autorun/SprintMode push into Client/Movement/RunController.lua, which owns the run end to end on the
+	client (the key, hold-versus-toggle, Autorun, the intent remote, and every piece of run
+	presentation). Both settings spent a while inert -- their previous consumer, Client/Combat/
+	CombatClient.lua, was deleted with the rest of the combat system and nothing inherited sprint --
+	which is why this file's own header used to say they did nothing. They are live again, and the
+	forwarding is identical in shape to the Parkour block's: this module routes, the consumer owns.
 ]]
 
 local UserInputService = game:GetService("UserInputService")
@@ -38,8 +43,8 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local SettingsModule = require(script.Parent.Parent.UI.Screens.Settings)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
-local CombatClient = require(script.Parent.Parent.Combat.CombatClient)
 local ParkourController = require(script.Parent.Parent.Parkour.ParkourController)
+local RunController = require(script.Parent.Parent.Movement.RunController)
 
 type SettingsHandle = SettingsModule.SettingsHandle
 type ListeningState = { Device: Types.KeybindDevice, Action: Types.KeybindAction }
@@ -53,21 +58,15 @@ local STATUS_CLEAR_DELAY = Constants.Settings.StatusClearDelaySeconds
 
 local SettingsClient = {}
 
--- Set by RestoreSettings and by the panel's own toggle, read back by Start to seed the screen. The
--- EFFECT of the setting isn't implemented here: Autorun is auto-SPRINT (moving at all engages sprint,
--- exactly as if the Sprint key were held), and sprint is entirely Client/Combat/CombatClient.lua's
--- concern -- it owns the sprint remotes, the running animation, the dust trickle, the FOV zoom, the
--- Slide gate and the server-reject teardown. Driving a second, parallel sprint path from this module
--- would desync every one of those, so this only ever hands CombatClient the boolean and lets it
--- engage sprint through its own single code path (see CombatClient.SetAutoSprint).
+-- Set by RestoreSettings and by the panel's own toggle, read back by Start to seed the screen, and
+-- pushed to Client/Movement/RunController.lua, which is what Autorun actually drives.
 local autorunEnabled = false
 
 -- The live Parkour preference block. Same role as autorunEnabled above -- set by RestoreSettings and
--- by the panel's own controls, read back by Start to seed the screen -- and, like Autorun, the EFFECT
--- of each preference is owned elsewhere: Client/Parkour/ParkourController.lua for the movement ones,
--- Client/Combat/CombatClient.lua for SprintMode (sprint has always been CombatClient's, and driving a
--- second sprint path from here would desync every one of the things it already owns). This module
--- only routes.
+-- by the panel's own controls, read back by Start to seed the screen. Each movement preference's
+-- EFFECT is owned by Client/Parkour/ParkourController.lua, with the one exception of SprintMode, whose
+-- consumer is Client/Movement/RunController.lua -- hold-versus-toggle is a run concern, and the run
+-- owns its own key. This module only routes.
 local parkourSettings: Types.ParkourSettings = {
 	Enabled = false,
 	CameraEffects = true,
@@ -92,7 +91,19 @@ local function applyParkourSettings(): ()
 		LedgeAssist = parkourSettings.LedgeAssist,
 		StepAssist = parkourSettings.StepAssist,
 	})
-	CombatClient.SetSprintMode(parkourSettings.SprintMode)
+	-- The one field in this block whose consumer is not ParkourController: hold-versus-toggle is a run
+	-- concern, and Client/Movement/RunController.lua owns the run's key. Pushed from here anyway rather
+	-- than from the SprintModeChanged handler alone, so this function keeps its documented property of
+	-- being the single place a preference is mapped to a consumer -- a preference that is persisted but
+	-- never applied is the failure this function exists to make impossible.
+	RunController.SetSprintMode(parkourSettings.SprintMode)
+end
+
+-- Autorun's own applier. A sibling to applyParkourSettings above rather than a line inside it, because
+-- Autorun lives on Types.PlayerSettings directly rather than in the nested Parkour block -- see that
+-- type's own note on why it is flat.
+local function applyAutorun(): ()
+	RunController.SetAutorun(autorunEnabled)
 end
 
 -- Applies every persisted keybind override onto KeybindManager and primes the Autorun loop -- see
@@ -135,7 +146,7 @@ function SettingsClient.RestoreSettings(): ()
 	end
 
 	autorunEnabled = settings.Autorun == true
-	CombatClient.SetAutoSprint(autorunEnabled)
+	applyAutorun()
 
 	-- Field-by-field rather than assigning the payload wholesale: the server's own decode already
 	-- guarantees a complete block, but this module also has to survive an older server (a rolling
@@ -280,23 +291,23 @@ function SettingsClient.Start(handle: SettingsHandle): ()
 	})
 
 	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-		if input.UserInputType == Enum.UserInputType.Keyboard then
-			logger:debug("Key pressed", {
-				keyCode = tostring(input.KeyCode),
-				gameProcessed = gameProcessed,
-				matches = KeybindManager.Matches("SettingsToggle", input),
-			})
-		end
 		if gameProcessed then
 			return
 		end
+		-- Logged only on an actual match, not on every keyboard press this connection sees. It used to
+		-- fire unconditionally -- one Debug line per key, including every WASD/Space tick during ordinary
+		-- movement -- which made this the single loudest source in the whole client log for no
+		-- diagnostic gain: the field being logged, `matches`, was false on all but one key on the
+		-- keyboard. A log meant to help diagnose "why doesn't my rebound toggle key open Settings" is
+		-- more useful, not less, once the one line that fires is the one that actually answers that
+		-- question.
 		if KeybindManager.Matches("SettingsToggle", input) then
 			local nowOpen = not peek(handle.IsOpen)
 			handle.IsOpen:set(nowOpen)
 			if not nowOpen then
 				cancelCapture()
 			end
-			logger:debug("Settings panel toggled", { open = nowOpen })
+			logger:debug("Settings panel toggled", { open = nowOpen, keyCode = tostring(input.KeyCode) })
 		end
 	end)
 
@@ -320,7 +331,8 @@ function SettingsClient.Start(handle: SettingsHandle): ()
 	handle.AutorunToggled:Connect(function(enabled: boolean)
 		autorunEnabled = enabled
 		handle.Autorun:set(enabled)
-		CombatClient.SetAutoSprint(enabled)
+		-- Apply-then-persist, the same order every other control in this module uses.
+		applyAutorun()
 
 		local updateAutorunRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateAutorun)
 		updateAutorunRemote:FireServer(enabled)

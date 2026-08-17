@@ -102,6 +102,59 @@ Constants.Debug = {
 			ParkourMotor = true,
 			ParkourInput = true,
 			ParkourDebug = true,
+			-- Standalone hitbox engine. Quiet by default at the module's own level
+			-- (HitboxEngineConstants.Debug.Enabled gates its per-swing logging, because anything logged
+			-- per sample at 120Hz is a performance problem of its own), so this entry exists so its
+			-- warnings -- a broadphase saturating, a consumer's OnHit callback erroring, a definition
+			-- the sanitiser had to correct -- are visible when they do fire.
+			HitboxEngine = true,
+			-- Defense System (block/parry/guard). Same reasoning as HitboxEngine above -- its own
+			-- DefenseConstants.Debug.Enabled gates the high-frequency per-contact logging, so this entry
+			-- is what makes its ordinary Init/lifecycle lines and state-transition logs visible at all.
+			DefenseSystem = true,
+			DefenseClient = true,
+			-- Damage System (health, guard pressure, hitstun). Was MISSING from this table since it was
+			-- built, which meant every line it logged -- including its Init line and its "resolved a
+			-- contact for an attack with no catalogue entry" diagnostic, the single most useful thing to
+			-- see when hits land and nobody takes damage -- was silently swallowed by Logger.lua's own
+			-- scope filter regardless of Level. The same gap the Run System entries below were added to
+			-- close, found the same way: a whole layer being invisible in Output while debugging it.
+			DamageSystem = true,
+			-- Parry window resolution. Quiet in the ordinary case and FAIL-CLOSED in the interesting
+			-- one: a parry animation missing its ParryStart/ParryClose markers arms nothing, and the
+			-- warning saying so is the only signal that a parry key is being pressed and doing nothing.
+			ParryWindows = true,
+			-- The shared animation claim/layer arbitrator, now that both DefenseClient and
+			-- AttackInputClient drive their clips through it. Its warnings (a clip that would not load,
+			-- a rig whose repair budget ran out) are how "my swing plays no animation" is told apart
+			-- from "my swing has no animation authored" -- see Shared/Attack/AttackAnimations.lua.
+			AnimationManager = true,
+			-- Attack layer (the request/gating/buffering half, and its client input half). Same
+			-- reasoning as HitboxEngine/DefenseSystem above: AttackConstants.Debug.Enabled gates the
+			-- per-press logging on its own, so these entries exist so the Init/lifecycle lines and the
+			-- genuine warnings (a press arriving before the remote resolved, a move that vanished from
+			-- the registry between resolution and throw) are visible at all. Replaces the
+			-- TestAttackHarness/TestAttackHarnessClient pair, both deleted with the real layer's
+			-- arrival.
+			AttackRequestSystem = true,
+			AttackInputClient = true,
+			CombatFeedbackClient = true,
+			-- The catalogue's own "move projected with corrections" warning is production-loud by
+			-- design (see AttackCatalog.lua's own note on why it is deduped rather than debug-gated),
+			-- and this is the entry that lets it through the scope filter at all.
+			AttackCatalog = true,
+			-- Run System. All three had a Logger.scope(...) call from the moment they were written but
+			-- were never added here -- every logger:info/debug/warn call from RunController, RunSystem
+			-- and RunAudio has been silently swallowed by Logger.lua's own scope filter since the run
+			-- system was built, regardless of Constants.Debug.Logging.Level. Found only because the
+			-- run/ledge system was otherwise completely invisible in Studio Output while debugging it.
+			RunController = true,
+			RunSystem = true,
+			RunAudio = true,
+			-- LedgeHanging is the one individual movement state with its own logger scope (every other
+			-- state relies on ParkourController's own transition trace) -- see that module's own header
+			-- for why the shimmy and the ledge-leap earned one.
+			LedgeHanging = true,
 		},
 		-- Per (scope, level, message) cap, keyed off the static message text so a log site that
 		-- fires every frame can't flood Output even at Trace -- see Logger.lua's rate limiter.
@@ -373,7 +426,7 @@ Constants.Debug.TrainingBot = {
 	-- on the owner's CombatSnapshot) and the bot acting on that read -- the documented
 	-- ai-design.md "reaction-time parameter" difficulty knob, and also what keeps a Parry-preset
 	-- bot's timing beatable rather than superhuman (instant reaction would make most swings free
-	-- parries given ParryWindowSeconds vs typical windup+active timing).
+	-- parries given the authored parry window vs typical windup+active timing).
 	ReactionTimeSeconds = 0.1,
 	-- Server-side clamp ceiling for any single Custom weight component submitted by a client --
 	-- relative weights only, not probabilities, so this just needs to be finite and reasonable.
@@ -2376,12 +2429,6 @@ Constants.Run = {
 		-- code you don't own.
 		SilenceDefaultRunSound = true,
 
-		-- The speed each stage's authored StepIntervalSeconds is written FOR. The live interval is
-		-- scaled by ReferenceSpeed / currentSpeed, so a player slowed to a crawl (hit-slow, uphill)
-		-- takes slower steps and a downhill momentum carry takes faster ones, without either stage
-		-- needing its own curve.
-		Stage1ReferenceSpeed = 32,
-		Stage2ReferenceSpeed = 48,
 		-- Hard bounds on the scaled interval. The lower bound is what stops a momentum-carry burst
 		-- from turning the cadence into a machine-gun; the upper bound stops a near-stopped player
 		-- from taking one step every two seconds before the run states drop out entirely.
@@ -2399,70 +2446,132 @@ Constants.Run = {
 		-- documents. PitchJitter randomizes each play's PlaybackSpeed by +/- that fraction, which is
 		-- the cheapest possible fix for the "identical sample on a metronome" effect a fixed-interval
 		-- step system otherwise has.
-		Stage1 = {
-			StepIntervalSeconds = 0.33,
-			PitchJitter = 0.07,
-			-- Sliced out of the combined asset: the first second is the speed whoosh (which belongs to
-			-- Stage2Onset below, not to a footfall) and the second after it is a RUN of several steps.
-			-- The region here is ONE step's worth out of that run, not the whole second -- a slice
-			-- containing four footfalls, retriggered every 0.33s, would layer four-step bursts on top of
-			-- each other rather than producing a stride.
+		-- KEYED BY STAGE ID, not one flat field per stage. The ladder in Shared/Run/RunConstants.lua is
+		-- an array precisely so a fourth gear is one entry; this table has to be able to grow the same
+		-- way, or "add a stage" is a data change on the server and a code change on the client. Every
+		-- reader (Client/FX/RunAudio.lua's registration sweep, Client/Movement/RunController.lua's
+		-- cadence) iterates or indexes this table rather than naming StageN, and all of them fall back
+		-- to stage 1 for a stage with no entry -- so a ladder that grows before its assets do degrades
+		-- to "the new gear sounds like the old one" instead of going silent.
+		--
+		-- ReferenceSpeed is the speed that stage's StepIntervalSeconds was authored FOR. The live
+		-- interval is scaled by ReferenceSpeed / currentSpeed, so a player slowed to a crawl takes
+		-- slower steps and a downhill momentum carry takes faster ones, without any stage needing its
+		-- own curve.
+		Stages = {
+			[1] = {
+				StepIntervalSeconds = 0.33,
+				ReferenceSpeed = 32,
+				PitchJitter = 0.07,
+				-- Sliced out of the combined asset: the first second is the speed whoosh (which belongs
+				-- to StageOnset below, not to a footfall) and the second after it is a RUN of several
+				-- steps. The region here is ONE step's worth out of that run, not the whole second -- a
+				-- slice containing four footfalls, retriggered every 0.33s, would layer four-step bursts
+				-- on top of each other rather than producing a stride.
+				--
+				-- 1.0 -> 1.25 is a first-pass slice; nudge the start by ear until it lands right on a
+				-- step transient (a start slightly BEFORE the transient just adds a hair of silence,
+				-- which is harmless -- starting slightly after clips the attack, which is what makes a
+				-- footstep sound soft and wrong).
+				Sound = {
+					SoundId = "rbxassetid://76038309546970",
+					Volume = 0.35,
+					PoolSize = 3,
+					PlaybackRegion = NumberRange.new(1.0, 1.25),
+				} :: SoundDefinition,
+			},
+			[2] = {
+				StepIntervalSeconds = 0.25,
+				ReferenceSpeed = 48,
+				PitchJitter = 0.07,
+				-- PLAYBACK REGION (SoundDefinition.PlaybackRegion) -- the answer to "my stage-2 asset
+				-- has a speed whoosh at the front and then the steps." The asset is laid out as one
+				-- second of whoosh (0 -> 1.0, which belongs to StageOnset below) followed by one second
+				-- of running footfalls (1.0 -> 2.0), so this entry takes ONE footfall out of that
+				-- second, not the whole second -- a slice containing the entire run, retriggered every
+				-- 0.25s, would layer multi-step bursts on top of each other rather than producing a
+				-- stride. SoundManager applies it through Sound.PlaybackRegion/PlaybackRegionsEnabled,
+				-- so the ENGINE does the trimming -- no task.delay-based "stop it after N seconds,"
+				-- which is both jittery and one more timer to leak. Leave it out entirely for an
+				-- ordinary one-sound-one-file asset.
+				--
+				-- Deliberately the SAME slice stage 1 uses: it's one recording of one surface, so a
+				-- second footfall out of the same run (1.25 -> 1.5, if you want the stages to use
+				-- distinct samples) would differ only by recording noise, and PitchJitter above already
+				-- breaks the repetition. What actually separates the stages is cadence, volume and the
+				-- onset kick, not the sample.
+				Sound = {
+					SoundId = "rbxassetid://76038309546970",
+					Volume = 0.42,
+					PoolSize = 3,
+					PlaybackRegion = NumberRange.new(1.0, 1.25),
+				} :: SoundDefinition,
+			},
+			-- THE THIRD GEAR. No dedicated asset yet -- it reuses stage 2's sample, louder and at a
+			-- tighter cadence, which is the same "cadence and volume separate the stages, not the
+			-- sample" reasoning stage 2's own note sets out. The ReferenceSpeed is what actually does
+			-- the work here: authored for 72 rather than 48, so the scaling stays honest at a gear
+			-- that genuinely moves half again as fast.
 			--
-			-- 1.0 -> 1.25 is a first-pass slice; nudge the start by ear until it lands right on a step
-			-- transient (a start slightly BEFORE the transient just adds a hair of silence, which is
-			-- harmless -- starting slightly after clips the attack, which is what makes a footstep sound
-			-- soft and wrong).
-			Sound = {
-				SoundId = "rbxassetid://76038309546970",
-				Volume = 0.35,
-				PoolSize = 3,
-				PlaybackRegion = NumberRange.new(1.0, 1.25),
-			} :: SoundDefinition,
-		},
-		Stage2 = {
-			StepIntervalSeconds = 0.25,
-			PitchJitter = 0.07,
-			-- PLAYBACK REGION (SoundDefinition.PlaybackRegion) -- the answer to "my stage-2 asset has a
-			-- speed whoosh at the front and then the steps." The asset is laid out as one second of
-			-- whoosh (0 -> 1.0, which belongs to Stage2Onset below) followed by one second of running
-			-- footfalls (1.0 -> 2.0), so this entry takes ONE footfall out of that second, not the whole
-			-- second -- a slice containing the entire run, retriggered every 0.25s, would layer
-			-- multi-step bursts on top of each other rather than producing a stride. SoundManager applies
-			-- it through Sound.PlaybackRegion/PlaybackRegionsEnabled, so the ENGINE does the trimming --
-			-- no task.delay-based "stop it after N seconds," which is both jittery and one more timer to
-			-- leak. Leave it out entirely for an ordinary one-sound-one-file asset.
-			--
-			-- Deliberately the SAME slice Stage1 uses: it's one recording of one surface, so a second
-			-- footfall out of the same run (1.25 -> 1.5, if you want the stages to use distinct samples)
-			-- would differ only by recording noise, and PitchJitter above already breaks the repetition.
-			-- What actually separates the stages is cadence, volume and the onset kick, not the sample.
-			Sound = {
-				SoundId = "rbxassetid://76038309546970",
-				Volume = 0.42,
-				PoolSize = 3,
-				PlaybackRegion = NumberRange.new(1.0, 1.25),
-			} :: SoundDefinition,
+			-- MinIntervalSeconds below is the real floor on how fast this can get. At 81 studs per
+			-- second a 0.2s nominal cadence scales to roughly 0.18s, comfortably above the 0.15s floor,
+			-- so the top gear has a distinct stride rather than sitting pinned against the clamp.
+			[3] = {
+				StepIntervalSeconds = 0.2,
+				ReferenceSpeed = 72,
+				PitchJitter = 0.07,
+				Sound = {
+					SoundId = "rbxassetid://76038309546970",
+					Volume = 0.5,
+					PoolSize = 3,
+					PlaybackRegion = NumberRange.new(1.0, 1.25),
+				} :: SoundDefinition,
+			},
 		},
 	},
 
-	-- THE STAGE-2 ONSET KICK -- the one-shot that sells the gear change at the instant the second
-	-- stage engages. Plays once per stage-1 -> stage-2 transition, never on a loop, which is the
-	-- other half of the "speed sound at the beginning, then step sounds" split above.
-	Stage2Onset = {
-		-- The whoosh half of the combined asset -- see Footsteps.Stage2's PlaybackRegion note. The
-		-- whoosh occupies the first second and the footfall run starts at 1.0, so this stops exactly
-		-- there: run it any longer and the gear change ends with a stray footstep layered on top of the
-		-- real stride, which is heard as one step landing twice.
-		Sound = {
-			SoundId = "rbxassetid://74852553291807",
-			Volume = 0.55,
-			PlaybackRegion = NumberRange.new(0, 1.0),
-		} :: SoundDefinition,
-		-- Additional FOV pull layered on top of Constants.Camera.Sprint.FOVDelta while stage 2 is
-		-- engaged (Client/FX/FOVOffset.lua's named-slot composition, so it stacks with the sprint
-		-- slot instead of fighting it). Negative = narrower, matching Sprint's own convention.
-		FOVDelta = -5,
-		FOVEaseSpeed = 4,
+	-- THE ONSET KICK -- the one-shot that sells a gear change at the instant it engages, keyed by the
+	-- stage being ENTERED. Plays once per upward transition into that stage, never on a loop, which is
+	-- the other half of the "speed sound at the beginning, then step sounds" split above.
+	--
+	-- Stage 1 has no entry and deliberately so: engaging the run at all is not a gear CHANGE, it is the
+	-- run starting, and it already has the run animation and the footstep cadence to announce it. A
+	-- whoosh there would fire every time a player tapped the key.
+	--
+	-- FOVDelta is the additional pull layered on top of Constants.Camera.Sprint.FOVDelta while that
+	-- stage is held (Client/FX/FOVOffset.lua's named-slot composition, so it stacks with the sprint
+	-- slot rather than fighting it). Negative = narrower, matching Sprint's own convention. These are
+	-- ABSOLUTE per stage, not cumulative -- RunController writes one slot and simply changes its target
+	-- as the stage changes, so stage 3's -9 replaces stage 2's -5 rather than adding to it.
+	StageOnset = {
+		[2] = {
+			-- The whoosh half of the combined asset -- see Footsteps.Stages[2]'s PlaybackRegion note.
+			-- The whoosh occupies the first second and the footfall run starts at 1.0, so this stops
+			-- exactly there: run it any longer and the gear change ends with a stray footstep layered
+			-- on top of the real stride, which is heard as one step landing twice.
+			Sound = {
+				SoundId = "rbxassetid://74852553291807",
+				Volume = 0.55,
+				PlaybackRegion = NumberRange.new(0, 1.0),
+			} :: SoundDefinition,
+			FOVDelta = -5,
+			FOVEaseSpeed = 4,
+		},
+		[3] = {
+			-- Same whoosh, louder and pitched by the player's own ear rather than by a second asset --
+			-- there is one speed-whoosh recording, and the top gear is the same event happening harder.
+			-- Swap in a dedicated sample here when one exists; nothing else has to change.
+			Sound = {
+				SoundId = "rbxassetid://74852553291807",
+				Volume = 0.7,
+				PlaybackRegion = NumberRange.new(0, 1.0),
+			} :: SoundDefinition,
+			-- Nearly double stage 2's pull, and eased in faster. The top gear should be unmistakable
+			-- from the camera alone -- a player who cannot tell which gear they are in has a ladder with
+			-- no feedback, which is the same as no ladder.
+			FOVDelta = -9,
+			FOVEaseSpeed = 5,
+		},
 	},
 
 	-- ANIMATION. Stage 1 keeps Constants.Combat.AnimationIds.Running (the clip that has always played
@@ -2471,13 +2580,25 @@ Constants.Run = {
 	-- ParkourAnimator uses for its half-authored directional wall-jump pair, so this ships correctly
 	-- either way.
 	Animation = {
-		-- Playback speed for the run loop per stage. Applied on stage CHANGE only, never per frame:
-		-- CombatAnimator.FreezeActiveCombatTrack (hit-stop) drives the same property, and a per-frame
-		-- write here would silently cancel every freeze that landed on a running player.
-		Stage1PlaybackSpeed = 1,
-		-- Slightly hot even when a dedicated stage-2 clip exists -- a full-stride run reads as urgent,
-		-- and this is what makes stage 2 visibly different on day one, before that clip is authored.
-		Stage2PlaybackSpeed = 1.25,
+		-- Playback speed for the run loop, keyed by stage. Applied on stage CHANGE only, never per
+		-- frame: CombatAnimator.FreezeActiveCombatTrack (hit-stop) drives the same property, and a
+		-- per-frame write here would silently cancel every freeze that landed on a running player.
+		--
+		-- There are only two run CLIPS (Running, and RunningStage2 when authored), so stages 2 and 3
+		-- share the second one and are separated by rate alone. That is the same blank-id fallthrough
+		-- the rest of this table uses, applied one level further: a dedicated stage-3 clip can be added
+		-- later without any consumer changing, because nothing reads "how many clips are there" -- it
+		-- reads which stage is engaged and looks the rate up here.
+		PlaybackSpeeds = {
+			[1] = 1,
+			-- Slightly hot even when a dedicated stage-2 clip exists -- a full-stride run reads as
+			-- urgent, and this is what makes stage 2 visibly different on day one.
+			[2] = 1.25,
+			-- Hot enough to read as a different gear from stage 2 while staying short of the rate at
+			-- which a run clip starts to look like a cartoon. If a dedicated stage-3 clip lands, this
+			-- should come back toward 1.
+			[3] = 1.5,
+		},
 		-- Crossfade between the two run clips at a stage change. Longer than a combat interrupt cut
 		-- (the two clips are the same character doing the same thing harder, so the transition should
 		-- read as accelerating, not as swapping costumes) and shorter than a settle.
@@ -2561,85 +2682,32 @@ Constants.Combat = {
 	BlockDamageMultiplier = 0.25,
 	BlockPostureMultiplier = 1.0,
 
-	-- Parry: a timed block, not a separate input -- every accepted BlockStart request opens this
-	-- short server-tracked window (CombatSystem.lua's handleBlockStart), subject to the cooldown
-	-- between attempts below, and a hit landing inside that window is punished with the posture
-	-- damage dealt to the attacker instead of landing on the defender.
-	ParryWindowSeconds = 0.35,
-	ParryCooldownSeconds = 1.2,
-	ParryPunishPostureDamage = 30,
-	-- Ping compensation for the parry window (players only -- bots have no network latency). The
-	-- server opens the parry window when a block request ARRIVES, which is already ~ping later than
-	-- the client pressed, so a laggy player's real-time timing is silently punished by their
-	-- connection. handleBlockStart adds min(player ping, this cap) to the window so a high-ping
-	-- player gets back roughly the time their connection ate -- keeping "reads beat reflexes"
-	-- (combat-philosophy.md) fair across connections without trusting any client-sent timing. Capped
-	-- so an extreme/spoofed ping can't turn the window into a near-permanent parry.
-	ParryPingCompensationMaxSeconds = 0.12,
-
-	-- THE PARRIED ATTACKER'S OPEN GUARD -- how long after being parried they cannot raise a guard at
-	-- all (ACTION_GATES.GuardOpen rejects BlockStart) or have an already-raised one honored
-	-- (HitResolution.ClassifyDefense suppresses in the same branch posture-break uses).
+	-- THE PARRY/BLOCK CONFIG THAT USED TO LIVE HERE HAS MOVED, and was not merely deleted.
 	--
-	-- This exists because the parry punish was, measurably, not a punish. The whole reward was
-	-- StunDuration, and ACTION_GATES.BlockStart is exempt from Stun (deliberately -- see its own
-	-- header and Balance principle 1), so a parried attacker's only real lockout was the recovery of
-	-- the swing they had already committed to. Measured against this table's own frame data: the
-	-- earliest a parried attacker can press Block is ActiveSeconds + RecoverySeconds of whatever they
-	-- threw, since handleBlockStart rejects on attackEndsAt and HitboxResolver samples on the first
-	-- active tick. That is 0.36s after a parried Basic1 and 0.77s after a Heavy1 -- so parrying a
-	-- Heavy already bought a free follow-up from the recovery alone, and parrying ANY Basic stage
-	-- bought nothing a human could act inside.
+	-- ParryWindowSeconds/ParryCooldownSeconds/ParryPunishPostureDamage/ParryPingCompensationMaxSeconds/
+	-- GuardOpenSeconds/GuardResetSeconds were config for the deleted CombatSystem's parry. Every one of
+	-- them is now owned by Shared/Defense/DefenseConstants.lua, or by the animation asset:
 	--
-	-- 0.60 is sized to cover reaction + one-way latency + the slowest weapon's own WindupSeconds
-	-- (Primary Basic1, 0.31 -- the playtest-confirmed value, see its own comment), so the parrier gets
-	-- EXACTLY ONE guaranteed follow-up. The reaction+latency half of that (~0.25) is an engineering
-	-- estimate, not a measurement from this project -- it is the one soft number here. The design
-	-- degrades gracefully either way: shorter and there is slack to spare, longer and the follow-up
-	-- merely lands on a guard instead of through it. The UPPER bound is hard, though -- past ~0.75 a
-	-- Secondary user's second swing (0.25 + Dagger1 Cooldown 0.35 + Windup 0.16) also lands inside the
-	-- window, which is a combo handed out for one read rather than a conversion.
+	--   * The parry WINDOW is no longer a constant anywhere. It comes from ParryWindowOpen/
+	--     ParryWindowClose markers authored on the parry clip (Shared/Defense/ParryWindows.lua), so
+	--     retiming a parry is retiming the animation and nothing else.
+	--   * The ping refund survives as DefenseConstants.Parry.PingCompensationMaxSeconds, at the same
+	--     0.12 -- it is a latency correction, not a window length, so it is still a constant.
+	--   * The parried attacker's punish is DefenseConstants.Stagger.DurationSeconds. Note it is 1.5s
+	--     where GuardOpenSeconds was 0.6 -- and that 0.6 was DERIVED, not guessed: sized to cover
+	--     reaction plus one-way latency plus the slowest weapon's own windup (Primary Basic1, 0.31,
+	--     still live below) so the parrier got exactly ONE guaranteed follow-up, with a hard upper
+	--     bound near 0.75 past which a Secondary user's second swing also lands inside the window.
+	--     The derivation is recorded here because the constant that carried it is gone.
+	--   * The anti-turtle cost is DefenseConstants.Parry.MinUnguardedSeconds, at the same 0.3.
+	--   * The parry's REWARD is guard rather than posture damage (DefenseConstants.Guard.ParryRestore);
+	--     nothing in the Defense System applies damage of any kind.
 	--
-	-- Deliberately FLAT rather than tiered by what was parried. A Basic/Heavy split is the obvious
-	-- shape and it is the wrong one: the split already exists for free in RecoverySeconds, with the
-	-- same sign, so authoring a second one on top would widen the case that already works (Heavy) and
-	-- leave untouched the case that does not (Basic). A flat window is worth the most exactly where
-	-- the punish is currently worth the least.
-	--
-	-- Balance principle 3 ("no true unblockable/unparryable without an explicit telegraphed cost") is
-	-- satisfied by the parry itself being the telegraph: broadcastParryWindowOpened puts a bright,
-	-- everyone-visible highlight on the defender BEFORE the swing lands, and the attacker chose to
-	-- swing into it. Bounded, and non-refreshing -- only a parry writes it, and a parry costs the
-	-- defender ParryCooldownSeconds, so this can never stack into a lockout.
-	GuardOpenSeconds = 0.6,
-
-	-- THE COST OF ATTEMPTING A PARRY, expressed as a guard the player has to actually drop first.
-	--
-	-- handleBlockStart has no re-press guard (it never checked state.blocking), so the dominant
-	-- strategy was to hold Block permanently and re-tap it every ParryCooldownSeconds: continuous
-	-- block mitigation with a parry window covering 0.35/1.2 = 29% of all time, for nothing. That is
-	-- not a decision, which is what handleBlockStart's own "opening a parry window changes no vital
-	-- now that it costs nothing" comment was describing without treating as a problem.
-	--
-	-- Charged on RELEASE rather than on press, so it prices the turtle and not the tapper: a genuine
-	-- tap-to-parry releases while ParryCooldownSeconds still has ~0.85s to run, and math.max makes
-	-- this a no-op there. It only binds once the cooldown has already lapsed under a held guard --
-	-- i.e. exactly the hold-forever-and-re-tap case. To arm a parry you must have had your guard down
-	-- for this long, which is the exposure that makes the attempt a choice.
-	--
-	-- Costs the combo victim Balance principle 1 protects nothing at all, and that is checkable
-	-- rather than asserted: their first Block press comes from an unguarded state and arms normally,
-	-- and for hits 2-4 ParryCooldownSeconds (1.2) already dominates the worst-case inter-hit gap
-	-- (0.48 -- see HitStunDuration's own comment for that derivation). This binds in neutral only.
-	--
-	-- Also the design Server/Systems/TrainingBotSystem.lua's Parry preset was already written to --
-	-- see updateParryWatch, whose bot "stays unguarded and only presses Block reactively... hunting
-	-- parries" and releases immediately when no window opened. Turtle/Block presets correctly lose
-	-- parry access entirely under this, which will look like a regression before it looks like a fix.
-	GuardResetSeconds = 0.3,
+	-- Left as a pointer rather than as dead fields, because orphaned config reads as live and gets
+	-- retuned by someone who then cannot find what their change did.
 
 	-- Disarm: combat-philosophy.md's "Established systems" list names Block/Parry/Disarm as one
-	-- formal defensive layer (see ParryWindowSeconds' own comment for the Block/Parry merge).
+	-- formal defensive layer (Block/Parry are one input -- see Shared/Defense/DefenseConstants.lua).
 	--
 	-- NOTHING CURRENTLY PRODUCES A DISARM, and that is deliberate rather than an oversight. The whole
 	-- mechanism below it is live and correct -- HitResolution.ApplyDisarm, CombatState/BotState's
@@ -2679,68 +2747,11 @@ Constants.Combat = {
 	-- unrelated to that count. See that function's own header for why the clamp was a stage lockout
 	-- rather than a bound.
 
-	-- The HEAVY throw-combo's own reset window (CombatState.comboExpiry), deliberately separate from
-	-- ComboResetSeconds above rather than sharing it.
-	--
-	-- Sharing it was a silent, weapon-asymmetric bug: the Heavy combo is THROW-based, so stage 2 is
-	-- only reachable if the window outlives stage 1's own Cooldown. Primary's Heavy1 Cooldown is 3.00
-	-- against a 1.5s shared window, so resetHeavyComboIfLapsed always zeroed comboIndex before the
-	-- cooldown cleared and Primary could NEVER throw Heavy2 -- 21 damage / 25 posture of unreachable
-	-- data. Secondary (DaggerHeavy1 Cooldown 0.58 < 1.5) chained fine, so one weapon had a working
-	-- two-stage Heavy string and the other silently didn't.
-	--
-	-- Set above the slowest authored Heavy Cooldown (Primary's 3.00) so the second stage is reachable
-	-- on every weapon, but only just -- the remaining ~0.5s means continuing the Heavy string is a
-	-- deliberate, timed follow-up rather than something that happens automatically whenever the
-	-- cooldown happens to clear. Raising a Heavy Cooldown above this value silently re-breaks that
-	-- weapon's stage 2; ConstantsValidation asserts the relationship so it can't regress quietly.
-	HeavyComboResetSeconds = 3.5,
-
-	-- The basic (M1) finisher combo: land this many basic hits in a row (within ComboResetSeconds of
-	-- each other) and the next M1 becomes the Finisher (Hitboxes.Finisher below) instead of a normal
-	-- Basic swing. The combo is LANDING-based, not press-based (CombatSystem.lua's handleAttackRequest
-	-- / startAttackSwing) -- only hits that connect advance it, so whiffing can't fast-track a
-	-- launcher, and it matches the "3 hits that stun, then a finisher" design. Set to 4 = 3 normal
-	-- basic hits (Hitboxes.Basic stages 1-3) + the finisher; the value is the finisher's stage index.
-	BasicComboLength = 4,
-
-	-- Input buffering (CombatState.bufferedAttack): a Basic/Heavy attack request rejected purely
-	-- for landing before the previous swing's cooldown/commitment cleared is remembered and
-	-- automatically replayed once that gate opens, as long as it's still within this many seconds
-	-- of the original press -- short enough that it only smooths over "a few frames too early," not
-	-- a genuinely delayed queued action from a player who's moved on.
-	AttackInputBufferSeconds = 0.2,
-
-	-- Feint (right-click, RequestFeint/CombatSystem.lua's handleFeintRequest): cancels the player's
-	-- own Basic/Heavy/Finisher/AirSlam swing while it's still inside WindupSeconds, before the
-	-- hitbox can ever go active -- a mind-game tool (combat-philosophy.md's "reads beat reflexes"),
-	-- not a free escape hatch. Two things keep it from trivializing the swing it cancels: the swing's
-	-- own Cooldown (already committed to basicAttackReadyAt/heavyAttackReadyAt/airSlamReadyAt at
-	-- throw time) is NOT refunded, so baiting with the same attack slot repeatedly still costs the
-	-- real cooldown every time; and RecoverySeconds below REPLACES the remaining windup+active+
-	-- recovery commitment rather than clearing it outright, so a feint returns to neutral faster than
-	-- finishing the swing would have, but not instantly. Deliberately scoped to Basic/Heavy/Finisher/
-	-- AirSlam only, NOT Dash/DashPunch/DashHit/Slide -- see CombatSystem.lua's handleFeintRequest for
-	-- why those four (movement-integrated commitment, not a stationary telegraph) are out of scope.
-	-- First-pass technical value, free to tune per combat-philosophy.md's Tuning process.
-	Feint = {
-		RecoverySeconds = 0.15,
-	},
-
-	-- Client-side action-start prediction (Client/Combat/PredictionMirror.lua + CombatClient.lua):
-	-- the acting client plays its own swing/dash feedback the frame the input is pressed (when its
-	-- local mirror of server state says the action is legal) instead of waiting a full round-trip
-	-- for the AttackStarted/MovementPerformed echo. The echo CONFIRMS the prediction; a
-	-- Combat_ActionRejected event (or this timeout lapsing with neither echo nor reject seen)
-	-- ROLLS IT BACK with a fast fade. TimeoutSeconds must comfortably exceed a bad round-trip so a
-	-- merely-slow confirm doesn't read as a reject; RollbackFadeSeconds is the fade-out applied to
-	-- a rolled-back animation track so a mispredicted swing melts instead of snapping to idle.
-	-- Server-validated HIT feedback (damage numbers, hit SFX/VFX) is NEVER predicted -- see
-	-- animation-systems.md; this covers only the actor's own action-start presentation.
-	Prediction = {
-		TimeoutSeconds = 0.35,
-		RollbackFadeSeconds = 0.08,
-	},
+	-- HeavyComboResetSeconds/BasicComboLength/AttackInputBufferSeconds/Feint/Prediction (combo timing,
+	-- input buffering, Feint, and client-side action-start prediction) were removed alongside the rest
+	-- of the combat system -- every reader of these (CombatSystem.lua, PredictionMirror.lua,
+	-- CombatClient.lua's own predict/rollback path) is gone. Server/Combat/Movement.lua and
+	-- Server/Combat/DefaultMoveRegistry.lua, the two Combat/ modules kept on disk, read neither.
 
 	-- Finisher physics (Server/Combat/RagdollController.lua applies these; CombatSystem.lua picks the
 	-- variant at the 4th hit). The finisher's damage/reach/timing are the Hitboxes.Finisher swing
@@ -3319,279 +3330,40 @@ Constants.Combat = {
 		FaceDownSpin = 9,
 	},
 
-	-- Every combat animation id, named once here so a player's own client
-	-- (StarterPlayer/.../FX/CombatAnimator.lua) and a training bot's server-driven equivalent
-	-- (ServerScriptService/.../Combat/BotAnimator.lua) always play the identical clip for the
-	-- identical move -- a bot is meant to look like a real opponent (see createTrainingBot's own
-	-- comment on bot vitals), which includes moving like one. Real ids, supplied for this pass (not
-	-- guessed -- see CombatAudio.lua/VitalIcon.lua's headers for why this codebase never fabricates
-	-- an asset id). Heavy attacks have no dedicated animation yet and are a silent no-op in both
-	-- consumers until one is supplied.
+	-- Locomotion animation ids -- read generically by Client/FX/CombatAnimator.lua's BindCharacter
+	-- loop (whatever's in this table gets a template built and loaded, nothing hardcodes the name
+	-- list) -- see that module's own header. Every combat-specific id that used to live here
+	-- (Swing1-3, Heavy1-2, Uppercut/Downslam/FinisherNormal, BlockHold, ParryFlash, DashFront/Back/
+	-- Left/Right/DashPunch, Slide, Hit1-3/HitGeneric, PostureBreakStagger, Feint) was removed
+	-- alongside the rest of the combat system -- CombatAnimator.lua no longer has any code path that
+	-- would resolve them, and BotAnimator.lua (the other former consumer) is gone entirely.
 	AnimationIds = {
-		Swing1 = "rbxassetid://104588315151150",
-		Swing2 = "rbxassetid://78226937952673",
-		Swing3 = "rbxassetid://106982083848684",
 		-- Walking/Running are a pair -- CombatAnimator.lua's locomotion evaluator crossfades
 		-- between them on the same fade duration as sprint toggles, and stops whichever is
-		-- playing on a hard interrupt (combat action, or the character stops moving).
+		-- playing on a hard interrupt (the character stops moving).
 		Walking = "rbxassetid://92817463622620",
 		Running = "rbxassetid://134203885804635",
 		-- The SECOND run stage's own clip (Constants.Attributes.SprintStage == 2). Blank until a real
 		-- full-stride run is authored -- and blank is a supported, shipped state, not a stub: the
 		-- locomotion evaluator falls through to Running above when this has no id, so stage 2 still
-		-- reads as a different gear through Constants.Run.Animation.Stage2PlaybackSpeed, the FOV pull
+		-- reads as a different gear through Constants.Run.Animation.PlaybackSpeeds, the FOV pull
 		-- and the stage-2 footstep/onset audio. Paste an id here and the clip swaps in with no code
 		-- change, the same wired-but-unauthored convention Constants.Flight.AnimationIds uses.
 		RunningStage2 = "rbxassetid://126596518578942",
-		Uppercut = "rbxassetid://138196103225171",
-		BlockHold = "rbxassetid://105157110369149",
-		ParryFlash = "rbxassetid://71843503021113",
-		DashFront = "rbxassetid://124093005439273",
-		DashBack = "rbxassetid://79144536812023",
-		DashLeft = "rbxassetid://139531382954813",
-		DashRight = "rbxassetid://108317494909424",
-		-- The double-tap-W throw specifically (DashPunch -- Constants.Combat.DashPunch,
-		-- CombatSystem.lua's handleDashRequest/throwDashPunch) -- distinct from DashFront so the
-		-- punch reads as its own committed attack rather than reusing the plain forward-dash clip a
-		-- single Q-press-forward (DashHit) or a bare movement dash already plays. CombatAnimator.lua's
-		-- PlayPredictedDash/ConfirmDash pick this one specifically via viaDoubleTapForward/
-		-- DashFrontCommitmentSeconds -- see those functions' own headers.
-		DashPunch = "rbxassetid://74610110553864",
-		-- The new Slide ability (Movement.ApplySlide/CombatSystem.lua's handleSlideRequest) -- a
-		-- single clip, unlike Dash's four directional ones, since Slide never steers: it always plays
-		-- this one animation in whatever direction the player was already sprinting.
-		Slide = "rbxassetid://137106503700813",
-		Hit1 = "rbxassetid://122404425463872",
-		Hit2 = "rbxassetid://84510912158390",
-		Hit3 = "rbxassetid://71830231198123",
-		-- Slots wired end-to-end (every play path in CombatAnimator/BotAnimator resolves these
-		-- names) but awaiting Studio-authored assets -- an empty id is a SAFE no-op: CombatAnimator's
-		-- template loader skips empty ids, so the track never loads and every play path degrades to
-		-- its documented fallback (Heavy -> silent, Downslam/FinisherNormal -> the Uppercut stand-in,
-		-- HitGeneric -> no flinch, PostureBreakStagger -> no stagger, Feint -> the cancelled swing
-		-- just stops with no distinct recoil pose) exactly as before these slots were listed. Drop a
-		-- rbxassetid in and the wired path lights up with no code change.
-		Heavy1 = "rbxassetid://83363364108102",
-		Heavy2 = "rbxassetid://83363364108102",
-		-- The standalone AirSlam attack's ground-slam clip (Constants.Combat.AirSlam,
-		-- CombatSystem.lua's throwAirSlam) -- always thrown with FinisherVariant = "Downslam", so this
-		-- is the one slot that resolves it (see finisherTrackName in CombatAnimator.lua).
-		Downslam = "rbxassetid://106111823142540",
-		FinisherNormal = "",
-		HitGeneric = "",
-		PostureBreakStagger = "",
-		-- Feint's own recoil/whip-back clip (CombatAnimator.CancelActiveSwing) -- optional: with no
-		-- id supplied, a feint just stops whatever swing was playing (ROLLBACK_FADE_TIME fade to
-		-- idle) instead of crossfading into a dedicated cancel pose.
-		Feint = "",
 	} :: { [string]: string },
 
-	-- Passive posture regen once a target is outside its posture-broken window and not being hit.
-	-- The only passive-regen model the game has, now that Stamina is gone (Health has no passive
-	-- regen either -- see StarterCharacterScripts/Health.server.lua and combat-philosophy.md's
-	-- Sekiro-grade reference point).
-	PostureRegenPerSecond = 8,
+	-- PostureRegenPerSecond/HealthRegen/LockOnRange/ParryTellBroadcastRadius/MaxTrackedOpponents/
+	-- PassiveVitalsSyncInterval/FeedbackHeadOffset were removed alongside the rest of the combat
+	-- system -- every reader
+	-- (CombatSystem.lua, CombatClient.lua, HitResolution.lua) is gone, and
+	-- src/StarterPlayer/StarterCharacterScripts/Health.server.lua (the one file that still mentions
+	-- HealthRegen) only ever referenced it in a comment, never read it.
 
-	-- PASSIVE HEALTH REGEN. A deliberate reversal of a previously-deliberate decision, so it is worth
-	-- stating plainly rather than letting a future reader think it was an oversight: this game
-	-- shipped with NO passive health regen on purpose, and StarterCharacterScripts/Health.server.lua
-	-- exists as an intentionally-empty file purely to stop Roblox inserting its own default regen
-	-- script. That reasoning cited a Sekiro-grade reference point where health is only recovered
-	-- deliberately. Requested and re-affirmed by the repo owner; the suppression of Roblox's default
-	-- script still stands, because that script is an untracked writer of Humanoid.Health outside the
-	-- server's control -- which is a separate problem from whether regen should exist at all. This
-	-- table is the ONE model, and CombatSystem is its one writer.
-	--
-	-- SMART: regen is gated entirely on being out of combat. CombatState.inCombatUntil is refreshed by
-	-- every real exchange AND by proximity to a recent opponent (refreshInCombatFromProximity), so
-	-- circling a live opponent without trading blows does not heal you, and disengaging does not pay
-	-- out until InCombatDurationSeconds after the last exchange. Note this promotes inCombatUntil from
-	-- a purely presentational signal to one with a gameplay consequence -- syncInCombat's own header
-	-- called it presentation-only, and no longer can.
-	--
-	-- SMOOTH: two separate things, both needed, because either alone still reads as janky.
-	--   1. The RATE eases in rather than switching on. Regen begins at StartFractionPerSecond the
-	--      instant combat lapses and eases to FullFractionPerSecond over RampSeconds on a smoothstep
-	--      curve -- so recovery accelerates as safety persists, instead of a cliff where a trickle
-	--      becomes a torrent on one frame. A linear ramp was tried on paper and rejected: its
-	--      derivative is discontinuous at both ends, which is exactly where the eye is looking.
-	--   2. The VALUE is accumulated per tick from deltaTime, never in periodic lumps, and the client
-	--      bar already Springs its fill (Components/VitalIcon.lua), so the throttled
-	--      PassiveVitalsSyncInterval replication renders as continuous motion rather than steps.
-	--      No client change was needed for this, and none should be added.
-	--
-	-- Rates are FRACTIONS OF MAX per second, not flat HP/s, even though MaxHealth is currently a flat
-	-- 100 for every player and the two are therefore identical today. The Attributes screen already
-	-- advertises Vitality as "Max Health" (Constants.CharacterCreation.AttributeEffects) while nothing
-	-- yet reads that attribute -- when it does, a fraction-based rate scales with the larger pool on
-	-- its own and a flat one would quietly become a nerf.
-	HealthRegen = {
-		-- Master switch. Off restores the original no-regen design exactly, with no other edit.
-		Enabled = true,
-
-		-- Rate the moment the in-combat window lapses. Deliberately near-negligible (0.5 HP/s at
-		-- MaxHealth 100) -- this is the foot of the ramp, not a meaningful heal. Its job is to make
-		-- the onset continuous, so nothing visibly "turns on."
-		StartFractionPerSecond = 0.005,
-
-		-- Rate at the top of the ramp (4 HP/s at MaxHealth 100). Chosen against the actual recovery
-		-- it implies rather than by feel alone: from near-death, the ramp contributes ~13 HP over its
-		-- 6 seconds and the remainder arrives at 4 HP/s, so a full refill from ~5 HP takes roughly 28
-		-- seconds of genuinely uncontested time, on top of the 5-second InCombatDurationSeconds wait.
-		-- Fast enough that exploration between fights isn't a limp back to safety; far too slow to
-		-- out-heal any real exchange, which is what keeps this from touching combat balance.
-		FullFractionPerSecond = 0.04,
-
-		-- How long, after the in-combat window lapses, the rate takes to ease from Start to Full.
-		RampSeconds = 6,
-
-		-- Ceiling as a fraction of max health. 1 means passive regen alone can carry a player all the
-		-- way back to full. THE ONE LEVER TO REACH FOR FIRST if this turns out to remove too much
-		-- tension: dropping it to ~0.7 keeps the tedium fix (no limping home at 5 HP) while still
-		-- requiring a deliberate heal to top off, which is much closer to the original design's
-		-- intent than switching regen off wholesale.
-		MaxFractionOfMax = 1,
-	},
-
-	-- Lock-on acquisition range -- deliberately larger than any hitbox's reach so a player can lock
-	-- a target slightly outside melee range and close the distance, per combat-philosophy.md's
-	-- "Established systems" lock-on entry.
-	LockOnRange = 40,
-
-	-- Proximity radius (studs) CombatSystem.lua's refreshInCombatFromProximity checks a tracked
-	-- recent opponent (CombatState.recentOpponents) against, to EXTEND (never start) an
-	-- already-earned inCombatUntil window -- see that field's own header for the full "why." Same
-	-- value as Hitboxes.MaxCandidateRadius below, deliberately: both represent "close enough to
-	-- still plausibly be fighting," and were kept in sync on purpose here, not by coincidence -- a
-	-- future tuning pass touching one should consider whether the other should move too, rather than
-	-- assuming they drifted apart independently.
-	CombatEngagementRange = 20,
-
-	-- Radius (studs) CombatSystem.lua's broadcastParryWindowOpened uses to decide who receives the
-	-- Combat_ParryWindowOpened tell -- deliberately NOT CombatEngagementRange above. That value
-	-- answers "close enough to still plausibly be fighting THIS combatant"; this one answers "close
-	-- enough to plausibly SEE this combatant's highlight," which is a render-distance question, not a
-	-- combat-relevance one -- a spectator or a third party closing in on the fight should still get
-	-- the tell even though they're not a tracked recentOpponent of anyone involved. Sized well past
-	-- LockOnRange/CombatEngagementRange for exactly that reason. Was an unfiltered FireAllClients
-	-- before this constant existed (docs/architecture/2026-07-audit.md Tier 2.1, 2026-08-audit.md
-	-- §4.1): every parry-window open replicated to every connected client regardless of distance,
-	-- ~25 inbound calls/sec/client at 30 players duelling against a documented 4/sec budget
-	-- (MaxRemoteCallsPerSecondPerPlayer, this file's Networking section) -- the only O(players^2)
-	-- broadcast shape in the combat system.
-	ParryTellBroadcastRadius = 140,
-
-	-- Cap on CombatState.recentOpponents -- a small, fixed-size set of "who I've actually traded
-	-- with lately," not an unbounded fight history. HitResolution.StampRecentOpponent evicts the
-	-- OLDEST entry (lowest timestamp) once this many are already tracked, before adding a new one.
-	MaxTrackedOpponents = 4,
-
-	-- Passive (non-action-driven) vitals sync is throttled separately from action-driven syncs
-	-- (attack/block/parry resolution always syncs immediately) so idle posture regen
-	-- doesn't spend the whole per-player remote budget in NetworkBudget above -- see
-	-- performance-optimization.md: "cosmetic/UI-sync remotes... should be throttled first."
-	PassiveVitalsSyncInterval = 0.5,
-
-	-- Vertical lift (studs) applied on top of a combat-feedback target's root-part height (or its
-	-- server-reported TargetPosition) before placing a damage number / "PARRIED" label on screen --
-	-- Client/Combat/CombatClient.lua's own TARGET_HEAD_OFFSET, moved here so the number has a shared
-	-- home next to its sibling Constants.Combat presentation-adjacent tunables (LockOnRange etc.)
-	-- instead of living as a bare client-only local with no cross-reference. A fixed offset rather
-	-- than a real Head lookup: TargetPosition is a bare Vector3 the server reports (no live Instance
-	-- to look a Head up from for, e.g., a training dummy target with no owning Player), so both the
-	-- TargetPosition and TargetUserId resolution branches in CombatClient.lua need to agree on the
-	-- same approximation to avoid feedback jumping vertically depending on which branch fired -- see
-	-- that module's own comment at the use site. Roughly root-to-head height for a standard R15 rig.
-	FeedbackHeadOffset = Vector3.new(0, 3, 0),
-
-	-- Visualization of sampled hitbox poses (temporary, non-colliding, non-queryable Parts) -- see
-	-- Server/Combat/HitboxResolver.lua's renderDebugHitbox. Never affects hit logic even when on.
-	-- Only the BOOT-TIME default now -- Server/Combat/HitboxDebugState.lua owns the live value an
-	-- authorized admin can flip at runtime, in Studio OR a published server, via DevMenuSystem.lua's
-	-- GetHitboxDebug/SetHitboxDebug remotes, so this constant no longer needs editing/republishing
-	-- to see hitboxes; it only decides what a fresh server starts with.
-	-- Off by default: at 3 SweepSubsteps x ~7 samples per swing this creates ~21 Parts (plus 21
-	-- Debris:AddItem calls) per swing, ~48 instance create/destroy per second per attacking player,
-	-- which dominates any Studio MicroProfiler capture and makes a performance baseline meaningless,
-	-- and would visibly spam every nearby player's Workspace in a live server. Turn it on
-	-- deliberately (via the live toggle) while working on hitbox shape/reach/timing.
-	DebugHitboxes = false,
-
-	-- Swept melee hitbox geometry/scheduling -- shared regardless of which weapon (Weapons below) is
-	-- equipped. Per-weapon Basic/Heavy/Finisher stage arrays live in Constants.Combat.Weapons, not
-	-- here -- see that table's own header for why they were split out.
-	Hitboxes = {
-		-- Seconds between re-samples of the oriented box while a swing's active window is open.
-		SampleRate = 1 / 30,
-		-- Hard cap on samples taken in a single swing, independent of ActiveSeconds -- guards
-		-- against a misconfigured (too-long) ActiveSeconds turning into an unbounded per-swing cost.
-		MaxSamplesPerSwing = 20,
-		-- Same purpose as MaxSamplesPerSwing above, but for the Move Creation System's projectile
-		-- engine (HitboxResolver.StartProjectile/performProjectileSample) -- a much higher ceiling
-		-- since a projectile's own ActiveSeconds is expected to cover multiple real seconds of
-		-- flight (a melee swing's ActiveSeconds is a fraction of a second), not because projectiles
-		-- are sampled any more densely (same SampleRate cadence) or need to be.
-		MaxSamplesPerProjectile = 300,
-		-- Extra distance (studs) added past a hit candidate's root position when re-checking line of
-		-- sight for a swing-confirmed overlap, so standing flush against a thin wall doesn't produce
-		-- a false "blocked" reading from floating-point edge contact.
-		LineOfSightPadding = 0.5,
-		-- Radius (studs) CombatSystem.lua's getSwingCandidates spatial-queries around the attacker
-		-- for swing candidates, instead of scanning every connected player -- see that function's
-		-- own header for the scalability reasoning (performance-optimization.md: cost should scale
-		-- with local combat density, not total server population). Sized generously past the
-		-- farthest actual hitbox reach across every weapon AND every Move Creation System shape --
-		-- since this list is only the roster HitboxResolver's per-sample box query narrows further,
-		-- being a little generous here costs nothing (arc/LOS/distance are all re-validated
-		-- downstream), being too tight would silently drop a legitimately reachable target no matter
-		-- how correctly its shape's own geometry was authored.
-		--
-		-- 220 (2026-08-12, "much larger hitboxes"): comfortably past the largest reach
-		-- Shared/HitboxShapes.lua's own FIELD_SPECS now allow (a Length- or Radius-driven shape can
-		-- reach up to 200 studs -- see HitboxShapes.Reach and those fields' own Max) plus the
-		-- attacker's own Offset (up to 10 studs forward, MoveRegistryManager's
-		-- CLAMP_MAX_OFFSET_STUDS) and some slack for in-swing movement. Every hand-authored
-		-- Constants.lua attack still tops out at a few studs, same as the comment this replaced
-		-- noted -- this ceiling exists for the Move Creation System's own shapes, not those.
-		MaxCandidateRadius = 220,
-		-- Sub-samples interpolated between the previous and current main sample pose (CFrame:Lerp)
-		-- so a fast-moving/rotating hitbox still catches a target it swept past between two
-		-- SampleRate ticks -- see HitboxResolver.performSample, the only reader. Was a module-local
-		-- constant there; moved here per luau-coding-standards.md's "no magic numbers in system
-		-- logic" now that every other hitbox-timing number already lives in this table.
-		SweepSubsteps = 3,
-		-- Hard cap on parts a single OverlapParams query can return (Workspace:GetPartBoundsInBox) --
-		-- guards against a pathological number of candidate parts in one query. Same
-		-- moved-from-module-local reasoning as SweepSubsteps above.
-		MaxPartsPerQuery = 100,
-
-		-- Studio-only debug-hitbox Part cosmetics (Server/Combat/HitboxResolver.lua's
-		-- renderDebugHitbox, gated behind Constants.Combat.DebugHitboxes AND RunService:IsStudio() --
-		-- see that flag's own header above). Were three module-local constants in HitboxResolver.lua
-		-- (DEBUG_PART_LIFETIME/DEBUG_PART_COLOR/DEBUG_PART_TRANSPARENCY), inconsistent with this same
-		-- table's own sibling tunables (SweepSubsteps/MaxPartsPerQuery just above), which already made
-		-- the jump to Constants per luau-coding-standards.md's "no magic numbers in system logic" --
-		-- moved here to match. Purely cosmetic -- never read by, or able to influence, the actual
-		-- overlap query above it in performSample.
-		DebugPart = {
-			LifetimeSeconds = 0.15,
-			Color = Color3.fromRGB(255, 64, 64),
-			Transparency = 0.6,
-		},
-
-		-- Fraction of a candidate PART's own smallest extent used as the narrow-phase slack margin
-		-- (HitboxShapes.ContainsPoint's `margin`) when filtering a broadphase result for one of the
-		-- ten non-Box/Sphere shapes -- see HitboxResolver.performSample's shape branch. The
-		-- broadphase hands back whole parts but the narrow-phase tests a single point (the part's
-		-- centre), so a part overlapping the volume by a sliver would otherwise read as a miss.
-		-- Half the smallest extent is exactly "the part's own inscribed radius", i.e. treat the part
-		-- as the largest sphere that fits inside it -- generous enough that grazing contact counts,
-		-- tight enough that a shape's authored silhouette still means something.
-		--
-		-- Box and Sphere never reach this: their broadphase query IS their volume, so they keep the
-		-- original exact behaviour with no margin concept at all (HitboxShapes.IsExactBroadphase).
-		NarrowPhaseMarginFraction = 0.5,
-	},
+	-- DebugHitboxes/Hitboxes (swept melee hitbox geometry/scheduling and its Studio debug-Part
+	-- cosmetics) were removed alongside the rest of the combat system -- their one reader,
+	-- Server/Combat/HitboxResolver.lua, is gone. HitboxShapes.lua's own FIELD_SPECS comments still
+	-- cross-reference Hitboxes.MaxCandidateRadius by name for historical context (why its Max=500 was
+	-- chosen), but never actually read the constant.
 
 	-- Object Stun (Server/Combat/ObjectStunResolver.lua) -- the runtime constants that are NOT
 	-- per-move authorable. Everything an author tunes per move lives on the move itself
@@ -4126,115 +3898,12 @@ Constants.Combat = {
 		SlamImmediateImpactDropStuds = 1.5,
 	},
 
-	-- CombatAudio.lua's registered sound effects -- SoundId/Volume named once here so the client
-	-- module only owns the verb-named play functions, same split as Constants.Flight.Sound.
-	-- PoolSize = 2 on all three: fast combos can re-trigger the same name (a second Hit/BlockImpact/
-	-- HandToHandParried) before the first finishes playing, and a single shared Sound instance would
-	-- cut the first off rather than let them overlap -- see SoundManager.lua's own Play() comment.
-	Sound = {
-		Hit = { SoundId = "rbxassetid://100187980380825", Volume = 0.6, PoolSize = 2 } :: SoundDefinition,
-		BlockImpact = { SoundId = "rbxassetid://111982142063703", Volume = 0.6, PoolSize = 2 } :: SoundDefinition,
-		HandToHandParried = { SoundId = "rbxassetid://79732341463482", Volume = 0.6, PoolSize = 2 } :: SoundDefinition,
-	},
-
-	-- Every RemoteEvent CombatSystem owns, named once here so the server (which creates them) and
-	-- the client (which looks them up) never risk a typo'd duplicate -- luau-coding-standards.md's
-	-- networking convention ("declared once... never instanced ad hoc").
-	RemoteNames = {
-		RequestBasicAttack = "Combat_RequestBasicAttack",
-		RequestHeavyAttack = "Combat_RequestHeavyAttack",
-		RequestBlockStart = "Combat_RequestBlockStart",
-		RequestBlockStop = "Combat_RequestBlockStop",
-		-- Server -> acting client, fired the moment a BlockStart request is accepted -- the block
-		-- counterpart of AttackStarted/MovementPerformed, carrying just enough for CombatAnimator to
-		-- start the guard stance and (if ParryWindowOpened) the parry-flash, synced to the server's
-		-- real parryWindowExpiry rather than guessed from raw input. See CombatSystem.lua's
-		-- handleBlockStart and Types.BlockStartedPayload.
-		BlockStarted = "Combat_BlockStarted",
-		-- Server -> ALL clients (broadcast, unlike BlockStarted which is unicast to the blocker),
-		-- fired the moment ANY combatant's parry window opens -- a player OR a training bot. Carries
-		-- the combatant's character Model so every client can show the parry-window TELL (a bright
-		-- highlight, HitFlash.FlashHold) on it: this is what makes the tell both OBVIOUS (an attacker
-		-- can read "they're parry-armed") and SYNCED for everyone (a broadcast highlight any client can
-		-- adorn, not an animation that depends on the actor's own replicated Animator weight winning).
-		-- See CombatSystem.lua's handleBlockStart / RequestBotBlockStart.
-		ParryWindowOpened = "Combat_ParryWindowOpened",
-		-- Fires the neutral-game Dash -- see CombatSystem.lua's handleDashRequest. A forward-resolved
-		-- Dash reported as a double-tap (CombatClient.lua's double-tap-W trigger) can also throw
-		-- DashPunch off this same request.
-		RequestDash = "Combat_RequestDash",
-		-- Sprint is a held movement state (start/stop, like Block).
-		RequestSprintStart = "Combat_RequestSprintStart",
-		RequestSprintStop = "Combat_RequestSprintStop",
-		-- Fires the new Slide ability -- chained off Sprint (CombatSystem.lua's handleSlideRequest
-		-- independently re-checks state.sprinting/Movement.IsMoving server-side). No hitbox, unlike
-		-- a forward Dash -- pure repositioning, mirrors plain Dash.
-		RequestSlide = "Combat_RequestSlide",
-		RequestLockOn = "Combat_RequestLockOn",
-		VitalsUpdated = "Combat_VitalsUpdated",
-		FeedbackEvent = "Combat_FeedbackEvent",
-		KillFeed = "Combat_KillFeed",
-		LockOnChanged = "Combat_LockOnChanged",
-		AttackStarted = "Combat_AttackStarted",
-		-- Server -> acting client, fired the moment a Dash is accepted -- the movement counterpart of
-		-- AttackStarted, carrying just enough for the animation/FX layer to time a dash-step. Not
-		-- consumed for any gameplay decision (Sprint has no event: Roblox's default run cycle already
-		-- reflects the raised WalkSpeed).
-		MovementPerformed = "Combat_MovementPerformed",
-		-- Server -> acting client, fired the moment a Slide is accepted -- the Slide counterpart of
-		-- MovementPerformed, kept as its own remote/payload (Types.SlidePerformedPayload) rather than
-		-- reusing MovementPerformed, since that one is already disambiguated between plain-Dash and
-		-- DashPunch by a fragile numeric-duration comparison (PredictionMirror.OnMovementPerformed) --
-		-- see that type's own header for the full reasoning.
-		SlidePerformed = "Combat_SlidePerformed",
-		-- Server -> owning client, fired when the M1 combo's finisher becomes ready/unready (3 hits
-		-- landed). The client uses it to suppress the jump on the 4th hit so pressing Space triggers
-		-- the Uppercut instead of a jump -- see CombatSystem.lua's syncFinisherReady and CombatClient.
-		ComboStateChanged = "Combat_ComboStateChanged",
-		-- Server -> acting client, fired when a Basic/Heavy/Dash/Slide/BlockStart/Sprint/CustomMove
-		-- request is GENUINELY rejected (never for the too-early-but-buffered pseudo-reject, and never
-		-- for Stop actions, which are always honored) -- the rollback signal for the client's
-		-- predicted action-start feedback (Constants.Combat.Prediction above; Sprint's feedback is
-		-- visual-only, and CustomMove has no prediction to roll back at all -- see
-		-- Types.RejectedActionKind's own header for both). Network budget: server->client, fires at
-		-- most once per rejected request, so its rate is upper-bounded by the client->server rate
-		-- limiters (NetworkBudget) -- it can never exceed what the client was already allowed to send.
-		ActionRejected = "Combat_ActionRejected",
-		-- Client -> server, a one-shot toggle between Constants.Combat.Weapons.Primary/Secondary --
-		-- see handleSwapWeaponRequest. No payload: there are exactly two slots, so "swap" always
-		-- means "the other one."
-		RequestSwapWeapon = "Combat_RequestSwapWeapon",
-		-- Server -> owning client, fired on every accepted weapon swap so the HUD can reflect which
-		-- weapon is equipped -- the weapon-switching counterpart of ComboStateChanged's "fire on
-		-- transition" pattern.
-		WeaponChanged = "Combat_WeaponChanged",
-		-- Client -> server, right-click -- cancels the player's own Basic/Heavy/Finisher/AirSlam swing
-		-- while it's still in its WindupSeconds telegraph. See CombatSystem.lua's handleFeintRequest
-		-- and Types.FeintPerformedPayload's own header for the full mechanic.
-		RequestFeint = "Combat_RequestFeint",
-		-- Client -> server, admin-only: fires whatever Move-Editor-authored move the local admin has
-		-- bound to a hotbar slot (Client/Combat/HotbarBindings.lua) against real, live combat
-		-- (whatever/whoever they're actually fighting), not MoveEditorSystem.TestFireMove's own
-		-- preview dummy. Payload is the MoveId string. Unlike every remote above, acceptance is
-		-- ADDITIONALLY gated on AdminConfig.AuthorizedUserIds (CombatSystem.lua's
-		-- handleFireHotbarMoveRequest) -- CombatSystem.ThrowCustomMove itself has no admin check of
-		-- its own (see that function's header), so this handler owns it, the same "caller gates,
-		-- callee just throws" split TestFireMove/MoveEditorSystem already established for the other
-		-- caller. Fire-and-forget like every other RequestX remote here; a genuine reject echoes back
-		-- over ActionRejected below (Action = "CustomMove") rather than being silently dropped.
-		RequestFireHotbarMove = "Combat_RequestFireHotbarMove",
-		-- Server -> acting client, fired the moment a Feint is accepted -- the Feint counterpart of
-		-- MovementPerformed/SlidePerformed, carrying the shortened commitment (Types.
-		-- FeintPerformedPayload.RecoverySeconds) so PredictionMirror can collapse its own mirrored
-		-- attackEndsAt down to the real, shorter value instead of staying conservatively locked out
-		-- for the cancelled swing's original (longer) commitment.
-		FeintPerformed = "Combat_FeintPerformed",
-		-- Server -> owning client, fired when CombatState.inCombatUntil (see that field's own header)
-		-- transitions true/false -- same "fire on transition, not per-tick" shape as ComboStateChanged/
-		-- WeaponChanged, so the HUD's combat-state badge (Components/CombatStateBadge.lua) gets exactly
-		-- one event per real state change instead of a remote per Heartbeat tick.
-		InCombatChanged = "Combat_InCombatChanged",
-	},
+	-- Sound (CombatAudio.lua's registered sound effects) and RemoteNames (every RemoteEvent
+	-- CombatSystem.lua owned) were removed alongside the rest of the combat system -- CombatAudio.lua
+	-- is gone, and every remote these named was created exclusively by CombatSystem.lua's own Init(),
+	-- which no longer runs. HotbarMoveClient.lua/HotbarBindings.lua's own header still references
+	-- RequestFireHotbarMove by name for historical context; that module was also removed (see
+	-- Client/Combat/HotbarBindings.lua's own header on the surviving data-only half).
 }
 
 return Constants

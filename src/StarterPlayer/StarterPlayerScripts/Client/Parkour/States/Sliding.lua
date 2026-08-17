@@ -324,17 +324,27 @@ local Sliding: ParkourTypes.StateDefinition = {
 		-- carrying exactly what the jump gave it. Apply's Humanoid branch re-writes that same value on
 		-- the mode change, which is a no-op, and -- crucially -- tears down the velocity drive instead
 		-- of leaving it commanded.
-		if nextState == "Jumping" then
+		-- ...AND SO DO THE TRAVERSAL EXITS, for exactly the same reason. They used to sit in an
+		-- early-return list justified as "Vaulting and Mantling are kinematic and write their own
+		-- TargetCFrame in Enter, and Rolling writes its own velocity command -- so each overwrites this
+		-- frame's command before it is committed." That is not true of any of the three: none of
+		-- Vaulting.Enter, Mantling.Enter or Rolling.Enter touches context.Motor at all. All three write
+		-- the motor from their UPDATE, and StateMachine.Update applies at most one transition and
+		-- returns -- so the incoming state's Update does not run until the NEXT frame, and this frame
+		-- commits whatever the outgoing state last asked for.
+		--
+		-- What that meant in practice is the slide's own Velocity command -- including its downward
+		-- SurfaceStickSpeed, at the velocity drive's full 90000 MaxForce -- being driven for one frame
+		-- on the very frame a vault or mantle began, pressing the character into the ground exactly as
+		-- the traversal tried to lift them off it. Identical in shape to the slide-jump bug above, and
+		-- caught by the same reading: the field that matters is MODE, not Velocity.
+		--
+		-- Handing off with the LIVE velocity is deliberately near-neutral: Apply's Humanoid branch
+		-- rewrites the value the assembly already has (a no-op) and, crucially, tears the velocity drive
+		-- down instead of leaving it commanded. The traversal then takes a clean, unowned body on its
+		-- first Update, which is what all three of them assume they are getting.
+		if nextState == "Jumping" or nextState == "Vaulting" or nextState == "Mantling" or nextState == "Rolling" then
 			StateSupport.HandOff(context, context.RootPart.AssemblyLinearVelocity)
-			return
-		end
-
-		-- The remaining traversal exits keep driving the body themselves: Vaulting and Mantling are
-		-- kinematic and write their own TargetCFrame in Enter, and Rolling writes its own velocity
-		-- command -- so each overwrites this frame's command before it is committed, and a hand-off
-		-- here would only fight them. Every other exit releases the body with the slide's live
-		-- momentum.
-		if nextState == "Vaulting" or nextState == "Mantling" or nextState == "Rolling" then
 			return
 		end
 		local travel = ParkourMath.SafeUnit(ParkourMath.Flatten(slideDirection), Vector3.zero)

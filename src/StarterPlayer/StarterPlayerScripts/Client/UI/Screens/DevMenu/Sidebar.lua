@@ -69,12 +69,13 @@ local Sidebar = {}
 
 -- The overflow icon's own inline reveal -- see this file's own header for why this is an inline row
 -- (Visible tied to `isOpen`) rather than a floating popover. `onActivated` also closes the row
--- (`close()`) after firing, so it never lingers open after its one action was taken.
+-- (`close()`) after firing, so it never lingers open after its one action was taken. Full-width, a
+-- single action -- "Reset Combat" (Server/Systems/CombatSystem.lua's own reset) sat alongside
+-- "Teleport To" here before the combat system was removed.
 local function overflowRow(
 	scope: Scope,
 	isOpen: Fusion.Value<boolean>,
 	layoutOrder: number,
-	onResetCombatState: () -> (),
 	onTeleportTo: () -> ()
 ): Frame
 	local function close(): ()
@@ -84,7 +85,7 @@ local function overflowRow(
 	local function overflowAction(text: string, order: number, onActivated: () -> ()): TextButton
 		return Button(scope, {
 			Text = text,
-			Size = UDim2.new(0.5, -Tokens.Space.XS, 1, 0),
+			Size = UDim2.new(1, 0, 1, 0),
 			LayoutOrder = order,
 			OnActivated = function()
 				onActivated()
@@ -106,15 +107,14 @@ local function overflowRow(
 				Padding = UDim.new(0, Tokens.Space.XS),
 				SortOrder = Enum.SortOrder.LayoutOrder,
 			},
-			overflowAction("Reset Combat", 1, onResetCombatState),
-			overflowAction("Teleport To", 2, onTeleportTo),
+			overflowAction("Teleport To", 1, onTeleportTo),
 		},
 	} :: Frame
 end
 
 -- One roster row -- `onKick`/`onBan`/`onMute`/`onFlagSuspected`/`onResetPlayerData`/
--- `onResetCombatState`/`onTeleportTo` all receive the row's already-known UserId, so the caller
--- never has to thread it back through a shared "currently selected row" piece of state.
+-- `onTeleportTo` all receive the row's already-known UserId, so the caller never has to thread it
+-- back through a shared "currently selected row" piece of state.
 local function playerRosterRow(
 	scope: Scope,
 	display: PlayerRosterRowDisplay,
@@ -124,7 +124,6 @@ local function playerRosterRow(
 	onMute: () -> (),
 	onFlagSuspected: () -> (),
 	onResetPlayerData: () -> (),
-	onResetCombatState: () -> (),
 	onTeleportTo: () -> ()
 ): Frame
 	-- Ban arm/confirm -- purely local UX friction, scoped to this row instance. Ban is permanent and
@@ -275,7 +274,7 @@ local function playerRosterRow(
 					}),
 				},
 			},
-			overflowRow(scope, isOverflowOpen, 4, onResetCombatState, onTeleportTo),
+			overflowRow(scope, isOverflowOpen, 4, onTeleportTo),
 		},
 	}) :: Frame
 end
@@ -338,7 +337,6 @@ function Sidebar.Mount(scope: Scope, width: number, bodyHeight: number): Sidebar
 	local mutePlayerRequestedEvent = Instance.new("BindableEvent")
 	local setSuspectedCheaterRequestedEvent = Instance.new("BindableEvent")
 	local resetPlayerDataRequestedEvent = Instance.new("BindableEvent")
-	local resetPlayerCombatStateRequestedEvent = Instance.new("BindableEvent")
 	local teleportToPlayerRequestedEvent = Instance.new("BindableEvent")
 
 	local playerRefreshButtonText = scope:Computed(function(use)
@@ -360,8 +358,6 @@ function Sidebar.Mount(scope: Scope, width: number, bodyHeight: number): Sidebar
 				setSuspectedCheaterRequestedEvent:Fire(display.UserId, not display.SuspectedCheater)
 			end, function()
 				resetPlayerDataRequestedEvent:Fire(display.UserId)
-			end, function()
-				resetPlayerCombatStateRequestedEvent:Fire(display.UserId)
 			end, function()
 				teleportToPlayerRequestedEvent:Fire(display.UserId)
 			end)
@@ -465,7 +461,6 @@ function Sidebar.Mount(scope: Scope, width: number, bodyHeight: number): Sidebar
 		MutePlayerRequested = mutePlayerRequestedEvent.Event,
 		SetSuspectedCheaterRequested = setSuspectedCheaterRequestedEvent.Event,
 		ResetPlayerDataRequested = resetPlayerDataRequestedEvent.Event,
-		ResetPlayerCombatStateRequested = resetPlayerCombatStateRequestedEvent.Event,
 		TeleportToPlayerRequested = teleportToPlayerRequestedEvent.Event,
 		BugReportOpenCount = bugReportOpenCount,
 		SuspectedCheaterCount = suspectedCheaterCount,

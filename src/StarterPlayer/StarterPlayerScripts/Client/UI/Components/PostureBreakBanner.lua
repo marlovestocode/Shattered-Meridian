@@ -2,19 +2,23 @@
 --[[
 	PostureBreakBanner.lua
 
-	Owns: a generic, high-visibility status banner (docs/ui-ux-philosophy.md's Posture Break
-	Feedback section originated the visual language: a single controlled fade-in rather than a
+	Owns: StatusBanner, a generic, high-visibility status banner (docs/ui-ux-philosophy.md's Posture
+	Break Feedback section originated the visual language: a single controlled fade-in rather than a
 	repeating flash -- that doc's Critical States rule, "never use excessive flashing"). Originally
-	built for the Posture Break case only; generalized to a Title/Subtitle/Color-driven component so
-	the Disarmed banner (CombatSystem.lua's Disarm mechanic) could reuse the exact same visual
-	structure instead of forking a near-identical second component -- see CombatFeedback.lua, the
-	only caller, for how PostureBreak and Disarmed each drive their own instance of this component
-	with their own display state and color. File kept at this path/name rather than renamed to avoid
-	a disruptive Rojo-path churn for what is, underneath, the same "enemy exposed" banner shape.
+	built for the Posture Break case only, then generalized to a Title/Subtitle/Color-driven component
+	so the Disarmed banner could reuse the exact same visual structure -- and now the ONLY thing this
+	file owns, since the Posture Break case itself (the PostureBreakBanner adapter, CombatFeedback.lua
+	as its one caller) was removed alongside the rest of the combat system.
 
-	Does not own: deciding when to show, for how long, or what text to display -- CombatClient.lua
-	(reacting to CombatSystem's server-authoritative feedback events) owns all of that and hands this
-	component only the already-decided display state. This component only draws whatever it's given.
+	Kept at this path/name rather than renamed: Client/Intro/IntroClient.lua's own greeting banner is
+	the current real caller of StatusBanner (reusing the same visual structure Posture Break/Disarmed
+	used to), and renaming would only be churn for what is, underneath, still the same "high-visibility
+	banner" shape -- see this file's own history for why a Rojo-path rename was already once avoided
+	for the identical reason.
+
+	Does not own: deciding when to show, for how long, or what text to display -- the caller owns all
+	of that and hands this component only the already-decided display state. This component only draws
+	whatever it's given.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -26,10 +30,6 @@ local Label = require(script.Parent.Label)
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
 
-export type PostureBreakDisplay = {
-	TargetName: string?,
-}
-
 export type StatusBannerDisplay = {
 	Title: string,
 	Subtitle: string,
@@ -39,15 +39,9 @@ export type StatusBannerDisplay = {
 export type StatusBannerProps = {
 	-- nil = nothing to show right now = hidden.
 	Display: UsedAs<StatusBannerDisplay?>,
-	-- Vertical offset from the top of the screen (Tokens.Space units) -- lets two banners (e.g.
-	-- PostureBreak and Disarmed) stack without overlapping if they're ever both active at once.
+	-- Vertical offset from the top of the screen (Tokens.Space units) -- lets two banners stack
+	-- without overlapping if more than one is ever active at once.
 	YOffset: number?,
-}
-
--- Kept for the one existing caller's convenience (CombatFeedback.lua's PostureBreak display) --
--- StatusBanner below is the generic component; this type is just PostureBreak's own display shape.
-export type PostureBreakBannerProps = {
-	Target: UsedAs<PostureBreakDisplay?>,
 }
 
 -- One-shot entrance -- "high-impact" per the doc without becoming a repeating flash. Values live
@@ -126,27 +120,6 @@ local function StatusBanner(scope: Scope, props: StatusBannerProps): Frame
 	}) :: Frame
 end
 
--- Thin adapter over StatusBanner for the original Posture Break shape (TargetName only) -- kept so
--- CombatFeedback.lua's existing PostureBreak wiring (a Fusion.Value<PostureBreakDisplay?>) doesn't
--- need to change shape, only route through the generic component underneath.
-local function PostureBreakBanner(scope: Scope, props: PostureBreakBannerProps): Frame
-	local display = scope:Computed(function(use)
-		local target = use(props.Target)
-		if not target then
-			return nil
-		end
-		local displayName = if target.TargetName then target.TargetName else "Enemy"
-		return {
-			Title = "POSTURE BROKEN",
-			Subtitle = `{displayName} is exposed`,
-			Color = Tokens.VitalColor.Posture,
-		}
-	end)
-
-	return StatusBanner(scope, { Display = display })
-end
-
 return {
 	StatusBanner = StatusBanner,
-	PostureBreakBanner = PostureBreakBanner,
 }

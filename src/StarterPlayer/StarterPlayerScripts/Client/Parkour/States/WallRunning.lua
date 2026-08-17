@@ -10,9 +10,31 @@
 	properly follow the surface of the wall rather than feeling like the player is simply moving
 	sideways"), and the mechanism is ParkourMath.WallTangent: each frame the commanded velocity is the
 	wall's own horizontal tangent, re-derived from the live surface normal and oriented to agree with
-	the direction the character is already travelling. A curved wall therefore curves the run, and a
-	corner ends it (the tangent swings past the approach-angle limit) rather than pushing the character
-	through the corner.
+	the direction the character is already travelling. A curved wall therefore curves the run within a
+	single probe's own contact.
+
+	CORNERS ARE FOLLOWED, NOT JUST SURVIVED (Update, when activeWall loses the current surface). A
+	single wall segment's probe cannot itself express "the surface continues, just facing a new way" --
+	a real corner and a genuine dead end look identical to it, both are simply "not found here anymore."
+	So on losing contact, before falling, Update re-runs selectWall -- the SAME selection CanEnter uses
+	for a brand new attach, but with its FACING gate switched off -- and pivots onto whatever it finds,
+	in place, with no fresh Enter: momentum, the wall-jump chain and the rise/sink profile's own elapsed
+	clock all carry straight through, because a turn is a continuation of the run that started, not a new
+	one.
+
+	THE FACING GATE HAS TO BE SKIPPED FOR THE PIVOT, and this is not a loosening of the check so much as
+	a recognition that it is answering a different question here. MaxFacingAngleDegrees exists to tell a
+	genuine player-driven wall-run attempt from an accident -- facing is the camera-controlled, honest
+	signal of "am I looking at this wall" on the frame a fresh attach is being decided. But once a run is
+	ACTIVE, facing is no longer independent: this file's own Update commands it toward the wall's tangent
+	every frame (motor.FaceDirection = tangent), so at the instant a corner is crossed, facing is still
+	pointed along the wall just left -- it had been converging to exactly that for the whole run leading
+	up to the corner. Holding the pivot to the same facing tolerance a fresh attach needs would refuse
+	almost every real corner on the one frame it needs to succeed, which is turning INTO the check that
+	exists to confirm intent. The approach-angle gate (WallRun.MaxApproachAngleDegrees, measured against
+	TRAVEL rather than the commanded facing) is what still bounds the pivot: a corner sharp enough to fail
+	THAT was never one this move could have followed, and it degrades to the wall simply ending, exactly
+	the behavior this had before the turn existed. See selectWall's own header for the full reasoning.
 
 	THE THREE ANTI-INFINITE-CLIMB RULES, which together are why this cannot be used to ascend
 	arbitrarily and why none of them needed to be a blunt "no vertical gain" ban:
@@ -54,7 +76,23 @@ local reattachUntil = 0
 -- Picks the wall to run on: whichever side has a usable surface, preferring the one the character is
 -- travelling more nearly parallel to when both qualify. Returns the probe and the side (-1 left,
 -- 1 right), or nil when neither side qualifies -- with the reason, so CanEnter can report it.
-local function selectWall(context: ParkourContext): (WallProbe?, number, string?)
+--
+-- `requireFacing` exists for exactly one reason: the corner turn in Update below reuses this same
+-- selection for a MID-RUN PIVOT, and the facing check is calibrated for the wrong question there. It
+-- asks "is the player's own facing aimed at this wall" -- the right question for a FRESH attach, where
+-- facing is the camera-driven, player-controlled signal of intent (see the check's own comment on shift
+-- lock, below). But once a run is already active, facing is no longer independent: Update's own
+-- `motor.FaceDirection = tangent` is COMMANDING it toward the wall just held, and a non-rigid
+-- AlignOrientation takes several frames to converge. At the exact frame a corner is crossed, facing is
+-- still pointed along the OLD tangent -- because it had been converging to exactly that for the whole
+-- run leading up to the corner -- so ApproachAngle(facing, newTangent) reads close to the corner's own
+-- turn angle. For anything near or past a right angle, that is past MaxFacingAngleDegrees on the FIRST
+-- frame the new wall would otherwise be offered, which is precisely the frame the pivot needs to
+-- succeed. The check was refusing the turn for being a turn. Skipping it for the pivot leaves the
+-- approach-angle check (against TRAVEL, not facing) as the guard -- travel is not artificially pinned by
+-- the orientation drive the way facing is, so it is still a real bound on how sharp a "corner" this can
+-- follow; see Update's own header for that bound's exact shape.
+local function selectWall(context: ParkourContext, requireFacing: boolean): (WallProbe?, number, string?)
 	local travel = StateSupport.TravelDirection(context)
 	-- Read once here rather than inside `evaluate`, which runs twice per call -- and kept as its own
 	-- named value because it is a genuinely different vector from `travel` above the moment shift lock
@@ -85,7 +123,9 @@ local function selectWall(context: ParkourContext): (WallProbe?, number, string?
 		-- Refuses with 180 rather than the measured angle because the number in that slot is the
 		-- SELECTION metric (which side to prefer when both qualify), and it is defined as the approach
 		-- angle -- returning a facing angle there would put two different measurements in one slot.
-		if ParkourMath.ApproachAngle(facing, probe.Tangent) > WALLRUN.MaxFacingAngleDegrees then
+		--
+		-- Skipped entirely when `requireFacing` is false -- see this function's own header.
+		if requireFacing and ParkourMath.ApproachAngle(facing, probe.Tangent) > WALLRUN.MaxFacingAngleDegrees then
 			return false, 180, "NotFacingRunDirection"
 		end
 		return true, approach, nil
@@ -174,7 +214,7 @@ local WallRunning: ParkourTypes.StateDefinition = {
 		if context.Ground.NearGround and context.Ground.Distance < WALLRUN.MinGroundClearance then
 			return false, "TooCloseToGround"
 		end
-		local probe, _selected, reason = selectWall(context)
+		local probe, _selected, reason = selectWall(context, true)
 		if not probe then
 			return false, reason
 		end
@@ -192,7 +232,7 @@ local WallRunning: ParkourTypes.StateDefinition = {
 	end,
 
 	Enter = function(context: ParkourContext): ()
-		local probe, selectedSide = selectWall(context)
+		local probe, selectedSide = selectWall(context, true)
 		side = selectedSide
 		verticalSpeed = 0
 		context.WallRunChain += 1
@@ -208,9 +248,49 @@ local WallRunning: ParkourTypes.StateDefinition = {
 	end,
 
 	Update = function(context: ParkourContext): ParkourTypes.TransitionResult
+		-- Defaulted every frame before the corner turn below can override it -- see ParkourContext.
+		-- DebugWallRunPivot's own header for why this has to be fresh rather than left stale. "Straight"
+		-- is the honest answer for "still on the wall I attached to," which is most of a run's own
+		-- lifetime.
+		context.DebugWallRunPivot = "Straight"
 		local probe = activeWall(context)
 		if not probe then
-			return "Falling"
+			-- THE CORNER TURN. The wall just lost is not necessarily the run ending -- an outside or
+			-- inside corner reads exactly the same to activeWall (the side the run was on stops finding
+			-- anything) as a genuine dead end does, because a single wall segment's probe has no notion of
+			-- "the surface continues, just facing a different way." Before giving up, ask the SAME
+			-- question CanEnter asks a fresh attach: is there a usable wall right now, on either side, that
+			-- the character is still plausibly running along?
+			--
+			-- selectWall is reused rather than re-implemented, but with its FACING gate switched off --
+			-- see that function's own header for why: facing during an active run is being commanded
+			-- toward the OLD wall by this state's own Update, so at the exact frame a corner is crossed it
+			-- is still pointed along the tangent just left, and a corner anywhere near a right angle fails
+			-- that check on the one frame the turn needs to succeed. The remaining approach-angle gate
+			-- (WallRun.MaxApproachAngleDegrees, checked against TRAVEL rather than the commanded facing)
+			-- is what still bounds how sharp a turn this can follow -- a corner sharp enough to fail THAT
+			-- was never one this run could have followed, and it becomes an ordinary end of the wall,
+			-- exactly as it did before this existed. Also picks up a new wall on the OPPOSITE side for
+			-- free: after a real corner the surface is routinely sensed by the other side's probe, and
+			-- selectWall already checks both.
+			local newProbe, newSide = selectWall(context, false)
+			if not newProbe then
+				return "Falling"
+			end
+			-- Deliberately does NOT go through Enter. side is repointed in place and everything else --
+			-- momentum, WallJumpChain, verticalSpeed's own place in the rise/sink profile, StateElapsed --
+			-- carries over exactly as it was, because a turn is a CONTINUATION, not a fresh attach. Costing
+			-- a chain slot or re-clamping the speed band (both Enter-only effects) for simply following a
+			-- wall around a corner would be punishing the player for the wall's shape rather than for
+			-- anything they did.
+			side = newSide
+			probe = newProbe
+			context.DebugWallRunPivot = "Pivoted"
+			-- The camera tilt and the animator's left/right pick both read this off the context rather
+			-- than off `side` directly (see ParkourController's own per-frame push) -- without updating it
+			-- here, a corner that flips which side the wall is on would leave the lean and the animation
+			-- pointing the wrong way for the rest of the run.
+			context.AnimationVariant = if side < 0 then "Left" else "Right"
 		end
 		if context.Ground.Grounded then
 			return StateSupport.ResolveGroundedState(context)
@@ -299,9 +379,24 @@ local WallRunning: ParkourTypes.StateDefinition = {
 		reattachUntil = context.Now + WALLRUN.ReattachCooldownSeconds
 		context.AnimationVariant = nil
 
-		-- WallJumping composes its own departure velocity from the wall normal and needs the state
-		-- intact to do it; LedgeHanging takes the body kinematically. Neither wants a hand-off.
-		if nextState == "WallJumping" or nextState == "LedgeHanging" then
+		-- LedgeHanging genuinely wants no hand-off: its ENTER writes the kinematic command itself (see
+		-- that state's "THE GRAB BITES ON THE FRAME IT IS DETECTED" note), so it has already replaced
+		-- this frame's command by the time it is committed.
+		--
+		-- WallJumping was grouped with it on the reasoning that it "composes its own departure velocity
+		-- and needs the state intact to do it." The second half is true -- it reads this module's locals
+		-- in its Enter -- but it does not follow: WallJumping.Enter computes its velocity into a local
+		-- and writes the MOTOR only from its Update, a frame later. So this frame still committed the
+		-- WALL-RUN's command, whose velocity includes the stick INTO the wall, on the exact frame the
+		-- player kicked off it. Handing off with the live velocity releases the body cleanly instead;
+		-- the write is a no-op against what the assembly already has, and it is the rig teardown that
+		-- matters. Same reading, same fix, and the same false premise as the traversal exits in
+		-- States/Sliding.lua and States/Rolling.lua.
+		if nextState == "LedgeHanging" then
+			return
+		end
+		if nextState == "WallJumping" then
+			StateSupport.HandOff(context, context.RootPart.AssemblyLinearVelocity)
 			return
 		end
 		local tangent = if probe

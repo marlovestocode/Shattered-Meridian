@@ -5,13 +5,19 @@
 	Owns: grounded movement with sprint engaged. See Walking.lua's header for why this is its own
 	state rather than a flag on that one.
 
-	Sprint ENGAGEMENT is not decided here. Client/Combat/CombatClient.lua remains the owner of sprint
-	-- it holds the sprint remotes, the server-side WalkSpeed tier, the hold-vs-toggle preference and
-	the Autorun setting -- and pushes the resulting boolean into this framework through
-	ParkourController.SetSprinting. This state only reads it. Duplicating the engagement logic here
-	would mean two systems deciding whether a player is sprinting, which is precisely the kind of
-	split ownership that produces a character sprinting according to one system and walking according
-	to the other.
+	Run ENGAGEMENT is not decided here. Client/Movement/RunController.lua owns it -- the key, the
+	hold-versus-toggle preference, the Autorun setting and the one remote that tells the server -- and
+	ParkourController reads the resulting boolean back out through RunController.IsSprinting() once per
+	movement frame, publishing it as ParkourContext.SprintHeld. This state only reads that. Duplicating
+	the engagement logic here would mean two systems deciding whether a player is running, which is
+	precisely the kind of split ownership that produces a character running according to one system and
+	walking according to the other.
+
+	The STAGE (ParkourContext.SprintStage) is a separate question with a separate owner again:
+	Server/Systems/RunSystem.lua resolves which of the three gears the player has earned and publishes
+	it on the Humanoid. This state does not read it -- States/StateSupport.GroundTargetSpeed does, for
+	its target-speed reporting -- but everything downstream of running fast (the slide's entry speed,
+	the wall-run's minimum) becomes easier to reach at the upper gears, which is the intent.
 
 	Requests wall probes on top of Walking's set: wall-running is only reachable from a sprint, so
 	this is the state that has to keep the walls fresh for WallRunning.CanEnter to pre-empt off.

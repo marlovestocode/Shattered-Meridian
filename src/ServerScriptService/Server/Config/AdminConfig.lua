@@ -35,6 +35,7 @@ AdminConfig.AuthorizedUserIds = {
 	[4689336404] = true,
 	[1785892535] = true,
 	[88478367] = true,
+	[5123402196] = true, -- miraj
 } :: { [number]: boolean }
 
 return AdminConfig

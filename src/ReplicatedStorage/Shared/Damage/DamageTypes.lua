@@ -1,0 +1,119 @@
+--!strict
+--[[
+	DamageTypes.lua
+
+	Owns: the shapes the Damage System is written in -- what one resolved contact costs (DamageResult),
+	how deep into a string an attacker currently is (ComboEscalationState), what an attack looks like
+	once the Move Creation System has been projected onto the engine (AttackCatalogEntry), and the
+	payload both participants get told about it (CombatFeedback).
+
+	Deliberately NOT a section of Shared/Types.lua, for the same reason DefenseTypes.lua and
+	HitboxTypes.lua are not: this system is a module. A system whose types live somewhere else is one
+	that cannot be removed without unpicking that somewhere else.
+
+	Everything here is data. The only Instances any of it references are the two combatants on the
+	feedback payload, and those are carried rather than interpreted.
+
+	Does not own: what any of it MEANS in play (DamageResolver decides, DamageSystem applies), the
+	tunables (DamageConstants.lua), or the authored per-move numbers (MoveTypes.DamageProfile, which is
+	produced by the Move Creation System and only aliased here).
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
+local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
+local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+
+local DamageTypes = {}
+
+-- Aliased rather than redefined. DamageProfile is PRODUCED by MoveTypes.ToEngineAttackDefinition, so
+-- that file is where it has to live -- defining it here and having MoveTypes require this module would
+-- make the Move Creation System depend on the damage layer, and the authoring pipeline is supposed to
+-- be usable without one. Re-exported so a consumer of this system finds the whole vocabulary on one
+-- module.
+export type DamageProfile = MoveTypes.DamageProfile
+
+-- One authored move, resolved into the two things the combat stack needs from it: the geometry the
+-- engine runs, and the numbers this layer applies. Produced by AttackCatalog.
+--
+-- Deliberately holds both halves rather than being split into two lookups. They come from one
+-- MoveDefinition and one projection, so keeping them together means there is no way to resolve an
+-- attack's shape and its damage from two different versions of the same move.
+export type AttackCatalogEntry = {
+	MoveId: string,
+	Definition: HitboxTypes.AttackDefinition,
+	Profile: DamageProfile,
+	-- Carried through from the authored move for the attack layer's benefit. Nothing in the damage
+	-- layer reads it -- a cooldown gates whether a swing may START, which is a request-side question.
+	Cooldown: number,
+	-- Same "carried for the layer above" reasoning as Cooldown, for the authored clip. "" when the
+	-- move has none, which is every Default move today (DefaultMoveRegistry's own header on why a
+	-- Default move's AnimationId is always blank).
+	--
+	-- It rides on the catalogue entry rather than being looked up separately by the attack layer so
+	-- that a move's geometry, its damage, its cooldown and its clip all come from ONE resolution of
+	-- ONE MoveDefinition -- the same reason this record holds both halves of the projection instead of
+	-- being split into two lookups. A second lookup at throw time could straddle a Move Editor edit
+	-- and pair one version's timing with another version's animation.
+	AnimationId: string,
+}
+
+-- How deep into an unbroken string an attacker is. Landing-based, and NOT the same counter as "which
+-- move throws next" -- see ComboEscalation.lua's header for why those were always two numbers.
+--
+-- A flat record with an expiry timestamp rather than a state machine: this is never queried
+-- retroactively ("what was your stage at time t"), only read fresh at the next hit, so the segment
+-- history DefenseStateMachine needs would be machinery solving a problem this state does not have.
+export type ComboEscalationState = {
+	Stage: number,
+	-- Absolute time the string lapses. Extended by every landed hit, never shortened.
+	WindowExpiresAt: number,
+}
+
+-- What one contact costs, decided by DamageResolver and applied by DamageSystem. Pure data: nothing
+-- here is applied by the act of computing it, which is what lets the resolver be table-driven
+-- testable with no rig at all.
+export type DamageResult = {
+	Kind: DefenseTypes.OutcomeKind,
+	-- Health to remove from the defender. Already scaled by combo stage and any outcome multiplier --
+	-- the caller applies this number, it does not re-derive it.
+	Damage: number,
+	-- Guard (= posture, see DamageConstants.Guard) to drain from the defender. Zero for outcomes
+	-- DefenseSystem has already charged against the same pool, so no contact is priced twice.
+	GuardDrain: number,
+	-- Seconds of hitstun for the defender, and the signal to cancel their own in-flight swing. Zero
+	-- for any outcome that should not interrupt them.
+	HitstunSeconds: number,
+	-- Whether this hit escalates the ATTACKER's string. False for anything a defender answered
+	-- successfully -- landing on a raised guard denies escalation credit.
+	AdvancesCombo: boolean,
+	-- Resolved, never applied. This layer decides THAT a hit knocks back and by how much; the physics
+	-- rig that would apply it is the deleted RagdollController's territory and nothing rebuilds it
+	-- here. Carried so the eventual consumer does not have to re-resolve it.
+	Knockback: MoveTypes.MoveKnockback?,
+}
+
+-- Fired to both participants once per resolved contact. Everything each side needs to present the
+-- hit, and nothing either could act on -- the outcome is already decided by the time this leaves the
+-- server.
+export type CombatFeedback = {
+	Kind: DefenseTypes.OutcomeKind,
+	-- Which side the receiving client is on. Sent rather than left to the client to work out by
+	-- comparing its own character against the two models below: the same event is delivered to two
+	-- different players and means something different to each, so saying which is cheaper and less
+	-- error-prone than every client re-deriving it.
+	Role: "Attacker" | "Defender",
+	Attacker: Model,
+	Defender: Model,
+	Damage: number,
+	GuardDrain: number,
+	-- The attacker's stage AFTER this hit was applied, so a HUD reading it never shows a stale value.
+	ComboStage: number,
+	-- The MoveId that landed, via HitReport.DebugName. What a client uses to pick a hit effect or a
+	-- reaction animation per move rather than per outcome kind.
+	MoveId: string,
+	ContactPosition: Vector3,
+}
+
+return DamageTypes

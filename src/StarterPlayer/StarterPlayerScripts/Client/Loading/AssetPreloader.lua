@@ -34,6 +34,7 @@
 
 local ContentProvider = game:GetService("ContentProvider")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local AttackAnimations = require(ReplicatedStorage.Shared.Attack.AttackAnimations)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
@@ -42,23 +43,24 @@ local CombatAnimator = require(script.Parent.Parent.FX.CombatAnimator)
 local FlightAnimator = require(script.Parent.Parent.FX.FlightAnimator)
 local EmoteAnimator = require(script.Parent.Parent.FX.EmoteAnimator)
 local ParkourAnimator = require(script.Parent.Parent.Parkour.ParkourAnimator)
+local DefenseClient = require(script.Parent.Parent.Defense.DefenseClient)
 
 -- SoundManager holds a REGISTRY, not a fixed set -- it only knows about the sounds someone has
--- Register()ed into it, and these three modules are the ones who do that (CombatAudio at load,
--- FlightAudio at load, RunAudio at load). None of them is required above for its return value; they
--- are required for the side effect of their top-level Register() calls.
+-- Register()ed into it, and these two modules are the ones who do that (FlightAudio at load, RunAudio
+-- at load). Neither is required above for its return value; they are required for the side effect of
+-- their top-level Register() calls. CombatAudio.lua (a third former registrant) was removed alongside
+-- the rest of the combat system.
 --
 -- Requiring them HERE rather than relying on someone else having already done so is the point. That
--- used to hold only by accident: Client/Main.client.lua requires CombatClient/FlightController/
--- RunController at the top of its own body, each of which requires one of these, and all of that
--- happens to run before LoadingClient.Run() reaches this module. Main's own comment asserts that
--- ordering -- but nothing enforced it. Any one of those three modules switching to a lazy require
--- would have silently emptied its sounds out of the manifest: no error, no warning, just a cold-load
--- hitch on the first hit/takeoff/footstep of every session, and no test anywhere to catch it.
+-- used to hold only by accident: Client/Main.client.lua requires FlightController/RunController at
+-- the top of its own body, each of which requires one of these, and all of that happens to run before
+-- LoadingClient.Run() reaches this module. Main's own comment asserts that ordering -- but nothing
+-- enforced it. Either of those two modules switching to a lazy require would have silently emptied
+-- its sounds out of the manifest: no error, no warning, just a cold-load hitch on the first
+-- takeoff/footstep of every session, and no test anywhere to catch it.
 --
 -- Luau caches module results, so requiring them a second time here is free -- it cannot double-
 -- register.
-require(script.Parent.Parent.FX.CombatAudio)
 require(script.Parent.Parent.FX.FlightAudio)
 require(script.Parent.Parent.FX.RunAudio)
 
@@ -99,9 +101,24 @@ function AssetPreloader.BuildManifest(): { Instance | string }
 	for _, instance in EmoteAnimator.GetPreloadInstances() do
 		table.insert(raw, instance)
 	end
+	for _, instance in DefenseClient.GetPreloadInstances() do
+		table.insert(raw, instance)
+	end
 	-- Raw id strings rather than instances -- see ParkourAnimator.GetPreloadInstances' own header for
 	-- why that module is the one provider that doesn't keep templates to hand back.
 	for _, assetId in ParkourAnimator.GetPreloadInstances() do
+		table.insert(raw, assetId)
+	end
+	-- Attack swing clips, also as raw ids (same reason as ParkourAnimator above -- these are claimed
+	-- through AnimationManager, which pools its own templates internally and hands none out).
+	--
+	-- The config this reads (Shared/Attack/AttackAnimations.lua) ships with every slot blank, and
+	-- GetPreloadIds already filters those out -- so today this contributes nothing to the manifest and
+	-- costs nothing. It is wired now rather than later so that pasting an id into that one file is
+	-- genuinely the ONLY step: without this line, a newly authored swing clip would cold-load on its
+	-- first use mid-fight instead of during the loading screen, which is precisely the silent-hitch
+	-- failure this whole manifest exists to prevent.
+	for _, assetId in AttackAnimations.GetPreloadIds() do
 		table.insert(raw, assetId)
 	end
 	-- The one standalone texture id not owned by a domain module with its own instance-pooling

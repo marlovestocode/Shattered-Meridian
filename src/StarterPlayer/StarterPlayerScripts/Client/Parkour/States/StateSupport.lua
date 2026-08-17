@@ -26,6 +26,7 @@ local ObstacleClassifier = require(ReplicatedStorage.Shared.Parkour.ObstacleClas
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
+local RunLadder = require(ReplicatedStorage.Shared.Run.RunLadder)
 
 local InputBuffer = require(script.Parent.Parent.InputBuffer)
 local ParkourMotor = require(script.Parent.Parent.ParkourMotor)
@@ -115,20 +116,26 @@ function StateSupport.GroundTargetSpeed(context: ParkourContext): number
 	if not StateSupport.HasMoveIntent(context) then
 		return 0
 	end
-	-- Three tiers, not two, since the run system's second stage: the sprint target is whichever of the
-	-- two sprint speeds the SERVER currently has this character in (ParkourContext.SprintStage), not
-	-- whichever one the client would prefer. Reading the stage rather than re-deriving it from a local
-	-- timer is the whole point -- a client-side "I have been running for seven seconds" clock would be
-	-- a second answer to a question the server has already answered, and the two would disagree
-	-- through every stun, block and commitment lock that pauses the server's own charge.
-	local base
-	if not context.SprintHeld then
-		base = LOCOMOTION.WalkSpeed
-	elseif context.SprintStage >= 2 then
-		base = LOCOMOTION.SprintStage2Speed
-	else
-		base = LOCOMOTION.SprintSpeed
-	end
+	-- THE WHOLE LADDER, IN ONE MULTIPLY, and no mirrored per-stage speed anywhere in this file.
+	--
+	-- This used to be an if/elseif chain naming LOCOMOTION.WalkSpeed, LOCOMOTION.SprintStage2Speed and
+	-- LOCOMOTION.SprintSpeed -- three constants that had to be kept in agreement by hand with the
+	-- server's own multipliers, and a chain that would need a new branch and a fourth constant for
+	-- every gear added. Shared/Run/RunLadder.SpeedMultiplier is the same function the SERVER resolves
+	-- WalkSpeed through, so asking it here means this framework's belief about ground speed cannot
+	-- drift from what is actually being granted, and a gear added to the ladder needs no change here at
+	-- all.
+	--
+	-- The stage itself is the SERVER's (ParkourContext.SprintStage), never re-derived from a local
+	-- timer -- a client-side "I have been running for seven seconds" clock would be a second answer to
+	-- a question the server has already answered, and the two would disagree through every interruption
+	-- that pauses the server's own charge.
+	--
+	-- Floored at stage 1 while the run is held: there is a frame or two between the client engaging the
+	-- run and the server's resolved stage arriving back, and reading a literal 0 there would report the
+	-- walk speed for a character that is already accelerating.
+	local stage = if context.SprintHeld then math.max(context.SprintStage, 1) else 0
+	local base = LOCOMOTION.WalkSpeed * RunLadder.SpeedMultiplier(stage)
 	local signedSlope = ParkourMath.SignedSlopeAlong(context.Ground.Normal, StateSupport.TravelDirection(context))
 	return base
 		* ParkourMath.SlopeSpeedScale(signedSlope, SLOPE.UphillSpeedPenaltyPerDegree, SLOPE.DownhillSpeedBonusPerDegree)
@@ -399,11 +406,13 @@ end
 -- transition happens, the OUTGOING state's Update has already filled the shared motor command (with,
 -- say, a kinematic CFrame), and the incoming state's Update does not run until the next frame --
 -- StateMachine.Update applies at most one transition and returns immediately. Without this call the
--- transition frame would commit the outgoing state's last command one extra time: a vault would
--- re-anchor for a frame after it finished, and its exit velocity would be written onto an anchored
--- part and silently discarded (see ParkourMotor.Apply's own note on that ordering). Calling this
--- from Exit rewrites the command to the correct hand-off, so the very frame a traversal ends is the
--- frame the body is released with its momentum intact.
+-- transition frame would commit the outgoing state's last command one extra time: a vault's Kinematic
+-- mode does not read Velocity at all, so its exit momentum would simply never reach the physics engine
+-- on the frame it was meant to -- delayed at best (a grounded hand-off's next frame defaults to
+-- "Humanoid" via BeginFrame regardless) and silently lost at worst, for any hand-off target whose own
+-- Enter does not happen to set Motor itself. Calling this from Exit rewrites the command to the
+-- correct hand-off, so the very frame a traversal ends is the frame the body is released with its
+-- momentum intact.
 function StateSupport.HandOff(context: ParkourContext, exitVelocity: Vector3): ()
 	context.Motor.Mode = "Humanoid"
 	context.Motor.Velocity = exitVelocity

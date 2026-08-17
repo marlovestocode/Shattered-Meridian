@@ -33,7 +33,6 @@ local Section = require(script.Parent.Parent.Parent.Components.Section)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Parent.Components.Button)
 local Tab = require(script.Parent.Parent.Parent.Components.Tab)
-local Toggle = require(script.Parent.Parent.Parent.Components.Toggle)
 local TextField = require(script.Parent.Parent.Parent.Components.TextField)
 local AbilitySlot = require(script.Parent.Parent.Parent.Components.AbilitySlot)
 local DevMenuTypes = require(script.Parent.Types)
@@ -542,9 +541,6 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local invisibleActive = scope:Value(false)
 	local speedMultiplierActive = scope:Value(1)
 	local spectatingActive = scope:Value(false)
-	-- Server-wide, not per-target -- see Types.lua's HitboxDebugActive header for why this isn't
-	-- watched via a Humanoid Attribute the way Godmode/Flight/Frozen/Invisible above are.
-	local hitboxDebugActive = scope:Value(false)
 	-- Passive "a newer version has been published" banner -- see Types.lua's own VersionBannerText
 	-- header. nil (nothing shown) until DevMenuClient's fetch resolves AND finds a newer version.
 	local versionBannerText: Fusion.Value<string?> = scope:Value(nil :: string?)
@@ -561,10 +557,7 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	-- Held alive by each Button's OnActivated closure below for as long as the mounted UI tree
 	-- exists (which is the lifetime of this client) -- see DevMenu/init.lua's own header for why a
 	-- BindableEvent rather than a callback prop.
-	local spawnDummyRequestedEvent = Instance.new("BindableEvent")
-	local spawnBotRequestedEvent = Instance.new("BindableEvent")
 	local rollRareEmoteRequestedEvent = Instance.new("BindableEvent")
-	local setHealthRequestedEvent = Instance.new("BindableEvent")
 	local setGodmodeRequestedEvent = Instance.new("BindableEvent")
 	local setFlightRequestedEvent = Instance.new("BindableEvent")
 	local setFlightCollideRequestedEvent = Instance.new("BindableEvent")
@@ -590,7 +583,6 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local shutdownServerRequestedEvent = Instance.new("BindableEvent")
 	local instantRestartServerRequestedEvent = Instance.new("BindableEvent")
 	local spectateLockedTargetRequestedEvent = Instance.new("BindableEvent")
-	local setHitboxDebugRequestedEvent = Instance.new("BindableEvent")
 
 	local godmodeButtonText = scope:Computed(function(use)
 		return if use(godmodeActive) then "Godmode: On" else "Godmode: Off"
@@ -737,82 +729,16 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 		})
 	end
 
+	-- "Training Dummy"/"Training Bot Presets" sections (Spawn Training Dummy, the six bot-preset
+	-- buttons) were removed alongside the rest of the combat system -- CombatSystem.SpawnTrainingDummy/
+	-- SpawnTrainingBot no longer exist server-side. Emotes is now this tab's only section.
 	local spawnTab = tabContent(scope, "Spawn", selectedTab, scrollSize, {
-		Section(scope, "Training Dummy", 1, {
-			Button(scope, {
-				Text = "Spawn Training Dummy",
-				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
-				LayoutOrder = 2,
-				OnActivated = function()
-					spawnDummyRequestedEvent:Fire()
-				end,
-			}),
-		}),
-		Section(scope, "Training Bot Presets", 2, {
-			scope:New "Frame" {
-				Name = "BotPresetGrid",
-				Size = UDim2.fromScale(1, 0),
-				AutomaticSize = Enum.AutomaticSize.Y,
-				BackgroundTransparency = 1,
-				LayoutOrder = 2,
-
-				[Children] = {
-					scope:New "UIGridLayout" {
-						CellSize = UDim2.fromOffset(174, 36),
-						CellPadding = UDim2.fromOffset(Tokens.Space.S, Tokens.Space.S),
-						SortOrder = Enum.SortOrder.LayoutOrder,
-					},
-					Button(scope, {
-						Text = "Attack-Only",
-						LayoutOrder = 1,
-						OnActivated = function()
-							spawnBotRequestedEvent:Fire("AttackOnly")
-						end,
-					}),
-					Button(scope, {
-						Text = "Block-Only",
-						LayoutOrder = 2,
-						OnActivated = function()
-							spawnBotRequestedEvent:Fire("BlockOnly")
-						end,
-					}),
-					Button(scope, {
-						Text = "Parry-Only",
-						LayoutOrder = 3,
-						OnActivated = function()
-							spawnBotRequestedEvent:Fire("ParryOnly")
-						end,
-					}),
-					Button(scope, {
-						Text = "Full-Fight",
-						LayoutOrder = 4,
-						OnActivated = function()
-							spawnBotRequestedEvent:Fire("FullFight")
-						end,
-					}),
-					Button(scope, {
-						Text = "Aggressor",
-						LayoutOrder = 5,
-						OnActivated = function()
-							spawnBotRequestedEvent:Fire("Aggressor")
-						end,
-					}),
-					Button(scope, {
-						Text = "Turtle",
-						LayoutOrder = 6,
-						OnActivated = function()
-							spawnBotRequestedEvent:Fire("Turtle")
-						end,
-					}),
-				},
-			},
-		}),
 		-- Emote System roll-path test trigger (Phase 2, radial emote wheel) -- exercises
 		-- EmoteUnlockService.GrantEmote/RollEmote end to end from a human tester's own button press,
 		-- since there is still no AchievementSystem/quest/live-ops caller to trigger it for real. See
 		-- DevMenuSystem.handleRollEmote's own header for why this always rolls the "RareEmotes" pool
 		-- specifically, for the calling admin themselves.
-		Section(scope, "Emotes", 3, {
+		Section(scope, "Emotes", 1, {
 			Button(scope, {
 				Text = "Roll Rare Emote",
 				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
@@ -842,40 +768,10 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 		})
 	end
 
+	-- "Health" section (Heal Full/Set HP to 1) was removed alongside the rest of the combat system --
+	-- CombatSystem.SetPlayerHealth no longer exists server-side.
 	local adminTab = tabContent(scope, "Admin", selectedTab, scrollSize, {
-		Section(scope, "Health", 1, {
-			scope:New "Frame" {
-				Name = "HealthRow",
-				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
-				BackgroundTransparency = 1,
-				LayoutOrder = 2,
-
-				[Children] = {
-					scope:New "UIListLayout" {
-						FillDirection = Enum.FillDirection.Horizontal,
-						Padding = UDim.new(0, Tokens.Space.S),
-						SortOrder = Enum.SortOrder.LayoutOrder,
-					},
-					Button(scope, {
-						Text = "Heal Full",
-						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
-						LayoutOrder = 1,
-						OnActivated = function()
-							setHealthRequestedEvent:Fire(999999)
-						end,
-					}),
-					Button(scope, {
-						Text = "Set HP to 1",
-						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
-						LayoutOrder = 2,
-						OnActivated = function()
-							setHealthRequestedEvent:Fire(1)
-						end,
-					}),
-				},
-			},
-		}),
-		Section(scope, "Godmode / Flight / Collide", 2, {
+		Section(scope, "Godmode / Flight / Collide", 1, {
 			scope:New "Frame" {
 				Name = "ToggleRow",
 				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
@@ -918,7 +814,7 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 				},
 			},
 		}),
-		Section(scope, "Frozen / Invisible / Speed", 3, {
+		Section(scope, "Frozen / Invisible / Speed", 2, {
 			scope:New "Frame" {
 				Name = "FrozenInvisibleRow",
 				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
@@ -968,7 +864,7 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 				},
 			},
 		}),
-		Section(scope, "Teleport", 4, {
+		Section(scope, "Teleport", 3, {
 			scope:New "Frame" {
 				Name = "TeleportRow",
 				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
@@ -1059,7 +955,7 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 				end,
 			}),
 		}),
-		Section(scope, "Server Tools", 5, {
+		Section(scope, "Server Tools", 4, {
 			TextField(scope, {
 				Text = announcementMessageText,
 				PlaceholderText = "Announcement message...",
@@ -1113,19 +1009,8 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 				LayoutOrder = 7,
 			}),
 		}),
-		Section(scope, "Debug Visualization", 6, {
-			-- Server-wide (Server/Combat/HitboxDebugState.lua) -- flipping this shows every sampled
-			-- hitbox pose as a rendered Part to every nearby player, in Studio AND a live server, not
-			-- just the toggling admin. See HitboxDebugState.lua's own header.
-			Toggle(scope, {
-				Label = "Show Hitboxes (Studio + Live)",
-				Value = hitboxDebugActive,
-				LayoutOrder = 1,
-				OnChanged = function(enabled: boolean)
-					setHitboxDebugRequestedEvent:Fire(enabled)
-				end,
-			}),
-		}),
+		-- "Debug Visualization" (Show Hitboxes) was removed alongside the rest of the combat system --
+		-- Server/Combat/HitboxResolver.lua and HitboxDebugState.lua no longer exist.
 	})
 
 	local tuningTab = tabContent(scope, "Tuning", selectedTab, scrollSize, {
@@ -1490,10 +1375,7 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 		GodmodeActive = godmodeActive,
 		FlightActive = flightActive,
 		CollideActive = collideActive,
-		SpawnDummyRequested = spawnDummyRequestedEvent.Event,
-		SpawnBotRequested = spawnBotRequestedEvent.Event,
 		RollRareEmoteRequested = rollRareEmoteRequestedEvent.Event,
-		SetHealthRequested = setHealthRequestedEvent.Event,
 		SetGodmodeRequested = setGodmodeRequestedEvent.Event,
 		SetFlightRequested = setFlightRequestedEvent.Event,
 		SetFlightCollideRequested = setFlightCollideRequestedEvent.Event,
@@ -1528,8 +1410,6 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 		VersionBannerText = versionBannerText,
 		SpectatingActive = spectatingActive,
 		SpectateLockedTargetRequested = spectateLockedTargetRequestedEvent.Event,
-		HitboxDebugActive = hitboxDebugActive,
-		SetHitboxDebugRequested = setHitboxDebugRequestedEvent.Event,
 	}
 end
 

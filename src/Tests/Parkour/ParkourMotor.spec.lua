@@ -25,6 +25,7 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 
 local ATTACHMENT_NAME = "ParkourAttachment"
 local VELOCITY_DRIVE_NAME = "ParkourVelocityDrive"
+local POSITION_DRIVE_NAME = "ParkourPositionDrive"
 local ORIENTATION_DRIVE_NAME = "ParkourOrientationDrive"
 local GRAVITY_CANCEL_NAME = "ParkourGravityCancel"
 
@@ -167,7 +168,12 @@ return function()
 	end)
 
 	describe("ParkourMotor -- Kinematic drive mode", function()
-		it("anchors the root and drives it to the commanded CFrame", function()
+		it("builds a rigid, unanchored position rig and does not anchor the root", function()
+			-- The regression test for the replication bug this mode was rewritten to fix: an anchored
+			-- part never replicates to other clients, so Kinematic mode must never anchor. The
+			-- constraint's own properties are also spot-checked here for the same reason the file
+			-- header describes -- a bad property name (RigidityEnabled, Mode, Position) throws inside
+			-- rig creation, which this catches immediately rather than in a playtest.
 			local rig = makeRig()
 			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
 
@@ -178,19 +184,49 @@ return function()
 
 			expect(ParkourMotor.Apply()).to.equal(true)
 			expect(ParkourMotor.GetActiveMode()).to.equal("Kinematic")
-			expect(rig.RootPart.Anchored).to.equal(true)
-			expect(rig.RootPart.Position).to.equal(target.Position)
+			expect(rig.RootPart.Anchored).to.equal(false)
+
+			local drive = rig.RootPart:FindFirstChild(POSITION_DRIVE_NAME)
+			expect(drive).never.to.equal(nil)
+			expect((drive :: AlignPosition).RigidityEnabled).to.equal(true)
+			expect((drive :: AlignPosition).Position).to.equal(target.Position)
+			expect(rig.RootPart:FindFirstChild(ORIENTATION_DRIVE_NAME)).never.to.equal(nil)
 
 			destroyRig(rig)
 		end)
 
-		it("tears the constraint rig down -- an anchored part ignores it anyway", function()
+		-- NOT COVERED HERE, AND WHY: whether a rigid AlignPosition actually converges onto its target
+		-- over real physics (against gravity) and actually resists being deflected by solid geometry the
+		-- target lands inside (the open question States/Vaulting.lua's own header raises -- an anchored
+		-- CFrame write satisfied that guarantee by skipping collision resolution entirely).
+		--
+		-- Both were WRITTEN as real, physics-stepping specs here first -- construct the rig, command a
+		-- target, `task.wait()`, assert the resulting Position converged -- and both FAILED even for the
+		-- trivial case of an unconstrained part in free fall under gravity. Diagnosis: this suite runs
+		-- via run-in-roblox executing a plugin script against an OPENED place, never an entered Play
+		-- session -- `RunService:IsRunning()` is false, `Workspace:GetRealPhysicsFPS()` is 0, and
+		-- `RunService.Stepped` (the physics step signal) never fires at all over a real half-second wait,
+		-- even though `Heartbeat` does (18 times), which is what lets the timer-based waits elsewhere in
+		-- this suite (Tests/FX/AnimationFreezeGuard.spec.lua's own `task.wait`) work despite physics never
+		-- stepping. Every existing assertion in this file already worked within that limit without saying
+		-- so -- e.g. "commands the velocity it was given" above checks the LinearVelocity constraint's own
+		-- `VectorVelocity` property, never the root's resulting measured `Velocity` -- and the two tests
+		-- that used to live here were the first in this file to actually need physics to run.
+		--
+		-- So this drive mode's dynamic behavior -- does it hold against gravity, does it resist a
+		-- collision the anchored write it replaced was immune to -- is UNVERIFIED by this suite and needs
+		-- a real Studio Play-mode session or a live playtest. What CAN be, and is, verified headlessly is
+		-- everything above: the constraint is built with the right properties, on the right part, without
+		-- ever anchoring it, and the rig tears down and rebuilds correctly across every mode transition.
+
+		it("switching from Velocity to Kinematic drops the velocity rig and builds a position rig", function()
 			local rig = makeRig()
 			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
 			ParkourMotor.Apply()
+			expect(rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME)).never.to.equal(nil)
 
 			command = ParkourMotor.BeginFrame()
 			command.Mode = "Kinematic"
@@ -198,11 +234,12 @@ return function()
 			ParkourMotor.Apply()
 
 			expect(rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME)).to.equal(nil)
+			expect(rig.RootPart:FindFirstChild(POSITION_DRIVE_NAME)).never.to.equal(nil)
 
 			destroyRig(rig)
 		end)
 
-		it("refuses a kinematic frame with no target rather than anchoring in place", function()
+		it("refuses a kinematic frame with no target rather than driving toward nowhere", function()
 			local rig = makeRig()
 			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
 
@@ -212,16 +249,18 @@ return function()
 
 			expect(ParkourMotor.Apply()).to.equal(false)
 			expect(rig.RootPart.Anchored).to.equal(false)
+			expect(rig.RootPart:FindFirstChild(POSITION_DRIVE_NAME)).to.equal(nil)
 
 			destroyRig(rig)
 		end)
 	end)
 
 	describe("ParkourMotor -- handing the body back", function()
-		it("unanchors and writes the exit velocity when leaving an owned mode", function()
-			-- The ordering that makes a vault's exit momentum survive: unanchor FIRST, then write the
-			-- velocity. Writing it to an anchored part is silently discarded, which is what would turn
-			-- every vault into a dead stop.
+		it("writes the exit velocity and tears the rig down when leaving an owned mode", function()
+			-- Both happen inside one synchronous frame with no physics step in between, so the write
+			-- lands before the rig that could otherwise fight it is gone. Kinematic mode no longer
+			-- anchors, so this no longer depends on an unanchor-before-write ordering the way it used to
+			-- -- see ParkourMotor.lua's own header on why that specific failure mode no longer applies.
 			local rig = makeRig()
 			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
 
@@ -229,7 +268,7 @@ return function()
 			command.Mode = "Kinematic"
 			command.TargetCFrame = CFrame.new(0, 60, 0)
 			ParkourMotor.Apply()
-			expect(rig.RootPart.Anchored).to.equal(true)
+			expect(rig.RootPart.Anchored).to.equal(false)
 
 			command = ParkourMotor.BeginFrame()
 			command.Mode = "Humanoid"
@@ -238,12 +277,13 @@ return function()
 
 			expect(rig.RootPart.Anchored).to.equal(false)
 			expect(rig.RootPart.AssemblyLinearVelocity.Z).to.equal(30)
+			expect(rig.RootPart:FindFirstChild(POSITION_DRIVE_NAME)).to.equal(nil)
 			expect(ParkourMotor.GetActiveMode()).to.equal("Humanoid")
 
 			destroyRig(rig)
 		end)
 
-		it("Release clears the anchor, the rig and every restorable", function()
+		it("Release clears the rig and every restorable, and leaves the root unanchored", function()
 			local rig = makeRig()
 			local originalHipHeight = rig.Humanoid.HipHeight
 			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
@@ -259,6 +299,7 @@ return function()
 			expect(rig.RootPart.Anchored).to.equal(false)
 			expect(rig.RootPart:FindFirstChild(ATTACHMENT_NAME)).to.equal(nil)
 			expect(rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME)).to.equal(nil)
+			expect(rig.RootPart:FindFirstChild(POSITION_DRIVE_NAME)).to.equal(nil)
 			expect(rig.RootPart:FindFirstChild(ORIENTATION_DRIVE_NAME)).to.equal(nil)
 			expect(rig.Humanoid.HipHeight).to.equal(originalHipHeight)
 			expect(ParkourMotor.GetActiveMode()).to.equal("Humanoid")
@@ -332,7 +373,11 @@ return function()
 			destroyRig(rig)
 		end)
 
-		it("refuses an impulse while the root is anchored -- it would be silently discarded", function()
+		it("refuses an impulse during a kinematic traversal -- ownership of the body must not split", function()
+			-- Kinematic mode no longer anchors, so this guard is keyed off GetActiveMode() rather than
+			-- Anchored -- see ParkourMotor.ApplyImpulse's own header for why the contract (a kinematic
+			-- traversal's ownership cannot be fought by a stray impulse) still has to hold exactly, not
+			-- just "usually".
 			local rig = makeRig()
 			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
 
@@ -340,6 +385,8 @@ return function()
 			command.Mode = "Kinematic"
 			command.TargetCFrame = CFrame.new(0, 60, 0)
 			ParkourMotor.Apply()
+			expect(rig.RootPart.Anchored).to.equal(false)
+			expect(ParkourMotor.GetActiveMode()).to.equal("Kinematic")
 
 			expect(ParkourMotor.ApplyImpulse(Vector3.new(0, 50, 0))).to.equal(false)
 

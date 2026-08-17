@@ -192,19 +192,10 @@ local WallJumping: ParkourTypes.StateDefinition = {
 		local bounce = if wall then wall.BounceScale else 1
 		local outward = ParkourMath.SafeUnit(ParkourMath.Flatten(normal), Vector3.new(0, 0, -1))
 
-		velocity = ParkourMath.WallJumpVelocity(
-			normal,
-			StateSupport.TravelDirection(context),
-			context.Momentum,
-			WALLJUMP.PushSpeed * bounce,
-			WALLJUMP.UpSpeed,
-			WALLJUMP.ForwardRetainFraction,
-			context.WallJumpChain,
-			WALLJUMP.ChainFalloffMultiplier
-		)
-		assisted = false
-
-		-- WHERE THE JUMP IS AIMED, before anything is scanned for.
+		-- WHERE THE JUMP IS AIMED, computed BEFORE the push itself now -- both the unassisted push below
+		-- and the target scan further down read this same blend, so a player's aim means one thing for
+		-- the whole jump rather than two slightly different things depending on whether a target ends up
+		-- being found.
 		--
 		-- The push away from the wall is a hard requirement (jumping back INTO the face you are standing
 		-- on is not a jump), and everything else is the player's own statement of intent: facing carries
@@ -221,6 +212,35 @@ local WallJumping: ParkourTypes.StateDefinition = {
 		if aim:Dot(outward) < 0.1 then
 			aim = outward
 		end
+
+		-- THE UNASSISTED PUSH IS NOW STEERABLE, not pinned to the bare wall normal. `aim` already leans
+		-- toward wherever the player is looking; ParkourMath.SteerDirection here is doing something it
+		-- was not written for (that function is normally a per-frame turn-rate ramp) but is exactly the
+		-- primitive this needs anyway: called with a "rate" of WallJump.MaxAimSteerDegrees and a
+		-- "deltaTime" of 1 second, it rotates `outward` toward `aim` by AT MOST that many degrees in one
+		-- step -- landing exactly on `aim` when it is already within the cone (the common case: a modest
+		-- look-away), and clamped to the cone's edge when it is not (a player aiming almost along the
+		-- wall face, which this refuses to fully honor -- see MaxAimSteerDegrees' own header for why a
+		-- kick must stay recognizably a kick). A player who is not aiming anywhere in particular has `aim
+		-- == outward` from the fallback two lines up, so this is a no-op for them: the departure is
+		-- identical to the wall-jump that existed before this steering did.
+		--
+		-- Passed as the PUSH DIRECTION into WallJumpVelocity below, which only ever uses its `wallNormal`
+		-- parameter to flatten-and-normalize it for the push -- it has no idea, and no need to know,
+		-- whether what it is handed is the literal surface normal or a direction merely steered off it.
+		local pushDirection = ParkourMath.SteerDirection(outward, aim, WALLJUMP.MaxAimSteerDegrees, 1)
+
+		velocity = ParkourMath.WallJumpVelocity(
+			pushDirection,
+			StateSupport.TravelDirection(context),
+			context.Momentum,
+			WALLJUMP.PushSpeed * bounce,
+			WALLJUMP.UpSpeed,
+			WALLJUMP.ForwardRetainFraction,
+			context.WallJumpChain,
+			WALLJUMP.ChainFalloffMultiplier
+		)
+		assisted = false
 
 		local target = EnvironmentProbe.FindWallJumpTarget(
 			context.RootPart,

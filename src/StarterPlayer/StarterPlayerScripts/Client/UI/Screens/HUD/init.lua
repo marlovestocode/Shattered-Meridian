@@ -2,50 +2,46 @@
 --[[
 	HUD.lua
 
-	Owns: the always-visible combat HUD surface -- the central hotbar (docs/ui-ux-philosophy.md's
-	"Player Status Display" and "Ability System UI" sections): a single horizontal bar -- the tier
-	readout (TierBadge.lua) | a thin divider | Health/Qi/Posture as icon-tile gauges (VitalIcon.lua) |
-	a thin divider | a row of ability slots
-	(AbilitySlot.lua) -- with a CombatStateBadge unfolding above it the moment
-	CombatState.inCombatUntil goes live (see that component's own header) -- the first real consumer
-	of that server signal. Renders directly from ClientState -- never computes or guesses at a value
-	ClientState doesn't already hold, per that doc's HUD sync rule against optimistic HUD state.
+	Owns: the always-visible HUD surface -- the central hotbar (docs/ui-ux-philosophy.md's "Player
+	Status Display" and "Ability System UI" sections): a single horizontal bar -- the tier readout
+	(TierBadge.lua) | a thin divider | Health/Qi/Posture as icon-tile gauges (VitalIcon.lua) | a thin
+	divider | a row of ability slots (AbilitySlot.lua). Renders directly from ClientState -- never
+	computes or guesses at a value ClientState doesn't already hold, per that doc's HUD sync rule
+	against optimistic HUD state.
 
 	One row, not two: an earlier version stacked the vitals row over the ability row inside the same
 	Panel. The Figma Make hotbar reference this was rebuilt against calls for a single unified bar --
 	"no more stacked rows or connector lines" -- so the two groups now sit side by side, separated by
-	one hairline Divider frame, and CombatStateBadge is the only thing still stacked above the bar
-	(it has genuine open/closed state to unfold; the vitals/ability groups don't).
+	one hairline Divider frame.
 
-	The ability row is a real, styled mount point, not a placeholder comment -- but every slot
-	still renders in the doc's "Locked" appearance: ArtSystem is still an empty Init(), and
-	CombatSystem's first-pass melee foundation deliberately doesn't define an ability
-	icon/cooldown/resource concept (no arts/abilities exist yet -- see CombatSystem.lua's header),
-	so there's no real per-slot data to show. Health/Qi/Posture above are all live now: Health and
-	Posture from CombatSystem (ClientState.Bootstrap() wires them to Combat_VitalsUpdated), Qi from
-	QiSystem.lua (Progression_QiUpdated -> ClientState.Qi/MaxQi) -- the Qi VitalIcon lost its Muted
-	prop this pass now that a real System owns the resource behind it.
-	Damage numbers and lock-on UI are also now wired to CombatSystem, but live in the separate
-	Screens/CombatFeedback surface, not this hotbar.
+	Combat system rebuilt: CombatStateBadge (an "in combat" pill) stays gone -- the rebuilt stack has
+	no notion of "in combat" to feed it. Everything else on this bar is live again. Health and Posture
+	update from their new sources (the local Humanoid, and Defense_StateChanged's guard pool -- see
+	ClientState.lua's own header for why neither goes through a vitals remote anymore), Qi (QiSystem.
+	lua, Progression_QiUpdated) is untouched, and the five ability slots are clickable again: each one
+	still reflects Client/Combat/HotbarBindings.lua's admin-local slot->MoveId binding, and activating
+	one now routes through Client/Combat/AttackInputClient.PressHotbarSlot -- the same function the
+	number keys go through, so "the button does the same thing as its keybind" is one code path rather
+	than two that can drift.
 
-	The Player Status Display's "Level" entry is now real and is the TierBadge at the head of the bar:
-	TierSystem.lua owns the ladder and replicates tier identity plus its XP window, MeridianSystem
-	replicates the running XP total, and the badge fills a meter from the two (see TierBadge.lua and
+	Slot state is three-way now rather than two: Locked when nothing is bound, Cooldown while the
+	server's own CooldownSeconds for that slot is still running (AttackInputClient mirrors it back
+	through OnSlotCooldown), and Available otherwise. The cooldown is the server's number echoed, not
+	a locally-run timer of this screen's own -- the same "render what you were told" rule the rest of
+	this file keeps.
+
+	The ability row is a real, styled mount point, not a placeholder comment -- but every slot still
+	renders in the doc's "Locked" appearance by default: ArtSystem is still an empty Init(), so
+	there's no real per-slot ability data to show yet.
+
+	The Player Status Display's "Level" entry is the TierBadge at the head of the bar: TierSystem.lua
+	owns the ladder and replicates tier identity plus its XP window, MeridianSystem replicates the
+	running XP total, and the badge fills a meter from the two (see TierBadge.lua and
 	Types.TierUpdatePayload for why that arithmetic is presentation rather than a breach of the
 	server-owns-truth rule). Same "waits on the owning System" reasoning still applies to the rest of
 	that list -- character information and active effects -- and to notifications/menus, which still
 	wait on RewardSystem/ProgressionSystem/FactionManager; see docs/ui-ux-philosophy.md's "Current
 	build status" for what remains and why.
-
-	2026-08-10 (Move Creation System hotbar pass): the five slots are no longer permanently Locked --
-	each now reflects Client/Combat/HotbarBindings.lua's admin-local slot->MoveId binding (Available
-	when bound, Locked when not) and fires the bound move on click via HotbarMoveClient.Fire, the
-	same call CombatClient.lua's HotbarSlot1-5 keybinds make. This is still not the real ArtSystem
-	ability-loadout concept the paragraph above describes -- there is still no icon, resource cost,
-	or cooldown readout, since a Move Creation System move has none of those concepts -- it is
-	specifically the Move Editor's own "test your move against real combat" affordance made
-	reachable from the live HUD, gated end-to-end by CombatSystem.lua's own AdminConfig re-check
-	regardless of what this client renders.
 
 	Mount() returns the bare ScreenGui, not a *Handle table -- this surface is always-on with no
 	open/closed state to expose, one of the two documented Mount() return shapes (see
@@ -60,6 +56,7 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 
@@ -67,12 +64,11 @@ local Tokens = require(script.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Parent.Components.Panel)
 local VitalIcon = require(script.Parent.Parent.Components.VitalIcon)
 local AbilitySlot = require(script.Parent.Parent.Components.AbilitySlot)
-local CombatStateBadge = require(script.Parent.Parent.Components.CombatStateBadge)
 local TierBadge = require(script.Parent.Parent.Components.TierBadge)
 local BountyMarkedBadge = require(script.Parent.Parent.Components.BountyMarkedBadge)
 local ClientStateModule = require(script.Parent.Parent.State.ClientState)
 local HotbarBindings = require(script.Parent.Parent.Parent.Combat.HotbarBindings)
-local HotbarMoveClient = require(script.Parent.Parent.Parent.Combat.HotbarMoveClient)
+local AttackInputClient = require(script.Parent.Parent.Parent.Combat.AttackInputClient)
 
 local Children = Fusion.Children
 
@@ -138,32 +134,63 @@ local function Divider(scope: Scope, layoutOrder: number): Frame
 	} :: Frame
 end
 
--- "Available" whenever a Move-Editor-authored move is bound to this slot (Client/Combat/
--- HotbarBindings.lua), "Locked" otherwise -- the two existing AbilitySlotState values that already
--- carry this exact "something is/isn't here" meaning (see AbilitySlot.lua's header), reused rather
--- than inventing a new state for what is still just "bound vs. not."
-local function stateForBinding(moveId: string?): AbilitySlotState
-	return if moveId then "Available" else "Locked"
+-- The three states a live hotbar slot can be in, from the two independent facts the client already
+-- holds: whether a Move-Editor-authored move is bound to it (Client/Combat/HotbarBindings.lua), and
+-- whether the server's own cooldown for it is still running (mirrored back through
+-- AttackInputClient.OnSlotCooldown). "Active" is deliberately unused -- it would mean a sustained,
+-- currently-channelling ability, and nothing in the rebuilt combat stack has one.
+local function stateForSlot(moveId: string?, cooldownSeconds: number): AbilitySlotState
+	if not moveId then
+		return "Locked"
+	end
+	return if cooldownSeconds > 0 then "Cooldown" else "Available"
 end
 
 function HUD.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientState): ScreenGui
 	local abilitySlots = {}
 	-- One reactive State Value per slot, seeded from whatever's already bound this session (an
 	-- admin who bound a move, then closed and reopened the Move Editor, shouldn't see every slot
-	-- flash back to Locked) and kept live by the HotbarBindings.OnChanged subscription below -- the
-	-- same "screen owns a Fusion Value, an outside module writes into it" shape ClientState.
-	-- Bootstrap already uses for server-reflected state, applied here to a client-local source
-	-- instead.
+	-- flash back to Locked) and kept live by the two subscriptions below -- the same "screen owns a
+	-- Fusion Value, an outside module writes into it" shape ClientState.Bootstrap already uses for
+	-- server-reflected state, applied here to two client-local sources instead.
 	local abilitySlotStates: { Fusion.Value<AbilitySlotState> } = {}
+	-- Remaining cooldown per slot, ticked by the gated Heartbeat below. Kept as Fusion Values (rather
+	-- than derived from a single clock Value) because AbilitySlot consumes them as two independent
+	-- props -- the sweep overlay reads a 1..0 fraction, the countdown label reads seconds.
+	local cooldownSeconds: { Fusion.Value<number> } = {}
+	local cooldownFractions: { Fusion.Value<number> } = {}
+	-- Plain (non-reactive) mirrors of the two facts stateForSlot needs, so recomputing a slot's state
+	-- never has to peek at a Fusion Value or ask another module a question it already answered.
+	local boundMoveIds: { [number]: string? } = {}
+	local cooldownTotals: { [number]: number } = {}
+	local cooldownEndsAt: { [number]: number } = {}
+
+	local function refreshSlotState(slot: number): ()
+		local slotState = abilitySlotStates[slot]
+		if slotState then
+			slotState:set(stateForSlot(boundMoveIds[slot], Fusion.peek(cooldownSeconds[slot])))
+		end
+	end
+
 	for index, keybind in ipairs(ABILITY_KEYBINDS) do
-		local slotState = scope:Value(stateForBinding(HotbarBindings.Get(index)))
+		boundMoveIds[index] = HotbarBindings.Get(index)
+		cooldownSeconds[index] = scope:Value(0)
+		cooldownFractions[index] = scope:Value(0)
+
+		local slotState = scope:Value(stateForSlot(boundMoveIds[index], 0))
 		abilitySlotStates[index] = slotState
 		abilitySlots[index] = AbilitySlot(scope, {
 			LayoutOrder = index,
 			Keybind = keybind,
 			State = slotState,
+			CooldownFraction = cooldownFractions[index],
+			CooldownSeconds = cooldownSeconds[index],
+			-- Clickable again -- see this file's header. Routed through the same function the number
+			-- keys reach, so the button and the keybind cannot drift apart; that function owns the
+			-- binding lookup, the local cooldown check and the request payload, and this screen owns
+			-- none of them.
 			OnActivated = function()
-				HotbarMoveClient.Fire(index)
+				AttackInputClient.PressHotbarSlot(index)
 			end,
 		})
 	end
@@ -172,9 +199,54 @@ function HUD.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientState)
 	-- own header on Mount()'s return shape), the same "connect once, never disconnect" lifetime
 	-- every other HUD-wide listener here already has (ClientState.Bootstrap's own remote handlers).
 	HotbarBindings.OnChanged(function(slot: number, moveId: string?)
-		local slotState = abilitySlotStates[slot]
-		if slotState then
-			slotState:set(stateForBinding(moveId))
+		if boundMoveIds[slot] == nil and moveId == nil then
+			return
+		end
+		boundMoveIds[slot] = moveId
+		refreshSlotState(slot)
+	end)
+
+	-- Fires with (slot, seconds) when the server puts a slot on cooldown and (slot, 0) when it comes
+	-- off -- two edges, not a per-frame push, so the ticking below is this screen's own presentation
+	-- concern rather than network traffic.
+	AttackInputClient.OnSlotCooldown(function(slot: number, seconds: number)
+		if seconds <= 0 then
+			cooldownTotals[slot] = nil
+			cooldownEndsAt[slot] = nil
+			cooldownSeconds[slot]:set(0)
+			cooldownFractions[slot]:set(0)
+		else
+			cooldownTotals[slot] = seconds
+			cooldownEndsAt[slot] = os.clock() + seconds
+			cooldownSeconds[slot]:set(seconds)
+			cooldownFractions[slot]:set(1)
+		end
+		refreshSlotState(slot)
+	end)
+
+	-- A Heartbeat inside a Screen is off-pattern for this codebase and is kept deliberately narrow:
+	-- it exists only because AbilitySlot's cooldown sweep and countdown label are, by their nature,
+	-- values that have to change every frame, and pushing them from the network sixty times a second
+	-- would be far worse. It early-outs on an empty table, so it costs nothing at all except while a
+	-- hotbar slot is genuinely cooling -- which, with five slots, is a handful of arithmetic on the
+	-- frames it does run.
+	RunService.Heartbeat:Connect(function()
+		if next(cooldownEndsAt) == nil then
+			return
+		end
+		local now = os.clock()
+		for slot, endsAt in cooldownEndsAt do
+			local remaining = endsAt - now
+			if remaining <= 0 then
+				-- Left for AttackInputClient's own expiry callback to clear: it is the owner of that
+				-- edge, and clearing here as well would race it into a double refresh. Zeroing the
+				-- rendered values is enough to stop showing a negative countdown in the meantime.
+				cooldownSeconds[slot]:set(0)
+				cooldownFractions[slot]:set(0)
+			else
+				cooldownSeconds[slot]:set(remaining)
+				cooldownFractions[slot]:set(remaining / math.max(cooldownTotals[slot] or remaining, 1e-4))
+			end
 		end
 	end)
 
@@ -235,9 +307,9 @@ function HUD.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientState)
 				},
 				-- Padding is 0, not Tokens.Space.XS -- a UIListLayout's Padding applies BETWEEN items
 				-- regardless of either item's actual size, so a nonzero value here left a fixed
-				-- sliver of dead space above the bar row even while CombatStateBadge was fully
+				-- sliver of dead space above the bar row even while the badge above it was fully
 				-- collapsed (Size.Y = 0), reading as "more open space at top than bottom"
-				-- (2026-07-24 in-game screenshot review). CombatStateBadge.lua's own GAP_TO_NEXT now
+				-- (2026-07-24 in-game screenshot review). BountyMarkedBadge.lua's own GAP_TO_NEXT now
 				-- bakes that same gap into its own reactive height instead, so it collapses to true
 				-- zero together with the badge rather than being layout-imposed on top of it.
 				scope:New "UIListLayout" {
@@ -246,18 +318,13 @@ function HUD.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientState)
 					Padding = UDim.new(0, 0),
 					SortOrder = Enum.SortOrder.LayoutOrder,
 				},
-				-- Two stacked pills above the bar, both collapsing to true zero height when
-				-- inactive. Marked sits ABOVE in-combat deliberately: being hunted is the rarer and more
-				-- consequential of the two, and a player who is both should read the bounty warning
-				-- first.
+				-- CombatStateBadge (an "in combat" pill fed by ClientState.InCombat) was removed
+				-- alongside the rest of the combat system -- see this file's own header. Only the
+				-- bounty pill remains above the bar.
 				BountyMarkedBadge(scope, {
 					LayoutOrder = -1,
 					Marked = clientState.BountyMarked,
 					Reward = clientState.BountyReward,
-				}),
-				CombatStateBadge(scope, {
-					LayoutOrder = 0,
-					InCombat = clientState.InCombat,
 				}),
 				-- The single unified bar (see this file's header): vitals group | Divider | ability
 				-- group, one horizontal Row instead of the old two stacked rows. Gap is XS (not S)
