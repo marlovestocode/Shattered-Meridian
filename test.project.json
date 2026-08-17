@@ -127,6 +127,9 @@
 					"MoveEditorSystem": {
 						"$path": "src/ServerScriptService/Server/Systems/MoveEditorSystem.lua"
 					},
+					"LiveConsoleSystem": {
+						"$path": "src/ServerScriptService/Server/Systems/LiveConsoleSystem.lua"
+					},
 					"ParkourSystem": {
 						"$path": "src/ServerScriptService/Server/Systems/ParkourSystem.lua"
 					},

@@ -143,6 +143,12 @@ Constants.Debug = {
 			-- design (see AttackCatalog.lua's own note on why it is deduped rather than debug-gated),
 			-- and this is the entry that lets it through the scope filter at all.
 			AttackCatalog = true,
+			-- The Basic-string marker-driven windup override (Shared/Attack/AttackWindows.lua) --
+			-- without this, its boot-time "M1 windup is marker-driven" / "...using the hardcoded
+			-- Constants.lua value" pair (AttackRequestSystem.Init's own warm pass) would be the exact
+			-- same silent-swallow gap DamageSystem/ParryWindows/AnimationManager/the Run System trio
+			-- below each hit before being found and added here.
+			AttackWindows = true,
 			-- Run System. All three had a Logger.scope(...) call from the moment they were written but
 			-- were never added here -- every logger:info/debug/warn call from RunController, RunSystem
 			-- and RunAudio has been silently swallowed by Logger.lua's own scope filter since the run
@@ -155,10 +161,87 @@ Constants.Debug = {
 			-- state relies on ParkourController's own transition trace) -- see that module's own header
 			-- for why the shimmy and the ledge-leap earned one.
 			LedgeHanging = true,
+
+			-- EVERY OTHER Logger.scope(...) call site in the codebase, added in one exhaustive sweep
+			-- (grep every Logger.scope("...") in src/ against this table's own keys) rather than one
+			-- gap at a time -- the same discovery method that found DamageSystem/ParryWindows/
+			-- AnimationManager/the Run System trio above, just run to completion instead of stopping at
+			-- the first few. Every one of these modules' logger:info/debug/warn/error calls were
+			-- silently swallowed regardless of Level until now, with no error anywhere to say so --
+			-- Logger.lua's own scope filter fails silent by design, which is exactly what makes a gap
+			-- here invisible until someone goes looking for a specific module's missing Output lines.
+			--
+			-- Progression/meta systems.
+			QiSystem = true,
+			TierSystem = true,
+			ArtSystem = true,
+			ArtTreeManager = true,
+			MeridianSystem = true,
+			RivalrySystem = true,
+			BountySystem = true,
+			BountyMenu = true,
+			PlayerDataSystem = true,
+			CharacterSheetSystem = true,
+			RespawnSystem = true,
+			PlayerDeathSystem = true,
+			ServerHopSystem = true,
+			VersionWatchSystem = true,
+			AdminActionSystem = true,
+			ObjectStunResolver = true,
+			-- Emotes.
+			EmoteSystem = true,
+			EmoteUnlockService = true,
+			EmoteController = true,
+			EmoteWheelClient = true,
+			EmoteAnimator = true,
+			-- Move Creation System.
+			MoveEditorSystem = true,
+			MoveEditorClient = true,
+			-- Live Admin Console (F7). These two entries only gate their own Init/lifecycle lines
+			-- printing to Studio Output -- the console's actual log FEED comes from Logger.lua's
+			-- always-on capture buffer below, which is deliberately NOT gated by this table (or by
+			-- Enabled/IsStudio at all) so it works in a live server too.
+			LiveConsoleSystem = true,
+			LiveConsoleClient = true,
+			-- Shared/EngineLogCapture.lua's own lifecycle lines (connected/seeded from LogService).
+			EngineLogCapture = true,
+			-- Camera/FX (client).
+			ShiftLockCamera = true,
+			FlightCamera = true,
+			CameraShake = true,
+			CameraOffsetComposer = true,
+			FOVOffset = true,
+			HitStop = true,
+			MovementVFX = true,
+			DeathEffect = true,
+			FlightVFX = true,
+			FlightAnimator = true,
+			-- Intro/onboarding/menus (client).
+			IntroClient = true,
+			IntroCamera = true,
+			VisionEffects = true,
+			LoadingClient = true,
+			AssetPreloader = true,
+			StartMenuClient = true,
+			CharacterMenuClient = true,
+			-- Spec-only, for the retry-logging cases in Tests/Shared/DataStoreRetry.spec.lua -- included
+			-- for the same "every Logger.scope(...) in src/, no exceptions" completeness this sweep is
+			-- for, not because a passing spec depends on its own Output being visible.
+			DataStoreRetryTest = true,
 		},
 		-- Per (scope, level, message) cap, keyed off the static message text so a log site that
-		-- fires every frame can't flood Output even at Trace -- see Logger.lua's rate limiter.
+		-- fires every frame can't flood Output even at Trace -- see Logger.lua's rate limiter. Also
+		-- gates the always-on console capture buffer below (same key, same window) for the identical
+		-- flood-protection reason, independent of Enabled/IsStudio.
 		MaxRepeatsPerSecond = 20,
+		-- Fixed capacity of Logger.lua's always-on capture buffer (one per VM -- the server has its
+		-- own, each client has its own), read once at require-time. Feeds
+		-- Server/Systems/LiveConsoleSystem.lua's Subscribe snapshot and Client/LiveConsole/
+		-- LiveConsoleClient.lua's local "My Client" tab -- NOT gated by Enabled/IsStudio/Level/Scope
+		-- above (see Logger.lua's own header for why that split is safe). Oldest entries are evicted
+		-- past this count; 1000 is generous enough to cover a genuine investigation window without
+		-- an unbounded per-VM memory cost.
+		ConsoleBufferSize = 1000,
 	},
 
 	-- Whitelist-gated developer tooling -- unlike Logging above, this is NOT Studio-only; it's
@@ -695,10 +778,18 @@ Constants.Keybinds = {
 		-- DevMenuToggle's Equals key in the same "secondary system action" row of the keyboard.
 		-- Admin-only (MoveEditorClient.lua's own authorization round-trip, same as DevMenuToggle).
 		OpenMoveEditor = { KeyCode = Enum.KeyCode.Minus },
-		-- Opens Roblox's own developer console for an authorized admin (Client/DevMenu/
-		-- DevMenuClient.lua). F7 rather than the engine's own F9: F9 is bound by Roblox itself only for
-		-- accounts with edit access to the place and does nothing for anyone else, so reusing it would
-		-- leave a key that works for some admins and silently not for others.
+		-- Opens the Live Admin Console (Client/LiveConsole/LiveConsoleClient.lua,
+		-- Client/UI/Screens/LiveConsole/init.lua) for an authorized admin -- a bespoke live log
+		-- stream, not Roblox's own native Developer Console. It used to open the native one via
+		-- StarterGui:SetCore("DevConsoleVisible") until it was replaced: that panel only ever showed
+		-- anything in Studio, since Shared/Logger.lua never calls print()/warn() outside
+		-- RunService:IsStudio() by design, so on a live server the one key meant to surface logs
+		-- opened an empty panel. The Live Admin Console reads Logger.lua's always-on capture buffer
+		-- instead, which works regardless of IsStudio -- see that module's own header.
+		--
+		-- F7 rather than the engine's own F9: F9 is bound by Roblox itself only for accounts with
+		-- edit access to the place and does nothing for anyone else, so reusing it would leave a key
+		-- that works for some admins and silently not for others.
 		--
 		-- And NOT F6, which is where this first went: F6 is already the parkour debug overlay's raw
 		-- toggle (ParkourConstants.Debug.ToggleKeyCode). That binding is not in this table -- it is
@@ -742,6 +833,11 @@ Constants.Keybinds = {
 		-- leaving the movement keys, unlike the panel toggles above), and -- unlike every letter key
 		-- left -- carries no risk of colliding with Roblox's own chat-focus behavior on a stray press.
 		Roll = { KeyCode = Enum.KeyCode.LeftAlt },
+		-- Parkour committed leap (Client/Parkour/States/Leaping.lua). Used to fire on a double-tap of
+		-- jump; E is unclaimed elsewhere in this table, sits under the same hand already on WASD (same
+		-- reachability requirement as Roll's own comment above), and is the conventional "interact/use"
+		-- key this genre trains players to reach for on a deliberate single press.
+		Leap = { KeyCode = Enum.KeyCode.E },
 	} :: { [Types.KeybindAction]: Types.Keybind },
 
 	-- Gamepad defaults -- a SEPARATE table, not a wider Keybind, so a player can have a keyboard
@@ -800,6 +896,14 @@ Constants.Keybinds = {
 		-- would make two distinct mechanics indistinguishable on a controller. Flagged for a real
 		-- controller playtest, same as OpenBugReport's ButtonSelect note.
 		Roll = { KeyCode = Enum.KeyCode.DPadLeft },
+		-- Leap deliberately has NO gamepad default either, but for a different reason than
+		-- DevMenuToggle below: every face/shoulder/stick-click/D-pad value in this genre's own
+		-- convention family is already claimed above (see Roll's own comment, which hit the identical
+		-- wall) -- there is genuinely nowhere left to put it without doubling up two distinct
+		-- mechanics on one button. Value type is Keybind? for exactly this case; KeybindManager.Matches
+		-- simply never matches for an action with no bound gamepad input. Flagged for a real controller
+		-- pass if a button ever frees up.
+		--
 		-- DevMenuToggle deliberately has NO gamepad default -- admin-only, keyboard already covers
 		-- it, and exposing a stray always-live single-button dev-menu toggle to every controller
 		-- user isn't something to do by default. KeybindManager.Matches simply never matches for an
@@ -1708,6 +1812,39 @@ Constants.MoveEditor = {
 	},
 }
 
+-- Live Admin Console (F7) -- whitelist-gated, same trust model as Constants.Debug.DevMenu/
+-- Constants.MoveEditor above: every remote below is gated by LiveConsoleSystem.lua's own
+-- checkLiveConsolePreconditions (AdminConfig.AuthorizedUserIds + a dedicated rate-limit bucket),
+-- mirroring DevMenuSystem.lua's checkDevMenuPreconditions exactly. Unlike DevMenu/MoveEditor this
+-- is NOT Studio-only tooling wrapped around Studio-only data -- it exists specifically to work in a
+-- live server, where Shared/Logger.lua's own Output gate (RunService:IsStudio()) correctly stays
+-- silent. See Logger.lua's own header for how its always-on capture buffer makes that safe.
+Constants.LiveConsole = {
+	RemoteNames = {
+		-- RemoteFunction, fired when the panel actually opens (not eagerly at boot) -- doubles as the
+		-- authorization check AND fetches a fresh Logger.GetBufferSnapshot() at that exact moment, so
+		-- the console never opens on a snapshot that went stale while the panel sat closed.
+		Subscribe = "LiveConsole_Subscribe",
+		-- Fire-and-forget (RemoteEvent, no response needed) -- tells the server the admin's console
+		-- just closed, so the flush loop stops pushing to them. Same "SetEditorOpen" idiom
+		-- Constants.MoveEditor.RemoteNames uses for its own open/close signal above; no
+		-- precondition/rate-limit check on this one, matching RateLimiter.lua's own guidance that a
+		-- "stop" action should never be blocked.
+		Unsubscribe = "LiveConsole_Unsubscribe",
+		-- Server -> subscribed clients only (never FireAllClients -- see LiveConsoleSystem.lua's own
+		-- header for why a live log stream must never broadcast to non-admins). Payload: a batched
+		-- array of Types.LogEntry, flushed on the interval below rather than once per captured entry.
+		Stream = "LiveConsole_Stream",
+	},
+	-- How often LiveConsoleSystem.lua's flush loop pushes newly-captured entries to subscribers,
+	-- regardless of how fast logs are actually arriving -- caps this feature at 4 pushes/sec/admin
+	-- no matter the log volume, independent of Logger.lua's own per-message Output rate limit.
+	StreamFlushIntervalSeconds = 0.25,
+	-- Client-side render cap (Client/LiveConsole/LiveConsoleClient.lua) -- oldest rendered lines are
+	-- trimmed past this so a long-open console can't grow its own UI list unbounded.
+	ClientRenderCap = 1000,
+}
+
 -- Custom shift-lock camera tunables (Client/Camera/ShiftLockCamera.lua) -- combat-philosophy.md's
 -- "Established systems" list names combat camera behavior as bespoke, not default Roblox behavior.
 -- Client-only data living in Constants.lua for the same reason Keybinds above does: static tunable
@@ -1987,11 +2124,6 @@ Constants.FX = {
 		-- Per-axis math.noise decorrelation offsets so pitch/yaw/roll wander independently instead of
 		-- in lockstep (which would read as a single diagonal jerk rather than a shake).
 		NoiseSeeds = { Pitch = 0, Yaw = 37.2, Roll = 91.7 },
-		-- Extra forward camera translation (studs) CombatFeedbackClient layers on top of whichever
-		-- preset above is already playing, on a landed M1 (Basic weapon-string) attacker hit --
-		-- CameraShake.Shake's own pushForwardStuds parameter. Deliberately tiny -- a felt lunge
-		-- selling the punch landing, not a lasting reposition, and not meant to be consciously seen.
-		M1PushForwardStuds = 0.04,
 	},
 
 	-- Hit-stop (freeze-frame) durations, in seconds. Purely a client-visual pause of the involved
@@ -2580,20 +2712,19 @@ Constants.Run = {
 	},
 
 	-- ANIMATION. Stage 1 keeps Constants.Combat.AnimationIds.Running (the clip that has always played
-	-- while sprinting); stage 2 plays Constants.Combat.AnimationIds.RunningStage2 when that id is
-	-- authored and otherwise falls through to stage 1's clip -- the same blank-id fallthrough
-	-- ParkourAnimator uses for its half-authored directional wall-jump pair, so this ships correctly
-	-- either way.
+	-- while sprinting); stage 2 plays RunningStage2 when authored, stage 3 plays RunningStage3 when
+	-- authored -- each falls through to the stage below it when its own id is blank (RunningStage3 ->
+	-- RunningStage2 -> Running), the same blank-id fallthrough ParkourAnimator uses for its
+	-- half-authored directional wall-jump pair, so this ships correctly at every stage of authoring.
 	Animation = {
 		-- Playback speed for the run loop, keyed by stage. Applied on stage CHANGE only, never per
 		-- frame: CombatAnimator.FreezeActiveCombatTrack (hit-stop) drives the same property, and a
 		-- per-frame write here would silently cancel every freeze that landed on a running player.
 		--
-		-- There are only two run CLIPS (Running, and RunningStage2 when authored), so stages 2 and 3
-		-- share the second one and are separated by rate alone. That is the same blank-id fallthrough
-		-- the rest of this table uses, applied one level further: a dedicated stage-3 clip can be added
-		-- later without any consumer changing, because nothing reads "how many clips are there" -- it
-		-- reads which stage is engaged and looks the rate up here.
+		-- Also the fallback that makes an unauthored stage still feel distinct: while RunningStage3 is
+		-- blank, stage 3 plays RunningStage2 (or Running, if THAT'S also blank) at this rate instead of
+		-- its own clip -- see AnimationIds.RunningStage3's own header. Retune toward 1 once a real
+		-- clip lands there, or it will read as sped-up/cartoonish rather than a distinct gear.
 		PlaybackSpeeds = {
 			[1] = 1,
 			-- Slightly hot even when a dedicated stage-2 clip exists -- a full-stride run reads as
@@ -3310,7 +3441,16 @@ Constants.Combat = {
 		-- reads as a different gear through Constants.Run.Animation.PlaybackSpeeds, the FOV pull
 		-- and the stage-2 footstep/onset audio. Paste an id here and the clip swaps in with no code
 		-- change, the same wired-but-unauthored convention Constants.Flight.AnimationIds uses.
-		RunningStage2 = "rbxassetid://126596518578942",
+		RunningStage2 = "rbxassetid://95107102086715",
+		-- The THIRD run stage's own clip (Constants.Attributes.SprintStage == 3). USER-SUPPLIED, not
+		-- yet authored -- this codebase never guesses an asset id (see CombatAudio.lua/VitalIcon.lua's
+		-- headers). Blank until pasted in, same convention as RunningStage2 above: the locomotion
+		-- evaluator falls through to RunningStage2 (then, if that's also blank, to Running) when this
+		-- has no id, so stage 3 still reads as a distinct gear through
+		-- Constants.Run.Animation.PlaybackSpeeds alone until a real clip lands. That PlaybackSpeeds[3]
+		-- rate (1.5x) was tuned for THAT fallback -- once a real clip is pasted here, dial it back
+		-- toward 1 (see that field's own comment), or the clip will read as sped-up/cartoonish.
+		RunningStage3 = "rbxassetid://126596518578942",
 	} :: { [string]: string },
 
 	-- PostureRegenPerSecond/HealthRegen/LockOnRange/ParryTellBroadcastRadius/MaxTrackedOpponents/

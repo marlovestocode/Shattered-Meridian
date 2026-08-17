@@ -38,6 +38,7 @@ local DeathFeed = require(script.Screens.DeathFeed)
 local CombatFeedbackModule = require(script.Screens.CombatFeedback)
 local DevMenuModule = require(script.Screens.DevMenu)
 local MoveEditorModule = require(script.Screens.MoveEditor)
+local LiveConsoleModule = require(script.Screens.LiveConsole)
 local BugReportModule = require(script.Screens.BugReport)
 local AnnouncementModule = require(script.Screens.Announcement)
 local EmoteWheelModule = require(script.Screens.EmoteWheel)
@@ -55,6 +56,7 @@ export type UIHandles = {
 	CombatFeedback: CombatFeedbackModule.CombatFeedbackHandle,
 	DevMenu: DevMenuModule.DevMenuHandle,
 	MoveEditor: MoveEditorModule.MoveEditorHandle,
+	LiveConsole: LiveConsoleModule.LiveConsoleHandle,
 	BugReport: BugReportModule.BugReportHandle,
 	Announcement: AnnouncementModule.AnnouncementHandle,
 	EmoteWheel: EmoteWheelModule.EmoteWheelHandle,
@@ -123,6 +125,9 @@ function UI.Mount(): UIHandles
 	local moveEditor = MoveEditorModule.Mount(scope, playerGui)
 	logger:debug("MoveEditor mounted")
 
+	local liveConsole = LiveConsoleModule.Mount(scope, playerGui)
+	logger:debug("LiveConsole mounted")
+
 	local bugReport = BugReportModule.Mount(scope, playerGui)
 	logger:debug("BugReport mounted")
 
@@ -142,6 +147,7 @@ function UI.Mount(): UIHandles
 		CombatFeedback = combatFeedback,
 		DevMenu = devMenu,
 		MoveEditor = moveEditor,
+		LiveConsole = liveConsole,
 		BugReport = bugReport,
 		Announcement = announcement,
 		EmoteWheel = emoteWheel,

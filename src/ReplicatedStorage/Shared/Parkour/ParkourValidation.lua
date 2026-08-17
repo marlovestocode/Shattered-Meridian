@@ -45,12 +45,14 @@ local ParkourValidation = {}
 -- Every ActionKind the remote will accept, as a set. A closed set checked server-side rather than a
 -- string passed through -- an unrecognized kind is a malformed payload, not something to store and
 -- later act on.
+-- No separate WallJump entry: kicking off a wall is a phase of States/WallRunning.lua now, not its own
+-- state, and reports as a continuation of the same "WallRun" window rather than a second kind -- see
+-- ParkourTypes.ActionKind's own header.
 local VALID_KINDS: { [string]: boolean } = {
 	Slide = true,
 	Vault = true,
 	Mantle = true,
 	WallRun = true,
-	WallJump = true,
 	LedgeClimb = true,
 	Leap = true,
 	Roll = true,
@@ -195,9 +197,10 @@ function ParkourValidation.Validate(
 		-- in Movement.ComputeDesiredWalkSpeed) and the End is the only thing that gives it back. Any
 		-- action that legitimately ends within MinSameKindIntervalSeconds of starting therefore had its
 		-- RELEASE rejected as a duplicate and left the player frozen where they stood until the server's
-		-- own window expiry rescued them -- most reliably a wall-jump that reaches the ground almost
-		-- immediately, which States/WallJumping.Update ends after 0.05s against a 0.06s interval. That is
-		-- the "sometimes I get stuck when I land" report, and it is not a rate problem at all.
+		-- own window expiry rescued them -- most reliably a wall-kick that reaches the ground almost
+		-- immediately, which the kick phase in States/WallRunning.lua (updateDeparting) ends after 0.05s
+		-- against a 0.06s interval. That is the "sometimes I get stuck when I land" report, and it is
+		-- not a rate problem at all.
 		--
 		-- A Start is a CLAIM and a claim can be spammed, which is what this check is for. An End is a
 		-- RELEASE: refusing one can never protect anything -- the worst a flood of Ends can do is close

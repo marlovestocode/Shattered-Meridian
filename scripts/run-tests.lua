@@ -50,6 +50,13 @@ local modulesToLoad = {
 	-- exists to close. A broken require path in the module that writes WalkSpeed would otherwise
 	-- surface as "nobody can move" in a playtest rather than as a failing build.
 	ServerScriptService.Server.Systems.RunSystem,
+	-- LiveConsoleSystem.lua (the Live Admin Console's server half, F7) has no dedicated spec --
+	-- same reasoning as DevMenuSystem/MoveEditorSystem above: its whole surface is auth-gated
+	-- remote handling (Subscribe/Unsubscribe/the Stream flush loop), not pure logic with anything
+	-- to extract, so nothing else in this suite would ever require() it and catch a broken require
+	-- path. Its one pure dependency, Shared/Logger.lua's capture buffer, IS specced directly
+	-- (Tests/Shared/Logger.spec.lua).
+	ServerScriptService.Server.Systems.LiveConsoleSystem,
 }
 for _, moduleScript in ipairs(modulesToLoad) do
 	local ok, errorMessage = pcall(require, moduleScript)

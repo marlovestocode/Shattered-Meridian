@@ -164,17 +164,19 @@ ParkourConstants.Jump = {
 	-- straight through to ParkourMath.BufferLive's `enabled` parameter, which short-circuits to false
 	-- before it ever looks at the timestamp. So JumpBuffer = false made PeekJump return false for
 	-- EVERY press at EVERY instant -- and PeekJump is the "was jump pressed at all" test behind
-	-- Jumping.CanEnter, WallJumping.CanEnter, Leaping.CanEnter, LedgeClimbing.CanEnter,
-	-- LedgeHanging's climb branch and Sliding's slide-jump exit. A player who turned off one
-	-- forgiveness toggle in Settings silently lost wall-jumps, leaps, slide-jumps and ledge climb-ups
-	-- entirely, while ordinary jumping kept working (Roblox's own control script owns Space), which
-	-- is about as confusing as a settings toggle can get.
+	-- Jumping.CanEnter, WallRunning's kick trigger, LedgeClimbing.CanEnter, LedgeHanging's climb branch
+	-- and Sliding's slide-jump exit. A player who turned off one forgiveness toggle in Settings
+	-- silently lost wall-jumps, slide-jumps and ledge climb-ups entirely, while ordinary jumping kept
+	-- working (Roblox's own control script owns Space), which is about as confusing as a settings
+	-- toggle can get.
 	--
-	-- InputBuffer.PeekDoubleJump already had this right and says so in its own comment -- that
-	-- preference is about jumps firing LATE, and an action that never fires at all is a different
-	-- complaint. Sized to cover one step at a bad framerate (20fps): a press is stamped by
-	-- ParkourInput's InputBegan handler and read on the next controller step, so a window of zero
-	-- would drop presses to a race rather than to a preference.
+	-- Leaping.CanEnter is NOT on that list: the leap reads its own dedicated key (InputBuffer.PeekLeap)
+	-- rather than jump input at all now -- see States/Leaping.lua's own header -- so this assist has no
+	-- opinion on it either way. InputBuffer.PeekSlide/PeekRoll/PeekLeap never had PeekJump's bug in the
+	-- first place; they always passed BufferLive's `enabled` as an unconditional true. Sized to cover
+	-- one step at a bad framerate (20fps): a press is stamped by ParkourInput's InputBegan handler and
+	-- read on the next controller step, so a window of zero would drop presses to a race rather than to
+	-- a preference.
 	UnbufferedWindowSeconds = 0.05,
 
 	-- Fraction of current planar momentum preserved through a jump. 1.0 (full preservation) is
@@ -187,16 +189,11 @@ ParkourConstants.Jump = {
 	-- buffer/coyote paths (both can otherwise resolve on the same frame from one press), not a
 	-- gameplay cooldown.
 	MinIntervalSeconds = 0.1,
-
-	-- How close together two jump presses must be to read as a DOUBLE TAP -- the input for the leap
-	-- (Leap below). Comfortably longer than MinIntervalSeconds (so the two presses of a deliberate
-	-- double tap are never rejected as one press double-firing) and short enough that two ordinary
-	-- jumps taken in quick succession -- a hop, then another hop a third of a second later -- are not
-	-- mistaken for one.
-	DoubleTapSeconds = 0.26,
 }
 
--- THE LEAP: a long, committed jump aimed at wherever the player is looking, on a double tap of jump.
+-- THE LEAP: a long, committed jump aimed at wherever the player is looking, on the dedicated Leap key
+-- (Constants.Keybinds.Defaults.Leap, E by default) -- not a double tap of jump any more, see
+-- States/Leaping.lua's own header for that change and why it happened.
 --
 -- It exists because the ordinary jump is deliberately modest -- it is tuned against the combat layer's
 -- own speeds, and making it cover real ground would change every fight in the game -- while traversal
@@ -237,7 +234,7 @@ ParkourConstants.Leap = {
 	-- reasonably large platform, the thing under those sample points is the platform the player is
 	-- standing on. Combined with "take the farthest", that produced leaps to a spot on the player's own
 	-- floor: technically the most distant landing found, and obviously not what anyone asked for by
-	-- double-tapping jump.
+	-- pressing Leap.
 	--
 	-- The rule is not a blanket ban, because a leap down your own ramp or along your own rooftop IS a
 	-- legitimate thing to want. It is a DIRECTNESS requirement: the surface you are standing on, and
@@ -290,6 +287,19 @@ ParkourConstants.Leap = {
 	-- States/Leaping.CanEnter additionally requires the character to have touched the ground since the
 	-- last one -- together those are what keep it from being a flight system.
 	CooldownSeconds = 0.9,
+
+	-- THE CHARGE-UP. A brief, uninterruptible wind-up between the Leap key landing and the launch
+	-- actually firing -- States/Leaping.lua holds the character in place (zero velocity, gravity
+	-- cancelled) and plays AnimationIds.LeapCharge for this long before solving and flying the arc. The
+	-- telegraph is the point: a leap covers real traversal distance, and a beat of visible commitment
+	-- before it happens is what makes it read as a deliberate, weighty move rather than an instant
+	-- teleport-ish snap into flight. The aim (camera direction, ground instance) is sampled FRESH at the
+	-- moment the charge completes, not frozen at the press -- so a player who keeps adjusting their look
+	-- direction during the wind-up gets the leap they were aiming at the instant it fires, not the one
+	-- they were aiming at when they pressed.
+	--
+	-- Tune this directly -- it is the only number that controls how long the wind-up feels.
+	ChargeSeconds = 0.35,
 }
 
 -- Ledge-to-ledge leap: the search geometry for States/LedgeLeaping.lua, taken from States/
@@ -303,7 +313,7 @@ ParkourConstants.LedgeLeap = {
 	-- Shorter reach than the ordinary leap's 96/12: this is a targeted move between two known holds,
 	-- not a cross-the-courtyard traversal, and a shorter range keeps the search cheap enough to run
 	-- from a held pose every time the player presses jump with a direction held, rather than only on a
-	-- double tap.
+	-- press of the dedicated Leap key.
 	MaxRange = 40,
 	MinRange = 4,
 	-- Fewer samples than FindLeapTarget's 5: this search has no floor-cast/headroom/own-footing
@@ -683,8 +693,8 @@ ParkourConstants.WallRun = {
 	-- wall", which is the right requirement for STARTING a wall-run off a run-up -- you have to commit to
 	-- the surface -- and much too strict for the other thing these probes now feed: a player rising
 	-- between two walls arrives near a face rather than pressed against it, and at 2.6 the wall they are
-	-- plainly next to did not exist as far as States/WallJumping.CanEnter was concerned. That is a large
-	-- part of why a corridor climb "ran out": not a chain limit, just the next kick never being offered.
+	-- plainly next to did not exist as far as the wall probes were concerned. That is a large part of
+	-- why a corridor climb "ran out": not a chain limit, just the next kick never being offered.
 	ProbeDistance = 3.2,
 	-- Multiplier on that reach for the FORWARD-DIAGONAL fallback cast, which only runs while airborne and
 	-- only when the straight side cast found nothing -- see EnvironmentProbe.probeWall. Longer than the
@@ -1035,6 +1045,15 @@ ParkourConstants.WallJump = {
 -- the combat system has its OWN slide (CombatSystem.handleSlideRequest) which this does not touch;
 -- only the parkour framework's states are gated here.
 ParkourConstants.CombatGate = {
+	-- "WallJumping" is a GATE TAG, not a state id -- kicking off a wall stopped being its own state when
+	-- it was folded into States/WallRunning.lua as a phase (see that file's header), but combat still
+	-- needs to ask about it as its own question: a run legitimately started before combat began may
+	-- finish on its own timer (WallRunning is blocked here too, so no FRESH run may start once fighting,
+	-- but an active one is not force-exited), while the kick specifically -- the repositioning half --
+	-- must stop being available the instant an exchange begins. StateSupport.CombatBlocks takes a plain
+	-- string for exactly this: this table was already typed { [string]: boolean }, not
+	-- { [MovementStateId]: boolean }, anticipating a tag that outlives the state it once named
+	-- one-for-one.
 	BlockedStates = {
 		WallRunning = true,
 		WallJumping = true,
@@ -1268,6 +1287,12 @@ ParkourConstants.AnimationIds = {
 	VaultOver = "rbxassetid://126138799180188",
 	Mantle = "rbxassetid://126138799180188",
 	LedgeHang = "rbxassetid://83474290053648",
+	-- Plays while shimmying sideways along a held ledge (States/LedgeHanging.lua's Update, once lateral
+	-- MoveIntent crosses the shimmy threshold) instead of the static hang loop above. One clip rather
+	-- than a mirrored pair -- unlike the wall-run/wall-jump pairs below, shimmying left and shimmying
+	-- right are the same motion read backwards along a stable axis (WallRight), not two different
+	-- actions, so a single authored clip covers both directions.
+	LedgeShimmy = "rbxassetid://96438869641457",
 	LedgeClimb = "rbxassetid://73047490092830",
 	WallRunLeft = "rbxassetid://70828439233197",
 	WallRunRight = "rbxassetid://86594988194527",
@@ -1282,12 +1307,15 @@ ParkourConstants.AnimationIds = {
 	WallJumpLeft = "rbxassetid://88023924827467",
 	WallJumpRight = "rbxassetid://75811078175435",
 	Roll = "rbxassetid://125167812303491",
-	-- The double-tap leap. Starts on the vault-over clip as its placeholder because the two are the same
-	-- shape of movement -- a committed forward launch -- which makes it the least wrong thing to play
-	-- until a real one exists.
-	Leap = "rbxassetid://126138799180188",
+	-- The committed leap's flight -- the arc itself, once the charge below has committed to it.
+	Leap = "rbxassetid://73851621859324",
+	-- The leap's charge-up wind-up (Leap.ChargeSeconds), played on loop for however long that constant
+	-- says -- see States/Leaping.lua's Charging phase. Left blank ("authored later" -- see this table's
+	-- own header) until a real clip exists; a blank id plays nothing, not an error, so the charge still
+	-- times out and fires the leap on schedule even unauthored.
+	LeapCharge = "",
 	LandSoft = "rbxassetid://125167812303491",
-	LandHard = "rbxassetid://125167812303491",
+	LandHard = "rbxassetid://78765593305701",
 	FallLoop = "rbxassetid://125167812303491",
 } :: { [string]: string }
 
@@ -1359,10 +1387,7 @@ ParkourConstants.Tags = {
 	ForceWallRunnable = "ParkourWallRunnable",
 	ForceMantleable = "ParkourMantleable",
 	ForceLedge = "ParkourLedge",
-	-- Numeric Attribute (not a tag): multiplies slide friction on this surface, so ice/gravel can
-	-- feel different without any per-material table. Absent = 1.
 	SurfaceFrictionAttribute = "ParkourFriction",
-	-- Numeric Attribute: multiplies momentum retained when this surface is used for a wall-jump.
 	WallBounceAttribute = "ParkourWallBounce",
 }
 

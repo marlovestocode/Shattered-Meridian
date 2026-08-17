@@ -24,14 +24,19 @@
 	   1000  AerialCombat   -- combat owns the body; nothing may pre-empt it
 	    220  LedgeClimbing  -- only reachable from LedgeHanging
 	    210  LedgeHanging   -- catching an edge beats continuing to fall
-	    180  WallJumping    -- kicking off a wall beats staying on it
 	    176  LedgeLeaping   -- route-1 only (CanEnter always refuses); reachable exclusively from
 	                       -- LedgeHanging.Update. The priority number is never consulted for
 	                       -- pre-emption, and sits beside Leaping purely for a reader's convenience.
-	    175  Leaping        -- the double-tap leap, BELOW the wall-jump on purpose: a chimney climb is a
-	                       -- stream of jump presses, every one of them inside the double-tap window, so
-	                       -- a leap that outranked the kick would fling the player out of the shaft
-	    160  WallRunning    -- attaching to a wall beats falling past it
+	    175  Leaping        -- the committed leap, on its own dedicated key (not a double-tap of jump any
+	                       -- more -- see that state's own header). Above WallRunning, so a Leap press may
+	                       -- still hijack an ordinary (non-kicking) wall-run -- but not an active kick:
+	                       -- Leaping.CanEnter explicitly refuses while WallRunning's own kick phase is
+	                       -- running (see that state's own "A WALL-KICK IN PROGRESS ALWAYS WINS" note).
+	                       -- This used to be enforced structurally, by sitting below a separate
+	                       -- WallJumping state at priority 180; kicking off a wall is now a PHASE of
+	                       -- WallRunning below, not its own state -- see that file's header for why.
+	    160  WallRunning    -- attaching to a wall beats falling past it, AND kicking off one (the former
+	                       -- WallJumping state, now a phase of this one -- see its own header)
 	    150  Vaulting       -- clearing an obstacle beats running into it
 	    145  Mantling       -- just under Vaulting: when both are viable the faster option wins
 	    140  Rolling        -- a dodge beats whatever it is dodging out of
@@ -52,7 +57,6 @@ local States: { ParkourTypes.StateDefinition } = {
 	require(script.AerialCombat),
 	require(script.LedgeClimbing),
 	require(script.LedgeHanging),
-	require(script.WallJumping),
 	require(script.LedgeLeaping),
 	require(script.Leaping),
 	require(script.WallRunning),

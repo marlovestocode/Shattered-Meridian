@@ -21,6 +21,20 @@
 	owns formatting, filtering, and making sure a bad `fields` value can never throw into the
 	caller (pcall-wrapped end to end) or flood Output (per-message rate limiting).
 
+	Also owns (2026-08-17, the Live Admin Console): an always-on, per-VM capture buffer -- the
+	server has its own, each client has its own -- that records every entry passed to emit() (and
+	every raw engine line Shared/EngineLogCapture.lua feeds in via CaptureEngineEntry), regardless
+	of Enabled/IsStudio/Level/Scope above. This is a DELIBERATE, narrow exception to this module's
+	own production-safety contract, and it is safe precisely because of what it does NOT change:
+	the print()/warn() path above -- the only thing that can ever put a line in front of someone
+	who isn't explicitly asking for it -- keeps its exact original gate, untouched. The buffer is
+	inert data sitting in this VM's own memory until Server/Systems/LiveConsoleSystem.lua's
+	Subscribe handler (whitelist-gated the same way every other admin action in this codebase is)
+	hands a snapshot of it to an authorized admin's own client on request. "Never prints to Output
+	outside Studio" and "is capturable by a whitelisted admin regardless of Studio" are different
+	properties; this module still only ever does the first when Enabled+IsStudio hold, same as
+	before. See GetBufferSnapshot/OnEntry/CaptureEngineEntry below.
+
 	Usage:
 		local Logger = require(ReplicatedStorage.Shared.Logger)
 		local logger = Logger.scope("CombatSystem")
@@ -31,11 +45,18 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+-- LogTypes.lua is a leaf module (no requires of its own) purely so Types.lua can pull LogEntry in
+-- for LiveConsoleSubscribeResult without closing a Types -> Logger -> Constants -> Types cycle --
+-- see that module's own header. Re-exported below so every existing `Logger.LogEntry` etc. call
+-- site is unaffected.
+local LogTypes = require(ReplicatedStorage.Shared.LogTypes)
 
 local Logger = {}
 
-export type LogLevel = "Trace" | "Debug" | "Info" | "Warn" | "Error" | "Off"
-export type LogFields = { [string]: unknown }
+export type LogLevel = LogTypes.LogLevel
+export type LogFields = LogTypes.LogFields
+export type LogSource = LogTypes.LogSource
+export type LogEntry = LogTypes.LogEntry
 
 export type LoggerScope = {
 	trace: (self: LoggerScope, message: string, fields: LogFields?) -> (),
@@ -145,6 +166,104 @@ local function formatLine(scopeName: string, level: LogLevel, message: string, f
 end
 
 --
+-- Console capture buffer -- see this module's own header for what this is and why it's safe.
+-- Preallocated circular buffer (fixed capacity, wrapping write index) rather than table.insert/
+-- table.remove(1) -- O(1) per entry regardless of capacity, which matters because every
+-- logger:info/debug/etc call site in the whole codebase now pays this cost unconditionally,
+-- including in live production where it previously paid nothing past the `config.Enabled` check.
+--
+
+local CONSOLE_BUFFER_CAPACITY = math.max(1, Constants.Debug.Logging.ConsoleBufferSize)
+local consoleBuffer: { [number]: LogEntry } = table.create(CONSOLE_BUFFER_CAPACITY)
+local consoleSequence = 0
+
+-- Keyed by a fresh throwaway table (not a name/counter) purely as a unique, unforgeable token to
+-- disconnect by -- same idiom a :Connect() RBXScriptConnection object serves elsewhere, just
+-- without pulling in a real Connection type for what is otherwise a plain callback list.
+local entryListeners: { [{}]: (LogEntry) -> () } = {}
+
+local function oldestCapturedSequence(): number
+	return math.max(1, consoleSequence - CONSOLE_BUFFER_CAPACITY + 1)
+end
+
+-- Shared insertion point for both emit() (App-sourced) and CaptureEngineEntry (Engine-sourced)
+-- below -- funneling both through here is what keeps Sequence a single gapless counter and both
+-- sources visible to the same GetBufferSnapshot/OnEntry readers.
+local function captureEntry(
+	scopeName: string,
+	level: LogLevel,
+	message: string,
+	fields: LogFields?,
+	source: LogSource
+): ()
+	consoleSequence += 1
+	local entry: LogEntry = {
+		Sequence = consoleSequence,
+		TimestampUnix = os.time(),
+		Side = SIDE,
+		Scope = scopeName,
+		Level = level,
+		Message = message,
+		Fields = fields,
+		Source = source,
+	}
+	local slot = ((consoleSequence - 1) % CONSOLE_BUFFER_CAPACITY) + 1
+	consoleBuffer[slot] = entry
+
+	-- Individually pcall-wrapped so one bad listener can never stop the rest from hearing about
+	-- this entry -- matches this module's own "never throws into the caller" discipline, applied
+	-- one layer further out since a listener is foreign code, not this module's own.
+	for _, listener in pairs(entryListeners) do
+		pcall(listener, entry)
+	end
+end
+
+-- Every captured entry newer than `sinceSequence` (or the whole live buffer if omitted, or older
+-- than what's still retained), oldest first. O(capacity) worst case -- fine since this only ever
+-- runs on demand (LiveConsoleSystem.lua's Subscribe handler), never per-frame.
+function Logger.GetBufferSnapshot(sinceSequence: number?): { LogEntry }
+	local result: { LogEntry } = {}
+	local startSequence = math.max(oldestCapturedSequence(), (sinceSequence or 0) + 1)
+	for sequence = startSequence, consoleSequence do
+		local slot = ((sequence - 1) % CONSOLE_BUFFER_CAPACITY) + 1
+		local entry = consoleBuffer[slot]
+		if entry and entry.Sequence == sequence then
+			table.insert(result, entry)
+		end
+	end
+	return result
+end
+
+-- Registers a listener fired once per newly captured entry (App and Engine alike). Returns a
+-- disconnect function. Server/Systems/LiveConsoleSystem.lua is this function's one caller today,
+-- registered once at its own Init().
+function Logger.OnEntry(callback: (LogEntry) -> ()): () -> ()
+	local token = {}
+	entryListeners[token] = callback
+	return function()
+		entryListeners[token] = nil
+	end
+end
+
+-- Narrow ingestion path for Shared/EngineLogCapture.lua's LogService.MessageOut hook -- kept
+-- separate from emit() so a raw engine line (no scope, no fields, just a level + text Roblox
+-- already decided) never has to fake either to share the pipe, while still landing in the exact
+-- same Sequence-ordered buffer/listener fan-out real app logs use.
+function Logger.CaptureEngineEntry(level: LogLevel, message: string): ()
+	captureEntry("Engine", level, message, nil, "Engine")
+end
+
+-- True for exactly the duration of the print()/warn() call inside emit() below. Roblox's own
+-- LogService.MessageOut echoes every print/warn back to any listener -- EngineLogCapture.lua's own
+-- hook checks this before treating a MessageOut line as genuine external engine output, so a
+-- Studio session with logging enabled never double-captures this module's own lines (once here via
+-- captureEntry, once again via the LogService echo).
+local suppressingOwnOutput = false
+function Logger.IsSuppressingOwnOutput(): boolean
+	return suppressingOwnOutput
+end
+
+--
 -- Emission
 --
 
@@ -152,6 +271,18 @@ local function emit(scopeName: string, level: LogLevel, message: string, fields:
 	-- Whole body pcall-wrapped: per this module's header, a bad `fields` value (or literally
 	-- anything else going wrong here) must never throw into the caller's actual gameplay code.
 	pcall(function()
+		-- Shared by both destinations below (the always-on buffer AND Output) so a log site that
+		-- fires every frame can't flood either one, even at Trace, even outside Studio.
+		local rateLimitKey = scopeName .. "\0" .. level .. "\0" .. message
+		if isRateLimited(rateLimitKey) then
+			return
+		end
+
+		-- Always captured, independent of Enabled/IsStudio/Level/Scope below -- see this module's
+		-- own header for why. This is the one line in emit() that runs in a live server; everything
+		-- below it only runs in Studio with logging enabled, exactly as before.
+		captureEntry(scopeName, level, message, fields, "App")
+
 		local config = Constants.Debug.Logging
 		if not config.Enabled then
 			return
@@ -170,17 +301,14 @@ local function emit(scopeName: string, level: LogLevel, message: string, fields:
 			return
 		end
 
-		local rateLimitKey = scopeName .. "\0" .. level .. "\0" .. message
-		if isRateLimited(rateLimitKey) then
-			return
-		end
-
 		local line = formatLine(scopeName, level, message, fields)
+		suppressingOwnOutput = true
 		if levelRank >= LEVEL_RANK.Warn then
 			warn(line)
 		else
 			print(line)
 		end
+		suppressingOwnOutput = false
 	end)
 end
 

@@ -139,7 +139,15 @@ end
 -- The immediate, local "that registered" cue. Cosmetic in the strictest sense: a camera FOV nudge,
 -- composed through the shared FOVOffset compositor so it sums with (rather than fights) the run
 -- system's own zoom.
-local function playPressCue(): ()
+--
+-- SKIPPED FOR BASIC (M1): the narrow-then-wider punch read as an unwanted "zoom out" on every M1
+-- press, and M1 is throw-based and rapid (a string, mashed) where Heavy is a single deliberate,
+-- telegraphed swing -- a press cue earns its keep on the one press a player throws occasionally, not
+-- on the one they throw three times a second. Heavy keeps it.
+local function playPressCue(kind: AttackTypes.AttackKind): ()
+	if kind == "Basic" then
+		return
+	end
 	local now = os.clock()
 	if now - lastPunchAt < PUNCH.MinIntervalSeconds then
 		return
@@ -160,7 +168,7 @@ local function requestWeaponAttack(kind: AttackTypes.AttackKind): ()
 	-- ALWAYS SENT, never pre-filtered. Which move a Basic/Heavy press resolves to is server state this
 	-- module does not mirror, so there is no honest local answer to "would this be refused" -- and the
 	-- server forgives an early press by buffering it, which a local drop would throw away.
-	playPressCue()
+	playPressCue(kind)
 	sendRequest({ Kind = kind })
 end
 

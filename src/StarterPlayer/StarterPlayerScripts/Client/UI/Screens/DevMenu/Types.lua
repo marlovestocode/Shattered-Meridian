@@ -142,6 +142,12 @@ export type ContentAreaHandle = {
 	SetGodmodeRequested: RBXScriptSignal<boolean>,
 	SetFlightRequested: RBXScriptSignal<boolean>,
 	SetFlightCollideRequested: RBXScriptSignal<boolean>,
+	-- Swing-volume visualiser (DevMenu_GetHitboxDebug/SetHitboxDebug -> HitboxEngine.
+	-- SetDebugVolumesEnabled). SERVER-WIDE, not a personal overlay: the engine draws real server-side
+	-- Parts, so every player in the place sees them. Seeded once when the menu opens and refreshed from
+	-- whatever the server reports actually took effect, never optimistically from the press.
+	HitboxDebugActive: Fusion.Value<boolean>,
+	SetHitboxDebugRequested: RBXScriptSignal<boolean>,
 	FlightTuningDisplay: Fusion.Value<FlightTuningDisplayProps?>,
 	CycleFlightTuningPrevRequested: RBXScriptSignal,
 	CycleFlightTuningNextRequested: RBXScriptSignal,

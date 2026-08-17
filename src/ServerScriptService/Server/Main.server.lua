@@ -12,6 +12,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerRoot = ServerScriptService.Server
 
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
+local EngineLogCapture = require(ReplicatedStorage.Shared.EngineLogCapture)
 
 local Systems = ServerRoot.Systems
 local Managers = ServerRoot.Managers
@@ -54,11 +55,18 @@ local AdminActionSystem = require(Systems.AdminActionSystem)
 local ModerationSystem = require(Systems.ModerationSystem)
 local DevMenuSystem = require(Systems.DevMenuSystem)
 local MoveEditorSystem = require(Systems.MoveEditorSystem)
+local LiveConsoleSystem = require(Systems.LiveConsoleSystem)
 local CharacterCreationSystem = require(Systems.CharacterCreationSystem)
 local EmoteUnlockService = require(Systems.EmoteUnlockService)
 local EmoteSystem = require(Systems.EmoteSystem)
 
 -- Explicit boot order -- each comment states the dependency this ordering satisfies.
+
+-- 0. EngineLogCapture connects LogService before anything else below gets a chance to log a boot-
+--    time error/warning it should have seen -- see that module's own header. Zero dependency on any
+--    other System (it only ever touches Shared/Logger.lua's own always-on capture buffer), so
+--    nothing below gates it and it gates nothing below.
+EngineLogCapture.Init()
 
 -- 1. ModerationSystem boots FIRST, ahead of even PlayerDataSystem below -- Roblox fires
 --    Players.PlayerAdded listeners in the order they connected, and a banned player must be kicked
@@ -283,6 +291,13 @@ DevMenuSystem.Init()
 --      MoveRegistryManager (step 12 above) from its own DataStore on boot. Nothing else in this
 --      sequence depends on it existing first.
 MoveEditorSystem.Init()
+
+-- 22c. LiveConsoleSystem (the Live Admin Console's server half) boots right after MoveEditorSystem,
+--      the same whitelist-gated dev-tooling cluster -- its own Logger.OnEntry registration only
+--      needs Shared/Logger.lua (already required, not a System with an Init order of its own) and
+--      Server/Config/AdminConfig.lua, so nothing else in this sequence depends on it existing first,
+--      and it depends on nothing above.
+LiveConsoleSystem.Init()
 
 -- 23. First-time-player onboarding boots last -- it depends on PlayerDataSystem (WaitForProfile to
 --     read raceId, Transform to write the finalized profile) and AdminActionSystem (SetFrozen while

@@ -9,6 +9,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local AttackCatalog = require(ServerScriptService.Server.Combat.AttackCatalog)
+local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
 local DefaultMoveRegistry = require(ServerScriptService.Server.Combat.DefaultMoveRegistry)
 local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
@@ -91,6 +92,47 @@ return function()
 			custom.Damage = 2
 			MoveRegistryManager.Upsert(custom)
 			expect((AttackCatalog.Get(DEFAULT_MOVE_ID) :: any).Profile.Damage).to.equal(2)
+		end)
+	end)
+
+	describe("AttackCatalog.Get -- the WindupSeconds override's Cooldown bound", function()
+		-- Constants.Combat.Weapons.Primary.Stages.Basic[1]: WindupSeconds 0.31, ActiveSeconds 0.22,
+		-- RecoverySeconds 0.14, Cooldown 0.44. Active+Recovery = 0.36, so the override survives only
+		-- when it is at least Cooldown - (Active+Recovery) = 0.08.
+		local ANIMATION_ID = "rbxassetid://104588315151150" -- AttackAnimations["default:Primary:Basic:1"]
+
+		local function serveMarker(time: number): ()
+			AttackWindows.SetExtractor(function(): KeyframeSequence?
+				local sequence = Instance.new("KeyframeSequence")
+				local keyframe = Instance.new("Keyframe")
+				keyframe.Time = time
+				local marker = Instance.new("KeyframeMarker")
+				marker.Name = "AttackM1"
+				marker.Parent = keyframe
+				keyframe.Parent = sequence
+				return sequence
+			end)
+		end
+
+		afterEach(function()
+			AttackWindows.Reset()
+			AttackWindows.SetExtractor(function()
+				return nil
+			end)
+		end)
+
+		it("keeps the hardcoded WindupSeconds when the override would drop the swing below its own Cooldown", function()
+			serveMarker(0.05) -- 0.05 + 0.22 + 0.14 = 0.41, under the 0.44 Cooldown
+			AttackWindows.Prefetch(ANIMATION_ID, "AttackM1")
+			local entry = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
+			expect(entry.Definition.WindupSeconds).to.be.near(0.31, 1e-6)
+		end)
+
+		it("applies the override once the swing still meets or exceeds its own Cooldown", function()
+			serveMarker(0.10) -- 0.10 + 0.22 + 0.14 = 0.46, at or over the 0.44 Cooldown
+			AttackWindows.Prefetch(ANIMATION_ID, "AttackM1")
+			local entry = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
+			expect(entry.Definition.WindupSeconds).to.be.near(0.10, 1e-6)
 		end)
 	end)
 

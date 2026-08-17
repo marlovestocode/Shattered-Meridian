@@ -737,7 +737,8 @@ return function()
 
 		it("reports a target past the vertical cap as unreachable rather than pretending", function()
 			-- What stops a well-placed pair of walls from being an elevator. The caller refuses the assist
-			-- entirely on a false here (States/WallJumping.Enter) and flies the ordinary push instead.
+			-- entirely on a false here (the kick phase in States/WallRunning.lua) and flies the ordinary
+			-- push instead.
 			local start = Vector3.new(0, 20, 0)
 			local _velocity, reachable = solve(start, Vector3.new(6, 60, 0))
 			expect(reachable).to.equal(false)
@@ -811,9 +812,10 @@ return function()
 		end)
 
 		it("is reachable by the solver it feeds -- the two must agree", function()
-			-- The integration that actually matters: States/WallJumping hands this height to
-			-- SolveLaunchVelocity with the up-speed pinned at both ends, and a height the solver then calls
-			-- unreachable would silently drop the assist on exactly the jump it was written for. A small
+			-- The integration that actually matters: the kick phase in States/WallRunning.lua hands this
+			-- height to SolveLaunchVelocity with the up-speed pinned at both ends, and a height the
+			-- solver then calls unreachable would silently drop the assist on exactly the jump it was
+			-- written for. A small
 			-- safety shave (Assist.CorridorHeightSafetyStuds) exists for the apex case, where the two agree
 			-- to the last decimal place; this asserts the shave is enough.
 			for gap = 4, 26, 2 do

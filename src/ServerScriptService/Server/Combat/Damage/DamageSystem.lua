@@ -28,10 +28,18 @@
 	NO REGISTRY, and this is the one place this module deliberately departs from the shape of the two
 	below it. Everything it needs about a combatant is derivable from the Model it is handed -- the
 	Humanoid for health, HitboxEngine.GetCombatantId for the cancel, DefenseSystem for the guard -- and
-	the only state it keeps of its own (hitstun expiry, combo escalation) is bounded by a timestamp that
-	expires on its own. So there is nothing to register and nothing to leak: a player, a bot and a
-	training dummy all go through one path with nobody having to remember to register any of them, which
-	is the same domain-agnostic outcome DefenseSystem's own registry achieves by the opposite means.
+	the only state it keeps of its own (hitstun expiry, combo escalation, the attacker-lunge window
+	below) is bounded by a timestamp that expires on its own. So there is nothing to register and
+	nothing to leak: a player, a bot and a training dummy all go through one path with nobody having
+	to remember to register any of them, which is the same domain-agnostic outcome DefenseSystem's own
+	registry achieves by the opposite means.
+
+	ALSO OWNS (DamageConstants.AttackerLunge): a brief forced-forward Humanoid:Move() for the ATTACKER
+	on a landed Basic-string (M1) hit -- a felt "the punch connected" cue, distinct from the knockback
+	PHYSICS mentioned below (that is the DEFENDER's reaction to a hit; this is the attacker's own body
+	on a hit they landed). Never writes WalkSpeed -- see RunSystem.lua's sole-owner rule -- it only
+	forces MoveDirection for a few frames at whatever speed is already in effect, the same
+	Humanoid:Move() surface touch controls/gamepads/AI already drive a character through.
 
 	HEALTH IS NOT SHADOW-TRACKED. Humanoid.Health stays the single authority, exactly as
 	StarterCharacterScripts/Health.server.lua's standing rule requires -- this module calls
@@ -79,6 +87,10 @@ local DamageSystem = {}
 -- unregistration -- see this file's header on why there is no registry.
 local hitstunUntil: { [Model]: number } = {}
 
+-- When each attacker's post-M1-hit forced-forward window ends. Same "reclaimed by expiry, no
+-- registry" shape as hitstunUntil above -- see this file's header's AttackerLunge paragraph.
+local lungeUntil: { [Model]: number } = {}
+
 local appliedCallbacks: { (DefenseOutcome, DamageResult) -> () } = {}
 
 local started = false
@@ -97,6 +109,18 @@ end
 local function humanoidOf(model: Model): Humanoid?
 	local humanoid = model:FindFirstChildOfClass("Humanoid")
 	return if humanoid and humanoid.Health > 0 then humanoid else nil
+end
+
+-- Whether `moveId` is a weapon's Basic (M1) string hit -- gates DamageConstants.AttackerLunge.
+-- LIVE MoveIds never match the hand-authored DebugName fields on Constants.Combat.Weapons[...].
+-- Stages.Basic ("Basic1", "Dagger1", ...); every attack actually thrown resolves through
+-- DefaultMoveRegistry's synthetic scheme instead. Restated here rather than shared, the same
+-- "coupling is to the naming convention, not to a shared function" reasoning Shared/Attack/
+-- AttackWindows.lua's MarkerNameFor documents for its own identical pattern. A custom Move-Editor
+-- move can never match this shape (its MoveId is an author-assigned slug), so this correctly
+-- excludes those too -- Heavy and Finisher get no forward nudge, same as before this existed.
+local function isBasicMoveId(moveId: string): boolean
+	return string.match(moveId, "^default:%a+:Basic:%d+$") ~= nil
 end
 
 -- Tells one participant what just happened. Silently does nothing for a bot or a dummy, which have no
@@ -174,6 +198,14 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 		cancelSwingOf(outcome.Defender, at)
 	end
 
+	-- A landed M1 (Basic weapon-string) hit gives the ATTACKER a brief forced-forward nudge, driven
+	-- from Step below -- see DamageConstants.AttackerLunge's own comment. Parried is excluded because
+	-- nothing of the attacker's own swing actually connected; every other resolved kind (Clean,
+	-- Blocked, Backstab, GuardBroken, Trade) still counts as the swing having landed on something.
+	if DamageConstants.AttackerLunge.Enabled and outcome.Kind ~= "Parried" and isBasicMoveId(entry.MoveId) then
+		lungeUntil[outcome.Attacker] = at + DamageConstants.AttackerLunge.DurationSeconds
+	end
+
 	-- FIRED BEFORE THE HEALTH WRITE, and the ordering is the whole point rather than an accident.
 	-- Humanoid:TakeDamage raises Humanoid.Died synchronously when the blow is lethal, so a subscriber
 	-- notified afterwards would always be told who dealt the killing hit strictly AFTER
@@ -229,9 +261,12 @@ end
 -- One frame. `now` is the caller's clock, matching HitboxEngine.Step and DefenseSystem.Step's own
 -- convention so all three agree about what a frame is.
 --
--- There is nothing to APPLY here -- outcomes are applied the moment they resolve, from inside
--- DefenseSystem's own pass 2 (see this file's header on why one pass is enough). This exists purely to
--- reclaim state whose timestamps have passed, which is what lets both tables stay registry-free.
+-- Outcomes themselves are applied the moment they resolve, from inside DefenseSystem's own pass 2
+-- (see this file's header on why one pass is enough) -- most of what happens here is reclaiming
+-- state whose timestamps have passed, which is what lets hitstunUntil/ComboEscalation stay
+-- registry-free. The one exception is the attacker-lunge loop below: DamageConstants.AttackerLunge
+-- needs a few consecutive FRAMES of Humanoid:Move(), not a single instantaneous write, so it rides
+-- this System's already-connected Heartbeat rather than opening a second one.
 function DamageSystem.Step(_deltaTime: number, now: number): ()
 	for model, until_ in hitstunUntil do
 		if model.Parent == nil or now >= until_ then
@@ -239,6 +274,27 @@ function DamageSystem.Step(_deltaTime: number, now: number): ()
 		end
 	end
 	ComboEscalation.Sweep(now)
+
+	for model, until_ in lungeUntil do
+		if model.Parent == nil or now >= until_ then
+			lungeUntil[model] = nil
+			continue
+		end
+		local humanoid = humanoidOf(model)
+		-- PrimaryPart, not Humanoid.RootPart -- every registration path into this combat stack
+		-- (HitboxEngine.RegisterCombatant, DefenseSystem.RegisterCombatant) already requires and is
+		-- handed a root explicitly rather than trusting Roblox's own rig-joint auto-detection, and a
+		-- real player character's PrimaryPart is always its HumanoidRootPart. Same guarantee, no new
+		-- dependency on rig internals this module has never needed before.
+		local rootPart = model.PrimaryPart
+		if humanoid and rootPart then
+			-- The same Humanoid:Move() surface touch controls/gamepads/AI already drive a character
+			-- through -- forces MoveDirection for this one frame regardless of what the player is
+			-- actually holding, at whatever WalkSpeed RunSystem currently has in effect. relativeToCamera
+			-- = false: the world-space LookVector is the swing's own facing, not the player's camera.
+			humanoid:Move(rootPart.CFrame.LookVector, false)
+		end
+	end
 end
 
 -- Public queries -----------------------------------------------------------------------------------
@@ -258,6 +314,15 @@ end
 
 function DamageSystem.IsHitstunned(model: Model, now: number): boolean
 	local until_ = hitstunUntil[model]
+	return until_ ~= nil and now < until_
+end
+
+-- Whether Step is currently forcing this attacker forward via DamageConstants.AttackerLunge. Same
+-- read-only, timestamp-bounded query shape as IsHitstunned above -- exists so a spec can assert on
+-- the gating decision directly rather than on a real Humanoid's physics response, which a synthetic
+-- Step has no way to guarantee the timing of.
+function DamageSystem.IsLunging(model: Model, now: number): boolean
+	local until_ = lungeUntil[model]
 	return until_ ~= nil and now < until_
 end
 
@@ -343,6 +408,7 @@ function DamageSystem.Reset(): ()
 		resolvedDisconnect = nil
 	end
 	table.clear(hitstunUntil)
+	table.clear(lungeUntil)
 	table.clear(appliedCallbacks)
 	ComboEscalation.Reset()
 	AttackCatalog.Reset()

@@ -212,6 +212,18 @@ AttackConstants.Network = {
 	MaxSwapsPerSecondPerPlayer = 4,
 }
 
+-- Windows -----------------------------------------------------------------------------------------
+
+-- Shared/Attack/AttackWindows.lua's one setting. SERVER-AUTHORITATIVE (unlike Presentation below):
+-- when true, a Basic-string (M1) swing's WindupSeconds is overridden from its clip's own "AttackM<
+-- stage>" animation marker whenever one is cached and usable, falling back to the hand-typed
+-- Constants.Combat.Weapons[...].Stages.Basic[n].WindupSeconds otherwise. false disables the whole
+-- mechanism unconditionally -- every M1 keeps its hardcoded timing, the same behaviour as before
+-- AttackWindows.lua existed -- for ruling it out as a suspect on a live server without a code change.
+AttackConstants.Windows = {
+	Enabled = true,
+}
+
 -- Presentation ----------------------------------------------------------------------------------
 
 -- CLIENT-ONLY, and none of it can change an outcome. Every value here shapes how a press or a

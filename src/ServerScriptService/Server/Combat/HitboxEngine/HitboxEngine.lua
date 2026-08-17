@@ -179,7 +179,24 @@ local function debugEnabled(): boolean
 	return HitboxEngineConstants.Debug.Enabled
 end
 
+-- Runtime override for the volume visualiser, or nil to use the file constants below.
+--
+-- SEPARATE FROM Debug.Enabled ON PURPOSE, and it deliberately wins over BOTH constants. Those two
+-- gate the engine's per-sample LOGGING as well, which is a genuine performance cost at 120 samples a
+-- second per swing -- so "show me the hitboxes" must not be a request to also flood Output, and
+-- turning the visualiser on must not require an admin to first know that a second, unrelated master
+-- switch exists. One question, one answer.
+--
+-- Server-wide rather than per-player, because a debug volume is a real replicated Workspace Part that
+-- everyone near it already sees -- there is no per-player visibility to key this by, so pretending
+-- otherwise would be a lie in the API shape. That is also exactly why the toggle is admin-gated at
+-- its DevMenu call site: flipping this is visible to the whole server.
+local drawVolumesOverride: boolean? = nil
+
 local function drawVolumesEnabled(): boolean
+	if drawVolumesOverride ~= nil then
+		return drawVolumesOverride
+	end
 	return HitboxEngineConstants.Debug.Enabled and HitboxEngineConstants.Debug.DrawVolumes
 end
 
@@ -249,6 +266,24 @@ local function hideDebugVolume(combatant: Combatant): ()
 	if part then
 		part:Destroy()
 		debugVolumes[combatant] = nil
+	end
+end
+
+-- Drops every live debug Part and the folder holding them.
+--
+-- Needed because the ordinary hide path is per-combatant and runs at the END of a swing: without this,
+-- switching the visualiser off would leave whatever volumes happened to be mid-swing frozen in the
+-- world until their owners next swung, which reads as the toggle not working. Turning it off means
+-- they are gone now.
+local function clearAllDebugVolumes(): ()
+	for combatant, part in debugVolumes do
+		part:Destroy()
+		debugVolumes[combatant] = nil
+	end
+	local folder = debugVolumeFolder
+	if folder then
+		folder:Destroy()
+		debugVolumeFolder = nil
 	end
 end
 
@@ -788,6 +823,41 @@ function HitboxEngine.CancelAttack(combatantId: number, reason: string, now: num
 	return combatant.Machine:Interrupt(reason, now or os.clock())
 end
 
+-- Debug visualisation ---------------------------------------------------------------------------------
+
+-- Turns the swing-volume visualiser on or off for the WHOLE SERVER, live, in Studio or a published
+-- place. Overrides HitboxEngineConstants.Debug's own two switches in both directions -- see
+-- drawVolumesOverride's own header for why this is one question rather than two.
+--
+-- Switching off destroys every volume immediately rather than letting them expire with their swings.
+--
+-- The engine deliberately does no authorization of its own here: it has no notion of who a player is,
+-- and growing one would be the first crack in it being a standalone module. The gate lives at the call
+-- site, in DevMenuSystem's own admin whitelist, exactly where every other privileged action's does.
+function HitboxEngine.SetDebugVolumesEnabled(enabled: boolean): ()
+	drawVolumesOverride = enabled
+	if not enabled then
+		clearAllDebugVolumes()
+	end
+	logger:info("Hitbox debug volumes toggled", { enabled = enabled })
+end
+
+-- Whether volumes are currently drawn, resolving the runtime override against the file constants the
+-- same way the sampler itself does -- so a caller asking before anything has toggled gets the honest
+-- boot default rather than a hardcoded false.
+function HitboxEngine.IsDebugVolumesEnabled(): boolean
+	return drawVolumesEnabled()
+end
+
+-- Drops the runtime override, returning the visualiser to whatever HitboxEngineConstants.Debug says.
+-- Spec-only -- production has no reason to want "whatever the file said" back mid-session.
+function HitboxEngine.ClearDebugVolumesOverride(): ()
+	drawVolumesOverride = nil
+	if not drawVolumesEnabled() then
+		clearAllDebugVolumes()
+	end
+end
+
 function HitboxEngine.GetAttackState(combatantId: number): AttackStateMachine.AttackState?
 	local combatant = combatantById[combatantId]
 	return if combatant then combatant.Machine:GetState() else nil
@@ -939,6 +1009,9 @@ function HitboxEngine.Reset(): ()
 	combatantById = {}
 	modelToCombatant = {}
 	livenessCursor = 1
+	-- Dropped so one spec toggling the visualiser cannot leave it on for every case after it -- the
+	-- same "no case serves another its state" contract every other line in this function keeps.
+	HitboxEngine.ClearDebugVolumesOverride()
 	CandidateGatherer.SetRegisteredModels(registeredModels)
 end
 

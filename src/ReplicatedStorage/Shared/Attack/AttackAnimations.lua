@@ -154,4 +154,19 @@ function AttackAnimations.GetPreloadIds(): { string }
 	return ids
 end
 
+-- Normalized content id -> MoveId, for AssetPreloader's own failure log: "MoveId FrontLight1 failed"
+-- means something to a reader, "rbxassetid://82318659005476 failed" means a lookup. IDS is otherwise
+-- private (every other caller goes through Get/GetPreloadIds), so this is the one deliberate seam for
+-- exactly that diagnostic purpose -- not a general-purpose export.
+function AttackAnimations.GetPreloadLabels(): { [string]: string }
+	local labels: { [string]: string } = {}
+	for moveId, raw in IDS do
+		local id = normalize(raw)
+		if id ~= "" then
+			labels[id] = moveId
+		end
+	end
+	return labels
+end
+
 return AttackAnimations

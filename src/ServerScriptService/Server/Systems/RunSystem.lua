@@ -233,16 +233,28 @@ local function stepPlayer(player: Player, state: PlayerRunState, deltaTime: numb
 
 	local locked = isMovementLocked(humanoid)
 	local parkourOwned = humanoid:GetAttribute(ATTRIBUTES.ParkourVelocityOwned) == true
+	-- Read the same way Client/Movement/RunController.lua already reads the identical question
+	-- (FloorMaterial ~= Air, "the same single check MovementVFX's dust trickle uses") -- the server
+	-- and the client must agree on what "on the ground" means, since the client's own presentation
+	-- already hides footsteps and the FOV pull for every airborne/traversal state.
+	local grounded = humanoid.FloorMaterial ~= Enum.Material.Air
 
-	-- THE CHARGE. Accrues only while the player is both holding the intent AND genuinely moving, and
-	-- only while nothing has taken the character. Freezes -- neither accruing nor decaying -- while a
-	-- parkour action owns velocity, which is the one interruption that must not cost a gear.
+	-- THE CHARGE. Accrues only while the player is holding the intent, genuinely moving, standing on
+	-- something, and not taken by anything else. Freezes -- neither accruing nor decaying -- while
+	-- EITHER a parkour action owns velocity OR the character is simply airborne. Those are not the
+	-- same condition: Reports-bearing states (vault, wall-run, wall-jump, ledge-climb, roll, leap)
+	-- claim ParkourVelocityOwned and were already covered, but States/LedgeHanging.lua, LedgeLeaping,
+	-- Jumping, Falling and AerialCombat never do -- so a ledge hang or a jump arc taken with Sprint
+	-- and a direction held used to charge (or drain) the ladder exactly as if the character were
+	-- still flat-out sprinting on the ground. Grounded closes that: any state that leaves the ground,
+	-- reported or not, is "not a stop" in the same sense a vault already was, and must not cost or
+	-- earn a gear either way.
 	--
-	-- `locked` beats `parkourOwned` in the freeze argument below: flying across the map with the run
-	-- key held is not running, and it must not preserve a gear the way a vault does.
+	-- `locked` beats both in the freeze argument below: flying across the map with the run key held
+	-- is not running, and it must not preserve a gear the way a vault or a jump does.
 	local moving = humanoid.MoveDirection.Magnitude >= RunConstants.MoveInputThreshold
-	local accruing = state.Sprinting and moving and not locked
-	local frozen = parkourOwned and not locked
+	local accruing = state.Sprinting and moving and not locked and grounded
+	local frozen = (parkourOwned or not grounded) and not locked
 
 	-- HOW LONG HAS THIS BEEN GOING ON. Reset the moment accrual resumes, so the aggressive stop decay
 	-- only ever applies to a genuine, sustained stop and a player who clips a doorframe for two frames

@@ -31,13 +31,22 @@
 	move after an edit, which is the one failure the Move Editor's whole "edits take effect immediately"
 	design exists to avoid.
 
+	ONE MUTATION AFTER THE PROJECTION: Get overlays AttackWindows.WindupOverride onto the projected
+	definition's WindupSeconds when a Basic-string move's clip has a usable animation marker cached --
+	see that module's own header. Its cache lives in AttackWindows, not here, and for the opposite
+	reason this file has none: markers are read from an immutable authored asset, not from something
+	an admin can edit live, so there is nothing for it to go stale against.
+
 	Does not own: what a move IS (MoveTypes/MoveRegistryManager), whether a combatant may throw one
-	(DefenseSystem.CanAttack and the attack layer), or what a landed hit does (DamageResolver).
+	(DefenseSystem.CanAttack and the attack layer), what a landed hit does (DamageResolver), or where a
+	move's WindupSeconds ultimately comes from (Shared/Attack/AttackWindows.lua for a Basic string with
+	a marker, the authored Constants.lua/DataStore value otherwise).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AttackAnimations = require(ReplicatedStorage.Shared.Attack.AttackAnimations)
+local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -115,19 +124,37 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 		end
 	end
 
+	-- AUTHORED FIRST, CONFIGURED SECOND. A custom move authored in the Move Editor carries its own
+	-- AnimationId and keeps it. A "Default" move structurally cannot -- DefaultMoveRegistry builds its
+	-- projection fresh on every read with AnimationId hardcoded to "", and the editor hides the
+	-- Animation section for that category entirely -- so the whole live move set falls through to
+	-- Shared/Attack/AttackAnimations.lua, which exists to be the shelf those clips have nowhere else
+	-- to sit on. Resolved here (rather than inline in the returned table below) because AttackWindows
+	-- needs it too -- this is already the one place a MoveId becomes everything the combat stack knows
+	-- about a move.
+	local animationId = if move.AnimationId ~= "" then move.AnimationId else AttackAnimations.Get(move.MoveId)
+
+	-- Marker-driven WindupSeconds override (Shared/Attack/AttackWindows.lua) -- fail-soft: only ever
+	-- applies when a usable marker is already cached (AttackRequestSystem.Init's boot warm pass, or a
+	-- Prefetch this same session already ran) AND the result keeps the swing's own total AT LEAST as
+	-- long as its Cooldown. That bound is load-bearing, not belt-and-suspenders, and it guards the
+	-- OPPOSITE direction from what it might look like: this table's own header requires
+	-- Cooldown <= Windup+Active+Recovery so the swing's own end, not Cooldown, is the gate a player
+	-- feels -- a marker that legitimately SHRINKS WindupSeconds (the expected case; hand-typed values
+	-- run conservative) could push the new total below the untouched Cooldown, silently reintroducing
+	-- dead time after the animation finishes where the move still can't be re-thrown. A bad marker
+	-- degrades to "using the old hardcoded number" instead.
+	local windupOverride = AttackWindows.WindupOverride(moveId, animationId)
+	if windupOverride and windupOverride + definition.ActiveSeconds + definition.RecoverySeconds >= move.Cooldown then
+		definition.WindupSeconds = windupOverride
+	end
+
 	return {
 		MoveId = move.MoveId,
 		Definition = definition,
 		Profile = profile,
 		Cooldown = move.Cooldown,
-		-- AUTHORED FIRST, CONFIGURED SECOND. A custom move authored in the Move Editor carries its own
-		-- AnimationId and keeps it. A "Default" move structurally cannot -- DefaultMoveRegistry builds
-		-- its projection fresh on every read with AnimationId hardcoded to "", and the editor hides the
-		-- Animation section for that category entirely -- so the whole live move set falls through to
-		-- Shared/Attack/AttackAnimations.lua, which exists to be the shelf those clips have nowhere
-		-- else to sit on. Combined HERE rather than in either of them because this is already the one
-		-- place a MoveId becomes everything the combat stack knows about a move.
-		AnimationId = if move.AnimationId ~= "" then move.AnimationId else AttackAnimations.Get(move.MoveId),
+		AnimationId = animationId,
 	}
 end
 

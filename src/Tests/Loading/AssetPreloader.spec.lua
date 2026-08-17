@@ -170,4 +170,24 @@ return function()
 			end
 		end)
 	end)
+
+	describe("AssetPreloader.BuildLabelIndex", function()
+		it("resolves a Parkour animation id to a readable label", function()
+			local labels = AssetPreloader.BuildLabelIndex()
+			expect(labels[ParkourConstants.AnimationIds.Leap]).to.equal("Parkour.Leap")
+		end)
+
+		it("resolves a UI vital icon id to a readable label", function()
+			local labels = AssetPreloader.BuildLabelIndex()
+			expect(labels[Constants.UI.VitalIconIds.Health]).to.equal("UI.Health")
+		end)
+
+		it("never labels the empty-string placeholder id", function()
+			-- "" means "wired, not yet authored" everywhere in this codebase -- it must never resolve
+			-- to a label, or a preload failure log for a genuinely different asset that also happens
+			-- to be blank-id-adjacent could misreport which slot is unauthored.
+			local labels = AssetPreloader.BuildLabelIndex()
+			expect(labels[""]).to.equal(nil)
+		end)
+	end)
 end

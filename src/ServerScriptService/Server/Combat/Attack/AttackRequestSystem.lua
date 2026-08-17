@@ -67,10 +67,16 @@
 	against hitstun would be re-tested against the same expired hitstun for one extra frame. Main.
 	server.lua calls the four Inits in order and Init asserts it rather than trusting the comment.
 
+	ALSO WARMS AttackWindows' marker cache at boot (Init's own task.spawn, mirroring DefenseSystem.Init's
+	identical treatment of ParryWindows.ValidateAll) -- collectBasicMoveEntries discovers every Basic
+	stage across both weapons the same probing way SwingSequencer discovers a string's length, so this
+	list can never drift from what actually exists.
+
 	Does not own: contact detection (HitboxEngine), what kind of hit something was (DefenseSystem),
 	what a hit costs (DamageSystem), which move a press means (SwingSequencer), what a move IS
-	(AttackCatalog and the Move Creation System behind it), or any presentation whatsoever -- every FX
-	decision belongs to the client that receives Attack_Started.
+	(AttackCatalog and the Move Creation System behind it), where a Basic move's WindupSeconds
+	ultimately comes from (Shared/Attack/AttackWindows.lua, AttackCatalog.Get's own concern), or any
+	presentation whatsoever -- every FX decision belongs to the client that receives Attack_Started.
 ]]
 
 local Players = game:GetService("Players")
@@ -79,6 +85,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
+local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
@@ -129,6 +136,26 @@ local function debugLog(flag: boolean, message: string, data: { [string]: any }?
 	if AttackConstants.Debug.Enabled and flag then
 		logger:debug(message, data)
 	end
+end
+
+-- Every Basic-string MoveId this server might throw, across every weapon in the swap order, paired
+-- with its resolved AnimationId -- what AttackWindows.ValidateAll needs to warm its marker cache at
+-- boot. Counts up from stage 1 the same "until the catalogue stops resolving" way
+-- SwingSequencer.stageCountFor discovers a string's length, so this can never drift from what
+-- actually exists; Heavy/Finisher are never included, matching AttackWindows' own Basic-only scope.
+local function collectBasicMoveEntries(): { { MoveId: string, AnimationId: string } }
+	local entries: { { MoveId: string, AnimationId: string } } = {}
+	for _, weaponId in ipairs(AttackConstants.Weapons.Order) do
+		for stageIndex = 1, AttackConstants.Sequence.MaxStageProbe do
+			local moveId = `default:{weaponId}:Basic:{stageIndex}`
+			local entry = AttackCatalog.Get(moveId)
+			if not entry then
+				break
+			end
+			table.insert(entries, { MoveId = moveId, AnimationId = entry.AnimationId })
+		end
+	end
+	return entries
 end
 
 local function isAlive(model: Model): boolean
@@ -598,6 +625,14 @@ function AttackRequestSystem.Init(): ()
 	-- calling that first.
 	heartbeatConnection = RunService.Heartbeat:Connect(function(deltaTime: number)
 		AttackRequestSystem.Step(deltaTime, os.clock())
+	end)
+
+	-- Warms AttackWindows' marker cache for every Basic-string clip and reports what it found -- the
+	-- same "spawned rather than awaited" reasoning DefenseSystem.Init gives ParryWindows.ValidateAll:
+	-- GetKeyframeSequenceAsync is a rate-limited web call, and blocking boot on it would cost every
+	-- player more than the first few seconds of M1 falling back to hardcoded timing ever would.
+	task.spawn(function()
+		AttackWindows.ValidateAll(collectBasicMoveEntries())
 	end)
 
 	logger:info("AttackRequestSystem.Init() complete")

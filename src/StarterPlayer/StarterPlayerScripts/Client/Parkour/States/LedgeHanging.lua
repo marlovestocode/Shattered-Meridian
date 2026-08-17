@@ -255,8 +255,14 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		-- ParkourContext.DebugShimmy/DebugLedgeLeap's own header for why these have to be fresh every
 		-- frame rather than left stale. "Idle" is the honest answer for "fully attached, nothing being
 		-- attempted right now," which is the overwhelming majority of a hang's own lifetime.
+		--
+		-- AnimationVariant is reset here too, alongside them, for the identical reason: Enter published
+		-- "Hang" once, but the shimmy branch below flips it to "Shimmy" for exactly the frames lateral
+		-- intent clears the threshold, and it has to fall back to "Hang" the instant that stops being
+		-- true rather than staying stuck on whichever it last was.
 		context.DebugShimmy = "Idle"
 		context.DebugLedgeLeap = "Idle"
+		context.AnimationVariant = "Hang"
 
 		-- THE SHIMMY. Only once fully attached -- shimmying mid pull-in would be steering a position the
 		-- pull is still easing toward, which is a different motion than the pose it is easing FROM.
@@ -267,6 +273,7 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		local wallRight = ParkourMath.WallRight(wallNormal)
 		local lateral = context.MoveIntent:Dot(wallRight)
 		if wallRight.Magnitude > 1e-3 and math.abs(lateral) >= ParkourConstants.Locomotion.InputMagnitudeThreshold then
+			context.AnimationVariant = "Shimmy"
 			local direction = if lateral > 0 then wallRight else -wallRight
 			local step = direction * LEDGE.ShimmySpeed * context.DeltaTime
 			-- THE HEAD POSITION THE PROBE SEARCHES FROM -- and the thing that was wrong here before.

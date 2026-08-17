@@ -62,6 +62,10 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 		InputBuffer.PressRoll(now)
 		return
 	end
+	if KeybindManager.Matches("Leap", input) then
+		InputBuffer.PressLeap(now)
+		return
+	end
 end
 
 local function onInputEnded(input: InputObject): ()

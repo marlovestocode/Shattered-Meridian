@@ -23,6 +23,7 @@ local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstan
 local DefenseSystem = require(ServerScriptService.Server.Combat.Defense.DefenseSystem)
 local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.HitboxEngine)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
+local LiveTuningContract = require(ServerScriptService.Tests.TestHelpers.LiveTuningContract)
 local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
@@ -396,6 +397,83 @@ return function()
 			expect(DefenseSystem.GetState(attacker.Model)).to.equal("Staggered")
 			expect(defender.Humanoid.Health).to.equal(before)
 			expect(DamageSystem.IsHitstunned(defender.Model, base + FRAME)).to.equal(false)
+		end)
+	end)
+
+	describe("DamageSystem -- attacker lunge", function()
+		it("starts a forced-forward window for the attacker on a landed M1 hit", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(DamageSystem.IsLunging(attacker.Model, base + FRAME)).to.equal(true)
+		end)
+
+		it("clears on its own once DamageConstants.AttackerLunge.DurationSeconds elapses", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			local after = base + FRAME + DamageConstants.AttackerLunge.DurationSeconds
+			expect(DamageSystem.IsLunging(attacker.Model, after)).to.equal(false)
+		end)
+
+		it("never starts a window at all for a Parried attacker -- nothing of their swing connected", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(DefenseSystem.GetState(attacker.Model)).to.equal("Staggered")
+			expect(DamageSystem.IsLunging(attacker.Model, base + FRAME)).to.equal(false)
+		end)
+
+		it("does not start a window for a Heavy or Finisher landing, only a Basic (M1) string", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ DebugName = "default:Primary:Heavy:1" }), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(DamageSystem.IsLunging(attacker.Model, base + FRAME)).to.equal(false)
+		end)
+
+		it("still gives the attacker a window on a Blocked hit -- their swing still connected", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			step(FRAME, base + WINDOW_CLOSE + FRAME)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + WINDOW_CLOSE + 2 * FRAME)
+
+			expect(DamageSystem.IsLunging(attacker.Model, base + WINDOW_CLOSE + 2 * FRAME)).to.equal(true)
+		end)
+
+		it("respects DamageConstants.AttackerLunge.Enabled as a kill switch", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			LiveTuningContract.withRestore(function()
+				DamageConstants.AttackerLunge.Enabled = false
+				HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+				step(FRAME, base + FRAME)
+				expect(DamageSystem.IsLunging(attacker.Model, base + FRAME)).to.equal(false)
+			end, function()
+				DamageConstants.AttackerLunge.Enabled = true
+			end)
 		end)
 	end)
 

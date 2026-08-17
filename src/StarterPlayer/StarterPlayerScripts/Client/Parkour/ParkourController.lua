@@ -84,11 +84,20 @@ local ACTION_DURATIONS: { [string]: number } = {
 	Slide = ParkourConstants.Slide.MaxDurationSeconds + 0.5,
 	Vault = ParkourConstants.Obstacle.VaultDurationSeconds + 0.5,
 	Mantle = ParkourConstants.Obstacle.MantleDurationSeconds + 0.5,
+	-- No separate WallJump entry: the kick is a phase of WallRunning now, not its own reported action --
+	-- see ParkourTypes.ActionKind's own header. The WallRun duration above already has to cover it,
+	-- since the open window spans the whole run including any kick taken at the end of it; a run
+	-- (MaxDurationSeconds, 2.2s) chaining directly into a kick's control lock (well under 0.5s even
+	-- assisted) stays comfortably inside the existing +0.5s slack.
 	WallRun = ParkourConstants.WallRun.MaxDurationSeconds + 0.5,
-	WallJump = ParkourConstants.WallJump.ControlLockSeconds + 0.5,
 	LedgeClimb = ParkourConstants.Ledge.ClimbDurationSeconds + 0.5,
 	Roll = ParkourConstants.Roll.DurationSeconds + 0.5,
-	Leap = ParkourConstants.Leap.MaxFlightSeconds + 0.5,
+	-- Includes ChargeSeconds now: the report Start fires once, at Enter, which is the moment the CHARGE
+	-- begins (see States/Leaping.lua's Charging phase) -- not the moment the flight does. A window sized
+	-- only for the flight would under-declare the real duration by the whole charge, and a charge+flight
+	-- that ran past it would have its own ownership window force-expired by the server mid-air: the
+	-- exact "player frozen" failure ParkourValidation.lua's own history documents for a mis-sized window.
+	Leap = ParkourConstants.Leap.ChargeSeconds + ParkourConstants.Leap.MaxFlightSeconds + 0.5,
 }
 
 local machine = StateMachine.New("Idle")
@@ -105,6 +114,22 @@ local humanoid: Humanoid? = nil
 local rootPart: BasePart? = nil
 
 local wasGrounded = false
+-- What ParkourAnimator was last told the current state's variant is. OnStateChanged only fires on an
+-- actual state transition, but a variant can change WITHIN a state's own lifetime now -- States/
+-- LedgeHanging.lua flips ParkourContext.AnimationVariant between "Hang" and "Shimmy" every frame based
+-- on live lateral input, not just once at Enter -- so step() below has to notice that edge too, the
+-- same way it already notices the grounded edge just above.
+local lastAnimationVariant: string? = nil
+
+-- Whether an AnimationVariant names the kick phase of States/WallRunning.lua rather than the ordinary
+-- run loop (Left/Right) -- see that file's beginKick, which is the only thing that ever sets these.
+-- Used both to decide the camera tilt (wall-run only, not the kick -- see the per-frame push below) and
+-- to fire the kick's one-shot camera shake, which used to be OnStateChanged's job when the kick was its
+-- own state and "next == WallJumping" was a real transition to key off (see ParkourCamera.OnStateChanged's
+-- own header for why it no longer can be).
+local function isKickVariant(variant: string?): boolean
+	return variant == "KickLeft" or variant == "KickRight" or variant == "KickNeutral"
+end
 
 -- The single reused context. Every field is overwritten each frame before any state sees it; the
 -- probe fields are assigned by EnvironmentProbe.Update to its own persistent result tables. Reused
@@ -358,6 +383,28 @@ local function step(deltaTime: number): ()
 
 	if nextId ~= previousId then
 		onTransition(previousId, nextId)
+		lastAnimationVariant = context.AnimationVariant
+	elseif context.AnimationVariant ~= lastAnimationVariant then
+		-- SAME state, but its own Update just asked for a different variant -- LedgeHanging switching
+		-- between "Hang" and "Shimmy" as the player starts/stops shimmying, or WallRunning switching
+		-- into its own kick phase (Left/Right -> Kick*), are the two cases this exists for. OnStateChanged
+		-- is reused rather than duplicated because it already does exactly the resolve-and-SetClaim this
+		-- needs; passing nextId for both previous and next is safe because the function never reads its
+		-- `_previous` argument (see its own signature). RunController is deliberately NOT told about
+		-- this -- SetParkourState only cares about which STATE is active for locomotion-presentation
+		-- purposes, and a variant swap within one state never changes that answer.
+		ParkourAnimator.OnStateChanged(nextId, nextId, context.AnimationVariant)
+		-- The kick's one-shot camera punch, fired on the same edge (entering a Kick* variant this frame,
+		-- having not been in one last frame) that used to be "next == WallJumping" back when the kick was
+		-- its own state -- see ParkourCamera.PlayWallKick's own header.
+		if
+			nextId == "WallRunning"
+			and isKickVariant(context.AnimationVariant)
+			and not isKickVariant(lastAnimationVariant)
+		then
+			ParkourCamera.PlayWallKick()
+		end
+		lastAnimationVariant = context.AnimationVariant
 	end
 
 	-- After the transition, so it sees the state the frame actually ended in rather than the one it
@@ -367,7 +414,10 @@ local function step(deltaTime: number): ()
 
 	ParkourAnimator.SetMotion(context.Momentum)
 	ParkourCamera.SetSpeed(context.Momentum)
-	if nextId == "WallRunning" then
+	-- Tilt belongs to the RUN, not the kick -- Left/Right only, never a Kick* variant. Without this
+	-- guard a departing kick would read "not Left" and tilt as if still leaning into the wall on the
+	-- ordinary (arbitrary) side, right as the character is pushing away from it.
+	if nextId == "WallRunning" and (context.AnimationVariant == "Left" or context.AnimationVariant == "Right") then
 		ParkourCamera.SetWallSide(if context.AnimationVariant == "Left" then -1 else 1)
 	else
 		ParkourCamera.SetWallSide(0)
@@ -441,6 +491,7 @@ function ParkourController.BindCharacter(nextCharacter: Model): ()
 
 	context = buildInitialContext(nextCharacter, humanoid :: Humanoid, rootPart :: BasePart)
 	wasGrounded = false
+	lastAnimationVariant = nil
 
 	EnvironmentProbe.BindCharacter(nextCharacter, humanoid :: Humanoid, rootPart :: BasePart)
 	ParkourMotor.BindCharacter(nextCharacter, humanoid :: Humanoid, rootPart :: BasePart)

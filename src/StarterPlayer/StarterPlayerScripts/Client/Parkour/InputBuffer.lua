@@ -2,8 +2,8 @@
 --[[
 	InputBuffer.lua
 
-	Owns: the local player's buffered parkour intents -- when jump, slide and roll were last pressed,
-	whether slide is currently held, and whether each buffered press is still live.
+	Owns: the local player's buffered parkour intents -- when jump, slide, roll and leap were last
+	pressed, whether slide is currently held, and whether each buffered press is still live.
 
 	This module is the entire answer to the design's "add sensible buffering where necessary so
 	players can press an input slightly before an action becomes available and still have the action
@@ -48,19 +48,13 @@ local InputBuffer = {}
 local jumpPressedAt = 0
 local slidePressedAt = 0
 local rollPressedAt = 0
-
--- THE DOUBLE TAP, which needs two timestamps rather than one and cannot reuse `jumpPressedAt` for
--- either of them.
---
--- `lastJumpPressAt` is raw press HISTORY -- every press, never cleared by a consume -- because the
--- question "were these two presses close together" has to be answerable after the first of them has
--- already been spent on an ordinary jump, which is exactly what happens: tap one launches the jump and
--- clears jumpPressedAt, tap two arrives 0.15s later and has nothing left to compare itself against.
---
--- `doubleTapAt` is the detected gesture, buffered like any other intent so it survives a few frames of
--- the leap not yet being available.
-local lastJumpPressAt = 0
-local doubleTapAt = 0
+-- The committed leap's own dedicated press -- see PressLeap/PeekLeap/ConsumeLeap below, which mirror
+-- Roll's shape exactly. Leap used to be detected as a double-tap of jump instead of having a key of its
+-- own -- that mechanism (a raw press-history timestamp plus a detected-gesture buffer, and a line inside
+-- ConsumeJump spending the gesture alongside an ordinary jump so the two inputs could not fire twice off
+-- one press) is gone along with it: a dedicated key needs none of that cross-consumption, because there
+-- is only ever one input to spend.
+local leapPressedAt = 0
 
 -- Held state, distinct from the buffered press above: a slide continues while held and can be
 -- released early, where the press itself is a one-shot that expires. Both are needed -- see
@@ -88,10 +82,6 @@ function InputBuffer.GetAssists(): AssistSettings
 end
 
 function InputBuffer.PressJump(now: number): ()
-	if lastJumpPressAt > 0 and (now - lastJumpPressAt) <= ParkourConstants.Jump.DoubleTapSeconds then
-		doubleTapAt = now
-	end
-	lastJumpPressAt = now
 	jumpPressedAt = now
 end
 
@@ -106,6 +96,10 @@ end
 
 function InputBuffer.PressRoll(now: number): ()
 	rollPressedAt = now
+end
+
+function InputBuffer.PressLeap(now: number): ()
+	leapPressedAt = now
 end
 
 function InputBuffer.IsSlideHeld(): boolean
@@ -125,8 +119,8 @@ end
 -- version is that this function is the "was jump pressed" test for wall-jumps, leaps, slide-jumps and
 -- ledge climb-ups, not just for buffered jumps.
 --
--- `enabled` is now unconditionally true here, exactly as PeekSlide/PeekRoll/PeekDoubleJump already
--- pass it -- the preference is expressed entirely in which window it gets.
+-- `enabled` is now unconditionally true here, exactly as PeekSlide/PeekRoll/PeekLeap already pass it --
+-- the preference is expressed entirely in which window it gets.
 function InputBuffer.PeekJump(now: number): boolean
 	local window = if assists.JumpBuffer
 		then ParkourConstants.Jump.BufferSeconds
@@ -134,43 +128,23 @@ function InputBuffer.PeekJump(now: number): boolean
 	return ParkourMath.BufferLive(now, jumpPressedAt, window, true)
 end
 
--- Spending a jump press ALSO spends the double tap it was the second half of, and that is the rule that
--- keeps the two inputs from fighting.
---
--- Without it a double tap fires twice: the wall-jump (or the ordinary jump) consumes the press, the
--- gesture survives in its own buffer, and the leap fires a frame or two later out of whatever state the
--- first action handed to. Chained wall-jumps make that constant rather than rare -- climbing a shaft is
--- literally a stream of jump presses inside the double-tap window, so every kick would be chased by a
--- leap that flings the player out of the corridor they were climbing.
---
--- One press, one action, whichever action claimed it.
 function InputBuffer.ConsumeJump(now: number): boolean
 	if not InputBuffer.PeekJump(now) then
 		return false
 	end
 	jumpPressedAt = 0
-	doubleTapAt = 0
 	return true
 end
 
--- Whether a double tap of jump is live. Uses the shared action buffer window rather than jump's own
--- tighter one: the leap it triggers has a real availability gate in front of it (a cooldown, and having
--- touched the ground since the last one), so the gesture has to survive long enough to be answered
--- once the gate opens, which is the same forgiveness ActionBufferSeconds exists to provide everywhere
--- else. It is deliberately NOT gated on the JumpBuffer assist -- that preference is about jumps firing
--- late, and a leap that never fires at all is not the same complaint.
-function InputBuffer.PeekDoubleJump(now: number): boolean
-	return ParkourMath.BufferLive(now, doubleTapAt, ParkourConstants.Assists.ActionBufferSeconds, true)
+function InputBuffer.PeekLeap(now: number): boolean
+	return ParkourMath.BufferLive(now, leapPressedAt, ParkourConstants.Assists.ActionBufferSeconds, true)
 end
 
-function InputBuffer.ConsumeDoubleJump(now: number): boolean
-	if not InputBuffer.PeekDoubleJump(now) then
+function InputBuffer.ConsumeLeap(now: number): boolean
+	if not InputBuffer.PeekLeap(now) then
 		return false
 	end
-	doubleTapAt = 0
-	-- The press itself goes too: the second tap of a leap must not also be sitting in the ordinary jump
-	-- buffer waiting to launch a jump out of the state the leap hands to.
-	jumpPressedAt = 0
+	leapPressedAt = 0
 	return true
 end
 
@@ -214,12 +188,8 @@ function InputBuffer.Clear(): ()
 	jumpPressedAt = 0
 	slidePressedAt = 0
 	rollPressedAt = 0
+	leapPressedAt = 0
 	slideHeld = false
-	-- The press HISTORY goes too, not just the live buffers: a press made before a respawn and one made
-	-- after it are not a double tap, and leaving the old timestamp would let the first jump of a new life
-	-- read as the second half of a gesture from the previous one.
-	lastJumpPressAt = 0
-	doubleTapAt = 0
 end
 
 return InputBuffer

@@ -12,16 +12,15 @@
 	server-side on every request regardless of what this module decides, per
 	luau-coding-standards.md's server/client split rule.
 
-	Also binds "OpenDevConsole" (F6), which opens Roblox's own developer console. It lives here rather
-	than in its own module for one reason: this is already the module that has asked the server
-	whether this client is an admin, so binding it inside startDevMenu gets the console the identical
-	whitelist as the menu for free -- no second authorization path, no new remote, nothing to keep in
-	sync. Roblox's built-in F9 only binds for accounts with edit access to the place, so a whitelisted
-	admin who is neither the owner nor a group member otherwise has no way to read a live server's
-	logs at all; StarterGui:SetCore("DevConsoleVisible") has no such gate. Same "client-side
-	convenience toggle, fires no remote" shape as the DevMenuToggle bind next to it -- and, like it,
-	not real authorization: nothing the console exposes is a privileged ACTION, every one of those
-	still goes through DevMenuSystem's own server-side check.
+	No longer binds "OpenDevConsole" (F7) -- that used to open Roblox's own native developer console
+	via StarterGui:SetCore("DevConsoleVisible") from right here, since this was already the module
+	that had asked the server whether this client is an admin. It moved to its own module,
+	Client/LiveConsole/LiveConsoleClient.lua, which binds F7 to a bespoke live log console instead:
+	the native console only ever showed anything in Studio (Shared/Logger.lua never calls
+	print()/warn() outside RunService:IsStudio() by design), so on a live server -- the one place a
+	whitelisted admin actually needs it, since Roblox's own F9 shortcut only binds for accounts with
+	edit access to the place -- it opened empty. See LiveConsoleClient.lua's own header for the
+	replacement.
 
 	Also drives the screen's TargetNameDisplay/GodmodeActive/FlightActive (see watchTarget below):
 	always the local player now -- DevMenuSystem.resolveActionTarget's lock-on lookup (and the
@@ -46,7 +45,6 @@
 ]]
 
 local Players = game:GetService("Players")
-local StarterGui = game:GetService("StarterGui")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -472,31 +470,6 @@ local function startDevMenu(handle: DevMenuHandle): ()
 			local nowOpen = not peek(handle.IsOpen)
 			handle.IsOpen:set(nowOpen)
 			logger:debug("Dev menu toggled", { open = nowOpen })
-		elseif KeybindManager.Matches("OpenDevConsole", input) then
-			-- Roblox's own developer console, opened for an authorized admin. Bound HERE, inside
-			-- startDevMenu, specifically because this function only ever runs after
-			-- requestServerAuthorization returned true -- so the console binding inherits the exact
-			-- same whitelist as the dev menu itself, with no second authorization path to keep in sync
-			-- and no new remote.
-			--
-			-- WHY THIS IS NEEDED AT ALL, since Roblox already ships F9: the engine only binds that
-			-- shortcut for accounts with edit access to the place. A whitelisted admin who is not the
-			-- place owner or a group member gets nothing from it in a live server, which means the one
-			-- place every Shared/Logger.lua line surfaces is unreachable for exactly the people who
-			-- need to read it. SetCore("DevConsoleVisible") carries no such permission gate.
-			--
-			-- pcall'd because SetCore is documented to error if the CoreGui script that registers the
-			-- "DevConsoleVisible" handler has not bound yet -- a real possibility on a very early
-			-- keypress. Failing to open a debug panel must never take down the input handler that also
-			-- owns the dev-menu toggle.
-			local ok, errorMessage = pcall(function()
-				StarterGui:SetCore("DevConsoleVisible", true)
-			end)
-			if ok then
-				logger:debug("Developer console opened")
-			else
-				logger:warn("Developer console could not be opened", { errorMessage = tostring(errorMessage) })
-			end
 		end
 	end)
 
@@ -547,6 +520,26 @@ local function startDevMenu(handle: DevMenuHandle): ()
 			local result = resultOrError :: Types.DevMenuActionResult
 			logger:debug("SetTargetFlightCollide result received", { success = result.Success, reason = result.Reason })
 			return describeActionResult(if enabled then "Collide on" else "Collide off", result)
+		end)
+	end)
+
+	content.SetHitboxDebugRequested:Connect(function(enabled: boolean)
+		logger:debug("SetHitboxDebugRequested received", { enabled = enabled })
+		invokeAndReport(handle, function()
+			local setHitboxDebugRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.SetHitboxDebug)
+			return setHitboxDebugRemote:InvokeServer(enabled)
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuHitboxDebugResult
+			logger:debug("SetHitboxDebug result received", { success = result.Success, enabled = result.Enabled })
+			-- Refreshed from what the server reports actually took effect, never optimistically from
+			-- the press -- see HitboxDebugActive's own header on why (this is a server-wide toggle,
+			-- not a personal one, so "did it work" is a real question a refused request can answer no
+			-- to).
+			if result.Success and result.Enabled ~= nil then
+				content.HitboxDebugActive:set(result.Enabled)
+			end
+			return describeActionResult(if enabled then "Hitboxes visible" else "Hitboxes hidden", result)
 		end)
 	end)
 
@@ -798,6 +791,35 @@ local function startDevMenu(handle: DevMenuHandle): ()
 	end
 
 	task.spawn(fetchServerVersionInfo)
+
+	-- Swing-volume visualiser (Server/Combat/HitboxEngine.lua) -- fetched once on Start(), same
+	-- eager-fetch shape as fetchServerVersionInfo above. SERVER-WIDE state, not a per-player
+	-- Attribute, so this fetch (not a watched Humanoid Attribute the way Godmode/Flight refresh) is
+	-- the only way this admin's own Toggle starts showing the truth rather than the client's
+	-- own scope:Value(false) default -- which would otherwise silently lie for an admin joining a
+	-- server where a previous admin already turned it on.
+	local function fetchHitboxDebug(): ()
+		local getHitboxDebugRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.GetHitboxDebug)
+		local ok, resultOrError = pcall(function()
+			return getHitboxDebugRemote:InvokeServer()
+		end)
+
+		if not ok then
+			logger:error("GetHitboxDebug request errored", { errorMessage = tostring(resultOrError) })
+			return
+		end
+
+		local result = resultOrError :: Types.DevMenuHitboxDebugResult
+		if not result.Success or result.Enabled == nil then
+			logger:warn("GetHitboxDebug rejected", { reason = result.Reason })
+			return
+		end
+
+		content.HitboxDebugActive:set(result.Enabled)
+		logger:debug("GetHitboxDebug loaded", { enabled = result.Enabled })
+	end
+
+	task.spawn(fetchHitboxDebug)
 
 	local function fetchPlayers(): ()
 		if peek(sidebar.PlayersLoading) then

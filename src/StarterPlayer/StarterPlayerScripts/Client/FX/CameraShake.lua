@@ -10,22 +10,16 @@
 	Constants.FX.CameraShake; CombatClient.lua's Combat_FeedbackEvent handler is the only caller, so a
 	shake only ever fires on a resolution the server already confirmed -- never optimistically.
 
-	Also owns an OPTIONAL one-shot forward translation (Shake's pushForwardStuds), composed alongside
-	the rotation on the same decay^2 envelope -- CombatFeedbackClient uses this to give a landed M1
-	(Basic weapon-string) hit a small forward lunge on top of its ordinary rotational shake, per-call
-	rather than baked into any preset (see Shake's own comment for why).
-
 	Implementation: a single active shake (newest wins -- upstream HitStop.MinIntervalSeconds already
 	throttles the rapid multi-target case) whose amplitude eases to zero over its duration, sampled
 	through math.noise per axis so the motion is smooth wander rather than random jitter. Applied by
-	POST-MULTIPLYING a small CFrame.Angles (and, when requested, a forward CFrame.new translation)
-	onto Workspace.CurrentCamera each frame at RenderPriority.Camera + 2 -- deliberately AFTER the
-	default camera scripts (Camera) AND ShiftLockCamera's Camera + 1 character-yaw write, so the shake
-	layers on the frame's FINAL camera pose instead of being overwritten by, or fighting, either. The
-	default camera rewrites the base CFrame fresh every frame, which is exactly what lets a decaying
-	offset here read as a shake that settles rather than a permanent nudge. Never touches
-	Humanoid.CameraOffset -- that property is ShiftLockCamera's alone (see its header); this only ever
-	composes onto the camera CFrame.
+	POST-MULTIPLYING a small CFrame.Angles onto Workspace.CurrentCamera each frame at
+	RenderPriority.Camera + 2 -- deliberately AFTER the default camera scripts (Camera) AND
+	ShiftLockCamera's Camera + 1 character-yaw write, so the shake layers on the frame's FINAL camera
+	pose instead of being overwritten by, or fighting, either. The default camera rewrites the base
+	CFrame fresh every frame, which is exactly what lets a decaying offset here read as a shake that
+	settles rather than a permanent nudge. Never touches Humanoid.CameraOffset -- that property is
+	ShiftLockCamera's alone (see its header); this only ever composes onto the camera CFrame.
 
 	Does not own: deciding WHEN to shake or how hard (CombatClient picks the preset per resolution),
 	the FOV punch (SwingEffect) or colour dip (StunEffect), or any camera framing/lock behavior
@@ -54,28 +48,14 @@ local CameraShake = {}
 
 -- The one active shake, or nil. Newest Shake() replaces it wholesale -- see the header for why a
 -- single slot is enough given upstream throttling.
-local active: {
-	Amplitude: number,
-	Frequency: number,
-	Duration: number,
-	StartClock: number,
-	Seed: number,
-	PushForward: number,
-}? =
-	nil
+local active: { Amplitude: number, Frequency: number, Duration: number, StartClock: number, Seed: number }? = nil
 
 local started = false
 
 -- Starts (or restarts) a shake from a Constants.FX.CameraShake preset. Cheap and allocation-light;
 -- safe to call every confirmed impact. A nil/malformed preset is a no-op (a missing shake degrades
 -- to no shake, never an error) -- consistent with Constants.FX's "presentation, not outcome" note.
---
--- pushForwardStuds is an OPTIONAL extra: a one-shot forward translation composed alongside the
--- rotational shake, eased with the same decay^2 curve so it reads as a lunge on impact that settles
--- rather than a lasting reposition. Separate from the preset table (rather than a preset field)
--- because it is a per-CALL decision -- e.g. CombatFeedbackClient only wants it on a landed M1 --
--- not a property of the shake preset itself, which other callers reuse unchanged.
-function CameraShake.Shake(preset: ShakePreset?, pushForwardStuds: number?): ()
+function CameraShake.Shake(preset: ShakePreset?): ()
 	if not preset or typeof(preset.Amplitude) ~= "number" then
 		return
 	end
@@ -87,7 +67,6 @@ function CameraShake.Shake(preset: ShakePreset?, pushForwardStuds: number?): ()
 		-- A fresh random phase per shake so two shakes of the same preset don't sample identical
 		-- noise and read as a repeat.
 		Seed = math.random() * 1000,
-		PushForward = pushForwardStuds or 0,
 	}
 end
 
@@ -118,12 +97,7 @@ local function onRenderStep(): ()
 	local yaw = amplitude * math.noise(t, shake.Seed + NOISE_SEEDS.Yaw)
 	local roll = amplitude * math.noise(t, shake.Seed + NOISE_SEEDS.Roll)
 
-	-- Same decay^2 envelope as the rotation: full push at the moment of impact, eased to zero over
-	-- the shake's own duration. -Z is the camera's local forward, so this reads as a brief lunge
-	-- into the hit rather than a jitter.
-	local push = shake.PushForward * decay * decay
-
-	camera.CFrame = camera.CFrame * CFrame.Angles(pitch, yaw, roll) * CFrame.new(0, 0, -push)
+	camera.CFrame = camera.CFrame * CFrame.Angles(pitch, yaw, roll)
 end
 
 -- Binds the render-step compositor. Called once from Main.client.lua's boot sequence, after

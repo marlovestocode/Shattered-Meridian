@@ -151,13 +151,11 @@ local STATE_CLIPS: { [string]: ClipEntry } = {
 		FadeIn = PROFILES.Snap.FadeIn,
 		FadeOut = PROFILES.Snap.FadeOut,
 	},
-	WallJumping = {
-		Key = "WallJump",
-		Looped = false,
-		ScalesWithSpeed = false,
-		FadeIn = PROFILES.Snap.FadeIn,
-		FadeOut = PROFILES.Snap.FadeOut,
-	},
+	-- Also present in VARIANT_CLIPS below (as the "Charge" variant's own fallback -- i.e. no variant,
+	-- which is what States/Leaping.lua publishes once its charge-up has committed to the flight). Same
+	-- dual-entry shape as LedgeHanging/Landing below, for the same reason: a transition frame that
+	-- reaches this resolver before Leaping.Update has cleared AnimationVariant back to nil still gets
+	-- the flight clip instead of silently playing nothing.
 	Leaping = {
 		Key = "Leap",
 		Looped = false,
@@ -165,6 +163,10 @@ local STATE_CLIPS: { [string]: ClipEntry } = {
 		FadeIn = PROFILES.Snap.FadeIn,
 		FadeOut = PROFILES.Snap.FadeOut,
 	},
+	-- Also present in VARIANT_CLIPS below (as the "Hang" variant); both agree on looped/non-scaling.
+	-- Kept here too, same as Landing's own dual entry, so a transition frame that reaches this
+	-- resolver before LedgeHanging.Enter has published its variant still gets the hang loop instead
+	-- of silently playing nothing for a frame.
 	LedgeHanging = {
 		Key = "LedgeHang",
 		Looped = true,
@@ -206,13 +208,32 @@ local STATE_CLIPS: { [string]: ClipEntry } = {
 -- is exactly how a wall-run came to play its clip once and stop: ParkourConstants.Animation's whole
 -- speed-scaling band (SpeedScaleReferenceSpeed/Min/MaxPlaybackSpeed, authored with a wall-run as its
 -- worked example) described behaviour the resolver could never actually select.
+--
+-- A CLIP ENTRY MAY OVERRIDE THE STATE-LEVEL PLAYBACK FLAGS, per variant. Most states have one shape of
+-- motion for every variant (a vault is one-shot whether it is a hop or a full vault-over), so a plain
+-- string naming the clip key is enough and inherits the state's own Looped/ScalesWithSpeed/Fade
+-- unchanged -- every existing entry below still works this way. States/WallRunning.lua is the reason
+-- the override exists at all: since its kick phase was folded in as part of this same state (see that
+-- file's header), ONE state now needs BOTH a looping, speed-scaled run clip (Left/Right) and a
+-- one-shot, non-scaling kick clip (Kick*) -- two genuinely different shapes of motion that a single
+-- Looped/ScalesWithSpeed pair per state cannot express. A variant entry given as a table instead of a
+-- bare string may set any of Looped/ScalesWithSpeed/FadeIn/FadeOut; whichever it leaves nil falls back
+-- to the state-level default exactly as a bare string does.
+type VariantClipOverride = {
+	Key: string,
+	Looped: boolean?,
+	ScalesWithSpeed: boolean?,
+	FadeIn: number?,
+	FadeOut: number?,
+}
+
 local VARIANT_CLIPS: {
 	[string]: {
 		Looped: boolean,
 		ScalesWithSpeed: boolean,
 		FadeIn: number?,
 		FadeOut: number?,
-		Clips: { [string]: string },
+		Clips: { [string]: string | VariantClipOverride },
 	},
 } =
 	{
@@ -225,29 +246,50 @@ local VARIANT_CLIPS: {
 			FadeOut = PROFILES.Snap.FadeOut,
 			Clips = { Hop = "VaultHop", Vault = "VaultOver" },
 		},
-		-- Loops for as long as the run lasts, and scales with speed -- a wall-run at 34 should not play at
-		-- the same cadence as one at 20, which is the case ParkourConstants.Animation is written about.
+		-- Loops for as long as the run lasts, and scales with speed -- a wall-run at 34 should not play
+		-- at the same cadence as one at 20, which is the case ParkourConstants.Animation is written
+		-- about. The kick (Kick*) overrides both to one-shot/non-scaling: a departure is a single beat
+		-- whose length is the control lock, not a cadence that should track speed -- see this map's own
+		-- header on why a wall-run needs the override at all.
+		--
+		-- The kick clips are mirrored the same way the run itself is, and for the same reason: kicking
+		-- off a wall on your left and kicking off on your right are opposite actions, and one shared
+		-- clip plays half of them backwards. "KickNeutral" is a genuine third case rather than a
+		-- fallback for missing data -- a wall square in front of or behind the character has no side
+		-- (ParkourMath.WallSide returns 0 there), and playing either mirror for it reads as kicking off
+		-- nothing. Named "Kick*" rather than reusing "Left"/"Right" so the loop and the one-shot kick
+		-- can never be confused for one another by a reader of the variant string alone -- see
+		-- States/WallRunning.lua's beginKick, which is the only thing that ever sets these.
 		WallRunning = {
 			Looped = true,
 			ScalesWithSpeed = true,
 			FadeIn = PROFILES.Settle.FadeIn,
 			FadeOut = PROFILES.Settle.FadeOut,
-			Clips = { Left = "WallRunLeft", Right = "WallRunRight" },
-		},
-		-- Mirrored the same way wall-runs are, and for the same reason: kicking off a wall on your left and
-		-- kicking off a wall on your right are opposite actions, and one shared clip plays half of them
-		-- backwards. "Neutral" is a genuine third case rather than a fallback for missing data -- a wall
-		-- square in front of or behind the character has no side (ParkourMath.WallSide returns 0 there), and
-		-- playing either mirror for it reads as kicking off nothing.
-		--
-		-- One-shot and non-scaling: a wall-jump is a single beat whose length is the control lock, not a
-		-- cadence that should track speed.
-		WallJumping = {
-			Looped = false,
-			ScalesWithSpeed = false,
-			FadeIn = PROFILES.Snap.FadeIn,
-			FadeOut = PROFILES.Snap.FadeOut,
-			Clips = { Left = "WallJumpLeft", Right = "WallJumpRight", Neutral = "WallJump" },
+			Clips = {
+				Left = "WallRunLeft",
+				Right = "WallRunRight",
+				KickLeft = {
+					Key = "WallJumpLeft",
+					Looped = false,
+					ScalesWithSpeed = false,
+					FadeIn = PROFILES.Snap.FadeIn,
+					FadeOut = PROFILES.Snap.FadeOut,
+				},
+				KickRight = {
+					Key = "WallJumpRight",
+					Looped = false,
+					ScalesWithSpeed = false,
+					FadeIn = PROFILES.Snap.FadeIn,
+					FadeOut = PROFILES.Snap.FadeOut,
+				},
+				KickNeutral = {
+					Key = "WallJump",
+					Looped = false,
+					ScalesWithSpeed = false,
+					FadeIn = PROFILES.Snap.FadeIn,
+					FadeOut = PROFILES.Snap.FadeOut,
+				},
+			},
 		},
 		-- Also present in STATE_CLIPS (as the no-variant fallback); both agree on one-shot, non-scaling.
 		Landing = {
@@ -256,6 +298,33 @@ local VARIANT_CLIPS: {
 			FadeIn = PROFILES.Ground.FadeIn,
 			FadeOut = PROFILES.Ground.FadeOut,
 			Clips = { Soft = "LandSoft", Medium = "LandSoft", Hard = "LandHard" },
+		},
+		-- Also present in STATE_CLIPS above (as the "Hang" variant's own fallback). States/LedgeHanging.lua
+		-- publishes "Hang" at Enter and switches to "Shimmy" for as long as its Update is actually stepping
+		-- the grab sideways (see that file's shimmy block), switching back to "Hang" the moment lateral
+		-- intent drops below the threshold -- so this variant changes DURING a hang, not just at the
+		-- transition into one, which is why ParkourController has to push it on more than the usual
+		-- state-change edge (see that module's own note on lastAnimationVariant).
+		LedgeHanging = {
+			Looped = true,
+			ScalesWithSpeed = false,
+			FadeIn = PROFILES.Settle.FadeIn,
+			FadeOut = PROFILES.Settle.FadeOut,
+			Clips = { Hang = "LedgeHang", Shimmy = "LedgeShimmy" },
+		},
+		-- Also present in STATE_CLIPS above (as the no-variant fallback, played once the charge has
+		-- committed to the flight). States/Leaping.lua publishes "Charge" for the brief wind-up
+		-- (Leap.ChargeSeconds) before the arc is solved and flown, then clears AnimationVariant back to
+		-- nil for the flight itself, which is what makes it fall through to STATE_CLIPS.Leaping's "Leap"
+		-- clip without needing a redundant "Flight" entry here. Looped, unlike the flight clip: the
+		-- charge's own duration is a tunable constant independent of whatever length the clip is
+		-- authored at, so looping is what keeps the wind-up covered regardless of which finishes first.
+		Leaping = {
+			Looped = true,
+			ScalesWithSpeed = false,
+			FadeIn = PROFILES.Snap.FadeIn,
+			FadeOut = PROFILES.Snap.FadeOut,
+			Clips = { Charge = "LeapCharge" },
 		},
 	}
 
@@ -284,13 +353,19 @@ end
 local function resolveKey(stateId: MovementStateId, variant: string?): (string?, boolean, boolean, number, number)
 	local variantEntry = VARIANT_CLIPS[stateId]
 	if variantEntry and variant then
-		local key = variantEntry.Clips[variant]
-		if key and hasAsset(key) then
-			return key,
-				variantEntry.Looped,
-				variantEntry.ScalesWithSpeed,
-				variantEntry.FadeIn or ANIMATION.FadeInSeconds,
-				variantEntry.FadeOut or ANIMATION.FadeOutSeconds
+		local rawClip = variantEntry.Clips[variant]
+		if rawClip then
+			-- A bare string is sugar for "use every state-level default" -- see VARIANT_CLIPS' own
+			-- header. Normalized to the same shape as an explicit override so the reads below don't
+			-- need two branches.
+			local clip: VariantClipOverride = if typeof(rawClip) == "string" then { Key = rawClip } else rawClip
+			if hasAsset(clip.Key) then
+				return clip.Key,
+					if clip.Looped ~= nil then clip.Looped else variantEntry.Looped,
+					if clip.ScalesWithSpeed ~= nil then clip.ScalesWithSpeed else variantEntry.ScalesWithSpeed,
+					clip.FadeIn or variantEntry.FadeIn or ANIMATION.FadeInSeconds,
+					clip.FadeOut or variantEntry.FadeOut or ANIMATION.FadeOutSeconds
+			end
 		end
 	end
 	local entry = STATE_CLIPS[stateId]

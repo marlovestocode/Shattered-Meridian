@@ -509,6 +509,11 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local godmodeActive = scope:Value(false)
 	local flightActive = scope:Value(false)
 	local collideActive = scope:Value(false)
+	-- Swing-volume visualiser -- SERVER-WIDE (a real replicated Part, not a personal overlay), so
+	-- this is seeded from DevMenu_GetHitboxDebug on open and refreshed from whatever
+	-- DevMenu_SetHitboxDebug reports actually took effect, the same "never optimistic" shape every
+	-- other server-authoritative toggle on this screen already follows.
+	local hitboxDebugActive = scope:Value(false)
 	local selectedTab: Fusion.Value<DevMenuTabName> = scope:Value("Spawn" :: DevMenuTabName)
 	local flightTuningDisplay: Fusion.Value<FlightTuningDisplayProps?> = scope:Value(nil :: FlightTuningDisplayProps?)
 
@@ -561,6 +566,7 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local setGodmodeRequestedEvent = Instance.new("BindableEvent")
 	local setFlightRequestedEvent = Instance.new("BindableEvent")
 	local setFlightCollideRequestedEvent = Instance.new("BindableEvent")
+	local setHitboxDebugRequestedEvent = Instance.new("BindableEvent")
 	local cycleFlightTuningPrevRequestedEvent = Instance.new("BindableEvent")
 	local cycleFlightTuningNextRequestedEvent = Instance.new("BindableEvent")
 	local adjustFlightTuningRequestedEvent = Instance.new("BindableEvent")
@@ -592,6 +598,9 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	end)
 	local collideButtonText = scope:Computed(function(use)
 		return if use(collideActive) then "Collide: On" else "Collide: Off"
+	end)
+	local hitboxDebugButtonText = scope:Computed(function(use)
+		return if use(hitboxDebugActive) then "Show Hitboxes: On" else "Show Hitboxes: Off"
 	end)
 	local frozenButtonText = scope:Computed(function(use)
 		return if use(frozenActive) then "Frozen: On" else "Frozen: Off"
@@ -1009,8 +1018,20 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 				LayoutOrder = 7,
 			}),
 		}),
-		-- "Debug Visualization" (Show Hitboxes) was removed alongside the rest of the combat system --
-		-- Server/Combat/HitboxResolver.lua and HitboxDebugState.lua no longer exist.
+		-- "Debug Visualization" (Show Hitboxes) is BACK, pointed at the rebuilt engine
+		-- (HitboxEngine.SetDebugVolumesEnabled via DevMenu_GetHitboxDebug/SetHitboxDebug) -- see
+		-- DevMenuSystem.lua's own header for why this is server-wide rather than a personal overlay.
+		Section(scope, "Debug Visualization", 5, {
+			Tab(scope, {
+				Text = hitboxDebugButtonText,
+				Selected = hitboxDebugActive,
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				LayoutOrder = 1,
+				OnActivated = function()
+					setHitboxDebugRequestedEvent:Fire(not peek(hitboxDebugActive))
+				end,
+			}),
+		}),
 	})
 
 	local tuningTab = tabContent(scope, "Tuning", selectedTab, scrollSize, {
@@ -1379,6 +1400,8 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 		SetGodmodeRequested = setGodmodeRequestedEvent.Event,
 		SetFlightRequested = setFlightRequestedEvent.Event,
 		SetFlightCollideRequested = setFlightCollideRequestedEvent.Event,
+		HitboxDebugActive = hitboxDebugActive,
+		SetHitboxDebugRequested = setHitboxDebugRequestedEvent.Event,
 		FlightTuningDisplay = flightTuningDisplay,
 		CycleFlightTuningPrevRequested = cycleFlightTuningPrevRequestedEvent.Event,
 		CycleFlightTuningNextRequested = cycleFlightTuningNextRequestedEvent.Event,

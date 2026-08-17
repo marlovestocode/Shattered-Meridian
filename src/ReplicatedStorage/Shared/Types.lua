@@ -12,6 +12,11 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 -- Clip type in here for AttackStartedPayload.Animations below cannot create a require cycle the way
 -- pulling in a module that itself requires Types.lua would.
 local AnimationTimeline = require(ReplicatedStorage.Shared.AnimationTimeline)
+-- Same "leaf module, no require cycle" reasoning as AnimationTimeline above -- LogTypes.lua has no
+-- requires of its own. NOT Shared/Logger.lua directly: Logger requires Constants, and Constants
+-- requires this very file, so requiring Logger here would close a three-module cycle
+-- (Types -> Logger -> Constants -> Types) -- see LogTypes.lua's own header.
+local LogTypes = require(ReplicatedStorage.Shared.LogTypes)
 
 local Types = {}
 
@@ -992,16 +997,21 @@ export type KeybindAction =
 	-- remote of its own (opening the screen is free; every actual action inside it goes through
 	-- MoveEditorSystem's own gated RemoteFunctions).
 	| "OpenMoveEditor"
-	-- Opens Roblox's own developer console (the F9 panel) via StarterGui:SetCore("DevConsoleVisible")
-	-- -- Client/DevMenu/DevMenuClient.lua binds it, and only for a client the server has already
-	-- authorized, same admin-only contract as "DevMenuToggle"/"OpenMoveEditor" above. Fires no remote
-	-- of its own; it is a purely local panel toggle like "OpenBugReport".
+	-- Opens the Live Admin Console (Client/LiveConsole/LiveConsoleClient.lua via
+	-- Client/UI/Screens/LiveConsole/init.lua) -- a bespoke live log stream, not Roblox's own native
+	-- Developer Console. Binding this key toggles the panel locally for every client (harmless --
+	-- an empty panel pre-authorization); the real gate is server-side, on the
+	-- Constants.LiveConsole.RemoteNames.Subscribe RemoteFunction the panel calls the moment it
+	-- opens, same "client-side toggle is UX only, server re-checks regardless" contract as
+	-- "DevMenuToggle"/"OpenMoveEditor" above.
 	--
-	-- Exists because Roblox only binds its own F9 shortcut for accounts with edit access to the
-	-- place, so a whitelisted admin who is not the place owner or a group member has no way to open
-	-- the console in a live server at all -- and the console is where every server/client log this
-	-- codebase emits through Shared/Logger.lua actually surfaces. SetCore has no such permission
-	-- gate, so binding it ourselves is the whole fix.
+	-- Used to open Roblox's own native console via StarterGui:SetCore("DevConsoleVisible") instead
+	-- (bound from Client/DevMenu/DevMenuClient.lua) -- replaced because that panel only ever showed
+	-- anything in Studio: Shared/Logger.lua never calls print()/warn() outside RunService:IsStudio()
+	-- by design, so on a live server -- the one place a whitelisted admin actually needs this, since
+	-- Roblox's own F9 shortcut only binds for accounts with edit access to the place -- the native
+	-- console opened empty. The Live Admin Console reads Logger.lua's always-on capture buffer
+	-- instead, which works regardless of IsStudio; see that module's own header.
 	| "OpenDevConsole"
 	-- The 5 hotbar slots (Client/UI/Screens/HUD/init.lua's Panel "Hotbar") -- fire whatever MoveId is
 	-- currently bound to that slot (Client/Combat/HotbarBindings.lua, admin-local, no persistence)
@@ -1043,6 +1053,12 @@ export type KeybindAction =
 	-- the same bindings), and jump has never been a rebindable action at all -- see KeybindManager.lua's
 	-- IsJumpKeyDown carve-out.
 	| "Roll"
+	-- The Parkour System's committed long jump (Client/Parkour/States/Leaping.lua via Client/Parkour/
+	-- ParkourInput.lua). Used to be a double-tap of jump rather than a KeybindAction of its own -- see
+	-- InputBuffer.lua's own header on why that meant it could never be independently rebound. A
+	-- dedicated key the same way Roll is, for the same reason: reachable without leaving the movement
+	-- keys, and no risk of a stray double-jump accidentally firing it.
+	| "Leap"
 
 -- Exactly one of KeyCode/UserInputType is populated -- KeyCode for ordinary keyboard keys,
 -- UserInputType for inputs with no KeyCode equivalent (Roblox only reports mouse buttons via
@@ -1147,9 +1163,10 @@ export type DevMenuActionResult = {
 	Reason: string?,
 }
 
--- Result of DevMenu_GetHitboxDebug / DevMenu_SetHitboxDebug (Server/Combat/HitboxDebugState.lua) --
--- same request/response reasoning as DevMenuActionResult above, carrying back the current/updated
--- Enabled value so the client can refresh its Toggle without a second round trip.
+-- Result of DevMenu_GetHitboxDebug / DevMenu_SetHitboxDebug (Server/Combat/HitboxEngine/
+-- HitboxEngine.lua's SetDebugVolumesEnabled/IsDebugVolumesEnabled) -- same request/response
+-- reasoning as DevMenuActionResult above, carrying back the current/updated Enabled value so the
+-- client can refresh its Toggle without a second round trip.
 export type DevMenuHitboxDebugResult = {
 	Success: boolean,
 	Enabled: boolean?,
@@ -1401,6 +1418,24 @@ export type SuspicionRecord = {
 	Confidence: number?,
 	-- Always nil this pass -- reserved for that same future pipeline's machine-readable reason code.
 	ReasonCode: string?,
+}
+
+-- Result of DevMenu_GetSidebarStats (RemoteFunction) -- fetched eagerly at Sidebar mount (same "pay
+-- one round trip even if the admin never looks" trade-off ListPlayers/ListBugReports already
+-- accept) and re-fetched after a successful Flag/Unflag action. BugReportOpenCount/
+-- SuspectedCheaterCount are each an in-memory counter maintained entirely by their owning System
+-- (BugReportSystem.GetOpenCount / ModerationSystem.GetSuspectedCheaterCount) -- DevMenuSystem only
+-- combines the two into one response so the Sidebar pays a single round trip instead of two.
+-- Result of LiveConsole_Subscribe (RemoteFunction, Server/Systems/LiveConsoleSystem.lua) -- fired
+-- by Client/LiveConsole/LiveConsoleClient.lua the moment the admin's console panel actually opens,
+-- doubling as both the authorization check (a rejection here IS the "not admin" answer, same
+-- "first remote call is the real gate" idiom DevMenu_GetSidebarStats/MoveEditor_ListMoves already
+-- use) and the fetch that populates the panel with whatever Shared/Logger.lua's capture buffer
+-- already holds at that exact moment, oldest first.
+export type LiveConsoleSubscribeResult = {
+	Success: boolean,
+	Reason: string?,
+	Snapshot: { LogTypes.LogEntry }?,
 }
 
 -- Result of DevMenu_GetSidebarStats (RemoteFunction) -- fetched eagerly at Sidebar mount (same "pay

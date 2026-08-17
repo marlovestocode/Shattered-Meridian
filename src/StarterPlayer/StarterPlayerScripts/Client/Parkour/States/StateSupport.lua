@@ -240,8 +240,13 @@ end
 -- Both halves compared against `true` rather than used for their truthiness, so a synthetic context
 -- that predates this field (the state-machine specs build their own) reads as "not in combat" and
 -- this returns a real boolean rather than nil.
-function StateSupport.CombatBlocks(context: ParkourContext, stateId: MovementStateId): boolean
-	return context.InCombat == true and ParkourConstants.CombatGate.BlockedStates[stateId] == true
+-- `gateKey` is a plain string rather than MovementStateId: most callers pass their own Id, but
+-- States/WallRunning.lua also asks under the name "WallJumping" for its kick phase specifically, which
+-- has not been a real state id since the kick was folded into WallRunning as a phase (see that file's
+-- header) -- ParkourConstants.CombatGate.BlockedStates is itself typed { [string]: boolean } for
+-- exactly this reason, so a combat-gate tag can outlive the state it used to name one-for-one.
+function StateSupport.CombatBlocks(context: ParkourContext, gateKey: string): boolean
+	return context.InCombat == true and ParkourConstants.CombatGate.BlockedStates[gateKey] == true
 end
 
 -- THE ONE ANSWER TO "IS A LEDGE GRAB AVAILABLE RIGHT NOW", and the regrab bookkeeping behind it.

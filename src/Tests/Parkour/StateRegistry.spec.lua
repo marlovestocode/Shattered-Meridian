@@ -35,7 +35,6 @@ local EXPECTED_IDS = {
 	"Vaulting",
 	"Mantling",
 	"WallRunning",
-	"WallJumping",
 	"LedgeHanging",
 	"LedgeClimbing",
 	"Rolling",
@@ -54,12 +53,13 @@ local DEFAULT_GRAVITY = 196.2
 -- Which states own the character's velocity and therefore MUST report to the server -- otherwise
 -- Server/Combat/Movement.ComputeDesiredWalkSpeed keeps driving WalkSpeed underneath them, which is
 -- the precise failure this feature's whole server integration exists to prevent.
+-- No WallJumping entry: kicking off a wall is a phase of WallRunning now, not its own state, and
+-- reports as a continuation of the same "WallRun" window (see ParkourTypes.ActionKind's own header).
 local MUST_REPORT = {
 	Sliding = "Slide",
 	Vaulting = "Vault",
 	Mantling = "Mantle",
 	WallRunning = "WallRun",
-	WallJumping = "WallJump",
 	LedgeClimbing = "LedgeClimb",
 	Rolling = "Roll",
 	Leaping = "Leap",
@@ -152,7 +152,7 @@ return function()
 
 		it("puts every traversal above ordinary ground locomotion", function()
 			local map = byId()
-			for _, id in { "Sliding", "Vaulting", "Mantling", "WallRunning", "WallJumping", "Rolling" } do
+			for _, id in { "Sliding", "Vaulting", "Mantling", "WallRunning", "Rolling" } do
 				expect(map[id].Priority > map.Sprinting.Priority).to.equal(true)
 			end
 		end)
@@ -204,10 +204,9 @@ return function()
 			end
 		end)
 
-		it("has the wall states request wall probes", function()
+		it("has the wall state request wall probes", function()
 			local map = byId()
 			expect(map.WallRunning.Probes.Walls).to.equal(true)
-			expect(map.WallJumping.Probes.Walls).to.equal(true)
 		end)
 
 		it("has the ledge states request ledge probes", function()

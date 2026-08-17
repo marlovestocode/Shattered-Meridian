@@ -122,6 +122,19 @@ DamageConstants.Backstab = {
 	Multiplier = 1.5,
 }
 
+-- Attacker lunge ------------------------------------------------------------------------------------
+
+DamageConstants.AttackerLunge = {
+	-- Whether a landed Basic-string (M1) hit gives the ATTACKER a brief forced-forward nudge --
+	-- DamageSystem holds Humanoid:Move() in the swing's own facing for DurationSeconds, at whatever
+	-- WalkSpeed RunSystem already has in effect (this never writes WalkSpeed itself -- see
+	-- RunSystem.lua's own "exactly one thing may write that property" rule). A felt "the punch has
+	-- weight" cue, not a real gap-closer: short enough that its actual travelled distance stays a
+	-- couple of studs at most. false makes every M1 behave exactly as it did before this existed.
+	Enabled = true,
+	DurationSeconds = 0.08,
+}
+
 -- Network -------------------------------------------------------------------------------------------
 
 DamageConstants.Network = {

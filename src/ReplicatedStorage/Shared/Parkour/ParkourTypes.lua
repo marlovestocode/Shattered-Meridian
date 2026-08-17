@@ -42,7 +42,6 @@ export type MovementStateId =
 	| "Vaulting"
 	| "Mantling"
 	| "WallRunning"
-	| "WallJumping"
 	| "LedgeHanging"
 	| "LedgeClimbing"
 	| "Rolling"
@@ -70,7 +69,14 @@ export type DriveMode = "Humanoid" | "Velocity" | "Kinematic"
 -- actually take ownership of velocity (and therefore need the server to stand its own WalkSpeed
 -- resolver down) are reportable -- Idle/Walking/Sprinting/Jumping/Falling are ordinary Humanoid
 -- locomotion the server already governs and are deliberately NOT network events.
-export type ActionKind = "Slide" | "Vault" | "Mantle" | "WallRun" | "WallJump" | "LedgeClimb" | "Roll" | "Leap"
+--
+-- No separate "WallJump" kind: kicking off a wall is now a PHASE of States/WallRunning.lua rather
+-- than its own state (see that file's header), so it reports as a continuation of the same "WallRun"
+-- window rather than a second Start/End pair. Nothing in ParkourValidation is tuned per-kind (its caps
+-- are deliberately uniform, "loose" ceilings meant to catch only the crude and impossible -- see that
+-- module's own header), so folding the kick's higher peak speed into WallRun's window needed no
+-- separate widening.
+export type ActionKind = "Slide" | "Vault" | "Mantle" | "WallRun" | "LedgeClimb" | "Roll" | "Leap"
 
 -- What a report is saying about that action.
 export type ActionPhase = "Start" | "End"
@@ -247,13 +253,14 @@ export type WallJumpTarget = {
 	Score: number,
 	-- True when this is the far wall of a CORRIDOR -- a surface facing back at the one being jumped from.
 	-- The two cases produce completely different jumps (across versus up), so the distinction has to
-	-- survive the trip back to States/WallJumping rather than being re-derived there from the normal.
+	-- survive the trip back to the kick logic in States/WallRunning.lua rather than being re-derived
+	-- there from the normal.
 	Corridor: boolean,
 }
 
--- Where a leap has decided to land. Produced on demand by EnvironmentProbe.FindLeapTarget at the moment
--- of the double tap, for the same reason WallJumpTarget is: nothing between two leaps has any use for
--- it, and a context field would be a stale answer sitting in scope for the whole life.
+-- Where a leap has decided to land. Produced on demand by EnvironmentProbe.FindLeapTarget the moment
+-- the charge-up commits to a flight, for the same reason WallJumpTarget is: nothing between two leaps
+-- has any use for it, and a context field would be a stale answer sitting in scope for the whole life.
 export type LeapTarget = {
 	Found: boolean,
 	-- The point the arc is solved to land on -- already pulled in from the surface's near edge by

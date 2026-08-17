@@ -3,7 +3,7 @@
 	CombatAnimator.lua
 
 	Owns: the LOCAL player's ordinary locomotion animation -- a Walking loop for ordinary movement
-	that crossfades into one of TWO Running loops for Sprint (the run system's stage 1 and stage 2 --
+	that crossfades into one of THREE Running loops for Sprint (the run system's stages 1, 2 and 3 --
 	see CombatAnimator.SetRunStage, and Client/Movement/RunController.lua for who decides which) on
 	their current character's Animator, driven by a single persistent Heartbeat evaluator that
 	re-derives "should Walking/Running be playing THIS frame" from live state every tick rather than
@@ -41,10 +41,10 @@ local logger = Logger.scope("CombatAnimator")
 local CombatAnimator = {}
 
 -- Constants.Combat.AnimationIds is the single source of truth -- now scoped to just the locomotion
--- clips (Walking/Running/RunningStage2) since combat's own clips (swings, finishers, dashes, etc.)
--- were removed from Constants.lua alongside the rest of the combat data. This loop is fully
--- data-driven, so trimming that table is what trimmed this module's actual loaded-track set -- no
--- code here needed to change to stop loading combat clips.
+-- clips (Walking/Running/RunningStage2/RunningStage3) since combat's own clips (swings, finishers,
+-- dashes, etc.) were removed from Constants.lua alongside the rest of the combat data. This loop is
+-- fully data-driven, so trimming that table is what trimmed this module's actual loaded-track set --
+-- no code here needed to change to stop loading combat clips.
 local ANIMATION_IDS = Constants.Combat.AnimationIds
 
 -- Walking/Running share the same fade constants so the locomotion evaluator's walk<->run crossfade
@@ -155,10 +155,10 @@ function CombatAnimator.BindCharacter(character: Model): ()
 			-- at Core priority, which otherwise wins over anything lower whenever the character has
 			-- real MoveDirection input. Matching Core is the standard workaround.
 			track.Priority = Enum.AnimationPriority.Core
-			-- RunningStage2 joins the looped set for the same reason Running does -- it IS the run
-			-- loop, at the second stage. A sustained locomotion track whose Looped flag was never set
-			-- plays through once and leaves the character in a T-pose-adjacent idle.
-			if name == "Running" or name == "RunningStage2" or name == "Walking" then
+			-- RunningStage2/RunningStage3 join the looped set for the same reason Running does -- each
+			-- IS the run loop, at that stage. A sustained locomotion track whose Looped flag was never
+			-- set plays through once and leaves the character in a T-pose-adjacent idle.
+			if name == "Running" or name == "RunningStage2" or name == "RunningStage3" or name == "Walking" then
 				track.Looped = true
 			end
 			tracks[name] = track
@@ -189,15 +189,15 @@ function CombatAnimator.StopRunning(): ()
 	sprintHeld = false
 end
 
--- THE RUN SYSTEM'S TWO STAGES, pushed in by Client/Movement/RunController.lua (which mirrors the
+-- THE RUN SYSTEM'S THREE STAGES, pushed in by Client/Movement/RunController.lua (which mirrors the
 -- server's own Constants.Attributes.SprintStage -- the stage is never decided on this side).
 --
--- Stage 2 plays its own clip when Constants.Combat.AnimationIds.RunningStage2 is authored, and
--- otherwise falls through to the stage-1 Running loop played faster
--- (Constants.Run.Animation.PlaybackSpeeds).
+-- Stage 2 plays its own clip when Constants.Combat.AnimationIds.RunningStage2 is authored, and stage
+-- 3 plays its own when RunningStage3 is authored -- each otherwise falls through to the stage below
+-- it (3 -> 2 -> 1) played faster instead (Constants.Run.Animation.PlaybackSpeeds).
 --
--- An intent value only, exactly like sprintHeld above: whether either clip actually plays this frame
--- is re-derived by the evaluator below, never decided here.
+-- An intent value only, exactly like sprintHeld above: whether any clip actually plays this frame is
+-- re-derived by the evaluator below, never decided here.
 local runStage = 1
 
 function CombatAnimator.SetRunStage(stage: number): ()
@@ -243,12 +243,13 @@ end)
 -- interrupt (the character actually stopping).
 RunService.Heartbeat:Connect(function()
 	local runningTrack = tracks.Running
-	-- nil whenever Constants.Combat.AnimationIds.RunningStage2 is still blank -- which is the shipped
-	-- default, and the case every branch below is written to handle by falling through to the stage-1
-	-- track rather than by going silent.
+	-- nil whenever Constants.Combat.AnimationIds.RunningStage2/RunningStage3 is still blank -- which
+	-- is the shipped default for RunningStage3, and the case every branch below is written to handle
+	-- by falling through to the stage below (3 -> 2 -> 1) rather than by going silent.
 	local runningStage2Track = tracks.RunningStage2
+	local runningStage3Track = tracks.RunningStage3
 	local walkingTrack = tracks.Walking
-	if runningTrack or runningStage2Track or walkingTrack then
+	if runningTrack or runningStage2Track or runningStage3Track or walkingTrack then
 		-- Also silenced while Flying (Client/DevMenu/FlightController.lua/FlightAnimator.lua own the
 		-- character's animation entirely during flight) -- Boost reuses the Sprint keybind and raw
 		-- WASD can still register nonzero MoveDirection mid-flight, so without this guard the
@@ -263,18 +264,21 @@ RunService.Heartbeat:Connect(function()
 		local canLocomote = moving and not locomotionSuppressed
 		local shouldRun = sprintHeld and canLocomote
 		local shouldWalk = not sprintHeld and canLocomote
-		-- The second run stage only claims its own track when there IS one. With RunningStage2 still
-		-- blank (the shipped default), stage 2 keeps the stage-1 track and is carried entirely by the
-		-- faster playback rate below, plus RunController's own audio/FOV.
-		local shouldRunStage2 = shouldRun and runStage >= 2 and runningStage2Track ~= nil
-		local shouldRunStage1 = shouldRun and not shouldRunStage2
+		-- Each run stage above 1 only claims its own track when there IS one, cascading downward:
+		-- stage 3 wants its own clip first; failing that (RunningStage3 still blank, the shipped
+		-- default), stage 3 falls to stage 2's track (which is what "shouldRunStage2" playing at
+		-- runStage 3 means below); failing THAT too, everything lands on stage 1. Playback rate below
+		-- is what still makes an unauthored stage read as a different gear either way.
+		local shouldRunStage3 = shouldRun and runStage >= 3 and runningStage3Track ~= nil
+		local shouldRunStage2 = shouldRun and not shouldRunStage3 and runStage >= 2 and runningStage2Track ~= nil
+		local shouldRunStage1 = shouldRun and not shouldRunStage3 and not shouldRunStage2
 
 		-- Client/FX/AnimationTrackUtil.lua's shared evaluator -- see that module's own header for why
 		-- this per-Heartbeat Play/AdjustWeight/Stop mechanic is extracted (the exact same shape
 		-- FlightAnimator.lua's Hover/CruiseLoop/BoostLoop pick uses below it). Only the StopFadeSeconds
-		-- per track varies here: a stage change between the two run clips crossfades at
-		-- RUN_STAGE_CROSSFADE_TIME (the two are the same action at different intensities, so it should
-		-- read as accelerating); a toggle to the OTHER locomotion track (still moving, Sprint
+		-- per track varies here: a stage change between any two run clips crossfades at
+		-- RUN_STAGE_CROSSFADE_TIME (all three are the same action at different intensities, so it
+		-- should read as accelerating); a toggle to the OTHER locomotion track (still moving, Sprint
 		-- pressed/released) crossfades symmetrically at LOCOMOTION_FADE_TIME; a genuine interrupt
 		-- (stopped moving, or the parkour framework taking the body) cuts fast at
 		-- LOCOMOTION_INTERRUPT_FADE_TIME.
@@ -283,7 +287,7 @@ RunService.Heartbeat:Connect(function()
 				Track = runningTrack,
 				ShouldPlay = shouldRunStage1,
 				PlayFadeSeconds = LOCOMOTION_FADE_TIME,
-				StopFadeSeconds = if shouldRunStage2
+				StopFadeSeconds = if shouldRunStage2 or shouldRunStage3
 					then RUN_STAGE_CROSSFADE_TIME
 					elseif shouldWalk then LOCOMOTION_FADE_TIME
 					else LOCOMOTION_INTERRUPT_FADE_TIME,
@@ -292,7 +296,16 @@ RunService.Heartbeat:Connect(function()
 				Track = runningStage2Track,
 				ShouldPlay = shouldRunStage2,
 				PlayFadeSeconds = RUN_STAGE_CROSSFADE_TIME,
-				StopFadeSeconds = if shouldRunStage1
+				StopFadeSeconds = if shouldRunStage1 or shouldRunStage3
+					then RUN_STAGE_CROSSFADE_TIME
+					elseif shouldWalk then LOCOMOTION_FADE_TIME
+					else LOCOMOTION_INTERRUPT_FADE_TIME,
+			},
+			{
+				Track = runningStage3Track,
+				ShouldPlay = shouldRunStage3,
+				PlayFadeSeconds = RUN_STAGE_CROSSFADE_TIME,
+				StopFadeSeconds = if shouldRunStage1 or shouldRunStage2
 					then RUN_STAGE_CROSSFADE_TIME
 					elseif shouldWalk then LOCOMOTION_FADE_TIME
 					else LOCOMOTION_INTERRUPT_FADE_TIME,
@@ -307,7 +320,10 @@ RunService.Heartbeat:Connect(function()
 
 		-- Per-stage playback rate, written only when the track or the rate actually changes -- see
 		-- appliedRunSpeedTrack's own header.
-		local activeRunTrack = if shouldRunStage2 then runningStage2Track else runningTrack
+		local activeRunTrack = if shouldRunStage3
+			then runningStage3Track
+			elseif shouldRunStage2 then runningStage2Track
+			else runningTrack
 		if shouldRun and activeRunTrack then
 			-- Falls back to stage 1's rate for any stage the table does not define, which is the same
 			-- direction every other run consumer defaults in: a gear with no authored presentation looks

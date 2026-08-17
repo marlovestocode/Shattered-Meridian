@@ -148,9 +148,11 @@ function ParkourCamera.OnStateChanged(previous: MovementStateId, next: MovementS
 		FOVOffset.SetContinuous(CAMERA.MantleFOVSlot, 0, CAMERA.MantleClimbFOVEaseSpeed)
 	end
 
-	if next == "WallJumping" then
-		CameraShake.Shake(SHAKE.WallJump)
-	end
+	-- No "next == WallJumping" branch here any more -- the kick is a phase of WallRunning now, not a
+	-- transition OnStateChanged ever sees (see States/WallRunning.lua's header). Its camera punch is
+	-- ParkourCamera.PlayWallKick below, called directly by ParkourController on the frame it detects the
+	-- SAME-state variant change into a kick, the same way it already calls PlayLanding directly rather
+	-- than keying it off a transition string here.
 
 	-- Tilt belongs to wall-running only. Cleared on every transition INTO anything else rather than
 	-- only on transition out of WallRunning, so a tilt can never survive a state the framework forced
@@ -170,6 +172,19 @@ function ParkourCamera.SetWallSide(side: number): ()
 		return
 	end
 	targetTilt = -side * CAMERA.WallRunTiltDegrees
+end
+
+-- One-shot punch for the kick phase of States/WallRunning.lua. Called directly by ParkourController on
+-- the frame it sees AnimationVariant change into a "Kick*" value -- there is no state TRANSITION to key
+-- this off any more (the kick used to be its own state, WallJumping, and this used to fire from
+-- OnStateChanged's "next == WallJumping" branch; see that branch's own note for why it moved). A plain
+-- function rather than something OnStateChanged dispatches is the honest shape for an event with no
+-- state id to name it by.
+function ParkourCamera.PlayWallKick(): ()
+	if not effectsEnabled then
+		return
+	end
+	CameraShake.Shake(SHAKE.WallJump)
 end
 
 -- One-shot landing dip, scaled by severity. The dip decays on its own through the offset composer's

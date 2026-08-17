@@ -249,9 +249,9 @@ return function()
 			-- Starts -- and a Start is what makes ParkourSystem set ParkourVelocityOwned, which pins the
 			-- player's WalkSpeed at zero until the matching End arrives. Any action that legitimately ended
 			-- within the interval of starting therefore had its release refused and left the player frozen
-			-- where they stood until the server's own window expiry rescued them. A wall-jump that reaches
-			-- the ground immediately does exactly that: States/WallJumping.Update ends it after 0.05s,
-			-- against a 0.06s interval.
+			-- where they stood until the server's own window expiry rescued them. A wall-kick that reaches
+			-- the ground immediately does exactly that: the kick phase in States/WallRunning.lua
+			-- (updateDeparting) ends it after 0.05s, against a 0.06s interval.
 			--
 			-- Refusing an End can never protect anything -- the worst a flood of them can do is close
 			-- windows that are already closed -- so there is no version of this check on the End phase that
@@ -344,16 +344,20 @@ return function()
 		end)
 
 		it("does not divide by zero for a near-instant action", function()
-			-- A hop or a wall-jump legitimately starts and ends within a frame; without the elapsed-time
-			-- floor this would compute an infinite travel speed for a two-stud move.
+			-- A hop or a wall-kick legitimately starts and ends within a frame; without the elapsed-time
+			-- floor this would compute an infinite travel speed for a two-stud move. WallRun rather than
+			-- WallJump -- the kick is a phase of States/WallRunning.lua now, not its own reported kind
+			-- (see ParkourTypes.ActionKind's own header), but the near-instant scenario this guards is
+			-- unchanged: a kick that reaches the ground almost immediately still ends the very same
+			-- WallRun window it started.
 			local state = observed({
-				OpenKind = "WallJump",
+				OpenKind = "WallRun",
 				OpenStartedAt = 99.999,
 				OpenStartPosition = Vector3.new(0, 10, 0),
 			})
 			expect(
 				ParkourValidation.Validate(
-					endReport({ Kind = "WallJump", Position = Vector3.new(1, 10, 0) }),
+					endReport({ Kind = "WallRun", Position = Vector3.new(1, 10, 0) }),
 					state,
 					CONFIG
 				)

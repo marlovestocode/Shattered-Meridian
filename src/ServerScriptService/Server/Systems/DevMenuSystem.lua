@@ -30,11 +30,17 @@
 	a RemoteEvent instead.
 
 	No longer owns (combat system removed): SpawnDummy/SpawnTrainingBot (training dummy/bot creation
-	lived in CombatSystem.lua/TrainingBotSystem.lua), SetTargetHealth/ResetTargetCombatState (direct
-	health mutation and combat-state reset), and GetHitboxDebug/SetHitboxDebug (toggled
-	Server/Combat/HitboxResolver.lua's debug visualization). resolveActionTarget's lock-on lookup was
-	also CombatSystem's -- every admin action now simply targets whichever player the "Players" tab row
+	lived in CombatSystem.lua/TrainingBotSystem.lua) and SetTargetHealth/ResetTargetCombatState (direct
+	health mutation and combat-state reset). resolveActionTarget's lock-on lookup was also
+	CombatSystem's -- every admin action now simply targets whichever player the "Players" tab row
 	names, or the calling admin themselves.
+
+	GetHitboxDebug/SetHitboxDebug are BACK, pointed at the rebuilt engine. They used to toggle the
+	deleted HitboxResolver.lua's visualisation through a small HitboxDebugState.lua holder; the state
+	now lives on HitboxEngine itself (SetDebugVolumesEnabled/IsDebugVolumesEnabled), since that module
+	both owns the Parts and is the only thing that can clear them. What has not changed is why these
+	are whitelist-gated like every other action here: the volumes are real server-side Parts, so
+	flipping them on is visible to every player in the server, not just the admin who asked.
 ]]
 
 local Players = game:GetService("Players")
@@ -54,6 +60,7 @@ local ModerationSystem = require(script.Parent.ModerationSystem)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local AdminConfig = require(script.Parent.Parent.Config.AdminConfig)
 local EmoteUnlockService = require(script.Parent.EmoteUnlockService)
+local HitboxEngine = require(script.Parent.Parent.Combat.HitboxEngine.HitboxEngine)
 
 local DevMenuSystem = {}
 
@@ -849,6 +856,46 @@ end
 -- in-memory counters (BugReportSystem.GetOpenCount/ModerationSystem.GetSuspectedCheaterCount) into
 -- one response so the Sidebar pays a single round trip. Neither counter is computed here -- this
 -- handler only gates the request and forwards each System's own already-maintained number.
+-- Hitbox visualisation -------------------------------------------------------------------------------
+
+-- Reads the server-wide swing-volume visualiser's current state. Fetched once when the DevMenu opens,
+-- the same fetch-once-on-open shape GetSidebarStats uses, so the Tuning tab's toggle renders the truth
+-- rather than a guess an admin then has to press twice to correct.
+local function handleGetHitboxDebug(player: Player): Types.DevMenuHitboxDebugResult
+	logger:debug("GetHitboxDebug received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "GetHitboxDebug")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+
+	return { Success = true, Enabled = HitboxEngine.IsDebugVolumesEnabled() }
+end
+
+-- Flips it. SERVER-WIDE AND VISIBLE TO EVERYONE, which is the whole reason it sits behind the same
+-- admin whitelist every other action in this file does: the engine draws its volumes as real
+-- server-side Parts, so they replicate to every client in the place. This is not a personal overlay
+-- and must never be reachable by an ordinary player.
+--
+-- Returns the value that actually took effect rather than echoing the request, so the client's toggle
+-- can refresh from the answer with no second round trip -- and so a future gate that refuses the flip
+-- reports honestly instead of leaving the UI showing something the server never did.
+local function handleSetHitboxDebug(player: Player, rawEnabled: unknown): Types.DevMenuHitboxDebugResult
+	logger:debug("SetHitboxDebug received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "SetHitboxDebug")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+	if typeof(rawEnabled) ~= "boolean" then
+		return { Success = false, Reason = "InvalidRequest" }
+	end
+
+	HitboxEngine.SetDebugVolumesEnabled(rawEnabled)
+	logger:info("SetHitboxDebug accepted", { player = player.Name, enabled = rawEnabled })
+	return { Success = true, Enabled = HitboxEngine.IsDebugVolumesEnabled() }
+end
+
 local function handleGetSidebarStats(player: Player): Types.DevMenuSidebarStatsResult
 	logger:debug("GetSidebarStats received", { player = player.Name, userId = player.UserId })
 
@@ -1303,6 +1350,16 @@ function DevMenuSystem.Init(): ()
 	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.GetSidebarStats })
 	getSidebarStatsRemote.OnServerInvoke = wrapHandler("GetSidebarStats", handleGetSidebarStats)
 	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.GetSidebarStats })
+
+	local getHitboxDebugRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.GetHitboxDebug)
+	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.GetHitboxDebug })
+	getHitboxDebugRemote.OnServerInvoke = wrapHandler("GetHitboxDebug", handleGetHitboxDebug)
+	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.GetHitboxDebug })
+
+	local setHitboxDebugRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetHitboxDebug)
+	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetHitboxDebug })
+	setHitboxDebugRemote.OnServerInvoke = wrapHandler("SetHitboxDebug", handleSetHitboxDebug)
+	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetHitboxDebug })
 
 	local getServerVersionInfoRemote =
 		NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.GetServerVersionInfo)

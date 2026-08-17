@@ -31,6 +31,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local EngineLogCapture = require(ReplicatedStorage.Shared.EngineLogCapture)
 
 local UI = require(script.Parent.UI)
 local StartMenuClient = require(script.Parent.StartMenu.StartMenuClient)
@@ -49,6 +50,7 @@ local ParkourController = require(script.Parent.Parkour.ParkourController)
 local RunController = require(script.Parent.Movement.RunController)
 local DevMenuClient = require(script.Parent.DevMenu.DevMenuClient)
 local MoveEditorClient = require(script.Parent.MoveEditor.MoveEditorClient)
+local LiveConsoleClient = require(script.Parent.LiveConsole.LiveConsoleClient)
 local FlightController = require(script.Parent.DevMenu.FlightController)
 local DefenseClient = require(script.Parent.Defense.DefenseClient)
 local AttackInputClient = require(script.Parent.Combat.AttackInputClient)
@@ -60,6 +62,13 @@ local SettingsClient = require(script.Parent.Settings.SettingsClient)
 local logger = Logger.scope("Main")
 
 logger:info("Client boot start")
+
+-- Connects LogService before anything else below gets a chance to log a boot-time error/warning it
+-- should have seen -- same "boots before everything else, gates nothing" reasoning as the server's
+-- own EngineLogCapture.Init() call in Main.server.lua. Zero dependency on any gate below (Start
+-- Menu/Loading/Onboarding included): it only ever touches Shared/Logger.lua's own always-on capture
+-- buffer.
+EngineLogCapture.Init()
 
 -- Three boot-time gates run in sequence before anything else in this file, each blocking until it's
 -- genuinely done: Start Menu -> Loading -> Onboarding.
@@ -241,6 +250,13 @@ logger:debug("DevMenuClient end")
 logger:debug("MoveEditorClient start")
 MoveEditorClient.Start(uiHandles.MoveEditor)
 logger:debug("MoveEditorClient end")
+
+-- Unlike DevMenuClient/MoveEditorClient above, this one binds its input unconditionally for every
+-- client -- the real gate is server-side, on Subscribe, fired only once the panel actually opens.
+-- See LiveConsoleClient.lua's own header.
+logger:debug("LiveConsoleClient start")
+LiveConsoleClient.Start(uiHandles.LiveConsole)
+logger:debug("LiveConsoleClient end")
 
 -- Unconditional for every client, unlike DevMenuClient above -- the bug report form has no
 -- whitelist gate; every player can open and submit it.

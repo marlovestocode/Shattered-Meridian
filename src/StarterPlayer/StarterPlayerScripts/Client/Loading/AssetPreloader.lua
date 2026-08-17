@@ -36,6 +36,7 @@ local ContentProvider = game:GetService("ContentProvider")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local AttackAnimations = require(ReplicatedStorage.Shared.Attack.AttackAnimations)
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local SoundManager = require(script.Parent.Parent.FX.SoundManager)
@@ -168,6 +169,41 @@ function AssetPreloader.BuildManifest(): { Instance | string }
 	return manifest
 end
 
+-- contentId -> a readable "Category.Key" label, for the failure log below. Built from every id-keyed
+-- constants table this module already knows the shape of (Parkour, Intro, UI icons) plus
+-- AttackAnimations' own deliberate label export -- see that function's header for why it exists at
+-- all. NOT exhaustive: the Sound/Animation-instance categories (SoundManager, CombatAnimator,
+-- FlightAnimator, EmoteAnimator, DefenseClient) have no equivalent id->name table to invert without a
+-- new export from each of them, so those fall back to the bare content id, same as before this
+-- existed. Rebuilt on every Run() call rather than cached at module scope -- this is a boot-time,
+-- once-per-life operation, and a cached index would be one more thing to invalidate if any of these
+-- tables ever became mutable.
+--
+-- Exposed on the module (not left local) for the same reason BuildManifest is: so a test can inspect
+-- it directly rather than triggering a real ContentProvider:PreloadAsync call to observe it indirectly.
+function AssetPreloader.BuildLabelIndex(): { [string]: string }
+	local labels: { [string]: string } = {}
+	for key, assetId in ParkourConstants.AnimationIds do
+		if assetId ~= "" then
+			labels[assetId] = `Parkour.{key}`
+		end
+	end
+	for key, assetId in Constants.Intro.AnimationIds do
+		if assetId ~= "" then
+			labels[assetId] = `Intro.{key}`
+		end
+	end
+	for key, assetId in Constants.UI.VitalIconIds do
+		if assetId ~= "" then
+			labels[assetId] = `UI.{key}`
+		end
+	end
+	for assetId, moveId in AttackAnimations.GetPreloadLabels() do
+		labels[assetId] = `Attack.{moveId}`
+	end
+	return labels
+end
+
 -- Blocks the calling thread until every asset in the manifest has been fetched (success or
 -- failure) -- this IS the point: Client/Loading/LoadingClient.lua calls this to gate a real loading
 -- screen on, not a best-effort background warm-up. onProgress, if given, fires once per asset with
@@ -183,20 +219,53 @@ function AssetPreloader.Run(onProgress: ((completed: number, total: number) -> (
 		return
 	end
 
+	local labels = AssetPreloader.BuildLabelIndex()
 	local completed = 0
+	local failed = 0
 	logger:debug("Preload start", { total = total })
 
 	ContentProvider:PreloadAsync(manifest, function(contentId: string, status: Enum.AssetFetchStatus)
 		completed += 1
 		if status ~= Enum.AssetFetchStatus.Success then
-			logger:warn("Asset failed to preload", { contentId = contentId, status = status.Name })
+			failed += 1
+			logger:warn("Asset failed to preload", {
+				contentId = contentId,
+				-- Falls back to the bare id when nothing in buildLabelIndex claims it -- see that
+				-- function's own "NOT exhaustive" note.
+				asset = labels[contentId] or contentId,
+				status = status.Name,
+			})
 		end
 		if onProgress then
 			onProgress(completed, total)
 		end
 	end)
 
-	logger:debug("Preload end", { total = total })
+	-- THE ACTUAL ANSWER TO "WHY," most of the time. ContentProvider:PreloadAsync's callback gives
+	-- Success/Failure and nothing else -- Roblox exposes no richer reason (not a 404 vs. a permissions
+	-- error vs. a timeout), so a per-asset log can only ever say THAT one failed, never why THAT ONE
+	-- did. But when many or all of them fail together, across categories that share no asset, no
+	-- owner and no upload date, the common cause is never "20 coincidentally broken ids" -- it is
+	-- something failing every fetch the same way: Studio's own "Enable Studio Access to API Services"
+	-- setting (Game Settings -> Security) being off blocks ALL asset fetches from a local Studio
+	-- session, and no network connection does the same from anywhere. This summary is what turns a
+	-- wall of individually-uninformative warnings into that diagnosis.
+	if failed > 0 then
+		local rate = failed / total
+		logger:warn("Preload finished with failures", {
+			failed = failed,
+			total = total,
+			failedPercent = math.floor(rate * 100 + 0.5),
+			-- Half the manifest is a deliberately loose threshold: a handful of individually-broken
+			-- ids (deleted, unpublished, not owned) is a real and different failure mode from
+			-- everything failing together, and this line should not fire for the former.
+			likelyCause = if rate >= 0.5
+				then "Most/all assets failed together -- check Studio Settings > Security > Enable Studio Access to API Services, and your network connection, before assuming individual assets are broken."
+				else "Only some assets failed -- check those specific ids are valid, published, and owned/public rather than a systemic access issue.",
+		})
+	end
+
+	logger:debug("Preload end", { total = total, failed = failed })
 end
 
 return AssetPreloader

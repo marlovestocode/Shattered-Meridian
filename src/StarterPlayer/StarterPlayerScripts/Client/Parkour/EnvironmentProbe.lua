@@ -558,12 +558,12 @@ local function probeWall(
 	-- question they were written to answer -- "is there a wall alongside me to run on." It is the wrong
 	-- instrument for the other question the wall probes now have to serve: "is there a wall here to kick
 	-- off." A character flying into a wall face-first has that wall directly in FRONT of them, so both
-	-- side casts run parallel to it and report open air, and States/WallJumping.CanEnter therefore
-	-- refuses -- which is precisely where a chained traversal dies, since flying at the next surface is
-	-- how a player arrives at it.
+	-- side casts run parallel to it and report open air, and States/WallRunning's own wall-select
+	-- therefore refuses -- which is precisely where a chained traversal dies, since flying at the next
+	-- surface is how a player arrives at it.
 	--
 	-- So when a side cast finds nothing, the same side is tried again angled forward. A wall dead ahead
-	-- registers on both sides (the nearer wins in WallJumping's own selection); a wall genuinely off to
+	-- registers on both sides (the nearer wins in WallRunning's own selection); a wall genuinely off to
 	-- one side registers there and not on the other. It cannot manufacture a spurious wall-RUN out of a
 	-- head-on approach either: the tangent of a wall in front is perpendicular to the travel direction,
 	-- so States/WallRunning's approach-angle gate refuses it exactly as it did before.
@@ -1171,7 +1171,8 @@ end
 -- Farthest, not nearest, and that is the whole character of the move rather than an implementation
 -- detail. A leap that picks the near ledge when the player is plainly looking at the far one has
 -- misread them -- and the near ledge was reachable with an ordinary jump anyway, so choosing it makes
--- the double tap pointless. The scan therefore walks OUTWARD and keeps the last thing that works.
+-- pressing the dedicated Leap key pointless. The scan therefore walks OUTWARD and keeps the last thing
+-- that works.
 --
 -- "Works" is three questions, and all three have to be asked here rather than left to the state:
 --   * Is there a floor under this point at all? (a downward cast from above it)
@@ -1179,8 +1180,8 @@ end
 --   * Can the launch caps actually get there? (ParkourMath.SolveLaunchVelocity's own reachability,
 --     asked with the same numbers States/Leaping will fly with)
 -- The third is what makes the promise honest. Without it the scan happily returns a rooftop eighty
--- studs away that the solver then refuses, and the player's double tap produces the fallback hop
--- instead of the leap they could see themselves making.
+-- studs away that the solver then refuses, and pressing Leap produces the fallback hop instead of the
+-- leap the player could see themselves making.
 --
 -- The view ray is cast once first, and it does two jobs. It bounds the open-air samples -- a wall across
 -- the courtyard is not a place to land, but the TOP of that wall very much is, and samples beyond it are
