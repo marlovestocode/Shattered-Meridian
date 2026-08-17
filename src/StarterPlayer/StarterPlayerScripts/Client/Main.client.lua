@@ -49,6 +49,7 @@ local CameraOffsetComposer = require(script.Parent.FX.CameraOffsetComposer)
 local ParkourController = require(script.Parent.Parkour.ParkourController)
 local RunController = require(script.Parent.Movement.RunController)
 local DevMenuClient = require(script.Parent.DevMenu.DevMenuClient)
+local CharacterMenuClient = require(script.Parent.CharacterMenu.CharacterMenuClient)
 local MoveEditorClient = require(script.Parent.MoveEditor.MoveEditorClient)
 local LiveConsoleClient = require(script.Parent.LiveConsole.LiveConsoleClient)
 local FlightController = require(script.Parent.DevMenu.FlightController)
@@ -245,6 +246,14 @@ logger:debug("CombatFeedbackClient end")
 logger:debug("DevMenuClient start")
 DevMenuClient.Start(uiHandles.DevMenu)
 logger:debug("DevMenuClient end")
+
+-- Unconditional for every client, unlike DevMenuClient above -- the character menu (M: sheet, Arts,
+-- Emotes, Bounties) has no whitelist gate. This was the one Screens/ handle UI.Mount() used to
+-- discard outright, which left CharacterMenuClient.Start with no caller anywhere and the whole
+-- panel unreachable -- M did nothing, and there was no way to unlock or equip an Art in play.
+logger:debug("CharacterMenuClient start")
+CharacterMenuClient.Start(uiHandles.Menus)
+logger:debug("CharacterMenuClient end")
 
 -- Same whitelist-gated, delayed-authorization shape as DevMenuClient above.
 logger:debug("MoveEditorClient start")

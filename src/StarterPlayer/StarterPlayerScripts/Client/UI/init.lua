@@ -55,6 +55,7 @@ export type UIHandles = {
 	-- the damage layer's Combat_Feedback event.
 	CombatFeedback: CombatFeedbackModule.CombatFeedbackHandle,
 	DevMenu: DevMenuModule.DevMenuHandle,
+	Menus: Menus.MenusHandle,
 	MoveEditor: MoveEditorModule.MoveEditorHandle,
 	LiveConsole: LiveConsoleModule.LiveConsoleHandle,
 	BugReport: BugReportModule.BugReportHandle,
@@ -90,14 +91,12 @@ function UI.Mount(): UIHandles
 	HUD.Mount(scope, playerGui, clientState)
 	logger:debug("HUD mounted")
 
-	-- Handle intentionally discarded: Menus owns its own open/closed state and drives it from its own
-	-- M keybind, so nothing out here needs the handle. (This comment previously said the screen had
-	-- "no keybind/driver yet" and nothing in it had real content -- both stopped being true when
-	-- BountyMenu was wired to live BountySystem data; see Menus/init.lua's header for what IS still
-	-- outstanding there, namely routing that key through Types.KeybindAction so it's rebindable.)
 	-- clientState is passed through so CharacterTab/EmotesTab can read the HUD-wide fields they don't
-	-- duplicate (see Menus/init.lua's header on that split).
-	Menus.Mount(scope, playerGui, clientState)
+	-- duplicate (see Menus/init.lua's header on that split). The handle is returned below --
+	-- Client/CharacterMenu/CharacterMenuClient.lua is what actually drives it (the M keybind, the
+	-- sheet/catalogue fetches, Unlock/Equip), the same "screen exposes state, client module drives
+	-- it" split every other Screens/ handle here already follows.
+	local menus = Menus.Mount(scope, playerGui, clientState)
 	logger:debug("Menus mounted")
 
 	local deathFeed = DeathFeed.Mount(scope, playerGui)
@@ -146,6 +145,7 @@ function UI.Mount(): UIHandles
 		DeathFeed = deathFeed,
 		CombatFeedback = combatFeedback,
 		DevMenu = devMenu,
+		Menus = menus,
 		MoveEditor = moveEditor,
 		LiveConsole = liveConsole,
 		BugReport = bugReport,
