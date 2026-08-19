@@ -27,6 +27,8 @@ local StarterPlayer = game:GetService("StarterPlayer")
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
+local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
+local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
 
 local Client = StarterPlayer.StarterPlayerScripts.Client
 local AssetPreloader = require(Client.Loading.AssetPreloader)
@@ -106,7 +108,7 @@ return function()
 
 	describe("manifest coverage by category", function()
 		it("covers every authored combat animation", function()
-			expectAllAuthoredIdsPresent(manifestKeys(), Constants.Combat.AnimationIds, "Constants.Combat.AnimationIds")
+			expectAllAuthoredIdsPresent(manifestKeys(), CombatConstants.AnimationIds, "CombatConstants.AnimationIds")
 		end)
 
 		it("covers every authored parkour animation", function()
@@ -121,7 +123,7 @@ return function()
 		end)
 
 		it("covers every authored flight animation", function()
-			expectAllAuthoredIdsPresent(manifestKeys(), Constants.Flight.AnimationIds, "Constants.Flight.AnimationIds")
+			expectAllAuthoredIdsPresent(manifestKeys(), FlightConstants.AnimationIds, "FlightConstants.AnimationIds")
 		end)
 
 		it("covers the HUD vital icons", function()
@@ -145,28 +147,73 @@ return function()
 			end
 		end)
 
-		it("covers run footstep sounds without depending on Main.client.lua's require order", function()
+		it("covers combat sounds without depending on Main.client.lua's require order", function()
+			-- CombatAudio.lua registers as its own require() side effect
+			-- (AssetPreloader.lua's own require(CombatAudio) above BuildManifest, next to
+			-- FlightAudio/RunAudio) rather than as a consequence of Main.client.lua's boot order --
+			-- see CombatAudio.lua's own header. This has to hold regardless of where
+			-- Main.client.lua's own CombatAudio.Start() call ends up.
+			local keys = manifestKeys()
+			for _, config in CombatConstants.Sound.Swing do
+				if config.SoundId ~= "" then
+					expect(keys[config.SoundId]).to.equal(true)
+				end
+			end
+			for _, config in CombatConstants.Sound.Impact do
+				if config.SoundId ~= "" then
+					expect(keys[config.SoundId]).to.equal(true)
+				end
+			end
+		end)
+
+		it("covers the run footstep sound without depending on Main.client.lua's require order", function()
 			-- Same reasoning as combat sounds above, for the newest registrar (RunAudio) -- the one
 			-- most likely to be missed, since it arrived after the preloader was written.
-			-- Iterated rather than naming each stage, so a gear added to the run ladder is covered by
-			-- this test the moment its audio is authored -- the same reason RunAudio builds its own
-			-- registration set by walking these tables instead of hand-listing them.
+			-- Only stage 1 carries a Sound (RunAudio.lua's own header explains why stages 2/3 reuse it
+			-- pitched up instead of registering their own) -- so this checks stage 1's asset directly
+			-- rather than iterating every stage for one.
 			local keys = manifestKeys()
+			local stage1 = Constants.Run.Footsteps.Stages[1]
+			if stage1.Sound.SoundId ~= "" then
+				expect(keys[stage1.Sound.SoundId]).to.equal(true)
+			end
+			-- Guards the shape as well as the manifest: a stage entry missing ReferenceSpeed or
+			-- StepIntervalSeconds would divide by nil inside RunController's cadence, which is a
+			-- crash in a per-frame loop rather than a missing sound.
 			for stage, config in Constants.Run.Footsteps.Stages do
-				if config.Sound.SoundId ~= "" then
-					expect(keys[config.Sound.SoundId]).to.equal(true)
-				end
-				-- Guards the shape as well as the manifest: a stage entry missing ReferenceSpeed or
-				-- StepIntervalSeconds would divide by nil inside RunController's cadence, which is a
-				-- crash in a per-frame loop rather than a missing sound.
 				expect(typeof(config.ReferenceSpeed)).to.equal("number")
 				expect(config.StepIntervalSeconds > 0).to.equal(true)
 				expect(stage > 0).to.equal(true)
 			end
-			for _, config in Constants.Run.StageOnset do
-				if config.Sound.SoundId ~= "" then
-					expect(keys[config.Sound.SoundId]).to.equal(true)
-				end
+		end)
+
+		it("covers the dash launch sound without depending on Main.client.lua's require order", function()
+			-- Same reasoning as combat/run sounds above, for the newest registrar (DashAudio) --
+			-- AssetPreloader.lua's own require(DashAudio) above BuildManifest is what has to hold
+			-- regardless of Main.client.lua's own boot order.
+			local keys = manifestKeys()
+			if ParkourConstants.Dash.Sound.SoundId ~= "" then
+				expect(keys[ParkourConstants.Dash.Sound.SoundId]).to.equal(true)
+			end
+		end)
+
+		it("covers the slide loop sound without depending on Main.client.lua's require order", function()
+			-- Same reasoning again, for the newest registrar (SlideAudio) -- AssetPreloader.lua's own
+			-- require(SlideAudio) above BuildManifest is what has to hold regardless of
+			-- Main.client.lua's own boot order.
+			local keys = manifestKeys()
+			if ParkourConstants.Slide.Sound.SoundId ~= "" then
+				expect(keys[ParkourConstants.Slide.Sound.SoundId]).to.equal(true)
+			end
+		end)
+
+		it("covers the mantle sound without depending on Main.client.lua's require order", function()
+			-- Same reasoning again, for the newest registrar (MantleAudio) -- AssetPreloader.lua's own
+			-- require(MantleAudio) above BuildManifest is what has to hold regardless of
+			-- Main.client.lua's own boot order.
+			local keys = manifestKeys()
+			if ParkourConstants.Obstacle.MantleSound.SoundId ~= "" then
+				expect(keys[ParkourConstants.Obstacle.MantleSound.SoundId]).to.equal(true)
 			end
 		end)
 	end)

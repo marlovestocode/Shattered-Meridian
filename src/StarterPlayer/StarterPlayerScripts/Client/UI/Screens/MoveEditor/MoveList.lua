@@ -55,6 +55,7 @@ local Tab = require(script.Parent.Parent.Parent.Components.Tab)
 local TextField = require(script.Parent.Parent.Parent.Components.TextField)
 local ActionIcon = require(script.Parent.Parent.Parent.Components.ActionIcon)
 local SectionIcon = require(script.Parent.Parent.Parent.Components.SectionIcon)
+local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -385,7 +386,7 @@ function MoveListModule.Mount(scope: Scope, width: number, height: number, props
 					filterTab("Default", "Default", 2),
 				},
 			},
-			scope:New "ScrollingFrame" {
+			ScrollArea(scope, {
 				Name = "Rows",
 				Size = UDim2.new(
 					1,
@@ -393,17 +394,9 @@ function MoveListModule.Mount(scope: Scope, width: number, height: number, props
 					1,
 					-(Tokens.Control.RowHeight + SEARCH_ROW_HEIGHT + FILTER_ROW_HEIGHT + Tokens.Space.S * 3)
 				),
-				BackgroundTransparency = 1,
-				BorderSizePixel = 0,
-				ScrollingDirection = Enum.ScrollingDirection.Y,
-				AutomaticCanvasSize = Enum.AutomaticSize.Y,
-				CanvasSize = UDim2.fromScale(0, 0),
-				ScrollBarThickness = 3,
-				ScrollBarImageColor3 = Tokens.Border.Standard.Color,
-				ScrollBarImageTransparency = Tokens.Border.Standard.Transparency,
 				LayoutOrder = 4,
 
-				[Children] = {
+				Children = {
 					scope:New "UIPadding" {
 						PaddingRight = UDim.new(0, Tokens.Space.XS),
 					},
@@ -414,7 +407,7 @@ function MoveListModule.Mount(scope: Scope, width: number, height: number, props
 					},
 					rows,
 				},
-			},
+			}),
 		},
 	} :: Frame
 end

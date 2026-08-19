@@ -22,7 +22,6 @@
 	CombatSystem.SpawnTrainingDummy trusts DevMenuSystem already.
 ]]
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
@@ -32,8 +31,10 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
+local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
 
 local BugReportSystem = {}
@@ -230,9 +231,18 @@ function BugReportSystem.ValidateCategory(raw: unknown): Types.BugReportCategory
 	return CATEGORY_SET[raw]
 end
 
+-- Generous slack above DescriptionMaxLength so a few stray leading/trailing whitespace characters
+-- never turn a legitimate submission into a rejection, while still bounding the two gsub passes
+-- below to a small fixed multiple of the intended cap rather than whatever length a client sends --
+-- see this function's own TooLong check, which used to run AFTER (and therefore not bound) them.
+local RAW_DESCRIPTION_LENGTH_SLACK = 256
+
 function BugReportSystem.ValidateDescription(raw: unknown): (string?, string?)
 	if typeof(raw) ~= "string" then
 		return nil, "InvalidType"
+	end
+	if #raw > Config.DescriptionMaxLength + RAW_DESCRIPTION_LENGTH_SLACK then
+		return nil, "TooLong"
 	end
 	local trimmed = raw:gsub("^%s+", ""):gsub("%s+$", "")
 	if #trimmed < Config.DescriptionMinLength then
@@ -779,21 +789,22 @@ function BugReportSystem.Init(): ()
 
 	local submitRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.Submit)
 	logger:debug("Remote created", { name = Config.RemoteNames.Submit })
-	submitRemote.OnServerInvoke = function(player: Player, rawCategory: unknown, rawDescription: unknown)
-		local ok, resultOrError = pcall(BugReportSystem.Submit, player, rawCategory, rawDescription)
-		if not ok then
-			logger:error("Submit handler errored", { player = player.Name, errorMessage = tostring(resultOrError) })
-			return { Success = false, Reason = "InternalError" }
-		end
-		return resultOrError
-	end
+	submitRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
+		logger,
+		"Submit",
+		{ Success = false, Reason = "InternalError" } :: Types.BugReportSubmitResult,
+		BugReportSystem.Submit
+	)
 	logger:debug("Handler connected", { remote = Config.RemoteNames.Submit })
 
-	Players.PlayerRemoving:Connect(function(player: Player)
-		lastSubmitAt[player] = nil
-		submitRateLimiter:Clear(player)
-		adminPagingSessions[player] = nil
-	end)
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "BugReportSystem",
+		OnPlayerRemoving = function(player: Player)
+			lastSubmitAt[player] = nil
+			submitRateLimiter:Clear(player)
+			adminPagingSessions[player] = nil
+		end,
+	})
 
 	logger:info("BugReportSystem.Init() complete")
 end

@@ -27,7 +27,7 @@
 
 	Flying/FlightCollide resolve their target's live Humanoid directly off Player.Character rather
 	than through any other System's private state table (a Humanoid is always reachable straight off
-	a Player, no cache needed) -- see getLiveHumanoid.
+	a Player, no cache needed) -- see Shared/CharacterUtil.lua's LiveRig.
 
 	Does not own: authorization or rate-limiting (DevMenuSystem.lua's job, identical to every other
 	admin action -- this module trusts its caller is already an authorized, rate-limited request, the
@@ -39,11 +39,12 @@
 	Health didn't move here alongside Godmode/Flying/FlightCollide.
 ]]
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 
 local logger = Logger.scope("AdminActionSystem")
 
@@ -251,18 +252,6 @@ function AdminActionSystem.ReapplyRespawnOverrides(state: AdminOverrideState, ch
 	end
 end
 
--- Resolves a target's LIVE Humanoid straight off their own Player.Character -- no cache, no other
--- System's private state table involved (a Humanoid is always reachable this way), which is what
--- keeps this module from ever needing to require CombatSystem.lua back.
-local function getLiveHumanoid(player: Player): (Model?, Humanoid?)
-	local character = player.Character
-	if not character then
-		return nil, nil
-	end
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	return character, humanoid
-end
-
 -- Admin-only actions (DevMenuSystem.lua's own whitelist check happens entirely before any of these
 -- are ever called -- this module trusts its caller is a server-internal System, never re-checks
 -- authorization itself, the same trust boundary CombatSystem.SpawnTrainingDummy/SpawnTrainingBot
@@ -277,7 +266,7 @@ function AdminActionSystem.SetGodmode(targetPlayer: Player, enabled: boolean): b
 		return false
 	end
 	state.Godmode = enabled
-	local _, humanoid = getLiveHumanoid(targetPlayer)
+	local _, humanoid = CharacterUtil.LiveRig(targetPlayer)
 	if humanoid then
 		humanoid:SetAttribute(Constants.Attributes.Godmode, enabled)
 	end
@@ -313,7 +302,7 @@ function AdminActionSystem.SetFlying(targetPlayer: Player, enabled: boolean): bo
 	if not state then
 		return false
 	end
-	local character, humanoid = getLiveHumanoid(targetPlayer)
+	local character, humanoid = CharacterUtil.LiveRig(targetPlayer)
 	if not humanoid then
 		return false
 	end
@@ -341,7 +330,7 @@ function AdminActionSystem.SetFlightCollide(targetPlayer: Player, enabled: boole
 	if not state then
 		return false
 	end
-	local _, humanoid = getLiveHumanoid(targetPlayer)
+	local _, humanoid = CharacterUtil.LiveRig(targetPlayer)
 	if not humanoid then
 		return false
 	end
@@ -365,7 +354,7 @@ function AdminActionSystem.SetFrozen(targetPlayer: Player, enabled: boolean): bo
 	if not state then
 		return false
 	end
-	local _, humanoid = getLiveHumanoid(targetPlayer)
+	local _, humanoid = CharacterUtil.LiveRig(targetPlayer)
 	if humanoid then
 		AdminActionSystem.ApplyFrozen(state, humanoid, enabled)
 	else
@@ -381,7 +370,7 @@ function AdminActionSystem.SetInvisible(targetPlayer: Player, enabled: boolean):
 	if not state then
 		return false
 	end
-	local character, humanoid = getLiveHumanoid(targetPlayer)
+	local character, humanoid = CharacterUtil.LiveRig(targetPlayer)
 	if character and humanoid then
 		AdminActionSystem.ApplyInvisible(state, character, humanoid, enabled)
 	else
@@ -402,7 +391,7 @@ function AdminActionSystem.SetSpeedMultiplier(targetPlayer: Player, multiplier: 
 	if not state then
 		return false
 	end
-	local _, humanoid = getLiveHumanoid(targetPlayer)
+	local _, humanoid = CharacterUtil.LiveRig(targetPlayer)
 	if humanoid then
 		AdminActionSystem.ApplySpeedMultiplier(state, humanoid, multiplier)
 	else
@@ -431,39 +420,27 @@ function AdminActionSystem.TeleportToPosition(targetPlayer: Player, position: Ve
 	return true
 end
 
-local function onCharacterAdded(player: Player, character: Model): ()
-	local state = overrideStates[player]
-	if not state then
-		return
-	end
-	local humanoid = character:WaitForChild("Humanoid", Constants.Network.WaitForChildTimeoutSeconds)
-	if not humanoid or not humanoid:IsA("Humanoid") then
-		return
-	end
-	AdminActionSystem.ReapplyRespawnOverrides(state, character, humanoid :: Humanoid)
-end
-
-local function onPlayerAdded(player: Player): ()
-	overrideStates[player] = AdminActionSystem.CreateOverrideState()
-
-	player.CharacterAdded:Connect(function(character: Model)
-		onCharacterAdded(player, character)
-	end)
-	if player.Character then
-		onCharacterAdded(player, player.Character)
-	end
-end
-
-local function onPlayerRemoving(player: Player): ()
-	overrideStates[player] = nil
-end
-
 function AdminActionSystem.Init(): ()
-	Players.PlayerAdded:Connect(onPlayerAdded)
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
-	for _, player in ipairs(Players:GetPlayers()) do
-		onPlayerAdded(player)
-	end
+	-- See Shared/PlayerLifecycle.lua. The Humanoid wait that used to sit inside this System's own
+	-- onCharacterAdded is the binder's now, which matters here specifically: a respawn override
+	-- (godmode, flight, frozen, invisible) that misses its Humanoid is an admin action that silently
+	-- stops applying from that life onward, with nothing to tell either the admin or the target.
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "AdminActionSystem",
+		OnPlayer = function(player: Player)
+			overrideStates[player] = AdminActionSystem.CreateOverrideState()
+		end,
+		OnPlayerRemoving = function(player: Player)
+			overrideStates[player] = nil
+		end,
+		OnCharacter = function(player: Player, character: Model, humanoid: Humanoid)
+			local state = overrideStates[player]
+			if not state then
+				return
+			end
+			AdminActionSystem.ReapplyRespawnOverrides(state, character, humanoid)
+		end,
+	})
 
 	logger:info("AdminActionSystem.Init() complete")
 end

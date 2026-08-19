@@ -33,20 +33,39 @@
 	                            playtest against the old resolver. Pinned to 0 closes it at the source.
 	  3. EmoteMovementLocked -- EmoteSystem. A MovementLocked emote is a deliberate full stop, not
 	                            something a gear can peek through.
-	  4. ParkourVelocityOwned-- ParkourSystem. The client's movement framework is driving velocity
+	  4. Grabbed             -- Server/Combat/Grab/GrabSystem.lua. True for a victim's whole
+	                            hold-then-flight lifetime -- pinned by the same fist (or, mid-air, by
+	                            nothing but the thrown velocity itself) that already owns their
+	                            RootControlLocked Attribute, so WalkSpeed has nothing legitimate to
+	                            drive either way.
+	  5. ParkourVelocityOwned-- ParkourSystem. The client's movement framework is driving velocity
 	                            directly for an accepted action; WalkSpeed must stand down entirely or
 	                            the two fight for the same body.
-	  5. The run ladder      -- base times the stage's multiplier, or plain base while not running.
-	  6. ParkourSpeedFloor   -- the decaying momentum carry a finished traversal leaves behind, applied
-	                            as a FLOOR on tier 5 rather than as a tier of its own.
+	  6. The run ladder      -- base times the stage's multiplier, or plain base while not running.
+	  7. ParkourSpeedFloor   -- the decaying momentum carry a finished traversal leaves behind, applied
+	                            as a FLOOR on tier 6 rather than as a tier of its own.
 
-	THE SEAM FOR COMBAT. There is no hit-slow, dash or commitment tier in that list, and their absence
-	is a statement of fact rather than a decision: the combat layer that produced them was deleted, so
-	there is nothing to read. When it comes back it should publish its own speed effect as an Attribute
-	and this file grows one tier -- which is exactly how Frozen, Flying and EmoteMovementLocked already
-	work, and why none of those three required a line of code in the System that owns them. Until then,
-	note honestly that "you cannot just run away from a fight" is currently unenforced, because the
-	thing that enforced it does not exist.
+	THE SEAM FOR COMBAT, now taken. The rebuilt combat layer publishes two things this System reads,
+	and neither layer required a line of code in the other:
+	  * Constants.Attributes.CombatBusyUntil -- an os.clock() deadline written by
+	    Server/Combat/Attack/AttackRequestSystem.lua covering the swing it just accepted.
+	  * DefenseConstants.DefenseStateAttribute -- the live defence state, already published for the HUD
+	    ("purely informational: nothing in this system gates on it"). It is gated on HERE, which is the
+	    first consumer to make a decision out of it, so that constant's own header now understates it.
+	Both mean the same thing to this file: a combat action is committing this body. THROWING A SWING OR
+	RAISING A GUARD FORCES THE RUN DOWN -- stage to 0 and the charge to 0, not merely frozen -- so a
+	player has to be walking to fight, and re-earns the gear from scratch afterwards. The intent is
+	deliberately left alone: a player still holding the key starts charging again the moment the swing
+	is over, which is what makes this feel like the fight interrupting the run rather than like the run
+	key being taken away.
+
+	It is a charge reset rather than a WalkSpeed tier because "you cannot run away from a fight" is a
+	statement about the LADDER, not about a speed: pinning a number would leave the gear intact
+	underneath and hand it straight back the instant the pin lifted, which is the same player sprinting
+	through a fight with an extra step.
+
+	There is still no hit-slow or dash tier in the list above, and their absence remains a statement of
+	fact rather than a decision -- nothing publishes one yet.
 
 	Does not own: sprint INPUT (Client/Movement/RunController.lua owns the key, the hold-vs-toggle
 	preference and Autorun, and pushes the resulting boolean here), any presentation (Constants.Run and
@@ -54,18 +73,20 @@
 	(Shared/Run/RunConstants.lua).
 ]]
 
-local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
+local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local RunConstants = require(ReplicatedStorage.Shared.Run.RunConstants)
 local RunLadder = require(ReplicatedStorage.Shared.Run.RunLadder)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 
 local logger = Logger.scope("RunSystem")
 
@@ -146,6 +167,11 @@ local function isMovementLocked(humanoid: Humanoid): boolean
 	return humanoid:GetAttribute(ATTRIBUTES.Frozen) == true
 		or humanoid:GetAttribute(ATTRIBUTES.Flying) == true
 		or humanoid:GetAttribute(ATTRIBUTES.EmoteMovementLocked) == true
+		-- Grab layer (Server/Combat/Grab/GrabSystem.lua) -- true for the whole hold-then-flight
+		-- lifetime. Same "external system freezes movement without touching this System's own
+		-- resolver" shape as the three above; see Constants.Attributes.Grabbed's own header for why
+		-- this is a separate Attribute from RootControlLocked rather than a widened meaning for it.
+		or humanoid:GetAttribute(ATTRIBUTES.Grabbed) == true
 end
 
 -- The decaying WalkSpeed floor a just-finished parkour action leaves behind (Constants.Attributes.
@@ -160,6 +186,23 @@ end
 -- plausibility checks on that number by the time it reaches the Attribute; this is the second, separate
 -- limit on the one value a client can influence, so even a report that survives validation cannot
 -- translate into unbounded ground speed.
+-- Whether a combat action is committing this body right now -- a swing still inside its own
+-- windup/active/recovery, or a guard that is up. See this file's header on the two Attributes and on
+-- why both collapse to one answer here.
+--
+-- The defence side reads "anything that is not Neutral", which deliberately sweeps in Staggered and
+-- GuardBroken alongside Raising/ParryWindow/Blocking/ParryRecovery. Those two are not actions the
+-- player chose, but a player being punished for a broken guard is even less entitled to a sprint gear
+-- than one who chose to guard, so listing the states to include would only create a way to get one
+-- back by being parried.
+local function combatCommitted(humanoid: Humanoid, now: number): boolean
+	if now < numberAttribute(humanoid, ATTRIBUTES.CombatBusyUntil, 0) then
+		return true
+	end
+	local defenceState = humanoid:GetAttribute(DefenseConstants.DefenseStateAttribute)
+	return typeof(defenceState) == "string" and defenceState ~= "" and defenceState ~= "Neutral"
+end
+
 local function parkourSpeedFloor(humanoid: Humanoid, now: number): number
 	local floorSpeed = numberAttribute(humanoid, ATTRIBUTES.ParkourSpeedFloor, 0)
 	local expiry = numberAttribute(humanoid, ATTRIBUTES.ParkourSpeedFloorExpiry, 0)
@@ -178,7 +221,7 @@ end
 -- future bloodline/stat system changes BonusWalkSpeed per player and this file never needs to know
 -- bloodlines exist.
 --
--- BonusWalkSpeed defaults to Constants.Combat.DefaultBonusWalkSpeed rather than to 0, and that default
+-- BonusWalkSpeed defaults to CombatConstants.DefaultBonusWalkSpeed rather than to 0, and that default
 -- is load-bearing rather than cosmetic. The two constants are authored as a PAIR -- BaseWalkSpeed 10
 -- plus a default bonus of 8 -- and every speed comment in this codebase is written against their sum
 -- of 18 ("today's 18 base -> Sprint 27"). Defaulting the bonus to 0 would quietly run the whole game
@@ -187,9 +230,9 @@ end
 -- onCharacterAdded seeds the Attribute explicitly, so this default is the belt to that braces -- it
 -- covers the window before the seed lands and any character this System never saw spawn.
 local function effectiveBaseSpeed(humanoid: Humanoid): number
-	local bonus = numberAttribute(humanoid, ATTRIBUTES.BonusWalkSpeed, Constants.Combat.DefaultBonusWalkSpeed)
+	local bonus = numberAttribute(humanoid, ATTRIBUTES.BonusWalkSpeed, CombatConstants.DefaultBonusWalkSpeed)
 	local multiplier = numberAttribute(humanoid, ATTRIBUTES.SpeedMultiplier, 1)
-	return (Constants.Combat.BaseWalkSpeed + bonus) * multiplier
+	return (CombatConstants.BaseWalkSpeed + bonus) * multiplier
 end
 
 -- Ramps `current` toward `desired` instead of snapping to it, so a gear change reads as an
@@ -253,8 +296,19 @@ local function stepPlayer(player: Player, state: PlayerRunState, deltaTime: numb
 	-- `locked` beats both in the freeze argument below: flying across the map with the run key held
 	-- is not running, and it must not preserve a gear the way a vault or a jump does.
 	local moving = humanoid.MoveDirection.Magnitude >= RunConstants.MoveInputThreshold
-	local accruing = state.Sprinting and moving and not locked and grounded
-	local frozen = (parkourOwned or not grounded) and not locked
+	-- COMBAT ENDS THE RUN, and it outranks the freeze rather than joining it. A vault or a jump FREEZES
+	-- the charge because a traversal is not a stop; a swing ZEROES it, because fighting is not something
+	-- you do while running -- see this file's header. Ordered ahead of `frozen` below so a swing thrown
+	-- mid-air (which is airborne, and would otherwise be frozen and preserve its gear intact) still
+	-- costs the run.
+	local committed = combatCommitted(humanoid, now)
+	if committed then
+		state.ChargeSeconds = 0
+		state.NotAccruingSeconds = 0
+	end
+
+	local accruing = state.Sprinting and moving and not locked and grounded and not committed
+	local frozen = (parkourOwned or not grounded) and not locked and not committed
 
 	-- HOW LONG HAS THIS BEEN GOING ON. Reset the moment accrual resumes, so the aggressive stop decay
 	-- only ever applies to a genuine, sustained stop and a player who clips a doorframe for two frames
@@ -272,7 +326,11 @@ local function stepPlayer(player: Player, state: PlayerRunState, deltaTime: numb
 	-- THE STAGE. Resolved from the charge and the held intent, and published only on a real change --
 	-- SetAttribute is a replicated write with a changed-signal behind it, and restating the same stage
 	-- sixty times a second would be sixty round trips to tell every client nothing.
-	local nextStage = RunLadder.ResolveStage(state.Stage, state.ChargeSeconds, state.Sprinting and not locked)
+	-- `committed` forces the intent argument false rather than being checked after the fact: ResolveStage
+	-- owns the hysteresis, and second-guessing its answer from out here is how a resolver ends up with
+	-- two disagreeing definitions of which gear a player is in.
+	local nextStage =
+		RunLadder.ResolveStage(state.Stage, state.ChargeSeconds, state.Sprinting and not locked and not committed)
 	if nextStage ~= state.Stage then
 		state.Stage = nextStage
 		humanoid:SetAttribute(ATTRIBUTES.SprintStage, nextStage)
@@ -358,7 +416,7 @@ local function onCharacterAdded(player: Player, character: Model): ()
 	humanoid:SetAttribute(ATTRIBUTES.SprintStage, 0)
 
 	-- THE PER-PLAYER SPEED BONUS, seeded here because the System that used to seed it is gone.
-	-- CombatSystem.onCharacterAdded stamped this from Constants.Combat.DefaultBonusWalkSpeed on every
+	-- CombatSystem.onCharacterAdded stamped this from CombatConstants.DefaultBonusWalkSpeed on every
 	-- new character; with that module deleted, nothing did, and an unset Attribute would run every
 	-- character at a base of 10 instead of the 18 the entire speed table is authored against.
 	--
@@ -366,38 +424,34 @@ local function onCharacterAdded(player: Player, character: Model): ()
 	-- a different value on this Humanoid, and this System's job is to guarantee the Attribute EXISTS,
 	-- not to have an opinion about what it should be. Only the nil/non-number case is filled in.
 	if typeof(humanoid:GetAttribute(ATTRIBUTES.BonusWalkSpeed)) ~= "number" then
-		humanoid:SetAttribute(ATTRIBUTES.BonusWalkSpeed, Constants.Combat.DefaultBonusWalkSpeed)
+		humanoid:SetAttribute(ATTRIBUTES.BonusWalkSpeed, CombatConstants.DefaultBonusWalkSpeed)
 	end
-end
-
-local function onPlayerAdded(player: Player): ()
-	getState(player)
-	player.CharacterAdded:Connect(function(character: Model)
-		onCharacterAdded(player, character)
-	end)
-	if player.Character then
-		onCharacterAdded(player, player.Character)
-	end
-end
-
-local function onPlayerRemoving(player: Player): ()
-	playerStates[player] = nil
-	rateLimiter:Clear(player)
 end
 
 function RunSystem.Init(): ()
 	local setSprinting = NetworkBridge.CreateRemoteEvent(REMOTE_NAMES.SetSprinting)
 	setSprinting.OnServerEvent:Connect(handleSetSprinting)
 
-	Players.PlayerAdded:Connect(onPlayerAdded)
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
+	-- Shared/PlayerLifecycle.lua owns the PlayerAdded / PlayerRemoving / Init-time-GetPlayers-sweep
+	-- triple that used to be written out here, and the per-player CharacterAdded hookup inside it. The
+	-- sweep in particular is not optional and was easy to forget: a player who joined before this
+	-- System booted is otherwise never given a run state, which only reproduces under a real join race.
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "RunSystem",
+		OnPlayer = function(player: Player)
+			getState(player)
+		end,
+		OnPlayerRemoving = function(player: Player)
+			playerStates[player] = nil
+			rateLimiter:Clear(player)
+		end,
+		OnCharacter = function(player: Player, character: Model)
+			onCharacterAdded(player, character)
+		end,
+	})
 	-- Players who joined before this System booted (a fast rejoin during server start) still need their
 	-- per-player state and character hook -- the same Init()-time sweep every other PlayerAdded-driven
 	-- System in this codebase uses as its backstop.
-	for _, player in Players:GetPlayers() do
-		onPlayerAdded(player)
-	end
-
 	RunService.Heartbeat:Connect(onHeartbeat)
 
 	logger:info("RunSystem.Init() complete", { stages = #RunConstants.Stages })

@@ -12,10 +12,10 @@
 	server-side on every request regardless of what this module decides, per
 	luau-coding-standards.md's server/client split rule.
 
-	No longer binds "OpenDevConsole" (F7) -- that used to open Roblox's own native developer console
+	No longer binds "OpenDevConsole" (F5) -- that used to open Roblox's own native developer console
 	via StarterGui:SetCore("DevConsoleVisible") from right here, since this was already the module
 	that had asked the server whether this client is an admin. It moved to its own module,
-	Client/LiveConsole/LiveConsoleClient.lua, which binds F7 to a bespoke live log console instead:
+	Client/LiveConsole/LiveConsoleClient.lua, which binds F5 to a bespoke live log console instead:
 	the native console only ever showed anything in Studio (Shared/Logger.lua never calls
 	print()/warn() outside RunService:IsStudio() by design), so on a live server -- the one place a
 	whitelisted admin actually needs it, since Roblox's own F9 shortcut only binds for accounts with
@@ -49,10 +49,12 @@ local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
+local Lazy = require(ReplicatedStorage.Shared.Lazy)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local DevMenuModule = require(script.Parent.Parent.UI.Screens.DevMenu)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
@@ -250,16 +252,14 @@ end
 
 -- Target-tracking state for the Admin tab's live display (TargetNameDisplay/GodmodeActive/
 -- FlightActive) -- module-local like hitboxStages above, since this module has exactly one
--- long-lived Start() call per client session. godmodeAttributeConnection/flyingAttributeConnection
--- watch whichever Humanoid currently belongs to the resolved target; targetCharacterAddedConnection
--- rebinds them across that target's own respawns (mirroring FlightController.lua's own
--- BindCharacter, just for a possibly-other player instead of always the local one).
-local godmodeAttributeConnection: RBXScriptConnection? = nil
-local flyingAttributeConnection: RBXScriptConnection? = nil
-local collideAttributeConnection: RBXScriptConnection? = nil
-local frozenAttributeConnection: RBXScriptConnection? = nil
-local invisibleAttributeConnection: RBXScriptConnection? = nil
-local speedMultiplierAttributeConnection: RBXScriptConnection? = nil
+-- long-lived Start() call per client session. attributeTrove watches whichever Humanoid currently
+-- belongs to the resolved target across all six tracked Attributes as one scope -- rebindAttributeConnections
+-- and watchTarget's own "target has no character" branch both need to drop every one of them at once,
+-- which a Trove makes a single :Clean() instead of six hand-paired disconnect-and-nil sites.
+-- targetCharacterAddedConnection rebinds them across that target's own respawns (mirroring
+-- FlightController.lua's own BindCharacter, just for a possibly-other player instead of always the
+-- local one).
+local attributeTrove = Trove.New()
 local targetCharacterAddedConnection: RBXScriptConnection? = nil
 
 -- The Player DevMenuSystem.resolveActionTarget would currently resolve to -- kept alongside the
@@ -275,24 +275,7 @@ local currentResolvedTarget: Player? = nil
 -- touched here (Godmode/Flight/Collide/Frozen/Invisible/SpeedMultiplier) lives on the Admin tab, so
 -- it's Content-owned -- see DevMenuHandle's own header for the Sidebar/Content split.
 local function rebindAttributeConnections(handle: DevMenuHandle, humanoid: Humanoid): ()
-	if godmodeAttributeConnection then
-		godmodeAttributeConnection:Disconnect()
-	end
-	if flyingAttributeConnection then
-		flyingAttributeConnection:Disconnect()
-	end
-	if collideAttributeConnection then
-		collideAttributeConnection:Disconnect()
-	end
-	if frozenAttributeConnection then
-		frozenAttributeConnection:Disconnect()
-	end
-	if invisibleAttributeConnection then
-		invisibleAttributeConnection:Disconnect()
-	end
-	if speedMultiplierAttributeConnection then
-		speedMultiplierAttributeConnection:Disconnect()
-	end
+	attributeTrove:Clean()
 
 	local content = handle.Content
 
@@ -303,28 +286,24 @@ local function rebindAttributeConnections(handle: DevMenuHandle, humanoid: Human
 	content.InvisibleActive:set(humanoid:GetAttribute(Constants.Attributes.Invisible) == true)
 	content.SpeedMultiplierActive:set((humanoid:GetAttribute(Constants.Attributes.SpeedMultiplier) :: number?) or 1)
 
-	godmodeAttributeConnection = humanoid:GetAttributeChangedSignal(Constants.Attributes.Godmode):Connect(function()
+	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.Godmode), function()
 		content.GodmodeActive:set(humanoid:GetAttribute(Constants.Attributes.Godmode) == true)
 	end)
-	flyingAttributeConnection = humanoid:GetAttributeChangedSignal(Constants.Attributes.Flying):Connect(function()
+	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.Flying), function()
 		content.FlightActive:set(humanoid:GetAttribute(Constants.Attributes.Flying) == true)
 	end)
-	collideAttributeConnection = humanoid:GetAttributeChangedSignal(Constants.Attributes.FlyCollide):Connect(function()
+	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.FlyCollide), function()
 		content.CollideActive:set(humanoid:GetAttribute(Constants.Attributes.FlyCollide) == true)
 	end)
-	frozenAttributeConnection = humanoid:GetAttributeChangedSignal(Constants.Attributes.Frozen):Connect(function()
+	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.Frozen), function()
 		content.FrozenActive:set(humanoid:GetAttribute(Constants.Attributes.Frozen) == true)
 	end)
-	invisibleAttributeConnection = humanoid:GetAttributeChangedSignal(Constants.Attributes.Invisible):Connect(function()
+	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.Invisible), function()
 		content.InvisibleActive:set(humanoid:GetAttribute(Constants.Attributes.Invisible) == true)
 	end)
-	speedMultiplierAttributeConnection = humanoid
-		:GetAttributeChangedSignal(Constants.Attributes.SpeedMultiplier)
-		:Connect(function()
-			content.SpeedMultiplierActive:set(
-				(humanoid:GetAttribute(Constants.Attributes.SpeedMultiplier) :: number?) or 1
-			)
-		end)
+	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.SpeedMultiplier), function()
+		content.SpeedMultiplierActive:set((humanoid:GetAttribute(Constants.Attributes.SpeedMultiplier) :: number?) or 1)
+	end)
 end
 
 -- Watches `targetPlayer` (whichever player DevMenuSystem.resolveActionTarget would currently
@@ -346,30 +325,7 @@ local function watchTarget(handle: DevMenuHandle, targetPlayer: Player): ()
 	if targetPlayer.Character then
 		onCharacterAdded(targetPlayer.Character)
 	else
-		if godmodeAttributeConnection then
-			godmodeAttributeConnection:Disconnect()
-		end
-		if flyingAttributeConnection then
-			flyingAttributeConnection:Disconnect()
-		end
-		if collideAttributeConnection then
-			collideAttributeConnection:Disconnect()
-		end
-		if frozenAttributeConnection then
-			frozenAttributeConnection:Disconnect()
-		end
-		if invisibleAttributeConnection then
-			invisibleAttributeConnection:Disconnect()
-		end
-		if speedMultiplierAttributeConnection then
-			speedMultiplierAttributeConnection:Disconnect()
-		end
-		godmodeAttributeConnection = nil
-		flyingAttributeConnection = nil
-		collideAttributeConnection = nil
-		frozenAttributeConnection = nil
-		invisibleAttributeConnection = nil
-		speedMultiplierAttributeConnection = nil
+		attributeTrove:Clean()
 		handle.Content.GodmodeActive:set(false)
 		handle.Content.FlightActive:set(false)
 		handle.Content.CollideActive:set(false)
@@ -540,6 +496,65 @@ local function startDevMenu(handle: DevMenuHandle): ()
 				content.HitboxDebugActive:set(result.Enabled)
 			end
 			return describeActionResult(if enabled then "Hitboxes visible" else "Hitboxes hidden", result)
+		end)
+	end)
+
+	-- Debug dummy (Spawn tab, Server/Systems/DebugDummySystem.lua) -- SpawnDebugDummyRequested/
+	-- DespawnAllDebugDummiesRequested are fire-and-forget, same "invokeAndReport, status text only"
+	-- shape as RollRareEmoteRequested above. SetDummyGuardRequested refreshes DummyGuardActive from
+	-- the server's own echoed value, never optimistically from the press -- same contract
+	-- SetHitboxDebugRequested's own handler already keeps for its server-wide toggle.
+	content.SpawnDebugDummyRequested:Connect(function()
+		logger:debug("SpawnDebugDummyRequested received")
+		invokeAndReport(handle, function()
+			local spawnDebugDummyRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.SpawnDummy)
+			return spawnDebugDummyRemote:InvokeServer()
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuActionResult
+			logger:debug("SpawnDebugDummy result received", { success = result.Success, reason = result.Reason })
+			if result.Success then
+				content.ActiveDummyCountDisplay:set(peek(content.ActiveDummyCountDisplay) + 1)
+			end
+			return describeActionResult("Spawn debug dummy", result)
+		end)
+	end)
+
+	content.DespawnAllDebugDummiesRequested:Connect(function()
+		logger:debug("DespawnAllDebugDummiesRequested received")
+		invokeAndReport(handle, function()
+			local despawnAllRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.DespawnAllDebugDummies)
+			return despawnAllRemote:InvokeServer()
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuActionResult
+			logger:debug("DespawnAllDebugDummies result received", { success = result.Success, reason = result.Reason })
+			if result.Success then
+				content.ActiveDummyCountDisplay:set(0)
+			end
+			return describeActionResult("Despawn all debug dummies", result)
+		end)
+	end)
+
+	content.SetDummyGuardRequested:Connect(function(enabled: boolean)
+		logger:debug("SetDummyGuardRequested received", { enabled = enabled })
+		invokeAndReport(handle, function()
+			local setDummyGuardRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.SetDummyGuard)
+			return setDummyGuardRemote:InvokeServer(enabled)
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuDebugDummyStateResult
+			logger:debug(
+				"SetDummyGuard result received",
+				{ success = result.Success, guardEnabled = result.GuardEnabled }
+			)
+			if result.Success and result.GuardEnabled ~= nil then
+				content.DummyGuardActive:set(result.GuardEnabled)
+			end
+			if result.Success and result.ActiveCount ~= nil then
+				content.ActiveDummyCountDisplay:set(result.ActiveCount)
+			end
+			return describeActionResult(if enabled then "Guard on" else "Guard off", result)
 		end)
 	end)
 
@@ -820,6 +835,41 @@ local function startDevMenu(handle: DevMenuHandle): ()
 	end
 
 	task.spawn(fetchHitboxDebug)
+
+	-- Debug dummy guard toggle + active count (Spawn tab) -- same eager fetch-once-on-open shape as
+	-- fetchHitboxDebug directly above, for the identical reason: a server-wide toggle a joining admin
+	-- must see the truth of, not this client's own scope:Value(false) default.
+	local function fetchDebugDummyState(): ()
+		local getDebugDummyStateRemote =
+			NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.GetDebugDummyState)
+		local ok, resultOrError = pcall(function()
+			return getDebugDummyStateRemote:InvokeServer()
+		end)
+
+		if not ok then
+			logger:error("GetDebugDummyState request errored", { errorMessage = tostring(resultOrError) })
+			return
+		end
+
+		local result = resultOrError :: Types.DevMenuDebugDummyStateResult
+		if not result.Success then
+			logger:warn("GetDebugDummyState rejected", { reason = result.Reason })
+			return
+		end
+
+		if result.GuardEnabled ~= nil then
+			content.DummyGuardActive:set(result.GuardEnabled)
+		end
+		if result.ActiveCount ~= nil then
+			content.ActiveDummyCountDisplay:set(result.ActiveCount)
+		end
+		logger:debug(
+			"GetDebugDummyState loaded",
+			{ guardEnabled = result.GuardEnabled, activeCount = result.ActiveCount }
+		)
+	end
+
+	task.spawn(fetchDebugDummyState)
 
 	local function fetchPlayers(): ()
 		if peek(sidebar.PlayersLoading) then
@@ -1189,7 +1239,13 @@ end
 -- Consequence worth knowing: for an authorized admin, the DevMenuToggle keybind binds one round-trip
 -- after join rather than instantly, so a keypress in the first few hundred milliseconds of a session
 -- does nothing. Acceptable for dev tooling; the alternative was keeping the whitelist replicated.
-function DevMenuClient.Start(handle: DevMenuHandle): ()
+--
+-- TAKES A Shared/Lazy.lua THUNK, not a mounted handle. The panel this drives is ~105 Instances that
+-- UI.Mount() used to build on the boot path for every player regardless of the answer below -- see
+-- Client/UI/init.lua's own header. Forcing it here rather than there costs nothing: this function was
+-- already doing all its real work on its own thread behind the same round trip, so the mount simply
+-- joins work that was already deferred, and a non-admin never pays for it at all.
+function DevMenuClient.Start(deferredHandle: Lazy.Lazy<DevMenuHandle>): ()
 	task.spawn(function()
 		if not requestServerAuthorization() then
 			logger:debug("DevMenuClient not started: server did not authorize this client")
@@ -1199,8 +1255,10 @@ function DevMenuClient.Start(handle: DevMenuHandle): ()
 		-- one authorization round-trip per session, one whitelist to maintain. Granted here rather
 		-- than inside startDevMenu because it is not part of the menu; it just shares the gate. See
 		-- ParkourDebug.SetAuthorized for why a client-side grant is safe for a read-only overlay.
+		-- Deliberately BEFORE the mount below: the overlay is not part of the panel and must not be
+		-- gated on the panel's own construction.
 		ParkourDebug.SetAuthorized(true)
-		startDevMenu(handle)
+		startDevMenu(deferredHandle.Get())
 	end)
 end
 

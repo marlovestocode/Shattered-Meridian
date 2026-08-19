@@ -45,36 +45,43 @@ local TELEPORT_FAILED_MESSAGE = "Failed to join a server. Try again."
 -- lua's own per-player maps.
 local pendingByPlayer: { [Player]: boolean } = {}
 
-function ServerHopSystem.Init(): ()
-	local requestTeleportRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.RequestTeleport)
+-- Not Shared/RemoteHandler.WrapInvoke -- this handler returns (boolean, string?), and WrapInvoke's
+-- generic only carries a single Result, not a Result... pack. Hand-wrapped instead, in the same
+-- catch/log/fallback shape WrapInvoke itself uses ("<name> handler errored", TELEPORT_FAILED_MESSAGE),
+-- with the single pcall boundary widened to cover everything from the moment pendingByPlayer[player]
+-- is reserved through the teleport attempt -- not just TeleportAsync itself as before -- so
+-- pendingByPlayer[player] = nil below always runs, on the success path, the known-failure path, AND a
+-- thrown error, rather than only being reachable past a narrower inner pcall.
+local function handleRequestTeleport(player: Player): (boolean, string?)
+	if rateLimiter:IsLimited(player) then
+		return false, TELEPORT_FAILED_MESSAGE
+	end
+	if pendingByPlayer[player] then
+		logger:warn("Duplicate teleport request ignored", { player = player.Name })
+		return false, TELEPORT_FAILED_MESSAGE
+	end
+	pendingByPlayer[player] = true
 
-	requestTeleportRemote.OnServerInvoke = function(player: Player): (boolean, string?)
-		if rateLimiter:IsLimited(player) then
-			return false, TELEPORT_FAILED_MESSAGE
-		end
-		if pendingByPlayer[player] then
-			logger:warn("Duplicate teleport request ignored", { player = player.Name })
-			return false, TELEPORT_FAILED_MESSAGE
-		end
-		pendingByPlayer[player] = true
-
+	local ok, errorMessage = pcall(function()
 		local options = Instance.new("TeleportOptions")
 		options:SetTeleportData({ FromStartMenu = true })
+		TeleportService:TeleportAsync(game.PlaceId, { player }, options)
+	end)
 
-		local ok, errorMessage = pcall(function()
-			TeleportService:TeleportAsync(game.PlaceId, { player }, options)
-		end)
+	pendingByPlayer[player] = nil
 
-		pendingByPlayer[player] = nil
-
-		if not ok then
-			logger:warn("TeleportAsync failed", { player = player.Name, errorMessage = tostring(errorMessage) })
-			return false, TELEPORT_FAILED_MESSAGE
-		end
-
-		logger:info("Teleport requested", { player = player.Name })
-		return true
+	if not ok then
+		logger:error("RequestTeleport handler errored", { player = player.Name, errorMessage = tostring(errorMessage) })
+		return false, TELEPORT_FAILED_MESSAGE
 	end
+
+	logger:info("Teleport requested", { player = player.Name })
+	return true
+end
+
+function ServerHopSystem.Init(): ()
+	local requestTeleportRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.RequestTeleport)
+	requestTeleportRemote.OnServerInvoke = handleRequestTeleport
 
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "ServerHopSystem",

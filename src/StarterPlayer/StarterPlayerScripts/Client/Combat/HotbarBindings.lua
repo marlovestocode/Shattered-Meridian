@@ -23,13 +23,13 @@
 
 	Does not own: firing the bound move (AttackInputClient.lua), rendering the hotbar
 	(HUD/init.lua), or admin authorization -- nothing here checks whether the local player is
-	actually an admin. That's fine, and the rebuilt attack layer keeps the same contract this header
-	always described: the only way a MoveId ever reaches Set() is through the Move Editor's own
-	admin-gated UI (which never even starts for a non-admin -- see MoveEditorClient.lua's
-	requestServerAuthorization), and firing a bound move still round-trips through the server's own
-	AdminConfig re-check regardless of what this module holds (Server/Combat/Attack/
-	AttackRequestSystem.lua's resolveRequest, and AttackTypes.AttackRequest.MoveId's own header) --
-	so a non-admin client with a hand-crafted binding here gains nothing.
+	actually an admin. That's fine either way: firing a bound move round-trips through the server's
+	own re-check regardless of what this module holds (Server/Combat/Attack/
+	AttackRequestSystem.lua's resolveRequest, and AttackTypes.AttackRequest.MoveId's own header). For
+	an admin sender the server trusts the MoveId as sent (the Move Editor's own admin-gated "Bind to
+	slot" control is the only writer that path needs). For anyone else the server ignores whatever
+	this module holds entirely and resolves the slot from ArtSystem.GetEquipped instead -- so a
+	non-admin client with a hand-crafted binding here gains nothing.
 ]]
 
 local HotbarBindings = {}

@@ -40,6 +40,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
+local AmortizedReclaim = require(ReplicatedStorage.Shared.AmortizedReclaim)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local AttackCatalog = require(script.Parent.Parent.AttackCatalog)
@@ -78,6 +79,9 @@ type Record = {
 local SwingSequencer = {}
 
 local records: { [Model]: Record } = {}
+
+-- The round-robin cursor Sweep below walks -- see Shared/AmortizedReclaim.lua.
+local recordsReclaim = AmortizedReclaim.New()
 
 -- Keyed "weaponId|category". See this file's header for why caching this is safe when caching a
 -- move's contents would not be.
@@ -321,18 +325,21 @@ function SwingSequencer.Clear(model: Model): ()
 	records[model] = nil
 end
 
--- Reclaims records for models that no longer exist.
+-- Reclaims records for models that no longer exist. Returns how many were dropped this call.
 --
 -- DELIBERATELY NOT AN EXPIRY SWEEP. A lapsed string is already handled by stringIsLive reading the
 -- timestamp at resolve time, and dropping the record would take the WeaponId with it -- a player who
 -- swapped weapons and then stood still would silently be handed Primary back. Only a destroyed model
 -- loses its record.
-function SwingSequencer.Sweep(): ()
-	for model in records do
-		if model.Parent == nil then
-			records[model] = nil
-		end
-	end
+--
+-- AMORTISED, NOT EXHAUSTIVE, as of the reclaim pass: one call examines a fixed handful of records
+-- rather than the whole table, so a destroyed model is reclaimed within a few frames rather than on
+-- the very next one. Nothing observes the difference -- every read of `records` either finds a record
+-- and timestamp-checks it, or builds a fresh one on demand -- which is precisely the property that
+-- makes it safe here and NOT safe for a loop that does per-entry work. See
+-- Shared/AmortizedReclaim.lua's own header for that distinction.
+function SwingSequencer.Sweep(): number
+	return recordsReclaim:Step(records)
 end
 
 -- Spec-only, so one case cannot serve another its state -- the same role HitboxEngine.Reset,
@@ -340,6 +347,7 @@ end
 -- counts too, since a spec may legitimately reshape the registry between cases.
 function SwingSequencer.Reset(): ()
 	table.clear(records)
+	recordsReclaim:Reset()
 	table.clear(stageCounts)
 end
 

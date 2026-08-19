@@ -35,10 +35,10 @@
 	resolver itself (Server/Combat/Movement.lua), or the tunables (Shared/Parkour/ParkourConstants.lua).
 ]]
 
-local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
@@ -47,6 +47,7 @@ local ParkourValidation = require(ReplicatedStorage.Shared.Parkour.ParkourValida
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 
 local ModerationSystem = require(script.Parent.ModerationSystem)
 
@@ -67,7 +68,6 @@ local VALIDATION = ParkourConstants.Validation
 -- was pure allocation on a per-action path, and having two copies invited them to drift.
 local VALIDATION_CONFIG: ParkourValidation.ValidationConfig = {
 	MaxReportedSpeed = VALIDATION.MaxReportedSpeed,
-	MaxVerticalGainStuds = VALIDATION.MaxVerticalGainStuds,
 	MaxTravelSpeed = VALIDATION.MaxTravelSpeed,
 	MaxActionSeconds = VALIDATION.MaxActionSeconds,
 	MomentumCarryObservedTolerance = VALIDATION.MomentumCarryObservedTolerance,
@@ -124,32 +124,11 @@ local function getState(player: Player): PlayerParkourState
 	return created
 end
 
-local function getHumanoid(player: Player): Humanoid?
-	local character = player.Character
-	if not character then
-		return nil
-	end
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	return humanoid
-end
-
-local function getRootPart(player: Player): BasePart?
-	local character = player.Character
-	if not character then
-		return nil
-	end
-	local rootPart = character:FindFirstChild("HumanoidRootPart")
-	if rootPart and rootPart:IsA("BasePart") then
-		return rootPart
-	end
-	return nil
-end
-
 -- Clears every Attribute this System sets. Called when an action ends, when its window expires, on
 -- respawn and on leave -- every path out of ownership, without exception, because an unreleased
 -- ParkourVelocityOwned pins that player's WalkSpeed at zero for the rest of their life.
 local function releaseOwnership(player: Player): ()
-	local humanoid = getHumanoid(player)
+	local _, humanoid = CharacterUtil.LiveRig(player)
 	if not humanoid then
 		return
 	end
@@ -199,7 +178,7 @@ end
 
 -- Grants velocity ownership for an accepted Start report.
 local function beginAction(player: Player, state: PlayerParkourState, report: ActionReport, now: number): ()
-	local humanoid = getHumanoid(player)
+	local _, humanoid = CharacterUtil.LiveRig(player)
 	if not humanoid then
 		return
 	end
@@ -250,7 +229,7 @@ local function endAction(
 	state.OpenStartPosition = nil
 	state.OpenExpiresAt = 0
 
-	local humanoid = getHumanoid(player)
+	local _, humanoid = CharacterUtil.LiveRig(player)
 	if not humanoid then
 		return
 	end
@@ -261,7 +240,7 @@ local function endAction(
 	-- vertical component must not inflate it. nil when the root can't be read at all, which
 	-- ResolveMomentumCarry treats as "no observed ceiling available."
 	local observedPlanar: number? = nil
-	local rootPart = getRootPart(player)
+	local _, _, rootPart = CharacterUtil.LiveRig(player)
 	if rootPart then
 		local velocity = rootPart.AssemblyLinearVelocity
 		observedPlanar = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
@@ -308,7 +287,7 @@ local function handleReport(player: Player, rawPayload: unknown): ()
 		return
 	end
 
-	local rootPart = getRootPart(player)
+	local _, _, rootPart = CharacterUtil.LiveRig(player)
 	if not rootPart then
 		notifyRejected(player, report.Kind, report.Phase, "NoCharacter")
 		return
@@ -319,7 +298,7 @@ local function handleReport(player: Player, rawPayload: unknown): ()
 	-- way granting velocity ownership would put the parkour framework and RagdollController's
 	-- AlignPosition pin on the same body at once. The client's own controller independently parks in
 	-- its AerialCombat state for the same signal, so an honest client never reaches this branch.
-	local humanoid = getHumanoid(player)
+	local _, humanoid = CharacterUtil.LiveRig(player)
 	if humanoid and humanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true then
 		notifyRejected(player, report.Kind, report.Phase, "CombatRestricted")
 		return
@@ -400,36 +379,30 @@ local function onCharacterAdded(player: Player): ()
 	releaseOwnership(player)
 end
 
-local function onPlayerAdded(player: Player): ()
-	getState(player)
-	player.CharacterAdded:Connect(function()
-		onCharacterAdded(player)
-	end)
-	if player.Character then
-		onCharacterAdded(player)
-	end
-end
-
-local function onPlayerRemoving(player: Player): ()
-	playerStates[player] = nil
-	rateLimiter:Clear(player)
-end
-
 function ParkourSystem.Init(): ()
 	local report = NetworkBridge.CreateRemoteEvent(RemoteNames.ReportAction)
 	report.OnServerEvent:Connect(handleReport)
 
 	rejectedRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.ActionRejected)
 
-	Players.PlayerAdded:Connect(onPlayerAdded)
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
+	-- See Shared/PlayerLifecycle.lua -- the add/sweep/remove triple plus the per-player character
+	-- hookup, in one call instead of four places that all had to agree.
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "ParkourSystem",
+		OnPlayer = function(player: Player)
+			getState(player)
+		end,
+		OnPlayerRemoving = function(player: Player)
+			playerStates[player] = nil
+			rateLimiter:Clear(player)
+		end,
+		OnCharacter = function(player: Player)
+			onCharacterAdded(player)
+		end,
+	})
 	-- Players who joined before this System booted (a fast rejoin during server start) still need
 	-- their per-player state and character hook -- the same Init()-time sweep every other
 	-- PlayerAdded-driven System in this codebase uses as its backstop.
-	for _, player in Players:GetPlayers() do
-		onPlayerAdded(player)
-	end
-
 	RunService.Heartbeat:Connect(onHeartbeat)
 
 	logger:info("ParkourSystem.Init() complete", { enabled = ParkourConstants.Enabled })

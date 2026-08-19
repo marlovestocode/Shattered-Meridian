@@ -50,6 +50,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Parent.Parent.Components.Panel)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
+local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 
 local logger = Logger.scope("BountyMenu")
 
@@ -240,21 +241,13 @@ function BountyTab.Mount(scope: Scope, props: BountyTabProps): Frame
 			-- populated server can carry more marks than fit, and a plain Frame silently clipped the
 			-- overflow. AutomaticCanvasSize means the canvas tracks however many rows exist without
 			-- this file counting them, the same shape Screens/MoveEditor/MoveList.lua uses.
-			scope:New "ScrollingFrame" {
+			ScrollArea(scope, {
 				Name = "Rows",
 				Size = UDim2.new(1, 0, 1, -HEADER_ALLOWANCE),
-				BackgroundTransparency = 1,
-				BorderSizePixel = 0,
-				ScrollingDirection = Enum.ScrollingDirection.Y,
-				AutomaticCanvasSize = Enum.AutomaticSize.Y,
-				CanvasSize = UDim2.fromScale(0, 0),
-				ScrollBarThickness = 3,
-				ScrollBarImageColor3 = Tokens.Border.Standard.Color,
-				ScrollBarImageTransparency = Tokens.Border.Standard.Transparency,
 				LayoutOrder = 4,
 				Visible = hasEntries,
 
-				[Fusion.Children] = {
+				Children = {
 					scope:New "UIPadding" {
 						PaddingRight = UDim.new(0, Tokens.Space.S),
 					},
@@ -266,7 +259,7 @@ function BountyTab.Mount(scope: Scope, props: BountyTabProps): Frame
 					},
 					rows,
 				},
-			},
+			}),
 		},
 	} :: Frame
 end

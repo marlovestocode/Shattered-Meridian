@@ -90,18 +90,38 @@ local SIDE = if RunService:IsServer() then "Server" else "Client"
 --
 
 type RateLimitBucket = { windowStart: number, count: number }
-local rateLimitBuckets: { [string]: RateLimitBucket } = {}
+-- Nested scope -> level -> message rather than one table keyed by a `scope\0level\0message` string.
+-- The triple identifies the same bucket either way, but the flat key had to be BUILT on every single
+-- log call before the bucket could be looked up -- a fresh string concatenation, and therefore a heap
+-- allocation plus an interning hash, at all ~380 logger:debug/:info call sites in src/, including the
+-- ones inside per-frame loops, and including in a live server where nothing was ever going to print.
+-- Three table indexes cost nothing and allocate nothing on the steady-state path (the two inner
+-- tables are created once per distinct call site, which is bounded by source, exactly as the flat
+-- keys were). This is the same reason emitBody exists as a named function instead of a closure -- see
+-- its own comment below.
+local rateLimitBuckets: { [string]: { [string]: { [string]: RateLimitBucket } } } = {}
 
-local function isRateLimited(key: string): boolean
+local function isRateLimited(scopeName: string, level: LogLevel, message: string): boolean
 	local maxPerSecond = Constants.Debug.Logging.MaxRepeatsPerSecond
 	if not maxPerSecond or maxPerSecond <= 0 then
 		return false
 	end
 
+	local byLevel = rateLimitBuckets[scopeName]
+	if not byLevel then
+		byLevel = {}
+		rateLimitBuckets[scopeName] = byLevel
+	end
+	local byMessage = byLevel[level]
+	if not byMessage then
+		byMessage = {}
+		byLevel[level] = byMessage
+	end
+
 	local now = os.clock()
-	local bucket = rateLimitBuckets[key]
+	local bucket = byMessage[message]
 	if not bucket or now - bucket.windowStart >= 1 then
-		rateLimitBuckets[key] = { windowStart = now, count = 1 }
+		byMessage[message] = { windowStart = now, count = 1 }
 		return false
 	end
 
@@ -249,7 +269,21 @@ end
 -- separate from emit() so a raw engine line (no scope, no fields, just a level + text Roblox
 -- already decided) never has to fake either to share the pipe, while still landing in the exact
 -- same Sequence-ordered buffer/listener fan-out real app logs use.
+--
+-- Rate-limited on the same (scope, level, message) triple emit() uses, under the fixed "Engine"
+-- scope. This path used to reach captureEntry with no cap at all, which meant Constants.Debug.
+-- Logging.MaxRepeatsPerSecond -- documented as protecting "the always-on console capture buffer" --
+-- protected it only from THIS codebase's own log sites, and not at all from the engine's. A single
+-- engine warning repeating every frame (a physics/asset/script warning in a loop, none of which this
+-- codebase controls) would evict the entire 1000-entry ring within seconds and, with an admin
+-- subscribed, be forwarded verbatim to their client on every flush -- so the one situation where an
+-- admin most needs the Live Console is the one where the engine's own noise had already destroyed
+-- the buffer they wanted to read. Deliberately NOT gated on CaptureLevel: Roblox decides these
+-- levels, and an engine line arriving at all is already evidence of something worth keeping.
 function Logger.CaptureEngineEntry(level: LogLevel, message: string): ()
+	if isRateLimited("Engine", level, message) then
+		return
+	end
 	captureEntry("Engine", level, message, nil, "Engine")
 end
 
@@ -267,49 +301,65 @@ end
 -- Emission
 --
 
+-- Split from emit() below purely so pcall can be called as pcall(emitBody, ...) instead of
+-- pcall(function() ... end) -- the latter allocates a fresh closure (capturing scopeName/level/
+-- message/fields) on every single logger:info/debug/etc call site in the codebase; passing emitBody
+-- as a plain function value plus its args to pcall allocates nothing extra. Behavior is unchanged --
+-- still whole-body pcall-wrapped so a bad `fields` value (or anything else going wrong here) can
+-- never throw into the caller's actual gameplay code.
+local function emitBody(scopeName: string, level: LogLevel, message: string, fields: LogFields?): ()
+	local config = Constants.Debug.Logging
+	local levelRank = LEVEL_RANK[level] or LEVEL_RANK.Off
+
+	-- THE FIRST GATE, and deliberately the cheapest thing in this function: two table indexes and a
+	-- comparison, above the rate limiter and above captureEntry. Everything past this line allocates
+	-- something (a bucket table, a LogEntry, a listener fan-out), and in a live server the capture
+	-- buffer is the ONLY consumer of any of it -- so a level the buffer has been told not to record
+	-- must cost nothing rather than being allocated and then discarded downstream. See
+	-- Constants.Debug.Logging.CaptureLevel for why this is a separate knob from `Level` below.
+	if levelRank < (LEVEL_RANK[config.CaptureLevel] or LEVEL_RANK.Off) then
+		return
+	end
+
+	-- Shared by both destinations below (the always-on buffer AND Output) so a log site that
+	-- fires every frame can't flood either one, even at Trace, even outside Studio.
+	if isRateLimited(scopeName, level, message) then
+		return
+	end
+
+	-- Captured independent of Enabled/IsStudio/Level/Scope below -- see this module's own header
+	-- for why. This is the one line in emit() that runs in a live server; everything below it only
+	-- runs in Studio with logging enabled, exactly as before.
+	captureEntry(scopeName, level, message, fields, "App")
+
+	if not config.Enabled then
+		return
+	end
+	if not RunService:IsStudio() then
+		return
+	end
+
+	local configuredRank = LEVEL_RANK[config.Level] or LEVEL_RANK.Off
+	if levelRank < configuredRank then
+		return
+	end
+
+	if config.Scopes[scopeName] ~= true then
+		return
+	end
+
+	local line = formatLine(scopeName, level, message, fields)
+	suppressingOwnOutput = true
+	if levelRank >= LEVEL_RANK.Warn then
+		warn(line)
+	else
+		print(line)
+	end
+	suppressingOwnOutput = false
+end
+
 local function emit(scopeName: string, level: LogLevel, message: string, fields: LogFields?): ()
-	-- Whole body pcall-wrapped: per this module's header, a bad `fields` value (or literally
-	-- anything else going wrong here) must never throw into the caller's actual gameplay code.
-	pcall(function()
-		-- Shared by both destinations below (the always-on buffer AND Output) so a log site that
-		-- fires every frame can't flood either one, even at Trace, even outside Studio.
-		local rateLimitKey = scopeName .. "\0" .. level .. "\0" .. message
-		if isRateLimited(rateLimitKey) then
-			return
-		end
-
-		-- Always captured, independent of Enabled/IsStudio/Level/Scope below -- see this module's
-		-- own header for why. This is the one line in emit() that runs in a live server; everything
-		-- below it only runs in Studio with logging enabled, exactly as before.
-		captureEntry(scopeName, level, message, fields, "App")
-
-		local config = Constants.Debug.Logging
-		if not config.Enabled then
-			return
-		end
-		if not RunService:IsStudio() then
-			return
-		end
-
-		local configuredRank = LEVEL_RANK[config.Level] or LEVEL_RANK.Off
-		local levelRank = LEVEL_RANK[level] or LEVEL_RANK.Off
-		if levelRank < configuredRank then
-			return
-		end
-
-		if config.Scopes[scopeName] ~= true then
-			return
-		end
-
-		local line = formatLine(scopeName, level, message, fields)
-		suppressingOwnOutput = true
-		if levelRank >= LEVEL_RANK.Warn then
-			warn(line)
-		else
-			print(line)
-		end
-		suppressingOwnOutput = false
-	end)
+	pcall(emitBody, scopeName, level, message, fields)
 end
 
 -- Returns a scoped logger bound to `name` (one of Constants.Debug.Logging.Scopes' keys, though an

@@ -26,8 +26,26 @@
 	from that same Constants table's Defaults/FollowUpDefaults, so "on" always means a coherent,
 	immediately-testable configuration rather than a pile of zeroes.
 
-	Does not own: detection or resolution (Server/Combat/ObjectStunResolver.lua and CombatSystem's
-	own impact handler), or the preview's wall/trajectory rendering (PreviewViewport.lua).
+	NOT CURRENTLY WIRED TO THE LIVE COMBAT STACK (2026-08-19 note, added during the Move Editor repair
+	pass -- see Client/MoveEditor/MoveEditorClient.lua's own header for the sibling fix that DID restore
+	live test-firing). Server/Combat/ObjectStunResolver.lua was deleted in the same combat rewrite that
+	replaced CombatSystem.lua with the current HitboxEngine -> DefenseSystem -> DamageSystem ->
+	AttackRequestSystem stack, and nothing has been rebuilt against the new stack to consume this
+	block since -- MoveRegistryManager.Validate still encodes/decodes it (the schema stayed alive on
+	purpose, see that module's own header), so authoring here is fully preserved and will take effect
+	the moment a resolver exists again, but until then every field below has zero effect on a real hit.
+	This is already independently reported: MoveTypes.ToEngineAttackDefinition's own `notes` mechanism
+	flags "ObjectStun is authored but ignored" for any move carrying one, and AttackCatalog.Get logs it
+	server-side -- see this section's own top-of-list notice below, which surfaces the SAME fact to the
+	person actually authoring it, matching the honesty bar Client/MoveEditor/MoveEditorClient.lua's own
+	header already holds Test-on-Dummy to. Rebuilding a minimal resolver (subscribing to
+	DamageSystem.OnApplied the way GrabSystem.lua's own header shows) is a real option for a future
+	pass, deliberately left undone here -- reintroducing wall-slam detection is a bigger feature-design
+	question than a "fix what's broken, don't relitigate design" pass should absorb on its own.
+
+	Does not own: detection or resolution -- see the notice immediately above -- or the preview's
+	wall/trajectory rendering (PreviewViewport.lua, which also does not draw one -- there is nothing
+	live to preview either).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -352,6 +370,47 @@ function ObjectStunEditorModule.Build(scope: Scope, context: DraftContext): { In
 	end
 
 	local children: { Instance } = {
+		-- ALWAYS visible (LayoutOrder 1, ahead of even the section's own intro note) and independent of
+		-- the Enable toggle below -- an admin should learn this BEFORE spending time configuring a block
+		-- that currently does nothing in real combat, not after. See this file's own header for why this
+		-- is a notice rather than a rebuild or a removal: the schema and this whole panel are preserved
+		-- on purpose, only the runtime consumer (Server/Combat/ObjectStunResolver.lua) is gone.
+		scope:New "Frame" {
+			Name = "NotWiredNotice",
+			Size = UDim2.fromScale(1, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundColor3 = Tokens.Wash.AccentFill.Color,
+			BackgroundTransparency = Tokens.Wash.AccentFill.Transparency,
+			BorderSizePixel = 0,
+			LayoutOrder = 1,
+
+			[Children] = {
+				scope:New "UICorner" { CornerRadius = Tokens.Radius.Sharp },
+				scope:New "UIStroke" {
+					Color = Tokens.Color.Warning,
+					Thickness = 1,
+					Transparency = 0.5,
+				},
+				scope:New "UIPadding" {
+					PaddingTop = UDim.new(0, Tokens.Space.S),
+					PaddingBottom = UDim.new(0, Tokens.Space.S),
+					PaddingLeft = UDim.new(0, Tokens.Space.S),
+					PaddingRight = UDim.new(0, Tokens.Space.S),
+				},
+				Label(scope, {
+					Text = "NOT WIRED TO THE LIVE COMBAT STACK -- the resolver that used to consume this block was "
+						.. "removed in this week's combat rewrite and has not been rebuilt against the new engine. "
+						.. "Everything below is saved and validated, but has no effect on a real hit until a resolver "
+						.. "exists again.",
+					Scale = "Detail",
+					Color = Tokens.Color.Warning,
+					AutoHeight = true,
+					LineHeight = Tokens.Leading.Prose,
+					Size = UDim2.fromScale(1, 0),
+				}),
+			},
+		} :: Frame,
+
 		note(
 			"Reacts when this move knocks a target into the world -- a wall, the floor, a pillar, a prop. "
 				.. "Everything below is about proving the move actually put them there, and what happens when it did.",

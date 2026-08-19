@@ -48,6 +48,12 @@ export type ParkourToggleField =
 	| "LedgeAssist"
 	| "StepAssist"
 
+-- Which Types.ComfortSettings field each camera-comfort toggle writes. Its own union rather than more
+-- members on ParkourToggleField above, because the two write different sub-tables through different
+-- remotes -- letting one field name stand for both would make a typo in either list silently route to
+-- the wrong handler.
+export type ComfortToggleField = "CameraShake" | "FieldOfViewEffects"
+
 export type GameplayTabProps = {
 	Width: number,
 	Height: number,
@@ -60,6 +66,10 @@ export type GameplayTabProps = {
 	-- holds a partially-updated view of it.
 	Parkour: Fusion.Value<Types.ParkourSettings>,
 	OnParkourToggled: (field: ParkourToggleField, enabled: boolean) -> (),
+	-- The live camera-comfort block, written from outside by SettingsClient. Same one-Value-for-the-
+	-- whole-table shape and same reasoning as Parkour above.
+	Comfort: Fusion.Value<Types.ComfortSettings>,
+	OnComfortToggled: (field: ComfortToggleField, enabled: boolean) -> (),
 	OnSprintModeChanged: (mode: Types.SprintMode) -> (),
 }
 
@@ -126,6 +136,14 @@ local function GameplayTab(scope: Scope, props: GameplayTabProps): ScrollingFram
 		end)
 	end
 
+	-- Sibling to fieldValue above, against the Comfort block. Separate rather than generic over both
+	-- tables so each stays type-checked against its own field union.
+	local function comfortValue(field: ComfortToggleField): UsedAs<boolean>
+		return scope:Computed(function(use)
+			return (use(props.Comfort) :: { [string]: any })[field] == true
+		end)
+	end
+
 	local sprintMode = scope:Computed(function(use)
 		return use(props.Parkour).SprintMode :: string
 	end)
@@ -177,8 +195,31 @@ local function GameplayTab(scope: Scope, props: GameplayTabProps): ScrollingFram
 			Hint = "Speed zoom, slide framing, wall-run lean and landing dips.",
 			LayoutOrder = 6,
 		}),
+		-- Combat's camera motion, kept as its own two rows rather than folded into the parkour toggle
+		-- above: a player who turns parkour's camera work off has said something about traversal, not
+		-- about being hit, and before these existed there was no way to say the second thing at all.
+		-- Both are worded as what they DO rather than as an accessibility label, so they read as
+		-- ordinary options to everyone -- the hint carries the reason for anyone looking for it.
+		Toggle(scope, {
+			Label = "Combat camera shake",
+			Value = comfortValue("CameraShake"),
+			OnChanged = function(enabled: boolean)
+				props.OnComfortToggled("CameraShake", enabled)
+			end,
+			Hint = "The camera kick on hits, parries and posture breaks. Turn this off if camera motion is uncomfortable -- nothing about combat itself changes.",
+			LayoutOrder = 7,
+		}),
+		Toggle(scope, {
+			Label = "Impact field-of-view punches",
+			Value = comfortValue("FieldOfViewEffects"),
+			OnChanged = function(enabled: boolean)
+				props.OnComfortToggled("FieldOfViewEffects", enabled)
+			end,
+			Hint = "The short zoom that punctuates an impact. The gradual speed zoom while running is unaffected.",
+			LayoutOrder = 8,
+		}),
 
-		sectionLabel(scope, "MOVEMENT ASSISTS", 7),
+		sectionLabel(scope, "MOVEMENT ASSISTS", 9),
 	}
 
 	for index, row in ASSIST_ROWS do
@@ -192,7 +233,7 @@ local function GameplayTab(scope: Scope, props: GameplayTabProps): ScrollingFram
 					props.OnParkourToggled(field, enabled)
 				end,
 				Hint = row.Hint,
-				LayoutOrder = 7 + index,
+				LayoutOrder = 9 + index,
 			})
 		)
 	end

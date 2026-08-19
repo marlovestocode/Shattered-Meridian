@@ -5,7 +5,9 @@
 	Owns: the hitbox engine's own tunables. Deliberately NOT a section of Shared/Constants.lua --
 	this engine is standalone, and a module that can be dropped in or pulled out without editing the
 	game's central constants table is the concrete form of that. Nothing outside HitboxEngine/ reads
-	this file.
+	this file. The one exception is RootControlLockedAttribute below, which aliases onto
+	Constants.Attributes.RootControlLocked rather than duplicating the literal -- see that field's
+	own header for why.
 
 	THE SUBSTEP FLOOR is the important number here, so it gets the long explanation.
 
@@ -41,6 +43,14 @@
 	nor any gameplay number -- there is no damage, no cooldown and no range figure in this file,
 	because the engine those would belong to does not decide any of it.
 ]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- Only reference into Shared/Constants.lua this file makes: RootControlLockedAttribute below is an
+-- alias onto Constants.Attributes.RootControlLocked, not a second definition of the string, so this
+-- engine still ships the string it owns everywhere else without a second source of truth for the one
+-- name it shares with GrabSystem/DefenseSystem (see that field's own header).
+local Constants = require(ReplicatedStorage.Shared.Constants)
 
 local HitboxEngineConstants = {}
 
@@ -126,8 +136,10 @@ HitboxEngineConstants.CombatantTag = "Combatant"
 -- Client/Parkour/ParkourController.lua's resolveCombatOwned already polls this exact Attribute and
 -- hands the body to the AerialCombat state (priority 1000, pre-empts everything) while it is set, so
 -- a locking swing parks parkour with zero parkour-side changes. Renaming it here silently unparks the
--- movement system mid-swing.
-HitboxEngineConstants.RootControlLockedAttribute = "RootControlLocked"
+-- movement system mid-swing. Aliased onto Constants.Attributes.RootControlLocked rather than a second
+-- literal -- GrabSystem.lua reads the same Attribute through that table directly, and two independently
+-- typed copies of this string could rename out of sync with no compile error and no test failure.
+HitboxEngineConstants.RootControlLockedAttribute = Constants.Attributes.RootControlLocked
 
 -- Debug ------------------------------------------------------------------------------------------
 

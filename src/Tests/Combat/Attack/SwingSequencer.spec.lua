@@ -26,6 +26,18 @@ local FINISHER_STAGE = AttackConstants.Finisher.MinComboStage
 
 local spawned: { Model } = {}
 
+-- Sweep is amortised (Shared/AmortizedReclaim.lua): one call examines a fixed handful of records, not
+-- the whole table. A case that wants "every destroyed record is gone" therefore has to run the cursor
+-- far enough round to lap the table, which is what sweepFully does -- generously bounded above the
+-- number of attackers this whole file registers, so it always laps and always terminates.
+local SWEEP_BOUND = 512
+
+local function sweepFully(): ()
+	for _ = 1, SWEEP_BOUND do
+		SwingSequencer.Sweep()
+	end
+end
+
 -- A bare Model is all this module ever touches -- it keys by attacker and never reads a rig.
 local function makeAttacker(name: string): Model
 	local model = Instance.new("Model")
@@ -187,7 +199,7 @@ return function()
 			-- silently hand a player back the default weapon for standing still.
 			local attacker = makeAttacker("Patient")
 			SwingSequencer.SwapWeapon(attacker, T)
-			SwingSequencer.Sweep()
+			sweepFully()
 			expect(SwingSequencer.GetWeapon(attacker)).to.equal("Secondary")
 		end)
 	end)
@@ -322,9 +334,27 @@ return function()
 			local attacker = makeAttacker("Destroyed")
 			SwingSequencer.SwapWeapon(attacker, T)
 			attacker:Destroy()
-			SwingSequencer.Sweep()
+			sweepFully()
 			-- A fresh record is built on demand, back on the default weapon.
 			expect(SwingSequencer.GetWeapon(attacker)).to.equal(AttackConstants.Weapons.Default)
+		end)
+
+		it("reclaims a destroyed record within a bounded number of frames, not necessarily the next one", function()
+			local attacker = makeAttacker("Amortised")
+			SwingSequencer.SwapWeapon(attacker, T)
+			attacker:Destroy()
+			-- The contract Sweep actually offers now (Shared/AmortizedReclaim.lua): a fixed handful of
+			-- keys per call, so the number of calls needed scales with how much OTHER state this spec
+			-- file has registered -- but it is always bounded, and it always terminates in a state
+			-- where nothing destroyed is left. Asserting "one Sweep is enough" would be asserting the
+			-- full walk that was removed.
+			local sweeps = 0
+			while SwingSequencer.GetWeapon(attacker) ~= AttackConstants.Weapons.Default and sweeps < SWEEP_BOUND do
+				SwingSequencer.Sweep()
+				sweeps += 1
+			end
+			expect(SwingSequencer.GetWeapon(attacker)).to.equal(AttackConstants.Weapons.Default)
+			expect(sweeps < SWEEP_BOUND).to.equal(true)
 		end)
 
 		it("drops everything on Clear", function()

@@ -27,7 +27,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local Tokens = require(script.Parent.Parent.Tokens)
-local Panel = require(script.Parent.Parent.Components.Panel)
+local ModalScreen = require(script.Parent.Parent.Components.ModalScreen)
 local Label = require(script.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Components.Button)
 local Tab = require(script.Parent.Parent.Components.Tab)
@@ -53,6 +53,9 @@ export type SettingsHandle = {
 	-- like KeyboardBindings/Autorun above. One Value for the whole table rather than one per field --
 	-- see GameplayTab.lua's own note for why the tab derives its rows from a single source.
 	Parkour: Fusion.Value<Types.ParkourSettings>,
+	-- The camera-comfort accessibility block, written from outside by SettingsClient exactly like
+	-- Parkour above, and one Value for the whole table for the same reason.
+	Comfort: Fusion.Value<Types.ComfortSettings>,
 	-- Non-nil while SettingsClient is mid-capture for one specific row (listening for the next
 	-- InputBegan after that row's Rebind button was clicked) -- lets KeybindsTab.lua show "Press a
 	-- key..."/"Cancel" on exactly that row and nowhere else.
@@ -69,6 +72,9 @@ export type SettingsHandle = {
 	-- Settings_UpdateParkour remote behind it (see that constant's own header for the reasoning, and
 	-- for the validation that makes the field name safe to send).
 	ParkourToggled: RBXScriptSignal<(string, boolean)>,
+	-- Fires (field, enabled) -- one of the camera-comfort toggles was flipped. Same single-signal-with-
+	-- a-field-name shape as ParkourToggled above, behind the same kind of single remote.
+	ComfortToggled: RBXScriptSignal<(string, boolean)>,
 	-- Fires (mode) -- the sprint hold/toggle dropdown changed.
 	SprintModeChanged: RBXScriptSignal<Types.SprintMode>,
 }
@@ -112,6 +118,13 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 		StepAssist = false,
 		SprintMode = "Hold" :: Types.SprintMode,
 	} :: Types.ParkourSettings)
+	-- Seeded all-off for exactly the reason the parkour block above is, and it matters slightly more
+	-- here: "on" is the shipped state for both of these, so seeding them true would make an
+	-- unpopulated panel indistinguishable from a correctly-loaded one.
+	local comfort = scope:Value({
+		CameraShake = false,
+		FieldOfViewEffects = false,
+	} :: Types.ComfortSettings)
 	local listeningFor = scope:Value(nil :: { Device: Types.KeybindDevice, Action: Types.KeybindAction }?)
 	local selectedTab = scope:Value("Keybinds" :: SettingsTabName)
 
@@ -120,6 +133,7 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 	local autorunToggledEvent = Instance.new("BindableEvent")
 	local parkourToggledEvent = Instance.new("BindableEvent")
 	local sprintModeChangedEvent = Instance.new("BindableEvent")
+	local comfortToggledEvent = Instance.new("BindableEvent")
 
 	local function close(): ()
 		isOpen:set(false)
@@ -188,33 +202,21 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 		OnParkourToggled = function(field: GameplayTab.ParkourToggleField, enabled: boolean)
 			parkourToggledEvent:Fire(field, enabled)
 		end,
+		Comfort = comfort,
+		OnComfortToggled = function(field: GameplayTab.ComfortToggleField, enabled: boolean)
+			comfortToggledEvent:Fire(field, enabled)
+		end,
 		OnSprintModeChanged = function(mode: Types.SprintMode)
 			sprintModeChangedEvent:Fire(mode)
 		end,
 	})
 
-	local root = Panel(scope, {
-		Name = "Root",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(0.5, 0.5),
+	ModalScreen(scope, playerGui, {
+		Name = "Settings",
 		Size = UDim2.fromOffset(ROOT_WIDTH, ROOT_HEIGHT),
-		Elevated = true,
-		CornerAccent = true,
+		IsOpen = isOpen,
 
 		Children = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.L),
-				PaddingBottom = UDim.new(0, Tokens.Space.L),
-				PaddingLeft = UDim.new(0, Tokens.Space.L),
-				PaddingRight = UDim.new(0, Tokens.Space.L),
-			},
-			scope:New "UIListLayout" {
-				FillDirection = Enum.FillDirection.Vertical,
-				HorizontalAlignment = Enum.HorizontalAlignment.Left,
-				Padding = UDim.new(0, Tokens.Space.M),
-				SortOrder = Enum.SortOrder.LayoutOrder,
-			},
-
 			scope:New "Frame" {
 				Name = "Header",
 				Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
@@ -262,16 +264,6 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 		},
 	})
 
-	scope:New "ScreenGui" {
-		Name = "Settings",
-		ResetOnSpawn = false,
-		Enabled = isOpen,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		Parent = playerGui,
-
-		[Children] = root,
-	}
-
 	return {
 		IsOpen = isOpen,
 		StatusText = statusText,
@@ -279,11 +271,13 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 		GamepadBindings = gamepadBindings,
 		Autorun = autorun,
 		Parkour = parkour,
+		Comfort = comfort,
 		ListeningFor = listeningFor,
 		RebindClicked = rebindClickedEvent.Event,
 		ResetKeybindsClicked = resetKeybindsClickedEvent.Event,
 		AutorunToggled = autorunToggledEvent.Event,
 		ParkourToggled = parkourToggledEvent.Event,
+		ComfortToggled = comfortToggledEvent.Event,
 		SprintModeChanged = sprintModeChangedEvent.Event,
 	}
 end

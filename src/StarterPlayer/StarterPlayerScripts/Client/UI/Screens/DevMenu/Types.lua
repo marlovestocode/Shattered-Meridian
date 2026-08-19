@@ -192,6 +192,20 @@ export type ContentAreaHandle = {
 	VersionBannerText: Fusion.Value<string?>,
 	SpectatingActive: Fusion.Value<boolean>,
 	SpectateLockedTargetRequested: RBXScriptSignal,
+
+	-- Debug dummy (Spawn tab, Server/Systems/DebugDummySystem.lua) -- SpawnDebugDummyRequested/
+	-- DespawnAllDebugDummiesRequested are fire-and-forget, same shape as RollRareEmoteRequested above.
+	-- DummyGuardActive is SERVER-WIDE (one toggle for every currently-active dummy, not a per-instance
+	-- picker -- see DebugDummySystem.SetGuard's own header), seeded once on open (DevMenu_
+	-- GetDebugDummyState) and refreshed from whatever the server reports actually took effect, never
+	-- optimistically from the press -- same "never let the client guess a server-wide toggle" contract
+	-- HitboxDebugActive above already keeps. ActiveDummyCountDisplay is advisory only, same fetch/
+	-- refresh shape.
+	DummyGuardActive: Fusion.Value<boolean>,
+	ActiveDummyCountDisplay: Fusion.Value<number>,
+	SpawnDebugDummyRequested: RBXScriptSignal,
+	DespawnAllDebugDummiesRequested: RBXScriptSignal,
+	SetDummyGuardRequested: RBXScriptSignal<boolean>,
 }
 
 return {}

@@ -43,6 +43,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local MenusModule = require(script.Parent.Parent.UI.Screens.Menus)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local HotbarBindings = require(script.Parent.Parent.Combat.HotbarBindings)
+local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
 
 type MenusHandle = MenusModule.MenusHandle
 
@@ -175,9 +176,7 @@ function CharacterMenuClient.Start(handle: MenusHandle): ()
 	-- shape BountyTab.lua's own initial fetch uses.
 	local function refreshSheet(): ()
 		task.spawn(function()
-			local ok, result = pcall(function()
-				return getSheet:InvokeServer()
-			end)
+			local ok, result = RemoteInvoker.Invoke(getSheet)
 			if not ok then
 				logger:warn("Character sheet fetch failed", { error = tostring(result) })
 				return
@@ -192,9 +191,7 @@ function CharacterMenuClient.Start(handle: MenusHandle): ()
 
 	local function refreshCatalogue(): ()
 		task.spawn(function()
-			local ok, result = pcall(function()
-				return getCatalogue:InvokeServer()
-			end)
+			local ok, result = RemoteInvoker.Invoke(getCatalogue)
 			if not ok then
 				logger:warn("Art catalogue fetch failed", { error = tostring(result) })
 				setStatus(handle, "Couldn't reach the art trees -- try reopening.")
@@ -218,9 +215,7 @@ function CharacterMenuClient.Start(handle: MenusHandle): ()
 
 	handle.UnlockArtRequested:Connect(function(artId: string)
 		task.spawn(function()
-			local ok, result = pcall(function()
-				return unlockArt:InvokeServer(artId)
-			end)
+			local ok, result = RemoteInvoker.Invoke(unlockArt, artId)
 			if not ok then
 				logger:warn("Art unlock failed", { artId = artId, error = tostring(result) })
 				setStatus(handle, "Couldn't reach the server.")
@@ -242,9 +237,7 @@ function CharacterMenuClient.Start(handle: MenusHandle): ()
 
 	handle.EquipArtRequested:Connect(function(slot: number, artId: string?)
 		task.spawn(function()
-			local ok, result = pcall(function()
-				return equipArt:InvokeServer(slot, artId)
-			end)
+			local ok, result = RemoteInvoker.Invoke(equipArt, slot, artId)
 			if not ok then
 				logger:warn("Art equip failed", { slot = slot, artId = artId, error = tostring(result) })
 				setStatus(handle, "Couldn't reach the server.")

@@ -38,6 +38,7 @@ local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Parent.Parent.Components.Panel)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
 local Bar = require(script.Parent.Parent.Parent.Components.Bar)
+local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 local ClientStateModule = require(script.Parent.Parent.Parent.State.ClientState)
 
 local Children = Fusion.Children
@@ -157,7 +158,7 @@ local function attributeRow(
 				FillColor = Tokens.AttributeColor[field],
 				AnchorPoint = Vector2.new(1, 1),
 				Position = UDim2.new(1, 0, 1, -2),
-				Size = UDim2.new(0, 120, 0, ATTRIBUTE_BAR_HEIGHT),
+				Size = UDim2.fromOffset(120, ATTRIBUTE_BAR_HEIGHT),
 			}),
 		},
 	} :: Frame
@@ -232,7 +233,7 @@ local function CharacterTab(scope: Scope, props: CharacterTabProps): Frame
 
 	local identityCard = Panel(scope, {
 		Name = "Identity",
-		Size = UDim2.new(1, 0, 0, 0),
+		Size = UDim2.fromScale(1, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		Elevated = true,
 		CornerAccent = true,
@@ -324,7 +325,7 @@ local function CharacterTab(scope: Scope, props: CharacterTabProps): Frame
 
 	local attributesCard = Panel(scope, {
 		Name = "Attributes",
-		Size = UDim2.new(1, 0, 0, 0),
+		Size = UDim2.fromScale(1, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		LayoutOrder = 2,
 		Children = attributeChildren,
@@ -376,7 +377,7 @@ local function CharacterTab(scope: Scope, props: CharacterTabProps): Frame
 
 	local standingCard = Panel(scope, {
 		Name = "Standing",
-		Size = UDim2.new(1, 0, 0, 0),
+		Size = UDim2.fromScale(1, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		LayoutOrder = 3,
 
@@ -418,19 +419,11 @@ local function CharacterTab(scope: Scope, props: CharacterTabProps): Frame
 		LayoutOrder = props.LayoutOrder,
 
 		[Children] = {
-			scope:New "ScrollingFrame" {
+			ScrollArea(scope, {
 				Name = "Body",
 				Size = UDim2.fromScale(1, 1),
-				BackgroundTransparency = 1,
-				BorderSizePixel = 0,
-				ScrollingDirection = Enum.ScrollingDirection.Y,
-				AutomaticCanvasSize = Enum.AutomaticSize.Y,
-				CanvasSize = UDim2.fromScale(0, 0),
-				ScrollBarThickness = 3,
-				ScrollBarImageColor3 = Tokens.Border.Standard.Color,
-				ScrollBarImageTransparency = Tokens.Border.Standard.Transparency,
 
-				[Children] = {
+				Children = {
 					scope:New "UIPadding" {
 						PaddingRight = UDim.new(0, Tokens.Space.S),
 					},
@@ -458,7 +451,7 @@ local function CharacterTab(scope: Scope, props: CharacterTabProps): Frame
 					attributesCard,
 					standingCard,
 				},
-			},
+			}),
 		},
 	} :: Frame
 end

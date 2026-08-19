@@ -40,7 +40,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local Tokens = require(script.Parent.Parent.Tokens)
-local Panel = require(script.Parent.Parent.Components.Panel)
+local ModalScreen = require(script.Parent.Parent.Components.ModalScreen)
 local Label = require(script.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Components.Button)
 local Tab = require(script.Parent.Parent.Components.Tab)
@@ -201,28 +201,12 @@ function Menus.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientStat
 		LayoutOrder = 3,
 	})
 
-	local root = Panel(scope, {
-		Name = "Root",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(0.5, 0.5),
+	ModalScreen(scope, playerGui, {
+		Name = "CharacterMenu",
 		Size = UDim2.fromOffset(ROOT_WIDTH, ROOT_HEIGHT),
-		Elevated = true,
-		CornerAccent = true,
+		IsOpen = isOpen,
 
 		Children = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.L),
-				PaddingBottom = UDim.new(0, Tokens.Space.L),
-				PaddingLeft = UDim.new(0, Tokens.Space.L),
-				PaddingRight = UDim.new(0, Tokens.Space.L),
-			},
-			scope:New "UIListLayout" {
-				FillDirection = Enum.FillDirection.Vertical,
-				HorizontalAlignment = Enum.HorizontalAlignment.Left,
-				Padding = UDim.new(0, Tokens.Space.M),
-				SortOrder = Enum.SortOrder.LayoutOrder,
-			},
-
 			scope:New "Frame" {
 				Name = "Header",
 				Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
@@ -271,16 +255,6 @@ function Menus.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientStat
 			}),
 		},
 	})
-
-	scope:New "ScreenGui" {
-		Name = "CharacterMenu",
-		ResetOnSpawn = false,
-		Enabled = isOpen,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		Parent = playerGui,
-
-		[Children] = root,
-	}
 
 	return {
 		IsOpen = isOpen,

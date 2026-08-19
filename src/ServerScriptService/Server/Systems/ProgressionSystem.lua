@@ -17,9 +17,10 @@
 	computes it.
 
 	Note: the documented "typical progression flow" in software-architecture.md references
-	RewardSystem, MeridianSystem, and AchievementSystem as upstream/downstream collaborators --
-	none of those exist yet in this codebase. This module's Init() has nothing to route to until
-	they (or their equivalents) are built.
+	RewardSystem, MeridianSystem, and AchievementSystem as upstream/downstream collaborators.
+	MeridianSystem is real and live; RewardSystem and AchievementSystem exist as files but, like
+	this module, are still empty Init()-only stubs (see Main.server.lua's boot list) -- this
+	module's Init() has nothing to route to until their bodies are built.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")

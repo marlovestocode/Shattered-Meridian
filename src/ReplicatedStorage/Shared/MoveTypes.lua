@@ -125,6 +125,70 @@ export type MoveProjectileConfig = {
 	MaxRange: number, -- studs
 }
 
+-- v1's only grab-authoring primitive -- see GrabSystem.lua (Server/Combat/Grab/) for the runtime
+-- this drives. Exactly one sibling of MoveKnockback above: an "instead of ordinary knockback, hold
+-- and throw" reaction to a landed Clean/Backstab/GuardBroken hit, authored on the move rather than
+-- invented as a new attack kind (see that module's own header for the whole design).
+--
+-- AttachOffset is NOT author-editable -- see PropertyEditor.lua's own Grab section header -- it is
+-- always GrabConstants.Defaults.AttachOffset, never round-tripped from a client-submitted CFrame the
+-- way the move's own top-level Offset deliberately never is either. It rides on this struct anyway
+-- (rather than being read straight from GrabConstants at hold time) so GrabSystem never has to import
+-- an authoring-side constants module to know where to pin a victim -- the same "everything a runtime
+-- needs travels with the definition" reasoning MoveKnockback/MoveProjectileConfig already follow.
+export type MoveGrabConfig = {
+	AttachOffset: CFrame,
+	-- Seconds the hold survives with no Throw input before GrabSystem drops the victim on its own --
+	-- see GrabSystem.Step's own header on why a hold can never be indefinite.
+	HoldSeconds: number,
+	-- Vertical/horizontal legs of the velocity impulse GrabSystem.Throw applies to the victim's own
+	-- body, in the attacker's facing direction -- real Roblox gravity does the rest of the arc.
+	ThrowUpVelocity: number,
+	ThrowHorizontalVelocity: number,
+	-- Health removed from whoever the thrown victim's body collides with on landing. 0 is legal (a
+	-- throw that only hurts the person thrown).
+	ThrowImpactDamage: number,
+	-- Health removed from the thrown victim itself on landing/collision -- the "that landing hurt"
+	-- cost of being thrown at all.
+	ThrowSelfDamage: number,
+}
+
+-- v1's only slam-authoring primitive -- see Server/Combat/Slam/SlamSystem.lua for the runtime this
+-- drives. A sibling of MoveGrabConfig immediately above: an "instead of ordinary knockback, drive the
+-- target into the ground" reaction to a landed Clean/Backstab/GuardBroken hit, authored on the move
+-- rather than invented as a new attack kind. Unlike Grab, a slam has no ATTACKER-side state at all --
+-- the DEFENDER is who gets driven down, nobody holds them -- so this never widens GrabSystem.CanAttack's
+-- three-way split; it earns its own CanAttack gate instead (SlamSystem.CanAttack), asked alongside it in
+-- AttackRequestSystem.Throw.
+export type MoveSlamConfig = {
+	-- Downward speed (studs/sec) SlamSystem drives the target's own body at once the hit lands -- real
+	-- Roblox gravity keeps adding to this over the fall, the same "one velocity write, then let physics
+	-- carry it" contract GrabSystem.Throw already uses for a thrown victim's own arc.
+	DownVelocity: number,
+	-- Seconds the target stays unable to move or act AFTER ground impact -- see SlamSystem.CanAttack's
+	-- own header for why this is a fourth CanAttack-shaped gate rather than folded into GrabSystem's.
+	-- 0 is legal (a slam with no knockdown at all, just the drop).
+	KnockdownSeconds: number,
+	-- Angular velocity (rad/sec) SlamSystem applies once, at the moment the descent begins, biasing the
+	-- target's tumble face-first into the ground -- the downward-launch counterpart of the deleted
+	-- RagdollController's own launch-spin bias (Constants.Combat.Finisher.Uppercut.LaunchBackwardSpin's
+	-- own header describes the same technique for the opposite direction). 0 is legal (a straight drop,
+	-- no spin).
+	FaceDownSpin: number,
+	-- Bonus health removed from the target on ground contact, via Humanoid:TakeDamage directly --
+	-- exactly the same self-contained-side-effect shape GrabConstants.Defaults.ThrowImpactDamage/
+	-- ThrowSelfDamage already take, rather than a second trip back through HitboxEngine/DefenseSystem/
+	-- DamageResolver for one extra number. nil/0 is legal (a slam that only costs the knockdown, no
+	-- extra health).
+	--
+	-- Deliberately NO ImpactPostureDamage sibling: posture is DefenseSystem's own resource, drained only
+	-- through GuardMeter.DrainFor at contact time -- SlamSystem has no seam back into that pool (and
+	-- inventing one would widen a boundary this combat stack treats as a design smell, the same reason
+	-- GrabSystem.lua's own header gives for why IT never touches posture either), so an impact "posture"
+	-- cost would have nowhere honest to go.
+	ImpactDamage: number?,
+}
+
 -- The Object Stun schema itself lives in Types.lua, not here, and these three are pure aliases.
 -- Unlike Movement/Knockback/Projectile above (which are authored here and projected onto
 -- HitboxAttackDefinition by hand), an ObjectStun config is consumed by a SERVER module that never
@@ -227,6 +291,24 @@ export type MoveDefinition = {
 	-- nil = no effect (a pure stationary hitbox, identical to today's weapon-stage behavior).
 	Movement: MoveMovementGrant?,
 	Knockback: MoveKnockback?,
+	-- nil = a landed hit applies its ordinary Knockback (or none) exactly as before. Present = a
+	-- landed Clean/Backstab/GuardBroken hit holds the victim instead -- see MoveGrabConfig's own
+	-- header. Mutually meaningful alongside Knockback (both may be authored; GrabSystem's hold takes
+	-- over from whatever knockback velocity would otherwise have been resolved, the same way
+	-- MoveKnockback.StartsAirCombo already layers a second effect onto one resolved hit) but a move
+	-- rarely wants both -- the Move Editor's Grab toggle does not require Knockback to be off first.
+	Grab: MoveGrabConfig?,
+	-- nil = an ordinary landed hit, exactly as before. Present = a landed Clean/Backstab/GuardBroken hit
+	-- drives the DEFENDER into the ground -- see MoveSlamConfig's own header. A sibling of Grab, not a
+	-- variant of it: a move can author Slam without Grab (AirSlam does, and is this field's only
+	-- authored user today), and authoring both on one move is structurally legal but UNGUARDED -- both
+	-- SlamSystem.beginSlam and GrabSystem.beginHold would independently try to PlatformStand +
+	-- SetNetworkOwner the same defender's root and drive it two different ways. Neither module depends
+	-- on the other (by design -- see GrabSystem.lua's own header on why this stack keeps modules from
+	-- knowing about each other), so this combination is left unauthored rather than adding a
+	-- cross-module guard nothing currently needs; flagged here so the day a move wants both, that gap is
+	-- the first thing to close.
+	Slam: MoveSlamConfig?,
 	-- nil = an ordinary body-relative melee hitbox (v1's original behavior, unchanged). Present =
 	-- a traveling projectile -- see MoveProjectileConfig's own header.
 	Projectile: MoveProjectileConfig?,
@@ -329,6 +411,11 @@ function MoveTypes.Clone(move: MoveDefinition): MoveDefinition
 
 		Movement = if move.Movement then table.clone(move.Movement) else nil,
 		Knockback = if move.Knockback then table.clone(move.Knockback) else nil,
+		-- Flat table.clone is correct here and not an oversight, same reasoning as Art below: unlike
+		-- ObjectStun, MoveGrabConfig nests nothing (AttachOffset is an immutable CFrame value type).
+		Grab = if move.Grab then table.clone(move.Grab) else nil,
+		-- Flat table.clone is correct here too -- MoveSlamConfig nests nothing, same shape as Grab.
+		Slam = if move.Slam then table.clone(move.Slam) else nil,
 		Projectile = if move.Projectile then table.clone(move.Projectile) else nil,
 		ObjectStun = objectStun,
 		-- Flat table.clone is correct here and not an oversight: MoveArtBinding nests nothing, unlike
@@ -442,6 +529,11 @@ function MoveTypes.Fingerprint(move: MoveDefinition): string
 
 		Movement = move.Movement,
 		Knockback = move.Knockback,
+		-- AttachOffset rides along even though it is never author-edited (see MoveGrabConfig's own
+		-- header) -- it is still part of what a Save persists, so a digest that ignored it would miss
+		-- a change to GrabConstants.Defaults.AttachOffset re-applied by a fresh toggle-on/off cycle.
+		Grab = move.Grab,
+		Slam = move.Slam,
 		Projectile = move.Projectile,
 		ObjectStun = move.ObjectStun,
 	})
@@ -540,6 +632,12 @@ export type DamageProfile = {
 	Damage: number,
 	PostureDamage: number,
 	Knockback: MoveKnockback?,
+	-- Threaded alongside Knockback for the identical reason: DamageResolver.Resolve sets
+	-- DamageResult.Grab straight from this field in the same Clean/Backstab/GuardBroken branches that
+	-- already set Knockback, and GrabSystem is a DamageSystem.OnApplied subscriber, never a Move
+	-- Creation System caller -- so this is the seam that carries an authored Grab from the move down
+	-- to the layer that acts on it.
+	Grab: MoveGrabConfig?,
 }
 
 -- The Move Creation System authors twelve shapes; the engine understands seven. The five extra were
@@ -715,6 +813,7 @@ function MoveTypes.ToEngineAttackDefinition(
 		Damage = move.Damage,
 		PostureDamage = move.PostureDamage,
 		Knockback = move.Knockback,
+		Grab = move.Grab,
 	}
 
 	return definition, profile, notes

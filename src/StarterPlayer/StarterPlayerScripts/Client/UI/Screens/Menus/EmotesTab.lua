@@ -35,6 +35,7 @@ local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
 local Tab = require(script.Parent.Parent.Parent.Components.Tab)
 local Button = require(script.Parent.Parent.Parent.Components.Button)
+local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 local ClientStateModule = require(script.Parent.Parent.Parent.State.ClientState)
 
 local Children = Fusion.Children
@@ -177,20 +178,12 @@ local function EmotesTab(scope: Scope, props: EmotesTabProps): Frame
 					return not use(hasUnlocked)
 				end),
 			}),
-			scope:New "ScrollingFrame" {
+			ScrollArea(scope, {
 				Name = "Unlocked",
 				Size = UDim2.new(1, 0, 1, -(SLOT_ROW_HEIGHT * math.ceil(EmoteConstants.LoadoutSize / 4) + 100)),
-				BackgroundTransparency = 1,
-				BorderSizePixel = 0,
-				ScrollingDirection = Enum.ScrollingDirection.Y,
-				AutomaticCanvasSize = Enum.AutomaticSize.Y,
-				CanvasSize = UDim2.fromScale(0, 0),
-				ScrollBarThickness = 3,
-				ScrollBarImageColor3 = Tokens.Border.Standard.Color,
-				ScrollBarImageTransparency = Tokens.Border.Standard.Transparency,
 				LayoutOrder = 6,
 
-				[Children] = {
+				Children = {
 					scope:New "UIPadding" {
 						PaddingRight = UDim.new(0, Tokens.Space.S),
 					},
@@ -202,7 +195,7 @@ local function EmotesTab(scope: Scope, props: EmotesTabProps): Frame
 					},
 					emoteButtons,
 				},
-			},
+			}),
 		},
 	} :: Frame
 end

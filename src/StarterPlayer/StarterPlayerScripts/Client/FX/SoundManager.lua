@@ -35,12 +35,17 @@
 	several distinct sounds can be registered under several names, each restricted to its own slice by
 	the engine rather than by a stop timer.
 
+	PlayLooped/StopLooped take an optional fade duration, a self-contained TweenService fade rather
+	than a per-frame ramp -- see PlayLooped's own comment for why that is a different shape from
+	SetLoopedVolume's "the caller eases every frame" contract, and not a replacement for it.
+
 	2D-only (SoundService-parented) for now -- positional/3D audio (a Sound parented to a world
 	Part) is a different concern nothing has asked for yet; adding it later is a new Register()
 	option, not a rewrite of this module's shape.
 ]]
 
 local SoundService = game:GetService("SoundService")
+local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -61,6 +66,11 @@ type RegisteredSound = {
 	poolSize: number,
 	instances: { Sound },
 	nextIndex: number,
+	-- The in-flight fade Tween for the LOOPED slot (index 1), if PlayLooped/StopLooped's optional fade
+	-- is in use -- see those functions' own comments for why this has to be tracked rather than fired
+	-- and forgotten: a fade-out that is still running when a fresh PlayLooped arrives must be
+	-- cancelled, or its own Completed handler would stop the loop that was just restarted.
+	loopTween: Tween?,
 }
 
 local registeredSounds: { [string]: RegisteredSound } = {}
@@ -103,7 +113,8 @@ function SoundManager.Register(name: string, definition: SoundDefinition): ()
 		)
 	end
 
-	registeredSounds[name] = { definition = definition, poolSize = poolSize, instances = {}, nextIndex = 1 }
+	registeredSounds[name] =
+		{ definition = definition, poolSize = poolSize, instances = {}, nextIndex = 1, loopTween = nil }
 	logger:debug("Sound registered", { name = name, hasSoundId = definition.SoundId ~= "", poolSize = poolSize })
 end
 
@@ -227,9 +238,16 @@ end
 -- setter here, the same division of labor CombatAudio.lua already has with Play(). Always pool slot
 -- 1 -- a loop is singular by definition, pooling it would be nonsensical.
 --
--- Idempotent: calling this while already playing is a no-op rather than restarting the loop from
--- the beginning.
-function SoundManager.PlayLooped(name: string): ()
+-- Idempotent: calling this while already playing is a no-op (beyond restoring full volume -- see
+-- below) rather than restarting the loop from the beginning.
+--
+-- `fadeInSeconds` is optional and self-contained, unlike SetLoopedVolume's "the caller eases every
+-- frame" contract: a discrete "ease in over this long, once, on start" is a different shape from a
+-- continuously-driven value like wind intensity, and fits a fire-and-forget TweenService tween rather
+-- than asking every caller that just wants a soft start to grow its own Heartbeat loop
+-- (Client/FX/SlideAudio.lua is the first user -- a slide has no per-frame owner the way flight's
+-- wind-intensity tracking does).
+function SoundManager.PlayLooped(name: string, fadeInSeconds: number?): ()
 	local registered = registeredSounds[name]
 	if not registered then
 		logger:warn("PlayLooped requested for unregistered sound", { name = name })
@@ -240,21 +258,74 @@ function SoundManager.PlayLooped(name: string): ()
 		return
 	end
 
+	-- Cancel any fade-out still in flight from a very recent StopLooped -- otherwise its own Completed
+	-- handler would stop the loop being (re)started here the moment that old tween finishes.
+	if registered.loopTween then
+		registered.loopTween:Cancel()
+		registered.loopTween = nil
+	end
+
 	local sound = getOrCreateInstanceAt(name, registered, 1)
 	sound.Looped = true
-	if not sound.IsPlaying then
-		sound:Play()
-		logger:debug("Looped sound started", { name = name })
+	if sound.IsPlaying then
+		-- Cancelling the fade-out above can leave volume mid-fade; restore it rather than leaving a
+		-- loop that is technically "playing" but quiet.
+		sound.Volume = registered.definition.Volume
+		return
 	end
+
+	if fadeInSeconds and fadeInSeconds > 0 then
+		sound.Volume = 0
+		sound:Play()
+		local tween =
+			TweenService:Create(sound, TweenInfo.new(fadeInSeconds), { Volume = registered.definition.Volume })
+		registered.loopTween = tween
+		tween:Play()
+	else
+		sound.Volume = registered.definition.Volume
+		sound:Play()
+	end
+	logger:debug("Looped sound started", { name = name, fadeInSeconds = fadeInSeconds })
 end
 
-function SoundManager.StopLooped(name: string): ()
+-- `fadeOutSeconds` is optional for the identical reason PlayLooped's own is -- see its comment. The
+-- actual :Stop() is deferred to the tween's Completed event rather than fired immediately, so the
+-- fade is heard rather than just seen in the volume property; guarded on PlaybackState.Completed
+-- specifically so a tween CANCELLED by a fresh PlayLooped (above) never stops the loop that
+-- superseded it.
+function SoundManager.StopLooped(name: string, fadeOutSeconds: number?): ()
 	local registered = registeredSounds[name]
 	if not registered or not registered.instances[1] then
 		return
 	end
-	registered.instances[1]:Stop()
-	logger:debug("Looped sound stopped", { name = name })
+	if registered.loopTween then
+		registered.loopTween:Cancel()
+		registered.loopTween = nil
+	end
+
+	local sound = registered.instances[1]
+	if not sound.IsPlaying then
+		return
+	end
+
+	if fadeOutSeconds and fadeOutSeconds > 0 then
+		local tween = TweenService:Create(sound, TweenInfo.new(fadeOutSeconds), { Volume = 0 })
+		registered.loopTween = tween
+		tween.Completed:Connect(function(playbackState: Enum.PlaybackState)
+			if playbackState ~= Enum.PlaybackState.Completed then
+				return
+			end
+			sound:Stop()
+			-- Restored immediately rather than left at 0, so the NEXT PlayLooped (which skips straight
+			-- to full volume when it has no fade of its own) does not inherit a silent instance.
+			sound.Volume = registered.definition.Volume
+			registered.loopTween = nil
+		end)
+		tween:Play()
+	else
+		sound:Stop()
+	end
+	logger:debug("Looped sound stopped", { name = name, fadeOutSeconds = fadeOutSeconds })
 end
 
 -- Direct volume write, no tween -- the caller is expected to already be easing its own target value

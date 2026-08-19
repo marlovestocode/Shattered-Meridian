@@ -921,6 +921,20 @@ export type HitboxAttackDefinition = {
 		-- copy instead of needing a rebuild.
 		StartsAirCombo: boolean?,
 	}?,
+	-- Additive, nil for every hand-authored Constants.lua definition except AirSlam -- see
+	-- MoveTypes.MoveSlamConfig's own header for the authoring-side shape this mirrors by hand (the same
+	-- "duplicated inline rather than shared" convention Knockback above already keeps, since Types.lua
+	-- does not depend on MoveTypes.lua to stay a leaf module). DefaultMoveRegistry.toMoveDefinition
+	-- reads this straight off the live Constants table and projects it onto MoveDefinition.Slam
+	-- unmodified -- there is no admin-editable snapshot for it (DefaultMoveRegistry.MutableSnapshot has
+	-- no Slam field), so retuning it means editing Constants.lua directly. Consumed by
+	-- Server/Combat/Slam/SlamSystem.lua, a DamageSystem.OnApplied subscriber exactly like GrabSystem.
+	Slam: {
+		DownVelocity: number,
+		KnockdownSeconds: number,
+		FaceDownSpin: number,
+		ImpactDamage: number?,
+	}?,
 	-- Additive, nil for every hand-authored Constants.lua definition and every existing standalone
 	-- attack (DashPunch/DashHit/AirSlam) -- those all stay body-relative swings. Set only by
 	-- MoveRegistryManager.ToHitboxAttackDefinition for a Move Creation System move authored as a
@@ -1059,6 +1073,12 @@ export type KeybindAction =
 	-- dedicated key the same way Roll is, for the same reason: reachable without leaving the movement
 	-- keys, and no risk of a stray double-jump accidentally firing it.
 	| "Leap"
+	-- The Grab layer's follow-up throw (Client/Combat/GrabInputClient.lua via
+	-- Server/Combat/Grab/GrabSystem.lua). Fires Grab_Throw only while the local player's own Grabbing
+	-- Attribute is true -- see Constants.Attributes.Grabbing's own header -- the same "the client
+	-- declines to send what it can already see is illegal" convention ParkourOwnership.OwnsBody's
+	-- consumers already use.
+	| "GrabThrow"
 
 -- Exactly one of KeyCode/UserInputType is populated -- KeyCode for ordinary keyboard keys,
 -- UserInputType for inputs with no KeyCode equivalent (Roblox only reports mouse buttons via
@@ -1092,6 +1112,40 @@ export type PlayerSettings = {
 	-- preference belonging to sprint, and this file's own "a future toggle is just one more field
 	-- here" note still governs anything that isn't part of a group like this one.
 	Parkour: ParkourSettings,
+	-- Visual-comfort / accessibility preferences. A nested group for the same reason Parkour above is
+	-- one: these belong to a single concern, are surfaced as a single Settings section, and are pushed
+	-- to a single pair of consumers.
+	--
+	-- Deliberately NOT folded into Parkour, even though ParkourSettings already carries a CameraEffects
+	-- toggle. That field gates Client/Parkour/ParkourCamera.lua specifically -- speed zoom, slide
+	-- framing, wall-run lean, landing dips -- and switching parkour itself off is a reasonable thing to
+	-- want to do without also giving up on combat being readable, or vice versa. A player who gets
+	-- motion sick is not asking about parkour; they are asking about the camera, everywhere. Keeping
+	-- this its own group is also what makes it the obvious home for every accessibility toggle added
+	-- after this one, rather than each finding a different existing group to hide in.
+	Comfort: ComfortSettings,
+}
+
+-- Camera-comfort preferences (Server/Systems/SettingsSystem.lua persists them,
+-- Client/Settings/SettingsClient.lua applies them). Both default to true -- the game ships with its
+-- effects on, and this is an opt-OUT for players who need one, never a feature gated behind a setting
+-- most players will never open.
+--
+-- These are the two camera effects with no player-facing switch of any kind before this: combat hit
+-- shake and the FOV punches that ride along with it. Parkour's own camera work was already opt-out
+-- via ParkourSettings.CameraEffects, so a player sensitive to camera motion could disable every
+-- traversal effect in the game and still be shaken by every hit they took, with nothing in the menu
+-- to explain why or turn it off.
+export type ComfortSettings = {
+	-- Client/FX/CameraShake.lua -- the rotational shake played on hits, parries and posture breaks.
+	-- Off means the shake is never applied; it does not mean the events stop firing, so nothing about
+	-- hit registration, feedback text or audio changes.
+	CameraShake: boolean,
+	-- Client/FX/FOVOffset.lua's Punch path -- the short field-of-view kicks layered onto impacts.
+	-- Continuous FOV slots (the run's speed zoom) are NOT affected: those are a legible readout of how
+	-- fast the player is going, they ease rather than snap, and they are the part of the FOV system
+	-- that is information rather than punctuation.
+	FieldOfViewEffects: boolean,
 }
 
 -- The player's own movement preferences (Server/Systems/SettingsSystem.lua persists them,
@@ -1170,6 +1224,20 @@ export type DevMenuActionResult = {
 export type DevMenuHitboxDebugResult = {
 	Success: boolean,
 	Enabled: boolean?,
+	Reason: string?,
+}
+
+-- Result of DevMenu_GetDebugDummyState / DevMenu_SetDummyGuard (Server/Systems/DebugDummySystem.lua)
+-- -- same "carry back the current/updated value so the client can refresh without a second round
+-- trip" reasoning as DevMenuHitboxDebugResult above. GuardEnabled is SERVER-WIDE (applies to every
+-- active debug dummy at once, not a per-dummy setting -- see DebugDummySystem.SetGuard's own header),
+-- the same "one toggle, no per-instance picker" shape HitboxDebugActive already uses for its own
+-- server-wide visualiser. ActiveCount is advisory only (how many dummies currently exist), never a
+-- gameplay-relevant number -- purely so the Spawn tab can show "3 active" without a second remote.
+export type DevMenuDebugDummyStateResult = {
+	Success: boolean,
+	GuardEnabled: boolean?,
+	ActiveCount: number?,
 	Reason: string?,
 }
 

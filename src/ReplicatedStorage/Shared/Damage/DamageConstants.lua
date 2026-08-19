@@ -38,16 +38,31 @@ DamageConstants.Hitstun = {
 	-- block or a parry, and two combatants who connect in the same batch both lose their swing, which
 	-- is what a trade should mean.
 	--
-	-- 0.45 borrows only the ORDER OF MAGNITUDE from the deleted system's HitStunDuration (0.6). It is
-	-- not a re-derivation: that number was measured against a move set that no longer exists, and the
-	-- real constraint is its relationship to the rebuilt move set's WindupSeconds, which cannot be
-	-- checked until real attacks exist. Deliberately shorter than the old value because it now cancels
-	-- swings as well as gating them, so it does strictly more per second than its predecessor did.
+	-- RAISED FROM 0.45 TO 0.65 once real attacks existed to check it against. 0.45 borrowed only the
+	-- ORDER OF MAGNITUDE from the deleted system's HitStunDuration (0.6) as a placeholder -- it was
+	-- never a re-derivation, because the real constraint (its relationship to the rebuilt move set's
+	-- WindupSeconds) could not be checked until the rebuilt move set existed. With the real Basic/Heavy
+	-- stages authored (Constants.Combat.Weapons -- Basic windups 0.14-0.18, Heavy 0.35/0.6), 0.45 read
+	-- as a flinch rather than a stun in play: a hit landed and the victim's next legal action arrived
+	-- before the attacker's own follow-up swing had even finished its windup, so "you got hit" cost
+	-- less than a single beat of pressure. 0.65 is a full, felt lockout a player cannot mistake for
+	-- ordinary recovery -- comfortably past every Basic windup on both weapons and past Primary Heavy's
+	-- own 0.6, so a stunned combatant reliably eats at least one more committed attack rather than
+	-- occasionally slipping out from under it by a few frames of luck.
+	--
+	-- STILL SHORTER than the deleted system's 0.6 HitStunDuration despite landing above it now, in the
+	-- sense that matters: this one also cancels the victim's own in-flight swing (see this table's own
+	-- header), which that predecessor never did. Longer in seconds, but strictly more per second than
+	-- its predecessor was, exactly as the previous 0.45 already reasoned -- raising the number further
+	-- does not undo that comparison, it just moves where the two curves cross.
 	--
 	-- The bound that keeps it fair: every hit that causes hitstun was itself avoidable -- blockable,
 	-- parryable, or duckable by spacing -- and the telegraph is the same Windup every attack already
-	-- authors. It is short and fixed, so no chain of them is an infinite stun.
-	Seconds = 0.45,
+	-- authors. It is short and fixed, so no chain of them is an infinite stun. And it widens rather than
+	-- threatens AttackConstants.Input.BufferSeconds' own margin below it (0.35): that constant's whole
+	-- job is expiring a press buffered at the moment of being hit rather than firing it the instant
+	-- hitstun clears, and every second this number gains is a second more room for that rule to hold.
+	Seconds = 0.65,
 }
 
 -- Combo ---------------------------------------------------------------------------------------------
@@ -131,6 +146,20 @@ DamageConstants.AttackerLunge = {
 	-- RunSystem.lua's own "exactly one thing may write that property" rule). A felt "the punch has
 	-- weight" cue, not a real gap-closer: short enough that its actual travelled distance stays a
 	-- couple of studs at most. false makes every M1 behave exactly as it did before this existed.
+	--
+	-- ONLY REACHES BODIES THE SERVER OWNS, which in practice is bots and training dummies. A player's
+	-- character is network-owned by that player's own client: the client simulates it and replicates
+	-- the result, so this Humanoid:Move() write lands on the server's follower copy and is replaced by
+	-- the owner's next replicated frame. It moves no player, silently, with nothing logged anywhere --
+	-- which is exactly how it read as working. Left enabled rather than deleted because for an NPC it
+	-- is still the correct and only place to write this.
+	--
+	-- The player-facing half is AttackConstants.Presentation.SwingLunge, driven from
+	-- Client/Combat/SwingLunge.lua on the acting client. Two mechanisms rather than one is not the
+	-- "one system, two configs" trap: they run on different machines for different bodies and neither
+	-- can reach the other's, so there is no pair of numbers here that can silently disagree. They ARE
+	-- deliberately different moments -- this one fires on a landed hit, that one on the throw -- see
+	-- that constant's own comment for why the throw is the right moment for a body you can see.
 	Enabled = true,
 	DurationSeconds = 0.08,
 }

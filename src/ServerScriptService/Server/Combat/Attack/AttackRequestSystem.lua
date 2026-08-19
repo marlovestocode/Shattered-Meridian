@@ -30,11 +30,12 @@
 	the layer that actually throws things is the natural home for "who is a fighter the engine knows
 	about." A bot or a dummy still calls HitboxEngine.RegisterCombatant directly, exactly as before.
 
-	TWO GATES, NOT ONE, AND NEITHER SYSTEM KNOWS THE OTHER EXISTS. DefenseSystem.CanAttack answers
-	"are you staggered, broken, or currently guarding"; DamageSystem.CanAttack answers "are you reeling
-	from a hit." Two questions, two owners. This module is the only place they are asked together, and
-	it deliberately does not merge them into a shared notion of "can act" that both would then have to
-	agree on.
+	THREE GATES, NOT ONE, AND NO TWO SYSTEMS KNOW EACH OTHER EXIST. DefenseSystem.CanAttack answers "are
+	you staggered, broken, or currently guarding"; DamageSystem.CanAttack answers "are you reeling from
+	a hit"; GrabSystem.CanAttack answers "is a grab currently committing your body, on either end of
+	it." Three questions, three owners. This module is the only place they are asked together, and it
+	deliberately does not merge them into a shared notion of "can act" that all three would then have
+	to agree on.
 
 	REFUSAL IS ORDINARY, AND MOST OF IT IS BUFFERED RATHER THAN DROPPED. A press that arrives a few
 	milliseconds before recovery ends is not a mistake worth punishing -- it is the single most common
@@ -86,17 +87,24 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
+local AmortizedReclaim = require(ReplicatedStorage.Shared.AmortizedReclaim)
+local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnership)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local SwingSequencer = require(script.Parent.SwingSequencer)
 local AttackCatalog = require(script.Parent.Parent.AttackCatalog)
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
 local DefenseSystem = require(script.Parent.Parent.Defense.DefenseSystem)
+local GrabSystem = require(script.Parent.Parent.Grab.GrabSystem)
 local HitboxEngine = require(script.Parent.Parent.HitboxEngine.HitboxEngine)
 local AdminConfig = require(script.Parent.Parent.Parent.Config.AdminConfig)
+local ArtSystem = require(script.Parent.Parent.Parent.Systems.ArtSystem)
 
 type AttackRequest = AttackTypes.AttackRequest
 type AttackStartedPayload = AttackTypes.AttackStartedPayload
@@ -112,6 +120,11 @@ local combatantIds: { [Model]: number } = {}
 -- drop in one assignment when their life ends, rather than needing a sweep over a flat composite key.
 local cooldownUntil: { [Model]: { [string]: number } } = {}
 
+-- One round-robin reclaim cursor per table above -- see Shared/AmortizedReclaim.lua for why these are
+-- separate instances rather than one shared cursor, and Step below for what they replaced.
+local combatantIdsReclaim = AmortizedReclaim.New()
+local cooldownReclaim = AmortizedReclaim.New()
+
 -- The one buffered press per combatant, or none. AttackConstants.Input.BufferDepth is 1 and this
 -- shape enforces it structurally rather than by checking a length.
 type Buffered = {
@@ -124,7 +137,7 @@ type Buffered = {
 local buffered: { [Model]: Buffered } = {}
 
 local started = false
-local heartbeatConnection: RBXScriptConnection? = nil
+local heartbeatTrove = Trove.New()
 local startedRemote: RemoteEvent? = nil
 local weaponChangedRemote: RemoteEvent? = nil
 local requestLimiter = RateLimiter.New(AttackConstants.Network.MaxCallsPerSecondPerPlayer)
@@ -217,20 +230,50 @@ local function resolveRequest(
 	now: number
 ): (SwingSequencer.Resolution?, string?)
 	if request.Kind == "Hotbar" then
-		-- ADMIN-GATED, NOT TRUSTED -- see AttackTypes.AttackRequest.MoveId's own header for the whole
-		-- reasoning, and for what deletes this branch once a real loadout system exists.
-		if not authorized then
+		-- ADMIN PATH, STILL TRUSTED -- kept for Move Editor live-fire testing (MoveEditorClient.lua's
+		-- "Bind to slot" control), which is the only test-fire tool left since TestFireMove/
+		-- SpawnPreviewDummy were removed with the old combat system. An admin can bind and throw a
+		-- move that isn't authored as an Art at all, so this cannot be routed through ArtSystem below.
+		if authorized then
+			local moveId = request.MoveId
+			if typeof(moveId) ~= "string" or not AttackCatalog.Has(moveId) then
+				return nil, "UnknownMove"
+			end
+			return {
+				MoveId = moveId,
+				WeaponId = SwingSequencer.GetWeapon(model),
+				-- A hotbar move is not part of either string, so it has no stage of its own and must not
+				-- disturb the one in progress. Advance is deliberately never called for it below.
+				StageIndex = 0,
+				IsFinisher = false,
+			},
+				nil
+		end
+
+		-- EVERYONE ELSE, RESOLVED FROM ARTSYSTEM -- not trusted at all: the client's own MoveId is
+		-- ignored entirely and the slot is resolved against ArtSystem.GetEquipped, the same
+		-- server-persisted binding CharacterMenuClient's equip UI writes through ArtSystem.Equip. A
+		-- slot with nothing equipped, or an equipped art CanUse currently refuses (not unlocked, not
+		-- enough Qi), refuses the whole request -- there is no other way onto this branch.
+		local player = Players:GetPlayerFromCharacter(model)
+		if not player then
 			return nil, "NotAuthorized"
 		end
-		local moveId = request.MoveId
-		if typeof(moveId) ~= "string" or not AttackCatalog.Has(moveId) then
-			return nil, "UnknownMove"
+		local slot = request.Slot
+		if typeof(slot) ~= "number" then
+			return nil, "InvalidSlot"
+		end
+		local artId = ArtSystem.GetEquipped(player)[slot]
+		if not artId then
+			return nil, "NoArtEquipped"
+		end
+		local refusal = ArtSystem.CanUse(player, artId)
+		if refusal then
+			return nil, refusal
 		end
 		return {
-			MoveId = moveId,
+			MoveId = artId,
 			WeaponId = SwingSequencer.GetWeapon(model),
-			-- A hotbar move is not part of either string, so it has no stage of its own and must not
-			-- disturb the one in progress. Advance is deliberately never called for it below.
 			StageIndex = 0,
 			IsFinisher = false,
 		},
@@ -275,6 +318,34 @@ function AttackRequestSystem.Throw(
 	local damageAllows, damageReason = DamageSystem.CanAttack(model, now)
 	if not damageAllows then
 		return false, damageReason or "Hitstun"
+	end
+
+	-- Third gate of the identical shape -- see Server/Combat/Grab/GrabSystem.lua's own header on why
+	-- it belongs alongside DefenseSystem.CanAttack/DamageSystem.CanAttack rather than being merged into
+	-- either: this one asks "is a grab currently committing your body, on either end of it," a
+	-- question neither of the other two systems can answer. Refuses a holding attacker (must Throw or
+	-- wait the hold out) and a held-or-thrown victim.
+	local grabAllows, grabReason = GrabSystem.CanAttack(model, now)
+	if not grabAllows then
+		return false, grabReason or "Grabbed"
+	end
+
+	-- A COMMITTED TRAVERSAL REFUSES THE SWING OUTRIGHT. Mid-vault, mid-slide, mid-wall-run, the body
+	-- belongs to the movement framework, and a swing thrown out of one would be a character attacking
+	-- from a pose the animation, the hitbox and the player's own expectations all disagree about.
+	--
+	-- Deliberately NOT in AttackConstants.Input.TransientRefusals, unlike almost every other refusal
+	-- in this function. A buffered press would fire on the frame the traversal ends, which is exactly
+	-- the "vault into a free hit" the gate exists to prevent -- the press is dropped, and the player
+	-- presses again once they have landed. That table is the whole mechanism for this distinction, so
+	-- the choice is expressed by leaving the reason out of it rather than by a branch here.
+	--
+	-- Reads the Attribute through Shared/Parkour/ParkourOwnership rather than requiring ParkourSystem,
+	-- so this layer stays free of a movement dependency and a bot (no parkour, no Attribute) is never
+	-- gated. See that module's header for what the Attribute does and does not cover.
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	if humanoid and ParkourOwnership.OwnsBody(humanoid) then
+		return false, "ParkourAction"
 	end
 
 	local resolution, resolveReason = resolveRequest(model, request, authorized, now)
@@ -322,19 +393,59 @@ function AttackRequestSystem.Throw(
 		return false, engineReason or "Busy"
 	end
 
+	-- ART QI IS CHARGED ONLY NOW, after the engine agreed to throw -- not inside resolveRequest's
+	-- CanUse check above, which runs before Cooldown and the engine's own concurrent-swing ceiling
+	-- and would otherwise charge Qi for a swing that goes on to be refused as "Cooldown" or "Busy".
+	-- UseArt re-checks unlock and Qi itself rather than trusting resolveRequest's CanUse asked
+	-- moments ago; nothing yields between the two in this synchronous call, so it cannot newly fail
+	-- here. Never runs for the admin Hotbar path (that MoveId may not even be an art) or for a
+	-- Basic/Heavy swing (those cost no Qi).
+	if request.Kind == "Hotbar" and not authorized then
+		local player = Players:GetPlayerFromCharacter(model)
+		if player then
+			local refusal = ArtSystem.UseArt(player, resolution.MoveId)
+			if refusal then
+				logger:warn(
+					"Art Qi charge failed after engine accepted swing",
+					{ player = player.Name, artId = resolution.MoveId, reason = refusal }
+				)
+			end
+		end
+	end
+
 	-- Committed only now, after the engine agreed. A refused press leaves the string exactly where it
 	-- was, which is what makes "press early, get refused, press again" continue the combo rather than
 	-- silently skipping a stage.
 	--
 	-- The commitment handed over is the same definition the engine was just given, so the string's own
 	-- deadline can never be built from a different version of the move than the one actually swinging.
+	local commitment = entry.Definition.WindupSeconds
+		+ entry.Definition.ActiveSeconds
+		+ entry.Definition.RecoverySeconds
 	if request.Kind ~= "Hotbar" then
-		local commitment = entry.Definition.WindupSeconds
-			+ entry.Definition.ActiveSeconds
-			+ entry.Definition.RecoverySeconds
 		SwingSequencer.Advance(model, request.Kind, resolution, commitment, now)
 	end
 	setCooldown(model, resolution.MoveId, entry.Cooldown, now)
+
+	-- PUBLISHED FOR RunSystem, which reads it and forces the run down for the duration -- see
+	-- Constants.Attributes.CombatBusyUntil for the whole contract and for why it is a deadline rather
+	-- than a flag. This layer knows nothing about running and gains no dependency on it; it states when
+	-- this swing is over and lets anyone who cares read that.
+	--
+	-- Computed for a Hotbar move too, unlike the SwingSequencer commitment above -- a hotbar cast is
+	-- not a link in a string, but it is just as much a swing you should not be sprinting through.
+	--
+	-- math.max against whatever is already there, never a bare write: a swing accepted while a longer
+	-- one is still committing this body must not SHORTEN the deadline. That cannot happen through
+	-- HitboxEngine today (it refuses a second swing as Busy), but a future move with an early-cancel
+	-- window would reach here mid-swing, and a gate that quietly gets weaker under a feature nobody has
+	-- built yet is the kind that fails silently when they do.
+	local humanoidForBusy = model:FindFirstChildOfClass("Humanoid")
+	if humanoidForBusy then
+		local existingBusy = humanoidForBusy:GetAttribute(Constants.Attributes.CombatBusyUntil)
+		local busyUntil = if typeof(existingBusy) == "number" then existingBusy else 0
+		humanoidForBusy:SetAttribute(Constants.Attributes.CombatBusyUntil, math.max(busyUntil, now + commitment))
+	end
 
 	sendStarted(model, {
 		MoveId = resolution.MoveId,
@@ -522,10 +633,13 @@ end
 
 -- Registry -----------------------------------------------------------------------------------------
 
-local function bindCharacter(character: Model): ()
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
+-- `humanoid` is resolved by Shared/PlayerLifecycle.lua before this is reached; the HumanoidRootPart
+-- is this System's own additional requirement and is still looked up here. A character missing its
+-- root is simply not registered -- the engine requires a root explicitly and there is nothing useful
+-- to register without one.
+local function bindCharacter(character: Model, humanoid: Humanoid): ()
 	local rootPart = character:FindFirstChild("HumanoidRootPart")
-	if not humanoid or not rootPart or not rootPart:IsA("BasePart") then
+	if not rootPart or not rootPart:IsA("BasePart") then
 		return
 	end
 	combatantIds[character] = HitboxEngine.RegisterCombatant(character, rootPart, humanoid)
@@ -564,12 +678,18 @@ function AttackRequestSystem.Step(_deltaTime: number, now: number): ()
 
 	-- Reclaims cooldown records for characters that no longer exist. Every individual timestamp
 	-- expires on its own, so this only exists to stop the OUTER table holding a reference to a
-	-- destroyed model forever.
-	for model in cooldownUntil do
-		if model.Parent == nil then
-			cooldownUntil[model] = nil
-		end
-	end
+	-- destroyed model forever -- which is exactly the "nothing here goes stale in a way a reader can
+	-- observe" property that makes an amortised cursor safe. Both of these used to be a FULL walk of
+	-- their table every frame; they are now a fixed handful of key checks regardless of how many
+	-- combatants the server holds. See Shared/AmortizedReclaim.lua, and note the deliberate contrast
+	-- with DamageSystem.Step's lungeUntil and GrabSystem.Step's holds/flights, which do per-entry work
+	-- and therefore keep their full walks.
+	cooldownReclaim:Step(cooldownUntil)
+	-- Same reclaim for combatantIds -- unlike cooldownUntil this one is normally cleared by
+	-- unbindCharacter's CharacterRemoving/PlayerRemoving handlers, but this is the belt-and-braces
+	-- sweep every other per-model table in this stack keeps (DamageSystem.Step, SwingSequencer.Sweep)
+	-- in case that event ordering is ever missed.
+	combatantIdsReclaim:Step(combatantIds)
 	SwingSequencer.Sweep()
 end
 
@@ -584,6 +704,7 @@ function AttackRequestSystem.Init(): ()
 	assert(HitboxEngine.RegisteredCount() >= 0, "AttackRequestSystem.Init() requires HitboxEngine to be available")
 	assert(DefenseSystem.CanAttack ~= nil, "AttackRequestSystem.Init() requires DefenseSystem to be available")
 	assert(DamageSystem.CanAttack ~= nil, "AttackRequestSystem.Init() requires DamageSystem to be available")
+	assert(GrabSystem.CanAttack ~= nil, "AttackRequestSystem.Init() requires GrabSystem to be available")
 	started = true
 
 	local requestRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.Request)
@@ -597,33 +718,29 @@ function AttackRequestSystem.Init(): ()
 	-- REGISTERS PLAYER CHARACTERS WITH THE ENGINE, inherited from the deleted TestAttackHarness -- see
 	-- this file's header. Bots and dummies are NOT auto-registered: they have no CharacterAdded to
 	-- hang off, and whoever spawns them already knows when they exist.
-	local function bindPlayer(player: Player): ()
-		player.CharacterAdded:Connect(bindCharacter)
-		player.CharacterRemoving:Connect(unbindCharacter)
-		if player.Character then
-			bindCharacter(player.Character)
-		end
-	end
-
-	Players.PlayerAdded:Connect(bindPlayer)
-	-- Players who joined before this System booted still need their registration -- the same Init()-
-	-- time sweep every other PlayerAdded-driven System in this codebase uses as its backstop.
-	for _, player in Players:GetPlayers() do
-		bindPlayer(player)
-	end
-
-	Players.PlayerRemoving:Connect(function(player: Player)
-		requestLimiter:Clear(player)
-		swapLimiter:Clear(player)
-		local character = player.Character
-		if character then
+	-- Through Shared/PlayerLifecycle.lua: the per-player CharacterAdded/CharacterRemoving hookup and
+	-- the Init()-time sweep for players who joined before this System booted are all its job now.
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "AttackRequestSystem",
+		OnPlayerRemoving = function(player: Player)
+			requestLimiter:Clear(player)
+			swapLimiter:Clear(player)
+			local character = player.Character
+			if character then
+				unbindCharacter(character)
+			end
+		end,
+		OnCharacter = function(_player: Player, character: Model, humanoid: Humanoid)
+			bindCharacter(character, humanoid)
+		end,
+		OnCharacterRemoving = function(_player: Player, character: Model)
 			unbindCharacter(character)
-		end
-	end)
+		end,
+	})
 
 	-- Connected AFTER DamageSystem.Init has connected its own, which Main.server.lua guarantees by
 	-- calling that first.
-	heartbeatConnection = RunService.Heartbeat:Connect(function(deltaTime: number)
+	heartbeatTrove:Connect(RunService.Heartbeat, function(deltaTime: number)
 		AttackRequestSystem.Step(deltaTime, os.clock())
 	end)
 
@@ -639,10 +756,7 @@ function AttackRequestSystem.Init(): ()
 end
 
 function AttackRequestSystem.Shutdown(): ()
-	if heartbeatConnection then
-		heartbeatConnection:Disconnect()
-		heartbeatConnection = nil
-	end
+	heartbeatTrove:Clean()
 	started = false
 end
 
@@ -652,6 +766,8 @@ end
 function AttackRequestSystem.Reset(): ()
 	table.clear(combatantIds)
 	table.clear(cooldownUntil)
+	combatantIdsReclaim:Reset()
+	cooldownReclaim:Reset()
 	table.clear(buffered)
 	SwingSequencer.Reset()
 end

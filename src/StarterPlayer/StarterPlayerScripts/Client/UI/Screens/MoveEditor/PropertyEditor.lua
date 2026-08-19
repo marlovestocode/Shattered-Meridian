@@ -4,8 +4,8 @@
 
 	Owns: the Move Editor's content pane -- the full authoring form for whichever move is currently
 	selected (props.Draft), now split by Sidebar.lua's Sections nav instead of one long scroll. A
-	persistent toolbar (Test on Dummy / Save / Hotbar bind row / last-test-result) sits at the top
-	regardless of which section is active; below it, exactly one of 9 Section(scope,...)-wrapped
+	persistent toolbar (Spawn/Despawn Dummy / Save / Hotbar bind row / last-test-result) sits at the
+	top regardless of which section is active; below it, exactly one of 9 Section(scope,...)-wrapped
 	"detail pages" is Visible at a time (props.SelectedSection, owned by Sidebar.lua), all 9 mounted
 	up front and toggled via Visible rather than re-mounted on nav clicks -- the same idiom
 	Screens/DevMenu/ContentArea.lua's own `tabContent` already established for its 4-tab strip.
@@ -13,9 +13,10 @@
 	The toolbar's Hotbar row (2026-08-10, the Move Creation System hotbar pass) is 5 small Tab.lua
 	buttons, one per slot -- Selected reflects whether HotbarBindings currently maps that slot to
 	THIS move's MoveId, and clicking toggles it (bind if not already this move, unbind if it is) via
-	OnBindHotbarSlot. Hidden for a Default move for the exact same reason Test on Dummy is (see
-	below) -- ThrowCustomMove's MoveRegistryManager.Get(moveId) lookup only ever knows Custom moves,
-	so binding a Default move's MoveId would just be an always-MoveNotFound dead slot.
+	OnBindHotbarSlot. Hidden for a Default move today as a UX choice, not a technical one -- the
+	rebuilt admin hotbar path (AttackRequestSystem.resolveRequest's trusted `authorized == true`
+	branch) resolves through AttackCatalog.Has, which knows Default moves too, but binding one to a
+	slot has never had a UI affordance and this pass does not add one.
 
 	Every numeric field is still a Components/NumericField.lua row; Shape is still a
 	Components/Dropdown.lua selector; text fields (DisplayName/Category/AnimationId) still commit on
@@ -64,11 +65,12 @@
 	switch by design -- see that file's header -- so this panel double-checks rather than trust the
 	nav alone).
 
-	"Test on Dummy" (TestFireMove/SpawnPreviewDummy) was removed alongside the rest of the combat
-	system -- there is no server-side handler left to fire a move at a dummy with. StatsPanel/
-	LastTestResultText below are left wired (see this file's own use of them further down): they are
-	pure display, fed only by whatever handle.TestSamples holds, and now simply never receive a new
-	sample -- no dead remote call to clean up on their side.
+	"Test on Dummy" is REAL AGAIN (2026-08-19, the Move Editor repair pass) -- see
+	MoveEditor/Types.lua's own MoveEditorHandle header for the rebuilt pipeline. This panel's own part
+	of it is small: the toolbar's "Spawn Dummy"/"Despawn Dummy" buttons (OnSpawnTestDummy/
+	OnDespawnTestDummy) sit beside Save, and StatsPanel/LastTestResultText below are unchanged --
+	still pure display, fed by whatever handle.TestSamples holds -- because MoveEditorClient.lua is
+	what now actually writes into it again, not this file.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -85,6 +87,7 @@ local TrackedLabel = require(script.Parent.Parent.Parent.Components.TrackedLabel
 local Toggle = require(script.Parent.Parent.Parent.Components.Toggle)
 local TextField = require(script.Parent.Parent.Parent.Components.TextField)
 local NumericField = require(script.Parent.Parent.Parent.Components.NumericField)
+local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 local MoveEditorTypes = require(script.Parent.Types)
 local Copy = require(script.Parent.Copy)
 local DraftBinding = require(script.Parent.DraftBinding)
@@ -119,6 +122,15 @@ export type PropertyEditorProps = {
 	-- MoveEditorClient.lua's own handler for why this needs no new remote (blanking MoveId is what
 	-- makes stampTrustedMetadata mint a new one through the existing UpdateDraft path).
 	OnDuplicate: () -> (),
+	-- Toolbar's single toggling "Spawn Dummy"/"Despawn Dummy" button -- MoveEditorClient.lua routes
+	-- both directions through DevMenuSystem's own DevMenu_SpawnDummy/DevMenu_DespawnAllDebugDummies
+	-- remotes (Server/Systems/DebugDummySystem.lua) rather than a second dummy implementation.
+	-- HasTestDummy is this client's own best-effort local guess (flipped optimistically on a
+	-- successful Spawn/Despawn, not polled from the server) -- worst case it mislabels the button for
+	-- one click, which the request underneath tolerates fine either way (spawning again just makes a
+	-- second dummy, MaxActive eviction handles the overflow; despawning with none active is a no-op).
+	HasTestDummy: UsedAs<boolean>,
+	OnToggleTestDummy: () -> (),
 	-- Fired by the empty-state card's own "New Move" button, which is the only reachable action while
 	-- nothing is selected -- the same signal Sidebar.lua's own "New Move" button already fires, routed
 	-- here so an admin who is looking at the empty content pane doesn't have to find the sidebar.
@@ -495,6 +507,10 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 		local draft = use(props.Draft)
 		return draft ~= nil and draft.Knockback ~= nil
 	end)
+	local hasGrab = scope:Computed(function(use)
+		local draft = use(props.Draft)
+		return draft ~= nil and draft.Grab ~= nil
+	end)
 	local hasProjectile = scope:Computed(function(use)
 		local draft = use(props.Draft)
 		return draft ~= nil and draft.Projectile ~= nil
@@ -563,6 +579,25 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 	local knockStartsAirCombo = fieldValue(props, scope, function(d)
 		return d.Knockback ~= nil and d.Knockback.StartsAirCombo == true
 	end, false)
+	-- Mirrors GrabConstants.Defaults' own numbers -- see that module's own header on why this file does
+	-- not require it just to read them: the same "defaults are hardcoded literals in the UI" precedent
+	-- Knockback's own toggle right above already sets (20/10/0.6/false, none sourced from
+	-- DamageConstants either).
+	local grabHoldSeconds = fieldValue(props, scope, function(d)
+		return if d.Grab then d.Grab.HoldSeconds else 3
+	end, 3)
+	local grabThrowUp = fieldValue(props, scope, function(d)
+		return if d.Grab then d.Grab.ThrowUpVelocity else 20
+	end, 20)
+	local grabThrowHorizontal = fieldValue(props, scope, function(d)
+		return if d.Grab then d.Grab.ThrowHorizontalVelocity else 55
+	end, 55)
+	local grabImpactDamage = fieldValue(props, scope, function(d)
+		return if d.Grab then d.Grab.ThrowImpactDamage else 15
+	end, 15)
+	local grabSelfDamage = fieldValue(props, scope, function(d)
+		return if d.Grab then d.Grab.ThrowSelfDamage else 10
+	end, 10)
 	local projectileSpeed = fieldValue(props, scope, function(d)
 		return if d.Projectile then d.Projectile.Speed else 40
 	end, 40)
@@ -583,7 +618,7 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 	-- move switch (that file's own header), so a section content pane still double-checks here rather
 	-- than trusting the nav alone to keep the admin off it.
 	local HIDDEN_FOR_DEFAULT: { [string]: boolean } =
-		{ Movement = true, Knockback = true, Projectile = true, ObjectStun = true, Art = true }
+		{ Movement = true, Knockback = true, Grab = true, Projectile = true, ObjectStun = true, Art = true }
 
 	-- One ScrollingFrame per section, all mounted up front, Visible-toggled by props.SelectedSection
 	-- -- see this file's own header and ContentArea.lua's `tabContent` precedent.
@@ -611,21 +646,13 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 		-- nav icon.
 		local icon = SectionIcon(scope, { Glyph = sectionId, Color = Tokens.Color.AccentPrimaryBright })
 
-		return scope:New "ScrollingFrame" {
+		return ScrollArea(scope, {
 			Name = sectionId .. "Content",
 			Size = contentSize,
 			LayoutOrder = 2,
 			Visible = isVisible,
-			BackgroundTransparency = 1,
-			BorderSizePixel = 0,
-			ScrollingDirection = Enum.ScrollingDirection.Y,
-			AutomaticCanvasSize = Enum.AutomaticSize.Y,
-			CanvasSize = UDim2.fromScale(0, 0),
-			ScrollBarThickness = 3,
-			ScrollBarImageColor3 = Tokens.Border.Standard.Color,
-			ScrollBarImageTransparency = Tokens.Border.Standard.Transparency,
 
-			[Children] = {
+			Children = {
 				scope:New "UIPadding" { PaddingRight = UDim.new(0, Tokens.Space.XS) },
 				scope:New "UIListLayout" {
 					FillDirection = Enum.FillDirection.Vertical,
@@ -634,7 +661,7 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 				},
 				Section(scope, title, 1, fields, description, icon, true, summary),
 			},
-		} :: ScrollingFrame
+		})
 	end
 
 	local basicInfoContent = sectionContent("BasicInfo", "Basic Info", Copy.Sections.BasicInfo, {
@@ -1012,6 +1039,131 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 		}),
 	})
 
+	-- Grab -----------------------------------------------------------------------------------------
+	-- AttachOffset deliberately has NO field here -- see MoveGrabConfig.AttachOffset's own header
+	-- (MoveTypes.lua). Enabling the toggle seeds a placeholder identity CFrame that the very next
+	-- UpdateDraft round trip overwrites with GrabConstants.Defaults.AttachOffset (MoveRegistryManager.
+	-- Validate ignores whatever this file sends for that one field, always) -- the same brief
+	-- "optimistic value until the server's own clamp lands" window every other authored number in this
+	-- panel already tolerates.
+	local grabContent = sectionContent("Grab", "Grab", Copy.Sections.Grab, {
+		Toggle(scope, {
+			Label = "Enable Grab",
+			Value = hasGrab,
+			LayoutOrder = 3,
+			OnChanged = function(enabled: boolean)
+				applyChange(props, function(d)
+					if enabled then
+						d.Grab = {
+							AttachOffset = CFrame.new(),
+							HoldSeconds = 3,
+							ThrowUpVelocity = 20,
+							ThrowHorizontalVelocity = 55,
+							ThrowImpactDamage = 15,
+							ThrowSelfDamage = 10,
+						}
+					else
+						d.Grab = nil
+					end
+				end)
+			end,
+		}),
+		NumericField.Mount(scope, {
+			Label = "Hold Duration",
+			Unit = Copy.Field("Grab.HoldSeconds").Unit,
+			Hint = Copy.Field("Grab.HoldSeconds").Hint,
+			Value = grabHoldSeconds,
+			Min = 0.5,
+			Max = 15,
+			Steps = { 0.25, 1 },
+			Visible = hasGrab,
+			LayoutOrder = 4,
+			OnChanged = function(v)
+				applyChange(props, function(d)
+					if d.Grab then
+						d.Grab.HoldSeconds = v
+					end
+				end)
+			end,
+		}),
+		NumericField.Mount(scope, {
+			Label = "Throw Up Velocity",
+			Unit = Copy.Field("Grab.ThrowUpVelocity").Unit,
+			Hint = Copy.Field("Grab.ThrowUpVelocity").Hint,
+			Value = grabThrowUp,
+			Min = 0,
+			Max = 150,
+			Steps = { 5, 20 },
+			Decimals = 0,
+			Visible = hasGrab,
+			LayoutOrder = 5,
+			OnChanged = function(v)
+				applyChange(props, function(d)
+					if d.Grab then
+						d.Grab.ThrowUpVelocity = v
+					end
+				end)
+			end,
+		}),
+		NumericField.Mount(scope, {
+			Label = "Throw Horizontal Velocity",
+			Unit = Copy.Field("Grab.ThrowHorizontalVelocity").Unit,
+			Hint = Copy.Field("Grab.ThrowHorizontalVelocity").Hint,
+			Value = grabThrowHorizontal,
+			Min = 0,
+			Max = 150,
+			Steps = { 5, 20 },
+			Decimals = 0,
+			Visible = hasGrab,
+			LayoutOrder = 6,
+			OnChanged = function(v)
+				applyChange(props, function(d)
+					if d.Grab then
+						d.Grab.ThrowHorizontalVelocity = v
+					end
+				end)
+			end,
+		}),
+		NumericField.Mount(scope, {
+			Label = "Throw Impact Damage",
+			Unit = Copy.Field("Grab.ThrowImpactDamage").Unit,
+			Hint = Copy.Field("Grab.ThrowImpactDamage").Hint,
+			Value = grabImpactDamage,
+			Min = 0,
+			Max = 200,
+			Steps = { 1, 10 },
+			Decimals = 0,
+			Visible = hasGrab,
+			LayoutOrder = 7,
+			OnChanged = function(v)
+				applyChange(props, function(d)
+					if d.Grab then
+						d.Grab.ThrowImpactDamage = v
+					end
+				end)
+			end,
+		}),
+		NumericField.Mount(scope, {
+			Label = "Throw Self Damage",
+			Unit = Copy.Field("Grab.ThrowSelfDamage").Unit,
+			Hint = Copy.Field("Grab.ThrowSelfDamage").Hint,
+			Value = grabSelfDamage,
+			Min = 0,
+			Max = 200,
+			Steps = { 1, 10 },
+			Decimals = 0,
+			Visible = hasGrab,
+			LayoutOrder = 8,
+			OnChanged = function(v)
+				applyChange(props, function(d)
+					if d.Grab then
+						d.Grab.ThrowSelfDamage = v
+					end
+				end)
+			end,
+		}),
+	})
+
 	local projectileContent = sectionContent("Projectile", "Projectile", Copy.Sections.Projectile, {
 		Label(scope, {
 			Text = "MaxTargets (Damage section) doubles as pierce count while this is on (1 = stops on first hit).",
@@ -1375,6 +1527,27 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 									OnActivated = props.OnReset,
 								}),
 							},
+							-- Visible for BOTH Custom and Default moves -- see PropertyEditorProps' own
+							-- HasTestDummy/OnToggleTestDummy comment. Not gated on isCustomMove/isDefaultMove at
+							-- all: spawning a target has nothing to do with which kind of move is selected, only
+							-- that a move IS selected (the whole toolbar's own Visible = hasDraft already covers
+							-- that). ONE toggling button, not a Spawn/Despawn pair -- reoccupies the exact 140px
+							-- slot the old "Test on Dummy" button held (see this file's own width-budget comment
+							-- above), so this row's fit against the UNSAVED chip is unchanged from before.
+							scope:New "Frame" {
+								Name = "TestDummySlot",
+								Size = UDim2.fromOffset(140, Tokens.Control.RowHeight),
+								BackgroundTransparency = 1,
+								LayoutOrder = 5,
+
+								[Children] = Button(scope, {
+									Text = scope:Computed(function(use)
+										return if use(props.HasTestDummy) then "Despawn Dummy" else "Spawn Dummy"
+									end),
+									Size = UDim2.fromOffset(140, Tokens.Control.RowHeight),
+									OnActivated = props.OnToggleTestDummy,
+								}),
+							},
 						},
 					},
 					-- The unsaved-changes chip. UpdateDraft has already applied this edit to the
@@ -1477,6 +1650,7 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 			animationContent,
 			movementContent,
 			knockbackContent,
+			grabContent,
 			projectileContent,
 			objectStunContent,
 			artContent,

@@ -67,6 +67,7 @@ local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local HitboxGeometry = require(ReplicatedStorage.Shared.HitboxEngine.HitboxGeometry)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local AttackStateMachine = require(ServerScriptService.Server.Combat.HitboxEngine.AttackStateMachine)
 local CandidateGatherer = require(ServerScriptService.Server.Combat.HitboxEngine.CandidateGatherer)
@@ -153,7 +154,7 @@ local candidateBuffer: { BasePart } = {}
 type ContactCandidate = { Part: BasePart, Owner: Combatant, Distance: number }
 
 local nextCombatantId = 1
-local heartbeatConnection: RBXScriptConnection? = nil
+local heartbeatTrove = Trove.New()
 
 -- Round-robin cursor for the liveness sweep. Characters despawn without telling this module, and a
 -- combatant whose Model has been destroyed would otherwise sit in the registry forever holding a slot
@@ -163,11 +164,6 @@ local heartbeatConnection: RBXScriptConnection? = nil
 -- reasoning behind ObjectStunResolver's nextBookkeepingExpiry watermark.
 local livenessCursor = 1
 local LIVENESS_CHECKS_PER_FRAME = 4
-
--- Sanitised definitions, keyed by the caller's own definition table. Weak-keyed so a caller that
--- builds definitions on the fly cannot leak them through this cache. Exists because sanitising is a
--- per-field walk and a real attack is requested from the same authored table thousands of times.
-local sanitizedDefinitions: { [any]: AttackDefinition } = setmetatable({}, { __mode = "k" }) :: any
 
 -- How far up from a candidate part the engine will look for a registered owner. A body part is one
 -- level under the character Model; an accessory's Handle is two (Handle -> Accessory -> Model); a
@@ -773,17 +769,17 @@ function HitboxEngine.RequestAttack(
 		return false, "TooManySwings"
 	end
 
-	local sanitized = sanitizedDefinitions[definition]
-	if sanitized == nil then
-		local resolved, problems = HitboxTypes.SanitizeDefinition(definition)
-		sanitized = resolved
-		sanitizedDefinitions[definition] = resolved
-		if debugEnabled() and #problems > 0 then
-			logger:warn("Attack definition corrected", {
-				attack = resolved.DebugName,
-				problems = table.concat(problems, "; "),
-			})
-		end
+	-- No cache here: this used to be a table-identity-keyed cache on the theory that a real attack is
+	-- requested from the same authored table thousands of times. It never actually hit -- the caller
+	-- (AttackCatalog.Get) projects a fresh AttackDefinition table on every call, so every lookup missed,
+	-- and the cache itself cost a weak-table insert plus GC traversal for nothing. Sanitising is a
+	-- single per-field walk; just do it.
+	local sanitized, problems = HitboxTypes.SanitizeDefinition(definition)
+	if debugEnabled() and #problems > 0 then
+		logger:warn("Attack definition corrected", {
+			attack = sanitized.DebugName,
+			problems = table.concat(problems, "; "),
+		})
 	end
 
 	-- Guarded here rather than trusted, because they come from a caller and flow straight into the
@@ -970,20 +966,17 @@ end
 -- above, so the engine stays drivable from a spec with a synthetic clock. Idempotent: a second Init()
 -- is a no-op rather than a second connection quietly doubling every sample rate.
 function HitboxEngine.Init(): ()
-	if heartbeatConnection then
+	if heartbeatTrove:Count() > 0 then
 		return
 	end
-	heartbeatConnection = RunService.Heartbeat:Connect(function(deltaTime: number)
+	heartbeatTrove:Connect(RunService.Heartbeat, function(deltaTime: number)
 		HitboxEngine.Step(deltaTime, os.clock())
 	end)
 	logger:info("Hitbox engine started")
 end
 
 function HitboxEngine.Shutdown(): ()
-	if heartbeatConnection then
-		heartbeatConnection:Disconnect()
-		heartbeatConnection = nil
-	end
+	heartbeatTrove:Clean()
 end
 
 function HitboxEngine.RegisteredCount(): number

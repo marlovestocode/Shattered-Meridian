@@ -133,6 +133,141 @@ return function()
 			expect(profile.settings.Parkour.Enabled).to.equal(false)
 			expect(profile.settings.Parkour.SprintMode).to.equal("Toggle")
 		end)
+
+		it("migrates a pre-Comfort v5 record, backfilling both camera effects as ENABLED", function()
+			-- The direction matters more than the presence here. Backfilling everything OFF would
+			-- silently strip camera shake and impact FOV punches from the entire existing player base on
+			-- their next login -- a change nobody asked for, that looks exactly like a bug, and that a
+			-- player would have no reason to go looking in Settings to undo. Landing on the shipped
+			-- defaults means the migration changes nobody's game and only gives them a switch.
+			local raw = {
+				SchemaVersion = 5,
+				Profile = {
+					tier = 3,
+					settings = {
+						Keybinds = {},
+						GamepadKeybinds = {},
+						Autorun = false,
+						Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
+					},
+				},
+			}
+			local migrated = PlayerDataSystem.MigrateRecord(raw)
+			local profile = migrated.Profile :: any
+
+			expect(migrated.SchemaVersion).to.equal(CURRENT_SCHEMA)
+			expect(profile.settings.Comfort).never.to.equal(nil)
+			expect(profile.settings.Comfort.CameraShake).to.equal(true)
+			expect(profile.settings.Comfort.FieldOfViewEffects).to.equal(true)
+			-- The block the previous migration added must survive this step untouched.
+			expect(profile.settings.Parkour).never.to.equal(nil)
+		end)
+
+		it("does not overwrite an already-present Comfort block on a v5 record", function()
+			local raw = {
+				SchemaVersion = 5,
+				Profile = {
+					tier = 1,
+					settings = {
+						Keybinds = {},
+						GamepadKeybinds = {},
+						Autorun = false,
+						Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
+						Comfort = { CameraShake = false, FieldOfViewEffects = false },
+					},
+				},
+			}
+			local migrated = PlayerDataSystem.MigrateRecord(raw)
+			local profile = migrated.Profile :: any
+
+			expect(profile.settings.Comfort.CameraShake).to.equal(false)
+			expect(profile.settings.Comfort.FieldOfViewEffects).to.equal(false)
+		end)
+
+		-- The full walk, not just the one new step: MigrateRecord chains Migrations[1..5], and a v1
+		-- record is the oldest thing that can still be sitting in the DataStore. A migration that works
+		-- from v5 but breaks the chain from v1 would only be discovered by a player who last logged in
+		-- before any of this existed.
+		it("walks a v1 record all the way forward, arriving with both new settings blocks", function()
+			local raw = {
+				SchemaVersion = 1,
+				Profile = { tier = 1 },
+			}
+			local migrated = PlayerDataSystem.MigrateRecord(raw)
+			local profile = migrated.Profile :: any
+
+			expect(migrated.SchemaVersion).to.equal(CURRENT_SCHEMA)
+			expect(profile.settings).never.to.equal(nil)
+			expect(profile.settings.Parkour).never.to.equal(nil)
+			expect(profile.settings.Comfort).never.to.equal(nil)
+			expect(profile.settings.Comfort.CameraShake).to.equal(true)
+		end)
+	end)
+
+	describe("PlayerDataSystem comfort settings encode/decode", function()
+		it("round-trips both camera-comfort preferences", function()
+			local settings: Types.PlayerSettings = {
+				Keybinds = {},
+				GamepadKeybinds = {},
+				Autorun = false,
+				Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
+				Comfort = {
+					CameraShake = false,
+					FieldOfViewEffects = true,
+				},
+			}
+			local decoded = PlayerDataSystem.DecodeSettings(PlayerDataSystem.EncodeSettings(settings))
+
+			expect(decoded.Comfort.CameraShake).to.equal(false)
+			expect(decoded.Comfort.FieldOfViewEffects).to.equal(true)
+		end)
+
+		-- The failure this guards is uniquely hard to notice: a decode that resolves a missing key to
+		-- nil produces `false` for every boolean, which is a PERFECTLY WORKING-LOOKING accessibility
+		-- setting. Nothing errors, nothing warns, the panel renders correctly -- the effects are just
+		-- gone, for everyone, forever.
+		it("falls back to effects-ON for a missing Comfort block", function()
+			local decoded = PlayerDataSystem.DecodeSettings({
+				Keybinds = {},
+				GamepadKeybinds = {},
+				Autorun = false,
+			})
+
+			expect(decoded.Comfort.CameraShake).to.equal(true)
+			expect(decoded.Comfort.FieldOfViewEffects).to.equal(true)
+		end)
+
+		-- The autosave path, not a hypothetical. EncodeSettings runs against a LIVE in-memory profile on
+		-- every save, and a live profile can arrive here with a sub-table missing (a skipped migration, a
+		-- rollback to an older server, a Transform caller that replaced `settings` wholesale) in ways
+		-- Types.PlayerSettings' non-optional fields never see. Indexing a nil block there throws inside
+		-- the save, which means the player's whole session silently fails to persist.
+		it("encodes a settings table with both sub-blocks missing instead of throwing mid-save", function()
+			local partial = {
+				Keybinds = {},
+				GamepadKeybinds = {},
+				Autorun = true,
+			} :: any
+
+			local encoded = PlayerDataSystem.EncodeSettings(partial)
+
+			expect(encoded.Autorun).to.equal(true)
+			expect(encoded.Parkour).never.to.equal(nil)
+			expect(encoded.Comfort).never.to.equal(nil)
+			expect(encoded.Comfort.CameraShake).to.equal(true)
+		end)
+
+		it("keeps an explicitly disabled effect disabled rather than treating it as missing", function()
+			local decoded = PlayerDataSystem.DecodeSettings({
+				Keybinds = {},
+				GamepadKeybinds = {},
+				Autorun = false,
+				Comfort = { CameraShake = false, FieldOfViewEffects = false },
+			})
+
+			expect(decoded.Comfort.CameraShake).to.equal(false)
+			expect(decoded.Comfort.FieldOfViewEffects).to.equal(false)
+		end)
 	end)
 
 	describe("PlayerDataSystem parkour settings encode/decode", function()
@@ -151,6 +286,7 @@ return function()
 					StepAssist = false,
 					SprintMode = "Toggle",
 				},
+				Comfort = PlayerDataSystem.CreateDefaultComfortSettings(),
 			}
 			local decoded = PlayerDataSystem.DecodeSettings(PlayerDataSystem.EncodeSettings(settings))
 

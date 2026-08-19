@@ -36,9 +36,34 @@
 	(Client/FX/CameraShake.lua) or the FOV compositor (Client/FX/FOVOffset.lua), the press-side cue
 	(Client/Combat/AttackInputClient.lua), or the HUD's own vitals (Client/UI/State/ClientState.lua
 	reflects those from their own sources).
+
+	ALSO OWNS the two other per-resolution cues that read off this same event, alongside the shake:
+	CombatAudio.PlayImpact (the landed-contact stinger) and HitFlash.Flash (the victim's pooled-Highlight
+	pop). Both are pure, domain-agnostic FX primitives -- see their own headers -- and this module is
+	where DefenseTypes.OutcomeKind gets turned into "which sound" and "which color" for both of them,
+	the same way it already turns Kind into "which shake preset." One place answering what an outcome
+	MEANS, not three FX modules each re-deriving it.
+
+	AND NOW A FOURTH: HitStop.FreezeVictimMovement, the combat hit-stop. DEFENDER-ONLY, unlike the three
+	above -- there is no attacker-side freeze wired from here (see Constants.FX.HitStop's own comment on
+	why AttackerSeconds stays orphaned). Fired for exactly the three outcomes that grant
+	DamageConstants.Hitstun server-side (Clean, Backstab, GuardBroken): the freeze is a cosmetic stinger
+	riding alongside a lockout that is already real and already server-enforced (DamageSystem.CanAttack),
+	never a new source of truth about whether the victim is stunned. THIS is the module that has to fire
+	it rather than some new subscriber, because Role already answers the one question a freeze trigger
+	needs ("was this client the one hit") that a second listener on the same event would otherwise have
+	to re-derive.
+
+	A FIFTH, gated identically to the fourth: AttackInputClient.CancelSwing, which cuts this client's OWN
+	in-flight swing animation short the instant a landed hit puts its owner into real hitstun.
+	DamageSystem.applyOutcome already cancels that same swing SERVER-SIDE on the same three outcomes
+	(cancelSwingOf -> HitboxEngine.CancelAttack), but that cancellation has no remote of its own -- this
+	is the first (and, today, only) place a defender's own client learns its swing was just cut short,
+	so it is the only place that can also tell AttackInputClient to stop showing it. Reuses
+	FREEZE_SECONDS_BY_KIND as its own gate rather than a second hand-written kind list: "does this
+	outcome grant real hitstun" is one question, and the freeze above already answers it correctly.
 ]]
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
@@ -47,10 +72,15 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 
+local AttackInputClient = require(script.Parent.AttackInputClient)
 local CameraShake = require(script.Parent.Parent.FX.CameraShake)
+local CombatAudio = require(script.Parent.Parent.FX.CombatAudio)
 local CombatFeedbackModule = require(script.Parent.Parent.UI.Screens.CombatFeedback)
+local HitFlash = require(script.Parent.Parent.FX.HitFlash)
+local HitStop = require(script.Parent.Parent.FX.HitStop)
 local Tokens = require(script.Parent.Parent.UI.Tokens)
 
 type CombatFeedback = DamageTypes.CombatFeedback
@@ -134,6 +164,80 @@ local function shakeFor(payload: CombatFeedback): ()
 	CameraShake.Shake((Constants.FX.CameraShake :: any)[presetName])
 end
 
+-- Which of Constants.FX.HitFlash's three named colors a resolution pops on the defender -- the same
+-- "white = a plain hit, gold = a parry deflection, red-gold = a posture break" family that config's own
+-- header describes. Fewer buckets than DefenseTypes.OutcomeKind has entries, deliberately: Backstab and
+-- Trade already get their own answer through the shake presets and the banner above, so they read here
+-- as "a plain hit" rather than earning a fourth/fifth color with nothing else to distinguish it by.
+local HIT_FLASH_COLORS: { [string]: Color3 } = {
+	Clean = Constants.FX.HitFlash.HitColor,
+	Blocked = Constants.FX.HitFlash.HitColor,
+	Backstab = Constants.FX.HitFlash.HitColor,
+	Trade = Constants.FX.HitFlash.HitColor,
+	Parried = Constants.FX.HitFlash.ParryColor,
+	GuardBroken = Constants.FX.HitFlash.PostureBreakColor,
+}
+
+-- Victim-only, per HitFlash's own header -- fired on outcome.Defender's body regardless of which
+-- participant's client is running this, since a Highlight reads the same for both. Unmapped for an
+-- outcome with no entry above only in principle; every current OutcomeKind has one.
+local function flashFor(payload: CombatFeedback): ()
+	local color = HIT_FLASH_COLORS[payload.Kind]
+	if not color then
+		return
+	end
+	HitFlash.Flash(payload.Defender, color)
+end
+
+-- How long the DEFENDER's own client freezes its body's movement on this outcome -- see
+-- HitStop.lua's own header for what the freeze actually does and why it is movement rather than
+-- animation. Deliberately the SAME three keys DamageResolver.AdvancesCombo/Resolve grant
+-- DamageConstants.Hitstun for (Clean, Backstab, GuardBroken) and no others: Blocked, Parried and Trade
+-- never stun the defender server-side, so freezing their movement on one of those would be a purely
+-- cosmetic lie about a lockout that was never real.
+--
+-- Clean gets the base VictimSeconds; Backstab and GuardBroken share the heavier PostureBreakSeconds --
+-- the same grouping ShakePresets.Defender above already draws between these three kinds, reused here
+-- rather than re-derived so the two tables cannot quietly disagree about which outcomes read as
+-- "heavier" to the player being hit.
+local FREEZE_SECONDS_BY_KIND: { [string]: number } = {
+	Clean = Constants.FX.HitStop.VictimSeconds,
+	Backstab = Constants.FX.HitStop.PostureBreakSeconds,
+	GuardBroken = Constants.FX.HitStop.PostureBreakSeconds,
+}
+
+-- Victim-only, unlike shakeFor/flashFor/CombatAudio.PlayImpact above which fire for both roles (or are
+-- role-aware internally). Checked against payload.Role directly rather than against a Kind-only table
+-- lookup, because an attacker's own client also receives this same Combat_Feedback event (with
+-- Role == "Attacker") for the hit it just landed, and an attacker freezing their own movement on a
+-- swing that connected would read as the game stuttering on a successful hit rather than as feedback.
+local function freezeVictimFor(payload: CombatFeedback): ()
+	if payload.Role ~= "Defender" then
+		return
+	end
+	local seconds = FREEZE_SECONDS_BY_KIND[payload.Kind]
+	if not seconds then
+		return
+	end
+	HitStop.FreezeVictimMovement(seconds)
+end
+
+-- Victim-only, same shape and same gate as freezeVictimFor directly above -- see this file's header
+-- for why FREEZE_SECONDS_BY_KIND is the right table to reuse rather than a second list of the same
+-- three kinds. Stops this client's own in-flight swing animation (AttackInputClient.CancelSwing) the
+-- instant this hit is one that put the LOCAL player into real, server-enforced hitstun -- see that
+-- function's own header for why nothing else in this codebase ever tells that client its swing was
+-- cut short otherwise.
+local function cancelSwingFor(payload: CombatFeedback): ()
+	if payload.Role ~= "Defender" then
+		return
+	end
+	if not FREEZE_SECONDS_BY_KIND[payload.Kind] then
+		return
+	end
+	AttackInputClient.CancelSwing()
+end
+
 -- Projects the world contact onto the screen. Returns nil when the contact is behind the camera or
 -- there is no camera at all, which the caller treats as "put it in the middle" rather than as an
 -- error -- DamageNumberLabel already defaults to centre for exactly this case.
@@ -205,6 +309,10 @@ local function onFeedback(raw: unknown): ()
 	end
 
 	shakeFor(payload)
+	CombatAudio.PlayImpact(payload.Kind)
+	flashFor(payload)
+	freezeVictimFor(payload)
+	cancelSwingFor(payload)
 
 	local surfaces = handle
 	if surfaces then
@@ -240,9 +348,17 @@ function CombatFeedbackClient.Start(feedbackHandle: Handle): ()
 
 	-- A new life must not inherit the previous one's banner. The screen is mounted once for the
 	-- session (ResetOnSpawn = false), so nothing else would clear it.
-	Players.LocalPlayer.CharacterAdded:Connect(function()
-		feedbackHandle.Outcome:set(nil)
-	end)
+	--
+	-- Routed through Shared/PlayerLifecycle.lua rather than a bare CharacterAdded connect, for one
+	-- shape rather than sixteen. The Humanoid wait it adds is not needed here (a banner does not care
+	-- about a Humanoid) and costs nothing -- a life whose Humanoid never arrives is a life the player
+	-- has bigger problems with than a stale outcome banner.
+	PlayerLifecycle.BindLocalCharacter({
+		Scope = "CombatFeedbackClient",
+		OnCharacter = function()
+			feedbackHandle.Outcome:set(nil)
+		end,
+	})
 
 	logger:info("CombatFeedbackClient started")
 end

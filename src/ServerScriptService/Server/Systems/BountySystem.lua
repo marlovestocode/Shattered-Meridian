@@ -49,6 +49,7 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local MeridianSystem = require(script.Parent.MeridianSystem)
@@ -396,6 +397,15 @@ function BountySystem.ResetState(): ()
 	lastExpirySweepAt = os.clock()
 end
 
+-- Takes no arguments at all -- there is nothing a client could pass that would be honored, which is
+-- the cheapest possible validation story for a public remote.
+local function handleGetActiveBounties(player: Player): { Types.BountyBoardEntry }
+	if queryRateLimiter:IsLimited(player) then
+		return {}
+	end
+	return BountySystem.ListActiveBounties()
+end
+
 function BountySystem.Init(): ()
 	for _, connection in ipairs(connections) do
 		connection:Disconnect()
@@ -411,14 +421,8 @@ function BountySystem.Init(): ()
 	markedChangedRemote = NetworkBridge.CreateRemoteEvent(BountyConstants.RemoteNames.MarkedChanged)
 
 	local getActiveRemote = NetworkBridge.CreateRemoteFunction(BountyConstants.RemoteNames.GetActiveBounties)
-	-- Takes no arguments at all -- there is nothing a client could pass that would be honored, which
-	-- is the cheapest possible validation story for a public remote.
-	getActiveRemote.OnServerInvoke = function(player: Player): { Types.BountyBoardEntry }
-		if queryRateLimiter:IsLimited(player) then
-			return {}
-		end
-		return BountySystem.ListActiveBounties()
-	end
+	getActiveRemote.OnServerInvoke =
+		RemoteHandler.WrapInvoke(logger, "GetActiveBounties", {} :: { Types.BountyBoardEntry }, handleGetActiveBounties)
 
 	table.insert(
 		connections,

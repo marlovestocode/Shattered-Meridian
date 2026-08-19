@@ -31,6 +31,7 @@ local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Parent.Components.Button)
 local Tab = require(script.Parent.Parent.Parent.Components.Tab)
+local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 
 local Children = Fusion.Children
 local peek = Fusion.peek
@@ -224,21 +225,13 @@ local function buildDeviceRows(
 		table.insert(rows, KeybindRow(scope, device, action, index, bindings, listeningFor, onRebindClicked))
 	end
 
-	return scope:New "ScrollingFrame" {
+	return ScrollArea(scope, {
 		Name = device .. "Rows",
 		Size = scrollSize,
 		LayoutOrder = 2,
 		Visible = isSelected,
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-		ScrollingDirection = Enum.ScrollingDirection.Y,
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		CanvasSize = UDim2.fromScale(0, 0),
-		ScrollBarThickness = 3,
-		ScrollBarImageColor3 = Tokens.Border.Standard.Color,
-		ScrollBarImageTransparency = Tokens.Border.Standard.Transparency,
 
-		[Children] = {
+		Children = {
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Left,
@@ -247,7 +240,7 @@ local function buildDeviceRows(
 			},
 			table.unpack(rows),
 		},
-	} :: ScrollingFrame
+	})
 end
 
 local function KeybindsTab(scope: Scope, props: KeybindsTabProps): Frame

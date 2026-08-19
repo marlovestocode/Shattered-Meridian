@@ -34,7 +34,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
 local Tokens = require(script.Parent.Parent.Tokens)
-local Panel = require(script.Parent.Parent.Components.Panel)
+local ModalScreen = require(script.Parent.Parent.Components.ModalScreen)
 local Label = require(script.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Components.Button)
 local Tab = require(script.Parent.Parent.Components.Tab)
@@ -170,29 +170,13 @@ local function BugReport(scope: Scope, playerGui: PlayerGui): BugReportHandle
 	cancelButton.NextSelectionUp = descriptionField
 	cancelButton.NextSelectionLeft = submitButton
 
-	local root = Panel(scope, {
-		Name = "Root",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(0.5, 0.5),
+	local root = ModalScreen(scope, playerGui, {
+		Name = "BugReport",
 		Size = UDim2.fromOffset(ROOT_WIDTH, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
-		Elevated = true,
-		CornerAccent = true,
+		IsOpen = isOpen,
 
 		Children = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.L),
-				PaddingBottom = UDim.new(0, Tokens.Space.L),
-				PaddingLeft = UDim.new(0, Tokens.Space.L),
-				PaddingRight = UDim.new(0, Tokens.Space.L),
-			},
-			scope:New "UIListLayout" {
-				FillDirection = Enum.FillDirection.Vertical,
-				HorizontalAlignment = Enum.HorizontalAlignment.Left,
-				Padding = UDim.new(0, Tokens.Space.M),
-				SortOrder = Enum.SortOrder.LayoutOrder,
-			},
-
 			scope:New "Frame" {
 				Name = "Header",
 				Size = UDim2.new(1, 0, 0, 36),
@@ -314,16 +298,6 @@ local function BugReport(scope: Scope, playerGui: PlayerGui): BugReportHandle
 			}),
 		},
 	})
-
-	scope:New "ScreenGui" {
-		Name = "BugReport",
-		ResetOnSpawn = false,
-		Enabled = isOpen,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		Parent = playerGui,
-
-		[Children] = root,
-	}
 
 	-- Initial gamepad focus on open, released again (only if still ours) on close -- see file
 	-- header. onChange (not onBind) is deliberate: this must NOT fire immediately at Mount time,

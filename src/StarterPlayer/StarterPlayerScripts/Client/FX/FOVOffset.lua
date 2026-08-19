@@ -70,6 +70,10 @@ local slots: { [string]: Slot } = {}
 
 local started = false
 local baseFovCaptured = false
+-- Last value actually written to Camera.FieldOfView, so an unchanged frame can skip the write -- see
+-- onRenderStep. nil until the first write, so the first frame after Start (or after a camera swap
+-- resets baseFov) always writes.
+local lastWritten: number? = nil
 local baseFov = 70
 
 -- Persistent named offset. If easeSpeed is a positive number, THIS module eases the slot's live
@@ -102,11 +106,40 @@ function FOVOffset.ClearContinuous(name: string): ()
 	slots[name] = nil
 end
 
+-- The player's own Types.ComfortSettings.FieldOfViewEffects preference, pushed by Client/Settings/
+-- SettingsClient.lua. Defaults to true for the same reason CameraShake.lua's own flag does: a client
+-- whose settings round trip fails gets the shipped experience, not a quietly diminished one.
+local punchesEnabled = true
+
+-- Gates the Punch path ONLY -- SetContinuous slots are deliberately unaffected. A continuous slot is
+-- the run's speed zoom: it eases rather than snaps, and it is a readout of how fast the player is
+-- moving, which is information a player needs rather than punctuation they might not want. The
+-- one-shot punches are the impact emphasis, and they are what a player reaching for a camera-comfort
+-- setting is actually reaching for. See Types.ComfortSettings for the same split stated from the
+-- settings side.
+--
+-- Clears every in-flight punch on the way to disabled -- same reasoning as CameraShake.SetEnabled's
+-- own clear. Continuous slots are left exactly as they are, which is the whole point of the split.
+function FOVOffset.SetPunchesEnabled(enabled: boolean): ()
+	punchesEnabled = enabled
+	if enabled then
+		return
+	end
+	for name, slot in pairs(slots) do
+		if slot.Kind == "Punch" then
+			slots[name] = nil
+		end
+	end
+end
+
 -- One-shot: eases this named slot from 0 to delta over outSeconds, then back to 0 over
 -- backSeconds, then removes itself. Safe to call again mid-punch under the SAME name (restarts
 -- that slot from StartClock = now). A DIFFERENT name's punch is a separate slot -- both sum
 -- normally (e.g. a Basic swing's punch landing the same frame as a Slide kick).
 function FOVOffset.Punch(name: string, delta: number, outSeconds: number, backSeconds: number): ()
+	if not punchesEnabled then
+		return
+	end
 	slots[name] = {
 		Kind = "Punch",
 		StartClock = os.clock(),
@@ -143,6 +176,9 @@ local function onRenderStep(deltaTime: number): ()
 	if not baseFovCaptured then
 		baseFov = camera.FieldOfView
 		baseFovCaptured = true
+		-- A freshly captured base means the memo below describes the PREVIOUS camera's projection, not
+		-- this one's -- cleared so the first frame against a new base always writes.
+		lastWritten = nil
 	end
 
 	local now = os.clock()
@@ -165,7 +201,17 @@ local function onRenderStep(deltaTime: number): ()
 		end
 	end
 
-	camera.FieldOfView = baseFov + total
+	-- Conditional for exactly the reason CameraOffsetComposer.lua's own write is -- see that module's
+	-- comment, and Server/Systems/RunSystem.lua's Heartbeat for where this codebase states the rule.
+	-- FieldOfView is the more expensive of the two to re-assert: it is a camera projection parameter,
+	-- so writing it invalidates frustum-derived work even when the value is unchanged. The steady
+	-- state is an empty `slots` table -- no speed zoom, no punch -- which produced baseFov + 0 every
+	-- single rendered frame, forever, for every player.
+	local nextFov = baseFov + total
+	if lastWritten ~= nextFov then
+		camera.FieldOfView = nextFov
+		lastWritten = nextFov
+	end
 end
 
 -- Binds the render-step compositor. Called once from Main.client.lua's boot sequence. Idempotent.

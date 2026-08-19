@@ -17,7 +17,6 @@ type ActionReport = ParkourTypes.ActionReport
 
 local CONFIG: ParkourValidation.ValidationConfig = {
 	MaxReportedSpeed = 70,
-	MaxVerticalGainStuds = 24,
 	MaxTravelSpeed = 90,
 	MaxActionSeconds = 8,
 	-- Deliberately blunt round numbers, unlike the shipped tuning: a spec asserting a clamp is
@@ -80,6 +79,23 @@ return function()
 		it("accepts a payload with no duration -- that field is optional by contract", function()
 			local parsed = ParkourValidation.Parse({ Kind = "Roll", Phase = "End", Speed = 10, Position = ORIGIN })
 			expect(parsed).to.be.ok()
+		end)
+
+		it("accepts the dash kind", function()
+			-- VALID_KINDS is a closed set checked server-side, so a state whose Reports kind is missing
+			-- from it has every one of its reports refused as MalformedPayload -- which the player
+			-- experiences as the server never standing its WalkSpeed resolver down, i.e. the dash
+			-- fighting ordinary locomotion for the whole of its duration.
+			local parsed, reason = ParkourValidation.Parse({
+				Kind = "Dash",
+				Phase = "Start",
+				Speed = 60,
+				Position = ORIGIN,
+				DurationSeconds = 0.26,
+			})
+			expect(parsed).to.be.ok()
+			expect(reason).to.equal(nil)
+			expect((parsed :: ActionReport).Kind).to.equal("Dash")
 		end)
 
 		it("rejects a non-table payload", function()
@@ -285,83 +301,50 @@ return function()
 			)
 		end)
 
-		it("rejects an End implying impossible travel", function()
+		it("accepts an End implying implausible travel -- refusing a release can never protect anything", function()
+			-- Used to be "rejects...". Removed for the identical reason the per-kind-interval fix above
+			-- was: an End is a RELEASE, and refusing one strands ParkourVelocityOwned (and therefore
+			-- WalkSpeed, pinned to 0) until the stranded-ownership watchdog's next retry or the server's
+			-- own window expiry rescues the player a beat later. The reward this used to gate is not
+			-- weakened by removing it -- ResolveMomentumCarry clamps the granted carry against the
+			-- server's own OBSERVED velocity regardless of what this report claims.
 			local state = observed({
 				OpenKind = "Slide",
 				OpenStartedAt = 99.9,
 				OpenStartPosition = Vector3.new(0, 10, 0),
 			})
-			-- The claimed position also has to stay near the server's own view, so the server is moved
-			-- with it -- this test is specifically about the START-to-END travel rate, not the anchor.
+			-- The claimed position also has to stay near the server's own CURRENT view (the shared
+			-- claimDrift check above the phase split, still live) -- moved with it so this test isolates
+			-- the removed START-to-END travel-rate check rather than tripping that one instead.
 			state.Position = Vector3.new(80, 10, 0)
-			local accepted, reason =
-				ParkourValidation.Validate(endReport({ Position = Vector3.new(80, 10, 0) }), state, CONFIG)
-			expect(accepted).to.equal(false)
-			expect(reason).to.equal("ImplausibleTravel")
+			expect(ParkourValidation.Validate(endReport({ Position = Vector3.new(80, 10, 0) }), state, CONFIG)).to.equal(
+				true
+			)
 		end)
 
-		it("rejects an End implying impossible vertical gain", function()
+		it("accepts an End implying implausible vertical gain, for the same reason", function()
 			local state = observed({
 				OpenKind = "WallRun",
 				OpenStartedAt = 96,
 				OpenStartPosition = Vector3.new(0, 10, 0),
 			})
 			state.Position = Vector3.new(0, 200, 0)
-			local accepted, reason = ParkourValidation.Validate(
-				endReport({ Kind = "WallRun", Position = Vector3.new(0, 200, 0) }),
-				state,
-				CONFIG
-			)
-			expect(accepted).to.equal(false)
-			expect(reason).to.equal("ImplausibleVerticalGain")
-		end)
-
-		it("allows ordinary vertical gain within the cap", function()
-			local state = observed({
-				OpenKind = "WallRun",
-				OpenStartedAt = 98,
-				OpenStartPosition = Vector3.new(0, 10, 0),
-			})
-			state.Position = Vector3.new(0, 25, 0)
 			expect(
 				ParkourValidation.Validate(
-					endReport({ Kind = "WallRun", Position = Vector3.new(0, 25, 0) }),
+					endReport({ Kind = "WallRun", Position = Vector3.new(0, 200, 0) }),
 					state,
 					CONFIG
 				)
 			).to.equal(true)
 		end)
 
-		it("rejects an End for a window open longer than any action may last", function()
+		it("accepts an End for a window claimed open longer than any action may last, for the same reason", function()
 			local state = observed({
 				OpenKind = "Slide",
 				OpenStartedAt = 50,
 				OpenStartPosition = ORIGIN,
 			})
-			local accepted, reason = ParkourValidation.Validate(endReport(), state, CONFIG)
-			expect(accepted).to.equal(false)
-			expect(reason).to.equal("ActionTooLong")
-		end)
-
-		it("does not divide by zero for a near-instant action", function()
-			-- A hop or a wall-kick legitimately starts and ends within a frame; without the elapsed-time
-			-- floor this would compute an infinite travel speed for a two-stud move. WallRun rather than
-			-- WallJump -- the kick is a phase of States/WallRunning.lua now, not its own reported kind
-			-- (see ParkourTypes.ActionKind's own header), but the near-instant scenario this guards is
-			-- unchanged: a kick that reaches the ground almost immediately still ends the very same
-			-- WallRun window it started.
-			local state = observed({
-				OpenKind = "WallRun",
-				OpenStartedAt = 99.999,
-				OpenStartPosition = Vector3.new(0, 10, 0),
-			})
-			expect(
-				ParkourValidation.Validate(
-					endReport({ Kind = "WallRun", Position = Vector3.new(1, 10, 0) }),
-					state,
-					CONFIG
-				)
-			).to.equal(true)
+			expect(ParkourValidation.Validate(endReport(), state, CONFIG)).to.equal(true)
 		end)
 	end)
 

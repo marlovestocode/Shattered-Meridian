@@ -48,6 +48,7 @@ export type SectionIconGlyphKind =
 	| "Animation"
 	| "Movement"
 	| "Knockback"
+	| "Grab"
 	| "Projectile"
 	| "ObjectStun"
 	| "Art"
@@ -220,6 +221,19 @@ local function KnockbackGlyph(scope: Scope, color: UsedAs<Color3>): { Instance }
 	}
 end
 
+-- A claw closing around a held point -- two arms opening toward a dot on the right, the "gripping
+-- something" reading, distinct from Knockback's diamond silhouette (an impact) and Movement's own
+-- single forward-only chevron (a step). Built from the identical edgeArm/centerDot primitives every
+-- other glyph in this file already uses.
+local function GrabGlyph(scope: Scope, color: UsedAs<Color3>): { Instance }
+	local pivot = Vector2.new(0.32, 0.5)
+	return {
+		edgeArm(scope, 7, 55, color, pivot),
+		edgeArm(scope, 7, -55, color, pivot),
+		centerDot(scope, 4, color, UDim2.fromScale(0.78, 0.5)),
+	}
+end
+
 -- A shaft plus a chevron arrowhead (MovementGlyph's own chevron, reused as the arrowhead) -- the
 -- "something traveling away from the attacker" reading.
 local function ProjectileGlyph(scope: Scope, color: UsedAs<Color3>): { Instance }
@@ -276,6 +290,7 @@ local GLYPH_BUILDERS: { [SectionIconGlyphKind]: (Scope, UsedAs<Color3>) -> { Ins
 	Animation = AnimationGlyph,
 	Movement = MovementGlyph,
 	Knockback = KnockbackGlyph,
+	Grab = GrabGlyph,
 	Projectile = ProjectileGlyph,
 	ObjectStun = ObjectStunGlyph,
 	Art = ArtGlyph,

@@ -5,6 +5,19 @@
 	Owns: the server boot sequence. Requires every System/Manager module and initializes them in
 	explicit dependency order per software-architecture.md ("boot order matters ... never rely on
 	implicit load order from script instancing").
+
+	Every numbered step calls boot(name, module) rather than module.Init() directly, and the last line
+	of this file checks what actually happened against Server/Config/BootManifest.lua. That is the
+	whole reason for the extra name: a System dropped from this list, or renamed out from under it,
+	used to produce a server that booted cleanly and was simply missing a feature -- its remotes were
+	never created, so its clients waited out a WaitForChild timeout and asserted, one player at a time,
+	in a playtest. Half these Systems own no remote at all, so there is nothing to infer their absence
+	from; saying so at the call site is what makes it checkable. See BootManifest.lua's own header for
+	the other half of the check, which is a spec rather than a runtime assertion.
+
+	The ordering comments below are still the authority on ORDER. The manifest is deliberately not:
+	it lists what must boot, never in what sequence, so nothing about adding a System to it can be
+	mistaken for a reason to move it in here.
 ]]
 
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -13,10 +26,15 @@ local ServerRoot = ServerScriptService.Server
 
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local EngineLogCapture = require(ReplicatedStorage.Shared.EngineLogCapture)
+local Logger = require(ReplicatedStorage.Shared.Logger)
+local Types = require(ReplicatedStorage.Shared.Types)
 
 local Systems = ServerRoot.Systems
 local Managers = ServerRoot.Managers
 local Combat = ServerRoot.Combat
+local Config = ServerRoot.Config
+
+local BootManifest = require(Config.BootManifest)
 
 local ServerHopSystem = require(Systems.ServerHopSystem)
 local VersionWatchSystem = require(Systems.VersionWatchSystem)
@@ -40,6 +58,7 @@ local HitboxEngine = require(Combat.HitboxEngine.HitboxEngine)
 local DefenseSystem = require(Combat.Defense.DefenseSystem)
 local DamageSystem = require(Combat.Damage.DamageSystem)
 local AttackRequestSystem = require(Combat.Attack.AttackRequestSystem)
+local GrabSystem = require(Combat.Grab.GrabSystem)
 local ParkourSystem = require(Systems.ParkourSystem)
 local RunSystem = require(Systems.RunSystem)
 local AbsorbSystem = require(Systems.AbsorbSystem)
@@ -52,6 +71,7 @@ local RivalrySystem = require(Systems.RivalrySystem)
 local BountySystem = require(Systems.BountySystem)
 local BugReportSystem = require(Systems.BugReportSystem)
 local AdminActionSystem = require(Systems.AdminActionSystem)
+local DebugDummySystem = require(Systems.DebugDummySystem)
 local ModerationSystem = require(Systems.ModerationSystem)
 local DevMenuSystem = require(Systems.DevMenuSystem)
 local MoveEditorSystem = require(Systems.MoveEditorSystem)
@@ -59,6 +79,17 @@ local LiveConsoleSystem = require(Systems.LiveConsoleSystem)
 local CharacterCreationSystem = require(Systems.CharacterCreationSystem)
 local EmoteUnlockService = require(Systems.EmoteUnlockService)
 local EmoteSystem = require(Systems.EmoteSystem)
+
+local logger = Logger.scope("Boot")
+
+-- Initializes one System and records that it did, for the end-of-boot check on the last line of this
+-- file. The name is passed explicitly rather than derived, because a module table has no name at
+-- runtime -- and a name derived from the variable it happens to be assigned to would silently stop
+-- matching the manifest the first time someone renamed the local.
+local function boot(name: string, system: Types.SystemModule): ()
+	system.Init()
+	BootManifest.MarkBooted(name)
+end
 
 -- Explicit boot order -- each comment states the dependency this ordering satisfies.
 
@@ -74,51 +105,46 @@ EngineLogCapture.Init()
 --    a chance to start writing per-player state for them. This is the one System in this boot
 --    sequence whose position is a correctness requirement, not just a dependency-ordering
 --    convenience -- see ModerationSystem.lua's own header.
-ModerationSystem.Init()
+boot("ModerationSystem", ModerationSystem)
 
 -- 2. ServerHopSystem has zero dependency on any other System (it only ever calls TeleportService for
 --    a requesting player -- no PlayerDataSystem/CombatSystem/etc. state involved), so nothing below
 --    gates it. Boots this early so it's ready as soon as possible -- it's the very first remote a
 --    freshly-joined client's Start Menu can call, ahead of everything else in this file.
-ServerHopSystem.Init()
+boot("ServerHopSystem", ServerHopSystem)
 
 -- 2b. VersionWatchSystem also has zero dependency on any other System (it only ever writes its own
 --     boot-time game.PlaceVersion into its own DataStore key) -- boots early alongside ServerHopSystem
 --     so the shared "highest booted version" key starts converging as soon as possible.
 --     DevMenuSystem (step 22) is the one caller with a runtime dependency on it, reading it via
 --     GetVersionInfo for the Admin tab's version-mismatch banner.
-VersionWatchSystem.Init()
+boot("VersionWatchSystem", VersionWatchSystem)
 
 -- 3. Data layer next: every other System reads/writes player state through PlayerDataSystem.
-PlayerDataSystem.Init()
+boot("PlayerDataSystem", PlayerDataSystem)
 
 -- 3b. SettingsSystem's only dependency is PlayerDataSystem immediately above (Transform/GetProfile
 --     on Types.PlayerProfile.settings) -- boots here, right next to it, rather than later alongside
 --     some unrelated cluster, since nothing else in this sequence needs it running sooner or later.
-SettingsSystem.Init()
-
--- 4. Faction membership before anything faction-gated (standing, territory contest, Qi Conflict).
-FactionManager.Init()
+boot("SettingsSystem", SettingsSystem)
 
 -- 5. Meridian XP is the resource TierSystem's tier-up checks read -- the resource has to exist
 --    before the system gating on it can meaningfully check it (software-architecture.md).
-MeridianSystem.Init()
+boot("MeridianSystem", MeridianSystem)
 
 -- 6. Qi's live resource (current/max, regen) reads profile.tier/attributes straight off
 --    PlayerDataSystem, so it only needs step 3 -- placed here, ahead of TierSystem, purely to sit
 --    next to MeridianSystem as the other "resource that has to exist before something reads it"
 --    boot-order pair, and ahead of QiDeviationSystem (step 11) which is expected to read Qi state
 --    through QiSystem's public API once it's built out.
-QiSystem.Init()
+boot("QiSystem", QiSystem)
 
 -- 7. Tier before bloodline/art: awakening and mastery gates read current tier.
-TierSystem.Init()
+boot("TierSystem", TierSystem)
 
 -- 8. Registries (Managers) before the per-player Systems that read them.
-BloodlineManager.Init()
-BloodlineSystem.Init()
-ArtTreeManager.Init()
-ArtSystem.Init()
+boot("ArtTreeManager", ArtTreeManager)
+boot("ArtSystem", ArtSystem)
 
 -- 8b. The character sheet's replication layer -- pure projection of PlayerDataSystem's profile out
 --     to its owning client, so it needs nothing beyond step 3. Boots here, next to the progression
@@ -126,21 +152,7 @@ ArtSystem.Init()
 --     bottom with the UI-facing tools: it subscribes to OnProfileLoaded, and a profile that loads
 --     before this connects would never push its sheet at all (the Init()-time GetPlayers() sweep in
 --     that module is the backstop, not the plan).
-CharacterSheetSystem.Init()
-
--- 9. ProgressionSystem is an orchestration layer (see software-architecture.md), not a data
---    owner -- its Init() doesn't need TierSystem/BloodlineSystem/ArtSystem/MeridianSystem
---    already running, it just needs to exist before any real gameplay event can be routed
---    through it, which this boot order already guarantees.
-ProgressionSystem.Init()
-
--- 10. AchievementSystem has no Init()-time dependency on the systems it later reads from either --
---     same orchestration-layer reasoning as ProgressionSystem, clustered here since
---     ProgressionSystem is what triggers its milestone checks.
-AchievementSystem.Init()
-
--- 11. Qi Deviation reads qi/art/bloodline state, so it boots after those exist.
-QiDeviationSystem.Init()
+boot("CharacterSheetSystem", CharacterSheetSystem)
 
 -- 12. MoveRegistryManager (the Move Creation System's live in-memory move registry --
 --     Server/Combat/MoveRegistryManager.lua) boots here -- MoveEditorSystem (step 22b) is what
@@ -158,9 +170,9 @@ QiDeviationSystem.Init()
 --     sequence reads from it -- so its position here is about where a reader expects combat to start,
 --     not about ordering. Init() only connects the Heartbeat; a server with nobody registered pays
 --     nothing for it.
-MoveRegistryManager.Init()
-PlayerDeathSystem.Init()
-HitboxEngine.Init()
+boot("MoveRegistryManager", MoveRegistryManager)
+boot("PlayerDeathSystem", PlayerDeathSystem)
+boot("HitboxEngine", HitboxEngine)
 
 --     DefenseSystem is the engine's first consumer -- it turns a contact into a KIND of hit (clean,
 --     blocked, parried, traded, guard-broken, backstab) and stops there, applying no damage. Unlike
@@ -175,7 +187,7 @@ HitboxEngine.Init()
 --     header); ParryWindows fails closed on it exactly like any other id until it carries authored
 --     ParryStart/ParryClose markers.
 DefenseSystem.SetDefaultParryAnimation(DefenseConstants.ParryAnimationId)
-DefenseSystem.Init()
+boot("DefenseSystem", DefenseSystem)
 
 --     DamageSystem is the defence layer's first consumer, and the third and last layer of the combat
 --     stack -- it turns a KIND of hit into health lost, guard spent, and a swing interrupted. ITS
@@ -186,7 +198,7 @@ DefenseSystem.Init()
 --     Note it needs no character binding of its own and has no registry -- see its header on why
 --     everything it needs is derivable from the Model an outcome already carries, which is what lets a
 --     player, a bot and a dummy share one path with nobody registering any of them.
-DamageSystem.Init()
+boot("DamageSystem", DamageSystem)
 
 --     AttackRequestSystem is the fourth and topmost layer -- the one that lets anybody actually throw
 --     anything. It owns the Attack_Request remote, resolves which move a press means (SwingSequencer),
@@ -202,7 +214,17 @@ DamageSystem.Init()
 --     available rather than trusting this comment.
 --     TestAttackHarness (and its client half) are DELETED as of this System existing, exactly as that
 --     module's own header always said they would be.
-AttackRequestSystem.Init()
+boot("AttackRequestSystem", AttackRequestSystem)
+
+--     GrabSystem is a SIBLING of AttackRequestSystem, not a fifth layer stacked on top of it -- it
+--     subscribes to DamageSystem.OnApplied (the same public extension point that module's own header
+--     names as its intended use) and is READ by AttackRequestSystem.Throw as a third CanAttack-shaped
+--     gate. Boots immediately after AttackRequestSystem for the same "the layer that actually throws
+--     things is booted, so the thing reading its result can be too" readability reasoning, not a
+--     correctness requirement -- GrabSystem's own Step only ever reclaims ITS OWN state (holds/
+--     flights), so an out-of-order boot costs at most one stale frame rather than a wrong outcome. See
+--     that module's own Init() for the one assertion it does make (DamageSystem must be available).
+boot("GrabSystem", GrabSystem)
 
 -- 12a. Parkour System -- the server authority for the client-side movement framework. Its one
 --      integration point is the pair of Humanoid Attributes it stamps (ParkourVelocityOwned, and the
@@ -212,7 +234,7 @@ AttackRequestSystem.Init()
 --      without the other makes neither make sense. The one real requirement is ModerationSystem
 --      (step 1), since a sustained stream of implausible movement reports routes into its
 --      suspected-cheater flag.
-ParkourSystem.Init()
+boot("ParkourSystem", ParkourSystem)
 
 -- 12b. Run System -- the WalkSpeed owner, and the authority for the three-stage run. Takes over the
 --      per-Heartbeat WalkSpeed resolver that CombatSystem.onHeartbeat used to drive through
@@ -225,79 +247,72 @@ ParkourSystem.Init()
 --      would boot correctly anywhere in this sequence; its only genuine ordering constraint is that
 --      it must run before any System that expects a seeded BonusWalkSpeed Attribute, and nothing
 --      currently does.
-RunSystem.Init()
+boot("RunSystem", RunSystem)
 
 -- 12b. Emote System -- EmoteUnlockService only needs PlayerDataSystem (step 3), but boots here,
 --      immediately alongside its one dependent, rather than earlier: nothing else in this sequence
 --      needs it running sooner. EmoteSystem needs both PlayerDataSystem (persistence) and
 --      EmoteUnlockService (HasUnlocked/GetUnlockedIds gates on RequestPlay/RequestSetLoadoutSlot),
 --      so it boots last of the two.
-EmoteUnlockService.Init()
-EmoteSystem.Init()
-
--- 13. Absorb computes/applies essence absorption -- boots before RewardSystem, which is the one
---     with the runtime dependency on it (not the reverse).
-AbsorbSystem.Init()
-
--- 14. RewardSystem composes reward manifests from CombatSystem's outcomes, calling into
---     AbsorbSystem for the absorb component, before handing off to ProgressionSystem.
-RewardSystem.Init()
+boot("EmoteUnlockService", EmoteUnlockService)
+boot("EmoteSystem", EmoteSystem)
 
 -- 15. RespawnSystem subscribes to GameplayEvents.OnPlayerKilled, so it needs PlayerDeathSystem
---     already running (step 12) to ever fire that signal. Placed after the reward/progression
---     consumers above rather than before them only for readability -- it's a pure subscriber, so
---     nothing in this sequence depends on it. It owns every Player:LoadCharacter() call
+--     already running (step 12) to ever fire that signal. It owns every Player:LoadCharacter() call
 --     EXCEPT the session-first one CharacterCreationSystem makes at step 23 -- see its own header
 --     for why Players.CharacterAutoLoads = false makes that ownership split load-bearing.
-RespawnSystem.Init()
-
--- 16. Ascension reads tier/race/bloodline state to gate the awakening check.
-AwakeningSystem.Init()
-
--- 17. World/territory state depends on FactionManager for faction-contested zones.
-TerritorySystem.Init()
-WorldSystem.Init()
+boot("RespawnSystem", RespawnSystem)
 
 -- 18. Meta/social systems read PvP kill outcomes off GameplayEvents.OnPlayerKilled (PlayerDeathSystem,
 --     step 12, is what actually fires it now -- see that module's header) and player state from
 --     PlayerDataSystem.
-RivalrySystem.Init()
-BountySystem.Init()
+boot("RivalrySystem", RivalrySystem)
+boot("BountySystem", BountySystem)
 
 -- 20. Bug reports are independent of every gameplay System above (own DataStore, own public
 --     remote) but boot before the whitelist-gated dev tooling that triages them --
 --     DevMenuSystem's ListBugReports/UpdateBugReportStatus handlers call straight into
 --     BugReportSystem's public API -- "boots before its one dependent."
-BugReportSystem.Init()
+boot("BugReportSystem", BugReportSystem)
 
 -- 21. AdminActionSystem owns its own independent Players.PlayerAdded/CharacterAdded wiring (no
 --     runtime dependency on any other System above) -- boots before DevMenuSystem,
 --     which is the one with the runtime dependency on it (its SetTargetGodmode/SetTargetFlight/
 --     SetTargetFlightCollide/SetTargetFrozen/SetTargetInvisible/SetTargetSpeedMultiplier/
 --     TeleportToTarget/BringTarget/TeleportToCoordinates handlers call straight into it).
-AdminActionSystem.Init()
+boot("AdminActionSystem", AdminActionSystem)
+
+-- 21b. DebugDummySystem -- a real, fully-registered HitboxEngine/DefenseSystem combatant, spawnable
+--      only through the whitelist-gated Spawn tab (DevMenuSystem.handleSpawnDebugDummy below), so it
+--      boots alongside AdminActionSystem rather than earlier: nothing above needs it running sooner,
+--      and its own Init() asserts DamageSystem (step 12) is already available regardless of exactly
+--      where in this back half of the sequence it lands. See that module's own header for why it owns
+--      no Heartbeat and therefore has no connection-order requirement the way the four layers below it
+--      do.
+boot("DebugDummySystem", DebugDummySystem)
 
 -- 22. Whitelist-gated dev tooling boots last -- its
 --     ListBugReports/UpdateBugReportStatus handlers call BugReportSystem, its
 --     SetTargetGodmode/SetTargetFlight/SetTargetFlightCollide/etc. handlers call AdminActionSystem,
---     its KickPlayer/BanPlayer/MutePlayer handlers call ModerationSystem (already booted first,
---     step 1), and its RollEmote handler calls EmoteUnlockService (already booted at step 12b) -- so
---     it needs all of them already running, and nothing else in the boot sequence depends on
---     DevMenuSystem existing first.
-DevMenuSystem.Init()
+--     its SpawnDebugDummy/DespawnAllDebugDummies/SetDummyGuard/GetDebugDummyState handlers call
+--     DebugDummySystem (step 21b above), its KickPlayer/BanPlayer/MutePlayer handlers call
+--     ModerationSystem (already booted first, step 1), and its RollEmote handler calls
+--     EmoteUnlockService (already booted at step 12b) -- so it needs all of them already running, and
+--     nothing else in the boot sequence depends on DevMenuSystem existing first.
+boot("DevMenuSystem", DevMenuSystem)
 
 -- 22b. MoveEditorSystem (the Move Creation System's admin-gated authoring UI backend) boots right
 --      after DevMenuSystem, the same whitelist-gated dev-tooling cluster -- it populates
 --      MoveRegistryManager (step 12 above) from its own DataStore on boot. Nothing else in this
 --      sequence depends on it existing first.
-MoveEditorSystem.Init()
+boot("MoveEditorSystem", MoveEditorSystem)
 
 -- 22c. LiveConsoleSystem (the Live Admin Console's server half) boots right after MoveEditorSystem,
 --      the same whitelist-gated dev-tooling cluster -- its own Logger.OnEntry registration only
 --      needs Shared/Logger.lua (already required, not a System with an Init order of its own) and
 --      Server/Config/AdminConfig.lua, so nothing else in this sequence depends on it existing first,
 --      and it depends on nothing above.
-LiveConsoleSystem.Init()
+boot("LiveConsoleSystem", LiveConsoleSystem)
 
 -- 23. First-time-player onboarding boots last -- it depends on PlayerDataSystem (WaitForProfile to
 --     read raceId, Transform to write the finalized profile) and AdminActionSystem (SetFrozen while
@@ -306,4 +321,38 @@ LiveConsoleSystem.Init()
 --     Player:LoadCharacter() call for every player (Players.CharacterAutoLoads = false (default.project.json)) --
 --     nothing above depends on characters existing yet, so there's no ordering risk in placing this
 --     last.
-CharacterCreationSystem.Init()
+boot("CharacterCreationSystem", CharacterCreationSystem)
+
+-- PLANNED SYSTEMS -- every Init() below is currently empty (confirmed 2026-08-19). They boot here,
+-- outside the numbered sequence above, so the boot list stays a complete inventory of every System
+-- without pretending any ordering argument for them is real: none of them reads or writes anything
+-- yet, so none of them participates in the dependency ordering the numbered steps above document.
+-- Design intent for each one lives in its own module header, not here. Move a System's Init() call
+-- out of this loop and into its own numbered step, with a real ordering comment, the day its body
+-- stops being empty -- that migration is then a visible diff instead of a silent behavior change.
+--
+-- Named alongside their modules for the same reason the numbered steps above pass a name: these boot
+-- through a loop, but they are checked against BootManifest.lua exactly like everything else.
+for _, planned in
+	{
+		{ Name = "FactionManager", Module = FactionManager },
+		{ Name = "BloodlineManager", Module = BloodlineManager },
+		{ Name = "BloodlineSystem", Module = BloodlineSystem },
+		{ Name = "ProgressionSystem", Module = ProgressionSystem },
+		{ Name = "AchievementSystem", Module = AchievementSystem },
+		{ Name = "QiDeviationSystem", Module = QiDeviationSystem },
+		{ Name = "AbsorbSystem", Module = AbsorbSystem },
+		{ Name = "RewardSystem", Module = RewardSystem },
+		{ Name = "AwakeningSystem", Module = AwakeningSystem },
+		{ Name = "TerritorySystem", Module = TerritorySystem },
+		{ Name = "WorldSystem", Module = WorldSystem },
+	}
+do
+	boot(planned.Name, planned.Module)
+end
+
+-- LAST, and deliberately after every Init above including the planned loop: compares what actually
+-- booted, and the network surface it actually produced, against Server/Config/BootManifest.lua. Hard
+-- failure in Studio, an error-level log on a live server -- see AssertBootComplete's own comment for
+-- why those are different.
+BootManifest.AssertBootComplete(logger)

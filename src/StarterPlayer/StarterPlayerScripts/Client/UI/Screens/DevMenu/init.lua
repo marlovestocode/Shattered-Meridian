@@ -50,7 +50,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
 local Tokens = require(script.Parent.Parent.Tokens)
-local Panel = require(script.Parent.Parent.Components.Panel)
+local ModalScreen = require(script.Parent.Parent.Components.ModalScreen)
 local Label = require(script.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Components.Button)
 
@@ -115,104 +115,80 @@ function DevMenu.Mount(scope: Scope, playerGui: PlayerGui): DevMenuHandle
 		return `Target: {use(content.TargetNameDisplay)}`
 	end)
 
-	scope:New "ScreenGui" {
+	ModalScreen(scope, playerGui, {
 		Name = "DevMenu",
-		ResetOnSpawn = false,
-		Enabled = isOpen,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		Parent = playerGui,
+		Size = ROOT_SIZE,
+		IsOpen = isOpen,
 
-		[Children] = Panel(scope, {
-			Name = "Root",
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.fromScale(0.5, 0.5),
-			Size = ROOT_SIZE,
-			Elevated = true,
-			CornerAccent = true,
+		Children = {
+			-- Header: title, live resolved-target label, close button.
+			scope:New "Frame" {
+				Name = "Header",
+				Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
+				BackgroundTransparency = 1,
+				LayoutOrder = 1,
 
-			Children = {
-				scope:New "UIPadding" {
-					PaddingTop = UDim.new(0, Tokens.Space.L),
-					PaddingBottom = UDim.new(0, Tokens.Space.L),
-					PaddingLeft = UDim.new(0, Tokens.Space.L),
-					PaddingRight = UDim.new(0, Tokens.Space.L),
+				[Children] = {
+					-- Neither label passes Size -- Label.lua's own default (AutomaticSize.XY when
+					-- Size is omitted) is what makes each size itself to its text instead of
+					-- rendering at a literal zero-size frame, which is what happens if Size is
+					-- ever passed as fromScale(0, 0) here (Label.lua ties AutomaticSize to
+					-- "was Size provided at all", not to the value passed).
+					Label(scope, {
+						Text = "Developer Menu",
+						Scale = "Heading",
+						AnchorPoint = Vector2.new(0, 0.5),
+						Position = UDim2.fromScale(0, 0.5),
+					}),
+					Label(scope, {
+						Text = targetLabelText,
+						Scale = "Detail",
+						Color = Tokens.Color.TextSecondary,
+						AnchorPoint = Vector2.new(1, 0.5),
+						Position = UDim2.new(1, -Tokens.Control.CloseButtonClearance, 0.5, 0),
+						TextXAlignment = Enum.TextXAlignment.Right,
+					}),
+					Button(scope, {
+						Text = "X",
+						Size = UDim2.fromOffset(28, 28),
+						AnchorPoint = Vector2.new(1, 0.5),
+						Position = UDim2.fromScale(1, 0.5),
+						OnActivated = function()
+							isOpen:set(false)
+						end,
+					}),
 				},
-				scope:New "UIListLayout" {
-					FillDirection = Enum.FillDirection.Vertical,
-					HorizontalAlignment = Enum.HorizontalAlignment.Left,
-					Padding = UDim.new(0, Tokens.Space.M),
-					SortOrder = Enum.SortOrder.LayoutOrder,
-				},
-
-				-- Header: title, live resolved-target label, close button.
-				scope:New "Frame" {
-					Name = "Header",
-					Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
-					BackgroundTransparency = 1,
-					LayoutOrder = 1,
-
-					[Children] = {
-						-- Neither label passes Size -- Label.lua's own default (AutomaticSize.XY when
-						-- Size is omitted) is what makes each size itself to its text instead of
-						-- rendering at a literal zero-size frame, which is what happens if Size is
-						-- ever passed as fromScale(0, 0) here (Label.lua ties AutomaticSize to
-						-- "was Size provided at all", not to the value passed).
-						Label(scope, {
-							Text = "Developer Menu",
-							Scale = "Heading",
-							AnchorPoint = Vector2.new(0, 0.5),
-							Position = UDim2.fromScale(0, 0.5),
-						}),
-						Label(scope, {
-							Text = targetLabelText,
-							Scale = "Detail",
-							Color = Tokens.Color.TextSecondary,
-							AnchorPoint = Vector2.new(1, 0.5),
-							Position = UDim2.new(1, -Tokens.Control.CloseButtonClearance, 0.5, 0),
-							TextXAlignment = Enum.TextXAlignment.Right,
-						}),
-						Button(scope, {
-							Text = "X",
-							Size = UDim2.fromOffset(28, 28),
-							AnchorPoint = Vector2.new(1, 0.5),
-							Position = UDim2.fromScale(1, 0.5),
-							OnActivated = function()
-								isOpen:set(false)
-							end,
-						}),
-					},
-				},
-
-				-- Body: the persistent Sidebar column next to the tabbed ContentArea column, side by
-				-- side -- see this file's own header for the layout-budget split both receive.
-				scope:New "Frame" {
-					Name = "Body",
-					Size = UDim2.fromOffset(BODY_WIDTH, BODY_HEIGHT),
-					BackgroundTransparency = 1,
-					LayoutOrder = 2,
-
-					[Children] = {
-						scope:New "UIListLayout" {
-							FillDirection = Enum.FillDirection.Horizontal,
-							HorizontalAlignment = Enum.HorizontalAlignment.Left,
-							Padding = UDim.new(0, Tokens.Space.M),
-							SortOrder = Enum.SortOrder.LayoutOrder,
-						},
-						sidebar.Root,
-						content.Root,
-					},
-				},
-
-				Label(scope, {
-					Text = statusText,
-					Scale = "Detail",
-					Color = Tokens.Color.TextSecondary,
-					Size = UDim2.new(1, 0, 0, FOOTER_HEIGHT),
-					LayoutOrder = 30,
-				}),
 			},
-		}),
-	}
+
+			-- Body: the persistent Sidebar column next to the tabbed ContentArea column, side by
+			-- side -- see this file's own header for the layout-budget split both receive.
+			scope:New "Frame" {
+				Name = "Body",
+				Size = UDim2.fromOffset(BODY_WIDTH, BODY_HEIGHT),
+				BackgroundTransparency = 1,
+				LayoutOrder = 2,
+
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						HorizontalAlignment = Enum.HorizontalAlignment.Left,
+						Padding = UDim.new(0, Tokens.Space.M),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					sidebar.Root,
+					content.Root,
+				},
+			},
+
+			Label(scope, {
+				Text = statusText,
+				Scale = "Detail",
+				Color = Tokens.Color.TextSecondary,
+				Size = UDim2.new(1, 0, 0, FOOTER_HEIGHT),
+				LayoutOrder = 30,
+			}),
+		},
+	})
 
 	return {
 		IsOpen = isOpen,

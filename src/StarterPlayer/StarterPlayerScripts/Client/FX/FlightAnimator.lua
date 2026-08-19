@@ -31,6 +31,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local AnimatorUtil = require(ReplicatedStorage.Shared.AnimatorUtil)
 local AnimationTrackUtil = require(script.Parent.AnimationTrackUtil)
@@ -39,7 +40,7 @@ local logger = Logger.scope("FlightAnimator")
 
 local FlightAnimator = {}
 
-local ANIMATION_IDS = Constants.Flight.AnimationIds
+local ANIMATION_IDS = FlightConstants.AnimationIds
 
 -- Same reasoning as CombatAnimator.lua's own DOMINANT_WEIGHT: a single Play()-time weight isn't
 -- enough for a sustained/held track, since Roblox's default Animate script keeps re-asserting its
@@ -153,6 +154,15 @@ end
 -- unrelated track families would be wrong.
 local flightFreezeGuard = AnimationTrackUtil.NewFreezeGuard()
 
+-- Reused across every Heartbeat instead of building a fresh `{ {...}, {...}, {...} }` argument each
+-- frame -- see CombatAnimator.lua's own locomotionLoopEntries for why (DriveDominantLoop only reads
+-- these synchronously within the call and never retains the table).
+local flightLoopEntries: { AnimationTrackUtil.DominantLoopEntry } = {
+	{ Track = nil, ShouldPlay = false, PlayFadeSeconds = LOOP_FADE_TIME, StopFadeSeconds = LOOP_FADE_TIME },
+	{ Track = nil, ShouldPlay = false, PlayFadeSeconds = LOOP_FADE_TIME, StopFadeSeconds = LOOP_FADE_TIME },
+	{ Track = nil, ShouldPlay = false, PlayFadeSeconds = LOOP_FADE_TIME, StopFadeSeconds = LOOP_FADE_TIME },
+}
+
 -- Freezes whichever flight tracks are currently playing (landing-impact hit-stop) -- the
 -- flight-domain counterpart to CombatAnimator.FreezeActiveCombatTrack, kept as a separate
 -- FreezeGuard instance per this module's own header so a combat hit-stop never touches a flight
@@ -183,7 +193,7 @@ RunService.Heartbeat:Connect(function()
 	end
 
 	local flying = currentHumanoid ~= nil and currentHumanoid:GetAttribute(Constants.Attributes.Flying) == true
-	local shouldHover = flying and currentSpeed < Constants.Flight.HoverSpeedThreshold
+	local shouldHover = flying and currentSpeed < FlightConstants.HoverSpeedThreshold
 	local shouldCruise = flying and not shouldHover and not currentlyBoosting
 	local shouldBoost = flying and not shouldHover and currentlyBoosting
 
@@ -192,26 +202,14 @@ RunService.Heartbeat:Connect(function()
 	-- that module's own header. All three loops here share one fade time both ways (no
 	-- toggle-vs-interrupt distinction the way Combat's Walking<->Running has), so PlayFadeSeconds
 	-- and StopFadeSeconds are both just LOOP_FADE_TIME.
-	AnimationTrackUtil.DriveDominantLoop({
-		{
-			Track = hoverTrack,
-			ShouldPlay = shouldHover,
-			PlayFadeSeconds = LOOP_FADE_TIME,
-			StopFadeSeconds = LOOP_FADE_TIME,
-		},
-		{
-			Track = cruiseTrack,
-			ShouldPlay = shouldCruise,
-			PlayFadeSeconds = LOOP_FADE_TIME,
-			StopFadeSeconds = LOOP_FADE_TIME,
-		},
-		{
-			Track = boostTrack,
-			ShouldPlay = shouldBoost,
-			PlayFadeSeconds = LOOP_FADE_TIME,
-			StopFadeSeconds = LOOP_FADE_TIME,
-		},
-	}, DOMINANT_WEIGHT)
+	flightLoopEntries[1].Track = hoverTrack
+	flightLoopEntries[1].ShouldPlay = shouldHover
+	flightLoopEntries[2].Track = cruiseTrack
+	flightLoopEntries[2].ShouldPlay = shouldCruise
+	flightLoopEntries[3].Track = boostTrack
+	flightLoopEntries[3].ShouldPlay = shouldBoost
+
+	AnimationTrackUtil.DriveDominantLoop(flightLoopEntries, DOMINANT_WEIGHT)
 end)
 
 return FlightAnimator

@@ -46,7 +46,7 @@ local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local MoveStats = require(ReplicatedStorage.Shared.MoveStats)
 
 local Tokens = require(script.Parent.Parent.Tokens)
-local Panel = require(script.Parent.Parent.Components.Panel)
+local ModalScreen = require(script.Parent.Parent.Components.ModalScreen)
 local Label = require(script.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Components.Button)
 local Divider = require(script.Parent.Parent.Components.Divider)
@@ -108,6 +108,10 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.M
 	local resetRequestedEvent = Instance.new("BindableEvent")
 	local bindHotbarSlotRequestedEvent = Instance.new("BindableEvent")
 	local duplicateMoveRequestedEvent = Instance.new("BindableEvent")
+	local toggleTestDummyRequestedEvent = Instance.new("BindableEvent")
+	-- This client's own best-effort guess, per HasTestDummy's own header -- MoveEditorClient.lua is
+	-- the only writer (on a successful Spawn/Despawn response).
+	local hasTestDummy = scope:Value(false)
 
 	local selectedMoveId = scope:Computed(function(use)
 		local currentDraft = use(draft)
@@ -154,6 +158,10 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.M
 		OnReset = function()
 			resetRequestedEvent:Fire()
 		end,
+		HasTestDummy = hasTestDummy,
+		OnToggleTestDummy = function()
+			toggleTestDummyRequestedEvent:Fire()
+		end,
 		OnBindHotbarSlot = function(slot: number)
 			-- Resolved here (not passed down as a prop) since init.lua already owns `draft` -- the
 			-- same "screen exposes state/signals, client module drives from outside" boundary this
@@ -173,94 +181,70 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.M
 		IsOpen = isOpen,
 	})
 
-	scope:New "ScreenGui" {
+	ModalScreen(scope, playerGui, {
 		Name = "MoveEditor",
-		ResetOnSpawn = false,
-		Enabled = isOpen,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		Parent = playerGui,
+		Size = ROOT_SIZE,
+		IsOpen = isOpen,
 
-		[Children] = Panel(scope, {
-			Name = "Root",
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.fromScale(0.5, 0.5),
-			Size = ROOT_SIZE,
-			Elevated = true,
-			CornerAccent = true,
+		Children = {
+			scope:New "Frame" {
+				Name = "Header",
+				Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
+				BackgroundTransparency = 1,
+				LayoutOrder = 1,
 
-			Children = {
-				scope:New "UIPadding" {
-					PaddingTop = UDim.new(0, Tokens.Space.L),
-					PaddingBottom = UDim.new(0, Tokens.Space.L),
-					PaddingLeft = UDim.new(0, Tokens.Space.L),
-					PaddingRight = UDim.new(0, Tokens.Space.L),
-				},
-				scope:New "UIListLayout" {
-					FillDirection = Enum.FillDirection.Vertical,
-					HorizontalAlignment = Enum.HorizontalAlignment.Left,
-					Padding = UDim.new(0, Tokens.Space.M),
-					SortOrder = Enum.SortOrder.LayoutOrder,
-				},
-
-				scope:New "Frame" {
-					Name = "Header",
-					Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
-					BackgroundTransparency = 1,
-					LayoutOrder = 1,
-
-					[Children] = {
-						Label(scope, {
-							Text = "Move Creation System",
-							Scale = "Heading",
-							AnchorPoint = Vector2.new(0, 0.5),
-							Position = UDim2.fromScale(0, 0.5),
-						}),
-						Label(scope, {
-							Text = statusText,
-							Scale = "Body",
-							Color = Tokens.Color.TextSecondary,
-							AnchorPoint = Vector2.new(1, 0.5),
-							Position = UDim2.new(1, -Tokens.Control.CloseButtonClearance, 0.5, 0),
-							TextXAlignment = Enum.TextXAlignment.Right,
-						}),
-						Button(scope, {
-							Text = "X",
-							Size = UDim2.fromOffset(28, 28),
-							AnchorPoint = Vector2.new(1, 0.5),
-							Position = UDim2.fromScale(1, 0.5),
-							OnActivated = function()
-								closeRequestedEvent:Fire()
-							end,
-						}),
-					},
-				},
-
-				-- The header/body seam -- docs/ui-ux-philosophy.md's own "layered depth" panel
-				-- language, made literal as a hairline rule between the two bands instead of relying
-				-- on padding alone to separate them.
-				Divider.Plain(scope, { LayoutOrder = 2, Tint = Tokens.Border.Lit }),
-
-				scope:New "Frame" {
-					Name = "Body",
-					Size = UDim2.fromOffset(BODY_WIDTH, BODY_HEIGHT),
-					BackgroundTransparency = 1,
-					LayoutOrder = 3,
-
-					[Children] = {
-						scope:New "UIListLayout" {
-							FillDirection = Enum.FillDirection.Horizontal,
-							HorizontalAlignment = Enum.HorizontalAlignment.Left,
-							Padding = UDim.new(0, Tokens.Space.M),
-							SortOrder = Enum.SortOrder.LayoutOrder,
-						},
-						sidebar.Root,
-						propertyEditorRoot,
-						previewRoot,
-					},
+				[Children] = {
+					Label(scope, {
+						Text = "Move Creation System",
+						Scale = "Heading",
+						AnchorPoint = Vector2.new(0, 0.5),
+						Position = UDim2.fromScale(0, 0.5),
+					}),
+					Label(scope, {
+						Text = statusText,
+						Scale = "Body",
+						Color = Tokens.Color.TextSecondary,
+						AnchorPoint = Vector2.new(1, 0.5),
+						Position = UDim2.new(1, -Tokens.Control.CloseButtonClearance, 0.5, 0),
+						TextXAlignment = Enum.TextXAlignment.Right,
+					}),
+					Button(scope, {
+						Text = "X",
+						Size = UDim2.fromOffset(28, 28),
+						AnchorPoint = Vector2.new(1, 0.5),
+						Position = UDim2.fromScale(1, 0.5),
+						OnActivated = function()
+							closeRequestedEvent:Fire()
+						end,
+					}),
 				},
 			},
-		}),
-	}
+
+			-- The header/body seam -- docs/ui-ux-philosophy.md's own "layered depth" panel
+			-- language, made literal as a hairline rule between the two bands instead of relying
+			-- on padding alone to separate them.
+			Divider.Plain(scope, { LayoutOrder = 2, Tint = Tokens.Border.Lit }),
+
+			scope:New "Frame" {
+				Name = "Body",
+				Size = UDim2.fromOffset(BODY_WIDTH, BODY_HEIGHT),
+				BackgroundTransparency = 1,
+				LayoutOrder = 3,
+
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						HorizontalAlignment = Enum.HorizontalAlignment.Left,
+						Padding = UDim.new(0, Tokens.Space.M),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					sidebar.Root,
+					propertyEditorRoot,
+					previewRoot,
+				},
+			},
+		},
+	})
 
 	return {
 		IsOpen = isOpen,
@@ -281,6 +265,8 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.M
 		SavedFingerprint = savedFingerprint,
 		IsDirty = isDirty,
 		DuplicateMoveRequested = duplicateMoveRequestedEvent.Event,
+		ToggleTestDummyRequested = toggleTestDummyRequestedEvent.Event,
+		HasTestDummy = hasTestDummy,
 	}
 end
 

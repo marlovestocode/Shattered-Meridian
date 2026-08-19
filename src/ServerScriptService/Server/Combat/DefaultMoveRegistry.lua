@@ -10,14 +10,14 @@
 	RecoverySeconds/Cooldown/Damage/PostureDamage/ArcDegrees/MaxTargets) is reachable through the SAME
 	Sidebar/PropertyEditor UI a hand-authored custom move uses (Client/UI/Screens/MoveEditor/), instead
 	of the old DevMenu Tuning tab's narrow +-delta stepper rows. That old UI is gone; this module's own
-	job -- mutate the real Constants tables live, by reference -- is unchanged.
+	job -- mutate the real CombatConstants tables live, by reference -- is unchanged.
 
 	A "Default" move is presented to the UI as a MoveTypes.MoveDefinition projection (synthetic MoveId,
 	e.g. "default:Primary:Basic:1" / "default:DashPunch"; Category = "Default", the reserved sentinel
 	documented in MoveTypes.lua's own header) purely so it can flow through the Move Editor's existing
 	Sidebar/PropertyEditor/PreviewViewport components and MoveRegistryManager.Validate's clamping
 	logic. It is NOT stored in MoveRegistryManager's own registry -- see this file's own List/
-	ApplyEdit/Reset below, which read/write Constants.Combat.Weapons[...].Stages/DashPunch/DashHit/
+	ApplyEdit/Reset below, which read/write CombatConstants.Weapons[...].Stages/DashPunch/DashHit/
 	AirSlam directly, by reference, exactly as this module's HitboxTuning.lua predecessor did.
 	CombatSystem.lua's selectAttackDefinition/commitAndThrowAttack/handleDashRequest/
 	handleAirSlamRequest and HitboxResolver.lua's Update all read those exact tables live, every
@@ -28,25 +28,24 @@
 	samples/ends but not when the attacker can act again for that one already-thrown swing). UNLIKE
 	its HitboxTuning.lua predecessor, an edit here CAN be made durable across a restart -- see
 	MoveEditorSystem.lua's SaveDefaultMove/loadDefaultMoveOverrides for the DataStore-backed override
-	record this module itself stays unaware of (ApplyEdit/Reset only ever touch the live Constants
-	tables; persistence is entirely MoveEditorSystem's concern, same ownership split as
+	record this module itself stays unaware of (ApplyEdit/Reset only ever touch the live
+	CombatConstants tables; persistence is entirely MoveEditorSystem's concern, same ownership split as
 	MoveRegistryManager/MoveEditorSystem's own custom-move Save).
 
 	AnimationId is always "" on the returned projection and never written anywhere -- a Default move's
 	animation is driven entirely by CombatAnimator.lua's existing DebugName-trailing-digit inference
 	(Shared/CombatDebugNames.lua), never by MoveDefinition.AnimationId; DebugName itself is NEVER
-	touched by ApplyEdit/Reset, only the fields listed above. Movement/Knockback/Projectile stay nil on
-	every projection -- those three sub-tables are consumed ONLY by CombatSystem.ThrowCustomMove's own
-	code path (HitResolution.lua has zero references to either field; the generic swing-resolution path
-	CombatSystem's own throw handlers use never reads them), so they'd be silently inert for a Default
-	move; the Move Editor UI hides those nav sections entirely for Category == "Default" rather than
-	exposing dead controls.
+	touched by ApplyEdit/Reset, only the fields listed above. Movement/Knockback/Grab/Projectile stay
+	nil on every projection -- those four sub-tables are consumed ONLY by the rebuilt combat stack's own
+	custom-move path (a live CombatConstants.Weapons stage has no field for any of them), so they'd be
+	silently inert for a Default move; the Move Editor UI hides those nav sections entirely for
+	Category == "Default" rather than exposing dead controls.
 
 	Captures every attack's ORIGINAL mutable-field values once, lazily, the first time any public
-	function here runs (guaranteed to be well after Constants.lua has fully loaded, and -- now that
-	MoveEditorSystem.lua's loadDefaultMoveOverrides calls List() before applying any saved override --
-	guaranteed to run BEFORE an override is ever applied, so a captured default is always the true
-	Constants.lua file value, never a previously-persisted override) so Reset can restore known-good
+	function here runs (guaranteed to be well after CombatConstants.lua has fully loaded, and -- now
+	that MoveEditorSystem.lua's loadDefaultMoveOverrides calls List() before applying any saved
+	override -- guaranteed to run BEFORE an override is ever applied, so a captured default is always
+	the true CombatConstants.lua file value, never a previously-persisted override) so Reset can restore known-good
 	values without a full Studio restart. Reset always reverts to THIS captured value and nothing else
 	-- MoveEditorSystem.lua's own ResetDefaultMove handler is responsible for also clearing that move's
 	DataStore override record, so a Reset a fresh boot won't silently re-apply.
@@ -59,7 +58,7 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local HitboxShapes = require(ReplicatedStorage.Shared.HitboxShapes)
@@ -84,9 +83,12 @@ type WeaponStageCategory = "Basic" | "Heavy" | "Finisher"
 -- One entry per live-tunable attack -- Definition is the LIVE Constants table object (by reference,
 -- never copied), MoveId/DisplayName are derived purely from this attack's fixed position in the
 -- (weaponId, category, stageIndex)/standalone-name scheme below, never stored or read back from
--- anywhere mutable. Rebuilt fresh on every call (cheap -- a couple dozen entries at most) rather than
--- cached, so a descriptor's Definition reference is always resolved against whatever Constants.lua
--- actually holds right now.
+-- anywhere mutable. The descriptor LIST is cached (see enumerateDescriptors) once this module's
+-- structural shape (which Stages arrays exist, how many entries each has) is established at boot --
+-- each Definition entry is still the live Constants table BY REFERENCE, and ApplyEdit/Reset always
+-- mutate that referenced table in place (applySnapshot never replaces it), so a cached descriptor's
+-- Definition is always resolved against whatever Constants.lua actually holds right now regardless of
+-- when the list itself was built.
 type Descriptor = {
 	MoveId: string,
 	DisplayName: string,
@@ -117,24 +119,36 @@ end
 
 local function resolveStandaloneDefinition(name: StandaloneName): Types.HitboxAttackDefinition
 	if name == "DashPunch" then
-		return Constants.Combat.DashPunch
+		return CombatConstants.DashPunch
 	elseif name == "DashHit" then
-		return Constants.Combat.DashHit
+		return CombatConstants.DashHit
 	end
-	return Constants.Combat.AirSlam
+	return CombatConstants.AirSlam
 end
 
 -- Every tunable attack, in a stable display order (Primary before Secondary, Basic before Heavy
 -- before Finisher, array order within each, then DashPunch/DashHit/AirSlam) -- the one enumeration
 -- every other function in this module (capture, resolve, list) is built from, so the order can never
--- drift between them. Cheap enough (a couple dozen entries) to rebuild on every call rather than
--- cache -- see Descriptor's own header.
+-- drift between them.
+--
+-- Cached after the first build: this used to be rebuilt from scratch on every call on the theory that
+-- a couple dozen entries is cheap, back when the only caller was an admin UI. It is now also the inner
+-- loop of AttackCatalog.Get (findDescriptor scans this list), called per landed hit and per buffered
+-- input replay every Heartbeat -- see AttackCatalog.lua's own header for that path. Caching is safe
+-- because the list's SHAPE (which MoveIds exist, which live Constants table each one points at) is
+-- fixed at boot -- CombatConstants.Weapons.*.Stages arrays are never resized or replaced at runtime,
+-- only mutated in place (see Descriptor's own header) -- so nothing here ever needs invalidating.
+local cachedDescriptors: { Descriptor }? = nil
+
 local function enumerateDescriptors(): { Descriptor }
+	if cachedDescriptors then
+		return cachedDescriptors
+	end
 	local result: { Descriptor } = {}
 	for _, weaponId in ipairs({ "Primary", "Secondary" } :: { Types.WeaponId }) do
 		local weapon = if weaponId == "Primary"
-			then Constants.Combat.Weapons.Primary
-			else Constants.Combat.Weapons.Secondary
+			then CombatConstants.Weapons.Primary
+			else CombatConstants.Weapons.Secondary
 		for index, definition in ipairs(weapon.Stages.Basic) do
 			table.insert(result, {
 				MoveId = weaponStageMoveId(weaponId, "Basic", index),
@@ -164,6 +178,7 @@ local function enumerateDescriptors(): { Descriptor }
 			Definition = resolveStandaloneDefinition(name),
 		})
 	end
+	cachedDescriptors = result
 	return result
 end
 
@@ -318,6 +333,10 @@ local function toMoveDefinition(
 		Animations = {},
 		Movement = nil,
 		Knockback = nil,
+		-- Same "consumed only by the Move Creation System's own throw path" reasoning as
+		-- Movement/Knockback/Projectile above -- a Default move's live Constants table has no field for
+		-- this either, so it would be silently inert. See MoveTypes.lua's own header.
+		Grab = nil,
 		Projectile = nil,
 		ObjectStun = nil,
 	}

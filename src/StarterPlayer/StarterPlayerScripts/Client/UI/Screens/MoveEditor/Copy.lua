@@ -131,6 +131,33 @@ Copy.Fields = {
 			.. "no floor time. Default 0.60s.",
 	} :: FieldCopy,
 
+	-- Grab -------------------------------------------------------------------------------------
+	["Grab.HoldSeconds"] = {
+		Unit = "seconds",
+		Hint = "How long the victim stays pinned to your fist before you must throw them or they drop on their own. "
+			.. "Default 3.00s.",
+	} :: FieldCopy,
+	["Grab.ThrowUpVelocity"] = {
+		Unit = "studs/s",
+		Hint = "Upward velocity given to the victim's own body the moment you throw them. Real gravity does the rest "
+			.. "of the arc. Default 20.",
+	} :: FieldCopy,
+	["Grab.ThrowHorizontalVelocity"] = {
+		Unit = "studs/s",
+		Hint = "Forward velocity given to the victim's own body, in the direction you're facing when you throw. "
+			.. "Default 55.",
+	} :: FieldCopy,
+	["Grab.ThrowImpactDamage"] = {
+		Unit = "HP",
+		Hint = "Health removed from whoever the thrown body collides with on landing. 0 is legal -- a throw that only "
+			.. "hurts the person thrown. Default 15.",
+	} :: FieldCopy,
+	["Grab.ThrowSelfDamage"] = {
+		Unit = "HP",
+		Hint = "Health removed from the VICTIM themselves on landing -- the cost of being thrown at all, regardless "
+			.. "of what (if anything) they hit. Default 10.",
+	} :: FieldCopy,
+
 	-- Projectile -------------------------------------------------------------------------------
 	["Projectile.Speed"] = {
 		Unit = "studs/s",
@@ -163,6 +190,9 @@ Copy.Sections = {
 		.. "stationary swing is the normal case.",
 	Knockback = "An optional launch and ragdoll applied to whoever is HIT. Off by default. This is also the "
 		.. "prerequisite for Object Stun, which needs a target actually in motion to slam into something.",
+	Grab = "Instead of ordinary knockback, pin whoever is HIT to your own fist and hold them there. A follow-up "
+		.. "press throws them along a real physics arc, dealing damage on landing. Off by default, and the attach "
+		.. "point itself is not authored here -- only how long the hold lasts and how hard the throw is.",
 	Projectile = "Turns this move into a travelling hitbox instead of a melee one. The shape and size above become the "
 		.. "projectile's own volume; it does not gain a separate one.",
 	ObjectStun = "What happens when this move's knockback drives a target into world geometry -- a wall, the floor, a "

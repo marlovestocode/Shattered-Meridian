@@ -44,6 +44,7 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 
 local logger = Logger.scope("CharacterSheetSystem")
@@ -113,7 +114,8 @@ function CharacterSheetSystem.Init(): ()
 	sheetRemote = NetworkBridge.CreateRemoteEvent(Constants.CharacterSheet.RemoteNames.SheetUpdated)
 
 	local getSheetRemote = NetworkBridge.CreateRemoteFunction(Constants.CharacterSheet.RemoteNames.GetSheet)
-	getSheetRemote.OnServerInvoke = handleGetSheet
+	getSheetRemote.OnServerInvoke =
+		RemoteHandler.WrapInvoke(logger, "GetSheet", nil :: Types.CharacterSheetPayload?, handleGetSheet)
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(function(player: Player)
 		CharacterSheetSystem.Refresh(player)

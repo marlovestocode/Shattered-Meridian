@@ -5,23 +5,30 @@
 	Owns: the run system's sound registrations and the verb-named play functions
 	Client/Movement/RunController.lua calls -- the same "domain module owns WHICH sounds exist and
 	gives them a typed API" shape Client/FX/CombatAudio.lua and Client/FX/FlightAudio.lua already
-	establish. Definitions come from Constants.Run (empty SoundId placeholders until real assets are
-	supplied -- SoundManager.Play already no-ops safely on those).
+	establish. Definitions come from Constants.Run (an empty SoundId placeholder until a real asset is
+	supplied -- SoundManager.Play already no-ops safely on that).
 
-	Three sounds, and the split between them is the point:
-	  * RunStepStage1 / RunStepStage2 -- one shot per footfall, at whichever stage is engaged.
-	  * RunStage<n>Onset -- one shot at the INSTANT stage n engages, never repeated. No stage 1 entry.
+	ONE registered sound, not three. Only Constants.Run.Footsteps.Stages[1] carries a Sound; stages 2
+	and 3 reuse that same registration and just play it faster
+	(Footsteps.Stages[n].PlaybackSpeedMultiplier), rather than each stage owning its own asset. There
+	used to also be a separate one-shot "gear change" whoosh (RunStage<n>Onset, keyed off
+	Constants.Run.StageOnset) that fired once on the instant a faster stage engaged -- removed, because
+	a faster gear pitching the SAME step sound up already sells "this is quicker now" through the
+	footsteps themselves, and a second competing audio event on top of that read as clutter rather than
+	clarity. StageOnset still exists in Constants.Run for its FOVDelta pull (RunController reads that
+	directly); this module no longer has anything to do with it.
 
-	That split is what solves the "my stage-2 file opens with a speed whoosh and then continues into
-	footsteps" problem. Registered as two independent names pointing at the same asset with different
-	SoundDefinition.PlaybackRegion slices, the whoosh plays once as the gear change and the step slice
-	plays per footfall -- with the engine doing the trimming (Sound.PlaybackRegion), not a stop timer.
-	Point them at two separate assets instead and nothing here changes; the region is optional.
+	Pitch jitter (Constants.Run.Footsteps.Stages[n].PitchJitter) is applied per play on top of the
+	stage's PlaybackSpeedMultiplier, because a fixed-interval step system replaying one identical
+	sample is instantly recognizable as a metronome. It's a few percent -- enough to break the pattern,
+	not enough to read as a different surface.
 
-	Pitch jitter (Constants.Run.Footsteps.Stages[n].PitchJitter) is applied per play rather than
-	baked into the registration, because a fixed-interval step system replaying one identical sample
-	is instantly recognizable as a metronome. It's a few percent -- enough to break the pattern, not
-	enough to read as a different surface.
+	PlayWallRunStep REUSES THE SAME REGISTRATION, played slower and jittered by
+	ParkourConstants.WallRun.Step -- a wall-run gets a lighter, heavier-sounding cadence through the
+	same asset rather than a whole second one, the literal "a slower version of run sound" ask. The
+	cadence TIMER lives in Client/Movement/RunController.lua (stepWallRun), the same "controller owns
+	WHEN, this module owns WHICH sound and how it is played" split PlayStep's own caller already
+	uses -- this module has no per-frame loop of its own for either.
 
 	Does not own: WHEN a step happens or which stage is engaged (RunController.lua re-derives both
 	every frame from live speed and the server's Constants.Attributes.SprintStage), the Sound-instance
@@ -32,6 +39,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local SoundManager = require(script.Parent.SoundManager)
@@ -41,30 +49,27 @@ local logger = Logger.scope("RunAudio")
 local RunAudio = {}
 
 local RUN_CONFIG = Constants.Run
+local WALL_RUN_STEP = ParkourConstants.WallRun.Step
 
--- DERIVED FROM THE CONFIG, not hand-listed alongside it. Both tables used to be literal maps naming
--- stage 1 and stage 2, which meant adding a third gear was an edit here as well as in Constants --
--- and an edit that, if forgotten, fails silently as a stage with no sound rather than loudly as an
--- error. Building the names by iterating Constants.Run.Footsteps.Stages makes the config the single
--- place a stage exists.
-local STEP_SOUND_NAMES: { [number]: string } = {}
+-- The one registered name every stage plays through -- see this file's header for why stages 2 and 3
+-- no longer get their own registration. Named for what it is regardless of which stage triggered it,
+-- the same reason CombatAudio's ImpactClean covers three OutcomeKinds under one name.
+local STEP_SOUND_NAME = "RunStep"
+
+-- DERIVED FROM THE CONFIG, not hand-listed alongside it. Adding a fourth gear is an edit to
+-- Constants.Run.Footsteps.Stages alone; iterating it here rather than naming stage numbers is what
+-- keeps that true.
 local STEP_PITCH_JITTER: { [number]: number } = {}
-local ONSET_SOUND_NAMES: { [number]: string } = {}
+local STEP_SPEED_MULTIPLIER: { [number]: number } = {}
 
--- Registered at load, exactly like FlightAudio's own set -- registration is what puts these in
+-- Registered at load, exactly like FlightAudio's own set -- registration is what puts this in
 -- SoundManager.GetPreloadInstances, which Client/Loading/AssetPreloader.lua sweeps at boot so the
 -- first footstep of a session doesn't pay CDN streaming latency mid-stride.
-for stage, config in RUN_CONFIG.Footsteps.Stages do
-	local name = `RunStepStage{stage}`
-	STEP_SOUND_NAMES[stage] = name
-	STEP_PITCH_JITTER[stage] = config.PitchJitter
-	SoundManager.Register(name, config.Sound)
-end
+SoundManager.Register(STEP_SOUND_NAME, RUN_CONFIG.Footsteps.Stages[1].Sound)
 
-for stage, config in RUN_CONFIG.StageOnset do
-	local name = `RunStage{stage}Onset`
-	ONSET_SOUND_NAMES[stage] = name
-	SoundManager.Register(name, config.Sound)
+for stage, config in RUN_CONFIG.Footsteps.Stages do
+	STEP_PITCH_JITTER[stage] = config.PitchJitter
+	STEP_SPEED_MULTIPLIER[stage] = config.PlaybackSpeedMultiplier or 1
 end
 
 -- One shared generator rather than math.random's global state, so footstep jitter can never perturb
@@ -72,34 +77,34 @@ end
 -- anything with a per-frame draw should use its own stream.
 local random = Random.new()
 
--- Plays one footfall for `stage`. Falls back to the stage-1 sound for any unexpected stage value
--- rather than going silent: a missing step sound is a bug the player experiences as the run losing
--- its feel, and there is always a correct-enough answer available.
+-- Plays one footfall for `stage`, pitched by that stage's PlaybackSpeedMultiplier (the "speed it up
+-- per stage" that now does the job the removed onset whoosh used to). Falls back to stage 1's
+-- multiplier/jitter for any unexpected stage value rather than going silent: a missing step sound is
+-- a bug the player experiences as the run losing its feel, and there is always a correct-enough
+-- answer available.
 function RunAudio.PlayStep(stage: number): ()
 	if not RUN_CONFIG.Footsteps.Enabled then
 		return
 	end
-	local name = STEP_SOUND_NAMES[stage] or STEP_SOUND_NAMES[1]
-	local jitter = STEP_PITCH_JITTER[stage] or 0
-	local playbackSpeed = if jitter > 0 then 1 + random:NextNumber(-jitter, jitter) else 1
-	SoundManager.Play(name, playbackSpeed)
+	local jitter = STEP_PITCH_JITTER[stage] or STEP_PITCH_JITTER[1] or 0
+	local speedMultiplier = STEP_SPEED_MULTIPLIER[stage] or STEP_SPEED_MULTIPLIER[1] or 1
+	local jitterFactor = if jitter > 0 then 1 + random:NextNumber(-jitter, jitter) else 1
+	SoundManager.Play(STEP_SOUND_NAME, speedMultiplier * jitterFactor)
 end
 
--- The gear-change kick for the stage being ENTERED. Called exactly once per upward stage transition
--- by RunController; this module does no transition detection of its own.
---
--- Silent for a stage with no authored onset rather than falling back to another stage's. That is the
--- opposite of PlayStep's fallback above, and deliberately: a missing footstep is a hole in a
--- continuous texture and any step is better than none, where a missing onset is a one-shot that simply
--- should not fire -- stage 1 has no onset at all by design (see Constants.Run.StageOnset's header),
--- and borrowing stage 2's whoosh for it would fire a gear-change sound every time a player tapped the
--- run key.
-function RunAudio.PlayStageOnset(stage: number): ()
-	local name = ONSET_SOUND_NAMES[stage]
-	if not name then
+-- The wall-run cadence's own play call -- see this file's header for why it reuses STEP_SOUND_NAME
+-- rather than a second registration, and why the interval/multiplier/jitter live in
+-- ParkourConstants.WallRun.Step instead of being hand-typed here. Sharing the pool with PlayStep is
+-- deliberate too: RunAudio.StopRunSounds already cuts every instance of this name, so a wall-run step
+-- still ringing out gets silenced by the exact same falling-edge call its ordinary counterpart does --
+-- see Client/Movement/RunController.lua's own stepWallRun for that edge.
+function RunAudio.PlayWallRunStep(): ()
+	if not RUN_CONFIG.Footsteps.Enabled then
 		return
 	end
-	SoundManager.Play(name)
+	local jitter = WALL_RUN_STEP.PitchJitter
+	local jitterFactor = if jitter > 0 then 1 + random:NextNumber(-jitter, jitter) else 1
+	SoundManager.Play(STEP_SOUND_NAME, WALL_RUN_STEP.PlaybackSpeedMultiplier * jitterFactor)
 end
 
 -- Cuts every run sound currently playing -- called by RunController the moment the run genuinely ends
@@ -114,40 +119,17 @@ end
 -- (SoundDefinition.PlaybackRegion) is the real fix for that; this is the guarantee that holds
 -- regardless of what asset someone points these names at.
 function RunAudio.StopRunSounds(): ()
-	for _, name in STEP_SOUND_NAMES do
-		SoundManager.StopAll(name)
-	end
-	-- The onset whooshes too: each announces entering a gear, so none of them has anything to say once
-	-- the run is over.
-	for _, name in ONSET_SOUND_NAMES do
-		SoundManager.StopAll(name)
-	end
+	SoundManager.StopAll(STEP_SOUND_NAME)
 end
 
--- Runtime swap for either stage's step sound, so step audio can be changed without an edit-and-
--- rejoin cycle (Constants.Run.Footsteps.Stages[n].Sound remains the shipped default and the
--- thing to edit for a permanent change). Routed through SoundManager.Reconfigure rather than
--- Register so the existing pooled instances are repointed instead of orphaned -- see that function's
--- own header.
-function RunAudio.SetStepSound(stage: number, definition: Constants.SoundDefinition): ()
-	local name = STEP_SOUND_NAMES[stage]
-	if not name then
-		logger:warn("SetStepSound called with an unknown run stage", { stage = stage })
-		return
-	end
-	SoundManager.Reconfigure(name, definition)
-	logger:info("Run step sound changed", { stage = stage, soundId = definition.SoundId })
-end
-
--- Same, for a given stage's onset whoosh.
-function RunAudio.SetStageOnsetSound(stage: number, definition: Constants.SoundDefinition): ()
-	local name = ONSET_SOUND_NAMES[stage]
-	if not name then
-		logger:warn("SetStageOnsetSound called with a stage that has no onset", { stage = stage })
-		return
-	end
-	SoundManager.Reconfigure(name, definition)
-	logger:info("Run stage onset sound changed", { stage = stage, soundId = definition.SoundId })
+-- Runtime swap for the step sound, so step audio can be changed without an edit-and-rejoin cycle
+-- (Constants.Run.Footsteps.Stages[1].Sound remains the shipped default and the thing to edit for a
+-- permanent change). Routed through SoundManager.Reconfigure rather than Register so the existing
+-- pooled instances are repointed instead of orphaned -- see that function's own header. No stage
+-- parameter anymore: every stage plays through the one registration this swaps.
+function RunAudio.SetStepSound(definition: Constants.SoundDefinition): ()
+	SoundManager.Reconfigure(STEP_SOUND_NAME, definition)
+	logger:info("Run step sound changed", { soundId = definition.SoundId })
 end
 
 -- Silences Roblox's own stock "Running" Sound on a freshly-bound character.

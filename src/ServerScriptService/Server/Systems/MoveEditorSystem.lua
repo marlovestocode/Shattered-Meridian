@@ -5,11 +5,12 @@
 	Owns: authorization + rate-limiting, every Constants.MoveEditor.RemoteNames RemoteFunction, and
 	DataStore persistence for the Move Creation System -- the "System" half of the Manager/System
 	pairing whose "Manager" half is Server/Combat/MoveRegistryManager.lua (the live in-memory
-	registry itself). Mirrors DevMenuSystem.lua's own shape exactly: its own isAuthorized
-	(AdminConfig.AuthorizedUserIds), its own checkMoveEditorPreconditions (authorization + rate
-	limit), its own wrapHandler (pcall-safety so an internal error never throws across the remote
-	boundary) -- a dedicated copy rather than a cross-file call, since DevMenuSystem's own
-	checkDevMenuPreconditions is a local, non-exported function.
+	registry itself). checkMoveEditorPreconditions is a thin wrapper over
+	Server/Network/AdminGate.Check (auth + rate limit), with its own dedicated `rateLimiter` bucket
+	passed in -- see AdminGate.lua's own header for why it never constructs or defaults one itself.
+	wrapHandler stays a local copy (pcall-safety so an internal error never throws across the remote
+	boundary) since generalizing that one too was ruled out during the Network-module design pass --
+	see Shared/RemoteHandler.lua's own header for the module that WAS extracted for that shape.
 
 	Persistence shape: one DataStore key per move ("Move_<MoveId>") plus a small fixed-key index
 	record ("MoveIndex" -> { MoveIds: {string} }, maintained via UpdateAsync for atomicity) since
@@ -75,7 +76,7 @@ local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
-local AdminConfig = require(script.Parent.Parent.Config.AdminConfig)
+local AdminGate = require(script.Parent.Parent.Network.AdminGate)
 
 local MoveRegistryManager = require(script.Parent.Parent.Combat.MoveRegistryManager)
 local DefaultMoveRegistry = require(script.Parent.Parent.Combat.DefaultMoveRegistry)
@@ -104,23 +105,10 @@ local function defaultOverrideKey(moveId: string): string
 	return "DefaultOverride_" .. moveId
 end
 
--- Reads Server/Config/AdminConfig.lua, not Constants -- same reasoning as DevMenuSystem.isAuthorized.
-local function isAuthorized(player: Player): boolean
-	return AdminConfig.AuthorizedUserIds[player.UserId] == true
-end
-
--- Shared auth + rate-limit precondition -- see DevMenuSystem.lua's checkDevMenuPreconditions for
--- the identical shape/reasoning this mirrors.
+-- Shared auth + rate-limit precondition -- Server/Network/AdminGate.lua's own Check, the module
+-- this used to hand-duplicate (see that module's header).
 local function checkMoveEditorPreconditions(player: Player, actionName: string): (boolean, string?)
-	if not isAuthorized(player) then
-		logger:warn(actionName .. " rejected: not authorized", { player = player.Name, userId = player.UserId })
-		return false, "NotAuthorized"
-	end
-	if rateLimiter:IsLimited(player) then
-		logger:debug(actionName .. " rejected: rate limited", { player = player.Name, userId = player.UserId })
-		return false, "RateLimited"
-	end
-	return true, nil
+	return AdminGate.Check(player, actionName, rateLimiter)
 end
 
 local function wrapHandler<Result, Args...>(name: string, handler: (Player, Args...) -> Result): (Player, Args...) -> Result
@@ -785,7 +773,7 @@ end
 -- for free), so only the unfreeze path is exempted: unfreezing your own character must never be
 -- something a shared network budget can leave stuck.
 local function handleSetEditorOpen(player: Player, rawIsOpen: unknown): ()
-	if not isAuthorized(player) then
+	if not AdminGate.IsAuthorized(player) then
 		logger:warn("SetEditorOpen rejected: not authorized", { player = player.Name, userId = player.UserId })
 		return
 	end

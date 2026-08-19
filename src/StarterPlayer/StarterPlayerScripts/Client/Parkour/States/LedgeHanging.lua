@@ -221,6 +221,11 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 		-- succeeding.
 		context.WallRunChain = 0
 		context.WallJumpChain = 0
+		-- The air dash's charge, refunded here for the same reason -- and it matters more than the two
+		-- above do, because reaching an out-of-range lip is the single thing the air dash exists for.
+		-- Refusing the refund would mean the reward for a successful air-dash-to-catch is being unable
+		-- to dash off the ledge you just caught.
+		context.AirDashChain = 0
 	end,
 
 	Update = function(context: ParkourContext): ParkourTypes.TransitionResult

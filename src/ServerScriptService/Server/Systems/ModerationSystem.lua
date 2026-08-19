@@ -472,6 +472,20 @@ function ModerationSystem.Init(): ()
 	banStore = DataStoreService:GetDataStore(StorageConfig.BanDataStoreName)
 	suspicionStore = DataStoreService:GetDataStore(StorageConfig.SuspectedCheaterDataStoreName)
 
+	-- Mute only works when this place's chat runs through TextChatService's ShouldDeliverCallback --
+	-- if ChatVersion is still LegacyChatService, every message bypasses TextChannels entirely and
+	-- Mute's wiring below silently does nothing. Previously an unverified assumption documented in a
+	-- comment (see this function's old NOTE); this is that same fact checked at boot and logged loud
+	-- rather than left for someone to discover mid-incident.
+	if TextChatService.ChatVersion ~= Enum.ChatVersion.TextChatService then
+		logger:error(
+			"TextChatService.ChatVersion is not TextChatService -- Mute enforcement WILL NOT WORK "
+				.. "(messages bypass TextChannels/ShouldDeliverCallback entirely). Set ChatVersion to "
+				.. "TextChatService in game settings.",
+			{ chatVersion = tostring(TextChatService.ChatVersion) }
+		)
+	end
+
 	-- Backgrounded, not called inline -- this module boots FIRST in Main.server.lua's whole sequence
 	-- (see this module's own header), so a synchronous ListKeysAsync page-through here would delay
 	-- every other System's Init() behind it, including whichever one first triggers NetworkBridge's
@@ -487,6 +501,14 @@ function ModerationSystem.Init(): ()
 	-- CRITICAL: this connection must land before any other System's own Players.PlayerAdded --
 	-- Main.server.lua calls ModerationSystem.Init() first in the whole boot sequence to guarantee it
 	-- (see this module's own header).
+	-- DELIBERATELY NOT Shared/PlayerLifecycle.lua, and this is the one file in the codebase where that
+	-- is a considered decision rather than an oversight. Two reasons, both specific to this System:
+	-- its PlayerAdded connection must be the FIRST one any System makes (see the critical-ordering
+	-- note in this file's header), which is a property of raw connection order that a helper would
+	-- obscure; and it deliberately has NO Init()-time GetPlayers() sweep, because a player already in
+	-- the server has already been through this check, and re-running a ban lookup against them on
+	-- every boot is a DataStore read per player for an answer nothing acts on differently. The binder
+	-- supplies that sweep unconditionally, which is right for every other caller and wrong here.
 	Players.PlayerAdded:Connect(function(player: Player)
 		-- Checked BEFORE the real (async) IsBanned lookup below -- an in-flight BanPlayer call for
 		-- this exact UserId has no DataStore record yet for IsBanned's GetAsync to find, but this
@@ -532,13 +554,6 @@ function ModerationSystem.Init(): ()
 	end)
 
 	logger:info("ModerationSystem.Init() complete")
-
-	-- NOTE (flagged for the Chief Architect, not a TODO left in gameplay logic): Mute's actual
-	-- effectiveness depends on this place's TextChatService.ChatVersion being set to
-	-- Enum.ChatVersion.TextChatService -- if it's still LegacyChatService, messages never flow through
-	-- TextChannels/ShouldDeliverCallback at all and this wiring silently does nothing. This couldn't be
-	-- verified from source (no Studio/live-server session available in this pass) -- confirm
-	-- game.TextChatService.ChatVersion in Studio before relying on Mute in production.
 end
 
 -- Not cast to Types.SystemModule -- same reasoning as BugReportSystem.lua's own return: DevMenuSystem

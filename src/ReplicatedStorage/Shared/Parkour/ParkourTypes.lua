@@ -36,6 +36,7 @@ export type MovementStateId =
 	| "Walking"
 	| "Sprinting"
 	| "Jumping"
+	| "WallLaunching"
 	| "Falling"
 	| "Landing"
 	| "Sliding"
@@ -45,6 +46,7 @@ export type MovementStateId =
 	| "LedgeHanging"
 	| "LedgeClimbing"
 	| "Rolling"
+	| "Dashing"
 	| "Leaping"
 	| "LedgeLeaping"
 	| "AerialCombat"
@@ -76,7 +78,14 @@ export type DriveMode = "Humanoid" | "Velocity" | "Kinematic"
 -- are deliberately uniform, "loose" ceilings meant to catch only the crude and impossible -- see that
 -- module's own header), so folding the kick's higher peak speed into WallRun's window needed no
 -- separate widening.
-export type ActionKind = "Slide" | "Vault" | "Mantle" | "WallRun" | "LedgeClimb" | "Roll" | "Leap"
+--
+-- "Dash" IS its own kind, unlike the wall-kick above, and the distinction is worth stating because the
+-- two cases look superficially alike (both are short bursts folded in beside an existing move). The
+-- kick is a phase of a run that has ALREADY opened a window -- reporting it separately would send a
+-- second Start inside the first one's ownership. A dash opens its own window from ordinary locomotion,
+-- owns velocity for its whole duration, and hands momentum back on its own terms; there is no other
+-- window for it to be a continuation of. See States/Dashing.lua.
+export type ActionKind = "Slide" | "Vault" | "Mantle" | "WallRun" | "LedgeClimb" | "Roll" | "Leap" | "Dash"
 
 -- What a report is saying about that action.
 export type ActionPhase = "Start" | "End"
@@ -109,7 +118,6 @@ export type RejectionReason =
 	| "MalformedPayload"
 	| "ImplausibleSpeed"
 	| "ImplausibleTravel"
-	| "ImplausibleVerticalGain"
 	| "ActionTooLong"
 	| "DuplicateAction"
 	| "CombatRestricted"
@@ -378,9 +386,26 @@ export type ParkourContext = {
 	-- -climb counters. Reset by the controller on grounding, incremented by the states themselves.
 	WallRunChain: number,
 	WallJumpChain: number,
+	-- The third counter of that same family: how many AIR dashes have been spent since the last ground
+	-- contact. Incremented by States/Dashing.lua's own Enter, and reset by the controller on grounding
+	-- exactly as the two above are -- which is what makes the air dash a constraint on AIRTIME rather
+	-- than a global budget.
+	--
+	-- It is ALSO refunded by States/WallRunning's attach and States/LedgeHanging's grab, which the two
+	-- counters above are not, and that difference is the mechanic rather than an inconsistency: a
+	-- wall-run and a ledge grab are the things the dash exists to reach, so reaching one is what buys
+	-- the next dash. Refunding the wall-run chain on a wall-run would simply be an infinite climb.
+	AirDashChain: number,
 	-- The last wall part attached to, and when it was left -- the SameWallLockout reference.
 	LastWallInstance: BasePart?,
 	LastWallLeftAt: number,
+
+	-- os.clock() deadline until which a dash resolving to "Up" counts as CHAINED from a
+	-- States/WallLaunching.lua launch, and earns Dash.WallLaunchChainExtraHangSeconds. Set by
+	-- WallLaunching.Enter, read (never written) by States/Dashing.lua's own Enter. Zero (the default)
+	-- can never be a live deadline against a real os.clock() timestamp, so no separate boolean flag is
+	-- needed to express "not currently chained."
+	WallLaunchDashBoostUntil: number,
 
 	-- True while the combat layer has taken the body (ragdoll, air-combo hold/chase, an emote lock,
 	-- flight, or an admin freeze) -- read from the Humanoid Attributes the server already publishes.
@@ -439,6 +464,32 @@ export type ParkourContext = {
 	DebugLedgeLeap: ("Idle" | "NoIntent" | "NoTarget" | "Unreachable" | "Launched")?,
 	-- States/WallRunning.lua, every frame it runs:
 	DebugWallRunPivot: ("Straight" | "Pivoted")?,
+	-- The wall CATCH's last entry verdict, as a already-formatted readout line -- "ready", or a refusal
+	-- with the measurements behind it ("closing 4.2/18 approach 88"). A free string rather than the
+	-- closed unions above because the useful part is the NUMBERS: "TooSlowToCatch" alone cannot
+	-- distinguish "you were nearly fast enough" from "you were barely moving", and that difference is
+	-- the whole question a player asking "why didn't it catch" is trying to answer.
+	--
+	-- Unlike DebugWallRunPivot above, this is written by States/WallRunning.lua's CanEnter rather than
+	-- by its Update -- so it is refreshed every frame REGARDLESS of which state is current, and the
+	-- overlay reads it whether or not a wall-run is running. That is the entire point: a catch that
+	-- never happened leaves no state to inspect, and a row gated on the state being active would be
+	-- blank in exactly the case somebody is debugging.
+	DebugWallCatch: string?,
+	-- True for exactly the window States/WallRunning.lua is in its Catching phase (pinned to a wall
+	-- arrived at head-on). Read by ONE thing: EnvironmentProbe's `allowDiagonal`, which is otherwise
+	-- switched off for the whole of WallRunning.
+	--
+	-- IT IS NOT A DEBUG FIELD despite sitting next to them, and the catch does not work without it.
+	-- The diagonal fallback cast is the only probe that can see a wall dead AHEAD (both side casts run
+	-- parallel to one). It is disabled during a wall-run because a run reads its probes as a CONTINUING
+	-- contact and a perpendicular wall found further ahead would swing its tangent through ninety
+	-- degrees -- see that flag's own comment. A catch is the opposite case: the wall it is holding is
+	-- the one dead ahead, it re-derives no tangent, and it has no corner pivot to mislead. Without this
+	-- exemption the catch entered from Falling (where the fallback is live) and then lost its own wall
+	-- on the very next frame, when the current state had become WallRunning and the fallback switched
+	-- off -- a one-frame catch that read in play as the bounce it was meant to replace.
+	WallCatchActive: boolean,
 }
 
 -- The player's own movement preferences (Settings System). Mirrors the shape persisted on

@@ -191,13 +191,21 @@ return function()
 		end)
 
 		it("does not disturb the pre-existing travel-vs-tangent refusal", function()
-			-- Running straight INTO the wall, facing the same way. The older check owns this one, and
-			-- the new gate must not steal its refusal reason -- the debug overlay's whole value is that
-			-- the two stay distinguishable.
+			-- Running straight INTO the wall, facing the same way. The FACING gate must not steal this
+			-- one -- the debug overlay's whole value is that the two stay distinguishable.
+			--
+			-- The reason is now "TooSlowToCatch" rather than "ApproachAngleTooSteep", and that is the
+			-- assertion rather than a weakening of it: since the wall-CATCH landed (States/WallRunning's
+			-- Catching phase), a head-on approach is no longer a dead end but a catch candidate, and
+			-- CanEnter deliberately reports the catch's own reason for exactly the approaches the run
+			-- refused on angle. Reaching this reason at all therefore PROVES the approach gate fired
+			-- first -- nothing else routes here -- while still proving the facing gate did not. This
+			-- context carries no AssemblyLinearVelocity, so the catch refuses it for the honest reason:
+			-- walking into a wall is not slamming into one.
 			local intoWall = Vector3.new(-1, 0, 0)
 			local allowed, reason = WallRunning.CanEnter(makeWallRunContext(intoWall, intoWall, WALL_NORMAL))
 			expect(allowed).to.equal(false)
-			expect(reason).to.equal("ApproachAngleTooSteep")
+			expect(reason).to.equal("TooSlowToCatch")
 		end)
 	end)
 

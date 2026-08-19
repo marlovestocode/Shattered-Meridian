@@ -62,11 +62,14 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local AmortizedReclaim = require(ReplicatedStorage.Shared.AmortizedReclaim)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local ComboEscalation = require(script.Parent.ComboEscalation)
@@ -87,6 +90,10 @@ local DamageSystem = {}
 -- unregistration -- see this file's header on why there is no registry.
 local hitstunUntil: { [Model]: number } = {}
 
+-- Round-robin reclaim cursor for hitstunUntil -- see Step below, and Shared/AmortizedReclaim.lua for
+-- why lungeUntil directly beneath it deliberately does NOT get one.
+local hitstunReclaim = AmortizedReclaim.New()
+
 -- When each attacker's post-M1-hit forced-forward window ends. Same "reclaimed by expiry, no
 -- registry" shape as hitstunUntil above -- see this file's header's AttackerLunge paragraph.
 local lungeUntil: { [Model]: number } = {}
@@ -94,7 +101,7 @@ local lungeUntil: { [Model]: number } = {}
 local appliedCallbacks: { (DefenseOutcome, DamageResult) -> () } = {}
 
 local started = false
-local heartbeatConnection: RBXScriptConnection? = nil
+local heartbeatTrove = Trove.New()
 local resolvedDisconnect: (() -> ())? = nil
 local feedbackRemote: RemoteEvent? = nil
 
@@ -104,11 +111,6 @@ local function debugLog(message: string, data: { [string]: any }?): ()
 	if DamageConstants.Debug.Enabled and DamageConstants.Debug.LogApplied then
 		logger:debug(message, data)
 	end
-end
-
-local function humanoidOf(model: Model): Humanoid?
-	local humanoid = model:FindFirstChildOfClass("Humanoid")
-	return if humanoid and humanoid.Health > 0 then humanoid else nil
 end
 
 -- Whether `moveId` is a weapon's Basic (M1) string hit -- gates DamageConstants.AttackerLunge.
@@ -187,7 +189,14 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 		stage = ComboEscalation.GetStage(outcome.Attacker, at)
 	end
 
-	local result = DamageResolver.Resolve(outcome.Kind, outcome.DefenderStateAtContact, entry.Profile, stage)
+	-- M1 (Basic weapon-string) hits are priced at flat authored damage every time, never scaled by the
+	-- string's own escalation -- see DamageConstants.Combo.DamageMultiplierPerStage's own header for why
+	-- that multiplier exists for everything else. `stage` above still tracks the real combo depth (feedback/
+	-- Finisher-eligibility/UI all need the true number), so only the value fed into the resolver is pinned;
+	-- pin to 1 rather than skip Resolve entirely so Basic keeps the exact same Clean/Blocked/Backstab/
+	-- GuardBroken pricing rules as everything else, just at ComboMultiplier(1) == 1.
+	local pricingStage = if isBasicMoveId(entry.MoveId) then 1 else stage
+	local result = DamageResolver.Resolve(outcome.Kind, outcome.DefenderStateAtContact, entry.Profile, pricingStage)
 
 	if result.GuardDrain > 0 then
 		DefenseSystem.DrainGuard(outcome.Defender, result.GuardDrain, at)
@@ -223,7 +232,7 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	end
 
 	if result.Damage > 0 then
-		local humanoid = humanoidOf(outcome.Defender)
+		local humanoid = CharacterUtil.LiveHumanoidOf(outcome.Defender)
 		if humanoid then
 			humanoid:TakeDamage(result.Damage)
 		end
@@ -268,19 +277,31 @@ end
 -- needs a few consecutive FRAMES of Humanoid:Move(), not a single instantaneous write, so it rides
 -- this System's already-connected Heartbeat rather than opening a second one.
 function DamageSystem.Step(_deltaTime: number, now: number): ()
-	for model, until_ in hitstunUntil do
-		if model.Parent == nil or now >= until_ then
-			hitstunUntil[model] = nil
-		end
-	end
+	-- AMORTISED, and no longer an expiry sweep. Every reader of hitstunUntil (CanAttack,
+	-- IsHitstunned) already compares the stored timestamp against its own `now`, so an entry that has
+	-- passed its expiry but has not yet been dropped is invisible from outside -- which means the
+	-- eviction was never doing anything a reader could observe, and a full walk of the table every
+	-- frame was paying for it. What the sweep IS still for is stopping the outer table from holding a
+	-- reference to a destroyed character forever, and that is what the cursor does, a fixed handful of
+	-- keys per frame regardless of how many combatants exist. The table's size is unchanged by the
+	-- switch: it was already bounded by live-combatant count, since a fresh hit overwrites the
+	-- existing entry rather than adding one.
+	hitstunReclaim:Step(hitstunUntil)
+	-- Left as a full walk deliberately: unlike hitstunUntil, this one's `now` is part of its own
+	-- public contract (Sweep(now)), and its table is bounded by live-combatant count either way.
 	ComboEscalation.Sweep(now)
 
+	-- DELIBERATELY A FULL WALK, unlike hitstunUntil above. This loop does per-entry WORK -- it calls
+	-- Humanoid:Move() on every live entry, every frame -- so an amortised cursor here would not be a
+	-- delayed cleanup, it would be a dropped frame of the lunge. It is also naturally tiny: only
+	-- combatants inside their post-hit forward window are ever in it. See
+	-- Shared/AmortizedReclaim.lua's header on that distinction.
 	for model, until_ in lungeUntil do
 		if model.Parent == nil or now >= until_ then
 			lungeUntil[model] = nil
 			continue
 		end
-		local humanoid = humanoidOf(model)
+		local humanoid = CharacterUtil.LiveHumanoidOf(model)
 		-- PrimaryPart, not Humanoid.RootPart -- every registration path into this combat stack
 		-- (HitboxEngine.RegisterCombatant, DefenseSystem.RegisterCombatant) already requires and is
 		-- handed a root explicitly rather than trusting Roblox's own rig-joint auto-detection, and a
@@ -375,7 +396,7 @@ function DamageSystem.Init(): ()
 
 	-- Connected AFTER DefenseSystem.Init has connected its own, which Main.server.lua guarantees by
 	-- calling that first.
-	heartbeatConnection = RunService.Heartbeat:Connect(function(deltaTime: number)
+	heartbeatTrove:Connect(RunService.Heartbeat, function(deltaTime: number)
 		DamageSystem.Step(deltaTime, os.clock())
 	end)
 
@@ -383,10 +404,7 @@ function DamageSystem.Init(): ()
 end
 
 function DamageSystem.Shutdown(): ()
-	if heartbeatConnection then
-		heartbeatConnection:Disconnect()
-		heartbeatConnection = nil
-	end
+	heartbeatTrove:Clean()
 	if resolvedDisconnect then
 		resolvedDisconnect()
 		resolvedDisconnect = nil
@@ -409,6 +427,7 @@ function DamageSystem.Reset(): ()
 	end
 	table.clear(hitstunUntil)
 	table.clear(lungeUntil)
+	hitstunReclaim:Reset()
 	table.clear(appliedCallbacks)
 	ComboEscalation.Reset()
 	AttackCatalog.Reset()

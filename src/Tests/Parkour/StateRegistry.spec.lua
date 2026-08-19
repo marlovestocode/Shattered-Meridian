@@ -29,6 +29,7 @@ local EXPECTED_IDS = {
 	"Walking",
 	"Sprinting",
 	"Jumping",
+	"WallLaunching",
 	"Falling",
 	"Landing",
 	"Sliding",
@@ -38,6 +39,7 @@ local EXPECTED_IDS = {
 	"LedgeHanging",
 	"LedgeClimbing",
 	"Rolling",
+	"Dashing",
 	"Leaping",
 	"LedgeLeaping",
 	"AerialCombat",
@@ -62,6 +64,7 @@ local MUST_REPORT = {
 	WallRunning = "WallRun",
 	LedgeClimbing = "LedgeClimb",
 	Rolling = "Roll",
+	Dashing = "Dash",
 	Leaping = "Leap",
 	LedgeLeaping = "Leap",
 }
@@ -166,6 +169,39 @@ return function()
 			local map = byId()
 			expect(map.LedgeClimbing.Priority > map.LedgeHanging.Priority).to.equal(true)
 		end)
+
+		it("puts Dashing above Sliding and below every traversal it chains into", function()
+			-- 130 is chosen from BOTH sides and neither is arbitrary. Above Sliding, so an incidental
+			-- slide detection (a downhill slope underfoot, say) can never pre-empt an in-flight dash via
+			-- route 2 -- Dash itself is AIR-ONLY now (States/Dashing.lua's CanEnter refuses while
+			-- grounded), so this is no longer about entering FROM Sliding, only about not being
+			-- interrupted BY it mid-burst. Below Mantling/Vaulting/WallRunning/LedgeHanging, because
+			-- those pre-empting a running dash is how "dash into a vault" and "air-dash onto a ledge"
+			-- happen WITH those states' own CanEnter gates consulted, rather than through a route-1
+			-- hand-off from Dashing.Update that would bypass every one of them (see
+			-- StateSupport.LedgeGrabAvailable's header for the cascade that produced last time).
+			local map = byId()
+			expect(map.Dashing.Priority > map.Sliding.Priority).to.equal(true)
+			for _, id in { "Mantling", "Vaulting", "WallRunning", "LedgeHanging", "Leaping" } do
+				expect(map[id].Priority > map.Dashing.Priority).to.equal(true, id)
+			end
+		end)
+
+		it("keeps every AllowedFromStates entry below the state that names it", function()
+			-- An entry above the naming state's own priority is a lie: route 2 could never pre-empt
+			-- INTO it from there, so the table would be promising a transition the machine cannot make.
+			-- Also catches a typo'd state id, which is otherwise a silent no-op -- these tables have
+			-- been hand-edited for months with nothing checking them.
+			local map = byId()
+			for owner, allowed in
+				{ Dashing = ParkourConstants.Dash.AllowedFromStates, Rolling = ParkourConstants.Roll.AllowedFromStates }
+			do
+				for id in allowed :: { [string]: boolean } do
+					expect(map[id]).never.to.equal(nil, `{owner}.AllowedFromStates names unregistered state {id}`)
+					expect(map[id].Priority < map[owner].Priority).to.equal(true, `{owner} <- {id}`)
+				end
+			end
+		end)
 	end)
 
 	describe("States registry -- server reporting", function()
@@ -178,7 +214,9 @@ return function()
 
 		it("declares NO report for ordinary locomotion -- those must not be network events", function()
 			local map = byId()
-			for _, id in { "Idle", "Walking", "Sprinting", "Jumping", "Falling", "Landing", "AerialCombat" } do
+			for _, id in
+				{ "Idle", "Walking", "Sprinting", "Jumping", "WallLaunching", "Falling", "Landing", "AerialCombat" }
+			do
 				expect(map[id].Reports).to.equal(nil)
 			end
 		end)
@@ -228,6 +266,17 @@ return function()
 			expect(map.Vaulting.Probes.Obstacle).to.equal(true)
 			expect(map.Mantling.Probes.Obstacle).to.equal(true)
 		end)
+
+		it("has the dash request every probe its own chains are pre-empted by", function()
+			-- Dashing owns no traversal geometry itself, so it is easy to read as needing only Ground.
+			-- It needs all four: the vault/mantle/wall-run/ledge-catch chains are route-2 pre-emptions
+			-- evaluated against THIS state's probe request, so a probe left out is served stale from
+			-- cache and the chain it feeds silently stops firing at speed.
+			local map = byId()
+			expect(map.Dashing.Probes.Obstacle).to.equal(true)
+			expect(map.Dashing.Probes.Walls).to.equal(true)
+			expect(map.Dashing.Probes.Ledge).to.equal(true)
+		end)
 	end)
 
 	describe("States registry -- commitment", function()
@@ -257,9 +306,19 @@ return function()
 			expect(map.LedgeHanging.Committed).to.equal(true)
 		end)
 
+		it("leaves the dash interruptible, unlike the roll", function()
+			-- The one structural difference between the two burst states, and the whole reason both
+			-- exist. Roll is Committed because a dodge that can be stolen is not a dodge. The dash
+			-- takes the opposite trade on purpose: being pre-empted by a vault, a wall or a ledge IS
+			-- the mechanic. Flipping this would silently delete all four chains.
+			local map = byId()
+			expect(map.Dashing.Committed).never.to.equal(true)
+			expect(map.Rolling.Committed).to.equal(true)
+		end)
+
 		it("leaves ordinary locomotion interruptible", function()
 			local map = byId()
-			for _, id in { "Idle", "Walking", "Sprinting", "Falling" } do
+			for _, id in { "Idle", "Walking", "Sprinting", "Falling", "Jumping", "WallLaunching" } do
 				expect(map[id].Committed).never.to.equal(true)
 			end
 		end)
@@ -289,6 +348,7 @@ return function()
 			expect(ParkourConstants.Obstacle.MantleDurationSeconds < ceiling).to.equal(true)
 			expect(ParkourConstants.Ledge.ClimbDurationSeconds < ceiling).to.equal(true)
 			expect(ParkourConstants.Roll.DurationSeconds < ceiling).to.equal(true)
+			expect(ParkourConstants.Dash.MaxDurationSeconds < ceiling).to.equal(true)
 		end)
 
 		it("keeps the ledge grab's attach pull short enough to read as a catch", function()

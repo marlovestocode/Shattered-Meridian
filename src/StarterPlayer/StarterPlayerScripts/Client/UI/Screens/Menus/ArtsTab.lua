@@ -42,6 +42,7 @@ local Label = require(script.Parent.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Parent.Components.Button)
 local Tab = require(script.Parent.Parent.Parent.Components.Tab)
 local Bar = require(script.Parent.Parent.Parent.Components.Bar)
+local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 
 local Children = Fusion.Children
 local peek = Fusion.peek
@@ -232,7 +233,7 @@ local function artRow(
 				Max = ArtConstants.MasteryToUnlockNext,
 				FillColor = Tokens.Color.AccentSecondary,
 				AnchorPoint = Vector2.new(0, 1),
-				Position = UDim2.new(0, 0, 1, 0),
+				Position = UDim2.fromScale(0, 1),
 				Size = UDim2.new(0.5, 0, 0, MASTERY_BAR_HEIGHT),
 			}),
 			Button(scope, {
@@ -400,7 +401,7 @@ local function ArtsTab(scope: Scope, props: ArtsTabProps): Frame
 				Text = treeDescription,
 				Scale = "Detail",
 				Color = Tokens.Color.TextSecondary,
-				Size = UDim2.new(1, 0, 0, 0),
+				Size = UDim2.fromScale(1, 0),
 				AutoHeight = true,
 				LineHeight = Tokens.Leading.Prose,
 				LayoutOrder = 3,
@@ -419,7 +420,7 @@ local function ArtsTab(scope: Scope, props: ArtsTabProps): Frame
 					return not use(hasArts)
 				end),
 			}),
-			scope:New "ScrollingFrame" {
+			ScrollArea(scope, {
 				Name = "Rows",
 				Size = UDim2.new(
 					1,
@@ -427,17 +428,9 @@ local function ArtsTab(scope: Scope, props: ArtsTabProps): Frame
 					1,
 					-(SLOT_STRIP_HEIGHT + TREE_STRIP_HEIGHT + DESCRIPTION_ALLOWANCE + Tokens.Space.S * 4)
 				),
-				BackgroundTransparency = 1,
-				BorderSizePixel = 0,
-				ScrollingDirection = Enum.ScrollingDirection.Y,
-				AutomaticCanvasSize = Enum.AutomaticSize.Y,
-				CanvasSize = UDim2.fromScale(0, 0),
-				ScrollBarThickness = 3,
-				ScrollBarImageColor3 = Tokens.Border.Standard.Color,
-				ScrollBarImageTransparency = Tokens.Border.Standard.Transparency,
 				LayoutOrder = 5,
 
-				[Children] = {
+				Children = {
 					scope:New "UIPadding" {
 						PaddingRight = UDim.new(0, Tokens.Space.S),
 					},
@@ -448,7 +441,7 @@ local function ArtsTab(scope: Scope, props: ArtsTabProps): Frame
 					},
 					rows,
 				},
-			},
+			}),
 		},
 	} :: Frame
 end

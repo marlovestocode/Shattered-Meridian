@@ -59,15 +59,17 @@
 	watch-and-cache-a-local shape) rather than re-deriving a second mechanism for the same signal.
 ]]
 
-local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local FlightPhysics = require(script.Parent.FlightPhysics)
 local FlightAnimator = require(script.Parent.Parent.FX.FlightAnimator)
@@ -83,7 +85,11 @@ local logger = Logger.scope("FlightController")
 local FlightController = {}
 
 local heartbeatConnection: RBXScriptConnection? = nil
-local attributeConnections: { RBXScriptConnection } = {}
+-- Every Attribute/state watch this module puts on the CURRENT character's Humanoid. A
+-- Shared/Trove.lua scope rather than the hand-rolled list-plus-disconnect-loop it used to be -- same
+-- job, but "rebind without leaking" is now a property of the structure instead of of remembering to
+-- reset one specific field, which is the whole argument that module's header makes.
+local attributeTrove = Trove.New()
 local postFlightSampleConnection: RBXScriptConnection? = nil
 
 -- Per-flight-session movement state. Reset at the top of startFlying(); meaningless while not
@@ -220,10 +226,10 @@ end
 local function classifyLanding(descentSpeed: number): (boolean, boolean)
 	-- descentSpeed is signed (negative while falling); returns (shouldFire, isHard).
 	local fallSpeed = -descentSpeed
-	if fallSpeed <= Constants.Flight.LandingSpeedDeadzone then
+	if fallSpeed <= FlightConstants.LandingSpeedDeadzone then
 		return false, false
 	end
-	return true, fallSpeed >= Constants.Flight.HardLandingSpeedThreshold
+	return true, fallSpeed >= FlightConstants.HardLandingSpeedThreshold
 end
 
 local function stepFlight(humanoid: Humanoid, rootPart: BasePart, deltaTime: number): ()
@@ -235,7 +241,7 @@ local function stepFlight(humanoid: Humanoid, rootPart: BasePart, deltaTime: num
 	if not camera then
 		return
 	end
-	local cfg = Constants.Flight
+	local cfg = FlightConstants
 
 	local horizontalInput = Vector3.zero
 	if UserInputService:IsKeyDown(Enum.KeyCode.W) then
@@ -349,7 +355,7 @@ local function stepFlight(humanoid: Humanoid, rootPart: BasePart, deltaTime: num
 	if
 		touchingGround
 		and landingArmed
-		and now - lastLandingFireClock >= Constants.Flight.LandingFireDebounceSeconds
+		and now - lastLandingFireClock >= FlightConstants.LandingFireDebounceSeconds
 	then
 		local shouldFire, isHard = classifyLanding(currentVelocity.Y)
 		if shouldFire then
@@ -430,14 +436,14 @@ local function startFlying(humanoid: Humanoid, character: Model): ()
 	renderedPitch = 0
 	renderedBank = 0
 
-	local groundCheck = raycastDown(rootPart.Position, Constants.Flight.TakeoffGroundCheckStuds)
+	local groundCheck = raycastDown(rootPart.Position, FlightConstants.TakeoffGroundCheckStuds)
 	local wasGrounded = groundCheck ~= nil
 	if wasGrounded then
 		local forward = rootPart.CFrame.LookVector
 		local flatForward = Vector3.new(forward.X, 0, forward.Z)
 		flatForward = if flatForward.Magnitude > 1e-3 then flatForward.Unit else Vector3.zero
-		currentVelocity = flatForward * Constants.Flight.TakeoffBurstForwardSpeed
-			+ Vector3.new(0, Constants.Flight.TakeoffBurstUpSpeed, 0)
+		currentVelocity = flatForward * FlightConstants.TakeoffBurstForwardSpeed
+			+ Vector3.new(0, FlightConstants.TakeoffBurstUpSpeed, 0)
 	end
 	handleTakeoffEvent(wasGrounded, rootPart.Position)
 
@@ -462,10 +468,7 @@ end
 -- character spawn (FlightController.Start's own CharacterAdded binding below).
 function FlightController.BindCharacter(character: Model): ()
 	FlightController.StopFlying()
-	for _, connection in attributeConnections do
-		connection:Disconnect()
-	end
-	attributeConnections = {}
+	attributeTrove:Clean()
 	if postFlightSampleConnection then
 		postFlightSampleConnection:Disconnect()
 		postFlightSampleConnection = nil
@@ -486,12 +489,9 @@ function FlightController.BindCharacter(character: Model): ()
 	-- reads below) and keep it live from here on. See this file's header, "Root-control lock", and
 	-- ShiftLockCamera.lua's onCharacterAdded for the identical watch shape on the same Attribute.
 	rootControlLocked = humanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true
-	table.insert(
-		attributeConnections,
-		humanoid:GetAttributeChangedSignal(Constants.Attributes.RootControlLocked):Connect(function()
-			rootControlLocked = humanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true
-		end)
-	)
+	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.RootControlLocked), function()
+		rootControlLocked = humanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true
+	end)
 
 	FlightAnimator.BindCharacter(character)
 
@@ -502,62 +502,56 @@ function FlightController.BindCharacter(character: Model): ()
 		syncCollideMode(humanoid, rootPart)
 	end
 
-	table.insert(
-		attributeConnections,
-		humanoid:GetAttributeChangedSignal(Constants.Attributes.Flying):Connect(function()
-			if humanoid:GetAttribute(Constants.Attributes.Flying) == true then
-				startFlying(humanoid, character)
-			else
-				FlightController.StopFlying()
-				recentlyFlyingUntil = os.clock() + Constants.Flight.RecentlyFlyingGraceSeconds
-				if rootPart then
-					startPostFlightSampling(rootPart)
-				end
-			end
+	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.Flying), function()
+		if humanoid:GetAttribute(Constants.Attributes.Flying) == true then
+			startFlying(humanoid, character)
+		else
+			FlightController.StopFlying()
+			recentlyFlyingUntil = os.clock() + FlightConstants.RecentlyFlyingGraceSeconds
 			if rootPart then
-				syncCollideMode(humanoid, rootPart)
+				startPostFlightSampling(rootPart)
 			end
-		end)
-	)
+		end
+		if rootPart then
+			syncCollideMode(humanoid, rootPart)
+		end
+	end)
 
-	table.insert(
-		attributeConnections,
-		humanoid:GetAttributeChangedSignal(Constants.Attributes.FlyCollide):Connect(function()
-			if rootPart then
-				syncCollideMode(humanoid, rootPart)
-			end
-		end)
-	)
+	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.FlyCollide), function()
+		if rootPart then
+			syncCollideMode(humanoid, rootPart)
+		end
+	end)
 
 	-- Post-flight free-fall landing path: covers "flew up, turned flight off, fell, landed" -- the
 	-- natural way most flight sessions end. Always connected (cheap, single-property watch); the
 	-- recentlyFlyingUntil gate below means it's a no-op for a character that has never flown.
-	table.insert(
-		attributeConnections,
-		humanoid.StateChanged:Connect(function(_old: Enum.HumanoidStateType, new: Enum.HumanoidStateType)
-			if new ~= Enum.HumanoidStateType.Landed then
-				return
-			end
-			if os.clock() >= recentlyFlyingUntil then
-				return
-			end
-			local shouldFire, isHard = classifyLanding(lastDescentSpeed)
-			if shouldFire and rootPart then
-				handleLandingEvent(isHard, rootPart.Position)
-			end
-		end)
-	)
+	attributeTrove:Connect(humanoid.StateChanged, function(_old: Enum.HumanoidStateType, new: Enum.HumanoidStateType)
+		if new ~= Enum.HumanoidStateType.Landed then
+			return
+		end
+		if os.clock() >= recentlyFlyingUntil then
+			return
+		end
+		local shouldFire, isHard = classifyLanding(lastDescentSpeed)
+		if shouldFire and rootPart then
+			handleLandingEvent(isHard, rootPart.Position)
+		end
+	end)
 end
 
 function FlightController.Start(): ()
-	local localPlayer = Players.LocalPlayer
-
-	if localPlayer.Character then
-		FlightController.BindCharacter(localPlayer.Character)
-	end
-	localPlayer.CharacterAdded:Connect(function(character: Model)
-		FlightController.BindCharacter(character)
-	end)
+	-- Through Shared/PlayerLifecycle.lua, which fixes a boot stall this had: BindCharacter yields on
+	-- WaitForChild("Humanoid"), and the already-present-character call above it was made INLINE on
+	-- Main.client.lua's synchronous boot thread -- so on the Studio play-solo and fast-rejoin paths
+	-- every module booted after this one waited behind one character's assembly, up to the full
+	-- WaitForChild timeout. The binder always spawns that call.
+	PlayerLifecycle.BindLocalCharacter({
+		Scope = "FlightController",
+		OnCharacter = function(character: Model)
+			FlightController.BindCharacter(character)
+		end,
+	})
 end
 
 return FlightController

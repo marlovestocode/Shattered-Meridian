@@ -45,6 +45,8 @@ local SettingsModule = require(script.Parent.Parent.UI.Screens.Settings)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local ParkourController = require(script.Parent.Parent.Parkour.ParkourController)
 local RunController = require(script.Parent.Parent.Movement.RunController)
+local CameraShake = require(script.Parent.Parent.FX.CameraShake)
+local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
 
 type SettingsHandle = SettingsModule.SettingsHandle
 type ListeningState = { Device: Types.KeybindDevice, Action: Types.KeybindAction }
@@ -99,6 +101,22 @@ local function applyParkourSettings(): ()
 	RunController.SetSprintMode(parkourSettings.SprintMode)
 end
 
+-- The live camera-comfort block. Same role as parkourSettings above -- set by RestoreSettings and by
+-- the panel's own controls, read back by Start to seed the screen. Seeded to the shipped defaults
+-- (both effects on) so a failed settings fetch runs the game everyone else sees rather than silently
+-- stripping effects; see RestoreSettings' own fallback for the identical reasoning applied to parkour.
+local comfortSettings: Types.ComfortSettings = {
+	CameraShake = true,
+	FieldOfViewEffects = true,
+}
+
+-- Sibling to applyParkourSettings above, with the same contract: the single place a comfort preference
+-- is mapped to its consumer, so a preference cannot be persisted but never applied.
+local function applyComfortSettings(): ()
+	CameraShake.SetEnabled(comfortSettings.CameraShake)
+	FOVOffset.SetPunchesEnabled(comfortSettings.FieldOfViewEffects)
+end
+
 -- Autorun's own applier. A sibling to applyParkourSettings above rather than a line inside it, because
 -- Autorun lives on Types.PlayerSettings directly rather than in the nested Parkour block -- see that
 -- type's own note on why it is flat.
@@ -131,7 +149,13 @@ function SettingsClient.RestoreSettings(): ()
 		-- a settings round trip failing is a transient network problem, and degrading a player's
 		-- movement to the fallback controller because of it would be a far more visible and confusing
 		-- failure than simply running the shipped defaults for the session.
-		settings = { Keybinds = {}, GamepadKeybinds = {}, Autorun = false, Parkour = parkourSettings }
+		settings = {
+			Keybinds = {},
+			GamepadKeybinds = {},
+			Autorun = false,
+			Parkour = parkourSettings,
+			Comfort = comfortSettings,
+		}
 	end
 
 	if typeof(settings.Keybinds) == "table" then
@@ -172,7 +196,28 @@ function SettingsClient.RestoreSettings(): ()
 	end
 	applyParkourSettings()
 
-	logger:info("Settings restored", { autorun = autorunEnabled, parkour = parkourSettings.Enabled })
+	-- Same field-by-field decode and same reasoning as the Parkour block directly above: an older
+	-- server that predates this block sends nothing, and every field must fall back to this module's
+	-- own default (effects ON) rather than to false, which would read as "the player disabled
+	-- everything" and would be indistinguishable from a working accessibility setting.
+	local restoredComfort = settings.Comfort
+	if typeof(restoredComfort) == "table" then
+		local raw = restoredComfort :: { [string]: any }
+		local function boolean(key: string, fallback: boolean): boolean
+			return if typeof(raw[key]) == "boolean" then raw[key] else fallback
+		end
+		comfortSettings = {
+			CameraShake = boolean("CameraShake", comfortSettings.CameraShake),
+			FieldOfViewEffects = boolean("FieldOfViewEffects", comfortSettings.FieldOfViewEffects),
+		}
+	end
+	applyComfortSettings()
+
+	logger:info("Settings restored", {
+		autorun = autorunEnabled,
+		parkour = parkourSettings.Enabled,
+		cameraShake = comfortSettings.CameraShake,
+	})
 end
 
 local statusGeneration = 0
@@ -349,6 +394,18 @@ function SettingsClient.Start(handle: SettingsHandle): ()
 
 		local updateParkourRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateParkour)
 		updateParkourRemote:FireServer(field, enabled)
+	end)
+
+	-- Apply-then-persist, same order and same reasoning as ParkourToggled directly above. The server
+	-- re-validates the field name and value regardless of what is sent -- see SettingsSystem's
+	-- COMFORT_SETTING_FIELDS.
+	handle.ComfortToggled:Connect(function(field: string, enabled: boolean)
+		(comfortSettings :: { [string]: any })[field] = enabled
+		handle.Comfort:set(table.clone(comfortSettings))
+		applyComfortSettings()
+
+		local updateComfortRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateComfort)
+		updateComfortRemote:FireServer(field, enabled)
 	end)
 
 	handle.SprintModeChanged:Connect(function(mode: Types.SprintMode)

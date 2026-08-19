@@ -38,12 +38,12 @@
 	be a dependency of everyone interested in it, and why this module stays exactly this small.
 ]]
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 
 local PlayerDeathSystem = {}
@@ -52,31 +52,23 @@ local logger = Logger.scope("PlayerDeathSystem")
 
 type PlayerDeathState = {
 	DeathConfirmed: boolean,
-	DiedConnection: RBXScriptConnection?,
 }
 
 local deathStates: { [Player]: PlayerDeathState } = {}
 
-local function onCharacterAdded(player: Player, character: Model): ()
+-- `life` is Shared/PlayerLifecycle.lua's per-life Trove: the Died connection goes in it, so the
+-- previous life's listener is released by the structure on every respawn and on the player leaving.
+-- That is what the hand-tracked DiedConnection field on PlayerDeathState was for -- it is gone, and
+-- with it the three separate places (rebind, PlayerRemoving, and the nil-guard between them) that all
+-- had to agree about disconnecting it.
+local function onCharacterAdded(player: Player, humanoid: Humanoid, life: Trove.TroveInstance): ()
 	local state = deathStates[player]
 	if not state then
 		return
 	end
-
-	if state.DiedConnection then
-		state.DiedConnection:Disconnect()
-		state.DiedConnection = nil
-	end
 	state.DeathConfirmed = false
 
-	local humanoidInstance = character:WaitForChild("Humanoid", Constants.Network.WaitForChildTimeoutSeconds)
-	if not humanoidInstance or not humanoidInstance:IsA("Humanoid") then
-		logger:warn("Character has no Humanoid -- death cannot be detected for this life", { player = player.Name })
-		return
-	end
-	local humanoid = humanoidInstance :: Humanoid
-
-	state.DiedConnection = humanoid.Died:Connect(function()
+	life:Connect(humanoid.Died, function()
 		if state.DeathConfirmed then
 			return
 		end
@@ -86,31 +78,21 @@ local function onCharacterAdded(player: Player, character: Model): ()
 	end)
 end
 
-local function onPlayerAdded(player: Player): ()
-	deathStates[player] = { DeathConfirmed = false, DiedConnection = nil }
-
-	player.CharacterAdded:Connect(function(character: Model)
-		onCharacterAdded(player, character)
-	end)
-	if player.Character then
-		onCharacterAdded(player, player.Character)
-	end
-end
-
-local function onPlayerRemoving(player: Player): ()
-	local state = deathStates[player]
-	if state and state.DiedConnection then
-		state.DiedConnection:Disconnect()
-	end
-	deathStates[player] = nil
-end
-
 function PlayerDeathSystem.Init(): ()
-	Players.PlayerAdded:Connect(onPlayerAdded)
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
-	for _, player in ipairs(Players:GetPlayers()) do
-		onPlayerAdded(player)
-	end
+	-- See Shared/PlayerLifecycle.lua. The Humanoid wait this used to do by hand (and warn about) is
+	-- the binder's now, and a life whose Humanoid never arrives is skipped there rather than here.
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "PlayerDeathSystem",
+		OnPlayer = function(player: Player)
+			deathStates[player] = { DeathConfirmed = false }
+		end,
+		OnPlayerRemoving = function(player: Player)
+			deathStates[player] = nil
+		end,
+		OnCharacter = function(player: Player, _character: Model, humanoid: Humanoid, life: Trove.TroveInstance)
+			onCharacterAdded(player, humanoid, life)
+		end,
+	})
 
 	logger:info("PlayerDeathSystem.Init() complete")
 end

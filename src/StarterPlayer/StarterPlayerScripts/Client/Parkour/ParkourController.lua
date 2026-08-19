@@ -37,7 +37,6 @@
 	write to the character (ParkourMotor), or any validation (the server re-checks everything).
 ]]
 
-local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
@@ -45,9 +44,15 @@ local Workspace = game:GetService("Workspace")
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
+local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnership)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 
+local DashAudio = require(script.Parent.Parent.FX.DashAudio)
+local SlideAudio = require(script.Parent.Parent.FX.SlideAudio)
+local MantleAudio = require(script.Parent.Parent.FX.MantleAudio)
 local EnvironmentProbe = require(script.Parent.EnvironmentProbe)
 local InputBuffer = require(script.Parent.InputBuffer)
 local ParkourAnimator = require(script.Parent.ParkourAnimator)
@@ -92,6 +97,10 @@ local ACTION_DURATIONS: { [string]: number } = {
 	WallRun = ParkourConstants.WallRun.MaxDurationSeconds + 0.5,
 	LedgeClimb = ParkourConstants.Ledge.ClimbDurationSeconds + 0.5,
 	Roll = ParkourConstants.Roll.DurationSeconds + 0.5,
+	-- Derived from the LONGEST direction rather than from any one of the four, so retuning a single
+	-- direction longer can never under-declare the window and have the server force-expire a dash
+	-- mid-burst. States/Dashing.lua's own spec asserts every direction stays at or under it.
+	Dash = ParkourConstants.Dash.MaxDurationSeconds + 0.5,
 	-- Includes ChargeSeconds now: the report Start fires once, at Enter, which is the moment the CHARGE
 	-- begins (see States/Leaping.lua's Charging phase) -- not the moment the flight does. A window sized
 	-- only for the flight would under-declare the real duration by the whole charge, and a charge+flight
@@ -108,6 +117,9 @@ end
 local started = false
 local enabled = ParkourConstants.Enabled
 local heartbeatConnection: RBXScriptConnection? = nil
+
+-- The Shared/PlayerLifecycle.lua handle Start() takes out and Stop() releases -- see both.
+local lifecycleBinding: Trove.TroveInstance? = nil
 
 local character: Model? = nil
 local humanoid: Humanoid? = nil
@@ -154,6 +166,8 @@ local function buildInitialContext(boundCharacter: Model, boundHumanoid: Humanoi
 		SprintHeld = false,
 		SprintStage = 0,
 		Momentum = 0,
+		DebugWallCatch = nil,
+		WallCatchActive = false,
 		MoveDirection = Vector3.zero,
 		Velocity = Vector3.zero,
 		VerticalVelocity = 0,
@@ -170,8 +184,10 @@ local function buildInitialContext(boundCharacter: Model, boundHumanoid: Humanoi
 		LastGroundedAt = os.clock(),
 		WallRunChain = 0,
 		WallJumpChain = 0,
+		AirDashChain = 0,
 		LastWallInstance = nil,
 		LastWallLeftAt = 0,
+		WallLaunchDashBoostUntil = 0,
 		CombatOwned = false,
 		InCombat = false,
 		Assists = InputBuffer.GetAssists(),
@@ -283,10 +299,31 @@ local function releaseStrandedOwnership(currentHumanoid: Humanoid, definition: P
 	ParkourNetwork.ReportEnd(kind, context.Momentum, context.RootPart.Position)
 end
 
+-- Publishes Constants.Attributes.ParkourActionOwned for the combat layers' own client-side gate. An
+-- Attribute rather than a call into Client/Combat, for the identical require-graph reason
+-- ParkourFacingOwned is one: the combat modules are not in this framework's load chain and must not
+-- become part of it just to be told a state changed. See that Attribute's own header in Constants for
+-- what it covers and why it is not the authority.
+--
+-- Cleared rather than set false on the way out, so a character carries no leftover key at all -- the
+-- readers treat unset and false identically, and an unset Attribute is the honest representation of
+-- "this framework is not driving".
+local function setActionOwned(owned: boolean): ()
+	local currentHumanoid = humanoid
+	if not currentHumanoid then
+		return
+	end
+	currentHumanoid:SetAttribute(Constants.Attributes.ParkourActionOwned, if owned then true else nil)
+end
+
 local function onTransition(previousId: MovementStateId, nextId: MovementStateId): ()
 	reportTransition(previousId, nextId)
+	setActionOwned(ParkourOwnership.IsActionState(nextId))
 	ParkourAnimator.OnStateChanged(previousId, nextId, context.AnimationVariant)
 	ParkourCamera.OnStateChanged(previousId, nextId)
+	DashAudio.OnStateChanged(previousId, nextId)
+	SlideAudio.OnStateChanged(previousId, nextId)
+	MantleAudio.OnStateChanged(previousId, nextId)
 	-- The run system, told the same thing on the same frame as the animator and the camera. This is
 	-- what stops the run loop and the footstep audio from continuing straight through a slide, a
 	-- wall-run, a vault or a fall -- before this, the run presentation asked only "is sprint held and
@@ -363,12 +400,13 @@ local function step(deltaTime: number): ()
 	if grounded ~= wasGrounded then
 		if grounded then
 			context.LastGroundedAt = now
-			-- Touching the ground is what resets the wall-run and wall-jump chain limits. That single
-			-- rule is what makes those limits a constraint on AIRTIME rather than a global budget: a
-			-- player who returns to the ground gets a full fresh set, which is what keeps a long
-			-- traversal readable instead of gradually running out of moves for no visible reason.
+			-- Touching the ground is what resets the wall-run, wall-jump and air-dash chain limits.
+			-- That single rule is what makes those limits a constraint on AIRTIME rather than a global
+			-- budget: a player who returns to the ground gets a full fresh set, which is what keeps a
+			-- long traversal readable instead of gradually running out of moves for no visible reason.
 			context.WallRunChain = 0
 			context.WallJumpChain = 0
+			context.AirDashChain = 0
 			context.LastWallInstance = nil
 		else
 			context.LeftGroundAt = now
@@ -497,6 +535,7 @@ function ParkourController.BindCharacter(nextCharacter: Model): ()
 	ParkourMotor.BindCharacter(nextCharacter, humanoid :: Humanoid, rootPart :: BasePart)
 	ParkourAnimator.BindCharacter(nextCharacter)
 	ParkourCamera.Reset()
+	SlideAudio.Reset()
 	ParkourNetwork.Reset()
 	InputBuffer.Clear()
 
@@ -509,10 +548,13 @@ function ParkourController.BindCharacter(nextCharacter: Model): ()
 end
 
 local function unbind(): ()
+	-- Before the handles are dropped below -- setActionOwned needs the Humanoid it is clearing.
+	setActionOwned(false)
 	ParkourMotor.Unbind()
 	EnvironmentProbe.Unbind()
 	ParkourAnimator.Unbind()
 	ParkourCamera.Reset()
+	SlideAudio.Reset()
 	InputBuffer.Clear()
 	-- nil, not "Idle": the framework is no longer driving at all, and the run system's fallback path
 	-- (its own grounded/moving checks, with no parkour veto) is the correct behavior in that case --
@@ -533,6 +575,9 @@ function ParkourController.SetEnabled(nextEnabled: boolean): ()
 	end
 	enabled = nextEnabled
 	if not enabled then
+		-- The framework is switched off, so whatever state it was parked in is no longer an action
+		-- anyone is doing. Left set, it would refuse every combat press for the rest of the life.
+		setActionOwned(false)
 		ParkourMotor.Release()
 		ParkourAnimator.Reset()
 		ParkourCamera.Reset()
@@ -614,14 +659,20 @@ function ParkourController.Start(): ()
 	ParkourCamera.Start()
 	ParkourDebug.Start()
 
-	local localPlayer = Players.LocalPlayer
-	if localPlayer.Character then
-		task.spawn(ParkourController.BindCharacter, localPlayer.Character)
-	end
-	localPlayer.CharacterAdded:Connect(function(nextCharacter: Model)
-		ParkourController.BindCharacter(nextCharacter)
-	end)
-	localPlayer.CharacterRemoving:Connect(unbind)
+	-- See Shared/PlayerLifecycle.lua. BindCharacter keeps its own Humanoid/HumanoidRootPart waits and
+	-- its public signature -- the binder's Humanoid wait makes the first of those two a table lookup
+	-- rather than removing it, and this stays callable directly by a future harness.
+	--
+	-- The returned handle is what Stop() below needs: this module's own Stop used to disconnect the
+	-- Heartbeat and release the body while LEAVING these two connections live, so a "stopped"
+	-- controller quietly rebound itself and started driving again on the player's next respawn.
+	lifecycleBinding = PlayerLifecycle.BindLocalCharacter({
+		Scope = "ParkourController",
+		OnCharacter = function(nextCharacter: Model)
+			ParkourController.BindCharacter(nextCharacter)
+		end,
+		OnCharacterRemoving = unbind,
+	})
 
 	heartbeatConnection = RunService.Heartbeat:Connect(onHeartbeat)
 	logger:info("ParkourController started")
@@ -634,6 +685,12 @@ function ParkourController.Stop(): ()
 	if heartbeatConnection then
 		heartbeatConnection:Disconnect()
 		heartbeatConnection = nil
+	end
+	-- Cleaned BEFORE unbind below, so a CharacterAdded landing in the same frame as a Stop cannot
+	-- rebind the body this call is in the middle of releasing.
+	if lifecycleBinding then
+		lifecycleBinding:Clean()
+		lifecycleBinding = nil
 	end
 	started = false
 	unbind()

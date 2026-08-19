@@ -47,23 +47,28 @@ local ParkourAnimator = require(script.Parent.Parent.Parkour.ParkourAnimator)
 local DefenseClient = require(script.Parent.Parent.Defense.DefenseClient)
 
 -- SoundManager holds a REGISTRY, not a fixed set -- it only knows about the sounds someone has
--- Register()ed into it, and these two modules are the ones who do that (FlightAudio at load, RunAudio
--- at load). Neither is required above for its return value; they are required for the side effect of
--- their top-level Register() calls. CombatAudio.lua (a third former registrant) was removed alongside
--- the rest of the combat system.
+-- Register()ed into it, and these six modules are the ones who do that (FlightAudio at load,
+-- RunAudio at load, CombatAudio at load, DashAudio at load, SlideAudio at load, MantleAudio at load).
+-- None is required above for its return value; each is required for the side effect of its own
+-- top-level Register() calls. CombatAudio.lua was removed alongside the rest of the combat system and
+-- has since been rebuilt -- see that module's own header.
 --
 -- Requiring them HERE rather than relying on someone else having already done so is the point. That
 -- used to hold only by accident: Client/Main.client.lua requires FlightController/RunController at
 -- the top of its own body, each of which requires one of these, and all of that happens to run before
 -- LoadingClient.Run() reaches this module. Main's own comment asserts that ordering -- but nothing
--- enforced it. Either of those two modules switching to a lazy require would have silently emptied
+-- enforced it. Any of those modules switching to a lazy require would have silently emptied
 -- its sounds out of the manifest: no error, no warning, just a cold-load hitch on the first
--- takeoff/footstep of every session, and no test anywhere to catch it.
+-- takeoff/footstep/swing of every session, and no test anywhere to catch it.
 --
 -- Luau caches module results, so requiring them a second time here is free -- it cannot double-
 -- register.
 require(script.Parent.Parent.FX.FlightAudio)
 require(script.Parent.Parent.FX.RunAudio)
+require(script.Parent.Parent.FX.CombatAudio)
+require(script.Parent.Parent.FX.DashAudio)
+require(script.Parent.Parent.FX.SlideAudio)
+require(script.Parent.Parent.FX.MantleAudio)
 
 local logger = Logger.scope("AssetPreloader")
 

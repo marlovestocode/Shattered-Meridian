@@ -52,10 +52,37 @@ local active: { Amplitude: number, Frequency: number, Duration: number, StartClo
 
 local started = false
 
+-- The player's own Types.ComfortSettings.CameraShake preference, pushed by Client/Settings/
+-- SettingsClient.lua. Defaults to true so a client whose settings round trip fails still gets the
+-- shipped behavior rather than a silently effect-less game -- the same "a missing answer degrades to
+-- the default experience, never to a degraded one" posture Shake() below already takes for a nil
+-- preset.
+local shakeEnabled = true
+
+-- Pushed from Client/Settings/SettingsClient.lua's applyComfortSettings, never read from a profile
+-- here -- this module has no business knowing that persistence exists, the same routing-only split
+-- ParkourController.SetCameraEffectsEnabled already keeps.
+--
+-- Clears any in-flight shake on the way to disabled rather than only refusing new ones, so switching
+-- the setting off in the middle of a fight stops the camera THIS frame instead of after the current
+-- decay finishes. Someone reaching for this toggle is not asking to be shaken a little less.
+function CameraShake.SetEnabled(enabled: boolean): ()
+	shakeEnabled = enabled
+	if not enabled then
+		active = nil
+	end
+end
+
 -- Starts (or restarts) a shake from a Constants.FX.CameraShake preset. Cheap and allocation-light;
 -- safe to call every confirmed impact. A nil/malformed preset is a no-op (a missing shake degrades
 -- to no shake, never an error) -- consistent with Constants.FX's "presentation, not outcome" note.
 function CameraShake.Shake(preset: ShakePreset?): ()
+	-- Refused here rather than inside onRenderStep so a disabled player pays nothing at all: no active
+	-- slot means the render step's own first line returns immediately, exactly as it does when nothing
+	-- is shaking.
+	if not shakeEnabled then
+		return
+	end
 	if not preset or typeof(preset.Amplitude) ~= "number" then
 		return
 	end

@@ -30,12 +30,32 @@
 	superseded response from clobbering a newer edit that landed while the old one was still in
 	flight.
 
-	"Test on Dummy" (TestFireMove/SpawnPreviewDummy, and the feedback listener that used to stream
-	results back over Combat_FeedbackEvent) was removed alongside the rest of the combat system --
-	there is no server-side handler left to fire a move at a dummy with, and no Combat_FeedbackEvent
-	remote left to listen to (CombatSystem.lua, its only creator, is gone). handle.LastTestResultText/
-	handle.TestSamples stay part of MoveEditorHandle (StatsPanel.lua still reads them as pure display),
-	they just never receive a new value anymore -- see Types.lua's own header.
+	"TEST ON DUMMY" IS REAL AGAIN (2026-08-19, the Move Editor repair pass) -- rebuilt against the NEW
+	4-layer combat stack (HitboxEngine -> DefenseSystem -> DamageSystem -> AttackRequestSystem) rather
+	than revived as it was. The old TestFireMove/SpawnPreviewDummy remotes and Combat_FeedbackEvent are
+	still gone -- CombatSystem.lua, their only creator, is gone with them -- but nothing needed to be
+	rebuilt in their shape, because the pieces that survived the rewrite already cover the same ground:
+
+	  * FIRING was never actually broken. AttackRequestSystem.resolveRequest's admin-trusted Hotbar
+	    branch (`authorized == true`) still lets an admin bind ANY known move (AttackCatalog.Has) to a
+	    hotbar slot and throw it for real -- see this file's own BindHotbarSlotRequested wiring below,
+	    which was already live before this pass touched anything. What that swing needed was a target
+	    and a way to hear back what happened to it, not a new way to throw it.
+	  * THE TARGET is Server/Systems/DebugDummySystem.lua's training dummy (the DevMenu "Spawn" tab's
+	    own tool) -- a real HitboxEngine/DefenseSystem combatant, not a Move-Editor-owned duplicate. The
+	    toolbar's "Spawn Dummy"/"Despawn Dummy" button (handle.ToggleTestDummyRequested, handled below)
+	    reuses DevMenuSystem's own DevMenu_SpawnDummy/DevMenu_DespawnAllDebugDummies remotes directly --
+	    no new server code, per this codebase's own "search before duplicating" rule.
+	  * THE FEEDBACK is DamageSystem's own Combat_Feedback event -- the same one
+	    Client/Combat/CombatFeedbackClient.lua already subscribes to for hit-stop/shake/damage-number FX.
+	    This module adds a second, independent subscriber (see onCombatFeedback below): filtered to
+	    Role == "Attacker" and MoveId == the currently selected Draft's MoveId, each matching payload
+	    becomes one MoveStats.TestSample appended to handle.TestSamples, timed from the most recent
+	    matching Attack_Started this module observed via AttackInputClient.OnAttackStarted (t = 0 for
+	    that swing). GuardDrain stands in for PostureDamage in that sample -- CombatFeedback never
+	    carries the resolved DamageResult's own PostureDamage field, and GuardDrain (DamageConstants.
+	    Guard's own "guard IS the posture pool" -- see that constant's header) is the closest real number
+	    the client is actually told.
 
 	Does not own: whether a request is actually allowed (MoveEditorSystem.lua re-checks
 	server-side regardless), or the editor panel itself (UI/Screens/MoveEditor/init.lua) -- this
@@ -47,22 +67,30 @@
 	see this file's own wiring in startMoveEditor and HotbarBindings.lua's own header. Unlike every
 	remote-backed signal above, this one never touches NetworkBridge -- binding a move to a hotbar
 	slot is pure client-side bookkeeping; only firing the bound move round-trips to the server
-	(Client/Combat/HotbarMoveClient.lua, a different module entirely -- this feature's actual
-	live-fire path runs independently of whether the Move Editor screen is even open).
+	(Client/Combat/AttackInputClient.lua -- the same module every OTHER player's own hotbar press
+	already goes through; this feature's actual live-fire path runs independently of whether the Move
+	Editor screen is even open).
 ]]
 
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
+local Lazy = require(ReplicatedStorage.Shared.Lazy)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local MoveStats = require(ReplicatedStorage.Shared.MoveStats)
+local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
+local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
+local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local MoveEditorModule = require(script.Parent.Parent.UI.Screens.MoveEditor)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local HotbarBindings = require(script.Parent.Parent.Combat.HotbarBindings)
+local AttackInputClient = require(script.Parent.Parent.Combat.AttackInputClient)
+local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
 
 type MoveEditorHandle = MoveEditorModule.MoveEditorHandle
 
@@ -81,7 +109,7 @@ local draftUpdateGeneration = 0
 -- True from the moment a field edit schedules a debounced UpdateDraft until that exact call
 -- either lands or is superseded/flushed -- see flushPendingDraftUpdate's own header below for why
 -- this exists. Without it, a hotbar press that follows once the panel closes (Client/Combat/
--- HotbarMoveClient.lua's live-fire path, which reads MoveRegistryManager's registry by moveId alone)
+-- AttackInputClient.lua's live-fire path, which reads MoveRegistryManager's registry by moveId alone)
 -- can beat the debounced UpdateDraft the most recent field edit scheduled to the server:
 -- Config.DraftDebounceSeconds (150ms) plus the RemoteFunction round trip on top of it is easily beaten
 -- by the completely ordinary "edit a field, immediately close the panel" cadence, which would leave
@@ -219,6 +247,90 @@ local function fetchDefaultMoves(): { MoveTypes.MoveDefinition }
 	return result.Moves
 end
 
+-- Test-fire feedback ---------------------------------------------------------------------------------
+
+-- The moment (os.clock()) this client last observed an Attack_Started for a HOTBAR throw of whatever
+-- move is CURRENTLY selected in the editor -- t = 0 for the TestSample(s) that throw's own
+-- Combat_Feedback event(s) get timed against. nil until a matching throw has actually been observed
+-- this session; a Combat_Feedback that arrives with no known throw start (the admin fighting something
+-- unrelated to the editor's own test-fire flow, or a follow-up landing after the editor has since
+-- selected a different move) is simply not recorded -- see onCombatFeedback below.
+local lastTestThrowAt: number? = nil
+
+-- AttackInputClient.OnAttackStarted fires for every server-confirmed throw this client makes, not just
+-- hotbar ones -- narrowed to Hotbar AND a MoveId matching the CURRENTLY selected draft, so an ordinary
+-- Basic/Heavy swing thrown while the editor happens to be open (or a hotbar press of some OTHER bound
+-- move) never resets the test-fire clock a real test wasn't waiting on.
+local function onTestAttackStarted(handle: MoveEditorHandle, payload: AttackTypes.AttackStartedPayload): ()
+	if payload.Kind ~= "Hotbar" then
+		return
+	end
+	local draft = peek(handle.Draft)
+	if not draft or draft.MoveId ~= payload.MoveId then
+		return
+	end
+	lastTestThrowAt = os.clock()
+end
+
+-- Combat_Feedback fires to BOTH participants of every resolved contact server-wide (DamageSystem's own
+-- header) -- this is a SECOND, independent subscriber alongside Client/Combat/CombatFeedbackClient.lua's
+-- FX one, filtered down to exactly the hits this editor's own test-fire flow produced: this client was
+-- the attacker, and the move that landed is the one currently open in the editor. Everything else
+-- (ordinary combat elsewhere on the server, a hit on some other admin's own dummy) is silently ignored.
+--
+-- GuardDrain stands in for MoveStats.TestSample.PostureDamage -- CombatFeedback never carries the
+-- resolved DamageResult's own PostureDamage (DamageSystem.applyOutcome's own feedback table only ever
+-- sends Damage/GuardDrain, see DamageTypes.CombatFeedback), and GuardDrain (DamageConstants.Guard's own
+-- "guard IS the posture pool") is the closest real number this client is actually told -- an honest
+-- approximation, not the exact authored PostureDamage a Blocked/GuardBroken contact would otherwise
+-- already have priced through DefenseSystem's own guard pool instead.
+local function onCombatFeedback(handle: MoveEditorHandle, raw: unknown): ()
+	if typeof(raw) ~= "table" then
+		return
+	end
+	local payload = raw :: DamageTypes.CombatFeedback
+	if payload.Role ~= "Attacker" then
+		return
+	end
+	local draft = peek(handle.Draft)
+	if not draft or draft.MoveId ~= payload.MoveId then
+		return
+	end
+	local throwAt = lastTestThrowAt
+	if not throwAt then
+		-- This move landed a hit without this client ever observing a matching test-fire throw --
+		-- most likely a Basic/Heavy weapon-string hit that happens to share a MoveId format, or a
+		-- follow-up from before the editor was opened. Nothing honest to time it against.
+		return
+	end
+
+	local sample: MoveStats.TestSample = {
+		TimeSeconds = math.max(os.clock() - throwAt, 0),
+		Damage = payload.Damage,
+		PostureDamage = payload.GuardDrain,
+		Kind = payload.Kind,
+	}
+	local updated = table.clone(peek(handle.TestSamples))
+	table.insert(updated, sample)
+	handle.TestSamples:set(updated)
+
+	handle.LastTestResultText:set(
+		string.format("Last test: %s -- %.0f dmg, %.0f posture", payload.Kind, payload.Damage, payload.GuardDrain)
+	)
+end
+
+-- Describes a DevMenuSystem-shaped {Success, Reason?} result for the toolbar's toggling Spawn/Despawn
+-- Dummy button -- same "invoke -> describe -> setStatus" shape RemoteInvoker.InvokeAndReport already
+-- codifies, reused here rather than hand-rolled.
+local function describeDummyToggleResult(actionText: string, resultOrError: unknown): string
+	local result = resultOrError :: { Success: boolean, Reason: string? }
+	if typeof(result) == "table" and result.Success then
+		return actionText .. "."
+	end
+	local reason = if typeof(result) == "table" then result.Reason else nil
+	return "Failed: " .. actionText .. " (" .. (reason or "Unknown") .. ")"
+end
+
 local function startMoveEditor(handle: MoveEditorHandle, initialMoves: { MoveTypes.MoveDefinition }): ()
 	logger:info("MoveEditorClient started")
 	handle.MovesDisplay:set(initialMoves)
@@ -242,6 +354,18 @@ local function startMoveEditor(handle: MoveEditorHandle, initialMoves: { MoveTyp
 	HotbarBindings.OnChanged(function()
 		handle.HotbarBindings:set(HotbarBindings.GetAll())
 	end)
+
+	-- Test-fire feedback -- see this file's own header and onTestAttackStarted/onCombatFeedback's own
+	-- headers above. Both subscriptions run for the life of the session, same as HotbarBindings.OnChanged
+	-- immediately above -- there is nothing move-editor-specific about the underlying remotes that would
+	-- make either safe to only listen to while the editor screen is open.
+	AttackInputClient.OnAttackStarted(function(payload: AttackTypes.AttackStartedPayload)
+		onTestAttackStarted(handle, payload)
+	end)
+	NetworkBridge.GetRemoteEvent(DamageConstants.Network.RemoteNames.Feedback).OnClientEvent
+		:Connect(function(raw: unknown)
+			onCombatFeedback(handle, raw)
+		end)
 
 	-- The ONE place IsOpen is ever written client-side (the keybind toggle and the screen's own "X"
 	-- button both route through this) -- keeps the server-side freeze/unfreeze
@@ -334,9 +458,10 @@ local function startMoveEditor(handle: MoveEditorHandle, initialMoves: { MoveTyp
 
 	handle.SelectMoveRequested:Connect(function(moveId: string)
 		-- Samples belong to the move that produced them, so switching moves drops them -- otherwise
-		-- the Stats panel would keep showing the PREVIOUS move's (now permanently frozen, see this
-		-- file's header) samples under the newly selected move's name, which is worse than showing
-		-- none.
+		-- the Stats panel would keep showing the PREVIOUS move's samples under the newly selected
+		-- move's name, which is worse than showing none. onCombatFeedback's own MoveId check would
+		-- already stop new samples from landing under the wrong move, but old ones already in the
+		-- array need clearing explicitly.
 		handle.TestSamples:set({})
 
 		-- A Default move is already fully known client-side from the initial ListDefaultMoves fetch
@@ -563,6 +688,37 @@ local function startMoveEditor(handle: MoveEditorHandle, initialMoves: { MoveTyp
 	end
 	handle.DuplicateMoveRequested:Connect(requestDuplicate)
 
+	-- Reuses DevMenuSystem's own DevMenu_SpawnDummy/DevMenu_DespawnAllDebugDummies remotes
+	-- (Server/Systems/DebugDummySystem.lua) -- see this file's own header on why the Move Editor never
+	-- grows a second dummy implementation. handle.HasTestDummy is this client's own optimistic guess
+	-- (flipped only on a Success response), not polled from the server -- see that field's own header
+	-- in MoveEditor/Types.lua on why a wrong guess here is harmless.
+	handle.ToggleTestDummyRequested:Connect(function()
+		local spawning = not peek(handle.HasTestDummy)
+		local remote = NetworkBridge.GetRemoteFunction(
+			if spawning
+				then Constants.Debug.DevMenu.RemoteNames.SpawnDummy
+				else Constants.Debug.DevMenu.RemoteNames.DespawnAllDebugDummies
+		)
+		RemoteInvoker.InvokeAndReport(
+			function(status: string)
+				handle.StatusText:set(status)
+			end,
+			remote,
+			{},
+			function(resultOrError: unknown)
+				local result = resultOrError :: { Success: boolean, Reason: string? }
+				if typeof(result) == "table" and result.Success then
+					handle.HasTestDummy:set(spawning)
+				end
+				return describeDummyToggleResult(
+					if spawning then "Spawned test dummy" else "Despawned test dummy",
+					result
+				)
+			end
+		)
+	end)
+
 	-- Client-only bookkeeping, no RemoteFunction involved -- see MoveEditor/Types.lua's own header
 	-- on this signal. Toggles: binding the SAME move that's already on this slot clears it instead
 	-- of re-binding it, the only way the UI offers to free a slot (HotbarBindings.Clear exists for
@@ -580,7 +736,12 @@ end
 
 -- Runs on a delay (task.spawn), same reasoning as DevMenuClient.Start: this is called synchronously
 -- partway through Main.client.lua's boot sequence, and the authorization round trip yields.
-function MoveEditorClient.Start(handle: MoveEditorHandle): ()
+--
+-- TAKES A Shared/Lazy.lua THUNK, same as DevMenuClient.Start and for the same reason -- this is the
+-- BIGGEST of the three deferred admin panels at ~143 Instances, and UI.Mount() used to build all of
+-- them on the boot path for every player. Forced only once the server has said yes AND both move
+-- lists are in hand, so the panel is mounted with real data rather than mounted empty and then filled.
+function MoveEditorClient.Start(deferredHandle: Lazy.Lazy<MoveEditorHandle>): ()
 	task.spawn(function()
 		local authorized, initialMoves = requestServerAuthorization()
 		if not authorized then
@@ -594,7 +755,7 @@ function MoveEditorClient.Start(handle: MoveEditorHandle): ()
 		for _, move in ipairs(fetchDefaultMoves()) do
 			table.insert(merged, move)
 		end
-		startMoveEditor(handle, merged)
+		startMoveEditor(deferredHandle.Get(), merged)
 	end)
 end
 

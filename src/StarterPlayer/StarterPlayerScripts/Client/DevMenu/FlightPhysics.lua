@@ -25,7 +25,7 @@
 
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
 
 local FlightPhysics = {}
 
@@ -37,8 +37,8 @@ local ORIENTATION_DRIVE_NAME = "FlightOrientationDrive"
 -- Large-but-finite rather than math.huge: too low and the character's own momentum/gravity fights
 -- the drive (sluggish, sinks), too high and wall contact reads as a violent stop instead of a
 -- controlled halt. Starting point only -- flagged as a Studio-tune item in the design plan. Now
--- Constants.Flight.VelocityDriveMaxForce -- see that field's own header in Constants.lua.
-local VELOCITY_DRIVE_MAX_FORCE = Constants.Flight.VelocityDriveMaxForce
+-- FlightConstants.VelocityDriveMaxForce -- see that field's own header in FlightConstants.lua.
+local VELOCITY_DRIVE_MAX_FORCE = FlightConstants.VelocityDriveMaxForce
 
 local function findAttachment(rootPart: BasePart): Attachment?
 	local existing = rootPart:FindFirstChild(ATTACHMENT_NAME)

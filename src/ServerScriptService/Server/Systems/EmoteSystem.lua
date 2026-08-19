@@ -72,17 +72,18 @@
 	StopEmote call.
 ]]
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local Types = require(ReplicatedStorage.Shared.Types)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
 local EmoteRegistry = require(ReplicatedStorage.Shared.Emotes.EmoteRegistry)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local EmoteUnlockService = require(script.Parent.EmoteUnlockService)
@@ -117,16 +118,8 @@ local stoppedRemote: RemoteEvent? = nil
 local loadoutUpdatedRemote: RemoteEvent? = nil
 local unlockedUpdatedRemote: RemoteEvent? = nil
 
-local function getHumanoid(player: Player): Humanoid?
-	local character = player.Character
-	if not character then
-		return nil
-	end
-	return character:FindFirstChildOfClass("Humanoid")
-end
-
 local function setMovementLocked(player: Player, locked: boolean): ()
-	local humanoid = getHumanoid(player)
+	local _, humanoid = CharacterUtil.LiveRig(player)
 	if not humanoid then
 		return
 	end
@@ -409,7 +402,10 @@ function EmoteSystem.Init(): ()
 		EmoteSystem.StopEmote(victim)
 	end)
 
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "EmoteSystem",
+		OnPlayerRemoving = onPlayerRemoving,
+	})
 
 	logger:info("EmoteSystem.Init() complete")
 end

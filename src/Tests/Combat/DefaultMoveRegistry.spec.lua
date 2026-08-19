@@ -2,10 +2,10 @@
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local DefaultMoveRegistry = require(ServerScriptService.Server.Combat.DefaultMoveRegistry) :: any
-local Constants = require(game:GetService("ReplicatedStorage").Shared.Constants)
+local CombatConstants = require(game:GetService("ReplicatedStorage").Shared.Combat.CombatConstants)
 local LiveTuningContract = require(ServerScriptService.Tests.TestHelpers.LiveTuningContract)
 
--- DefaultMoveRegistry mutates the REAL, shared Constants.Combat.Weapons/DashPunch/DashHit/AirSlam
+-- DefaultMoveRegistry mutates the REAL, shared CombatConstants.Weapons/DashPunch/DashHit/AirSlam
 -- tables (that is the whole point of this module -- see its own header, and HitboxTuning.lua's
 -- before it) -- and TestEZ runs every spec file in one Lua VM/session, so a leaked mutation here
 -- would silently change combat behavior for any other spec that happens to read the same attack
@@ -130,7 +130,7 @@ return function()
 				local candidate = toCandidate(before)
 				candidate.Damage = 999
 				DefaultMoveRegistry.ApplyEdit("default:Primary:Basic:1", candidate)
-				expect(Constants.Combat.Weapons.Primary.Stages.Basic[1].DebugName).to.equal("Basic1")
+				expect(CombatConstants.Weapons.Primary.Stages.Basic[1].DebugName).to.equal("Basic1")
 			end, function()
 				DefaultMoveRegistry.Reset("default:Primary:Basic:1")
 			end)
@@ -143,7 +143,7 @@ return function()
 				candidate.WindupSeconds = 999
 				local result = DefaultMoveRegistry.ApplyEdit("default:Primary:Basic:1", candidate)
 				expect(result).to.be.ok()
-				expect((result :: any).WindupSeconds).to.equal(5)
+				expect((result :: any).WindupSeconds).to.equal(45) -- CLAMP_MAX_SECONDS
 			end, function()
 				DefaultMoveRegistry.Reset("default:Primary:Basic:1")
 			end)
@@ -168,7 +168,7 @@ return function()
 				expect(result.Shape).to.equal("Sphere")
 				expect(result.Radius).to.equal(6)
 				expect(result.Size).to.equal(nil)
-				expect(Constants.Combat.Weapons.Primary.Stages.Basic[1].Shape).to.equal("Sphere")
+				expect(CombatConstants.Weapons.Primary.Stages.Basic[1].Shape).to.equal("Sphere")
 			end, function()
 				DefaultMoveRegistry.Reset("default:Primary:Basic:1")
 			end)

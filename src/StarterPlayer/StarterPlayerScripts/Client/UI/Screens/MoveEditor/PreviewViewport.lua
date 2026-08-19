@@ -129,19 +129,19 @@ end
 local PreviewViewportModule = {}
 
 function PreviewViewportModule.Mount(scope: Scope, width: number, height: number, props: PreviewViewportProps): Frame
-	local dummyModel, dummyRootCFrame = buildDummyRig()
-	local dummyHumanoid = dummyModel:FindFirstChildOfClass("Humanoid")
-	-- LoadAnimation needs a real Animator, not just a Humanoid -- CreateHumanoidModelFromDescription
-	-- doesn't wire one up on its own (no Animate script runs on a rig sitting in a WorldModel, not a
-	-- live character), so one is created up front rather than lazily on first Play.
+	-- The dummy rig is NOT built here -- buildDummyRig calls the yielding
+	-- Players:CreateHumanoidModelFromDescription, and Mount runs for every player at UI boot (see
+	-- UI/init.lua), admin or not, panel opened or not. Deferred to ensureDummyRig below, called the
+	-- first time this panel's own IsOpen flips true (near worldModel's own construction, since that's
+	-- what the rig gets parented into), so a player who never opens the Move Editor never pays for a
+	-- rig they'll never see. dummyRootCFrame starts at the same fallback buildDummyRig itself falls
+	-- back to for a rig missing a HumanoidRootPart, so the gizmo positioning math below has a sane
+	-- pose to read before the real rig exists.
+	local dummyModel: Model? = nil
+	local dummyHumanoid: Humanoid? = nil
 	local dummyAnimator: Animator? = nil
-	if dummyHumanoid then
-		dummyAnimator = dummyHumanoid:FindFirstChildOfClass("Animator")
-		if not dummyAnimator then
-			dummyAnimator = Instance.new("Animator")
-			dummyAnimator.Parent = dummyHumanoid
-		end
-	end
+	local dummyRootCFrame = CFrame.new(0, 3, 0)
+	local dummyRigBuilt = false
 
 	local selectedPhase: Fusion.Value<Phase> = scope:Value("Active" :: Phase)
 
@@ -234,7 +234,9 @@ function PreviewViewportModule.Mount(scope: Scope, width: number, height: number
 		isPlaying:set(false)
 		playElapsed:set(0)
 		dummyLiveCFrame:set(dummyRootCFrame)
-		dummyModel:PivotTo(dummyRootCFrame)
+		if dummyModel then
+			dummyModel:PivotTo(dummyRootCFrame)
+		end
 	end
 
 	-- The clip list a draft previews with: its authored timeline, or -- for a move carrying only the
@@ -292,7 +294,9 @@ function PreviewViewportModule.Mount(scope: Scope, width: number, height: number
 				local traveled = math.min(elapsed, currentDraft.Movement.LungeDurationSeconds) * speed
 				local liveRoot = dummyRootCFrame * CFrame.new(0, 0, -traveled)
 				dummyLiveCFrame:set(liveRoot)
-				dummyModel:PivotTo(liveRoot)
+				if dummyModel then
+					dummyModel:PivotTo(liveRoot)
+				end
 			end
 		end)
 	end
@@ -516,7 +520,41 @@ function PreviewViewportModule.Mount(scope: Scope, width: number, height: number
 	local worldModel = scope:New "WorldModel" {
 		[Children] = { gizmoFolder },
 	}
-	dummyModel.Parent = worldModel
+
+	-- Builds the rig into `worldModel` above -- see this file's own header and Mount's opening
+	-- comment for why this is deferred rather than built eagerly. Re-derives dummyRootCFrame/
+	-- dummyLiveCFrame from the REAL rig (not the placeholder) and refreshes the gizmo pool against
+	-- it, since rebuildGizmo() already ran once above against the placeholder pose during Mount.
+	local function ensureDummyRig(): ()
+		if dummyRigBuilt then
+			return
+		end
+		dummyRigBuilt = true
+		local model, rootCFrame = buildDummyRig()
+		dummyModel = model
+		dummyRootCFrame = rootCFrame
+		dummyLiveCFrame:set(rootCFrame)
+		dummyHumanoid = model:FindFirstChildOfClass("Humanoid")
+		if dummyHumanoid then
+			dummyAnimator = dummyHumanoid:FindFirstChildOfClass("Animator")
+			if not dummyAnimator then
+				dummyAnimator = Instance.new("Animator")
+				dummyAnimator.Parent = dummyHumanoid
+			end
+		end
+		model.Parent = worldModel
+		rebuildGizmo()
+	end
+
+	if peek(props.IsOpen) then
+		ensureDummyRig()
+	else
+		scope:Observer(props.IsOpen):onChange(function()
+			if peek(props.IsOpen) then
+				ensureDummyRig()
+			end
+		end)
+	end
 
 	local camera = scope:New "Camera" {
 		CFrame = cameraCFrame,

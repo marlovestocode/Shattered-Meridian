@@ -24,7 +24,7 @@
 	entirely rather than left dead alongside Dash/Slide: Sprint already HAS its replacement --
 	Server/Systems/RunSystem.lua, driven by Shared/Run/RunConstants.lua/RunLadder.lua -- so keeping a
 	second, disconnected copy of the same mechanic here was exactly the "multiple configs for one
-	system" trap Constants.Combat's own former Sprint* fields already were. Dash/Slide have no live
+	system" trap CombatConstants' own former Sprint* fields already were. Dash/Slide have no live
 	replacement yet, so they stay as the record of what a live one needs to do.
 
 	Does not own: whether a request is legal (CombatSystem.lua's shared pre-checks -- rate limit,
@@ -36,8 +36,9 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 -- The Parkour System's tuning table (Shared/Parkour/ParkourConstants.lua). Required here rather than
--- duplicating its acceleration/momentum-carry numbers into Constants.Combat: the client-side movement
+-- duplicating its acceleration/momentum-carry numbers into CombatConstants: the client-side movement
 -- framework and this resolver have to agree on the same acceleration curve, and two copies of that
 -- pair would silently diverge on the first retune. Pure data with no Instance dependency, so it costs
 -- this module nothing and keeps it headlessly testable.
@@ -53,21 +54,21 @@ local Movement = {}
 -- checking state.dashCooldownExpiry first -- this function only applies the effect, it does not
 -- itself validate legality (per this file's header, that's CombatSystem.lua's job). isFrontDash
 -- (from ResolveDashDirection below) picks the longer front-lunge duration/commitment pair over the
--- plain one -- see Constants.Combat.DashFrontDurationSeconds' own comment for why a front dash
+-- plain one -- see CombatConstants.DashFrontDurationSeconds' own comment for why a front dash
 -- needs both a longer burst and a longer lock (it's carrying a punch, not just a step). isBackDash
 -- picks the weaker speed multiplier + longer cooldown -- see DashBackSpeedMultiplier/
 -- DashBackCooldownSeconds' own header for why backward specifically is tuned down. Mutually
 -- exclusive with isFrontDash by construction (ResolveDashDirection returns exactly one direction).
 function Movement.ApplyDash(state: CombatState, now: number, isFrontDash: boolean, isBackDash: boolean): ()
 	local durationSeconds = if isFrontDash
-		then Constants.Combat.DashFrontDurationSeconds
-		else Constants.Combat.DashDurationSeconds
+		then CombatConstants.DashFrontDurationSeconds
+		else CombatConstants.DashDurationSeconds
 	local commitmentSeconds = if isFrontDash
-		then Constants.Combat.DashFrontCommitmentSeconds
-		else Constants.Combat.DashCommitmentSeconds
+		then CombatConstants.DashFrontCommitmentSeconds
+		else CombatConstants.DashCommitmentSeconds
 	local cooldownSeconds = if isBackDash
-		then Constants.Combat.DashBackCooldownSeconds
-		else Constants.Combat.DashCooldownSeconds
+		then CombatConstants.DashBackCooldownSeconds
+		else CombatConstants.DashCooldownSeconds
 	state.Movement.dashWindowExpiry = now + durationSeconds
 	state.Movement.dashCooldownExpiry = now + cooldownSeconds
 	state.Movement.dashIsBackward = isBackDash
@@ -101,7 +102,7 @@ function Movement.ResolveDashDirection(state: CombatState): ("Front" | "Back" | 
 	end
 
 	local moveDirection = humanoid.MoveDirection
-	if moveDirection.Magnitude < Constants.Combat.MovementInputMagnitudeThreshold then
+	if moveDirection.Magnitude < CombatConstants.MovementInputMagnitudeThreshold then
 		return nil
 	end
 
@@ -124,12 +125,12 @@ end
 -- supplied clip in whatever direction the player is already moving (no steering, see this
 -- feature's own scope). Cancels an active block, same rule ApplyDash already enforces.
 function Movement.ApplySlide(state: CombatState, now: number): ()
-	state.Movement.slideWindowExpiry = now + Constants.Combat.SlideDurationSeconds
-	state.Movement.slideCooldownExpiry = now + Constants.Combat.SlideCooldownSeconds
+	state.Movement.slideWindowExpiry = now + CombatConstants.SlideDurationSeconds
+	state.Movement.slideCooldownExpiry = now + CombatConstants.SlideCooldownSeconds
 	-- Shared with Dash -- see MovementState.movementCooldownExpiry's own header for why this exists
 	-- (closes the "alternate Dash/Slide to renew faster than either move's own cooldown" loophole).
-	state.Movement.movementCooldownExpiry = now + Constants.Combat.SlideCooldownSeconds
-	state.attackEndsAt = now + Constants.Combat.SlideCommitmentSeconds
+	state.Movement.movementCooldownExpiry = now + CombatConstants.SlideCooldownSeconds
+	state.attackEndsAt = now + CombatConstants.SlideCommitmentSeconds
 	state.blocking = false
 end
 
@@ -155,7 +156,7 @@ function Movement.ApplyCustomMoveLunge(
 end
 
 -- Whether `state`'s humanoid currently has meaningful held movement input -- the same
--- Constants.Combat.MovementInputMagnitudeThreshold ResolveDashDirection above already reads,
+-- CombatConstants.MovementInputMagnitudeThreshold ResolveDashDirection above already reads,
 -- extracted as its own testable query since handleSlideRequest needs it as a real reject gate
 -- (Slide requires genuinely moving, not just holding Sprint while stationary).
 function Movement.IsMoving(state: CombatState): boolean
@@ -163,7 +164,7 @@ function Movement.IsMoving(state: CombatState): boolean
 	if not humanoid then
 		return false
 	end
-	return humanoid.MoveDirection.Magnitude >= Constants.Combat.MovementInputMagnitudeThreshold
+	return humanoid.MoveDirection.Magnitude >= CombatConstants.MovementInputMagnitudeThreshold
 end
 
 -- Force-ends any in-flight Dash/Slide burst the moment its owner stops being in a state where
@@ -176,7 +177,7 @@ end
 -- Slide tiers ABOVE the hit-slow tier, and consults stunExpiry/postureBrokenExpiry only inside the
 -- Sprint branch, so a burst that was legal when it started kept its full multiplier through a hit
 -- that landed a frame later: press Slide, get hit, and the resolver still returned base * 2.0 for the
--- rest of the window. Constants.Combat.HitSlowMultiplier is documented as "the 'can't just run away'
+-- rest of the window. CombatConstants.HitSlowMultiplier is documented as "the 'can't just run away'
 -- factor" and was defeatable on reaction for the price of one movement cooldown. Nothing else in the
 -- codebase cleared these two fields either -- only resetTransientCombatState (respawn) and
 -- setActiveAction (starting a different action) ever zeroed them.
@@ -323,7 +324,7 @@ function Movement.ComputeDesiredWalkSpeed(state: CombatState, now: number): numb
 	end
 
 	-- "BonusWalkSpeed" is a per-player Humanoid Attribute (onCharacterAdded seeds it from
-	-- Constants.Combat.DefaultBonusWalkSpeed), not a Constants read -- see that constant's own
+	-- CombatConstants.DefaultBonusWalkSpeed), not a Constants read -- see that constant's own
 	-- header for why: a future race/bloodline stat system can change it per-player without this
 	-- module (or CombatSystem) needing to know anything about bloodlines.
 	local bonus = 0
@@ -343,7 +344,7 @@ function Movement.ComputeDesiredWalkSpeed(state: CombatState, now: number): numb
 			speedMultiplier = attributeValue
 		end
 	end
-	local base = (Constants.Combat.BaseWalkSpeed + bonus) * speedMultiplier
+	local base = (CombatConstants.BaseWalkSpeed + bonus) * speedMultiplier
 	-- Air-combo chase (the ATTACKER's own hold) and air-combo held (the VICTIM's own hold, see
 	-- AirComboState.airComboHeldExpiry's own header) share this same top WalkSpeed tier -- both are a
 	-- RagdollController.HoldAloft AlignPosition pin, and a player-commanded WalkSpeed burst on top of
@@ -362,22 +363,22 @@ function Movement.ComputeDesiredWalkSpeed(state: CombatState, now: number): numb
 	if now < state.Movement.dashWindowExpiry then
 		-- Backward gets its own weaker multiplier -- see DashBackSpeedMultiplier's own header.
 		local dashMultiplier = if state.Movement.dashIsBackward
-			then Constants.Combat.DashBackSpeedMultiplier
-			else Constants.Combat.DashSpeedMultiplier
+			then CombatConstants.DashBackSpeedMultiplier
+			else CombatConstants.DashSpeedMultiplier
 		return base * dashMultiplier
 	end
 	if now < state.Movement.slideWindowExpiry then
-		return base * Constants.Combat.SlideSpeedMultiplier
+		return base * CombatConstants.SlideSpeedMultiplier
 	end
 	if now < state.Vitals.hitSlowExpiry then
-		return base * Constants.Combat.HitSlowMultiplier
+		return base * CombatConstants.HitSlowMultiplier
 	end
 	-- Parkour momentum carry, applied to the base tier and never to any tier that returned early.
 	-- That placement is the whole safety argument for this feature's one client-influenced number: a
 	-- slide's earned speed survives into ordinary ground movement, but it cannot peek through
 	-- hit-slow, a stun, a posture break, a commitment lock, an air-combo hold, a freeze or a flight --
 	-- so no amount of parkour lets a player outrun the consequences of being hit, which is precisely
-	-- what Constants.Combat.HitSlowMultiplier's own "can't just run away" comment exists to guarantee.
+	-- what CombatConstants.HitSlowMultiplier's own "can't just run away" comment exists to guarantee.
 	return math.max(base, Movement.ComputeParkourSpeedFloor(state, now))
 end
 

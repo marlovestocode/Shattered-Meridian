@@ -28,9 +28,9 @@
 	"construct once, Bind() per respawn" shape and not an inconsistency.
 ]]
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local EngineLogCapture = require(ReplicatedStorage.Shared.EngineLogCapture)
 
 local UI = require(script.Parent.UI)
@@ -55,6 +55,9 @@ local LiveConsoleClient = require(script.Parent.LiveConsole.LiveConsoleClient)
 local FlightController = require(script.Parent.DevMenu.FlightController)
 local DefenseClient = require(script.Parent.Defense.DefenseClient)
 local AttackInputClient = require(script.Parent.Combat.AttackInputClient)
+local GrabInputClient = require(script.Parent.Combat.GrabInputClient)
+local SwingLunge = require(script.Parent.Combat.SwingLunge)
+local CombatAudio = require(script.Parent.FX.CombatAudio)
 local CombatFeedbackClient = require(script.Parent.Combat.CombatFeedbackClient)
 local BugReportClient = require(script.Parent.BugReport.BugReportClient)
 local AnnouncementClient = require(script.Parent.Announcement.AnnouncementClient)
@@ -129,15 +132,21 @@ logger:debug("SettingsClient RestoreSettings end")
 -- both the ordinary respawn path and a Studio play-solo start where a character already exists
 -- before this line runs.
 logger:debug("Character-bind hookup start")
-local function bindCharacterPresentation(character: Model): ()
-	CombatAnimator.BindCharacter(character)
-	MovementVFX.BindCharacter(character)
-	RunController.BindCharacter(character)
-end
-Players.LocalPlayer.CharacterAdded:Connect(bindCharacterPresentation)
-if Players.LocalPlayer.Character then
-	bindCharacterPresentation(Players.LocalPlayer.Character)
-end
+-- Shared/PlayerLifecycle.lua owns the whole shape now: waiting for the Humanoid before handing the
+-- character to any sub-binder below, spawning the already-present-character call rather than blocking
+-- this boot thread on it, and re-checking after that yield that the character is still the current
+-- one. All three used to be written out here, at length, and in fourteen other client modules with
+-- byte-identical comments -- see that module's header for what each of them is actually protecting
+-- against and what losing the race looks like from the player's seat.
+PlayerLifecycle.BindLocalCharacter({
+	Scope = "Main",
+	OnCharacter = function(character: Model)
+		CombatAnimator.BindCharacter(character)
+		MovementVFX.BindCharacter(character)
+		RunController.BindCharacter(character)
+		SwingLunge.BindCharacter(character)
+	end,
+})
 logger:debug("Character-bind hookup end")
 
 -- After UI.Mount() above: UI.Mount() is what calls ClientState.Bootstrap() internally, which is
@@ -236,6 +245,32 @@ logger:debug("AttackInputClient start")
 AttackInputClient.Start()
 logger:debug("AttackInputClient end")
 
+-- Grab-throw input, alongside AttackInputClient above -- same "AFTER SettingsClient.RestoreSettings so
+-- a rebound GrabThrow key is live before the first press" reasoning that module's own comment gives.
+logger:debug("GrabInputClient start")
+GrabInputClient.Start()
+logger:debug("GrabInputClient end")
+
+-- Next to AttackInputClient above because its only input is that module's OnAttackStarted seam --
+-- read as one unit, not because the order is load-bearing. OnAttackStarted appends to a plain
+-- listener list that nothing rebuilds, so subscribing on either side of that module's own Start()
+-- would work; there is no hidden ordering rule here to preserve. The one real dependency is on
+-- ParkourController.Start() further up, which is what binds the ParkourMotor this module pushes its
+-- velocity through -- already satisfied by boot position, and self-correcting anyway (an unbound
+-- motor refuses the impulse rather than erroring, and rebinds on the next life).
+logger:debug("SwingLunge start")
+SwingLunge.Start()
+logger:debug("SwingLunge end")
+
+-- Same one real dependency as SwingLunge directly above -- AttackInputClient.OnAttackStarted, which
+-- this module subscribes to for the swing whoosh (Client/FX/CombatAudio.lua's own header on why it
+-- keeps its own subscription rather than being called out to). Registration itself already happened
+-- earlier, at LoadingClient.Run()'s AssetPreloader pass (Client/Loading/AssetPreloader.lua's own
+-- require(CombatAudio) for exactly that side effect) -- Start() here only arms the listener.
+logger:debug("CombatAudio start")
+CombatAudio.Start()
+logger:debug("CombatAudio end")
+
 -- Hit presentation -- damage numbers, the outcome banner and the camera shake, driven off the damage
 -- layer's Combat_Feedback event. AFTER UI.Mount(), and that IS load-bearing: it is handed the
 -- CombatFeedback screen's own handle, which does not exist until UI.Mount() returns.
@@ -243,6 +278,11 @@ logger:debug("CombatFeedbackClient start")
 CombatFeedbackClient.Start(uiHandles.CombatFeedback)
 logger:debug("CombatFeedbackClient end")
 
+-- uiHandles.DevMenu is a Shared/Lazy.lua thunk, not a mounted panel -- the Dev Menu, Move Editor and
+-- Live Console are the three screens UI.Mount() no longer builds on this boot thread (see its own
+-- header). Nothing about this call site's position changes: this module already returned immediately
+-- and did its real work behind a server authorization round trip, and it is now also what decides the
+-- panel gets built at all.
 logger:debug("DevMenuClient start")
 DevMenuClient.Start(uiHandles.DevMenu)
 logger:debug("DevMenuClient end")
@@ -255,14 +295,16 @@ logger:debug("CharacterMenuClient start")
 CharacterMenuClient.Start(uiHandles.Menus)
 logger:debug("CharacterMenuClient end")
 
--- Same whitelist-gated, delayed-authorization shape as DevMenuClient above.
+-- Same whitelist-gated, delayed-authorization shape as DevMenuClient above -- and the same deferred
+-- mount, from the same thunk (this is the largest of the three panels).
 logger:debug("MoveEditorClient start")
 MoveEditorClient.Start(uiHandles.MoveEditor)
 logger:debug("MoveEditorClient end")
 
 -- Unlike DevMenuClient/MoveEditorClient above, this one binds its input unconditionally for every
 -- client -- the real gate is server-side, on Subscribe, fired only once the panel actually opens.
--- See LiveConsoleClient.lua's own header.
+-- Its panel is deferred too, but on that same open-time gate rather than on an authorization answer,
+-- since there is no boot-time answer here to hang it off. See LiveConsoleClient.lua's own header.
 logger:debug("LiveConsoleClient start")
 LiveConsoleClient.Start(uiHandles.LiveConsole)
 logger:debug("LiveConsoleClient end")

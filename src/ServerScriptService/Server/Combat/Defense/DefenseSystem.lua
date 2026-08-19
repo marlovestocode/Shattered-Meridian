@@ -58,11 +58,14 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
+local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnership)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local DefenseStateMachine = require(script.Parent.DefenseStateMachine)
@@ -92,6 +95,9 @@ type Registration = {
 	-- HoldsMovementLock flag, and for the same reason -- two writers to one Attribute need each to
 	-- know whether it is the one holding it.
 	HoldsMovementLock: boolean,
+	-- The DefenseState last actually written to the Humanoid Attribute, so publishState can skip the
+	-- write when Step re-asserts the same state it already published. See publishState's own header.
+	PublishedState: DefenseState?,
 }
 
 local registrations: { [Model]: Registration } = {}
@@ -105,7 +111,7 @@ local parryConsumedThisBatch: { [Model]: boolean } = {}
 local outcomeCallbacks: { (DefenseOutcome) -> () } = {}
 
 local started = false
-local heartbeatConnection: RBXScriptConnection? = nil
+local heartbeatTrove = Trove.New()
 local hitDisconnect: (() -> ())? = nil
 local stateChangedRemote: RemoteEvent? = nil
 local rateLimiter = RateLimiter.New(DefenseConstants.Network.MaxCallsPerSecondPerPlayer)
@@ -140,6 +146,13 @@ end
 -- Publishes the live state so the HUD and any future spectator tooling can read it off the Humanoid
 -- for free, and takes or releases the movement lock for the two states that genuinely remove control.
 --
+-- THE STATE ATTRIBUTE ITSELF IS DEDUPED, THE MOVEMENT LOCK IS NOT (see below for why the lock already
+-- was). Step calls this every frame for every registration regardless of whether the state actually
+-- changed -- RunSystem.lua's own header names writing an unchanged replicated Attribute sixty times a
+-- second as "the single most expensive thing a System with a Heartbeat can do for no effect", and this
+-- system used to do exactly that on every Humanoid it manages. PublishedState is what makes a re-
+-- assertion of the same state a no-op instead of a property write.
+--
 -- ROOTCONTROLLOCKED HAS TWO WRITERS -- this system and HitboxEngine, which holds it for the duration
 -- of a locking swing's Active window. They are kept from fighting by ordering rather than by locking:
 -- in pass 2 an attacker's swing is CANCELLED before they are staggered, so the engine has already
@@ -151,7 +164,10 @@ local function publishState(registration: Registration, state: DefenseState): ()
 	if humanoid.Parent == nil then
 		return
 	end
-	humanoid:SetAttribute(DefenseConstants.DefenseStateAttribute, state)
+	if registration.PublishedState ~= state then
+		registration.PublishedState = state
+		humanoid:SetAttribute(DefenseConstants.DefenseStateAttribute, state)
+	end
 
 	local wantsLock = state == "Staggered" or state == "GuardBroken"
 	if wantsLock == registration.HoldsMovementLock then
@@ -211,6 +227,7 @@ function DefenseSystem.RegisterCombatant(
 		Guard = GuardMeter.New(),
 		ParryAnimationId = parryAnimationId or defaultParryAnimationId,
 		HoldsMovementLock = false,
+		PublishedState = nil,
 	}
 	registration.Machine = DefenseStateMachine.New({
 		OnTransition = function(_from: DefenseState, to: DefenseState, _at: number)
@@ -264,6 +281,18 @@ function DefenseSystem.SetBlocking(model: Model, blocking: boolean, now: number)
 		return
 	end
 	if blocking then
+		-- A committed traversal refuses the guard, on the same rule and through the same predicate
+		-- AttackRequestSystem.Throw refuses a swing with -- see Shared/Parkour/ParkourOwnership. Raising
+		-- a guard mid-vault would be the cheapest possible way to make every traversal safe, which is
+		-- the opposite of what committing to one is supposed to mean.
+		--
+		-- ONLY THE PRESS. A Release always goes through: refusing one would strand a guard already up
+		-- when the traversal started, held open with no input able to lower it -- the machine's own
+		-- Press/Release pairing is what keeps the state honest, and a gate that can break the pair is a
+		-- worse bug than the one it is closing.
+		if ParkourOwnership.OwnsBody(registration.Humanoid) then
+			return
+		end
 		local window = ParryWindows.Get(registration.ParryAnimationId)
 		registration.Machine:Press(now, window, pingSecondsFor(model))
 	else
@@ -599,41 +628,36 @@ function DefenseSystem.Init(): ()
 	--
 	-- Bots and dummies are NOT auto-registered: they have no CharacterAdded to hang off, and whoever
 	-- spawns them already knows when they exist. They call RegisterCombatant directly.
-	local function bindCharacter(character: Model): ()
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		local rootPart = character:FindFirstChild("HumanoidRootPart")
-		if not humanoid or not rootPart or not rootPart:IsA("BasePart") then
-			return
-		end
-		DefenseSystem.RegisterCombatant(character, rootPart, humanoid)
-	end
-
-	local function bindPlayer(player: Player): ()
-		player.CharacterAdded:Connect(bindCharacter)
-		player.CharacterRemoving:Connect(DefenseSystem.UnregisterCombatant)
-		if player.Character then
-			bindCharacter(player.Character)
-		end
-	end
-
-	Players.PlayerAdded:Connect(bindPlayer)
-	-- Players who joined before this System booted still need their registration -- the same Init()-
-	-- time sweep every other PlayerAdded-driven System in this codebase uses as its backstop.
-	for _, player in Players:GetPlayers() do
-		bindPlayer(player)
-	end
-
-	Players.PlayerRemoving:Connect(function(player: Player)
-		rateLimiter:Clear(player)
-		local character = player.Character
-		if character then
+	-- Through Shared/PlayerLifecycle.lua, which supplies the per-player character hookup AND the
+	-- Init()-time sweep for players who joined before this System booted. The Humanoid arrives already
+	-- resolved; the HumanoidRootPart stays this System's own lookup, since RegisterCombatant requires
+	-- a root explicitly rather than trusting rig-joint auto-detection.
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "DefenseSystem",
+		OnCharacter = function(_player: Player, character: Model, humanoid: Humanoid)
+			local rootPart = character:FindFirstChild("HumanoidRootPart")
+			if not rootPart or not rootPart:IsA("BasePart") then
+				return
+			end
+			DefenseSystem.RegisterCombatant(character, rootPart, humanoid)
+		end,
+		OnCharacterRemoving = function(_player: Player, character: Model)
 			DefenseSystem.UnregisterCombatant(character)
-		end
-	end)
+		end,
+		-- Separate from OnCharacterRemoving above and NOT redundant with it: CharacterRemoving does not
+		-- fire for a player who simply leaves the server, so the registration has to be dropped here too.
+		OnPlayerRemoving = function(player: Player)
+			rateLimiter:Clear(player)
+			local character = player.Character
+			if character then
+				DefenseSystem.UnregisterCombatant(character)
+			end
+		end,
+	})
 
 	-- Connected AFTER HitboxEngine.Init has connected its own, which Main.server.lua guarantees by
 	-- calling that first.
-	heartbeatConnection = RunService.Heartbeat:Connect(function(deltaTime: number)
+	heartbeatTrove:Connect(RunService.Heartbeat, function(deltaTime: number)
 		DefenseSystem.Step(deltaTime, os.clock())
 	end)
 
@@ -651,10 +675,7 @@ function DefenseSystem.Init(): ()
 end
 
 function DefenseSystem.Shutdown(): ()
-	if heartbeatConnection then
-		heartbeatConnection:Disconnect()
-		heartbeatConnection = nil
-	end
+	heartbeatTrove:Clean()
 	if hitDisconnect then
 		hitDisconnect()
 		hitDisconnect = nil

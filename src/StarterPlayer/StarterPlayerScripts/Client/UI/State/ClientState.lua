@@ -45,7 +45,6 @@
 	own IsOpen.
 ]]
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -56,6 +55,8 @@ local TierConstants = require(ReplicatedStorage.Shared.TierConstants)
 local BountyConstants = require(ReplicatedStorage.Shared.BountyConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local logger = Logger.scope("ClientState")
 
@@ -181,27 +182,28 @@ function ClientState.Bootstrap(state: ClientState): ()
 	--             records the decision and why). So the HUD's Posture tile renders the guard pool,
 	--             which drains both from blocking (DefenseSystem) and from being hit without a guard
 	--             up (DamageSystem.DrainGuard) -- the two halves that make it behave like posture.
-	local function bindHumanoidHealth(character: Model): ()
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		if not humanoid then
-			return
-		end
-		local function push(): ()
-			state.Health:set(humanoid.Health)
-			state.MaxHealth:set(humanoid.MaxHealth)
-		end
-		-- Connected per life and never disconnected: the connections die with the Humanoid they are
-		-- on, which is the whole object being replaced on respawn.
-		humanoid:GetPropertyChangedSignal("Health"):Connect(push)
-		humanoid:GetPropertyChangedSignal("MaxHealth"):Connect(push)
-		push()
-	end
-
-	local localPlayer = Players.LocalPlayer
-	localPlayer.CharacterAdded:Connect(bindHumanoidHealth)
-	if localPlayer.Character then
-		bindHumanoidHealth(localPlayer.Character)
-	end
+	--
+	-- Bound through Shared/PlayerLifecycle.lua, which closes a race this used to lose silently. It
+	-- read the Humanoid with a raw FindFirstChildOfClass and returned if it was not there yet -- and
+	-- CharacterAdded fires before every descendant has replicated, so losing that race meant the HUD's
+	-- health tile sat at its ClientState.new() default for the ENTIRE life with nothing retrying and
+	-- nothing logged. The binder waits the Humanoid out and only calls this once it exists.
+	PlayerLifecycle.BindLocalCharacter({
+		Scope = "ClientState",
+		OnCharacter = function(_character: Model, humanoid: Humanoid, life: Trove.TroveInstance)
+			local function push(): ()
+				state.Health:set(humanoid.Health)
+				state.MaxHealth:set(humanoid.MaxHealth)
+			end
+			-- Tracked in the per-life Trove rather than left to die with the Humanoid. Both are
+			-- correct here (the Humanoid IS the object being replaced), but relying on that means every
+			-- reader has to know it -- and a life whose Humanoid outlives its usefulness for any reason
+			-- would keep pushing a dead body's health into the live HUD.
+			life:Connect(humanoid:GetPropertyChangedSignal("Health"), push)
+			life:Connect(humanoid:GetPropertyChangedSignal("MaxHealth"), push)
+			push()
+		end,
+	})
 
 	logger:debug("Waiting for Defense_StateChanged remote")
 	local defenseStateChanged = NetworkBridge.GetRemoteEvent(DefenseConstants.Network.RemoteNames.StateChanged)

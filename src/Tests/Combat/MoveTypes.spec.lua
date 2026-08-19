@@ -157,7 +157,7 @@ return function()
 		it("clamps an out-of-range timing field instead of rejecting it", function()
 			local move = MoveRegistryManager.Validate(makeBoxCandidate({ WindupSeconds = 999 }))
 			expect(move).to.be.ok()
-			expect((move :: any).WindupSeconds).to.equal(5) -- CLAMP_MAX_SECONDS
+			expect((move :: any).WindupSeconds).to.equal(45) -- CLAMP_MAX_SECONDS
 		end)
 
 		it("rejects a non-string AnimationId", function()
@@ -199,7 +199,7 @@ return function()
 			local candidate = makeBoxCandidate({ Projectile = { Speed = 9999, MaxRange = -5 } })
 			local move = MoveRegistryManager.Validate(candidate)
 			expect(move).to.be.ok()
-			expect((move :: any).Projectile.Speed).to.equal(150) -- CLAMP_MAX_PROJECTILE_SPEED
+			expect((move :: any).Projectile.Speed).to.equal(1999) -- CLAMP_MAX_PROJECTILE_SPEED
 			expect((move :: any).Projectile.MaxRange).to.equal(5) -- CLAMP_MIN_PROJECTILE_RANGE
 		end)
 

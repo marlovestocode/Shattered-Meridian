@@ -240,7 +240,7 @@ end
 -- ACTIONS/RECENT TRANSITIONS are the two sections that CANNOT be sized until the first real frame.
 local STATE_ROW_COUNT = 8
 local SURFACE_ROW_COUNT = 9
-local MECHANICS_ROW_COUNT = 3
+local MECHANICS_ROW_COUNT = 4
 
 type Handles = {
 	Scope: Scope,
@@ -368,8 +368,13 @@ local function mountPanel(): Handles?
 				scope,
 				"Live Mechanics",
 				3,
-				{ mechanicsRows[1].Instance, mechanicsRows[2].Instance, mechanicsRows[3].Instance },
-				"The shimmy, the ledge-to-ledge leap and the wall-run corner turn -- decisions made every frame with no state transition to show elsewhere.",
+				{
+					mechanicsRows[1].Instance,
+					mechanicsRows[2].Instance,
+					mechanicsRows[3].Instance,
+					mechanicsRows[4].Instance,
+				},
+				"The shimmy, the ledge-to-ledge leap, the wall-run corner turn and the head-on wall catch -- decisions made every frame with no state transition to show elsewhere.",
 				nil,
 				true -- emphasis: this is the section this whole redesign exists to add
 			),
@@ -492,6 +497,25 @@ local function leapColor(outcome: string?): Color3
 		return Tokens.Color.Warning
 	end
 	return Tokens.Color.TextSecondary
+end
+
+-- Green once the catch would fire, amber while it is being evaluated against real geometry and
+-- refusing on something the player could change (speed, angle, the surface), muted for the refusals
+-- that are simply "not applicable right now" -- standing on the ground being the overwhelmingly common
+-- one. The three-way split matters more here than for the rows above: "blocked Grounded" while walking
+-- around is the resting state and must not read as a fault, where "TooSlowToCatch closing 14.2/18" is
+-- a near miss worth looking at.
+local function catchColor(verdict: string?): Color3
+	if verdict == nil then
+		return Tokens.Color.TextDisabled
+	end
+	if string.match(verdict, "^ready") then
+		return Tokens.Color.Positive
+	end
+	if string.match(verdict, "^blocked") or verdict == "disabled" then
+		return Tokens.Color.TextDisabled
+	end
+	return Tokens.Color.Warning
 end
 
 local function pivotColor(outcome: string?): Color3
@@ -693,6 +717,19 @@ local function refreshReadout(context: ParkourContext, machine: Machine): ()
 	else
 		setRow(mechanics[3], "wall pivot   -- (not wall-running)", Tokens.Color.TextDisabled)
 	end
+
+	-- THE WALL CATCH IS NOT GATED ON THE STATE BEING ACTIVE, unlike every row above it, and the
+	-- difference is the entire reason this row is useful. A shimmy or a pivot is a decision made INSIDE
+	-- a running state, so there is no question worth answering while that state is not current. A catch
+	-- that never happened leaves no state at all -- "I ran at the wall and nothing happened" is asked
+	-- precisely when WallRunning is NOT current, and a row that went blank exactly then would be blank
+	-- in the only case anybody opens it for. States/WallRunning's CanEnter refreshes the field every
+	-- frame regardless of which state is running, so this always has a live answer.
+	setRow(
+		mechanics[4],
+		string.format("wall catch   %s", context.DebugWallCatch or "-- (no evaluation yet)"),
+		catchColor(context.DebugWallCatch)
+	)
 
 	-- AVAILABLE ACTIONS. The active state gets ACTIVE rather than its CanEnter answer --
 	-- EvaluateAvailability asks every registered state "could you be entered right now," and it asks

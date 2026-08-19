@@ -2,8 +2,8 @@
 --[[
 	InputBuffer.lua
 
-	Owns: the local player's buffered parkour intents -- when jump, slide, roll and leap were last
-	pressed, whether slide is currently held, and whether each buffered press is still live.
+	Owns: the local player's buffered parkour intents -- when jump, slide, roll, leap and dash were
+	last pressed, whether slide is currently held, and whether each buffered press is still live.
 
 	This module is the entire answer to the design's "add sensible buffering where necessary so
 	players can press an input slightly before an action becomes available and still have the action
@@ -55,6 +55,10 @@ local rollPressedAt = 0
 -- one press) is gone along with it: a dedicated key needs none of that cross-consumption, because there
 -- is only ever one input to spend.
 local leapPressedAt = 0
+-- The four-way dash's press (States/Dashing.lua). Mirrors Roll's shape exactly, and deliberately has
+-- no held counterpart the way slide does: a dash is a one-shot burst with an authored duration, so
+-- there is nothing for holding the key to extend.
+local dashPressedAt = 0
 
 -- Held state, distinct from the buffered press above: a slide continues while held and can be
 -- released early, where the press itself is a one-shot that expires. Both are needed -- see
@@ -100,6 +104,10 @@ end
 
 function InputBuffer.PressLeap(now: number): ()
 	leapPressedAt = now
+end
+
+function InputBuffer.PressDash(now: number): ()
+	dashPressedAt = now
 end
 
 function InputBuffer.IsSlideHeld(): boolean
@@ -172,6 +180,18 @@ function InputBuffer.ConsumeRoll(now: number): boolean
 	return true
 end
 
+function InputBuffer.PeekDash(now: number): boolean
+	return ParkourMath.BufferLive(now, dashPressedAt, ParkourConstants.Assists.ActionBufferSeconds, true)
+end
+
+function InputBuffer.ConsumeDash(now: number): boolean
+	if not InputBuffer.PeekDash(now) then
+		return false
+	end
+	dashPressedAt = 0
+	return true
+end
+
 -- Whether a jump is still legal within the coyote window after walking off a ledge. Lives here
 -- rather than in a state module because it is the same class of forgiveness as the buffers above
 -- (the player's timing was slightly off; the game chooses to honor the intent) and because keeping
@@ -189,6 +209,7 @@ function InputBuffer.Clear(): ()
 	slidePressedAt = 0
 	rollPressedAt = 0
 	leapPressedAt = 0
+	dashPressedAt = 0
 	slideHeld = false
 end
 

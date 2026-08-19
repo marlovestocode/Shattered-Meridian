@@ -5,6 +5,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
+local StarterPlayer = game:GetService("StarterPlayer")
 
 -- Load-check: nothing in this test place actually calls require() on DevMenuSystem.lua (no spec
 -- needs its behavior, only the pure logic extracted into Server/Combat/), so a broken require()
@@ -50,7 +51,7 @@ local modulesToLoad = {
 	-- exists to close. A broken require path in the module that writes WalkSpeed would otherwise
 	-- surface as "nobody can move" in a playtest rather than as a failing build.
 	ServerScriptService.Server.Systems.RunSystem,
-	-- LiveConsoleSystem.lua (the Live Admin Console's server half, F7) has no dedicated spec --
+	-- LiveConsoleSystem.lua (the Live Admin Console's server half, F5) has no dedicated spec --
 	-- same reasoning as DevMenuSystem/MoveEditorSystem above: its whole surface is auth-gated
 	-- remote handling (Subscribe/Unsubscribe/the Stream flush loop), not pure logic with anything
 	-- to extract, so nothing else in this suite would ever require() it and catch a broken require
@@ -58,6 +59,38 @@ local modulesToLoad = {
 	-- (Tests/Shared/Logger.spec.lua).
 	ServerScriptService.Server.Systems.LiveConsoleSystem,
 }
+
+-- CLIENT-side load-checks, same reasoning as the server list above and added for the same class of
+-- gap: nothing in this place ever require()d the client's UI tree, so a broken require path, a syntax
+-- error, or a signature change in the largest UI surface on the client (UI/init.lua and the three
+-- admin-gated screen drivers it hands deferred handles to) surfaced only when someone opened Studio.
+-- Requiring is enough and is all that is safe: Mount()/Start() need a real LocalPlayer and PlayerGui
+-- that this headless server place does not have, and every one of these modules is written so its
+-- top-level body touches neither.
+local clientModulesToLoad = {
+	StarterPlayer.StarterPlayerScripts.Client.UI,
+	StarterPlayer.StarterPlayerScripts.Client.DevMenu.DevMenuClient,
+	StarterPlayer.StarterPlayerScripts.Client.MoveEditor.MoveEditorClient,
+	StarterPlayer.StarterPlayerScripts.Client.LiveConsole.LiveConsoleClient,
+	-- The camera/movement/input modules whose character binding moved onto
+	-- Shared/PlayerLifecycle.lua. Nothing in this place drives a real character, so their BEHAVIOUR
+	-- still needs a playtest -- but a broken require path or a bad call shape in the shared binder
+	-- would previously have gone unnoticed here, and these entries close that.
+	StarterPlayer.StarterPlayerScripts.Client.Camera.ShiftLockCamera,
+	StarterPlayer.StarterPlayerScripts.Client.Camera.FlightCamera,
+	StarterPlayer.StarterPlayerScripts.Client.DevMenu.FlightController,
+	StarterPlayer.StarterPlayerScripts.Client.Emotes.EmoteController,
+	StarterPlayer.StarterPlayerScripts.Client.FX.CameraOffsetComposer,
+	StarterPlayer.StarterPlayerScripts.Client.Combat.AttackInputClient,
+	StarterPlayer.StarterPlayerScripts.Client.Combat.GrabInputClient,
+	StarterPlayer.StarterPlayerScripts.Client.Combat.CombatFeedbackClient,
+	StarterPlayer.StarterPlayerScripts.Client.Defense.DefenseClient,
+	StarterPlayer.StarterPlayerScripts.Client.Movement.RunController,
+	StarterPlayer.StarterPlayerScripts.Client.Parkour.ParkourController,
+}
+for _, moduleScript in ipairs(clientModulesToLoad) do
+	table.insert(modulesToLoad, moduleScript)
+end
 for _, moduleScript in ipairs(modulesToLoad) do
 	local ok, errorMessage = pcall(require, moduleScript)
 	if not ok then

@@ -34,6 +34,11 @@ export type SectionId =
 	| "Animation"
 	| "Movement"
 	| "Knockback"
+	-- Instead of ordinary Knockback, hold the victim on the attacker's fist and let a follow-up throw
+	-- them (MoveTypes.MoveGrabConfig, authored by GrabSystem's own "Enable Grab" toggle in
+	-- PropertyEditor.lua). Same optional-sub-table status as Knockback right above it -- off by
+	-- default, hidden for a Default move.
+	| "Grab"
 	| "Projectile"
 	-- The reaction to knocking a target INTO world geometry (Shared/Types.ObjectStunConfig, authored
 	-- by ObjectStunEditor.lua). Like Movement/Knockback/Projectile it is an OPTIONAL sub-table, so it
@@ -65,16 +70,35 @@ export type MoveEditorHandle = {
 	-- being created yet. This is the SAME Fusion.Value both panels render from, so they can never
 	-- drift out of sync with each other.
 	Draft: Fusion.Value<MoveTypes.MoveDefinition?>,
-	-- "Test on Dummy" (TestFireMove/SpawnPreviewDummy, and the Combat_FeedbackEvent listener that used
-	-- to append to TestSamples below) was removed alongside the rest of the combat system -- there is
-	-- no server-side handler left to fire a move at a dummy with. LastTestResultText/TestSamples stay
-	-- part of this handle (StatsPanel.lua still reads them as pure display), they just never receive a
-	-- new value anymore.
+	-- "Test on Dummy" is REAL AGAIN (2026-08-19, the Move Editor repair pass), rebuilt against the new
+	-- 4-layer combat stack rather than revived as-was -- see Client/MoveEditor/MoveEditorClient.lua's
+	-- own header for the pipeline. Firing still goes through the ADMIN HOTBAR PATH (bind the move to a
+	-- slot, press the key -- AttackRequestSystem.Throw's own trusted `authorized == true` branch, which
+	-- never stopped working); what was actually missing was a target to swing at and a way to hear back
+	-- what happened, both restored now: SpawnTestDummyRequested/DespawnTestDummyRequested below reuse
+	-- Server/Systems/DebugDummySystem.lua (the DevMenu Spawn tab's own training dummy, already a real
+	-- HitboxEngine/DefenseSystem combatant -- see that module's header) rather than a second dummy
+	-- implementation, and MoveEditorClient.lua listens to the SAME Combat_Feedback event
+	-- CombatFeedbackClient.lua already uses for FX, filtered to this admin's own landed hits on the
+	-- currently selected move, to append into TestSamples below.
 	LastTestResultText: Fusion.Value<string>,
 	-- Read by StatsPanel.lua as the OBSERVED series it plots against the move's own computed one. A
 	-- plain accumulating array rather than a rolling window: a test fire is a deliberate, bounded
 	-- action, and the panel's own "Clear" button is what resets it -- see StatsPanel's own header.
 	TestSamples: Fusion.Value<{ MoveStats.TestSample }>,
+	-- Fired by PropertyEditor.lua's toolbar single toggling "Spawn Dummy"/"Despawn Dummy" button --
+	-- MoveEditorClient.lua routes it (Spawn or Despawn, based on its own HasTestDummy guess) through
+	-- DevMenuSystem's own DevMenu_SpawnDummy/DevMenu_DespawnAllDebugDummies remotes
+	-- (Server/Systems/DebugDummySystem.lua's public surface) rather than a Move-Editor-owned duplicate --
+	-- see this handle's LastTestResultText header on why reusing the existing training dummy is the
+	-- right call. Fire-and-forget, status text only, the same shape DevMenuClient.lua's own
+	-- SpawnDebugDummyRequested/DespawnAllDebugDummiesRequested already use.
+	ToggleTestDummyRequested: RBXScriptSignal,
+	-- This client's own best-effort local guess at whether it currently has a dummy spawned -- flipped
+	-- optimistically by MoveEditorClient.lua on a successful Spawn/Despawn response, never polled from
+	-- the server. Drives the toolbar button's own label -- see PropertyEditorProps.HasTestDummy's own
+	-- header on why a wrong guess is harmless.
+	HasTestDummy: Fusion.Value<boolean>,
 
 	NewMoveRequested: RBXScriptSignal,
 	SelectMoveRequested: RBXScriptSignal<string>,

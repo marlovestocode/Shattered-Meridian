@@ -191,6 +191,30 @@ ParkourConstants.Jump = {
 	MinIntervalSeconds = 0.1,
 }
 
+-- THE WALL LAUNCH -- States/WallLaunching.lua's custom jump off a wall too tall to vault, mantle,
+-- wall-run or catch. A deliberately narrow, higher-than-Jumping-priority window whose only job is
+-- handing the player room and time to look up and dash straight up the wall -- see that file's own
+-- header for the full design and for why this earns its own state rather than a branch inside Jumping
+-- or WallRunning.
+ParkourConstants.WallLaunch = {
+	-- A bit more than an ordinary jump (Jump.JumpVelocity, 50) -- "a little higher," not a second
+	-- jump's worth. Paired with the backward tilt below, enough extra hang to actually have time to
+	-- look up and press the dash key before gravity takes back over.
+	VerticalVelocity = 58,
+	-- Pushed along -facing (away from the wall the character is looking at) rather than left as zero.
+	-- Two jobs, not one: it is the visual room to look up the design asked for (the wall's face no
+	-- longer fills the camera the instant the launch starts), and it is what keeps
+	-- States/WallRunning.lua's own Catching phase from immediately re-claiming this launch -- that
+	-- phase's MinClosingSpeed gate is measured on the SURFACE NORMAL, and a body moving away from the
+	-- wall has a negative closing speed by construction. No priority fight against WallRunning (160)
+	-- needed; the physics itself is the guard.
+	BackwardSpeed = 12,
+	-- How long after the launch a dash still counts as CHAINED from it, for
+	-- Dash.WallLaunchChainExtraHangSeconds' purposes. Generous enough to cover "look up, then press
+	-- the key" as one unhurried beat rather than a frame-perfect input.
+	DashBoostWindowSeconds = 0.7,
+}
+
 -- THE LEAP: a long, committed jump aimed at wherever the player is looking, on the dedicated Leap key
 -- (Constants.Keybinds.Defaults.Leap, E by default) -- not a double tap of jump any more, see
 -- States/Leaping.lua's own header for that change and why it happened.
@@ -253,8 +277,8 @@ ParkourConstants.Leap = {
 	-- Apex clearance above the landing point, so the arc comes down ONTO the surface rather than into the
 	-- lip in front of it.
 	ApexClearance = 2.5,
-	-- Launch caps. Both are well clear of Validation.MaxReportedSpeed/MaxVerticalGainStuds, so a
-	-- legitimate leap can never have its own report refused.
+	-- Launch caps. Both are well clear of Validation.MaxReportedSpeed, so a legitimate leap can never
+	-- have its own report refused.
 	MinUpSpeed = 42,
 	MaxUpSpeed = 72,
 	MaxPlanarSpeed = 95,
@@ -432,6 +456,24 @@ ParkourConstants.Slide = {
 	JumpOutRetainFraction = 1.08,
 	-- Fraction carried into a roll taken out of a slide.
 	RollOutRetainFraction = 0.95,
+
+	-- The continuous slide loop, played for exactly the duration Sliding is the active state
+	-- (Client/FX/SlideAudio.lua's own OnStateChanged, started/stopped the same way
+	-- Client/FX/DashAudio.lua's one-shot is, but looped rather than one-shot). Lives here rather than
+	-- in Shared/Constants.lua alongside Constants.Combat.Sound/Constants.Flight.Sound for the same
+	-- reason Dash.Sound does -- see that field's own comment.
+	Sound = {
+		SoundId = "rbxassetid://18952286141",
+		Volume = 0.5,
+		-- Passed straight through to SoundManager.PlayLooped/StopLooped's own optional fade argument --
+		-- an abrupt start/stop on every slide read as a hard edit rather than a body sliding into and
+		-- out of contact with the ground. A slide voluntarily cut at MinDurationSeconds (0.18s) will
+		-- have its fade-out start before the fade-in finishes -- SoundManager handles that by tweening
+		-- out from whatever volume the fade-in had already reached, not by any special case here, so
+		-- the shortest slides just get a shorter-sounding swell instead of a broken one.
+		FadeInSeconds = 0.25,
+		FadeOutSeconds = 0.25,
+	},
 }
 
 -- Obstacle traversal. Height bands are measured from the character's FOOT plane (root position
@@ -511,6 +553,17 @@ ParkourConstants.Obstacle = {
 	VaultExitForwardStuds = 1.4,
 
 	CooldownSeconds = 0.25,
+
+	-- The one-shot played the instant Mantling is entered (Client/FX/MantleAudio.lua's own
+	-- OnStateChanged), the same "domain module owns WHICH sound, the controller owns WHEN" shape
+	-- States/Dashing.lua's launch stinger uses. Named distinctly from a bare "Sound" so a future Vault
+	-- sound can sit beside it without ambiguity about which traversal either belongs to. Lives here
+	-- rather than in Shared/Constants.lua alongside Constants.Combat.Sound for the same reason
+	-- Dash.Sound does -- see that field's own comment.
+	MantleSound = {
+		SoundId = "rbxassetid://120034381418358",
+		Volume = 0.6,
+	},
 }
 
 -- Ledge detection, hanging and climbing. Distinct from Obstacle above: an OBSTACLE is something in
@@ -734,6 +787,59 @@ ParkourConstants.WallRun = {
 	-- Inward force keeping the character glued to the wall against its own outward drift.
 	StickSpeed = 6,
 
+	-- THE CATCH: the head-on arrival MaxApproachAngleDegrees above deliberately refuses as a RUN.
+	-- Flying into a wall face-first is the one wall contact the run cannot express -- the tangent of a
+	-- wall in front is perpendicular to travel, so the approach gate rejects it by construction (see
+	-- EnvironmentProbe.probeWall's diagonal-fallback comment, which finds the wall but says outright
+	-- that it cannot manufacture a run out of it). Before this existed nothing else claimed that
+	-- contact either, so Roblox's own collision response resolved it and the character bounced off a
+	-- wall they were clearly trying to use.
+	--
+	-- The catch takes the body instead: it kills the closing speed, pins the character flat to the
+	-- surface, slides them down it, and offers the SAME kick a run does. It is a phase of
+	-- States/WallRunning.lua rather than a state of its own, for the reason that file's header gives
+	-- about the kick having exactly one trigger site that cannot be bypassed.
+	--
+	-- NO ANGLE THRESHOLD OF ITS OWN, on purpose. The catch is defined as "the approach the run
+	-- refused" -- it reads MaxApproachAngleDegrees above rather than authoring a second number, so the
+	-- two are mutually exclusive by construction and retuning the run's gate can never open a band
+	-- where both apply or neither does.
+	Catch = {
+		-- false makes a head-on wall arrival behave exactly as it did before this existed: no catch, no
+		-- claim on the body, and Roblox's collision response resolves it. The suspect-elimination switch
+		-- every other feature-level toggle in this file carries.
+		Enabled = true,
+		-- How fast the character must be closing ON THE SURFACE -- speed along the inward normal, not
+		-- raw momentum. A player drifting gently into a wall is not slamming into one, and catching them
+		-- would turn every incidental brush against a corner into a stick. Measured on the normal
+		-- specifically so a fast run PAST a wall (high momentum, almost no closing speed) never trips it.
+		--
+		-- Comfortably above Locomotion.WalkSpeed (18) and below SprintSpeed (27): was 18 itself, which
+		-- is not a margin at all -- an ordinary walk straight at a wall closes at very close to WalkSpeed
+		-- and could trip "TooSlowToCatch"'s `<` either way depending on a frame of input noise, which is
+		-- exactly the "I just walked into it and got stuck" complaint this number exists to prevent. A
+		-- deliberate sprint into a wall must still catch; an ordinary walk into one must never.
+		MinClosingSpeed = 24,
+		-- The catch costs a wall-run chain slot and honours SameWallLockoutSeconds, so it cannot become
+		-- its own ladder. This is how long the stick itself lasts before the character simply falls --
+		-- short, because it is a beat to react in, not a perch to camp on.
+		MaxDurationSeconds = 0.9,
+		-- The slide down the face while stuck. Starts at zero (the impact killed the vertical too) and
+		-- accelerates under a fraction of gravity, so a catch reads as a body scraping down a wall
+		-- rather than as one glued to it. Fraction is heavier than the run's own GravityFraction: a run
+		-- is holding itself up and visibly running out of lift, where a catch never had any.
+		GravityFraction = 0.55,
+		MaxSlideSpeed = 22,
+		-- Inward hold, same role as StickSpeed above. Stronger, because a catch has no tangential motion
+		-- helping keep it against the surface the way a run does.
+		StickSpeed = 9,
+		-- What the impact leaves of the character's horizontal speed, for the KICK that may follow to
+		-- carry (ParkourMath.WallJumpVelocity's momentum term). Low: hitting a wall face-first should
+		-- cost most of the run-up, or a catch becomes the cheapest way to preserve speed through a
+		-- corridor. Not zero, so a fast arrival still kicks out harder than a slow one.
+		MomentumRetainFraction = 0.35,
+	},
+
 	-- After leaving a wall, that SPECIFIC wall part can't be re-attached to for this long -- this is
 	-- the anti-cheese rule that stops infinite vertical climbing by re-triggering the same surface.
 	-- A DIFFERENT wall is available immediately, which is exactly the chained wall-jump the design
@@ -767,6 +873,25 @@ ParkourConstants.WallRun = {
 	-- terrain should still be the fastest thing in the game -- and far under Validation.MaxReportedSpeed,
 	-- so a legitimately long chain can never have its own movement rejected.
 	ChainMaxSpeed = 44,
+
+	-- The footfall-like cadence while running the "Running" phase of a wall-run. Reuses RunAudio's own
+	-- registered step sound (Constants.Run.Footsteps.Stages[1].Sound) rather than a separate asset --
+	-- see Client/FX/RunAudio.PlayWallRunStep -- slower and on a longer interval than an ordinary run
+	-- (Run.Footsteps.Stages[1].StepIntervalSeconds is 0.33), since a wall-run reads as a lighter,
+	-- more careful contact than sprinting on open ground. Client/Movement/RunController.lua owns the
+	-- cadence timer that reads this, the same "controller owns WHEN, audio module owns WHICH sound"
+	-- split every other *Audio.lua module in this framework uses.
+	Step = {
+		IntervalSeconds = 0.42,
+		-- Below 1 -- a lower PlaybackSpeed reads as a slower, heavier step, which is the literal ask
+		-- ("a slower version of run sound") as well as the feel one: the wall is taking more of the
+		-- character's weight than the ground does.
+		PlaybackSpeedMultiplier = 0.8,
+		-- A few percent of pitch variation, the identical "one sample on a metronome" fix
+		-- Constants.Run.Footsteps.Stages[n].PitchJitter documents -- a wall-run can run
+		-- MaxDurationSeconds (2.2s) long, plenty of time for an un-jittered repeat to be noticed.
+		PitchJitter = 0.05,
+	},
 }
 
 ParkourConstants.WallJump = {
@@ -912,9 +1037,8 @@ ParkourConstants.WallJump = {
 		ReachMargin = 1.09,
 
 		-- Bounds on what the solver is allowed to produce. The vertical cap is the one that matters for
-		-- fairness -- it is what stops a well-placed pair of walls from being an elevator -- and is set so
-		-- a single assisted jump's own ballistic gain stays inside Validation.MaxVerticalGainStuds. The
-		-- horizontal cap keeps a far target from turning into a launch that outruns the camera.
+		-- fairness -- it is what stops a well-placed pair of walls from being an elevator. The horizontal
+		-- cap keeps a far target from turning into a launch that outruns the camera.
 		--
 		-- MinUpSpeed raised 34 -> 46 to MATCH WallJump.UpSpeed, and that equality is the whole point
 		-- rather than a coincidence to be tuned away from. At 34 an assisted jump at a level target left
@@ -958,9 +1082,7 @@ ParkourConstants.WallJump = {
 		CorridorSplayDegrees = 20,
 		-- Lift for a corridor kick, replacing the MinUpSpeed/MaxUpSpeed band. Higher than either, because
 		-- height is the entire purpose here and the horizontal cost of a chimney crossing is small. Gains
-		-- about 11.8 studs per kick under default gravity -- so a five-storey shaft is five or six kicks --
-		-- and a single kick's ballistic gain stays comfortably inside Validation.MaxVerticalGainStuds, which
-		-- is what keeps an honest climb from having its own reports refused.
+		-- about 11.8 studs per kick under default gravity -- so a five-storey shaft is five or six kicks.
 		CorridorUpSpeed = 68,
 		-- Shaved off the computed aim height so the solve is never asked for an arc that is EXACTLY at the
 		-- edge of what its own vertical cap allows -- at the apex the two agree to the last decimal place,
@@ -1083,6 +1205,149 @@ ParkourConstants.Roll = {
 		Sliding = true,
 		Landing = true,
 		Falling = true,
+	},
+}
+
+-- THE DASH -- the facing-relative burst on its own key (Constants.Keybinds.Defaults.Dash, Q / gamepad
+-- B): four directions off the body's own facing, plus a fifth, camera-aimed UP that replaces Front
+-- while looking steeply up (see UpPitchDegrees below). AIR-ONLY (States/Dashing.lua's CanEnter refuses
+-- outright while grounded). Sits beside Roll above rather than replacing it, and the split of labour
+-- between the two is the whole reason both exist:
+--   * ROLL is the grounded DODGE. Committed, so nothing can steal it, which is most of its defensive
+--     value, and it owns the landing-roll conversion.
+--   * DASH is the AIRBORNE CHAINING move. Deliberately NOT committed, so a vault, a mantle, a wall-run
+--     or a ledge grab may pre-empt it mid-burst -- which is how "dash into a vault" and "air-dash onto a
+--     ledge" happen through the state machine's own arbitration, with each target's CanEnter fully
+--     honoured, rather than through hand-written hand-offs that would bypass them.
+-- See States/Dashing.lua's header for the priority reasoning that makes that split work.
+ParkourConstants.Dash = {
+	-- Ceiling on the burst's peak speed. Matches Leap.MaxPlanarSpeed (95) -- this framework's existing
+	-- precedent for the fastest legitimate planar claim -- and leaves 1.47x headroom under
+	-- Validation.MaxReportedSpeed (140), so a dash taken out of a top-gear run can never have its own
+	-- action report refused. src/Tests/Parkour/DashState.spec.lua asserts that relationship rather than
+	-- leaving it to whoever next retunes DistanceStuds to remember.
+	MaxSpeed = 95,
+	-- The speed a dash is never allowed to leave the player below. Above Locomotion.WalkSpeed (18) so a
+	-- dash from a standstill ends MOVING rather than pinned, and below SprintSpeed (27) so it is never
+	-- worth taking for the exit speed alone.
+	MinExitSpeed = 20,
+	-- Air dashes available per trip through the air. One: enough to convert a misjudged jump into a
+	-- reachable ledge, not enough to fly. Refunded by ground contact, by a wall-run attach, and by a
+	-- ledge grab -- see ParkourTypes.ParkourContext.AirDashChain for why those last two refund when the
+	-- wall-run/wall-jump chains deliberately do not.
+	AirCharges = 1,
+	-- How long an AIR dash holds vertical velocity at exactly zero before gravity resumes. The hang is
+	-- what makes an air dash read as weighted rather than as a nudge, and it is what lets a dash cancel
+	-- a fall -- one learnable rule instead of a velocity-dependent one. Short enough that it can never
+	-- be mistaken for hovering, and asserted below Front.DurationSeconds so it stays a PHASE of the
+	-- dash rather than the whole of it.
+	AirHangSeconds = 0.12,
+	-- UP's own hang, longer than the shared one above on purpose: a launch that starts falling again the
+	-- instant its burst ends reads as weak no matter how fast the burst itself was. A dedicated constant
+	-- rather than widening AirHangSeconds so the other four directions' air dash keeps its snappier,
+	-- unweighted feel.
+	UpAirHangSeconds = 0.2,
+	-- Extra hang, ON TOP OF UpAirHangSeconds, granted to an Up dash taken within
+	-- WallLaunch.DashBoostWindowSeconds of a States/WallLaunching.lua launch -- the "give them a
+	-- little extra boost" half of that combo (see States/Dashing.lua's own Enter for where this is
+	-- read). Extra HANG rather than extra SPEED: a dash chained this soon off a wall launch carries
+	-- very little entry momentum (the launch itself is mostly vertical), so BurstPeak's own
+	-- distance-driven peak is nowhere near MaxSpeed's ceiling for it already -- more speed would do
+	-- something, but more TIME at the peak is the lever that cannot be silently absorbed by a clamp
+	-- elsewhere.
+	WallLaunchChainExtraHangSeconds = 0.15,
+	-- Whether the air dash resumes gravity from ZERO (true) or from the vertical velocity it entered
+	-- with (false). True, because restoring a large entry Y after the hang snaps visibly in either
+	-- direction -- a fast fall lurches back down, and a rising jump turns the dash into a float
+	-- extender. Kept as a constant rather than inlined so the trade is reversible in one edit.
+	AirVerticalResetsFall = true,
+	-- Constant downward bias applied once a dash's own flight LANDS mid-burst (every dash starts
+	-- airborne -- see CanEnter -- but a short one can easily touch down before its duration elapses),
+	-- keeping the body in contact across small bumps instead of skipping off them. Same value and same
+	-- job as Slide.SurfaceStickSpeed.
+	SurfaceStickSpeed = 8,
+	-- The longest any direction below may last. Two readers: ParkourController.ACTION_DURATIONS derives
+	-- the server ownership window it declares from this, and the spec asserts every per-direction
+	-- duration is at or under it -- so retuning one direction longer can never silently under-declare
+	-- the window and have the server force-expire a dash mid-flight.
+	MaxDurationSeconds = 0.26,
+
+	-- The camera pitch, in degrees above level, that turns a FORWARD dash into an UP dash -- see
+	-- ParkourMath.DashQuadrant's own header for why it is forward specifically that this replaces, and
+	-- why back/left/right are never touched by it. High enough that ordinary climbing (a player looking
+	-- up at the wall or ledge they are about to grab, which in this game is most of the time) never
+	-- silently launches them; low enough that deliberately tipping the camera back to aim up a shaft
+	-- reads as reliable rather than as a coin flip. Only ever evaluated while airborne in the first
+	-- place -- Dash as a whole is AIR-ONLY, see the block header.
+	UpPitchDegrees = 55,
+
+	-- THE FIVE DIRECTIONS, resolved against the body's own facing (ParkourMath.DashQuadrant), never
+	-- against the camera -- except Up, which IS the camera, by design (see UpPitchDegrees above). Front
+	-- is the committed, chaining burst; Back and the sides are shorter, cost more cooldown and give up
+	-- momentum on exit, which is how "defensive" is expressed as numbers rather than as a feeling. Left
+	-- and Right are identical by construction -- a sidestep that is better in one direction than the
+	-- other is a bug, not a mechanic, and the spec asserts it. Up keeps Front's cooldown and exit
+	-- fraction -- it IS the forward dash's chaining privilege, merely redirected by where the camera is
+	-- looking -- but travels further on the same duration (a bigger peak, via BurstPeak) than Front
+	-- does: a vertical launch needs to visibly outdo a flat dash to read as powerful rather than as a
+	-- weaker sideways option, vertical distance counting the same as horizontal here. Paired with
+	-- Dash.UpAirHangSeconds above, which holds that peak a beat longer before gravity resumes.
+	--
+	-- Annotated rather than left to inference: States/Dashing.lua indexes this with a union-typed
+	-- quadrant, which does not typecheck against a bare table literal under --!strict.
+	Directions = {
+		-- Furthest, longest, cheapest, and the only direction that keeps 100% of entry momentum -- a
+		-- front dash must never cost a stud of speed, or the optimal play becomes never dashing.
+		Front = { DistanceStuds = 7, DurationSeconds = 0.26, CooldownSeconds = 0.55, ExitRetainFraction = 1 },
+		-- Shortest and by far the most expensive. Backward-dash spam is the standard failure mode of
+		-- every game that ships a uniform dash cooldown, and the deleted combat system's own
+		-- DashBackCooldownSeconds (1.6, against a 0.8 front) is this codebase's record of having
+		-- already paid for it once.
+		Back = { DistanceStuds = 4.5, DurationSeconds = 0.2, CooldownSeconds = 1.1, ExitRetainFraction = 0.8 },
+		Left = { DistanceStuds = 5.5, DurationSeconds = 0.22, CooldownSeconds = 0.8, ExitRetainFraction = 0.88 },
+		Right = { DistanceStuds = 5.5, DurationSeconds = 0.22, CooldownSeconds = 0.8, ExitRetainFraction = 0.88 },
+		-- Front's cooldown and exit fraction, but a bigger peak (see the block header) for the extra
+		-- oomph a launch off the ground needs to read as powerful rather than as a stumble upward.
+		Up = { DistanceStuds = 10, DurationSeconds = 0.26, CooldownSeconds = 0.55, ExitRetainFraction = 1 },
+	} :: {
+		[string]: { DistanceStuds: number, DurationSeconds: number, CooldownSeconds: number, ExitRetainFraction: number },
+	},
+
+	-- A dash may be started from these states only. Data rather than a condition in States/Dashing.lua,
+	-- for the same reason Roll.AllowedFromStates is. Every entry here is already an AIRBORNE state --
+	-- Dash's own CanEnter refuses unconditionally while context.Ground.Grounded (see its own comment),
+	-- so listing a grounded state (Idle, Walking, Sprinting, Landing, Sliding) would only ever be a dead
+	-- entry that could never actually pass. Jumping, Falling and WallLaunching are the three states a
+	-- player is airborne in that this table needs to name -- WallLaunching specifically so "look up and
+	-- press dash" can actually chain out of States/WallLaunching.lua's own launch into the boosted Up
+	-- dash it exists to set up (Dash.WallLaunchChainExtraHangSeconds).
+	--
+	-- EVERY ID HERE MUST HAVE A PRIORITY BELOW DASHING'S OWN (130), or the entry is a lie: route-2
+	-- pre-emption requires the incoming state to STRICTLY outrank the active one, so a listed state
+	-- above 130 could never actually be pre-empted into a dash. src/Tests/Parkour/StateRegistry.spec.lua
+	-- asserts both that relationship and that every key names a real registered state.
+	--
+	-- Deliberately absent: WallRunning, LedgeHanging, Vaulting, Mantling, Rolling, Leaping. The last
+	-- five are Committed and therefore unreachable by route 2 regardless of what this table says;
+	-- WallRunning is not committed, but dashing out of a wall-run is that state's own call to make from
+	-- its Update, not this table's to grant behind its back.
+	AllowedFromStates = {
+		Jumping = true,
+		Falling = true,
+		WallLaunching = true,
+	},
+
+	-- The launch stinger, played once per dash (Client/FX/DashAudio.lua) regardless of which of the
+	-- five quadrants resolved -- every dash is airborne now (CanEnter's own AIR-ONLY gate above), so
+	-- there is no grounded/aerial split left for a second sound to distinguish. Shape matches
+	-- Constants.Combat.Sound's entries (SoundId/Volume/PoolSize?/PlaybackRegion?) even though it lives
+	-- here rather than in Shared/Constants.lua: ParkourConstants.lua has no requires of its own and
+	-- this framework's own habit is to keep it that way, so it is not worth importing Constants.lua
+	-- just to borrow its SoundDefinition type for one table. DashAudio.lua reads the value directly.
+	Sound = {
+		SoundId = "rbxassetid://126862391298039",
+		Volume = 0.6,
+		PoolSize = 2,
 	},
 }
 
@@ -1294,6 +1559,11 @@ ParkourConstants.AnimationIds = {
 	-- actions, so a single authored clip covers both directions.
 	LedgeShimmy = "rbxassetid://96438869641457",
 	LedgeClimb = "rbxassetid://73047490092830",
+	-- Blank: not authored yet. States/WallRunning.lua's Catching phase asks for it by variant and
+	-- ParkourAnimator's own hasAsset check falls the request through to the state's shared clip (of
+	-- which WallRunning has none), so a catch currently plays no clip rather than an empty track --
+	-- the same half-authored path the directional wall-jump pair shipped on.
+	WallCatch = "",
 	WallRunLeft = "rbxassetid://70828439233197",
 	WallRunRight = "rbxassetid://86594988194527",
 	-- Three wall-jump clips, selected by which side the wall was on, exactly like the wall-run pair
@@ -1307,6 +1577,17 @@ ParkourConstants.AnimationIds = {
 	WallJumpLeft = "rbxassetid://88023924827467",
 	WallJumpRight = "rbxassetid://75811078175435",
 	Roll = "rbxassetid://125167812303491",
+	-- The five-way dash, one clip per resolved quadrant (States/Dashing.lua publishes the quadrant as
+	-- its AnimationVariant). All five left blank -- "authored later", see this table's own header --
+	-- because a dash has no shared fallback clip the way the wall-jump pair does: playing a FRONT dash
+	-- clip for a back-dash would read worse than playing nothing, so ParkourAnimator gives this state no
+	-- STATE_CLIPS entry to fall through to. A blank id plays nothing and errors nowhere, so the dash
+	-- ships driving the body correctly and each clip is a one-line edit here when authored.
+	DashFront = "",
+	DashBack = "",
+	DashLeft = "",
+	DashRight = "",
+	DashUp = "",
 	-- The committed leap's flight -- the arc itself, once the charge below has committed to it.
 	Leap = "rbxassetid://73851621859324",
 	-- The leap's charge-up wind-up (Leap.ChargeSeconds), played on loop for however long that constant
@@ -1439,8 +1720,6 @@ ParkourConstants.Validation = {
 	-- have; 140 restores that headroom against the new ceiling rather than leaving an honest player one
 	-- hill away from the reject path.
 	MaxReportedSpeed = 140,
-	-- Ceiling on vertical gain attributable to a single action.
-	MaxVerticalGainStuds = 24,
 	-- Ceiling on how far a character may have moved between an action's start report and its end
 	-- report, per second of elapsed time. Above MaxReportedSpeed with headroom, since a slide that
 	-- accelerates throughout can legitimately average close to its peak. Moved with MaxReportedSpeed
@@ -1509,6 +1788,20 @@ ParkourConstants.Debug = {
 	ReadoutIntervalSeconds = 0.1,
 	-- How many recent transitions the readout lists.
 	TransitionHistory = 6,
+
+	-- Edge-triggered logging for the wall CATCH's entry decision (States/WallRunning.lua's Catching
+	-- phase). Independent of StartEnabled/the F6 overlay above: the overlay answers "why is it refusing
+	-- RIGHT NOW", which needs the panel open and the eye on it at the moment of the attempt, and a wall
+	-- catch is over in a tenth of a second. This writes the same verdict to Shared/Logger.lua's capture
+	-- buffer, which is readable after the fact and, through the Live Admin Console, on a live server.
+	--
+	-- EDGE-TRIGGERED IS NOT AN OPTIMISATION, it is the only shape that can be left on. CanEnter is
+	-- evaluated for every registered state every frame, so a line per evaluation is sixty lines a
+	-- second per player of a message that has not changed -- which would bury the one transition that
+	-- matters and is exactly the "anything logged per press is its own performance problem" trap
+	-- AttackConstants.Debug documents. WallRunning only emits when the verdict string CHANGES, so
+	-- walking around emits nothing and one wall attempt emits one line.
+	LogWallCatch = true,
 }
 
 return ParkourConstants

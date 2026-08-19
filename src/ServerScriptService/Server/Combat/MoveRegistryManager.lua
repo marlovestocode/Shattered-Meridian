@@ -55,6 +55,7 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
+local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
 local HitboxShapes = require(ReplicatedStorage.Shared.HitboxShapes)
 local AnimationTimeline = require(ReplicatedStorage.Shared.AnimationTimeline)
 
@@ -86,6 +87,10 @@ local CLAMP_MIN_KNOCKBACK_VELOCITY = 0
 local CLAMP_MAX_KNOCKBACK_VELOCITY = 150
 local CLAMP_MIN_RAGDOLL_SECONDS = 0
 local CLAMP_MAX_RAGDOLL_SECONDS = 5
+-- Grab -- read from GrabConstants.Limits rather than re-typed here, the same "one place the editor's
+-- own field bounds and the server's own clamp agree on a range" reasoning
+-- Constants.MoveEditor.ObjectStun.Limits already established for validateObjectStun.
+local GRAB_LIMITS = GrabConstants.Limits
 -- A slow thrown-weapon feel through a fast arrow/bolt feel -- wide enough to cover either, still
 -- closed enough that a projectile can never be authored effectively-instant (Speed too high) or
 -- effectively-stationary (Speed too low, reads as broken rather than "a very slow projectile").
@@ -207,6 +212,53 @@ local function validateKnockback(raw: unknown): (MoveTypes.MoveKnockback?, strin
 		HorizontalVelocity = horizontalVelocity,
 		RagdollSeconds = ragdollSeconds,
 		StartsAirCombo = startsAirCombo,
+	},
+		nil
+end
+
+-- Same reasoning as validateMovement/validateKnockback above, for the optional MoveGrabConfig
+-- sub-table -- EXCEPT for AttachOffset, which is never taken from `raw` at all. See
+-- MoveGrabConfig.AttachOffset's own header (MoveTypes.lua): it is not an author-editable field, so
+-- there is no client-submitted value to trust OR clamp -- this always writes
+-- GrabConstants.Defaults.AttachOffset, the same "the server decides what the numbers mean" posture
+-- the move's own top-level Offset already takes for its translation, just total here rather than
+-- partial since no legitimate candidate should ever disagree with this default.
+local function validateGrab(raw: unknown): (MoveTypes.MoveGrabConfig?, string?)
+	if raw == nil then
+		return nil, nil
+	end
+	if typeof(raw) ~= "table" then
+		return nil, "InvalidGrab"
+	end
+	local candidate = raw :: { [string]: unknown }
+	local holdSeconds = clampedNumber(candidate.HoldSeconds, GRAB_LIMITS.HoldSeconds.Min, GRAB_LIMITS.HoldSeconds.Max)
+	local throwUpVelocity =
+		clampedNumber(candidate.ThrowUpVelocity, GRAB_LIMITS.ThrowUpVelocity.Min, GRAB_LIMITS.ThrowUpVelocity.Max)
+	local throwHorizontalVelocity = clampedNumber(
+		candidate.ThrowHorizontalVelocity,
+		GRAB_LIMITS.ThrowHorizontalVelocity.Min,
+		GRAB_LIMITS.ThrowHorizontalVelocity.Max
+	)
+	local throwImpactDamage =
+		clampedNumber(candidate.ThrowImpactDamage, GRAB_LIMITS.ThrowImpactDamage.Min, GRAB_LIMITS.ThrowImpactDamage.Max)
+	local throwSelfDamage =
+		clampedNumber(candidate.ThrowSelfDamage, GRAB_LIMITS.ThrowSelfDamage.Min, GRAB_LIMITS.ThrowSelfDamage.Max)
+	if
+		holdSeconds == nil
+		or throwUpVelocity == nil
+		or throwHorizontalVelocity == nil
+		or throwImpactDamage == nil
+		or throwSelfDamage == nil
+	then
+		return nil, "InvalidGrab"
+	end
+	return {
+		AttachOffset = GrabConstants.Defaults.AttachOffset,
+		HoldSeconds = holdSeconds,
+		ThrowUpVelocity = throwUpVelocity,
+		ThrowHorizontalVelocity = throwHorizontalVelocity,
+		ThrowImpactDamage = throwImpactDamage,
+		ThrowSelfDamage = throwSelfDamage,
 	},
 		nil
 end
@@ -647,6 +699,10 @@ function MoveRegistryManager.Validate(
 	if knockbackError then
 		return nil, knockbackError
 	end
+	local grab, grabError = validateGrab(raw.Grab)
+	if grabError then
+		return nil, grabError
+	end
 	local projectile, projectileError = validateProjectile(raw.Projectile)
 	if projectileError then
 		return nil, projectileError
@@ -685,6 +741,7 @@ function MoveRegistryManager.Validate(
 		Animations = animations,
 		Movement = movement,
 		Knockback = knockback,
+		Grab = grab,
 		Projectile = projectile,
 		ObjectStun = objectStun,
 		Art = art,
@@ -715,6 +772,11 @@ local function copyMove(move: MoveTypes.MoveDefinition): MoveTypes.MoveDefinitio
 	end
 	if move.Knockback then
 		copy.Knockback = table.clone(move.Knockback :: any) :: MoveTypes.MoveKnockback
+	end
+	if move.Grab then
+		-- Flat table.clone is correct here, same reasoning MoveTypes.Clone's own comment gives:
+		-- MoveGrabConfig nests nothing, AttachOffset is an immutable CFrame value type.
+		copy.Grab = table.clone(move.Grab :: any) :: MoveTypes.MoveGrabConfig
 	end
 	if move.Projectile then
 		copy.Projectile = table.clone(move.Projectile :: any) :: MoveTypes.MoveProjectileConfig

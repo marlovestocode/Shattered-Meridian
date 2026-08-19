@@ -41,6 +41,10 @@
 	Start() that recomputes "should a step fire right now" from live state, rather than something
 	scheduled per key-press. There is no task.delay in this file at all, and every connection it makes
 	has exactly one owner and one disconnect path -- see `connections` and releaseConnections below.
+	stepWallRun rides the SAME Heartbeat rather than a connection of its own -- a wall-run and an
+	ordinary run are mutually exclusive by construction, so there is nothing to gain from separating
+	their timers, and RunAudio.PlayWallRunStep reuses the ordinary run's own registered sound
+	(ParkourConstants.WallRun.Step's own comment has the reasoning).
 
 	Does not own: the stage (RunSystem resolves it), WalkSpeed (RunSystem writes it), the ladder's
 	numbers (Shared/Run/RunConstants.lua), the sound instances (SoundManager via RunAudio), the dust
@@ -54,7 +58,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 local RunConstants = require(ReplicatedStorage.Shared.Run.RunConstants)
 local RunLadder = require(ReplicatedStorage.Shared.Run.RunLadder)
@@ -72,6 +78,7 @@ local RunController = {}
 
 local RUN_CONFIG = Constants.Run
 local FOOTSTEPS = RUN_CONFIG.Footsteps
+local WALL_RUN_STEP = ParkourConstants.WallRun.Step
 
 -- TWO FOV SLOTS, composed rather than fought over. Client/FX/FOVOffset.lua is a named-slot composer
 -- precisely so two independent reasons to change the field of view can coexist: the base pull that
@@ -98,23 +105,24 @@ local RUN_PRESENTATION_STATES: { [string]: boolean } = {
 
 local started = false
 
--- EVERY CONNECTION THIS MODULE OWNS, in one list with one release path.
+-- EVERY CONNECTION THIS MODULE OWNS, in two scopes with one release path each.
 --
 -- Split into two lifetimes because they genuinely have two: the SESSION connections (input, the
--- heartbeat, the player's own CharacterAdded/Removing) are made once at Start and live until Stop,
--- while the PER-LIFE connections (the stage attribute watcher) must be torn down and remade for every
--- character. Keeping them in separate lists is what makes "rebind without leaking" a property of the
--- structure rather than of remembering to nil one specific field -- the leak shape this codebase has
--- already paid for once.
-local sessionConnections: { RBXScriptConnection } = {}
-local lifeConnections: { RBXScriptConnection } = {}
-
-local function releaseConnections(list: { RBXScriptConnection }): ()
-	for index = #list, 1, -1 do
-		list[index]:Disconnect()
-		list[index] = nil
-	end
-end
+-- heartbeat, the player's own CharacterRemoving) are made once at Start and live until Stop, while the
+-- PER-LIFE connections (the stage attribute watcher) must be torn down and remade for every character.
+-- Keeping them in separate scopes is what makes "rebind without leaking" a property of the structure
+-- rather than of remembering to nil one specific field -- the leak shape this codebase has already
+-- paid for once.
+--
+-- These were a pair of plain arrays and a local releaseConnections helper, and that helper was the
+-- direct ancestor of Shared/Trove.lua -- the right idea, kept private to one module while about
+-- twenty-five other sites hand-rolled a worse version of it. They are the shared thing now; this file
+-- keeps the shape it always had, just no longer as its own private copy. Two independent Troves rather
+-- than one nested inside the other, deliberately: nesting would make Stop tear down the life scope
+-- through the session's cleanup rather than through unbind, which is the one place this module wants
+-- that decision made.
+local sessionTrove = Trove.New()
+local lifeTrove = Trove.New()
 
 -- The bound character and its Humanoid. The ROOT PART is deliberately not cached alongside them: it is
 -- read live off Humanoid.RootPart in the loop below, because a character binds before its parts have
@@ -153,6 +161,11 @@ local parkourStateId: string? = nil
 -- against `now` -- a stale value from a previous life can at worst allow one immediate step on the
 -- first frame of the next one, and BindCharacter resets it anyway.
 local lastStepClock = 0
+-- The wall-run cadence's own clock, same reasoning as lastStepClock above -- a separate one because
+-- the two cadences are independent (a player can never be both, but the wall-run one has its own
+-- interval, ParkourConstants.WallRun.Step.IntervalSeconds, and comparing it against lastStepClock
+-- would let a footstep taken moments before an attach suppress the first wall-run step or vice versa).
+local lastWallRunStepClock = 0
 
 -- Whether the stock character run sound has been muted for the CURRENT life yet -- see
 -- RunAudio.SilenceDefaultRunSound for why this is a retry rather than a single attempt at bind time.
@@ -162,6 +175,12 @@ local defaultRunSoundSilenced = false
 -- level. Only the falling edge does anything (cutting in-flight step sounds); the rising edge needs
 -- nothing, since the first step fires off the cadence clock like any other.
 local wasRunning = false
+-- Same edge-tracking, for the wall-run cadence, and it needs its OWN flag rather than reusing
+-- wasRunning's: evaluateRunning() already returns false throughout a wall-run (WallRunning is not in
+-- RUN_PRESENTATION_STATES), so wasRunning's own falling edge fires the moment a wall-run STARTS (an
+-- ordinary run sound genuinely ending there) and never fires again for the rest of it -- there is no
+-- edge left in that flag for stepWallRun's own cadence to end ON when the wall-run itself finishes.
+local wasWallRunning = false
 
 -- Held rather than looked up per edge: this is fired on every intent change, and GetRemoteEvent does a
 -- FindFirstChild through the Remotes folder each time. Nil until Start, and every fire is guarded --
@@ -189,22 +208,16 @@ end
 --
 
 -- Applies everything that changes when the stage does. Called only on a real transition -- every
--- effect in here is either a one-shot (the onset kick) or a set-and-forget property (the FOV target,
--- the animator's stage), and re-applying them every frame would either machine-gun the kick or fight
--- CombatAnimator's own hit-stop freeze for AnimationTrack.Speed.
+-- effect in here is a set-and-forget property (the FOV target, the animator's stage), and
+-- re-applying it every frame would fight CombatAnimator's own hit-stop freeze for
+-- AnimationTrack.Speed. The stage change is instead sold through RunAudio.PlayStep itself: the same
+-- footstep sound just plays faster once Footsteps.Stages[nextStage].PlaybackSpeedMultiplier takes
+-- over on the next footfall, so there is nothing one-shot left for this function to fire.
 local function applyStage(previousStage: number, nextStage: number): ()
 	CombatAnimator.SetRunStage(nextStage)
 
 	local onset = RUN_CONFIG.StageOnset[nextStage]
 	if onset then
-		-- The kick fires only on the way UP. Dropping from stage 3 to stage 2 is a loss, and announcing
-		-- it with the same triumphant whoosh that announced earning it reads as the player being
-		-- rewarded for slowing down. The FOV still eases to stage 2's target either way -- that is a
-		-- continuous property describing where you ARE, where the sound is an event describing
-		-- something that just happened.
-		if nextStage > previousStage then
-			RunAudio.PlayStageOnset(nextStage)
-		end
 		FOVOffset.SetContinuous(FOV_SLOT_STAGE, onset.FOVDelta, onset.FOVEaseSpeed)
 		logger:debug("Run stage engaged", { from = previousStage, to = nextStage })
 	else
@@ -344,6 +357,37 @@ local function evaluateRunning(): (boolean, BasePart?)
 	return true, currentRoot
 end
 
+-- The wall-run cadence, evaluated alongside the ordinary footstep one below but entirely independent
+-- of it (see lastWallRunStepClock's own comment for why they cannot share a clock). Fixed interval
+-- rather than speed-scaled: WallRun.Speed is a single authored value the whole run holds close to
+-- (unlike the ground ladder's three gears), so there is no equivalent "measured speed" signal worth
+-- deriving a cadence from the way ParkourMath.StepInterval does for ordinary running.
+local function stepWallRun(): ()
+	local wallRunning = parkourStateId == "WallRunning"
+
+	-- THE FALLING EDGE, the wall-run cadence's own -- see wasWallRunning's own comment for why
+	-- wasRunning's falling edge above cannot cover this. RunAudio.StopRunSounds cuts BOTH cadences at
+	-- once (they share one registered sound), so this call is a no-op whenever the ordinary falling
+	-- edge above already fired on the same frame -- SoundManager.StopAll on an already-stopped pool is
+	-- itself a no-op, per that function's own contract.
+	if wallRunning ~= wasWallRunning then
+		wasWallRunning = wallRunning
+		if not wallRunning then
+			RunAudio.StopRunSounds()
+		end
+	end
+	if not wallRunning then
+		return
+	end
+
+	local now = os.clock()
+	if (now - lastWallRunStepClock) < WALL_RUN_STEP.IntervalSeconds then
+		return
+	end
+	lastWallRunStepClock = now
+	RunAudio.PlayWallRunStep()
+end
+
 -- One frame of the run: Autorun's movement check, then footstep evaluation. Every condition is
 -- re-derived from live state; nothing here is remembered between frames except the step clock and the
 -- running edge.
@@ -374,6 +418,12 @@ local function stepRun(): ()
 			RunAudio.StopRunSounds()
 		end
 	end
+
+	-- Independent of the ordinary run's own early return below -- a wall-run and an ordinary run are
+	-- mutually exclusive, so this always resolves to "nothing to do" on the branch the early return
+	-- below would otherwise skip it on.
+	stepWallRun()
+
 	if not running or not currentRoot then
 		return
 	end
@@ -408,7 +458,7 @@ end
 --
 
 local function unbind(): ()
-	releaseConnections(lifeConnections)
+	lifeTrove:Clean()
 	character = nil
 	humanoid = nil
 	-- The falling edge in the loop above cannot be relied on for teardown: a death that destroys the
@@ -416,6 +466,7 @@ local function unbind(): ()
 	-- Heartbeat outright, so there would be no frame left to notice anything. Cutting here covers every
 	-- teardown path (respawn, death, Stop) directly, and is a no-op when nothing is playing.
 	wasRunning = false
+	wasWallRunning = false
 	RunAudio.StopRunSounds()
 	-- A life that ended mid-stride must not hand the next one a stage it never earned, a live FOV pull
 	-- or a run-stage the animator will apply to a brand-new track set. Routed through setStage rather
@@ -444,6 +495,7 @@ function RunController.BindCharacter(nextCharacter: Model): ()
 	character = nextCharacter
 	humanoid = humanoidInstance
 	lastStepClock = 0
+	lastWallRunStepClock = 0
 	-- A new life gets a new set of stock character sounds, so the mute has to be earned again.
 	defaultRunSoundSilenced = RunAudio.SilenceDefaultRunSound(nextCharacter)
 
@@ -451,13 +503,10 @@ function RunController.BindCharacter(nextCharacter: Model): ()
 	-- Attribute every Heartbeat would be 60 reads a second to observe nothing. Seeded immediately below
 	-- the connection, because the server may well have published a stage before this client got around
 	-- to binding (a rapid respawn mid-run), and a signal only fires on future changes.
-	table.insert(
-		lifeConnections,
-		humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.SprintStage):Connect(function()
-			local value = humanoidInstance:GetAttribute(Constants.Attributes.SprintStage)
-			setStage(if typeof(value) == "number" then value else 0)
-		end)
-	)
+	lifeTrove:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.SprintStage), function()
+		local value = humanoidInstance:GetAttribute(Constants.Attributes.SprintStage)
+		setStage(if typeof(value) == "number" then value else 0)
+	end)
 	local initialStage = humanoidInstance:GetAttribute(Constants.Attributes.SprintStage)
 	setStage(if typeof(initialStage) == "number" then initialStage else 0)
 
@@ -565,10 +614,10 @@ function RunController.Start(): ()
 		RunController.BindCharacter(localPlayer.Character)
 	end
 
-	table.insert(sessionConnections, localPlayer.CharacterRemoving:Connect(unbind))
-	table.insert(sessionConnections, UserInputService.InputBegan:Connect(onInputBegan))
-	table.insert(sessionConnections, UserInputService.InputEnded:Connect(onInputEnded))
-	table.insert(sessionConnections, RunService.Heartbeat:Connect(stepRun))
+	sessionTrove:Connect(localPlayer.CharacterRemoving, unbind)
+	sessionTrove:Connect(UserInputService.InputBegan, onInputBegan)
+	sessionTrove:Connect(UserInputService.InputEnded, onInputEnded)
+	sessionTrove:Connect(RunService.Heartbeat, stepRun)
 
 	logger:info("RunController started", { stages = RunLadder.MaxStage() })
 end
@@ -577,7 +626,7 @@ end
 -- future spectator mode -- the same reason ParkourController.Stop exists rather than being left to
 -- process teardown.
 function RunController.Stop(): ()
-	releaseConnections(sessionConnections)
+	sessionTrove:Clean()
 	started = false
 	-- Routed through syncEngaged rather than assigned, so every consumer is told the run ended by the
 	-- same path that tells them anything else -- including the server, which would otherwise keep a

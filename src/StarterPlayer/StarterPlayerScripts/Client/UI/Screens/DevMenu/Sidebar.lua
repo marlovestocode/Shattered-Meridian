@@ -56,6 +56,7 @@ local Label = require(script.Parent.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Parent.Components.Button)
 local ActionIcon = require(script.Parent.Parent.Parent.Components.ActionIcon)
 local TextField = require(script.Parent.Parent.Parent.Components.TextField)
+local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 local DevMenuTypes = require(script.Parent.Types)
 
 local Children = Fusion.Children
@@ -85,7 +86,7 @@ local function overflowRow(
 	local function overflowAction(text: string, order: number, onActivated: () -> ()): TextButton
 		return Button(scope, {
 			Text = text,
-			Size = UDim2.new(1, 0, 1, 0),
+			Size = UDim2.fromScale(1, 1),
 			LayoutOrder = order,
 			OnActivated = function()
 				onActivated()
@@ -388,22 +389,12 @@ function Sidebar.Mount(scope: Scope, width: number, bodyHeight: number): Sidebar
 		},
 	})
 
-	local rosterScroll = scope:New "ScrollingFrame" {
+	local rosterScroll = ScrollArea(scope, {
 		Name = "RosterScroll",
 		Size = rosterScrollSize,
 		LayoutOrder = 2,
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-		ScrollingDirection = Enum.ScrollingDirection.Y,
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		CanvasSize = UDim2.fromScale(0, 0),
-		-- 3px, no track (docs/design/intro-redesign-figma-spec.md section 7's Scrollbar note), the
-		-- Border.Standard tint instead of a flat accent -- matches CreatorFrame.lua's own scrollbar.
-		ScrollBarThickness = 3,
-		ScrollBarImageColor3 = Tokens.Border.Standard.Color,
-		ScrollBarImageTransparency = Tokens.Border.Standard.Transparency,
 
-		[Children] = {
+		Children = {
 			-- Right padding keeps roster row panels clear of the scrollbar, same convention
 			-- ContentArea.lua's own tabContent uses.
 			scope:New "UIPadding" {
@@ -432,7 +423,7 @@ function Sidebar.Mount(scope: Scope, width: number, bodyHeight: number): Sidebar
 			}),
 			playerRows,
 		},
-	} :: ScrollingFrame
+	})
 
 	local root = scope:New "Frame" {
 		Name = "Sidebar",

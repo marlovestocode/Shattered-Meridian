@@ -51,6 +51,7 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local QiSystem = require(script.Parent.QiSystem)
 local TierSystem = require(script.Parent.TierSystem)
@@ -378,16 +379,31 @@ function ArtSystem.Init(): ()
 	artStateRemote = NetworkBridge.CreateRemoteEvent(ArtConstants.RemoteNames.ArtStateUpdated)
 
 	local catalogueRemote = NetworkBridge.CreateRemoteFunction(ArtConstants.RemoteNames.GetArtCatalogue)
-	catalogueRemote.OnServerInvoke = handleGetCatalogue
+	catalogueRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
+		logger,
+		"GetArtCatalogue",
+		{ Success = false, Reason = "InternalError" } :: Types.ArtCatalogueResult,
+		handleGetCatalogue
+	)
 
 	local unlockRemote = NetworkBridge.CreateRemoteFunction(ArtConstants.RemoteNames.UnlockArt)
-	unlockRemote.OnServerInvoke = handleUnlockArt
+	unlockRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
+		logger,
+		"UnlockArt",
+		{ Success = false, Reason = "InternalError" } :: Types.ArtActionResult,
+		handleUnlockArt
+	)
 
 	-- A RemoteFunction, not a fire-and-forget RemoteEvent, for the same reason UnlockArt is one: the
 	-- panel has to be able to say WHY an equip was refused. A silently-ignored equip would leave the
 	-- client showing an art in a slot the server never accepted.
 	local equipRemote = NetworkBridge.CreateRemoteFunction(ArtConstants.RemoteNames.EquipArt)
-	equipRemote.OnServerInvoke = handleEquipArt
+	equipRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
+		logger,
+		"EquipArt",
+		{ Success = false, Reason = "InternalError" } :: Types.ArtActionResult,
+		handleEquipArt
+	)
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(onProfileLoaded)
 	PlayerLifecycle.BindAllPlayers({

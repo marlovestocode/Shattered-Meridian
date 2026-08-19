@@ -26,6 +26,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local BugReportModule = require(script.Parent.Parent.UI.Screens.BugReport)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
 
 type BugReportHandle = BugReportModule.BugReportHandle
 
@@ -94,9 +95,7 @@ function BugReportClient.Start(handle: BugReportHandle): ()
 		setStatus(handle, "Submitting...")
 
 		local submitRemote = NetworkBridge.GetRemoteFunction(Constants.BugReport.RemoteNames.Submit)
-		local ok, resultOrError = pcall(function()
-			return submitRemote:InvokeServer(category, description)
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(submitRemote, category, description)
 
 		handle.IsSubmitting:set(false)
 

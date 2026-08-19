@@ -100,7 +100,6 @@
 	direction -- see Constants.Attributes.ParkourFacingOwned's own note.
 ]]
 
-local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
@@ -109,6 +108,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
@@ -282,24 +283,18 @@ local function onRenderStep(_deltaTime: number): ()
 	end
 end
 
-local function onCharacterAdded(character: Model): ()
-	local localPlayer = Players.LocalPlayer
-
-	local humanoidInstance = character:WaitForChild("Humanoid", Constants.Network.WaitForChildTimeoutSeconds)
-	if not humanoidInstance or not humanoidInstance:IsA("Humanoid") then
-		logger:warn("Character has no Humanoid -- shift lock cannot drive this character")
-		return
-	end
+-- `life` is the per-life Shared/Trove.lua scope Shared/PlayerLifecycle.lua hands every bind. Every
+-- Attribute watch below goes into it, which is a real fix and not just tidying: those three
+-- GetAttributeChangedSignal connections used to be made fresh on every respawn and disconnected never,
+-- so a session's worth of deaths left a stack of live listeners all writing the same three
+-- module-locals from bodies that no longer existed.
+local function onCharacterAdded(character: Model, humanoidInstance: Humanoid, life: Trove.TroveInstance): ()
+	-- The Humanoid is already resolved and already re-checked against the current character by the
+	-- binder. The HumanoidRootPart is this module's own additional requirement and still waits here --
+	-- see Shared/PlayerLifecycle.lua's header on why it knows about exactly one part of a character.
 	local rootPartInstance = character:WaitForChild("HumanoidRootPart", Constants.Network.WaitForChildTimeoutSeconds)
 	if not rootPartInstance or not rootPartInstance:IsA("BasePart") then
 		logger:warn("Character has no HumanoidRootPart -- shift lock cannot drive this character")
-		return
-	end
-
-	-- The WaitForChild calls above yield -- if this character was already replaced while we
-	-- waited (rapid respawn), binding it now would clobber the newer character's handler.
-	if localPlayer.Character ~= character then
-		logger:debug("Character replaced while binding -- skipping stale bind")
 		return
 	end
 
@@ -311,12 +306,12 @@ local function onCharacterAdded(character: Model): ()
 	-- rather than assume in case this bind is racing a same-tick server write) and keep it live
 	-- from here on. Same watch shape as FlightController.BindCharacter's "Flying" signal.
 	rootControlLocked = humanoidInstance:GetAttribute(Constants.Attributes.RootControlLocked) == true
-	humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.RootControlLocked):Connect(function()
+	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.RootControlLocked), function()
 		rootControlLocked = humanoidInstance:GetAttribute(Constants.Attributes.RootControlLocked) == true
 	end)
 
 	flying = humanoidInstance:GetAttribute(Constants.Attributes.Flying) == true
-	humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.Flying):Connect(function()
+	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.Flying), function()
 		flying = humanoidInstance:GetAttribute(Constants.Attributes.Flying) == true
 	end)
 
@@ -325,7 +320,7 @@ local function onCharacterAdded(character: Model): ()
 	-- is read. Seeded rather than assumed false for the same reason as the two above -- a rapid respawn
 	-- can land this bind after the motor has already taken the new character.
 	parkourFacingOwned = humanoidInstance:GetAttribute(Constants.Attributes.ParkourFacingOwned) == true
-	humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.ParkourFacingOwned):Connect(function()
+	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.ParkourFacingOwned), function()
 		local nowOwned = humanoidInstance:GetAttribute(Constants.Attributes.ParkourFacingOwned) == true
 		parkourFacingOwned = nowOwned
 		-- Parkour just handed rotation back. ParkourMotor.restoreRestorables writes Humanoid.AutoRotate
@@ -365,15 +360,13 @@ function ShiftLockCamera.Start(shiftLockEngaged: Fusion.Value<boolean>): ()
 
 	crosshairEngaged = shiftLockEngaged
 
-	local localPlayer = Players.LocalPlayer
-
-	localPlayer.CharacterAdded:Connect(onCharacterAdded)
-	localPlayer.CharacterRemoving:Connect(onCharacterRemoving)
-	if localPlayer.Character then
-		-- task.spawn because onCharacterAdded yields on WaitForChild -- the client boot sequence
-		-- (Main.client.lua) shouldn't stall behind character assembly.
-		task.spawn(onCharacterAdded, localPlayer.Character)
-	end
+	-- See Shared/PlayerLifecycle.lua. This module and FlightCamera were the two that already kept the
+	-- post-yield stale-character re-check by hand; that check is now every caller's, not just theirs.
+	PlayerLifecycle.BindLocalCharacter({
+		Scope = "ShiftLockCamera",
+		OnCharacter = onCharacterAdded,
+		OnCharacterRemoving = onCharacterRemoving,
+	})
 
 	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
 		if gameProcessed then

@@ -5,7 +5,7 @@
 	Owns: registering the dev-menu flight feature's sound effects with SoundManager.lua and exposing
 	verb-named play functions for Client/DevMenu/FlightController.lua to call -- the same "domain
 	module owns WHICH sounds exist and gives them a typed API" shape Client/FX/CombatAudio.lua
-	already established. Sound definitions come from Constants.Flight.Sound (empty SoundId
+	already established. Sound definitions come from FlightConstants.Sound (empty SoundId
 	placeholders until real assets are supplied -- SoundManager.Play/PlayLooped already no-op safely
 	on those, so registering ahead of having real ids is safe, same convention as CombatAudio.lua's
 	own sounds when they were first wired).
@@ -22,7 +22,7 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
 
 local SoundManager = require(script.Parent.SoundManager)
 
@@ -34,7 +34,7 @@ local LANDING_HARD_SOUND_NAME = "FlightLandingHard"
 local SONIC_BOOM_SOUND_NAME = "FlightSonicBoom"
 local WIND_LOOP_SOUND_NAME = "FlightWind"
 
-local soundCfg = Constants.Flight.Sound
+local soundCfg = FlightConstants.Sound
 
 SoundManager.Register(TAKEOFF_SOUND_NAME, { SoundId = soundCfg.Takeoff.SoundId, Volume = soundCfg.Takeoff.Volume })
 SoundManager.Register(

@@ -44,6 +44,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local FXPool = require(script.Parent.FXPool)
 
@@ -53,9 +54,9 @@ local CONFIG = Constants.FX.MovementDust
 
 -- Same threshold CombatAnimator's own locomotion evaluator and Server/Combat/Movement.lua's
 -- ResolveDashDirection/IsMoving use for "is there real held movement input right now" -- now
--- Constants.Combat.MovementInputMagnitudeThreshold, see that field's own header for the other call
+-- CombatConstants.MovementInputMagnitudeThreshold, see that field's own header for the other call
 -- sites this used to independently duplicate.
-local LOCOMOTION_THRESHOLD = Constants.Combat.MovementInputMagnitudeThreshold
+local LOCOMOTION_THRESHOLD = CombatConstants.MovementInputMagnitudeThreshold
 
 local MovementVFX = {}
 

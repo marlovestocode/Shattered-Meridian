@@ -219,6 +219,11 @@ end
 -- down with the character). Holding them in a table would be a list nothing ever reads.
 local playersWatched = false
 
+-- NOT Shared/PlayerLifecycle.lua: this watches EVERY player's character, including other people's,
+-- and what it wants from each is the Model's existence rather than a bound Humanoid -- the exclude
+-- list has to be correct the instant a body appears, not once its Humanoid has replicated. That
+-- binder is for "the local player's successive characters" and for per-player scopes; a roster watch
+-- is a different shape wearing similar words.
 local function watchPlayer(player: Player): ()
 	player.CharacterAdded:Connect(rebuildExcludeList)
 	player.CharacterRemoving:Connect(rebuildExcludeList)
@@ -1439,13 +1444,22 @@ function EnvironmentProbe.Update(context: ParkourContext, request: ProbeRequest)
 		-- facing is the camera rather than the flight. Falls back to facing when there is no travel, which
 		-- is the same composite `travelDirection` above already resolved.
 		local forward = ParkourMath.SafeUnit(ParkourMath.Flatten(travelDirection), Vector3.zero)
-		-- Never during a wall-run, which is the one state that reads these probes as a CONTINUING contact
+		-- Never during a wall-RUN, which is the one state that reads these probes as a CONTINUING contact
 		-- rather than as a search. States/WallRunning re-derives its tangent from the live normal every
 		-- frame precisely so a corner ends the run instead of the run clipping through it -- and a fallback
 		-- that answers "the straight cast lost the wall" with a perpendicular wall further ahead would
 		-- swing that tangent ninety degrees and carry the run around the corner, which is the exact
 		-- behavior that file's header rules out.
-		local allowDiagonal = not ground.Grounded and forward.Magnitude > 0 and context.CurrentStateId ~= "WallRunning"
+		--
+		-- EXCEPT WHILE THAT SAME STATE IS CATCHING, which is the opposite case in every particular the
+		-- paragraph above turns on: the wall a catch holds IS the one dead ahead (the only thing this
+		-- fallback can see), it re-derives no tangent, and it has no corner pivot to mislead. The
+		-- exemption is not a loosening -- without it the catch could not exist at all. It entered from
+		-- Falling, where the fallback is live, and then lost its own wall on the very next frame once the
+		-- current state had become WallRunning and the fallback switched off; a one-frame catch reads in
+		-- play as exactly the bounce it was built to replace. See ParkourContext.WallCatchActive.
+		local wallRunSearching = context.CurrentStateId ~= "WallRunning" or context.WallCatchActive
+		local allowDiagonal = not ground.Grounded and forward.Magnitude > 0 and wallRunSearching
 		probeWall(wallLeft, rootPart, -right, travelDirection, forward, allowDiagonal, now)
 		probeWall(wallRight, rootPart, right, travelDirection, forward, allowDiagonal, now)
 	elseif tooSlowToCare and not wantWalls then

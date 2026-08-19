@@ -39,12 +39,11 @@
 	CameraShake's alone; AutoRotate/WalkSpeed/etc. stay owned exactly where they already are).
 ]]
 
-local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
-local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 
 local logger = Logger.scope("CameraOffsetComposer")
 
@@ -59,6 +58,11 @@ type ContinuousSlot = {
 local CameraOffsetComposer = {}
 
 local slots: { [string]: ContinuousSlot } = {}
+
+-- Last value actually written to Humanoid.CameraOffset, so an unchanged frame can skip the write --
+-- see onRenderStep. Seeded to a sentinel no real composition produces so the very first frame always
+-- writes, rather than inheriting whatever a previous character left on the property.
+local lastWritten: Vector3? = nil
 
 local started = false
 local humanoid: Humanoid? = nil
@@ -108,23 +112,23 @@ local function onRenderStep(deltaTime: number): ()
 		total += slot.Current
 	end
 
-	currentHumanoid.CameraOffset = total
-end
-
-local function onCharacterAdded(character: Model): ()
-	local localPlayer = Players.LocalPlayer
-	local humanoidInstance = character:WaitForChild("Humanoid", Constants.Network.WaitForChildTimeoutSeconds)
-	if not humanoidInstance or not humanoidInstance:IsA("Humanoid") then
-		return
+	-- The write is conditional for the same reason Server/Systems/RunSystem.lua's own Heartbeat
+	-- guards `humanoid.WalkSpeed ~= nextSpeed` ("the single most expensive thing a System with a
+	-- Heartbeat can do for no effect"): assigning an engine property is not free even when the value
+	-- is identical, and this ran unconditionally on every rendered frame for every player. The
+	-- steady state here is no slots at all -- no shake, no lean, no landing dip -- so the overwhelming
+	-- majority of those writes were re-asserting Vector3.zero over Vector3.zero forever.
+	--
+	-- Comparing against what THIS module last wrote, rather than reading back currentHumanoid.
+	-- CameraOffset, is deliberate: a property read is the cost being avoided, and this module is
+	-- documented as the single canonical writer of that property, so its own record of the last write
+	-- is authoritative. lastWritten is cleared on character change (see onCharacterRemoving) because a
+	-- new Humanoid starts at its own default and the record would otherwise describe a body that no
+	-- longer exists.
+	if lastWritten ~= total then
+		currentHumanoid.CameraOffset = total
+		lastWritten = total
 	end
-	if localPlayer.Character ~= character then
-		return
-	end
-	humanoid = humanoidInstance :: Humanoid
-end
-
-local function onCharacterRemoving(): ()
-	humanoid = nil
 end
 
 -- Binds the render-step compositor and the local player's own character watch. Called once from
@@ -138,12 +142,18 @@ function CameraOffsetComposer.Start(): ()
 	end
 	started = true
 
-	local localPlayer = Players.LocalPlayer
-	localPlayer.CharacterAdded:Connect(onCharacterAdded)
-	localPlayer.CharacterRemoving:Connect(onCharacterRemoving)
-	if localPlayer.Character then
-		task.spawn(onCharacterAdded, localPlayer.Character)
-	end
+	-- lastWritten is cleared with the character deliberately -- see onRenderStep's own comment on why
+	-- this module's record of its last write describes one specific Humanoid and nothing else.
+	PlayerLifecycle.BindLocalCharacter({
+		Scope = "CameraOffsetComposer",
+		OnCharacter = function(_character: Model, boundHumanoid: Humanoid)
+			humanoid = boundHumanoid
+		end,
+		OnCharacterRemoving = function()
+			humanoid = nil
+			lastWritten = nil
+		end,
+	})
 
 	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value + 1, onRenderStep)
 	logger:info("CameraOffsetComposer started")

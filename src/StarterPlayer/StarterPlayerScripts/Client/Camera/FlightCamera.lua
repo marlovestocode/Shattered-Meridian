@@ -50,8 +50,10 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
 local CameraOffsetComposer = require(script.Parent.Parent.FX.CameraOffsetComposer)
 
@@ -140,37 +142,26 @@ function FlightCamera.SetFlightMotion(
 	_pitchAngleRadians: number,
 	isBoosting: boolean
 ): ()
-	local cfg = Constants.Flight
+	local cfg = FlightConstants
 	local maxSpeed = cfg.CruiseSpeed * (if isBoosting then cfg.BoostSpeedMultiplier else 1)
 	currentSpeedFraction = math.clamp(speed / math.max(maxSpeed, 1), 0, 1)
 	currentBankRadians = bankAngleRadians
 end
 
-local function onCharacterAdded(character: Model): ()
-	local localPlayer = Players.LocalPlayer
-	local humanoidInstance = character:WaitForChild("Humanoid", Constants.Network.WaitForChildTimeoutSeconds)
-	if not humanoidInstance or not humanoidInstance:IsA("Humanoid") then
-		return
-	end
-	if localPlayer.Character ~= character then
-		return
-	end
-	humanoid = humanoidInstance :: Humanoid
-end
-
-local function onCharacterRemoving(): ()
-	humanoid = nil
-	engaged = false
-end
-
 function FlightCamera.Start(): ()
-	local localPlayer = Players.LocalPlayer
-
-	localPlayer.CharacterAdded:Connect(onCharacterAdded)
-	localPlayer.CharacterRemoving:Connect(onCharacterRemoving)
-	if localPlayer.Character then
-		task.spawn(onCharacterAdded, localPlayer.Character)
-	end
+	-- The Humanoid wait, the already-present-character task.spawn, and the "is this still the current
+	-- character after the wait" re-check all moved into Shared/PlayerLifecycle.lua -- this module wrote
+	-- all three by hand, correctly, and was one of only two that did. See that module's header.
+	PlayerLifecycle.BindLocalCharacter({
+		Scope = "FlightCamera",
+		OnCharacter = function(_character: Model, boundHumanoid: Humanoid)
+			humanoid = boundHumanoid
+		end,
+		OnCharacterRemoving = function()
+			humanoid = nil
+			engaged = false
+		end,
+	})
 
 	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value + 1, onRenderStep)
 	logger:info("FlightCamera started")

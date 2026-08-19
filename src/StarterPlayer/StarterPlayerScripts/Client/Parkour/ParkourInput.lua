@@ -66,6 +66,13 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 		InputBuffer.PressLeap(now)
 		return
 	end
+	-- Dash (Q / gamepad B). The binding has existed in Constants.Keybinds since the deleted combat
+	-- system owned a dash of its own -- this line is what finally reads it, and the Settings panel's
+	-- long-dormant "Dash" rebind row now rebinds something real.
+	if KeybindManager.Matches("Dash", input) then
+		InputBuffer.PressDash(now)
+		return
+	end
 end
 
 local function onInputEnded(input: InputObject): ()

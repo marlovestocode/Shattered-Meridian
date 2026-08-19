@@ -73,6 +73,7 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
+local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 
 local ServerScriptService = game:GetService("ServerScriptService")
 local Systems = ServerScriptService.Server.Systems
@@ -585,29 +586,22 @@ end
 function CharacterCreationSystem.Init(): ()
 	local onboardingStateRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.GetOnboardingState)
 	logger:debug("Remote created", { name = Config.RemoteNames.GetOnboardingState })
-	onboardingStateRemote.OnServerInvoke = function(player: Player)
-		local ok, resultOrError = pcall(handleGetOnboardingState, player)
-		if not ok then
-			logger:error("GetOnboardingState handler errored", {
-				player = player.Name,
-				errorMessage = tostring(resultOrError),
-			})
-			return { NeedsOnboarding = false }
-		end
-		return resultOrError
-	end
+	onboardingStateRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
+		logger,
+		"GetOnboardingState",
+		{ NeedsOnboarding = false } :: Types.CharacterCreationOnboardingStateResult,
+		handleGetOnboardingState
+	)
 	logger:debug("Handler connected", { remote = Config.RemoteNames.GetOnboardingState })
 
 	local finalizeRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.Finalize)
 	logger:debug("Remote created", { name = Config.RemoteNames.Finalize })
-	finalizeRemote.OnServerInvoke = function(player: Player, rawPayload: unknown)
-		local ok, resultOrError = pcall(handleFinalize, player, rawPayload)
-		if not ok then
-			logger:error("Finalize handler errored", { player = player.Name, errorMessage = tostring(resultOrError) })
-			return { Success = false, Reason = "InternalError" }
-		end
-		return resultOrError
-	end
+	finalizeRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
+		logger,
+		"Finalize",
+		{ Success = false, Reason = "InternalError" } :: Types.CharacterCreationFinalizeResult,
+		handleFinalize
+	)
 	logger:debug("Handler connected", { remote = Config.RemoteNames.Finalize })
 
 	local awakeningCompleteRemote = NetworkBridge.CreateRemoteEvent(Config.RemoteNames.AwakeningComplete)

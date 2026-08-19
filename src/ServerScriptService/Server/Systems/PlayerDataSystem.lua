@@ -227,6 +227,7 @@ function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProf
 			GamepadKeybinds = {},
 			Autorun = false,
 			Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
+			Comfort = PlayerDataSystem.CreateDefaultComfortSettings(),
 		},
 	}
 end
@@ -406,10 +407,55 @@ local function decodeParkourSettings(raw: unknown): Types.ParkourSettings
 	}
 end
 
+-- The camera-comfort block's shipped defaults. Both true: the game's effects are ON out of the box
+-- and this group is an opt-OUT, so a fresh profile, a migrated profile and a profile whose Comfort
+-- table failed to decode all land on exactly the behavior every player has today. Exported for the
+-- same reasons CreateDefaultParkourSettings above is -- Migrations[5] and decodeComfortSettings both
+-- need it, and a spec should be able to assert a decoded record matches the shipped defaults without
+-- re-listing them.
+function PlayerDataSystem.CreateDefaultComfortSettings(): Types.ComfortSettings
+	return {
+		CameraShake = true,
+		FieldOfViewEffects = true,
+	}
+end
+
+-- Field-by-field, same defensive posture and same reasoning as decodeParkourSettings above: a missing
+-- key must resolve to the shipped default rather than to nil. That matters more here than it does for
+-- the parkour assists, because nil reads as `false` for a boolean and `false` in THIS block means "an
+-- effect the player never asked to disable is now silently off" -- a decode bug would look exactly
+-- like a working accessibility setting, which is the hardest kind to notice is broken.
+local function decodeComfortSettings(raw: unknown): Types.ComfortSettings
+	local defaults = PlayerDataSystem.CreateDefaultComfortSettings()
+	if typeof(raw) ~= "table" then
+		return defaults
+	end
+	local rawTable = raw :: { [string]: any }
+	local function boolean(key: string, fallback: boolean): boolean
+		local value = rawTable[key]
+		return if typeof(value) == "boolean" then value else fallback
+	end
+	return {
+		CameraShake = boolean("CameraShake", defaults.CameraShake),
+		FieldOfViewEffects = boolean("FieldOfViewEffects", defaults.FieldOfViewEffects),
+	}
+end
+
 -- Exported for the same reason every other pure encode/decode function in this file is (TestEZ
 -- coverage with no live Player/DataStore) -- see file header.
+--
+-- EVERY SUB-TABLE IS DEFAULTED BEFORE IT IS READ, and that is a save-path safety requirement rather
+-- than type-checker appeasement. Types.PlayerSettings says both blocks are non-optional, but this
+-- function runs on the AUTOSAVE path against a live in-memory profile, and a live profile can reach
+-- here with a block missing in ways the type system never sees: a record written by a build that
+-- predates the block and rolled forward by a migration that was skipped, a rollback to an older
+-- server, or any Transform caller that replaced `settings` wholesale. Indexing a nil sub-table there
+-- does not degrade -- it throws inside the save, so the player's entire session fails to persist, and
+-- it fails silently from their seat. Falling back to the shipped defaults costs one table construction
+-- on a path that runs at autosave cadence and turns a data-loss bug into a no-op.
 function PlayerDataSystem.EncodeSettings(settings: Types.PlayerSettings): { [string]: any }
-	local parkour = settings.Parkour
+	local parkour = settings.Parkour or PlayerDataSystem.CreateDefaultParkourSettings()
+	local comfort = settings.Comfort or PlayerDataSystem.CreateDefaultComfortSettings()
 	return {
 		Keybinds = encodeKeybindOverrides(settings.Keybinds),
 		GamepadKeybinds = encodeKeybindOverrides(settings.GamepadKeybinds),
@@ -426,6 +472,10 @@ function PlayerDataSystem.EncodeSettings(settings: Types.PlayerSettings): { [str
 			StepAssist = parkour.StepAssist,
 			SprintMode = parkour.SprintMode,
 		},
+		Comfort = {
+			CameraShake = comfort.CameraShake,
+			FieldOfViewEffects = comfort.FieldOfViewEffects,
+		},
 	}
 end
 
@@ -436,6 +486,7 @@ function PlayerDataSystem.DecodeSettings(raw: unknown): Types.PlayerSettings
 			GamepadKeybinds = {},
 			Autorun = false,
 			Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
+			Comfort = PlayerDataSystem.CreateDefaultComfortSettings(),
 		}
 	end
 	local rawTable = raw :: { [string]: any }
@@ -444,6 +495,7 @@ function PlayerDataSystem.DecodeSettings(raw: unknown): Types.PlayerSettings
 		GamepadKeybinds = decodeKeybindOverrides(rawTable.GamepadKeybinds),
 		Autorun = if typeof(rawTable.Autorun) == "boolean" then rawTable.Autorun else false,
 		Parkour = decodeParkourSettings(rawTable.Parkour),
+		Comfort = decodeComfortSettings(rawTable.Comfort),
 	}
 end
 
@@ -708,6 +760,28 @@ Migrations[4] = function(raw: { [string]: any }): { [string]: any }
 		local settings = profileTable.settings
 		if typeof(settings) == "table" and (settings :: { [string]: any }).Parkour == nil then
 			(settings :: { [string]: any }).Parkour = PlayerDataSystem.CreateDefaultParkourSettings()
+		end
+	end
+	return raw
+end
+
+-- v5 -> v6: backfills Types.PlayerSettings' `Comfort` sub-table (the camera-comfort accessibility
+-- block) onto any record saved before this pass -- byte-for-byte the shape of Migrations[4] above,
+-- one field over.
+--
+-- Backfilled with both effects ENABLED, which is the shipped default and therefore exactly what every
+-- existing player already experiences. That is the whole point of the choice: a migration that lands
+-- on the defaults changes nobody's game on their next login, it only means the switch now exists in
+-- their menu. Backfilling with everything OFF would silently strip camera shake from the entire
+-- existing player base, and backfilling with an empty table would leave decodeComfortSettings to fill
+-- it in anyway -- correct, but it would make this migration a no-op that looks like it does something.
+Migrations[5] = function(raw: { [string]: any }): { [string]: any }
+	local profile = raw.Profile
+	if typeof(profile) == "table" then
+		local profileTable = profile :: { [string]: any }
+		local settings = profileTable.settings
+		if typeof(settings) == "table" and (settings :: { [string]: any }).Comfort == nil then
+			(settings :: { [string]: any }).Comfort = PlayerDataSystem.CreateDefaultComfortSettings()
 		end
 	end
 	return raw
@@ -1369,11 +1443,17 @@ end
 function PlayerDataSystem.Init(): ()
 	dataStore = DataStoreService:GetDataStore(StorageConfig.PlayerDataStoreName)
 
+	-- DELIBERATELY NOT Shared/PlayerLifecycle.lua, unlike the ten other Systems that took the same
+	-- add/sweep/remove triple through it. This System has no per-character work at all, so all the
+	-- binder would supply here is the sweep -- and this is the one place in the codebase where a
+	-- profile load and a final save are on the line, so the wiring stays flat, local, and readable
+	-- against this file's own design-decision 1 (LOAD TIMING) rather than routed through a helper
+	-- whose contract a reader would have to go and check. AdminActionSystem, which this file's own
+	-- comment used to point at as the matching pattern, HAS moved.
 	Players.PlayerAdded:Connect(onPlayerAdded)
 	Players.PlayerRemoving:Connect(onPlayerRemoving)
 	-- Defensive: anyone already connected when this System boots (Studio Team Create, or a slow
-	-- server start) still needs a load -- same pattern CombatSystem.lua/AdminActionSystem.lua
-	-- already use for their own PlayerAdded wiring.
+	-- server start) still needs a load.
 	for _, player in ipairs(Players:GetPlayers()) do
 		onPlayerAdded(player)
 	end

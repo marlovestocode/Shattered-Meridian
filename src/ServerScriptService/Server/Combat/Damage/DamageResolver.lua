@@ -129,6 +129,7 @@ function DamageResolver.Resolve(
 		-- One source of truth with the predicate above, never a second hand-written kind list.
 		AdvancesCombo = DamageResolver.AdvancesCombo(kind),
 		Knockback = nil,
+		Grab = nil,
 	}
 
 	if kind == "Clean" or kind == "Backstab" then
@@ -137,10 +138,12 @@ function DamageResolver.Resolve(
 		result.GuardDrain = authoredPosture * DamageConstants.Guard.PressurePerPostureDamage * outcomeScale
 		result.HitstunSeconds = DamageConstants.Hitstun.Seconds
 		result.Knockback = profile.Knockback
+		result.Grab = profile.Grab
 	elseif kind == "GuardBroken" then
 		result.Damage = authoredDamage * comboScale
 		result.HitstunSeconds = DamageConstants.Hitstun.Seconds
 		result.Knockback = profile.Knockback
+		result.Grab = profile.Grab
 	elseif kind == "Blocked" then
 		if defenderStateAtContact == "Staggered" then
 			result.Damage = authoredDamage * comboScale * (1 - DefenseConstants.Stagger.MitigationMultiplier)

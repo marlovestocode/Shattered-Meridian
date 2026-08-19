@@ -18,6 +18,15 @@
 	interaction). The direct-velocity path is used only for the coyote case, where the Humanoid
 	refuses to jump because it already believes it is falling.
 
+	AN ORDINARY JUMP, DELIBERATELY, EVEN AT A WALL. States/WallLaunching.lua owns the custom launch off
+	a wall too tall to vault, mantle, wall-run or catch -- this file used to fold a wall-facing boost
+	into the ordinary jump here, and that turned out to be the wrong seam: two genuinely different
+	moves (a plain jump, and a deliberate wall-scaling launch) were sharing one trigger and one set of
+	numbers. Splitting them into a higher-priority state of its own (WallLaunching, Priority 75, one
+	above this file's own 70) means a wall-facing jump press resolves to WallLaunching whenever its own
+	conditions are met and to this ordinary jump otherwise, with neither file needing to know the other
+	exists.
+
 	Momentum is fully preserved through a jump (ParkourConstants.Jump.MomentumRetainFraction, 1 by
 	default): a jump must never be a speed penalty in a momentum system, or the optimal play becomes
 	never jumping.

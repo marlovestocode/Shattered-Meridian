@@ -35,13 +35,14 @@
 	(DefenseSystem), or the HUD's guard readout (a future consumer of the DefenseState Attribute).
 ]]
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
+local Constants = require(ReplicatedStorage.Shared.Constants)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
@@ -61,6 +62,9 @@ local blockHeld = false
 -- Only the root part is held, not the character: the facing snap is the sole thing this module does
 -- to the body, and a cached character reference nothing reads is a field that goes stale silently.
 local rootPart: BasePart? = nil
+-- The local Humanoid, cached at bind for the parkour gate below. Cached rather than looked up per
+-- press for the same reason AttackInputClient caches its own: this runs on the input edge.
+local boundHumanoid: Humanoid? = nil
 
 -- ONE manager for the local player's whole lifetime, bound/unbound per life -- the same "construct
 -- once, Bind() per respawn" shape AnimationManager.new's own header recommends for a caller that owns
@@ -164,11 +168,26 @@ local function setBlockHeld(held: boolean): ()
 	)
 end
 
+-- Whether the movement framework has this body in a committed traversal. Mirrors the identical gate
+-- in Client/Combat/AttackInputClient.lua, off the same client-written Attribute, and is refused
+-- server-side in DefenseSystem.SetBlocking regardless -- see Shared/Parkour/ParkourOwnership.
+local function parkourOwnsBody(): boolean
+	local currentHumanoid = boundHumanoid
+	return currentHumanoid ~= nil and currentHumanoid:GetAttribute(Constants.Attributes.ParkourActionOwned) == true
+end
+
 local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 	if gameProcessed then
 		return
 	end
 	if KeybindManager.Matches("Block", input) then
+		-- Only the PRESS is gated. The release below is not, for the same reason it is not gated on
+		-- gameProcessed and for the same reason the server refuses only a Press: a guard already up when
+		-- a traversal started must still be able to come down, and a gate that can strand it raised is
+		-- worse than the one it closes.
+		if parkourOwnsBody() then
+			return
+		end
 		setBlockHeld(true)
 	end
 end
@@ -226,9 +245,16 @@ end
 
 -- Lifecycle -----------------------------------------------------------------------------------------
 
-local function bindCharacter(nextCharacter: Model): ()
-	local root = nextCharacter:FindFirstChild("HumanoidRootPart")
+local function bindCharacter(nextCharacter: Model, humanoid: Humanoid): ()
+	-- The Humanoid was already waited out by Shared/PlayerLifecycle.lua before this is called. The
+	-- HumanoidRootPart is NOT, and still needs its own wait here: it is this module's own extra
+	-- requirement, replicates independently of the Humanoid, and PlayerLifecycle deliberately knows
+	-- about exactly one part of a character so that every caller does not inherit every caller's
+	-- requirements. A missing root is survivable for a life (the gate that reads it simply refuses),
+	-- which is why it warns nothing and does not abort the bind.
+	local root = nextCharacter:WaitForChild("HumanoidRootPart", Constants.Network.WaitForChildTimeoutSeconds)
 	rootPart = if root and root:IsA("BasePart") then root else nil
+	boundHumanoid = humanoid
 
 	-- A new life never inherits the previous one's guard. The server rebuilds its own state on
 	-- registration; this is the client half of the same reset, and without it a player who died
@@ -245,6 +271,9 @@ end
 
 local function unbind(): ()
 	rootPart = nil
+	-- Dropped with the body it describes -- a stale Humanoid would leave the gate above reading a dead
+	-- character's last Attribute, which for a life that ended mid-vault reads true forever.
+	boundHumanoid = nil
 	-- Cleared without telling the server: the character this guard belonged to is gone, and the
 	-- server drops its own registration on the same event. Firing a release for a body that no longer
 	-- exists would be a remote call with nothing to act on.
@@ -266,12 +295,13 @@ function DefenseClient.Start(): ()
 	UserInputService.InputBegan:Connect(onInputBegan)
 	UserInputService.InputEnded:Connect(onInputEnded)
 
-	local localPlayer = Players.LocalPlayer
-	localPlayer.CharacterAdded:Connect(bindCharacter)
-	localPlayer.CharacterRemoving:Connect(unbind)
-	if localPlayer.Character then
-		bindCharacter(localPlayer.Character)
-	end
+	-- See Shared/PlayerLifecycle.lua: the Humanoid wait, the boot-thread task.spawn and the
+	-- post-yield "is this still the current character" re-check are its job now, not this file's.
+	PlayerLifecycle.BindLocalCharacter({
+		Scope = "DefenseClient",
+		OnCharacter = bindCharacter,
+		OnCharacterRemoving = unbind,
+	})
 
 	logger:info("DefenseClient started")
 end

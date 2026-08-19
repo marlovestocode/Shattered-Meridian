@@ -36,6 +36,7 @@ local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Parent.Parent.Components.Panel)
 local Divider = require(script.Parent.Parent.Parent.Components.Divider)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
+local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 local StepRail = require(script.Parent.StepRail)
 local OnboardingTypes = require(script.Parent.Types)
 
@@ -120,25 +121,13 @@ local function CreatorFrame(scope: Scope, props: CreatorFrameProps): Frame
 				},
 			},
 
-			scope:New "ScrollingFrame" {
+			ScrollArea(scope, {
 				Name = "Body",
 				Size = UDim2.new(1, 0, 1, -nonBodyHeight),
-				BackgroundTransparency = 1,
-				BorderSizePixel = 0,
 				LayoutOrder = 3,
-				-- 3px, no track (docs/design/intro-redesign-figma-spec.md section 7's Scrollbar note)
-				-- -- the redesign's scrollbar language, not Roblox's chunky default.
-				ScrollBarThickness = 3,
-				ScrollBarImageColor3 = Tokens.Border.Standard.Color,
-				ScrollBarImageTransparency = Tokens.Border.Standard.Transparency,
-				CanvasSize = UDim2.fromScale(0, 0),
-				-- Enum.AutomaticSize, not a separate "Enum.AutomaticCanvasSize" (no such enum exists)
-				-- -- same value Sidebar.lua/ContentArea.lua's own scrolling columns already use for
-				-- this exact property.
-				AutomaticCanvasSize = Enum.AutomaticSize.Y,
 
-				[Children] = props.BodyContent,
-			},
+				Children = props.BodyContent,
+			}),
 
 			scope:New "Frame" {
 				Name = "Footer",

@@ -56,6 +56,7 @@ local VALID_KINDS: { [string]: boolean } = {
 	LedgeClimb = true,
 	Leap = true,
 	Roll = true,
+	Dash = true,
 }
 
 local VALID_PHASES: { [string]: boolean } = {
@@ -67,7 +68,6 @@ local VALID_PHASES: { [string]: boolean } = {
 -- constants table, same reasoning as ObstacleClassifier.ClassifierConfig.
 export type ValidationConfig = {
 	MaxReportedSpeed: number,
-	MaxVerticalGainStuds: number,
 	MaxTravelSpeed: number,
 	MaxActionSeconds: number,
 	-- Read only by ResolveMomentumCarry -- see its own header for what they defend against.
@@ -163,12 +163,9 @@ end
 --   * Per-kind interval -- catches a stuck or scripted client re-firing one action every frame,
 --     more cheaply and more specifically than the shared rate limiter can. START REPORTS ONLY, and
 --     that restriction is load-bearing rather than a nicety -- see the End-phase note below.
---   * Duration -- a Start report may not claim an ownership window longer than MaxActionSeconds,
---     and an End report may not close a window that has been open longer than that (the server
---     expires those itself; a late End is a symptom, not something to honor).
---   * Travel between Start and End -- distance covered divided by elapsed time, against
---     MaxTravelSpeed. The one check that looks at the action as a whole rather than an instant, and
---     the only one that can catch a teleport disguised as a legitimate slide.
+--   * Duration -- a Start report may not claim an ownership window longer than MaxActionSeconds.
+--     An End report is NOT held to this any more -- see the End-phase branch's own header for why
+--     every plausibility check on that phase was removed, not just this one.
 --   * Duplicate Start -- a second Start for a kind already open, which would otherwise leave the
 --     first window's expiry orphaned.
 function ParkourValidation.Validate(
@@ -223,34 +220,33 @@ function ParkourValidation.Validate(
 		return true, nil
 	end
 
-	-- End phase. An End with no matching open window is not an error worth rejecting -- the server
-	-- expires windows on its own, so a slightly-late End for an already-expired action is the
-	-- expected, benign case and honoring it is a no-op. What IS rejected is an End whose implied
-	-- travel is impossible.
-	local startedAt = observed.OpenStartedAt
-	local startPosition = observed.OpenStartPosition
-	if observed.OpenKind ~= report.Kind or startedAt == nil or startPosition == nil then
-		return true, nil
-	end
-
-	local elapsed = observed.Now - startedAt
-	if elapsed > config.MaxActionSeconds then
-		return false, "ActionTooLong"
-	end
-
-	local travelled = (report.Position - startPosition).Magnitude
-	-- A floor on elapsed time so a near-instant action (a hop, a wall-jump) doesn't divide by
-	-- something close to zero and report an infinite speed for a perfectly ordinary two-stud move.
-	local effectiveElapsed = math.max(elapsed, 1 / 30)
-	if travelled / effectiveElapsed > config.MaxTravelSpeed then
-		return false, "ImplausibleTravel"
-	end
-
-	local verticalGain = report.Position.Y - startPosition.Y
-	if verticalGain > config.MaxVerticalGainStuds then
-		return false, "ImplausibleVerticalGain"
-	end
-
+	-- End phase. ALWAYS ACCEPTED, unconditionally -- including when a matching window IS open, which
+	-- is new. An End with no matching window was already accepted (the server expires windows on its
+	-- own, so a slightly-late End for an already-expired action is the benign case) -- what changed is
+	-- that a matching End used to still be checked for implied travel speed, elapsed duration and
+	-- vertical gain since the window opened, and refused if any looked implausible.
+	--
+	-- THIS WAS THE SAME BUG THE DUPLICATE-ACTION FIX ABOVE CLOSED, just reached through a different
+	-- rejection reason. That fix's own reasoning is not scoped to the interval check specifically --
+	-- read it again: "An End is a RELEASE: refusing one can never protect anything -- the worst a
+	-- flood of Ends can do is close windows that are already closed -- while granting one always
+	-- returns the player their own movement. There is no version of this check on the End phase that
+	-- is not strictly harmful." That argument applies to EVERY rejection reason on this phase equally,
+	-- and three were still live here: a Roll's End arriving with a slightly stale claim after a network
+	-- hiccup, a fast landing-roll's own honest vertical delta, or ordinary lag stretching elapsed past
+	-- MaxActionSeconds could each still refuse the release and strand ParkourVelocityOwned (and
+	-- therefore WalkSpeed, pinned to 0 by Server/Combat/Movement.ComputeDesiredWalkSpeed) until either
+	-- ParkourController's stranded-ownership watchdog's next retry or the server's own hard window
+	-- expiry rescued the player a beat later -- read in play as "I keep rolling and randomly lock up
+	-- for a second." Short, frequent, back-to-back-capable actions like Roll are exactly what turns a
+	-- rare edge case into something a player notices "after multiple rolls."
+	--
+	-- REMOVING THESE COSTS NOTHING THE REWARD PATH DEPENDS ON: ResolveMomentumCarry below clamps the
+	-- momentum carry an End actually grants against the SERVER'S OWN OBSERVED velocity, entirely
+	-- independent of the elapsed/travelled/vertical-gain numbers this branch used to gate on. No claim
+	-- in an End report -- honest or not -- was ever able to inflate that reward past what the server
+	-- can see the body actually doing, so there was no exploit here left to protect against, only an
+	-- honest player left to strand.
 	return true, nil
 end
 

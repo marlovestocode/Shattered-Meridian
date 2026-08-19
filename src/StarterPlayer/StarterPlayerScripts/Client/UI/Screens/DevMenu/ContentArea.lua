@@ -35,6 +35,7 @@ local Button = require(script.Parent.Parent.Parent.Components.Button)
 local Tab = require(script.Parent.Parent.Parent.Components.Tab)
 local TextField = require(script.Parent.Parent.Parent.Components.TextField)
 local AbilitySlot = require(script.Parent.Parent.Parent.Components.AbilitySlot)
+local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 local DevMenuTypes = require(script.Parent.Types)
 
 local Children = Fusion.Children
@@ -435,7 +436,7 @@ local function tabContent(
 		return use(selectedTab) == tabName
 	end)
 
-	return scope:New "ScrollingFrame" {
+	return ScrollArea(scope, {
 		Name = tabName .. "Content",
 		Size = scrollSize,
 		-- All four tab contents share one LayoutOrder: they occupy the same slot below the tab strip
@@ -444,20 +445,10 @@ local function tabContent(
 		-- layout space).
 		LayoutOrder = 2,
 		Visible = isVisible,
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-		ScrollingDirection = Enum.ScrollingDirection.Y,
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		CanvasSize = UDim2.fromScale(0, 0),
-		-- 3px, no track (docs/design/intro-redesign-figma-spec.md section 7's Scrollbar note), the
-		-- Border.Standard tint instead of a flat accent -- matches CreatorFrame.lua's own scrollbar.
-		ScrollBarThickness = 3,
-		ScrollBarImageColor3 = Tokens.Border.Standard.Color,
-		ScrollBarImageTransparency = Tokens.Border.Standard.Transparency,
 
-		[Children] = {
-			-- Right padding keeps section panels clear of the scrollbar (ScrollBarThickness above)
-			-- instead of its right edge overlapping panel borders.
+		Children = {
+			-- Right padding keeps section panels clear of the scrollbar (ScrollArea's own
+			-- ScrollBarThickness) instead of its right edge overlapping panel borders.
 			scope:New "UIPadding" {
 				PaddingRight = UDim.new(0, Tokens.Space.XS),
 			},
@@ -469,7 +460,7 @@ local function tabContent(
 			},
 			table.unpack(children),
 		},
-	} :: ScrollingFrame
+	})
 end
 
 -- Tab-strip row height -- a ContentArea-internal layout decision (unlike `width`/`bodyHeight` below,
@@ -550,6 +541,12 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	-- header. nil (nothing shown) until DevMenuClient's fetch resolves AND finds a newer version.
 	local versionBannerText: Fusion.Value<string?> = scope:Value(nil :: string?)
 
+	-- Debug dummy (Spawn tab) -- SERVER-WIDE guard toggle and an advisory active-count readout, same
+	-- "seeded on open, refreshed from what the server reports actually took effect" contract as
+	-- hitboxDebugActive above.
+	local dummyGuardActive = scope:Value(false)
+	local activeDummyCountDisplay = scope:Value(0)
+
 	-- Local-only raw input state for Teleport-To-Coordinates/Broadcast-Announcement -- neither is
 	-- exposed on the handle itself (same "screen owns its own raw input, fires already-validated
 	-- values" boundary the Reports tab's triage buttons and BugReport/init.lua's description field
@@ -589,6 +586,9 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local shutdownServerRequestedEvent = Instance.new("BindableEvent")
 	local instantRestartServerRequestedEvent = Instance.new("BindableEvent")
 	local spectateLockedTargetRequestedEvent = Instance.new("BindableEvent")
+	local spawnDebugDummyRequestedEvent = Instance.new("BindableEvent")
+	local despawnAllDebugDummiesRequestedEvent = Instance.new("BindableEvent")
+	local setDummyGuardRequestedEvent = Instance.new("BindableEvent")
 
 	local godmodeButtonText = scope:Computed(function(use)
 		return if use(godmodeActive) then "Godmode: On" else "Godmode: Off"
@@ -613,6 +613,12 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	end)
 	local spectateButtonText = scope:Computed(function(use)
 		return if use(spectatingActive) then "Spectating: On" else "Spectate Locked Target"
+	end)
+	local dummyGuardButtonText = scope:Computed(function(use)
+		return if use(dummyGuardActive) then "Guard: On" else "Guard: Off"
+	end)
+	local activeDummyCountText = scope:Computed(function(use)
+		return `Active: {use(activeDummyCountDisplay)}`
 	end)
 	-- Empty string (renders nothing) rather than "Loading..." while versionBannerText is nil -- this
 	-- banner is advisory chrome, not a value the admin is waiting on the way the flight tuner's
@@ -738,9 +744,11 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 		})
 	end
 
-	-- "Training Dummy"/"Training Bot Presets" sections (Spawn Training Dummy, the six bot-preset
-	-- buttons) were removed alongside the rest of the combat system -- CombatSystem.SpawnTrainingDummy/
-	-- SpawnTrainingBot no longer exist server-side. Emotes is now this tab's only section.
+	-- "Training Bot Presets" (the six bot-preset buttons) stays removed alongside the rest of the
+	-- deleted combat system -- CombatSystem.SpawnTrainingBot no longer exists server-side, and nothing
+	-- has rebuilt an AI-controlled sparring partner yet. "Training Dummy" is BACK, rebuilt from
+	-- scratch against the current combat stack -- see Server/Systems/DebugDummySystem.lua's own
+	-- header. Emotes is no longer this tab's only section.
 	local spawnTab = tabContent(scope, "Spawn", selectedTab, scrollSize, {
 		-- Emote System roll-path test trigger (Phase 2, radial emote wheel) -- exercises
 		-- EmoteUnlockService.GrantEmote/RollEmote end to end from a human tester's own button press,
@@ -756,6 +764,73 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 					rollRareEmoteRequestedEvent:Fire()
 				end,
 			}),
+		}),
+		-- Debug Dummy -- a real, fully-registered combatant against the rebuilt HitboxEngine/
+		-- DefenseSystem stack (see DebugDummySystem.lua's own header), spawned SpawnDistance studs in
+		-- front of the requesting admin. Guard is a SERVER-WIDE toggle covering every currently-active
+		-- (and every future) dummy at once -- there is no per-dummy target picker, the same "no
+		-- player-select UI" posture every other action on this screen already takes.
+		Section(scope, "Debug Dummy", 2, {
+			scope:New "Frame" {
+				Name = "SpawnRow",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				BackgroundTransparency = 1,
+				LayoutOrder = 1,
+
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						Padding = UDim.new(0, Tokens.Space.S),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					Button(scope, {
+						Text = "Spawn Debug Dummy",
+						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 1,
+						OnActivated = function()
+							spawnDebugDummyRequestedEvent:Fire()
+						end,
+					}),
+					Button(scope, {
+						Text = "Despawn All",
+						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 2,
+						OnActivated = function()
+							despawnAllDebugDummiesRequestedEvent:Fire()
+						end,
+					}),
+				},
+			},
+			scope:New "Frame" {
+				Name = "GuardRow",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				BackgroundTransparency = 1,
+				LayoutOrder = 2,
+
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						Padding = UDim.new(0, Tokens.Space.S),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					Tab(scope, {
+						Text = dummyGuardButtonText,
+						Selected = dummyGuardActive,
+						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 1,
+						OnActivated = function()
+							setDummyGuardRequestedEvent:Fire(not peek(dummyGuardActive))
+						end,
+					}),
+					Label(scope, {
+						Text = activeDummyCountText,
+						Scale = "Body",
+						Color = Tokens.Color.TextSecondary,
+						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 2,
+					}),
+				},
+			},
 		}),
 	})
 
@@ -1433,6 +1508,11 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 		VersionBannerText = versionBannerText,
 		SpectatingActive = spectatingActive,
 		SpectateLockedTargetRequested = spectateLockedTargetRequestedEvent.Event,
+		DummyGuardActive = dummyGuardActive,
+		ActiveDummyCountDisplay = activeDummyCountDisplay,
+		SpawnDebugDummyRequested = spawnDebugDummyRequestedEvent.Event,
+		DespawnAllDebugDummiesRequested = despawnAllDebugDummiesRequestedEvent.Event,
+		SetDummyGuardRequested = setDummyGuardRequestedEvent.Event,
 	}
 end
 

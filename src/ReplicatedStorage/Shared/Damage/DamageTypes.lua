@@ -92,6 +92,10 @@ export type DamageResult = {
 	-- rig that would apply it is the deleted RagdollController's territory and nothing rebuilds it
 	-- here. Carried so the eventual consumer does not have to re-resolve it.
 	Knockback: MoveTypes.MoveKnockback?,
+	-- Same "resolved, never applied here" contract as Knockback above -- Server/Combat/Grab/
+	-- GrabSystem.lua is the eventual consumer, subscribing to DamageSystem.OnApplied rather than this
+	-- layer reaching into it. Set in the same Clean/Backstab/GuardBroken branches Knockback is.
+	Grab: MoveTypes.MoveGrabConfig?,
 }
 
 -- Fired to both participants once per resolved contact. Everything each side needs to present the

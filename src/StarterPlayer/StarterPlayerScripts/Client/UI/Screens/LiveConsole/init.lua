@@ -2,7 +2,7 @@
 --[[
 	LiveConsole/init.lua
 
-	Owns: the Live Admin Console (F7) panel -- log list, Server/My Client source tabs, and
+	Owns: the Live Admin Console (F5) panel -- log list, Server/My Client source tabs, and
 	client-side-only level/text filters, Pause, and Clear. Follows CombatFeedback.lua/DevMenu's own
 	"screen exposes state, client module drives it from outside" split: ServerEntries/ClientEntries
 	are plain Fusion Values this screen renders from, written into entirely by
@@ -32,11 +32,12 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local Tokens = require(script.Parent.Parent.Tokens)
-local Panel = require(script.Parent.Parent.Components.Panel)
+local ModalScreen = require(script.Parent.Parent.Components.ModalScreen)
 local Label = require(script.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Components.Button)
 local Tab = require(script.Parent.Parent.Components.Tab)
 local TextField = require(script.Parent.Parent.Components.TextField)
+local ScrollArea = require(script.Parent.Parent.Components.ScrollArea)
 
 local Children = Fusion.Children
 local peek = Fusion.peek
@@ -195,182 +196,151 @@ function LiveConsole.Mount(scope: Scope, playerGui: PlayerGui): LiveConsoleHandl
 		})
 	end
 
-	scope:New "ScreenGui" {
+	ModalScreen(scope, playerGui, {
 		Name = "LiveConsole",
-		ResetOnSpawn = false,
-		Enabled = isOpen,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		Parent = playerGui,
+		Size = ROOT_SIZE,
+		IsOpen = isOpen,
 
-		[Children] = Panel(scope, {
-			Name = "Root",
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.fromScale(0.5, 0.5),
-			Size = ROOT_SIZE,
-			Elevated = true,
-			CornerAccent = true,
+		Children = {
+			-- Header: title, Server/My Client source tabs, close button.
+			scope:New "Frame" {
+				Name = "Header",
+				Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
+				BackgroundTransparency = 1,
+				LayoutOrder = 1,
 
-			Children = {
-				scope:New "UIPadding" {
-					PaddingTop = UDim.new(0, Tokens.Space.L),
-					PaddingBottom = UDim.new(0, Tokens.Space.L),
-					PaddingLeft = UDim.new(0, Tokens.Space.L),
-					PaddingRight = UDim.new(0, Tokens.Space.L),
-				},
-				scope:New "UIListLayout" {
-					FillDirection = Enum.FillDirection.Vertical,
-					HorizontalAlignment = Enum.HorizontalAlignment.Left,
-					Padding = UDim.new(0, Tokens.Space.M),
-					SortOrder = Enum.SortOrder.LayoutOrder,
-				},
+				[Children] = {
+					Label(scope, {
+						Text = "Live Admin Console",
+						Scale = "Heading",
+						AnchorPoint = Vector2.new(0, 0.5),
+						Position = UDim2.fromScale(0, 0.5),
+					}),
+					scope:New "Frame" {
+						Name = "SourceTabs",
+						AutomaticSize = Enum.AutomaticSize.X,
+						Size = UDim2.fromOffset(0, Tokens.Control.StepButtonSize),
+						AnchorPoint = Vector2.new(1, 0.5),
+						Position = UDim2.new(1, -Tokens.Control.CloseButtonClearance - Tokens.Space.M, 0.5, 0),
+						BackgroundTransparency = 1,
 
-				-- Header: title, Server/My Client source tabs, close button.
-				scope:New "Frame" {
-					Name = "Header",
-					Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
-					BackgroundTransparency = 1,
-					LayoutOrder = 1,
-
-					[Children] = {
-						Label(scope, {
-							Text = "Live Admin Console",
-							Scale = "Heading",
-							AnchorPoint = Vector2.new(0, 0.5),
-							Position = UDim2.fromScale(0, 0.5),
-						}),
-						scope:New "Frame" {
-							Name = "SourceTabs",
-							AutomaticSize = Enum.AutomaticSize.X,
-							Size = UDim2.fromOffset(0, Tokens.Control.StepButtonSize),
-							AnchorPoint = Vector2.new(1, 0.5),
-							Position = UDim2.new(1, -Tokens.Control.CloseButtonClearance - Tokens.Space.M, 0.5, 0),
-							BackgroundTransparency = 1,
-
-							[Children] = {
-								scope:New "UIListLayout" {
-									FillDirection = Enum.FillDirection.Horizontal,
-									Padding = UDim.new(0, Tokens.Space.S),
-									SortOrder = Enum.SortOrder.LayoutOrder,
-								},
-								sourceTab("Server", 1),
-								sourceTab("My Client", 2),
+						[Children] = {
+							scope:New "UIListLayout" {
+								FillDirection = Enum.FillDirection.Horizontal,
+								Padding = UDim.new(0, Tokens.Space.S),
+								SortOrder = Enum.SortOrder.LayoutOrder,
 							},
+							sourceTab("Server", 1),
+							sourceTab("My Client", 2),
 						},
-						Button(scope, {
-							Text = "X",
-							Size = UDim2.fromOffset(28, 28),
-							AnchorPoint = Vector2.new(1, 0.5),
-							Position = UDim2.fromScale(1, 0.5),
-							OnActivated = function()
-								closeRequestedEvent:Fire()
-							end,
-						}),
 					},
+					Button(scope, {
+						Text = "X",
+						Size = UDim2.fromOffset(28, 28),
+						AnchorPoint = Vector2.new(1, 0.5),
+						Position = UDim2.fromScale(1, 0.5),
+						OnActivated = function()
+							closeRequestedEvent:Fire()
+						end,
+					}),
 				},
-
-				-- Toolbar: min-level cycle, search, Pause, Clear.
-				scope:New "Frame" {
-					Name = "Toolbar",
-					Size = UDim2.new(1, 0, 0, TOOLBAR_HEIGHT),
-					BackgroundTransparency = 1,
-					LayoutOrder = 2,
-
-					[Children] = {
-						scope:New "UIListLayout" {
-							FillDirection = Enum.FillDirection.Horizontal,
-							VerticalAlignment = Enum.VerticalAlignment.Center,
-							Padding = UDim.new(0, Tokens.Space.S),
-							SortOrder = Enum.SortOrder.LayoutOrder,
-						},
-						Button(scope, {
-							Text = minLevelText,
-							Size = UDim2.fromOffset(110, Tokens.Control.StepButtonSize),
-							LayoutOrder = 1,
-							OnActivated = function()
-								local nextIndex = peek(minLevelIndex) + 1
-								if nextIndex > #LEVEL_ORDER then
-									nextIndex = 1
-								end
-								minLevelIndex:set(nextIndex)
-							end,
-						}),
-						TextField(scope, {
-							Text = searchText,
-							PlaceholderText = "Search...",
-							Size = UDim2.fromOffset(220, Tokens.Control.StepButtonSize),
-							LayoutOrder = 2,
-						}),
-						Tab(scope, {
-							Text = "Pause",
-							Selected = paused,
-							Size = UDim2.fromOffset(80, Tokens.Control.StepButtonSize),
-							LayoutOrder = 3,
-							OnActivated = function()
-								local nowPaused = not peek(paused)
-								if nowPaused then
-									frozenEntries:set(peek(liveSourceEntries))
-								end
-								paused:set(nowPaused)
-							end,
-						}),
-						Button(scope, {
-							Text = "Clear",
-							Size = UDim2.fromOffset(80, Tokens.Control.StepButtonSize),
-							LayoutOrder = 4,
-							OnActivated = function()
-								if peek(selectedSource) == "Server" then
-									serverEntries:set({})
-								else
-									clientEntries:set({})
-								end
-							end,
-						}),
-					},
-				},
-
-				scope:New "ScrollingFrame" {
-					Name = "LogList",
-					Size = UDim2.new(1, 0, 1, -(HEADER_HEIGHT + TOOLBAR_HEIGHT + FOOTER_HEIGHT + Tokens.Space.M * 3)),
-					LayoutOrder = 3,
-					BackgroundColor3 = Tokens.Color.Background,
-					BackgroundTransparency = 0,
-					BorderSizePixel = 0,
-					ScrollingDirection = Enum.ScrollingDirection.Y,
-					AutomaticCanvasSize = Enum.AutomaticSize.Y,
-					CanvasSize = UDim2.fromScale(0, 0),
-					ScrollBarThickness = 3,
-					ScrollBarImageColor3 = Tokens.Border.Standard.Color,
-					ScrollBarImageTransparency = Tokens.Border.Standard.Transparency,
-
-					[Children] = {
-						scope:New "UICorner" {
-							CornerRadius = Tokens.Radius.Sharp,
-						},
-						scope:New "UIPadding" {
-							PaddingTop = UDim.new(0, Tokens.Space.S),
-							PaddingBottom = UDim.new(0, Tokens.Space.S),
-							PaddingLeft = UDim.new(0, Tokens.Space.S),
-							PaddingRight = UDim.new(0, Tokens.Space.S),
-						},
-						scope:New "UIListLayout" {
-							FillDirection = Enum.FillDirection.Vertical,
-							Padding = UDim.new(0, 2),
-							SortOrder = Enum.SortOrder.LayoutOrder,
-						},
-						logRows,
-					},
-				},
-
-				Label(scope, {
-					Text = statusText,
-					Scale = "Detail",
-					Color = Tokens.Color.TextSecondary,
-					Size = UDim2.new(1, 0, 0, FOOTER_HEIGHT),
-					LayoutOrder = 4,
-				}),
 			},
-		}),
-	}
+
+			-- Toolbar: min-level cycle, search, Pause, Clear.
+			scope:New "Frame" {
+				Name = "Toolbar",
+				Size = UDim2.new(1, 0, 0, TOOLBAR_HEIGHT),
+				BackgroundTransparency = 1,
+				LayoutOrder = 2,
+
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						VerticalAlignment = Enum.VerticalAlignment.Center,
+						Padding = UDim.new(0, Tokens.Space.S),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					Button(scope, {
+						Text = minLevelText,
+						Size = UDim2.fromOffset(110, Tokens.Control.StepButtonSize),
+						LayoutOrder = 1,
+						OnActivated = function()
+							local nextIndex = peek(minLevelIndex) + 1
+							if nextIndex > #LEVEL_ORDER then
+								nextIndex = 1
+							end
+							minLevelIndex:set(nextIndex)
+						end,
+					}),
+					TextField(scope, {
+						Text = searchText,
+						PlaceholderText = "Search...",
+						Size = UDim2.fromOffset(220, Tokens.Control.StepButtonSize),
+						LayoutOrder = 2,
+					}),
+					Tab(scope, {
+						Text = "Pause",
+						Selected = paused,
+						Size = UDim2.fromOffset(80, Tokens.Control.StepButtonSize),
+						LayoutOrder = 3,
+						OnActivated = function()
+							local nowPaused = not peek(paused)
+							if nowPaused then
+								frozenEntries:set(peek(liveSourceEntries))
+							end
+							paused:set(nowPaused)
+						end,
+					}),
+					Button(scope, {
+						Text = "Clear",
+						Size = UDim2.fromOffset(80, Tokens.Control.StepButtonSize),
+						LayoutOrder = 4,
+						OnActivated = function()
+							if peek(selectedSource) == "Server" then
+								serverEntries:set({})
+							else
+								clientEntries:set({})
+							end
+						end,
+					}),
+				},
+			},
+
+			ScrollArea(scope, {
+				Name = "LogList",
+				Size = UDim2.new(1, 0, 1, -(HEADER_HEIGHT + TOOLBAR_HEIGHT + FOOTER_HEIGHT + Tokens.Space.M * 3)),
+				LayoutOrder = 3,
+				BackgroundColor3 = Tokens.Color.Background,
+				BackgroundTransparency = 0,
+
+				Children = {
+					scope:New "UICorner" {
+						CornerRadius = Tokens.Radius.Sharp,
+					},
+					scope:New "UIPadding" {
+						PaddingTop = UDim.new(0, Tokens.Space.S),
+						PaddingBottom = UDim.new(0, Tokens.Space.S),
+						PaddingLeft = UDim.new(0, Tokens.Space.S),
+						PaddingRight = UDim.new(0, Tokens.Space.S),
+					},
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Vertical,
+						Padding = UDim.new(0, 2),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					logRows,
+				},
+			}),
+
+			Label(scope, {
+				Text = statusText,
+				Scale = "Detail",
+				Color = Tokens.Color.TextSecondary,
+				Size = UDim2.new(1, 0, 0, FOOTER_HEIGHT),
+				LayoutOrder = 4,
+			}),
+		},
+	})
 
 	return {
 		IsOpen = isOpen,

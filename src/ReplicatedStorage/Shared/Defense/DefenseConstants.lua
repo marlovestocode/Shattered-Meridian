@@ -5,7 +5,9 @@
 	Owns: the Defense System's tunables. Standalone, and deliberately NOT a section of
 	Shared/Constants.lua -- the same choice HitboxEngineConstants.lua makes and for the same reason:
 	this system is a module, and a module that can be added or removed without editing the game's
-	central constants table is the concrete form of that claim.
+	central constants table is the concrete form of that claim. The one exception is
+	DefenseStateAttribute below, which aliases onto Constants.Attributes.DefenseState rather than
+	duplicating the literal -- see that field's own header for why.
 
 	THERE IS NO PARRY WINDOW LENGTH IN THIS FILE, and its absence is the point. A parry's timing comes
 	from markers authored on the animation asset (Shared/Defense/ParryWindows.lua), so retiming a parry
@@ -18,6 +20,13 @@
 	Does not own: window timing (ParryWindows.lua), any damage number (nothing in this system applies
 	damage), or the engine's own tunables (HitboxEngineConstants.lua).
 ]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- Only reference into Shared/Constants.lua this file makes: DefenseStateAttribute below is an alias
+-- onto Constants.Attributes.DefenseState, not a second definition of the string -- see that field's
+-- own header.
+local Constants = require(ReplicatedStorage.Shared.Constants)
 
 local DefenseConstants = {}
 
@@ -208,12 +217,17 @@ DefenseConstants.MaxPendingContactsPerFrame = 128
 
 -- Integration --------------------------------------------------------------------------------------
 
--- Humanoid Attribute mirroring the defender's live DefenseState, as a string. Purely informational:
--- nothing in this system gates on it. It exists because Humanoid Attributes replicate to every client
+-- Humanoid Attribute mirroring the defender's live DefenseState, as a string. Nothing in THIS system
+-- gates on it -- but something outside it now does, so it is no longer purely informational and must
+-- not be renamed or made lossy on that assumption: Server/Systems/RunSystem.lua reads anything other
+-- than "Neutral" as "a combat action is committing this body" and forces the run's stage and charge to
+-- zero for the duration. See Constants.Attributes.CombatBusyUntil, its counterpart for the attack
+-- side, for the whole contract. It exists because Humanoid Attributes replicate to every client
 -- for free, so the HUD -- and any future spectator or debug tooling -- can read what a remote
 -- character is doing without this system adding a broadcast remote of its own. Same shape and same
--- reasoning as Constants.Attributes.ParkourState.
-DefenseConstants.DefenseStateAttribute = "DefenseState"
+-- reasoning as Constants.Attributes.ParkourState. Aliased onto Constants.Attributes.DefenseState
+-- rather than a second literal, now that RunSystem.lua also reads this Attribute by name.
+DefenseConstants.DefenseStateAttribute = Constants.Attributes.DefenseState
 
 DefenseConstants.Network = {
 	RemoteNames = {

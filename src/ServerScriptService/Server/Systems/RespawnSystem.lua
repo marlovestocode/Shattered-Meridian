@@ -47,6 +47,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 
 local RespawnSystem = {}
@@ -119,22 +120,20 @@ function RespawnSystem.Init(): ()
 	-- Any character arriving by ANY path (this System's own respawn, CharacterCreationSystem's
 	-- session-first spawn, DevMenuSystem's ForceRespawnTarget) invalidates a pending timer -- the
 	-- player already has a body, so a queued LoadCharacter would only destroy and replace it.
-	local function watchPlayer(player: Player): ()
-		player.CharacterAdded:Connect(function()
+	--
+	-- Through Shared/PlayerLifecycle.lua, which is also what supplies the "players who joined before
+	-- this connected" sweep -- there are none under Main.server.lua's boot order, but this System must
+	-- not silently depend on being initialized before the first PlayerAdded, and that is now a property
+	-- of the binder rather than a loop each caller remembers to write.
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "RespawnSystem",
+		OnPlayerRemoving = function(player: Player)
+			respawnGeneration[player] = nil
+		end,
+		OnCharacter = function(player: Player)
 			bumpGeneration(player)
-		end)
-	end
-
-	-- Players who joined before this connected (there are none under Main.server.lua's boot order,
-	-- but this System must not silently depend on being initialized before the first PlayerAdded).
-	for _, player in Players:GetPlayers() do
-		watchPlayer(player)
-	end
-	Players.PlayerAdded:Connect(watchPlayer)
-
-	Players.PlayerRemoving:Connect(function(player: Player)
-		respawnGeneration[player] = nil
-	end)
+		end,
+	})
 
 	logger:info("RespawnSystem.Init() complete")
 end

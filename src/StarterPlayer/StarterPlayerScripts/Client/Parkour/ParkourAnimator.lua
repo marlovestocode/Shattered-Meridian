@@ -268,6 +268,18 @@ local VARIANT_CLIPS: {
 			Clips = {
 				Left = "WallRunLeft",
 				Right = "WallRunRight",
+				-- The catch: one-shot and non-scaling, like the kick and for the same reason -- it is a
+				-- single beat of impact, not a cadence, and its horizontal speed is zero by construction
+				-- so there would be nothing for the speed scaling to read. Unmirrored, unlike the run and
+				-- the kick, because a head-on catch has no side to mirror: the character hits the wall
+				-- square and faces into it (States/WallRunning's updateCatching commands exactly that).
+				Catch = {
+					Key = "WallCatch",
+					Looped = false,
+					ScalesWithSpeed = false,
+					FadeIn = PROFILES.Snap.FadeIn,
+					FadeOut = PROFILES.Snap.FadeOut,
+				},
 				KickLeft = {
 					Key = "WallJumpLeft",
 					Looped = false,
@@ -311,6 +323,24 @@ local VARIANT_CLIPS: {
 			FadeIn = PROFILES.Settle.FadeIn,
 			FadeOut = PROFILES.Settle.FadeOut,
 			Clips = { Hang = "LedgeHang", Shimmy = "LedgeShimmy" },
+		},
+		-- THE ONLY VARIANT-DRIVEN STATE WITH NO STATE_CLIPS FALLBACK, and that absence is deliberate
+		-- rather than an oversight. Leaping/LedgeHanging/Landing each keep a dual entry so a transition
+		-- frame that arrives before the variant is published still plays something sensible. A dash has
+		-- no sensible shared clip: the four directions are genuinely different motions, and playing a
+		-- FRONT dash for a back-dash would read worse than playing nothing at all. States/Dashing.lua
+		-- publishes its quadrant in Enter, before any frame can reach this resolver, so the gap those
+		-- other three cover does not exist here.
+		--
+		-- Snap profile, one-shot, non-scaling: a dash is a single readable beat whose opening frame is
+		-- the whole point, and whose speed is an authored curve rather than a cadence -- scaling
+		-- playback to a decaying burst speed would make the clip slow down as the dash finished.
+		Dashing = {
+			Looped = false,
+			ScalesWithSpeed = false,
+			FadeIn = PROFILES.Snap.FadeIn,
+			FadeOut = PROFILES.Snap.FadeOut,
+			Clips = { Front = "DashFront", Back = "DashBack", Left = "DashLeft", Right = "DashRight", Up = "DashUp" },
 		},
 		-- Also present in STATE_CLIPS above (as the no-variant fallback, played once the charge has
 		-- committed to the flight). States/Leaping.lua publishes "Charge" for the brief wind-up

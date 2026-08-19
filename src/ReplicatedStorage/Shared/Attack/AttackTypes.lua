@@ -51,21 +51,19 @@ export type AttackRequest = {
 	Kind: AttackKind,
 	-- 1..AttackConstants.Hotbar.SlotCount, and only meaningful for Kind == "Hotbar".
 	Slot: number?,
-	-- Only meaningful for Kind == "Hotbar", and ADMIN-GATED SERVER-SIDE rather than trusted.
+	-- Only meaningful for Kind == "Hotbar", and NOT TRUSTED for an ordinary player -- see
+	-- Server/Combat/Attack/AttackRequestSystem.lua's resolveRequest for the two paths this splits
+	-- into.
 	--
-	-- The hotbar's slot -> MoveId binding lives entirely on the client (Client/Combat/
-	-- HotbarBindings.lua, written by the Move Editor's "Bind to slot" control), because there is no
-	-- server-side loadout system yet -- ArtSystem is still an empty Init(). So the server has no way
-	-- to turn a bare slot number into a move, and the binding has to travel with the request.
+	-- For an admin (Server/Config/AdminConfig.lua's whitelist), this field is still trusted as sent:
+	-- that is the Move Editor's live-fire test path (Client/Combat/HotbarBindings.lua, written by the
+	-- "Bind to slot" control), the only way left to throw a move that isn't authored as an Art at all
+	-- since TestFireMove/SpawnPreviewDummy were removed with the old combat system.
 	--
-	-- That would be a "throw any move you like" hole if it were trusted, so it is not: the request
-	-- handler refuses a Hotbar kind outright unless the sender is in Server/Config/AdminConfig.lua's
-	-- whitelist, exactly the re-check HotbarBindings.lua's own header already documents as the
-	-- contract ("firing a bound move still round-trips through the server's own AdminConfig
-	-- re-check"). For everyone else the hotbar is inert, which is what it already was.
-	--
-	-- When a real loadout system exists, this field is what it deletes: the slot number stays, the
-	-- server resolves it from persisted state, and the admin gate goes with the MoveId.
+	-- For everyone else, this field is IGNORED. The server resolves the slot against
+	-- ArtSystem.GetEquipped(player) -- the same persisted binding CharacterMenuClient's equip UI
+	-- writes through ArtSystem.Equip -- and gates the result on ArtSystem.CanUse. A client cannot
+	-- claim a slot holds an art it does not, because the claim is never read.
 	MoveId: string?,
 }
 

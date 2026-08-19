@@ -47,6 +47,7 @@ local Label = require(script.Parent.Parent.Parent.Components.Label)
 local TrackedLabel = require(script.Parent.Parent.Parent.Components.TrackedLabel)
 local Divider = require(script.Parent.Parent.Parent.Components.Divider)
 local SectionIcon = require(script.Parent.Parent.Parent.Components.SectionIcon)
+local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 local MoveList = require(script.Parent.MoveList)
 local MoveEditorTypes = require(script.Parent.Types)
 
@@ -105,6 +106,7 @@ local SECTION_ORDER: { { Id: SectionId, Text: string } } = {
 	{ Id = "Animation", Text = "Animation" },
 	{ Id = "Movement", Text = "Movement" },
 	{ Id = "Knockback", Text = "Knockback" },
+	{ Id = "Grab", Text = "Grab" },
 	{ Id = "Projectile", Text = "Projectile" },
 	{ Id = "ObjectStun", Text = "Object Stun" },
 	{ Id = "Art", Text = "Art" },
@@ -233,6 +235,10 @@ function SidebarModule.Mount(scope: Scope, width: number, height: number, props:
 		local draft = use(props.Draft)
 		return draft ~= nil and draft.Knockback ~= nil
 	end)
+	local hasGrab = scope:Computed(function(use)
+		local draft = use(props.Draft)
+		return draft ~= nil and draft.Grab ~= nil
+	end)
 	local hasProjectile = scope:Computed(function(use)
 		local draft = use(props.Draft)
 		return draft ~= nil and draft.Projectile ~= nil
@@ -247,15 +253,16 @@ function SidebarModule.Mount(scope: Scope, width: number, height: number, props:
 	local statusDots: { [string]: Fusion.Computed<boolean> } = {
 		Movement = hasMovement,
 		Knockback = hasKnockback,
+		Grab = hasGrab,
 		Projectile = hasProjectile,
 		ObjectStun = hasObjectStun,
 	}
 
-	-- Movement/Knockback/Projectile/ObjectStun are non-functional for a Default move -- see this
-	-- file's own header -- so those four (and only those four) nav items hide entirely whenever the
+	-- Movement/Knockback/Grab/Projectile/ObjectStun are non-functional for a Default move -- see this
+	-- file's own header -- so those five (and only those five) nav items hide entirely whenever the
 	-- current draft's Category == "Default". Every other section stays visible regardless.
 	local HIDDEN_FOR_DEFAULT: { [string]: boolean } =
-		{ Movement = true, Knockback = true, Projectile = true, ObjectStun = true }
+		{ Movement = true, Knockback = true, Grab = true, Projectile = true, ObjectStun = true }
 	local isDefaultMove = scope:Computed(function(use)
 		local draft = use(props.Draft)
 		return draft ~= nil and draft.Category == MoveTypes.DefaultCategory
@@ -300,24 +307,16 @@ function SidebarModule.Mount(scope: Scope, width: number, height: number, props:
 			},
 			moveListRoot,
 			Divider.Plain(scope, { LayoutOrder = 2 }),
-			scope:New "ScrollingFrame" {
+			ScrollArea(scope, {
 				Name = "SectionsGroup",
 				-- Exactly the height left over once the Moves group, the divider and the two list gaps
 				-- above have taken theirs -- see MOVES_GROUP_HEIGHT's own comment on why this scrolls.
-				Size = UDim2.new(1, 0, 1, -(MOVES_GROUP_HEIGHT + DIVIDER_HEIGHT + Tokens.Space.M * 2)),
-				BackgroundTransparency = 1,
-				BorderSizePixel = 0,
-				LayoutOrder = 3,
-				ScrollingDirection = Enum.ScrollingDirection.Y,
-				AutomaticCanvasSize = Enum.AutomaticSize.Y,
-				CanvasSize = UDim2.fromScale(0, 0),
 				-- Matches PropertyEditor.lua's own section panes, so the two scrollable regions of this
 				-- screen read as the same control rather than two different ones.
-				ScrollBarThickness = 3,
-				ScrollBarImageColor3 = Tokens.Border.Standard.Color,
-				ScrollBarImageTransparency = Tokens.Border.Standard.Transparency,
+				Size = UDim2.new(1, 0, 1, -(MOVES_GROUP_HEIGHT + DIVIDER_HEIGHT + Tokens.Space.M * 2)),
+				LayoutOrder = 3,
 
-				[Children] = {
+				Children = {
 					-- Keeps the last nav item clear of the scrollbar's own track, the same inset the
 					-- section panes use.
 					scope:New "UIPadding" { PaddingRight = UDim.new(0, Tokens.Space.XS) },
@@ -335,7 +334,7 @@ function SidebarModule.Mount(scope: Scope, width: number, height: number, props:
 					}),
 					table.unpack(navItems),
 				},
-			},
+			}),
 		},
 	}) :: Frame
 

@@ -59,14 +59,15 @@
 	(Client/Combat/HotbarBindings.lua), or what any of it costs (the server).
 ]]
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
+local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Types = require(ReplicatedStorage.Shared.Types)
 
@@ -123,7 +124,38 @@ local manager = AnimationManager.new({ Name = "AttackInputClient" })
 
 -- Sending -------------------------------------------------------------------------------------------
 
+-- The local Humanoid, cached at bind, for the one question below that needs it. Kept as a field
+-- rather than looked up per press: this runs on the input edge, and a FindFirstChildOfClass on every
+-- mouse click for a value that changes once a life is a lookup nobody needs to pay for.
+local boundHumanoid: Humanoid? = nil
+
+-- Whether the movement framework currently has this body in a committed traversal -- a vault, a
+-- slide, a wall-run, a ledge hang. Refused HERE as well as server-side, and this is squarely inside
+-- this module's "filtered only where it genuinely knows the answer" rule: the state machine that
+-- decides this runs on this very client, so the answer is not a guess about server state the way
+-- "which move does this press resolve to" would be.
+--
+-- The server's own gate in AttackRequestSystem.Throw is still the authority and still refuses these
+-- independently -- see Shared/Parkour/ParkourOwnership on why the two see slightly different sets and
+-- which one this is here to cover.
+local function parkourOwnsBody(): boolean
+	local currentHumanoid = boundHumanoid
+	return currentHumanoid ~= nil and currentHumanoid:GetAttribute(Constants.Attributes.ParkourActionOwned) == true
+end
+
 local function sendRequest(request: AttackTypes.AttackRequest): ()
+	if parkourOwnsBody() then
+		-- Dropped outright, never buffered -- the same choice the server's own gate makes by keeping
+		-- "ParkourAction" out of AttackConstants.Input.TransientRefusals. A press queued through a vault
+		-- and flushed on landing is exactly the free hit the gate exists to remove.
+		-- Gated the same way this layer's server half gates its own per-press lines: a mashed button
+		-- during a long wall-run is many presses a second, and anything logged per press is its own
+		-- performance problem (see AttackConstants.Debug.Enabled's header).
+		if AttackConstants.Debug.Enabled and AttackConstants.Debug.LogRefused then
+			logger:debug("Attack press dropped -- a parkour action owns the body")
+		end
+		return
+	end
 	local remote = requestRemote
 	if not remote then
 		-- Only reachable in the window between a keypress and Start() resolving the remote, which the
@@ -247,6 +279,31 @@ local function playSwing(payload: AttackStartedPayload): ()
 	})
 end
 
+-- Cuts the LOCAL player's own in-flight swing animation short, the instant this client learns a hit
+-- just put its owner into real hitstun. CombatFeedbackClient.lua is the only caller, gated the exact
+-- same way it already gates HitStop.FreezeVictimMovement: Role == "Defender" and one of the three
+-- outcome kinds DamageResolver.Resolve actually grants DamageConstants.Hitstun.Seconds for (Clean,
+-- Backstab, GuardBroken).
+--
+-- WHY THIS HAS TO EXIST AT ALL. DamageSystem.applyOutcome cancels the victim's swing SERVER-SIDE the
+-- moment a qualifying hit resolves (cancelSwingOf -> HitboxEngine.CancelAttack), which stops the
+-- hitbox and the attack state machine immediately -- but that cancellation has no remote of its own
+-- and reaches no client. Attack_Started is the only message this layer ever sends about a swing, and
+-- it is sent once, at the moment the swing began; nothing tells the swing's OWN client that the
+-- server just cut it short. Left alone, a swing thrown a moment before taking a hit keeps playing on
+-- this client all the way to its own MaxSeconds (playSwing's own ceiling) regardless of the character
+-- now sitting in hitstun -- an M1 that visibly keeps swinging through a lockout that has already
+-- started, which is exactly the "should be blocked by hitstun" gap this closes. The attack GATE itself
+-- was always correct (DamageSystem.CanAttack already refuses a NEW throw for the same window); this is
+-- the missing other half, cutting the swing that was already in flight when the window opened.
+--
+-- A plain SetClaim(nil): retiring a claim nothing currently holds is Clear's own documented no-op (see
+-- AnimationManager.Clear), so calling this on every qualifying hit costs nothing when the victim was
+-- not mid-swing at all -- there is no need to check GetActiveClip first.
+function AttackInputClient.CancelSwing(): ()
+	manager:SetClaim(ATTACK_LAYER, SWING_SOURCE, nil)
+end
+
 -- Records the cooldown the server just imposed, and tells whoever is drawing it. Fires once on start
 -- and once on expiry rather than every frame -- a consumer that wants a smooth sweep animates
 -- between the two edges itself, which is cheaper than pushing a value 60 times a second to a HUD that
@@ -311,7 +368,7 @@ end
 
 -- Lifecycle ------------------------------------------------------------------------------------------
 
-local function bindCharacter(character: Model): ()
+local function bindCharacter(character: Model, humanoid: Humanoid): ()
 	-- A new life inherits no cooldowns: the server drops them on the same event (
 	-- AttackRequestSystem's own unbindCharacter), so leaving them here would show a HUD sweep for a
 	-- restriction that no longer exists.
@@ -322,12 +379,22 @@ local function bindCharacter(character: Model): ()
 		end
 	end
 
+	-- Already waited out by Shared/PlayerLifecycle.lua, which is also what guarantees this is only
+	-- ever called for a life whose Humanoid actually arrived -- manager:Bind below fails PERMANENTLY
+	-- for a life bound without one (AnimationManager.Bind logs one warning and stays "Unbound" until
+	-- the next CharacterAdded; nothing here ever retries), so "no Humanoid, no bind" is a correctness
+	-- requirement of this module and not a defensive nicety.
+	boundHumanoid = humanoid
+
 	-- Bind() runs Unbind() first thing internally, so the previous life's claims and tracks are
 	-- dropped without this needing to clear ATTACK_LAYER separately.
 	manager:Bind(character)
 end
 
 local function unbind(): ()
+	-- Dropped with the body it describes. A stale Humanoid here would have the gate above reading a
+	-- dead character's last Attribute value, which for a life that ended mid-vault reads true forever.
+	boundHumanoid = nil
 	manager:Unbind()
 end
 
@@ -348,12 +415,14 @@ function AttackInputClient.Start(): ()
 
 	UserInputService.InputBegan:Connect(onInputBegan)
 
-	local localPlayer = Players.LocalPlayer
-	localPlayer.CharacterAdded:Connect(bindCharacter)
-	localPlayer.CharacterRemoving:Connect(unbind)
-	if localPlayer.Character then
-		bindCharacter(localPlayer.Character)
-	end
+	-- See Shared/PlayerLifecycle.lua. This module's own copy of the wait/spawn/re-check comment was one
+	-- of fifteen; the behaviour it described is now the shared binder's, so there is one place left to
+	-- get it right.
+	PlayerLifecycle.BindLocalCharacter({
+		Scope = "AttackInputClient",
+		OnCharacter = bindCharacter,
+		OnCharacterRemoving = unbind,
+	})
 
 	logger:info("AttackInputClient started")
 end

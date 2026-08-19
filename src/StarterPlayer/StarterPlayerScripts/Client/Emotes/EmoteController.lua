@@ -34,20 +34,18 @@
 	AnimationTrack itself (Client/FX/EmoteAnimator.lua).
 ]]
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Types = require(ReplicatedStorage.Shared.Types)
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local EmoteAnimator = require(script.Parent.Parent.FX.EmoteAnimator)
 
 local logger = Logger.scope("EmoteController")
 
 local EmoteController = {}
-
-local localPlayer = Players.LocalPlayer
 
 local requestPlayRemote: RemoteEvent? = nil
 local requestSetLoadoutSlotRemote: RemoteEvent? = nil
@@ -71,10 +69,6 @@ function EmoteController.RequestSetLoadoutSlot(slotIndex: number, emoteId: strin
 		return
 	end
 	requestSetLoadoutSlotRemote:FireServer(slotIndex, emoteId)
-end
-
-local function bindLocalCharacter(character: Model): ()
-	EmoteAnimator.BindCharacter(character)
 end
 
 function EmoteController.Start(): ()
@@ -114,12 +108,15 @@ function EmoteController.Start(): ()
 		EmoteAnimator.Stop()
 	end)
 
-	if localPlayer.Character then
-		task.spawn(bindLocalCharacter, localPlayer.Character)
-	end
-	localPlayer.CharacterAdded:Connect(function(character: Model)
-		task.spawn(bindLocalCharacter, character)
-	end)
+	-- See Shared/PlayerLifecycle.lua. EmoteAnimator.BindCharacter does its own Humanoid/Animator
+	-- lookup, so waiting for the Humanoid first is not new behaviour here -- it just moves the wait to
+	-- the one place that also re-checks the character is still current afterwards.
+	PlayerLifecycle.BindLocalCharacter({
+		Scope = "EmoteController",
+		OnCharacter = function(character: Model)
+			EmoteAnimator.BindCharacter(character)
+		end,
+	})
 
 	logger:info("EmoteController.Start() complete")
 end

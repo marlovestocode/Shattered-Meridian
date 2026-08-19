@@ -4,15 +4,16 @@
 
 	Owns: server-side authorization and request handling for whitelist-gated developer tooling
 	(Constants.Debug.DevMenu for tunables; Server/Config/AdminConfig.lua for the whitelist itself).
-	Every request re-checks AdminConfig.AuthorizedUserIds[player.UserId] itself, regardless of what
-	the client believes. That list deliberately lives in a server-only module rather than in
-	Constants.lua, which replicates -- see AdminConfig.lua's own header. DevMenuClient.lua therefore
-	no longer holds a local copy to gate itself with; it asks this System instead, over the
-	GetSidebarStats RemoteFunction it already calls at startup, and a rejection from any handler here
-	is the authorization answer. Unlike Logger.lua, this System
-	is NOT Studio-gated -- Constants.Debug.DevMenu's own header is explicit that dev tooling is
-	meant to work in live servers too; safety comes entirely from the whitelist plus this System's
-	own re-check on every request, never from RunService:IsStudio() or from being hidden.
+	Every request re-checks the whitelist itself (via checkDevMenuPreconditions ->
+	Server/Network/AdminGate.Check), regardless of what the client believes. That list deliberately
+	lives in a server-only module rather than in Constants.lua, which replicates -- see
+	AdminConfig.lua's own header. DevMenuClient.lua therefore no longer holds a local copy to gate
+	itself with; it asks this System instead, over the GetSidebarStats RemoteFunction it already
+	calls at startup, and a rejection from any handler here is the authorization answer. Unlike
+	Logger.lua, this System is NOT Studio-gated -- Constants.Debug.DevMenu's own header is explicit
+	that dev tooling is meant to work in live servers too; safety comes entirely from the whitelist
+	plus this System's own re-check on every request, never from RunService:IsStudio() or from being
+	hidden.
 
 	Does not own: what a dev action actually does -- AdminActionSystem owns the
 	Godmode/Flying/FlightCollide/Frozen/Invisible/SpeedMultiplier/Teleport override actions,
@@ -29,11 +30,16 @@
 	deliberate exception (a genuine broadcast to every client, not just the requesting admin), so it's
 	a RemoteEvent instead.
 
-	No longer owns (combat system removed): SpawnDummy/SpawnTrainingBot (training dummy/bot creation
-	lived in CombatSystem.lua/TrainingBotSystem.lua) and SetTargetHealth/ResetTargetCombatState (direct
-	health mutation and combat-state reset). resolveActionTarget's lock-on lookup was also
+	No longer owns (combat system removed): SetTargetHealth/ResetTargetCombatState (direct health
+	mutation and combat-state reset -- these stay gone). resolveActionTarget's lock-on lookup was also
 	CombatSystem's -- every admin action now simply targets whichever player the "Players" tab row
 	names, or the calling admin themselves.
+
+	SPAWNDUMMY IS BACK, pointed at the rebuilt stack. handleSpawnDebugDummy/handleDespawnAllDebugDummies/
+	handleSetDummyGuard/handleGetDebugDummyState below delegate to Server/Systems/DebugDummySystem.lua,
+	a from-scratch module (not a CombatSystem revival -- see that module's own header) that spawns a
+	real HitboxEngine/DefenseSystem-registered combatant. SpawnTrainingBot stays orphaned -- an
+	AI-controlled sparring partner is a materially bigger feature nothing has rebuilt yet.
 
 	GetHitboxDebug/SetHitboxDebug are BACK, pointed at the rebuilt engine. They used to toggle the
 	deleted HitboxResolver.lua's visualisation through a small HitboxDebugState.lua holder; the state
@@ -47,18 +53,22 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 
 local AdminActionSystem = require(script.Parent.AdminActionSystem)
+local DebugDummySystem = require(script.Parent.DebugDummySystem)
 local VersionWatchSystem = require(script.Parent.VersionWatchSystem)
 local FlightTuning = require(script.Parent.Parent.DevMenu.FlightTuning)
 local BugReportSystem = require(script.Parent.BugReportSystem)
 local ModerationSystem = require(script.Parent.ModerationSystem)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
-local AdminConfig = require(script.Parent.Parent.Config.AdminConfig)
+local AdminGate = require(script.Parent.Parent.Network.AdminGate)
 local EmoteUnlockService = require(script.Parent.EmoteUnlockService)
 local HitboxEngine = require(script.Parent.Parent.Combat.HitboxEngine.HitboxEngine)
 
@@ -79,39 +89,26 @@ local DevMenuConfig = Constants.Debug.DevMenu
 -- per-Heartbeat polling remote) would be the kind of case that legitimately earns its own bucket.
 local rateLimiter = RateLimiter.New(Constants.NetworkBudget.MaxRemoteCallsPerSecondPerPlayer)
 
--- Reads Server/Config/AdminConfig.lua, not Constants -- the whitelist deliberately lives in a
--- server-only module so it never replicates to clients. See AdminConfig.lua's own header.
-local function isAuthorized(player: Player): boolean
-	return AdminConfig.AuthorizedUserIds[player.UserId] == true
-end
-
 -- Shared auth + rate-limit precondition, unifying what every one of the handlers below used to
--- hand-duplicate -- the same failure mode any hand-duplicated gate is one edit away from repeating.
--- actionName feeds both the "X rejected: ..." log message and the caller's own "X received" debug
--- line, so callers only need to name their action once. `limiter` defaults to the shared `rateLimiter`
--- above -- every handler in this file now uses the shared bucket (see that variable's own comment).
--- Returns (true, nil) when the request may proceed, or (false, Reason) with the Reason string every
--- handler's own Result shape already uses.
-local function checkDevMenuPreconditions(
-	player: Player,
-	actionName: string,
-	limiter: RateLimiter.RateLimiterInstance?
-): (boolean, string?)
-	if not isAuthorized(player) then
-		logger:warn(actionName .. " rejected: not authorized", { player = player.Name, userId = player.UserId })
-		return false, "NotAuthorized"
-	end
-	if (limiter or rateLimiter):IsLimited(player) then
-		logger:debug(actionName .. " rejected: rate limited", { player = player.Name, userId = player.UserId })
-		return false, "RateLimited"
-	end
-	return true, nil
+-- hand-duplicate -- Server/Network/AdminGate.lua's own Check now owns the auth-check + rate-limit +
+-- rejection-logging shape itself (this file's own comment above is the origin that module's header
+-- cites); this wrapper stays local only to pin every call site here to the shared `rateLimiter`
+-- bucket above without repeating it at each of the 37 call sites. `actionName` feeds both the
+-- "X rejected: ..." log message and the caller's own "X received" debug line, so callers only need
+-- to name their action once. Returns (true, nil) when the request may proceed, or (false, Reason)
+-- with the Reason string every handler's own Result shape already uses.
+local function checkDevMenuPreconditions(player: Player, actionName: string): (boolean, string?)
+	return AdminGate.Check(player, actionName, rateLimiter)
 end
 
 -- Shared "does this player have a live character with a HumanoidRootPart" lookup, used by every
 -- teleport-flavored action below (TeleportToTarget/BringTarget/JumpToReporter). A missing root part
 -- is treated the same way a missing character is ("NoCharacter") since none of these actions have
 -- anything meaningful to do with a rootPart-less character.
+-- Thin logging wrapper around Shared/CharacterUtil.lua's RootOf -- kept local rather than folded into
+-- that shared module because the debug-log reason ("no character" vs "no root part") and the
+-- `logPrefix`-per-caller shape are specific to this System's own handlers, not something every other
+-- CharacterUtil caller would want.
 local function getRootPart(player: Player, logPrefix: string): (BasePart?, string?)
 	local character = player.Character
 	if not character then
@@ -119,12 +116,12 @@ local function getRootPart(player: Player, logPrefix: string): (BasePart?, strin
 		return nil, "NoCharacter"
 	end
 
-	local rootPartInstance = character:FindFirstChild("HumanoidRootPart")
-	if not rootPartInstance or not rootPartInstance:IsA("BasePart") then
+	local rootPartInstance = CharacterUtil.RootOf(character)
+	if not rootPartInstance then
 		logger:debug(logPrefix .. " rejected: no root part", { player = player.Name })
 		return nil, "NoCharacter"
 	end
-	return rootPartInstance :: BasePart, nil
+	return rootPartInstance, nil
 end
 
 -- Closed-whitelist string-to-enum lookup, unifying the several call sites below that used to each
@@ -506,10 +503,12 @@ local function handleBroadcastAnnouncement(player: Player, rawMessage: unknown):
 	return { Success = true }
 end
 
--- Module-local (not per-player) armed state -- see this function's own Constants.lua comment
--- (ShutdownConfirmWindowSeconds/ShutdownDelaySeconds) for the two-press confirmation shape. 0 (not
--- armed) rather than a boolean, so the window itself expires without a separate timer to cancel.
-local shutdownArmedUntil: number = 0
+-- Per-admin (keyed by UserId), not module-local -- docs/architecture/2026-08-audit.md section 3.6.10
+-- flagged the prior module-local shape: any authorized admin's confirm press executed whichever
+-- admin's arm was still open, not necessarily their own. 0 (not armed) rather than a missing key, so
+-- the window itself expires without a separate timer to cancel. Cleared on PlayerRemoving below so a
+-- departed admin's stale arm can never be confirmed by someone else re-using the slot.
+local shutdownArmedUntil: { [number]: number } = {}
 
 local function handleShutdownServer(player: Player): Types.DevMenuActionResult
 	logger:debug("ShutdownServer received", { player = player.Name, userId = player.UserId })
@@ -520,15 +519,15 @@ local function handleShutdownServer(player: Player): Types.DevMenuActionResult
 	end
 
 	local now = os.clock()
-	if now >= shutdownArmedUntil then
-		shutdownArmedUntil = now + DevMenuConfig.ShutdownConfirmWindowSeconds
+	if now >= (shutdownArmedUntil[player.UserId] or 0) then
+		shutdownArmedUntil[player.UserId] = now + DevMenuConfig.ShutdownConfirmWindowSeconds
 		-- Unconditional Warn-level log for the initiating admin's UserId -- this is the one action
 		-- where under-logging would be a real problem (see this System's own process reminders).
 		logger:warn("ShutdownServer armed", { player = player.Name, userId = player.UserId })
 		return { Success = false, Reason = "ConfirmationRequired" }
 	end
 
-	shutdownArmedUntil = 0
+	shutdownArmedUntil[player.UserId] = nil
 	logger:warn("ShutdownServer confirmed -- server shutting down", {
 		player = player.Name,
 		userId = player.UserId,
@@ -547,14 +546,15 @@ local function handleShutdownServer(player: Player): Types.DevMenuActionResult
 end
 
 -- Instant Restart Server admin action -- same two-press server-armed confirmation shape as
--- handleShutdownServer above (own module-local armed-until var, so arming one of these two actions
--- never arms or disarms the other), but the second press kicks IMMEDIATELY, no
+-- handleShutdownServer above (own per-admin armed-until table, so arming one of these two actions
+-- never arms or disarms the other, and arming it never arms it for a different admin either -- see
+-- shutdownArmedUntil's own comment), but the second press kicks IMMEDIATELY, no
 -- ShutdownDelaySeconds countdown wait -- see Constants.Debug.DevMenu.InstantRestartConfirmWindowSeconds's
 -- own header for why this exists as a distinct, faster action alongside Shutdown Server rather than
 -- replacing it: an admin who has just published a place update and wants this server cycled onto it
 -- right away has no reason to sit through a countdown warning meant for a planned maintenance
 -- window.
-local instantRestartArmedUntil: number = 0
+local instantRestartArmedUntil: { [number]: number } = {}
 
 local function handleInstantRestartServer(player: Player): Types.DevMenuActionResult
 	logger:debug("InstantRestartServer received", { player = player.Name, userId = player.UserId })
@@ -565,15 +565,15 @@ local function handleInstantRestartServer(player: Player): Types.DevMenuActionRe
 	end
 
 	local now = os.clock()
-	if now >= instantRestartArmedUntil then
-		instantRestartArmedUntil = now + DevMenuConfig.InstantRestartConfirmWindowSeconds
+	if now >= (instantRestartArmedUntil[player.UserId] or 0) then
+		instantRestartArmedUntil[player.UserId] = now + DevMenuConfig.InstantRestartConfirmWindowSeconds
 		-- Unconditional Warn-level log, same "under-logging would be a real problem" standard
 		-- ShutdownServer's own arming log applies to itself.
 		logger:warn("InstantRestartServer armed", { player = player.Name, userId = player.UserId })
 		return { Success = false, Reason = "ConfirmationRequired" }
 	end
 
-	instantRestartArmedUntil = 0
+	instantRestartArmedUntil[player.UserId] = nil
 	logger:warn("InstantRestartServer confirmed -- server restarting immediately", {
 		player = player.Name,
 		userId = player.UserId,
@@ -896,6 +896,88 @@ local function handleSetHitboxDebug(player: Player, rawEnabled: unknown): Types.
 	return { Success = true, Enabled = HitboxEngine.IsDebugVolumesEnabled() }
 end
 
+-- Debug dummy ("Spawn" tab) -------------------------------------------------------------------------
+
+-- Spawns one debug dummy SpawnDistance studs in front of the requesting admin's own character, facing
+-- them -- same geometry as every other "spawn near me" admin convenience (see getRootPart above),
+-- never a player-select UI. Delegates entirely to Server/Systems/DebugDummySystem.lua; this handler
+-- owns only authorization/validation and the position math.
+local function handleSpawnDebugDummy(player: Player): Types.DevMenuActionResult
+	logger:debug("SpawnDebugDummy received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "SpawnDebugDummy")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+
+	local rootPart, rootPartFailureReason = getRootPart(player, "SpawnDebugDummy")
+	if not rootPart then
+		return { Success = false, Reason = rootPartFailureReason }
+	end
+
+	local spawnCFrame = rootPart.CFrame * CFrame.new(0, 0, -Constants.Debug.TrainingDummy.SpawnDistance)
+	local model, spawnFailureReason = DebugDummySystem.Spawn(spawnCFrame)
+	if not model then
+		return { Success = false, Reason = spawnFailureReason or "SpawnFailed" }
+	end
+
+	logger:info("SpawnDebugDummy accepted", { player = player.Name })
+	return { Success = true }
+end
+
+-- Clears every active debug dummy at once -- the Spawn tab's deliberate full-reset companion to
+-- SpawnDebugDummy above (MaxActive eviction already handles the "too many at once" case one at a
+-- time; this is for a tester who wants a clean training area right now).
+local function handleDespawnAllDebugDummies(player: Player): Types.DevMenuActionResult
+	logger:debug("DespawnAllDebugDummies received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "DespawnAllDebugDummies")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+
+	local count = DebugDummySystem.DespawnAll()
+	logger:info("DespawnAllDebugDummies accepted", { player = player.Name, count = count })
+	return { Success = true }
+end
+
+-- Server-wide guard toggle -- see DebugDummySystem.SetGuard's own header for why this applies to
+-- every active dummy at once rather than needing a per-dummy picker. Returns the value that actually
+-- took effect (always the request here, but echoed the same "never let the client guess a server-wide
+-- toggle" way SetHitboxDebug's own handler above does).
+local function handleSetDummyGuard(player: Player, rawEnabled: unknown): Types.DevMenuDebugDummyStateResult
+	logger:debug("SetDummyGuard received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "SetDummyGuard")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+	if typeof(rawEnabled) ~= "boolean" then
+		return { Success = false, Reason = "InvalidRequest" }
+	end
+
+	local guardEnabled = DebugDummySystem.SetGuard(rawEnabled)
+	logger:info("SetDummyGuard accepted", { player = player.Name, enabled = guardEnabled })
+	return { Success = true, GuardEnabled = guardEnabled, ActiveCount = DebugDummySystem.ActiveCount() }
+end
+
+-- Fetch-once-on-open for the Spawn tab -- same "never let a joining admin's client guess a
+-- server-wide toggle's truth" reasoning handleGetHitboxDebug above already establishes.
+local function handleGetDebugDummyState(player: Player): Types.DevMenuDebugDummyStateResult
+	logger:debug("GetDebugDummyState received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "GetDebugDummyState")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+
+	return {
+		Success = true,
+		GuardEnabled = DebugDummySystem.IsGuardEnabled(),
+		ActiveCount = DebugDummySystem.ActiveCount(),
+	}
+end
+
 local function handleGetSidebarStats(player: Player): Types.DevMenuSidebarStatsResult
 	logger:debug("GetSidebarStats received", { player = player.Name, userId = player.UserId })
 
@@ -1167,209 +1249,121 @@ local function handleJumpToReporter(player: Player, rawReportId: unknown): Types
 	return { Success = true }
 end
 
--- Shared pcall-wrap-and-log-error boilerplate for OnServerInvoke registration, unifying what all 15
--- remotes below used to hand-duplicate in Init(). `name` feeds the error log message; the handler's
--- own first parameter is always the requesting Player (every handler above takes one), reused here
--- purely for the error-log's `player.Name` field, not passed through specially otherwise -- pcall
--- forwards every argument (Player included) straight to `handler` unchanged. On a caught error,
--- returns a same-shaped `{ Success = false, Reason = "InternalError" }` cast to whatever Result type
--- the specific handler declares -- every one of this System's Result types shares that Success/Reason
--- pair (Types.DevMenu*Result), so the same literal fits all of them; the `:: any` bridge is required
--- because `Result` is a generic here and Luau can't otherwise verify a literal table matches an
--- unresolved generic type parameter.
-local function wrapHandler<Result, Args...>(name: string, handler: (Player, Args...) -> Result): (Player, Args...) -> Result
-	return function(player: Player, ...: Args...): Result
-		local ok, resultOrError = pcall(handler, player, ...)
-		if not ok then
-			logger:error(name .. " handler errored", { player = player.Name, errorMessage = tostring(resultOrError) })
-			return ({ Success = false, Reason = "InternalError" } :: any) :: Result
-		end
-		return resultOrError :: Result
-	end
-end
+-- The pcall-wrap-and-log-error boilerplate every RemoteFunction below used to hand-duplicate in
+-- Init() now lives in Shared/RemoteHandler.WrapInvoke -- see that module's own header. The literal
+-- error result below is shared across every handler in REMOTE_HANDLERS, since every one of this
+-- System's Result types shares the same Success/Reason pair (Types.DevMenu*Result).
+local DEV_MENU_INTERNAL_ERROR_RESULT = { Success = false, Reason = "InternalError" }
+
+-- Every RemoteFunction this System registers, as data rather than 37 hand-duplicated 5-line blocks.
+-- RemoteKey indexes DevMenuConfig.RemoteNames; Name is what RemoteHandler.WrapInvoke logs a caught
+-- error under -- usually identical to RemoteKey, EXCEPT SpawnDummy below, which keeps the config's
+-- un-renamed "SpawnDummy" key (see that field's own comment) paired with the handler's real name.
+-- Handler is cast to `any` because this table deliberately holds handlers of different Result/Args
+-- types side by side -- the same heterogeneity RemoteHandler.WrapInvoke's own generic accepts;
+-- Init() still gets a fully-typed `(Player, Args...) -> Result` back out of it for each one.
+type RemoteHandlerSpec = {
+	RemoteKey: string,
+	Name: string,
+	Handler: (Player, ...any) -> any,
+}
+local REMOTE_HANDLERS: { RemoteHandlerSpec } = {
+	{ RemoteKey = "RollEmote", Name = "RollEmote", Handler = handleRollEmote :: any },
+	{ RemoteKey = "SetTargetGodmode", Name = "SetTargetGodmode", Handler = handleSetTargetGodmode :: any },
+	{ RemoteKey = "SetTargetFlight", Name = "SetTargetFlight", Handler = handleSetTargetFlight :: any },
+	{
+		RemoteKey = "SetTargetFlightCollide",
+		Name = "SetTargetFlightCollide",
+		Handler = handleSetTargetFlightCollide :: any,
+	},
+	{ RemoteKey = "ListFlightTuning", Name = "ListFlightTuning", Handler = handleListFlightTuning :: any },
+	{ RemoteKey = "AdjustFlightTuning", Name = "AdjustFlightTuning", Handler = handleAdjustFlightTuning :: any },
+	{ RemoteKey = "ResetFlightTuning", Name = "ResetFlightTuning", Handler = handleResetFlightTuning :: any },
+	{ RemoteKey = "ListBugReports", Name = "ListBugReports", Handler = handleListBugReports :: any },
+	{
+		RemoteKey = "UpdateBugReportStatus",
+		Name = "UpdateBugReportStatus",
+		Handler = handleUpdateBugReportStatus :: any,
+	},
+	{ RemoteKey = "AddBugReportNote", Name = "AddBugReportNote", Handler = handleAddBugReportNote :: any },
+	{ RemoteKey = "SetBugReportPriority", Name = "SetBugReportPriority", Handler = handleSetBugReportPriority :: any },
+	{ RemoteKey = "AssignBugReport", Name = "AssignBugReport", Handler = handleAssignBugReport :: any },
+	{ RemoteKey = "JumpToReporter", Name = "JumpToReporter", Handler = handleJumpToReporter :: any },
+	{ RemoteKey = "SetTargetFrozen", Name = "SetTargetFrozen", Handler = handleSetTargetFrozen :: any },
+	{ RemoteKey = "SetTargetInvisible", Name = "SetTargetInvisible", Handler = handleSetTargetInvisible :: any },
+	{
+		RemoteKey = "SetTargetSpeedMultiplier",
+		Name = "SetTargetSpeedMultiplier",
+		Handler = handleSetTargetSpeedMultiplier :: any,
+	},
+	{ RemoteKey = "TeleportToTarget", Name = "TeleportToTarget", Handler = handleTeleportToTarget :: any },
+	{ RemoteKey = "BringTarget", Name = "BringTarget", Handler = handleBringTarget :: any },
+	{
+		RemoteKey = "TeleportToCoordinates",
+		Name = "TeleportToCoordinates",
+		Handler = handleTeleportToCoordinates :: any,
+	},
+	{ RemoteKey = "ForceRespawnTarget", Name = "ForceRespawnTarget", Handler = handleForceRespawnTarget :: any },
+	{
+		RemoteKey = "BroadcastAnnouncement",
+		Name = "BroadcastAnnouncement",
+		Handler = handleBroadcastAnnouncement :: any,
+	},
+	{ RemoteKey = "ShutdownServer", Name = "ShutdownServer", Handler = handleShutdownServer :: any },
+	{ RemoteKey = "InstantRestartServer", Name = "InstantRestartServer", Handler = handleInstantRestartServer :: any },
+	{ RemoteKey = "ListPlayers", Name = "ListPlayers", Handler = handleListPlayers :: any },
+	{ RemoteKey = "KickPlayer", Name = "KickPlayer", Handler = handleKickPlayer :: any },
+	{ RemoteKey = "BanPlayer", Name = "BanPlayer", Handler = handleBanPlayer :: any },
+	{ RemoteKey = "MutePlayer", Name = "MutePlayer", Handler = handleMutePlayer :: any },
+	{
+		RemoteKey = "ResetTargetPlayerData",
+		Name = "ResetTargetPlayerData",
+		Handler = handleResetTargetPlayerData :: any,
+	},
+	{ RemoteKey = "SetSuspectedCheater", Name = "SetSuspectedCheater", Handler = handleSetSuspectedCheater :: any },
+	{ RemoteKey = "GetSidebarStats", Name = "GetSidebarStats", Handler = handleGetSidebarStats :: any },
+	{ RemoteKey = "GetHitboxDebug", Name = "GetHitboxDebug", Handler = handleGetHitboxDebug :: any },
+	{ RemoteKey = "SetHitboxDebug", Name = "SetHitboxDebug", Handler = handleSetHitboxDebug :: any },
+	-- Config key stays "SpawnDummy" (DevMenuConfig.lua never renamed it -- see that field's own
+	-- comment, "the direct successor to that action, not a new feature sharing an old label"), but
+	-- the handler and its error-log name are the real "SpawnDebugDummy" identity.
+	{ RemoteKey = "SpawnDummy", Name = "SpawnDebugDummy", Handler = handleSpawnDebugDummy :: any },
+	{
+		RemoteKey = "DespawnAllDebugDummies",
+		Name = "DespawnAllDebugDummies",
+		Handler = handleDespawnAllDebugDummies :: any,
+	},
+	{ RemoteKey = "SetDummyGuard", Name = "SetDummyGuard", Handler = handleSetDummyGuard :: any },
+	{ RemoteKey = "GetDebugDummyState", Name = "GetDebugDummyState", Handler = handleGetDebugDummyState :: any },
+	{ RemoteKey = "GetServerVersionInfo", Name = "GetServerVersionInfo", Handler = handleGetServerVersionInfo :: any },
+}
 
 function DevMenuSystem.Init(): ()
-	local rollEmoteRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.RollEmote)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.RollEmote })
-	rollEmoteRemote.OnServerInvoke = wrapHandler("RollEmote", handleRollEmote)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.RollEmote })
-
-	local setGodmodeRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetTargetGodmode)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetTargetGodmode })
-	setGodmodeRemote.OnServerInvoke = wrapHandler("SetTargetGodmode", handleSetTargetGodmode)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetTargetGodmode })
-
-	local setFlightRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetTargetFlight)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetTargetFlight })
-	setFlightRemote.OnServerInvoke = wrapHandler("SetTargetFlight", handleSetTargetFlight)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetTargetFlight })
-
-	local setFlightCollideRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetTargetFlightCollide)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetTargetFlightCollide })
-	setFlightCollideRemote.OnServerInvoke = wrapHandler("SetTargetFlightCollide", handleSetTargetFlightCollide)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetTargetFlightCollide })
-
-	local listFlightTuningRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ListFlightTuning)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ListFlightTuning })
-	listFlightTuningRemote.OnServerInvoke = wrapHandler("ListFlightTuning", handleListFlightTuning)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ListFlightTuning })
-
-	local adjustFlightTuningRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.AdjustFlightTuning)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.AdjustFlightTuning })
-	adjustFlightTuningRemote.OnServerInvoke = wrapHandler("AdjustFlightTuning", handleAdjustFlightTuning)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.AdjustFlightTuning })
-
-	local resetFlightTuningRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ResetFlightTuning)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ResetFlightTuning })
-	resetFlightTuningRemote.OnServerInvoke = wrapHandler("ResetFlightTuning", handleResetFlightTuning)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ResetFlightTuning })
-
-	local listBugReportsRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ListBugReports)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ListBugReports })
-	listBugReportsRemote.OnServerInvoke = wrapHandler("ListBugReports", handleListBugReports)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ListBugReports })
-
-	local updateBugReportStatusRemote =
-		NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.UpdateBugReportStatus)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.UpdateBugReportStatus })
-	updateBugReportStatusRemote.OnServerInvoke = wrapHandler("UpdateBugReportStatus", handleUpdateBugReportStatus)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.UpdateBugReportStatus })
-
-	local addBugReportNoteRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.AddBugReportNote)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.AddBugReportNote })
-	addBugReportNoteRemote.OnServerInvoke = wrapHandler("AddBugReportNote", handleAddBugReportNote)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.AddBugReportNote })
-
-	local setBugReportPriorityRemote =
-		NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetBugReportPriority)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetBugReportPriority })
-	setBugReportPriorityRemote.OnServerInvoke = wrapHandler("SetBugReportPriority", handleSetBugReportPriority)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetBugReportPriority })
-
-	local assignBugReportRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.AssignBugReport)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.AssignBugReport })
-	assignBugReportRemote.OnServerInvoke = wrapHandler("AssignBugReport", handleAssignBugReport)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.AssignBugReport })
-
-	local jumpToReporterRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.JumpToReporter)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.JumpToReporter })
-	jumpToReporterRemote.OnServerInvoke = wrapHandler("JumpToReporter", handleJumpToReporter)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.JumpToReporter })
-
-	local setFrozenRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetTargetFrozen)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetTargetFrozen })
-	setFrozenRemote.OnServerInvoke = wrapHandler("SetTargetFrozen", handleSetTargetFrozen)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetTargetFrozen })
-
-	local setInvisibleRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetTargetInvisible)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetTargetInvisible })
-	setInvisibleRemote.OnServerInvoke = wrapHandler("SetTargetInvisible", handleSetTargetInvisible)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetTargetInvisible })
-
-	local setSpeedMultiplierRemote =
-		NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetTargetSpeedMultiplier)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetTargetSpeedMultiplier })
-	setSpeedMultiplierRemote.OnServerInvoke = wrapHandler("SetTargetSpeedMultiplier", handleSetTargetSpeedMultiplier)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetTargetSpeedMultiplier })
-
-	local teleportToTargetRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.TeleportToTarget)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.TeleportToTarget })
-	teleportToTargetRemote.OnServerInvoke = wrapHandler("TeleportToTarget", handleTeleportToTarget)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.TeleportToTarget })
-
-	local bringTargetRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.BringTarget)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.BringTarget })
-	bringTargetRemote.OnServerInvoke = wrapHandler("BringTarget", handleBringTarget)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.BringTarget })
-
-	local teleportToCoordinatesRemote =
-		NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.TeleportToCoordinates)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.TeleportToCoordinates })
-	teleportToCoordinatesRemote.OnServerInvoke = wrapHandler("TeleportToCoordinates", handleTeleportToCoordinates)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.TeleportToCoordinates })
-
-	local forceRespawnTargetRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ForceRespawnTarget)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ForceRespawnTarget })
-	forceRespawnTargetRemote.OnServerInvoke = wrapHandler("ForceRespawnTarget", handleForceRespawnTarget)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ForceRespawnTarget })
-
-	local broadcastAnnouncementRemote =
-		NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.BroadcastAnnouncement)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.BroadcastAnnouncement })
-	broadcastAnnouncementRemote.OnServerInvoke = wrapHandler("BroadcastAnnouncement", handleBroadcastAnnouncement)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.BroadcastAnnouncement })
-
-	local shutdownServerRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ShutdownServer)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ShutdownServer })
-	shutdownServerRemote.OnServerInvoke = wrapHandler("ShutdownServer", handleShutdownServer)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ShutdownServer })
-
-	local instantRestartServerRemote =
-		NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.InstantRestartServer)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.InstantRestartServer })
-	instantRestartServerRemote.OnServerInvoke = wrapHandler("InstantRestartServer", handleInstantRestartServer)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.InstantRestartServer })
+	for _, spec in REMOTE_HANDLERS do
+		local remoteName = DevMenuConfig.RemoteNames[spec.RemoteKey]
+		local remote = NetworkBridge.CreateRemoteFunction(remoteName)
+		logger:debug("Remote created", { name = remoteName })
+		remote.OnServerInvoke =
+			RemoteHandler.WrapInvoke(logger, spec.Name, DEV_MENU_INTERNAL_ERROR_RESULT, spec.Handler)
+		logger:debug("Handler connected", { remote = remoteName })
+	end
 
 	-- RemoteEvent, not RemoteFunction -- broadcast to every client (Client/Announcement/
 	-- AnnouncementClient.lua, unconditional for every player, not just admins). Created here (not
-	-- inside broadcastAnnouncement) so it exists before any handler could possibly fire it.
+	-- inside broadcastAnnouncement) so it exists before any handler could possibly fire it. Not in
+	-- REMOTE_HANDLERS above: that table is RemoteFunctions only, this is the one deliberate
+	-- RemoteEvent exception (see this module's own header).
 	announcementRemote = NetworkBridge.CreateRemoteEvent(DevMenuConfig.RemoteNames.Announcement)
 	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.Announcement })
 
-	local listPlayersRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ListPlayers)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ListPlayers })
-	listPlayersRemote.OnServerInvoke = wrapHandler("ListPlayers", handleListPlayers)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ListPlayers })
-
-	local kickPlayerRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.KickPlayer)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.KickPlayer })
-	kickPlayerRemote.OnServerInvoke = wrapHandler("KickPlayer", handleKickPlayer)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.KickPlayer })
-
-	local banPlayerRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.BanPlayer)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.BanPlayer })
-	banPlayerRemote.OnServerInvoke = wrapHandler("BanPlayer", handleBanPlayer)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.BanPlayer })
-
-	local mutePlayerRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.MutePlayer)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.MutePlayer })
-	mutePlayerRemote.OnServerInvoke = wrapHandler("MutePlayer", handleMutePlayer)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.MutePlayer })
-
-	local resetPlayerDataRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.ResetTargetPlayerData)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.ResetTargetPlayerData })
-	resetPlayerDataRemote.OnServerInvoke = wrapHandler("ResetTargetPlayerData", handleResetTargetPlayerData)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.ResetTargetPlayerData })
-
-	local setSuspectedCheaterRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetSuspectedCheater)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetSuspectedCheater })
-	setSuspectedCheaterRemote.OnServerInvoke = wrapHandler("SetSuspectedCheater", handleSetSuspectedCheater)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetSuspectedCheater })
-
-	local getSidebarStatsRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.GetSidebarStats)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.GetSidebarStats })
-	getSidebarStatsRemote.OnServerInvoke = wrapHandler("GetSidebarStats", handleGetSidebarStats)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.GetSidebarStats })
-
-	local getHitboxDebugRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.GetHitboxDebug)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.GetHitboxDebug })
-	getHitboxDebugRemote.OnServerInvoke = wrapHandler("GetHitboxDebug", handleGetHitboxDebug)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.GetHitboxDebug })
-
-	local setHitboxDebugRemote = NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.SetHitboxDebug)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.SetHitboxDebug })
-	setHitboxDebugRemote.OnServerInvoke = wrapHandler("SetHitboxDebug", handleSetHitboxDebug)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.SetHitboxDebug })
-
-	local getServerVersionInfoRemote =
-		NetworkBridge.CreateRemoteFunction(DevMenuConfig.RemoteNames.GetServerVersionInfo)
-	logger:debug("Remote created", { name = DevMenuConfig.RemoteNames.GetServerVersionInfo })
-	getServerVersionInfoRemote.OnServerInvoke = wrapHandler("GetServerVersionInfo", handleGetServerVersionInfo)
-	logger:debug("Handler connected", { remote = DevMenuConfig.RemoteNames.GetServerVersionInfo })
-
-	Players.PlayerRemoving:Connect(function(player: Player)
-		rateLimiter:Clear(player)
-	end)
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "DevMenuSystem",
+		OnPlayerRemoving = function(player: Player)
+			rateLimiter:Clear(player)
+			shutdownArmedUntil[player.UserId] = nil
+			instantRestartArmedUntil[player.UserId] = nil
+		end,
+	})
 
 	logger:info("DevMenuSystem.Init() complete")
 end

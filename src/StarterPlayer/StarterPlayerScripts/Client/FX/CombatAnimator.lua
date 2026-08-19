@@ -32,6 +32,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local AnimatorUtil = require(ReplicatedStorage.Shared.AnimatorUtil)
 local AnimationTrackUtil = require(script.Parent.AnimationTrackUtil)
@@ -40,12 +41,12 @@ local logger = Logger.scope("CombatAnimator")
 
 local CombatAnimator = {}
 
--- Constants.Combat.AnimationIds is the single source of truth -- now scoped to just the locomotion
+-- CombatConstants.AnimationIds is the single source of truth -- now scoped to just the locomotion
 -- clips (Walking/Running/RunningStage2/RunningStage3) since combat's own clips (swings, finishers,
 -- dashes, etc.) were removed from Constants.lua alongside the rest of the combat data. This loop is
 -- fully data-driven, so trimming that table is what trimmed this module's actual loaded-track set --
 -- no code here needed to change to stop loading combat clips.
-local ANIMATION_IDS = Constants.Combat.AnimationIds
+local ANIMATION_IDS = CombatConstants.AnimationIds
 
 -- Walking/Running share the same fade constants so the locomotion evaluator's walk<->run crossfade
 -- is symmetric on both sides. Action priority (above the default Movement-tier walk/run cycle) so
@@ -66,8 +67,8 @@ local RUN_PLAYBACK_SPEEDS = Constants.Run.Animation.PlaybackSpeeds
 
 -- The MoveDirection magnitude below which there's no meaningful held movement input -- shared with
 -- Server/Combat/Movement.lua's own IsMoving and Client/FX/MovementVFX.lua, see
--- Constants.Combat.MovementInputMagnitudeThreshold's own header for the other call sites.
-local LOCOMOTION_THRESHOLD = Constants.Combat.MovementInputMagnitudeThreshold
+-- CombatConstants.MovementInputMagnitudeThreshold's own header for the other call sites.
+local LOCOMOTION_THRESHOLD = CombatConstants.MovementInputMagnitudeThreshold
 
 -- Priority alone (Core, set below) isn't enough: Roblox's default character rig ALSO plays its own
 -- walk/run cycle at Core priority, so two same-priority tracks blend proportionally by Weight rather
@@ -84,7 +85,7 @@ local DOMINANT_WEIGHT = Constants.FX.Animation.DominantWeight
 
 local animationTemplates: { [string]: Animation } = {}
 for name, id in pairs(ANIMATION_IDS) do
-	-- Skip empty-id slots (Constants.Combat.AnimationIds lists wired-but-unauthored clips as ""):
+	-- Skip empty-id slots (CombatConstants.AnimationIds lists wired-but-unauthored clips as ""):
 	-- no template means no load attempt and tracks[name] stays nil, so every play path degrades to
 	-- its documented no-op/fallback.
 	if id ~= "" then
@@ -96,7 +97,7 @@ for name, id in pairs(ANIMATION_IDS) do
 end
 
 -- Client/Loading/AssetPreloader.lua's boot-time preload pass reuses these SAME template instances
--- (built above, once, at module load) rather than constructing its own from Constants.Combat.
+-- (built above, once, at module load) rather than constructing its own from CombatConstants.
 -- AnimationIds directly -- this module is that data's one owner, and a second construction path
 -- would just be a duplicate of it.
 function CombatAnimator.GetPreloadInstances(): { Instance }
@@ -192,7 +193,7 @@ end
 -- THE RUN SYSTEM'S THREE STAGES, pushed in by Client/Movement/RunController.lua (which mirrors the
 -- server's own Constants.Attributes.SprintStage -- the stage is never decided on this side).
 --
--- Stage 2 plays its own clip when Constants.Combat.AnimationIds.RunningStage2 is authored, and stage
+-- Stage 2 plays its own clip when CombatConstants.AnimationIds.RunningStage2 is authored, and stage
 -- 3 plays its own when RunningStage3 is authored -- each otherwise falls through to the stage below
 -- it (3 -> 2 -> 1) played faster instead (Constants.Run.Animation.PlaybackSpeeds).
 --
@@ -231,6 +232,17 @@ registerPerLifeReset(function()
 	appliedRunSpeed = 0
 end)
 
+-- Reused across every Heartbeat instead of building a fresh `{ {...}, {...}, {...}, {...} }` argument
+-- each frame -- AnimationTrackUtil.DriveDominantLoop only reads these synchronously within the call
+-- and never retains the table, so it's safe to mutate the four entries' fields in place below rather
+-- than allocate all five tables (the array plus its four entries) 60 times a second forever.
+local locomotionLoopEntries: { AnimationTrackUtil.DominantLoopEntry } = {
+	{ Track = nil, ShouldPlay = false, PlayFadeSeconds = 0, StopFadeSeconds = 0 },
+	{ Track = nil, ShouldPlay = false, PlayFadeSeconds = 0, StopFadeSeconds = 0 },
+	{ Track = nil, ShouldPlay = false, PlayFadeSeconds = 0, StopFadeSeconds = 0 },
+	{ Track = nil, ShouldPlay = false, PlayFadeSeconds = 0, StopFadeSeconds = 0 },
+}
+
 -- The single, continuously-correct answer to "should Walking/Running be playing THIS frame" --
 -- connected once at module load (not per Sprint-press), so it never needs to be told when an action
 -- started or ended; it just re-derives the right answer every tick from state that's already being
@@ -243,7 +255,7 @@ end)
 -- interrupt (the character actually stopping).
 RunService.Heartbeat:Connect(function()
 	local runningTrack = tracks.Running
-	-- nil whenever Constants.Combat.AnimationIds.RunningStage2/RunningStage3 is still blank -- which
+	-- nil whenever CombatConstants.AnimationIds.RunningStage2/RunningStage3 is still blank -- which
 	-- is the shipped default for RunningStage3, and the case every branch below is written to handle
 	-- by falling through to the stage below (3 -> 2 -> 1) rather than by going silent.
 	local runningStage2Track = tracks.RunningStage2
@@ -282,41 +294,39 @@ RunService.Heartbeat:Connect(function()
 		-- pressed/released) crossfades symmetrically at LOCOMOTION_FADE_TIME; a genuine interrupt
 		-- (stopped moving, or the parkour framework taking the body) cuts fast at
 		-- LOCOMOTION_INTERRUPT_FADE_TIME.
-		AnimationTrackUtil.DriveDominantLoop({
-			{
-				Track = runningTrack,
-				ShouldPlay = shouldRunStage1,
-				PlayFadeSeconds = LOCOMOTION_FADE_TIME,
-				StopFadeSeconds = if shouldRunStage2 or shouldRunStage3
-					then RUN_STAGE_CROSSFADE_TIME
-					elseif shouldWalk then LOCOMOTION_FADE_TIME
-					else LOCOMOTION_INTERRUPT_FADE_TIME,
-			},
-			{
-				Track = runningStage2Track,
-				ShouldPlay = shouldRunStage2,
-				PlayFadeSeconds = RUN_STAGE_CROSSFADE_TIME,
-				StopFadeSeconds = if shouldRunStage1 or shouldRunStage3
-					then RUN_STAGE_CROSSFADE_TIME
-					elseif shouldWalk then LOCOMOTION_FADE_TIME
-					else LOCOMOTION_INTERRUPT_FADE_TIME,
-			},
-			{
-				Track = runningStage3Track,
-				ShouldPlay = shouldRunStage3,
-				PlayFadeSeconds = RUN_STAGE_CROSSFADE_TIME,
-				StopFadeSeconds = if shouldRunStage1 or shouldRunStage2
-					then RUN_STAGE_CROSSFADE_TIME
-					elseif shouldWalk then LOCOMOTION_FADE_TIME
-					else LOCOMOTION_INTERRUPT_FADE_TIME,
-			},
-			{
-				Track = walkingTrack,
-				ShouldPlay = shouldWalk,
-				PlayFadeSeconds = LOCOMOTION_FADE_TIME,
-				StopFadeSeconds = if shouldRun then LOCOMOTION_FADE_TIME else LOCOMOTION_INTERRUPT_FADE_TIME,
-			},
-		}, DOMINANT_WEIGHT)
+		local stage1Entry, stage2Entry, stage3Entry, walkEntry =
+			locomotionLoopEntries[1], locomotionLoopEntries[2], locomotionLoopEntries[3], locomotionLoopEntries[4]
+
+		stage1Entry.Track = runningTrack
+		stage1Entry.ShouldPlay = shouldRunStage1
+		stage1Entry.PlayFadeSeconds = LOCOMOTION_FADE_TIME
+		stage1Entry.StopFadeSeconds = if shouldRunStage2 or shouldRunStage3
+			then RUN_STAGE_CROSSFADE_TIME
+			elseif shouldWalk then LOCOMOTION_FADE_TIME
+			else LOCOMOTION_INTERRUPT_FADE_TIME
+
+		stage2Entry.Track = runningStage2Track
+		stage2Entry.ShouldPlay = shouldRunStage2
+		stage2Entry.PlayFadeSeconds = RUN_STAGE_CROSSFADE_TIME
+		stage2Entry.StopFadeSeconds = if shouldRunStage1 or shouldRunStage3
+			then RUN_STAGE_CROSSFADE_TIME
+			elseif shouldWalk then LOCOMOTION_FADE_TIME
+			else LOCOMOTION_INTERRUPT_FADE_TIME
+
+		stage3Entry.Track = runningStage3Track
+		stage3Entry.ShouldPlay = shouldRunStage3
+		stage3Entry.PlayFadeSeconds = RUN_STAGE_CROSSFADE_TIME
+		stage3Entry.StopFadeSeconds = if shouldRunStage1 or shouldRunStage2
+			then RUN_STAGE_CROSSFADE_TIME
+			elseif shouldWalk then LOCOMOTION_FADE_TIME
+			else LOCOMOTION_INTERRUPT_FADE_TIME
+
+		walkEntry.Track = walkingTrack
+		walkEntry.ShouldPlay = shouldWalk
+		walkEntry.PlayFadeSeconds = LOCOMOTION_FADE_TIME
+		walkEntry.StopFadeSeconds = if shouldRun then LOCOMOTION_FADE_TIME else LOCOMOTION_INTERRUPT_FADE_TIME
+
+		AnimationTrackUtil.DriveDominantLoop(locomotionLoopEntries, DOMINANT_WEIGHT)
 
 		-- Per-stage playback rate, written only when the track or the rate actually changes -- see
 		-- appliedRunSpeedTrack's own header.

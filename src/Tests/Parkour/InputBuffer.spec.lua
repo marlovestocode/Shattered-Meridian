@@ -170,16 +170,51 @@ return function()
 		end)
 	end)
 
+	describe("InputBuffer -- dash", function()
+		it("buffers and consumes a press", function()
+			InputBuffer.PressDash(100)
+			expect(InputBuffer.PeekDash(100)).to.equal(true)
+			expect(InputBuffer.ConsumeDash(100)).to.equal(true)
+			expect(InputBuffer.PeekDash(100)).to.equal(false)
+		end)
+
+		it("expires past the shared action window", function()
+			InputBuffer.PressDash(100)
+			expect(InputBuffer.PeekDash(100 + ACTION_WINDOW + 0.01)).to.equal(false)
+		end)
+
+		it("does not consume on a peek", function()
+			-- The contract States/Dashing.CanEnter depends on. ParkourDebug calls every registered
+			-- state's CanEnter on a timer, so a peek that consumed would have the overlay eating the
+			-- player's dash presses for as long as it was open -- a bug that only appears while you
+			-- are looking at the tool meant to diagnose it.
+			InputBuffer.PressDash(100)
+			for _ = 1, 5 do
+				expect(InputBuffer.PeekDash(100)).to.equal(true)
+			end
+			expect(InputBuffer.ConsumeDash(100)).to.equal(true)
+		end)
+	end)
+
 	describe("InputBuffer -- intents are independent", function()
-		it("consuming a jump leaves slide, roll and leap alone", function()
+		it("consuming a jump leaves slide, roll, leap and dash alone", function()
 			InputBuffer.PressJump(100)
 			InputBuffer.PressSlide(100)
 			InputBuffer.PressRoll(100)
 			InputBuffer.PressLeap(100)
+			InputBuffer.PressDash(100)
 			InputBuffer.ConsumeJump(100)
 			expect(InputBuffer.PeekSlide(100)).to.equal(true)
 			expect(InputBuffer.PeekRoll(100)).to.equal(true)
 			expect(InputBuffer.PeekLeap(100)).to.equal(true)
+			expect(InputBuffer.PeekDash(100)).to.equal(true)
+		end)
+
+		it("consuming a dash leaves the roll alone -- they are separate keys and separate moves", function()
+			InputBuffer.PressRoll(100)
+			InputBuffer.PressDash(100)
+			InputBuffer.ConsumeDash(100)
+			expect(InputBuffer.PeekRoll(100)).to.equal(true)
 		end)
 	end)
 
@@ -210,12 +245,14 @@ return function()
 			InputBuffer.PressSlide(100)
 			InputBuffer.PressRoll(100)
 			InputBuffer.PressLeap(100)
+			InputBuffer.PressDash(100)
 			InputBuffer.Clear()
 
 			expect(InputBuffer.PeekJump(100)).to.equal(false)
 			expect(InputBuffer.PeekSlide(100)).to.equal(false)
 			expect(InputBuffer.PeekRoll(100)).to.equal(false)
 			expect(InputBuffer.PeekLeap(100)).to.equal(false)
+			expect(InputBuffer.PeekDash(100)).to.equal(false)
 			expect(InputBuffer.IsSlideHeld()).to.equal(false)
 		end)
 	end)

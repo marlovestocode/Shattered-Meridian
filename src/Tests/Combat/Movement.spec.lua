@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local CombatTypes = require(ServerScriptService.Server.Combat.CombatTypes)
 local Movement = require(ServerScriptService.Server.Combat.Movement)
@@ -99,7 +100,7 @@ local function makeState(overrides: { [string]: any }?): CombatState
 		basicComboLanded = 0,
 		basicComboExpiry = 0,
 
-		equippedWeaponId = Constants.Combat.Weapons.Default,
+		equippedWeaponId = CombatConstants.Weapons.Default,
 		weaponSwapReadyAt = 0,
 		bufferedAttack = nil,
 
@@ -107,9 +108,9 @@ local function makeState(overrides: { [string]: any }?): CombatState
 		pendingKillerUserId = nil,
 
 		Vitals = {
-			maxHealth = Constants.Combat.MaxHealth,
-			posture = Constants.Combat.MaxPosture,
-			maxPosture = Constants.Combat.MaxPosture,
+			maxHealth = CombatConstants.MaxHealth,
+			posture = CombatConstants.MaxPosture,
+			maxPosture = CombatConstants.MaxPosture,
 			postureBrokenExpiry = 0,
 			parryWindowExpiry = 0,
 			parryCooldownExpiry = 0,
@@ -146,7 +147,7 @@ end
 
 return function()
 	describe("Movement.ComputeDesiredWalkSpeed", function()
-		local base = Constants.Combat.BaseWalkSpeed
+		local base = CombatConstants.BaseWalkSpeed
 
 		it("returns base speed with no active effects", function()
 			local state = makeState()
@@ -213,7 +214,7 @@ return function()
 				dashWindowExpiry = 200,
 				hitSlowExpiry = 200,
 			})
-			expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base * Constants.Combat.DashSpeedMultiplier)
+			expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base * CombatConstants.DashSpeedMultiplier)
 		end)
 
 		it("uses DashBackSpeedMultiplier instead of DashSpeedMultiplier while dashIsBackward is true", function()
@@ -222,7 +223,7 @@ return function()
 				dashIsBackward = true,
 			})
 			expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(
-				base * Constants.Combat.DashBackSpeedMultiplier
+				base * CombatConstants.DashBackSpeedMultiplier
 			)
 		end)
 
@@ -231,7 +232,7 @@ return function()
 				slideWindowExpiry = 200,
 				hitSlowExpiry = 200,
 			})
-			expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base * Constants.Combat.SlideSpeedMultiplier)
+			expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base * CombatConstants.SlideSpeedMultiplier)
 		end)
 
 		it("prioritizes dash over slide when both windows happen to be open", function()
@@ -239,7 +240,7 @@ return function()
 				dashWindowExpiry = 200,
 				slideWindowExpiry = 200,
 			})
-			expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base * Constants.Combat.DashSpeedMultiplier)
+			expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base * CombatConstants.DashSpeedMultiplier)
 		end)
 
 		it("treats an expired slide window as inactive", function()
@@ -251,7 +252,7 @@ return function()
 			local state = makeState({
 				hitSlowExpiry = 200,
 			})
-			expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base * Constants.Combat.HitSlowMultiplier)
+			expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base * CombatConstants.HitSlowMultiplier)
 		end)
 
 		it("treats an expired window as inactive", function()
@@ -264,10 +265,10 @@ return function()
 		it("ApplyDash(isFrontDash=false) opens the plain dash window, cancels blocking", function()
 			local state = makeState({ blocking = true })
 			Movement.ApplyDash(state, 100, false, false)
-			expect(state.Movement.dashWindowExpiry).to.equal(100 + Constants.Combat.DashDurationSeconds)
-			expect(state.Movement.dashCooldownExpiry).to.equal(100 + Constants.Combat.DashCooldownSeconds)
-			expect(state.Movement.movementCooldownExpiry).to.equal(100 + Constants.Combat.DashCooldownSeconds)
-			expect(state.attackEndsAt).to.equal(100 + Constants.Combat.DashCommitmentSeconds)
+			expect(state.Movement.dashWindowExpiry).to.equal(100 + CombatConstants.DashDurationSeconds)
+			expect(state.Movement.dashCooldownExpiry).to.equal(100 + CombatConstants.DashCooldownSeconds)
+			expect(state.Movement.movementCooldownExpiry).to.equal(100 + CombatConstants.DashCooldownSeconds)
+			expect(state.attackEndsAt).to.equal(100 + CombatConstants.DashCommitmentSeconds)
 			expect(state.Movement.dashIsBackward).to.equal(false)
 			expect(state.blocking).to.equal(false)
 		end)
@@ -275,9 +276,9 @@ return function()
 		it("ApplyDash(isFrontDash=true) uses the longer front-lunge duration/commitment", function()
 			local state = makeState({ blocking = true })
 			Movement.ApplyDash(state, 100, true, false)
-			expect(state.Movement.dashWindowExpiry).to.equal(100 + Constants.Combat.DashFrontDurationSeconds)
-			expect(state.Movement.dashCooldownExpiry).to.equal(100 + Constants.Combat.DashCooldownSeconds)
-			expect(state.attackEndsAt).to.equal(100 + Constants.Combat.DashFrontCommitmentSeconds)
+			expect(state.Movement.dashWindowExpiry).to.equal(100 + CombatConstants.DashFrontDurationSeconds)
+			expect(state.Movement.dashCooldownExpiry).to.equal(100 + CombatConstants.DashCooldownSeconds)
+			expect(state.attackEndsAt).to.equal(100 + CombatConstants.DashFrontCommitmentSeconds)
 			expect(state.blocking).to.equal(false)
 		end)
 
@@ -286,7 +287,7 @@ return function()
 			Movement.ApplyDash(state, 100, false, false)
 			-- A Slide fired 100 seconds after this Dash must still be gated by the SHARED cooldown,
 			-- even though slideCooldownExpiry (50) has long since cleared on its own.
-			expect(state.Movement.movementCooldownExpiry).to.equal(100 + Constants.Combat.DashCooldownSeconds)
+			expect(state.Movement.movementCooldownExpiry).to.equal(100 + CombatConstants.DashCooldownSeconds)
 		end)
 
 		it(
@@ -295,12 +296,12 @@ return function()
 				local state = makeState()
 				Movement.ApplyDash(state, 100, false, true)
 				expect(state.Movement.dashIsBackward).to.equal(true)
-				expect(state.Movement.dashCooldownExpiry).to.equal(100 + Constants.Combat.DashBackCooldownSeconds)
-				expect(state.Movement.movementCooldownExpiry).to.equal(100 + Constants.Combat.DashBackCooldownSeconds)
+				expect(state.Movement.dashCooldownExpiry).to.equal(100 + CombatConstants.DashBackCooldownSeconds)
+				expect(state.Movement.movementCooldownExpiry).to.equal(100 + CombatConstants.DashBackCooldownSeconds)
 				-- Duration/commitment stay the SAME as every other non-front direction -- only speed
 				-- (read by ComputeDesiredWalkSpeed) and cooldown differ for backward.
-				expect(state.Movement.dashWindowExpiry).to.equal(100 + Constants.Combat.DashDurationSeconds)
-				expect(state.attackEndsAt).to.equal(100 + Constants.Combat.DashCommitmentSeconds)
+				expect(state.Movement.dashWindowExpiry).to.equal(100 + CombatConstants.DashDurationSeconds)
+				expect(state.attackEndsAt).to.equal(100 + CombatConstants.DashCommitmentSeconds)
 			end
 		)
 
@@ -308,7 +309,7 @@ return function()
 			local state = makeState({ dashIsBackward = true })
 			Movement.ApplyDash(state, 100, false, false)
 			expect(state.Movement.dashIsBackward).to.equal(false)
-			expect(state.Movement.dashCooldownExpiry).to.equal(100 + Constants.Combat.DashCooldownSeconds)
+			expect(state.Movement.dashCooldownExpiry).to.equal(100 + CombatConstants.DashCooldownSeconds)
 		end)
 	end)
 
@@ -316,10 +317,10 @@ return function()
 		it("opens the slide window, its own cooldown, the commitment lock, and cancels blocking", function()
 			local state = makeState({ blocking = true })
 			Movement.ApplySlide(state, 100)
-			expect(state.Movement.slideWindowExpiry).to.equal(100 + Constants.Combat.SlideDurationSeconds)
-			expect(state.Movement.slideCooldownExpiry).to.equal(100 + Constants.Combat.SlideCooldownSeconds)
-			expect(state.Movement.movementCooldownExpiry).to.equal(100 + Constants.Combat.SlideCooldownSeconds)
-			expect(state.attackEndsAt).to.equal(100 + Constants.Combat.SlideCommitmentSeconds)
+			expect(state.Movement.slideWindowExpiry).to.equal(100 + CombatConstants.SlideDurationSeconds)
+			expect(state.Movement.slideCooldownExpiry).to.equal(100 + CombatConstants.SlideCooldownSeconds)
+			expect(state.Movement.movementCooldownExpiry).to.equal(100 + CombatConstants.SlideCooldownSeconds)
+			expect(state.attackEndsAt).to.equal(100 + CombatConstants.SlideCommitmentSeconds)
 			expect(state.blocking).to.equal(false)
 		end)
 
@@ -328,7 +329,7 @@ return function()
 			Movement.ApplySlide(state, 100)
 			-- A Dash fired 100 seconds after this Slide must still be gated by the SHARED cooldown,
 			-- even though dashCooldownExpiry (50) has long since cleared on its own.
-			expect(state.Movement.movementCooldownExpiry).to.equal(100 + Constants.Combat.SlideCooldownSeconds)
+			expect(state.Movement.movementCooldownExpiry).to.equal(100 + CombatConstants.SlideCooldownSeconds)
 		end)
 	end)
 
@@ -425,8 +426,8 @@ return function()
 			-- Bare BaseWalkSpeed, no BonusWalkSpeed term: the fixture has humanoid = nil, so
 			-- ComputeDesiredWalkSpeed's attribute reads are skipped and bonus/multiplier stay 0/1 --
 			-- the same convention the ComputeDesiredWalkSpeed tests above already use.
-			local base = Constants.Combat.BaseWalkSpeed
-			expect(Movement.ComputeDesiredWalkSpeed(state, now)).to.equal(base * Constants.Combat.HitSlowMultiplier)
+			local base = CombatConstants.BaseWalkSpeed
+			expect(Movement.ComputeDesiredWalkSpeed(state, now)).to.equal(base * CombatConstants.HitSlowMultiplier)
 		end)
 
 		it("does not refund the cooldown -- the burst was still spent", function()
@@ -556,12 +557,12 @@ return function()
 			return state
 		end
 
-		local base = Constants.Combat.BaseWalkSpeed + Constants.Combat.DefaultBonusWalkSpeed
+		local base = CombatConstants.BaseWalkSpeed + CombatConstants.DefaultBonusWalkSpeed
 
 		describe("ComputeDesiredWalkSpeed -- ParkourVelocityOwned tier", function()
 			it("pins WalkSpeed to zero while parkour owns velocity", function()
 				local state = makeHumanoidState({
-					[Constants.Attributes.BonusWalkSpeed] = Constants.Combat.DefaultBonusWalkSpeed,
+					[Constants.Attributes.BonusWalkSpeed] = CombatConstants.DefaultBonusWalkSpeed,
 					[Constants.Attributes.ParkourVelocityOwned] = true,
 				})
 				expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(0)
@@ -569,7 +570,7 @@ return function()
 
 			it("has no effect once released", function()
 				local state = makeHumanoidState({
-					[Constants.Attributes.BonusWalkSpeed] = Constants.Combat.DefaultBonusWalkSpeed,
+					[Constants.Attributes.BonusWalkSpeed] = CombatConstants.DefaultBonusWalkSpeed,
 					[Constants.Attributes.ParkourVelocityOwned] = false,
 				})
 				expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base)
@@ -647,7 +648,7 @@ return function()
 			it("raises the base tier to the carried floor", function()
 				local carry = ParkourConstants.Locomotion.MomentumCarrySeconds
 				local state = makeHumanoidState({
-					[Constants.Attributes.BonusWalkSpeed] = Constants.Combat.DefaultBonusWalkSpeed,
+					[Constants.Attributes.BonusWalkSpeed] = CombatConstants.DefaultBonusWalkSpeed,
 					[Constants.Attributes.ParkourSpeedFloor] = 40,
 					[Constants.Attributes.ParkourSpeedFloorExpiry] = 100 + carry,
 				})
@@ -657,7 +658,7 @@ return function()
 			it("never LOWERS a speed the ordinary tiers already granted", function()
 				local carry = ParkourConstants.Locomotion.MomentumCarrySeconds
 				local state = makeHumanoidState({
-					[Constants.Attributes.BonusWalkSpeed] = Constants.Combat.DefaultBonusWalkSpeed,
+					[Constants.Attributes.BonusWalkSpeed] = CombatConstants.DefaultBonusWalkSpeed,
 					[Constants.Attributes.ParkourSpeedFloor] = 1,
 					[Constants.Attributes.ParkourSpeedFloorExpiry] = 100 + carry,
 				})
@@ -670,11 +671,11 @@ return function()
 				-- stun, posture break, commitment, air-combo hold, freeze, flight) is unaffected.
 				local carry = ParkourConstants.Locomotion.MomentumCarrySeconds
 				local state = makeHumanoidState({
-					[Constants.Attributes.BonusWalkSpeed] = Constants.Combat.DefaultBonusWalkSpeed,
+					[Constants.Attributes.BonusWalkSpeed] = CombatConstants.DefaultBonusWalkSpeed,
 					[Constants.Attributes.ParkourSpeedFloor] = 46,
 					[Constants.Attributes.ParkourSpeedFloorExpiry] = 100 + carry,
 				}, { hitSlowExpiry = 200 })
-				expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base * Constants.Combat.HitSlowMultiplier)
+				expect(Movement.ComputeDesiredWalkSpeed(state, 100)).to.equal(base * CombatConstants.HitSlowMultiplier)
 			end)
 
 			it("cannot peek through an admin freeze", function()

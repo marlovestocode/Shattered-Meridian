@@ -26,7 +26,6 @@
 	module only persists what a client already decided to bind.
 ]]
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Types = require(ReplicatedStorage.Shared.Types)
@@ -34,6 +33,8 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 
 local logger = Logger.scope("SettingsSystem")
@@ -52,6 +53,7 @@ local DEFAULT_SETTINGS: Types.PlayerSettings = {
 	GamepadKeybinds = {},
 	Autorun = false,
 	Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
+	Comfort = PlayerDataSystem.CreateDefaultComfortSettings(),
 }
 
 -- The closed set of Types.ParkourSettings fields a client may write, and the value type each one
@@ -69,6 +71,14 @@ local PARKOUR_SETTING_TYPES: { [string]: "boolean" | "SprintMode" } = {
 	LedgeAssist = "boolean",
 	StepAssist = "boolean",
 	SprintMode = "SprintMode",
+}
+
+-- The closed set of Types.ComfortSettings fields a client may write. Same role, same reasoning and
+-- same untrusted-field-name posture as PARKOUR_SETTING_TYPES above; every entry is a plain boolean, so
+-- this one needs no value-type column at all.
+local COMFORT_SETTING_FIELDS: { [string]: true } = {
+	CameraShake = true,
+	FieldOfViewEffects = true,
 }
 
 -- See file header -- structurally valid AND not a hotbar slot. Constants.Keybinds.Defaults is a
@@ -256,13 +266,55 @@ local function handleUpdateParkour(player: Player, rawField: unknown, rawValue: 
 	logger:debug("Parkour setting persisted", { player = player.Name, field = field })
 end
 
+-- Camera-comfort preferences. Mirrors handleUpdateParkour above exactly -- rate limit, closed-set
+-- field validation, typed value check, Transform-with-defensive-backfill -- and is a separate handler
+-- rather than a branch inside it because the two write different sub-tables and validate against
+-- different closed sets; sharing one handler would mean a field name from either group being accepted
+-- for the other.
+local function handleUpdateComfort(player: Player, rawField: unknown, rawValue: unknown): ()
+	if rateLimiter:IsLimited(player) then
+		return
+	end
+	if typeof(rawField) ~= "string" then
+		logger:debug("UpdateComfort rejected: non-string field", { player = player.Name })
+		return
+	end
+	local field = rawField :: string
+	if not COMFORT_SETTING_FIELDS[field] then
+		logger:debug("UpdateComfort rejected: unknown field", { player = player.Name, field = field })
+		return
+	end
+	if typeof(rawValue) ~= "boolean" then
+		logger:debug("UpdateComfort rejected: expected boolean", { player = player.Name, field = field })
+		return
+	end
+	local value = rawValue :: boolean
+
+	local transformed = PlayerDataSystem.Transform(player, function(profile)
+		-- Defensive, for the same reason handleUpdateParkour's own backfill is: a profile that somehow
+		-- missed Migrations[5] would have no table to write into, and one stale record must not make
+		-- the whole Settings panel non-functional for that player.
+		if typeof(profile.settings.Comfort) ~= "table" then
+			profile.settings.Comfort = PlayerDataSystem.CreateDefaultComfortSettings()
+		end
+		(profile.settings.Comfort :: { [string]: any })[field] = value
+	end)
+	if not transformed then
+		logger:warn("UpdateComfort: Transform failed (profile not loaded)", { player = player.Name })
+		return
+	end
+
+	logger:debug("Comfort setting persisted", { player = player.Name, field = field })
+end
+
 local function onPlayerRemoving(player: Player): ()
 	rateLimiter:Clear(player)
 end
 
 function SettingsSystem.Init(): ()
 	local getSettingsRemote = NetworkBridge.CreateRemoteFunction(RemoteNames.GetSettings)
-	getSettingsRemote.OnServerInvoke = handleGetSettings
+	getSettingsRemote.OnServerInvoke =
+		RemoteHandler.WrapInvoke(logger, "GetSettings", DEFAULT_SETTINGS, handleGetSettings)
 
 	local updateKeybindRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateKeybind)
 	updateKeybindRemote.OnServerEvent:Connect(handleUpdateKeybind)
@@ -276,7 +328,13 @@ function SettingsSystem.Init(): ()
 	local updateParkourRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateParkour)
 	updateParkourRemote.OnServerEvent:Connect(handleUpdateParkour)
 
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
+	local updateComfortRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateComfort)
+	updateComfortRemote.OnServerEvent:Connect(handleUpdateComfort)
+
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "SettingsSystem",
+		OnPlayerRemoving = onPlayerRemoving,
+	})
 
 	logger:info("SettingsSystem.Init() complete")
 end

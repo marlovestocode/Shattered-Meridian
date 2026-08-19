@@ -65,16 +65,35 @@ AttackConstants.Sequence = {
 	-- BufferSeconds, comfortably longer than this) and fires the instant the beat ends. The player
 	-- presses at whatever rhythm they like; the pause shapes what comes OUT, not what goes in.
 	--
-	-- 0.15 against the Primary Basic string's own ~0.45s stage-to-stage gap (0.14 recovery + 0.31
-	-- windup) makes a three-hit string read at roughly 0.6s per link. Raise it for a heavier, more
-	-- deliberate game; drop it to 0 to restore the previous back-to-back chaining exactly.
+	-- DROPPED TO 0.01 FROM 0.20 -- a deliberate, verified retune (not a placeholder, not a bug to
+	-- correct back): the 0.20 beat that "just a little slower" landed on read as a hitch rather than a
+	-- deliberate pace once actually played, and the ask flipped to "a lot smoother" instead. 0 was not
+	-- used in its place because this constant is still what SwingSequencer keys ChainReadyAt off of --
+	-- a real, if imperceptible, positive number keeps that timestamp meaningfully AFTER the swing that
+	-- set it (see SwingSequencer.Advance) rather than collapsing chain-readiness and swing-end into the
+	-- exact same instant, which is the kind of equality a floating-point clock should never be asked to
+	-- resolve. 0.01s has no perceptible effect on pacing -- Input.BufferSeconds already absorbs it, see
+	-- below -- while keeping the ordering real.
 	--
-	-- TWO RELATIONSHIPS BOUND IT, and both bite quietly if ignored. It must stay well under
-	-- Input.BufferSeconds (see that constant -- the gap between them IS the early-press forgiveness a
-	-- player actually gets), and the resulting stage-to-stage gap must stay under
+	-- TWO RELATIONSHIPS BOUND IT, and both are trivially satisfied now, which is worth stating rather
+	-- than leaving silent: it must stay well under Input.BufferSeconds (0.35 -- the gap between them IS
+	-- the early-press forgiveness a player actually gets, and at 0.01 that forgiveness is essentially
+	-- the whole 0.35s), and the resulting stage-to-stage gap must stay under
 	-- DamageConstants.Combo.WindowSeconds (0.9) or a landed string stops escalating and the Finisher
-	-- becomes unreachable. At 0.15 the Basic string chains at ~0.6s, comfortably inside 0.9.
-	ChainDelaySeconds = 0.15,
+	-- becomes unreachable.
+	--
+	-- THE NUMBER THAT ACTUALLY BOUNDS THE SECOND RELATIONSHIP is not any single stage-to-stage gap --
+	-- it is the WORST recovery+windup pairing across BOTH weapons' full Basic->Finisher chains, because
+	-- SwingSequencer applies this same beat between every consecutive pair of stages, including into
+	-- the Finisher (see SwingSequencer.Advance, which stamps ChainReadyAt after every accepted throw
+	-- regardless of which stage it was). That worst case, checked by hand against
+	-- Constants.Combat.Weapons, is Primary's own Basic3->Finisher transition (0.20 recovery + 0.28
+	-- windup = 0.48s). At the 0.01 delay authored here that totals 0.49s against the 0.9s ceiling -- a
+	-- 0.41s margin, the widest this constant has had. If a future retune ever pushes this constant, or
+	-- any stage's Windup/RecoverySeconds, past the point where 0.48 + ChainDelaySeconds clears 0.9, the
+	-- Finisher silently stops being reachable off a fully-landed string -- redo this check by hand, the
+	-- same way this comment just did, rather than trusting the old margin.
+	ChainDelaySeconds = 0.05,
 
 	-- Switching between the Basic and Heavy strings restarts whichever you switched away from.
 	-- Without this a player could alternate presses and hold both strings at their last stage
@@ -135,14 +154,24 @@ AttackConstants.Input = {
 	-- waiting on opens at (swing end + chain delay) -- so the window a press can actually be made in
 	-- and still land is (BufferSeconds - ChainDelaySeconds) before the swing ends, plus the whole beat
 	-- after it. At 0.25 against a 0.15 beat that left only 0.1s of real early-press forgiveness, which
-	-- is tighter than the buffer appears to promise and would read as dropped inputs. 0.35 restores it
-	-- to a genuine 0.2s.
+	-- was tighter than the buffer appeared to promise and would read as dropped inputs. 0.35 restored it
+	-- to a genuine 0.2s at the time.
 	--
-	-- Still deliberately shorter than DamageConstants.Hitstun.Seconds (0.45), so a swing buffered at
-	-- the moment of being hit expires rather than firing the instant hitstun ends -- being interrupted
-	-- should cost the exchange, not merely delay it. That gives the pair a real ceiling: raising the
-	-- chain delay much further means raising this, and raising this past 0.45 silently un-does the
-	-- interruption rule.
+	-- ChainDelaySeconds HAS SINCE MOVED TWICE -- up to 0.20 ("just a little slower" on the chain beat),
+	-- then back down to a near-imperceptible 0.01 ("a lot smoother" -- see that constant's own header
+	-- for the full account, including why it did not go to a bare 0). Neither move ever needed this
+	-- constant to change: the real early-press forgiveness only ever narrowed to 0.15s at the 0.20 peak
+	-- (comfortably clear of the 0.1s that once read as broken, per the paragraph above) and has since
+	-- widened back out to essentially the full 0.35s. Still the first place to recheck if
+	-- ChainDelaySeconds ever moves again.
+	--
+	-- Still deliberately shorter than DamageConstants.Hitstun.Seconds (0.65 as of that constant's own
+	-- rebalance), so a swing buffered at the moment of being hit expires rather than firing the instant
+	-- hitstun ends -- being interrupted should cost the exchange, not merely delay it. That gives the
+	-- pair a real ceiling: raising the chain delay much further means raising this, and raising this
+	-- past 0.65 would silently un-do the interruption rule. Hitstun's own rise from 0.45 to 0.65 only
+	-- WIDENED this margin (0.10s of slack became 0.30s), so nothing here needed to change to stay safe
+	-- -- worth stating explicitly since the number this comment references moved out from under it.
 	BufferSeconds = 0.35,
 
 	-- Only the newest refused press is buffered; an older one it replaces is dropped rather than
@@ -170,6 +199,12 @@ AttackConstants.Input = {
 		-- Buffering it is not optional -- it is what lets the pause shape the OUTPUT without the player
 		-- having to feel for it on the input side. See that constant's own header.
 		ChainDelay = true,
+		-- Server/Combat/Grab/GrabSystem.lua: a holding attacker (must Throw or wait the hold out) or a
+		-- held-or-thrown victim. Both clear on their own -- a hold's own safety timer, a throw landing
+		-- -- so a press made mid-hold is worth remembering rather than dropping, the same reasoning
+		-- Hitstun/Staggered already buffer on.
+		Grabbing = true,
+		Grabbed = true,
 	} :: { [string]: boolean },
 }
 
@@ -286,6 +321,83 @@ AttackConstants.Presentation = {
 	-- block fade -- a swing has to look like it started on the frame the key went down, where a guard
 	-- can afford to ease up.
 	SwingFadeSeconds = 0.05,
+
+	-- The forward step a confirmed swing carries the LOCAL player's own body through
+	-- (Client/Combat/SwingLunge.lua). Fires on Attack_Started -- the swing being THROWN -- which is
+	-- what makes it a swing's own weight rather than a reward: a whiff steps forward exactly as far as
+	-- a hit does, because at the moment the step starts nobody knows yet which it will be.
+	--
+	-- CLIENT-SIDE, AND THAT IS THE WHOLE REASON THIS EXISTS. DamageConstants.AttackerLunge already
+	-- expresses the same idea server-side, and for a real player it cannot work: a player's character
+	-- is network-owned by their own client, so a server Humanoid:Move() write is replaced by the
+	-- owner's next replicated frame and never reaches the simulation that is actually drawing them.
+	-- That server-side nudge is still live and still correct for the bodies the SERVER owns (bots,
+	-- dummies), which is why it was left alone rather than deleted -- see its own comment.
+	--
+	-- Distance/duration, not a speed: a step is a distance a body covers, and stating it that way
+	-- means retuning the duration cannot silently change how far a swing carries. SwingLunge derives
+	-- the speed curve from the pair (linear decay to a standstill -- see SpeedAt there).
+	--
+	-- THE STEP WAITS OUT THE SWING'S OWN WINDUP. A body that lurches forward on the frame the button
+	-- goes down is moving before the arm is, which reads as the character being shoved rather than as
+	-- them throwing a punch. So the delay before the step starts is the swing's actual
+	-- AttackStartedPayload.WindupSeconds plus the per-kind DelaySeconds offset below -- windup is the
+	-- interval whose whole definition is "the arm is cocking and nothing has happened yet", so its end
+	-- is the instant the weight goes forward.
+	--
+	-- Taking it from the PAYLOAD rather than from a number here is what keeps it honest: that value is
+	-- what the server actually scheduled for this specific swing, which since AttackConstants.Windows
+	-- may have come from the clip's own AttackM<stage> marker rather than from any hand-typed constant.
+	-- So a re-authored animation moves the step with it, and a stage with a longer windup than its
+	-- neighbours waits longer, both without anyone editing this table.
+	--
+	-- NOT A GAP-CLOSER. Every distance below is under a character's own reach, so a swing thrown from
+	-- outside range still misses. Raising these past that turns whiffing into a dash and is a combat
+	-- balance change, not a feel change.
+	SwingLunge = {
+		-- false makes every swing behave exactly as it did before this existed -- the suspect-elimination
+		-- switch AttackConstants.Windows.Enabled documents its own reasoning for.
+		Enabled = true,
+		-- Per AttackTypes.AttackKind. Hotbar is deliberately absent rather than zeroed: an authored move
+		-- carries its own MoveTypes.LungeDistanceStuds/LungeDurationSeconds pair, and a second number here
+		-- would be the "one system, two configs" trap Constants.Combat's own former Sprint* fields were.
+		--
+		-- BASIC IS ALSO ABSENT NOW, and unlike Hotbar's absence this is a reversal rather than a thing that
+		-- was never authored: Basic used to carry a 4-stud step. Playtest read it as the punch closing
+		-- distance for the player rather than the player closing it themselves -- exactly the "not a
+		-- gap-closer" promise this whole table's header makes, and a step this short cannot be retuned
+		-- around that complaint because ANY nonzero forward push on the most-thrown move in the game
+		-- reproduces some version of the same slide. Removing the entry rather than zeroing it keeps this
+		-- table honest by its own rule (see Hotbar just above): onAttackStarted (SwingLunge.lua) already
+		-- treats a missing ByKind[Kind] as "this move does not step" -- an ordinary authoring answer, not a
+		-- fault -- so dropping Basic needed no code change anywhere, only this entry's removal. Heavy KEEPS
+		-- its step: a heavy swing is a slower, deliberate committing strike where a forward weight-shift
+		-- reads as the swing's own momentum, and nothing about the M1 complaint applies to a move thrown a
+		-- fraction as often.
+		--
+		-- DelaySeconds is an OFFSET ON TOP OF THE WINDUP, not the whole delay -- 0 starts the step on
+		-- the frame the windup ends and the swing goes active. Negative is legal and is the useful
+		-- direction: it starts the step slightly INSIDE the windup, so the body is already leaning as
+		-- the arm comes through rather than beginning to move once it has. SwingLunge floors the total
+		-- at zero, so an offset more negative than a short stage's own windup degrades to "immediately"
+		-- rather than to a step in the past. Both sit at 0 until someone has actually watched them --
+		-- the honest starting point for a number whose only correct value is the one that looks right.
+		-- The distance was raised from 4.5 on a playtest read of "a little further". Note what that does
+		-- to the SPEED, since the duration was deliberately left alone: SpeedAt derives its peak from
+		-- 2 * distance / duration, so a longer step over the same window is also a faster and punchier
+		-- one. That was the wanted direction here. Raising the duration alongside the distance is the
+		-- other lever -- same peak speed, more travel, a longer commitment -- and is the one to reach for
+		-- if the step ever starts reading as a shove rather than as a step.
+		ByKind = {
+			-- Further and longer than Basic used to be: a heavy swing commits harder, and the step is
+			-- most of what sells the commitment before the hitbox ever opens.
+			Heavy = { DistanceStuds = 5, DurationSeconds = 0.26, DelaySeconds = 0 },
+		} :: { [string]: { DistanceStuds: number, DurationSeconds: number, DelaySeconds: number } },
+		-- Skipped entirely while airborne (Humanoid.FloorMaterial == Air). A step is a thing feet do; the
+		-- same write with no ground under it is an air-dash on every M1, which is a movement mechanic
+		-- nobody designed. States/AerialCombat.lua already owns what the body does mid-air in combat.
+		GroundedOnly = true,
+	},
 }
 
 -- Debug -----------------------------------------------------------------------------------------

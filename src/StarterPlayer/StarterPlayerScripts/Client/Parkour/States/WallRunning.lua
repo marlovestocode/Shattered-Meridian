@@ -19,9 +19,25 @@
 	simply falling past a wall: kicking off is now something a wall-run DOES on its way out, not an
 	independently-triggerable move.
 
-	THE TWO PHASES, tracked by the file-local `phase`:
+	THE CATCH IS HERE FOR THE SAME REASON, and arrived the same way. Flying into a wall FACE-ON is the
+	one wall contact a run cannot express: ParkourMath.WallTangent orients the tangent to agree with
+	travel, so a wall dead ahead has a tangent perpendicular to where the character is going, and
+	selectWall's approach gate refuses it by construction -- see EnvironmentProbe.probeWall's own
+	diagonal-fallback comment, which goes out of its way to FIND that wall and then says plainly that it
+	cannot manufacture a run out of it. Nothing else claimed the contact either, so Roblox's collision
+	response resolved it and a player who had clearly aimed at a wall bounced off it.
+	  It is a phase here rather than a state of its own for the kick argument above, unchanged: a catch
+	that could kick would otherwise need its own trigger site, restating the chain cap and the combat
+	gate, and that is exactly the second copy this file was restructured to delete. A catch reaches the
+	kick through the one trigger in Update that every kick already goes through.
+
+	THE THREE PHASES, tracked by the file-local `phase`:
 	  * "Running"   -- the ordinary ride: follow the tangent, rise then sink, watch for a ledge or a
 	                   jump press. Everything this file always did.
+	  * "Catching"  -- pinned flat to a wall arrived at head-on, sliding down it, with the same ledge
+	                   grab and the same kick available. Short by design (Catch.MaxDurationSeconds):
+	                   a beat to react in, not a perch. Costs a WallRunChain slot and honours the
+	                   same-wall lockout, so catch -> kick -> catch cannot become its own ladder.
 	  * "Departing" -- the kick and its brief control lock, ending in a hand-off to Falling (or a
 	                   ledge grab, if one appears mid-flight -- see updateDeparting's own note). A
 	                   PHASE change, not a state transition: StateMachine never sees it, Enter/Exit do
@@ -88,6 +104,7 @@
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local Logger = require(ReplicatedStorage.Shared.Logger)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
@@ -99,7 +116,10 @@ local StateSupport = require(script.Parent.StateSupport)
 type ParkourContext = ParkourTypes.ParkourContext
 type WallProbe = ParkourTypes.WallProbe
 
+local logger = Logger.scope("WallRunning")
+
 local WALLRUN = ParkourConstants.WallRun
+local CATCH = WALLRUN.Catch
 local WALLJUMP = ParkourConstants.WallJump
 local ASSIST = WALLJUMP.Assist
 
@@ -113,9 +133,16 @@ local side = 0
 local verticalSpeed = 0
 local reattachUntil = 0
 
+-- The catch's own downward speed, positive-down and integrated across the stick. Separate from
+-- `verticalSpeed` above rather than reusing it: that one is the RUN's rise-then-sink profile, signed
+-- the other way and driven by ParkourMath.WallRunVerticalSpeed against the run's own elapsed clock, and
+-- sharing the variable would have a catch inherit whatever place in that profile the last run left
+-- behind.
+local catchSlideSpeed = 0
+
 -- Phase within an active wall-run -- see this file's header for what each means and why a phase change
 -- is not a state transition.
-local phase: "Running" | "Departing" = "Running"
+local phase: "Running" | "Catching" | "Departing" = "Running"
 
 -- THE KICK'S OWN STATE, mirroring what used to be States/WallJumping.lua's own file-locals.
 --
@@ -230,6 +257,94 @@ local function chainSpeedBand(context: ParkourContext): (number, number)
 end
 
 -- The probe currently describing the wall being run on, or nil if it has been lost.
+-- Picks a wall to CATCH: the head-on arrival selectWall refuses. Returns the probe and the side, or
+-- nil with a reason.
+--
+-- Defined as the complement of the run rather than as its own envelope, which is why the angle test
+-- reads `>` against the SAME constant selectWall tests `<=` against. The two can never both qualify
+-- and can never both refuse a wall that is otherwise usable, and retuning WallRun.MaxApproachAngleDegrees
+-- moves one boundary rather than opening a gap or an overlap between two independently authored ones.
+--
+-- CLOSING SPEED, NOT MOMENTUM, is the other gate, and the distinction is the whole difference between
+-- "slammed into a wall" and "ran quickly past one". Momentum is how fast the character is going; the
+-- dot against the inward normal is how fast they are going AT THIS SURFACE. A sprint along a wall face
+-- has plenty of the first and almost none of the second, and gating on momentum would catch it -- which
+-- would mean a wall-run's own approach silently turning into a stick.
+--
+-- Facing is deliberately not consulted. selectWall needs it as the independent witness of intent
+-- because travel-vs-tangent cannot refuse a backwards run; there is no equivalent ambiguity here, since
+-- flying into a surface fast enough to trip MinClosingSpeed is not something a player does by accident
+-- and is not something they can do while looking anywhere except roughly at it.
+local function selectCatchWall(context: ParkourContext): (WallProbe?, number, string?)
+	if not CATCH.Enabled then
+		context.DebugWallCatch = "disabled"
+		return nil, 0, "CatchDisabled"
+	end
+	local travel = StateSupport.TravelDirection(context)
+	local velocity = context.RootPart.AssemblyLinearVelocity
+
+	local function evaluate(probe: WallProbe): (boolean, number, string?)
+		if not probe.Found then
+			return false, 0, "NoWall"
+		end
+		if not probe.WallRunAllowed then
+			return false, 0, "WallNotRunnable"
+		end
+		if probe.TiltAngle > WALLRUN.MaxSurfaceTiltDegrees then
+			return false, 0, "SurfaceTooTilted"
+		end
+		-- The complement of selectWall's own gate -- see this function's header.
+		if ParkourMath.ApproachAngle(travel, probe.Tangent) <= WALLRUN.MaxApproachAngleDegrees then
+			return false, 0, "ApproachIsARun"
+		end
+		-- Speed along the INWARD normal. Read off the live assembly velocity rather than context.Momentum
+		-- for the reason in the header, and flattened because a fall straight down a wall face has a
+		-- large vertical speed and no closing speed at all.
+		local inward = -ParkourMath.SafeUnit(ParkourMath.Flatten(probe.Normal), Vector3.zero)
+		local closing = ParkourMath.Flatten(velocity):Dot(inward)
+		if closing < CATCH.MinClosingSpeed then
+			return false, closing, "TooSlowToCatch"
+		end
+		return true, closing, nil
+	end
+
+	local leftOk, leftClosing, leftReason = evaluate(context.WallLeft)
+	local rightOk, rightClosing, rightReason = evaluate(context.WallRight)
+
+	-- THE MEASUREMENTS, recorded whether the catch qualified or not -- see ParkourContext.DebugWallCatch
+	-- on why the refusing case is the one that matters. Written here rather than at the call site
+	-- because this is the only place the numbers exist: CanEnter sees a probe or a nil.
+	local bestClosing = math.max(leftClosing, rightClosing)
+	local bestProbe = if leftClosing >= rightClosing then context.WallLeft else context.WallRight
+	local approach = if bestProbe.Found then ParkourMath.ApproachAngle(travel, bestProbe.Tangent) else -1
+	context.DebugWallCatch = if leftOk or rightOk
+		then string.format("ready  closing %.1f  approach %.0f", bestClosing, approach)
+		else string.format(
+			"%s  closing %.1f/%d  approach %.0f",
+			leftReason or rightReason or "NoWall",
+			bestClosing,
+			CATCH.MinClosingSpeed,
+			approach
+		)
+
+	-- Prefers the HARDER impact when both qualify, which for a head-on arrival is the more nearly
+	-- square of the two -- the opposite tie-break from selectWall's (which prefers the shallower
+	-- approach, the better run). Both sides routinely qualify here: the diagonal fallback casts find a
+	-- wall dead ahead from both, by design.
+	if leftOk and rightOk then
+		return if leftClosing >= rightClosing then context.WallLeft else context.WallRight,
+			if leftClosing >= rightClosing then -1 else 1,
+			nil
+	end
+	if leftOk then
+		return context.WallLeft, -1, nil
+	end
+	if rightOk then
+		return context.WallRight, 1, nil
+	end
+	return nil, 0, leftReason or rightReason or "NoWall"
+end
+
 local function activeWall(context: ParkourContext): WallProbe?
 	local probe = if side < 0 then context.WallLeft else context.WallRight
 	if probe.Found and probe.WallRunAllowed then
@@ -248,6 +363,10 @@ local function beginKick(context: ParkourContext, wall: WallProbe): ()
 	StateSupport.NoteJump(context.Now)
 
 	kickBeganAt = context.Now
+	-- The kick is leaving the wall, so the head-on probe exemption ends here rather than at Exit -- a
+	-- kick can fly for its whole control lock before the state changes, and the exemption must not
+	-- outlive the contact it exists for.
+	context.WallCatchActive = false
 	kickEntryFacing =
 		ParkourMath.SafeUnit(ParkourMath.Flatten(context.RootPart.CFrame.LookVector), Vector3.new(0, 0, -1))
 
@@ -473,6 +592,206 @@ local function updateDeparting(context: ParkourContext): ParkourTypes.Transition
 	return nil
 end
 
+-- One frame of the catch: pinned flat to the wall, sliding down it, with the same two exits a run
+-- offers (a ledge above, or a kick) plus its own expiry.
+--
+-- Reads the wall through activeWall, the same accessor the run uses, so losing the surface ends the
+-- catch on the frame it is lost. There is deliberately NO corner-pivot equivalent here: a pivot exists
+-- because a run following a surface should keep following it around a bend, and a catch is not
+-- following anything -- it is holding still against one face. Losing that face is simply the end.
+-- Records a shared-gate refusal into the catch's debug line and returns it. The geometric refusals
+-- write their own richer line from inside selectCatchWall (with the measurements); these are the gates
+-- that refuse BEFORE any wall is ever looked at, and without this the overlay would keep showing a
+-- stale measurement from the last frame that got as far as the probes -- which reads as "the catch is
+-- nearly working" when the truth is that it was never evaluated at all.
+local function refuse(context: ParkourContext, reason: string): (boolean, string?)
+	context.DebugWallCatch = string.format("blocked  %s", reason)
+	return false, reason
+end
+
+-- The last verdict actually written to the log, so the next one can be compared against it.
+local lastLoggedCatchVerdict: string? = nil
+
+-- Emits the catch's verdict, ONCE per change of verdict.
+--
+-- Edge-triggered is the only shape this could take and still be shippable on: CanEnter is evaluated for
+-- every registered state every frame, so a line per call is sixty a second per player saying the same
+-- thing. Standing in an open field emits nothing at all (the verdict stays "blocked Grounded" from the
+-- first frame onward); one run at a wall emits the handful of lines that actually describe the attempt.
+--
+-- Deliberately logged from CanEnter rather than from Enter. Enter only ever runs for a catch that
+-- SUCCEEDED, and the whole diagnostic question here is about the ones that did not.
+local function logCatchVerdict(context: ParkourContext): ()
+	if not ParkourConstants.Debug.LogWallCatch then
+		return
+	end
+	local verdict = context.DebugWallCatch
+	if verdict == lastLoggedCatchVerdict then
+		return
+	end
+	lastLoggedCatchVerdict = verdict
+	if verdict == nil then
+		return
+	end
+	logger:debug("Wall catch verdict", {
+		verdict = verdict,
+		grounded = context.Ground.Grounded,
+		groundDistance = context.Ground.Distance,
+		momentum = context.Momentum,
+		wallRunChain = context.WallRunChain,
+	})
+end
+
+local function updateCatching(context: ParkourContext): ParkourTypes.TransitionResult
+	local probe = activeWall(context)
+	if not probe then
+		return "Falling"
+	end
+	if context.Ground.Grounded then
+		return StateSupport.ResolveGroundedState(context)
+	end
+	if context.StateElapsed >= CATCH.MaxDurationSeconds then
+		return "Falling"
+	end
+
+	-- Positive-down, integrated under a fraction of gravity and capped, so the slide accelerates from
+	-- the standstill the impact produced instead of starting at a speed nobody chose. Capped rather than
+	-- left to run because MaxDurationSeconds is short enough that an uncapped slide would still be
+	-- accelerating when it expires, handing Falling a velocity the catch never visibly reached.
+	catchSlideSpeed =
+		math.min(catchSlideSpeed + Workspace.Gravity * CATCH.GravityFraction * context.DeltaTime, CATCH.MaxSlideSpeed)
+
+	local outward = ParkourMath.SafeUnit(ParkourMath.Flatten(probe.Normal), Vector3.zero)
+	local stick = -outward * CATCH.StickSpeed
+
+	local motor = context.Motor
+	motor.Mode = "Velocity"
+	-- No tangential term at all -- that is the entire difference from the run's own command. The
+	-- horizontal velocity is the inward stick and nothing else, which is what turns a body that was
+	-- flying at the wall into one resting against it, and is what there is instead of a bounce.
+	motor.Velocity = stick + Vector3.new(0, -catchSlideSpeed, 0)
+	motor.CancelGravity = true
+	-- Facing INTO the wall (the inverse of its outward normal), which is where the character is looking
+	-- when they hit it. The run faces along its tangent because that is where it is going; a catch is
+	-- going nowhere horizontally, so the honest answer is the surface it is against.
+	motor.FaceDirection = -outward
+	motor.DesiredSpeed = 0
+
+	-- Checked before the kick for the same reason the run checks it first: catching a wall just under
+	-- its lip and pressing jump should take the ledge, not throw the player back into open air having
+	-- gained nothing. Passed the slide speed as the vertical, negated to the sign that function's own
+	-- callers use (the run hands it a rise-then-sink value where up is positive).
+	if StateSupport.LedgeGrabAvailable(context, -catchSlideSpeed) then
+		return "LedgeHanging"
+	end
+
+	-- THE KICK, reached through beginKick exactly as the run reaches it, with the same three gates in
+	-- the same order. This is the second CALL site and still the single TRIGGER: every gate a kick has
+	-- to clear is in this condition, and it is copied here in full rather than factored out precisely
+	-- so that a future gate added to one and not the other is a visible divergence in two adjacent
+	-- blocks rather than a silent one behind a helper. See this file's header on why the kick has no
+	-- CanEnter of its own to bypass.
+	if
+		StateSupport.JumpQueued(context)
+		and StateSupport.JumpIntervalElapsed(context.Now)
+		and not StateSupport.CombatBlocks(context, "WallJumping")
+		and context.WallJumpChain < WALLJUMP.MaxChainWithoutGround
+	then
+		beginKick(context, probe)
+		return updateDeparting(context)
+	end
+	return nil
+end
+
+-- The entry predicate proper. Extracted from the CanEnter field below so the verdict this writes
+-- into context.DebugWallCatch has exactly ONE place it can be emitted from, however many ways this
+-- can return. Emitting per-return would be a dozen call sites that the next refusal added here
+-- would silently not join -- and a refusal that logs nothing is the exact failure the log exists to
+-- end.
+local function evaluateEntry(context: ParkourContext): (boolean, string?)
+	-- Asked FIRST, ahead of every geometric check: a refusal the player cannot do anything about
+	-- should be the cheapest one and the one the debug overlay reports, rather than being masked by
+	-- whichever probe happens to also be unsatisfied this frame.
+	if StateSupport.CombatBlocks(context, "WallRunning") then
+		return refuse(context, "InCombat")
+	end
+	-- BOTH HALVES OF THIS STATE ARE AIRBORNE MOVES. A catch is what happens instead of bouncing off a
+	-- wall you flew into, and a body already standing on the floor does not bounce -- it stops, which
+	-- is Roblox's own collision response doing the right thing. Running along the ground into a wall
+	-- therefore refuses here and always will; the catch is reachable from a jump, a fall, a leap or a
+	-- previous kick.
+	if context.Ground.Grounded then
+		return refuse(context, "Grounded")
+	end
+	if context.Now < reattachUntil then
+		return refuse(context, "ReattachCooldown")
+	end
+	if context.WallRunChain >= WALLRUN.MaxChainWithoutGround then
+		return refuse(context, "WallRunChainExhausted")
+	end
+
+	-- Either a run or a catch qualifies this state -- Enter picks which phase from the same two
+	-- selections. The run is asked FIRST and wins any tie, though by construction there is no tie to
+	-- win: selectCatchWall is defined as exactly the approach selectWall refuses (see its header).
+	-- Asking in this order still matters for the REASON reported on a refusal, which should describe
+	-- the run the player was more likely attempting.
+	local probe, _selected, reason = selectWall(context, true)
+	if probe then
+		-- GROUND CLEARANCE IS THE RUN'S ALONE TOO, and for a plainer reason than the speed gate
+		-- below: "wall-running six inches off the floor is just running" (see MinGroundClearance's
+		-- own header) is an argument about a move that carries you ALONG a wall for two seconds. A
+		-- catch carries you nowhere -- it is the difference between stopping dead against a wall and
+		-- pinging off it -- and that difference is just as real one stud up as ten. Applying the
+		-- run's clearance to it refused every catch taken on the way up out of a jump, which is most
+		-- of them, for a reason the player could not see and could not have acted on.
+		if context.Ground.NearGround and context.Ground.Distance < WALLRUN.MinGroundClearance then
+			return refuse(context, "TooCloseToGround")
+		end
+		-- THE ENTRY-SPEED REQUIREMENT IS THE RUN'S ALONE, which is why it moved in here from above
+		-- the selection when the catch arrived. It exists so a wall-run is earned by a run-up rather
+		-- than available from a standstill against a wall. It is waived MID-CHAIN, because arriving
+		-- off a wall-jump IS a run-up -- just one whose speed was spent on the flight rather than
+		-- carried into the contact. An assisted jump aimed at a near surface legitimately lands slow
+		-- (the solve gives just enough to reach, by design), and testing that against a threshold
+		-- tuned for a sprint is how the fourth link of a chain refuses for a reason the player cannot
+		-- see. The entry clamp lifts momentum to the band floor immediately, so nothing downstream
+		-- sees the slow arrival; this only stops the gate from eating the link.
+		--
+		-- A catch is bounded by its own MinClosingSpeed instead, measured on the surface normal --
+		-- the stricter and more honest question for an impact, and one context.Momentum cannot answer
+		-- (it is a carried, state-authored value, not a live speed). Leaving this check above the
+		-- selection would have let a slow-momentum arrival that is nonetheless slamming into a wall
+		-- refuse as "TooSlowToWallRun" before the catch was ever considered.
+		if context.WallJumpChain <= 0 and context.Momentum < WALLRUN.MinEntrySpeed then
+			return refuse(context, "TooSlowToWallRun")
+		end
+	else
+		local catchProbe, _catchSide, catchReason = selectCatchWall(context)
+		if not catchProbe then
+			-- Reports the RUN's refusal, not the catch's. "ApproachIsARun" and "TooSlowToCatch" are
+			-- almost always the wrong story for a player who was trying to wall-run and missed --
+			-- except when the run itself refused for the approach angle, which is precisely the case
+			-- the catch is the intended answer to, so that one reports the catch's own reason.
+			if reason == "ApproachAngleTooSteep" then
+				return false, catchReason
+			end
+			return false, reason
+		end
+		probe = catchProbe
+	end
+	-- Rule 1: the wall just left is off-limits for a moment. Compared by Instance so a DIFFERENT
+	-- wall is available immediately -- which is exactly the chained wall-run the design asks for,
+	-- and is why this is a per-wall lockout rather than a global cooldown.
+	if
+		context.LastWallInstance ~= nil
+		and probe.Instance == context.LastWallInstance
+		and (context.Now - context.LastWallLeftAt) < WALLRUN.SameWallLockoutSeconds
+	then
+		return false, "SameWallLockout"
+	end
+	return true, nil
+end
+
 local WallRunning: ParkourTypes.StateDefinition = {
 	Id = "WallRunning",
 	Priority = 160,
@@ -481,59 +800,60 @@ local WallRunning: ParkourTypes.StateDefinition = {
 	Reports = "WallRun",
 
 	CanEnter = function(context: ParkourContext): (boolean, string?)
-		-- Asked FIRST, ahead of every geometric check: a refusal the player cannot do anything about
-		-- should be the cheapest one and the one the debug overlay reports, rather than being masked by
-		-- whichever probe happens to also be unsatisfied this frame.
-		if StateSupport.CombatBlocks(context, "WallRunning") then
-			return false, "InCombat"
-		end
-		if context.Ground.Grounded then
-			return false, "Grounded"
-		end
-		if context.Now < reattachUntil then
-			return false, "ReattachCooldown"
-		end
-		if context.WallRunChain >= WALLRUN.MaxChainWithoutGround then
-			return false, "WallRunChainExhausted"
-		end
-		-- The entry-speed requirement exists so a wall-run is earned by a run-up rather than available
-		-- from a standstill against a wall. It is waived MID-CHAIN, because arriving off a wall-jump IS a
-		-- run-up -- just one whose speed was spent on the flight rather than carried into the contact. An
-		-- assisted jump aimed at a near surface legitimately lands slow (the solve gives just enough to
-		-- reach, by design), and testing that against a threshold tuned for a sprint is how the fourth
-		-- link of a chain refuses for a reason the player cannot see. The entry clamp lifts momentum to
-		-- the band floor immediately, so nothing downstream sees the slow arrival; this only stops the
-		-- gate from eating the link.
-		if context.WallJumpChain <= 0 and context.Momentum < WALLRUN.MinEntrySpeed then
-			return false, "TooSlowToWallRun"
-		end
-		if context.Ground.NearGround and context.Ground.Distance < WALLRUN.MinGroundClearance then
-			return false, "TooCloseToGround"
-		end
-		local probe, _selected, reason = selectWall(context, true)
-		if not probe then
-			return false, reason
-		end
-		-- Rule 1: the wall just left is off-limits for a moment. Compared by Instance so a DIFFERENT
-		-- wall is available immediately -- which is exactly the chained wall-run the design asks for,
-		-- and is why this is a per-wall lockout rather than a global cooldown.
-		if
-			context.LastWallInstance ~= nil
-			and probe.Instance == context.LastWallInstance
-			and (context.Now - context.LastWallLeftAt) < WALLRUN.SameWallLockoutSeconds
-		then
-			return false, "SameWallLockout"
-		end
-		return true, nil
+		local allowed, reason = evaluateEntry(context)
+		logCatchVerdict(context)
+		return allowed, reason
 	end,
 
 	Enter = function(context: ParkourContext): ()
-		phase = "Running"
-		local probe, selectedSide = selectWall(context, true)
-		side = selectedSide
 		verticalSpeed = 0
+		catchSlideSpeed = 0
+
+		-- Re-run rather than remembered from CanEnter: a frame has passed and the probes have been
+		-- re-sampled, and a state that acts on a selection made against last frame's geometry is the
+		-- class of bug this framework's "the pose is never baked" habit exists to avoid. Same order as
+		-- CanEnter's, so the phase Enter picks is always the one CanEnter approved.
+		local probe, selectedSide = selectWall(context, true)
+		if probe then
+			phase = "Running"
+		else
+			probe, selectedSide = selectCatchWall(context)
+			phase = if probe then "Catching" else "Running"
+		end
+		side = selectedSide
+		-- A catch costs a chain slot exactly as a run does. Without it, catch -> kick -> catch down a
+		-- corridor would be an uncapped ladder -- the same hole SameWallLockoutSeconds and
+		-- MaxChainWithoutGround close for the run, closed the same way rather than with a new rule.
 		context.WallRunChain += 1
+		-- The air dash's charge, on the other hand, is REFUNDED by an attach rather than spent by one.
+		-- The two are not inconsistent: refunding the wall-run chain on a wall-run would be an infinite
+		-- climb, where a dash cannot re-reach this wall without a fresh surface to aim at. Attaching is
+		-- exactly the outcome the air dash exists to buy, so it is what buys the next one.
+		context.AirDashChain = 0
 		context.AnimationVariant = if side < 0 then "Left" else "Right"
+
+		-- Written on BOTH branches, never left to carry over: this flag is what keeps the head-on probe
+		-- alive (see ParkourContext.WallCatchActive), and a stale `true` surviving into an ordinary
+		-- wall-run would re-enable the very diagonal fallback that state's corner logic is documented to
+		-- require the absence of.
+		context.WallCatchActive = phase == "Catching"
+
+		if phase == "Catching" then
+			-- Not the run's Left/Right: a head-on catch has no side, and playing a sideways wall-run loop
+			-- against a wall the character is facing squarely reads as the wrong move entirely. The clip
+			-- behind this is blank today, which ParkourAnimator handles by falling through -- see
+			-- ParkourConstants.AnimationIds.WallCatch.
+			context.AnimationVariant = "Catch"
+			-- THE BOUNCE DIES HERE, and it dies by ARITHMETIC rather than by any collision setting: the
+			-- motor takes Velocity drive on this state's very first Update, so the commanded velocity
+			-- replaces whatever physics was about to reflect. Momentum is cut to what the impact leaves
+			-- because the character just hit a wall face-first -- the KICK that may follow reads this for
+			-- its carry term, and a catch that preserved full speed would be the cheapest way through a
+			-- corridor rather than the cost of misjudging one.
+			context.Momentum *= CATCH.MomentumRetainFraction
+			return
+		end
+
 		if probe then
 			-- Entry speed is clamped into the wall-run's own band: a very fast entry does not make the
 			-- run faster than the band's ceiling, and a marginal one is lifted to its floor so the run
@@ -547,6 +867,9 @@ local WallRunning: ParkourTypes.StateDefinition = {
 	Update = function(context: ParkourContext): ParkourTypes.TransitionResult
 		if phase == "Departing" then
 			return updateDeparting(context)
+		end
+		if phase == "Catching" then
+			return updateCatching(context)
 		end
 
 		-- Defaulted every frame before the corner turn below can override it -- see ParkourContext.
@@ -664,6 +987,9 @@ local WallRunning: ParkourTypes.StateDefinition = {
 
 	Exit = function(context: ParkourContext, nextState: ParkourTypes.MovementStateId): ()
 		context.AnimationVariant = nil
+		-- Unconditionally, on every exit route. Left set, the next airborne stretch would run with the
+		-- diagonal fallback enabled inside a real wall-run.
+		context.WallCatchActive = false
 
 		if phase == "Departing" then
 			-- The kick composed its own departure velocity into `kickVelocity`; hand off with THAT, not
@@ -682,7 +1008,9 @@ local WallRunning: ParkourTypes.StateDefinition = {
 		-- Record the wall and the moment it was left, for rule 1 (SameWallLockoutSeconds). Only
 		-- meaningful for a Running-phase exit -- a kick already recorded its own departure wall in
 		-- beginKick, at the moment it launched, which this must not overwrite with a stale or absent
-		-- probe from mid-flight.
+		-- probe from mid-flight. A CATCHING exit records it too, and must: the lockout is what stops a
+		-- catch that expires into a fall from immediately re-catching the same face on the way down,
+		-- which would be a body stuck to a wall for as long as the wall lasted.
 		if probe and probe.Instance then
 			context.LastWallInstance = probe.Instance
 			context.LastWallLeftAt = context.Now
@@ -692,6 +1020,16 @@ local WallRunning: ParkourTypes.StateDefinition = {
 		if nextState == "LedgeHanging" then
 			return
 		end
+
+		if phase == "Catching" then
+			-- Hands off the slide and nothing else. A catch has no tangential velocity to pass on by
+			-- construction (its own command is the inward stick alone), so composing a tangent term here
+			-- the way the run does below would invent horizontal speed the catch never had -- the body
+			-- would leave the wall sideways at the moment it stopped holding on.
+			StateSupport.HandOff(context, Vector3.new(0, -catchSlideSpeed, 0))
+			return
+		end
+
 		local tangent = if probe
 			then ParkourMath.WallTangent(probe.Normal, StateSupport.TravelDirection(context))
 			else Vector3.zero

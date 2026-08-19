@@ -2,33 +2,35 @@
 --[[
 	FlightTuning.lua
 
-	Owns: LIVE, IN-MEMORY tuning of Constants.Flight's feel numbers -- a Studio-only dev tool
+	Owns: LIVE, IN-MEMORY tuning of FlightConstants' feel numbers -- a Studio-only dev tool
 	(DevMenuSystem.lua's ListFlightTuning/AdjustFlightTuning/ResetFlightTuning) mirroring
-	Server/Combat/HitboxTuning.lua's shape: Constants.Flight is read BY REFERENCE every frame
+	Server/Combat/HitboxTuning.lua's shape: FlightConstants is read BY REFERENCE every frame
 	(Client/DevMenu/FlightController.lua never snapshots it), so mutating a field here takes effect
 	on the very next Heartbeat, including for an admin already mid-flight. Lives under a new
 	Server/DevMenu/ folder (mirroring the client's existing Client/DevMenu/ folder name) rather than
 	Server/Combat/, since HitboxTuning.lua's own placement there is specifically because it tunes
 	COMBAT weapon stages -- flight tuning has nothing to do with combat, so colocating it there for
 	require-path convenience alone would be exactly the "convenience over modularity"
-	software-architecture.md warns against.
+	software-architecture.md warns against. This module is exactly why FlightConstants was pulled out
+	of Shared/Constants.lua into its own Shared/Flight/FlightConstants.lua sibling -- see that file's
+	own header.
 
 	Deviation from HitboxTuning.lua: AdjustField takes a FRACTIONAL delta (e.g. 0.1 = +10% of the
-	field's CURRENT value), not an absolute delta -- Constants.Flight's fields span degrees, studs/s,
+	field's CURRENT value), not an absolute delta -- FlightConstants' fields span degrees, studs/s,
 	studs/s^2, and unitless multipliers, so one fixed absolute step size can't sensibly apply to all
 	of them the way HitboxTuning's seconds-only fields could share one.
 
 	Captures every field's ORIGINAL value once, lazily, on first use -- same "the only backup that
 	exists, never written to disk" contract as HitboxTuning.lua's own header: there is no
 	persistence, and a satisfying live-tuned value is meant to be copied BY HAND back into
-	Constants.lua once found.
+	FlightConstants.lua once found.
 
 	Does not own: authorization/rate-limiting (DevMenuSystem.lua), or deciding what a "reasonable"
 	value is beyond basic sanity clamping (FIELD_LIMITS below).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local FlightTuning = {}
@@ -100,12 +102,12 @@ local function ensureDefaultsCaptured(): ()
 	end
 	capturedOnce = true
 	for _, field in FIELD_ORDER do
-		defaultsByField[field] = Constants.Flight[field]
+		defaultsByField[field] = FlightConstants[field]
 	end
 end
 
 local function toInfo(field: Types.FlightTuningFieldName): Types.FlightTuningInfo
-	return { Field = field, DisplayName = FIELD_DISPLAY_NAMES[field], Value = Constants.Flight[field] }
+	return { Field = field, DisplayName = FIELD_DISPLAY_NAMES[field], Value = FlightConstants[field] }
 end
 
 function FlightTuning.ListFields(): { Types.FlightTuningInfo }
@@ -129,13 +131,13 @@ function FlightTuning.AdjustField(field: Types.FlightTuningFieldName, deltaFract
 	end
 	-- Defense in depth, same tier as the `limits` check above -- DevMenuSystem.handleAdjustFlightTuning
 	-- is the primary NaN gate, but a NaN here would otherwise survive math.clamp unchanged (NaN fails
-	-- both its < and > comparisons) and permanently poison this SHARED Constants.Flight[field] value.
+	-- both its < and > comparisons) and permanently poison this SHARED FlightConstants[field] value.
 	if deltaFraction ~= deltaFraction then
 		return nil
 	end
-	local current = Constants.Flight[field]
+	local current = FlightConstants[field]
 	local updated = math.clamp(current * (1 + deltaFraction), limits.Min, limits.Max)
-	Constants.Flight[field] = updated
+	FlightConstants[field] = updated
 	return toInfo(field)
 end
 
@@ -145,7 +147,7 @@ function FlightTuning.ResetField(field: Types.FlightTuningFieldName): Types.Flig
 	if default == nil then
 		return nil
 	end
-	Constants.Flight[field] = default
+	FlightConstants[field] = default
 	return toInfo(field)
 end
 
