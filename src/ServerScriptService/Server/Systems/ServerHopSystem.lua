@@ -18,13 +18,13 @@
 	teleport per successful request and reports whether it worked.
 ]]
 
-local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 
 local ServerHopSystem = {}
@@ -76,10 +76,13 @@ function ServerHopSystem.Init(): ()
 		return true
 	end
 
-	Players.PlayerRemoving:Connect(function(player: Player)
-		pendingByPlayer[player] = nil
-		rateLimiter:Clear(player)
-	end)
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "ServerHopSystem",
+		OnPlayerRemoving = function(player: Player)
+			pendingByPlayer[player] = nil
+			rateLimiter:Clear(player)
+		end,
+	})
 
 	logger:info("ServerHopSystem.Init() complete")
 end

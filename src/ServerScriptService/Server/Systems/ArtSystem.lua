@@ -50,6 +50,7 @@ local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local QiSystem = require(script.Parent.QiSystem)
 local TierSystem = require(script.Parent.TierSystem)
@@ -389,9 +390,12 @@ function ArtSystem.Init(): ()
 	equipRemote.OnServerInvoke = handleEquipArt
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(onProfileLoaded)
-	Players.PlayerRemoving:Connect(function(player: Player)
-		requestRateLimiter:Clear(player)
-	end)
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "ArtSystem",
+		OnPlayerRemoving = function(player: Player)
+			requestRateLimiter:Clear(player)
+		end,
+	})
 
 	-- Defensive pass for a profile that loaded before this Init() ran -- same reasoning
 	-- QiSystem.Init() and TierSystem.Init() both document for their own GetPlayers() loops.

@@ -40,7 +40,6 @@
 	waste work, it counts every kill twice and silently corrupts the thing under test.
 ]]
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
@@ -49,6 +48,8 @@ local BountyConstants = require(ReplicatedStorage.Shared.BountyConstants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local MeridianSystem = require(script.Parent.MeridianSystem)
 local TierSystem = require(script.Parent.TierSystem)
@@ -85,6 +86,11 @@ local queryRateLimiter = RateLimiter.New(BountyConstants.QueryMaxCallsPerSecond)
 -- Every connection this System owns, so Init() can tear down a previous Init()'s subscriptions --
 -- see this file's header on why that matters here specifically.
 local connections: { RBXScriptConnection } = {}
+-- The PlayerLifecycle master Trove backing the PlayerRemoving binding below. Cleaned at the top of
+-- Init() for the same idempotent-re-Init reason `connections` is disconnected there --
+-- PlayerLifecycle.BindAllPlayers hands back a Trove rather than a raw RBXScriptConnection the array
+-- above could hold directly.
+local lifecycle: Trove.TroveInstance? = nil
 
 --
 -- Pure reward math. Plain numbers in, one number out -- no Player, no profile -- so the real payout
@@ -395,6 +401,9 @@ function BountySystem.Init(): ()
 		connection:Disconnect()
 	end
 	table.clear(connections)
+	if lifecycle then
+		lifecycle:Clean()
+	end
 
 	BountySystem.ResetState()
 
@@ -419,7 +428,10 @@ function BountySystem.Init(): ()
 		end)
 	)
 
-	table.insert(connections, Players.PlayerRemoving:Connect(BountySystem.ClearPlayerReferences))
+	lifecycle = PlayerLifecycle.BindAllPlayers({
+		Scope = "BountySystem",
+		OnPlayerRemoving = BountySystem.ClearPlayerReferences,
+	})
 	table.insert(connections, GameplayEvents.OnHeartbeatTick(onHeartbeatTick))
 
 	logger:info("BountySystem.Init() complete", {

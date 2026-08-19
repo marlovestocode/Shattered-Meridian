@@ -63,7 +63,6 @@
 	responsibility, per the header above -- is untouched by that removal.
 ]]
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local DataStoreService = game:GetService("DataStoreService")
 
@@ -74,6 +73,7 @@ local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
 local AdminConfig = require(script.Parent.Parent.Config.AdminConfig)
 
@@ -962,9 +962,12 @@ function MoveEditorSystem.Init(): ()
 		end
 	end)
 
-	Players.PlayerRemoving:Connect(function(player: Player)
-		rateLimiter:Clear(player)
-	end)
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "MoveEditorSystem",
+		OnPlayerRemoving = function(player: Player)
+			rateLimiter:Clear(player)
+		end,
+	})
 
 	logger:info("MoveEditorSystem.Init() complete")
 end

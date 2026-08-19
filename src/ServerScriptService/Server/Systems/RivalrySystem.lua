@@ -31,6 +31,7 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 
 local logger = Logger.scope("RivalrySystem")
@@ -165,7 +166,10 @@ function RivalrySystem.Init(): ()
 		end
 	end)
 
-	Players.PlayerRemoving:Connect(RivalrySystem.ClearPlayerReferences)
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "RivalrySystem",
+		OnPlayerRemoving = RivalrySystem.ClearPlayerReferences,
+	})
 
 	local getTopRivalsRemote = NetworkBridge.CreateRemoteFunction(Constants.Rivalry.RemoteNames.GetTopRivals)
 	getTopRivalsRemote.OnServerInvoke = function(player: Player, rawLimit: unknown): { RivalLeaderboardEntry }

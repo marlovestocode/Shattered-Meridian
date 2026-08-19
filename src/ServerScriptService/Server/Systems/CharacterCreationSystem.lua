@@ -63,7 +63,6 @@
 	    CharacterCreation_AwakeningComplete, so Success = true no longer implies "no longer isolated."
 ]]
 
-local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TextService = game:GetService("TextService")
@@ -72,6 +71,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -623,7 +623,10 @@ function CharacterCreationSystem.Init(): ()
 	end)
 	logger:debug("Handler connected", { remote = Config.RemoteNames.AwakeningComplete })
 
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "CharacterCreationSystem",
+		OnPlayerRemoving = onPlayerRemoving,
+	})
 
 	logger:info("CharacterCreationSystem.Init() complete")
 end

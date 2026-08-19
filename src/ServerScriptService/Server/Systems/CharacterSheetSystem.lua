@@ -43,6 +43,7 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 
 local logger = Logger.scope("CharacterSheetSystem")
@@ -117,9 +118,12 @@ function CharacterSheetSystem.Init(): ()
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(function(player: Player)
 		CharacterSheetSystem.Refresh(player)
 	end)
-	Players.PlayerRemoving:Connect(function(player: Player)
-		requestRateLimiter:Clear(player)
-	end)
+	PlayerLifecycle.BindAllPlayers({
+		Scope = "CharacterSheetSystem",
+		OnPlayerRemoving = function(player: Player)
+			requestRateLimiter:Clear(player)
+		end,
+	})
 
 	-- Defensive pass for a profile that loaded before this Init() ran -- same reasoning
 	-- QiSystem.Init()/TierSystem.Init()/ArtSystem.Init() all document for their own GetPlayers() loops.

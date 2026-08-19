@@ -46,6 +46,7 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local QiConstants = require(ReplicatedStorage.Shared.QiConstants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 
@@ -256,7 +257,7 @@ function QiSystem.Init(): ()
 	qiUpdatedRemote = NetworkBridge.CreateRemoteEvent(Constants.Qi.RemoteNames.QiUpdated)
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(onProfileLoaded)
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
+	PlayerLifecycle.BindAllPlayers({ Scope = "QiSystem", OnPlayerRemoving = onPlayerRemoving })
 
 	-- Defensive pass for any profile that already finished loading before this Init() ran -- same
 	-- reasoning as PlayerDataSystem.Init()'s own GetPlayers() loop (Studio Team Create / a slow
