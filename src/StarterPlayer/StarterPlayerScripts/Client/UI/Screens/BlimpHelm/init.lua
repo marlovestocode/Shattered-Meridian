@@ -32,8 +32,8 @@
 	  * BRONZE, UN-RIVETTED BRACKETS braced into the cut (BracketInset), over a violet AccentPrimary
 	    edge at the dock's own 0.3 -- so the two surfaces read as cut from one material.
 	  * TWO RECESSED WELLS instead of two full-width rules. The dock reached this conclusion first: the
-	    container carries the grouping, so the line between two containers does not have to. See the
-	    `well` helper below, including why it is not a shared component yet.
+	    container carries the grouping, so the line between two containers does not have to. The chrome
+	    is Components/ModuleWell.lua as of the BlimpFuel rework, which was its third call site.
 	  * THE MODE IS A PAINTED CHIP (Components/StatusTag.lua), not coloured text. NO FUEL is a critical
 	    state, and the doc's Critical States rule is that colour is never the only signal.
 	  * THE LEGEND IS SET IN LABEL TYPE, NOT PROSE TYPE, and every row shares one description edge.
@@ -117,6 +117,7 @@ local StatusTag = require(script.Parent.Parent.Components.StatusTag)
 local TrackedLabel = require(script.Parent.Parent.Components.TrackedLabel)
 local SpeedLadder = require(script.Parent.Parent.Components.SpeedLadder)
 local Reveal = require(script.Parent.Parent.Components.Reveal)
+local ModuleWell = require(script.Parent.Parent.Components.ModuleWell)
 
 local Children = Fusion.Children
 
@@ -230,53 +231,28 @@ local function compassPoint(degrees: number): string
 	return COMPASS[sector + 1]
 end
 
--- THE DOCK'S MODULE WELL, IN A COLUMN INSTEAD OF A ROW -- a recessed group box holding one cluster of
--- readouts. Screens/HUD/init.lua's own `moduleGroup` is the identical shape (same RailScrim fill, same
--- hairline stroke, same Radius.Hairline corner) laid out horizontally, and this console adopting it is
--- most of what "look like the hotbar" means: the two surfaces now group their contents with the same
--- object rather than each inventing a grouping of its own.
+-- THE DOCK'S MODULE WELL, IN A COLUMN INSTEAD OF A ROW -- a recessed group box holding one cluster
+-- of readouts. Screens/HUD/init.lua's own dock group is the identical shape laid out horizontally,
+-- and this console adopting it is most of what "look like the hotbar" means: the two surfaces group
+-- their contents with the same object rather than each inventing a grouping of its own.
 --
 -- IT IS WHAT LET THE TWO FULL-WIDTH DIVIDERS GO. This panel used to band itself with Divider.Plain
--- rules, which is the treatment the dock ITSELF abandoned -- see moduleGroup's own comment: "the
--- container carries the grouping, so the line between two containers doesn't have to." A rule plus a
--- well is the grouping stated twice, and on a console this size the two rules were 2 of its ~200
--- vertical pixels spent saying something the wells already say.
+-- rules, which is the treatment the dock ITSELF abandoned -- the container carries the grouping, so
+-- the line between two containers does not have to. A rule plus a well is the grouping stated twice,
+-- and on a console this size the two rules were 2 of its ~200 vertical pixels spent saying something
+-- the wells already say.
 --
--- DELIBERATELY NOT A SHARED COMPONENT YET, and the bar is the reason rather than an oversight.
--- CLAUDE.md's rule for promoting one is three independently hand-written call sites; this is the
--- second. (Tokens.Wash.RailScrim has two other readers -- Screens/EmoteWheel's full-screen scrim and
--- Screens/Onboarding/StepRail's rail band -- but neither is this SHAPE, they only share the wash, so
--- neither counts toward it.) The third caller is what collapses these into Components/ModuleWell.lua;
--- until then the tokens are the contract, and naming them here is what keeps the two from drifting.
---
--- The UICorner/UIStroke/UIPadding are safe among a Stack's Children precisely because none of them is
--- a GuiObject -- a UIListLayout arranges GuiObject children only, which is the distinction
--- Components/Layer.lua's header is about.
+-- THE CHROME IS Components/ModuleWell.lua's NOW. This helper used to build it inline and carried a
+-- note saying it was the second of three hand-written copies and that the third would collapse them.
+-- Screens/BlimpFuel is the third, and it did. What is left here is the two arguments this caller
+-- pins -- a full-width column at the tighter inset -- which are the component's own defaults, so
+-- the wrapper survives only to keep the four call sites below reading as `well(...)`.
 local function well(scope: Scope, name: string, layoutOrder: number, gap: number, children: { any }): Frame
-	return Stack.New(scope, {
+	return ModuleWell(scope, {
 		Name = name,
 		LayoutOrder = layoutOrder,
-		-- Full width of whatever column it is dropped in, height from its own contents -- so a
-		-- passenger, whose legend collapses to a single row, gets a shorter well rather than a
-		-- part-empty one. Same reason this file's header gives for the panel's own AutomaticSize.
-		Size = UDim2.fromScale(1, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
 		Gap = gap,
-		BackgroundColor3 = Tokens.Wash.RailScrim.Color,
-		BackgroundTransparency = Tokens.Wash.RailScrim.Transparency,
-
-		Children = {
-			scope:New("UICorner")({
-				CornerRadius = Tokens.Radius.Hairline,
-			}),
-			scope:New("UIStroke")({
-				Color = Tokens.Border.Hairline.Color,
-				Transparency = Tokens.Border.Hairline.Transparency,
-				Thickness = 1,
-			}),
-			Inset(scope, { X = Tokens.Space.S, Y = Tokens.Space.XS }),
-			children,
-		},
+		Children = children,
 	})
 end
 

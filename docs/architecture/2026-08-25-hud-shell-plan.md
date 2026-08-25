@@ -1416,11 +1416,18 @@ is a regression this plan introduced; exit 1 on its own is not.
 3. **Should the Escape stack have a "modal Escape wins over game Escape" rule on gamepad?** No gamepad
    support exists today, so this is deferred rather than designed blind. Settings' existing
    `ButtonStart` handling is the only gamepad path and it stays local. *Owner: deferred.*
-4. ~~**Does `BottomRight` have a claimant?**~~ **ANSWERED 2026-08-25 at Phase 6 — no, and it stays
-   anyway.** Not because it might be useful: it is the region that carries `DOCK_BAND_CLEARANCE` for
-   whoever claims that corner first. Drop it and the next tile that wants the bottom-right corner
-   places itself there and lands in the dock's shadow, which is §2.1b for the third time in this
-   document. An empty region with a clearance on it is a note the next contributor cannot miss.
+4. ~~**Does `BottomRight` have a claimant?**~~ **ANSWERED TWICE ON THE SAME DAY, and the second
+   answer is what made the first one worth writing.** At Phase 6: no claimant, and it stays anyway —
+   not because it might be useful, but because it is the region carrying `DOCK_BAND_CLEARANCE` for
+   whoever claims that corner first. Drop it and the next tile to want the bottom-right corner places
+   itself there and lands in the dock's shadow, which is §2.1b for the third time in this document.
+
+   **Hours later it was claimed.** The furnace gauge (`Screens/BlimpFuel`) moved out of `TopRight`
+   into it during the instrument rework, and cleared the dock band with no work at all, because the
+   clearance had already been written against exactly this day. That is the strongest case in this
+   document for the region layer existing: the corner was empty, nobody knew what would want it, and
+   the answer to "what does a tile here have to keep off?" was recorded anyway — so the tile that
+   eventually arrived did not have to discover it by rendering through the hotbar.
    *Owner: Phase 6, closed.*
 6. **What gives on a left edge that is oversubscribed?** (§2.1a) **LARGELY RETRACTED 2026-08-25.**
    The helm console that this question was built around was not 710px of content — it was ~175px of

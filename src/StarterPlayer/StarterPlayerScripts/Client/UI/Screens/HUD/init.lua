@@ -6,12 +6,20 @@
 	"Player Status Display" and "Ability System UI" sections), assembled as five bands stacked
 	bottom-centre:
 
-	    engagement line      HUD/EngagementLine.lua -- combat state, off ClientState.InCombat
-	    bounty pill          Components/BountyMarkedBadge.lua -- collapses to zero height when unmarked
-	  +------------------------------------------------------------------+
-	  | TierBadge  |  [ Health  Qi  Posture ]  |  [ 1  2  3  4  5 ]       |   the dock
-	  +------------------------------------------------------------------+
-	    key legend           Components/KeyLegend.lua -- M / K / B, read live from KeybindManager
+	              engagement line      HUD/EngagementLine.lua -- combat state, off ClientState.InCombat
+	              bounty pill          Components/BountyMarkedBadge.lua -- zero height when unmarked
+	  +-----------o------------------------------------------------------+
+	  | armament  | TierBadge  |  [ Health  Qi  Posture ]  |  [ 1 .. 5 ]  |   the dock
+	  +-----------o------------------------------------------------------+
+	              key legend           Components/KeyLegend.lua -- M / K / B, live from KeybindManager
+
+	The armament island (HUD/ArmamentIsland.lua) is not a sixth band and not a neighbour -- it is
+	BOLTED to the dock's left edge, sharing that edge as its own: one rule at the seam, one height,
+	one content baseline, and a bronze bead through the joint. It springs out of the dock on the first
+	weapon pickup and is absent before then. Screens/WeaponInventory hands in the state it renders;
+	the geometry of the joint belongs here, next to the dock chrome it has to match. See that file's
+	header for the seam, and the dock band in Mount below for the fastener and why the island is
+	pinned rather than laid out.
 
 	Renders directly from ClientState -- never computes or guesses at a value ClientState doesn't
 	already hold, per that doc's HUD sync rule against optimistic HUD state.
@@ -84,6 +92,7 @@ local Panel = require(script.Parent.Parent.Components.Panel)
 local Divider = require(script.Parent.Parent.Components.Divider)
 local Inset = require(script.Parent.Parent.Components.Inset)
 local Stack = require(script.Parent.Parent.Components.Stack)
+local ModuleWell = require(script.Parent.Parent.Components.ModuleWell)
 local VitalIcon = require(script.Parent.Parent.Components.VitalIcon)
 local AbilitySlot = require(script.Parent.Parent.Components.AbilitySlot)
 local TierBadge = require(script.Parent.Parent.Components.TierBadge)
@@ -91,6 +100,7 @@ local KeyLegend = require(script.Parent.Parent.Components.KeyLegend)
 local BountyMarkedBadge = require(script.Parent.Parent.Components.BountyMarkedBadge)
 local ClientStateModule = require(script.Parent.Parent.State.ClientState)
 local EngagementLine = require(script.EngagementLine)
+local ArmamentIsland = require(script.ArmamentIsland)
 local KeybindManager = require(script.Parent.Parent.Parent.Input.KeybindManager)
 local HotbarBindings = require(script.Parent.Parent.Parent.Combat.HotbarBindings)
 local AttackInputClient = require(script.Parent.Parent.Parent.Combat.AttackInputClient)
@@ -126,6 +136,12 @@ local TIER_PROMOTION_HOLD_SECONDS = 2.5
 -- a full-height rule reads as a wall between two panels rather than as a seam within one.
 local SEPARATOR_HEIGHT = 40
 
+-- The bead that fastens the armament island to this dock -- see the dock band in Mount below. Seven,
+-- which is the rack strip's own selected-bead size: the fastener and the thing it fastens are the
+-- same mark at the same weight, so the joint reads as part of the island's vocabulary rather than as
+-- a decoration someone added to the seam.
+local SEAM_BOLT_SIZE = 7
+
 -- The countdown label is quantised to tenths (see the Heartbeat below). Ten updates a second is
 -- already faster than the eye resolves a changing digit, and it is a sixth of the string formatting.
 local COUNTDOWN_STEPS_PER_SECOND = 10
@@ -138,29 +154,26 @@ local COUNTDOWN_STEPS_PER_SECOND = 10
 -- The UICorner/UIStroke/UIPadding here are safe among a Stack's Children precisely because none of
 -- them is a GuiObject -- a UIListLayout arranges GuiObject children only, which is the distinction
 -- Components/Layer.lua's header is about.
+-- A RECESSED GROUP BOX around one cluster of dock readouts. The chrome moved to
+-- Components/ModuleWell.lua on 2026-08-25, at its third call site (Screens/BlimpFuel), which is
+-- CLAUDE.md's own bar for promoting a shared module -- Screens/BlimpHelm's copy of it had already
+-- named this file as the first of the three and pre-registered the trigger. Nothing about the dock's
+-- own group changed: same fill, same hairline, same M/S inset, passed explicitly here because the
+-- shared default is the tighter inset the two corner instruments want.
+--
+-- The reasoning this file reached first, and which the shared component now carries: the container
+-- carries the grouping, so the line between two containers does not have to. That is why the dock's
+-- Divider.Plain rules went away when these arrived, and why a rule inside a well would be the same
+-- statement twice.
 local function moduleGroup(scope: Scope, name: string, layoutOrder: number, gap: number, children: { Instance }): Frame
-	return Stack.Row(scope, {
+	return ModuleWell(scope, {
 		Name = name,
+		Direction = "Horizontal",
 		LayoutOrder = layoutOrder,
-		Size = UDim2.fromOffset(0, 0),
-		AutomaticSize = Enum.AutomaticSize.XY,
 		Gap = gap,
 		AlignY = Enum.VerticalAlignment.Center,
-		BackgroundColor3 = Tokens.Wash.RailScrim.Color,
-		BackgroundTransparency = Tokens.Wash.RailScrim.Transparency,
-
-		Children = {
-			scope:New("UICorner")({
-				CornerRadius = Tokens.Radius.Hairline,
-			}),
-			scope:New("UIStroke")({
-				Color = Tokens.Border.Hairline.Color,
-				Transparency = Tokens.Border.Hairline.Transparency,
-				Thickness = 1,
-			}),
-			Inset(scope, { X = Tokens.Space.M, Y = Tokens.Space.S }),
-			children,
-		},
+		Inset = { X = Tokens.Space.M, Y = Tokens.Space.S },
+		Children = children,
 	})
 end
 
@@ -204,7 +217,16 @@ end
 --     on the band stack itself; it is not true of the one on the host ScreenGui above it, which
 --     scales its descendants' position offsets as well as their sizes. So BottomCentre's ordinary
 --     Tokens.Space.L edge inset is the margin now, it scales, and no one has to remember why.
-function HUD.Mount(scope: Scope, clientState: ClientState): Frame
+-- THE ARMAMENT ISLAND IS BOLTED TO THIS DOCK, so this file owns the joint -- see
+-- HUD/ArmamentIsland.lua, which is a sibling of HUD/EngagementLine.lua for exactly that reason. What
+-- comes in is the STATE (Screens/WeaponInventory's Fusion Values, which is what a weapon is; the
+-- dock has no business knowing that), and what this file builds is the plate, the seam and the
+-- fastener, twenty lines from the dock's own chrome props rather than in another folder restating
+-- them from memory.
+--
+-- Optional: passing nothing gives the bare dock, byte-identical to what it was before the island
+-- existed, which is what Tests/UI/Hotbar.spec.lua's existing cases mount.
+function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsland.ArmamentState?): Frame
 	local abilitySlots = {}
 	-- One reactive State Value per slot, seeded from whatever's already bound this session (an admin
 	-- who bound a move, then closed and reopened the Move Editor, shouldn't see every slot flash back
@@ -462,6 +484,82 @@ function HUD.Mount(scope: Scope, clientState: ClientState): Frame
 		},
 	})
 
+	-- THE DOCK BAND, AND WHY IT IS A BARE FRAME RATHER THAN A Stack OR A Layer.
+	--
+	-- It holds the dock plus, when there is one, the island and the bead that fastens them. The dock
+	-- is the only child at the origin, so this frame's AutomaticSize resolves to exactly the dock's
+	-- size -- which is what gives the island something dock-shaped to pin against, and what keeps the
+	-- three OTHER bands (engagement line, bounty pill, key legend) centred on the dock rather than on
+	-- the dock-plus-island.
+	--
+	-- NO UIListLayout, hence no Stack: the island must NOT be laid out. Measured in this repo's own
+	-- harness before it was written -- an offset-sized child pinned to negative X neither inflates an
+	-- AutomaticSize parent nor displaces its siblings (host stayed 300x98 with the pinned child at
+	-- AbsolutePosition.X = -120), while the same child given a Scale HEIGHT inside an AutomaticSize.Y
+	-- parent latched onto the viewport and came back 793 tall. Both facts are load-bearing: the first
+	-- is why the dock cannot move, and the second is why ArmamentIsland's slot and plate are
+	-- offset-sized on both axes.
+	--
+	-- That is a strictly stronger guarantee than the mirror spacer this replaced. Reserving the
+	-- island's width in a centred row and cancelling it with an invisible frame of the same width on
+	-- the far side DOES keep the dock still -- but only for as long as the two agree to the pixel, in
+	-- the pre-UIScale coordinate space, on every frame of an under-damped spring. Pinning removes the
+	-- arithmetic rather than getting it right, and takes the island's Width out of the contract with
+	-- it.
+	--
+	-- Layer.lua is the right tool for pinning something into a frame that HAS a layout; there is none
+	-- here, so its two wrapper frames would buy nothing and its Scale-sized holders are precisely the
+	-- shape the measurement above rules out.
+	local dockBand: Frame = dock
+	if armament then
+		local island = ArmamentIsland(scope, armament)
+
+		-- THE FASTENER. One bronze bead straddling the seam -- half on the dock, half on the island --
+		-- at the one point on that edge the dock's own bracket elbows leave clear. It is what turns a
+		-- flush butt joint into a VISIBLE one: the island already borrows the dock's edge rather than
+		-- drawing its own (ArmamentIsland's header, seam point 2), and a shared rule with nothing on
+		-- it reads as one plate with a score line rather than as two plates fastened together. A
+		-- point, deliberately, not a rule down the seam: a point joins, a line divides.
+		--
+		-- Bronze because this palette's bronze is "committed / permanent" and a bolt is exactly that,
+		-- and the same 45-degree bead the rack strip and Divider.Flourish use, so it introduces no new
+		-- mark. ZIndex 6 clears everything Panel.lua builds (its accent overlay is the highest at 5) --
+		-- necessary because the host ScreenGui is ZIndexBehavior.Sibling, where a descendant's own
+		-- ZIndex is global rather than scoped to its parent.
+		--
+		-- Rides the island's OWN spring rather than a second one: it must not be sitting on the dock's
+		-- edge with nothing attached to it, and two springs off one boolean are one retune away from
+		-- disagreeing about how far out the island is.
+		local seamBolt = scope:New "Frame" {
+			Name = "SeamBolt",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0, 0.5),
+			Size = UDim2.fromOffset(SEAM_BOLT_SIZE, SEAM_BOLT_SIZE),
+			Rotation = 45,
+			BackgroundColor3 = Tokens.Color.AccentSecondary,
+			BackgroundTransparency = scope:Computed(function(use)
+				return 1 - math.clamp(use(island.Presence), 0, 1)
+			end),
+			BorderSizePixel = 0,
+			ZIndex = 6,
+		}
+
+		dockBand = scope:New "Frame" {
+			Name = "DockBand",
+			LayoutOrder = 3,
+			Size = UDim2.fromOffset(0, 0),
+			AutomaticSize = Enum.AutomaticSize.XY,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+
+			[Children] = {
+				dock,
+				island.Content,
+				seamBolt,
+			},
+		} :: Frame
+	end
+
 	-- NO AnchorPoint AND NO Position, which is the region tile contract (Shell/Regions.lua, contract 1)
 	-- and not a style preference: BottomCentre's UIListLayout overwrites a child's Position on every
 	-- layout pass, so a tile that set one would have it silently discarded. The bottom margin that
@@ -489,7 +587,7 @@ function HUD.Mount(scope: Scope, clientState: ClientState): Frame
 				Marked = clientState.BountyMarked,
 				Reward = clientState.BountyReward,
 			}),
-			dock,
+			dockBand,
 			-- The legend's own clearance from the dock, as padding on a holder rather than baked
 			-- into KeyLegend: that component is generic (Components/, not Screens/HUD/) and has no
 			-- business knowing what it happens to sit under here.

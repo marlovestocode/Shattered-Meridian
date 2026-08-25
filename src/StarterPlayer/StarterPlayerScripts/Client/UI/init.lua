@@ -369,8 +369,18 @@ function UI.Mount(): UIHandles
 	-- The four remaining ambient tiles. The ORDER NUMBERS ARE THE LAYOUT, and they are all that
 	-- decides who sits where now -- no panel carries a corner of its own any more. Lower sits nearer
 	-- its region's anchored edge, at both ends of the screen (Regions.lua handles the sign).
+	-- BOTTOM-RIGHT AS OF 2026-08-25, AND IT IS THE FIRST TILE EVER TO CLAIM THAT REGION. Moved from
+	-- TopRight at the owner's request, and the layout is better for it in a way worth stating: the
+	-- furnace gauge and the helm console (BottomLeft) are a matched pair of flight instruments, and
+	-- they now frame the dock from opposite bottom corners instead of one being in the pilot's
+	-- peripheral vision and the other diagonally across the screen from it.
+	--
+	-- BottomRight has been reserved and empty since Phase 1 of the HUD shell plan, and section 14.4
+	-- of that document asked whether it would ever have a claimant. It does now. It already carries
+	-- DOCK_BAND_CLEARANCE, so this tile clears the dock band for free -- which is exactly the reason
+	-- Phase 6 kept the region rather than deleting it as unused.
 	local blimpFuel, blimpFuelTile = BlimpFuelModule.Mount(scope)
-	regions:Add("TopRight", 20, blimpFuelTile)
+	regions:Add("BottomRight", 10, blimpFuelTile)
 	logger:debug("BlimpFuel mounted")
 
 	-- Rack at 10 (the bottom-left corner it has always occupied), helm above it at 20.

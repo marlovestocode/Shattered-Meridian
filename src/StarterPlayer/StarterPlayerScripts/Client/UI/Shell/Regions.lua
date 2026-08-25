@@ -320,10 +320,12 @@ local REGION_SPECS: { [Region]: RegionSpec } = {
 		AnchorScale = Vector2.new(1, 1),
 		ClearsTouchControls = true,
 		Ambient = true,
-		-- Empty today, and it takes the clearance anyway. The dock's right edge is only 12px clear of
-		-- this column at the reference resolution, so the FIRST tile to claim this corner would land
-		-- in the dock's shadow the way the helm console landed in the island's -- and it would land
-		-- there for the same reason, a region that never said anything about the strip it grows into.
+		-- CLAIMED 2026-08-25 by the furnace gauge (Screens/BlimpFuel), which had been sharing TopRight
+		-- with the kill feed. It is the first tile ever to sit here, and it landed clear because this
+		-- region already carried the clearance below -- written while the corner was still empty,
+		-- against the day something wanted it. The dock's right edge is only 12px from this column at
+		-- the reference resolution, so without it the gauge would have arrived in the dock's shadow
+		-- the way the helm console arrived in the armament island's.
 		EdgeInsetOverride = DOCK_BAND_CLEARANCE,
 	},
 }
