@@ -12,8 +12,12 @@
 	text sized for short combat callouts ("POSTURE BROKEN" / "Enemy is exposed") -- an admin-authored
 	message can run up to Constants.Debug.DevMenu.AnnouncementMaxLength (200) characters and needs to
 	WRAP, which StatusBanner's fixed 300x64 frame has no room for. Follows the same "screen exposes a
-	Value, driven from outside" pattern and the same one-shot Spring fade-in feel (Tokens.Motion.
-	FadeSpring) as that component, just with its own sized panel.
+	Value, driven from outside" pattern as that component, just with its own sized panel.
+
+	IT NO LONGER SHARES StatusBanner's FADE, and that parted at Phase 5 of the HUD shell plan. This
+	banner is a region tile and StatusBanner is not, so this one's entrance is the one every ambient
+	tile wears (Components/Reveal.lua) rather than a hand-held Tokens.Motion.FadeSpring -- and it
+	gained an arrival in the process, where before it only faded.
 
 	Stacked below CombatFeedback's PostureBreak (YOffset 0) and Disarmed (YOffset 72) banners, so a
 	mid-fight admin broadcast can never overlap either. That clearance used to be a 152px constant in
@@ -33,6 +37,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Parent.Components.Panel)
 local Label = require(script.Parent.Parent.Components.Label)
+local Reveal = require(script.Parent.Parent.Components.Reveal)
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 
@@ -50,9 +55,6 @@ export type AnnouncementHandle = {
 local ROOT_WIDTH = 420
 local ROOT_HEIGHT = 108
 
-local FADE_SPRING_SPEED = Tokens.Motion.FadeSpring.Speed
-local FADE_SPRING_DAMPING = Tokens.Motion.FadeSpring.Damping
-
 -- Returns its handle AND its tile. The tile is unparented -- UI/init.lua hands it to
 -- Shell/Regions.lua's TopCentre, which owns where it sits. The 152px dodge that used to be baked
 -- into this banner's own Position became that region's top inset; see COMBAT_BANNER_BAND_BOTTOM in
@@ -64,18 +66,17 @@ local function Announcement(scope: Scope): (AnnouncementHandle, Frame)
 		return use(display) ~= nil
 	end)
 
-	-- Same one-shot decorative fade-in as Components/PostureBreakBanner.lua's StatusBanner -- 0 while
-	-- hidden, springs to 1 the moment a display arrives, so the banner settles in instead of snapping.
-	local fadeIn = scope:Spring(
-		scope:Computed(function(use)
-			return if use(isVisible) then 1 else 0
-		end),
-		FADE_SPRING_SPEED,
-		FADE_SPRING_DAMPING
-	)
-	local contentTransparency = scope:Computed(function(use)
-		return 1 - use(fadeIn)
-	end)
+	-- The fade is Components/Reveal.lua's now, and it comes with the arrival this banner never had:
+	-- it used to spring transparency alone on Tokens.Motion.FadeSpring, so a broadcast materialised
+	-- in place rather than settling in. Same shape as the other three ambient tiles as of Phase 5 of
+	-- docs/architecture/2026-08-25-hud-shell-plan.md.
+	--
+	-- WHAT CHANGED BESIDES THE OWNER: FadeSpring is 14/0.7 and Reveal's is 22/1, so this banner now
+	-- arrives slightly faster and, being critically damped, without the small transparency overshoot
+	-- 0.7 gave it. That overshoot was never visible -- a transparency past 1 clamps -- which is
+	-- exactly why nobody would have noticed it either way.
+	local reveal = Reveal(scope, { Visible = isVisible })
+	local contentTransparency = reveal.Transparency
 
 	local accentColor = scope:Computed(function(use)
 		local current = use(display)
@@ -94,7 +95,9 @@ local function Announcement(scope: Scope): (AnnouncementHandle, Frame)
 	local root = Panel(scope, {
 		Name = "AnnouncementBanner",
 		Size = UDim2.fromOffset(ROOT_WIDTH, ROOT_HEIGHT),
-		Visible = isVisible,
+		-- Reveal's guard rather than isVisible directly: the banner has to stay drawn through its
+		-- exit or the fade out is a cut.
+		Visible = reveal.Mounted,
 		Elevated = true,
 		CornerAccent = true,
 		BorderColor3 = accentColor,
@@ -102,6 +105,7 @@ local function Announcement(scope: Scope): (AnnouncementHandle, Frame)
 		BorderTransparency = contentTransparency,
 
 		Children = {
+			reveal.Scale,
 			scope:New "UIPadding" {
 				PaddingTop = UDim.new(0, Tokens.Space.S),
 				PaddingBottom = UDim.new(0, Tokens.Space.S),

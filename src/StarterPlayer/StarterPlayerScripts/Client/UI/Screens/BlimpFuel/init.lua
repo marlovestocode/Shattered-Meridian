@@ -40,6 +40,7 @@ local Tokens = require(script.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Parent.Components.Panel)
 local Label = require(script.Parent.Parent.Components.Label)
 local FuelGauge = require(script.Parent.Parent.Components.FuelGauge)
+local Reveal = require(script.Parent.Parent.Components.Reveal)
 
 local Children = Fusion.Children
 
@@ -189,15 +190,25 @@ function BlimpFuel.Mount(scope: Scope): (BlimpFuelHandle, Frame)
 		end
 	end)
 
+	-- AN ENTRANCE THIS GAUGE NEVER HAD. It used to pop -- `visible` straight onto the Panel, so
+	-- boarding a blimp made a fully-formed panel exist in the corner between two frames. Phase 5 of
+	-- docs/architecture/2026-08-25-hud-shell-plan.md gives all four ambient tiles the same arrival;
+	-- see Components/Reveal.lua for what it can and cannot animate on a region-laid-out tile.
+	local reveal = Reveal(scope, { Visible = visible })
+
 	local tile = Panel(scope, {
 		Name = "BlimpFuelPanel",
 		Size = UDim2.fromOffset(PANEL_WIDTH, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
-		Visible = visible,
+		-- Reveal's guard, not `visible`: the tile has to outlive the close edge by the length of the
+		-- exit. `visible` is still the fact -- this screen decides when the gauge belongs on screen,
+		-- and Reveal only decides how long it takes to get there and back.
+		Visible = reveal.Mounted,
 		Elevated = true,
 		CornerAccent = true,
 
 		Children = {
+			reveal.Scale,
 			scope:New "UIPadding" {
 				PaddingLeft = UDim.new(0, Tokens.Space.M),
 				PaddingRight = UDim.new(0, Tokens.Space.M),

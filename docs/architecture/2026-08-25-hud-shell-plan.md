@@ -15,7 +15,7 @@ assert they cannot happen.
 - [x] **Phase 2** — `Surface.lua`, every remaining ScreenGui migrated
 - [x] **Phase 3** — `Chrome.lua` mode + HUD yielding
 - [x] **Phase 4** — `Chrome.lua` Escape stack
-- [ ] **Phase 5** — `Reveal.lua`, five entrances unified
+- [x] **Phase 5** — `Reveal.lua`, ~~five~~ four entrances unified
 - [ ] **Phase 6** — `Notify.lua` + the `TierPromotion` producer
 
 Phases are independently shippable and independently revertable. Each ends at a green gate (§9), and
@@ -240,6 +240,12 @@ read as a hard gate by `AttackInputClient`, `GrabInputClient`, `DefenseClient` a
 That is the right pattern with the right owner. The plan extends it; it does not replace it.
 
 ### 2.7 Five ambient panels, four different entrance behaviours
+
+**THE TABLE BELOW IS STALE AS OF PHASE 5, in two ways, and is left standing because it is what the
+phase was planned from.** `WeaponInventory` is no longer a region tile at all — the dock rework made
+its readout `Screens/HUD/ArmamentIsland.lua`, which has its own drawer entrance — so the real list is
+four. And the two hand-rolled entrances' *offsets* did not come back; they could not. Phase 5's
+build notes have both.
 
 | Screen | Entrance | Detail |
 |---|---|---|
@@ -1058,16 +1064,100 @@ stays deferred — `ButtonStart` remains local to Settings' capture, where it wa
 **Goal:** one entrance for all five ambient tiles (§2.7).
 **Risk:** low.
 
-- [ ] `UI/Components/Reveal.lua` — spring offset plus fade, direction from the host region, the
-      mounted-until-exit-finishes guard, and the zero-height collapse from §3.2.
-- [ ] Storybook page — it is a motion component and the gallery is the only place to look at one.
-- [ ] Migrate `BlimpHelm` (drop `ENTER_OFFSET`, the `entrance` spring at `:172`, the Position
-      `Computed` at `:362`).
-- [ ] Migrate `WeaponInventory` (drop `ENTER_RISE`, the `reveal` spring at `:374`, `:376`).
-- [ ] Migrate `Announcement` (drop the `fadeIn` spring at `:66`; it gains the offset it lacked).
-- [ ] Migrate `BlimpFuel` — gains an entrance it never had.
-- [ ] Migrate `CarriedResources` — gains an entrance it never had.
-- [ ] Confirm `Reveal` is exactly 0 when at rest, per §10 rule 5.
+- [x] `UI/Components/Reveal.lua` — **a spring-driven SCALE plus fade, not an offset**, the
+      mounted-until-exit-finishes guard, and the §3.2 collapse. "Direction from the host region" is
+      gone with the offset: there is no direction to take. See the build notes.
+- [x] Storybook specimen — it is a motion component and the gallery is the only place to look at one.
+      Two depths side by side (the shipped 0.02 and an exaggerated 0.12) on one toggle.
+- [x] Migrate `BlimpHelm` (drops its whole hand-rolled spring; Reveal adopted its tuning, so nothing
+      about how this console arrives changed).
+- [x] ~~Migrate `WeaponInventory`~~ — **STRICKEN. It is not a region tile any more.** The dock rework
+      turned its readout into `Screens/HUD/ArmamentIsland.lua`, an outrigger laid out by the dock,
+      which already has its own drawer entrance on `Tokens.Motion.IslandSpring`. §2.7's five is four.
+- [x] Migrate `Announcement` (drops the `fadeIn` spring; it gains the arrival it lacked).
+- [x] Migrate `BlimpFuel` — gains an entrance it never had.
+- [x] Migrate `CarriedResources` — gains an entrance it never had.
+- [x] Confirm `Reveal` is exactly its goal at rest, per §11 rule 5. **It is, and the reasoning behind
+      the checkbox was wrong** — see the build notes.
+- [x] Suite green — **2104 passed, 0 failed, 1 `Stack Begin`** (2093 + 11 new). `selene` 0/0,
+      `stylua --check` clean on the touched set.
+- [x] Reachability: `Components/Reveal.lua` has 6 inbound requires from outside `UI/Components/`.
+- [ ] Studio: board a blimp, pick up coal, take a broadcast. Four tiles, one arrival. **Needs a
+      human**, and it is the only check on whether the motion actually reads as arrival rather than
+      as a wobble.
+
+### §2.7's table was stale in two ways, and only one of them was known
+
+The plan expected five entrances at four different presets. The list at Phase 5 is four:
+
+| Screen | Was | Now |
+|---|---|---|
+| `BlimpHelm` | hand-rolled spring, 14px rise + 2% scale + its own exit guard | `Reveal`, same tuning |
+| `Announcement` | `Tokens.Motion.FadeSpring` on transparency only, no arrival | `Reveal`, gains the arrival |
+| `BlimpFuel` | nothing; it popped | `Reveal` |
+| `CarriedResources` | nothing; it popped | `Reveal` |
+| ~~`WeaponInventory`~~ | ~~hand-rolled spring, 14px rise~~ | **not a tile any more** |
+
+`WeaponInventory` renders no panel at all now. Its readout is `Screens/HUD/ArmamentIsland.lua`, an
+outrigger the dock lays out against its own left edge, and that file already has a drawer entrance on
+`Tokens.Motion.IslandSpring` — the one deliberately under-damped spring in the whole UI, because an
+island being shoved out of a dock is a thing with mass and a corner readout is not. Folding it into
+`Reveal` would have flattened a distinction that file argues for at length. Left alone.
+
+### The offset is not coming back, and the plan should stop saying it will
+
+Phase 1 recorded losing the 14px rise as a regression and put it in this phase to restore. It cannot
+be restored, and that is a property of the layout rather than a shortfall of effort: **a
+`UIListLayout` writes `Position` on every child on every layout pass**, so a spring driving a tile's
+`Position` is overwritten between frames. Every tile in `Reveal`'s list is laid out by its region.
+
+A translation is possible in principle — a fixed-size clipping tile with a sliding child — and was
+rejected on the spot: all four tiles are `AutomaticSize.Y` over content whose height changes (the
+helm drops three rows for a passenger, the resources tile grows a second line), so the fixed outer
+box a slide needs is exactly the thing those tiles were written not to have. Trading content sizing
+for a quarter-second of motion is the wrong way round.
+
+What shipped instead is a scale and a fade. `BlimpHelm` had already reached the same conclusion
+alone, at 2%, and `Reveal` adopted its number and its damping. **So the only tile that lost anything
+in Phase 1 got exactly what it had back, and three tiles gained something they never had.**
+
+### It returns values and one Instance, not a wrapper
+
+The obvious shape is `Reveal(scope, { Child = tile })` returning a wrapper Frame. That would put a
+second Frame between every tile and its region — six more Instances, and a second thing for
+`AutomaticSize` to measure through, which is the interaction that inflated the helm console to four
+times its content once already (Phase 1's order note). So it hands back `Mounted` / `Progress` /
+`Transparency` plus a pre-bound `UIScale` the caller parents itself — which also lets each caller
+decide *which* frame is scaled. All four put it inside `Panel`'s Content wrapper, so the chrome holds
+still while the contents arrive.
+
+### The spring lives in `Reveal`, not in `Tokens.Motion`, and that is a deliberate deviation
+
+Every other named spring in this UI is a `Tokens.Motion` entry. This one has exactly one reader —
+`Reveal` itself — and four screens that reach it only through `Reveal`. A token would be a number two
+places could set and one place could use. Recorded because it is a departure from an otherwise
+consistent convention, not because it is interesting.
+
+### §11 rule 5 as written is not achievable, and the honest version is better
+
+The checkbox above said "confirm `Reveal` is exactly 0 when at rest", on the assumption — stated in
+`Reveal`'s own first-draft header — that a Fusion Spring stops being stepped once it settles. **It
+does not.** Fusion 0.3's `Animation/Spring.luau` integrates every frame for the life of its scope;
+the sleep that would stop it is a commented-out TODO directly under the branch that detects it.
+
+What it does do is **snap**: once the remaining offset and velocity are both under `1e-5` it writes
+the goal exactly and `update` returns false, so nothing downstream recomputes. That is the property
+that actually matters — `Mounted`, `Transparency` and the `UIScale` binding are all genuinely idle
+while a tile sits still — and what remains is a few arithmetic ops per spring per frame that never
+propagate. Four springs on the client, one per ambient tile.
+
+**This cost a test round-trip and was worth it.** The first spec waited a flat 40 frames and read
+`0.0063` — converged to three decimal places, which is precisely the near-miss an "approximately
+equal" assertion would have swallowed while proving nothing. `Tests/UI/Reveal.spec.lua` now waits for
+the exact goal *by condition* and fails naming the value it stalled at. A second, smaller version of
+the same trap: `UIScale.Scale` is a float32 property, so `0.8` reads back as `0.800000011920929` —
+that one comparison takes a tolerance, and the comment says why the settled comparison next to it
+does not need one.
 
 ---
 

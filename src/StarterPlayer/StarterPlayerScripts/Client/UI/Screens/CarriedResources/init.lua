@@ -33,6 +33,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Parent.Components.Panel)
 local Label = require(script.Parent.Parent.Components.Label)
+local Reveal = require(script.Parent.Parent.Components.Reveal)
 
 local Children = Fusion.Children
 
@@ -95,15 +96,27 @@ function CarriedResources.Mount(scope: Scope): (CarriedResourcesHandle, Frame)
 		water:set(newWater)
 	end
 
+	-- AN ENTRANCE THIS TILE NEVER HAD. It used to pop -- `visible` straight onto the Panel, so the
+	-- first lump of coal picked up made a panel exist in the corner between two frames. Phase 5 of
+	-- docs/architecture/2026-08-25-hud-shell-plan.md gives all four ambient tiles the same arrival.
+	--
+	-- It matters more here than anywhere else on the list, because this is the one tile whose
+	-- visibility is derived from a QUANTITY rather than from a mode: it appears the moment coal or
+	-- water goes above zero and vanishes the moment both hit zero, which during a refuelling run is
+	-- something the player triggers repeatedly. Reveal's exit guard is what keeps the last unit
+	-- spent from being a cut.
+	local reveal = Reveal(scope, { Visible = visible })
+
 	local tile = Panel(scope, {
 		Name = "CarriedResourcesPanel",
 		Size = UDim2.fromOffset(PANEL_WIDTH, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
-		Visible = visible,
+		Visible = reveal.Mounted,
 		Elevated = true,
 		CornerAccent = true,
 
 		Children = {
+			reveal.Scale,
 			scope:New "UIPadding" {
 				PaddingLeft = UDim.new(0, Tokens.Space.M),
 				PaddingRight = UDim.new(0, Tokens.Space.M),
