@@ -12,7 +12,7 @@ assert they cannot happen.
 
 - [x] **Phase 0** — Baseline and guardrails
 - [x] **Phase 1** — `Layers.lua` + `Regions.lua`, six panels migrated
-- [ ] **Phase 2** — `Surface.lua`, every remaining ScreenGui migrated
+- [x] **Phase 2** — `Surface.lua`, every remaining ScreenGui migrated
 - [ ] **Phase 3** — `Chrome.lua` mode + HUD yielding
 - [ ] **Phase 4** — `Chrome.lua` Escape stack
 - [ ] **Phase 5** — `Reveal.lua`, five entrances unified
@@ -28,7 +28,8 @@ nothing in a later phase is required to make an earlier one correct.
 The token layer is good. The component layer is good. The layout layer landed in August and is good
 (`Stack`/`Layer`/`Inset`/`ScreenFrame`, per `2026-08-20-ui-velocity-plan.md` §7).
 
-**The shell layer does not exist.** There are 17 `ScreenGui` creation sites and nothing owns the
+**The shell layer does not exist.** There are 17 `ScreenGui` creation sites (**18 — see Phase 2
+on `Combat/GrabInputClient.lua`, which this count missed**) and nothing owns the
 questions that span them: who is in front, who owns which corner of the screen, who is allowed to
 handle Escape, what happens to the HUD when a modal opens, and how big any of it is at 4K. Each of
 those questions is currently answered independently by each screen, in a prose comment, and two of
@@ -342,6 +343,13 @@ Lower order sits closer to the region's anchored edge. Two contracts the region 
   Driving both is correct either way, so the question never has to be settled. Same posture the
   velocity plan took on `UIFlexItem`.
 
+  **THE PARENTHETICAL IS WRONG, corrected at Phase 2 and left standing because it is the sentence
+  that stopped anyone checking.** This place resolves `AbsoluteSize` perfectly well once a
+  `GuiObject` is parented into `StarterGui` and a `Heartbeat` is stepped — `Tests/UI/Hotbar.spec.lua`
+  was already relying on that before this document was written, and `Tests/UI/ShellSurface.spec.lua`
+  measures the §2.4 scale that way now. The *conclusion* survives on its own merits (driving both
+  costs nothing), and §14.1 was in the end answered by screenshot at Phase 1 anyway.
+
 `BottomCentre` is the dock's, and the dock's own band stack is already a region in everything but
 name — the migration adopts it rather than rebuilding it.
 
@@ -356,6 +364,10 @@ Surface.New(scope, {
     Scaled = true,               -- default true
 })
 ```
+
+**`Scaled` ended up REQUIRED, with no default** — see Phase 2's build notes. Phase 1 landed first
+and collapsed six of the surfaces this default was written for into region tiles, which left
+`true` as the minority answer among what remained.
 
 Applies, in one place and identically every time: the `Layers` band, `IgnoreGuiInset = true` (§2.3 —
 one coordinate space, chosen once), `ResetOnSpawn = false`, `ZIndexBehavior.Sibling`, the shared
@@ -618,44 +630,150 @@ and height) still costs nothing and should stay.
 
 ### Build
 
-- [ ] `UI/Shell/Surface.lua` per §3.3.
-- [ ] Hoist `ViewportScale.Compute` to a single call on the root scope; `Surface` and `Regions` both
-      read that one value. Assert one connection, not seventeen.
-- [ ] `Surface.New` errors when `Layer` is absent — no default band.
+- [x] `UI/Shell/Surface.lua` per §3.3.
+- [x] Hoist `ViewportScale.Compute` to a single call on the root scope (`UI/init.lua`); `Surface` and
+      `Regions` both read that one value. There is exactly one `Compute` call for the client's
+      surfaces now, and one more inside `Components/ModalScreen.lua` that is **not** a surface scale —
+      see the `AutoScale` note below.
+- [x] `Surface.New` errors when `Layer` is absent — no default band. It also errors on a `Layer` that
+      is not inside any band (`Layers.BandOf` returns nil), which is what actually catches the thirteen
+      pre-ladder literals rather than only catching a forgotten argument.
+- [x] **`Scaled` is required too, and does NOT default to `true` as specced above.** Phase 1 landed
+      first and took six of the surfaces that default was written for out of existence — they are tiles
+      on one host now. Of what remains, most is full-bleed (where a scale means nothing), a world-space
+      reticle, a literal-pixel debug readout, or a modal whose own `AutoScale` prop has owned this
+      since before `Surface` existed. `Scaled = true` is the minority answer, and a default that is
+      wrong more often than right is worse than no default. The rule that replaced it:
+      **a surface is scaled if it draws chrome alongside the dock.**
+- [x] `openModalCount`'s teardown reset, deferred here from Phase 1 — done in the same edit as the
+      `Layers.Modal + n` counter, which is why it waited. Both are module-scope state in the same file
+      with the same hot-reload failure: a Studio reload with a modal open left
+      `Constants.Attributes.UiModalOpen` stuck true and the player's fists gone for the session.
+- [x] The modal nudge is **clamped as well as reset** (`MAX_MODAL_NUDGE = Layers.Spacing - 1`). Reset
+      alone bounds nothing if the player never closes everything: a session that opened 100 modals
+      without the count reaching zero would have promoted one into `Layers.Debug`, and a debug overlay
+      a panel can cover is the exact failure the ladder's spacing exists to prevent.
 
 ### Migrate the remaining ScreenGui sites
 
-- [ ] `UI/Components/ModalScreen.lua:172` → `Layers.Modal` (keeps its own scrim and modal count), plus
-      the `Layers.Modal + n` last-opened-on-top counter and the teardown reset from §3.1 / Phase 1
-- [ ] Driver signatures: Phase 1 changed the `Mount()` return shape of every region-hosted screen, so
-      `AnnouncementClient`, `BlimpController` (three handles), `WeaponInventoryClient` and any
-      `DeathFeed` caller are updated in the same commit as the screen they read — not left to a
-      follow-up, where a stale handle field is a nil-index at runtime and not a type error
-- [ ] `UI/init.lua:173` ShiftLockCrosshair → `Layers.World`, `Scaled = false`
-- [ ] `Screens/CombatFeedback/init.lua:168` → `Layers.Overlay`
-- [ ] `Screens/EmoteWheel/init.lua:192` → `Layers.Overlay` (retire its `DisplayOrder = 10`)
-- [ ] `Screens/HUD/init.lua:457` → `BottomCentre` region tile. **Do this one last.** It is the only
-      migration touching a surface with its own `UIScale`, its own hand-scaled bottom margin
-      (`HUD/init.lua:466`, a `Computed` that multiplies `Space.L` by the scale because `UIScale` does
-      not affect `Position`) and its own band stack. That margin becomes the region's, and the
-      hand-scaling goes away with it.
-- [ ] `Screens/Loading/init.lua:123` → `Layers.Boot + 20`
-- [ ] `Screens/Onboarding/init.lua:305` → `Layers.Boot + 10`
-- [ ] `Screens/StartMenu/init.lua:136` → `Layers.Boot + 30`
-- [ ] `Intro/BlackScreen.lua:74` → `Layers.Boot + 11`
-- [ ] `Intro/IntroClient.lua:148` → `Layers.Boot`
-- [ ] `Parkour/ParkourDebug.lua:394` → `Layers.Debug`, `Scaled = false`
-- [ ] Retire the `DISPLAY_ORDER` literals and their explanatory comments in `Loading` and `StartMenu`
-      — the ladder is the explanation now.
+**There were 12 sites, not 17.** Phase 1 collapsed six into the single region host, so the list below
+is what was actually left. Four lines of the original list were stale by the time this phase ran; each
+is marked.
+
+- [x] `UI/Components/ModalScreen.lua` → `Layers.Modal`, plus the `Layers.Modal + n` last-opened-on-top
+      counter and the teardown reset. Keeps its own scrim, its own modal count, and `Scaled = false`.
+- [x] ~~Driver signatures~~ — **STRICKEN, and Phase 1's own write-up had already struck it.** The
+      bullet assumed Phase 1 changed the six screens' `Mount()` return shape. It did not: `Mount`
+      gained a *second* return value rather than altering the first, so `AnnouncementClient`,
+      `BlimpController`, `WeaponInventoryClient` and the `DeathFeed` caller were untouched and still
+      type-check. No work here.
+- [x] `UI/init.lua` ShiftLockCrosshair → `Layers.World`, `Scaled = false`. (Line **:196**, not the
+      `:173` this list carried — Phase 1 moved it.)
+- [x] `Screens/CombatFeedback/init.lua` → `Layers.Overlay`, `Scaled = true`.
+- [x] `Screens/EmoteWheel/init.lua` → `Layers.Overlay`, retiring its `DisplayOrder = 10`.
+- [x] `Screens/DeathFeed/init.lua` — **NOT ON THE ORIGINAL LIST.** Phase 1 split this screen: the kill
+      feed became a `TopRight` tile and the centred death overlay kept a `ScreenGui` of its own
+      *specifically because `Surface.lua` did not exist yet*. It is a new `Layers.Overlay` surface, and
+      it belongs to this phase because Phase 1 created it.
+- [x] `Screens/Loading/init.lua` → `Layers.Boot + 20`, `Scaled = false`.
+- [x] `Screens/Onboarding/init.lua` → `Layers.Boot + 10`, `Scaled = false`.
+- [x] `Screens/StartMenu/init.lua` → `Layers.Boot + 30`, `Scaled = false`.
+- [x] `Intro/BlackScreen.lua` → `Layers.Boot + 11`, `Scaled = false`.
+- [x] `Intro/IntroClient.lua` → `Layers.Boot`, `Scaled = false`.
+- [x] `Parkour/ParkourDebug.lua` → `Layers.Debug`, `Scaled = false`. This one **pays** for the §2.3
+      decision rather than being neutral to it: it is top-anchored, and the one time it had previously
+      tried `IgnoreGuiInset = true` its two most important lines went under Roblox's top bar. It reads
+      `Surface.TopBarInset()` now instead of dropping the property.
+- [x] `Screens/HUD/init.lua` → `BottomCentre` region tile. Done last, as specced.
+- [x] `Combat/GrabInputClient.lua` → `Layers.Overlay`. **THE EIGHTEENTH SURFACE, which this document
+      never counted.** Not in the 17, not in the 12. It is the one deliberate `Surface.New` exemption
+      in the client: hand-built `Instance.new` with no Fusion scope anywhere in the module, and
+      creating a session-long root scope in a combat input module for one `TextLabel` would cost more
+      than the factory saves. It takes the *band* from `Shell/Layers` and sets `IgnoreGuiInset` by
+      hand, so the "no raw `DisplayOrder` literals" assertion holds across the whole client rather than
+      across most of it. It used to carry a bare `DisplayOrder = 5`.
+- [x] `Shell/Regions.lua` — needed no `DisplayOrder` migration (Phase 1 already set `Layers.Regions`)
+      but did need the §2.3 decision applied: the host is built through `Surface.New` now, so it is
+      full-bleed like everything else.
+- [x] Retired the `DISPLAY_ORDER` literals and their explanatory comments in `Loading` and `StartMenu`.
+
+### The `IgnoreGuiInset` decision, and the one tile it deliberately moves
+
+Phase 1 left the region host without `IgnoreGuiInset` on purpose, so its six margins stayed
+byte-identical. Choosing a coordinate space was this phase's call. **Every surface is full-bleed**, and
+clearing Roblox's ~36px top bar became a layout problem owned by `Regions` (`Surface.TopBarInset()`,
+read from `GuiService` rather than hardcoded, with exactly two readers: the top-anchored regions and
+`ParkourDebug`).
+
+**Five of the six ambient tiles do not move.** The host's top-anchored regions add the bar's height
+back as part of their edge inset, so at scale 1.0 they render at exactly the 52px they always sat at.
+It holds across `ViewportScale`'s whole clamped range — at `MIN_SCALE` 0.8 a `16 + 36` inset still
+renders at 41.6px against a 36px bar.
+
+**The announcement banner moves up by 36px, and that is the fix.** `CombatFeedback` has always been
+`IgnoreGuiInset = true`; the announcement's host was not. So the two combat banners the announcement
+is written to clear were measured from the true top of the screen while the announcement itself was
+measured from below the top bar — `184` rendering at `220`, a 36px gap that no line in either file
+mentioned. That is §2.3 in one concrete pair of numbers, and 184 is finally the number it claimed to
+be. **This is the one visible change in the phase, and it needs the screenshot to confirm.**
+
+### What the plan got wrong about what is testable
+
+**§3.2 says a headless place never resolves `AbsoluteSize`. That is false, and this repo already
+depended on it being false.** `Tests/UI/Hotbar.spec.lua`'s "sizes itself to its content" case mounts
+into `StarterGui`, steps `Heartbeat` and reads `AbsoluteSize` back — which is how the dock's
+full-screen-height bug was caught in the first place. So the **scale half of §2.4 is measured for
+real** in `Tests/UI/ShellSurface.spec.lua` rather than deferred to a screenshot: a tile and its edge
+margin are asserted to grow by the same multiplier, and a pair of zeroes fails loudly rather than
+passing.
+
+The **inset half genuinely is not checkable** — `GuiService` reports a zero gui inset in this place
+because no topbar is drawn, so `IgnoreGuiInset` has no observable effect on any measurement here. What
+is asserted instead is that the property is set at all, on every surface, from one place. Whether the
+margins then *look* aligned against a real 36px bar is a screenshot's job and only a screenshot's.
+
+The §3.2 sentence is corrected in place rather than deleted, for the same reason `WeaponInventory`'s
+`SurfaceTexture` claim was in Phase 1: it is the sentence that stopped anyone checking.
+
+### One measurement that decided where the `UIScale` goes
+
+Taken against a real render pass rather than reasoned about, because getting it wrong is invisible
+until 1440p: **a `UIScale` parented directly to a `ScreenGui` multiplies its descendants' offsets —
+both size and position — while leaving a `Size = UDim2.fromScale(1, 1)` child at exactly the
+viewport.** The same `UIScale` one level lower, inside a full-bleed `Frame`, inflates that `Frame` to
+1.5× the screen instead.
+
+So the surface-level placement is the one spot where "scale the chrome" and "full-bleed stays
+full-bleed" are simultaneously true, which is what lets a single `Scaled` flag serve both a corner
+panel and a cinematic backdrop. It also means **an edge margin written as an offset scales for free**
+— which is what let `HUD/init.lua`'s hand-multiplied bottom margin go away rather than move. That
+margin's comment ("a `UIScale` does not affect `Position`") was true of *its* `UIScale`, which sat on
+the band stack; it is not true of one on the `ScreenGui` above it. Three things the HUD stopped
+owning: its `ScreenGui`, its `ViewportScale.Compute`, and that margin.
+
+`ModalScreen` keeps a second `ViewportScale.Compute`, and that is not a violation of the one-call rule
+— it is the `AutoScale` prop, applied to the *Panel's* own `UIScale`, off by default, and owned by
+that component since before `Surface` existed. Making it a surface scale would have resized five
+hand-measured panels inside a phase whose stated risk is "one property set per site".
 
 ### Verify
 
-- [ ] `ShellLayers.spec` extended to assert **zero** raw `DisplayOrder` literals outside `Layers.lua`.
-- [ ] Studio at 2560×1440: every ambient panel now scales with the dock. This is the check that
-      §2.4 is actually fixed and no test can perform it.
-- [ ] Studio on a platform with the top bar: top-anchored margins match the dock's. (§2.3)
-- [ ] `Lazy` boundary intact — DevMenu/MoveEditor/KitEditor/LiveConsole/Storybook still unmounted at
-      boot. Assert via the existing boot-debug log, not by opening them.
+- [x] `ShellLayers.spec` + new `Tests/UI/ShellSurface.spec.lua`: **zero** raw `DisplayOrder` literals
+      outside `Layers.lua` (a source scan, so it catches the next one too), and every surface the test
+      place can mount sits inside a named band.
+- [x] Modal ordering asserted in `ShellLayers.spec`: last-opened on top, the nudge restarting once
+      everything closes, and the clamp holding however many are opened.
+- [x] Suite green — **2055 passed, 0 failed, 1 `Stack Begin`** (baseline 2042 + 13 new). `selene` 0/0.
+      `stylua --check` clean on the touched set.
+- [x] Reachability: `Shell/Surface.lua` has 11 inbound requires from outside `UI/Shell/`.
+- [x] `Lazy` boundary intact — `Surface.New` is never called at boot for DevMenu / MoveEditor /
+      KitEditor / LiveConsole / Storybook. Registration happens inside the thunk on first open, so the
+      ~257-Instance boot deferral in `UI/init.lua`'s header is undisturbed.
+- [ ] Studio at 2560×1440: every ambient panel now scales with the dock. **Needs a human.** The spec
+      measures that the mechanism multiplies correctly; it cannot say the result looks right.
+- [ ] Studio with the top bar visible: top-anchored margins match the dock's, and the announcement
+      banner sits 36px higher than it used to. **Needs a human**, and it is the only check on §2.3.
+- [ ] Before/after pair at one window size for the five tiles expected NOT to move. **Needs a human.**
 
 ---
 

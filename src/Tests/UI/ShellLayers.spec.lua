@@ -9,19 +9,18 @@ local Shell = UI.Shell
 
 local Layers = require(Shell.Layers)
 local Regions = require(Shell.Regions)
+local ModalScreen = require(UI.Components.ModalScreen)
 
--- THE Z-ORDER LADDER, AND THE ONE SURFACE THAT WEARS IT SO FAR.
+-- THE Z-ORDER LADDER: its arithmetic, the region host, and the one band with an order INSIDE it.
 --
--- Phase 1 of docs/architecture/2026-08-25-hud-shell-plan.md builds the ladder and puts exactly one
--- ScreenGui on it: the region host. The other sixteen surfaces still sit at the default 0 and are
--- migrated in Phase 2, which is when this file grows the assertion the plan describes as "every
--- mounted ScreenGui's DisplayOrder is a known band" -- it cannot be written yet without failing on
--- surfaces nobody has touched.
+-- Phase 1 of docs/architecture/2026-08-25-hud-shell-plan.md built the ladder and put exactly one
+-- ScreenGui on it. Phase 2 moved the rest; "every surface is in a known band" lives next door in
+-- ShellSurface.spec.lua, alongside the factory that now enforces it.
 --
--- WHAT IS WORTH ASSERTING NOW is the ladder's own shape, because it is arithmetic that is easy to
--- get wrong and impossible to notice: bands that overlap, or a gap too small to hold the modal
--- counter that Phase 2 puts in it, would both look completely fine in the source and produce
--- z-fighting months later in a session nobody can reproduce.
+-- WHAT IS ASSERTED HERE is the ladder's own shape, because it is arithmetic that is easy to get
+-- wrong and impossible to notice: bands that overlap, or a gap too small to hold the modal counter
+-- that sits inside one of them, would both look completely fine in the source and produce z-fighting
+-- months later in a session nobody can reproduce.
 
 local function fakePlayerGui(): PlayerGui
 	return Instance.new("Folder") :: any
@@ -74,21 +73,131 @@ return function()
 		end)
 
 		it("rejects an order that predates the ladder", function()
-			-- 0 is where all thirteen unmigrated surfaces still sit, and the literals the four
-			-- self-ordering screens set (10, 20, 30) are all below the lowest band. Phase 2 turns this
-			-- into a positive assertion over every mounted ScreenGui; for now it just has to be true
-			-- that a raw literal is not mistaken for a band.
+			-- 0 is where thirteen surfaces sat before Phase 2 migrated them, and the literals the four
+			-- self-ordering screens set (10, 20, 30) are all below the lowest band. Surface.New now
+			-- refuses each of these outright (ShellSurface.spec.lua); this is the predicate that lets
+			-- it, and it has to keep being true that a raw literal is not mistaken for a band.
 			expect(Layers.BandOf(0)).to.equal(nil)
 			expect(Layers.BandOf(10)).to.equal(nil)
 			expect(Layers.IsBand(0)).to.equal(false)
 		end)
 	end)
 
+	describe("modal ordering inside the band", function()
+		-- WHY A COUNTER AT ALL. Two modals open at once is documented behaviour, not a hypothetical --
+		-- Constants.Attributes.UiModalOpen's own comment cites the Move Editor over the character
+		-- menu. If every modal took the bare Layers.Modal they would z-fight, and the winner would be
+		-- PlayerGui insertion order: for the five Lazy-deferred screens that is FIRST-OPEN order, so
+		-- which panel covered which would vary between sessions depending on what the player happened
+		-- to open first that day.
+		--
+		-- Asserted through the rendered DisplayOrder rather than by reading the counter, because the
+		-- counter is a module-scope local and the property is what a player actually sees.
+		--
+		-- EVERY EDGE NEEDS A FLUSH. ModalScreen drives its count and its nudge off the ScreenGui's own
+		-- Enabled property -- deliberately, since that is the rendered truth rather than a prop a
+		-- caller might have lied about -- and a GetPropertyChangedSignal handler is DEFERRED in this
+		-- engine. Setting the Value and asserting on the next line would read the state before the
+		-- edge was ever processed, and would do it intermittently rather than always.
+		local function flush(): ()
+			task.wait()
+		end
+
+		local function mountModal(
+			scope: Fusion.Scope<typeof(Fusion)>,
+			parent: PlayerGui,
+			name: string
+		): (ScreenGui, Fusion.Value<boolean>)
+			local isOpen: Fusion.Value<boolean> = scope:Value(false)
+			ModalScreen(scope, parent, {
+				Name = name,
+				Size = UDim2.fromOffset(200, 200),
+				IsOpen = isOpen,
+			})
+			local gui = parent:FindFirstChild(name) :: ScreenGui
+			expect(gui).to.be.ok()
+			return gui, isOpen
+		end
+
+		it("puts the last-opened modal on top, and keeps both inside the band", function()
+			local scope = Fusion.scoped(Fusion)
+			local parent = fakePlayerGui()
+
+			local first, firstOpen = mountModal(scope, parent, "FirstModal")
+			local second, secondOpen = mountModal(scope, parent, "SecondModal")
+
+			-- Never opened: the base of its own band, not an arbitrary point in it.
+			expect(first.DisplayOrder).to.equal(Layers.Modal)
+
+			firstOpen:set(true)
+			flush()
+			secondOpen:set(true)
+			flush()
+
+			expect(second.DisplayOrder > first.DisplayOrder).to.equal(true)
+			expect(Layers.BandOf(first.DisplayOrder)).to.equal("Modal")
+			expect(Layers.BandOf(second.DisplayOrder)).to.equal("Modal")
+
+			scope:doCleanup()
+		end)
+
+		it("starts the nudge again once everything is closed", function()
+			-- THE BOUND. Without a reset the nudge climbs for the whole session, and a player who
+			-- opened and closed a hundred panels would eventually promote a modal into Layers.Debug --
+			-- a debug overlay a panel can cover, which is the one thing the band spacing exists to
+			-- prevent. Reset when the OPEN COUNT returns to zero, which is the same edge the
+			-- UiModalOpen Attribute is published on, in the same function.
+			local scope = Fusion.scoped(Fusion)
+			local parent = fakePlayerGui()
+
+			local gui, isOpen = mountModal(scope, parent, "CyclingModal")
+
+			isOpen:set(true)
+			flush()
+			local firstOpenOrder = gui.DisplayOrder
+			expect(firstOpenOrder > Layers.Modal).to.equal(true)
+
+			isOpen:set(false)
+			flush()
+			isOpen:set(true)
+			flush()
+			expect(gui.DisplayOrder).to.equal(firstOpenOrder)
+
+			scope:doCleanup()
+		end)
+
+		it("cannot climb out of its band however many modals are opened", function()
+			local scope = Fusion.scoped(Fusion)
+			local parent = fakePlayerGui()
+
+			-- Held open TOGETHER, so the count never returns to zero and the reset never fires. That is
+			-- the only path by which the nudge can actually accumulate, and the clamp is what makes it
+			-- safe -- "reset when nothing is open" is only a bound if the player ever closes everything.
+			local guis: { ScreenGui } = {}
+			for index = 1, 40 do
+				local gui, isOpen = mountModal(scope, parent, string.format("Stacked%d", index))
+				isOpen:set(true)
+				table.insert(guis, gui)
+			end
+			flush()
+
+			for _, gui in guis do
+				expect(Layers.BandOf(gui.DisplayOrder)).to.equal("Modal")
+			end
+
+			scope:doCleanup()
+		end)
+	end)
+
 	describe("the region host", function()
+		-- The trailing 1 is the viewport multiplier UI/init.lua computes once on the root scope and
+		-- hands down (plan §2.4). Passed as a plain number rather than a Fusion Value because nothing
+		-- in this block is about scaling -- ShellSurface.spec.lua measures that against a real render
+		-- pass. Here it just has to be present: Surface.New refuses a scaled surface without one.
 		it("mounts on the Regions band with all six regions", function()
 			local scope = Fusion.scoped(Fusion)
 			local parent = fakePlayerGui()
-			local host = Regions.Mount(scope, parent)
+			local host = Regions.Mount(scope, parent, 1)
 
 			expect(host.Gui).to.be.ok()
 			expect(host.Gui.DisplayOrder).to.equal(Layers.Regions)
@@ -107,7 +216,7 @@ return function()
 			-- deterministic. Two top-right stacks in two ScreenGuis would still overlap.
 			local scope = Fusion.scoped(Fusion)
 			local parent = fakePlayerGui()
-			Regions.Mount(scope, parent)
+			Regions.Mount(scope, parent, 1)
 
 			local screenGuis = 0
 			for _, child in parent:GetChildren() do
@@ -126,11 +235,11 @@ return function()
 			-- therefore produce two different hosts, and the first must be gone after cleanup.
 			local firstScope = Fusion.scoped(Fusion)
 			local parent = fakePlayerGui()
-			local first = Regions.Mount(firstScope, parent)
+			local first = Regions.Mount(firstScope, parent, 1)
 			firstScope:doCleanup()
 
 			local secondScope = Fusion.scoped(Fusion)
-			local second = Regions.Mount(secondScope, parent)
+			local second = Regions.Mount(secondScope, parent, 1)
 
 			expect(second.Gui).never.to.equal(first.Gui)
 			expect(second.Gui.Parent).to.equal(parent)
@@ -139,7 +248,7 @@ return function()
 		it("stacks tiles instead of overlapping them, nearest edge first", function()
 			local scope = Fusion.scoped(Fusion)
 			local parent = fakePlayerGui()
-			local host = Regions.Mount(scope, parent)
+			local host = Regions.Mount(scope, parent, 1)
 
 			local feed = Instance.new("Frame")
 			local fuel = Instance.new("Frame")
@@ -161,7 +270,7 @@ return function()
 			-- ends of the screen and must never have to know which end they are at.
 			local scope = Fusion.scoped(Fusion)
 			local parent = fakePlayerGui()
-			local host = Regions.Mount(scope, parent)
+			local host = Regions.Mount(scope, parent, 1)
 
 			local rack = Instance.new("Frame")
 			local helm = Instance.new("Frame")
@@ -175,7 +284,7 @@ return function()
 		it("errors on a region that does not exist", function()
 			local scope = Fusion.scoped(Fusion)
 			local parent = fakePlayerGui()
-			local host = Regions.Mount(scope, parent)
+			local host = Regions.Mount(scope, parent, 1)
 
 			-- A typo'd region name must not be a silently unparented tile. That failure looks
 			-- identical to "the panel is broken" from a playtest and gives nobody a place to start.

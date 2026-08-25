@@ -60,6 +60,8 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 
 local Tokens = require(script.Parent.Parent.Tokens)
+local Layers = require(script.Parent.Parent.Shell.Layers)
+local Surface = require(script.Parent.Parent.Shell.Surface)
 local DeathOverlay = require(script.Parent.Parent.Components.DeathOverlay)
 
 local Children = Fusion.Children
@@ -85,7 +87,7 @@ local DeathFeed = {}
 -- death overlay, which is a centred full-screen surface rather than a corner tile and has no region
 -- to belong to. That surface moves onto Shell/Surface.lua at Layers.Overlay in Phase 2; splitting it
 -- out here would have meant inventing half of Surface early.
-function DeathFeed.Mount(scope: Scope, playerGui: PlayerGui): (DeathFeedHandle, Frame)
+function DeathFeed.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.UsedAs<number>): (DeathFeedHandle, Frame)
 	local deathDisplay: Fusion.Value<DeathOverlay.DeathOverlayDisplay?> =
 		scope:Value(nil :: DeathOverlay.DeathOverlayDisplay?)
 	local secondsRemaining: Fusion.Value<number> = scope:Value(0)
@@ -117,14 +119,24 @@ function DeathFeed.Mount(scope: Scope, playerGui: PlayerGui): (DeathFeedHandle, 
 		deathDisplay:set(nil)
 	end
 
-	scope:New "ScreenGui" {
+	-- THE ONE SURFACE THIS SCREEN STILL OWNS, and Phase 2's is the band it was always missing. Phase 1
+	-- split this screen in two: the kill feed became a TopRight region tile with no ScreenGui at all,
+	-- and this centred death card kept a surface of its own because it is not a tile -- it places
+	-- itself, deliberately, in the middle of the screen. Layers.Overlay is where "the screen is
+	-- telling you something happened" sits: over the dock, under a panel you opened.
+	--
+	-- Scaled, per the rule in Shell/Surface.lua's header -- the dock stays up through the death
+	-- overlay (there is no yielding until Phase 3), so this card is chrome beside the dock and the two
+	-- have to agree about how big the screen is.
+	Surface.New(scope, {
 		Name = "DeathFeed",
-		ResetOnSpawn = false,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		Layer = Layers.Overlay,
 		Parent = playerGui,
+		Scaled = true,
+		Scale = scale,
 
-		[Children] = DeathOverlay(scope, { Display = deathDisplay, SecondsRemaining = secondsRemaining }),
-	}
+		Children = DeathOverlay(scope, { Display = deathDisplay, SecondsRemaining = secondsRemaining }),
+	})
 
 	-- SIZED FROM ZERO, NOT FROM 320x200 AS IT USED TO BE. This tile now shares the TopRight stack
 	-- with the blimp fuel gauge, and a fixed 200px height would push the gauge 200px down the screen

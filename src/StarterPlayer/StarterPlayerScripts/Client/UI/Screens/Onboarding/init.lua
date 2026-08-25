@@ -33,12 +33,15 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local Tokens = require(script.Parent.Parent.Tokens)
+local Layers = require(script.Parent.Parent.Shell.Layers)
+local Surface = require(script.Parent.Parent.Shell.Surface)
 local OnboardingTypes = require(script.Types)
 local Cinematic = require(script.Cinematic)
 local RaceSelect = require(script.RaceSelect)
 local Attributes = require(script.Attributes)
 local NameEntry = require(script.NameEntry)
 local Confirmation = require(script.Confirmation)
+local BloodlineSpin = require(script.BloodlineSpin)
 
 local Children = Fusion.Children
 
@@ -91,12 +94,16 @@ local function Onboarding(scope: Scope, playerGui: PlayerGui): OnboardingHandle
 	-- confirmationBackRequestedEvent -- Confirmation's three labeled escape hatches fire this
 	-- instead (see Types.lua's own ConfirmationProps comment).
 	local stepRailNavigateRequestedEvent = Instance.new("BindableEvent")
+	local bloodlineSpinRequestedEvent = Instance.new("BindableEvent")
+	local bloodlineContinueRequestedEvent = Instance.new("BindableEvent")
 	table.insert(scope, raceContinueRequestedEvent)
 	table.insert(scope, attributesContinueRequestedEvent)
 	table.insert(scope, attributesBackRequestedEvent)
 	table.insert(scope, nameContinueRequestedEvent)
 	table.insert(scope, nameBackRequestedEvent)
 	table.insert(scope, stepRailNavigateRequestedEvent)
+	table.insert(scope, bloodlineSpinRequestedEvent)
+	table.insert(scope, bloodlineContinueRequestedEvent)
 
 	local cinematicProps: OnboardingTypes.CinematicProps = {
 		RevealIndex = cinematicRevealIndex,
@@ -133,6 +140,20 @@ local function Onboarding(scope: Scope, playerGui: PlayerGui): OnboardingHandle
 		IsSucceeding = isSucceeding,
 		CommitPointerHeld = commitPointerHeld,
 		StepRailNavigateRequested = stepRailNavigateRequestedEvent,
+	}
+
+	-- Its own StatusText Value rather than sharing Confirmation's: this stage runs AFTER Confirmation
+	-- has succeeded, and reusing that Value would resurrect whatever Finalize error was last shown
+	-- underneath the spin card.
+	local bloodlineSpinProps: OnboardingTypes.BloodlineSpinProps = {
+		ResultName = scope:Value(""),
+		ResultRarity = scope:Value(""),
+		ResultFlavor = scope:Value(""),
+		RerollsRemaining = scope:Value(0),
+		IsSpinning = scope:Value(false),
+		StatusText = scope:Value(""),
+		SpinRequested = bloodlineSpinRequestedEvent,
+		ContinueRequested = bloodlineContinueRequestedEvent,
 	}
 
 	local function isStage(target: OnboardingTypes.Stage): Fusion.Computed<boolean>
@@ -181,6 +202,7 @@ local function Onboarding(scope: Scope, playerGui: PlayerGui): OnboardingHandle
 	local attributesSettled = slideUpSettled(isStage("Attributes"))
 	local nameEntrySettled = slideUpSettled(isStage("NameEntry"))
 	local confirmationSettled = slideUpSettled(isStage("Confirmation"))
+	local bloodlineSpinSettled = slideUpSettled(isStage("BloodlineSpin"))
 
 	local root = scope:New "Frame" {
 		Name = "Root",
@@ -265,21 +287,37 @@ local function Onboarding(scope: Scope, playerGui: PlayerGui): OnboardingHandle
 
 						[Children] = Confirmation(scope, confirmationProps),
 					},
+					scope:New "CanvasGroup" {
+						Name = "BloodlineSpinLayer",
+						Size = UDim2.fromScale(1, 1),
+						Position = slideUpPosition(bloodlineSpinSettled),
+						BackgroundTransparency = 1,
+						GroupTransparency = scope:Computed(function(use)
+							return 1 - use(bloodlineSpinSettled)
+						end),
+						Visible = isStage("BloodlineSpin"),
+
+						[Children] = BloodlineSpin(scope, bloodlineSpinProps),
+					},
 				},
 			},
 		},
 	} :: Frame
 
-	local screenGui = scope:New "ScreenGui" {
+	-- Boot + 10. The bare 10 this used to carry was above the HUD only because the HUD was at the
+	-- default 0; the band says what the comment meant, and says it against a ladder rather than
+	-- against whatever happened to be mounted. Nudged under BlackScreen's Boot + 11, which covers
+	-- these creator screens once opaque.
+	--
+	-- Unscaled: the character creator is laid out full-bleed against the viewport it is given, and it
+	-- is the only thing on screen while it runs.
+	local screenGui = Surface.New(scope, {
 		Name = "Onboarding",
-		ResetOnSpawn = false,
-		Enabled = true,
-		DisplayOrder = 10, -- Above the normal HUD stack (which isn't even mounted yet at this point).
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		Layer = Layers.Boot + 10,
 		Parent = playerGui,
-
-		[Children] = root,
-	} :: ScreenGui
+		Scaled = false,
+		Children = root,
+	})
 
 	return {
 		Stage = stage,
@@ -288,6 +326,7 @@ local function Onboarding(scope: Scope, playerGui: PlayerGui): OnboardingHandle
 		Attributes = attributesProps,
 		NameEntry = nameEntryProps,
 		Confirmation = confirmationProps,
+		BloodlineSpin = bloodlineSpinProps,
 		Root = screenGui,
 		StepRailNavigateRequested = stepRailNavigateRequestedEvent,
 	}

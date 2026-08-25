@@ -12,13 +12,12 @@
 	AssetPreloader.Run's onProgress callback) and flipping Complete once that call returns; this
 	module only renders whatever it's given.
 
-	DisplayOrder = 20 -- above Screens/Onboarding/init.lua's own ScreenGui (DisplayOrder = 10, and
-	Client/Intro/BlackScreen.lua's DisplayOrder = 11) and below Screens/StartMenu/init.lua's own
-	(DisplayOrder = 30, the true first thing shown) -- headroom for any future transition overlap
-	between any of them, even though today they're all temporally exclusive: StartMenuClient.Run()
-	returns (or the engine kills the whole script) before LoadingClient.Run() ever starts, and
-	LoadingClient.Run() tears its own scope down before Client/Intro/IntroClient.Run() -- and
-	therefore Onboarding's/BlackScreen's own scope -- is ever created.
+	Layers.Boot + 20 -- the ladder in UI/Shell/Layers.lua is the explanation now, and this file no
+	longer keeps a private list of the other three boot surfaces' numbers to justify its own. All four
+	stay temporally exclusive in practice anyway: StartMenuClient.Run() returns (or the engine kills
+	the whole script) before LoadingClient.Run() ever starts, and LoadingClient.Run() tears its own
+	scope down before Client/Intro/IntroClient.Run() -- and therefore Onboarding's/BlackScreen's own
+	scope -- is ever created. The nudge is headroom for a future transition overlap between them.
 
 	Does not own: what counts as "loaded" or when Complete flips (AssetPreloader.lua/
 	LoadingClient.lua own both).
@@ -28,6 +27,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
 local Tokens = require(script.Parent.Parent.Tokens)
+local Layers = require(script.Parent.Parent.Shell.Layers)
+local Surface = require(script.Parent.Parent.Shell.Surface)
 local Label = require(script.Parent.Parent.Components.Label)
 local Divider = require(script.Parent.Parent.Components.Divider)
 local Bar = require(script.Parent.Parent.Components.Bar)
@@ -42,7 +43,6 @@ export type LoadingProps = {
 	Complete: Fusion.Value<boolean>,
 }
 
-local DISPLAY_ORDER = 20
 local COLUMN_WIDTH = 360
 local TITLE_TEXT = "SHATTERED MERIDIAN"
 local STATUS_TEXT = "Loading..."
@@ -120,16 +120,15 @@ local function Loading(scope: Scope, playerGui: PlayerGui, props: LoadingProps):
 		},
 	} :: CanvasGroup
 
-	return scope:New "ScreenGui" {
+	-- Unscaled: a full-bleed backdrop with one centred card, alone on screen. Nothing here is beside
+	-- the dock, which is the test Shell/Surface.lua's header sets for Scaled.
+	return Surface.New(scope, {
 		Name = "Loading",
-		ResetOnSpawn = false,
-		Enabled = true,
-		DisplayOrder = DISPLAY_ORDER,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		Layer = Layers.Boot + 20,
 		Parent = playerGui,
-
-		[Children] = root,
-	} :: ScreenGui
+		Scaled = false,
+		Children = root,
+	})
 end
 
 return { Mount = Loading }

@@ -85,6 +85,8 @@ local EnvironmentProbe = require(script.Parent.EnvironmentProbe)
 local StateMachine = require(script.Parent.StateMachine)
 
 local Tokens = require(script.Parent.Parent.UI.Tokens)
+local Layers = require(script.Parent.Parent.UI.Shell.Layers)
+local Surface = require(script.Parent.Parent.UI.Shell.Surface)
 local Panel = require(script.Parent.Parent.UI.Components.Panel)
 local Label = require(script.Parent.Parent.UI.Components.Label)
 local Section = require(script.Parent.Parent.UI.Components.Section)
@@ -389,25 +391,34 @@ local function mountPanel(): Handles?
 		},
 	}
 
-	-- No local kept for this: nothing after this point needs to reach back into the ScreenGui itself
-	-- (teardown goes through scope:doCleanup(), not an explicit :Destroy() on any one Instance).
-	scope:New "ScreenGui" {
-		Name = "ParkourDebug",
-		ResetOnSpawn = false,
-		-- FALSE, not true -- see this file's prior header note on why IgnoreGuiInset=true hid the two
-		-- most important lines of the readout underneath Roblox's own topbar. Unchanged by the redesign.
-		IgnoreGuiInset = false,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		Parent = playerGui,
+	-- THE TOP BAR IS THIS FILE'S PROBLEM NOW, AND THAT IS THE POINT. This surface used to set
+	-- IgnoreGuiInset = false by hand, with a note recording that true had once hidden the two most
+	-- important lines of the readout under Roblox's own topbar. Every surface in the client is
+	-- full-bleed as of Phase 2 (Shell/Surface.lua, plan 2.3) -- one coordinate space, so a margin
+	-- means the same pixels everywhere -- and the cost of that is that the topbar stops being
+	-- something the engine subtracts for you. So it is subtracted here, once, visibly, in the two
+	-- places that touch the top edge: the panel starts below the bar and gives back the height it
+	-- used. Renders exactly where it did before.
+	local topBarInset = Surface.TopBarInset()
 
-		[Children] = Panel(scope, {
+	-- No local kept for the surface: nothing after this point needs to reach back into the ScreenGui
+	-- itself (teardown goes through scope:doCleanup(), not an explicit :Destroy() on any one
+	-- Instance). Unscaled -- a debug readout wants literal pixels and as many rows on screen as will
+	-- fit, which is the opposite of what growing it with the viewport would do.
+	Surface.New(scope, {
+		Name = "ParkourDebug",
+		Layer = Layers.Debug,
+		Parent = playerGui,
+		Scaled = false,
+
+		Children = Panel(scope, {
 			Name = "Root",
-			Position = UDim2.fromOffset(12, 12),
+			Position = UDim2.fromOffset(12, 12 + topBarInset),
 			-- Fixed width, height relative to the viewport minus a margin -- adapts to any screen size
 			-- rather than a hardcoded pixel height clipping on a smaller display, and the internal
 			-- ScrollingFrame is what makes clipping harmless even so: nothing is ever unreachable, only
 			-- scrolled.
-			Size = UDim2.new(0, 460, 1, -24),
+			Size = UDim2.new(0, 460, 1, -24 - topBarInset),
 			CornerAccent = true,
 
 			Children = {
@@ -429,7 +440,7 @@ local function mountPanel(): Handles?
 				body,
 			},
 		}),
-	}
+	})
 
 	return {
 		Scope = scope,

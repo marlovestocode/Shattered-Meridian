@@ -7,11 +7,13 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local UI = StarterPlayer.StarterPlayerScripts.Client.UI
 local Screens = UI.Screens
 
+local ClientStateModule = require(UI.State.ClientState)
 local Announcement = require(Screens.Announcement)
 local BlimpFuel = require(Screens.BlimpFuel)
 local BlimpHelm = require(Screens.BlimpHelm)
 local CarriedResources = require(Screens.CarriedResources)
 local DeathFeed = require(Screens.DeathFeed)
+local HUD = require(Screens.HUD)
 local WeaponInventory = require(Screens.WeaponInventory)
 
 -- THE REGION CONTRACT, AS A TEST. Written in Phase 0 of docs/architecture/2026-08-25-hud-shell-plan.md
@@ -85,8 +87,12 @@ local CASES: { Case } = {
 	{
 		Name = "DeathFeed",
 		Tile = "KillFeedList",
+		-- The 1 is the viewport scale the root scope computes and hands to every scaled surface
+		-- (UI/init.lua). DeathFeed is the only case here that takes one, because it is the only one
+		-- that still owns a ScreenGui -- the other six contribute a tile and nothing else, and the
+		-- region host wears the scale on their behalf.
 		Mount = function(scope, parent)
-			return DeathFeed.Mount(scope, parent)
+			return DeathFeed.Mount(scope, parent, 1)
 		end,
 		OwnsASurface = true,
 	},
@@ -109,6 +115,18 @@ local CASES: { Case } = {
 		Tile = "BlimpHelmPanel",
 		Mount = function(scope, _parent)
 			return BlimpHelm.Mount(scope)
+		end,
+	},
+	-- THE DOCK JOINED THIS LIST IN PHASE 2. It was the seventh always-on panel and the only one still
+	-- placing itself: an AnchorPoint of (0.5, 1) and a Position whose bottom margin was Tokens.Space.L
+	-- multiplied by the viewport scale in a Computed, because the UIScale it carried sat below the
+	-- thing being positioned. It is BottomCentre's tile now, so the same two assertions every other
+	-- ambient panel answers here apply to it, and the margin is the region's.
+	{
+		Name = "HUD",
+		Tile = "Hotbar",
+		Mount = function(scope, _parent)
+			return nil, HUD.Mount(scope, ClientStateModule.new(scope))
 		end,
 	},
 }

@@ -6,9 +6,14 @@
 	region sits relative to its screen edge, and the order tiles stack in within one.
 
 	Does NOT own: what a tile contains, when a tile is visible, or how a tile enters. A tile is
-	handed in fully built; this file parents it and assigns its LayoutOrder, and that is all. It also
-	does not own the HUD dock -- BottomCentre is reserved for it and the dock adopts this in Phase 2
-	of docs/architecture/2026-08-25-hud-shell-plan.md, not here.
+	handed in fully built; this file parents it and assigns its LayoutOrder, and that is all.
+
+	THE DOCK IS A TILE NOW TOO. BottomCentre was reserved for it through Phase 1 and holds it as of
+	Phase 2 of docs/architecture/2026-08-25-hud-shell-plan.md -- Screens/HUD returns its band stack
+	the way the other six screens return theirs. Two things went away with that: the dock's own
+	ScreenGui, and the hand-scaled bottom margin it carried (a Computed multiplying Tokens.Space.L by
+	the viewport scale, because the UIScale it had sat BELOW the thing being positioned). BottomCentre's
+	ordinary edge inset is that margin now, and it scales because the host's UIScale is above it.
 
 	THE BUG IT CLOSES, WHICH IS WORTH READING BEFORE EXTENDING THIS. Two pairs of panels were
 	rendering at byte-identical coordinates, and each of the four files documented its own corner as
@@ -68,6 +73,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
 local Tokens = require(script.Parent.Parent.Tokens)
 local Layers = require(script.Parent.Layers)
+local Surface = require(script.Parent.Surface)
 
 local Children = Fusion.Children
 
@@ -115,7 +121,15 @@ local TOUCH_CONTROL_CLEARANCE = Tokens.Control.TouchTargetSize * 3
 -- are drawn above it by a DIFFERENT surface: Components/PostureBreakBanner.lua's StatusBanner sits at
 -- Tokens.Space.XXL + YOffset and is 64px tall, and Screens/CombatFeedback mounts it twice -- posture
 -- break at YOffset 0, disarmed at YOffset 72. The band therefore ends at 32 + 72 + 64 = 168, and the
--- announcement banner has always sat exactly one edge inset below it, at 184.
+-- announcement banner sits exactly one edge inset below it, at 184.
+--
+-- 184 IS FINALLY THE NUMBER IT CLAIMED TO BE, as of Phase 2. CombatFeedback has always been
+-- IgnoreGuiInset = true and this host was not, so the two banners it clears were measured from the
+-- true top of the screen while the announcement was measured from below Roblox's top bar -- 184
+-- rendering at 220, a 36px gap that no line in either file mentioned. That is plan §2.3 in one
+-- concrete pair of numbers ("the margins were authored to match and do not"). Both surfaces are in
+-- one coordinate space now, so the announcement moves UP by the top bar's height and lands where it
+-- was always written to land. It is the one tile this phase deliberately moves.
 --
 -- THE TWO NUMBERS BELOW ARE OWNED ELSEWHERE and are duplicated here rather than imported, because
 -- Shell/ must not require Components/ -- the dependency runs the other way everywhere else in this
@@ -131,6 +145,27 @@ local COMBAT_BANNER_BAND_BOTTOM = Tokens.Space.XXL + 72 + 64
 -- VISIBLE tiles: a UIListLayout excludes children whose Visible is false, so a hidden tile costs
 -- neither its own height nor a helping of this padding.
 local TILE_GAP = Tokens.Space.S
+
+-- ROBLOX'S OWN TOP BAR, WHICH IS THIS FILE'S PROBLEM NOW. Phase 1 left the host without
+-- IgnoreGuiInset specifically so the six migrated screens' margins stayed byte-identical; Phase 2
+-- chose one coordinate space for every surface in the client (Shell/Surface.lua's header, plan 2.3)
+-- and this host is full-bleed like the rest. So a top-anchored region's own edge inset no longer
+-- starts below Roblox's chrome -- it starts at the true top of the screen, and has to clear the bar
+-- itself.
+--
+-- EXACTLY THE SAME SHAPE AS TOUCH_CONTROL_CLEARANCE BELOW, and worth noticing that it is: both are
+-- "Roblox draws its own controls on this edge, so tiles start further in", both are per-edge, and
+-- both belong here rather than in a tile because this is the one layer that can apply them to every
+-- tile at once. Read from GuiService via Surface rather than hardcoded to 36 -- see that function.
+--
+-- IT SCALES WITH EVERYTHING ELSE, and does not need compensating. The host's UIScale multiplies this
+-- offset along with the edge inset, so the rendered clearance is (EDGE_INSET + bar) * scale. Over
+-- ViewportScale's whole clamped range that never dips below the bar: at MIN_SCALE 0.8 a 16 + 36
+-- inset still renders at 41.6px against a 36px bar. At scale 1.0 it renders at exactly the 52px
+-- these four tiles have always sat at, so this migration moves none of them.
+--
+-- Read at Mount, not at require: Surface.TopBarInset's own comment has the reason (this module is
+-- require()d on the server by the test place's client load-check, where GuiService reports zero).
 
 type RegionSpec = {
 	AnchorPoint: Vector2,
@@ -208,10 +243,17 @@ local REGION_ORDER: { Region } = {
 	"BottomRight",
 }
 
-local function regionPosition(spec: RegionSpec): UDim2
+local function regionPosition(spec: RegionSpec, topBarInset: number): UDim2
 	local verticalInset = spec.EdgeInsetOverride or EDGE_INSET
 	if spec.ClearsTouchControls and IS_TOUCH then
 		verticalInset += TOUCH_CONTROL_CLEARANCE
+	end
+	-- Only where there is a bar to clear AND no override. An override is an absolute distance from
+	-- the top of the screen chosen to clear something else entirely (TopCentre clears the combat
+	-- banner band, which is 168px down), so adding the bar to it would push it past the thing it was
+	-- measured against rather than clearing anything.
+	if not spec.AnchoredToBottom and spec.EdgeInsetOverride == nil then
+		verticalInset += topBarInset
 	end
 
 	-- The inset always points INWARD from whichever edge the anchor names: positive at scale 0,
@@ -227,8 +269,9 @@ local Regions = {}
 -- Builds the host ScreenGui and its six region frames on the scope it is given. Takes the scope as
 -- an argument and holds nothing globally -- see the memoization note in this file's header for the
 -- specific failure that rules out doing it any other way.
-function Regions.Mount(scope: Scope, playerGui: PlayerGui): RegionHost
+function Regions.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.UsedAs<number>): RegionHost
 	local frames: { [Region]: Frame } = {}
+	local topBarInset = Surface.TopBarInset()
 
 	for _, region in REGION_ORDER do
 		local spec = REGION_SPECS[region]
@@ -236,7 +279,7 @@ function Regions.Mount(scope: Scope, playerGui: PlayerGui): RegionHost
 		frames[region] = scope:New "Frame" {
 			Name = region,
 			AnchorPoint = spec.AnchorPoint,
-			Position = regionPosition(spec),
+			Position = regionPosition(spec, topBarInset),
 			-- Sized by its tiles, never by a counted allowance. A region holding nothing measures
 			-- 0x0 and costs nothing.
 			Size = UDim2.fromOffset(0, 0),
@@ -252,20 +295,24 @@ function Regions.Mount(scope: Scope, playerGui: PlayerGui): RegionHost
 		} :: Frame
 	end
 
-	local gui = scope:New "ScreenGui" {
+	-- THE ONE PLACE THE AMBIENT LAYER GETS ITS SCALE, and the actual fix for plan §2.4. Every tile in
+	-- this host -- the dock included, since BottomCentre is the dock's -- is authored in raw pixels,
+	-- and before this they were the only surfaces on screen that did not grow with the viewport while
+	-- the dock did. One UIScale on one host is what makes them agree. It is a value PASSED IN rather
+	-- than computed here, for the reason Surface's header gives: a Compute per surface is a
+	-- ViewportSize connection per surface.
+	--
+	-- The host is also where IgnoreGuiInset now comes from, rather than being omitted here as it was
+	-- through Phase 1 -- see topBarInset above for what that costs the top-anchored regions and why
+	-- it moves none of them at scale 1.0.
+	local gui = Surface.New(scope, {
 		Name = "Regions",
-		DisplayOrder = Layers.Regions,
-		ResetOnSpawn = false,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		-- NOT IgnoreGuiInset, deliberately, and only for now. None of the six screens this host
-		-- adopts set it either, so leaving it off is what keeps their margins byte-identical through
-		-- this migration. Choosing ONE coordinate space for every surface is Phase 2's job (§2.3),
-		-- and doing it here would silently move six panels by the top bar's height while claiming to
-		-- be a pure position refactor.
+		Layer = Layers.Regions,
 		Parent = playerGui,
-
-		[Children] = frames,
-	} :: ScreenGui
+		Scaled = true,
+		Scale = scale,
+		Children = frames,
+	})
 
 	local host = {} :: RegionHost
 	host.Gui = gui

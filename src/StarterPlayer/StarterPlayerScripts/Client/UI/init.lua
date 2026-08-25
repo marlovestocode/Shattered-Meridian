@@ -63,8 +63,6 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Lazy = require(ReplicatedStorage.Shared.Lazy)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
-local Children = Fusion.Children
-
 local ClientStateModule = require(script.State.ClientState)
 local HUD = require(script.Screens.HUD)
 local Menus = require(script.Screens.Menus)
@@ -84,7 +82,10 @@ local BlimpHelmModule = require(script.Screens.BlimpHelm)
 local CarriedResourcesModule = require(script.Screens.CarriedResources)
 local WeaponInventoryModule = require(script.Screens.WeaponInventory)
 local ShiftLockCrosshair = require(script.Components.ShiftLockCrosshair)
+local ViewportScale = require(script.ViewportScale)
+local Layers = require(script.Shell.Layers)
 local Regions = require(script.Shell.Regions)
+local Surface = require(script.Shell.Surface)
 
 export type UIHandles = {
 	ClientState: ClientStateModule.ClientState,
@@ -165,8 +166,15 @@ function UI.Mount(): UIHandles
 	ClientStateModule.Bootstrap(clientState)
 	logger:debug("ClientState bootstrap end")
 
-	HUD.Mount(scope, playerGui, clientState)
-	logger:debug("HUD mounted")
+	-- ONE ViewportScale.Compute FOR THE WHOLE CLIENT, and it is hoisted here rather than called at
+	-- each surface because each call opens its own Camera.ViewportSize connection. Before Phase 2
+	-- there were exactly two callers -- Components/ModalScreen.lua and Screens/HUD -- and every
+	-- ambient panel had no UIScale at all, which is why at 2560x1440 the dock grew to 1.5 and the
+	-- fuel gauge, weapon rack, helm console and carried-resources tile beside it did not (plan 2.4).
+	-- The fix is not "call Compute everywhere"; that would be seventeen connections recomputing
+	-- seventeen Computeds on every window resize, which is the idle cost plan 11 rule 2 forbids.
+	-- One value, passed down.
+	local viewportScale = ViewportScale.Compute(scope)
 
 	-- clientState is passed through so CharacterTab/EmotesTab can read the HUD-wide fields they don't
 	-- duplicate (see Menus/init.lua's header on that split). The handle is returned below --
@@ -180,27 +188,41 @@ function UI.Mount(): UIHandles
 	-- that has to be handed somewhere. Held on a local and passed down, never cached at module scope
 	-- -- see Shell/Regions.lua's header for the hot-reload failure that rules the module-level cache
 	-- out (a destroyed-Instance reference that swallows every tile on the second Mount, with no error).
-	local regions = Regions.Mount(scope, playerGui)
+	local regions = Regions.Mount(scope, playerGui, viewportScale)
 	logger:debug("Region host mounted")
 
-	local deathFeed, killFeedTile = DeathFeed.Mount(scope, playerGui)
+	-- THE DOCK IS A TILE NOW, and it is mounted here rather than first because a tile needs somewhere
+	-- to go. BottomCentre has been reserved for it since Phase 1; Screens/HUD no longer owns a
+	-- ScreenGui, a ViewportScale.Compute or a hand-scaled bottom margin -- see that file's Mount
+	-- comment for what each of those three turned out to be a restatement of.
+	regions:Add("BottomCentre", 10, HUD.Mount(scope, clientState))
+	logger:debug("HUD mounted")
+
+	local deathFeed, killFeedTile = DeathFeed.Mount(scope, playerGui, viewportScale)
 	regions:Add("TopRight", 10, killFeedTile)
 	logger:debug("DeathFeed mounted")
 
-	local combatFeedback = CombatFeedbackModule.Mount(scope, playerGui)
+	local combatFeedback = CombatFeedbackModule.Mount(scope, playerGui, viewportScale)
 	logger:debug("CombatFeedback mounted")
 
-	-- No longer part of a Screen's own handle -- see this file's header. A bare ScreenGui here (not
-	-- a whole Screens/ module) since ShiftLockCrosshair is the only content it will ever hold.
+	-- No longer part of a Screen's own handle -- see this file's header. A bare surface here (not a
+	-- whole Screens/ module) since ShiftLockCrosshair is the only content it will ever hold.
+	--
+	-- Layers.World, the bottom of the ladder, because this is drawn ON the world rather than on top of
+	-- the UI -- a reticle that covers a panel is wrong. It used to be at the default 0 like twelve
+	-- other surfaces and, being mounted late, therefore drew over every panel mounted before it.
+	--
+	-- Scaled = false, and unlike most of the unscaled surfaces this one is not full-bleed: it is a
+	-- world-space aim point. The crosshair marks where the camera is pointing, and growing it with the
+	-- viewport would make it a bigger mark on the same pixel rather than a truer one.
 	local shiftLockEngaged: Fusion.Value<boolean> = scope:Value(false)
-	scope:New "ScreenGui" {
+	Surface.New(scope, {
 		Name = "ShiftLockCrosshair",
-		ResetOnSpawn = false,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		Layer = Layers.World,
 		Parent = playerGui,
-
-		[Children] = ShiftLockCrosshair(scope, { Engaged = shiftLockEngaged }),
-	}
+		Scaled = false,
+		Children = ShiftLockCrosshair(scope, { Engaged = shiftLockEngaged }),
+	})
 	logger:debug("ShiftLockCrosshair mounted")
 
 	-- DEFERRED, not mounted -- see this file's header. Each of these three closures runs at most once,
@@ -243,7 +265,7 @@ function UI.Mount(): UIHandles
 	regions:Add("TopCentre", 10, announcementTile)
 	logger:debug("Announcement mounted")
 
-	local emoteWheel = EmoteWheelModule.Mount(scope, playerGui, clientState)
+	local emoteWheel = EmoteWheelModule.Mount(scope, playerGui, clientState, viewportScale)
 	logger:debug("EmoteWheel mounted")
 
 	local settings = SettingsModule.Mount(scope, playerGui)

@@ -18,6 +18,24 @@
 	Grabbing is false would always be refused ("NotHolding") server-side regardless, so filtering it
 	here costs nothing and saves a wasted round trip.
 
+	NOT BUILT THROUGH UI/Shell/Surface.lua, WHICH IS THE ONE EXEMPTION IN THE CLIENT. Every other
+	ScreenGui in the tree comes from that factory as of Phase 2 of
+	docs/architecture/2026-08-25-hud-shell-plan.md; Surface.New takes a Fusion scope, and this module
+	has none -- see the paragraph below on why the cue is hand-built Instances. Creating a Fusion scope
+	here purely to satisfy a factory would mean a session-long root scope in a combat input module, for
+	one TextLabel. What it DOES take from Shell is the band: DisplayOrder is Layers.Overlay, not the
+	bare 5 it used to carry, so this cue is on the same ladder as everything else and the "no raw
+	DisplayOrder literals outside Layers.lua" assertion in Tests/UI/ShellLayers.spec.lua holds across
+	the whole client rather than across most of it.
+
+	It keeps IgnoreGuiInset = true by hand for the same reason Surface sets it everywhere -- one
+	coordinate space -- and it is unscaled, which is correct rather than an omission: it is one line of
+	centred text at 0.28 of the screen height, positioned by scale rather than by offset.
+
+	This surface was NOT in the hud-shell plan's count of seventeen. It is the eighteenth, missed
+	because it is the only one built with Instance.new rather than scope:New and so does not match the
+	grep the audit was built from.
+
 	THE CUE IS DELIBERATELY A PLAIN Instance-built ScreenGui, not a Screens/ Fusion component. Every
 	other panel in this codebase's UI lives behind Client/UI/init.lua's session-long Fusion mount and
 	its own uiHandles plumbing -- machinery sized for a real panel (a settings screen, a move editor, a
@@ -42,6 +60,7 @@ local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local Layers = require(script.Parent.Parent.UI.Shell.Layers)
 
 local logger = Logger.scope("GrabInputClient")
 
@@ -68,7 +87,7 @@ local function ensureCue(): TextLabel
 	gui.Name = "GrabCue"
 	gui.ResetOnSpawn = false
 	gui.IgnoreGuiInset = true
-	gui.DisplayOrder = 5
+	gui.DisplayOrder = Layers.Overlay
 
 	local newLabel = Instance.new("TextLabel")
 	newLabel.Name = "Cue"
@@ -118,8 +137,23 @@ local function requestThrow(): ()
 	remote:FireServer()
 end
 
+-- True while any modal UI panel is up (Components/ModalScreen.lua publishes the count as
+-- Constants.Attributes.UiModalOpen -- see that constant's own comment). Roblox's own
+-- gameProcessedEvent only covers clicks that LAND on the GUI, and a centred 760x620 panel leaves
+-- most of the viewport uncovered, so a player reading their character sheet was still throwing a
+-- punch every time they clicked anywhere else on screen.
+local function isModalUiOpen(): boolean
+	local player = Players.LocalPlayer
+	return player ~= nil and player:GetAttribute(Constants.Attributes.UiModalOpen) == true
+end
+
 local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 	if gameProcessed then
+		return
+	end
+	-- Same gate AttackInputClient holds, for the same reason -- see isModalUiOpen above. A throw is
+	-- an attack as far as a player clicking inside their own menu is concerned.
+	if isModalUiOpen() then
 		return
 	end
 	if KeybindManager.Matches("GrabThrow", input) then

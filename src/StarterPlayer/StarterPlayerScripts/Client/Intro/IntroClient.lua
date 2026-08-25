@@ -62,11 +62,12 @@ local VisionEffects = require(script.Parent.VisionEffects)
 local BlackScreen = require(script.Parent.BlackScreen)
 local PostureBreakBanner = require(script.Parent.Parent.UI.Components.PostureBreakBanner)
 local Tokens = require(script.Parent.Parent.UI.Tokens)
+local Layers = require(script.Parent.Parent.UI.Shell.Layers)
+local Surface = require(script.Parent.Parent.UI.Shell.Surface)
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 
 local peek = Fusion.peek
-local Children = Fusion.Children
 
 local logger = Logger.scope("IntroClient")
 
@@ -145,16 +146,19 @@ local function showGreetingBanner(scope: Scope, playerGui: PlayerGui, raceId: Ty
 	local display: Fusion.Value<PostureBreakBanner.StatusBannerDisplay?> =
 		scope:Value(nil :: PostureBreakBanner.StatusBannerDisplay?)
 
-	scope:New "ScreenGui" {
+	-- Layers.Boot, unnudged: the greeting is the LOWEST of the boot surfaces, which is what its old
+	-- bare 5 meant relative to BlackScreen's 11. It is deliberately allowed to sit under the black
+	-- cover -- see the note further down about the cover fading back out over it.
+	--
+	-- Unscaled, unlike the ambient tiles: this is one centred banner alone on a dark screen at the end
+	-- of the cinematic, with no dock beside it to disagree with about how big the screen is.
+	Surface.New(scope, {
 		Name = "Greeting",
-		ResetOnSpawn = false,
-		Enabled = true,
-		DisplayOrder = 5,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		Layer = Layers.Boot,
 		Parent = playerGui,
-
-		[Children] = PostureBreakBanner.StatusBanner(scope, { Display = display }),
-	}
+		Scaled = false,
+		Children = PostureBreakBanner.StatusBanner(scope, { Display = display }),
+	})
 
 	local greetedName = if displayName ~= "" then displayName else "traveler"
 	local subtitle = if raceId then `{raceId} -- {Config.RaceEpithets[raceId] or ""}` else ""
@@ -277,16 +281,24 @@ function IntroClient.Run(): ()
 	handle.Stage:set("RaceSelect")
 	local navigationConnections = OnboardingClient.WireNavigation(handle)
 
-	OnboardingClient.RunConfirmationLoop(handle, function()
-		-- Fires the instant Finalize resolves Success = true -- concurrent with Confirmation.lua's
-		-- own 1.2s fracture-out hold (BlackScreen's FadeSpring settles well inside that), per this
-		-- feature's design.
-		blackScreen.IsOpaque:set(true)
-	end)
+	-- No onSuccess fade here any more -- see the bloodline spin below for why the fade to black now
+	-- waits. Confirmation's own 1.2s fracture-out beat is untouched; only what follows it moved.
+	OnboardingClient.RunConfirmationLoop(handle)
 
 	for _, connection in navigationConnections do
 		connection:Disconnect()
 	end
+
+	-- THE BLOODLINE ROLL, and its position here is forced from both sides rather than chosen:
+	-- BloodlineSystem.Spin refuses until the profile has a raceId (which only Finalize writes, so
+	-- this cannot run any EARLIER), and playAwakening below disables the whole onboarding ScreenGui
+	-- (so it cannot run any LATER). The one window is right here, between the two.
+	--
+	-- Which is also why the fade to black moved out of RunConfirmationLoop's success callback and
+	-- down past this call: the spin card has to be on a screen the player can still see. The visible
+	-- consequence is that the fracture-out beat is followed by the spin rather than by the fade.
+	OnboardingClient.RunBloodlineSpinStage(handle)
+	blackScreen.IsOpaque:set(true)
 
 	-- The server has already teleported this character into its race-keyed arrival spawn by now --
 	-- CharacterCreationSystem.lua's own failure-handling contract requires the PivotTo to complete

@@ -15,12 +15,13 @@
 	state shows via a separate status line below the button instead (reactive), while the button
 	itself only reacts via its existing (already-reactive) Disabled prop.
 
-	DisplayOrder = 30 -- above Screens/Loading/init.lua's own 20 and Screens/Onboarding/init.lua's 10,
-	continuing the same headroom-for-future-overlap reasoning Loading's own comment already states.
-	All three stay temporally exclusive in practice: StartMenuClient.Run() either returns immediately
-	(this arrival was via a Play teleport) before this screen would ever mount, or this screen's scope
-	is the only one alive on this server, forever, since there is no legitimate path from here into
-	Loading/Onboarding on the SAME server -- see StartMenuClient.lua's own header.
+	Layers.Boot + 30 -- the top of the boot band, which is where the true first thing shown belongs.
+	The ladder in UI/Shell/Layers.lua is the explanation now; this file used to carry the other two
+	boot surfaces' numbers in prose to justify its own. They stay temporally exclusive in practice
+	regardless: StartMenuClient.Run() either returns immediately (this arrival was via a Play
+	teleport) before this screen would ever mount, or this screen's scope is the only one alive on
+	this server, forever, since there is no legitimate path from here into Loading/Onboarding on the
+	SAME server -- see StartMenuClient.lua's own header.
 
 	Does not own: the teleport request, retry logic, or the FromStartMenu arrival check
 	(StartMenuClient.lua owns all three).
@@ -30,6 +31,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
 local Tokens = require(script.Parent.Parent.Tokens)
+local Layers = require(script.Parent.Parent.Shell.Layers)
+local Surface = require(script.Parent.Parent.Shell.Surface)
 local Label = require(script.Parent.Parent.Components.Label)
 local Divider = require(script.Parent.Parent.Components.Divider)
 local Button = require(script.Parent.Parent.Components.Button)
@@ -44,7 +47,6 @@ export type StartMenuProps = {
 	OnPlayRequested: () -> (),
 }
 
-local DISPLAY_ORDER = 30
 local COLUMN_WIDTH = 360
 local TITLE_TEXT = "SHATTERED MERIDIAN"
 local TAGLINE_TEXT = "A world reshaped by the Shattering."
@@ -133,21 +135,17 @@ local function StartMenu(scope: Scope, playerGui: PlayerGui, props: StartMenuPro
 		},
 	} :: Frame
 
-	return scope:New "ScreenGui" {
+	-- The IgnoreGuiInset this used to set by hand -- with a comment noting HUD and CombatFeedback set
+	-- it too, and not noting that the other six always-on panels did not -- is Shell/Surface.lua's
+	-- now, and applies to every surface rather than to the three that remembered. Unscaled: full-bleed
+	-- backdrop, alone on screen.
+	return Surface.New(scope, {
 		Name = "StartMenu",
-		ResetOnSpawn = false,
-		Enabled = true,
-		DisplayOrder = DISPLAY_ORDER,
-		-- True full-bleed, matching HUD/init.lua's and CombatFeedback/init.lua's own use of this same
-		-- property -- without it, Roblox insets GUI content by the top bar's height by default, which
-		-- would leave a gap of whatever's behind this screen visible along the top edge of what's
-		-- meant to be an edge-to-edge title screen.
-		IgnoreGuiInset = true,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		Layer = Layers.Boot + 30,
 		Parent = playerGui,
-
-		[Children] = root,
-	} :: ScreenGui
+		Scaled = false,
+		Children = root,
+	})
 end
 
 return { Mount = StartMenu }

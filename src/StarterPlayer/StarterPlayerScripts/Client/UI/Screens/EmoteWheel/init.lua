@@ -58,6 +58,8 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local EmoteRegistry = require(ReplicatedStorage.Shared.Emotes.EmoteRegistry)
 
 local Tokens = require(script.Parent.Parent.Tokens)
+local Layers = require(script.Parent.Parent.Shell.Layers)
+local Surface = require(script.Parent.Parent.Shell.Surface)
 local Label = require(script.Parent.Parent.Components.Label)
 local ClientStateModule = require(script.Parent.Parent.State.ClientState)
 local WheelSelection = require(script.WheelSelection)
@@ -96,7 +98,12 @@ local function centerOffsetPosition(offset: Vector2): UDim2
 	return UDim2.fromScale(0.5, 0.5) + UDim2.fromOffset(offset.X, offset.Y)
 end
 
-function EmoteWheel.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientState): EmoteWheelHandle
+function EmoteWheel.Mount(
+	scope: Scope,
+	playerGui: PlayerGui,
+	clientState: ClientState,
+	scale: Fusion.UsedAs<number>
+): EmoteWheelHandle
 	local isOpen = scope:Value(false)
 	local selectedIndex: Fusion.Value<number?> = scope:Value(nil :: number?)
 
@@ -189,15 +196,22 @@ function EmoteWheel.Mount(scope: Scope, playerGui: PlayerGui, clientState: Clien
 		return use(centerEmote) ~= nil
 	end)
 
-	scope:New "ScreenGui" {
+	-- Layers.Overlay, replacing a bare DisplayOrder = 10 that collided EXACTLY with the number
+	-- Screens/Onboarding used to carry. That was harmless only because the two are never simultaneously
+	-- mounted -- a fact nothing enforced and nobody would have noticed breaking. See Shell/Layers.lua.
+	--
+	-- Scaled, and the scale it takes is NOT the one already inside this screen: the UIScale on the
+	-- CanvasGroup below runs 0.85 -> 1.0 off openProgress and is the wheel's entrance, nothing to do
+	-- with the size of the player's monitor. The two multiply, which is what should happen.
+	Surface.New(scope, {
 		Name = "EmoteWheel",
-		ResetOnSpawn = false,
-		Enabled = screenEnabled,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		DisplayOrder = 10,
+		Layer = Layers.Overlay,
 		Parent = playerGui,
+		Scaled = true,
+		Scale = scale,
+		Enabled = screenEnabled,
 
-		[Children] = scope:New "CanvasGroup" {
+		Children = scope:New "CanvasGroup" {
 			Name = "Root",
 			Size = UDim2.fromScale(1, 1),
 			BackgroundTransparency = 1,
@@ -266,7 +280,7 @@ function EmoteWheel.Mount(scope: Scope, playerGui: PlayerGui, clientState: Clien
 				},
 			},
 		},
-	}
+	})
 
 	return {
 		IsOpen = isOpen,

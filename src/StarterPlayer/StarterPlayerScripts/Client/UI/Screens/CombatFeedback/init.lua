@@ -41,6 +41,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 
+local Layers = require(script.Parent.Parent.Shell.Layers)
+local Surface = require(script.Parent.Parent.Shell.Surface)
 local DamageNumberLabel = require(script.Parent.Parent.Components.DamageNumberLabel)
 local StatusBannerModule = require(script.Parent.Parent.Components.PostureBreakBanner)
 
@@ -81,7 +83,7 @@ export type CombatFeedbackHandle = {
 local DAMAGE_NUMBER_LIFETIME = Constants.FX.DamageNumbers.LifetimeSeconds
 local STACK_WINDOW_SECONDS = Constants.FX.DamageNumbers.StackWindowSeconds
 
-function CombatFeedback.Mount(scope: Scope, playerGui: PlayerGui): CombatFeedbackHandle
+function CombatFeedback.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.UsedAs<number>): CombatFeedbackHandle
 	local outcome: Fusion.Value<StatusBannerModule.StatusBannerDisplay?> =
 		scope:Value(nil :: StatusBannerModule.StatusBannerDisplay?)
 	local damageNumbers: Fusion.Value<{ [string]: DamageNumberSpawnProps }> = scope:Value({})
@@ -165,14 +167,23 @@ function CombatFeedback.Mount(scope: Scope, playerGui: PlayerGui): CombatFeedbac
 		end
 	end
 
-	scope:New "ScreenGui" {
+	-- Layers.Overlay: over the dock and the ambient tiles, under any panel the player opened on
+	-- purpose. A damage number that a modal cannot cover would be worse than one that can.
+	--
+	-- SCALED, and it is one of only three surfaces that are. The rule (Shell/Surface.lua's header) is
+	-- that a surface scales if it draws chrome alongside the dock, and this one always does -- the two
+	-- centred banners and every damage number are on screen at the same time as the hotbar. The
+	-- IgnoreGuiInset this used to set by hand is the surface's now, and the reason that matters is
+	-- that this file was one of only three that DID set it; the announcement banner below its two
+	-- banners did not, which is why it rendered 36px lower than the number in its own source said.
+	Surface.New(scope, {
 		Name = "CombatFeedback",
-		IgnoreGuiInset = true,
-		ResetOnSpawn = false,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		Layer = Layers.Overlay,
 		Parent = playerGui,
+		Scaled = true,
+		Scale = scale,
 
-		[Children] = {
+		Children = {
 			StatusBanner(scope, { Display = outcome }),
 			scope:New "Frame" {
 				Name = "DamageNumbers",
@@ -193,7 +204,7 @@ function CombatFeedback.Mount(scope: Scope, playerGui: PlayerGui): CombatFeedbac
 				end),
 			},
 		},
-	}
+	})
 
 	return {
 		Outcome = outcome,

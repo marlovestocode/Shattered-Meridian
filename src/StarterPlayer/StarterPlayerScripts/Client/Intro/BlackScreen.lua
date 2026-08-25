@@ -28,10 +28,10 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.UI.Tokens)
+local Layers = require(script.Parent.Parent.UI.Shell.Layers)
+local Surface = require(script.Parent.Parent.UI.Shell.Surface)
 
 type Scope = Fusion.Scope<typeof(Fusion)>
-
-local Children = Fusion.Children
 
 export type BlackScreenHandle = {
 	-- true = fully opaque. Springs rather than snaps (Tokens.Motion.FadeSpring, the same "one-shot
@@ -43,11 +43,12 @@ export type BlackScreenHandle = {
 	Root: ScreenGui,
 }
 
--- DisplayOrder 11: just above Screens/Onboarding/init.lua's own ScreenGui (DisplayOrder = 10, see
--- that file's header) so this covers the creator screens once opaque, and well below Screens/
--- StartMenu/init.lua's 30 / Screens/Loading/init.lua's 20 -- neither of which is still mounted by the
--- time this exists (both tear their own scopes down before Client/Intro/IntroClient.Run() starts).
-local DISPLAY_ORDER = 11
+-- Boot + 11: just above Screens/Onboarding's Boot + 10 so this covers the creator screens once
+-- opaque, and below Screens/Loading's Boot + 20 and Screens/StartMenu's Boot + 30 -- neither of which
+-- is still mounted by the time this exists (both tear their own scopes down before
+-- Client/Intro/IntroClient.Run() starts). The bare 11 this used to be said the same thing about the
+-- same four surfaces, but only in the comment above; the nudge says it in the number.
+local DISPLAY_ORDER = Layers.Boot + 11
 
 local function BlackScreen(scope: Scope, playerGui: PlayerGui): BlackScreenHandle
 	local isOpaque: Fusion.Value<boolean> = scope:Value(false)
@@ -71,16 +72,16 @@ local function BlackScreen(scope: Scope, playerGui: PlayerGui): BlackScreenHandl
 		BorderSizePixel = 0,
 	} :: Frame
 
-	local screenGui = scope:New "ScreenGui" {
+	-- Unscaled: one full-bleed Frame at Size = fromScale(1, 1) and nothing else. There is no chrome
+	-- here to grow with the viewport, and nothing else is on screen to disagree with -- see
+	-- Shell/Surface.lua's header on why that, not a default, is what decides Scaled.
+	local screenGui = Surface.New(scope, {
 		Name = "BlackScreen",
-		ResetOnSpawn = false,
-		Enabled = true,
-		DisplayOrder = DISPLAY_ORDER,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		Layer = DISPLAY_ORDER,
 		Parent = playerGui,
-
-		[Children] = frame,
-	} :: ScreenGui
+		Scaled = false,
+		Children = frame,
+	})
 
 	return {
 		IsOpaque = isOpaque,
