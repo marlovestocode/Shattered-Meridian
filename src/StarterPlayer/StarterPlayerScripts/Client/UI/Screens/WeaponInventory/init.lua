@@ -482,8 +482,14 @@ function WeaponInventory.Mount(scope: Scope): (WeaponInventoryHandle, Frame)
 		-- viewport height, not the content height -- reproducible with CornerAccent on or off, so
 		-- CornerAccent's own AccentOverlay (the same Scale(1,1)-sibling shape) is not what triggers
 		-- it. ScreenFrame.lua's own SurfaceTexture panel never hits this because ModalScreen hands it
-		-- a fixed Size, never AutomaticSize -- this panel is the only SurfaceTexture caller that is
-		-- also AutomaticSize, which is exactly why nothing else in this codebase surfaced it. The
+		-- a fixed Size, never AutomaticSize -- as does Screens/Onboarding/CreatorFrame.lua, the third
+		-- caller. This note used to claim this panel was the ONLY SurfaceTexture caller that is also
+		-- AutomaticSize; it was not. Screens/BlimpHelm/init.lua was the second and had the identical
+		-- bug for as long, its console resolving to roughly the viewport height with about 175px of
+		-- real content in it. It went unnoticed because a helm console is only on screen while
+		-- piloting and nothing sat next to it to make the empty space obvious -- until the region
+		-- migration stacked the weapon rack against it. Corrected here rather than deleted, because
+		-- "nothing else surfaced it" was the reasoning that stopped anyone checking. The
 		-- grain was always subtle at this panel's width (0.55 intensity, see the removed comment
 		-- this replaced) and losing it costs nothing next to shipping a panel that silently covers a
 		-- third of the screen. Fixing MeridianField/Panel.lua's general AutomaticSize interaction is

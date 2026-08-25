@@ -256,18 +256,15 @@ function UI.Mount(): UIHandles
 	regions:Add("TopRight", 20, blimpFuelTile)
 	logger:debug("BlimpFuel mounted")
 
-	-- HELM AT 10, RACK AT 20 -- the helm is nearest the bottom edge, not the rack. This is the
-	-- opposite of what the plan's §3.2 table specified, and it was swapped after seeing it: the helm
-	-- console is roughly 650px tall on a ~795px viewport, so putting the rack under it lifted the
-	-- helm by a rack-height plus the gap and pushed its header row up under Roblox's own topbar
-	-- buttons. Anchoring the tall, stable panel and floating the small, transient one above it also
-	-- stops the whole console jumping every time a weapon is picked up.
+	-- Rack at 10 (the bottom-left corner it has always occupied), helm above it at 20.
 	--
-	-- This does NOT solve the left edge being over-budget -- the bottom-left stack plus the top-left
-	-- tile is more content than a short viewport has room for, and the ordering only chooses which
-	-- pair meets first (see the plan's §14.6). It picks the collision that costs least.
+	-- This was briefly swapped, because with the helm console resolving to ~710px on a ~795px
+	-- viewport there was no room for anything beneath it. That turned out to be a bug in the console
+	-- and not a fact about the screen: it was opting into SurfaceTexture on an AutomaticSize.Y panel,
+	-- which sizes the panel to roughly the viewport instead of to its ~175px of content. With that
+	-- fixed the original order fits comfortably, so the rack keeps its corner.
 	local blimpHelm, blimpHelmTile = BlimpHelmModule.Mount(scope)
-	regions:Add("BottomLeft", 10, blimpHelmTile)
+	regions:Add("BottomLeft", 20, blimpHelmTile)
 	logger:debug("BlimpHelm mounted")
 
 	local carriedResources, carriedResourcesTile = CarriedResourcesModule.Mount(scope)
@@ -275,7 +272,7 @@ function UI.Mount(): UIHandles
 	logger:debug("CarriedResources mounted")
 
 	local weaponInventory, weaponInventoryTile = WeaponInventoryModule.Mount(scope)
-	regions:Add("BottomLeft", 20, weaponInventoryTile)
+	regions:Add("BottomLeft", 10, weaponInventoryTile)
 	logger:debug("WeaponInventory mounted")
 
 	return {

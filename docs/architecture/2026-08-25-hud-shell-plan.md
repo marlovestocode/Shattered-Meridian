@@ -101,6 +101,14 @@ bottom-anchored helm console grows *upward* until it reaches the top-anchored re
 It is reachable by ordinary play, not a corner case — carrying fuel to a blimp you are piloting is
 the intended loop, and it is the state all three Phase 0 reference shots happened to be in.
 
+**REVISED 2026-08-25, after the cause was found.** The helm was only tall enough to reach the
+resources tile because of the `SurfaceTexture` + `AutomaticSize.Y` inflation described in Phase 1's
+order note — ~175px of content in a panel resolving to ~710px. Fixed, the two no longer meet at
+ordinary viewport heights. This entry stays because the *shape* of the defect is still real (two
+regions sharing one screen edge, both growing by content, with nothing arbitrating between them) and
+because it is the clearest example in this document of a rendered size being taken for a design fact.
+It is no longer a live collision.
+
 **Phase 1 as specced does NOT fix this, and should not pretend to.** `TopLeft` and `BottomLeft` are
 two separate stacks; making each internally well-ordered leaves a bottom-anchored stack free to grow
 into a top-anchored one on the same edge. §2.1's two collisions are *within* one region and the
@@ -318,7 +326,7 @@ render layer in Roblox.
 | `TopLeft` | 10 | Carried resources | `Screens/CarriedResources` |
 | `TopCentre` | 10 / 20 | Announcement / notifications | `Screens/Announcement`, `Shell/Notify` |
 | `TopRight` | 10 / 20 | Kill feed / blimp fuel | `Screens/DeathFeed`, `Screens/BlimpFuel` |
-| `BottomLeft` | 10 / 20 | Helm console / weapon rack | `Screens/BlimpHelm`, `Screens/WeaponInventory` |
+| `BottomLeft` | 10 / 20 | Weapon rack / helm console | `Screens/WeaponInventory`, `Screens/BlimpHelm` |
 | `BottomCentre` | 10 | The dock and its bands | `Screens/HUD` |
 | `BottomRight` | — | reserved | — |
 
@@ -505,8 +513,8 @@ already true: `DeathFeed` owns exactly one surface).
       always-visible tile would have pushed the fuel gauge down the screen for a feed that is
       permanently empty.
 - [x] `Screens/BlimpFuel` → `TopRight` / 20
-- [x] `Screens/WeaponInventory` → `BottomLeft` / **20** (not 10 — see the order note below)
-- [x] `Screens/BlimpHelm` → `BottomLeft` / **10** (not 20 — see the order note below)
+- [x] `Screens/WeaponInventory` → `BottomLeft` / 10
+- [x] `Screens/BlimpHelm` → `BottomLeft` / 20
 - [x] Deleted the now-false corner-ownership comments in `WeaponInventory` and `BlimpHelm`. Both are
       quoted in `Regions.lua`'s header and in `ShellRegions.spec` — the only place they still appear
       is where they explain why the mechanism had to exist.
@@ -559,18 +567,33 @@ content scale on the same spring, so it still has an arrival; `WeaponInventory` 
 one. Phase 5's `Reveal.lua` is where the offset comes back for all five ambient tiles at once, which
 is where this plan already put it.
 
-**THE BOTTOM-LEFT ORDER IS SWAPPED RELATIVE TO §3.2, AND THIS IS WHY.** The table above originally
-read `WeaponInventory` 10 / `BlimpHelm` 20. Built that way, screenshotted, and reverted on the
-evidence: with the rack anchored to the bottom edge, the helm console is lifted by a rack-height plus
-the tile gap, and its header row ends up level with Roblox's own topbar buttons — the panel runs
-underneath them. The helm is roughly **650px tall on a ~795px viewport**, so it has no room to give.
-It is now 10 (anchored to the edge, exactly where it sat before this phase) and the rack is 20
-(floating above it). That also stops the entire console shifting every time a weapon is picked up,
-which the original order would have done.
+**THE BOTTOM-LEFT ORDER IS §3.2'S AFTER ALL, AND THE DETOUR IS WORTH RECORDING.** It was swapped to
+helm 10 / rack 20 for one round, on screenshot evidence: with the rack anchored to the bottom edge
+the helm console was lifted clear off the top of the screen, its header row level with Roblox's own
+topbar buttons. The reasoning at the time was that the helm is ~710px tall on a ~795px viewport and
+therefore has no room to give, and §14.6 was written up as "the left edge is over-budget".
 
-This does **not** fix the left edge; it picks the cheaper collision. The bottom-left stack plus the
-top-left tile is more content than a short viewport has room for, whichever way round the two are —
-see §14.6, which this is evidence for rather than a resolution of.
+**That was wrong, and wrong in a way worth naming: a bug was read as a constraint.** The helm console
+is not a 710px panel. It is a ~175px panel that was opting into `SurfaceTexture = true` on an
+`AutomaticSize.Y` frame — the combination `Screens/WeaponInventory/init.lua` had already measured and
+documented (`MeridianField`'s root Frame is `Size = Scale(1, 1)` and `Panel.lua` parents it as a
+direct sibling of `Content` inside the very frame being auto-sized, so the frame sizes itself from a
+child defined as 100% of itself and resolves to roughly the viewport height). Roughly three quarters
+of that panel was empty.
+
+Fixed at the call site the same way `WeaponInventory` fixed it, and the original order fits with room
+to spare. **§14.6's premise is therefore mostly retracted** — see the revision recorded there.
+
+Two lessons this cost a round-trip to learn, both worth keeping:
+
+- **An unexpected size is a bug until measured otherwise.** The whole "left edge is over-budget"
+  conclusion, the order swap, and §14.6's original framing all followed from accepting a panel's
+  rendered height as a fact about the design rather than asking why a console with four rows of
+  content in it filled most of a screen.
+- **`WeaponInventory`'s note said it was "the only SurfaceTexture caller that is also AutomaticSize,
+  which is exactly why nothing else in this codebase surfaced it."** `BlimpHelm` was the second, with
+  the identical bug, at the time that sentence was written. The claim is corrected in place rather
+  than deleted, because it is the sentence that stopped anyone checking.
 
 **What Phase 1 could not preserve.** The 14px entrance rise on `BlimpHelm` and `WeaponInventory` is
 gone. Both were springs driving the panel's `Position`, and a region tile's `Position` is overwritten
@@ -842,10 +865,17 @@ is a regression this plan introduced; exit 1 on its own is not.
    `ButtonStart` handling is the only gamepad path and it stays local. *Owner: deferred.*
 4. **Does `BottomRight` have a claimant?** Reserved and empty in §3.2. If nothing wants it by Phase 6,
    drop it rather than leaving a region nobody mounts into.
-6. **What gives on a left edge that is oversubscribed?** (§2.1a) `TopLeft` and `BottomLeft` share
-   the `x = Space.L` column, both grow by content, and at ~740px of viewport height the helm console
-   reaches the carried-resources tile. Regions make this describable but do not resolve it. The
-   options, none of them free:
+6. **What gives on a left edge that is oversubscribed?** (§2.1a) **LARGELY RETRACTED 2026-08-25.**
+   The helm console that this question was built around was not 710px of content — it was ~175px of
+   content in a panel inflated by the `SurfaceTexture` + `AutomaticSize` bug (see Phase 1's order
+   note). With that fixed, the bottom-left stack and the top-left tile fit on a ~795px viewport with
+   room to spare, and none of the options below need choosing today.
+
+   What survives is the narrow original observation and nothing more: `TopLeft` and `BottomLeft`
+   share the `x = Space.L` column and both grow by content, so a tall enough bottom-left stack can
+   still reach the top-left tile — on a short viewport, with a future third tile, or if the helm
+   grows. That is a thing to watch, not a thing to fix now. The options are kept below for whoever
+   hits it for real:
 
    - **One `Left` region** — merges the two stacks so the layout cannot overlap itself. Contradicts
      the six-region table, and puts the resources tile in the middle of the screen edge when the helm

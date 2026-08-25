@@ -359,7 +359,23 @@ function BlimpHelm.Mount(scope: Scope): (BlimpHelmHandle, Frame)
 		end),
 		Elevated = true,
 		CornerAccent = true,
-		SurfaceTexture = true,
+		-- NOT SurfaceTexture, and this is why the console used to be a column of empty panel roughly
+		-- four times taller than anything drawn in it. MeridianField.lua's root Frame is
+		-- Size = Scale(1, 1) and Panel.lua parents it as a DIRECT sibling of Content inside the very
+		-- Frame this panel sets AutomaticSize.Y on -- so the frame sizes itself from a child that is
+		-- defined as 100% of the frame, and resolves to roughly the viewport height instead of the
+		-- content height. Screens/WeaponInventory/init.lua has the full measurement (a bare
+		-- AutomaticSize.Y panel with SurfaceTexture and 40px of content resolved to Y = 852) and hit
+		-- exactly this; it is not repeated here.
+		--
+		-- That file's note claims it is "the only SurfaceTexture caller that is also AutomaticSize".
+		-- It was not -- this panel was the second, and went unnoticed because a helm console is only
+		-- on screen while piloting and nothing sat beside it to make the empty space obvious. The
+		-- other two callers (Components/ScreenFrame.lua, Screens/Onboarding/CreatorFrame.lua) are
+		-- both handed a fixed Size and are genuinely unaffected.
+		--
+		-- Fixing Panel/MeridianField's AutomaticSize interaction properly is still the real follow-up.
+		-- This call site just stops opting into the broken combination, same as the other one did.
 
 		Children = {
 			scope:New "UIPadding" {
