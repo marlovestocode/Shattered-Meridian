@@ -252,34 +252,47 @@ return function()
 			return -frame.Position.Y.Offset
 		end
 
-		for _, corner in { "BottomLeft", "BottomRight" } do
-			it(string.format("%s starts above the dock band's top edge", corner), function()
-				local reach = measureDockBandReach()
+		it("BottomLeft starts above the dock band's top edge", function()
+			-- The left corner is the one the armament island reaches into: 224px pinned left of an
+			-- 870px centred dock puts its edge 24px from the screen edge at the reference width, which
+			-- is the whole of the helm console's column.
+			local reach = measureDockBandReach()
 
-				local scope = Fusion.scoped(Fusion)
-				local host = Regions.Mount(scope, fakePlayerGui(), 1)
+			local scope = Fusion.scoped(Fusion)
+			local host = Regions.Mount(scope, fakePlayerGui(), 1)
 
-				local dockBandTop = insetAboveBottom(host, "BottomCentre") + reach
-				local cornerInset = insetAboveBottom(host, corner)
+			local dockBandTop = insetAboveBottom(host, "BottomCentre") + reach
+			local cornerInset = insetAboveBottom(host, "BottomLeft")
 
-				if cornerInset < dockBandTop then
-					error(
-						string.format(
-							"%s starts %dpx above the bottom edge, but the dock band's top is at %dpx "
-								.. "(BottomCentre's %dpx inset plus a measured %dpx of reach). A tile in "
-								.. "this corner renders into whatever is bolted to the dock's edge -- "
-								.. "raise DOCK_BAND_REACH in Shell/Regions.lua to %d.",
-							corner,
-							cornerInset,
-							dockBandTop,
-							insetAboveBottom(host, "BottomCentre"),
-							reach,
-							reach
-						)
+			if cornerInset < dockBandTop then
+				error(
+					string.format(
+						"BottomLeft starts %dpx above the bottom edge, but the dock band's top is at "
+							.. "%dpx (BottomCentre's %dpx inset plus a measured %dpx of reach). A tile "
+							.. "in this corner renders into whatever is bolted to the dock's edge -- "
+							.. "raise DOCK_BAND_REACH in Shell/Regions.lua to %d.",
+						cornerInset,
+						dockBandTop,
+						insetAboveBottom(host, "BottomCentre"),
+						reach,
+						reach
 					)
-				end
-			end)
-		end
+				)
+			end
+		end)
+
+		it("BottomRight sits in the corner, because nothing reaches it", function()
+			-- THE OPPOSITE ASSERTION FROM ITS NEIGHBOUR, AND DELIBERATELY SO. This corner carried the
+			-- same clearance while it was empty, on a guess that read "the dock's right edge is only
+			-- 12px clear of this column" as a hazard rather than as clearance. Nothing is bolted to
+			-- the dock's RIGHT edge, so a tile here has nothing to keep off and 161px of lift put the
+			-- furnace gauge in the middle of the screen. Pinned so that re-adding the clearance out of
+			-- symmetry fails here instead of shipping.
+			local scope = Fusion.scoped(Fusion)
+			local host = Regions.Mount(scope, fakePlayerGui(), 1)
+
+			expect(insetAboveBottom(host, "BottomRight")).to.equal(insetAboveBottom(host, "BottomCentre"))
+		end)
 	end)
 
 	describe("the ambient layer yields to the mode", function()

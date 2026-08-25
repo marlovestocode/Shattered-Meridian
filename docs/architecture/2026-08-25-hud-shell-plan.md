@@ -200,9 +200,38 @@ dock and has one owner) or narrowing the helm (a content decision to fix a layou
 region layer is the one place that can state "another surface draws on this strip" once for every
 tile that will ever sit there — which is the same job `COMBAT_BANNER_BAND_BOTTOM` does at `TopCentre`.
 
-`BottomRight` takes the clearance too, though it is empty. The dock's right edge is only 12px clear
+~~`BottomRight` takes the clearance too, though it is empty. The dock's right edge is only 12px clear
 of that column at the reference resolution, so the *first* tile to claim the corner would land in the
-dock's shadow for exactly the reason the helm landed in the island's.
+dock's shadow for exactly the reason the helm landed in the island's.~~
+
+**STRICKEN 2026-08-25, and it is the sharpest self-inflicted example in this document.** Twelve
+pixels clear *is* clear. That sentence reads like a measurement and is a guess — it took a number
+that proves the corner is safe and used it to argue the corner is dangerous. The cost landed on the
+first tile ever to claim `BottomRight`: the reworked furnace gauge went into it and sat 161px off the
+bottom of the screen, nowhere near the corner it had just been moved to, for a collision that cannot
+happen.
+
+Measured properly when the owner said it did not look like a corner (all figures in reference units,
+which is also the whole viewport story — the dock, the island and the insets share one
+`ViewportScale`, and that scale is `min(W/1366, H/768)`, so every ordinary 16:9 display resolves to
+an effective width of about 1366):
+
+| effective width | dock band | island left edge | `BottomLeft` 16..236 | `BottomRight` W-236.. |
+|---|---|---|---|---|
+| 1366 | 248..1118 | 24 | band clear, **island collides** | band clear by 12px |
+| 1600 | 365..1235 | 141 | band clear, **island collides** | band clear |
+| 1920 | 525..1395 | 301 | band clear, island clear | band clear |
+
+**The dock band never reaches either corner at the reference width or above.** The only thing that
+reaches is the armament island, and only on the left. So `BottomRight` now takes the ordinary edge
+inset and the furnace gauge sits in the actual corner; `BottomLeft` keeps the clearance, because 24px
+of gap will not hold a 220px console.
+
+Two things worth keeping from this. A defensive constant costs nothing *until something claims the
+region it is defending* — this one sat harmless for a day and then mis-placed the first tile that
+arrived. And the measurement that settles it took one script: the same "an unexpected rendered
+position is a bug until measured otherwise" rule Phase 1 already paid to learn, applied a step too
+late.
 
 **Unlike `COMBAT_BANNER_BAND_BOTTOM`, this constant is guarded.** That one's own comment admits "if
 either banner's YOffset or its height changes, this has to change with it, and nothing will tell

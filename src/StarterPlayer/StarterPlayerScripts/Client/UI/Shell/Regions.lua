@@ -172,21 +172,36 @@ local TILE_GAP = Tokens.Space.S
 -- TOP sits. 129 = the key legend band beneath the dock (31) plus the dock band itself (98), both read
 -- off a real layout pass in this repo's own harness rather than added up from Screens/HUD's source.
 --
--- WHY EITHER BOTTOM CORNER CARES ABOUT A CENTRED TILE. The dock is 870px wide and something is BOLTED
--- TO ITS LEFT EDGE: Screens/HUD/ArmamentIsland.lua pins a 224px weapon plate at x = -224 inside the
--- dock band, deliberately outside the BottomCentre tile's own bounds so the dock cannot be displaced
--- by it. At this UI's authoring resolution (1366x768, ViewportScale.REFERENCE_*, where the scale is
--- exactly 1.0) that puts the island's left edge at (1366 - 870) / 2 - 224 = 24px from the screen edge
--- -- straight through BottomLeft's 16..236 column, and straight through the helm console sitting in
--- it. Measured on 2026-08-25 from a screenshot and then reproduced from the numbers; it is not an
--- edge case, it is what the reference resolution renders.
+-- ONLY BottomLeft TAKES IT, AND ONLY THE ARMAMENT ISLAND EARNS IT. Both bottom corners carried this
+-- when it was introduced. That was over-broad, and the measurement that should have been taken first
+-- was finally taken on 2026-08-25 when the furnace gauge claimed the right-hand corner and looked
+-- nowhere near it. Everything below is in REFERENCE units, which is also the whole viewport story:
+-- the dock, the island and these insets are all multiplied by the same ViewportScale, and that scale
+-- is min(W/1366, H/768), so any ordinary 16:9 display -- 1366x768, 1920x1080, 1600x900 -- resolves to
+-- an effective width of ~1366 and behaves as the second row does.
 --
--- SO THE BOTTOM CORNERS START ABOVE THE DOCK BAND, and that is the fix rather than moving the island
--- or narrowing the helm: the island cannot move (it is one half of a joint with the dock, see its own
+--   effective W   dock band      island left   BottomLeft (16..236)        BottomRight (W-236..)
+--   1366          248..1118      24            band CLEAR, island COLLIDES  band CLEAR (12px)
+--   1600          365..1235      141           band CLEAR, island COLLIDES  band CLEAR
+--   1920          525..1395      301           band CLEAR, island CLEAR     band CLEAR
+--
+-- So the dock BAND never reaches either corner at the reference width or above. What does reach is
+-- Screens/HUD/ArmamentIsland.lua's 224px weapon plate, pinned at x = -224 inside the dock band and
+-- deliberately outside the BottomCentre tile's own bounds so the dock cannot be displaced by it --
+-- which lands its left edge 24px from the screen edge and covers essentially the whole of the helm
+-- console standing there.
+--
+-- SO BottomLeft STARTS ABOVE THE DOCK BAND, and that is the fix rather than moving the island or
+-- narrowing the helm: the island cannot move (it is one half of a joint with the dock, see its own
 -- header), and a region layer that lets a tile grow into a strip another tile already occupies is
 -- exactly the arbitration this module exists to do. The same shape as the deleted
 -- COMBAT_BANNER_BAND_BOTTOM above -- "another surface draws on this edge, so tiles on it start
 -- further in".
+--
+-- IT IS NOT CONDITIONAL ON THE ISLAND BEING OUT, and that was considered. The island appears on the
+-- first weapon pickup and never leaves ("an inventory never empties back out" -- its own header), so
+-- a conditional inset would be permanently on for any player past their first rack, at the cost of a
+-- layout that shifts underneath them the one time it flips.
 --
 -- THE DIFFERENCE IS THAT THIS ONE IS GUARDED, and that difference is why one of the two is still
 -- here. COMBAT_BANNER_BAND_BOTTOM had no test and went stale without anyone noticing;
@@ -199,9 +214,10 @@ local TILE_GAP = Tokens.Space.S
 -- outside its own region deliberately, because it is one half of a joint with the dock.
 local DOCK_BAND_REACH = 129
 
--- Where a bottom CORNER region's stack starts, measured from the bottom of the screen: BottomCentre's
--- own edge inset, plus the dock band's reach above that, plus one more edge inset of air so the two
--- read as separate surfaces rather than as a seam.
+-- Where BottomLeft's stack starts, measured from the bottom of the screen: BottomCentre's own edge
+-- inset, plus the dock band's reach above that, plus one more edge inset of air so the two read as
+-- separate surfaces rather than as a seam. 145 is the floor (the island's own top edge); the last 16
+-- is the only discretionary pixel in it.
 local DOCK_BAND_CLEARANCE = EDGE_INSET + DOCK_BAND_REACH + EDGE_INSET
 
 -- How dark the ambient layer goes behind an open panel, at full dim. Not opaque, deliberately: the
@@ -320,13 +336,13 @@ local REGION_SPECS: { [Region]: RegionSpec } = {
 		AnchorScale = Vector2.new(1, 1),
 		ClearsTouchControls = true,
 		Ambient = true,
-		-- CLAIMED 2026-08-25 by the furnace gauge (Screens/BlimpFuel), which had been sharing TopRight
-		-- with the kill feed. It is the first tile ever to sit here, and it landed clear because this
-		-- region already carried the clearance below -- written while the corner was still empty,
-		-- against the day something wanted it. The dock's right edge is only 12px from this column at
-		-- the reference resolution, so without it the gauge would have arrived in the dock's shadow
-		-- the way the helm console arrived in the armament island's.
-		EdgeInsetOverride = DOCK_BAND_CLEARANCE,
+		-- NO CLEARANCE, AND THE ONE THIS REGION USED TO CARRY WAS WRONG. It was given
+		-- DOCK_BAND_CLEARANCE while empty, on the reasoning that "the dock's right edge is only 12px
+		-- clear of this column at the reference resolution, so the FIRST tile to claim it would land
+		-- in the dock's shadow." Twelve pixels clear IS clear -- that was a defensive guess dressed
+		-- as a measurement, and it cost the furnace gauge (the tile that did eventually claim this
+		-- corner) 161px of lift for a collision that cannot happen. See DOCK_BAND_CLEARANCE above
+		-- for the measured table.
 	},
 }
 
