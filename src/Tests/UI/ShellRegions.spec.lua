@@ -40,33 +40,77 @@ local WeaponInventory = require(Screens.WeaponInventory)
 -- hand-places itself now fails here instead of being approved by a reviewer reading the same stale
 -- comments.
 --
--- BY TILE NAME, NOT BY WALKING WHAT THE SCREEN BUILT. Found while writing this: a screen is allowed
--- to contribute something that is NOT a tile, and DeathFeed does. Its ScreenGui holds the top-right
--- KillFeedList *and* Components/DeathOverlay -- a centred 360x168 card at UDim2.fromScale(0.5, 0.4)
--- which is not a region tile at all and must keep placing itself. A spec that walked every root
--- would demand the death overlay stop centring itself, which would be wrong. Naming the tile is
--- also the more honest assertion: the migration's claim is about one specific Frame per screen, so
--- that is what gets checked.
+-- AGAINST THE RETURNED TILE, NOT AGAINST EVERYTHING THE SCREEN BUILT. Found while writing the
+-- Phase 0 version of this file: a screen is allowed to contribute something that is NOT a tile, and
+-- DeathFeed does. It still owns a ScreenGui for Components/DeathOverlay -- a centred 360x168 card at
+-- UDim2.fromScale(0.5, 0.4) which is not a region tile and must keep placing itself. A spec that
+-- walked every root would have demanded the death overlay stop centring itself, which would be
+-- wrong. Checking the value Mount actually hands to Shell/Regions.lua is both narrower and more
+-- honest: that one Frame is the whole of the migration's claim. The name is asserted too, so a
+-- screen cannot rename what it returns without this noticing.
 --
 -- STRUCTURE ONLY, like ScreenFrameScreens.spec.lua beside it. That the tiles LOOK right at 1366x768
 -- is not answerable in this place and is checked by screenshot instead.
 
+type Scope = Fusion.Scope<typeof(Fusion)>
+
 type Case = {
 	Name: string,
-	-- The one Frame this screen contributes to a region, by name.
+	-- The one Frame this screen contributes to a region, by name. Asserted as well as the returned
+	-- tile so a screen cannot quietly rename what it hands over.
 	Tile: string,
-	Mount: (any, PlayerGui) -> any,
+	-- Uniform here even though the real signatures are not: five screens take only a scope, and
+	-- DeathFeed also takes a PlayerGui for the one surface it still owns. Wrapping the five is what
+	-- lets every assertion below run over one list instead of special-casing the odd one out twice.
+	Mount: (Scope, PlayerGui) -> (any, GuiObject),
 	-- DeathFeed only -- see the exemption note on the second describe block below.
 	OwnsASurface: boolean?,
 }
 
 local CASES: { Case } = {
-	{ Name = "CarriedResources", Tile = "CarriedResourcesPanel", Mount = CarriedResources.Mount },
-	{ Name = "Announcement", Tile = "AnnouncementBanner", Mount = Announcement.Mount },
-	{ Name = "DeathFeed", Tile = "KillFeedList", Mount = DeathFeed.Mount, OwnsASurface = true },
-	{ Name = "BlimpFuel", Tile = "BlimpFuelPanel", Mount = BlimpFuel.Mount },
-	{ Name = "WeaponInventory", Tile = "WeaponInventoryPanel", Mount = WeaponInventory.Mount },
-	{ Name = "BlimpHelm", Tile = "BlimpHelmPanel", Mount = BlimpHelm.Mount },
+	{
+		Name = "CarriedResources",
+		Tile = "CarriedResourcesPanel",
+		Mount = function(scope, _parent)
+			return CarriedResources.Mount(scope)
+		end,
+	},
+	{
+		Name = "Announcement",
+		Tile = "AnnouncementBanner",
+		Mount = function(scope, _parent)
+			return Announcement.Mount(scope)
+		end,
+	},
+	{
+		Name = "DeathFeed",
+		Tile = "KillFeedList",
+		Mount = function(scope, parent)
+			return DeathFeed.Mount(scope, parent)
+		end,
+		OwnsASurface = true,
+	},
+	{
+		Name = "BlimpFuel",
+		Tile = "BlimpFuelPanel",
+		Mount = function(scope, _parent)
+			return BlimpFuel.Mount(scope)
+		end,
+	},
+	{
+		Name = "WeaponInventory",
+		Tile = "WeaponInventoryPanel",
+		Mount = function(scope, _parent)
+			return WeaponInventory.Mount(scope)
+		end,
+	},
+	{
+		Name = "BlimpHelm",
+		Tile = "BlimpHelmPanel",
+		Mount = function(scope, _parent)
+			return BlimpHelm.Mount(scope)
+		end,
+	},
 }
 
 local function fakePlayerGui(): PlayerGui
@@ -77,15 +121,8 @@ return function()
 	-- Declared inside the returned function, not beside fakePlayerGui above it: TestEZ injects
 	-- `expect` into the environment of THIS function only, so a helper at module scope sees it as nil
 	-- and fails pointing at its own declaration line. Same note ScreenFrameScreens.spec.lua carries.
-	local function expectPlacedByItsRegion(parent: Instance, case: Case): ()
-		-- Recursive, so this keeps working across the migration without being rewritten: today the
-		-- tile sits under the screen's own ScreenGui, afterwards it is a direct child of the region
-		-- frame it was handed.
-		local tile = parent:FindFirstChild(case.Tile, true)
-		if tile == nil then
-			error(string.format("%s: expected a tile named %q, found none", case.Name, case.Tile))
-		end
-		local gui = tile :: GuiObject
+	local function expectPlacedByItsRegion(case: Case, gui: GuiObject): ()
+		expect(gui.Name).to.equal(case.Tile)
 
 		-- Compared against a constructed default rather than four spelled-out numbers, so a Roblox
 		-- default change cannot leave this quietly asserting the wrong thing.
@@ -118,8 +155,17 @@ return function()
 			it(string.format("%s leaves placement to its region", case.Name), function()
 				local scope = Fusion.scoped(Fusion)
 				local parent = fakePlayerGui()
-				case.Mount(scope, parent)
-				expectPlacedByItsRegion(parent, case)
+				local _handle, tile = case.Mount(scope, parent)
+
+				-- Asserted before anything else: a screen that returned nothing would make every
+				-- check below vacuous, which is the one way this spec could go green on a broken tree.
+				expect(tile).to.be.ok()
+				-- Unparented. The region it belongs to is UI/init.lua's call to make, not the
+				-- screen's, and a tile that arrived already parented would mean the screen had found
+				-- somewhere to put itself after all.
+				expect(tile.Parent).to.equal(nil)
+
+				expectPlacedByItsRegion(case, tile)
 			end)
 		end
 	end)

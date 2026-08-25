@@ -23,6 +23,20 @@
 	PlayerGui -- one entry point is what keeps teardown well-defined if this ever needs to unmount
 	(e.g. hot-reloading in Studio), per ui-ux-philosophy.md's Framework section.
 
+	SIX SCREENS NO LONGER MOUNT A ScreenGui AT ALL. CarriedResources, Announcement, DeathFeed's kill
+	feed, BlimpFuel, WeaponInventory and BlimpHelm each return a TILE, and this file hands each one to
+	Shell/Regions.lua with the region and order it belongs at. Those six used to place themselves at
+	absolute screen coordinates, and two pairs of them placed themselves at IDENTICAL ones while each
+	carrying a comment asserting its corner was free -- see Shell/Regions.lua's header for the
+	specific lines. The order numbers passed below are now the entire layout: no panel owns a corner,
+	and a seventh tile joins a stack rather than guessing at a free one.
+
+	The region host is mounted BEFORE any of the six, and is held on a local that is passed down --
+	never on a module-level upvalue. Shell/Regions.lua's header has the reason in full; the short
+	version is that a cached host would survive this file's own :doCleanup() as a reference to a
+	destroyed Instance and swallow every tile on a second Mount(), showing a blank screen and logging
+	nothing.
+
 	THREE SCREENS ARE NOT MOUNTED HERE -- Dev Menu, Move Editor and Live Console are handed out as
 	Shared/Lazy.lua thunks instead, and only actually built the first time the module that drives each
 	one decides this player has earned it. Between them they built roughly 257 Instances (105/143/9)
@@ -58,12 +72,19 @@ local DeathFeed = require(script.Screens.DeathFeed)
 local CombatFeedbackModule = require(script.Screens.CombatFeedback)
 local DevMenuModule = require(script.Screens.DevMenu)
 local MoveEditorModule = require(script.Screens.MoveEditor)
+local KitEditorModule = require(script.Screens.KitEditor)
 local LiveConsoleModule = require(script.Screens.LiveConsole)
 local BugReportModule = require(script.Screens.BugReport)
 local AnnouncementModule = require(script.Screens.Announcement)
 local EmoteWheelModule = require(script.Screens.EmoteWheel)
 local SettingsModule = require(script.Screens.Settings)
+local StorybookModule = require(script.Screens.Storybook)
+local BlimpFuelModule = require(script.Screens.BlimpFuel)
+local BlimpHelmModule = require(script.Screens.BlimpHelm)
+local CarriedResourcesModule = require(script.Screens.CarriedResources)
+local WeaponInventoryModule = require(script.Screens.WeaponInventory)
 local ShiftLockCrosshair = require(script.Components.ShiftLockCrosshair)
+local Regions = require(script.Shell.Regions)
 
 export type UIHandles = {
 	ClientState: ClientStateModule.ClientState,
@@ -74,17 +95,50 @@ export type UIHandles = {
 	-- Damage numbers and the outcome banner, driven by Client/Combat/CombatFeedbackClient.lua from
 	-- the damage layer's Combat_Feedback event.
 	CombatFeedback: CombatFeedbackModule.CombatFeedbackHandle,
-	-- The three admin-gated screens, deferred -- see this file's header. Get() mounts on first call
+	-- The admin-gated screens, deferred -- see this file's header. Get() mounts on first call
 	-- and returns the same handle forever after; IsResolved() asks whether it has been mounted
 	-- WITHOUT mounting it, which is what lets a stray server push for an unopened panel be dropped.
 	DevMenu: Lazy.Lazy<DevMenuModule.DevMenuHandle>,
 	Menus: Menus.MenusHandle,
 	MoveEditor: Lazy.Lazy<MoveEditorModule.MoveEditorHandle>,
+	-- Authors Race Trait and Bloodline content (Server/Managers/RaceManager.lua,
+	-- Server/Managers/BloodlineManager.lua). Deferred exactly like MoveEditor above -- and, until
+	-- this entry existed, not mounted AT ALL: Client/KitEditor/KitEditorClient.lua had no inbound
+	-- require from anywhere, so its OpenKitEditor keybind never bound and BloodlineManager's
+	-- registry had no way to be populated. Every downstream reader degraded quietly rather than
+	-- erroring, which is why it went unnoticed -- see this codebase's own "bootstrap tracing proves
+	-- the app STARTS it, not that a player can REACH it" rule.
+	KitEditor: Lazy.Lazy<KitEditorModule.KitEditorHandle>,
 	LiveConsole: Lazy.Lazy<LiveConsoleModule.LiveConsoleHandle>,
 	BugReport: BugReportModule.BugReportHandle,
 	Announcement: AnnouncementModule.AnnouncementHandle,
 	EmoteWheel: EmoteWheelModule.EmoteWheelHandle,
 	Settings: SettingsModule.SettingsHandle,
+	-- The component gallery (Client/UI/Screens/Storybook/init.lua). Deferred exactly like the admin
+	-- screens above, and gated harder than any of them: Client/Storybook/StorybookClient.lua only ever
+	-- calls Get() inside Studio, so on a live client this promise is never redeemed and the gallery's
+	-- several hundred Instances are never built. A Lazy rather than a nil-able field for the same
+	-- reason theirs are -- no caller learns a new nil case.
+	Storybook: Lazy.Lazy<StorybookModule.StorybookHandle>,
+	-- The Driver fuel HUD (Screens/BlimpFuel/init.lua) -- always mounted (it is one small panel, not
+	-- worth a Lazy the way the admin screens are), visibility driven by Client/Blimp/BlimpController.lua
+	-- off the same FuelUpdated remote/mount broadcast that module already tracks.
+	BlimpFuel: BlimpFuelModule.BlimpFuelHandle,
+	-- The ship's own console (Screens/BlimpHelm/init.lua) -- role, the control legend, the engine
+	-- telegraph and a live speed/altitude/heading row, in one bottom-left panel. Always mounted for
+	-- the same reason BlimpFuel above is, and driven by the same module -- but shown to PASSENGERS as
+	-- well as the pilot, which is the whole difference between the two panels (see that screen's own
+	-- header, including why the controls are a SECTION of it rather than a surface of their own).
+	BlimpHelm: BlimpHelmModule.BlimpHelmHandle,
+	-- The player's own carried-coal/water readout (Screens/CarriedResources/init.lua) -- always
+	-- mounted, self-hiding at 0/0. Also driven by Client/Blimp/BlimpController.lua, off the
+	-- CarriedFuelUpdated remote -- unrelated to a blimp's own tank (BlimpFuel above), just the same
+	-- driving module for convenience.
+	CarriedResources: CarriedResourcesModule.CarriedResourcesHandle,
+	-- The player's own picked-up weapons, which one T will draw and whether it is out
+	-- (Screens/WeaponInventory/init.lua) -- always mounted, hidden until the first pickup, driven by
+	-- Client/Combat/WeaponInventoryClient.lua.
+	WeaponInventory: WeaponInventoryModule.WeaponInventoryHandle,
 	-- The root Fusion scope Mount() created, exposed so a future re-Mount() (Studio hot-reload) has
 	-- something to call :doCleanup() on before mounting a fresh tree -- see this file's header on
 	-- why nothing else should ever create its own root scope. Previously created and discarded
@@ -122,7 +176,15 @@ function UI.Mount(): UIHandles
 	local menus = Menus.Mount(scope, playerGui, clientState)
 	logger:debug("Menus mounted")
 
-	local deathFeed = DeathFeed.Mount(scope, playerGui)
+	-- THE REGION HOST GOES UP BEFORE ANY REGION-HOSTED SCREEN, because each of those returns a tile
+	-- that has to be handed somewhere. Held on a local and passed down, never cached at module scope
+	-- -- see Shell/Regions.lua's header for the hot-reload failure that rules the module-level cache
+	-- out (a destroyed-Instance reference that swallows every tile on the second Mount, with no error).
+	local regions = Regions.Mount(scope, playerGui)
+	logger:debug("Region host mounted")
+
+	local deathFeed, killFeedTile = DeathFeed.Mount(scope, playerGui)
+	regions:Add("TopRight", 10, killFeedTile)
 	logger:debug("DeathFeed mounted")
 
 	local combatFeedback = CombatFeedbackModule.Mount(scope, playerGui)
@@ -156,16 +218,29 @@ function UI.Mount(): UIHandles
 		return handle
 	end)
 
+	local kitEditor = Lazy.new("KitEditor", function()
+		local handle = KitEditorModule.Mount(scope, playerGui)
+		logger:debug("KitEditor mounted (deferred until authorized)")
+		return handle
+	end)
+
 	local liveConsole = Lazy.new("LiveConsole", function()
 		local handle = LiveConsoleModule.Mount(scope, playerGui)
 		logger:debug("LiveConsole mounted (deferred until first open)")
 		return handle
 	end)
 
+	local storybook = Lazy.new("Storybook", function()
+		local handle = StorybookModule.Mount(scope, playerGui)
+		logger:debug("Storybook mounted (deferred until first open, Studio only)")
+		return handle
+	end)
+
 	local bugReport = BugReportModule.Mount(scope, playerGui)
 	logger:debug("BugReport mounted")
 
-	local announcement = AnnouncementModule.Mount(scope, playerGui)
+	local announcement, announcementTile = AnnouncementModule.Mount(scope)
+	regions:Add("TopCentre", 10, announcementTile)
 	logger:debug("Announcement mounted")
 
 	local emoteWheel = EmoteWheelModule.Mount(scope, playerGui, clientState)
@@ -173,6 +248,25 @@ function UI.Mount(): UIHandles
 
 	local settings = SettingsModule.Mount(scope, playerGui)
 	logger:debug("Settings mounted")
+
+	-- The four remaining ambient tiles. The ORDER NUMBERS ARE THE LAYOUT, and they are all that
+	-- decides who sits where now -- no panel carries a corner of its own any more. Lower sits nearer
+	-- its region's anchored edge, at both ends of the screen (Regions.lua handles the sign).
+	local blimpFuel, blimpFuelTile = BlimpFuelModule.Mount(scope)
+	regions:Add("TopRight", 20, blimpFuelTile)
+	logger:debug("BlimpFuel mounted")
+
+	local blimpHelm, blimpHelmTile = BlimpHelmModule.Mount(scope)
+	regions:Add("BottomLeft", 20, blimpHelmTile)
+	logger:debug("BlimpHelm mounted")
+
+	local carriedResources, carriedResourcesTile = CarriedResourcesModule.Mount(scope)
+	regions:Add("TopLeft", 10, carriedResourcesTile)
+	logger:debug("CarriedResources mounted")
+
+	local weaponInventory, weaponInventoryTile = WeaponInventoryModule.Mount(scope)
+	regions:Add("BottomLeft", 10, weaponInventoryTile)
+	logger:debug("WeaponInventory mounted")
 
 	return {
 		ClientState = clientState,
@@ -182,11 +276,17 @@ function UI.Mount(): UIHandles
 		DevMenu = devMenu,
 		Menus = menus,
 		MoveEditor = moveEditor,
+		KitEditor = kitEditor,
 		LiveConsole = liveConsole,
 		BugReport = bugReport,
 		Announcement = announcement,
 		EmoteWheel = emoteWheel,
 		Settings = settings,
+		Storybook = storybook,
+		BlimpFuel = blimpFuel,
+		BlimpHelm = blimpHelm,
+		CarriedResources = carriedResources,
+		WeaponInventory = weaponInventory,
 		Scope = scope,
 	}
 end

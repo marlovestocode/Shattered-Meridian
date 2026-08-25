@@ -15,8 +15,12 @@
 	Value, driven from outside" pattern and the same one-shot Spring fade-in feel (Tokens.Motion.
 	FadeSpring) as that component, just with its own sized panel.
 
-	Stacked below CombatFeedback's PostureBreak (YOffset 0) and Disarmed (YOffset 72) banners -- see
-	ANNOUNCEMENT_Y_OFFSET below -- so a mid-fight admin broadcast can never overlap either.
+	Stacked below CombatFeedback's PostureBreak (YOffset 0) and Disarmed (YOffset 72) banners, so a
+	mid-fight admin broadcast can never overlap either. That clearance used to be a 152px constant in
+	this file baked into the banner's own Position; it is now the TopCentre region's top inset (see
+	COMBAT_BANNER_BAND_BOTTOM in Shell/Regions.lua). Moved rather than kept because this screen no
+	longer places itself at all -- it hands a tile to a region and the region decides where the
+	column starts.
 
 	Does not own: when to show, for how long, or what text/color to display -- AnnouncementClient.lua
 	owns all of that (reacting to the server-authoritative Announcement RemoteEvent); this module only
@@ -29,8 +33,6 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Parent.Components.Panel)
 local Label = require(script.Parent.Parent.Components.Label)
-
-local Children = Fusion.Children
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 
@@ -47,14 +49,15 @@ export type AnnouncementHandle = {
 
 local ROOT_WIDTH = 420
 local ROOT_HEIGHT = 108
--- Below CombatFeedback's PostureBreak (YOffset 0, per StatusBanner's own default) and Disarmed
--- (YOffset 72) banners -- see this file's own header.
-local ANNOUNCEMENT_Y_OFFSET = 152
 
 local FADE_SPRING_SPEED = Tokens.Motion.FadeSpring.Speed
 local FADE_SPRING_DAMPING = Tokens.Motion.FadeSpring.Damping
 
-local function Announcement(scope: Scope, playerGui: PlayerGui): AnnouncementHandle
+-- Returns its handle AND its tile. The tile is unparented -- UI/init.lua hands it to
+-- Shell/Regions.lua's TopCentre, which owns where it sits. The 152px dodge that used to be baked
+-- into this banner's own Position became that region's top inset; see COMBAT_BANNER_BAND_BOTTOM in
+-- Regions.lua for the two banners it is still clearing.
+local function Announcement(scope: Scope): (AnnouncementHandle, Frame)
 	local display: Fusion.Value<AnnouncementDisplay?> = scope:Value(nil :: AnnouncementDisplay?)
 
 	local isVisible = scope:Computed(function(use)
@@ -90,8 +93,6 @@ local function Announcement(scope: Scope, playerGui: PlayerGui): AnnouncementHan
 
 	local root = Panel(scope, {
 		Name = "AnnouncementBanner",
-		AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.new(0.5, 0, 0, Tokens.Space.XXL + ANNOUNCEMENT_Y_OFFSET),
 		Size = UDim2.fromOffset(ROOT_WIDTH, ROOT_HEIGHT),
 		Visible = isVisible,
 		Elevated = true,
@@ -138,19 +139,9 @@ local function Announcement(scope: Scope, playerGui: PlayerGui): AnnouncementHan
 		},
 	})
 
-	scope:New "ScreenGui" {
-		Name = "Announcement",
-		ResetOnSpawn = false,
-		Enabled = true,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		Parent = playerGui,
-
-		[Children] = root,
-	}
-
 	return {
 		Display = display,
-	}
+	}, root
 end
 
 return { Mount = Announcement }

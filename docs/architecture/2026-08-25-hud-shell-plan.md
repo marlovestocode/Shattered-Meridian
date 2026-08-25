@@ -11,7 +11,7 @@ assert they cannot happen.
 ## 0. Progress tracker
 
 - [x] **Phase 0** — Baseline and guardrails
-- [ ] **Phase 1** — `Layers.lua` + `Regions.lua`, six panels migrated
+- [x] **Phase 1** — `Layers.lua` + `Regions.lua`, six panels migrated
 - [ ] **Phase 2** — `Surface.lua`, every remaining ScreenGui migrated
 - [ ] **Phase 3** — `Chrome.lua` mode + HUD yielding
 - [ ] **Phase 4** — `Chrome.lua` Escape stack
@@ -462,53 +462,110 @@ already true: `DeathFeed` owns exactly one surface).
 
 ### Build
 
-- [ ] `UI/Shell/Layers.lua` — the ladder from §3.1, plus a `Layers.IsBand(order)` used by the spec.
-- [ ] `UI/Shell/Regions.lua` — the region host `ScreenGui`, the six anchored region frames, and
-      `Regions.Mount(scope, region, order, tile)`.
-- [ ] Per-input-mode insets (§14.5, decided): an inset table keyed on `IS_TOUCH`, with the bottom
-      regions clearing Roblox's default thumbstick and jump-button zones on touch. Sized off
-      `Tokens.Control.TouchTargetSize`. Read once per session like `Tokens.lua`'s own `IS_TOUCH`, not
-      reactively — a device does not grow a touchscreen mid-session, and `ViewportScale.lua`'s header
-      already draws exactly this distinction for exactly this reason.
-- [ ] Verify on a touch device (or Studio's device emulator) that both bottom regions clear the
-      controls, and that desktop is byte-identical to before the inset existed.
-- [ ] Region host is created once, from `UI/init.lua`, on the existing root scope. It must not create
-      its own `Fusion.scoped` — the single-root rule in `UI/init.lua`'s header.
-- [ ] **The host must not be memoized at module scope.** `UI/init.lua` exposes its root `Scope`
-      specifically so a future re-`Mount()` (Studio hot-reload) can `:doCleanup()` and mount a fresh
-      tree. A module-scope cached host survives that cleanup as a reference to a destroyed Instance,
-      and the second `Mount()` parents every tile into it — a blank screen with no error. Hold the
-      host on the value `Regions` returns, or on the handle, never in a module-level upvalue.
-- [ ] Same audit on `ModalScreen`'s existing `openModalCount` before Phase 2 touches it: it is
-      legitimately module-scope (it backs a *client-wide* Attribute, not a panel), but it is not
-      reset by a scope teardown. A hot-reload with a modal open leaves `UiModalOpen` stuck true, and
-      the player's fists never come back. Add the reset while adding the modal ordering counter,
-      which lives in the same place.
-- [ ] Header comment on each, in house style: what it owns, what it deliberately does not, and the
-      specific bug it closes (quote the two stale comments from §2.1 — they are the rationale).
+- [x] `UI/Shell/Layers.lua` — the ladder from §3.1, plus `Layers.IsBand(order)` and
+      `Layers.BandOf(order)`. `IsBand` alone was not enough: a legitimate `Layers.Boot + 20` is not a
+      band base, so the spec needs the containment check too, and that is also what catches a nudge
+      counter overrunning into the next band.
+- [x] `UI/Shell/Regions.lua` — the region host `ScreenGui`, the six anchored region frames, and
+      `Regions.Mount(scope, playerGui) -> host` plus `host:Add(region, order, tile)`. Split in two
+      rather than the single `Regions.Mount(scope, region, order, tile)` sketched here, because the
+      host has to be created exactly once and then added to six times — one call doing both would
+      have had no way to say which of those it was doing.
+- [x] Per-input-mode insets (§14.5, decided). `BottomLeft`/`BottomRight` add
+      `Tokens.Control.TouchTargetSize * 3` of bottom clearance on touch. `Tokens.lua`'s `IS_TOUCH` was
+      a module-local and not exported; it is now `Tokens.IsTouch`, and `Regions` reads that rather
+      than opening a second `UserInputService.TouchEnabled` of its own.
+- [~] Verify on a touch device (or Studio's device emulator) that both bottom regions clear the
+      controls. **NOT DONE — needs a human at Studio's device emulator**; no test in this repo can
+      answer it. Desktop is unaffected by construction: the clearance is added only under `IS_TOUCH`,
+      and the desktop inset is the same `Tokens.Space.L` all six screens already used.
+- [x] Region host is created once, from `UI/init.lua`, on the existing root scope — `Regions.Mount`
+      takes the scope as an argument and never calls `Fusion.scoped`.
+- [x] **The host is not memoized at module scope.** It lives on the value `Regions.Mount` returns,
+      and `UI/init.lua` holds it on a local. Asserted rather than only commented: `ShellLayers.spec`'s
+      "does not survive its scope's teardown" mounts, tears the scope down, mounts again on a fresh
+      scope, and requires the two hosts to be different Instances.
+- [ ] Same audit on `ModalScreen`'s existing `openModalCount`. **Deliberately left for Phase 2**,
+      where this plan already puts the modal ordering counter that lives in the same place — the reset
+      and the counter are one edit, and doing half of it here would mean touching `ModalScreen.lua`
+      twice for one change. Not forgotten, still true, still a real hot-reload bug.
+- [x] Header comment on each, in house style, quoting both stale comments from §2.1 as the
+      rationale.
 
 ### Migrate — each screen returns a tile, drops its own ScreenGui
 
-- [ ] `Screens/CarriedResources` → `TopLeft` / 10
-- [ ] `Screens/Announcement` → `TopCentre` / 10
-- [ ] `Screens/DeathFeed` → `TopRight` / 10
-- [ ] `Screens/BlimpFuel` → `TopRight` / 20
-- [ ] `Screens/WeaponInventory` → `BottomLeft` / 10
-- [ ] `Screens/BlimpHelm` → `BottomLeft` / 20
-- [ ] Delete the now-false corner-ownership comments in `WeaponInventory:479` and `BlimpHelm:356`
-      rather than editing them — the mechanism replaces the prose, and a corrected comment would rot
-      the same way.
-- [ ] `UI/init.lua`: mount the region host before any region-hosted screen; update `UIHandles` for any
-      screen whose `Mount()` return shape changed, and its header's screen list.
+- [x] `Screens/CarriedResources` → `TopLeft` / 10
+- [x] `Screens/Announcement` → `TopCentre` / 10. Its 152px dodge of the combat-banner band could not
+      simply be dropped — that would have put the banner on top of the posture-break banner, which
+      belongs to a different surface and is not region-hosted. It became `TopCentre`'s top inset
+      (`COMBAT_BANNER_BAND_BOTTOM` in `Regions.lua`), so the banner still lands at exactly 184.
+- [x] `Screens/DeathFeed` → `TopRight` / 10. Only the kill feed moves; the death overlay is not a
+      tile and keeps DeathFeed's `ScreenGui` until Phase 2 gives it `Layers.Overlay`. The tile is now
+      `AutomaticSize.Y` from a zero height and `Visible = false`, per §2.9a — a fixed 200px
+      always-visible tile would have pushed the fuel gauge down the screen for a feed that is
+      permanently empty.
+- [x] `Screens/BlimpFuel` → `TopRight` / 20
+- [x] `Screens/WeaponInventory` → `BottomLeft` / 10
+- [x] `Screens/BlimpHelm` → `BottomLeft` / 20
+- [x] Deleted the now-false corner-ownership comments in `WeaponInventory` and `BlimpHelm`. Both are
+      quoted in `Regions.lua`'s header and in `ShellRegions.spec` — the only place they still appear
+      is where they explain why the mechanism had to exist.
+- [x] `UI/init.lua`: region host mounted before any region-hosted screen, header updated.
+      **`UIHandles` needed no change, and neither did any driver** — see the note under Verify.
 
 ### Verify
 
-- [ ] `Tests/UI/ShellRegions.spec.lua` green.
-- [ ] New `Tests/UI/ShellLayers.spec.lua`: every mounted `ScreenGui`'s `DisplayOrder` is a known band;
-      no two surfaces share an order within a band.
-- [ ] Studio: pilot a blimp and trigger a kill — fuel gauge and kill feed stack, never overlap.
-- [ ] Studio: pick up a weapon while piloting — rack and helm console stack, never overlap.
-- [ ] Screenshot diff against Phase 0 for the three unaffected corners.
+- [x] `Tests/UI/ShellRegions.spec.lua` green.
+- [x] New `Tests/UI/ShellLayers.spec.lua`. Asserts the ladder's own arithmetic (ordering, a full band
+      of headroom between neighbours, band containment for a nudge, and that a pre-ladder literal like
+      0 or 10 is NOT mistaken for a band) plus the region host: on the `Regions` band, one `ScreenGui`
+      rather than six, all six frames present, tiles stacked, bottom regions reversed, and an unknown
+      region name erroring rather than silently dropping a tile. **"Every mounted ScreenGui is in a
+      known band" belongs to Phase 2**, not here — thirteen surfaces are still at the default 0, so
+      that assertion cannot pass until Phase 2 migrates them.
+- [~] Studio: pilot a blimp and trigger a kill — fuel gauge and kill feed stack, never overlap.
+      **Cannot be performed**: there is no way to produce a kill feed entry (§2.9a). What IS checkable
+      is that the fuel gauge has not moved, which the after-screenshot covers.
+- [ ] Studio: pick up a weapon while piloting — rack and helm console stack, never overlap. **Needs a
+      human.** This is the one change a player can see, and the whole point of the phase.
+- [ ] Screenshot diff against Phase 0 for the three unaffected corners. **Needs a human.**
+
+**No driver changes were needed, and the plan expected some.** §6 warns that Phase 1 changes the
+`Mount()` return shape of the six screens and that `AnnouncementClient`, `BlimpController` (three
+handles), `WeaponInventoryClient` and any `DeathFeed` caller must be updated in the same commit. They
+were not, because the handle types did not change: `Mount` gained a *second return value* rather than
+altering the first, so every driver consuming `UIHandles.<Screen>` is untouched and still type-checks.
+Only `UI/init.lua` reads the new value. Verified by reading all four drivers rather than assumed —
+none of them ever reached for a `ScreenGui` or a position.
+
+The one caller that DID need updating was a spec, not a driver: `Tests/UI/WeaponInventory.spec.lua`
+resolved the panel by walking into the screen's `ScreenGui` by name. Its 8 tests failed on the first
+post-migration run and are fixed in the same commit. Every assertion in it was about the panel's
+contents; none had to change, only how the panel is obtained.
+
+**§14.1 turns out to be load-bearing after all, and the top-right screenshot is what answers it.**
+The plan drives both `Visible` and height specifically so it never has to know whether `UIListLayout`
+skips invisible children. That holds for a tile's own height — but not for the region's `Padding`,
+which a visible zero-height child would still take a share of. The kill feed tile is therefore
+`Visible = false` rather than merely zero-tall. If `UIListLayout` does skip invisible children, the
+fuel gauge is pixel-identical to before; if it does not, it sits `Tokens.Space.S` (8px) lower. The
+after-screenshot at top-right settles it at no extra cost.
+
+**One regression this phase knowingly introduces.** The 14px entrance rise on `BlimpHelm` and
+`WeaponInventory` is gone. Both were springs driving the panel's `Position`, and a region tile's
+`Position` is overwritten by its region's `UIListLayout` on every layout pass — so they did not
+survive the migration and could not have, whatever this plan preferred. `BlimpHelm` keeps its 2%
+content scale on the same spring, so it still has an arrival; `WeaponInventory` now appears without
+one. Phase 5's `Reveal.lua` is where the offset comes back for all five ambient tiles at once, which
+is where this plan already put it.
+
+**And one it worsens slightly.** With the weapon rack now stacked BELOW the helm console rather than
+over it, the helm's top edge sits roughly a rack-height higher whenever both are visible — which
+means it reaches the carried-resources tile (§2.1a) sooner than it used to. The orders here are the
+ones §3.2's table specifies. Swapping them (helm 10, rack 20) would pin the large stable panel to the
+edge and float the small transient one above it, which would avoid this and also stop the helm
+shifting whenever a weapon is picked up. That is a one-line change in `UI/init.lua` and a decision
+for whoever owns §14.6, not one to make silently mid-migration.
 
 ---
 
