@@ -1,5 +1,7 @@
 --!strict
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local StarterGui = game:GetService("StarterGui")
 local StarterPlayer = game:GetService("StarterPlayer")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
@@ -8,6 +10,7 @@ local UI = StarterPlayer.StarterPlayerScripts.Client.UI
 local Screens = UI.Screens
 
 local ClientStateModule = require(UI.State.ClientState)
+local Regions = require(UI.Shell.Regions)
 local Announcement = require(Screens.Announcement)
 local BlimpFuel = require(Screens.BlimpFuel)
 local BlimpHelm = require(Screens.BlimpHelm)
@@ -103,13 +106,15 @@ local CASES: { Case } = {
 			return BlimpFuel.Mount(scope)
 		end,
 	},
-	{
-		Name = "WeaponInventory",
-		Tile = "WeaponInventoryPanel",
-		Mount = function(scope, _parent)
-			return WeaponInventory.Mount(scope)
-		end,
-	},
+	-- WeaponInventory IS NO LONGER IN THIS LIST, and its absence is the point rather than an omission.
+	-- It was BottomLeft/10 from Phase 1 until the island rework, when it moved out of Shell/Regions
+	-- entirely: it is now an outrigger laid out by Screens/HUD against the dock's left edge, so it
+	-- returns a { Content, Width } island instead of a tile and the region contract this file states
+	-- simply does not apply to it. Tests/UI/WeaponInventory.spec.lua covers it in its new shape.
+	--
+	-- Worth recording because it CHANGES 2.1a: BottomLeft now holds one stack (the helm console)
+	-- rather than two, so the left edge cannot oversubscribe itself against the top-left tile the way
+	-- that section describes.
 	{
 		Name = "BlimpHelm",
 		Tile = "BlimpHelmPanel",
@@ -184,6 +189,95 @@ return function()
 				expect(tile.Parent).to.equal(nil)
 
 				expectPlacedByItsRegion(case, tile)
+			end)
+		end
+	end)
+
+	describe("the bottom corners clear what the dock band draws", function()
+		-- THE COLLISION THIS EXISTS TO STOP HAPPENED, AND IT IS THE THIRD OF ITS KIND. The armament
+		-- island (Screens/HUD/ArmamentIsland.lua) is pinned at x = -224 inside the dock band,
+		-- deliberately outside the BottomCentre tile's own bounds so the dock cannot be shoved sideways
+		-- by it. At this UI's authoring resolution -- 1366x768, where ViewportScale is exactly 1.0 --
+		-- that puts its left edge 24px from the screen edge, straight through BottomLeft's column and
+		-- straight through the helm console standing in it. Shell/Regions.lua answers it by starting
+		-- both bottom CORNERS above the dock band; this is the assertion that they still do.
+		--
+		-- MEASURED, NOT COMPARED TO A COPY OF THE CONSTANT. Asserting DOCK_BAND_REACH against itself
+		-- would pass forever. What is measured here is the dock band's REAL top edge off a real layout
+		-- pass, so retuning the key legend beneath the dock, or the dock's own height, fails this test
+		-- naming the number it has become -- which is exactly what COMBAT_BANNER_BAND_BOTTOM's own
+		-- note in that file says nothing does for it.
+		--
+		-- Mounts into StarterGui because AbsoluteSize is zero for a tree hanging off a bare Folder,
+		-- and cleans up after itself. Same harness as Tests/UI/Hotbar.spec.lua's sizing test.
+		local function measureDockBandReach(): number
+			local scope = Fusion.scoped(Fusion)
+			local holder = Instance.new("ScreenGui")
+			holder.Parent = StarterGui
+
+			-- WITH the armament state, because the DockBand frame only exists when there is an island
+			-- to pin -- and the island is the whole reason the corners have to keep clear.
+			local _handle, armament = WeaponInventory.Mount(scope)
+			local tile = HUD.Mount(scope, ClientStateModule.new(scope), armament)
+			tile.Parent = holder
+
+			for _ = 1, 8 do
+				RunService.Heartbeat:Wait()
+			end
+
+			local band = tile:FindFirstChild("DockBand", true) :: Frame
+			expect(band).to.be.ok()
+			-- Asserted rather than tolerated: a harness that stopped resolving layout would otherwise
+			-- let this pass on a pair of zeroes.
+			expect(tile.AbsoluteSize.Y > 0).to.equal(true)
+			expect(band.AbsoluteSize.Y > 0).to.equal(true)
+
+			-- From the tile's own BOTTOM edge up to the top of the band -- the band's height plus
+			-- everything below it (the key legend). Independent of where the tile itself sits.
+			local reach = tile.AbsoluteSize.Y - (band.AbsolutePosition.Y - tile.AbsolutePosition.Y)
+			-- The reach contains the band, by construction. Asserted anyway, because the one way this
+			-- whole test could go green while proving nothing is a reach that came back near zero and
+			-- made the comparison below trivially true.
+			expect(reach >= band.AbsoluteSize.Y).to.equal(true)
+
+			holder:Destroy()
+			return reach
+		end
+
+		-- A bottom-anchored region's inset is a NEGATIVE offset from the bottom edge; this reads it
+		-- back as a positive distance so the comparison below says what it means.
+		local function insetAboveBottom(host: Regions.RegionHost, region: string): number
+			local frame = host.Gui:FindFirstChild(region) :: Frame
+			expect(frame).to.be.ok()
+			return -frame.Position.Y.Offset
+		end
+
+		for _, corner in { "BottomLeft", "BottomRight" } do
+			it(string.format("%s starts above the dock band's top edge", corner), function()
+				local reach = measureDockBandReach()
+
+				local scope = Fusion.scoped(Fusion)
+				local host = Regions.Mount(scope, fakePlayerGui(), 1)
+
+				local dockBandTop = insetAboveBottom(host, "BottomCentre") + reach
+				local cornerInset = insetAboveBottom(host, corner)
+
+				if cornerInset < dockBandTop then
+					error(
+						string.format(
+							"%s starts %dpx above the bottom edge, but the dock band's top is at %dpx "
+								.. "(BottomCentre's %dpx inset plus a measured %dpx of reach). A tile in "
+								.. "this corner renders into whatever is bolted to the dock's edge -- "
+								.. "raise DOCK_BAND_REACH in Shell/Regions.lua to %d.",
+							corner,
+							cornerInset,
+							dockBandTop,
+							insetAboveBottom(host, "BottomCentre"),
+							reach,
+							reach
+						)
+					)
+				end
 			end)
 		end
 	end)

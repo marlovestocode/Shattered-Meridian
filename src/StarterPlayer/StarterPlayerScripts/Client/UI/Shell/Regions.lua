@@ -8,6 +8,14 @@
 	Does NOT own: what a tile contains, when a tile is visible, or how a tile enters. A tile is
 	handed in fully built; this file parents it and assigns its LayoutOrder, and that is all.
 
+	A REGION ALSO KEEPS OUT OF WHAT ITS NEIGHBOURS DRAW, and that is the second thing this file
+	arbitrates after who-stacks-with-whom. Both bottom CORNERS start above the dock band rather than in
+	the corner itself, because the dock is 870px wide and has a 224px weapon plate bolted to its left
+	edge -- at this UI's own authoring resolution that plate lands 24px from the left screen edge,
+	directly on top of the helm console. See DOCK_BAND_REACH. That is the same class of bug as the two
+	byte-identical collisions below, arriving the same way (a panel grew into a strip another panel
+	already occupied, and nothing was watching the strip), so it is closed in the same place.
+
 	THE DOCK IS A TILE NOW TOO. BottomCentre was reserved for it through Phase 1 and holds it as of
 	Phase 2 of docs/architecture/2026-08-25-hud-shell-plan.md -- Screens/HUD returns its band stack
 	the way the other six screens return theirs. Two things went away with that: the dock's own
@@ -146,6 +154,37 @@ local COMBAT_BANNER_BAND_BOTTOM = Tokens.Space.XXL + 72 + 64
 -- neither its own height nor a helping of this padding.
 local TILE_GAP = Tokens.Space.S
 
+-- THE DOCK'S OWN REACH, MEASURED: how far above the BottomCentre tile's bottom edge the dock band's
+-- TOP sits. 129 = the key legend band beneath the dock (31) plus the dock band itself (98), both read
+-- off a real layout pass in this repo's own harness rather than added up from Screens/HUD's source.
+--
+-- WHY EITHER BOTTOM CORNER CARES ABOUT A CENTRED TILE. The dock is 870px wide and something is BOLTED
+-- TO ITS LEFT EDGE: Screens/HUD/ArmamentIsland.lua pins a 224px weapon plate at x = -224 inside the
+-- dock band, deliberately outside the BottomCentre tile's own bounds so the dock cannot be displaced
+-- by it. At this UI's authoring resolution (1366x768, ViewportScale.REFERENCE_*, where the scale is
+-- exactly 1.0) that puts the island's left edge at (1366 - 870) / 2 - 224 = 24px from the screen edge
+-- -- straight through BottomLeft's 16..236 column, and straight through the helm console sitting in
+-- it. Measured on 2026-08-25 from a screenshot and then reproduced from the numbers; it is not an
+-- edge case, it is what the reference resolution renders.
+--
+-- SO THE BOTTOM CORNERS START ABOVE THE DOCK BAND, and that is the fix rather than moving the island
+-- or narrowing the helm: the island cannot move (it is one half of a joint with the dock, see its own
+-- header), and a region layer that lets a tile grow into a strip another tile already occupies is
+-- exactly the arbitration this module exists to do. The same shape as COMBAT_BANNER_BAND_BOTTOM
+-- above -- "another surface draws on this edge, so tiles on it start further in".
+--
+-- UNLIKE COMBAT_BANNER_BAND_BOTTOM, THIS ONE IS GUARDED. That constant's own note says "if either
+-- banner's YOffset or its height changes, this has to change with it, and nothing will tell you."
+-- Tests/UI/ShellRegions.spec.lua tells you about this one: it mounts the dock for real, measures the
+-- reach off a live layout pass, and fails if BottomLeft no longer clears it. Retune the legend or the
+-- dock's height and the spec fails naming the new number.
+local DOCK_BAND_REACH = 129
+
+-- Where a bottom CORNER region's stack starts, measured from the bottom of the screen: BottomCentre's
+-- own edge inset, plus the dock band's reach above that, plus one more edge inset of air so the two
+-- read as separate surfaces rather than as a seam.
+local DOCK_BAND_CLEARANCE = EDGE_INSET + DOCK_BAND_REACH + EDGE_INSET
+
 -- ROBLOX'S OWN TOP BAR, WHICH IS THIS FILE'S PROBLEM NOW. Phase 1 left the host without
 -- IgnoreGuiInset specifically so the six migrated screens' margins stayed byte-identical; Phase 2
 -- chose one coordinate space for every surface in the client (Shell/Surface.lua's header, plan 2.3)
@@ -212,6 +251,9 @@ local REGION_SPECS: { [Region]: RegionSpec } = {
 		HorizontalAlignment = Enum.HorizontalAlignment.Left,
 		AnchorScale = Vector2.new(0, 1),
 		ClearsTouchControls = true,
+		-- Starts above the dock band rather than in the corner -- see DOCK_BAND_CLEARANCE. This is the
+		-- region the armament island was rendering into.
+		EdgeInsetOverride = DOCK_BAND_CLEARANCE,
 	},
 	BottomCentre = {
 		AnchorPoint = Vector2.new(0.5, 1),
@@ -228,6 +270,11 @@ local REGION_SPECS: { [Region]: RegionSpec } = {
 		HorizontalAlignment = Enum.HorizontalAlignment.Right,
 		AnchorScale = Vector2.new(1, 1),
 		ClearsTouchControls = true,
+		-- Empty today, and it takes the clearance anyway. The dock's right edge is only 12px clear of
+		-- this column at the reference resolution, so the FIRST tile to claim this corner would land
+		-- in the dock's shadow the way the helm console landed in the island's -- and it would land
+		-- there for the same reason, a region that never said anything about the strip it grows into.
+		EdgeInsetOverride = DOCK_BAND_CLEARANCE,
 	},
 }
 
