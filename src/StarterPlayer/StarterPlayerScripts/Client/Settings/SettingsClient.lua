@@ -47,6 +47,8 @@ local ParkourController = require(script.Parent.Parent.Parkour.ParkourController
 local RunController = require(script.Parent.Parent.Movement.RunController)
 local CameraShake = require(script.Parent.Parent.FX.CameraShake)
 local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
+local BlimpCamera = require(script.Parent.Parent.Camera.BlimpCamera)
+local Chrome = require(script.Parent.Parent.UI.Shell.Chrome)
 
 type SettingsHandle = SettingsModule.SettingsHandle
 type ListeningState = { Device: Types.KeybindDevice, Action: Types.KeybindAction }
@@ -108,6 +110,7 @@ end
 local comfortSettings: Types.ComfortSettings = {
 	CameraShake = true,
 	FieldOfViewEffects = true,
+	VehicleCameraMotion = true,
 }
 
 -- Sibling to applyParkourSettings above, with the same contract: the single place a comfort preference
@@ -115,6 +118,7 @@ local comfortSettings: Types.ComfortSettings = {
 local function applyComfortSettings(): ()
 	CameraShake.SetEnabled(comfortSettings.CameraShake)
 	FOVOffset.SetPunchesEnabled(comfortSettings.FieldOfViewEffects)
+	BlimpCamera.SetMotionEnabled(comfortSettings.VehicleCameraMotion)
 end
 
 -- Autorun's own applier. A sibling to applyParkourSettings above rather than a line inside it, because
@@ -260,7 +264,7 @@ local function resolveCandidateKeybind(device: Types.KeybindDevice, input: Input
 	return nil
 end
 
-function SettingsClient.Start(handle: SettingsHandle): ()
+function SettingsClient.Start(handle: SettingsHandle, chrome: Chrome.ChromeHandle): ()
 	logger:info("SettingsClient.Start called")
 
 	-- Seeds from KeybindManager's already-merged (defaults + RestoreSettings' overrides) live state
@@ -271,11 +275,27 @@ function SettingsClient.Start(handle: SettingsHandle): ()
 	handle.Parkour:set(table.clone(parkourSettings))
 
 	local captureConnection: RBXScriptConnection? = nil
+	-- The capture's own entry on Shell/Chrome.lua's Escape stack, pushed ABOVE the panel's. Escape
+	-- while a row is listening therefore cancels the listen and leaves the panel up, which is the one
+	-- behaviour this migration had to preserve exactly -- a player who reaches for Escape to abandon
+	-- a mis-click on "Rebind" is not asking to lose the settings screen as well.
+	--
+	-- The raw PushEscape primitive rather than BindEscape, and this is the one caller in the client
+	-- that wants it. BindEscape derives its edges from a Fusion boolean; what says "a capture is
+	-- running" here is handle.ListeningFor being non-nil, and turning that into a boolean would need
+	-- a Computed on a scope this module does not have. beginCapture/cancelCapture are already an
+	-- exactly-matched pair -- every exit from a capture goes through cancelCapture, including the
+	-- panel's own close -- so the push and the pop have somewhere honest to sit.
+	local captureEscape: Chrome.EscapeHandle? = nil
 
 	local function cancelCapture(): ()
 		if captureConnection then
 			captureConnection:Disconnect()
 			captureConnection = nil
+		end
+		if captureEscape ~= nil then
+			captureEscape:Pop()
+			captureEscape = nil
 		end
 		handle.ListeningFor:set(nil)
 	end
@@ -291,12 +311,20 @@ function SettingsClient.Start(handle: SettingsHandle): ()
 		end
 
 		handle.ListeningFor:set({ Device = device, Action = action })
+		captureEscape = chrome:PushEscape("SettingsKeybindCapture", cancelCapture)
 
 		captureConnection = UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
 			if gameProcessed then
 				return
 			end
-			if input.KeyCode == Enum.KeyCode.Escape or input.KeyCode == Enum.KeyCode.ButtonStart then
+			-- ButtonStart still cancels here -- it is the gamepad's own menu button and there is no
+			-- gamepad Escape stack (plan section 14.3 defers that deliberately). Escape only RETURNS:
+			-- the cancel itself is Chrome's, off the entry pushed above, and this branch exists solely
+			-- so resolveCandidateKeybind below never gets a chance to bind Escape to an action.
+			if input.KeyCode == Enum.KeyCode.Escape then
+				return
+			end
+			if input.KeyCode == Enum.KeyCode.ButtonStart then
 				cancelCapture()
 				return
 			end
@@ -328,6 +356,22 @@ function SettingsClient.Start(handle: SettingsHandle): ()
 			updateKeybindRemote:FireServer(device, action, keybind)
 		end)
 	end
+
+	-- SETTINGS COULD NOT BE CLOSED WITH ESCAPE BEFORE THIS, and the plan that asked for this phase
+	-- said it could. docs/architecture/2026-08-25-hud-shell-plan.md section 2.6 lists Settings among
+	-- the four screens that "handle Escape", citing the line inside beginCapture above -- but that
+	-- line cancels a keybind CAPTURE, not the panel. K toggled this screen and nothing else closed
+	-- it. So Settings is an ADOPTER here rather than a migration, and the entry below is new
+	-- behaviour, not relocated behaviour.
+	--
+	-- cancelCapture as well as the close, because a capture left listening behind a closed panel
+	-- would keep an InputBegan connection eating the next key the player pressed. The keybind toggle
+	-- below has always done this; Escape has to do it too or it is a second, quieter close path with
+	-- different consequences.
+	chrome:BindEscape("Settings", handle.IsOpen, function()
+		handle.IsOpen:set(false)
+		cancelCapture()
+	end)
 
 	local toggleBinding = KeybindManager.Get("SettingsToggle")
 	logger:info("Settings toggle binding resolved", {

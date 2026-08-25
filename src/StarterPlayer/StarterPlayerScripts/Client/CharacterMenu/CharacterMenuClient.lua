@@ -8,15 +8,15 @@
 	art catalogue, unlock, equip, emote-slot assignment), and one thing that isn't UI at all: keeping
 	Client/Combat/HotbarBindings.lua in sync with the arts the server says are equipped.
 
-	THAT LAST PART IS WHAT MAKES AN EQUIPPED ART PRESSABLE. HotbarBindings is the slot -> MoveId map
-	the HUD renders and HotbarMoveClient.Fire reads; until now the only writer was the Move Editor's
-	own admin-local "bind to slot" control. Mirroring the server's equippedArts into it means slot N
-	fires the art in slot N through the SAME Combat_RequestFireHotbarMove path an admin's test-fire
-	uses, with no second fire path to keep in sync -- and CombatSystem re-validates the art (unlocked,
-	equipped, affordable) server-side regardless of what this client happens to hold, so the mirror is
-	a convenience, never an authority. An admin's Move-Editor binding and an art equip can overwrite
-	each other in the same slot; that is HotbarBindings' own documented last-write-wins contract, not
-	a new rule invented here.
+	THAT LAST PART IS WHAT MAKES AN EQUIPPED ART PRESSABLE. HotbarBindings is the slot -> ArtId mirror
+	the HUD renders and AttackInputClient.lua reads to build a hotbar press; this module (mirrorToHotbar,
+	via HotbarBindings.SyncFromServer) is its ONLY writer -- see that module's own header on why the
+	Move Editor's "bind to slot" control is no longer a second one, now that it equips through
+	ArtSystem.DevGrantAndEquip server-side instead of writing here directly. Mirroring the server's
+	equippedArts means slot N fires the art in slot N through the SAME AttackRequestSystem.resolveRequest
+	path an admin's Move-Editor test-fire uses, with no second fire path to keep in sync -- and
+	resolveRequest re-resolves the slot against ArtSystem.GetEquipped server-side regardless of what
+	this client happens to hold, so the mirror is a convenience, never an authority.
 
 	FETCH ON OPEN, not on a timer and not once at boot. The catalogue carries per-row LockedReason
 	values computed server-side at fetch time (Types.ArtCatalogueEntry), so a catalogue held across a
@@ -36,6 +36,8 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
+local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
+local BloodlineTypes = require(ReplicatedStorage.Shared.Bloodline.BloodlineTypes)
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -44,6 +46,7 @@ local MenusModule = require(script.Parent.Parent.UI.Screens.Menus)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local HotbarBindings = require(script.Parent.Parent.Combat.HotbarBindings)
 local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
+local Chrome = require(script.Parent.Parent.UI.Shell.Chrome)
 
 type MenusHandle = MenusModule.MenusHandle
 
@@ -81,6 +84,26 @@ local function describeArtFailure(reason: string?): string
 	return "Failed: " .. (reason or "Unknown")
 end
 
+-- Reason CODE -> the sentence a player reads, for the bloodline reroll. Its own copy rather than
+-- shared with OnboardingClient's identically-named helper: the two are worded for genuinely
+-- different moments (that one is giving you blood for the first time, this one is replacing blood
+-- you already carry), and requiring that module from here to save five strings would drag the
+-- whole onboarding flow into the character menu's dependency graph.
+local function describeSpinFailure(reason: string?): string
+	if reason == "NoRerollsLeft" then
+		return "No rerolls left -- what you carry is yours."
+	elseif reason == "NoBloodlinesAvailable" then
+		return "Nothing else answers. There is no other blood to take."
+	elseif reason == "NoRaceChosen" then
+		return "Your origin has not settled yet."
+	elseif reason == "ProfileNotLoaded" then
+		return "Your profile is still loading."
+	elseif reason == "RateLimited" then
+		return "Too many requests -- try again in a moment."
+	end
+	return "The reroll failed: " .. (reason or "Unknown")
+end
+
 local statusGeneration = 0
 
 local function setStatus(handle: MenusHandle, message: string): ()
@@ -96,14 +119,10 @@ local function setStatus(handle: MenusHandle, message: string): ()
 	end)
 end
 
--- Rewrites every hotbar slot from `equipped`, including the ones it does NOT mention: a slot the
--- server no longer lists is a slot the player cleared, and leaving the old MoveId there would keep
--- firing an art they unequipped. HotbarBindings.Set no-ops when the value is unchanged, so this is
--- cheap to call on every state push.
+-- Forwards the server's equipped-arts push straight to HotbarBindings.SyncFromServer -- see that
+-- module's own header on why this is now its only writer.
 local function mirrorToHotbar(equipped: { [number]: string }): ()
-	for slot = 1, ArtConstants.EquipSlotCount do
-		HotbarBindings.Set(slot, equipped[slot])
-	end
+	HotbarBindings.SyncFromServer(equipped)
 end
 
 -- Validated at the boundary for the same reason ClientState.Bootstrap validates its own payloads --
@@ -145,8 +164,16 @@ local function isValidSheet(payload: unknown): boolean
 		and typeof(candidate.HasAscended) == "boolean"
 end
 
-function CharacterMenuClient.Start(handle: MenusHandle): ()
+function CharacterMenuClient.Start(handle: MenusHandle, chrome: Chrome.ChromeHandle): ()
 	logger:info("CharacterMenuClient.Start called")
+
+	-- ADOPTED, not migrated: this screen had no Escape handling at all, so M was the only way out of
+	-- the biggest panel in the game. See Shell/Chrome.lua's Escape-stack header for the four screens
+	-- that did have one and the five, this one first, that did not.
+	chrome:BindEscape("CharacterMenu", handle.IsOpen, function()
+		handle.IsOpen:set(false)
+		logger:debug("Character menu closed on Escape")
+	end)
 
 	local sheetUpdated = NetworkBridge.GetRemoteEvent(Constants.CharacterSheet.RemoteNames.SheetUpdated)
 	local getSheet = NetworkBridge.GetRemoteFunction(Constants.CharacterSheet.RemoteNames.GetSheet)
@@ -154,6 +181,7 @@ function CharacterMenuClient.Start(handle: MenusHandle): ()
 	local getCatalogue = NetworkBridge.GetRemoteFunction(ArtConstants.RemoteNames.GetArtCatalogue)
 	local unlockArt = NetworkBridge.GetRemoteFunction(ArtConstants.RemoteNames.UnlockArt)
 	local equipArt = NetworkBridge.GetRemoteFunction(ArtConstants.RemoteNames.EquipArt)
+	local spinBloodline = NetworkBridge.GetRemoteFunction(BloodlineConstants.RemoteNames.Spin)
 	local setEmoteSlot = NetworkBridge.GetRemoteEvent(EmoteConstants.RemoteNames.RequestSetLoadoutSlot)
 
 	sheetUpdated.OnClientEvent:Connect(function(payload: Types.CharacterSheetPayload)
@@ -232,6 +260,31 @@ function CharacterMenuClient.Start(handle: MenusHandle): ()
 			-- the whole catalogue is refetched rather than the one row being patched locally -- the
 			-- server is the only thing that knows what just became reachable.
 			refreshCatalogue()
+		end)
+	end)
+
+	-- THE SAME REMOTE the onboarding creator's own spin uses. A reroll from this menu and a roll
+	-- during character creation are the identical server operation -- BloodlineSystem.Spin decides
+	-- whether it is free (you hold nothing) or costs a reroll, so neither caller has to know.
+	handle.RerollBloodlineRequested:Connect(function()
+		task.spawn(function()
+			local ok, result = RemoteInvoker.Invoke(spinBloodline)
+			if not ok then
+				logger:warn("Bloodline reroll failed", { error = tostring(result) })
+				setStatus(handle, "Couldn't reach the server.")
+				return
+			end
+			local spin = result :: BloodlineTypes.BloodlineSpinResult
+			if typeof(spin) ~= "table" or not spin.Success then
+				local reason = if typeof(spin) == "table" then spin.Reason else nil
+				setStatus(handle, describeSpinFailure(reason))
+				return
+			end
+			-- No local write to the sheet: Awaken calls CharacterSheetSystem.Refresh, and that push is
+			-- what updates the bloodline line AND the reroll count. Writing optimistically would risk
+			-- showing blood the server hadn't accepted -- the same desync the equip handler below
+			-- avoids for the identical reason.
+			setStatus(handle, `The blood answers: {spin.DisplayName or spin.BloodlineId}.`)
 		end)
 	end)
 

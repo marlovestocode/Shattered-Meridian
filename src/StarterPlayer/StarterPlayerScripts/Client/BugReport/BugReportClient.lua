@@ -27,6 +27,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local BugReportModule = require(script.Parent.Parent.UI.Screens.BugReport)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
+local Chrome = require(script.Parent.Parent.UI.Shell.Chrome)
 
 type BugReportHandle = BugReportModule.BugReportHandle
 
@@ -75,8 +76,18 @@ local function setStatus(handle: BugReportHandle, message: string): ()
 	end)
 end
 
-function BugReportClient.Start(handle: BugReportHandle): ()
+function BugReportClient.Start(handle: BugReportHandle, chrome: Chrome.ChromeHandle): ()
 	logger:info("BugReportClient.Start called")
+
+	-- ADOPTED: this form had no Escape at all. The plan asked for a "is a TextBox focused?" check
+	-- here first, so that Escape gives up on the description field before it throws the whole report
+	-- away -- that check is real and it lives in Shell/Chrome.lua instead, because it is one rule
+	-- about what Escape means rather than one form's quirk, and every other panel with a field in it
+	-- (the move editor's name box, the dev menu's target field) needs the same answer.
+	chrome:BindEscape("BugReport", handle.IsOpen, function()
+		handle.IsOpen:set(false)
+		logger:debug("Bug report form closed on Escape")
+	end)
 
 	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
 		if gameProcessed then

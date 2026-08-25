@@ -55,6 +55,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local LiveConsoleModule = require(script.Parent.Parent.UI.Screens.LiveConsole)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local Chrome = require(script.Parent.Parent.UI.Shell.Chrome)
 
 type LiveConsoleHandle = LiveConsoleModule.LiveConsoleHandle
 
@@ -140,7 +141,7 @@ local function unsubscribe(): ()
 	unsubscribeRemote:FireServer()
 end
 
-function LiveConsoleClient.Start(deferredHandle: Lazy.Lazy<LiveConsoleHandle>): ()
+function LiveConsoleClient.Start(deferredHandle: Lazy.Lazy<LiveConsoleHandle>, chrome: Chrome.ChromeHandle): ()
 	-- This module's own copy of the open state, rather than peek(handle.IsOpen). The handle does not
 	-- exist until the first open, so the toggle below cannot read the current state out of a panel --
 	-- and once the panel does exist, setOpen is still the only writer of both, so the two can never
@@ -165,6 +166,16 @@ function LiveConsoleClient.Start(deferredHandle: Lazy.Lazy<LiveConsoleHandle>): 
 		mounted = handle
 		handle.CloseRequested.Event:Connect(function()
 			setOpen(false)
+		end)
+		-- ADOPTED: F5 was the only way out of this panel. Bound HERE rather than in Start, because
+		-- until this moment there is no handle.IsOpen to bind to -- and that costs nothing, because
+		-- an unmounted console cannot be open, so there is no window in which Escape should have done
+		-- something and did not. handle.IsOpen is still false at this point (setOpen writes it just
+		-- after this returns), so the bind's initial sync pushes nothing and the Observer catches the
+		-- open edge that follows.
+		chrome:BindEscape("LiveConsole", handle.IsOpen, function()
+			setOpen(false)
+			logger:debug("Live Admin Console closed on Escape")
 		end)
 		return handle
 	end

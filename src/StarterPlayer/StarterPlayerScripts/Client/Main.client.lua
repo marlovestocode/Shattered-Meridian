@@ -51,11 +51,15 @@ local RunController = require(script.Parent.Movement.RunController)
 local DevMenuClient = require(script.Parent.DevMenu.DevMenuClient)
 local CharacterMenuClient = require(script.Parent.CharacterMenu.CharacterMenuClient)
 local MoveEditorClient = require(script.Parent.MoveEditor.MoveEditorClient)
+local KitEditorClient = require(script.Parent.KitEditor.KitEditorClient)
 local LiveConsoleClient = require(script.Parent.LiveConsole.LiveConsoleClient)
+local StorybookClient = require(script.Parent.Storybook.StorybookClient)
 local FlightController = require(script.Parent.DevMenu.FlightController)
 local DefenseClient = require(script.Parent.Defense.DefenseClient)
 local AttackInputClient = require(script.Parent.Combat.AttackInputClient)
+local WeaponInventoryClient = require(script.Parent.Combat.WeaponInventoryClient)
 local GrabInputClient = require(script.Parent.Combat.GrabInputClient)
+local BlimpController = require(script.Parent.Blimp.BlimpController)
 local SwingLunge = require(script.Parent.Combat.SwingLunge)
 local CombatAudio = require(script.Parent.FX.CombatAudio)
 local CombatFeedbackClient = require(script.Parent.Combat.CombatFeedbackClient)
@@ -164,7 +168,7 @@ logger:debug("EmoteController end")
 -- the Screen's own IsOpen/SelectedIndex handle, and uiHandles.ClientState, to read the live loadout
 -- -- neither exists before UI.Mount() returns).
 logger:debug("EmoteWheelClient start")
-EmoteWheelClient.Start(uiHandles.EmoteWheel, uiHandles.ClientState)
+EmoteWheelClient.Start(uiHandles.EmoteWheel, uiHandles.ClientState, uiHandles.Chrome)
 logger:debug("EmoteWheelClient end")
 
 -- Before ShiftLockCamera/FlightCamera/CameraShake below: FOVOffset is the single canonical writer
@@ -245,11 +249,32 @@ logger:debug("AttackInputClient start")
 AttackInputClient.Start()
 logger:debug("AttackInputClient end")
 
+-- Drives the inventory HUD off Weapon_InventoryChanged. Receive-only (the T/Y keys belong to
+-- AttackInputClient above), so its position here is about keeping the two weapon-facing client modules
+-- adjacent rather than about ordering -- the server re-pushes the whole inventory on every character
+-- bind, so a listener connected late still gets the current state rather than missing an edge.
+logger:debug("WeaponInventoryClient start")
+WeaponInventoryClient.Start(uiHandles.WeaponInventory)
+logger:debug("WeaponInventoryClient end")
+
 -- Grab-throw input, alongside AttackInputClient above -- same "AFTER SettingsClient.RestoreSettings so
 -- a rebound GrabThrow key is live before the first press" reasoning that module's own comment gives.
 logger:debug("GrabInputClient start")
 GrabInputClient.Start()
 logger:debug("GrabInputClient end")
+
+-- Blimp mount input, the mounted-body pose and the pilot's helm. AFTER SettingsClient.RestoreSettings
+-- for the same reason the two input modules above are -- it reads the Interact bind both to match the
+-- release press AND to re-key every blimp ProximityPrompt, so a rebound key that was not live yet would
+-- leave prompts showing the default while the release press listened for the new one.
+--
+-- Client/Camera/BlimpCamera.lua and Client/FX/BlimpAudio.lua are deliberately NOT started here. Neither
+-- has a Start() at all: both are driven entirely off this module's mount/dismount edges, and the camera
+-- binds its own render step only while somebody is actually aboard rather than for the session -- see
+-- its own header on why that differs from FlightCamera/ShiftLockCamera immediately above.
+logger:debug("BlimpController start")
+BlimpController.Start(uiHandles.BlimpHelm, uiHandles.BlimpFuel, uiHandles.CarriedResources)
+logger:debug("BlimpController end")
 
 -- Next to AttackInputClient above because its only input is that module's OnAttackStarted seam --
 -- read as one unit, not because the order is load-bearing. OnAttackStarted appends to a plain
@@ -284,7 +309,7 @@ logger:debug("CombatFeedbackClient end")
 -- and did its real work behind a server authorization round trip, and it is now also what decides the
 -- panel gets built at all.
 logger:debug("DevMenuClient start")
-DevMenuClient.Start(uiHandles.DevMenu)
+DevMenuClient.Start(uiHandles.DevMenu, uiHandles.Chrome)
 logger:debug("DevMenuClient end")
 
 -- Unconditional for every client, unlike DevMenuClient above -- the character menu (M: sheet, Arts,
@@ -292,27 +317,47 @@ logger:debug("DevMenuClient end")
 -- discard outright, which left CharacterMenuClient.Start with no caller anywhere and the whole
 -- panel unreachable -- M did nothing, and there was no way to unlock or equip an Art in play.
 logger:debug("CharacterMenuClient start")
-CharacterMenuClient.Start(uiHandles.Menus)
+CharacterMenuClient.Start(uiHandles.Menus, uiHandles.Chrome)
 logger:debug("CharacterMenuClient end")
 
 -- Same whitelist-gated, delayed-authorization shape as DevMenuClient above -- and the same deferred
 -- mount, from the same thunk (this is the largest of the three panels).
 logger:debug("MoveEditorClient start")
-MoveEditorClient.Start(uiHandles.MoveEditor)
+MoveEditorClient.Start(uiHandles.MoveEditor, uiHandles.Chrome)
 logger:debug("MoveEditorClient end")
+
+-- Identical shape to MoveEditorClient above, and it had NO CALLER AT ALL until this line: nothing
+-- anywhere required Client/KitEditor/KitEditorClient.lua, so its OpenKitEditor keybind never bound
+-- and the Kit Editor was unreachable. That matters beyond the panel -- it is the only thing that
+-- authors Race Trait and Bloodline content, so BloodlineManager's registry booted empty and stayed
+-- empty, and every reader downstream (BloodlineSystem, KitAbilitySystem, the character sheet's own
+-- bloodline line) degraded quietly instead of erroring. Same class of gap as the M menu having no
+-- caller before commit ab9f335.
+logger:debug("KitEditorClient start")
+KitEditorClient.Start(uiHandles.KitEditor, uiHandles.Chrome)
+logger:debug("KitEditorClient end")
 
 -- Unlike DevMenuClient/MoveEditorClient above, this one binds its input unconditionally for every
 -- client -- the real gate is server-side, on Subscribe, fired only once the panel actually opens.
 -- Its panel is deferred too, but on that same open-time gate rather than on an authorization answer,
 -- since there is no boot-time answer here to hang it off. See LiveConsoleClient.lua's own header.
 logger:debug("LiveConsoleClient start")
-LiveConsoleClient.Start(uiHandles.LiveConsole)
+LiveConsoleClient.Start(uiHandles.LiveConsole, uiHandles.Chrome)
 logger:debug("LiveConsoleClient end")
+
+-- The component Storybook, and the one module here that usually does NOTHING: StorybookClient.Start
+-- returns immediately outside Studio, so on a live client no key is bound and the gallery is never
+-- built. Started unconditionally anyway rather than being wrapped in an IsStudio check here, because
+-- the gate belongs with the module that owns the reason for it -- the same call every other
+-- authorization-gated client module on this list already makes.
+logger:debug("StorybookClient start")
+StorybookClient.Start(uiHandles.Storybook, uiHandles.Chrome)
+logger:debug("StorybookClient end")
 
 -- Unconditional for every client, unlike DevMenuClient above -- the bug report form has no
 -- whitelist gate; every player can open and submit it.
 logger:debug("BugReportClient start")
-BugReportClient.Start(uiHandles.BugReport)
+BugReportClient.Start(uiHandles.BugReport, uiHandles.Chrome)
 logger:debug("BugReportClient end")
 
 -- Unconditional for every client, same reasoning as BugReportClient above -- an admin broadcast (or
@@ -326,7 +371,7 @@ logger:debug("AnnouncementClient end")
 -- KeybindManager restore already happened earlier (see SettingsClient.RestoreSettings' own call
 -- site above).
 logger:debug("SettingsClient start")
-SettingsClient.Start(uiHandles.Settings)
+SettingsClient.Start(uiHandles.Settings, uiHandles.Chrome)
 logger:debug("SettingsClient end")
 
 -- Unconditional for every client, not just admins -- see FlightController.lua's own header for

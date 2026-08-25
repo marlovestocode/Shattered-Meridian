@@ -14,7 +14,7 @@ assert they cannot happen.
 - [x] **Phase 1** — `Layers.lua` + `Regions.lua`, six panels migrated
 - [x] **Phase 2** — `Surface.lua`, every remaining ScreenGui migrated
 - [x] **Phase 3** — `Chrome.lua` mode + HUD yielding
-- [ ] **Phase 4** — `Chrome.lua` Escape stack
+- [x] **Phase 4** — `Chrome.lua` Escape stack
 - [ ] **Phase 5** — `Reveal.lua`, five entrances unified
 - [ ] **Phase 6** — `Notify.lua` + the `TierPromotion` producer
 
@@ -47,7 +47,7 @@ change except where §2 says it is currently broken.
 | 3 | `IgnoreGuiInset` inconsistent | set on 3, absent on 6 always-on panels | Phase 2 |
 | 4 | Autoscale reaches 2 surfaces of 17 | `ViewportScale` has exactly 2 callers | Phase 2 |
 | 5 | HUD never yields | zero `Enabled` gating in `Screens/HUD/init.lua` | Phase 3 |
-| 6 | No input arbitration | 16 independent `InputBegan` connections; 5 screens cannot be closed with Escape at all | Phase 4 |
+| 6 | No input arbitration | 16 independent `InputBegan` connections; ~~5~~ **6** screens cannot be closed with Escape at all (§2.6's Settings row is wrong — see Phase 4) | Phase 4 |
 | 7 | Entrance motion hand-rolled or absent | 2 hand-rolled, 1 fade-only, 2 that pop | Phase 5 |
 | 8 | Bottom tiles sit under the mobile thumbstick | pre-existing; `IS_TOUCH` and `TouchTargetSize` both already exist | Phase 1, pending §14.5 |
 | 9 | No notification channel | 1 bespoke banner, 1 bespoke feed, nothing shared | Phase 6 |
@@ -212,9 +212,15 @@ ask it to step back, because there is no one to ask.
 
 Escape is handled by exactly four of them:
 
+**THE SETTINGS ROW IS WRONG — corrected at Phase 4, and left standing because it is the row a reader
+would otherwise trust.** `SettingsClient.lua:302` is inside `beginCapture`'s own `InputBegan` and
+cancels a keybind *capture*; the panel itself was toggled by `K` and closed by nothing else. Three
+screens handled Escape, not four, and six could not be dismissed with it, not five. See Phase 4's
+build notes.
+
 | Screen | Escape closes it? | Where |
 |---|---|---|
-| Settings | yes | `SettingsClient.lua:302` |
+| ~~Settings~~ | **no** — see above | ~~`SettingsClient.lua:302`~~ |
 | MoveEditor | yes | `MoveEditorClient.lua:581` |
 | KitEditor | yes | `KitEditorClient.lua:232` |
 | EmoteWheel | yes | `EmoteWheelClient.lua:214` |
@@ -929,38 +935,121 @@ how a value Phase 4's Escape stack depends on quietly rots before Phase 4 arrive
 
 ### Build
 
-- [ ] `Chrome.PushEscape(name, close) -> handle` and `handle:Pop()`, backed by an ordered stack.
-- [ ] One `InputBegan` connection for Escape, in `Chrome` and nowhere else.
-- [ ] Pop is idempotent and order-independent — a screen closed by its own toggle must pop cleanly
+- [x] `Chrome.PushEscape(name, close) -> handle` and `handle:Pop()`, backed by an ordered stack.
+- [x] One `InputBegan` connection for Escape, in `Chrome` and nowhere else.
+- [x] Pop is idempotent and order-independent — a screen closed by its own toggle must pop cleanly
       even if it is not on top.
-- [ ] Empty stack means Escape is not consumed, so Roblox's own menu still opens.
+- [x] Empty stack means Escape is not consumed, so Roblox's own menu still opens. **Reworded in the
+      code, because the specced claim overstates what a game script can do** — see the notes below.
+- [x] **`Chrome.BindEscape(name, isOpen, close)` was added, and is what nine of the ten entries
+      actually use.** Not in this plan; why it had to exist is below.
+- [x] **A focused `TextBox` declines Escape, in `Chrome` rather than in `BugReportClient`.**
 
 ### Migrate — remove local Escape handling, push instead
 
-- [ ] `Settings/SettingsClient.lua:302` — note it also matches `ButtonStart`; keep that on the driver,
-      only Escape moves. Its keybind-capture mode at `:298` must suppress the stack while capturing.
-- [ ] `MoveEditor/MoveEditorClient.lua:581` — `F1` shortcuts overlay stays local; only Escape moves.
-      The overlay pushes its own entry so Escape closes it before the editor.
-- [ ] `KitEditor/KitEditorClient.lua:232`
-- [ ] `Emotes/EmoteWheelClient.lua:214` — also matches `MouseButton2`; that stays local.
+- [x] `Settings/SettingsClient.lua` — **the plan was wrong about this screen, and it moved to Adopt.**
+      §2.6 lists it among the four that "handle Escape", citing the line inside `beginCapture`; that
+      line cancels a keybind **capture**, not the panel. See the notes below. The capture now pushes
+      its own entry above the panel's, so Escape while rebinding cancels the capture and leaves the
+      screen up. `ButtonStart` stayed on the driver.
+- [x] `MoveEditor/MoveEditorClient.lua` — `F1` shortcuts overlay stays local; only Escape moves. The
+      overlay pushes its own entry so Escape closes it before the editor. The three-layer
+      `requestEscape` if-chain is gone; the unsaved-changes arm stayed inside the editor's own entry,
+      because an arm is a state of the close rather than a surface the player can back out of.
+- [x] `KitEditor/KitEditorClient.lua`
+- [x] `Emotes/EmoteWheelClient.lua` — also matches `MouseButton2`; that stays local. Bound off
+      `handle.IsOpen` rather than the module-local `isOpenValue`, which that field's own note already
+      promises is kept in lockstep with it.
 
 ### Adopt — screens that had no Escape at all
 
-- [ ] `CharacterMenu/CharacterMenuClient.lua`
-- [ ] `DevMenu/DevMenuClient.lua`
-- [ ] `BugReport/BugReportClient.lua` — check an open `TextBox` first; Escape should defocus the field
-      before it closes the form.
-- [ ] `LiveConsole/LiveConsoleClient.lua`
-- [ ] `Storybook/StorybookClient.lua`
+- [x] `CharacterMenu/CharacterMenuClient.lua`
+- [x] `DevMenu/DevMenuClient.lua` — bound inside `startDevMenu`, not `Start`, which holds a `Lazy`.
+- [x] `BugReport/BugReportClient.lua` — the `TextBox` check moved to `Chrome`, per above.
+- [x] `LiveConsole/LiveConsoleClient.lua` — bound inside `ensureMounted`: there is no `handle.IsOpen`
+      before the first force, and an unmounted console cannot be open, so nothing is lost.
+- [x] `Storybook/StorybookClient.lua` — same, on the first toggle press, behind a `bound` flag.
+- [x] `Settings/SettingsClient.lua` — **six adopters, not five.** See above.
 
 ### Verify
 
-- [ ] `Chrome.spec`: Escape pops exactly one; a non-top close pops correctly; the stack empties.
+- [x] `Chrome.spec`: Escape pops exactly one; a non-top close pops correctly; the stack empties.
+      Eleven new cases, including the pop-before-close ordering and the two-unrelated-panels gesture
+      §2.6 describes.
+- [x] Suite green — **2093 passed, 0 failed, 1 `Stack Begin`** (baseline 2082 + 11 new). `selene` 0/0,
+      `stylua --check` clean on the touched set.
+- [x] Reachability: `Shell/Chrome.lua` has 11 inbound requires, 10 of them from outside `UI/`.
 - [ ] Studio: open Settings, then the character menu. Escape closes the menu only. Escape again closes
-      Settings. This is the §2.6 regression in one gesture.
-- [ ] Studio: each of the five adopting screens closes on Escape.
-- [ ] Studio: Escape with nothing open still opens the Roblox menu.
-- [ ] Studio: Escape while rebinding a key in Settings cancels the capture, not the panel.
+      Settings. This is the §2.6 regression in one gesture. **Needs a human.**
+- [ ] Studio: each of the six adopting screens closes on Escape. **Needs a human.**
+- [ ] Studio: Escape with nothing open still opens the Roblox menu. **Needs a human.**
+- [ ] Studio: Escape while rebinding a key in Settings cancels the capture, not the panel. **Needs a
+      human**, and it is the one behaviour here that a wrong answer degrades quietly rather than
+      visibly.
+
+### `PushEscape` alone would have rebuilt the bug the mode `Computed` was shaped to avoid
+
+The plan specs one primitive: push on open, pop on close. Written out at nine call sites, that is
+nine hand-maintained pairs of edges — and these screens do not have one close path each. The move
+editor closes from its toggle key, from an "X" routed through `CloseRequested`, and from a guarded
+`requestClose` that sometimes *declines*; the live console closes from a `BindableEvent` the panel
+owns; Settings now closes from its toggle and from Escape. A screen with four close paths and three
+pops leaves a stale entry that eats the next Escape, and that is the same forgotten-edge failure
+`Chrome.lua`'s own header spends four paragraphs arguing a *mode* must not be exposed to. Exposing
+the Escape stack to it instead would have been the same mistake one layer down.
+
+So `BindEscape(name, isOpen, close)` derives both edges from the screen's own `IsOpen` — the same
+fact its visibility is derived from — and there is no edge to forget. `PushEscape` stayed as the
+primitive underneath and has exactly one caller: Settings' keybind capture, whose "am I running" fact
+is a nilable `ListeningFor` table in a module with no Fusion scope to make a boolean from, and whose
+`beginCapture`/`cancelCapture` genuinely are an exactly-matched pair.
+
+**Ten entries, nine panels.** The two extras are layers, not screens: the move editor's F1 overlay
+above the editor, and Settings' capture above Settings. Both were branches of an if-chain inside one
+screen's private handler before this, and both are structurally identical to the panel-over-panel
+case — which is the argument for a stack rather than a registry keyed by screen.
+
+### §2.6's table is wrong about Settings, and the citation is what makes it worth recording
+
+§2.6 says Settings handles Escape at `SettingsClient.lua:302`, and there is a line there. It sits
+inside `beginCapture`'s own `InputBegan`, and what it cancels is a keybind capture. The panel was
+toggled by `K` and closed by nothing else. So the pre-Phase-4 count is **three** screens Escape could
+dismiss and **six** it could not, and this phase adopted six rather than five.
+
+Worth recording because of what the mis-citation nearly cost: both this document and the phase
+written from it treated Settings as a screen whose Escape behaviour needed *relocating*. It needed
+inventing. The line number was right and the claim about it was not — which is a worse failure than a
+number that has merely drifted, because grepping the line finds something and it looks like
+confirmation.
+
+### Escape is not sinkable, so "the empty stack does not consume it" is narrower than it sounds
+
+`Shared/Constants.lua`'s `SettingsToggle` comment already had this: *"this repo never disables
+Roblox's own native Escape/Menu overlay"*, which is why the settings toggle is `K`. Roblox opens its
+menu on Escape at the CoreGui level, above every game script, and a `UserInputService` handler cannot
+stop it. So "Escape closes the topmost panel" has always meant "**and** the Roblox menu opens over the
+result" — true of the three handlers this phase replaced, and still true of the ten entries replacing
+them. Nothing regressed and nothing improved on that axis, and the plan should not have implied it
+would.
+
+What the empty-stack rule does guarantee is that with nothing pushed, this connection does nothing at
+all — Escape is the Roblox menu and only that. That is what the spec asserts. The stronger reading,
+that an open panel somehow suppresses the native menu, was never achievable.
+
+### The stack is the arbiter, not the mode
+
+`Chrome`'s Phase 3 header said Phase 4 would read `Mode` "to decide whether Escape belongs to a panel
+or to Roblox's own menu". It does not, and should not. `Mode` is one value with a precedence (`Dead`
+outranks `Menu`), so routing the decision through it would make "killed with a panel open" a case
+where Escape does nothing — for no gain. Whether anything is listening is answered by whether the
+stack is empty, which is the fact the question was about. Corrected in place in `Chrome.lua`.
+
+### What this phase deliberately did not do
+
+No `ContextActionService`, and no screen's *open* keybind moved. §3.4's "not a full input router"
+holds: nine modules handed over the close edge and nothing else. Each still owns its own `InputBegan`
+for its own toggle, and combat/movement/parkour input was not touched. The gamepad question (§14.3)
+stays deferred — `ButtonStart` remains local to Settings' capture, where it was.
 
 ---
 

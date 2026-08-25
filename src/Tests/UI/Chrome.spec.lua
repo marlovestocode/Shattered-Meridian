@@ -118,6 +118,240 @@ return function()
 		end)
 	end)
 
+	describe("the Escape stack", function()
+		-- Phase 4, plan section 8. The gap it closes (2.6) is that Escape was handled unconditionally
+		-- by four screens and not at all by five, so Escape with two panels stacked closed both and
+		-- Escape with the character menu up closed nothing.
+		--
+		-- DRIVEN THROUGH HandleEscape RATHER THAN THROUGH A KEYPRESS, because a headless place has no
+		-- way to press a key. That is the whole reason HandleEscape is on the handle at all: the
+		-- InputBegan connection in Chrome.New does nothing but call it, so a test that drives it is
+		-- testing the same code path the key does rather than a parallel one.
+		it("closes the topmost entry and only the topmost", function()
+			local _, _, _, chrome = build()
+			local closed: { string } = {}
+
+			chrome:PushEscape("Under", function()
+				table.insert(closed, "Under")
+			end)
+			chrome:PushEscape("Over", function()
+				table.insert(closed, "Over")
+			end)
+
+			expect(chrome:HandleEscape()).to.equal(true)
+			expect(#closed).to.equal(1)
+			expect(closed[1]).to.equal("Over")
+
+			expect(chrome:HandleEscape()).to.equal(true)
+			expect(#closed).to.equal(2)
+			expect(closed[2]).to.equal("Under")
+		end)
+
+		it("does not consume Escape once the stack is empty", function()
+			-- The other half of the same guarantee, and the one a player notices: with nothing open,
+			-- Escape has to reach Roblox's own menu untouched. See Chrome.lua's header on why "does
+			-- not consume" is the honest claim here rather than "sinks or does not sink" -- Escape is
+			-- not sinkable from a game script at all.
+			local _, _, _, chrome = build()
+
+			expect(chrome:HandleEscape()).to.equal(false)
+
+			local handle = chrome:PushEscape("Only", function() end)
+			handle:Pop()
+			expect(chrome:HandleEscape()).to.equal(false)
+		end)
+
+		it("pops an entry out of the middle of the stack", function()
+			-- The order-independence requirement. A screen closed by its own toggle key while another
+			-- panel sits above it must come out cleanly, and the panel above must still be the one
+			-- Escape closes next.
+			local _, _, _, chrome = build()
+			local closed: { string } = {}
+
+			local under = chrome:PushEscape("Under", function()
+				table.insert(closed, "Under")
+			end)
+			chrome:PushEscape("Over", function()
+				table.insert(closed, "Over")
+			end)
+
+			under:Pop()
+			expect(chrome:EscapeStack()[1]).to.equal("Over")
+			expect(#chrome:EscapeStack()).to.equal(1)
+
+			chrome:HandleEscape()
+			expect(closed[1]).to.equal("Over")
+			expect(chrome:HandleEscape()).to.equal(false)
+		end)
+
+		it("treats a second Pop as a no-op rather than an error", function()
+			-- Not defensive coding: it is the NORMAL path. BindEscape pops on its screen's close
+			-- edge, and Escape closing that screen fires exactly that edge -- so the entry Chrome
+			-- just removed gets popped again a moment later, every single time.
+			local _, _, _, chrome = build()
+
+			local handle = chrome:PushEscape("Once", function() end)
+			chrome:PushEscape("Keep", function() end)
+
+			handle:Pop()
+			handle:Pop()
+
+			expect(#chrome:EscapeStack()).to.equal(1)
+			expect(chrome:EscapeStack()[1]).to.equal("Keep")
+		end)
+
+		it("pops before it closes, so a re-entrant Pop cannot take the entry underneath", function()
+			-- The specific bug this ordering exists to stop. Close flips the screen's IsOpen, which
+			-- fires BindEscape's Observer, which pops -- and if HandleEscape had not already removed
+			-- its own entry, that re-entrant pop would remove it and HandleEscape's own remove would
+			-- then take the panel below with it.
+			local _, _, _, chrome = build()
+			local closed: { string } = {}
+
+			chrome:PushEscape("Under", function()
+				table.insert(closed, "Under")
+			end)
+			local over: Chrome.EscapeHandle
+			over = chrome:PushEscape("Over", function()
+				table.insert(closed, "Over")
+				over:Pop()
+			end)
+
+			chrome:HandleEscape()
+
+			expect(#closed).to.equal(1)
+			expect(#chrome:EscapeStack()).to.equal(1)
+			expect(chrome:EscapeStack()[1]).to.equal("Under")
+		end)
+
+		it("hands back a copy of the stack, not the stack", function()
+			local _, _, _, chrome = build()
+			chrome:PushEscape("Real", function() end)
+
+			local names = chrome:EscapeStack()
+			table.clear(names)
+
+			expect(#chrome:EscapeStack()).to.equal(1)
+		end)
+	end)
+
+	describe("BindEscape", function()
+		it("pushes when the screen opens and pops when it closes", function()
+			local scope, _, _, chrome = build()
+			local isOpen: Fusion.Value<boolean> = scope:Value(false)
+			local closes = 0
+
+			chrome:BindEscape("Panel", isOpen, function()
+				closes += 1
+				isOpen:set(false)
+			end)
+
+			expect(#chrome:EscapeStack()).to.equal(0)
+
+			isOpen:set(true)
+			expect(#chrome:EscapeStack()).to.equal(1)
+
+			-- Closed by its OWN toggle, not by Escape. The pop still has to happen, and this is the
+			-- edge a hand-written push/pop pair forgets.
+			isOpen:set(false)
+			expect(#chrome:EscapeStack()).to.equal(0)
+			expect(closes).to.equal(0)
+
+			isOpen:set(true)
+			chrome:HandleEscape()
+			expect(closes).to.equal(1)
+			expect(#chrome:EscapeStack()).to.equal(0)
+		end)
+
+		it("pushes immediately for a screen that is already open when it binds", function()
+			-- A Lazy screen resolves its handle on first open, so LiveConsole and Storybook bind at a
+			-- moment the panel may already be up. Waiting for the next change would leave that first
+			-- opening unclosable.
+			local scope, _, _, chrome = build()
+			local isOpen: Fusion.Value<boolean> = scope:Value(true)
+
+			chrome:BindEscape("AlreadyOpen", isOpen, function() end)
+
+			expect(#chrome:EscapeStack()).to.equal(1)
+			expect(chrome:EscapeStack()[1]).to.equal("AlreadyOpen")
+		end)
+
+		it("never puts one screen on the stack twice", function()
+			-- An Observer can fire on a set that did not change the value. Two entries for one panel
+			-- would mean two Escapes to close it, which is the sort of thing that only shows up in
+			-- play.
+			local scope, _, _, chrome = build()
+			local isOpen: Fusion.Value<boolean> = scope:Value(false)
+
+			chrome:BindEscape("Panel", isOpen, function() end)
+
+			isOpen:set(true)
+			isOpen:set(true)
+			isOpen:set(true)
+
+			expect(#chrome:EscapeStack()).to.equal(1)
+		end)
+
+		it("stacks a layer above its own screen and closes them outermost first", function()
+			-- The move editor's F1 overlay, and Settings' keybind capture, are both this shape: a
+			-- second entry pushed while the first is still open. Before Phase 4 each was a branch in
+			-- an if-chain inside one screen's private handler.
+			local scope, _, _, chrome = build()
+			local editorOpen: Fusion.Value<boolean> = scope:Value(false)
+			local overlayOpen: Fusion.Value<boolean> = scope:Value(false)
+			local closed: { string } = {}
+
+			chrome:BindEscape("Editor", editorOpen, function()
+				table.insert(closed, "Editor")
+				editorOpen:set(false)
+			end)
+			chrome:BindEscape("Overlay", overlayOpen, function()
+				table.insert(closed, "Overlay")
+				overlayOpen:set(false)
+			end)
+
+			editorOpen:set(true)
+			overlayOpen:set(true)
+			expect(#chrome:EscapeStack()).to.equal(2)
+
+			chrome:HandleEscape()
+			expect(closed[1]).to.equal("Overlay")
+			-- The editor is still up, which is the whole point -- dismissing the shortcut list used
+			-- to close the editor underneath it.
+			expect(#chrome:EscapeStack()).to.equal(1)
+
+			chrome:HandleEscape()
+			expect(closed[2]).to.equal("Editor")
+			expect(#chrome:EscapeStack()).to.equal(0)
+		end)
+
+		it("closes the last-opened panel first when two unrelated screens are up", function()
+			-- Plan 2.6 in one gesture: open Settings, then the character menu, press Escape once.
+			-- Before this phase, either both closed or neither did.
+			local scope, _, _, chrome = build()
+			local settingsOpen: Fusion.Value<boolean> = scope:Value(false)
+			local menuOpen: Fusion.Value<boolean> = scope:Value(false)
+
+			chrome:BindEscape("Settings", settingsOpen, function()
+				settingsOpen:set(false)
+			end)
+			chrome:BindEscape("CharacterMenu", menuOpen, function()
+				menuOpen:set(false)
+			end)
+
+			settingsOpen:set(true)
+			menuOpen:set(true)
+
+			chrome:HandleEscape()
+			expect(Fusion.peek(menuOpen)).to.equal(false)
+			expect(Fusion.peek(settingsOpen)).to.equal(true)
+
+			chrome:HandleEscape()
+			expect(Fusion.peek(settingsOpen)).to.equal(false)
+			expect(chrome:HandleEscape()).to.equal(false)
+		end)
+	end)
+
 	describe("the mode is derived, not set", function()
 		it("exposes no way to write it", function()
 			local _, _, _, chrome = build()

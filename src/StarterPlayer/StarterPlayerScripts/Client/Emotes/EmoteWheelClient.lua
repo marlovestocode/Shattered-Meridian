@@ -14,7 +14,11 @@
 	whole client session (cheap -- matches DevMenuClient.lua/CombatClient.lua's own always-on
 	InputBegan pattern). It does two things: opens the wheel on the EmoteWheel keybind (keyboard B /
 	gamepad DPadDown, Constants.Keybinds.Defaults/GamepadDefaults), and, only while the wheel is
-	already open, closes it without confirming on Escape or right-click (MouseButton2). The mouse-
+	already open, closes it without confirming on right-click (MouseButton2). ESCAPE IS NO LONGER ONE
+	OF THEM -- it is the shell's single Escape stack now (Client/UI/Shell/Chrome.lua), bound in Start
+	below off the same handle.IsOpen this module already keeps in lockstep with isOpenValue. The
+	cancel behaviour is identical; what changed is that Escape with the wheel open over a panel now
+	closes the wheel only, instead of the wheel and whatever it was over. The mouse-
 	tracking InputChanged connection and the release-detecting InputEnded connection are NOT part of
 	that always-on handler -- both are connected only once the wheel actually opens and disconnected
 	the instant it closes (confirm, cancel, or the escape/right-click path), per this feature's own
@@ -67,6 +71,7 @@ local EmoteWheelModule = require(script.Parent.Parent.UI.Screens.EmoteWheel)
 local WheelSelection = require(script.Parent.Parent.UI.Screens.EmoteWheel.WheelSelection)
 local ClientStateModule = require(script.Parent.Parent.UI.State.ClientState)
 local ShiftLockCamera = require(script.Parent.Parent.Camera.ShiftLockCamera)
+local Chrome = require(script.Parent.Parent.UI.Shell.Chrome)
 
 local peek = Fusion.peek
 
@@ -194,7 +199,19 @@ local function openWheel(handle: EmoteWheelHandle, clientState: ClientState): ()
 	logger:debug("Emote wheel opened")
 end
 
-function EmoteWheelClient.Start(handle: EmoteWheelHandle, clientState: ClientState): ()
+function EmoteWheelClient.Start(handle: EmoteWheelHandle, clientState: ClientState, chrome: Chrome.ChromeHandle): ()
+	-- ESCAPE IS THE SHELL'S NOW; RIGHT-CLICK IS STILL THIS MODULE'S. The two used to be one branch,
+	-- and separating them is the whole of this migration: MouseButton2 is a wheel-specific cancel
+	-- gesture that means nothing anywhere else in the client, while Escape is the one key nine panels
+	-- were each answering on their own terms (see Shell/Chrome.lua's Escape-stack header). Bound off
+	-- handle.IsOpen rather than isOpenValue below because BindEscape wants a Fusion value and the two
+	-- are written in lockstep by openWheel/closeWheel -- which is what isOpenValue's own note above
+	-- promises.
+	chrome:BindEscape("EmoteWheel", handle.IsOpen, function()
+		logger:debug("Emote wheel cancelled")
+		closeWheel(handle)
+	end)
+
 	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
 		if gameProcessed then
 			return
@@ -211,7 +228,7 @@ function EmoteWheelClient.Start(handle: EmoteWheelHandle, clientState: ClientSta
 		-- path above (InputEnded matching the EmoteWheel keybind itself). See this file's header on
 		-- why MouseButton2 needing a guard against CombatClient.lua's own Feint bind is handled on
 		-- that module's side (EmoteWheelClient.IsOpen()), not here.
-		if input.KeyCode == Enum.KeyCode.Escape or input.UserInputType == Enum.UserInputType.MouseButton2 then
+		if input.UserInputType == Enum.UserInputType.MouseButton2 then
 			logger:debug("Emote wheel cancelled")
 			closeWheel(handle)
 		end

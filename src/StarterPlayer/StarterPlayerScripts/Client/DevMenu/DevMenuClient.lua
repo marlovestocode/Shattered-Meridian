@@ -60,6 +60,7 @@ local DevMenuModule = require(script.Parent.Parent.UI.Screens.DevMenu)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local ParkourDebug = require(script.Parent.Parent.Parkour.ParkourDebug)
 local SpectateController = require(script.Parent.SpectateController)
+local Chrome = require(script.Parent.Parent.UI.Shell.Chrome)
 
 type DevMenuHandle = DevMenuModule.DevMenuHandle
 
@@ -74,6 +75,13 @@ local DevMenuClient = {}
 local function describeRollEmoteResult(result: Types.DevMenuRollEmoteResult): string
 	if result.Success then
 		return `Emote rolled: {result.EmoteId or "?"}.`
+	end
+	return "Failed: " .. (result.Reason or "Unknown")
+end
+
+local function describeGrantRerollsResult(result: Types.DevMenuGrantRerollsResult): string
+	if result.Success then
+		return `Rerolls granted -- {result.RerollsRemaining or 0} held.`
 	end
 	return "Failed: " .. (result.Reason or "Unknown")
 end
@@ -395,7 +403,7 @@ local function requestServerAuthorization(): boolean
 	return result ~= nil and result.Success == true
 end
 
-local function startDevMenu(handle: DevMenuHandle): ()
+local function startDevMenu(handle: DevMenuHandle, chrome: Chrome.ChromeHandle): ()
 	local localPlayer = Players.LocalPlayer
 	local sidebar = handle.Sidebar
 	local content = handle.Content
@@ -418,6 +426,14 @@ local function startDevMenu(handle: DevMenuHandle): ()
 
 	setTarget()
 
+	-- ADOPTED: this panel had no Escape at all, so the toggle key was the only way out of it. Bound
+	-- here rather than in Start below because Start holds a Lazy thunk and this needs the resolved
+	-- handle -- which is also why the bind can safely assume the panel exists.
+	chrome:BindEscape("DevMenu", handle.IsOpen, function()
+		handle.IsOpen:set(false)
+		logger:debug("Dev menu closed on Escape")
+	end)
+
 	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
 		if gameProcessed then
 			return
@@ -438,6 +454,19 @@ local function startDevMenu(handle: DevMenuHandle): ()
 			local result = resultOrError :: Types.DevMenuRollEmoteResult
 			logger:debug("RollEmote result received", { success = result.Success, emoteId = result.EmoteId })
 			return describeRollEmoteResult(result)
+		end)
+	end)
+
+	content.GrantBloodlineRerollsRequested:Connect(function()
+		logger:debug("GrantBloodlineRerollsRequested received")
+		invokeAndReport(handle, function()
+			local grantRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.GrantBloodlineRerolls)
+			return grantRemote:InvokeServer()
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuGrantRerollsResult
+			logger:debug("GrantBloodlineRerolls result received", { success = result.Success })
+			return describeGrantRerollsResult(result)
 		end)
 	end)
 
@@ -555,6 +584,35 @@ local function startDevMenu(handle: DevMenuHandle): ()
 				content.ActiveDummyCountDisplay:set(result.ActiveCount)
 			end
 			return describeActionResult(if enabled then "Guard on" else "Guard off", result)
+		end)
+	end)
+
+	-- Blimp Fuel System test nodes (Spawn tab, Server/Systems/ResourceGatheringSystem.SpawnDebugNode)
+	-- -- fire-and-forget, same "invokeAndReport, status text only" shape as SpawnDebugDummyRequested
+	-- above.
+	content.SpawnCoalDepositRequested:Connect(function()
+		logger:debug("SpawnCoalDepositRequested received")
+		invokeAndReport(handle, function()
+			local spawnCoalDepositRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.SpawnCoalDeposit)
+			return spawnCoalDepositRemote:InvokeServer()
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuActionResult
+			logger:debug("SpawnCoalDeposit result received", { success = result.Success, reason = result.Reason })
+			return describeActionResult("Spawn coal deposit", result)
+		end)
+	end)
+
+	content.SpawnWaterSourceRequested:Connect(function()
+		logger:debug("SpawnWaterSourceRequested received")
+		invokeAndReport(handle, function()
+			local spawnWaterSourceRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.SpawnWaterSource)
+			return spawnWaterSourceRemote:InvokeServer()
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuActionResult
+			logger:debug("SpawnWaterSource result received", { success = result.Success, reason = result.Reason })
+			return describeActionResult("Spawn water source", result)
 		end)
 	end)
 
@@ -1245,7 +1303,7 @@ end
 -- Client/UI/init.lua's own header. Forcing it here rather than there costs nothing: this function was
 -- already doing all its real work on its own thread behind the same round trip, so the mount simply
 -- joins work that was already deferred, and a non-admin never pays for it at all.
-function DevMenuClient.Start(deferredHandle: Lazy.Lazy<DevMenuHandle>): ()
+function DevMenuClient.Start(deferredHandle: Lazy.Lazy<DevMenuHandle>, chrome: Chrome.ChromeHandle): ()
 	task.spawn(function()
 		if not requestServerAuthorization() then
 			logger:debug("DevMenuClient not started: server did not authorize this client")
@@ -1258,7 +1316,7 @@ function DevMenuClient.Start(deferredHandle: Lazy.Lazy<DevMenuHandle>): ()
 		-- Deliberately BEFORE the mount below: the overlay is not part of the panel and must not be
 		-- gated on the panel's own construction.
 		ParkourDebug.SetAuthorized(true)
-		startDevMenu(deferredHandle.Get())
+		startDevMenu(deferredHandle.Get(), chrome)
 	end)
 end
 
