@@ -318,7 +318,7 @@ render layer in Roblox.
 | `TopLeft` | 10 | Carried resources | `Screens/CarriedResources` |
 | `TopCentre` | 10 / 20 | Announcement / notifications | `Screens/Announcement`, `Shell/Notify` |
 | `TopRight` | 10 / 20 | Kill feed / blimp fuel | `Screens/DeathFeed`, `Screens/BlimpFuel` |
-| `BottomLeft` | 10 / 20 | Weapon rack / helm console | `Screens/WeaponInventory`, `Screens/BlimpHelm` |
+| `BottomLeft` | 10 / 20 | Helm console / weapon rack | `Screens/BlimpHelm`, `Screens/WeaponInventory` |
 | `BottomCentre` | 10 | The dock and its bands | `Screens/HUD` |
 | `BottomRight` | — | reserved | — |
 
@@ -505,8 +505,8 @@ already true: `DeathFeed` owns exactly one surface).
       always-visible tile would have pushed the fuel gauge down the screen for a feed that is
       permanently empty.
 - [x] `Screens/BlimpFuel` → `TopRight` / 20
-- [x] `Screens/WeaponInventory` → `BottomLeft` / 10
-- [x] `Screens/BlimpHelm` → `BottomLeft` / 20
+- [x] `Screens/WeaponInventory` → `BottomLeft` / **20** (not 10 — see the order note below)
+- [x] `Screens/BlimpHelm` → `BottomLeft` / **10** (not 20 — see the order note below)
 - [x] Deleted the now-false corner-ownership comments in `WeaponInventory` and `BlimpHelm`. Both are
       quoted in `Regions.lua`'s header and in `ShellRegions.spec` — the only place they still appear
       is where they explain why the mechanism had to exist.
@@ -559,13 +559,32 @@ content scale on the same spring, so it still has an arrival; `WeaponInventory` 
 one. Phase 5's `Reveal.lua` is where the offset comes back for all five ambient tiles at once, which
 is where this plan already put it.
 
-**And one it worsens slightly.** With the weapon rack now stacked BELOW the helm console rather than
-over it, the helm's top edge sits roughly a rack-height higher whenever both are visible — which
-means it reaches the carried-resources tile (§2.1a) sooner than it used to. The orders here are the
-ones §3.2's table specifies. Swapping them (helm 10, rack 20) would pin the large stable panel to the
-edge and float the small transient one above it, which would avoid this and also stop the helm
-shifting whenever a weapon is picked up. That is a one-line change in `UI/init.lua` and a decision
-for whoever owns §14.6, not one to make silently mid-migration.
+**THE BOTTOM-LEFT ORDER IS SWAPPED RELATIVE TO §3.2, AND THIS IS WHY.** The table above originally
+read `WeaponInventory` 10 / `BlimpHelm` 20. Built that way, screenshotted, and reverted on the
+evidence: with the rack anchored to the bottom edge, the helm console is lifted by a rack-height plus
+the tile gap, and its header row ends up level with Roblox's own topbar buttons — the panel runs
+underneath them. The helm is roughly **650px tall on a ~795px viewport**, so it has no room to give.
+It is now 10 (anchored to the edge, exactly where it sat before this phase) and the rack is 20
+(floating above it). That also stops the entire console shifting every time a weapon is picked up,
+which the original order would have done.
+
+This does **not** fix the left edge; it picks the cheaper collision. The bottom-left stack plus the
+top-left tile is more content than a short viewport has room for, whichever way round the two are —
+see §14.6, which this is evidence for rather than a resolution of.
+
+**What Phase 1 could not preserve.** The 14px entrance rise on `BlimpHelm` and `WeaponInventory` is
+gone. Both were springs driving the panel's `Position`, and a region tile's `Position` is overwritten
+by its region's `UIListLayout` on every layout pass — so they did not survive the migration and could
+not have, whatever this plan preferred. `BlimpHelm` keeps its 2% content scale on the same spring, so
+it still has an arrival; `WeaponInventory` now appears without one. Phase 5's `Reveal.lua` is where
+the offset comes back for all five ambient tiles at once, which is where this plan already put it.
+
+**§14.1 answered, by screenshot rather than by test.** The top-right gauge measures at the same
+height relative to the viewport before and after — within about a pixel, where a `Tokens.Space.S`
+shift would have been eight. So `UIListLayout` does skip children whose `Visible` is false, and the
+hidden kill feed tile costs neither height nor a share of the region's padding. Evidence, not proof:
+it is a measurement off a screenshot, and the plan's belt-and-braces posture (drive both `Visible`
+and height) still costs nothing and should stay.
 
 ---
 
