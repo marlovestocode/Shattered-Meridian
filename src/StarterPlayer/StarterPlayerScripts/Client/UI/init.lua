@@ -37,6 +37,14 @@
 	destroyed Instance and swallow every tile on a second Mount(), showing a blank screen and logging
 	nothing.
 
+	THE UI HAS A MODE NOW, AND IT IS BUILT BETWEEN THE DEATH FEED AND THE REGION HOST. Shell/Chrome.lua
+	derives Playing / Menu / Dead from the modal count and DeathFeed's own death state, and the region
+	host reads it to dim the ambient layer behind an open panel and to drop the corner tiles while the
+	player is down. That ordering is the only thing about it that constrains this file: Chrome's inputs
+	must exist before Chrome, and Chrome must exist before the host that yields to it -- which is why
+	DeathFeed is mounted several blocks earlier than it used to be. Its tile still joins TopRight at
+	order 10, unchanged.
+
 	THREE SCREENS ARE NOT MOUNTED HERE -- Dev Menu, Move Editor and Live Console are handed out as
 	Shared/Lazy.lua thunks instead, and only actually built the first time the module that drives each
 	one decides this player has earned it. Between them they built roughly 257 Instances (105/143/9)
@@ -83,6 +91,7 @@ local CarriedResourcesModule = require(script.Screens.CarriedResources)
 local WeaponInventoryModule = require(script.Screens.WeaponInventory)
 local ShiftLockCrosshair = require(script.Components.ShiftLockCrosshair)
 local ViewportScale = require(script.ViewportScale)
+local Chrome = require(script.Shell.Chrome)
 local Layers = require(script.Shell.Layers)
 local Regions = require(script.Shell.Regions)
 local Surface = require(script.Shell.Surface)
@@ -93,6 +102,11 @@ export type UIHandles = {
 	-- UI/Components/ShiftLockCrosshair.lua.
 	ShiftLockEngaged: Fusion.Value<boolean>,
 	DeathFeed: DeathFeed.DeathFeedHandle,
+	-- What the UI is currently doing -- Playing / Menu / Dead -- derived from the modal count and
+	-- DeathFeed's own state, never set (Shell/Chrome.lua). Returned because Phase 4's Escape stack
+	-- lives on this handle and because Client/ modules that want to know whether a panel is up should
+	-- read one derived value rather than each re-deriving it from the Attribute.
+	Chrome: Chrome.ChromeHandle,
 	-- Damage numbers and the outcome banner, driven by Client/Combat/CombatFeedbackClient.lua from
 	-- the damage layer's Combat_Feedback event.
 	CombatFeedback: CombatFeedbackModule.CombatFeedbackHandle,
@@ -184,23 +198,56 @@ function UI.Mount(): UIHandles
 	local menus = Menus.Mount(scope, playerGui, clientState)
 	logger:debug("Menus mounted")
 
+	-- DEATH FEED FIRST, AND ONLY BECAUSE CHROME NEEDS ITS FACT. This screen is mounted here rather
+	-- than in the ambient cluster below because the UI mode is derived from whether the local player
+	-- is down, and a derived value cannot be wired to a handle that does not exist yet. Nothing about
+	-- the screen itself moved: it still builds one Surface for the death overlay and hands back a
+	-- tile, and that tile is added to TopRight in the same order relative to the fuel gauge as before
+	-- -- an Add is a separate call from a Mount, which is exactly why the two can be separated here.
+	local deathFeed, killFeedTile = DeathFeed.Mount(scope, playerGui, viewportScale)
+	logger:debug("DeathFeed mounted")
+
+	-- THE UI MODE, DERIVED FROM TWO FACTS THAT ALREADY EXIST. Nothing sets it -- see Shell/Chrome.lua
+	-- on why a mode a screen can assert is a mode that eventually gets stuck on. The modal half comes
+	-- through the Constants.Attributes.UiModalOpen seam that combat input already reads, rather than
+	-- through a second count of this file's own.
+	local chrome = Chrome.New(scope, {
+		ModalOpen = Chrome.ObserveModalGate(scope),
+		Dead = deathFeed.Dead,
+	})
+	logger:debug("Chrome mode wired")
+
 	-- THE REGION HOST GOES UP BEFORE ANY REGION-HOSTED SCREEN, because each of those returns a tile
 	-- that has to be handed somewhere. Held on a local and passed down, never cached at module scope
 	-- -- see Shell/Regions.lua's header for the hot-reload failure that rules the module-level cache
 	-- out (a destroyed-Instance reference that swallows every tile on the second Mount, with no error).
-	local regions = Regions.Mount(scope, playerGui, viewportScale)
+	--
+	-- `chrome` is passed as the host's yield, and it satisfies Regions' own RegionYield structurally
+	-- rather than by import -- neither module requires the other. That is the whole of plan 2.5: the
+	-- dock and the ambient tiles finally have something to step back FOR.
+	local regions = Regions.Mount(scope, playerGui, viewportScale, chrome)
+	regions:Add("TopRight", 10, killFeedTile)
 	logger:debug("Region host mounted")
+
+	-- THE ARMAMENT STATE IS BUILT BEFORE THE DOCK THAT RENDERS IT, which is the only ordering
+	-- constraint between these two lines. What comes back is three Fusion Values, not a tile: the
+	-- weapon readout used to be a Shell/Regions BottomLeft panel in the opposite corner, and is now
+	-- a plate bolted to the hotbar dock's left edge (Screens/HUD/ArmamentIsland.lua), built by the
+	-- file that owns the dock because the two share a seam.
+	--
+	-- Moving it out of BottomLeft also empties that region down to the helm console alone, which
+	-- retires the last of the left-edge crowding docs/architecture/2026-08-25-hud-shell-plan.md
+	-- section 2.1a is about -- two content-sized stacks sharing one screen edge with nothing
+	-- arbitrating between them. There is now one.
+	local weaponInventory, armament = WeaponInventoryModule.Mount(scope)
+	logger:debug("WeaponInventory mounted")
 
 	-- THE DOCK IS A TILE NOW, and it is mounted here rather than first because a tile needs somewhere
 	-- to go. BottomCentre has been reserved for it since Phase 1; Screens/HUD no longer owns a
 	-- ScreenGui, a ViewportScale.Compute or a hand-scaled bottom margin -- see that file's Mount
 	-- comment for what each of those three turned out to be a restatement of.
-	regions:Add("BottomCentre", 10, HUD.Mount(scope, clientState))
+	regions:Add("BottomCentre", 10, HUD.Mount(scope, clientState, armament))
 	logger:debug("HUD mounted")
-
-	local deathFeed, killFeedTile = DeathFeed.Mount(scope, playerGui, viewportScale)
-	regions:Add("TopRight", 10, killFeedTile)
-	logger:debug("DeathFeed mounted")
 
 	local combatFeedback = CombatFeedbackModule.Mount(scope, playerGui, viewportScale)
 	logger:debug("CombatFeedback mounted")
@@ -293,14 +340,11 @@ function UI.Mount(): UIHandles
 	regions:Add("TopLeft", 10, carriedResourcesTile)
 	logger:debug("CarriedResources mounted")
 
-	local weaponInventory, weaponInventoryTile = WeaponInventoryModule.Mount(scope)
-	regions:Add("BottomLeft", 10, weaponInventoryTile)
-	logger:debug("WeaponInventory mounted")
-
 	return {
 		ClientState = clientState,
 		ShiftLockEngaged = shiftLockEngaged,
 		DeathFeed = deathFeed,
+		Chrome = chrome,
 		CombatFeedback = combatFeedback,
 		DevMenu = devMenu,
 		Menus = menus,

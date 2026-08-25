@@ -3,10 +3,13 @@
 	Shell/Regions.lua
 
 	Owns: the six named screen regions, the single ScreenGui that hosts all of them, where each
-	region sits relative to its screen edge, and the order tiles stack in within one.
+	region sits relative to its screen edge, the order tiles stack in within one, and how the whole
+	ambient layer steps back when something is asked of the screen.
 
-	Does NOT own: what a tile contains, when a tile is visible, or how a tile enters. A tile is
-	handed in fully built; this file parents it and assigns its LayoutOrder, and that is all.
+	Does NOT own: what a tile contains, when a tile is visible for reasons of its own, or how a tile
+	enters. A tile is handed in fully built; this file parents it and assigns its LayoutOrder, and
+	that is all. It does not own the MODE either -- Shell/Chrome.lua decides what "a panel is open" or
+	"the player is dead" means; this file only knows what a dim and a hidden corner look like.
 
 	A REGION ALSO KEEPS OUT OF WHAT ITS NEIGHBOURS DRAW, and that is the second thing this file
 	arbitrates after who-stacks-with-whom. Both bottom CORNERS start above the dock band rather than in
@@ -93,9 +96,26 @@ export type RegionHost = {
 	-- Parents `tile` into `region` and gives it its place in that region's stack. Lower order sits
 	-- nearer the region's anchored edge, whichever edge that is.
 	Add: (self: RegionHost, region: Region, order: number, tile: GuiObject) -> (),
-	-- The one host ScreenGui. Exposed for Phase 3's yielding binding (the whole ambient layer steps
-	-- back as a unit) and for the specs -- not so callers can parent into it directly.
+	-- The one host ScreenGui. Exposed for the specs -- not so callers can parent into it directly.
 	Gui: ScreenGui,
+}
+
+-- HOW THE AMBIENT LAYER YIELDS, as two presentation values and nothing else. Shell/Chrome.lua's
+-- handle satisfies this structurally, which is the whole reason it is spelled out here rather than
+-- imported: this file has no opinion about what a "mode" is, only about what a dim and a hidden
+-- corner look like, and Chrome has no opinion about which regions are corners. Neither requires the
+-- other.
+--
+-- Optional at Mount. A spec that only asserts structure passes nothing and gets no scrim and no
+-- Visible binding at all, which is one fewer moving part in the tests that are not about yielding.
+export type RegionYield = {
+	-- 0 = the ambient layer is at full strength; 1 = fully behind the scrim. Read as a GOAL, not as an
+	-- animated value -- the tween that carries it lives here, at the pixels, so that Chrome stays
+	-- pure logic and is testable without a render pass.
+	Dim: Fusion.UsedAs<number>,
+	-- Whether the four CORNER regions are on screen at all. The two centre regions ignore it -- see
+	-- the Ambient flag on each spec below for which is which and why.
+	AmbientVisible: Fusion.UsedAs<boolean>,
 }
 
 -- Tokens.IsTouch, not a second UserInputService.TouchEnabled read of this file's own. Tokens.lua
@@ -185,6 +205,16 @@ local DOCK_BAND_REACH = 129
 -- read as separate surfaces rather than as a seam.
 local DOCK_BAND_CLEARANCE = EDGE_INSET + DOCK_BAND_REACH + EDGE_INSET
 
+-- How dark the ambient layer goes behind an open panel, at full dim. Not opaque, deliberately: the
+-- point of Chrome's Menu mode is that the dock STEPS BACK rather than vanishing (plan 2.5), so the
+-- player can still read their own vitals through it while a menu is up.
+local SCRIM_TRANSPARENCY = 0.45
+
+-- Above every tile in this host and nothing else. The tallest ZIndex any tile draws at is 6 (the
+-- armament island's seam bolt, which has to clear everything Panel.lua builds), so this is chosen for
+-- headroom rather than measured -- it only ever has to beat its siblings inside one ScreenGui.
+local SCRIM_ZINDEX = 50
+
 -- ROBLOX'S OWN TOP BAR, WHICH IS THIS FILE'S PROBLEM NOW. Phase 1 left the host without
 -- IgnoreGuiInset specifically so the six migrated screens' margins stayed byte-identical; Phase 2
 -- chose one coordinate space for every surface in the client (Shell/Surface.lua's header, plan 2.3)
@@ -217,6 +247,12 @@ type RegionSpec = {
 	AnchorScale: Vector2,
 	-- Extra bottom clearance on touch, for the two regions that sit under Roblox's own controls.
 	ClearsTouchControls: boolean,
+	-- Whether this region holds AMBIENT tiles -- the corner readouts that describe the world around
+	-- the player (carried resources, the fuel gauge, the helm console, the kill feed) rather than the
+	-- player's own controls. The four corners are; the two centre regions are not, because the dock is
+	-- the player and TopCentre is the announcement/notification channel, and neither should be taken
+	-- away by a mode change. This is what Chrome's Dead mode drops -- see RegionYield below.
+	Ambient: boolean,
 	-- Replaces the ordinary edge inset on the anchored edge. Only TopCentre uses one -- see
 	-- COMBAT_BANNER_BAND_BOTTOM above for the one thing it is clearing and why that is temporary.
 	EdgeInsetOverride: number?,
@@ -229,6 +265,7 @@ local REGION_SPECS: { [Region]: RegionSpec } = {
 		HorizontalAlignment = Enum.HorizontalAlignment.Left,
 		AnchorScale = Vector2.new(0, 0),
 		ClearsTouchControls = false,
+		Ambient = true,
 	},
 	TopCentre = {
 		AnchorPoint = Vector2.new(0.5, 0),
@@ -236,6 +273,10 @@ local REGION_SPECS: { [Region]: RegionSpec } = {
 		HorizontalAlignment = Enum.HorizontalAlignment.Center,
 		AnchorScale = Vector2.new(0.5, 0),
 		ClearsTouchControls = false,
+		-- NOT ambient, and it is the one region that stays up in every mode. A server announcement --
+		-- and, from Phase 6, a rank-up notification -- has to be able to reach a player who happens to
+		-- have a panel open or to be waiting out a respawn. A channel a mode can swallow is not one.
+		Ambient = false,
 		EdgeInsetOverride = COMBAT_BANNER_BAND_BOTTOM + EDGE_INSET,
 	},
 	TopRight = {
@@ -244,6 +285,7 @@ local REGION_SPECS: { [Region]: RegionSpec } = {
 		HorizontalAlignment = Enum.HorizontalAlignment.Right,
 		AnchorScale = Vector2.new(1, 0),
 		ClearsTouchControls = false,
+		Ambient = true,
 	},
 	BottomLeft = {
 		AnchorPoint = Vector2.new(0, 1),
@@ -251,6 +293,7 @@ local REGION_SPECS: { [Region]: RegionSpec } = {
 		HorizontalAlignment = Enum.HorizontalAlignment.Left,
 		AnchorScale = Vector2.new(0, 1),
 		ClearsTouchControls = true,
+		Ambient = true,
 		-- Starts above the dock band rather than in the corner -- see DOCK_BAND_CLEARANCE. This is the
 		-- region the armament island was rendering into.
 		EdgeInsetOverride = DOCK_BAND_CLEARANCE,
@@ -263,6 +306,9 @@ local REGION_SPECS: { [Region]: RegionSpec } = {
 		-- The dock sits BETWEEN the thumbstick and the jump button, not under either, so it takes the
 		-- ordinary edge inset. Lifting it too would be a mobile layout decision, not a clearance.
 		ClearsTouchControls = false,
+		-- The dock is the player's own controls, not a readout about the world, so it survives Dead --
+		-- an empty health bar and a spent hotbar are things a dead player is meant to be looking at.
+		Ambient = false,
 	},
 	BottomRight = {
 		AnchorPoint = Vector2.new(1, 1),
@@ -270,6 +316,7 @@ local REGION_SPECS: { [Region]: RegionSpec } = {
 		HorizontalAlignment = Enum.HorizontalAlignment.Right,
 		AnchorScale = Vector2.new(1, 1),
 		ClearsTouchControls = true,
+		Ambient = true,
 		-- Empty today, and it takes the clearance anyway. The dock's right edge is only 12px clear of
 		-- this column at the reference resolution, so the FIRST tile to claim this corner would land
 		-- in the dock's shadow the way the helm console landed in the island's -- and it would land
@@ -316,7 +363,12 @@ local Regions = {}
 -- Builds the host ScreenGui and its six region frames on the scope it is given. Takes the scope as
 -- an argument and holds nothing globally -- see the memoization note in this file's header for the
 -- specific failure that rules out doing it any other way.
-function Regions.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.UsedAs<number>): RegionHost
+function Regions.Mount(
+	scope: Scope,
+	playerGui: PlayerGui,
+	scale: Fusion.UsedAs<number>,
+	yield: RegionYield?
+): RegionHost
 	local frames: { [Region]: Frame } = {}
 	local topBarInset = Surface.TopBarInset()
 
@@ -332,6 +384,10 @@ function Regions.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.UsedAs<
 			Size = UDim2.fromOffset(0, 0),
 			AutomaticSize = Enum.AutomaticSize.XY,
 			BackgroundTransparency = 1,
+			-- nil, not `true`, for a centre region or an unyielded host: Fusion leaves the property at
+			-- its default rather than binding anything, so the two regions that must never be taken
+			-- away have no binding that could take them away.
+			Visible = if yield ~= nil and spec.Ambient then yield.AmbientVisible else nil,
 
 			[Children] = scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
@@ -352,13 +408,50 @@ function Regions.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.UsedAs<
 	-- The host is also where IgnoreGuiInset now comes from, rather than being omitted here as it was
 	-- through Phase 1 -- see topBarInset above for what that costs the top-anchored regions and why
 	-- it moves none of them at scale 1.0.
+	-- THE SCRIM: how the ambient layer steps back behind an open panel, and the answer to plan 2.5.
+	--
+	-- A SHEET OVER THE LAYER, NOT A TRANSPARENCY ON IT, and that is forced rather than chosen. Roblox
+	-- offers exactly one way to fade a subtree as a unit -- a CanvasGroup -- and a CanvasGroup CLIPS
+	-- its descendants to its own bounds. BottomCentre's tile deliberately pins the armament island at
+	-- x = -224, outside the region frame it lives in (Screens/HUD/init.lua's dock band note explains
+	-- why the dock cannot be allowed to move for it), so a CanvasGroup region would clip the island
+	-- away the moment it was introduced. A full-bleed sheet drawn over the whole host has no such
+	-- constraint, costs one Frame, and dims the world along with the chrome -- which is what an
+	-- elevated panel wants behind it anyway.
+	--
+	-- IT DOES NOT SWALLOW INPUT. A plain Frame is invisible to Roblox's hit-testing unless it is
+	-- Active or a GuiButton (Components/ModalScreen.lua's header has the long version), so the dock's
+	-- ability slots underneath stay clickable. They are gated by Constants.Attributes.UiModalOpen
+	-- anyway while this is up; the point is that the scrim adds no second, quieter gate of its own.
+	--
+	-- THE TWEEN IS ON THE GOAL, NOT DOWNSTREAM OF IT. The Computed below runs on mode EDGES only and
+	-- the tween carries its output straight into a property -- so there is no Computed recomputing
+	-- per frame while it travels, which is plan 11 rule 5 (VitalIcon's "exactly 0 when nothing is
+	-- happening" standard). EnterTween rather than a fourth spring, per the plan: this is a whole
+	-- surface arriving, and it should move on the same curve as the panel arriving on top of it.
+	local scrim = if yield ~= nil
+		then scope:New "Frame" {
+			Name = "Scrim",
+			Size = UDim2.fromScale(1, 1),
+			BackgroundColor3 = Tokens.Color.Background,
+			BackgroundTransparency = scope:Tween(
+				scope:Computed(function(use)
+					return 1 - use(yield.Dim) * (1 - SCRIM_TRANSPARENCY)
+				end),
+				Tokens.Motion.EnterTween
+			),
+			BorderSizePixel = 0,
+			ZIndex = SCRIM_ZINDEX,
+		}
+		else nil
+
 	local gui = Surface.New(scope, {
 		Name = "Regions",
 		Layer = Layers.Regions,
 		Parent = playerGui,
 		Scaled = true,
 		Scale = scale,
-		Children = frames,
+		Children = { frames, scrim },
 	})
 
 	local host = {} :: RegionHost

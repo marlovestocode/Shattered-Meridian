@@ -13,7 +13,7 @@ assert they cannot happen.
 - [x] **Phase 0** — Baseline and guardrails
 - [x] **Phase 1** — `Layers.lua` + `Regions.lua`, six panels migrated
 - [x] **Phase 2** — `Surface.lua`, every remaining ScreenGui migrated
-- [ ] **Phase 3** — `Chrome.lua` mode + HUD yielding
+- [x] **Phase 3** — `Chrome.lua` mode + HUD yielding
 - [ ] **Phase 4** — `Chrome.lua` Escape stack
 - [ ] **Phase 5** — `Reveal.lua`, five entrances unified
 - [ ] **Phase 6** — `Notify.lua` + the `TierPromotion` producer
@@ -120,6 +120,53 @@ What Phase 1 does change is that the collision becomes describable: it moves fro
 each believe they own a free corner" to "the left edge is oversubscribed at short viewport heights",
 which is a statement about a layout with a named owner rather than about two files that never heard
 of each other.
+
+### 2.1b The bottom edge oversubscribed itself, at the resolution this UI is authored against
+
+**Found by screenshot 2026-08-25, after Phase 2. FIXED in the same pass as Phase 3, as a separate
+commit.** Not a Phase 1 regression and not something the region table got wrong — a new occupant
+arrived on an edge and nothing was watching it, which is §2.1's shape a third time.
+
+The armament island (`Screens/HUD/ArmamentIsland.lua`) is pinned at `x = -224` inside the dock band,
+outside the `BottomCentre` tile's own bounds, so that the dock cannot be shoved sideways to make room
+for it. That is right, and the file's header argues for it well. What nobody costed is where the far
+end of it lands:
+
+```
+dock width                        870   (measured, not estimated)
+viewport                         1366   (ViewportScale.REFERENCE_WIDTH — scale is exactly 1.0 here)
+dock left edge      (1366-870)/2 = 248
+island left edge      248 - 224  =  24
+BottomLeft column          16 .. 236    (Space.L inset + the helm console's 220px panel)
+```
+
+212px of a 220px panel, covered. Vertically they coincide too: the island occupies 47..145 above the
+bottom edge, the helm console 16..162. So at the reference resolution — the one every pixel in this
+UI is authored against, and a very ordinary windowed Studio size — the weapon plate renders straight
+through the helm's control legend. It clears at 1920 (island left edge 336, 100px of air) and
+collides at anything narrower, which is why it was not caught by the Phase 1 screenshots.
+
+**§2.1a's premise is now live again, for a different reason.** That entry was about `TopLeft` and
+`BottomLeft` growing into each other on a shared *vertical* column, and was retracted when the helm's
+inflation bug was fixed. This is a *horizontal* version of the same thing between `BottomLeft` and
+`BottomCentre`, and unlike §2.1a it is not a short-viewport corner case.
+
+**Fixed in `Regions.lua`, not at either tile.** Both bottom *corner* regions now start above the dock
+band rather than in the corner: `DOCK_BAND_CLEARANCE` = `BottomCentre`'s own edge inset (16) + the
+dock band's measured reach above it (129 = the key legend's 31 plus the band's 98) + one more edge
+inset of air = 161px. The alternatives were moving the island (it is one half of a joint with the
+dock and has one owner) or narrowing the helm (a content decision to fix a layout bug), and the
+region layer is the one place that can state "another surface draws on this strip" once for every
+tile that will ever sit there — which is the same job `COMBAT_BANNER_BAND_BOTTOM` does at `TopCentre`.
+
+`BottomRight` takes the clearance too, though it is empty. The dock's right edge is only 12px clear
+of that column at the reference resolution, so the *first* tile to claim the corner would land in the
+dock's shadow for exactly the reason the helm landed in the island's.
+
+**Unlike `COMBAT_BANNER_BAND_BOTTOM`, this constant is guarded.** That one's own comment admits "if
+either banner's YOffset or its height changes, this has to change with it, and nothing will tell
+you." `Tests/UI/ShellRegions.spec.lua` mounts the dock with an island, measures the band's real top
+off a live layout pass, and fails naming the new number if either corner stops clearing it.
 
 ### 2.2 `DisplayOrder` is set by 4 of 17 surfaces
 
@@ -404,6 +451,11 @@ set by hand:
 ```
 Playing | Menu | Cinematic | Dead | Boot
 ```
+
+**THREE OF THESE SHIPPED, AND THE OTHER TWO ARE UNREACHABLE** — `Main.client.lua` finishes the whole
+boot/intro sequence before `UI.Mount()` is called at all, so `Chrome` never exists while a `Cinematic`
+or `Boot` surface is up. Corrected at Phase 3 rather than deleted here, because this line is what a
+reader would otherwise trust. See that phase's build notes.
 
 `Menu` comes off the existing `UiModalOpen` count. `Dead` comes off `DeathFeed`'s existing state.
 `Cinematic` and `Boot` come off `Onboarding`/`Intro`, which already gate themselves. Nothing new is
@@ -784,27 +836,89 @@ hand-measured panels inside a phase whose stated risk is "one property set per s
 
 ### Build
 
-- [ ] `UI/Shell/Chrome.lua` with the five-value mode from §3.4, derived only from existing facts.
-- [ ] `Chrome.Mode` is a `Computed`, not a Value anything writes — if a mode needs a fact nobody
-      publishes, publish that fact at its own owner rather than letting screens set the mode.
-- [ ] Yield bindings on the region host and the dock. Transparency via `Reveal`'s spring if Phase 5
-      has landed, otherwise a plain `Tokens.Motion` tween — do not hand-roll a third spring here.
-- [ ] Decide and record open question §11.2 (does `Dead` dim or hide the ambient region).
+- [x] `UI/Shell/Chrome.lua`, derived only from existing facts.
+- [x] `Chrome.Mode` is a `Computed`, not a Value anything writes. `Tests/UI/Chrome.spec.lua` asserts
+      the absence of a `set` on all three exposed values rather than only commenting it.
+- [x] Yield bindings on the region host. Phase 5 has not landed, so the motion is a plain
+      `Tokens.Motion.EnterTween` — and it lives in `Regions.lua` on the *goal*, not in `Chrome`,
+      which is what leaves `Chrome` testable with no render pass and keeps §11 rule 5 (no `Computed`
+      recomputing per frame downstream of an animated value).
+- [x] §14.2 decided — see below.
 
 ### Wire
 
-- [ ] `Menu` off the existing `UiModalOpen` count — read it, do not add a parallel counter.
-- [ ] `Dead` off `DeathFeed`'s existing handle.
-- [ ] `Cinematic` / `Boot` off `Onboarding` and `Intro`.
-- [ ] `UI/init.lua` constructs `Chrome` after the region host and before any screen registers.
+- [x] `Menu` off the existing `UiModalOpen` count, read through the Attribute seam
+      (`Chrome.ObserveModalGate`). No parallel counter, and no `require` from `Shell/` into
+      `Components/`.
+- [x] `Dead` off `DeathFeed`'s handle, which gained a `Dead: Computed<boolean>` off the same Value
+      that already drives the respawn overlay.
+- [x] ~~`Cinematic` / `Boot` off `Onboarding` and `Intro`~~ — **STRICKEN, they are unreachable.**
+- [x] `UI/init.lua` constructs `Chrome` after its inputs and before the region host. The plan said
+      "after the region host"; it cannot be, because the host is what yields to it. `DeathFeed.Mount`
+      moved several blocks earlier for the same reason — a `Mount` and an `Add` are separate calls, so
+      the kill feed still joins `TopRight` at order 10 exactly as before.
 
 ### Verify
 
-- [ ] `Tests/UI/Chrome.spec.lua`: every mode transition; mode is derived, never set.
-- [ ] Studio: open the character menu — dock dims, does not vanish, and returns cleanly.
-- [ ] Studio: die — dock stays, ambient tiles go per the §11.2 decision.
-- [ ] Studio: intro cinematic — dock and region host both hidden, both return.
-- [ ] Confirm no `RunService` connection was added (§8 rule 1).
+- [x] `Tests/UI/Chrome.spec.lua`: every mode transition in both directions, both orders of the
+      Dead/Menu stack, and the no-`set` assertion. Plus one end-to-end case that drives
+      `DeathFeed.ShowDeath` and asserts the *mode*, so the two cannot drift apart.
+- [x] `Tests/UI/ShellRegions.spec.lua` gained the host half: the four corner regions drop and the two
+      centre ones are provably not bound to anything, and the scrim darkens and clears again.
+- [ ] Studio: open the character menu — dock dims, does not vanish, and returns cleanly. **Needs a
+      human.**
+- [ ] Studio: die — dock stays, ambient tiles go. **Needs a human.**
+- [x] ~~Studio: intro cinematic~~ — nothing to verify; see below.
+- [x] No `RunService` connection added. Both inputs change on edges that already exist (an Attribute
+      write, a Fusion Value set); the tween rides Fusion's own scheduler like every existing spring.
+
+### Two modes were dropped, and they were not merely unused
+
+The plan specced `Playing | Menu | Cinematic | Dead | Boot`. `Cinematic` and `Boot` are **not
+reachable from anywhere `Chrome` exists.** `Main.client.lua` runs `StartMenuClient.Run()`, then
+`LoadingClient.Run()`, then `IntroClient.Run()` — which blocks through the entire cinematic and
+character creator — and only *then* calls `UI.Mount()`. Every surface those two modes describe has
+been torn down before this module is constructed, and the dock they would hide has not been built.
+
+That also **retracts a clause of §2.5**: "the dock renders at full opacity ... during the intro
+cinematic" is false. There is no dock during the intro cinematic.
+
+Declaring them anyway would have meant two branches no session can enter and no spec can drive. The
+day something runs a cinematic *after* boot, it publishes that fact at its own owner and this file
+grows one `Computed` branch and one spec case.
+
+### §14.2 decided — `Dead` hides the ambient corners, `Menu` dims everything
+
+`Menu` puts a scrim over the whole host (the dock included) and takes nothing away — the plan's own
+verify step asks for "dims, does not vanish", and combat input is already hard-gated by
+`UiModalOpen`, so nothing behind it is actionable anyway. `Dead` hides the four corner regions and
+keeps the dock: the corner tiles describe a world the player is not standing in, while an empty
+health bar and a spent hotbar are things a dead player is meant to be looking at.
+
+`TopCentre` yields to neither. It is the announcement channel and, from Phase 6, the notification
+channel — a channel a mode can swallow is not a channel.
+
+### A scrim, because a `CanvasGroup` would have clipped the island away
+
+The mechanism is worth recording, because the obvious one is wrong here in a way that only shows up
+at the pixels. Roblox offers exactly one way to fade a subtree as a unit — a `CanvasGroup` — and a
+`CanvasGroup` **clips its descendants to its own bounds**. `BottomCentre`'s tile deliberately pins
+the armament island at `x = -224`, outside the region frame it lives in (§2.1b), so a `CanvasGroup`
+region would delete the island from the screen the moment it was introduced. One host-wide
+`CanvasGroup` avoids the clipping but cannot do `Dead` at all, which needs per-region control.
+
+A full-bleed `Frame` drawn over the six regions has neither problem, costs one Instance, and dims the
+world along with the chrome — which is what an elevated panel wants behind it. It does not swallow
+input: a plain `Frame` is invisible to Roblox's hit-testing unless it is `Active` or a `GuiButton`
+(`ModalScreen.lua`'s header has the long version).
+
+### `Dead` outranks `Menu`, and the cost is real
+
+The mode is one value, so a player killed with the character menu open reads as `Dead`: the corner
+tiles drop (right) and the scrim lifts (wrong — the panel is still up, over an undimmed screen, until
+it is closed or the respawn lands). Deriving each binding from the raw facts instead of from the mode
+composes correctly and was rejected because it leaves the mode with **no consumer at all**, which is
+how a value Phase 4's Escape stack depends on quietly rots before Phase 4 arrives.
 
 ---
 
@@ -976,8 +1090,10 @@ is a regression this plan introduced; exit 1 on its own is not.
 1. **Does `UIListLayout` skip invisible children?** Load-bearing for §3.2 only if a region ever relies
    on `Visible` alone. The plan drives both `Visible` and height so it never has to be answered — but
    it is four seconds in the Storybook and worth settling. *Owner: Phase 1.*
-2. **Does `Dead` hide the ambient region or dim it?** A design call, not a technical one. Phase 3 has
-   to pick one and the philosophy doc does not cover the death state. *Owner: Phase 3.*
+2. ~~**Does `Dead` hide the ambient region or dim it?**~~ **DECIDED 2026-08-25 — `Dead` hides the
+   four corner regions and keeps the dock; `Menu` dims everything and hides nothing; `TopCentre`
+   yields to neither.** Rationale, and the mechanism that forced a scrim rather than a `CanvasGroup`,
+   are recorded in Phase 3's build notes. *Owner: Phase 3, closed.*
 3. **Should the Escape stack have a "modal Escape wins over game Escape" rule on gamepad?** No gamepad
    support exists today, so this is deferred rather than designed blind. Settings' existing
    `ButtonStart` handling is the only gamepad path and it stays local. *Owner: deferred.*
@@ -989,7 +1105,12 @@ is a regression this plan introduced; exit 1 on its own is not.
    note). With that fixed, the bottom-left stack and the top-left tile fit on a ~795px viewport with
    room to spare, and none of the options below need choosing today.
 
-   What survives is the narrow original observation and nothing more: `TopLeft` and `BottomLeft`
+   **AND THEN THE EDGE OVERSUBSCRIBED ITSELF ANYWAY, HORIZONTALLY — see §2.1b.** The question was
+   right and only its axis was wrong: what reached into `BottomLeft` was not the top-left tile
+   growing downward, it was the armament island reaching left out of `BottomCentre`. Answered there
+   by the region layer arbitrating the shared strip, rather than by any of the four options below.
+
+   What survives of the original vertical observation, and nothing more: `TopLeft` and `BottomLeft`
    share the `x = Space.L` column and both grow by content, so a tall enough bottom-left stack can
    still reach the top-left tile — on a short viewport, with a future third tile, or if the helm
    grows. That is a thing to watch, not a thing to fix now. The options are kept below for whoever

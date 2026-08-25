@@ -282,6 +282,101 @@ return function()
 		end
 	end)
 
+	describe("the ambient layer yields to the mode", function()
+		-- Plan 2.5: the dock renders at full opacity behind every modal, through the death overlay,
+		-- and nothing can ask it to step back. Phase 3 gives it something to step back for. What is
+		-- asserted here is the HOST half -- that the two presentation values Shell/Chrome.lua derives
+		-- actually reach pixels, and that they reach the RIGHT ones. Chrome's own logic is next door
+		-- in Tests/UI/Chrome.spec.lua.
+		--
+		-- THE TWO CENTRE REGIONS ARE THE POINT OF HALF OF THIS. BottomCentre is the dock -- the
+		-- player's own controls, which a dead player is meant to be looking at -- and TopCentre is the
+		-- announcement channel, which must be able to reach a player who has a panel open. Neither may
+		-- be taken away by a mode, and "was never bound to it" is a stronger guarantee than "is bound
+		-- to something that happens to be true".
+		local AMBIENT = { "TopLeft", "TopRight", "BottomLeft", "BottomRight" }
+		local NEVER_YIELDS = { "TopCentre", "BottomCentre" }
+
+		local function mountYielded(): (Fusion.Value<number>, Fusion.Value<boolean>, ScreenGui)
+			local scope = Fusion.scoped(Fusion)
+			local dim: Fusion.Value<number> = scope:Value(0)
+			local ambientVisible: Fusion.Value<boolean> = scope:Value(true)
+			local host = Regions.Mount(scope, fakePlayerGui(), 1, { Dim = dim, AmbientVisible = ambientVisible })
+			return dim, ambientVisible, host.Gui
+		end
+
+		local function regionFrame(gui: ScreenGui, region: string): Frame
+			local frame = gui:FindFirstChild(region) :: Frame
+			expect(frame).to.be.ok()
+			return frame
+		end
+
+		it("drops the four corner regions and keeps the two centre ones", function()
+			local _dim, ambientVisible, gui = mountYielded()
+
+			ambientVisible:set(false)
+			for _, region in AMBIENT do
+				expect(regionFrame(gui, region).Visible).to.equal(false)
+			end
+			for _, region in NEVER_YIELDS do
+				expect(regionFrame(gui, region).Visible).to.equal(true)
+			end
+
+			-- Back up on respawn. The close edge, asserted for the same reason Chrome.spec asserts
+			-- every one of its own.
+			ambientVisible:set(true)
+			for _, region in AMBIENT do
+				expect(regionFrame(gui, region).Visible).to.equal(true)
+			end
+		end)
+
+		it("draws a scrim over the whole host that clears again", function()
+			local dim, _ambientVisible, gui = mountYielded()
+
+			local scrim = gui:FindFirstChild("Scrim") :: Frame
+			expect(scrim).to.be.ok()
+			-- Full-bleed, so it covers the world between the tiles as well as the tiles -- see the
+			-- scrim note in Shell/Regions.lua on why a sheet over the layer rather than a CanvasGroup
+			-- around it (a CanvasGroup clips, and BottomCentre's island lives outside its region).
+			expect(scrim.Size).to.equal(UDim2.fromScale(1, 1))
+			-- Invisible at rest, and that is asserted rather than assumed: a scrim that starts even
+			-- slightly opaque is a permanent veil over live gameplay that nobody would think to look
+			-- for.
+			expect(scrim.BackgroundTransparency).to.equal(1)
+
+			-- The tween needs real elapsed frames, which this place does step -- unlike the note
+			-- Tests/UI/Hotbar.spec.lua carries, whose springs are simply never given any. 0.35s of
+			-- EnterTween is about 21 frames at 60Hz; 40 is slack for a slow one.
+			dim:set(1)
+			for _ = 1, 40 do
+				RunService.Heartbeat:Wait()
+			end
+			-- Darkened, but NOT opaque. How dark exactly is Shell/Regions.lua's to tune, so this
+			-- asserts the two properties that would make it wrong rather than the value itself.
+			expect(scrim.BackgroundTransparency < 1).to.equal(true)
+			expect(scrim.BackgroundTransparency > 0).to.equal(true)
+
+			dim:set(0)
+			for _ = 1, 40 do
+				RunService.Heartbeat:Wait()
+			end
+			expect(scrim.BackgroundTransparency).to.equal(1)
+		end)
+
+		it("builds no scrim and binds nothing when it is given no mode", function()
+			-- The unyielded host every other spec in this file mounts. Worth stating: a host with no
+			-- yield must be the pre-Phase-3 host exactly, or the specs around it are testing something
+			-- the client does not run.
+			local scope = Fusion.scoped(Fusion)
+			local host = Regions.Mount(scope, fakePlayerGui(), 1)
+
+			expect(host.Gui:FindFirstChild("Scrim")).to.equal(nil)
+			for _, region in AMBIENT do
+				expect(regionFrame(host.Gui, region).Visible).to.equal(true)
+			end
+		end)
+	end)
+
 	describe("region-hosted screens do not own a render layer", function()
 		-- The other half of 3.2, and the half that actually resolves 2.1. Two tiles in two different
 		-- ScreenGuis would still overlap however the bands are ordered -- a z-order ladder alone only

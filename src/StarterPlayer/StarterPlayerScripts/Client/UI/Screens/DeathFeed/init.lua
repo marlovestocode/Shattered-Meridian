@@ -73,6 +73,11 @@ export type DeathFeedHandle = {
 	-- environmental/non-attributed death -- see DeathOverlay.DeathOverlayDisplay's own header.
 	ShowDeath: (killerName: string?) -> (),
 	ClearDeath: () -> (),
+	-- Whether the local player is down right now, off the same Value that drives the overlay above --
+	-- so the two can never disagree. Read by Shell/Chrome.lua, which turns it into the Dead UI mode;
+	-- exposed rather than duplicated because "is this player dead" is this screen's fact to publish
+	-- and Chrome's rule is that it derives modes rather than being told them.
+	Dead: Fusion.Computed<boolean>,
 	-- Whether the kill feed tile is in its region's stack at all. False, and nothing sets it true --
 	-- the feed has had no producer since the combat rewrite. See the note at its construction below
 	-- for what a future producer has to do besides parenting rows in.
@@ -154,6 +159,13 @@ function DeathFeed.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.UsedA
 	-- no children is not free once it is in a stack: it still takes the region's tile gap, which would
 	-- shift the fuel gauge down by 8px for no visible reason. That is exactly the kind of thing a
 	-- comment does not prevent, which is why it is a handle field rather than a note.
+	-- See the handle's Dead field. A Computed rather than a second Value for the usual reason: a
+	-- second Value is a second edge somebody has to remember to set, and showDeath/clearDeath above
+	-- already have exactly one.
+	local dead = scope:Computed(function(use): boolean
+		return use(deathDisplay) ~= nil
+	end)
+
 	local killFeedVisible: Fusion.Value<boolean> = scope:Value(false)
 
 	local killFeedTile = scope:New "Frame" {
@@ -172,10 +184,12 @@ function DeathFeed.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.UsedA
 	} :: Frame
 
 	return {
+		Dead = dead,
 		ShowDeath = showDeath,
 		ClearDeath = clearDeath,
 		KillFeedVisible = killFeedVisible,
-	}, killFeedTile
+	},
+		killFeedTile
 end
 
 return DeathFeed
