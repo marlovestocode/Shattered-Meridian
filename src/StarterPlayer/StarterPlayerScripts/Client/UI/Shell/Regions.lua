@@ -145,29 +145,23 @@ local EDGE_INSET = Tokens.Space.L
 -- which recorded that boundary as the reason this option was chosen over the alternatives.
 local TOUCH_CONTROL_CLEARANCE = Tokens.Control.TouchTargetSize * 3
 
--- TopCentre starts BELOW the combat banner band, not at the ordinary edge inset. Two centred banners
--- are drawn above it by a DIFFERENT surface: Components/PostureBreakBanner.lua's StatusBanner sits at
--- Tokens.Space.XXL + YOffset and is 64px tall, and Screens/CombatFeedback mounts it twice -- posture
--- break at YOffset 0, disarmed at YOffset 72. The band therefore ends at 32 + 72 + 64 = 168, and the
--- announcement banner sits exactly one edge inset below it, at 184.
+-- COMBAT_BANNER_BAND_BOTTOM USED TO LIVE HERE, AND ITS DELETION IS THE POINT RATHER THAN A TIDY-UP.
+-- It was TopCentre's EdgeInsetOverride of 168 -- a hardcoded dodge of two centred combat banners that
+-- a DIFFERENT surface (Screens/CombatFeedback) drew above this host, so that the announcement banner
+-- could clear something it had no other way to know about. Its own note admitted the cost: "this is
+-- the one constant in this file that can rot: if either banner's YOffset or its height changes, this
+-- has to change with it, and nothing will tell you."
 --
--- 184 IS FINALLY THE NUMBER IT CLAIMED TO BE, as of Phase 2. CombatFeedback has always been
--- IgnoreGuiInset = true and this host was not, so the two banners it clears were measured from the
--- true top of the screen while the announcement was measured from below Roblox's top bar -- 184
--- rendering at 220, a 36px gap that no line in either file mentioned. That is plan §2.3 in one
--- concrete pair of numbers ("the margins were authored to match and do not"). Both surfaces are in
--- one coordinate space now, so the announcement moves UP by the top bar's height and lands where it
--- was always written to land. It is the one tile this phase deliberately moves.
+-- IT HAD ALREADY ROTTED BY THE TIME IT WAS DELETED, which is the part worth keeping. The comment
+-- described two banners, at YOffset 0 and 72; Screens/CombatFeedback mounted exactly ONE, at no
+-- offset. So the announcement banner had been clearing 72px of band that did not exist, and nothing
+-- did tell anyone -- the constant went stale in precisely the manner its own note predicted.
 --
--- THE TWO NUMBERS BELOW ARE OWNED ELSEWHERE and are duplicated here rather than imported, because
--- Shell/ must not require Components/ -- the dependency runs the other way everywhere else in this
--- tree. This is the one constant in this file that can rot: if either banner's YOffset or its height
--- changes, this has to change with it, and nothing will tell you.
---
--- IT IS ALSO MEANT TO BE TEMPORARY. It exists only because CombatFeedback is still a separate surface
--- placing its own banners absolutely. The moment those two banners become TopCentre tiles, the stack
--- orders them against the announcement for free and this constant is deleted rather than adjusted.
-local COMBAT_BANNER_BAND_BOTTOM = Tokens.Space.XXL + 72 + 64
+-- Phase 6 of docs/architecture/2026-08-25-hud-shell-plan.md made that banner a TopCentre tile at
+-- order 5, so the stack orders it against the announcement (10) and the notification channel (20)
+-- for free, and TopCentre takes the ordinary edge inset like every other region. The general lesson
+-- is the one this whole module exists for: a region that has to know what a neighbouring SURFACE
+-- draws is a region whose neighbour should have been a tile.
 
 -- Gap between two tiles stacked in the same region. Only ever paid when a region actually holds two
 -- VISIBLE tiles: a UIListLayout excludes children whose Visible is false, so a hidden tile costs
@@ -190,14 +184,19 @@ local TILE_GAP = Tokens.Space.S
 -- SO THE BOTTOM CORNERS START ABOVE THE DOCK BAND, and that is the fix rather than moving the island
 -- or narrowing the helm: the island cannot move (it is one half of a joint with the dock, see its own
 -- header), and a region layer that lets a tile grow into a strip another tile already occupies is
--- exactly the arbitration this module exists to do. The same shape as COMBAT_BANNER_BAND_BOTTOM
--- above -- "another surface draws on this edge, so tiles on it start further in".
+-- exactly the arbitration this module exists to do. The same shape as the deleted
+-- COMBAT_BANNER_BAND_BOTTOM above -- "another surface draws on this edge, so tiles on it start
+-- further in".
 --
--- UNLIKE COMBAT_BANNER_BAND_BOTTOM, THIS ONE IS GUARDED. That constant's own note says "if either
--- banner's YOffset or its height changes, this has to change with it, and nothing will tell you."
--- Tests/UI/ShellRegions.spec.lua tells you about this one: it mounts the dock for real, measures the
--- reach off a live layout pass, and fails if BottomLeft no longer clears it. Retune the legend or the
--- dock's height and the spec fails naming the new number.
+-- THE DIFFERENCE IS THAT THIS ONE IS GUARDED, and that difference is why one of the two is still
+-- here. COMBAT_BANNER_BAND_BOTTOM had no test and went stale without anyone noticing;
+-- Tests/UI/ShellRegions.spec.lua mounts the dock for real, measures the reach off a live layout pass,
+-- and fails if BottomLeft no longer clears it. Retune the key legend or the dock height and the spec
+-- fails naming the new number.
+--
+-- The better fix is still the one Phase 6 applied to the other constant -- make the neighbour a tile
+-- so no clearance is needed. That is not available here: the island IS a tile, just one that draws
+-- outside its own region deliberately, because it is one half of a joint with the dock.
 local DOCK_BAND_REACH = 129
 
 -- Where a bottom CORNER region's stack starts, measured from the bottom of the screen: BottomCentre's
@@ -253,8 +252,9 @@ type RegionSpec = {
 	-- the player and TopCentre is the announcement/notification channel, and neither should be taken
 	-- away by a mode change. This is what Chrome's Dead mode drops -- see RegionYield below.
 	Ambient: boolean,
-	-- Replaces the ordinary edge inset on the anchored edge. Only TopCentre uses one -- see
-	-- COMBAT_BANNER_BAND_BOTTOM above for the one thing it is clearing and why that is temporary.
+	-- Replaces the ordinary edge inset on the anchored edge. The two bottom CORNERS use one, to clear
+	-- the dock band (DOCK_BAND_CLEARANCE). TopCentre used to and no longer does, which was Phase 6's
+	-- companion cleanup -- the note standing where that constant stood says what it cost.
 	EdgeInsetOverride: number?,
 }
 
@@ -273,11 +273,14 @@ local REGION_SPECS: { [Region]: RegionSpec } = {
 		HorizontalAlignment = Enum.HorizontalAlignment.Center,
 		AnchorScale = Vector2.new(0.5, 0),
 		ClearsTouchControls = false,
-		-- NOT ambient, and it is the one region that stays up in every mode. A server announcement --
-		-- and, from Phase 6, a rank-up notification -- has to be able to reach a player who happens to
-		-- have a panel open or to be waiting out a respawn. A channel a mode can swallow is not one.
+		-- NOT ambient, and it is the one region that stays up in every mode. A server announcement, a
+		-- rank-up notification and a posture-break banner all have to be able to reach a player who
+		-- happens to have a panel open or to be waiting out a respawn. A channel a mode can swallow is
+		-- not one.
+		--
+		-- Three tiles now, and no EdgeInsetOverride: the combat banner is one of them (order 5) rather
+		-- than something drawn above this host that the announcement had to dodge.
 		Ambient = false,
-		EdgeInsetOverride = COMBAT_BANNER_BAND_BOTTOM + EDGE_INSET,
 	},
 	TopRight = {
 		AnchorPoint = Vector2.new(1, 0),

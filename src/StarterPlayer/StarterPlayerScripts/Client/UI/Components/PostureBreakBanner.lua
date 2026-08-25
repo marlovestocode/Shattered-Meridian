@@ -40,8 +40,14 @@ export type StatusBannerProps = {
 	-- nil = nothing to show right now = hidden.
 	Display: UsedAs<StatusBannerDisplay?>,
 	-- Vertical offset from the top of the screen (Tokens.Space units) -- lets two banners stack
-	-- without overlapping if more than one is ever active at once.
+	-- without overlapping if more than one is ever active at once. Ignored when Tiled is true.
 	YOffset: number?,
+	-- TRUE = this banner is a Shell/Regions tile and MUST NOT PLACE ITSELF. A region frame's
+	-- UIListLayout writes Position on every child on every layout pass, so a self-placing tile either
+	-- fights the layout or silently loses -- see Components/Reveal.lua's header for the long version
+	-- of the same constraint. Screens/CombatFeedback passes this; Client/Intro/IntroClient does not,
+	-- because its greeting banner is on its own boot surface with no region host in existence yet.
+	Tiled: boolean?,
 }
 
 -- One-shot entrance -- "high-impact" per the doc without becoming a repeating flash. Values live
@@ -78,8 +84,10 @@ local function StatusBanner(scope: Scope, props: StatusBannerProps): Frame
 
 	return Panel(scope, {
 		Name = "StatusBanner",
-		AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.new(0.5, 0, 0, Tokens.Space.XXL + (props.YOffset or 0)),
+		-- nil, not a default, when tiled: Fusion leaves the property alone rather than writing one the
+		-- region's layout would then have to overwrite.
+		AnchorPoint = if props.Tiled then nil else Vector2.new(0.5, 0),
+		Position = if props.Tiled then nil else UDim2.new(0.5, 0, 0, Tokens.Space.XXL + (props.YOffset or 0)),
 		Size = UDim2.fromOffset(300, 64),
 		Visible = isVisible,
 		Elevated = true,

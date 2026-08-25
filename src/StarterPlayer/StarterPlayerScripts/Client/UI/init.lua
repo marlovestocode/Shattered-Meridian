@@ -82,6 +82,7 @@ local KitEditorModule = require(script.Screens.KitEditor)
 local LiveConsoleModule = require(script.Screens.LiveConsole)
 local BugReportModule = require(script.Screens.BugReport)
 local AnnouncementModule = require(script.Screens.Announcement)
+local NotificationsModule = require(script.Screens.Notifications)
 local EmoteWheelModule = require(script.Screens.EmoteWheel)
 local SettingsModule = require(script.Screens.Settings)
 local StorybookModule = require(script.Screens.Storybook)
@@ -93,6 +94,7 @@ local ShiftLockCrosshair = require(script.Components.ShiftLockCrosshair)
 local ViewportScale = require(script.ViewportScale)
 local Chrome = require(script.Shell.Chrome)
 local Layers = require(script.Shell.Layers)
+local Notify = require(script.Shell.Notify)
 local Regions = require(script.Shell.Regions)
 local Surface = require(script.Shell.Surface)
 
@@ -127,6 +129,10 @@ export type UIHandles = {
 	LiveConsole: Lazy.Lazy<LiveConsoleModule.LiveConsoleHandle>,
 	BugReport: BugReportModule.BugReportHandle,
 	Announcement: AnnouncementModule.AnnouncementHandle,
+	-- The one notification channel (Shell/Notify.lua). Returned so a future producer can reach it
+	-- from a driver module the way every other handle here is reached -- the only one wired today is
+	-- the tier promotion below, which lives in this file because ClientState is already in hand.
+	Notify: Notify.NotifyHandle,
 	EmoteWheel: EmoteWheelModule.EmoteWheelHandle,
 	Settings: SettingsModule.SettingsHandle,
 	-- The component gallery (Client/UI/Screens/Storybook/init.lua). Deferred exactly like the admin
@@ -249,7 +255,13 @@ function UI.Mount(): UIHandles
 	regions:Add("BottomCentre", 10, HUD.Mount(scope, clientState, armament))
 	logger:debug("HUD mounted")
 
-	local combatFeedback = CombatFeedbackModule.Mount(scope, playerGui, viewportScale)
+	-- ITS OUTCOME BANNER IS A TopCentre TILE AT ORDER 5 -- ahead of the announcement (10) and the
+	-- notification channel (20), which is where it already sat visually. The damage numbers stay on
+	-- CombatFeedback's own Overlay surface, because they are world-anchored and have nothing to stack
+	-- against. That split is what let Shell/Regions.lua delete COMBAT_BANNER_BAND_BOTTOM, the one
+	-- constant in that file whose own comment admitted it could rot silently -- and had.
+	local combatFeedback, combatBannerTile = CombatFeedbackModule.Mount(scope, playerGui, viewportScale)
+	regions:Add("TopCentre", 5, combatBannerTile)
 	logger:debug("CombatFeedback mounted")
 
 	-- No longer part of a Screen's own handle -- see this file's header. A bare surface here (not a
@@ -312,6 +324,42 @@ function UI.Mount(): UIHandles
 	regions:Add("TopCentre", 10, announcementTile)
 	logger:debug("Announcement mounted")
 
+	-- THE NOTIFICATION CHANNEL, at TopCentre/20 -- behind the announcement banner, which is the whole
+	-- of the arbitration between them. An admin broadcast and a rank-up in the same second queue in a
+	-- stack instead of racing for one strip, which is the thing plan 2.1 is about.
+	local notify = Notify.New(scope)
+	regions:Add("TopCentre", 20, NotificationsModule.Mount(scope, notify))
+	logger:debug("Notify mounted")
+
+	-- THE ONE WIRED PRODUCER, and the restraint is the point. Shell/Notify.lua declares four kinds
+	-- because docs/ui-ux-philosophy.md's Notification Design section names four; exactly one of them
+	-- has a real, server-driven fact behind it today. Everything else on that list is blocked on a
+	-- System that publishes nothing, and inventing content ahead of the server is how a UI ends up
+	-- with a toast that fires off a client guess.
+	--
+	-- HERE RATHER THAN IN A DRIVER MODULE because both halves are already in this function and
+	-- neither is anybody else's: ClientState is constructed above, and Notify a few lines up. A
+	-- producer that needed a remote of its own would belong at that remote's owner instead.
+	--
+	-- TierBadge's promotion flare is untouched. That is the FELT cue -- a colour surge in the corner
+	-- of the eye during a fight -- and this is the READABLE one. See Screens/HUD/init.lua's
+	-- promotionPulse, which observes this same value for its own reason.
+	scope:Observer(clientState.TierPromotion):onChange(function()
+		local promotion = Fusion.peek(clientState.TierPromotion)
+		if promotion == nil then
+			return
+		end
+		notify:Push({
+			Kind = "Progression",
+			-- The tier's NAME, not its number. TierName is the server's authoritative identity for
+			-- the tier the player has just reached, and "Opened Meridian" is the thing they will tell
+			-- someone about; "Tier 3" is a number they would then have to translate.
+			Title = Fusion.peek(clientState.TierName),
+			Detail = string.format("Tier %d ascended", promotion.To),
+		})
+	end)
+	logger:debug("TierPromotion notification producer wired")
+
 	local emoteWheel = EmoteWheelModule.Mount(scope, playerGui, clientState, viewportScale)
 	logger:debug("EmoteWheel mounted")
 
@@ -353,6 +401,7 @@ function UI.Mount(): UIHandles
 		LiveConsole = liveConsole,
 		BugReport = bugReport,
 		Announcement = announcement,
+		Notify = notify,
 		EmoteWheel = emoteWheel,
 		Settings = settings,
 		Storybook = storybook,

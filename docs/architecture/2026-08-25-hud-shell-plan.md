@@ -16,10 +16,51 @@ assert they cannot happen.
 - [x] **Phase 3** — `Chrome.lua` mode + HUD yielding
 - [x] **Phase 4** — `Chrome.lua` Escape stack
 - [x] **Phase 5** — `Reveal.lua`, ~~five~~ four entrances unified
-- [ ] **Phase 6** — `Notify.lua` + the `TierPromotion` producer
+- [x] **Phase 6** — `Notify.lua` + the `TierPromotion` producer
 
 Phases are independently shippable and independently revertable. Each ends at a green gate (§9), and
 nothing in a later phase is required to make an earlier one correct.
+
+**All six phases have landed, each as one path-scoped commit.** Suite at Phase 6: `all 2122 test(s)
+passed`, exactly one `Stack Begin` (the pre-existing one §12 documents). `selene` 0/0.
+
+### 0.1 Everything that still needs a human in Studio
+
+Nothing below is blocked on more code. Each is a check no test in this repo can perform, carried
+forward from the phase that produced it rather than left in that phase's checklist to be forgotten.
+Grouped by what a single Studio session can cover in one sitting:
+
+**One session, ordinary play at a windowed 1366×768 — the resolution this UI is authored against.**
+
+1. Pick up a weapon while piloting a blimp. The weapon plate, the helm console and the dock must
+   never overlap. *(Phase 1, and the dock-band clearance commit; this is the one change a player can
+   see and the whole point of both.)*
+2. Board a blimp, carry coal, take an admin broadcast. Four ambient tiles, one arrival each — does
+   the scale read as arrival, or as a wobble? *(Phase 5, the only check on whether the motion works.)*
+3. Trigger a defensive outcome, then send an announcement. The outcome banner sits where it always
+   did and the announcement queues below it. *(Phase 6, the one visible change in that phase.)*
+4. Promote a tier. The badge flares and the notification reads. *(Phase 6.)*
+5. Open the character menu — the dock dims, does not vanish, and returns cleanly. Then die — the dock
+   stays and the four corner tiles go. *(Phase 3.)*
+
+**One session, the Escape stack.** *(Phase 4 — the phase most worth backing out on its own, so worth
+checking on its own.)*
+
+6. Open Settings, then the character menu. Escape closes the menu only; Escape again closes Settings.
+7. Each of the six adopting screens (character menu, dev menu, bug report, live console, storybook,
+   Settings) closes on Escape.
+8. Escape with nothing open still opens Roblox's own menu.
+9. Escape while rebinding a key in Settings cancels the capture and leaves the panel up. This is the
+   one behaviour here that a wrong answer degrades quietly rather than visibly.
+
+**Resolution and device passes.**
+
+10. 2560×1440: every ambient panel scales with the dock. *(Phase 2 — the spec proves the mechanism
+    multiplies; it cannot say the result looks right.)*
+11. Top bar visible: top-anchored margins match the dock's. *(Phase 2, the only check on §2.3.)*
+12. Studio's device emulator, touch: both bottom regions clear Roblox's thumbstick and jump button.
+    *(Phase 1 — added under `IS_TOUCH` only, so desktop is unaffected by construction.)*
+13. Screenshot diffs against the Phase 0 baseline at one window size. *(Phases 1, 2, 6.)*
 
 ---
 
@@ -280,6 +321,10 @@ philosophy doc's **Notification Design** section (item acquired, rank change, pr
 has no surface at all, and `ClientState.TierPromotion` — a real, wired, server-driven promotion
 event — is consumed only as a colour flare on `TierBadge`. A rank-up currently cannot say so in words
 anywhere on screen.
+
+**CLOSED at Phase 6.** `Shell/Notify.lua` + `Screens/Notifications` are the channel, at `TopCentre`
+order 20, with `TierPromotion` as the one wired producer. Three of the four kinds are still unwired
+and deliberately so. The flare stays.
 
 ---
 
@@ -1166,16 +1211,111 @@ does not need one.
 **Goal:** one notification channel with one real producer (§2.9).
 **Risk:** low — new surface, no migration.
 
-- [ ] `UI/Shell/Notify.lua` — prioritised queue, kind enum, one `TopCentre` tile at order 20.
-- [ ] `Notify.Push({ Kind, Title, Detail?, Duration? })`, coalescing duplicates.
-- [ ] Queue depth cap with an explicit drop policy — a burst must not build an unbounded backlog.
-- [ ] Producer: `ClientState.TierPromotion` → a `Progression` notification reading `From`/`To`. It
-      already carries both, which is why the type is a table and not a boolean.
-- [ ] Leave `TierBadge`'s promotion flare exactly as it is — the flare is the felt cue, the
+- [x] `UI/Shell/Notify.lua` — prioritised queue and kind enum. **The TILE is a separate module** —
+      `Screens/Notifications/init.lua`, at `TopCentre` order 20. See the build notes.
+- [x] `Notify.Push({ Kind, Title, Detail?, Duration? })`, coalescing duplicates by CONTENT rather
+      than by kind — two different rank-ups are two facts.
+- [x] Queue depth cap with an explicit drop policy — a burst must not build an unbounded backlog.
+      Eight waiting entries; the lowest-priority, oldest waiting entry is evicted, and an arrival no
+      better than that entry is itself what does not get in.
+- [x] Producer: `ClientState.TierPromotion` → a `Progression` notification. Titled with `TierName`
+      rather than the number — see the build notes.
+- [x] Leave `TierBadge`'s promotion flare exactly as it is — the flare is the felt cue, the
       notification is the readable one, and they are not redundant.
-- [ ] Storybook page for all four kinds.
-- [ ] **Do not** add producers for anything else. Every other Notification Design item is blocked on a
-      server System that publishes nothing (§12).
+- [x] Storybook specimen for all four kinds, on a live channel rather than four static tiles.
+- [x] **Do not** add producers for anything else. Three of the four kinds are declared and unwired,
+      and that is the phase's main act of restraint.
+- [x] **Companion cleanup: `COMBAT_BANNER_BAND_BOTTOM` is deleted**, and CombatFeedback's outcome
+      banner is a `TopCentre` tile at order 5. The damage numbers stayed where they were.
+- [x] Suite green — **2122 passed, 0 failed, 1 `Stack Begin`** (2104 + 18 new). `selene` 0/0,
+      `stylua --check` clean on the touched set.
+- [x] Reachability: `Shell/Notify.lua` has 4 inbound requires (3 outside `UI/Shell/`);
+      `Screens/Notifications` has 2.
+- [ ] Studio: promote a tier and read the notification. **Needs a human.**
+- [ ] Studio: the outcome banner sits where it used to, and an announcement now queues below it
+      rather than dodging a constant. **Needs a human**, and it is the only check on the one visible
+      change in this phase.
+
+### The tile is a second module, and `Shell/` may not require `Components/`
+
+§3.5 specs "one prioritised queue feeding one `TopCentre` region tile" as one file. It is two, because
+of a rule this document already recorded and then walked into: `Shell/Regions.lua`'s own
+`COMBAT_BANNER_BAND_BOTTOM` note says *"Shell/ must not require Components/ — the dependency runs the
+other way everywhere else in this tree"*, and pays for it by duplicating two numbers rather than
+importing them. The direction is load-bearing: `Components/ModalScreen.lua` requires `Shell/Surface`
+and `Shell/Layers`, so an arrow back is a cycle waiting for its second edge.
+
+The split is the same one `Chrome`/`Regions` already made and buys the same thing. `Shell/Notify.lua`
+is a table and a `task.delay`, so `Tests/UI/Notify.spec.lua` drives the entire policy — priority,
+coalescing, the cap and its drop rule, the generation guard — with **no render pass at all**.
+`Screens/Notifications` reads one Value.
+
+Kind styling stayed in `Shell/Notify.lua` rather than going with the tile: which kinds exist, which
+outranks which, how long each is worth reading and what each is called are statements about the
+channel, not about the drawing. `Tokens` is not `Components`, and `Regions` already requires it.
+
+### One channel, four kinds, one producer — and the restraint is the deliverable
+
+`Progression` is wired to `ClientState.TierPromotion`. `Acquisition`, `World` and `Warning` are
+declared, styled, visible in the Storybook, and reach nothing. That is this repo's standing rule
+applied literally: a Notification Design item stays unbuilt until its owning System publishes real
+data. Each costs one line in `KIND_STYLE`, so the day an inventory System publishes an acquisition
+the channel is already there.
+
+Three decisions inside the channel worth naming, because the obvious alternative is wrong in each:
+
+- **It does not preempt.** A `Warning` arriving behind a `World` notice goes to the front of the
+  QUEUE, not onto the screen. Cutting a notification off mid-read to show a better one means the
+  player reliably reads neither, and the worst a Warning can be delayed is one duration.
+- **Coalescing is by content, not by kind.** Two rank-ups are two facts. A repeat of what is
+  currently showing restarts its read rather than queueing a copy.
+- **One tile, not a column of toasts.** Three notifications at once in the top centre over live
+  combat is the opposite of the philosophy doc's "out of the player's way".
+
+The producer titles the notification with `TierName` — *"Opened Meridian"* — and puts the number in
+the detail line. The name is the thing a player would tell someone about; "Tier 3" is a number they
+would then have to translate.
+
+### `COMBAT_BANNER_BAND_BOTTOM` had already gone stale, exactly as its own comment predicted
+
+The constant was `TopCentre`'s `EdgeInsetOverride`: 168px of dodge so the announcement banner would
+clear two combat banners that a *different surface* drew above the region host. Its note admitted the
+cost — *"this is the one constant in this file that can rot: if either banner's YOffset or its height
+changes, this has to change with it, and nothing will tell you."*
+
+**It described two banners. `Screens/CombatFeedback` mounts one, at no offset.** So the announcement
+had been clearing 72px of band that does not exist, and nothing told anyone. That is not a small
+find: it is the same class of defect as §2.1's byte-identical collisions — one surface reasoning in
+prose about what another surface draws — surviving inside the very module built to make that
+impossible.
+
+Fixed the way the constant's own note said to fix it, rather than by correcting the number. The
+outcome banner is a `TopCentre` tile at order 5, ahead of the announcement (10) and the notification
+channel (20); the stack orders all three and no constant describes any of them. `StatusBanner` gained
+a `Tiled` flag that drops its `AnchorPoint`/`Position`, because a self-placing tile loses to its
+region's `UIListLayout` — the same constraint `Reveal` is shaped around. `IntroClient`'s greeting
+banner does not pass it: that one is on its own boot surface, with no region host in existence yet.
+
+**The damage numbers did not move, and the split is the interesting part.** They are world-anchored,
+positioned per hit in screen space — there is nothing to stack them against, and their whole
+placement contract is "wherever the hit landed". A region would be meaningless for them. The banner
+is chrome at a fixed spot on an edge, which is precisely what a region is for. *Whether a thing
+belongs in a region is a question about whether its position is arbitrated or intrinsic*, and this
+phase is the first time that line had to be drawn inside one screen.
+
+`DOCK_BAND_CLEARANCE` survives the same audit and stays, for one reason: it is guarded by a test that
+measures the real band off a live layout pass. That is the difference between the two constants, and
+it is now written next to the one that remains.
+
+### §14.4 answered: `BottomRight` still has no claimant
+
+Phase 6 was the deadline that question set for itself — *"if nothing wants it by Phase 6, drop it
+rather than leaving a region nobody mounts into."* Nothing wants it. **It stays anyway**, and the
+reason is narrower than "it might be useful": it is not an empty region, it is the region that
+carries `DOCK_BAND_CLEARANCE` for whoever claims that corner first. Drop it and the first tile to
+want the bottom-right corner places itself there and lands in the dock's shadow — which is §2.1b
+happening a second time, for the third time in this document. An empty region with a clearance on it
+is a note the next contributor cannot fail to read.
 
 ---
 
@@ -1276,8 +1416,12 @@ is a regression this plan introduced; exit 1 on its own is not.
 3. **Should the Escape stack have a "modal Escape wins over game Escape" rule on gamepad?** No gamepad
    support exists today, so this is deferred rather than designed blind. Settings' existing
    `ButtonStart` handling is the only gamepad path and it stays local. *Owner: deferred.*
-4. **Does `BottomRight` have a claimant?** Reserved and empty in §3.2. If nothing wants it by Phase 6,
-   drop it rather than leaving a region nobody mounts into.
+4. ~~**Does `BottomRight` have a claimant?**~~ **ANSWERED 2026-08-25 at Phase 6 — no, and it stays
+   anyway.** Not because it might be useful: it is the region that carries `DOCK_BAND_CLEARANCE` for
+   whoever claims that corner first. Drop it and the next tile that wants the bottom-right corner
+   places itself there and lands in the dock's shadow, which is §2.1b for the third time in this
+   document. An empty region with a clearance on it is a note the next contributor cannot miss.
+   *Owner: Phase 6, closed.*
 6. **What gives on a left edge that is oversubscribed?** (§2.1a) **LARGELY RETRACTED 2026-08-25.**
    The helm console that this question was built around was not 710px of content — it was ~175px of
    content in a panel inflated by the `SurfaceTexture` + `AutomaticSize` bug (see Phase 1's order

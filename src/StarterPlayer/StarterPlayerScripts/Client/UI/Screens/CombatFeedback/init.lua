@@ -83,10 +83,22 @@ export type CombatFeedbackHandle = {
 local DAMAGE_NUMBER_LIFETIME = Constants.FX.DamageNumbers.LifetimeSeconds
 local STACK_WINDOW_SECONDS = Constants.FX.DamageNumbers.StackWindowSeconds
 
-function CombatFeedback.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.UsedAs<number>): CombatFeedbackHandle
+-- Returns its handle AND its banner tile. The tile is unparented -- UI/init.lua hands it to
+-- Shell/Regions.lua's TopCentre at order 5, above the announcement banner at 10. See the note at the
+-- StatusBanner call below for why the banner left this surface and the damage numbers did not.
+function CombatFeedback.Mount(
+	scope: Scope,
+	playerGui: PlayerGui,
+	scale: Fusion.UsedAs<number>
+): (CombatFeedbackHandle, Frame)
 	local outcome: Fusion.Value<StatusBannerModule.StatusBannerDisplay?> =
 		scope:Value(nil :: StatusBannerModule.StatusBannerDisplay?)
 	local damageNumbers: Fusion.Value<{ [string]: DamageNumberSpawnProps }> = scope:Value({})
+
+	-- Tiled, so it carries no AnchorPoint and no Position of its own -- see StatusBanner's own Tiled
+	-- note. It used to sit at Tokens.Space.XXL from the true top of the screen and now starts at
+	-- TopCentre's edge inset instead, which is the one visible change in this migration.
+	local bannerTile = StatusBanner(scope, { Display = outcome, Tiled = true })
 
 	local nextId = 0
 
@@ -167,6 +179,19 @@ function CombatFeedback.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.
 		end
 	end
 
+	-- THE OUTCOME BANNER IS A REGION TILE NOW; THE DAMAGE NUMBERS ARE NOT. Phase 6 of
+	-- docs/architecture/2026-08-25-hud-shell-plan.md, and the split between the two is the whole of
+	-- the reasoning:
+	--
+	--   * The banner is CHROME at a fixed spot on the top edge -- exactly what a region is for, and
+	--     exactly what was making Shell/Regions.lua carry a hardcoded 168px dodge of it
+	--     (COMBAT_BANNER_BAND_BOTTOM, now deleted) so the announcement banner could clear something it
+	--     had no other way to know about. As a TopCentre tile at order 5 it queues with the
+	--     announcement and the notification channel for free, and the dodge stops existing.
+	--   * The damage numbers are WORLD-ANCHORED, positioned per hit in screen space, and stay on this
+	--     surface. Putting them in a region would be meaningless -- there is nothing to stack them
+	--     against and their whole placement contract is "wherever the hit landed".
+	--
 	-- Layers.Overlay: over the dock and the ambient tiles, under any panel the player opened on
 	-- purpose. A damage number that a modal cannot cover would be worse than one that can.
 	--
@@ -184,7 +209,6 @@ function CombatFeedback.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.
 		Scale = scale,
 
 		Children = {
-			StatusBanner(scope, { Display = outcome }),
 			scope:New "Frame" {
 				Name = "DamageNumbers",
 				Size = UDim2.fromScale(1, 1),
@@ -211,7 +235,8 @@ function CombatFeedback.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.
 		SpawnDamageNumber = spawnDamageNumber,
 		AddDamageHit = addDamageHit,
 		SuppressDamageNumbers = suppressDamageNumbers,
-	}
+	},
+		bannerTile
 end
 
 return CombatFeedback

@@ -19,12 +19,12 @@
 	tile wears (Components/Reveal.lua) rather than a hand-held Tokens.Motion.FadeSpring -- and it
 	gained an arrival in the process, where before it only faded.
 
-	Stacked below CombatFeedback's PostureBreak (YOffset 0) and Disarmed (YOffset 72) banners, so a
-	mid-fight admin broadcast can never overlap either. That clearance used to be a 152px constant in
-	this file baked into the banner's own Position; it is now the TopCentre region's top inset (see
-	COMBAT_BANNER_BAND_BOTTOM in Shell/Regions.lua). Moved rather than kept because this screen no
-	longer places itself at all -- it hands a tile to a region and the region decides where the
-	column starts.
+	Stacked below the combat outcome banner, so a mid-fight admin broadcast can never overlap it.
+	That clearance has now been three different things and the last one is the one worth keeping: a
+	152px constant baked into this banner's own Position, then a hardcoded 168px top inset on the
+	TopCentre region (COMBAT_BANNER_BAND_BOTTOM, which went stale and was deleted), and now nothing
+	at all -- the combat banner is a TopCentre tile at order 5 and this one is order 10, so the stack
+	orders the two and no constant describes either.
 
 	Does not own: when to show, for how long, or what text/color to display -- AnnouncementClient.lua
 	owns all of that (reacting to the server-authoritative Announcement RemoteEvent); this module only
@@ -56,9 +56,7 @@ local ROOT_WIDTH = 420
 local ROOT_HEIGHT = 108
 
 -- Returns its handle AND its tile. The tile is unparented -- UI/init.lua hands it to
--- Shell/Regions.lua's TopCentre, which owns where it sits. The 152px dodge that used to be baked
--- into this banner's own Position became that region's top inset; see COMBAT_BANNER_BAND_BOTTOM in
--- Regions.lua for the two banners it is still clearing.
+-- Shell/Regions.lua at TopCentre order 10, which owns where it sits and what it queues behind.
 local function Announcement(scope: Scope): (AnnouncementHandle, Frame)
 	local display: Fusion.Value<AnnouncementDisplay?> = scope:Value(nil :: AnnouncementDisplay?)
 

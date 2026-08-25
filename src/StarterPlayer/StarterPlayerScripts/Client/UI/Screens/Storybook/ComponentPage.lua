@@ -43,6 +43,9 @@ local CharacterPortrait = require(script.Parent.Parent.Parent.Components.Charact
 local MeridianField = require(script.Parent.Parent.Parent.Components.MeridianField)
 local Reveal = require(script.Parent.Parent.Parent.Components.Reveal)
 
+local Notify = require(script.Parent.Parent.Parent.Shell.Notify)
+local NotificationsModule = require(script.Parent.Parent.Notifications)
+
 local Specimen = require(script.Parent.Specimen)
 
 local peek = Fusion.peek
@@ -50,6 +53,25 @@ local peek = Fusion.peek
 type Scope = Fusion.Scope<typeof(Fusion)>
 
 local Players = game:GetService("Players")
+
+-- Specimen copy for the notification kinds. Real-shaped rather than lorem, so the specimen also
+-- answers "does a tier name fit on one line" -- which is the only question about this tile that a
+-- screenshot can settle. Progression's is the exact shape UI/init.lua's producer pushes.
+local NOTIFY_SPECIMEN_TITLE: { [Notify.Kind]: string } = {
+	Progression = "Opened Meridian",
+	Acquisition = "Ninth Rain Talisman",
+	World = "The Vermilion Gate has fallen",
+	Warning = "Qi deviation imminent",
+}
+
+local NOTIFY_SPECIMEN_DETAIL: { [Notify.Kind]: string? } = {
+	Progression = "Tier 3 ascended",
+	Acquisition = "Rare -- from a sealed cache",
+	-- Deliberately nil, so the gallery shows the detail-less layout too. The tile is a fixed height
+	-- and the rows are centred, so a missing third line is a real visual case rather than a shrug.
+	World = nil,
+	Warning = "Cultivate to steady your channels",
+}
 
 local function ComponentPage(scope: Scope, layoutOrder: number, visible: Fusion.UsedAs<boolean>, width: number): Frame
 	-- Scope-local drive state for the live specimens. None of it leaves this page.
@@ -86,6 +108,36 @@ local function ComponentPage(scope: Scope, layoutOrder: number, visible: Fusion.
 				}),
 			},
 		})
+	end
+
+	-- A REAL Shell/Notify CHANNEL, not four static tiles. The specimen has to demonstrate the queue --
+	-- priority ordering, coalescing, one-at-a-time -- and the only honest way to do that is to build
+	-- the actual thing and push into it. Scope-local like every other drive value on this page: this
+	-- is a second channel, entirely separate from the one UI/init.lua mounts into TopCentre.
+	local storybookNotify = Notify.New(scope)
+	local notifyTile = NotificationsModule.Mount(scope, storybookNotify)
+
+	local notifyButtons: { Instance } = {}
+	for index, kind in Notify.Kinds do
+		table.insert(
+			notifyButtons,
+			Button(scope, {
+				Text = kind,
+				Variant = "Secondary",
+				Size = UDim2.fromOffset(112, 36),
+				LayoutOrder = index,
+				OnActivated = function()
+					storybookNotify:Push({
+						Kind = kind,
+						Title = NOTIFY_SPECIMEN_TITLE[kind],
+						Detail = NOTIFY_SPECIMEN_DETAIL[kind],
+						-- Short, so a curious reader can watch the queue drain rather than waiting out
+						-- four full reads. The real durations are per kind in Shell/Notify.lua.
+						Duration = 2,
+					})
+				end,
+			})
+		)
 	end
 
 	local localPlayer = Players.LocalPlayer
@@ -431,6 +483,32 @@ local function ComponentPage(scope: Scope, layoutOrder: number, visible: Fusion.
 			},
 		}),
 
+		-- ALL FOUR NOTIFICATION KINDS, WHICH IS THE ONLY PLACE THREE OF THEM CAN BE SEEN. Shell/Notify
+		-- declares Progression, Acquisition, World and Warning because the philosophy doc names four
+		-- kinds; only Progression has a producer, so the other three would otherwise be code nobody
+		-- has ever laid eyes on. The gallery is exactly the answer to that -- and it is also where the
+		-- accessibility contract gets checked, since what has to be true is that the four are tellable
+		-- apart from the EYEBROW alone, with the accent ignored.
+		--
+		-- A live channel, not four static tiles: the buttons push into one real Shell/Notify queue, so
+		-- pressing several in a row demonstrates the queueing and the priority (a Warning pushed
+		-- behind three World notices comes out first) rather than only the styling.
+		Specimen(scope, {
+			Title = "Notify",
+			Note = "The one notification channel, live. Press several -- they queue rather than stacking, highest kind first, and a repeat of the one on screen restarts its read instead of queueing a copy. Only Progression has a real producer; the other three are here because this is the only place they exist.",
+			Height = 148,
+			Direction = "Vertical",
+			LayoutOrder = 14,
+			Children = {
+				Stack.Row(scope, {
+					Size = UDim2.new(1, 0, 0, 36),
+					Gap = Tokens.Space.S,
+					Children = notifyButtons,
+				}),
+				notifyTile,
+			},
+		}),
+
 		Label(scope, {
 			Text = "AbilitySlot, ActionIcon, VitalIcon, Graph and DamageNumberLabel are not here yet -- each needs a data fixture. See this file's header.",
 			Scale = "Detail",
@@ -438,7 +516,7 @@ local function ComponentPage(scope: Scope, layoutOrder: number, visible: Fusion.
 			AutoHeight = true,
 			LineHeight = Tokens.Leading.Prose,
 			Size = UDim2.fromScale(1, 0),
-			LayoutOrder = 14,
+			LayoutOrder = 15,
 		}),
 	}
 
