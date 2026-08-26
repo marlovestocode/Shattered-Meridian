@@ -118,6 +118,7 @@ local TrackedLabel = require(script.Parent.Parent.Components.TrackedLabel)
 local SpeedLadder = require(script.Parent.Parent.Components.SpeedLadder)
 local Reveal = require(script.Parent.Parent.Components.Reveal)
 local ModuleWell = require(script.Parent.Parent.Components.ModuleWell)
+local FurnacePlate = require(script.FurnacePlate)
 
 local Children = Fusion.Children
 
@@ -150,6 +151,11 @@ local BlimpHelm = {}
 -- file's header calls the console minimap-sized on purpose, and 220 is 11% of a 1080p screen's width
 -- against 196's 10%. The alternative was shrinking the text column, and this codebase does not ship
 -- rows that clip.
+-- The bead that fastens the furnace plate to this console -- see the console stack in Mount below.
+-- Seven, which is the same mark at the same weight the hotbar dock uses to fasten its own armament
+-- island, so the two joints in this UI read as the same fastener rather than as two ideas.
+local SEAM_BOLT_SIZE = 7
+
 local PANEL_WIDTH = 220
 -- Clears CHAMFER_PX (8) on the horizontal, where the cut actually eats into the content box. The
 -- vertical can sit at the chamfer line because the cut is a CORNER: by the time content starts at
@@ -257,9 +263,12 @@ local function well(scope: Scope, name: string, layoutOrder: number, gap: number
 end
 
 -- Returns its handle AND its tile, unparented -- UI/init.lua hands it to Shell/Regions.lua's
--- BottomLeft at order 20, so it stacks ABOVE the weapon rack instead of underneath it. The two used
--- to share a coordinate; see Regions.lua's header for the pair of comments that said they could not.
-function BlimpHelm.Mount(scope: Scope): (BlimpHelmHandle, Frame)
+-- BottomRight at order 10, where it is the only tile: the furnace plate rides on it rather than
+-- beside it. `furnace` is Screens/BlimpFuel's state, and passing nothing gives the bare console,
+-- byte-identical to what it was before the joint existed -- the same optionality Screens/HUD gives
+-- its own armament island, and what keeps every spec that only wants a console from having to
+-- construct fuel state.
+function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (BlimpHelmHandle, Frame)
 	local visible = scope:Value(false)
 	local interactive = scope:Value(false)
 	local roleText = scope:Value("ABOARD")
@@ -717,6 +726,107 @@ function BlimpHelm.Mount(scope: Scope): (BlimpHelmHandle, Frame)
 		},
 	})
 
+	-- THE CONSOLE STACK, AND WHY IT IS A BARE FRAME RATHER THAN A Stack OR A Layer.
+	--
+	-- It holds the console plus, when there is fuel state, the furnace plate and the bead that
+	-- fastens them. The console is the only child at the origin, so this frame's AutomaticSize
+	-- resolves to exactly the console's size -- which is what gives the plate something console-shaped
+	-- to pin against, and what keeps the region's own layout measuring the console rather than the
+	-- console-plus-plate.
+	--
+	-- NO UIListLayout, hence no Stack: the plate must NOT be laid out. Screens/HUD/init.lua's dock
+	-- band measured the two facts this depends on before writing the same thing horizontally -- an
+	-- offset-sized child pinned to a negative coordinate neither inflates an AutomaticSize parent nor
+	-- displaces its siblings, while the same child given a Scale dimension inside an AutomaticSize
+	-- parent latches onto the viewport. Both are load-bearing here: the first is why the console
+	-- cannot move as the plate springs, and the second is why FurnacePlate's slot and plate are
+	-- offset-sized on both axes.
+	--
+	-- Layer.lua is the right tool for pinning something into a frame that HAS a layout; there is none
+	-- here, so its two wrapper frames would buy nothing.
+	local stack: Frame = tile
+	if furnace then
+		local plate = FurnacePlate.Build(scope, furnace)
+
+		-- THE FASTENER. One bronze bead straddling the seam -- half on the console, half on the plate
+		-- -- at the midpoint of the shared edge, which is the one point on it that both surfaces'
+		-- bracket elbows leave clear. It is what turns a flush butt joint into a VISIBLE one: the
+		-- plate already borrows the console's edge rather than drawing its own (FurnacePlate's header,
+		-- seam rule 2), and a shared rule with nothing on it reads as one plate with a score line
+		-- rather than as two plates fastened together. A point, deliberately, not a rule along the
+		-- seam: a point joins, a line divides.
+		--
+		-- Bronze because this palette's bronze is "committed / permanent" and a bolt is exactly that,
+		-- and the same 45-degree bead the dock's own joint uses, so it introduces no new mark. ZIndex
+		-- 6 clears everything Panel.lua builds (its accent overlay is the highest at 5) -- necessary
+		-- because the host ScreenGui is ZIndexBehavior.Sibling, where a descendant's own ZIndex is
+		-- global rather than scoped to its parent.
+		--
+		-- Rides the plate's OWN spring rather than a second one: it must not be sitting on the
+		-- console's edge with nothing attached to it, and two springs off one boolean are one retune
+		-- away from disagreeing about how far out the plate is.
+		-- THE SHARED RULE, AND IT HAS TO BE DRAWN RATHER THAN INHERITED HERE. The dock gets this for
+		-- free: its island stops at the dock's edge, so the dock's own left stroke IS the line at the
+		-- seam. This plate SINKS into the console by the chamfer depth (FurnacePlate's SEAM_OVERLAP,
+		-- which is what removes the two square ears a flush butt joint left on two chamfered panels),
+		-- and in doing so its fill covers the console's top stroke -- so the two surfaces merge into
+		-- one unbroken face and the bead is left floating in the middle of it.
+		--
+		-- One hairline at the plate's clipped bottom edge puts the division back where the eye expects
+		-- it, in the same violet at the same 0.3 both panels carry, so it reads as the assembly's own
+		-- internal edge rather than as a third colour. Full width because the console is already past
+		-- its chamfer at this Y -- the cuts finish exactly where this line sits, which is the whole
+		-- reason the sink is the chamfer depth and not some other number.
+		local seamRule = scope:New "Frame" {
+			Name = "SeamRule",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, 0, 0, FurnacePlate.SEAM_OVERLAP),
+			Size = UDim2.new(1, 0, 0, 1),
+			BackgroundColor3 = Tokens.Color.AccentPrimary,
+			BackgroundTransparency = scope:Computed(function(use)
+				-- The panel edge's own 0.3, faded out with the plate so a departing furnace does not
+				-- leave a rule ruled across the console's top edge.
+				return 1 - 0.7 * math.clamp(use(plate.Presence), 0, 1)
+			end),
+			BorderSizePixel = 0,
+			ZIndex = 5,
+		}
+
+		local seamBolt = scope:New "Frame" {
+			Name = "SeamBolt",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			-- On the rule, not on the console's nominal top edge: after the sink those are eight pixels
+			-- apart, and the bead belongs on the line it is fastening.
+			Position = UDim2.new(0.5, 0, 0, FurnacePlate.SEAM_OVERLAP),
+			Size = UDim2.fromOffset(SEAM_BOLT_SIZE, SEAM_BOLT_SIZE),
+			Rotation = 45,
+			BackgroundColor3 = Tokens.Color.AccentSecondary,
+			BackgroundTransparency = scope:Computed(function(use)
+				return 1 - math.clamp(use(plate.Presence), 0, 1)
+			end),
+			BorderSizePixel = 0,
+			ZIndex = 6,
+		}
+
+		stack = scope:New "Frame" {
+			Name = "BlimpConsoleStack",
+			Size = UDim2.fromOffset(0, 0),
+			AutomaticSize = Enum.AutomaticSize.XY,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			-- The console's own Reveal guard, lifted to the stack: the plate has its own entrance and
+			-- its own exit guard, but neither should be on screen while the whole assembly is away.
+			Visible = reveal.Mounted,
+
+			[Children] = {
+				tile,
+				plate.Content,
+				seamRule,
+				seamBolt,
+			},
+		} :: Frame
+	end
+
 	return {
 		SetVisible = setVisible,
 		SetKind = setKind,
@@ -724,7 +834,7 @@ function BlimpHelm.Mount(scope: Scope): (BlimpHelmHandle, Frame)
 		SetReleaseKey = setReleaseKey,
 		SetTelemetry = setTelemetry,
 	},
-		tile
+		stack
 end
 
 return BlimpHelm

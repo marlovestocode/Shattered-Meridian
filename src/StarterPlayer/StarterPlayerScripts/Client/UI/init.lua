@@ -369,29 +369,26 @@ function UI.Mount(): UIHandles
 	-- The four remaining ambient tiles. The ORDER NUMBERS ARE THE LAYOUT, and they are all that
 	-- decides who sits where now -- no panel carries a corner of its own any more. Lower sits nearer
 	-- its region's anchored edge, at both ends of the screen (Regions.lua handles the sign).
-	-- BOTTOM-RIGHT AS OF 2026-08-25, AND IT IS THE FIRST TILE EVER TO CLAIM THAT REGION. Moved from
-	-- TopRight at the owner's request, and the layout is better for it in a way worth stating: the
-	-- furnace gauge and the helm console (BottomLeft) are a matched pair of flight instruments, and
-	-- they now frame the dock from opposite bottom corners instead of one being in the pilot's
-	-- peripheral vision and the other diagonally across the screen from it.
+	-- THE TWO BLIMP INSTRUMENTS ARE ONE TILE NOW, IN THE BOTTOM-RIGHT CORNER (owner, 2026-08-25).
+	-- They were in opposite bottom corners for a day and neither reached one: BottomRight was
+	-- carrying a clearance it never needed, and BottomLeft carries one it does -- the armament island
+	-- is 224px pinned left of an 870px centred dock, which puts its edge 24px from the screen edge at
+	-- every ordinary 16:9 resolution, and a 220px console does not fit in 24px.
 	--
-	-- BottomRight has been reserved and empty since Phase 1 of the HUD shell plan, and section 14.4
-	-- of that document asked whether it would ever have a claimant. It does now. It already carries
-	-- DOCK_BAND_CLEARANCE, so this tile clears the dock band for free -- which is exactly the reason
-	-- Phase 6 kept the region rather than deleting it as unused.
-	local blimpFuel, blimpFuelTile = BlimpFuelModule.Mount(scope)
-	regions:Add("BottomRight", 10, blimpFuelTile)
+	-- So both moved right, where nothing is bolted to the dock, and they are ASSEMBLED rather than
+	-- stacked: the furnace plate shares the console's top edge the way the armament island shares the
+	-- dock's left edge, with one rule at the seam, one width, one content baseline, and a bronze bead
+	-- through the joint. Screens/BlimpHelm/FurnacePlate.lua has the five rules; the geometry lives
+	-- with the console because a joint has exactly one owner.
+	--
+	-- FUEL FIRST, AND ONLY BECAUSE THE CONSOLE NEEDS ITS STATE. Screens/BlimpFuel draws nothing now;
+	-- it returns the extrapolated furnace state and the console renders it on the plate. Identical
+	-- ordering, for the identical reason, to Screens/WeaponInventory ahead of Screens/HUD above.
+	local blimpFuel, furnace = BlimpFuelModule.Mount(scope)
 	logger:debug("BlimpFuel mounted")
 
-	-- Rack at 10 (the bottom-left corner it has always occupied), helm above it at 20.
-	--
-	-- This was briefly swapped, because with the helm console resolving to ~710px on a ~795px
-	-- viewport there was no room for anything beneath it. That turned out to be a bug in the console
-	-- and not a fact about the screen: it was opting into SurfaceTexture on an AutomaticSize.Y panel,
-	-- which sizes the panel to roughly the viewport instead of to its ~175px of content. With that
-	-- fixed the original order fits comfortably, so the rack keeps its corner.
-	local blimpHelm, blimpHelmTile = BlimpHelmModule.Mount(scope)
-	regions:Add("BottomLeft", 20, blimpHelmTile)
+	local blimpHelm, blimpConsoleTile = BlimpHelmModule.Mount(scope, furnace)
+	regions:Add("BottomRight", 10, blimpConsoleTile)
 	logger:debug("BlimpHelm mounted")
 
 	local carriedResources, carriedResourcesTile = CarriedResourcesModule.Mount(scope)

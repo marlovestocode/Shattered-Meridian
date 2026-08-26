@@ -12,7 +12,6 @@ local Screens = UI.Screens
 local ClientStateModule = require(UI.State.ClientState)
 local Regions = require(UI.Shell.Regions)
 local Announcement = require(Screens.Announcement)
-local BlimpFuel = require(Screens.BlimpFuel)
 local BlimpHelm = require(Screens.BlimpHelm)
 local CarriedResources = require(Screens.CarriedResources)
 local DeathFeed = require(Screens.DeathFeed)
@@ -99,13 +98,10 @@ local CASES: { Case } = {
 		end,
 		OwnsASurface = true,
 	},
-	{
-		Name = "BlimpFuel",
-		Tile = "BlimpFuelPanel",
-		Mount = function(scope, _parent)
-			return BlimpFuel.Mount(scope)
-		end,
-	},
+	-- BlimpFuel IS NO LONGER IN THIS LIST either, and for the same shape of reason WeaponInventory
+	-- left it: it stopped returning a tile. The furnace is a plate bolted to the helm console'"'"'s top
+	-- edge now (Screens/BlimpHelm/FurnacePlate.lua), so this screen hands out state and the console
+	-- is the one tile the pair contributes. Tests/UI/BlimpFuelPanel.spec.lua covers the assembly.
 	-- WeaponInventory IS NO LONGER IN THIS LIST, and its absence is the point rather than an omission.
 	-- It was BottomLeft/10 from Phase 1 until the island rework, when it moved out of Shell/Regions
 	-- entirely: it is now an outrigger laid out by Screens/HUD against the dock's left edge, so it
@@ -295,6 +291,19 @@ return function()
 		end)
 	end)
 
+	-- Steps frames until a condition holds, and fails naming the wait rather than the value. Used for
+	-- anything that travels -- a Fusion Tween or Spring reaches its goal when it reaches it, and a
+	-- fixed frame count is a bet on frame pacing that gets worse every time the suite grows.
+	local function settleUntil(condition: () -> boolean): ()
+		for _ = 1, 400 do
+			if condition() then
+				return
+			end
+			RunService.Heartbeat:Wait()
+		end
+		error("a tween never settled within 400 frames", 0)
+	end
+
 	describe("the ambient layer yields to the mode", function()
 		-- Plan 2.5: the dock renders at full opacity behind every modal, through the death overlay,
 		-- and nothing can ask it to step back. Phase 3 gives it something to step back for. What is
@@ -357,22 +366,24 @@ return function()
 			-- for.
 			expect(scrim.BackgroundTransparency).to.equal(1)
 
-			-- The tween needs real elapsed frames, which this place does step -- unlike the note
-			-- Tests/UI/Hotbar.spec.lua carries, whose springs are simply never given any. 0.35s of
-			-- EnterTween is about 21 frames at 60Hz; 40 is slack for a slow one.
+			-- WAITED FOR BY CONDITION, NOT BY A FRAME COUNT. This was 40 frames -- 0.35s of EnterTween
+			-- is about 21 at 60Hz, so it looked like ample slack -- and it went flaky as the suite grew
+			-- and frame pacing got less even, failing at 0.985 of the way home. A tween that has not
+			-- finished is not a different assertion from one that has; it is the same one, early. Same
+			-- correction Tests/UI/Reveal.spec.lua already carries for springs.
 			dim:set(1)
-			for _ = 1, 40 do
-				RunService.Heartbeat:Wait()
-			end
+			settleUntil(function()
+				return scrim.BackgroundTransparency < 1
+			end)
 			-- Darkened, but NOT opaque. How dark exactly is Shell/Regions.lua's to tune, so this
 			-- asserts the two properties that would make it wrong rather than the value itself.
 			expect(scrim.BackgroundTransparency < 1).to.equal(true)
 			expect(scrim.BackgroundTransparency > 0).to.equal(true)
 
 			dim:set(0)
-			for _ = 1, 40 do
-				RunService.Heartbeat:Wait()
-			end
+			settleUntil(function()
+				return scrim.BackgroundTransparency == 1
+			end)
 			expect(scrim.BackgroundTransparency).to.equal(1)
 		end)
 

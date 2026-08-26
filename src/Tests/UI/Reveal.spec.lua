@@ -219,15 +219,21 @@ return function()
 
 	describe("every ambient tile wears it", function()
 		-- The migration half. Section 2.7 listed five screens with four different answers; the real
-		-- list at Phase 5 is four, because WeaponInventory stopped being a region tile in the dock
-		-- rework and its readout (Screens/HUD/ArmamentIsland.lua) has its own drawer entrance on
-		-- Tokens.Motion.IslandSpring. A source scan rather than a mount, because what is being
-		-- asserted is that nobody hand-rolled a fifth answer -- which is a fact about the files, not
-		-- about any one render.
+		-- list is THREE, and both departures left for the same reason -- they stopped being tiles and
+		-- became plates BOLTED to another surface, which wants a drawer rather than a reveal:
+		--
+		--   WeaponInventory  -> Screens/HUD/ArmamentIsland, out of the dock'"'"'s left edge
+		--   BlimpFuel        -> Screens/BlimpHelm/FurnacePlate, out of the console'"'"'s top edge
+		--
+		-- Both spring a SIZE on Tokens.Motion.IslandSpring instead. That is the correct distinction
+		-- rather than an exemption: Reveal scales a tile in place, which is what a surface arriving on
+		-- its own should do, and a thing being pushed out of another thing should not.
+		--
+		-- A source scan rather than a mount, because what is being asserted is that nobody hand-rolled
+		-- a fourth answer -- a fact about the files, not about any one render.
 		local TILES = {
 			"CarriedResources",
 			"Announcement",
-			"BlimpFuel",
 			"BlimpHelm",
 		}
 
