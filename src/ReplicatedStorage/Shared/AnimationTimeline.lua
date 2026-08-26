@@ -58,6 +58,23 @@ export type ClipBlend = "Overlap" | "Exclusive" | "Queue"
 -- attacker dying). Carried through Resolve untouched -- see this file's header.
 export type ClipInterrupt = "Stop" | "Freeze" | "PlayThrough"
 
+-- Which layer this clip plays on -- Roblox's own AnimationTrack.Priority, decided by the author
+-- rather than left at whatever the uploaded asset happened to be exported with. It is what makes
+-- an upper-body swing play OVER a run cycle instead of replacing it, and it is the field that
+-- explains almost every "my animation doesn't show up" report.
+--
+-- STORED AS A STRING, never an Enum: this rides through a DataStore and across a RemoteFunction,
+-- neither of which round-trips an EnumItem, and a string also survives Roblox renaming or
+-- reordering the enum underneath it. The mapping to the real Enum.AnimationPriority happens at
+-- playback, in whatever plays the track.
+--
+-- Four of Roblox's seven, and only ones that genuinely name a layer: Core (underneath everything
+-- -- what default character animations use), Idle, Movement, and Action (over locomotion, which
+-- is what a combat swing almost always wants). Action2/3/4 exist in the engine but are just
+-- "Action, but more so" -- offering them would ask an author to pick between four rungs with no
+-- authored meaning. Add one when something in this game actually needs to sit between two.
+export type ClipPriority = "Core" | "Idle" | "Movement" | "Action"
+
 export type Clip = {
 	-- Stable within one move, assigned once at creation (NextClipId below) and never reused --
 	-- the editor's per-row UI state and Resolve's own ordering both key off it, so reordering or
@@ -88,6 +105,7 @@ export type Clip = {
 	FadeInSeconds: number,
 	FadeOutSeconds: number,
 	Looped: boolean,
+	Priority: ClipPriority,
 
 	Blend: ClipBlend,
 	OnInterrupt: ClipInterrupt,
@@ -153,6 +171,7 @@ local START_MODES: { [string]: boolean } = { Time = true, Phase = true, AfterPre
 local STOP_MODES: { [string]: boolean } = { Duration = true, PhaseEnd = true, MoveEnd = true, Natural = true }
 local BLEND_MODES: { [string]: boolean } = { Overlap = true, Exclusive = true, Queue = true }
 local INTERRUPT_MODES: { [string]: boolean } = { Stop = true, Freeze = true, PlayThrough = true }
+local PRIORITIES: { [string]: boolean } = { Core = true, Idle = true, Movement = true, Action = true }
 local PHASES: { [string]: boolean } = { Windup = true, Active = true, Recovery = true }
 
 -- Ordered for the editor's own dropdowns -- declaration order is presentation order.
@@ -222,6 +241,12 @@ end
 -- A sensible new clip: plays from the start of the move at native speed and full weight, stops on
 -- its own. Deliberately identical in effect to the single-AnimationId behaviour that predates this
 -- module, so adding the first clip to a move changes nothing until the author changes something.
+-- The same four as PRIORITIES above, but ORDERED -- bottom layer first. The editor's picker needs
+-- an order and this is the real one; sorting the set's keys would give alphabetical, which puts
+-- Action (the top layer) first and Movement above Idle, teaching exactly the wrong mental model of
+-- what the field does.
+AnimationTimeline.PriorityOrder = { "Core", "Idle", "Movement", "Action" } :: { ClipPriority }
+
 function AnimationTimeline.DefaultClip(clipId: string, order: number, animationId: string?): Clip
 	return {
 		ClipId = clipId,
@@ -240,6 +265,10 @@ function AnimationTimeline.DefaultClip(clipId: string, order: number, animationI
 		FadeInSeconds = 0.1,
 		FadeOutSeconds = 0.1,
 		Looped = false,
+		-- Action, not Core: a clip authored in this editor is an attack, and an attack that plays
+		-- UNDER the character's own locomotion is invisible, which reads as "the animation is broken"
+		-- rather than as a priority to go and change.
+		Priority = "Action",
 		Blend = "Overlap",
 		OnInterrupt = "Stop",
 	}
@@ -323,6 +352,10 @@ function AnimationTimeline.SanitizeClip(raw: unknown, clipId: string, order: num
 		FadeInSeconds = clampNumber(source.FadeInSeconds, Limits.MinFade, Limits.MaxFade, fallback.FadeInSeconds),
 		FadeOutSeconds = clampNumber(source.FadeOutSeconds, Limits.MinFade, Limits.MaxFade, fallback.FadeOutSeconds),
 		Looped = if typeof(source.Looped) == "boolean" then source.Looped :: boolean else false,
+		-- Absent (every clip persisted before this field existed) falls back to the default rather
+		-- than being rejected -- same as every other field here, and the reason no migration pass is
+		-- needed for the records already in storage.
+		Priority = readEnum(source.Priority, PRIORITIES, fallback.Priority) :: ClipPriority,
 		Blend = readEnum(source.Blend, BLEND_MODES, fallback.Blend) :: ClipBlend,
 		OnInterrupt = readEnum(source.OnInterrupt, INTERRUPT_MODES, fallback.OnInterrupt) :: ClipInterrupt,
 	}

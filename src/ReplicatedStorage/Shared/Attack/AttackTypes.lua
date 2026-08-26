@@ -51,19 +51,17 @@ export type AttackRequest = {
 	Kind: AttackKind,
 	-- 1..AttackConstants.Hotbar.SlotCount, and only meaningful for Kind == "Hotbar".
 	Slot: number?,
-	-- Only meaningful for Kind == "Hotbar", and NOT TRUSTED for an ordinary player -- see
-	-- Server/Combat/Attack/AttackRequestSystem.lua's resolveRequest for the two paths this splits
-	-- into.
+	-- Only meaningful for Kind == "Hotbar", and NOT TRUSTED, for anyone, admin included -- see
+	-- Server/Combat/Attack/AttackRequestSystem.lua's resolveRequest.
 	--
-	-- For an admin (Server/Config/AdminConfig.lua's whitelist), this field is still trusted as sent:
-	-- that is the Move Editor's live-fire test path (Client/Combat/HotbarBindings.lua, written by the
-	-- "Bind to slot" control), the only way left to throw a move that isn't authored as an Art at all
-	-- since TestFireMove/SpawnPreviewDummy were removed with the old combat system.
-	--
-	-- For everyone else, this field is IGNORED. The server resolves the slot against
-	-- ArtSystem.GetEquipped(player) -- the same persisted binding CharacterMenuClient's equip UI
-	-- writes through ArtSystem.Equip -- and gates the result on ArtSystem.CanUse. A client cannot
-	-- claim a slot holds an art it does not, because the claim is never read.
+	-- Slot is checked against ArtSystem.GetEquipped(player) and that is the WHOLE resolution: MoveId
+	-- is ignored entirely and the equipped ArtId is gated on ArtSystem.CanUse instead. A hotbar slot
+	-- can only ever hold a real, persisted Art -- ArtSystem.Equip for the normal ArtsTab flow,
+	-- ArtSystem.DevGrantAndEquip for an admin's Move Editor "bind to slot" test-fire (see that
+	-- function's own header) -- so there is no second kind of MoveId an admin account could have this
+	-- field trusted for. An admin equipping an Art normally must feel the same Qi cost/mastery/tier/
+	-- Deviation gating anyone else does, not a free pass just because their account also carries
+	-- dev-tool trust. A slot with nothing equipped simply refuses -- MoveId was never read at all.
 	MoveId: string?,
 }
 

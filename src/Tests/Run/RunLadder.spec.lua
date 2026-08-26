@@ -1,5 +1,5 @@
 --!strict
--- Covers Shared/Run/RunLadder.lua -- the pure arithmetic the run's three-stage ladder runs on, shared
+-- Covers Shared/Run/RunLadder.lua -- the pure arithmetic the run's two-stage ladder runs on, shared
 -- by the server (which resolves the authoritative stage and the WalkSpeed that follows from it) and
 -- the client (which presents it).
 --
@@ -19,17 +19,18 @@ local function expectClose(actual: number, expected: number, tolerance: number?)
 	expect(math.abs(actual - expected) <= allowed).to.equal(true)
 end
 
--- Read from the config rather than hardcoded, so retuning the ladder retunes these tests with it. A
--- spec that hardcodes 7 and 16 fails for the wrong reason the first time someone moves a threshold --
--- it should be asserting the RELATIONSHIPS, not restating the numbers.
+-- Read from the config rather than hardcoded, so retuning OR RESIZING the ladder retunes these tests
+-- with it -- these ran unchanged across a three-gear ladder and the two-gear one that replaced it. A
+-- spec that hardcodes 7 as the top threshold fails for the wrong reason the first time someone moves
+-- one -- it should be asserting the RELATIONSHIPS, not restating the numbers.
 local STAGES = RunConstants.Stages
 local TOP = STAGES[#STAGES]
 local SECOND = STAGES[2]
 
 return function()
 	describe("the ladder's own shape", function()
-		it("defines at least three stages", function()
-			expect(#STAGES >= 3).to.equal(true)
+		it("defines at least two stages", function()
+			expect(#STAGES >= 2).to.equal(true)
 		end)
 
 		it("is ordered: every stage is faster and costs more charge than the one below it", function()
@@ -131,12 +132,13 @@ return function()
 			expect(RunLadder.ResolveStage(SECOND.Id, justBelow, true)).to.equal(1)
 		end)
 
-		it("drops the top gear to the one below it, not all the way to stage 1", function()
+		it("drops a held top gear exactly one rung, never further", function()
+			local belowTop = STAGES[#STAGES - 1]
 			local belowTopSustain = TOP.ChargeSeconds * TOP.SustainFraction - 1e-3
-			-- That charge is still comfortably above stage 2's own entry requirement, so the fall is one
+			-- That charge is still at or above the rung below's own entry requirement, so the fall is one
 			-- gear rather than a collapse -- the property that makes the ladder feel like gears.
-			expect(belowTopSustain > SECOND.ChargeSeconds).to.equal(true)
-			expect(RunLadder.ResolveStage(TOP.Id, belowTopSustain, true)).to.equal(SECOND.Id)
+			expect(belowTopSustain >= belowTop.ChargeSeconds).to.equal(true)
+			expect(RunLadder.ResolveStage(TOP.Id, belowTopSustain, true)).to.equal(belowTop.Id)
 		end)
 	end)
 
@@ -230,8 +232,8 @@ return function()
 			expect(stage).to.equal(SECOND.Id)
 		end)
 
-		it("has NOT reached the top gear at second gear's threshold", function()
-			local stage = runFor(SECOND.ChargeSeconds + 0.5)
+		it("has NOT reached the top gear a hair before its own threshold", function()
+			local stage = runFor(TOP.ChargeSeconds - 0.5)
 			expect(stage < TOP.Id).to.equal(true)
 		end)
 

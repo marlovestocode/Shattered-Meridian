@@ -28,14 +28,30 @@ local AttackRequestSystem = require(ServerScriptService.Server.Combat.Attack.Att
 local DefenseSystem = require(ServerScriptService.Server.Combat.Defense.DefenseSystem)
 local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.HitboxEngine)
 local SwingSequencer = require(ServerScriptService.Server.Combat.Attack.SwingSequencer)
+local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
+
+-- The real roster this file asserts against -- weapons are models in Workspace.Weapons now, so a spec
+-- that installs none has an empty roster and every throw resolves to nothing.
+local ROSTER = WeaponFixture.Install()
+local FIRST_WEAPON = ROSTER[1]
+local SECOND_WEAPON = ROSTER[2]
 
 local FRAME = 1 / 60
 local BUFFER = AttackConstants.Input.BufferSeconds
 local CHAIN_DELAY = AttackConstants.Sequence.ChainDelaySeconds
 
--- A real, catalogued move with a long cooldown relative to its own swing, so a cooldown refusal can be
--- observed without waiting out a swing. Primary Heavy 1 authors Cooldown 1.37 against a ~1.37s swing.
-local HOTBAR_MOVE = "default:Primary:Heavy:1"
+-- A real, catalogued move -- used only to populate AttackRequest.MoveId in the "unauthorised sender"
+-- case below. Its VALUE never matters there: MoveId is read but completely ignored for Hotbar now
+-- (see AttackTypes.AttackRequest.MoveId's own header). This file used to also cover per-move
+-- cooldown, chain-delay independence, and "a hotbar press leaves the string alone" by THROWING a
+-- Hotbar move through this same constant -- all three needed the throw to actually SUCCEED, which
+-- now requires a real Player with a loaded profile and a real equipped Art
+-- (AttackRequestSystem.resolveRequest resolves every Hotbar press through ArtSystem.GetEquipped,
+-- admin or not -- see AttackRequestSystem.lua's own header). A bare Instance.new("Player") errors in
+-- this headless harness -- the same already-accepted gap Tests/Admin/AdminActionSystem.spec.lua's
+-- own header documents for its Player-keyed wrappers -- so that coverage is deferred to
+-- Studio/live-server verification; there is no synthetic-dummy substitute for it here.
+local HOTBAR_MOVE = `default:{FIRST_WEAPON}:Heavy:1`
 
 type Dummy = {
 	Model: Model,
@@ -70,6 +86,11 @@ local function makeDummy(name: string, position: Vector3): Dummy
 	table.insert(spawned, model)
 
 	local id = HitboxEngine.RegisterCombatant(model, root, humanoid)
+	-- ARMED, because a fresh SwingSequencer record is now EMPTY-HANDED and an unarmed combatant
+	-- resolves no swings at all (see that module's own recordFor). Every case in this file is about
+	-- the REQUEST path rather than about being armed, so this is fixture work rather than something
+	-- each case restates.
+	SwingSequencer.SetWeapon(model, FIRST_WEAPON, os.clock())
 	return { Model = model, Root = root, Humanoid = humanoid, Id = id }
 end
 
@@ -95,7 +116,7 @@ end
 
 -- How long the currently-authored stage-1 Basic swing occupies the engine for.
 local function basicSwingSeconds(): number
-	local entry = AttackCatalog.Get("default:Primary:Basic:1")
+	local entry = AttackCatalog.Get(`default:{FIRST_WEAPON}:Basic:1`)
 	assert(entry ~= nil, "the Primary Basic string must be catalogued")
 	local definition = (entry :: any).Definition
 	return definition.WindupSeconds + definition.ActiveSeconds + definition.RecoverySeconds
@@ -136,30 +157,24 @@ return function()
 			expect(reason).to.equal("NoCharacter")
 		end)
 
-		it("refuses a hotbar press from an unauthorised sender", function()
-			-- The whole reason a MoveId is allowed on the wire at all -- see AttackTypes.AttackRequest.
-			-- MoveId's own header. Without this gate the hotbar is a "throw any authored move" hole.
+		it("refuses a hotbar press whose model has no real Player behind it", function()
+			-- Every Hotbar press -- admin or not -- resolves through Players:GetPlayerFromCharacter
+			-- and then ArtSystem.GetEquipped now (see AttackRequestSystem.lua's own header on why);
+			-- there is no longer a second, trusted branch a synthetic dummy (or a spoofed `authorized`)
+			-- can reach instead. Asserted for BOTH authorized values on purpose, to prove that flag no
+			-- longer changes Hotbar resolution at all -- exactly the class of bug ("an admin's press
+			-- takes a different, less-checked path") this module's own header describes fixing.
 			local attacker = makeDummy("Civilian", Vector3.new(0, 5, 0))
-			local accepted, reason = AttackRequestSystem.Throw(
-				attacker.Model,
-				{ Kind = "Hotbar", Slot = 1, MoveId = HOTBAR_MOVE },
-				false,
-				os.clock()
-			)
-			expect(accepted).to.equal(false)
-			expect(reason).to.equal("NotAuthorized")
-		end)
-
-		it("refuses a hotbar press naming a move that does not exist", function()
-			local attacker = makeDummy("Fabricator", Vector3.new(0, 5, 0))
-			local accepted, reason = AttackRequestSystem.Throw(
-				attacker.Model,
-				{ Kind = "Hotbar", Slot = 1, MoveId = "default:NoSuchWeapon:Basic:99" },
-				true,
-				os.clock()
-			)
-			expect(accepted).to.equal(false)
-			expect(reason).to.equal("UnknownMove")
+			for _, authorized in { false, true } do
+				local accepted, reason = AttackRequestSystem.Throw(
+					attacker.Model,
+					{ Kind = "Hotbar", Slot = 1, MoveId = HOTBAR_MOVE },
+					authorized,
+					os.clock()
+				)
+				expect(accepted).to.equal(false)
+				expect(reason).to.equal("NotAuthorized")
+			end
 		end)
 	end)
 
@@ -185,66 +200,11 @@ return function()
 			expect(reason).to.equal("Busy")
 			expect(SwingSequencer.GetStageIndex(attacker.Model, "Basic", base + 0.01)).to.equal(1)
 		end)
-
-		it("leaves the string alone for a hotbar press", function()
-			-- A hotbar move is not part of either string and must not disturb the one in progress.
-			local attacker = makeDummy("Hotbarrer", Vector3.new(0, 5, 0))
-			local base = os.clock()
-
-			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
-			HitboxEngine.CancelAttack(attacker.Id, "Spec", base + 0.01)
-
-			local accepted = AttackRequestSystem.Throw(
-				attacker.Model,
-				{ Kind = "Hotbar", Slot = 1, MoveId = HOTBAR_MOVE },
-				true,
-				base + 0.02
-			)
-			expect(accepted).to.equal(true)
-			HitboxEngine.CancelAttack(attacker.Id, "Spec", base + 0.03)
-
-			-- Still stage 1 thrown, so the next Basic press is stage 2.
-			local resolution = SwingSequencer.Resolve(attacker.Model, "Basic", 1, base + 0.04)
-			expect((resolution :: any).StageIndex).to.equal(2)
-		end)
 	end)
 
-	describe("AttackRequestSystem -- per-move cooldown", function()
-		it("refuses the same move again while its authored cooldown is running", function()
-			-- Asserted through the hotbar rather than the string, deliberately: a second Basic press
-			-- resolves to a DIFFERENT move with its own cooldown, so the string can never exercise this
-			-- gate. The swing is cancelled first so "Busy" cannot be the reason instead.
-			local attacker = makeDummy("Cooling", Vector3.new(0, 5, 0))
-			local base = os.clock()
-			local request = { Kind = "Hotbar" :: "Hotbar", Slot = 1, MoveId = HOTBAR_MOVE }
-
-			expect(AttackRequestSystem.Throw(attacker.Model, request, true, base)).to.equal(true)
-			HitboxEngine.CancelAttack(attacker.Id, "Spec", base + 0.01)
-			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Idle")
-
-			local accepted, reason = AttackRequestSystem.Throw(attacker.Model, request, true, base + 0.02)
-			expect(accepted).to.equal(false)
-			expect(reason).to.equal("Cooldown")
-		end)
-
-		it("reports the remaining cooldown it is enforcing", function()
-			local attacker = makeDummy("Reporting", Vector3.new(0, 5, 0))
-			local base = os.clock()
-			AttackRequestSystem.Throw(attacker.Model, { Kind = "Hotbar", Slot = 1, MoveId = HOTBAR_MOVE }, true, base)
-
-			local entry = AttackCatalog.Get(HOTBAR_MOVE)
-			local authored = (entry :: any).Cooldown
-			expect(AttackRequestSystem.GetCooldownRemaining(attacker.Model, HOTBAR_MOVE, base)).to.be.near(
-				authored,
-				1e-3
-			)
-			-- Past the end, it is zero rather than negative -- a HUD reading this must never be handed
-			-- a number it would render as a countdown running backwards.
-			expect(AttackRequestSystem.GetCooldownRemaining(attacker.Model, HOTBAR_MOVE, base + authored + 1)).to.equal(
-				0
-			)
-		end)
-	end)
+	-- "AttackRequestSystem -- per-move cooldown" and a "leaves the string alone for a hotbar press"
+	-- case used to live here, both asserted by THROWING a Hotbar move -- see HOTBAR_MOVE's own header
+	-- on why that now needs a real Player and is deferred to Studio/live-server verification instead.
 
 	describe("AttackRequestSystem -- the input buffer", function()
 		it("remembers a press refused for being mid-swing", function()
@@ -376,23 +336,9 @@ return function()
 			expect(SwingSequencer.GetStageIndex(attacker.Model, "Basic", base + gate + 1e-3)).to.equal(2)
 		end)
 
-		it("does not make a hotbar move wait on a string's rhythm", function()
-			-- A hotbar cast is not a link in a chain; it has its own authored Cooldown, and making it
-			-- also wait on the beat would be a second, invisible cooldown stacked on the real one.
-			local attacker = makeDummy("Casting", Vector3.new(0, 5, 0))
-			local base = os.clock()
-
-			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
-			HitboxEngine.CancelAttack(attacker.Id, "Spec", base + 0.01)
-
-			local accepted = AttackRequestSystem.Throw(
-				attacker.Model,
-				{ Kind = "Hotbar", Slot = 1, MoveId = HOTBAR_MOVE },
-				true,
-				base + 0.02
-			)
-			expect(accepted).to.equal(true)
-		end)
+		-- A "does not make a hotbar move wait on a string's rhythm" case used to live here, asserted by
+		-- THROWING a Hotbar move -- see HOTBAR_MOVE's own header on why that now needs a real Player
+		-- and is deferred to Studio/live-server verification instead.
 
 		it("keeps the beat shorter than the buffer that forgives it", function()
 			-- The relationship, not either number: a chain delay at or past the buffer would mean a
@@ -406,9 +352,10 @@ return function()
 	describe("AttackRequestSystem -- weapons", function()
 		it("reports the weapon the sequencer is holding", function()
 			local attacker = makeDummy("Armed", Vector3.new(0, 5, 0))
-			expect(AttackRequestSystem.GetWeapon(attacker.Model)).to.equal(AttackConstants.Weapons.Default)
+			SwingSequencer.SetWeapon(attacker.Model, FIRST_WEAPON, os.clock())
+			expect(AttackRequestSystem.GetWeapon(attacker.Model)).to.equal(FIRST_WEAPON)
 			SwingSequencer.SwapWeapon(attacker.Model, os.clock())
-			expect(AttackRequestSystem.GetWeapon(attacker.Model)).to.equal("Secondary")
+			expect(AttackRequestSystem.GetWeapon(attacker.Model)).to.equal(SECOND_WEAPON)
 		end)
 	end)
 end

@@ -59,7 +59,9 @@
 	(Client/Combat/HotbarBindings.lua), or what any of it costs (the server).
 ]]
 
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
 local UserInputService = game:GetService("UserInputService")
 
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
@@ -69,9 +71,11 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local HotbarBindings = require(script.Parent.HotbarBindings)
+local CombatAnimator = require(script.Parent.Parent.FX.CombatAnimator)
 local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 
@@ -89,10 +93,14 @@ local SLOT_COUNT = AttackConstants.Hotbar.SlotCount
 local FOV_SLOT = "AttackSwing"
 local ATTACK_LAYER = "Attack"
 local SWING_SOURCE = "Swing"
+-- Client/FX/CombatAnimator.lua's own key for this source in its activeActionSources set -- see
+-- CombatAnimator.SetActionAnimationActive's header for why the swing claim has to report itself there.
+local ACTION_SOURCE = "Attack"
 
 local started = false
 local requestRemote: RemoteEvent? = nil
-local swapRemote: RemoteEvent? = nil
+local toggleDrawRemote: RemoteEvent? = nil
+local selectNextRemote: RemoteEvent? = nil
 
 -- The five hotbar keybind actions, resolved once. Types.KeybindAction is a closed union, so building
 -- these names by concatenation would type as `string` and silently stop matching if the union were
@@ -113,7 +121,12 @@ local lastPunchAt = 0
 
 -- The local player's weapon, as last reported by the server. Presentation only: nothing here decides
 -- which weapon is held, and no request payload carries it.
-local currentWeapon: Types.WeaponId = AttackConstants.Weapons.Default
+--
+-- Starts nil rather than at a default, because there is no client-knowable default any more -- the
+-- roster lives in Workspace.Weapons and the server picks the starting weapon from it. The server
+-- reports it through Combat_WeaponChanged on every character bind (AttackRequestSystem's own
+-- bindCharacter), so this is only nil for the moment before that first message lands.
+local currentWeapon: Types.WeaponId? = nil
 
 -- ONE manager for the local player's whole lifetime, bound/unbound per life -- the same "construct
 -- once, Bind() per respawn" shape AnimationManager.new's own header recommends for a caller that owns
@@ -221,11 +234,31 @@ end
 
 -- Input ---------------------------------------------------------------------------------------------
 
+-- True while any modal UI panel is up (Components/ModalScreen.lua publishes the count as
+-- Constants.Attributes.UiModalOpen -- see that constant's own comment). Roblox's own
+-- gameProcessedEvent only covers clicks that LAND on the GUI, and a centred 760x620 panel leaves
+-- most of the viewport uncovered, so a player reading their character sheet was still throwing a
+-- punch every time they clicked anywhere else on screen.
+local function isModalUiOpen(): boolean
+	local player = Players.LocalPlayer
+	return player ~= nil and player:GetAttribute(Constants.Attributes.UiModalOpen) == true
+end
+
 local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 	-- gameProcessed covers both halves of the obvious double-fire: a click that landed on a HUD
 	-- ability slot (that button fires its own OnActivated, which routes here through
 	-- AttackInputClient.PressHotbarSlot), and a number key typed into a TextBox.
 	if gameProcessed then
+		return
+	end
+
+	-- Gated here rather than inside each of the four branches below: while a panel is open NOTHING
+	-- in this module should fire -- not the swing, not a weapon swap, and not a hotbar number key,
+	-- which is otherwise just as reachable from a keyboard aimed at a menu.
+	--
+	-- AttackInputClient.PressHotbarSlot is deliberately NOT gated: that is the HUD ability slot's own
+	-- OnActivated, a click the player aimed at a button, and the HUD is not a modal.
+	if isModalUiOpen() then
 		return
 	end
 
@@ -237,8 +270,17 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 		requestWeaponAttack("Heavy")
 		return
 	end
-	if KeybindManager.Matches("SwapWeapon", input) then
-		local remote = swapRemote
+	if KeybindManager.Matches("ToggleWeapon", input) then
+		local remote = toggleDrawRemote
+		if remote then
+			-- No payload: the server owns which weapon is selected and whether it is currently out, so
+			-- there is nothing here for the client to name and nothing for the server to validate.
+			remote:FireServer()
+		end
+		return
+	end
+	if KeybindManager.Matches("SelectNextWeapon", input) then
+		local remote = selectNextRemote
 		if remote then
 			remote:FireServer()
 		end
@@ -276,7 +318,20 @@ local function playSwing(payload: AttackStartedPayload): ()
 		FadeIn = AttackConstants.Presentation.SwingFadeSeconds,
 		FadeOut = AttackConstants.Presentation.SwingFadeSeconds,
 		MaxSeconds = scheduled,
+		-- Tells Client/FX/CombatAnimator.lua's armed-idle loop to stand down for every way this claim
+		-- can stop owning the layer (landed, got superseded by the next swing, got cancelled by
+		-- CancelSwing below, expired, or failed to load) -- see CombatAnimator.
+		-- SetActionAnimationActive's own header for why a Core-priority idle loop would otherwise mask
+		-- an Action-priority swing rather than the other way around.
+		OnFinished = function(_clip: string, _reason: AnimationManager.FinishReason)
+			CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, false)
+		end,
 	})
+	-- Queried rather than assumed true: a claim whose track failed to load retires SYNCHRONOUSLY inside
+	-- SetClaim above (calling OnFinished with "Failed" before this line ever runs), so asking
+	-- AnimationManager what is actually active is what keeps this correct in that case too, instead of
+	-- unconditionally re-asserting true over a claim that never actually started.
+	CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, manager:GetActiveClip(ATTACK_LAYER) ~= nil)
 end
 
 -- Cuts the LOCAL player's own in-flight swing animation short, the instant this client learns a hit
@@ -359,7 +414,11 @@ local function onWeaponChanged(raw: unknown): ()
 		return
 	end
 	local payload = raw :: AttackTypes.WeaponChangedPayload
-	if payload.WeaponId ~= "Primary" and payload.WeaponId ~= "Secondary" then
+	-- Any non-empty string is accepted: weapon ids are roster model names now, so there is no closed
+	-- set to check against here. Deliberately NOT re-validated client-side -- the server picked this
+	-- id out of its own roster and is the only authority on it, and this value is used for
+	-- presentation only (nothing gated on it), so the worst a bad one could do is mislabel a log line.
+	if typeof(payload.WeaponId) ~= "string" or payload.WeaponId == "" then
 		return
 	end
 	currentWeapon = payload.WeaponId
@@ -405,7 +464,24 @@ function AttackInputClient.Start(): ()
 	started = true
 
 	requestRemote = NetworkBridge.GetRemoteEvent(AttackConstants.Network.RemoteNames.Request)
-	swapRemote = NetworkBridge.GetRemoteEvent(AttackConstants.Network.RemoteNames.SwapWeapon)
+	-- HIDES ROBLOX'S OWN BACKPACK HOTBAR. Weapons in this game are held through a Tool (see
+	-- Server/Combat/Weapon/WeaponVisualSystem.lua on why a real Tool rather than a hand-rolled
+	-- Motor6D), and the engine draws every Tool a character owns as a numbered slot along the bottom
+	-- of the screen. That hotbar is Roblox's inventory UI, not this game's: drawing/sheathing is T,
+	-- selection is Y, and both are server-owned -- so the built-in strip both duplicates state this
+	-- game already presents and offers a second, unsynchronised way to un-equip.
+	--
+	-- pcall'd because SetCoreGuiEnabled throws if the CoreGui is not ready yet on a very early boot,
+	-- and a cosmetic strip failing to hide must not take the whole attack input layer down with it.
+	local ok, err = pcall(function()
+		StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
+	end)
+	if not ok then
+		logger:warn("Could not hide the Backpack CoreGui", { errorMessage = tostring(err) })
+	end
+
+	toggleDrawRemote = NetworkBridge.GetRemoteEvent(WeaponConstants.Network.RemoteNames.ToggleDraw)
+	selectNextRemote = NetworkBridge.GetRemoteEvent(WeaponConstants.Network.RemoteNames.SelectNext)
 
 	local startedRemote = NetworkBridge.GetRemoteEvent(AttackConstants.Network.RemoteNames.Started)
 	startedRemote.OnClientEvent:Connect(onAttackStarted)

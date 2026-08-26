@@ -27,6 +27,7 @@ local RunService = game:GetService("RunService")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Parent.Parent.Components.Panel)
 local Section = require(script.Parent.Parent.Parent.Components.Section)
@@ -37,6 +38,7 @@ local TextField = require(script.Parent.Parent.Parent.Components.TextField)
 local AbilitySlot = require(script.Parent.Parent.Parent.Components.AbilitySlot)
 local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 local DevMenuTypes = require(script.Parent.Types)
+local VehiclesTab = require(script.Parent.VehiclesTab)
 
 local Children = Fusion.Children
 local peek = Fusion.peek
@@ -560,6 +562,7 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	-- exists (which is the lifetime of this client) -- see DevMenu/init.lua's own header for why a
 	-- BindableEvent rather than a callback prop.
 	local rollRareEmoteRequestedEvent = Instance.new("BindableEvent")
+	local grantBloodlineRerollsRequestedEvent = Instance.new("BindableEvent")
 	local setGodmodeRequestedEvent = Instance.new("BindableEvent")
 	local setFlightRequestedEvent = Instance.new("BindableEvent")
 	local setFlightCollideRequestedEvent = Instance.new("BindableEvent")
@@ -589,6 +592,9 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local spawnDebugDummyRequestedEvent = Instance.new("BindableEvent")
 	local despawnAllDebugDummiesRequestedEvent = Instance.new("BindableEvent")
 	local setDummyGuardRequestedEvent = Instance.new("BindableEvent")
+	local spawnCoalDepositRequestedEvent = Instance.new("BindableEvent")
+	local spawnWaterSourceRequestedEvent = Instance.new("BindableEvent")
+	local fillCarriedFuelRequestedEvent = Instance.new("BindableEvent")
 
 	local godmodeButtonText = scope:Computed(function(use)
 		return if use(godmodeActive) then "Godmode: On" else "Godmode: Off"
@@ -726,7 +732,10 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	-- regardless of the root panel's own width -- same 1/N-split idiom this file already uses for
 	-- the Admin tab's Godmode/Flight/Collide row and the standalone-attack/hitbox selector rows.
 	-- 4, not 5 -- "Players" was dropped from the tab strip in Phase 1 (see this module's own header).
-	local TAB_COUNT = 4
+	-- Every tab in the strip takes an equal share of its width, so this has to be kept in step with
+	-- the tabButton calls below -- a strip built for four with five buttons in it silently overflows
+	-- the content column rather than erroring.
+	local TAB_COUNT = 5
 	local function tabButton(tabName: DevMenuTabName, text: string, layoutOrder: number): TextButton
 		return Tab(scope, {
 			Text = text,
@@ -765,12 +774,29 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 				end,
 			}),
 		}),
+		-- THE ONLY WAY TO GET A BLOODLINE REROLL. A fresh profile gets
+		-- BloodlineConstants.StartingRerolls and nothing in the game has ever granted one since, so
+		-- the character menu's own reroll control went permanently dead the moment a player spent
+		-- theirs -- including for whoever is trying to test the bloodline system. Sits beside Roll
+		-- Rare Emote because it is the same kind of thing: a grant that exists only because the live
+		-- path that would eventually do it for real (a shop, a quest, a tier-up) has not been
+		-- designed yet.
+		Section(scope, "Bloodline", 2, {
+			Button(scope, {
+				Text = `Grant {BloodlineConstants.DevGrantRerollAmount} Rerolls`,
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				LayoutOrder = 1,
+				OnActivated = function()
+					grantBloodlineRerollsRequestedEvent:Fire()
+				end,
+			}),
+		}),
 		-- Debug Dummy -- a real, fully-registered combatant against the rebuilt HitboxEngine/
 		-- DefenseSystem stack (see DebugDummySystem.lua's own header), spawned SpawnDistance studs in
 		-- front of the requesting admin. Guard is a SERVER-WIDE toggle covering every currently-active
 		-- (and every future) dummy at once -- there is no per-dummy target picker, the same "no
 		-- player-select UI" posture every other action on this screen already takes.
-		Section(scope, "Debug Dummy", 2, {
+		Section(scope, "Debug Dummy", 3, {
 			scope:New "Frame" {
 				Name = "SpawnRow",
 				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
@@ -828,6 +854,62 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 						Color = Tokens.Color.TextSecondary,
 						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
 						LayoutOrder = 2,
+					}),
+				},
+			},
+		}),
+		-- Blimp Fuel System test nodes -- one tagged CoalDeposit/WaterSource Part spawned
+		-- RESOURCE_NODE_SPAWN_DISTANCE studs in front of the requesting admin (Server/Systems/
+		-- DevMenuSystem.handleSpawnCoalDeposit/handleSpawnWaterSource), so a tester can gather before a
+		-- builder has placed any real world nodes. See Server/Systems/ResourceGatheringSystem.
+		-- SpawnDebugNode's own header.
+		Section(scope, "Blimp Fuel Nodes", 4, {
+			scope:New "Frame" {
+				Name = "SpawnResourceNodeRow",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				BackgroundTransparency = 1,
+				LayoutOrder = 1,
+
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						Padding = UDim.new(0, Tokens.Space.S),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					Button(scope, {
+						Text = "Spawn Coal Deposit",
+						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 1,
+						OnActivated = function()
+							spawnCoalDepositRequestedEvent:Fire()
+						end,
+					}),
+					Button(scope, {
+						Text = "Spawn Water Source",
+						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 2,
+						OnActivated = function()
+							spawnWaterSourceRequestedEvent:Fire()
+						end,
+					}),
+				},
+			},
+			-- Its own full-width row under the two node spawns, not a third button squeezed beside
+			-- them: this is the shortcut PAST the pair above (fill the pockets instead of placing
+			-- something to mine), so it reads better as the next step down than as a third of three.
+			scope:New "Frame" {
+				Name = "FillCarriedFuelRow",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				BackgroundTransparency = 1,
+				LayoutOrder = 2,
+
+				[Children] = {
+					Button(scope, {
+						Text = "Fill Carried Fuel",
+						Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+						OnActivated = function()
+							fillCarriedFuelRequestedEvent:Fire()
+						end,
 					}),
 				},
 			},
@@ -1426,6 +1508,12 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 		}),
 	})
 
+	-- Built as its own module, unlike the four tabs above -- see VehiclesTab.lua's own header. It
+	-- hands back the section Instances only; the ScrollingFrame, the visibility Computed and the tab
+	-- strip entry below all stay this module's, exactly as they are for every other tab.
+	local vehicles = VehiclesTab.Build(scope)
+	local vehiclesTab = tabContent(scope, "Vehicles", selectedTab, scrollSize, vehicles.Children)
+
 	local tabStrip = scope:New "Frame" {
 		Name = "TabStrip",
 		Size = UDim2.new(1, 0, 0, TAB_STRIP_HEIGHT),
@@ -1442,6 +1530,7 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 			tabButton("Admin", "Admin", 2),
 			tabButton("Tuning", "Tuning", 3),
 			tabButton("Reports", "Reports", 4),
+			tabButton("Vehicles", "Vehicles", 5),
 		},
 	} :: Frame
 
@@ -1462,16 +1551,19 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 			adminTab,
 			tuningTab,
 			reportsTab,
+			vehiclesTab,
 		},
 	} :: Frame
 
 	return {
 		Root = root,
+		Vehicles = vehicles,
 		TargetNameDisplay = targetNameDisplay,
 		GodmodeActive = godmodeActive,
 		FlightActive = flightActive,
 		CollideActive = collideActive,
 		RollRareEmoteRequested = rollRareEmoteRequestedEvent.Event,
+		GrantBloodlineRerollsRequested = grantBloodlineRerollsRequestedEvent.Event,
 		SetGodmodeRequested = setGodmodeRequestedEvent.Event,
 		SetFlightRequested = setFlightRequestedEvent.Event,
 		SetFlightCollideRequested = setFlightCollideRequestedEvent.Event,
@@ -1513,6 +1605,9 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 		SpawnDebugDummyRequested = spawnDebugDummyRequestedEvent.Event,
 		DespawnAllDebugDummiesRequested = despawnAllDebugDummiesRequestedEvent.Event,
 		SetDummyGuardRequested = setDummyGuardRequestedEvent.Event,
+		SpawnCoalDepositRequested = spawnCoalDepositRequestedEvent.Event,
+		SpawnWaterSourceRequested = spawnWaterSourceRequestedEvent.Event,
+		FillCarriedFuelRequested = fillCarriedFuelRequestedEvent.Event,
 	}
 end
 

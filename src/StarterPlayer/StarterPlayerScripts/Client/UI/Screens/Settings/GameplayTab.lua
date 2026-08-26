@@ -52,7 +52,7 @@ export type ParkourToggleField =
 -- members on ParkourToggleField above, because the two write different sub-tables through different
 -- remotes -- letting one field name stand for both would make a typo in either list silently route to
 -- the wrong handler.
-export type ComfortToggleField = "CameraShake" | "FieldOfViewEffects"
+export type ComfortToggleField = "CameraShake" | "FieldOfViewEffects" | "VehicleCameraMotion"
 
 export type GameplayTabProps = {
 	Width: number,
@@ -218,8 +218,21 @@ local function GameplayTab(scope: Scope, props: GameplayTabProps): ScrollingFram
 			Hint = "The short zoom that punctuates an impact. The gradual speed zoom while running is unaffected.",
 			LayoutOrder = 8,
 		}),
+		-- Its own row rather than a third meaning for the shake toggle above, on the same reasoning that
+		-- separated combat's two rows from parkour's: riding a blimp is a different situation from being
+		-- hit, and a player has every reason to want one and not the other. The hint says what stays on,
+		-- because "off" here is a partial answer by design -- see Types.ComfortSettings.
+		Toggle(scope, {
+			Label = "Airship camera lean",
+			Value = comfortValue("VehicleCameraMotion"),
+			OnChanged = function(enabled: boolean)
+				props.OnComfortToggled("VehicleCameraMotion", enabled)
+			end,
+			Hint = "The roll and sway the view takes on while riding a blimp. Off keeps the sense of speed -- the pull-back and the drift under acceleration stay -- and only levels the horizon.",
+			LayoutOrder = 9,
+		}),
 
-		sectionLabel(scope, "MOVEMENT ASSISTS", 9),
+		sectionLabel(scope, "MOVEMENT ASSISTS", 10),
 	}
 
 	for index, row in ASSIST_ROWS do

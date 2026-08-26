@@ -2,15 +2,17 @@
 --[[
 	DraftBinding.lua
 
-	Owns: the three primitives every Move Editor form panel is built out of, so the four of them
-	(PropertyEditor.lua and the HitboxEditor/AnimationTimelineEditor/ObjectStunEditor sub-panels it
-	hosts) share one implementation instead of four copies:
+	Owns: the primitives every Move Editor form panel is built out of, so all of them
+	(PropertyEditor.lua and the HitboxEditor/AnimationTimelineEditor/ObjectStunEditor/EffectsEditor/
+	ArtBindingEditor sub-panels it hosts) share one implementation instead of six copies:
 
-	  * Apply  -- clone the current draft, mutate exactly the field that changed, hand the whole
-	              record to OnFieldChanged. Every control in every panel commits through this.
-	  * Field  -- read one field off the current draft as a Computed, falling back to a default while
-	              nothing is selected, so no control ever has to nil-check its own Value prop.
-	  * Row    -- lay related controls out side by side in N even columns.
+	  * Apply   -- clone the current draft, mutate exactly the field that changed, hand the whole
+	               record to OnFieldChanged. Every control in every panel commits through this.
+	  * Field   -- read one field off the current draft as a Computed, falling back to a default while
+	               nothing is selected, so no control ever has to nil-check its own Value prop.
+	  * Row     -- lay related controls out side by side in N even columns.
+	  * Stack   -- lay a variable number of children out vertically.
+	  * TextRow -- a labelled string field that reseeds from the draft and commits on FocusLost.
 
 	These lived as file-local helpers in PropertyEditor.lua while it was the only form panel. Once
 	the hitbox, animation-timeline and object-stun editors became their own files -- each of which is
@@ -27,6 +29,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
+local Label = require(script.Parent.Parent.Parent.Components.Label)
+local TextField = require(script.Parent.Parent.Parent.Components.TextField)
 
 local Children = Fusion.Children
 local peek = Fusion.peek
@@ -41,6 +45,11 @@ export type DraftContext = {
 	Draft: Fusion.Value<MoveDefinition?>,
 	OnFieldChanged: (MoveDefinition) -> (),
 }
+
+-- Four Body-scale lines plus the box's own padding -- enough for the two or three sentences a
+-- field like a move's Description actually attracts, without the box dominating a section that
+-- also has to show real controls.
+local MULTILINE_HEIGHT = 88
 
 local DraftBinding = {}
 
@@ -139,6 +148,134 @@ function DraftBinding.Stack(scope: Scope, layoutOrder: number, spacing: number, 
 		LayoutOrder = layoutOrder,
 
 		[Children] = stacked,
+	} :: Frame
+end
+
+-- A labelled single-line string field over the draft: display name, category, an animation id, an
+-- art's prerequisite. Three files had independently grown the same shape before this existed --
+-- PropertyEditor.lua's TextFieldRow, ObjectStunEditor.lua's stunTextRow, and the Art section's copy
+-- of the first -- because none of it is expressible as a Computed: TextField.lua owns a real
+-- Fusion.Value that it writes into as the author types, so the row has to hold that Value itself and
+-- RESEED it whenever the draft changes underneath (a move switch, a server reconcile). Getting that
+-- reseed wrong is invisible until an admin switches moves and the old text is still sitting there.
+--
+-- The caller owns the WRITE (OnCommit), not just the value: a row over a top-level field commits
+-- through a plain Apply, while one over a sub-table has to go through that sub-table's own
+-- clone-then-mutate helper (ObjectStunEditor's applyStun, EffectsEditor's applyToSubTable). Taking a
+-- `(draft, text) -> ()` setter instead would have to run inside Apply and could not reach those.
+export type TextRowProps = {
+	Label: string,
+	LayoutOrder: number,
+	-- Reads this row's current text off the draft. Re-run on every draft change to reseed the field.
+	Get: (MoveDefinition) -> string,
+	-- Called with the committed text on FocusLost -- never per keystroke, so a half-typed id never
+	-- reaches the draft (and, through it, the debounced UpdateDraft).
+	OnCommit: (string) -> (),
+	Placeholder: string?,
+	-- A wrapping, fixed-height box instead of a single line -- for a field whose content is prose
+	-- rather than an identifier. The height is fixed rather than auto-grown because the box lives
+	-- inside a ScrollingFrame with AutomaticCanvasSize: a box that grows as you type re-measures the
+	-- canvas and slides the cursor out from under the pointer mid-sentence.
+	Multiline: boolean?,
+	-- Caps what can be typed, enforced by TextField itself. Only meaningful for a field the server
+	-- also bounds -- pass the SAME number the server truncates at, or the box will accept text the
+	-- save silently shortens.
+	MaxLength: number?,
+	Visible: Fusion.UsedAs<boolean>?,
+	-- Mounts a plain read-only Label where the TextField would go. Both are built up front and
+	-- Visible-toggled, rather than teaching TextField.lua a disabled state it has no prop for.
+	ReadOnly: Fusion.UsedAs<boolean>?,
+}
+
+function DraftBinding.TextRow(scope: Scope, context: DraftContext, props: TextRowProps): Frame
+	local localText = scope:Value("")
+	local function reseed(): ()
+		local draft = peek(context.Draft)
+		localText:set(if draft then props.Get(draft) else "")
+	end
+	scope:Observer(context.Draft):onChange(reseed)
+	-- Once up front too, not only on change: a row mounted while a draft is ALREADY selected would
+	-- otherwise render blank until the next edit reseeded it.
+	reseed()
+
+	local readOnly: Fusion.UsedAs<boolean> = if props.ReadOnly == nil then false else props.ReadOnly
+	local editableVisible = scope:Computed(function(use)
+		return not use(readOnly)
+	end)
+
+	return scope:New "Frame" {
+		Name = props.Label,
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		LayoutOrder = props.LayoutOrder,
+		Visible = if props.Visible == nil then true else props.Visible,
+
+		[Children] = {
+			scope:New "UIListLayout" {
+				FillDirection = Enum.FillDirection.Vertical,
+				Padding = UDim.new(0, Tokens.Space.XS),
+				SortOrder = Enum.SortOrder.LayoutOrder,
+			},
+			Label(scope, { Text = props.Label, Scale = "Body", Color = Tokens.Color.TextPrimary, LayoutOrder = 1 }),
+			-- TextField.lua has no Visible prop of its own -- wrapped in a plain Frame so the editable and
+			-- read-only presentations can be mounted-both/Visible-toggled without widening that API.
+			scope:New "Frame" {
+				Name = "Editable",
+				Size = UDim2.fromScale(1, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				BackgroundTransparency = 1,
+				LayoutOrder = 2,
+				Visible = editableVisible,
+
+				[Children] = TextField(scope, {
+					Text = localText,
+					PlaceholderText = props.Placeholder,
+					Multiline = props.Multiline,
+					MaxLength = props.MaxLength,
+					Size = if props.Multiline
+						then UDim2.new(1, 0, 0, MULTILINE_HEIGHT)
+						else UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+					OnFocusLost = props.OnCommit,
+				}),
+			},
+			Label(scope, {
+				Text = localText,
+				Scale = "Body",
+				Color = Tokens.Color.TextSecondary,
+				LayoutOrder = 2,
+				Visible = readOnly,
+			}),
+		},
+	} :: Frame
+end
+
+-- Wraps a child that has no Visible prop of its own in a full-width, auto-height Frame that does.
+-- Components/Dropdown.lua and TextRow above both predate any caller needing to hide them reactively;
+-- giving each its own Visible prop for a handful of call sites would widen two shared APIs where one
+-- wrapper does the same job. Collapses to zero height when hidden, so the section's UIListLayout
+-- closes the gap rather than leaving a hole.
+function DraftBinding.VisibleWhen(
+	scope: Scope,
+	layoutOrder: number,
+	visible: Fusion.UsedAs<boolean>,
+	child: Instance
+): Frame
+	return scope:New "Frame" {
+		Name = "VisibleWhen",
+		LayoutOrder = layoutOrder,
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		Visible = visible,
+
+		[Children] = {
+			scope:New "UIListLayout" {
+				FillDirection = Enum.FillDirection.Vertical,
+				SortOrder = Enum.SortOrder.LayoutOrder,
+			},
+			child,
+		},
 	} :: Frame
 end
 

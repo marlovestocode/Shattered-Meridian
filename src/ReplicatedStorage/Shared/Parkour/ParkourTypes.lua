@@ -340,7 +340,7 @@ export type ParkourContext = {
 	-- pushed in from CombatClient.lua, which remains the owner of sprint. See ParkourController.
 	-- SetSprinting.
 	SprintHeld: boolean,
-	-- Which run stage the SERVER currently has this character in: 0 = not sprinting, 1/2/3 = the
+	-- Which run stage the SERVER currently has this character in: 0 = not sprinting, 1/2 = the
 	-- ladder Shared/Run/RunConstants.lua's Stages array defines (that file, not this comment, is the
 	-- source of truth for each stage's threshold). Mirrored from Constants.Attributes.SprintStage by
 	-- the controller each frame -- the client never resolves it, since the stage decides a WalkSpeed

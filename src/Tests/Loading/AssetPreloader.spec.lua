@@ -22,6 +22,7 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
 local StarterPlayer = game:GetService("StarterPlayer")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
@@ -29,24 +30,44 @@ local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstan
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
+local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
 
 local Client = StarterPlayer.StarterPlayerScripts.Client
 local AssetPreloader = require(Client.Loading.AssetPreloader)
 
--- Mirrors AssetPreloader's own assetKey(): a manifest entry is either a raw content-id string or an
--- instance carrying its id as a property. Building the key set once per test lets each assertion ask
--- the single question that matters -- "is this authored id actually in there?" -- without caring
--- which of the two shapes it arrived as (that is an implementation detail of the owning module, and
--- ParkourAnimator deliberately differs from CombatAnimator here).
+-- Installed once, at file scope, never removed -- the same convention every WeaponFixture consumer in
+-- this suite keeps (see Tests/Combat/Attack/AttackAnimations.spec.lua's own header for why a per-test
+-- Install()/Remove() cycle would tear the shared fixture down out from under another spec file).
+local WEAPON_ROSTER = WeaponFixture.Install()
+local WEAPON_ID = WEAPON_ROSTER[1]
+
+-- Mirrors AssetPreloader's own assetKey(): every manifest entry is an Instance carrying its asset id
+-- as a property -- either one a domain module already owned, or a throwaway the preloader wrapped a
+-- raw id in. Returns nil for anything else, which is what the "preloadable Instance" case below
+-- asserts never happens.
+local function entryKey(item: any): string?
+	if typeof(item) ~= "Instance" then
+		return nil
+	elseif item:IsA("Sound") then
+		return item.SoundId
+	elseif item:IsA("Animation") then
+		return item.AnimationId
+	elseif item:IsA("Decal") then
+		return item.Texture
+	end
+	return nil
+end
+
+-- Building the key set once per test lets each assertion ask the single question that matters -- "is
+-- this authored id actually in there?" -- without caring which shape it arrived as (that is an
+-- implementation detail of the owning module, and ParkourAnimator deliberately differs from
+-- CombatAnimator here).
 local function manifestKeys(): { [string]: boolean }
 	local keys: { [string]: boolean } = {}
 	for _, item in AssetPreloader.BuildManifest() do
-		if typeof(item) == "string" then
-			keys[item] = true
-		elseif item:IsA("Sound") then
-			keys[item.SoundId] = true
-		elseif item:IsA("Animation") then
-			keys[item.AnimationId] = true
+		local key = entryKey(item)
+		if key ~= nil then
+			keys[key] = true
 		end
 	end
 	return keys
@@ -73,12 +94,42 @@ return function()
 
 		it("never includes an empty or placeholder-prefix id", function()
 			for _, item in AssetPreloader.BuildManifest() do
-				if typeof(item) == "string" then
+				local key = entryKey(item)
+				if key ~= nil then
 					-- "" is the unauthored convention; the BARE prefix is the anti-pattern
 					-- EmoteDefinitions.lua records having shipped once -- it passes every ~= ""
 					-- guard and still reaches a real load attempt.
-					expect(item).never.to.equal("")
-					expect(item).never.to.equal("rbxassetid://")
+					expect(key).never.to.equal("")
+					expect(key).never.to.equal("rbxassetid://")
+				end
+			end
+		end)
+
+		it("hands ContentProvider a preloadable Instance, never a bare content id", function()
+			-- THE REGRESSION THIS FILE EXISTS FOR SECOND-MOST, after completeness -- and the one that
+			-- actually shipped. ContentProvider:PreloadAsync reports Enum.AssetFetchStatus.Failure for
+			-- a raw "rbxassetid://..." string whatever the underlying asset is, so a manifest carrying
+			-- ids directly warms NOTHING while looking entirely healthy: the loading bar still fills,
+			-- the game still plays, and every asset simply cold-loads at first use instead -- the exact
+			-- hitch the manifest exists to have already paid. It surfaced only as a wall of
+			-- "Asset failed to preload" warnings that read like broken ids.
+			--
+			-- Several providers legitimately return { string } (ParkourAnimator, DefenseClient,
+			-- AttackAnimations, WeaponIdleAnimations, WeaponDefenseAnimations, WeaponSounds), so a new
+			-- source dropped into BuildManifest unwrapped is a one-line, plausible-looking mistake.
+			-- This is what makes it loud.
+			for _, item in AssetPreloader.BuildManifest() do
+				if typeof(item) ~= "Instance" then
+					error(
+						`manifest entry {tostring(item)} is a {typeof(item)}, not an Instance -- PreloadAsync will report Failure for it`,
+						0
+					)
+				end
+				if entryKey(item) == nil then
+					error(
+						`manifest entry {item:GetFullName()} is a {item.ClassName}, which carries no preloadable asset id`,
+						0
+					)
 				end
 			end
 		end)
@@ -90,14 +141,7 @@ return function()
 			-- that isn't real.
 			local seen: { [string]: boolean } = {}
 			for _, item in AssetPreloader.BuildManifest() do
-				local key
-				if typeof(item) == "string" then
-					key = item
-				elseif item:IsA("Sound") then
-					key = item.SoundId
-				elseif item:IsA("Animation") then
-					key = item.AnimationId
-				end
+				local key = entryKey(item)
 				if key ~= nil then
 					expect(seen[key]).to.equal(nil)
 					seen[key] = true
@@ -141,10 +185,31 @@ return function()
 		it("covers the defense/parry animation", function()
 			-- DefenseClient.GetPreloadInstances (via Shared/Animation/AnimationManager.GetPreloadIds)
 			-- hands back raw content ids, not Animation instances -- same shape as ParkourConstants'
-			-- own category above.
+			-- own category above -- so this also covers AssetPreloader having wrapped them, which is
+			-- what makes them preloadable at all.
 			if DefenseConstants.ParryAnimationId ~= "" then
 				expect(manifestKeys()[DefenseConstants.ParryAnimationId]).to.equal(true)
 			end
+		end)
+
+		describe("covers per-weapon animation Attributes", function()
+			-- Own afterEach, scoped to this describe block only, clearing just the two clips these
+			-- cases set -- the fixture itself (WEAPON_ROSTER above) is shared VM-wide and stays
+			-- installed, per this file's own header note.
+			afterEach(function()
+				(WeaponFixture.AnimationSlot(WEAPON_ID, "M1") :: Animation).AnimationId = ""
+				(WeaponFixture.AnimationSlot(WEAPON_ID, "IDLE") :: Animation).AnimationId = ""
+			end)
+
+			it("covers a weapon's own swing-clip override (Shared/Attack/AttackAnimations.lua)", function()
+				(WeaponFixture.AnimationSlot(WEAPON_ID, "M1") :: Animation).AnimationId = "rbxassetid://111111"
+				expect(manifestKeys()["rbxassetid://111111"]).to.equal(true)
+			end)
+
+			it("covers a weapon's own idle-clip override (Shared/Combat/WeaponIdleAnimations.lua)", function()
+				(WeaponFixture.AnimationSlot(WEAPON_ID, "IDLE") :: Animation).AnimationId = "rbxassetid://222222"
+				expect(manifestKeys()["rbxassetid://222222"]).to.equal(true)
+			end)
 		end)
 
 		it("covers combat sounds without depending on Main.client.lua's require order", function()

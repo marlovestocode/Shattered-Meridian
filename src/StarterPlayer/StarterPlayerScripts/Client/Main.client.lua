@@ -60,6 +60,7 @@ local AttackInputClient = require(script.Parent.Combat.AttackInputClient)
 local WeaponInventoryClient = require(script.Parent.Combat.WeaponInventoryClient)
 local GrabInputClient = require(script.Parent.Combat.GrabInputClient)
 local BlimpController = require(script.Parent.Blimp.BlimpController)
+local FurnacePromptClient = require(script.Parent.Blimp.FurnacePromptClient)
 local SwingLunge = require(script.Parent.Combat.SwingLunge)
 local CombatAudio = require(script.Parent.FX.CombatAudio)
 local CombatFeedbackClient = require(script.Parent.Combat.CombatFeedbackClient)
@@ -273,7 +274,16 @@ logger:debug("GrabInputClient end")
 -- binds its own render step only while somebody is actually aboard rather than for the session -- see
 -- its own header on why that differs from FlightCamera/ShiftLockCamera immediately above.
 logger:debug("BlimpController start")
-BlimpController.Start(uiHandles.BlimpHelm, uiHandles.BlimpFuel, uiHandles.CarriedResources)
+BlimpController.Start(uiHandles.BlimpHelm, uiHandles.BlimpFuel, uiHandles.CarriedResources, uiHandles.Notify)
+
+-- The furnace's custom prompt. A SIBLING of BlimpController rather than part of it -- see
+-- Client/Blimp/FurnacePromptClient.lua's own header: this serves anyone standing next to a hull,
+-- including someone who has never boarded one, which is the opposite audience to everything that
+-- module owns. Order relative to it does not matter (they share no state and no remote); it is
+-- started here because this is where the blimp client cluster lives.
+logger:debug("FurnacePromptClient start")
+FurnacePromptClient.Start(uiHandles.FurnacePrompt, uiHandles.ViewportScale)
+logger:debug("FurnacePromptClient end")
 logger:debug("BlimpController end")
 
 -- Next to AttackInputClient above because its only input is that module's OnAttackStarted seam --

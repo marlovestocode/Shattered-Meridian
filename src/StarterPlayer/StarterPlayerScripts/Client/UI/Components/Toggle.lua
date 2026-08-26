@@ -23,6 +23,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
+local Selection = require(script.Parent.Selection)
 local Label = require(script.Parent.Label)
 
 local Children = Fusion.Children
@@ -65,7 +66,11 @@ local KNOB_SIZE = 18
 local KNOB_INSET = 2
 
 local function Toggle(scope: Scope, props: ToggleProps): Frame
-	local isHovering = scope:Value(false)
+	-- Pointer-over AND gamepad-selection, OR-ed into the single boolean every visual Computed
+	-- below already reads as `isHovering` -- see Components/Selection.lua for why the two stay
+	-- separate rather than both writing one Value.
+	local engagement = Selection.New(scope)
+	local isHovering = engagement.Active
 	local disabled: UsedAs<boolean> = if props.Disabled == nil then false else props.Disabled
 
 	local knobPosition = scope:Computed(function(use)
@@ -114,11 +119,17 @@ local function Toggle(scope: Scope, props: ToggleProps): Frame
 			return not use(disabled)
 		end),
 
+		[OnEvent "SelectionGained"] = function()
+			engagement.Selected:set(true)
+		end,
+		[OnEvent "SelectionLost"] = function()
+			engagement.Selected:set(false)
+		end,
 		[OnEvent "MouseEnter"] = function()
-			isHovering:set(true)
+			engagement.PointerOver:set(true)
 		end,
 		[OnEvent "MouseLeave"] = function()
-			isHovering:set(false)
+			engagement.PointerOver:set(false)
 		end,
 		[OnEvent "Activated"] = function()
 			if not peek(disabled) then

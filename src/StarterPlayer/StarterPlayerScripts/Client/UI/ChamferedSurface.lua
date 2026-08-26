@@ -18,7 +18,7 @@
 	per-instance via ImageColor3/ImageTransparency -- the same modulation VitalIcon.lua's own
 	IconAssetId branch already uses -- which is what makes "one generated texture, reused everywhere"
 	actually work: a caller's fill color (Surface/SurfaceElevated/Background) and its border color
-	(BorderSubtle/BorderAccent) are never the same token, and a solid-white source means whichever
+	(Tokens.Border.Standard/AccentPrimary) are never the same token, and a solid-white source means whichever
 	color a caller tints toward is exactly the color that renders, regardless of Roblox's precise
 	UIGradient/ImageColor3 compositing order.
 

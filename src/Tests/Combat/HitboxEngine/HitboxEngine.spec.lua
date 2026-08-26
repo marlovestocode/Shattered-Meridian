@@ -59,6 +59,41 @@ local function makeDummy(name: string, position: Vector3): Dummy
 	return { Model = model, Root = root, Humanoid = humanoid, Id = id }
 end
 
+-- Parents a Tool onto a dummy's Model the same way Humanoid:EquipTool does for a real player -- a
+-- direct child of the character -- so resolveAttachmentPart's "Weapon" case (model:
+-- FindFirstChildOfClass("Tool")) finds it. Handle and Blade are both real, independently placed and
+-- sized BaseParts: Handle at the dummy's own position (where a naive "just use the grip" resolution
+-- would anchor), Blade wherever the case wants the swing to actually reach, so a test can prove which
+-- one the engine picked from where a hit does or doesn't land rather than reaching into a private
+-- function.
+local function equipWeapon(
+	dummy: Dummy,
+	options: { HandlePosition: Vector3?, BladePosition: Vector3?, BladeSize: Vector3? }
+): Tool
+	local tool = Instance.new("Tool")
+	tool.Name = "TestSword"
+
+	local handle = Instance.new("Part")
+	handle.Name = "Handle"
+	handle.Anchored = true
+	handle.CanCollide = false
+	handle.CFrame = CFrame.new(options.HandlePosition or dummy.Root.Position)
+	handle.Parent = tool
+
+	local blade = Instance.new("Part")
+	blade.Name = "Blade"
+	blade.Anchored = true
+	blade.CanCollide = false
+	blade.Size = options.BladeSize or Vector3.new(2, 2, 2)
+	blade.CFrame = CFrame.new(options.BladePosition or dummy.Root.Position)
+	blade.Parent = tool
+
+	-- Not added to `spawned` -- it is a descendant of dummy.Model, which afterEach already destroys, so
+	-- tracking it separately would just double-destroy an already-gone Instance.
+	tool.Parent = dummy.Model
+	return tool
+end
+
 local function makeDefinition(overrides: { [string]: any }): HitboxTypes.AttackDefinition
 	local base: { [string]: any } = {
 		DebugName = "SpecSwing",
@@ -526,6 +561,134 @@ return function()
 			disconnectGood()
 
 			expect(#hits).to.equal(1)
+		end)
+	end)
+
+	describe("HitboxEngine -- Weapon attachment resolves onto the equipped Blade", function()
+		it("anchors on the weapon's Blade part, not its Handle, when both exist", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			-- Handle sits at the attacker's own position (where a naive "just grip" resolution would
+			-- anchor); Blade sits 4 studs out in front, matching this file's usual reach convention.
+			equipWeapon(attacker, { HandlePosition = attacker.Root.Position, BladePosition = Vector3.new(0, 5, -4) })
+			makeDummy("Target", Vector3.new(0, 5, -4))
+			local hits = captureHits()
+
+			HitboxEngine.RequestAttack(
+				attacker.Id,
+				makeDefinition({ AttachmentPart = "Weapon", Offset = CFrame.new() }),
+				1,
+				0
+			)
+			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+
+			-- A box centred on Handle (the attacker's own position) would fall a full stud short of a
+			-- target 4 studs out at this definition's Length (6, half-length 3) -- only a Blade-centred
+			-- box reaches it, so a hit here is proof of which part actually won.
+			expect(#hits).to.equal(1)
+		end)
+
+		it("falls back to Handle when the weapon has no part named Blade", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local tool = Instance.new("Tool")
+			tool.Name = "HandleOnlySword"
+			local handle = Instance.new("Part")
+			handle.Name = "Handle"
+			handle.Anchored = true
+			handle.CFrame = CFrame.new(0, 5, -4)
+			handle.Parent = tool
+			tool.Parent = attacker.Model
+
+			makeDummy("Target", Vector3.new(0, 5, -4))
+			local hits = captureHits()
+
+			HitboxEngine.RequestAttack(
+				attacker.Id,
+				makeDefinition({ AttachmentPart = "Weapon", Offset = CFrame.new() }),
+				1,
+				0
+			)
+			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+
+			expect(#hits).to.equal(1)
+		end)
+
+		it("derives Box dimensions from the Blade's own live Size, ignoring BaseDimensions", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			equipWeapon(attacker, { BladePosition = Vector3.new(0, 5, -5), BladeSize = Vector3.new(2, 4, 10) })
+			makeDummy("Target", Vector3.new(0, 5, -5))
+			local hits = captureHits()
+
+			HitboxEngine.RequestAttack(
+				attacker.Id,
+				makeDefinition({
+					AttachmentPart = "Weapon",
+					Offset = CFrame.new(),
+					SizeFromAttachmentPart = true,
+					-- Deliberately absurd, to prove they are never read in this mode.
+					BaseDimensions = { Width = 999, Height = 999, Length = 999 },
+				}),
+				1,
+				0
+			)
+			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+
+			expect(#hits).to.equal(1)
+			local report = hits[1]
+			expect(report.Dimensions.Width).to.equal(2)
+			expect(report.Dimensions.Height).to.equal(4)
+			expect(report.Dimensions.Length).to.equal(10)
+		end)
+
+		it("scales the Blade-derived size by SizeMultiplier, the WeaponReach carrier", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			equipWeapon(attacker, { BladePosition = Vector3.new(0, 5, -5), BladeSize = Vector3.new(2, 4, 10) })
+			makeDummy("Target", Vector3.new(0, 5, -5))
+			local hits = captureHits()
+
+			HitboxEngine.RequestAttack(
+				attacker.Id,
+				makeDefinition({
+					AttachmentPart = "Weapon",
+					Offset = CFrame.new(),
+					SizeFromAttachmentPart = true,
+					SizeMultiplier = 2,
+					BaseDimensions = { Width = 999, Height = 999, Length = 999 },
+				}),
+				1,
+				0
+			)
+			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+
+			local report = hits[1]
+			assert(report, "must land a hit")
+			expect(report.Dimensions.Width).to.equal(4)
+			expect(report.Dimensions.Height).to.equal(8)
+			expect(report.Dimensions.Length).to.equal(20)
+		end)
+
+		it("leaves BaseDimensions in full control when SizeFromAttachmentPart is unset", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			equipWeapon(attacker, { BladePosition = Vector3.new(0, 5, -5), BladeSize = Vector3.new(2, 4, 10) })
+			makeDummy("Target", Vector3.new(0, 5, -5))
+			local hits = captureHits()
+
+			HitboxEngine.RequestAttack(
+				attacker.Id,
+				makeDefinition({
+					AttachmentPart = "Weapon",
+					Offset = CFrame.new(),
+					BaseDimensions = { Width = 4, Height = 6, Length = 6 },
+				}),
+				1,
+				0
+			)
+			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+
+			local report = hits[1]
+			assert(report, "must land a hit")
+			expect(report.Dimensions.Width).to.equal(4)
+			expect(report.Dimensions.Height).to.equal(6)
+			expect(report.Dimensions.Length).to.equal(6)
 		end)
 	end)
 end

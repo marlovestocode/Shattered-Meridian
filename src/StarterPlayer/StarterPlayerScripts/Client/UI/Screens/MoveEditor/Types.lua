@@ -62,6 +62,17 @@ export type MoveEditorHandle = {
 	-- closing via the X button would leave the admin frozen.
 	CloseRequested: RBXScriptSignal,
 	StatusText: Fusion.Value<string>,
+	-- Which section of the authoring form is open, owned by Sidebar.lua's own nav and normally
+	-- written only by clicking that nav. Exposed on the handle so MoveEditorClient.lua can JUMP it on
+	-- a rejected Save: a save validates the whole record at once, so the section that failed is very
+	-- often not the one the admin is looking at, and a status line naming a section they then have to
+	-- go find is barely better than the bare reason code it replaced. See Copy.Failures.
+	SelectedSection: Fusion.Value<SectionId>,
+	-- Whether the F1 shortcut list is up. Written only by MoveEditorClient.lua, which owns every key
+	-- this editor binds -- ShortcutsOverlay.lua itself is pure render and has no input of its own.
+	-- Deliberately independent of IsOpen: closing the list must not close the editor behind it, which
+	-- is exactly what a shared flag would do to a layered Escape.
+	ShortcutsOpen: Fusion.Value<boolean>,
 	-- Every move currently known client-side -- populated once by MoveEditorClient after ListMoves,
 	-- patched in place (never a blind full re-fetch) after a successful Save/Delete so unrelated
 	-- rows' own local UI state (e.g. a delete Armed timer) survives a save elsewhere in the list.
@@ -73,9 +84,10 @@ export type MoveEditorHandle = {
 	-- "Test on Dummy" is REAL AGAIN (2026-08-19, the Move Editor repair pass), rebuilt against the new
 	-- 4-layer combat stack rather than revived as-was -- see Client/MoveEditor/MoveEditorClient.lua's
 	-- own header for the pipeline. Firing still goes through the ADMIN HOTBAR PATH (bind the move to a
-	-- slot, press the key -- AttackRequestSystem.Throw's own trusted `authorized == true` branch, which
-	-- never stopped working); what was actually missing was a target to swing at and a way to hear back
-	-- what happened, both restored now: SpawnTestDummyRequested/DespawnTestDummyRequested below reuse
+	-- slot via ArtSystem.DevGrantAndEquip, press the key -- AttackRequestSystem.resolveRequest's
+	-- ArtSystem-backed Hotbar case, which never stopped working); what was actually missing was a
+	-- target to swing at and a way to hear back what happened, both restored now:
+	-- SpawnTestDummyRequested/DespawnTestDummyRequested below reuse
 	-- Server/Systems/DebugDummySystem.lua (the DevMenu Spawn tab's own training dummy, already a real
 	-- HitboxEngine/DefenseSystem combatant -- see that module's header) rather than a second dummy
 	-- implementation, and MoveEditorClient.lua listens to the SAME Combat_Feedback event
@@ -103,6 +115,11 @@ export type MoveEditorHandle = {
 	NewMoveRequested: RBXScriptSignal,
 	SelectMoveRequested: RBXScriptSignal<string>,
 	DeleteMoveRequested: RBXScriptSignal<string>,
+	-- (moveId, newDisplayName) from MoveList.lua's inline rename. Needs no remote of its own:
+	-- MoveEditorClient.lua resolves the record, rewrites one field, and sends it through the EXISTING
+	-- UpdateDraft -- a rename is an ordinary field edit that happens to be authored from the list
+	-- instead of from the Basic Info section. Custom moves only.
+	RenameMoveRequested: RBXScriptSignal<(string, string)>,
 	-- Fires with the FULL, already-locally-updated draft after any single PropertyEditor field
 	-- edit -- the whole record is the unit of update everywhere else in this feature
 	-- (UpdateDraft/SaveMove both take a full MoveDefinition), so this mirrors that instead of
@@ -116,7 +133,7 @@ export type MoveEditorHandle = {
 	-- pattern. Never fires for a custom move; a Default move can never be deleted, only reset.
 	ResetRequested: RBXScriptSignal,
 
-	-- Live mirror of Client/Combat/HotbarBindings.lua's slot->MoveId map, kept in sync by
+	-- Live mirror of Client/Combat/HotbarBindings.lua's slot->ArtId map, kept in sync by
 	-- MoveEditorClient.lua (initial GetAll() + an OnChanged subscription) -- PropertyEditor.lua's
 	-- toolbar reads this to show which slot(s), if any, the CURRENTLY SELECTED move already
 	-- occupies. This screen never writes HotbarBindings directly (that stays MoveEditorClient.lua's
@@ -124,11 +141,12 @@ export type MoveEditorHandle = {
 	-- everything else in this file) -- see BindHotbarSlotRequested below for the write path.
 	HotbarBindings: Fusion.Value<{ [number]: string? }>,
 	-- Fired by PropertyEditor.lua's toolbar's "bind to slot N" buttons, carrying (slot, moveId) for
-	-- whichever move is currently selected -- MoveEditorClient.lua's handler toggles
-	-- HotbarBindings.Set/Clear (bind if this move doesn't already occupy that slot, unbind if it
-	-- does) and reflects the result in StatusText. Purely client-side bookkeeping -- unlike every
-	-- other signal above, nothing here ever reaches a RemoteFunction; only actually FIRING a bound
-	-- move round-trips to the server (Combat_RequestFireHotbarMove).
+	-- whichever move is currently selected -- MoveEditorClient.lua's handler calls the
+	-- EquipArtSlot RemoteFunction (bind if this move doesn't already occupy that slot, unbind if it
+	-- does) and reflects the result in StatusText. An equip, not client-only bookkeeping -- see
+	-- HotbarBindings.lua's own header on why binding IS equipping now (ArtSystem.DevGrantAndEquip
+	-- server-side); HotbarBindings itself only ever updates from the server's own Art_StateUpdated
+	-- push, never optimistically from this signal.
 	BindHotbarSlotRequested: RBXScriptSignal<(number, string)>,
 
 	-- MoveTypes.Fingerprint of the last state the server confirmed as authoritative. Written by
@@ -143,12 +161,51 @@ export type MoveEditorHandle = {
 	-- properly needs the server to report persisted-vs-live divergence, which is a feature rather
 	-- than a polish item.
 	SavedFingerprint: Fusion.Value<string>,
+	-- How many DISTINCT moves have been edited but not saved this session. IsDirty below answers the
+	-- same question for the OPEN move only, which is not the same question: the editor happily lets an
+	-- admin retune three moves and close, and before this there was nothing anywhere that said two of
+	-- them were about to be left behind. Maintained by MoveEditorClient.lua, which is the only module
+	-- that sees every edit and every save.
+	UnsavedCount: Fusion.Value<number>,
+	-- The move whose row should be flashing "saved" right now, or "" for none. Set on a successful
+	-- Save/Reset and cleared by MoveEditorClient.lua a moment later -- the timer lives there rather
+	-- than in the row so a row rebuilt mid-flash (a MovesDisplay patch does exactly that) picks the
+	-- flash back up instead of losing it, and so the whole feature is one value rather than per-row
+	-- state that has to be found again.
+	LastSavedMoveId: Fusion.Value<string>,
 	IsDirty: Fusion.Computed<boolean>,
-	-- Fired by PropertyEditor.lua's toolbar Duplicate button and by Ctrl+D. Custom moves only.
-	-- Needs no remote of its own: MoveEditorClient.lua clones the draft, blanks its MoveId, and sends
-	-- it through the EXISTING UpdateDraft, where stampTrustedMetadata mints a fresh server-assigned
-	-- MoveId for it -- the same path "+ New Move" already takes.
-	DuplicateMoveRequested: RBXScriptSignal,
+	-- Fired by PropertyEditor.lua's toolbar Duplicate button, by Ctrl+D, and by a move row's own ⊕
+	-- tile. Custom moves only. Needs no remote of its own: MoveEditorClient.lua clones the record,
+	-- blanks its MoveId, and sends it through the EXISTING UpdateDraft, where stampTrustedMetadata
+	-- mints a fresh server-assigned MoveId for it -- the same path "+ New Move" already takes.
+	--
+	-- Carries the MoveId to copy, which is "" from the toolbar and Ctrl+D (both mean "the open
+	-- draft") and a real id from a list row, since a row can be copied without being selected.
+	DuplicateMoveRequested: RBXScriptSignal<string>,
 }
 
-return {}
+-- The sections a Default move has no legitimate use for. Movement/Knockback/Grab/Projectile/
+-- ObjectStun are consumed only by CombatSystem.ThrowCustomMove's own code path (see Server/Combat/
+-- DefaultMoveRegistry.lua's header), and Art promotes a move into a tree the player unlocks, which
+-- a built-in weapon stage is not. Sidebar.lua hides their NAV ITEMS and PropertyEditor.lua hides
+-- their CONTENT PANES -- two different jobs off one list, which is why it lives here rather than in
+-- either of them.
+--
+-- It lives here because it had ALREADY DRIFTED: both files hand-wrote the same table with only a
+-- comment binding them together, and Art was added to one before the other, leaving a live nav item
+-- that opened a blank pane. Adding a section to this list is now one edit, not two.
+--
+-- A hidden section is not merely disabled: there is nothing legitimate to navigate to, and showing
+-- a live control that visibly does nothing is worse than showing none.
+local HiddenForDefaultSections: { [SectionId]: boolean } = {
+	Movement = true,
+	Knockback = true,
+	Grab = true,
+	Projectile = true,
+	ObjectStun = true,
+	Art = true,
+}
+
+return {
+	HiddenForDefaultSections = HiddenForDefaultSections,
+}

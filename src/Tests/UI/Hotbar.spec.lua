@@ -11,6 +11,7 @@ local Client = StarterPlayer.StarterPlayerScripts.Client
 local HUD = require(Client.UI.Screens.HUD)
 local ClientStateModule = require(Client.UI.State.ClientState)
 local KeybindManager = require(Client.Input.KeybindManager)
+local HotbarBindings = require(Client.Combat.HotbarBindings)
 
 -- The hotbar dock, mounted and then driven through the states a player actually reaches. Same
 -- argument as WeaponInventory.spec.lua and Storybook.spec.lua beside it: Roblox property names are
@@ -214,6 +215,102 @@ return function()
 			-- one non-geometric way to prove the state actually reached the visuals.
 			local edge = find(button, "EdgeBar") :: Frame
 			expect(edge.BackgroundTransparency).to.equal(1)
+		end)
+	end)
+
+	describe("an equipped slot", function()
+		-- Components/Label.lua sets no Name, so all four text runs on a tile arrive as "TextLabel" and
+		-- none of them is findable by name. Matching on the TEXT is the assertion anyway: what is
+		-- being proved is that the art's own data reached the tile, not where in the tree it landed.
+		local function hasText(root: Instance, text: string): boolean
+			for _, descendant in ipairs(root:GetDescendants()) do
+				if descendant:IsA("TextLabel") and descendant.Text == text then
+					return true
+				end
+			end
+			return false
+		end
+
+		-- HotbarBindings is a VM-wide singleton (a plain Luau module, not per-mount state), so each
+		-- case here has to hand it back empty or the Locked case above starts failing the moment one
+		-- of these leaves an art in slot 1. afterEach rather than a tail call per case, so a failed
+		-- assertion still cleans up after itself.
+		afterEach(function()
+			HotbarBindings.SyncFromServer({})
+		end)
+
+		it("replaces the empty-slot reticle with the art's monogram", function()
+			local _, _, hotbar = mount()
+			local button = find(hotbar, "AbilitySlot1")
+			-- The reticle is EMPTY-slot chrome (AbilitySlot.lua's header). Until 2026-08-25 nothing
+			-- ever turned it off, so an equipped art rendered the "nothing here" mark -- which is
+			-- exactly the kind of regression that still looks like *something* on screen and so goes
+			-- unnoticed. Both halves are asserted: showing when empty, gone when filled.
+			local reticle = find(button, "Reticle") :: Frame
+			expect(reticle.Visible).to.equal(true)
+
+			HotbarBindings.SyncFromServer(
+				{ [1] = "art_ascendant_palm" },
+				{ art_ascendant_palm = { DisplayName = "Ascendant Palm", QiCost = 20 } }
+			)
+
+			expect(reticle.Visible).to.equal(false)
+			-- Two words -> two initials. The abbreviation is AbilitySlot's own call (a 56px tile fits
+			-- about two characters), so this is where the rule is pinned down.
+			expect(hasText(button, "AP")).to.equal(true)
+			expect(hasText(button, "20 Qi")).to.equal(true)
+		end)
+
+		it("abbreviates a single-word art to two letters, title-cased", function()
+			local _, _, hotbar = mount()
+			local button = find(hotbar, "AbilitySlot2")
+
+			HotbarBindings.SyncFromServer(
+				{ [2] = "art_thunderclap" },
+				{ art_thunderclap = { DisplayName = "Thunderclap", QiCost = 0 } }
+			)
+
+			expect(hasText(button, "Th")).to.equal(true)
+			-- A free art shows no cost line at all rather than "0 Qi" -- HUD/init.lua's applySlotInfo.
+			expect(hasText(button, "0 Qi")).to.equal(false)
+		end)
+
+		it("goes back to empty chrome when the slot is cleared", function()
+			local _, _, hotbar = mount()
+			local button = find(hotbar, "AbilitySlot1")
+			local reticle = find(button, "Reticle") :: Frame
+
+			HotbarBindings.SyncFromServer(
+				{ [1] = "art_ascendant_palm" },
+				{ art_ascendant_palm = { DisplayName = "Ascendant Palm", QiCost = 20 } }
+			)
+			expect(reticle.Visible).to.equal(false)
+
+			-- A slot the server no longer lists is a slot the player cleared -- HotbarBindings.
+			-- SyncFromServer rewrites every slot, including the ones the payload omits.
+			HotbarBindings.SyncFromServer({})
+			expect(reticle.Visible).to.equal(true)
+			expect(hasText(button, "AP")).to.equal(false)
+		end)
+
+		it("re-renders a renamed art that kept its id", function()
+			local _, _, hotbar = mount()
+			local button = find(hotbar, "AbilitySlot3")
+
+			HotbarBindings.SyncFromServer(
+				{ [3] = "art_ascendant_palm" },
+				{ art_ascendant_palm = { DisplayName = "Ascendant Palm", QiCost = 20 } }
+			)
+			HotbarBindings.SyncFromServer(
+				{ [3] = "art_ascendant_palm" },
+				{ art_ascendant_palm = { DisplayName = "Falling Palm", QiCost = 35 } }
+			)
+
+			-- The id never changed, so an id-only no-op guard would have swallowed this push and left
+			-- the tile spelling the old name and the old price forever.
+			expect(hasText(button, "FP")).to.equal(true)
+			expect(hasText(button, "35 Qi")).to.equal(true)
+			expect(hasText(button, "20 Qi")).to.equal(false)
 		end)
 	end)
 

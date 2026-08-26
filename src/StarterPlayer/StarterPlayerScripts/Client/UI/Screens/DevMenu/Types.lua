@@ -19,7 +19,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 -- "Players" dropped in Phase 1 -- the roster moved from a Content tab to the persistent Sidebar
 -- position (see Sidebar.lua/ContentArea.lua's own headers), so it's no longer one of the tab strip's
 -- selectable values.
-export type DevMenuTabName = "Spawn" | "Admin" | "Tuning" | "Reports"
+export type DevMenuTabName = "Spawn" | "Admin" | "Tuning" | "Reports" | "Vehicles"
 
 -- Pre-formatted strings, not raw numbers, per this screen's "already-computed value in, presentation
 -- out" boundary (see init.lua's own header) -- DevMenuClient.lua owns number->string formatting, this
@@ -83,6 +83,64 @@ export type PlayerRosterRowDisplay = {
 	SuspectedCheater: boolean,
 }
 
+-- === Vehicles tab (DevMenu/VehiclesTab.lua) ===
+--
+-- All three row types below follow this file's own "already-computed value in, presentation out"
+-- contract: DevMenuClient.lua turns the server's VehicleTypes snapshot (studs, seconds, Vector3
+-- positions) into these strings, and the tab renders nothing it has to format itself.
+
+-- One catalog row -- a vehicle that COULD be spawned.
+export type VehicleCatalogRowDisplay = {
+	-- The registry key, which is what a Spawn request carries -- never DisplayName, which a designer
+	-- may retitle at any time.
+	Id: string,
+	NameText: string,
+	DetailText: string,
+	-- True when this vehicle is already at its own live cap, so the next spawn recycles the oldest
+	-- rather than adding one. A real boolean, not pre-formatted, because the row's own button label
+	-- changes with it -- the same split BugReportRowDisplay.Status already uses.
+	AtCapacity: boolean,
+}
+
+-- One live row -- a vehicle currently in the world.
+export type VehicleLiveRowDisplay = {
+	InstanceId: string,
+	NameText: string,
+	DetailText: string,
+}
+
+-- One berth row in the spawn-target picker. `Label` is pre-formatted (it carries the occupied marker
+-- and the accept-list), while `Name` stays the raw berth name the Spawn request sends -- the same
+-- "real value alongside its own display text" split PlayerRosterRowDisplay.Muted uses.
+export type VehicleBerthRowDisplay = {
+	Name: string,
+	Label: string,
+}
+
+-- Handle returned by VehiclesTab.Build(scope). Unlike SidebarHandle/ContentAreaHandle below it
+-- carries no Root: ContentArea.lua still owns this tab's ScrollingFrame and visibility, and this
+-- module only supplies the sections that go inside it (see VehiclesTab.lua's own header).
+export type VehiclesTabHandle = {
+	Children: { Instance },
+	CatalogDisplay: Fusion.Value<{ VehicleCatalogRowDisplay }>,
+	LiveDisplay: Fusion.Value<{ VehicleLiveRowDisplay }>,
+	BerthDisplay: Fusion.Value<{ VehicleBerthRowDisplay }>,
+	-- Where the server's registry actually resolved, e.g. "ServerStorage.Vehicles (2 vehicles)".
+	RegistryText: Fusion.Value<string>,
+	-- Registry entries the server rejected and why, or nil when there were none -- surfaced in the tab
+	-- rather than only in the server log, since a builder whose model does not appear has no reason to
+	-- go looking there.
+	RejectionText: Fusion.Value<string?>,
+	Loading: Fusion.Value<boolean>,
+	RefreshRequested: RBXScriptSignal,
+	ReloadRegistryRequested: RBXScriptSignal,
+	-- Fires (vehicleId, berthName?) -- nil berth means "in front of me", which the tab resolves from
+	-- its own picker before firing, so the client module never re-derives it.
+	SpawnRequested: RBXScriptSignal<(string, string?)>,
+	DespawnRequested: RBXScriptSignal<string>,
+	DespawnAllRequested: RBXScriptSignal,
+}
+
 -- Handle returned by Sidebar.Mount(scope, ...) -- the persistent left-column roster surface (Phase 1
 -- onward: a permanent sidebar position, visible regardless of which Content tab is selected, not a
 -- "Players" tab anymore -- see Sidebar.lua's own header). Same "screen exposes state/signals, client
@@ -124,6 +182,10 @@ export type SidebarHandle = {
 -- Handle returned by ContentArea.Mount(scope, ...) -- every DevMenu tab (Spawn/Admin/Tuning/Reports
 -- -- "Players" dropped from the tab strip in Phase 1, see ContentArea.lua's own header).
 export type ContentAreaHandle = {
+	-- The Vehicles tab, whose own state/signals live on their own nested handle rather than being
+	-- flattened in here -- five tabs' worth of fields in one table is what made this type unreadable
+	-- before the Sidebar/Content split, and the Vehicles tab is the first one built as its own module.
+	Vehicles: VehiclesTabHandle,
 	-- The fully self-contained content column Instance (tab strip + the 4 tab ScrollingFrames
 	-- stacked, only one Visible at a time), sized and positioned by init.lua's own Body row layout.
 	Root: Frame,
@@ -139,6 +201,11 @@ export type ContentAreaHandle = {
 	-- "RareEmotes" pool -- see DevMenuSystem.handleRollEmote). No payload, fire-and-forget -- there is
 	-- still no client-facing way to roll an arbitrary pool.
 	RollRareEmoteRequested: RBXScriptSignal,
+	-- Grants the resolved target a fixed batch of bloodline rerolls
+	-- (BloodlineConstants.DevGrantRerollAmount). No payload, same fire-and-forget shape as
+	-- RollRareEmoteRequested above and for the same reason: the amount is a server constant, not a
+	-- client choice, so there is nothing for the press to carry.
+	GrantBloodlineRerollsRequested: RBXScriptSignal,
 	SetGodmodeRequested: RBXScriptSignal<boolean>,
 	SetFlightRequested: RBXScriptSignal<boolean>,
 	SetFlightCollideRequested: RBXScriptSignal<boolean>,
@@ -206,6 +273,12 @@ export type ContentAreaHandle = {
 	SpawnDebugDummyRequested: RBXScriptSignal,
 	DespawnAllDebugDummiesRequested: RBXScriptSignal,
 	SetDummyGuardRequested: RBXScriptSignal<boolean>,
+
+	-- Blimp Fuel System test nodes (Spawn tab, Server/Systems/ResourceGatheringSystem.
+	-- SpawnDebugNode) -- fire-and-forget, same shape as SpawnDebugDummyRequested above.
+	SpawnCoalDepositRequested: RBXScriptSignal,
+	SpawnWaterSourceRequested: RBXScriptSignal,
+	FillCarriedFuelRequested: RBXScriptSignal,
 }
 
 return {}

@@ -7,9 +7,11 @@
 
 	Was BountyMenu.lua, when this whole screen WAS the bounty board and nothing else. It is now one
 	tab of four (see Screens/Menus/init.lua), which is why it renders a plain transparent Frame
-	rather than its own Panel: the menu root already draws one border around the tab body, and a
-	second nested one here would double up chrome inside a single card -- the same reasoning
-	Screens/MoveEditor/MoveList.lua's own header gives for not nesting a Panel inside Sidebar's.
+	rather than its own Panel -- the menu root already draws the frame around everything.
+
+	Its rows DO carry a 1px edge (added 2026-08-20, same pass as ArtsTab's). They previously relied on
+	a fill alone, which over the panel's own surface texture gave a two-line entry no readable
+	boundary; a board of three marks read as six loose lines of text.
 
 	Renders live server data only. This file previously seeded itself with `createDemoBounty`
 	fabricated rows and hand-copied BountySystem's six reward constants into its own `computeReward`
@@ -26,9 +28,10 @@
 	only would go stale while open, push only would show nothing until the next kill.
 
 	Does not own: whether the player themselves is marked (ClientState.BountyMarked, which the hotbar
-	badge also reads -- see ClientState.lua's header on why that one is shared state and this board
-	is not), or any placement action. There is no "place bounty" control here and adding one would be
-	a design change: bounties are server-placed, see BountyConstants.lua's header.
+	badge and the identity rail also read -- see ClientState.lua's header on why that one is shared
+	state and this board is not), or any placement action. There is no "place bounty" control here
+	and adding one would be a design change: bounties are server-placed, see BountyConstants.lua's
+	header.
 
 	Keeps its OWN remote wiring, unlike the Character/Arts tabs beside it, which read Values that
 	Client/CharacterMenu/CharacterMenuClient.lua fills from outside. That is a deliberate asymmetry,
@@ -48,9 +51,13 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
-local Panel = require(script.Parent.Parent.Parent.Components.Panel)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
 local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
+local SectionHeading = require(script.Parent.Parent.Parent.Components.SectionHeading)
+local StatusTag = require(script.Parent.Parent.Parent.Components.StatusTag)
+local Stack = require(script.Parent.Parent.Parent.Components.Stack)
+
+local Children = Fusion.Children
 
 local logger = Logger.scope("BountyMenu")
 
@@ -65,73 +72,115 @@ export type BountyTabProps = {
 	LayoutOrder: number,
 }
 
+local HINT_HEIGHT = 20
+local GAP = Tokens.Space.S
 local ROW_HEIGHT = 64
--- Vertical space the "Bounty Board" heading, its one-line subtitle, and the two Space.S gaps around
--- them take before the scrolling rows begin -- the value the rows' own height subtracts. Named
--- rather than left as the bare -80 this file used to carry, so the number is attributable to
--- something rather than being a magic constant.
-local HEADER_ALLOWANCE = 80
+local ROW_PADDING_X = Tokens.Space.M
+local REWARD_WIDTH = 110
 
 -- One board row. `isSelf` drives the only per-row styling decision: the player's own bounty is drawn
 -- in the Danger register the hotbar badge already uses for the same fact, so the two surfaces agree
 -- rather than each inventing their own language for "this one is you."
 local function bountyRow(scope: Scope, entry: Types.BountyBoardEntry, rank: number, isSelf: boolean): Frame
-	local accent = if isSelf then Tokens.Color.Danger else Tokens.Color.AccentPrimary
+	local accent = if isSelf then Tokens.Color.Danger else Tokens.Border.Standard.Color
 
-	return Panel(scope, {
+	local metaChildren: { Instance } = {
+		scope:New "UIListLayout" {
+			FillDirection = Enum.FillDirection.Horizontal,
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+			Padding = UDim.new(0, Tokens.Space.S),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		},
+		Label(scope, {
+			Text = `Tier {entry.TargetTier}`,
+			Scale = "Detail",
+			Color = Tokens.Color.TextSecondary,
+			Size = UDim2.fromOffset(52, 16),
+			LayoutOrder = 1,
+		}),
+		Label(scope, {
+			Text = `{entry.Streak} kill streak`,
+			Scale = "Detail",
+			Color = Tokens.Color.TextSecondary,
+			Size = UDim2.fromOffset(102, 16),
+			LayoutOrder = 2,
+		}),
+	}
+	if isSelf then
+		-- Only on your own row. A "them" chip on every other row would be noise; the absence of this
+		-- one IS the other state.
+		table.insert(
+			metaChildren,
+			StatusTag(scope, {
+				Label = "You",
+				Color = Tokens.Color.Danger,
+				Tracked = true,
+				LayoutOrder = 3,
+			})
+		)
+	end
+
+	return scope:New "Frame" {
 		Name = `BountyRow_{entry.BountyId}`,
 		Size = UDim2.new(1, 0, 0, ROW_HEIGHT),
 		LayoutOrder = rank,
-		Elevated = isSelf,
-		BorderColor3 = accent,
-		BorderTransparency = if isSelf then 0.2 else 0.6,
+		BackgroundColor3 = if isSelf then Tokens.Color.SurfaceElevated else Tokens.Color.Surface,
+		BackgroundTransparency = if isSelf then 0 else 0.35,
+		BorderSizePixel = 0,
 
-		Children = {
+		[Children] = {
+			scope:New "UICorner" {
+				CornerRadius = Tokens.Radius.Sharp,
+			},
+			scope:New "UIStroke" {
+				Color = if isSelf then Tokens.Color.Danger else Tokens.Border.Standard.Color,
+				Thickness = 1,
+				Transparency = if isSelf then 0.4 else Tokens.Border.Standard.Transparency,
+			},
 			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.S),
-				PaddingBottom = UDim.new(0, Tokens.Space.S),
-				PaddingLeft = UDim.new(0, Tokens.Space.M),
-				PaddingRight = UDim.new(0, Tokens.Space.M),
+				PaddingLeft = UDim.new(0, ROW_PADDING_X),
+				PaddingRight = UDim.new(0, ROW_PADDING_X),
 			},
-			scope:New "UIListLayout" {
-				FillDirection = Enum.FillDirection.Vertical,
-				HorizontalAlignment = Enum.HorizontalAlignment.Left,
-				Padding = UDim.new(0, Tokens.Space.XS),
-				SortOrder = Enum.SortOrder.LayoutOrder,
+			-- A single lit edge on your own row rather than a full border: it marks the row without
+			-- turning it into a box the neighbouring rows aren't.
+			scope:New "Frame" {
+				Name = "Edge",
+				AnchorPoint = Vector2.new(0, 0),
+				Position = UDim2.fromOffset(-ROW_PADDING_X, 0),
+				Size = UDim2.new(0, 2, 1, 0),
+				BackgroundColor3 = accent,
+				BackgroundTransparency = if isSelf then 0 else 1,
+				BorderSizePixel = 0,
 			},
+
 			Label(scope, {
-				Text = if isSelf then `{rank}. {entry.TargetName}  (you)` else `{rank}. {entry.TargetName}`,
+				Text = `{rank}.  {entry.TargetName}`,
 				Scale = "BodyLarge",
 				Color = if isSelf then Tokens.Color.Danger else Tokens.Color.TextPrimary,
-				LayoutOrder = 1,
+				AnchorPoint = Vector2.new(0, 0),
+				Position = UDim2.fromOffset(0, 11),
+				Size = UDim2.new(1, -REWARD_WIDTH, 0, 20),
 			}),
 			Label(scope, {
-				Text = `Tier {entry.TargetTier}  |  {entry.Streak} kill streak  |  {entry.Reward} Meridian XP`,
-				Scale = "Detail",
-				Color = Tokens.Color.TextSecondary,
-				LayoutOrder = 2,
+				Text = `{entry.Reward} XP`,
+				Scale = "Numeral",
+				Color = Tokens.Color.AccentSecondary,
+				AnchorPoint = Vector2.new(1, 0),
+				Position = UDim2.new(1, 0, 0, 12),
+				Size = UDim2.fromOffset(REWARD_WIDTH, 18),
+				TextXAlignment = Enum.TextXAlignment.Right,
 			}),
+
+			scope:New "Frame" {
+				Name = "Meta",
+				AnchorPoint = Vector2.new(0, 0),
+				Position = UDim2.fromOffset(0, 33),
+				Size = UDim2.new(1, 0, 0, 22),
+				BackgroundTransparency = 1,
+
+				[Children] = metaChildren,
+			},
 		},
-	}) :: Frame
-end
-
-local function emptyState(scope: Scope): Frame
-	return scope:New "Frame" {
-		Name = "EmptyState",
-		Size = UDim2.new(1, 0, 0, ROW_HEIGHT),
-		BackgroundTransparency = 1,
-		LayoutOrder = 1,
-
-		[Fusion.Children] = Label(scope, {
-			-- States the rule rather than just reporting emptiness -- an empty board is the normal
-			-- resting state of this system, so "none right now" alone would read as broken.
-			Text = `No bounties. A bounty appears when someone reaches a {BountyConstants.NotorietyStreakThreshold}-kill streak.`,
-			Scale = "Detail",
-			Color = Tokens.Color.TextSecondary,
-			Size = UDim2.fromScale(1, 0),
-			AutoHeight = true,
-			LineHeight = Tokens.Leading.Prose,
-		}),
 	} :: Frame
 end
 
@@ -197,71 +246,86 @@ function BountyTab.Mount(scope: Scope, props: BountyTabProps): Frame
 	local hasEntries = scope:Computed(function(use)
 		return #use(entries) > 0
 	end)
+	local countText = scope:Computed(function(use)
+		local count = #use(entries)
+		return if count == 1 then "1 marked" else `{count} marked`
+	end)
+	local countColor = scope:Computed(function(use)
+		return if #use(entries) > 0 then Tokens.Color.Danger else Tokens.Color.TextDisabled
+	end)
 
-	return scope:New "Frame" {
+	return Stack.New(scope, {
 		Name = "BountyTab",
 		Size = UDim2.fromOffset(props.Width, props.Height),
-		BackgroundTransparency = 1,
+		Gap = GAP,
 		Visible = props.Visible,
 		LayoutOrder = props.LayoutOrder,
 
-		[Fusion.Children] = {
-			scope:New "UIListLayout" {
-				FillDirection = Enum.FillDirection.Vertical,
-				HorizontalAlignment = Enum.HorizontalAlignment.Left,
-				Padding = UDim.new(0, Tokens.Space.S),
-				SortOrder = Enum.SortOrder.LayoutOrder,
-			},
-			Label(scope, {
-				Text = "Bounty Board",
-				Scale = "Heading",
+		Children = {
+			SectionHeading(scope, {
+				Text = "Active Bounties",
 				LayoutOrder = 1,
+				Accessory = StatusTag(scope, {
+					Label = countText,
+					Color = countColor,
+				}),
 			}),
 			Label(scope, {
 				Text = "Marked by the server. Ranked by what they pay.",
 				Scale = "Detail",
 				Color = Tokens.Color.TextSecondary,
+				Size = UDim2.new(1, 0, 0, HINT_HEIGHT),
 				LayoutOrder = 2,
 			}),
+
 			-- The empty state and the list are mutually exclusive, driven off the same one Computed
 			-- rather than each deciding independently -- so there is no frame in which both or neither
 			-- renders.
-			scope:New "Frame" {
-				Name = "EmptySlot",
-				Size = UDim2.new(1, 0, 0, ROW_HEIGHT),
-				BackgroundTransparency = 1,
+			Label(scope, {
+				-- States the rule rather than just reporting emptiness -- an empty board is the normal
+				-- resting state of this system, so "none right now" alone would read as broken.
+				Text = `No bounties. One appears when someone reaches a {BountyConstants.NotorietyStreakThreshold}-kill streak.`,
+				Scale = "Detail",
+				Color = Tokens.Color.TextSecondary,
+				AutoHeight = true,
+				LineHeight = Tokens.Leading.Prose,
+				Size = UDim2.fromScale(1, 0),
 				LayoutOrder = 3,
 				Visible = scope:Computed(function(use)
 					return not use(hasEntries)
 				end),
-
-				[Fusion.Children] = emptyState(scope),
-			},
+			}),
 			-- A ScrollingFrame now that this is a full tab rather than a 420px-tall side panel: a
 			-- populated server can carry more marks than fit, and a plain Frame silently clipped the
 			-- overflow. AutomaticCanvasSize means the canvas tracks however many rows exist without
 			-- this file counting them, the same shape Screens/MoveEditor/MoveList.lua uses.
-			ScrollArea(scope, {
-				Name = "Rows",
-				Size = UDim2.new(1, 0, 1, -HEADER_ALLOWANCE),
-				LayoutOrder = 4,
-				Visible = hasEntries,
+			-- Takes whatever the heading and the subtitle left, rather than giving back a hand-summed
+			-- HEADER_ALLOWANCE -- see Components/Stack.lua's header. That constant was this file's
+			-- share of the ten that a single Tokens.Type change used to invalidate silently.
+			Stack.Fill(
+				scope,
+				ScrollArea(scope, {
+					Name = "Rows",
+					Size = UDim2.fromScale(1, 1),
+					LayoutOrder = 4,
+					Visible = hasEntries,
 
-				Children = {
-					scope:New "UIPadding" {
-						PaddingRight = UDim.new(0, Tokens.Space.S),
+					Children = {
+						scope:New "UIPadding" {
+							PaddingRight = UDim.new(0, Tokens.Space.S),
+						},
+						scope:New "UIListLayout" {
+							FillDirection = Enum.FillDirection.Vertical,
+							HorizontalAlignment = Enum.HorizontalAlignment.Left,
+							Padding = UDim.new(0, Tokens.Space.XS),
+							SortOrder = Enum.SortOrder.LayoutOrder,
+						},
+						rows,
 					},
-					scope:New "UIListLayout" {
-						FillDirection = Enum.FillDirection.Vertical,
-						HorizontalAlignment = Enum.HorizontalAlignment.Left,
-						Padding = UDim.new(0, Tokens.Space.S),
-						SortOrder = Enum.SortOrder.LayoutOrder,
-					},
-					rows,
-				},
-			}),
+				})
+			),
 		},
-	} :: Frame
+	})
 end
 
 return BountyTab

@@ -7,8 +7,9 @@
 	not yet reflected in the shared shattered-meridian-studio skill's software-architecture.md
 	ownership map -- ClientState.lua's own header already documented that Qi/MaxQi were render-only
 	defaults because "no System owns the Qi resource yet"; this is that System. Distinct from
-	QiDeviationSystem (still a stub), which owns deviation risk/trigger/consequence and is expected
-	to read Qi state through this module's public API rather than duplicating it.
+	QiDeviationSystem, which owns deviation risk/trigger/consequence and reads Qi state through
+	GameplayEvents.OnQiSpent (fired at the bottom of Spend below) rather than this module calling
+	into it directly -- see GameplayEvents.lua's own header on why that direction is deliberate.
 
 	Does not own: Max Qi/regen TUNING NUMBERS -- Shared/QiConstants.lua owns every one of those, see
 	that file's own header for the "edit data, not code" contract this System is built around.
@@ -166,12 +167,33 @@ function QiSystem.Spend(player: Player, amount: number, reason: string?): boolea
 	state.current -= amount
 	logger:debug("Qi spent", { player = player.Name, amount = amount, reason = reason, remaining = state.current })
 	sendQiUpdate(player, state, os.clock())
+	GameplayEvents.FireQiSpent(player, amount, state.current, state.max, reason)
 	return true
 end
 
 -- Refunds `amount` Qi, clamped to max -- for a cancelled/refunded ability cost, never for granting
 -- Qi beyond what a matching Spend already took.
 function QiSystem.Refund(player: Player, amount: number): ()
+	if typeof(amount) ~= "number" or amount <= 0 then
+		return
+	end
+	local state = qiStates[player]
+	if not state then
+		return
+	end
+	state.current = math.min(state.max, state.current + amount)
+	sendQiUpdate(player, state, os.clock())
+end
+
+-- Grants `amount` Qi outright, clamped to max -- for an ability that GRANTS Qi, never a refund of a
+-- cost that was already paid (Refund immediately above owns that case, and its own docstring is
+-- explicit it is never for granting Qi beyond what a matching Spend already took). Race Traits +
+-- Bloodline Abilities plan -- EffectSystem.Apply's own "QiRestore" Instant effect kind is what calls
+-- this. Byte-identical body to Refund's above deliberately: the two exist for a CONTRACT reason (a
+-- future reader must never have to wonder whether a Qi-granting call site secretly implies "this
+-- reverses a spend"), not an implementation one, so they stay separately named rather than one
+-- reusing the other with a comment explaining why that's fine this one time.
+function QiSystem.Restore(player: Player, amount: number): ()
 	if typeof(amount) ~= "number" or amount <= 0 then
 		return
 	end

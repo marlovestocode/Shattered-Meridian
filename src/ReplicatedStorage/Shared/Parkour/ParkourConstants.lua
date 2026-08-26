@@ -43,16 +43,22 @@ ParkourConstants.Enabled = true
 
 -- Ordinary ground/air locomotion -- the continuum Idle/Walking/Sprinting share. Speeds are
 -- deliberately aligned with the combat layer's own established numbers (Constants.Combat.
--- BaseWalkSpeed 10 + DefaultBonusWalkSpeed 8 = 18 effective, times SprintSpeedMultiplier 1.5 = 27)
--- so a parkour-driven sprint and a combat-driven sprint read as the SAME speed rather than two
--- systems disagreeing about how fast "running" is. If Constants.Combat's numbers are retuned, these
--- two should move with them -- Shared/ConstantsValidation.lua asserts the relationship at boot.
+-- BaseWalkSpeed 10 + DefaultBonusWalkSpeed 8 = 18 effective, times Run.Stages[1].SpeedMultiplier
+-- 1.8 = 32.4) so a parkour-driven sprint and a combat-driven sprint read as the SAME speed rather
+-- than two systems disagreeing about how fast "running" is.
+--
+-- SPRINTSPEED BELOW IS A HAND-KEPT MIRROR OF THAT PRODUCT, AND NOTHING CHECKS IT. This comment used
+-- to claim "Shared/ConstantsValidation.lua asserts the relationship at boot" -- that module does not
+-- exist and, as far as the require graph goes, never did. Retuning Run.Stages[1].SpeedMultiplier
+-- without editing SprintSpeed here is therefore a silent divergence: the server grants one speed and
+-- every threshold on this page is sized against another. It cannot be derived here instead, because
+-- this file deliberately has no requires of its own.
 ParkourConstants.Locomotion = {
 	WalkSpeed = 18,
-	SprintSpeed = 27,
+	SprintSpeed = 32.4,
 	-- THERE IS DELIBERATELY NO PER-STAGE SPEED HERE any more. SprintStage2Speed used to sit at this
 	-- spot, hand-kept in agreement with the server's own multiplier -- which meant the run ladder's size
-	-- was baked into this file as well as into the resolver, and a third gear needed a fourth constant.
+	-- was baked into this file as well as into the resolver, and resizing the ladder meant editing both.
 	--
 	-- States/StateSupport.GroundTargetSpeed now multiplies WalkSpeed above by
 	-- Shared/Run/RunLadder.SpeedMultiplier(stage), which is the SAME function the server resolves
@@ -60,14 +66,14 @@ ParkourConstants.Locomotion = {
 	-- actually being granted, and adding a gear is a change to Shared/Run/RunConstants.lua alone.
 	--
 	-- Everything downstream that keys off momentum -- the slide's entry speed, the wall-run's minimum,
-	-- the vault's speed floor -- becomes easier to reach at the upper gears, which is intended: reaching
+	-- the vault's speed floor -- becomes easier to reach at the top gear, which is intended: reaching
 	-- full stride SHOULD open up the traversal moves. Every one of those thresholds is a MINIMUM, so
 	-- none of them needed retuning. The validator's ceilings DID -- see Validation.MaxReportedSpeed's
-	-- own header for why a 110 sized against a 36-stud top gear becomes a live reject risk against an
-	-- 81-stud one.
+	-- own header for why a 110 sized against a 36-stud top gear became a live reject risk once the run
+	-- ladder started granting real traversal speed.
 
 	-- How fast momentum climbs toward the target speed on the ground. Deliberately high enough that
-	-- a standing start still feels immediate (0 -> 27 in ~0.32s) -- the "extremely responsive" bar
+	-- a standing start still feels immediate (0 -> 32.4 in ~0.32s) -- the "extremely responsive" bar
 	-- this system is held to -- while still being a real ramp rather than an instant snap, which is
 	-- what makes a slide/vault/wall-jump exit carrying extra momentum actually READ as extra
 	-- momentum instead of being erased on the first frame of ground contact.
@@ -79,7 +85,7 @@ ParkourConstants.Locomotion = {
 	-- Extra bleed applied ON TOP of Deceleration while momentum is ABOVE the state's own target
 	-- speed. This is the single knob that decides how long "earned" speed lasts -- raise it to make
 	-- momentum feel disposable, lower it to make chaining more rewarding. Currently tuned so a slide
-	-- exit at ~34 decays to sprint speed (27) in roughly half a second of running.
+	-- exit at ~41 decays to sprint speed (32.4) in roughly half a second of running.
 	OverspeedDecay = 14,
 
 	-- Air control: the fraction of ground acceleration usable while airborne, and the cap on how
@@ -350,11 +356,13 @@ ParkourConstants.LedgeLeap = {
 -- slide itself only ever decays (or accelerates downhill), and every exit hands its live momentum
 -- to the next state rather than resetting it -- see States/Sliding.lua.
 ParkourConstants.Slide = {
-	-- Minimum planar speed to start a slide at all. Just under SprintSpeed so a slide is reliably
-	-- available the instant sprint is up to speed, but a walking player can't slide.
+	-- Minimum planar speed to start a slide at all. Sits between WalkSpeed (18) and SprintSpeed
+	-- (32.4), so a slide is reliably available well before sprint is even up to speed, but a walking
+	-- player can't slide. The margin over sprint used to be a hair (24 against 27) and is now a
+	-- comfortable one -- this is a MINIMUM, so a faster stage 1 only made it easier to clear.
 	EntryMinSpeed = 24,
 	-- One-shot multiplier applied to entry momentum, so committing to a slide is rewarded with a
-	-- burst rather than merely preserving what you had. 34 studs/s from a 27 sprint.
+	-- burst rather than merely preserving what you had. ~41 studs/s from a 32.4 sprint.
 	EntryBoostMultiplier = 1.26,
 	-- Floor on entry momentum when the slide starts on a slope steep enough to sustain one
 	-- (SustainSlopeDegrees below). A multiplier alone cannot start a slide that began from a standstill
@@ -736,8 +744,11 @@ ParkourConstants.WallRun = {
 	-- Entry requires real speed AND a wall within reach AND ground clearance -- all three, see
 	-- States/WallRunning.CanEnter.
 	MinEntrySpeed = 20,
-	-- Speed held along the wall. Slightly under SprintSpeed so wall-running is a traversal option
-	-- rather than a strictly faster way to travel in a straight line.
+	-- Speed held along the wall. Under SprintSpeed so wall-running is a traversal option rather than a
+	-- strictly faster way to travel in a straight line. That gap USED to be a hair (26 against a 27
+	-- sprint) and is now about a fifth (26 against 32.4), so the intent still holds but is stated much
+	-- more emphatically than it was authored to be -- if wall-running now reads as a speed penalty
+	-- rather than a sidegrade, this is the number to raise, not the sprint to lower.
 	Speed = 26,
 	MaxSpeed = 36,
 	-- How far sideways the wall probes reach from the root.
@@ -814,7 +825,7 @@ ParkourConstants.WallRun = {
 		-- would turn every incidental brush against a corner into a stick. Measured on the normal
 		-- specifically so a fast run PAST a wall (high momentum, almost no closing speed) never trips it.
 		--
-		-- Comfortably above Locomotion.WalkSpeed (18) and below SprintSpeed (27): was 18 itself, which
+		-- Comfortably above Locomotion.WalkSpeed (18) and below SprintSpeed (32.4): was 18 itself, which
 		-- is not a margin at all -- an ordinary walk straight at a wall closes at very close to WalkSpeed
 		-- and could trip "TooSlowToCatch"'s `<` either way depending on a frame of input noise, which is
 		-- exactly the "I just walked into it and got stuck" complaint this number exists to prevent. A
@@ -1208,110 +1219,164 @@ ParkourConstants.Roll = {
 	},
 }
 
--- THE DASH -- the facing-relative burst on its own key (Constants.Keybinds.Defaults.Dash, Q / gamepad
--- B): four directions off the body's own facing, plus a fifth, camera-aimed UP that replaces Front
--- while looking steeply up (see UpPitchDegrees below). AIR-ONLY (States/Dashing.lua's CanEnter refuses
--- outright while grounded). Sits beside Roll above rather than replacing it, and the split of labour
--- between the two is the whole reason both exist:
+-- THE DASH -- an AIR-ONLY, camera-aimed, steerable launch on its own key
+-- (Constants.Keybinds.Defaults.Dash, Q / gamepad B). ONE rule: it sends you exactly where you are
+-- looking, at full power, and you fly it with the mouse for as long as it lasts.
+--
+-- THIS BLOCK WAS REWRITTEN FROM A FIVE-DIRECTION TABLE, and the three things that were deleted are
+-- worth naming, because each was a separate reason the old dash read as rigid:
+--   1. A `Directions` table quantized every dash onto one of four vectors off the BODY's own facing,
+--      with a fifth, camera-aimed "Up" that only unlocked above a 55-degree pitch gate. Whatever
+--      angle the player was actually looking at was discarded. Now the aim IS the direction, at
+--      every angle, with no gate and no quadrant.
+--   2. Those five directions had five different distances, durations, cooldowns and momentum
+--      penalties, so three of them were deliberately weak. There is one power budget now.
+--   3. Direction was frozen at entry and commanded unchanged for the whole burst, so there was no
+--      input path into a running dash at all. TurnDegreesPerSecond below is that path.
+-- Sits beside Roll (above) rather than replacing it, and the split of labour is what lets both exist:
 --   * ROLL is the grounded DODGE. Committed, so nothing can steal it, which is most of its defensive
 --     value, and it owns the landing-roll conversion.
---   * DASH is the AIRBORNE CHAINING move. Deliberately NOT committed, so a vault, a mantle, a wall-run
---     or a ledge grab may pre-empt it mid-burst -- which is how "dash into a vault" and "air-dash onto a
---     ledge" happen through the state machine's own arbitration, with each target's CanEnter fully
---     honoured, rather than through hand-written hand-offs that would bypass them.
+--   * DASH is the AIRBORNE CHAINING move. Deliberately NOT committed, so a vault, a mantle, a
+--     wall-run or a ledge grab may pre-empt it mid-flight -- which is how "dash into a vault" and
+--     "air-dash onto a ledge" happen through the state machine's own arbitration, with each target's
+--     CanEnter fully honoured, rather than through hand-written hand-offs that would bypass them.
 -- See States/Dashing.lua's header for the priority reasoning that makes that split work.
 ParkourConstants.Dash = {
-	-- Ceiling on the burst's peak speed. Matches Leap.MaxPlanarSpeed (95) -- this framework's existing
-	-- precedent for the fastest legitimate planar claim -- and leaves 1.47x headroom under
-	-- Validation.MaxReportedSpeed (140), so a dash taken out of a top-gear run can never have its own
-	-- action report refused. src/Tests/Parkour/DashState.spec.lua asserts that relationship rather than
-	-- leaving it to whoever next retunes DistanceStuds to remember.
+	-- Hard ceiling on the commanded speed, spring overshoot included. Matches Leap.MaxPlanarSpeed
+	-- (95) -- this framework's existing precedent for the fastest legitimate planar claim -- and
+	-- leaves 1.47x headroom under Validation.MaxReportedSpeed (140), so a dash taken out of a
+	-- top-gear run can never have its own action report refused.
+	--
+	-- DELIBERATELY NOT RAISED by this rewrite even though the dash got much more powerful. The extra
+	-- power comes from REACH (LaunchSpeed held for CruiseSeconds, then a long settle) and from being
+	-- steerable, not from a bigger number -- which is what keeps every validator relationship, and
+	-- the "terrain is still the fastest thing in the game" rule, exactly where they were.
 	MaxSpeed = 95,
-	-- The speed a dash is never allowed to leave the player below. Above Locomotion.WalkSpeed (18) so a
-	-- dash from a standstill ends MOVING rather than pinned, and below SprintSpeed (27) so it is never
-	-- worth taking for the exit speed alone.
-	MinExitSpeed = 20,
-	-- Air dashes available per trip through the air. One: enough to convert a misjudged jump into a
-	-- reachable ledge, not enough to fly. Refunded by ground contact, by a wall-run attach, and by a
-	-- ledge grab -- see ParkourTypes.ParkourContext.AirDashChain for why those last two refund when the
+
+	-- THE LAUNCH, as a spring rather than a curve. The old dash stamped its peak speed on frame one
+	-- and decayed linearly from it; a stamp has no mass, which is most of why it read as a nudge
+	-- rather than a launch. Shared/FlightMath.SpringStep drives commanded speed toward the target
+	-- below instead, so it winds up over a few frames and then overshoots slightly before settling --
+	-- and per that function's own header, the OVERSHOOT IS THE MASS. There is no phase enum in
+	-- States/Dashing.lua because there does not need to be: the same spring that builds the launch
+	-- also bleeds it off once the target drops to the exit speed.
+	--
+	-- LaunchSpeed is under MaxSpeed by more than the overshoot, on purpose. Raising it toward MaxSpeed
+	-- does not make the dash faster; it makes the clamp eat the overshoot, and the mass cue with it.
+	--
+	-- HOW BIG THE OVERSHOOT ACTUALLY IS, measured rather than derived, because the two disagree and
+	-- the derived figure is the misleading one. A damping ratio of 0.62 overshoots a step by about 8.4
+	-- percent in CONTINUOUS time -- exp(-pi * z / sqrt(1 - z * z)) -- which would put a launch from a
+	-- standstill near 91. It does not get there: FlightMath.SpringStep integrates implicitly, and at
+	-- LaunchFrequency 60 against a 60Hz frame the step is omega * dt = 1, which is deep into the range
+	-- where that integrator's own numerical damping dominates. The realized peak is about 85.4 from a
+	-- standstill and about 85.0 from a jog -- roughly 1 to 2 percent over target, not 8.
+	--
+	-- Two consequences, both worth knowing before retuning:
+	--   * The headroom under MaxSpeed is far LARGER than the analytic figure implies, so the clamp is
+	--     nowhere near binding. That is slack available to CruiseSeconds or LaunchSpeed, not a problem.
+	--   * At this frequency the mass cue is carried by the WIND-UP (four frames to full speed -- see
+	--     LaunchFrequency) rather than by a visible overshoot, which at 1 percent is not visible at
+	--     all. LOWERING LaunchFrequency is the dial that trades a slower wind-up for a bigger real
+	--     overshoot; 20 roughly doubles it (to ~2.6 over target) at the cost of nine frames of
+	--     wind-up instead of four. src/Tests/Parkour/DashState.spec.lua asserts only that the
+	--     overshoot is real and stays under the ceiling, so that trade is a one-number edit here.
+	LaunchSpeed = 84,
+	-- Undamped natural frequency, radians/second. Higher settles faster. The first (overshooting)
+	-- peak lands at roughly pi / (frequency * sqrt(1 - damping * damping)) seconds -- about 0.067s
+	-- here, or four frames of visible wind-up. Drop it and the dash starts feeling like it has to be
+	-- dragged into motion; raise it far and it becomes the instantaneous stamp this replaced.
+	LaunchFrequency = 60,
+	-- Damping RATIO, not a second name for speed: 1 is critical (no overshoot at all), below 1 rings.
+	-- Below 1 on purpose -- see LaunchSpeed above.
+	LaunchDamping = 0.62,
+	-- How long the spring's target stays at LaunchSpeed before dropping to the exit speed. THE
+	-- distance dial: nearly all of the dash's travel happens inside this window, so this is the first
+	-- number to move if the reach turns out to be too generous for the level geometry (roughly 28
+	-- studs of travel at the values here, against the old five-direction dash's 4.5 to 10).
+	CruiseSeconds = 0.24,
+	-- Total flight time. Longer than the old longest direction (0.26) because a launch that is over
+	-- before the player can steer it is not steerable in any meaningful sense -- the tail past
+	-- CruiseSeconds is where the dash settles onto its final heading and hands off.
+	DurationSeconds = 0.4,
+	-- The longest a dash may last. One direction now, so this is DurationSeconds -- but it stays a
+	-- separate constant because ParkourController.ACTION_DURATIONS derives the server ownership
+	-- window it declares from THIS name, and the spec asserts the two agree. Lengthening the flight
+	-- without lengthening the declared window would have the server force-expire a dash mid-air.
+	MaxDurationSeconds = 0.4,
+
+	-- THE STEER -- how fast the travel vector may rotate toward wherever the player is CURRENTLY
+	-- looking, per second, for as long as the dash lasts. This one number is the whole of "drivable",
+	-- and the cap is the mechanic rather than a safety rail: uncapped, the dash would snap onto the
+	-- live aim every frame and read as a flying camera with a body attached; at zero it is the frozen
+	-- burst this rewrite replaced. 220 buys about 66 degrees of authority over a full-authority
+	-- window, which is enough to bank a dash around a corner and not enough to reverse one.
+	TurnDegreesPerSecond = 220,
+	-- Steering authority tapers linearly to exactly zero over the LAST this-many seconds of the
+	-- flight, so the dash commits to its final heading before it hands off. Without it, the exit
+	-- velocity is whatever direction the mouse happened to be sweeping through on the final frame,
+	-- which is the one moment the player is least likely to be aiming deliberately -- and that vector
+	-- is what every downstream chain (the route-2 vault/mantle/wall-run/ledge pre-emptions, all of
+	-- which gate on facing) then inherits.
+	SteerReleaseSeconds = 0.1,
+
+	-- Air dashes available per trip through the air. Still one, deliberately, even though the dash
+	-- itself got several times bigger: one is enough to convert a misjudged jump into a reachable
+	-- ledge and not enough to fly. Refunded by ground contact, by a wall-run attach, and by a ledge
+	-- grab -- see ParkourTypes.ParkourContext.AirDashChain for why those last two refund when the
 	-- wall-run/wall-jump chains deliberately do not.
 	AirCharges = 1,
-	-- How long an AIR dash holds vertical velocity at exactly zero before gravity resumes. The hang is
-	-- what makes an air dash read as weighted rather than as a nudge, and it is what lets a dash cancel
-	-- a fall -- one learnable rule instead of a velocity-dependent one. Short enough that it can never
-	-- be mistaken for hovering, and asserted below Front.DurationSeconds so it stays a PHASE of the
-	-- dash rather than the whole of it.
-	AirHangSeconds = 0.12,
-	-- UP's own hang, longer than the shared one above on purpose: a launch that starts falling again the
-	-- instant its burst ends reads as weak no matter how fast the burst itself was. A dedicated constant
-	-- rather than widening AirHangSeconds so the other four directions' air dash keeps its snappier,
-	-- unweighted feel.
-	UpAirHangSeconds = 0.2,
-	-- Extra hang, ON TOP OF UpAirHangSeconds, granted to an Up dash taken within
+	-- One cooldown, where there used to be five. Only really binds on the chained case (dash into a
+	-- ledge grab into another dash), since AirCharges already limits a single trip through the air to
+	-- one.
+	CooldownSeconds = 0.75,
+	-- The floor under the speed a dash leaves the player at, as a fraction of LaunchSpeed. Of the
+	-- LAUNCH, deliberately, not of the momentum the player arrived with: the old dash charged three
+	-- of its five directions a momentum penalty on exit, which made them strictly worse ways to
+	-- travel and pushed the whole movement meta onto the one direction that did not. A dash must
+	-- never cost speed -- States/Dashing.lua takes the greater of this and the entry momentum.
+	ExitRetainFraction = 0.55,
+	-- Absolute floor, for the case where both of those are tiny. Above Locomotion.WalkSpeed (18) so a
+	-- dash from a standstill ends MOVING rather than pinned, and below SprintSpeed (32.4) so it is
+	-- never worth taking for the exit speed alone.
+	MinExitSpeed = 20,
+
+	-- How long the dash holds vertical velocity at exactly zero before gravity resumes. The hang is
+	-- what lets a dash CANCEL a fall -- one learnable rule instead of a velocity-dependent one -- and
+	-- it is what stops a level dash from sagging into a shallow arc. Asserted below DurationSeconds
+	-- so it stays a PHASE of the flight rather than the whole of it: the last stretch, where gravity
+	-- is back and the spring is bleeding speed off, is the dash visibly settling.
+	--
+	-- One number now, where the old block had a shared value plus a longer dedicated one for its "Up"
+	-- quadrant. There is no Up quadrant any more -- every angle is reachable -- so a dash aimed
+	-- straight up gets exactly this hang, and gets its height from the launch itself.
+	AirHangSeconds = 0.28,
+	-- Extra hang, ON TOP OF AirHangSeconds, granted to a dash taken within
 	-- WallLaunch.DashBoostWindowSeconds of a States/WallLaunching.lua launch -- the "give them a
-	-- little extra boost" half of that combo (see States/Dashing.lua's own Enter for where this is
-	-- read). Extra HANG rather than extra SPEED: a dash chained this soon off a wall launch carries
-	-- very little entry momentum (the launch itself is mostly vertical), so BurstPeak's own
-	-- distance-driven peak is nowhere near MaxSpeed's ceiling for it already -- more speed would do
-	-- something, but more TIME at the peak is the lever that cannot be silently absorbed by a clamp
-	-- elsewhere.
+	-- little extra boost" half of that combo. Extra HANG rather than extra speed: a dash chained this
+	-- soon off a wall launch is already commanding LaunchSpeed like any other, so more speed would be
+	-- silently absorbed by the MaxSpeed clamp; more TIME before gravity returns cannot be.
+	--
+	-- Granted to ANY chained dash now, not only an upward one. The old block restricted it to the
+	-- "Up" quadrant because that quadrant was the only way to aim a dash skyward at all; with the aim
+	-- itself deciding, restricting it would just be an invisible pitch gate on a reward.
 	WallLaunchChainExtraHangSeconds = 0.15,
-	-- Whether the air dash resumes gravity from ZERO (true) or from the vertical velocity it entered
-	-- with (false). True, because restoring a large entry Y after the hang snaps visibly in either
+	-- Whether the dash resumes gravity from ZERO (true) or from the vertical velocity it entered with
+	-- (false). True, because restoring a large entry Y after the hang snaps visibly in either
 	-- direction -- a fast fall lurches back down, and a rising jump turns the dash into a float
 	-- extender. Kept as a constant rather than inlined so the trade is reversible in one edit.
 	AirVerticalResetsFall = true,
 	-- Constant downward bias applied once a dash's own flight LANDS mid-burst (every dash starts
-	-- airborne -- see CanEnter -- but a short one can easily touch down before its duration elapses),
-	-- keeping the body in contact across small bumps instead of skipping off them. Same value and same
-	-- job as Slide.SurfaceStickSpeed.
+	-- airborne -- see CanEnter -- but one aimed downward, or simply a long one, can easily touch down
+	-- before its duration elapses), keeping the body in contact across small bumps instead of
+	-- skipping off them. Same value and same job as Slide.SurfaceStickSpeed.
 	SurfaceStickSpeed = 8,
-	-- The longest any direction below may last. Two readers: ParkourController.ACTION_DURATIONS derives
-	-- the server ownership window it declares from this, and the spec asserts every per-direction
-	-- duration is at or under it -- so retuning one direction longer can never silently under-declare
-	-- the window and have the server force-expire a dash mid-flight.
-	MaxDurationSeconds = 0.26,
 
-	-- The camera pitch, in degrees above level, that turns a FORWARD dash into an UP dash -- see
-	-- ParkourMath.DashQuadrant's own header for why it is forward specifically that this replaces, and
-	-- why back/left/right are never touched by it. High enough that ordinary climbing (a player looking
-	-- up at the wall or ledge they are about to grab, which in this game is most of the time) never
-	-- silently launches them; low enough that deliberately tipping the camera back to aim up a shaft
-	-- reads as reliable rather than as a coin flip. Only ever evaluated while airborne in the first
-	-- place -- Dash as a whole is AIR-ONLY, see the block header.
-	UpPitchDegrees = 55,
-
-	-- THE FIVE DIRECTIONS, resolved against the body's own facing (ParkourMath.DashQuadrant), never
-	-- against the camera -- except Up, which IS the camera, by design (see UpPitchDegrees above). Front
-	-- is the committed, chaining burst; Back and the sides are shorter, cost more cooldown and give up
-	-- momentum on exit, which is how "defensive" is expressed as numbers rather than as a feeling. Left
-	-- and Right are identical by construction -- a sidestep that is better in one direction than the
-	-- other is a bug, not a mechanic, and the spec asserts it. Up keeps Front's cooldown and exit
-	-- fraction -- it IS the forward dash's chaining privilege, merely redirected by where the camera is
-	-- looking -- but travels further on the same duration (a bigger peak, via BurstPeak) than Front
-	-- does: a vertical launch needs to visibly outdo a flat dash to read as powerful rather than as a
-	-- weaker sideways option, vertical distance counting the same as horizontal here. Paired with
-	-- Dash.UpAirHangSeconds above, which holds that peak a beat longer before gravity resumes.
-	--
-	-- Annotated rather than left to inference: States/Dashing.lua indexes this with a union-typed
-	-- quadrant, which does not typecheck against a bare table literal under --!strict.
-	Directions = {
-		-- Furthest, longest, cheapest, and the only direction that keeps 100% of entry momentum -- a
-		-- front dash must never cost a stud of speed, or the optimal play becomes never dashing.
-		Front = { DistanceStuds = 7, DurationSeconds = 0.26, CooldownSeconds = 0.55, ExitRetainFraction = 1 },
-		-- Shortest and by far the most expensive. Backward-dash spam is the standard failure mode of
-		-- every game that ships a uniform dash cooldown, and the deleted combat system's own
-		-- DashBackCooldownSeconds (1.6, against a 0.8 front) is this codebase's record of having
-		-- already paid for it once.
-		Back = { DistanceStuds = 4.5, DurationSeconds = 0.2, CooldownSeconds = 1.1, ExitRetainFraction = 0.8 },
-		Left = { DistanceStuds = 5.5, DurationSeconds = 0.22, CooldownSeconds = 0.8, ExitRetainFraction = 0.88 },
-		Right = { DistanceStuds = 5.5, DurationSeconds = 0.22, CooldownSeconds = 0.8, ExitRetainFraction = 0.88 },
-		-- Front's cooldown and exit fraction, but a bigger peak (see the block header) for the extra
-		-- oomph a launch off the ground needs to read as powerful rather than as a stumble upward.
-		Up = { DistanceStuds = 10, DurationSeconds = 0.26, CooldownSeconds = 0.55, ExitRetainFraction = 1 },
-	} :: {
-		[string]: { DistanceStuds: number, DurationSeconds: number, CooldownSeconds: number, ExitRetainFraction: number },
-	},
+	-- The pitch, in degrees off level, that sorts a launch into the Up / Level / Down animation
+	-- bands. ANIMATION ONLY -- it has no effect on where the dash goes, which is the aim and nothing
+	-- but the aim. It replaces the old Dash.UpPitchDegrees, which was a real gameplay gate deciding
+	-- whether a forward dash became a vertical one; nothing about the flight is gated on pitch now.
+	AnimationPitchDegrees = 30,
 
 	-- A dash may be started from these states only. Data rather than a condition in States/Dashing.lua,
 	-- for the same reason Roll.AllowedFromStates is. Every entry here is already an AIRBORNE state --
@@ -1319,8 +1384,8 @@ ParkourConstants.Dash = {
 	-- so listing a grounded state (Idle, Walking, Sprinting, Landing, Sliding) would only ever be a dead
 	-- entry that could never actually pass. Jumping, Falling and WallLaunching are the three states a
 	-- player is airborne in that this table needs to name -- WallLaunching specifically so "look up and
-	-- press dash" can actually chain out of States/WallLaunching.lua's own launch into the boosted Up
-	-- dash it exists to set up (Dash.WallLaunchChainExtraHangSeconds).
+	-- press dash" can actually chain out of States/WallLaunching.lua's own launch into the boosted dash
+	-- it exists to set up (WallLaunchChainExtraHangSeconds).
 	--
 	-- EVERY ID HERE MUST HAVE A PRIORITY BELOW DASHING'S OWN (130), or the entry is a lie: route-2
 	-- pre-emption requires the incoming state to STRICTLY outrank the active one, so a listed state
@@ -1337,13 +1402,14 @@ ParkourConstants.Dash = {
 		WallLaunching = true,
 	},
 
-	-- The launch stinger, played once per dash (Client/FX/DashAudio.lua) regardless of which of the
-	-- five quadrants resolved -- every dash is airborne now (CanEnter's own AIR-ONLY gate above), so
-	-- there is no grounded/aerial split left for a second sound to distinguish. Shape matches
-	-- Constants.Combat.Sound's entries (SoundId/Volume/PoolSize?/PlaybackRegion?) even though it lives
-	-- here rather than in Shared/Constants.lua: ParkourConstants.lua has no requires of its own and
-	-- this framework's own habit is to keep it that way, so it is not worth importing Constants.lua
-	-- just to borrow its SoundDefinition type for one table. DashAudio.lua reads the value directly.
+	-- The launch stinger, played once per dash (Client/FX/DashAudio.lua) regardless of which way it
+	-- was aimed -- every dash is airborne (CanEnter's own AIR-ONLY gate above) and every dash now
+	-- carries the same power budget, so there is no split left for a second sound to distinguish.
+	-- Shape matches Constants.Combat.Sound's entries (SoundId/Volume/PoolSize?/PlaybackRegion?) even
+	-- though it lives here rather than in Shared/Constants.lua: ParkourConstants.lua has no requires
+	-- of its own and this framework's own habit is to keep it that way, so it is not worth importing
+	-- Constants.lua just to borrow its SoundDefinition type for one table. DashAudio.lua reads the
+	-- value directly.
 	Sound = {
 		SoundId = "rbxassetid://126862391298039",
 		Volume = 0.6,
@@ -1499,6 +1565,28 @@ ParkourConstants.Camera = {
 	VaultFOVPunchOutSeconds = 0.09,
 	VaultFOVPunchBackSeconds = 0.24,
 
+	-- THE DASH PUNCH -- the only camera treatment the dash has, and the reason it exists is that
+	-- before this it had NONE. A move that is meant to read as the most powerful thing in the
+	-- movement kit was, from the camera's point of view, indistinguishable from falling.
+	--
+	-- POSITIVE, unlike every other FOV punch in this table. Vault's is -2.5 and Mantle's -1.5: both
+	-- NARROW, because both are the camera bracing against a body pulling itself over something, and
+	-- narrowing reads as effort. A dash is the opposite event -- the world is being thrown past the
+	-- player -- and WIDENING is what the eye reads as speed, because more of the periphery sweeps by
+	-- per frame at the wider angle. Punching a dash inward would say "strain" about the one move in
+	-- this framework that should say "released".
+	--
+	-- Larger in magnitude than the vault's, and out FASTER (0.07 against 0.09): the launch spring is
+	-- at its overshooting peak about four frames in (Dash.LaunchFrequency's own comment does that
+	-- arithmetic), and the punch wants to arrive with it rather than behind it. The recovery is then
+	-- deliberately long -- 0.35s, past the dash's own 0.4s duration -- so the FOV is still easing
+	-- back as the player hands off into a fall or a chained traversal. A punch that had fully
+	-- recovered before the move ended would put a visible "it's over" beat in the middle of a dash
+	-- that is still very much happening.
+	DashFOVPunchDelta = 4,
+	DashFOVPunchOutSeconds = 0.07,
+	DashFOVPunchBackSeconds = 0.35,
+
 	-- MANTLE GETS ITS OWN TREATMENT, deliberately not Vault's punch-and-shake.
 	--
 	-- Both used to fire through the same "next == Vaulting or next == Mantling" branch, on the
@@ -1526,6 +1614,7 @@ ParkourConstants.Camera = {
 	SlideFOVSlot = "ParkourSlide",
 	VaultFOVSlot = "ParkourVault",
 	MantleFOVSlot = "ParkourMantle",
+	DashFOVSlot = "ParkourDash",
 	OffsetSlot = "Parkour",
 }
 
@@ -1577,17 +1666,22 @@ ParkourConstants.AnimationIds = {
 	WallJumpLeft = "rbxassetid://88023924827467",
 	WallJumpRight = "rbxassetid://75811078175435",
 	Roll = "rbxassetid://125167812303491",
-	-- The five-way dash, one clip per resolved quadrant (States/Dashing.lua publishes the quadrant as
-	-- its AnimationVariant). All five left blank -- "authored later", see this table's own header --
-	-- because a dash has no shared fallback clip the way the wall-jump pair does: playing a FRONT dash
-	-- clip for a back-dash would read worse than playing nothing, so ParkourAnimator gives this state no
-	-- STATE_CLIPS entry to fall through to. A blank id plays nothing and errors nowhere, so the dash
-	-- ships driving the body correctly and each clip is a one-line edit here when authored.
-	DashFront = "",
-	DashBack = "",
-	DashLeft = "",
-	DashRight = "",
+	-- The dash, one clip per PITCH BAND of the launch aim -- States/Dashing.lua sorts the angle it
+	-- launched at into Up / Level / Down (Dash.AnimationPitchDegrees) and publishes that as its
+	-- AnimationVariant, once at Enter. Three bands rather than the five body-relative quadrants this
+	-- replaced, because the dash is no longer quantized to the body at all: it goes wherever the
+	-- camera is aimed, so "which of four directions relative to my chest" is no longer a question the
+	-- animation could answer even if it wanted to. What is left that a clip can honestly show is
+	-- whether the launch was upward, level, or downward.
+	--
+	-- All three left blank -- "authored later", see this table's own header -- and, as before,
+	-- ParkourAnimator gives this state no STATE_CLIPS entry to fall through to: the three bands are
+	-- genuinely different motions and playing a rising clip for a dive would read worse than playing
+	-- nothing. A blank id plays nothing and errors nowhere, so the dash ships driving the body
+	-- correctly and each clip is a one-line edit here when authored.
 	DashUp = "",
+	DashLevel = "",
+	DashDown = "",
 	-- The committed leap's flight -- the arc itself, once the charge below has committed to it.
 	Leap = "rbxassetid://73851621859324",
 	-- The leap's charge-up wind-up (Leap.ChargeSeconds), played on loop for however long that constant
@@ -1643,8 +1737,12 @@ ParkourConstants.Animation = {
 	-- fight combat animations."
 	Priority = Enum.AnimationPriority.Movement,
 	-- Loop clips whose playback speed scales with actual speed, so a wall-run at 34 doesn't play at
-	-- the same cadence as one at 20.
-	SpeedScaleReferenceSpeed = 27,
+	-- the same cadence as one at 20. This is the speed at which a clip plays at exactly its authored
+	-- cadence, and it MIRRORS Locomotion.SprintSpeed on purpose: sprinting is the pace these loops
+	-- were authored against. It moved 27 -> 32.4 with the sprint itself, which is what KEEPS the
+	-- current look -- leaving it at 27 would have silently played every parkour loop 20% fast during
+	-- an ordinary sprint.
+	SpeedScaleReferenceSpeed = 32.4,
 	MinPlaybackSpeed = 0.6,
 	MaxPlaybackSpeed = 1.6,
 }
@@ -1711,14 +1809,15 @@ ParkourConstants.Validation = {
 	-- back to ordinary locomotion. src/Tests/Parkour/StateRegistry.spec.lua asserts the relationship
 	-- rather than leaving it to whoever next retunes the slide to remember.
 	--
-	-- RAISED FROM 110 FOR THE THIRD RUN GEAR. There are now two candidates for "fastest legitimate
-	-- claim", not one: a slide at Slide.MaxSpeed (80, unchanged) down a steep face, and simply RUNNING
-	-- at the top gear, which Shared/Run/RunConstants.lua puts at 81 studs per second. Every action
-	-- report carries the framework's live momentum, so a stage-3 runner starting any traversal at all
-	-- now reports a number that used to be reachable only by a committed downhill slide. At 110 the
-	-- margin over an ordinary top-gear run was 1.36x, against the ~3x this constant was written to
-	-- have; 140 restores that headroom against the new ceiling rather than leaving an honest player one
-	-- hill away from the reject path.
+	-- RAISED FROM 110 FOR THE RUN LADDER, and deliberately NOT lowered again when the ladder dropped back
+	-- to two gears. There are two candidates for "fastest legitimate claim", not one: a slide at
+	-- Slide.MaxSpeed (80, unchanged) down a steep face, and simply RUNNING at the top gear, which
+	-- Shared/Run/RunConstants.lua now puts at 54 studs per second. Every action report carries the
+	-- framework's live momentum, so a top-gear runner starting any traversal at all reports a number that
+	-- used to be reachable only by a committed downhill slide. Kept at 140 because this ceiling is only
+	-- ever dangerous in one direction: walking it back toward the old 110 buys nothing, and would eat
+	-- into the headroom Dash.MaxSpeed (95) and Leap.MaxPlanarSpeed assert against it -- leaving an honest
+	-- player one hill away from the reject path for no gain.
 	MaxReportedSpeed = 140,
 	-- Ceiling on how far a character may have moved between an action's start report and its end
 	-- report, per second of elapsed time. Above MaxReportedSpeed with headroom, since a slide that

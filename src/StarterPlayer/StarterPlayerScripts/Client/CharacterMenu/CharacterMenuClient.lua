@@ -121,18 +121,21 @@ end
 
 -- Forwards the server's equipped-arts push straight to HotbarBindings.SyncFromServer -- see that
 -- module's own header on why this is now its only writer.
-local function mirrorToHotbar(equipped: { [number]: string }): ()
-	HotbarBindings.SyncFromServer(equipped)
+local function mirrorToHotbar(equipped: { [number]: string }, info: { [string]: Types.ArtDisplayInfo }): ()
+	HotbarBindings.SyncFromServer(equipped, info)
 end
 
 -- Validated at the boundary for the same reason ClientState.Bootstrap validates its own payloads --
 -- a Types annotation is not enforced across a remote, and a malformed row should be dropped rather
 -- than reaching a Fusion ForPairs and taking the panel down with it.
-local function sanitizeArtState(payload: unknown): ({ [string]: number }, { [number]: string })
+local function sanitizeArtState(
+	payload: unknown
+): ({ [string]: number }, { [number]: string }, { [string]: Types.ArtDisplayInfo })
 	local mastery: { [string]: number } = {}
 	local equipped: { [number]: string } = {}
+	local info: { [string]: Types.ArtDisplayInfo } = {}
 	if typeof(payload) ~= "table" then
-		return mastery, equipped
+		return mastery, equipped, info
 	end
 	local table_ = payload :: { [string]: any }
 	if typeof(table_.Mastery) == "table" then
@@ -149,7 +152,20 @@ local function sanitizeArtState(payload: unknown): ({ [string]: number }, { [num
 			end
 		end
 	end
-	return mastery, equipped
+	-- A row missing either field is dropped WHOLE rather than half-filled: the hotbar renders an art
+	-- with no entry as an empty slot, which is a state it already handles, while an entry with a
+	-- name and no cost would render a tile claiming the art is free.
+	if typeof(table_.EquippedInfo) == "table" then
+		for artId, row in pairs(table_.EquippedInfo :: { [any]: any }) do
+			if typeof(artId) == "string" and typeof(row) == "table" then
+				local candidate = row :: { [string]: any }
+				if typeof(candidate.DisplayName) == "string" and typeof(candidate.QiCost) == "number" then
+					info[artId] = { DisplayName = candidate.DisplayName, QiCost = candidate.QiCost }
+				end
+			end
+		end
+	end
+	return mastery, equipped, info
 end
 
 local function isValidSheet(payload: unknown): boolean
@@ -193,10 +209,10 @@ function CharacterMenuClient.Start(handle: MenusHandle, chrome: Chrome.ChromeHan
 	end)
 
 	artStateUpdated.OnClientEvent:Connect(function(payload: Types.ArtStatePayload)
-		local mastery, equipped = sanitizeArtState(payload)
+		local mastery, equipped, info = sanitizeArtState(payload)
 		handle.ArtMastery:set(mastery)
 		handle.EquippedArts:set(equipped)
-		mirrorToHotbar(equipped)
+		mirrorToHotbar(equipped, info)
 	end)
 
 	-- Every RemoteFunction call below is wrapped and spawned: an invoke yields, and a server that

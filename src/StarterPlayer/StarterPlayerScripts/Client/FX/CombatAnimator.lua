@@ -9,6 +9,30 @@
 	re-derives "should Walking/Running be playing THIS frame" from live state every tick rather than
 	being told when an action started or ended.
 
+	ALSO OWNS the ARMED-IDLE loop -- the per-WEAPON standing pose a player holds while their sword is
+	drawn and they are doing nothing else (not moving, not mid-swing, not blocking). Extended into this
+	module rather than a new one because it is the exact same problem Walking/Running already solved:
+	something has to beat Roblox's own default Animate script for ownership of a stationary character's
+	pose, and the DOMINANT_WEIGHT technique below is the one place in this codebase that already does
+	that (it plays a tier higher than Walking/Running do, though -- see loadArmedIdleTrack's own header
+	on why Core is not enough for a clip that has to survive a drawn weapon).
+	SetArmedWeapon(weaponId, drawn) is pushed by this module's own
+	Weapon_InventoryChanged listener (see the bottom of this file) -- CombatAnimator reads that remote
+	directly rather than through Client/Combat/WeaponInventoryClient.lua, whose own header documents
+	itself as "the whole module" for driving the inventory HUD and nothing else. The clip for a given
+	weapon comes from Shared/Combat/WeaponIdleAnimations.lua's own Animations/IDLE folder lookup -- see
+	that module's header for why it is a separate file from the swing clips in Shared/Attack/
+	AttackAnimations.lua. A weapon with no clip authored there plays no override at all, which lets
+	Roblox's own default idle show through -- a real, unbroken answer for a weapon nobody has posed yet.
+
+	AND OWNS ONE PIECE OF DEMOLITION ON THE SAME GROUND: silencing Roblox's default Animate script's
+	TOOL animation pass for the local character (suppressDefaultToolAnimations, below). A drawn weapon
+	IS a real Tool in this game (Server/Combat/Weapon/WeaponVisualSystem.lua), and the default Animate
+	script answers a Tool with a static "toolnone" upper-body pose ABOVE Core priority -- which silently
+	masked both the armed idle and the Walking/Running loops' arms for as long as a weapon was out.
+	Owned here because this is already the one module in the codebase whose job is beating that script
+	for ownership of the local character's pose; there is no second front worth a second file.
+
 	This module used to also own the full combat animation surface -- swing/finisher/block/parry/
 	dash/slide/hit-reaction playback, and the Move Creation System's runtime timeline playback -- all
 	of which was removed alongside the rest of the combat system (Server/Systems/CombatSystem.lua and
@@ -35,6 +59,10 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local AnimatorUtil = require(ReplicatedStorage.Shared.AnimatorUtil)
+local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local Trove = require(ReplicatedStorage.Shared.Trove)
+local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
+local WeaponIdleAnimations = require(ReplicatedStorage.Shared.Combat.WeaponIdleAnimations)
 local AnimationTrackUtil = require(script.Parent.AnimationTrackUtil)
 
 local logger = Logger.scope("CombatAnimator")
@@ -42,16 +70,18 @@ local logger = Logger.scope("CombatAnimator")
 local CombatAnimator = {}
 
 -- CombatConstants.AnimationIds is the single source of truth -- now scoped to just the locomotion
--- clips (Walking/Running/RunningStage2/RunningStage3) since combat's own clips (swings, finishers,
+-- clips (Walking/Running/RunningStage2) since combat's own clips (swings, finishers,
 -- dashes, etc.) were removed from Constants.lua alongside the rest of the combat data. This loop is
 -- fully data-driven, so trimming that table is what trimmed this module's actual loaded-track set --
 -- no code here needed to change to stop loading combat clips.
 local ANIMATION_IDS = CombatConstants.AnimationIds
 
 -- Walking/Running share the same fade constants so the locomotion evaluator's walk<->run crossfade
--- is symmetric on both sides. Action priority (above the default Movement-tier walk/run cycle) so
--- these actually visually override Roblox's own baked-in animations instead of fighting them for the
--- same joints. Constants.FX.Animation.Combat -- see that table's own header in Constants.lua.
+-- is symmetric on both sides. These two loops play at CORE priority, the same tier Roblox's own
+-- baked-in walk/run cycle uses, and win the resulting tie on DOMINANT_WEIGHT alone -- not on priority
+-- (Core is the BOTTOM of Enum.AnimationPriority, not the top; see loadArmedIdleTrack's own header for
+-- what that costs the moment something ABOVE Core starts playing).
+-- Constants.FX.Animation.Combat -- see that table's own header in Constants.lua.
 -- Shared by Walking and Running: a start/crossfade (Play(), or a Stop() that's really a handoff to
 -- the OTHER locomotion loop -- see the evaluator below) uses this softer duration; a genuine
 -- interrupt (the character stopping) uses LOCOMOTION_INTERRUPT_FADE_TIME instead, since that one
@@ -113,6 +143,10 @@ local tracks: { [string]: AnimationTrack } = {}
 -- Bound in BindCharacter so the Walking/Running eligibility evaluator (below) can read live
 -- MoveDirection every frame without a FindFirstChildOfClass lookup on the hot path.
 local currentHumanoid: Humanoid? = nil
+-- Bound alongside currentHumanoid -- resolveArmedIdle (below) needs it to load a dynamically-chosen
+-- clip, which is the one thing this module loads OUTSIDE the fixed animationTemplates/tracks pair
+-- BindCharacter otherwise builds wholesale.
+local currentAnimator: Animator? = nil
 
 -- Reset hooks for per-life module state declared further down this file -- none of that state is
 -- tied to the `tracks` table BindCharacter already rebuilds below, so left alone it survives a
@@ -124,11 +158,211 @@ local function registerPerLifeReset(fn: () -> ()): ()
 	table.insert(perLifeResetHandlers, fn)
 end
 
+-- Which weapon the player currently has DRAWN, and whether it is drawn at all -- the two inputs
+-- SetArmedWeapon feeds and resolveArmedIdle reads. Deliberately NOT reset by registerPerLifeReset:
+-- these are server-reported facts about the player's inventory, not per-life animation state, and
+-- BindCharacter's own call to resolveArmedIdle at the end of this function re-derives the track from
+-- whatever they already say the instant the new Animator exists -- regardless of whether the server's
+-- own Weapon_InventoryChanged re-push for this life has arrived yet (it always does, on every
+-- character bind -- see Client/Combat/WeaponInventoryClient.lua's own header -- but arrival order
+-- against this client's own BindCharacter call is not guaranteed, so this function must not depend on
+-- it).
+local armedWeaponId: string? = nil
+local armedWeaponDrawn = false
+
+-- The currently-claimed idle track, and the asset id it was built from -- kept separate from `tracks`
+-- (the Walking/Running set built once, wholesale, in BindCharacter) because this one clip is chosen
+-- dynamically as the drawn weapon changes rather than fixed at bind time.
+local armedIdleTrack: AnimationTrack? = nil
+local armedIdleAssetId = ""
+-- Loaded tracks for THIS life's Animator, keyed by asset id, so toggling the same weapon's draw state
+-- on and off repeatedly -- or swapping between two weapons that share one idle clip -- does not
+-- reload the same clip over and over.
+local armedIdleTracksByAssetId: { [string]: AnimationTrack } = {}
+registerPerLifeReset(function()
+	armedIdleTrack = nil
+	armedIdleAssetId = ""
+	table.clear(armedIdleTracksByAssetId)
+end)
+
+-- What shouldArmedIdle resolved to on the PREVIOUS Heartbeat, purely so the evaluator below can log
+-- the gate's full boolean breakdown only when it actually CHANGES rather than once a frame --
+-- diagnostic-only state, read and written nowhere except that one debug line.
+local lastShouldArmedIdle = false
+registerPerLifeReset(function()
+	lastShouldArmedIdle = false
+end)
+
+-- Every AnimationTrack name Roblox's own default Animate script can play from its TOOL animation set
+-- -- the folder names it falls back to when a character has no `toolnone`/`toolslash`/`toollunge`
+-- config folder, and the Animation instance names inside those folders when it does (a track takes its
+-- name from the Animation instance it was loaded from, and the two paths name them differently).
+-- Matched by name rather than by asset id because the ids are the default rig's, not ours, and a rig
+-- variant is free to author its own.
+local DEFAULT_TOOL_TRACK_NAMES: { [string]: boolean } = {
+	toolnone = true,
+	ToolNoneAnim = true,
+	toolslash = true,
+	ToolSlashAnim = true,
+	toollunge = true,
+	ToolLungeAnim = true,
+}
+
+-- Per-life connections owned by BindCharacter -- Shared/Trove.lua rather than a bare connection field,
+-- per the module table in CLAUDE.md. Cleaned at the TOP of every BindCharacter, so a respawn never
+-- leaves the previous life's Animator listener alive.
+local characterTrove = Trove.New()
+
+-- Kills Roblox's default Animate script's TOOL animations on this character, for this life.
+--
+-- WHY THIS EXISTS AT ALL. Server/Combat/Weapon/WeaponVisualSystem.lua draws a weapon by parenting a
+-- real Tool (with a Handle) to the character and calling Humanoid:EquipTool -- deliberately, so
+-- HitboxEngine's "Weapon" attachment point resolves for free. But the default Animate script polls
+-- `Character:FindFirstChildOfClass("Tool")` on its own loop, and the instant it sees one it plays
+-- "toolnone" -- a static arms-out pose covering the whole upper body, ABOVE Core priority. That is
+-- what took the character over roughly one frame after every draw: the armed-idle stance really was
+-- playing, at DOMINANT_WEIGHT, entirely masked. It masks the Walking/Running loops' arms the same way
+-- for as long as a weapon is out, which is the same bug wearing different clothes.
+--
+-- STOPPED AT PLAY TIME, NOT BLANKED AT THE SOURCE. The obvious fix -- setting
+-- Animate.toolnone.ToolNoneAnim.AnimationId to "" -- leaves the Animate script calling
+-- Animator:LoadAnimation on a blank Animation from inside its own unprotected `while` loop; if that
+-- ever throws, the loop dies and takes the character's default jump/fall/climb/swim animations with
+-- it, silently. Animator.AnimationPlayed is free (it fires exactly when the Animate script starts the
+-- track, no per-frame poll of GetPlayingAnimationTracks) and Stop() on a track cannot throw. The
+-- Animate script does not re-play a tool clip it has already started -- it only reloads when the
+-- animation INSTANCE changes -- so one Stop per draw is the whole cost.
+--
+-- Does not touch the default idle/walk/run tracks: those are Core priority and DOMINANT_WEIGHT already
+-- beats them, and stopping them would leave an unauthored weapon (no IDLE clip in its own Animations
+-- folder -- see WeaponIdleAnimations' own header) standing in a genuine T-pose instead of Roblox's
+-- default idle, which is the documented fallback.
+local function suppressDefaultToolAnimations(animator: Animator): ()
+	local function stopIfToolTrack(track: AnimationTrack): ()
+		if DEFAULT_TOOL_TRACK_NAMES[track.Name] then
+			track:Stop(0)
+		end
+	end
+	-- Already-playing pass first: BindCharacter can run after the Animate script has started (a
+	-- respawn straight back into a drawn weapon), and AnimationPlayed only reports tracks started
+	-- AFTER the connection.
+	for _, track in animator:GetPlayingAnimationTracks() do
+		stopIfToolTrack(track)
+	end
+	characterTrove:Connect(animator.AnimationPlayed, stopIfToolTrack)
+end
+
+-- Loads (and caches, for this life) the track for `assetId` against the current Animator, or nil if
+-- there is no Animator yet or the load fails. Mirrors BindCharacter's own pcall'd LoadAnimation below
+-- -- a failure here costs one warning and no armed-idle override, never a wedged character.
+local function loadArmedIdleTrack(assetId: string): AnimationTrack?
+	local existing = armedIdleTracksByAssetId[assetId]
+	if existing then
+		return existing
+	end
+	local animator = currentAnimator
+	if not animator then
+		return nil
+	end
+	local animation = Instance.new("Animation")
+	animation.Name = "ArmedIdle"
+	animation.AnimationId = assetId
+	local ok, trackOrError = pcall(function()
+		return animator:LoadAnimation(animation)
+	end)
+	if not ok then
+		logger:warn("Failed to load armed-idle animation", {
+			assetId = assetId,
+			errorMessage = tostring(trackOrError),
+		})
+		return nil
+	end
+	local track = trackOrError :: AnimationTrack
+	-- MOVEMENT, NOT CORE, AND THAT IS THE WHOLE OF WHY THE ARMED IDLE USED TO BE INVISIBLE.
+	-- Enum.AnimationPriority ascends Core(1000) < Idle(2000) < Movement(3000) < Action(4000) < Action2
+	-- ...; Core is the BOTTOM of the ladder, not the top. Walking/Running get away with Core because
+	-- the thing they fight -- Roblox's own default walk/run cycle -- is ALSO Core, so DOMINANT_WEIGHT
+	-- decides the tie. The armed idle fights something else entirely: the moment a weapon is drawn,
+	-- Server/Combat/Weapon/WeaponVisualSystem.lua parents a real Tool to the character, and Roblox's
+	-- default Animate script's own tool-animation pass then plays "toolnone" over the whole upper body
+	-- ABOVE Core priority -- no weight can beat a priority tier, so the stance clip kept playing at
+	-- DOMINANT_WEIGHT while being completely masked (the pose visibly flipped to toolnone one frame
+	-- after every draw). suppressDefaultToolAnimations below removes that track at the source; this
+	-- sits above Idle anyway so a tool clip that slips through (a rig whose Animate script this client
+	-- never got to touch) still loses. Stays BELOW Action so swings/blocks keep winning outright --
+	-- activeActionSources' own gate is what keeps this from blending under them at all.
+	track.Priority = Enum.AnimationPriority.Movement
+	track.Looped = true
+	armedIdleTracksByAssetId[assetId] = track
+	-- Length is the cheapest way to tell "this clip is a moving loop" from "this clip is a single held
+	-- pose" apart from actually watching it play -- a length near 0 means there is nothing for Looped
+	-- to loop, which reads as "stuck" in play even once everything else here is working correctly.
+	logger:debug("Loaded armed-idle animation", { assetId = assetId, lengthSeconds = track.Length })
+	return track
+end
+
+-- Re-derives which idle clip (if any) should be claimed, from the currently-remembered weapon/drawn
+-- state -- called on every SetArmedWeapon push and once more at the end of BindCharacter. Cheap to
+-- call redundantly (the id-equality check below makes a repeat call a no-op), so both call sites can
+-- call it freely without coordinating who "really" needs to.
+--
+-- STOPS THE OUTGOING TRACK ITSELF, BEFORE SWAPPING THE REFERENCE OUT FROM UNDER IT, and that is not
+-- optional. armedIdleTrack is the one entry in the Heartbeat evaluator's locomotionLoopEntries whose
+-- TRACK OBJECT ITSELF changes over a character's life (a different weapon's clip, or nil once
+-- sheathed) rather than only its ShouldPlay -- Walking/Running/RunningStage2 each keep
+-- the exact same Track for the whole life and only ever toggle whether it should play. Without this,
+-- swapping armedIdleTrack here (to a different clip, or to nil on sheathe) leaves the PREVIOUS track
+-- with no reference anywhere that still points at it: AnimationTrackUtil.DriveDominantLoop can only
+-- Stop() a track it can currently see via entry.Track, and by the very next Heartbeat that field
+-- already holds the NEW value. The old track keeps playing, still holding Core priority and
+-- DOMINANT_WEIGHT, forever -- which is exactly "the character's pose locks the instant you sheathe"
+-- rather than a crash or a warning, because nothing ever errors: the orphaned track simply never
+-- stops.
+local function resolveArmedIdle(): ()
+	local desiredAssetId = if armedWeaponDrawn then WeaponIdleAnimations.Get(armedWeaponId) else ""
+	if desiredAssetId == armedIdleAssetId then
+		return
+	end
+	local previousAssetId = armedIdleAssetId
+	armedIdleAssetId = desiredAssetId
+	local outgoing = armedIdleTrack
+	armedIdleTrack = if desiredAssetId ~= "" then loadArmedIdleTrack(desiredAssetId) else nil
+	local outgoingStopped = false
+	if outgoing and outgoing ~= armedIdleTrack and outgoing.IsPlaying then
+		outgoing:Stop(LOCOMOTION_INTERRUPT_FADE_TIME)
+		outgoingStopped = true
+	end
+	logger:debug("Armed-idle resolved", {
+		weaponId = armedWeaponId,
+		drawn = armedWeaponDrawn,
+		fromAssetId = previousAssetId,
+		toAssetId = desiredAssetId,
+		outgoingWasPlaying = outgoingStopped,
+		-- Re-read on EVERY resolve, not just the one load log in loadArmedIdleTrack -- the cached
+		-- track is reused across every redraw of the same weapon, so this is what actually tells
+		-- apart "the clip is genuinely empty" from "Length just hadn't finished loading yet the
+		-- first time" -- Roblox populates Length asynchronously once the animation's real content
+		-- arrives, and the very first LoadAnimation call can read 0 before that happens.
+		currentTrackLengthSeconds = if armedIdleTrack then armedIdleTrack.Length else nil,
+	})
+end
+
+-- Pushed by this module's own Weapon_InventoryChanged listener (bottom of this file) on every draw/
+-- sheath/select and on every character bind. `drawn` false clears the override outright rather than
+-- resolving WeaponIdleAnimations.Get and discarding it -- a sheathed weapon has no stance to hold.
+function CombatAnimator.SetArmedWeapon(weaponId: string?, drawn: boolean): ()
+	armedWeaponId = weaponId
+	armedWeaponDrawn = drawn
+	resolveArmedIdle()
+end
+
 -- Rebuilds every AnimationTrack against `character`'s own Animator. Safe to call on a character with
 -- no Humanoid yet (returns having loaded nothing).
 function CombatAnimator.BindCharacter(character: Model): ()
 	tracks = {}
 	currentHumanoid = nil
+	currentAnimator = nil
+	characterTrove:Clean()
 	for _, reset in perLifeResetHandlers do
 		reset()
 	end
@@ -141,6 +375,8 @@ function CombatAnimator.BindCharacter(character: Model): ()
 		logger:warn("BindCharacter: no Humanoid/Animator available", { character = character.Name })
 		return
 	end
+	currentAnimator = animator
+	suppressDefaultToolAnimations(animator)
 
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	currentHumanoid = humanoid
@@ -156,10 +392,10 @@ function CombatAnimator.BindCharacter(character: Model): ()
 			-- at Core priority, which otherwise wins over anything lower whenever the character has
 			-- real MoveDirection input. Matching Core is the standard workaround.
 			track.Priority = Enum.AnimationPriority.Core
-			-- RunningStage2/RunningStage3 join the looped set for the same reason Running does -- each
-			-- IS the run loop, at that stage. A sustained locomotion track whose Looped flag was never
-			-- set plays through once and leaves the character in a T-pose-adjacent idle.
-			if name == "Running" or name == "RunningStage2" or name == "RunningStage3" or name == "Walking" then
+			-- RunningStage2 joins the looped set for the same reason Running does -- it IS the run loop, at
+			-- that stage. A sustained locomotion track whose Looped flag was never set plays through once
+			-- and leaves the character in a T-pose-adjacent idle.
+			if name == "Running" or name == "RunningStage2" or name == "Walking" then
 				track.Looped = true
 			end
 			tracks[name] = track
@@ -172,6 +408,11 @@ function CombatAnimator.BindCharacter(character: Model): ()
 			logger:warn("Failed to load animation", { name = name, errorMessage = tostring(trackOrError) })
 		end
 	end
+
+	-- Re-derives the armed-idle track against the Animator just bound above, from whatever
+	-- armedWeaponId/armedWeaponDrawn already say -- see those fields' own header for why this cannot
+	-- simply wait for the next Weapon_InventoryChanged push.
+	resolveArmedIdle()
 end
 
 -- Tracks the player's held Sprint INTENT -- whether that intent actually plays/keeps playing the
@@ -190,12 +431,11 @@ function CombatAnimator.StopRunning(): ()
 	sprintHeld = false
 end
 
--- THE RUN SYSTEM'S THREE STAGES, pushed in by Client/Movement/RunController.lua (which mirrors the
+-- THE RUN SYSTEM'S TWO STAGES, pushed in by Client/Movement/RunController.lua (which mirrors the
 -- server's own Constants.Attributes.SprintStage -- the stage is never decided on this side).
 --
--- Stage 2 plays its own clip when CombatConstants.AnimationIds.RunningStage2 is authored, and stage
--- 3 plays its own when RunningStage3 is authored -- each otherwise falls through to the stage below
--- it (3 -> 2 -> 1) played faster instead (Constants.Run.Animation.PlaybackSpeeds).
+-- Stage 2 plays its own clip when CombatConstants.AnimationIds.RunningStage2 is authored, and
+-- otherwise falls through to stage 1's, played faster instead (Constants.Run.Animation.PlaybackSpeeds).
 --
 -- An intent value only, exactly like sprintHeld above: whether any clip actually plays this frame is
 -- re-derived by the evaluator below, never decided here.
@@ -219,6 +459,37 @@ function CombatAnimator.SetLocomotionSuppressed(suppressed: boolean): ()
 	locomotionSuppressed = suppressed
 end
 
+-- Sources currently holding an Action-priority pose on this same character -- the swing claim
+-- (Client/Combat/AttackInputClient.lua) and the block/parry hold (Client/Defense/DefenseClient.lua).
+-- Both play through their OWN, entirely separate AnimationManager instances at
+-- Enum.AnimationPriority.Action; the armed-idle loop below plays at Movement, one tier BELOW that (see
+-- loadArmedIdleTrack's own header for why it is not Core). So a swing already wins the joints it
+-- animates outright, and this set is not what makes that true -- it is what keeps the stance from
+-- bleeding through on the joints a swing clip does NOT key, which reads as the character half-holding
+-- its guard through its own attack. The evaluator below refuses to play the armed-idle loop at all
+-- while anything is in this set.
+--
+-- A SET KEYED BY SOURCE, NOT A PLAIN COUNTER, so two independent callers can each clear their own
+-- claim without one accidentally clearing the other's, and so a caller that fires two "active" pushes
+-- in a row (a swing immediately superseding another) costs one table write rather than needing to be
+-- balanced against two clears.
+local activeActionSources: { [string]: boolean } = {}
+
+-- Pushed by AttackInputClient/DefenseClient the instant their own Action-priority claim actually
+-- becomes the active track on their layer (not merely requested -- a claim that fails to load must
+-- never wedge this true forever), and cleared from that same claim's OnFinished, which fires for
+-- EVERY way a claim stops owning its layer (Completed/Superseded/Cleared/Expired/Failed alike) --
+-- see Shared/Animation/AnimationManager.lua's own FinishReason. That is deliberately the only way this
+-- is ever cleared: there is no timer and no per-frame re-derivation, because "is a claim active" is
+-- exactly what AnimationManager already tracks and reports.
+function CombatAnimator.SetActionAnimationActive(source: string, active: boolean): ()
+	if active then
+		activeActionSources[source] = true
+	else
+		activeActionSources[source] = nil
+	end
+end
+
 -- The run track (and speed) the playback-rate write below last applied to, so that write happens on a
 -- real change and NOT every frame.
 --
@@ -232,10 +503,12 @@ registerPerLifeReset(function()
 	appliedRunSpeed = 0
 end)
 
--- Reused across every Heartbeat instead of building a fresh `{ {...}, {...}, {...}, {...} }` argument
--- each frame -- AnimationTrackUtil.DriveDominantLoop only reads these synchronously within the call
--- and never retains the table, so it's safe to mutate the four entries' fields in place below rather
--- than allocate all five tables (the array plus its four entries) 60 times a second forever.
+-- Reused across every Heartbeat instead of building a fresh `{ {...}, {...}, {...}, {...} }`
+-- argument each frame -- AnimationTrackUtil.DriveDominantLoop only reads these synchronously within
+-- the call and never retains the table, so it's safe to mutate the four entries' fields in place below
+-- rather than allocate all five tables (the array plus its four entries) 60 times a second forever. The
+-- fourth entry is the armed-idle loop -- see CombatAnimator's own header on why it belongs in this same
+-- mutually-exclusive set rather than a second evaluator.
 local locomotionLoopEntries: { AnimationTrackUtil.DominantLoopEntry } = {
 	{ Track = nil, ShouldPlay = false, PlayFadeSeconds = 0, StopFadeSeconds = 0 },
 	{ Track = nil, ShouldPlay = false, PlayFadeSeconds = 0, StopFadeSeconds = 0 },
@@ -255,13 +528,12 @@ local locomotionLoopEntries: { AnimationTrackUtil.DominantLoopEntry } = {
 -- interrupt (the character actually stopping).
 RunService.Heartbeat:Connect(function()
 	local runningTrack = tracks.Running
-	-- nil whenever CombatConstants.AnimationIds.RunningStage2/RunningStage3 is still blank -- which
-	-- is the shipped default for RunningStage3, and the case every branch below is written to handle
-	-- by falling through to the stage below (3 -> 2 -> 1) rather than by going silent.
+	-- nil whenever CombatConstants.AnimationIds.RunningStage2 is still blank -- a supported, shipped
+	-- state, and the case the branches below are written to handle by falling through to stage 1 rather
+	-- than by going silent.
 	local runningStage2Track = tracks.RunningStage2
-	local runningStage3Track = tracks.RunningStage3
 	local walkingTrack = tracks.Walking
-	if runningTrack or runningStage2Track or runningStage3Track or walkingTrack then
+	if runningTrack or runningStage2Track or walkingTrack or armedIdleTrack then
 		-- Also silenced while Flying (Client/DevMenu/FlightController.lua/FlightAnimator.lua own the
 		-- character's animation entirely during flight) -- Boost reuses the Sprint keybind and raw
 		-- WASD can still register nonzero MoveDirection mid-flight, so without this guard the
@@ -276,31 +548,70 @@ RunService.Heartbeat:Connect(function()
 		local canLocomote = moving and not locomotionSuppressed
 		local shouldRun = sprintHeld and canLocomote
 		local shouldWalk = not sprintHeld and canLocomote
-		-- Each run stage above 1 only claims its own track when there IS one, cascading downward:
-		-- stage 3 wants its own clip first; failing that (RunningStage3 still blank, the shipped
-		-- default), stage 3 falls to stage 2's track (which is what "shouldRunStage2" playing at
-		-- runStage 3 means below); failing THAT too, everything lands on stage 1. Playback rate below
-		-- is what still makes an unauthored stage read as a different gear either way.
-		local shouldRunStage3 = shouldRun and runStage >= 3 and runningStage3Track ~= nil
-		local shouldRunStage2 = shouldRun and not shouldRunStage3 and runStage >= 2 and runningStage2Track ~= nil
-		local shouldRunStage1 = shouldRun and not shouldRunStage3 and not shouldRunStage2
+		-- Grounded, not moving, not flying, not mid-traversal, nothing Action-priority claiming the
+		-- body (see activeActionSources' own header), and a weapon idle clip actually resolved. The
+		-- FloorMaterial check is armed-idle's own addition on top of what Walking/Running already
+		-- silence for: a standing pose at the apex of a jump (MoveDirection can read ~0 there with no
+		-- WASD held) reads as broken in a way a paused walk cycle does not.
+		local grounded = currentHumanoid ~= nil and currentHumanoid.FloorMaterial ~= Enum.Material.Air
+		local shouldArmedIdle = armedIdleTrack ~= nil
+			and grounded
+			and not flying
+			and not moving
+			and not locomotionSuppressed
+			and next(activeActionSources) == nil
+		if shouldArmedIdle ~= lastShouldArmedIdle then
+			lastShouldArmedIdle = shouldArmedIdle
+			logger:debug("Armed-idle gate changed", {
+				shouldArmedIdle = shouldArmedIdle,
+				hasTrack = armedIdleTrack ~= nil,
+				grounded = grounded,
+				flying = flying,
+				moving = moving,
+				locomotionSuppressed = locomotionSuppressed,
+				activeActionSource = next(activeActionSources),
+			})
+		end
+		-- ARMED RUNS ALWAYS USE THE STAGE-2 CLIP, whatever gear the run ladder is actually in.
+		--
+		-- The two run clips were authored for an EMPTY-HANDED character, and they do not degrade the
+		-- same way once a sword is in the right hand: stage 1's wide arm swing scythes the blade
+		-- through the character's own hip, while stage 2's tighter, more forward-carried arms read as
+		-- someone running WITH something. So a drawn weapon simply pins the clip to stage 2 and lets
+		-- the ladder express itself through PLAYBACK RATE alone (the per-stage AdjustSpeed below,
+		-- which already keys off runStage independently of which track is playing) -- one clip, three
+		-- speeds, instead of one clip that looks wrong for the whole bottom gear.
+		--
+		-- This is deliberately a presentation-only rule: nothing about the run ladder itself changes,
+		-- the Attribute still reports the true stage, and an unarmed player keeps the original
+		-- two-clip progression untouched.
+		--
+		-- Stage 2 only claims its own track when there IS one: failing that (RunningStage2 blank), it falls
+		-- to stage 1's, and the playback rate below is what still makes it read as a different gear. That
+		-- fallback is also what makes the armed rule safe -- a build with no stage-2 clip authored gets
+		-- the ordinary stage-1 run armed, not silence.
+		-- `>= 2` rather than `== 2` so a stage this build has no assets for -- a client that read a 3 off
+		-- the Attribute before the ladder dropped its third gear -- presents as the top gear it DOES have
+		-- rather than as nothing.
+		local shouldRunStage2 = shouldRun and runningStage2Track ~= nil and (armedWeaponDrawn or runStage >= 2)
+		local shouldRunStage1 = shouldRun and not shouldRunStage2
 
 		-- Client/FX/AnimationTrackUtil.lua's shared evaluator -- see that module's own header for why
 		-- this per-Heartbeat Play/AdjustWeight/Stop mechanic is extracted (the exact same shape
 		-- FlightAnimator.lua's Hover/CruiseLoop/BoostLoop pick uses below it). Only the StopFadeSeconds
 		-- per track varies here: a stage change between any two run clips crossfades at
-		-- RUN_STAGE_CROSSFADE_TIME (all three are the same action at different intensities, so it
+		-- RUN_STAGE_CROSSFADE_TIME (both are the same action at different intensities, so it
 		-- should read as accelerating); a toggle to the OTHER locomotion track (still moving, Sprint
 		-- pressed/released) crossfades symmetrically at LOCOMOTION_FADE_TIME; a genuine interrupt
 		-- (stopped moving, or the parkour framework taking the body) cuts fast at
 		-- LOCOMOTION_INTERRUPT_FADE_TIME.
-		local stage1Entry, stage2Entry, stage3Entry, walkEntry =
+		local stage1Entry, stage2Entry, walkEntry, armedIdleEntry =
 			locomotionLoopEntries[1], locomotionLoopEntries[2], locomotionLoopEntries[3], locomotionLoopEntries[4]
 
 		stage1Entry.Track = runningTrack
 		stage1Entry.ShouldPlay = shouldRunStage1
 		stage1Entry.PlayFadeSeconds = LOCOMOTION_FADE_TIME
-		stage1Entry.StopFadeSeconds = if shouldRunStage2 or shouldRunStage3
+		stage1Entry.StopFadeSeconds = if shouldRunStage2
 			then RUN_STAGE_CROSSFADE_TIME
 			elseif shouldWalk then LOCOMOTION_FADE_TIME
 			else LOCOMOTION_INTERRUPT_FADE_TIME
@@ -308,15 +619,7 @@ RunService.Heartbeat:Connect(function()
 		stage2Entry.Track = runningStage2Track
 		stage2Entry.ShouldPlay = shouldRunStage2
 		stage2Entry.PlayFadeSeconds = RUN_STAGE_CROSSFADE_TIME
-		stage2Entry.StopFadeSeconds = if shouldRunStage1 or shouldRunStage3
-			then RUN_STAGE_CROSSFADE_TIME
-			elseif shouldWalk then LOCOMOTION_FADE_TIME
-			else LOCOMOTION_INTERRUPT_FADE_TIME
-
-		stage3Entry.Track = runningStage3Track
-		stage3Entry.ShouldPlay = shouldRunStage3
-		stage3Entry.PlayFadeSeconds = RUN_STAGE_CROSSFADE_TIME
-		stage3Entry.StopFadeSeconds = if shouldRunStage1 or shouldRunStage2
+		stage2Entry.StopFadeSeconds = if shouldRunStage1
 			then RUN_STAGE_CROSSFADE_TIME
 			elseif shouldWalk then LOCOMOTION_FADE_TIME
 			else LOCOMOTION_INTERRUPT_FADE_TIME
@@ -326,14 +629,21 @@ RunService.Heartbeat:Connect(function()
 		walkEntry.PlayFadeSeconds = LOCOMOTION_FADE_TIME
 		walkEntry.StopFadeSeconds = if shouldRun then LOCOMOTION_FADE_TIME else LOCOMOTION_INTERRUPT_FADE_TIME
 
+		-- Soft fade in either direction between standing still and starting to move (matches Walking's
+		-- own toggle fade); a hard cut only for a genuine interrupt of the idle pose itself (an action
+		-- claims the body, or the parkour framework does).
+		armedIdleEntry.Track = armedIdleTrack
+		armedIdleEntry.ShouldPlay = shouldArmedIdle
+		armedIdleEntry.PlayFadeSeconds = LOCOMOTION_FADE_TIME
+		armedIdleEntry.StopFadeSeconds = if shouldWalk or shouldRun
+			then LOCOMOTION_FADE_TIME
+			else LOCOMOTION_INTERRUPT_FADE_TIME
+
 		AnimationTrackUtil.DriveDominantLoop(locomotionLoopEntries, DOMINANT_WEIGHT)
 
 		-- Per-stage playback rate, written only when the track or the rate actually changes -- see
 		-- appliedRunSpeedTrack's own header.
-		local activeRunTrack = if shouldRunStage3
-			then runningStage3Track
-			elseif shouldRunStage2 then runningStage2Track
-			else runningTrack
+		local activeRunTrack = if shouldRunStage2 then runningStage2Track else runningTrack
 		if shouldRun and activeRunTrack then
 			-- Falls back to stage 1's rate for any stage the table does not define, which is the same
 			-- direction every other run consumer defaults in: a gear with no authored presentation looks
@@ -346,6 +656,44 @@ RunService.Heartbeat:Connect(function()
 			end
 		end
 	end
+end)
+
+-- Weapon_InventoryChanged -------------------------------------------------------------------------
+
+-- Feeds SetArmedWeapon straight off the server's own inventory push -- connected once, the same
+-- "one persistent connection, not a per-life rebind" shape the Heartbeat evaluator above already
+-- uses. Read here directly rather than through Client/Combat/WeaponInventoryClient.lua, whose own
+-- header documents itself as "the whole module" for driving the inventory HUD and nothing else --
+-- adding a second job to it would break that promise, and Roblox remotes support any number of
+-- independent listeners for free.
+--
+-- The server re-pushes the full payload on every pickup/draw/sheath/select AND on every character
+-- bind (see WeaponConstants.Network.RemoteNames.InventoryChanged's own header), so this needs no
+-- separate PlayerLifecycle hookup of its own the way BindCharacter does -- whatever this last received
+-- is re-applied against the freshly bound Animator by BindCharacter's own resolveArmedIdle() call.
+local function onInventoryChanged(raw: unknown): ()
+	if typeof(raw) ~= "table" then
+		return
+	end
+	local payload = raw :: WeaponConstants.InventoryPayload
+	if typeof(payload.Drawn) ~= "boolean" then
+		return
+	end
+	CombatAnimator.SetArmedWeapon(payload.Selected, payload.Drawn)
+end
+
+-- DEFERRED, NOT CONNECTED INLINE AT MODULE LOAD -- NetworkBridge.GetRemoteEvent WaitForChild's up to
+-- Constants.Network.WaitForChildTimeoutSeconds the first time a name is resolved (self-heals into a
+-- table hit after), and this module is required synchronously from Client/Main.client.lua's own
+-- top-level require list alongside RunController/FlightController. A blocking wait here at require
+-- time would stall the WHOLE client boot behind this one remote existing, which is exactly the trap
+-- every other remote-touching client module in this codebase avoids by resolving inside its own
+-- Start() instead of at module load. CombatAnimator has no Start() of its own to hook into (nothing
+-- else about it needs one), so task.spawn is the minimal fix: the require returns immediately, and
+-- this connects on the very next resumption instead of blocking the caller.
+task.spawn(function()
+	NetworkBridge.GetRemoteEvent(WeaponConstants.Network.RemoteNames.InventoryChanged).OnClientEvent
+		:Connect(onInventoryChanged)
 end)
 
 return CombatAnimator

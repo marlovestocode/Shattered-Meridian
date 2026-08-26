@@ -5,6 +5,16 @@
 	Owns: text rendering against Tokens.lua's type scale -- every text surface picks one of the
 	named scale steps (Display/Heading/Subheading/Body/Caption) rather than a one-off font size.
 
+	TEXT CANNOT LEAVE ITS BOX (2026-08-20). A fixed-Size, non-wrapping TextLabel in Roblox does not
+	clip: the glyphs simply keep drawing past the edge, and under TextXAlignment.Right they draw
+	LEFTWARD out of the frame. That is not theoretical -- the character menu's Bloodlines row rendered
+	"amberlane, gutterlight, stillwater_vein" straight out through the panel's left border and across
+	the game world behind it. So any label that was given an explicit Size and is not wrapping now
+	truncates with an ellipsis by default. This IS a behavior change for every existing caller, and
+	deliberately so: a caller whose text no longer fits used to get an overflow bug that only showed
+	up with real data, and now gets a visibly clipped string in the right place. Pass TextTruncate =
+	Enum.TextTruncate.None to opt one label back out.
+
 	AutoHeight (2026-08-12) closes this component's one long-standing hole: it had no fixed-WIDTH,
 	automatic-HEIGHT mode. Passing a Size switched AutomaticSize off entirely, so every caller with
 	genuinely wrapped prose had to hand-count a pixel height and accept that a third line clipped --
@@ -82,6 +92,25 @@ export type LabelProps = {
 	-- AutomaticSize.X parent the constraint is circular and Roblox collapses the height to zero --
 	-- a platform limitation this prop cannot paper over, so don't reach for it there.
 	AutoHeight: boolean?,
+	-- Automatic on BOTH axes, from a ZERO base -- the mode this component could not express, and the
+	-- one any label inside an AutomaticSize.X parent must use.
+	--
+	-- Omitting Size already gives AutomaticSize.XY, but from a base of `UDim2.fromScale(1, 0)`, and
+	-- that scale-1 WIDTH is not neutral: AutomaticSize overrides the offset and leaves the scale, so
+	-- the label resolves to `parent width + text width`. Inside a fixed-width parent that merely
+	-- overhangs (usually invisibly, inside something that clips). Inside an AUTOMATICALLY-width-sized
+	-- parent it is a feedback loop -- parent grows, so the child grows, so the parent grows -- which
+	-- inflates until something clamps it, and what clamped it in practice was the viewport. That is
+	-- exactly what happened to the hotbar's key legend on 2026-08-25: three short captions dragged a
+	-- centred dock to full screen width, and through a second auto-sized ancestor, to full height too.
+	--
+	-- Strictly additive: every existing caller passes neither prop and keeps the original two branches
+	-- verbatim.
+	AutoWidth: boolean?,
+	-- Overrides the automatic truncation described in this file's header. Omit for the default
+	-- (AtEnd whenever a fixed Size is given and the label isn't wrapping); pass
+	-- Enum.TextTruncate.None for a label that genuinely wants to overhang its box.
+	TextTruncate: Enum.TextTruncate?,
 	-- Line spacing multiplier for wrapped prose -- Tokens.Leading.Prose, effectively always paired
 	-- with AutoHeight above. Omit entirely for single-line text (see that token's own header on why
 	-- leading lives in its own table rather than on Tokens.Type).
@@ -95,13 +124,25 @@ export type LabelProps = {
 
 local function Label(scope: Scope, props: LabelProps): TextLabel
 	local scaleStep = Tokens.Type[props.Scale or "Body"]
+	local wraps = props.TextWrapped or props.AutoHeight == true
+	-- Only a fixed-width, single-line label can truncate meaningfully: an AutomaticSize label has no
+	-- box to overflow, and a wrapping one already answers overflow by growing downward.
+	local truncate = props.TextTruncate
+		or (
+			if props.Size ~= nil
+					and not wraps
+					and not props.AutoWidth
+				then Enum.TextTruncate.AtEnd
+				else Enum.TextTruncate.None
+		)
 
 	return scope:New "TextLabel" {
 		Position = props.Position,
 		AnchorPoint = props.AnchorPoint,
-		Size = props.Size or UDim2.fromScale(1, 0),
-		AutomaticSize = if props.AutoHeight
-			then Enum.AutomaticSize.Y
+		Size = if props.AutoWidth then UDim2.fromOffset(0, 0) else (props.Size or UDim2.fromScale(1, 0)),
+		AutomaticSize = if props.AutoWidth
+			then Enum.AutomaticSize.XY
+			elseif props.AutoHeight then Enum.AutomaticSize.Y
 			elseif props.Size then Enum.AutomaticSize.None
 			else Enum.AutomaticSize.XY,
 		LayoutOrder = props.LayoutOrder,
@@ -119,7 +160,8 @@ local function Label(scope: Scope, props: LabelProps): TextLabel
 		TextStrokeColor3 = props.StrokeColor3,
 		TextStrokeTransparency = props.StrokeTransparency,
 		TextXAlignment = props.TextXAlignment or Enum.TextXAlignment.Left,
-		TextWrapped = props.TextWrapped or props.AutoHeight == true,
+		TextWrapped = wraps,
+		TextTruncate = truncate,
 		LineHeight = props.LineHeight,
 	} :: TextLabel
 end

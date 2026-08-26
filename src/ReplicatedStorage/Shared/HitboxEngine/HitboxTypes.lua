@@ -104,6 +104,25 @@ export type AttackDefinition = {
 	-- HitboxEngineConstants.RootControlLockedAttribute -- that Attribute is the whole contract with
 	-- the parkour framework.
 	LocksMovement: boolean,
+	-- When true AND Shape == "Box", the engine reads Width/Height/Length for this swing off the
+	-- resolved AttachmentPart's own live Size every time the Active window opens, instead of off
+	-- BaseDimensions -- BaseDimensions.Radius/InnerRadius/AngleDegrees (unused by Box) still flow
+	-- through untouched, and ComboStage/PowerLevel scaling still applies on top of the part's size
+	-- exactly as it would on top of BaseDimensions. This is what lets a weapon swing's hitbox BE the
+	-- equipped weapon's own Blade part -- see HitboxEngine.resolveAttachmentPart's "Weapon" case --
+	-- rather than a hand-typed box guessed to roughly match it. Ignored (never read) for any other
+	-- Shape, and harmless when AttachmentPart resolved to something other than a Blade (a bare fist,
+	-- say): the swing simply hits with THAT part's own size, which degrades gracefully rather than
+	-- erroring. Default false, so every attack authored before this field existed keeps using its own
+	-- BaseDimensions exactly as before.
+	SizeFromAttachmentPart: boolean?,
+	-- Only read when SizeFromAttachmentPart is true: the resolved part's live Size is multiplied by
+	-- this (default 1, i.e. no change) before ComboStage/PowerLevel scaling runs on top. This is what
+	-- lets Shared/Combat/WeaponRoster.lua's WeaponReach Attribute keep meaning something once a weapon
+	-- swing's box comes from the Blade part itself rather than from hand-typed studs -- see
+	-- Types.HitboxAttackDefinition.SizeMultiplier's own header for the full chain. Ignored whenever
+	-- SizeFromAttachmentPart is false, same as BaseDimensions already scales by hand in that case.
+	SizeMultiplier: number?,
 }
 
 -- What the engine answers with. Everything a consumer needs to decide what a contact MEANS, and
@@ -327,6 +346,12 @@ function HitboxTypes.SanitizeDefinition(raw: unknown): (AttackDefinition, { stri
 		RecoverySeconds = sanitizeNumber(source.RecoverySeconds, 0, 30, 0),
 		MaxTargetsPerSwing = maxTargets,
 		LocksMovement = source.LocksMovement == true,
+		SizeFromAttachmentPart = source.SizeFromAttachmentPart == true,
+		-- Same floor as HitboxEngineConstants.MinScaleMultiplier and the same reasoning: a zero or
+		-- negative multiplier would collapse or invert the box, so a mis-authored value is clamped to
+		-- merely small rather than broken. 16 is generous the same way FIELD_BOUNDS' own uppers are --
+		-- a "no NaN, no negative, nothing absurd" guard, not a balance pass.
+		SizeMultiplier = sanitizeNumber(source.SizeMultiplier, 0.05, 16, 1),
 	},
 		problems
 end

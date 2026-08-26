@@ -146,6 +146,19 @@ local rootControlLocked = false
 -- rootControlLocked above.
 local flying = false
 
+-- Mirrors this character's own Humanoid "Mounted" Attribute (Server/Systems/BlimpSystem.lua sets it
+-- for the length of a blimp mount). Exactly the same carve-out as `flying` immediately above, for
+-- exactly the same reason, just with a different owner: while it is true Client/Camera/BlimpCamera.lua
+-- owns the camera offset and the body's facing is a weld the server controls, so contesting either
+-- would be this module fighting a system that always wins on the next replication tick.
+--
+-- A THIRD ATTRIBUTE RATHER THAN LEANING ON RootControlLocked, which BlimpSystem also sets. That one
+-- already stops the YAW write (see the guard in onRenderStep), but it does NOT stop the CameraOffset
+-- write, and it must not start: RootControlLocked is set by ragdolls and air-combo chases too, and a
+-- player being ragdolled out of shift lock should keep their shoulder framing rather than have it
+-- snap to centre and back. Mounting is the narrower fact, so it gets the narrower read.
+local mounted = false
+
 -- CombatFeedback's ShiftLockEngaged Value (see that file's handle type), bound in Start() --
 -- drives the game-styled crosshair (UI/Components/ShiftLockCrosshair.lua) that replaces the
 -- engine's stock mouse-locked cursor while the default cursor is hidden below.
@@ -220,7 +233,7 @@ local function onRenderStep(_deltaTime: number): ()
 	-- Flying -- see the `flying` local's own header. Registered through CameraOffsetComposer (a
 	-- named "ShiftLock" continuous slot, eased by that module itself via OffsetLerpSpeed) rather than
 	-- writing Humanoid.CameraOffset directly -- see this file's header.
-	if currentHumanoid and not flying then
+	if currentHumanoid and not flying and not mounted then
 		local targetOffset = Vector3.zero
 		if engaged and camera and currentRootPart then
 			local cameraDistance = (camera.CFrame.Position - currentRootPart.Position).Magnitude
@@ -230,11 +243,11 @@ local function onRenderStep(_deltaTime: number): ()
 		end
 
 		CameraOffsetComposer.SetContinuous("ShiftLock", targetOffset, shiftLock.OffsetLerpSpeed)
-	elseif flying then
-		-- Hand CameraOffset over to FlightCamera's own "Flight" slot entirely while flying --
-		-- clearing rather than leaving this slot at its last (possibly non-zero, shoulder-offset)
-		-- value, which would otherwise keep summing into the composer's total on top of Flight's
-		-- own chase pull-back once both slots exist on the same shared composer.
+	elseif flying or mounted then
+		-- Hand CameraOffset over to whichever module owns it -- FlightCamera's own "Flight" slot while
+		-- flying, BlimpCamera's "Blimp" slot while mounted. Cleared rather than left at its last
+		-- (possibly non-zero, shoulder-offset) value, which would otherwise keep summing into the
+		-- composer's total on top of that module's own offset for as long as the state lasted.
 		CameraOffsetComposer.ClearContinuous("ShiftLock")
 	end
 
@@ -313,6 +326,14 @@ local function onCharacterAdded(character: Model, humanoidInstance: Humanoid, li
 	flying = humanoidInstance:GetAttribute(Constants.Attributes.Flying) == true
 	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.Flying), function()
 		flying = humanoidInstance:GetAttribute(Constants.Attributes.Flying) == true
+	end)
+
+	-- Same shape again -- see the `mounted` local's own comment. Seeded rather than assumed false for
+	-- the same reason as its neighbours: a player who dies at a blimp helm and respawns can land this
+	-- bind after the server has already written the new character's Attributes.
+	mounted = humanoidInstance:GetAttribute(Constants.Attributes.Mounted) == true
+	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.Mounted), function()
+		mounted = humanoidInstance:GetAttribute(Constants.Attributes.Mounted) == true
 	end)
 
 	-- Same shape again, one owner further out: this one is written by another CLIENT module

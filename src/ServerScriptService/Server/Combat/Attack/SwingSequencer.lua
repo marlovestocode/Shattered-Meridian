@@ -42,6 +42,7 @@ local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local AmortizedReclaim = require(ReplicatedStorage.Shared.AmortizedReclaim)
 local Types = require(ReplicatedStorage.Shared.Types)
+local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
 local AttackCatalog = require(script.Parent.Parent.AttackCatalog)
 
@@ -52,10 +53,14 @@ type WeaponId = Types.WeaponId
 -- created on first use.
 --
 -- WeaponId outlives the string, which is why the record is not simply dropped when a string lapses:
--- a player who swapped to Secondary and then stood still for a minute is still holding Secondary.
+-- a player who swapped weapons and then stood still for a minute is still holding that weapon.
 -- Only a destroyed model drops its record -- see Sweep.
+--
+-- OPTIONAL because the roster can legitimately be empty (no models in Workspace.Weapons) -- see
+-- WeaponRoster.Default. nil means "empty-handed", and Resolve reads it as "throw nothing" rather than
+-- substituting a weapon nobody equipped.
 type Record = {
-	WeaponId: WeaponId,
+	WeaponId: WeaponId?,
 	-- Which string StageIndex belongs to. nil when no string is in progress.
 	Category: AttackKind?,
 	-- 0 means "nothing thrown yet, or the last throw was a Finisher" -- both resolve to stage 1 next.
@@ -129,7 +134,11 @@ local function recordFor(model: Model): Record
 		return existing
 	end
 	local created: Record = {
-		WeaponId = AttackConstants.Weapons.Default,
+		-- EMPTY-HANDED. A combatant holds nothing until something puts a weapon in their hand --
+		-- Server/Combat/Weapon/WeaponInventorySystem.lua, when the player draws one they have picked
+		-- up. This used to default to the roster's first weapon, which meant every fresh spawn came
+		-- with a free sword already out and made the whole pickup/draw loop unreachable.
+		WeaponId = nil,
 		Category = nil,
 		StageIndex = 0,
 		LapsesAt = -math.huge,
@@ -157,22 +166,24 @@ end
 
 -- Public ---------------------------------------------------------------------------------------------
 
--- What this combatant is currently holding.
-function SwingSequencer.GetWeapon(model: Model): WeaponId
+-- What this combatant is currently holding -- exactly one weapon, or nil for an empty roster.
+function SwingSequencer.GetWeapon(model: Model): WeaponId?
 	return recordFor(model).WeaponId
 end
 
--- Cycles to the next weapon in AttackConstants.Weapons.Order and returns it.
+-- Cycles to the next weapon in the roster (WeaponRoster.Order) and returns it.
 --
--- The in-progress string is abandoned rather than carried across: stage 2 of a Primary string is not
--- stage 2 of a Secondary one, and continuing the count into a different move set would throw a move
--- the player never worked up to. Cheaply done by clearing Category, which stringIsLive already reads
--- as "no string in progress" without a second flag.
-function SwingSequencer.SwapWeapon(model: Model, now: number): WeaponId
+-- The in-progress string is abandoned rather than carried across: stage 2 of one weapon's string is
+-- not stage 2 of another's, and continuing the count into a different move set would throw a move the
+-- player never worked up to. Cheaply done by clearing Category, which stringIsLive already reads as
+-- "no string in progress" without a second flag.
+function SwingSequencer.SwapWeapon(model: Model, now: number): WeaponId?
 	local record = recordFor(model)
-	local order = AttackConstants.Weapons.Order
-	local index = table.find(order, record.WeaponId) or 0
-	local nextWeapon = order[(index % #order) + 1] :: WeaponId
+	local current = record.WeaponId
+	local nextWeapon = if current then WeaponRoster.Next(current) else WeaponRoster.Default()
+	if not nextWeapon then
+		return nil
+	end
 
 	record.WeaponId = nextWeapon
 	record.Category = nil
@@ -184,9 +195,11 @@ function SwingSequencer.SwapWeapon(model: Model, now: number): WeaponId
 end
 
 -- Sets the weapon outright, for a caller that knows which one it wants (a loadout system, a spec).
--- Returns false for an id that is not in the swap order rather than accepting an arbitrary string.
+-- Returns false for an id the roster doesn't know rather than accepting an arbitrary string -- with
+-- WeaponId now an open type (see Types.WeaponId), this check is the ONLY thing standing between a
+-- client-supplied string and a combatant claiming to hold a weapon that does not exist.
 function SwingSequencer.SetWeapon(model: Model, weaponId: WeaponId, now: number): boolean
-	if table.find(AttackConstants.Weapons.Order, weaponId) == nil then
+	if not WeaponRoster.Has(weaponId) then
 		return false
 	end
 	local record = recordFor(model)
@@ -202,9 +215,26 @@ function SwingSequencer.SetWeapon(model: Model, weaponId: WeaponId, now: number)
 	return true
 end
 
+-- Puts this combatant's hands empty, abandoning any string in progress -- what sheathing is, and the
+-- exact state a fresh record starts in. Resolve already refuses for a record with no weapon, so this
+-- is the whole of "you cannot swing a sword you have put away": no gate, no flag, no second source of
+-- truth about what is in someone's hand.
+function SwingSequencer.ClearWeapon(model: Model, now: number): ()
+	local record = recordFor(model)
+	record.WeaponId = nil
+	record.Category = nil
+	record.StageIndex = 0
+	record.LapsesAt = now
+	-- ChainReadyAt deliberately untouched, same as SwapWeapon/SetWeapon: sheathing must not be a way
+	-- to skip the beat you still owe for the swing you just threw.
+end
+
 export type Resolution = {
 	MoveId: string,
-	WeaponId: WeaponId,
+	-- Always set for a weapon-stage resolution (Resolve refuses outright with no weapon in hand).
+	-- Optional only because an Art thrown from a Hotbar slot is a move a combatant can legitimately
+	-- throw empty-handed -- see AttackRequestSystem's resolveFromEquippedArt.
+	WeaponId: WeaponId?,
 	-- 0 for the Finisher, matching DefaultMoveRegistry's own stageIndex sentinel.
 	StageIndex: number,
 	IsFinisher: boolean,
@@ -223,6 +253,11 @@ export type Resolution = {
 function SwingSequencer.Resolve(model: Model, category: AttackKind, comboStage: number, now: number): Resolution?
 	local record = recordFor(model)
 	local weaponId = record.WeaponId
+	if not weaponId then
+		-- Empty-handed: an empty roster, or a weapon deleted out from under this combatant. Nothing to
+		-- swing, and the caller's existing "no authored string" path already means exactly that.
+		return nil
+	end
 
 	local count = stageCountFor(weaponId, category)
 	if count <= 0 then

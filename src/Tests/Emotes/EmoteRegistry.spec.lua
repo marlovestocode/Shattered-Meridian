@@ -214,4 +214,42 @@ return function()
 			expect(reason).to.equal("InvalidUnlock")
 		end)
 	end)
+
+	describe("the authored roster's own exit invariants", function()
+		-- NOT a Validate() rule, on purpose: these are facts about what the CLIENT can get a player out
+		-- of, not about whether a definition is well-formed, and Validate is a runtime shape check that
+		-- knows nothing about input. They live here because the suite is the only place that reads the
+		-- real EmoteDefinitions.lua roster and can therefore catch the day somebody authors an emote
+		-- with no way out.
+
+		it("gives every looping emote a movement cancel, so none of them can trap a player", function()
+			-- Client/Emotes/EmoteWheelClient.lua arms its movement/jump cancel watch for a
+			-- MovementLocked emote and only for one. A Loop emote has no EndsAt and no track that could
+			-- ever finish (Server/Systems/EmoteSystem.lua's WHAT ENDS A LOOPING EMOTE header), so a
+			-- looping emote that is NOT MovementLocked would have no player-reachable exit at all -- it
+			-- would run until its owner picked another emote, was dragged into combat, or died. Sit and
+			-- Dance are both locked today; this is what says so out loud the next time one is added.
+			for emoteId, definition in EmoteRegistry.GetAll() do
+				if definition.Loop then
+					expect(definition.MovementLocked).to.equal(true)
+					-- Named in the failure output rather than only in this comment.
+					expect(typeof(emoteId)).to.equal("string")
+				end
+			end
+		end)
+
+		it("gives every non-looping emote something that ends it", function()
+			-- The other half of the same rule, from the server's side: a one-shot emote is ended either
+			-- by its clip's own reported end (a real AnimationId) or by its authored Duration. An entry
+			-- with neither would sit on the player until EmoteConstants.MaxOneShotSeconds guillotined
+			-- it -- fifteen seconds of a pose nobody asked for.
+			for _, definition in EmoteRegistry.GetAll() do
+				if not definition.Loop then
+					local hasClip = definition.AnimationId ~= ""
+					local hasDuration = definition.Duration ~= nil and (definition.Duration :: number) > 0
+					expect(hasClip or hasDuration).to.equal(true)
+				end
+			end
+		end)
+	end)
 end

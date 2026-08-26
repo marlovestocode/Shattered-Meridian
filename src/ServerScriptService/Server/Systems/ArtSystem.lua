@@ -30,10 +30,16 @@
 
 	EQUIPPING IS PERSISTED, AND IT IS WHAT MAKES AN ART REACHABLE. Unlocking an art earns it;
 	equipping it to one of the ArtConstants.EquipSlotCount hotbar slots is what puts it under a key.
-	Types.PlayerProfile.equippedArts holds that binding, so it survives a rejoin -- unlike
-	Client/Combat/HotbarBindings.lua, the admin-local, session-scoped binding the Move Editor writes,
-	which this replicates INTO on the client (CharacterMenuClient.lua) rather than replacing. The two
-	coexist by the same last-write-wins rule that module already documents.
+	Types.PlayerProfile.equippedArts holds that binding, so it survives a rejoin.
+
+	IT IS ALSO THE ONLY SLOT MAP. Client/Combat/HotbarBindings.lua used to be a second, writable one
+	-- the Move Editor bound moves into it directly while CharacterMenuClient mirrored equippedArts
+	into the same five slots, so an art push silently erased an editor binding (sendArtState fires on
+	every RegisterUse, i.e. every art use) and an editor binding silently shadowed an equipped art in
+	the UI while the server went on firing the art. That was never two features to reconcile: an art
+	IS a move, so there was only ever one thing to store. HotbarBindings is now a read-only mirror of
+	what this System says, and the Move Editor's own slot control routes here through
+	DevGrantAndEquip below.
 
 	CanUse vs. UseArt is a deliberate split, not a duplicate. CombatSystem asks CanUse before it
 	commits a swing, so an art refused for a COMBAT reason (mid-attack, stunned, on cooldown) costs
@@ -55,6 +61,7 @@ local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local QiSystem = require(script.Parent.QiSystem)
 local TierSystem = require(script.Parent.TierSystem)
+local QiDeviationSystem = require(script.Parent.QiDeviationSystem)
 local ArtTreeManager = require(script.Parent.Parent.Managers.ArtTreeManager)
 
 local logger = Logger.scope("ArtSystem")
@@ -106,6 +113,10 @@ end
 -- refused for a combat reason (mid-attack, stunned, on cooldown) costs no Qi. UseArt below is the
 -- one that charges, and it re-checks all of this itself rather than trusting that a caller asked
 -- first.
+--
+-- QiDeviationLocked is checked before the Qi-cost gate, on purpose: a deviating player is refused
+-- for the SAME "costs no Qi" reason mid-attack/stunned/on-cooldown already are, per this header --
+-- the real reason is the lockout, not a shortfall, and the client should be told which.
 function ArtSystem.CanUse(player: Player, artId: string): string?
 	local move = ArtTreeManager.GetArt(artId)
 	if not move then
@@ -113,6 +124,9 @@ function ArtSystem.CanUse(player: Player, artId: string): string?
 	end
 	if not ArtSystem.IsUnlocked(player, artId) then
 		return "NotUnlocked"
+	end
+	if QiDeviationSystem.IsLocked(player) then
+		return "QiDeviationLocked"
 	end
 	local art = move.Art :: MoveTypes.MoveArtBinding
 	if art.QiCost > 0 and QiSystem.GetQi(player) < art.QiCost then
@@ -174,15 +188,40 @@ local function buildStatePayload(player: Player): Types.ArtStatePayload
 	local profile = PlayerDataSystem.GetProfile(player)
 	local mastery: { [string]: number } = {}
 	local equipped: { [number]: string } = {}
+	-- Resolved for the EQUIPPED arts only, not for every unlocked one. Mastery can hold an entire
+	-- tree's worth of ids for a deep character, and nothing renders a name for an art that isn't in
+	-- a slot -- the Arts panel gets its names from the catalogue, which it fetches anyway.
+	local equippedInfo: { [string]: Types.ArtDisplayInfo } = {}
 	if profile then
 		for artId, value in pairs(profile.artMastery) do
 			mastery[artId] = value
 		end
 		for slot, artId in pairs(profile.equippedArts) do
 			equipped[slot] = artId
+			-- Keyed by art, so two slots holding the same art resolve it once -- and so a re-equip
+			-- into a different slot can't produce two disagreeing entries.
+			if equippedInfo[artId] == nil then
+				local move = ArtTreeManager.GetArt(artId)
+				if move then
+					local art = move.Art :: MoveTypes.MoveArtBinding
+					equippedInfo[artId] = { DisplayName = move.DisplayName, QiCost = art.QiCost }
+				else
+					-- The move behind a persisted equip is gone (deleted in the editor, or its
+					-- registry load failed). Left ABSENT rather than filled with a placeholder name:
+					-- the client's own fallback for a missing entry is its empty-slot chrome, which
+					-- is the honest rendering of a slot pointing at nothing, and a fabricated
+					-- "Unknown Art" tile would claim the player has something to throw. Equipped
+					-- still lists it, so the slot stays bound and the server still refuses the throw
+					-- through the same CanUse path it always did.
+					logger:warn(
+						"Equipped art has no move behind it",
+						{ player = player.Name, slot = slot, artId = artId }
+					)
+				end
+			end
 		end
 	end
-	return { Mastery = mastery, Equipped = equipped }
+	return { Mastery = mastery, Equipped = equipped, EquippedInfo = equippedInfo }
 end
 
 local function sendArtState(player: Player): ()
@@ -248,6 +287,64 @@ function ArtSystem.Equip(player: Player, slot: number, artId: string?): string?
 	return nil
 end
 
+-- ADMIN DEV SEAM, and the ONLY unlock bypass anywhere in this System. Puts `artId` in `slot` for
+-- `player`, unlocking it first if they have not earned it.
+--
+-- It exists because of a real dead end, not for convenience: an admin authors a form in the Move
+-- Editor and wants to throw it, but Equip refuses anything not unlocked and Unlock enforces
+-- faction, tier and prerequisite mastery -- which a brand-new art at the top of a tree can never
+-- satisfy. Before this, the Move Editor answered that by keeping its OWN client-side slot map
+-- (Client/Combat/HotbarBindings.lua), which is what let a slot appear to hold two different
+-- things at once and lose whichever one the last art-state push did not mention.
+--
+-- The bypass is narrow on purpose. It skips CanUnlock and NOTHING else: the art still has to be a
+-- real art (a move carrying an Art binding), and every gate that applies at USE time -- Qi cost,
+-- Deviation lock, cooldown, mastery accrual -- runs exactly as it does for anyone else, because
+-- firing it goes down the same AttackRequestSystem path as any other equipped art, which spends
+-- real Qi and credits real mastery (UseArt/RegisterUse) for a Hotbar press unconditionally now,
+-- admin or not (2026-08-19: an earlier version exempted `authorized` from that charge specifically
+-- so a dev-tested art wouldn't drain real Qi from repeated testing, but the exemption had no way to
+-- tell "equipped normally, fired via hotbar" apart from "dev-tested" -- they're the SAME press now
+-- that a slot only ever holds a real Art -- so it also silently ate an admin's own Qi UI feedback
+-- for their real equips. An admin gets to hold the form early; they do not get to throw it for free).
+--
+-- Authorization is NOT checked here. Server/Systems/MoveEditorSystem.lua is the only caller and
+-- gates it through AdminGate first, the same "gate at the remote, compute in the owning System"
+-- split every other admin action in this codebase uses.
+function ArtSystem.DevGrantAndEquip(player: Player, slot: number, artId: string?): string?
+	if not ArtSystem.IsValidSlot(slot) then
+		return "InvalidSlot"
+	end
+	if artId == nil then
+		-- Clearing needs no grant and no art lookup -- removing something is always legal, the same
+		-- reasoning Equip's own header gives.
+		return ArtSystem.Equip(player, slot, nil)
+	end
+	if not ArtTreeManager.IsArt(artId) then
+		-- A move with no Art binding is not an art and has no business in a hotbar slot. This is the
+		-- refusal that replaced the old trusted admin fire path: bind it into a tree in the editor's
+		-- Art section, then it is equippable like anything else.
+		return "NotAnArt"
+	end
+
+	local committed = PlayerDataSystem.Transform(player, function(profile)
+		-- Presence of a mastery key IS unlocked (see this file's header), so a 0 entry is the whole
+		-- grant. Never overwritten: an admin test-equipping a form they have genuinely been using
+		-- must not have its earned mastery reset to zero.
+		if profile.artMastery[artId] == nil then
+			profile.artMastery[artId] = 0
+		end
+		profile.equippedArts[slot] = artId
+	end)
+	if not committed then
+		return "ProfileNotLoaded"
+	end
+
+	logger:warn("Art dev-granted and equipped", { player = player.Name, slot = slot, artId = artId })
+	sendArtState(player)
+	return nil
+end
+
 -- Credits mastery for one confirmed use. Separate from UseArt so a future path that resolves an art
 -- through some other route (a scripted encounter, a bloodline-granted cast) credits mastery the same
 -- way rather than reimplementing the accrual rule.
@@ -287,6 +384,9 @@ function ArtSystem.UseArt(player: Player, artId: string): string?
 	end
 	if not ArtSystem.IsUnlocked(player, artId) then
 		return "NotUnlocked"
+	end
+	if QiDeviationSystem.IsLocked(player) then
+		return "QiDeviationLocked"
 	end
 
 	local art = move.Art :: MoveTypes.MoveArtBinding

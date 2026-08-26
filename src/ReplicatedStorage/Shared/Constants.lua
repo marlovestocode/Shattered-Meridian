@@ -99,6 +99,7 @@ Constants.Debug = {
 			ChamferedSurface = true,
 			HotbarMoveClient = true,
 			SettingsClient = true,
+			StorybookClient = true,
 			SettingsSystem = true,
 			-- Parkour System. ParkourController/ParkourSystem log transitions and rejections; the other
 			-- three are quiet by design (a warning on a failed animation load, a dropped report, a
@@ -249,6 +250,22 @@ Constants.Debug = {
 			-- for the same "every Logger.scope(...) in src/, no exceptions" completeness this sweep is
 			-- for, not because a passing spec depends on its own Output being visible.
 			DataStoreRetryTest = true,
+			-- Per-weapon idle-clip resolution (Shared/Combat/WeaponIdleAnimations.lua). Its Get() traces
+			-- every step of finding a weapon's Animations/IDLE clip -- missing folder, missing
+			-- subfolder, no Animation instance, a blank AnimationId -- which is what actually
+			-- distinguishes "wrong weaponId," "wrong folder shape," and "the clip has no real content
+			-- authored" from each other, none of which read any differently from CombatAnimator's own
+			-- side of the seam.
+			WeaponIdleAnimations = true,
+			-- Per-weapon swing-clip resolution (Shared/Attack/AttackAnimations.lua) -- the identical
+			-- trace, one folder slot per M1/M2/M3/HEAVY/FINISHER stage instead of IDLE alone.
+			AttackAnimations = true,
+			-- Per-weapon PARRY/BLOCK resolution (Shared/Defense/WeaponDefenseAnimations.lua) -- the same
+			-- trace again, and the one where it earns the most: an unresolved PARRY slot does not just
+			-- look wrong, it silently costs that weapon its parry WINDOW, since the window IS that
+			-- clip's markers. This trace distinguishes the five authoring states; ParryWindows' own
+			-- boot-time ValidateAll warning is what reports the sixth (a real clip with no markers).
+			WeaponDefenseAnimations = true,
 		},
 		-- Per (scope, level, message) cap, keyed off the static message text so a log site that
 		-- fires every frame can't flood Output even at Trace -- see Logger.lua's rate limiter. Also
@@ -286,6 +303,26 @@ Constants.Debug = {
 	-- Safety comes entirely from the whitelist below plus DevMenuSystem.lua re-checking every
 	-- request's Player.UserId server-side -- never from being hidden or from Studio-gating. See
 	-- DevMenuSystem.lua's header for the full authorization contract.
+	-- The component Storybook (Client/UI/Screens/Storybook/init.lua, driven by
+	-- Client/Storybook/StorybookClient.lua) -- the gallery of every shared component, token and layout
+	-- primitive. Studio-only diagnostics, which is why it lives under Constants.Debug rather than in
+	-- Constants.Keybinds below.
+	Storybook = {
+		-- Master switch, same shape and same meaning as Logging.Enabled above: the driver ALSO requires
+		-- RunService:IsStudio(), so shipping this true is safe -- it does nothing on a live client.
+		Enabled = true,
+		-- A RAW key, deliberately NOT a Types.KeybindAction in Constants.Keybinds. Same call
+		-- ParkourConstants.Debug.ToggleKeyCode's F6 overlay makes, for the same reason: an authoring tool
+		-- that never opens for a player has no business occupying a row in the player-facing rebind list.
+		--
+		-- The cost of a raw bind is that no table checks it for collisions, which is exactly how F5 and
+		-- F6 ended up both firing on one press (see Constants.Keybinds.Defaults.OpenDevConsole's own
+		-- comment). So, checked by hand against BOTH tables at the time of writing: F5 is
+		-- OpenDevConsole, F6 is ParkourConstants.Debug.ToggleKeyCode, F8 is OpenBugReport, and F7 --
+		-- this -- was free in both. A future dev key must check all three places.
+		ToggleKeyCode = Enum.KeyCode.F7,
+	},
+
 	DevMenu = {
 		-- AuthorizedUserIds moved to ServerScriptService/Server/Config/AdminConfig.lua. Everything in
 		-- this file replicates to every client, so the roster of privileged accounts was readable by
@@ -383,11 +420,27 @@ Constants.Debug = {
 			-- GetHitboxDebug already establishes for the swing-volume visualiser.
 			GetDebugDummyState = "DevMenu_GetDebugDummyState",
 			SpawnTrainingBot = "DevMenu_SpawnTrainingBot",
+			-- Blimp Fuel System's dev/test convenience (Server/Systems/ResourceGatheringSystem.
+			-- SpawnDebugNode) -- spawns one tagged CoalDeposit/WaterSource Part near the requesting
+			-- admin, the same "spawn near me" shape SpawnDummy above already uses, so a tester can
+			-- gather without a builder having placed real world nodes yet.
+			SpawnCoalDeposit = "DevMenu_SpawnCoalDeposit",
+			SpawnWaterSource = "DevMenu_SpawnWaterSource",
+			-- Tops the requesting admin's own carried coal AND water up to their carry cap in one
+			-- call. The companion to the two node spawns above, and the one a tester actually reaches
+			-- for: those place a rock to mine, this skips the mining. Between them, "I want to test a
+			-- blimp" stops being a gathering trip.
+			FillCarriedFuel = "DevMenu_FillCarriedFuel",
 			-- Admin actions -- all three target whichever player the requesting admin currently has
 			-- locked on (CombatState.lockOnTarget), falling back to themselves if nothing's locked --
 			-- reuses the existing lock-on system as the "who am I targeting" picker instead of a new
 			-- player-select UI. See DevMenuSystem.lua's handleSetHealth/handleSetGodmode/
 			-- handleSetFlight for the resolution.
+			-- Hands the resolved target BloodlineConstants.DevGrantRerollAmount bloodline rerolls.
+			-- The ONLY grant path that exists for them -- a fresh profile gets StartingRerolls and
+			-- nothing in the game has ever added one since, so the character menu's reroll control was
+			-- permanently dead for anyone who spent theirs. See BloodlineSystem.GrantRerolls.
+			GrantBloodlineRerolls = "DevMenu_GrantBloodlineRerolls",
 			SetTargetHealth = "DevMenu_SetTargetHealth",
 			SetTargetGodmode = "DevMenu_SetTargetGodmode",
 			SetTargetFlight = "DevMenu_SetTargetFlight",
@@ -685,6 +738,24 @@ Constants.Attributes = {
 	-- stale `true` would leave that player unable to reach second gear again for the rest of their life
 	-- with no error anywhere to explain it.
 	CombatBusyUntil = "CombatBusyUntil",
+	-- Whether this client currently has a modal UI panel open -- the character menu, Settings, the
+	-- Move Editor, the Live Console, DevMenu, the bug reporter. Written by
+	-- Client/UI/Components/ModalScreen.lua (the one thing that creates a modal, so it is the one
+	-- thing that can count them); read by every input consumer that must not fire while the player is
+	-- reading a panel rather than fighting.
+	--
+	-- THE ONE ATTRIBUTE IN THIS TABLE THAT LIVES ON THE PLAYER, NOT THE HUMANOID, and the one that
+	-- never leaves the client. It has to outlive the character (a menu stays open across a respawn),
+	-- and nothing on the server has any business knowing what the player is looking at. It is
+	-- registered here anyway because the whole point of this table is that an Attribute name shared
+	-- by two modules is written down once -- Client/UI writes it and Client/Combat reads it, two
+	-- folders with no shared module between them, which is exactly the coupling this registry exists
+	-- to keep honest.
+	--
+	-- A COUNT-BACKED BOOLEAN, not a raw flag: two panels can be open at once (the Move Editor over
+	-- the character menu), so ModalScreen tracks how many are open and publishes `count > 0`. A plain
+	-- boolean would let closing either one re-arm the player's fists while the other is still up.
+	UiModalOpen = "UiModalOpen",
 	-- Parkour System (Server/Systems/ParkourSystem.lua, Client/Parkour/*). Set on a player's own
 	-- Humanoid while the client-side movement framework legitimately owns that character's velocity --
 	-- a slide, wall-run, vault, mantle, ledge climb, roll or wall-jump the server has accepted and not
@@ -746,7 +817,7 @@ Constants.Attributes = {
 	ParkourState = "ParkourState",
 	-- Run System (Server/Systems/RunSystem.lua, Client/Movement/RunController.lua). The sustained-run
 	-- STAGE this player's server-side state currently resolves to: 0 = not running (or running but
-	-- not actually being granted the tier), 1/2/3 = the ladder Shared/Run/RunConstants.lua's Stages
+	-- not actually being granted the tier), 1/2 = the ladder Shared/Run/RunConstants.lua's Stages
 	-- array defines -- that file, not this one, is the single source of truth for the thresholds and
 	-- speeds behind each stage.
 	--
@@ -773,6 +844,14 @@ Constants.Attributes = {
 	-- Attribute always did, historically HoldAloft's own airComboChaseExpiry), so widening its meaning
 	-- now would quietly change what every OTHER historical setter of it was ever promising.
 	Grabbed = "Grabbed",
+	-- Blimp layer (Server/Systems/BlimpSystem.lua). Set true on a MOUNTED player's Humanoid for the whole
+	-- time they are welded to a station -- helm or handhold, both -- and cleared by BlimpSystem.Dismount,
+	-- which is the single release path every one of the six ways off a blimp ends in. Added to
+	-- RunSystem.isMovementLocked's tier list so a mounted player's WalkSpeed pins to 0, the same shape
+	-- Grabbed above already uses and for exactly the same reason it is a separate Attribute rather than a
+	-- widened RootControlLocked (BlimpSystem sets BOTH: RootControlLocked to park client-side parkour,
+	-- this one to zero the speed).
+	Mounted = "Mounted",
 	-- The ATTACKER-side half of the same lifetime -- true only while GrabSystem holds a victim for this
 	-- combatant, cleared the instant they Throw or the hold auto-releases. Read by
 	-- Client/Combat/GrabInputClient.lua to gate sending Grab_Throw (the same "the client declines to
@@ -820,9 +899,20 @@ Constants.Keybinds = {
 		-- would fight over MouseBehavior every frame.
 		ShiftLock = { KeyCode = Enum.KeyCode.LeftControl },
 		DevMenuToggle = { KeyCode = Enum.KeyCode.Equals },
-		-- T is unbound elsewhere in this table and is a conventional "swap/loadout" key in the
-		-- genre -- fires RequestSwapWeapon (Constants.Combat.Weapons), a one-shot toggle like Dash.
-		SwapWeapon = { KeyCode = Enum.KeyCode.T },
+		-- T is the conventional "draw/sheath" key in the genre. Fires Weapon_ToggleDraw --
+		-- Server/Combat/Weapon/WeaponInventorySystem.lua pulls out the selected weapon, or puts it
+		-- away if it is already out. A one-shot toggle like Dash.
+		--
+		-- USED TO BE SwapWeapon (cycle between two hardcoded loadout slots), which stopped meaning
+		-- anything once weapons became an open roster you pick up: there are no slots to swap between,
+		-- there is an inventory to draw FROM. Cycling which weapon is selected moved to ToggleWeapon's
+		-- neighbour below rather than staying on this key, because "put my sword away" is the action a
+		-- player reaches for constantly and "switch to my other sword" is the one they reach for
+		-- occasionally.
+		ToggleWeapon = { KeyCode = Enum.KeyCode.T },
+		-- Cycles which owned weapon T will draw, applying immediately if one is already out. Y sits
+		-- next to T and is unbound elsewhere in this table -- the two weapon actions stay adjacent.
+		SelectNextWeapon = { KeyCode = Enum.KeyCode.Y },
 		-- Right-click is otherwise unbound in this table (MouseButton1 is BasicAttack, Block/Parry
 		-- already lives on F) -- fires RequestFeint (CombatSystem.lua's handleFeintRequest), the
 		-- conventional "cancel/reposition" slot this genre leaves free next to the primary attack
@@ -837,6 +927,11 @@ Constants.Keybinds = {
 		-- DevMenuToggle's Equals key in the same "secondary system action" row of the keyboard.
 		-- Admin-only (MoveEditorClient.lua's own authorization round-trip, same as DevMenuToggle).
 		OpenMoveEditor = { KeyCode = Enum.KeyCode.Minus },
+		-- Kit Editor toggle (Race Traits + Bloodline Abilities plan) -- unbound elsewhere in this
+		-- table, sits directly next to OpenMoveEditor's Minus key in the same "secondary system
+		-- action" row of the keyboard (DevMenuToggle = Equals, OpenMoveEditor = Minus, this =
+		-- LeftBracket). Admin-only, same authorization contract as OpenMoveEditor above.
+		OpenKitEditor = { KeyCode = Enum.KeyCode.LeftBracket },
 		-- Opens the Live Admin Console (Client/LiveConsole/LiveConsoleClient.lua,
 		-- Client/UI/Screens/LiveConsole/init.lua) for an authorized admin -- a bespoke live log
 		-- stream, not Roblox's own native Developer Console. It used to open the native one via
@@ -902,6 +997,21 @@ Constants.Keybinds = {
 		-- reachability requirement as Roll's own comment above), and is the conventional "interact/use"
 		-- key this genre trains players to reach for on a deliberate single press.
 		Leap = { KeyCode = Enum.KeyCode.E },
+		-- Board/leave a blimp station (Client/Blimp/BlimpController.lua, and the KeyboardKeyCode that
+		-- module writes onto each server-created ProximityPrompt so a rebind carries to the prompt too).
+		--
+		-- DELIBERATELY SHARES E WITH Leap ABOVE, which is the only doubled key in this table and so needs
+		-- saying out loud -- the F5/F6 collision OpenDevConsole's own comment records is what happens when
+		-- a doubled key is NOT written down. It is safe in both directions and neither is an accident:
+		--   * Pressing E to BOARD also buffers a leap, but Leaping's own CanEnter refuses a standing
+		--     character, and the mount sets RootControlLocked a frame later, which parks parkour outright.
+		--   * Pressing E to LEAVE cannot buffer a leap at all -- ParkourInput skips the Leap branch while
+		--     Constants.Attributes.Mounted is set, which is the one case that would otherwise have fired
+		--     (a buffered press surviving the release and launching the player off the deck).
+		-- E is the conventional interact key this genre trains players to reach for, which is the same
+		-- argument Leap's own comment makes; if the overlap ever stops being acceptable, MOVE Leap -- a
+		-- prompt is the more discoverable of the two and the one a new player meets first.
+		Interact = { KeyCode = Enum.KeyCode.E },
 		-- Grab layer's follow-up throw input (Client/Combat/GrabInputClient.lua). G is unbound
 		-- elsewhere in this table and sits under the same hand already on WASD -- a throw has to be
 		-- reachable the instant a hold lands, the same "no leaving the movement keys" requirement
@@ -927,8 +1037,12 @@ Constants.Keybinds = {
 		-- consumer as the keyboard entry above -- KeybindManager.Matches checks both device maps in
 		-- one call, so States/Dashing.lua needs no per-device branching.
 		Dash = { KeyCode = Enum.KeyCode.ButtonB },
-		-- R3 (click right stick) is the standard lock-on button (Souls, Zelda).
-		LockOn = { KeyCode = Enum.KeyCode.ButtonL2 },
+		-- R3 (click right stick) is the standard lock-on button (Souls, Zelda). This line used to say
+		-- exactly that and then bind ButtonL2 -- a doc/code mismatch recorded, but not fixed, by
+		-- Feint's own comment below. It is fixed now, and the fix was forced rather than tidy: L2 had
+		-- to come free to become GamepadModifier below, and the button this comment always claimed
+		-- LockOn should be on is the one Feint was sitting on.
+		LockOn = { KeyCode = Enum.KeyCode.ButtonR3 },
 		-- L3 (click left stick) is a common third-person sprint convention.
 		Sprint = { KeyCode = Enum.KeyCode.ButtonL3 },
 		-- X (Square) -- a free face button, pressed while already holding L3 for Sprint.
@@ -936,11 +1050,7 @@ Constants.Keybinds = {
 		-- Y (Triangle) -- a free face button, toggles the camera-facing-lock mode.
 		ShiftLock = { KeyCode = Enum.KeyCode.ButtonY },
 		-- D-pad item/weapon-swap is a standard convention in this genre.
-		SwapWeapon = { KeyCode = Enum.KeyCode.DPadRight },
-		-- R3 (click right stick) is otherwise unused among the actual KeyCode values in this table
-		-- (unlike LockOn's comment above, which names R3 but binds ButtonL2 -- a separate, pre-
-		-- existing doc/code mismatch this change doesn't touch) -- free for Feint.
-		Feint = { KeyCode = Enum.KeyCode.ButtonR3 },
+		ToggleWeapon = { KeyCode = Enum.KeyCode.DPadRight },
 		-- Bug report form, gamepad side -- ButtonA is Roblox's own native Jump (would double-fire on
 		-- every jump), ButtonStart is the engine's native Escape/Menu button (would fight this
 		-- panel), D-pad is already this game's "quick select" semantic (SwapWeapon owns DPadRight).
@@ -967,23 +1077,77 @@ Constants.Keybinds = {
 		-- would make two distinct mechanics indistinguishable on a controller. Flagged for a real
 		-- controller playtest, same as OpenBugReport's ButtonSelect note.
 		Roll = { KeyCode = Enum.KeyCode.DPadLeft },
-		-- Leap deliberately has NO gamepad default either, but for a different reason than
-		-- DevMenuToggle below: every face/shoulder/stick-click/D-pad value in this genre's own
-		-- convention family is already claimed above (see Roll's own comment, which hit the identical
-		-- wall) -- there is genuinely nowhere left to put it without doubling up two distinct
-		-- mechanics on one button. Value type is Keybind? for exactly this case; KeybindManager.Matches
-		-- simply never matches for an action with no bound gamepad input. Flagged for a real controller
-		-- pass if a button ever frees up.
+		-- Leap, Interact, GrabThrow and HotbarSlot1-5 have no entry in THIS table and are not
+		-- unbound: they live one table down, in GamepadChords, reached by holding GamepadModifier.
+		-- This comment used to say there was "genuinely nowhere left to put" Leap without doubling up
+		-- two distinct mechanics on one button, and that was true of the single-press map and only of
+		-- the single-press map -- every face/shoulder/stick-click/D-pad value in this genre's own
+		-- convention family really is claimed above. A held modifier is the way out of that wall
+		-- rather than an admission of defeat: see GamepadChords' own header below.
 		--
 		-- DevMenuToggle deliberately has NO gamepad default -- admin-only, keyboard already covers
 		-- it, and exposing a stray always-live single-button dev-menu toggle to every controller
 		-- user isn't something to do by default. KeybindManager.Matches simply never matches for an
 		-- action with no bound gamepad input. Value type is Keybind? (unlike Defaults' Keybind
 		-- above), honestly reflecting that this map is deliberately partial -- every consumer that
-		-- reads it must nil-check. HotbarSlot1-5 are absent for the same admin-only reasoning -- there
-		-- are no unclaimed face/shoulder/D-pad buttons left in this genre's own convention family
-		-- (see every KeyCode above) to spare for a five-way admin-only picker, and keyboard already
-		-- covers the one audience (admins running the Move Editor) that needs it.
+		-- reads it must nil-check. HotbarSlot1-5 are absent from THIS map for the reason Leap is
+		-- (they are on the chord layer below), not for the admin-only reason this comment used to
+		-- give.
+	} :: { [Types.KeybindAction]: Types.Keybind? },
+
+	-- The held button that switches the gamepad onto GamepadChords below. ButtonL2 -- free only
+	-- because LockOn moved to the ButtonR3 its own comment always claimed, which freed ButtonR3 for
+	-- Feint, which is now on the chord layer anyway.
+	--
+	-- WHY L2 AND NOT A FACE BUTTON. A modifier has to be holdable without giving up any of the four
+	-- buttons a thumb needs DURING the hold, which rules out every face button and both stick
+	-- clicks. That leaves the four shoulders: R1/R2 are light/heavy attack and L1 is guard, all
+	-- three of which must stay single-press in combat. L2 is the only one left, and it is the one a
+	-- player's index finger is already resting on.
+	--
+	-- REBINDABLE, like everything else here -- Types.GamepadSettings.ChordModifier is the persisted
+	-- override, and Client/Input/Chord.lua reads through that rather than off this constant directly.
+	GamepadModifier = { KeyCode = Enum.KeyCode.ButtonL2 } :: Types.Keybind,
+
+	-- The ALTERNATE gamepad layer: what each button means while GamepadModifier is held. A third
+	-- map rather than a wider Keybind, for the same reason GamepadDefaults is a second one -- an
+	-- action can be live on keyboard, on a plain gamepad button, and on a gamepad chord at once, and
+	-- collapsing them would force every consumer to branch on device and on modifier state.
+	--
+	-- THIS EXISTS BECAUSE THE BUTTON BUDGET IS GENUINELY FULL, not because chords are nice. Read
+	-- GamepadDefaults above: Roll's comment and Leap's comment independently hit the same wall --
+	-- every face, shoulder, stick-click and D-pad direction in this genre's convention family is
+	-- already spoken for -- and Leap, Interact and GrabThrow are live gameplay actions, not admin
+	-- tooling. The choice was doubling two distinct mechanics onto one button (which makes them
+	-- indistinguishable) or adding a layer. A layer also means the NEXT action to need a binding
+	-- gets one without re-litigating any of this.
+	--
+	-- EACH PAIRING IS THE MODIFIED FORM OF WHAT THE PLAIN BUTTON ALREADY MEANS, so the layer is
+	-- learnable rather than arbitrary -- and Client/Input/Glyph.lua swaps every on-screen legend to
+	-- this map while the modifier is held, so it is discoverable rather than secret.
+	--
+	-- FLAGGED FOR A REAL CONTROLLER PLAYTEST, the same standing OpenBugReport's ButtonSelect note and
+	-- Roll's DPadLeft note already take in the map above. These are reasoned, not measured.
+	GamepadChords = {
+		-- R1 is BasicAttack; a feint is the cancel of exactly that, so it reads as a modified attack.
+		Feint = { KeyCode = Enum.KeyCode.ButtonR1 },
+		-- B is Dash; a leap is the committed version of the same "get clear of here" idea.
+		Leap = { KeyCode = Enum.KeyCode.ButtonB },
+		-- X is Slide; both are "engage with the ground/world in front of you".
+		Interact = { KeyCode = Enum.KeyCode.ButtonX },
+		-- Y is ShiftLock, the least combat-critical face button, so it is the one to spare for the
+		-- grab layer's follow-up throw.
+		GrabThrow = { KeyCode = Enum.KeyCode.ButtonY },
+		-- The D-pad is already this game's quick-select semantic (ToggleWeapon/EmoteWheel/Settings
+		-- all live there unmodified), so the modified D-pad is the natural home for the slot picker.
+		HotbarSlot1 = { KeyCode = Enum.KeyCode.DPadUp },
+		HotbarSlot2 = { KeyCode = Enum.KeyCode.DPadRight },
+		HotbarSlot3 = { KeyCode = Enum.KeyCode.DPadDown },
+		HotbarSlot4 = { KeyCode = Enum.KeyCode.DPadLeft },
+		-- The fifth slot has no fifth D-pad direction to take, so it goes to the one shoulder that is
+		-- neither the modifier nor an attack: L1. Guard is a HOLD and this is a modified TAP, so the
+		-- two never compete for the same press.
+		HotbarSlot5 = { KeyCode = Enum.KeyCode.ButtonL1 },
 	} :: { [Types.KeybindAction]: Types.Keybind? },
 
 	-- NO DoubleTapDashWindowSeconds HERE ANY MORE, and it should not come back. It configured a
@@ -1080,8 +1244,15 @@ Constants.PlayerData = {
 	-- enabled rather than a half-populated settings table. Bumped 5 -> 6 for the camera-comfort
 	-- accessibility block (`settings.Comfort`, Types.ComfortSettings) -- PlayerDataSystem.lua's
 	-- Migrations[5] backfills it with both effects ENABLED, matching what every player already
-	-- experiences today, so the migration changes nobody's game and only gives them a switch.
-	SchemaVersion = 6,
+	-- experiences today, so the migration changes nobody's game and only gives them a switch. Bumped
+	-- 6 -> 7 for the Race Traits + Bloodline Abilities plan's `bloodlineStageProgress` field
+	-- (Types.PlayerProfile) -- PlayerDataSystem.lua's Migrations[6] backfills an empty table onto any
+	-- record saved before this pass, the same "empty is honest" shape Migrations[3] already used for
+	-- equippedArts. Bumped 7 -> 8 for the bloodline spin's `bloodlineRerolls` field, and 8 -> 9 for the
+	-- Blimp Fuel System's `blimpFuel` field (Types.PlayerProfile) -- PlayerDataSystem.lua's
+	-- Migrations[8] backfills { Coal = 0, Water = 0 } onto any record saved before this pass, the same
+	-- "empty is honest" shape as every migration before it.
+	SchemaVersion = 9,
 
 	-- A brand-new profile's starting Tier -- Tier 1 is the bottom of TierSystem's nine-tier ladder
 	-- (progression-systems.md), the correct starting point for a player who has never played before.
@@ -1292,10 +1463,34 @@ Constants.CharacterCreation = {
 	AttributeAbbreviations = {
 		Vitality = "VIT",
 		Fortitude = "FOR",
-		MeridianFlow = "MER",
+		MeridianFlow = "QIF",
 		Might = "MGT",
 		Pressure = "PRS",
 		Fleetness = "FLT",
+	} :: { [string]: string },
+
+	-- What each attribute is CALLED on screen, as opposed to what its field is named in code. Keyed
+	-- the same way as AttributeFields/AttributeAbbreviations above, and every surface that shows an
+	-- attribute to a player reads this rather than rendering the raw key.
+	--
+	-- It exists for exactly one entry. `MeridianFlow` is the field name in Types.AttributeBlock, in
+	-- every saved profile, in KitValidation's allow-list, in Types.ActiveModifierAttributeKey, and in
+	-- ~15 bloodline stage effects in DefaultBloodlineRegistry -- so renaming the KEY is a data
+	-- migration across a persisted schema, not a copy change. What the player actually needed was the
+	-- LABEL: "MeridianFlow" is jargon that reads as a system name, where the thing it governs is
+	-- plainly your qi (user, 2026-08-20). So the key stays and the label is "Qi Flow", with the
+	-- abbreviation moving MER -> QIF to match.
+	--
+	-- The other five map to themselves. They are listed anyway rather than left to fall through to
+	-- the key, so that a sixth rename is a one-line edit here instead of a discovery that only one
+	-- attribute in the table ever had a display name.
+	AttributeDisplayNames = {
+		Vitality = "Vitality",
+		Fortitude = "Fortitude",
+		MeridianFlow = "Qi Flow",
+		Might = "Might",
+		Pressure = "Pressure",
+		Fleetness = "Fleetness",
 	} :: { [string]: string },
 
 	-- Attribute point budget -- every one of the six attributes (Types.AttributeBlock) starts at
@@ -1385,7 +1580,7 @@ Constants.CharacterCreation = {
 		Human = "No starting lean -- every point is unspent, and yours to place.",
 		Firmborn = "A lean toward Fortitude, already spent for you before you begin.",
 		Rivenkin = "A lean toward Might, already spent for you before you begin.",
-		Hollowborn = "A deep lean toward MeridianFlow, paid for out of Vitality.",
+		Hollowborn = "A deep lean toward Qi Flow, paid for out of Vitality.",
 	} :: { [string]: string },
 
 	-- Plain-language one-line effect shown under each attribute on the Attributes screen (screen 2).
@@ -1889,6 +2084,103 @@ Constants.MoveEditor = {
 		-- admin's own "Frozen" DevMenu toggle already uses) -- editing a move's numbers shouldn't
 		-- leave the admin's own character walking around or swinging mid-edit.
 		SetEditorOpen = "MoveEditor_SetEditorOpen",
+		-- Puts the open move in one of the player's own hotbar slots, for live-fire testing.
+		--
+		-- It is an ART EQUIP, not a second kind of binding: an art IS a move carrying a
+		-- MoveTypes.MoveArtBinding (see ArtTreeManager.lua's header -- an art's ArtId is its MoveId),
+		-- so a slot has exactly one occupant and one owner, ArtSystem, whose equippedArts already
+		-- persists. This remote exists only because ArtSystem.Equip refuses an art the player has not
+		-- UNLOCKED, and an admin testing a form they authored ten seconds ago has not earned it --
+		-- see ArtSystem.DevGrantAndEquip, which is the only unlock bypass in the codebase.
+		EquipArtSlot = "MoveEditor_EquipArtSlot",
+	},
+}
+
+-- Race Traits + Bloodline Abilities plan -- KitAbilitySystem's own shared trigger/resolution path
+-- (Server/Systems/KitAbilitySystem.lua, not built yet). ONE remote pair for both content layers'
+-- Active abilities, not two -- the same anti-duplication reasoning Shared/Kit/KitTypes.lua's own
+-- header gives for sharing KitAbilityDefinition itself.
+Constants.Kit = {
+	RemoteNames = {
+		-- RemoteFunction, not a RemoteEvent -- "the panel has to say why" a use was refused, the same
+		-- request/response contract ArtSystem.UnlockArt/EquipArt already use. A utility press is
+		-- low-frequency (unlike a combat swing), so there's no client-side prediction/input buffer to
+		-- keep in sync the way Combat_RequestBasicAttack's fire-and-forget shape needs.
+		RequestAbility = "Kit_RequestAbility",
+		-- Server -> owning client only, fired on a successful UseAbility -- the post-success FX echo.
+		-- Payload: Types.KitAbilityUsedPayload.
+		AbilityUsed = "Kit_AbilityUsed",
+	},
+	-- Same per-player budget ArtConstants.RequestMaxCallsPerSecond already uses for its own
+	-- low-frequency gated-action remotes (unlock/equip) -- a genuine player mashing this button still
+	-- can't press faster than a few times a second, so anything beyond this is a modified client.
+	RequestMaxCallsPerSecond = 4,
+
+	-- Per-field authoring bounds for KitAbilityDefinition/ActiveModifierSpec (Shared/Kit/KitTypes.lua,
+	-- Types.lua) -- ONE table read by both RaceManager.Validate/BloodlineManager.Validate and, once it
+	-- exists, KitEditorSystem's own client field bounds, the same "one place the editor's own bounds
+	-- and the server's own clamp agree on a range" reasoning Constants.MoveEditor.ObjectStun.Limits'
+	-- own header already establishes for that feature. First-pass ranges, wide enough to cover any
+	-- real authored ability -- not a balance opinion, same as MoveRegistryManager's own clamp
+	-- constants, just a floor against a value that would read as broken.
+	Limits = {
+		-- 1-9, matching TierConstants.MaxTier's own count -- hand-written rather than required from
+		-- TierConstants (Constants.lua stays a leaf the same way QiConstants.MaxTierDefined's own
+		-- hand-written 9 does, per that constant's own header on why).
+		RequiredTier = { Min = 1, Max = 9 },
+		-- Scaled against QiConstants.MaxQiByTier's own top entry (560 at tier 9) -- a single ability
+		-- should never be able to cost or restore more Qi than a player could ever hold.
+		QiCost = { Min = 0, Max = 500 },
+		QiRestoreAmount = { Min = 0, Max = 500 },
+		-- Up to five minutes -- generous enough for a signature ultimate-style ability, still closed
+		-- enough that a mis-typed value can't leave an ability permanently on cooldown.
+		CooldownSeconds = { Min = 0, Max = 300 },
+		-- Up to ten minutes -- long enough for a genuinely long-lasting Bound-adjacent buff authored as
+		-- Timed instead, still finite.
+		DurationSeconds = { Min = 0.1, Max = 600 },
+		-- Symmetric: a trait/stage may buff OR debuff an attribute.
+		Delta = { Min = -50, Max = 50 },
+		-- Open-ended per-tag semantic (EffectSystem never interprets what a Tag means) -- a generic
+		-- 0-100 scale is wide enough for a stacking count or a percentage-style strength either way.
+		Magnitude = { Min = 0, Max = 100 },
+		-- A bloodline's stage ladder (BloodlineStageDefinition.StageIndex) -- 20 is generous headroom
+		-- above any authored bloodline this pass ships (v1 authors none), matching TierSystem's own
+		-- nine-tier ladder being a much shorter, separately-owned progression.
+		StageIndex = { Min = 1, Max = 20 },
+	},
+}
+
+-- Race Traits + Bloodline Abilities plan -- the shared admin editor for both Race Traits and
+-- Bloodline stages (Server/Systems/KitEditorSystem.lua, Client/UI/Screens/KitEditor/, not built yet).
+-- Mirrors Constants.MoveEditor above field-for-field: same DataStore retry/backoff shape (Shared/
+-- DataStoreRetry.lua), same debounce reasoning between a PropertyEditor field edit and the
+-- UpdateDraft round trip it triggers.
+Constants.KitEditor = {
+	SchemaVersion = 1,
+	StorageRetryMaxAttempts = 3,
+	StorageRetryBaseBackoffSeconds = 1,
+	DraftDebounceSeconds = 0.15,
+
+	-- Admin-only, same trust model as Constants.MoveEditor above -- every RemoteFunction below is
+	-- gated by KitEditorSystem's own checkKitEditorPreconditions (AdminGate.Check + a dedicated
+	-- rate-limit bucket). One roster of five actions PER content type (Race Traits, Bloodlines) --
+	-- List/Get/UpdateDraft/Save/Delete -- rather than two separately-named sets, since the two share
+	-- one screen and the naming already disambiguates which content type each acts on.
+	RemoteNames = {
+		ListRaceTraits = "KitEditor_ListRaceTraits",
+		GetRaceTrait = "KitEditor_GetRaceTrait",
+		-- In-memory only, no DataStore write -- takes effect immediately in RaceManager's live
+		-- registry, the same "Save is explicit only" contract Constants.MoveEditor.RemoteNames.
+		-- UpdateDraft already establishes for moves.
+		UpdateRaceTraitDraft = "KitEditor_UpdateRaceTraitDraft",
+		SaveRaceTrait = "KitEditor_SaveRaceTrait",
+		DeleteRaceTrait = "KitEditor_DeleteRaceTrait",
+
+		ListBloodlines = "KitEditor_ListBloodlines",
+		GetBloodline = "KitEditor_GetBloodline",
+		UpdateBloodlineDraft = "KitEditor_UpdateBloodlineDraft",
+		SaveBloodline = "KitEditor_SaveBloodline",
+		DeleteBloodline = "KitEditor_DeleteBloodline",
 	},
 }
 
@@ -2426,20 +2718,6 @@ Constants.Run = {
 				-- stage 1's PlaybackRegion slice used before it was tuned in.
 				PlaybackSpeedMultiplier = 1.15,
 			},
-			-- THE THIRD GEAR. Reuses stage 1's sample too, pitched up further than stage 2 -- cadence and
-			-- pitch separate the stages now, not a second/third recording. The ReferenceSpeed is what
-			-- keeps the cadence scaling honest at a gear that genuinely moves half again as fast as
-			-- stage 2: authored for 72, not 48.
-			--
-			-- MinIntervalSeconds below is the real floor on how fast this can get. At 81 studs per
-			-- second a 0.2s nominal cadence scales to roughly 0.18s, comfortably above the 0.15s floor,
-			-- so the top gear has a distinct stride rather than sitting pinned against the clamp.
-			[3] = {
-				StepIntervalSeconds = 0.2,
-				ReferenceSpeed = 72,
-				PitchJitter = 0.07,
-				PlaybackSpeedMultiplier = 1.3,
-			},
 		},
 	},
 
@@ -2457,44 +2735,36 @@ Constants.Run = {
 	-- stage is held (Client/FX/FOVOffset.lua's named-slot composition, so it stacks with the sprint
 	-- slot rather than fighting it). Negative = narrower, matching Sprint's own convention. These are
 	-- ABSOLUTE per stage, not cumulative -- RunController writes one slot and simply changes its target
-	-- as the stage changes, so stage 3's -9 replaces stage 2's -5 rather than adding to it.
+	-- as the stage changes, so a ladder carrying several entries here never accumulates their pulls.
 	StageOnset = {
+		-- The ladder's only gear change, so this is the whole camera language of "you are at full stride":
+		-- a player who cannot tell which gear they are in has a ladder with no feedback, which is the same
+		-- as no ladder. Sized while a third gear still sat above it and took the unmistakable pull for
+		-- itself -- worth a second pass by eye now that this IS the top.
 		[2] = {
 			FOVDelta = -5,
 			FOVEaseSpeed = 4,
 		},
-		[3] = {
-			-- Nearly double stage 2's pull, and eased in faster. The top gear should be unmistakable
-			-- from the camera alone -- a player who cannot tell which gear they are in has a ladder with
-			-- no feedback, which is the same as no ladder.
-			FOVDelta = -9,
-			FOVEaseSpeed = 5,
-		},
 	},
 
 	-- ANIMATION. Stage 1 keeps Constants.Combat.AnimationIds.Running (the clip that has always played
-	-- while sprinting); stage 2 plays RunningStage2 when authored, stage 3 plays RunningStage3 when
-	-- authored -- each falls through to the stage below it when its own id is blank (RunningStage3 ->
-	-- RunningStage2 -> Running), the same blank-id fallthrough ParkourAnimator uses for its
-	-- half-authored directional wall-jump pair, so this ships correctly at every stage of authoring.
+	-- while sprinting); stage 2 plays RunningStage2 when authored, and falls through to Running when its
+	-- own id is blank -- the same blank-id fallthrough ParkourAnimator uses for its half-authored
+	-- directional wall-jump pair, so this ships correctly at every stage of authoring.
 	Animation = {
 		-- Playback speed for the run loop, keyed by stage. Applied on stage CHANGE only, never per
 		-- frame: CombatAnimator.FreezeActiveCombatTrack (hit-stop) drives the same property, and a
 		-- per-frame write here would silently cancel every freeze that landed on a running player.
 		--
-		-- Also the fallback that makes an unauthored stage still feel distinct: while RunningStage3 is
-		-- blank, stage 3 plays RunningStage2 (or Running, if THAT'S also blank) at this rate instead of
-		-- its own clip -- see AnimationIds.RunningStage3's own header. Retune toward 1 once a real
-		-- clip lands there, or it will read as sped-up/cartoonish rather than a distinct gear.
+		-- Also the fallback that makes an unauthored stage still feel distinct: while a stage's own clip is
+		-- blank it plays the stage below's at this rate instead -- see AnimationIds.RunningStage2's own
+		-- header. Retune toward 1 once a real clip lands there, or it will read as sped-up/cartoonish
+		-- rather than a distinct gear.
 		PlaybackSpeeds = {
 			[1] = 1,
 			-- Slightly hot even when a dedicated stage-2 clip exists -- a full-stride run reads as
 			-- urgent, and this is what makes stage 2 visibly different on day one.
 			[2] = 1.25,
-			-- Hot enough to read as a different gear from stage 2 while staying short of the rate at
-			-- which a run clip starts to look like a cartoon. If a dedicated stage-3 clip lands, this
-			-- should come back toward 1.
-			[3] = 1.5,
 		},
 		-- Crossfade between the two run clips at a stage change. Longer than a combat interrupt cut
 		-- (the two clips are the same character doing the same thing harder, so the transition should

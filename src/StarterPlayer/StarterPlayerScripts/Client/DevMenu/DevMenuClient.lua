@@ -53,9 +53,12 @@ local Lazy = require(ReplicatedStorage.Shared.Lazy)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
+local VehicleConstants = require(ReplicatedStorage.Shared.Vehicle.VehicleConstants)
+local VehicleTypes = require(ReplicatedStorage.Shared.Vehicle.VehicleTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
+local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
 local DevMenuModule = require(script.Parent.Parent.UI.Screens.DevMenu)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local ParkourDebug = require(script.Parent.Parent.Parkour.ParkourDebug)
@@ -258,6 +261,129 @@ local function fetchReports(handle: DevMenuHandle, cursorMode: string): ()
 	logger:debug("ListBugReports loaded", { fetchedCount = #result.Reports, cursorMode = cursorMode })
 end
 
+-- Vehicles tab ------------------------------------------------------------------------------------
+--
+-- Every function here exists to turn Server/Systems/VehicleManager.lua's one snapshot into the
+-- already-formatted rows Screens/DevMenu/VehiclesTab.lua renders -- this module owns all number ->
+-- string formatting for that tab, per that screen's own "already-computed value in, presentation
+-- out" boundary.
+
+-- "2m 14s" / "9s". Coarse on purpose: an age is read to answer "is this the one I just spawned",
+-- which never needs sub-second precision, and a ticking millisecond readout in a list that only
+-- refreshes on demand would be a lie the moment it stopped updating.
+local function formatVehicleAge(seconds: number): string
+	local whole = math.max(0, math.floor(seconds))
+	if whole < 60 then
+		return `{whole}s`
+	end
+	return `{whole // 60}m {whole % 60}s`
+end
+
+local function formatVehiclePosition(position: Vector3): string
+	return string.format("%d, %d, %d", position.X, position.Y, position.Z)
+end
+
+-- The whole tab's state from one snapshot -- see VehicleConstants.RemoteNames.GetState on why this is
+-- a single round trip rather than four. `reload` re-scans the registry server-side first, which is
+-- what makes a model added in Studio appear without a server restart.
+local function fetchVehicleState(handle: DevMenuHandle, reload: boolean): ()
+	local vehicles = handle.Content.Vehicles
+	if peek(vehicles.Loading) then
+		return
+	end
+	vehicles.Loading:set(true)
+
+	local remoteName = if reload
+		then VehicleConstants.RemoteNames.ReloadRegistry
+		else VehicleConstants.RemoteNames.GetState
+	local ok, resultOrError = RemoteInvoker.Invoke(NetworkBridge.GetRemoteFunction(remoteName))
+
+	vehicles.Loading:set(false)
+
+	if not ok then
+		logger:error("Vehicle state request errored", { errorMessage = tostring(resultOrError) })
+		vehicles.RegistryText:set("Registry: request failed.")
+		return
+	end
+
+	local result = resultOrError :: VehicleTypes.VehicleStateResult
+	if not result.Success or not result.Catalog or not result.Live or not result.Berths then
+		logger:warn("Vehicle state rejected", { reason = result.Reason })
+		vehicles.RegistryText:set(`Registry: rejected ({result.Reason or "Unknown"}).`)
+		return
+	end
+
+	local catalog = result.Catalog
+	local liveVehicles = result.Live
+	local berths = result.Berths
+
+	vehicles.RegistryText:set(
+		`Registry: {result.RegistryPath or "<unknown>"} -- {#catalog} vehicle(s), {#liveVehicles} live.`
+	)
+
+	local rejectionLines: { string } = {}
+	for _, rejection in result.Rejections or {} do
+		table.insert(rejectionLines, `{rejection.Path}: {rejection.Reason}`)
+	end
+	vehicles.RejectionText:set(
+		if #rejectionLines > 0 then "Rejected -- " .. table.concat(rejectionLines, "; ") else nil
+	)
+
+	local catalogRows: { DevMenuModule.VehicleCatalogRowDisplay } = {}
+	for index, entry in catalog do
+		catalogRows[index] = {
+			Id = entry.Id,
+			NameText = entry.DisplayName,
+			DetailText = `{entry.Kind} - {entry.FootprintStuds} studs - {entry.LiveCount}/{entry.MaxLive} live`,
+			AtCapacity = entry.LiveCount >= entry.MaxLive,
+		}
+	end
+	vehicles.CatalogDisplay:set(catalogRows)
+
+	local liveRows: { DevMenuModule.VehicleLiveRowDisplay } = {}
+	for index, info in liveVehicles do
+		local where = if info.BerthName then `berth {info.BerthName}` else formatVehiclePosition(info.Position)
+		local occupied = if info.Occupied then " - occupied" else ""
+		liveRows[index] = {
+			InstanceId = info.InstanceId,
+			NameText = info.DisplayName,
+			DetailText = `{info.OwnerName} - {formatVehicleAge(info.AgeSeconds)} - {where}{occupied}`,
+		}
+	end
+	vehicles.LiveDisplay:set(liveRows)
+
+	local berthRows: { DevMenuModule.VehicleBerthRowDisplay } = {}
+	for index, berth in berths do
+		local accepts = if #berth.Accepts > 0 then ` ({table.concat(berth.Accepts, "/")})` else ""
+		local occupied = if berth.Occupied then " - occupied" else ""
+		berthRows[index] = {
+			Name = berth.Name,
+			Label = `{berth.Name}{accepts}{occupied}`,
+		}
+	end
+	vehicles.BerthDisplay:set(berthRows)
+
+	logger:debug("Vehicle state loaded", { catalog = #catalog, live = #liveVehicles, berths = #berths })
+end
+
+-- Module-local, like every other piece of this module's session state (reportRecords, hitboxStages):
+-- there is exactly one Start() per client, so a second "has this been seeded" flag per handle would
+-- be tracking a distinction that cannot arise.
+local vehicleStateSeeded = false
+
+-- The first-open read. Idempotent and non-yielding at the call site, so the keybind handler can call
+-- it unconditionally on every open without either checking the flag itself or blocking the input
+-- thread on a round trip.
+local function seedVehicleStateOnce(handle: DevMenuHandle): ()
+	if vehicleStateSeeded then
+		return
+	end
+	vehicleStateSeeded = true
+	task.spawn(function()
+		fetchVehicleState(handle, false)
+	end)
+end
+
 -- Target-tracking state for the Admin tab's live display (TargetNameDisplay/GodmodeActive/
 -- FlightActive) -- module-local like hitboxStages above, since this module has exactly one
 -- long-lived Start() call per client session. attributeTrove watches whichever Humanoid currently
@@ -441,6 +567,9 @@ local function startDevMenu(handle: DevMenuHandle, chrome: Chrome.ChromeHandle):
 		if KeybindManager.Matches("DevMenuToggle", input) then
 			local nowOpen = not peek(handle.IsOpen)
 			handle.IsOpen:set(nowOpen)
+			if nowOpen then
+				seedVehicleStateOnce(handle)
+			end
 			logger:debug("Dev menu toggled", { open = nowOpen })
 		end
 	end)
@@ -613,6 +742,19 @@ local function startDevMenu(handle: DevMenuHandle, chrome: Chrome.ChromeHandle):
 			local result = resultOrError :: Types.DevMenuActionResult
 			logger:debug("SpawnWaterSource result received", { success = result.Success, reason = result.Reason })
 			return describeActionResult("Spawn water source", result)
+		end)
+	end)
+
+	content.FillCarriedFuelRequested:Connect(function()
+		logger:debug("FillCarriedFuelRequested received")
+		invokeAndReport(handle, function()
+			local fillCarriedFuelRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.FillCarriedFuel)
+			return fillCarriedFuelRemote:InvokeServer()
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuActionResult
+			logger:debug("FillCarriedFuel result received", { success = result.Success, reason = result.Reason })
+			return describeActionResult("Fill carried fuel", result)
 		end)
 	end)
 
@@ -1162,6 +1304,78 @@ local function startDevMenu(handle: DevMenuHandle, chrome: Chrome.ChromeHandle):
 	-- Refresh/Load More/triage.
 	task.spawn(function()
 		fetchReports(handle, "First")
+	end)
+
+	-- Vehicles tab: seeded the first time the panel is opened rather than eagerly at Start(), unlike
+	-- Reports above. The snapshot walks every live hull's pivot and every tagged berth on the server,
+	-- and an admin who never opens this menu should not pay for that on every join. Driven off
+	-- seedVehicleStateOnce, which the keybind handler above calls -- rather than an Observer on
+	-- handle.IsOpen, which would need a Fusion scope this module deliberately does not have (it drives
+	-- a screen from outside; it never builds one). Every mutation below re-reads afterwards rather
+	-- than guessing at what the server did, since a spawn may have evicted something to make room.
+	content.Vehicles.RefreshRequested:Connect(function()
+		task.spawn(function()
+			fetchVehicleState(handle, false)
+		end)
+	end)
+
+	content.Vehicles.ReloadRegistryRequested:Connect(function()
+		task.spawn(function()
+			fetchVehicleState(handle, true)
+		end)
+	end)
+
+	content.Vehicles.SpawnRequested:Connect(function(vehicleId: string, berthName: string?)
+		logger:debug("SpawnVehicleRequested received", { vehicleId = vehicleId, berth = berthName })
+		invokeAndReport(handle, function()
+			local remote = NetworkBridge.GetRemoteFunction(VehicleConstants.RemoteNames.Spawn)
+			return remote:InvokeServer(vehicleId, berthName)
+		end, function(resultOrError)
+			local result = resultOrError :: VehicleTypes.VehicleSpawnResult
+			-- Re-read either way. A REJECTED spawn still usually means the tab is stale -- the berth
+			-- filled, the vehicle was rescanned away -- which is exactly what the admin needs to see.
+			task.spawn(function()
+				fetchVehicleState(handle, false)
+			end)
+			if result.Success then
+				return `Spawned {vehicleId}.`
+			end
+			return "Failed: " .. (result.Reason or "Unknown")
+		end)
+	end)
+
+	content.Vehicles.DespawnRequested:Connect(function(instanceId: string)
+		logger:debug("DespawnVehicleRequested received", { instanceId = instanceId })
+		invokeAndReport(handle, function()
+			local remote = NetworkBridge.GetRemoteFunction(VehicleConstants.RemoteNames.Despawn)
+			return remote:InvokeServer(instanceId)
+		end, function(resultOrError)
+			local result = resultOrError :: VehicleTypes.VehicleActionResult
+			task.spawn(function()
+				fetchVehicleState(handle, false)
+			end)
+			if result.Success then
+				return "Vehicle despawned."
+			end
+			return "Failed: " .. (result.Reason or "Unknown")
+		end)
+	end)
+
+	content.Vehicles.DespawnAllRequested:Connect(function()
+		logger:debug("DespawnAllVehiclesRequested received")
+		invokeAndReport(handle, function()
+			local remote = NetworkBridge.GetRemoteFunction(VehicleConstants.RemoteNames.DespawnAll)
+			return remote:InvokeServer()
+		end, function(resultOrError)
+			local result = resultOrError :: VehicleTypes.VehicleActionResult
+			task.spawn(function()
+				fetchVehicleState(handle, false)
+			end)
+			if result.Success then
+				return "All vehicles cleared."
+			end
+			return "Failed: " .. (result.Reason or "Unknown")
+		end)
 	end)
 
 	content.LoadFirstReportsRequested:Connect(function()

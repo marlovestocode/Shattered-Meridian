@@ -172,6 +172,9 @@ local function isMovementLocked(humanoid: Humanoid): boolean
 		-- resolver" shape as the three above; see Constants.Attributes.Grabbed's own header for why
 		-- this is a separate Attribute from RootControlLocked rather than a widened meaning for it.
 		or humanoid:GetAttribute(ATTRIBUTES.Grabbed) == true
+		-- Blimp layer (Server/Systems/BlimpSystem.lua) -- true for as long as this player is welded to a
+		-- station. Same shape as Grabbed immediately above; see Constants.Attributes.Mounted's own header.
+		or humanoid:GetAttribute(ATTRIBUTES.Mounted) == true
 end
 
 -- The decaying WalkSpeed floor a just-finished parkour action leaves behind (Constants.Attributes.

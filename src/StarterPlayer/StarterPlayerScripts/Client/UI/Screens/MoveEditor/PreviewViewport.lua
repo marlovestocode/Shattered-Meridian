@@ -72,6 +72,7 @@ local AnimationTimeline = require(ReplicatedStorage.Shared.AnimationTimeline)
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local MoveStatsGrid = require(script.Parent.MoveStatsGrid)
 local Panel = require(script.Parent.Parent.Parent.Components.Panel)
+local Stack = require(script.Parent.Parent.Parent.Components.Stack)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
 local Tab = require(script.Parent.Parent.Parent.Components.Tab)
 local Button = require(script.Parent.Parent.Parent.Components.Button)
@@ -210,6 +211,13 @@ function PreviewViewportModule.Mount(scope: Scope, width: number, height: number
 				local loaded = loadClipTrack(clip)
 				if loaded then
 					loaded.Looped = clip.Looped
+					-- The authored layer, applied before Play so the track never renders one frame at
+					-- whatever priority the uploaded asset was exported with. The clip stores a STRING (it
+					-- crosses a DataStore and a remote -- see AnimationTimeline.ClipPriority), so this is
+					-- where it becomes a real EnumItem. An unknown name can't reach here: SanitizeClip
+					-- restricts the field to the four the picker offers, and the fallback keeps a hand-crafted
+					-- payload from indexing Enum with nil.
+					loaded.Priority = (Enum.AnimationPriority :: any)[clip.Priority] or Enum.AnimationPriority.Action
 					loaded:Play(clip.FadeInSeconds, clip.Weight, clip.Speed)
 					playingTracks[clip.ClipId] = loaded
 				end
@@ -561,9 +569,12 @@ function PreviewViewportModule.Mount(scope: Scope, width: number, height: number
 		FieldOfView = 60,
 	} :: Camera
 
+	-- Fills whatever the phase row above it leaves, rather than subtracting that row's height and the
+	-- gap after it -- see Components/Stack.lua. Stack.Fill works on any child of any UIListLayout, and
+	-- the one here is Components/Panel.lua's, not a Stack's.
 	local viewport = scope:New "ViewportFrame" {
 		Name = "Viewport",
-		Size = UDim2.new(1, 0, 1, -Tokens.Control.RowHeight - Tokens.Space.S),
+		Size = UDim2.fromScale(1, 1),
 		BackgroundColor3 = Tokens.Color.Background,
 		BorderSizePixel = 0,
 		-- Without this, scrolling/dragging over the viewport doesn't count as "consumed by the UI"
@@ -710,7 +721,7 @@ function PreviewViewportModule.Mount(scope: Scope, width: number, height: number
 					}),
 				},
 			},
-			viewport,
+			Stack.Fill(scope, viewport),
 			-- A small readout chip, not a bare Label -- Tokens.Wash.Inset (its own doc comment already
 			-- names "a stepper button's face" as a use, the same recessed-field reading this is)
 			-- instead of floating text directly on the panel background, so the phase/timing readout

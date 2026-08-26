@@ -32,18 +32,23 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local Tokens = require(script.Parent.Parent.Tokens)
-local ModalScreen = require(script.Parent.Parent.Components.ModalScreen)
+local ScreenFrame = require(script.Parent.Parent.Components.ScreenFrame)
+local Stack = require(script.Parent.Parent.Components.Stack)
+local Inset = require(script.Parent.Parent.Components.Inset)
 local Label = require(script.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Components.Button)
 local Tab = require(script.Parent.Parent.Components.Tab)
 local TextField = require(script.Parent.Parent.Components.TextField)
 local ScrollArea = require(script.Parent.Parent.Components.ScrollArea)
 
-local Children = Fusion.Children
 local peek = Fusion.peek
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 
+-- The two log sources. Still exported and still the truth about what this panel can show, but no
+-- longer the type of a Value here: the selection now lives in Components/ScreenFrame.lua's tab state,
+-- which is keyed by plain strings because it cannot know any one screen's union. TAB_NAMES below is
+-- the list that has to agree with this.
 export type LiveConsoleSource = "Server" | "My Client"
 
 export type LiveConsoleHandle = {
@@ -61,10 +66,15 @@ export type LiveConsoleHandle = {
 
 local LiveConsole = {}
 
-local ROOT_SIZE = UDim2.fromOffset(820, 560)
-local HEADER_HEIGHT = 36
+local ROOT_WIDTH = 820
+local ROOT_HEIGHT = 560
 local TOOLBAR_HEIGHT = 36
-local FOOTER_HEIGHT = 24
+
+-- The two log sources ARE this panel's tabs, and were already drawn as Tab buttons before the frame
+-- existed -- they just lived in a header band of their own, at the far right, beside a title that
+-- said what the tab strip now says. Moving them into Components/ScreenFrame.lua's strip is the whole
+-- of this screen's migration: same control, same behaviour, one band fewer.
+local TAB_NAMES: { string } = { "Server", "My Client" }
 
 -- Ordered lowest to highest -- MinLevelIndex below is an index into this array, not a raw
 -- Logger.LogLevel string, so "cycle to the next level" is a plain +1 wrapping around Off.
@@ -133,7 +143,7 @@ function LiveConsole.Mount(scope: Scope, playerGui: PlayerGui): LiveConsoleHandl
 	local serverEntries: Fusion.Value<{ Logger.LogEntry }> = scope:Value({})
 	local clientEntries: Fusion.Value<{ Logger.LogEntry }> = scope:Value({})
 
-	local selectedSource: Fusion.Value<LiveConsoleSource> = scope:Value("Server")
+	local tabs = ScreenFrame.NewTabState(scope, TAB_NAMES)
 	local minLevelIndex = scope:Value(1)
 	local searchText = scope:Value("")
 	local paused = scope:Value(false)
@@ -145,7 +155,7 @@ function LiveConsole.Mount(scope: Scope, playerGui: PlayerGui): LiveConsoleHandl
 	end)
 
 	local liveSourceEntries = scope:Computed(function(use)
-		if use(selectedSource) == "Server" then
+		if use(tabs.Current) == "Server" then
 			return use(serverEntries)
 		end
 		return use(clientEntries)
@@ -182,164 +192,108 @@ function LiveConsole.Mount(scope: Scope, playerGui: PlayerGui): LiveConsoleHandl
 		return entry.Sequence, logRow(innerScope, entry, index)
 	end)
 
-	local function sourceTab(source: LiveConsoleSource, layoutOrder: number): TextButton
-		return Tab(scope, {
-			Text = source,
-			Selected = scope:Computed(function(use)
-				return use(selectedSource) == source
-			end),
-			Size = UDim2.fromOffset(96, Tokens.Control.StepButtonSize),
-			LayoutOrder = layoutOrder,
-			OnActivated = function()
-				selectedSource:set(source)
-			end,
-		})
-	end
-
-	ModalScreen(scope, playerGui, {
+	ScreenFrame.Mount(scope, playerGui, {
 		Name = "LiveConsole",
-		Size = ROOT_SIZE,
+		Size = UDim2.fromOffset(ROOT_WIDTH, ROOT_HEIGHT),
 		IsOpen = isOpen,
+		Tabs = tabs,
+		Wordmark = "LIVE CONSOLE",
+		StatusText = statusText,
+		-- Fires the signal rather than writing IsOpen -- see LiveConsoleHandle.CloseRequested's own
+		-- comment. This screen is the reason ScreenFrame takes a callback here instead of a Value.
+		OnClose = function()
+			closeRequestedEvent:Fire()
+		end,
 
-		Children = {
-			-- Header: title, Server/My Client source tabs, close button.
-			scope:New "Frame" {
-				Name = "Header",
-				Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
-				BackgroundTransparency = 1,
-				LayoutOrder = 1,
+		Body = Stack.New(scope, {
+			Name = "Body",
+			Gap = Tokens.Space.M,
+			Children = {
+				Inset(scope, { Top = Tokens.Space.M, Bottom = Tokens.Space.L, X = Tokens.Space.L }),
 
-				[Children] = {
-					Label(scope, {
-						Text = "Live Admin Console",
-						Scale = "Heading",
-						AnchorPoint = Vector2.new(0, 0.5),
-						Position = UDim2.fromScale(0, 0.5),
-					}),
-					scope:New "Frame" {
-						Name = "SourceTabs",
-						AutomaticSize = Enum.AutomaticSize.X,
-						Size = UDim2.fromOffset(0, Tokens.Control.StepButtonSize),
-						AnchorPoint = Vector2.new(1, 0.5),
-						Position = UDim2.new(1, -Tokens.Control.CloseButtonClearance - Tokens.Space.M, 0.5, 0),
-						BackgroundTransparency = 1,
+				-- Toolbar: min-level cycle, search, Pause, Clear.
+				Stack.Row(scope, {
+					Name = "Toolbar",
+					Size = UDim2.new(1, 0, 0, TOOLBAR_HEIGHT),
+					Gap = Tokens.Space.S,
+					AlignY = Enum.VerticalAlignment.Center,
+					LayoutOrder = 1,
+					Children = {
+						Button(scope, {
+							Text = minLevelText,
+							Size = UDim2.fromOffset(110, Tokens.Control.StepButtonSize),
+							LayoutOrder = 1,
+							OnActivated = function()
+								local nextIndex = peek(minLevelIndex) + 1
+								if nextIndex > #LEVEL_ORDER then
+									nextIndex = 1
+								end
+								minLevelIndex:set(nextIndex)
+							end,
+						}),
+						TextField(scope, {
+							Text = searchText,
+							PlaceholderText = "Search...",
+							Size = UDim2.fromOffset(220, Tokens.Control.StepButtonSize),
+							LayoutOrder = 2,
+						}),
+						Tab(scope, {
+							Text = "Pause",
+							Selected = paused,
+							Size = UDim2.fromOffset(80, Tokens.Control.StepButtonSize),
+							LayoutOrder = 3,
+							OnActivated = function()
+								local nowPaused = not peek(paused)
+								if nowPaused then
+									frozenEntries:set(peek(liveSourceEntries))
+								end
+								paused:set(nowPaused)
+							end,
+						}),
+						Button(scope, {
+							Text = "Clear",
+							Size = UDim2.fromOffset(80, Tokens.Control.StepButtonSize),
+							LayoutOrder = 4,
+							OnActivated = function()
+								if peek(tabs.Current) == "Server" then
+									serverEntries:set({})
+								else
+									clientEntries:set({})
+								end
+							end,
+						}),
+					},
+				}),
 
-						[Children] = {
+				-- The log itself takes everything the toolbar left. That subtraction used to be a
+				-- four-term sum of three band heights and three gaps (docs/architecture/
+				-- 2026-08-20-ui-velocity-plan.md section 2.1's worst kind), and two of those bands are
+				-- not even this file's any more.
+				Stack.Fill(
+					scope,
+					ScrollArea(scope, {
+						Name = "LogList",
+						Size = UDim2.fromScale(1, 1),
+						LayoutOrder = 2,
+						BackgroundColor3 = Tokens.Color.Background,
+						BackgroundTransparency = 0,
+
+						Children = {
+							scope:New "UICorner" {
+								CornerRadius = Tokens.Radius.Sharp,
+							},
+							Inset(scope, Tokens.Space.S),
 							scope:New "UIListLayout" {
-								FillDirection = Enum.FillDirection.Horizontal,
-								Padding = UDim.new(0, Tokens.Space.S),
+								FillDirection = Enum.FillDirection.Vertical,
+								Padding = UDim.new(0, 2),
 								SortOrder = Enum.SortOrder.LayoutOrder,
 							},
-							sourceTab("Server", 1),
-							sourceTab("My Client", 2),
+							logRows,
 						},
-					},
-					Button(scope, {
-						Text = "X",
-						Size = UDim2.fromOffset(28, 28),
-						AnchorPoint = Vector2.new(1, 0.5),
-						Position = UDim2.fromScale(1, 0.5),
-						OnActivated = function()
-							closeRequestedEvent:Fire()
-						end,
-					}),
-				},
+					})
+				),
 			},
-
-			-- Toolbar: min-level cycle, search, Pause, Clear.
-			scope:New "Frame" {
-				Name = "Toolbar",
-				Size = UDim2.new(1, 0, 0, TOOLBAR_HEIGHT),
-				BackgroundTransparency = 1,
-				LayoutOrder = 2,
-
-				[Children] = {
-					scope:New "UIListLayout" {
-						FillDirection = Enum.FillDirection.Horizontal,
-						VerticalAlignment = Enum.VerticalAlignment.Center,
-						Padding = UDim.new(0, Tokens.Space.S),
-						SortOrder = Enum.SortOrder.LayoutOrder,
-					},
-					Button(scope, {
-						Text = minLevelText,
-						Size = UDim2.fromOffset(110, Tokens.Control.StepButtonSize),
-						LayoutOrder = 1,
-						OnActivated = function()
-							local nextIndex = peek(minLevelIndex) + 1
-							if nextIndex > #LEVEL_ORDER then
-								nextIndex = 1
-							end
-							minLevelIndex:set(nextIndex)
-						end,
-					}),
-					TextField(scope, {
-						Text = searchText,
-						PlaceholderText = "Search...",
-						Size = UDim2.fromOffset(220, Tokens.Control.StepButtonSize),
-						LayoutOrder = 2,
-					}),
-					Tab(scope, {
-						Text = "Pause",
-						Selected = paused,
-						Size = UDim2.fromOffset(80, Tokens.Control.StepButtonSize),
-						LayoutOrder = 3,
-						OnActivated = function()
-							local nowPaused = not peek(paused)
-							if nowPaused then
-								frozenEntries:set(peek(liveSourceEntries))
-							end
-							paused:set(nowPaused)
-						end,
-					}),
-					Button(scope, {
-						Text = "Clear",
-						Size = UDim2.fromOffset(80, Tokens.Control.StepButtonSize),
-						LayoutOrder = 4,
-						OnActivated = function()
-							if peek(selectedSource) == "Server" then
-								serverEntries:set({})
-							else
-								clientEntries:set({})
-							end
-						end,
-					}),
-				},
-			},
-
-			ScrollArea(scope, {
-				Name = "LogList",
-				Size = UDim2.new(1, 0, 1, -(HEADER_HEIGHT + TOOLBAR_HEIGHT + FOOTER_HEIGHT + Tokens.Space.M * 3)),
-				LayoutOrder = 3,
-				BackgroundColor3 = Tokens.Color.Background,
-				BackgroundTransparency = 0,
-
-				Children = {
-					scope:New "UICorner" {
-						CornerRadius = Tokens.Radius.Sharp,
-					},
-					scope:New "UIPadding" {
-						PaddingTop = UDim.new(0, Tokens.Space.S),
-						PaddingBottom = UDim.new(0, Tokens.Space.S),
-						PaddingLeft = UDim.new(0, Tokens.Space.S),
-						PaddingRight = UDim.new(0, Tokens.Space.S),
-					},
-					scope:New "UIListLayout" {
-						FillDirection = Enum.FillDirection.Vertical,
-						Padding = UDim.new(0, 2),
-						SortOrder = Enum.SortOrder.LayoutOrder,
-					},
-					logRows,
-				},
-			}),
-
-			Label(scope, {
-				Text = statusText,
-				Scale = "Detail",
-				Color = Tokens.Color.TextSecondary,
-				Size = UDim2.new(1, 0, 0, FOOTER_HEIGHT),
-				LayoutOrder = 4,
-			}),
-		},
+		}),
 	})
 
 	return {

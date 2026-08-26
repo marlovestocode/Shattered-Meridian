@@ -352,11 +352,7 @@ local function stepFlight(humanoid: Humanoid, rootPart: BasePart, deltaTime: num
 	local touchingGround = rayResult ~= nil and rayResult.Distance <= cfg.LandingRaycastDistance
 	local clearOfGround = rayResult == nil or rayResult.Distance >= cfg.LandingRearmHeightStuds
 
-	if
-		touchingGround
-		and landingArmed
-		and now - lastLandingFireClock >= FlightConstants.LandingFireDebounceSeconds
-	then
+	if touchingGround and landingArmed and now - lastLandingFireClock >= FlightConstants.LandingFireDebounceSeconds then
 		local shouldFire, isHard = classifyLanding(currentVelocity.Y)
 		if shouldFire then
 			handleLandingEvent(isHard, rootPart.Position)

@@ -42,6 +42,7 @@ local TextField = require(script.Parent.Parent.Parent.Components.TextField)
 local Dropdown = require(script.Parent.Parent.Parent.Components.Dropdown)
 local NumericField = require(script.Parent.Parent.Parent.Components.NumericField)
 local DraftBinding = require(script.Parent.DraftBinding)
+local Copy = require(script.Parent.Copy)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -62,20 +63,6 @@ local CLIP_ROW_HEIGHT = 28
 local ROW_INDEX_WIDTH = 22
 local ROW_BUTTON_WIDTH = 26
 
--- Clip bars cycle through these so two overlapping clips are visibly distinct without the author
--- assigning colours. Deliberately drawn from the existing accent family rather than arbitrary hues,
--- so a busy timeline still reads as part of this UI.
-local CLIP_COLORS: { Color3 } = {
-	Color3.fromRGB(150, 130, 235),
-	Color3.fromRGB(120, 200, 210),
-	Color3.fromRGB(225, 170, 110),
-	Color3.fromRGB(200, 130, 180),
-	Color3.fromRGB(140, 210, 150),
-	Color3.fromRGB(210, 210, 130),
-	Color3.fromRGB(170, 160, 200),
-	Color3.fromRGB(230, 140, 140),
-}
-
 local AnimationTimelineEditorModule = {}
 
 -- The three phases and their colours, in timeline order. Exported (rather than left file-local, as
@@ -94,8 +81,12 @@ AnimationTimelineEditorModule.Phases = {
 	{ Name = "Recovery", Color = EditorTokens.Phase.Recovery },
 } :: { { Name: string, Color: Color3 } }
 
+-- Wraps rather than clamps, so a clip past the end of the palette restarts at colour 1 instead of
+-- silently sharing the last one with everything after it. The palette itself is EditorTokens' --
+-- three of its entries were byte-identical to StatsPanel.lua's own literals before it moved there.
 local function clipColor(index: number): Color3
-	return CLIP_COLORS[(index - 1) % #CLIP_COLORS + 1]
+	local palette = EditorTokens.ClipPalette
+	return palette[(index - 1) % #palette + 1]
 end
 
 local function timingsOf(draft: MoveDefinition): AnimationTimeline.PhaseTimings
@@ -820,6 +811,25 @@ local function detailForm(scope: Scope, context: DraftContext, selectedIndex: Fu
 				LineHeight = Tokens.Leading.Prose,
 				Size = UDim2.fromScale(1, 0),
 				LayoutOrder = 17,
+			}),
+
+			-- LAST, and the least often touched: Action is right for essentially every clip authored
+			-- here, and the only reason to move it is a specific problem (a clip that should sit under
+			-- locomotion, or one being hidden by it). PreviewViewport applies this to the real
+			-- AnimationTrack, so the effect is visible in the preview rather than only at test-fire.
+			dropdown("Animation layer", 18, AnimationTimeline.PriorityOrder :: { string }, function(clip)
+				return clip.Priority
+			end, function(clip, value)
+				clip.Priority = value :: AnimationTimeline.ClipPriority
+			end),
+			Label(scope, {
+				Text = Copy.Field("Animation.Priority").Hint,
+				Scale = "Detail",
+				Color = Tokens.Color.TextSecondary,
+				AutoHeight = true,
+				LineHeight = Tokens.Leading.Prose,
+				Size = UDim2.fromScale(1, 0),
+				LayoutOrder = 19,
 			}),
 		},
 	} :: Frame

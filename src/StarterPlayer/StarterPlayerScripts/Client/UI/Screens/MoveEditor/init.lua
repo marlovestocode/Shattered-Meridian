@@ -35,9 +35,10 @@
 	hotbar pass) -- PropertyEditor.lua's toolbar reads the former to show which slot(s) the
 	currently-selected move already occupies and fires the latter (via its own OnBindHotbarSlot
 	closure above, which resolves the signal's MoveId argument from `draft`) when an admin clicks a
-	slot button. Unlike every OTHER signal this file owns, MoveEditorClient.lua's handler for this
-	one never touches a RemoteFunction -- Client/Combat/HotbarBindings.lua is purely client-side
-	bookkeeping, see that module's own header.
+	slot button. MoveEditorClient.lua's handler for this one DOES touch a RemoteFunction
+	(EquipArtSlot, ArtSystem.DevGrantAndEquip server-side) -- binding to a slot is an equip, not
+	client-side bookkeeping, since an art IS a move; see Client/Combat/HotbarBindings.lua's own
+	header.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -46,12 +47,14 @@ local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local MoveStats = require(ReplicatedStorage.Shared.MoveStats)
 
 local Tokens = require(script.Parent.Parent.Tokens)
-local ModalScreen = require(script.Parent.Parent.Components.ModalScreen)
+local ScreenFrame = require(script.Parent.Parent.Components.ScreenFrame)
+local Stack = require(script.Parent.Parent.Components.Stack)
+local Inset = require(script.Parent.Parent.Components.Inset)
+local ShortcutsOverlay = require(script.ShortcutsOverlay)
 local Label = require(script.Parent.Parent.Components.Label)
-local Button = require(script.Parent.Parent.Components.Button)
-local Divider = require(script.Parent.Parent.Components.Divider)
 
 local MoveEditorTypes = require(script.Types)
+local EditorTokens = require(script.EditorTokens)
 local Sidebar = require(script.Sidebar)
 local PropertyEditor = require(script.PropertyEditor)
 local PreviewViewport = require(script.PreviewViewport)
@@ -65,13 +68,18 @@ export type MoveEditorHandle = MoveEditorTypes.MoveEditorHandle
 
 local MoveEditor = {}
 
-local HEADER_HEIGHT = 36
 local SIDEBAR_WIDTH = 260
 local CONTENT_WIDTH = 600
 local PREVIEW_WIDTH = 420
-local BODY_WIDTH = SIDEBAR_WIDTH + Tokens.Space.M * 2 + CONTENT_WIDTH + PREVIEW_WIDTH
-local ROOT_SIZE = UDim2.fromOffset(BODY_WIDTH + Tokens.Space.L * 2, 760)
-local BODY_HEIGHT = 760 - Tokens.Space.L * 2 - HEADER_HEIGHT - Tokens.Space.M
+local ROOT_WIDTH = SIDEBAR_WIDTH + Tokens.Space.M * 2 + CONTENT_WIDTH + PREVIEW_WIDTH + Tokens.Space.L * 2
+local ROOT_HEIGHT = 760
+
+-- The band heights are Components/ScreenFrame.lua's; this is what the three columns share once the
+-- body's own inset comes off. Same pair Screens/DevMenu/init.lua and Screens/KitEditor/init.lua take.
+local _, BODY_BAND_HEIGHT = ScreenFrame.BodySize(ROOT_WIDTH, ROOT_HEIGHT)
+local BODY_HEIGHT = BODY_BAND_HEIGHT - Tokens.Space.M - Tokens.Space.L
+-- The inventory readout's own row height, in the tab strip band.
+local READOUT_HEIGHT = 20
 
 function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.MoveEditorHandle
 	local isOpen = scope:Value(false)
@@ -91,6 +99,9 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.M
 	-- DataStore is untouched until Save, and "there is work the DataStore doesn't have" is precisely
 	-- what isDirty below reports.
 	local savedFingerprint = scope:Value("")
+	-- Both written only by MoveEditorClient.lua -- see their own headers in Types.lua.
+	local unsavedCount = scope:Value(0)
+	local lastSavedMoveId = scope:Value("")
 	local isDirty = scope:Computed(function(use)
 		local current = use(draft)
 		if not current then
@@ -108,6 +119,7 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.M
 	local resetRequestedEvent = Instance.new("BindableEvent")
 	local bindHotbarSlotRequestedEvent = Instance.new("BindableEvent")
 	local duplicateMoveRequestedEvent = Instance.new("BindableEvent")
+	local renameMoveRequestedEvent = Instance.new("BindableEvent")
 	local toggleTestDummyRequestedEvent = Instance.new("BindableEvent")
 	-- This client's own best-effort guess, per HasTestDummy's own header -- MoveEditorClient.lua is
 	-- the only writer (on a successful Spawn/Despawn response).
@@ -128,8 +140,15 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.M
 		OnSelect = function(moveId: string)
 			selectMoveRequestedEvent:Fire(moveId)
 		end,
+		LastSavedMoveId = lastSavedMoveId,
 		OnDelete = function(moveId: string)
 			deleteMoveRequestedEvent:Fire(moveId)
+		end,
+		OnRename = function(moveId: string, newName: string)
+			renameMoveRequestedEvent:Fire(moveId, newName)
+		end,
+		OnDuplicate = function(moveId: string)
+			duplicateMoveRequestedEvent:Fire(moveId)
 		end,
 	})
 
@@ -144,7 +163,10 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.M
 			newMoveRequestedEvent:Fire()
 		end,
 		OnDuplicate = function()
-			duplicateMoveRequestedEvent:Fire()
+			-- "" means "whatever is open" -- the toolbar button has no move in hand the way a list row
+			-- does, and resolving the draft here would duplicate a lookup MoveEditorClient must do
+			-- anyway (it needs the freshest record, including edits this screen has not sent yet).
+			duplicateMoveRequestedEvent:Fire("")
 		end,
 		OnFieldChanged = function(newDraft: MoveTypes.MoveDefinition)
 			-- Optimistic: both this panel and PreviewViewport read `draft` directly, so setting it
@@ -176,80 +198,101 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.M
 		end,
 	})
 
+	-- A sibling ModalScreen, not a child of the editor's root -- see ShortcutsOverlay.lua's header.
+	-- Mounted unconditionally and Visible-gated on its own value, like every other surface here.
+	local shortcutsOpen = scope:Value(false)
+	ShortcutsOverlay.Mount(scope, playerGui, { IsOpen = shortcutsOpen })
+
 	local previewRoot = PreviewViewport.Mount(scope, PREVIEW_WIDTH, BODY_HEIGHT, {
 		Draft = draft,
 		IsOpen = isOpen,
 	})
 
-	ModalScreen(scope, playerGui, {
+	ScreenFrame.Mount(scope, playerGui, {
 		Name = "MoveEditor",
-		Size = ROOT_SIZE,
+		Size = UDim2.fromOffset(ROOT_WIDTH, ROOT_HEIGHT),
 		IsOpen = isOpen,
+		-- No frame-level tabs: this editor's sections live in the Sidebar and scroll the middle column,
+		-- with the move list and the preview persisting across every one of them.
+		Title = "Move Creation System",
+		-- The inventory readout, pinned to the strip's right clear of the close control. It used to sit
+		-- beside the title and the status line used to sit out here; they have swapped, because "12
+		-- moves, 2 unsaved" is a standing fact about the panel and "Saved." is a transient answer to the
+		-- last thing you did -- and the footer band is where this frame puts transient answers.
+		HeaderAccessory = Stack.Row(scope, {
+			Name = "InventoryReadout",
+			Size = UDim2.fromOffset(0, READOUT_HEIGHT),
+			AutomaticSize = Enum.AutomaticSize.X,
+			Gap = Tokens.Space.S,
+			AlignY = Enum.VerticalAlignment.Center,
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -(Tokens.Control.CloseButtonClearance + ScreenFrame.BandPaddingX), 0.5, 0),
+			Children = {
+				-- The dot is the SECOND signal for the same fact the text beside it already states, per
+				-- Tokens.Color's rule that hue is never the only carrier: someone who cannot distinguish
+				-- the amber still reads "2 unsaved".
+				scope:New "Frame" {
+					Name = "UnsavedDot",
+					Size = UDim2.fromOffset(6, 6),
+					BackgroundColor3 = EditorTokens.Dirty,
+					BorderSizePixel = 0,
+					LayoutOrder = 1,
+					Visible = scope:Computed(function(use)
+						return use(unsavedCount) > 0
+					end),
 
-		Children = {
-			scope:New "Frame" {
-				Name = "Header",
-				Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
-				BackgroundTransparency = 1,
-				LayoutOrder = 1,
-
-				[Children] = {
-					Label(scope, {
-						Text = "Move Creation System",
-						Scale = "Heading",
-						AnchorPoint = Vector2.new(0, 0.5),
-						Position = UDim2.fromScale(0, 0.5),
-					}),
-					Label(scope, {
-						Text = statusText,
-						Scale = "Body",
-						Color = Tokens.Color.TextSecondary,
-						AnchorPoint = Vector2.new(1, 0.5),
-						Position = UDim2.new(1, -Tokens.Control.CloseButtonClearance, 0.5, 0),
-						TextXAlignment = Enum.TextXAlignment.Right,
-					}),
-					Button(scope, {
-						Text = "X",
-						Size = UDim2.fromOffset(28, 28),
-						AnchorPoint = Vector2.new(1, 0.5),
-						Position = UDim2.fromScale(1, 0.5),
-						OnActivated = function()
-							closeRequestedEvent:Fire()
-						end,
-					}),
+					[Children] = scope:New "UICorner" { CornerRadius = UDim.new(0.5, 0) },
 				},
+				Label(scope, {
+					-- Counts the whole known inventory, Default moves included -- an admin asking "how
+					-- much is in here" means everything the editor can open, not just the section they
+					-- happen to be looking at.
+					Text = scope:Computed(function(use)
+						local total = #use(movesDisplay)
+						local pending = use(unsavedCount)
+						if pending == 0 then
+							return `{total} moves`
+						end
+						return `{total} moves · {pending} unsaved`
+					end),
+					Scale = "Detail",
+					Color = scope:Computed(function(use)
+						return if use(unsavedCount) > 0 then EditorTokens.Dirty else Tokens.Color.TextSecondary
+					end),
+					Size = UDim2.fromOffset(160, READOUT_HEIGHT),
+					TextXAlignment = Enum.TextXAlignment.Right,
+					LayoutOrder = 2,
+				}),
 			},
+		}),
+		Wordmark = "MOVE EDITOR",
+		StatusText = statusText,
+		-- Fires the signal rather than writing IsOpen -- MoveEditorClient's setOpen is the one place
+		-- this screen's open state is written.
+		OnClose = function()
+			closeRequestedEvent:Fire()
+		end,
 
-			-- The header/body seam -- docs/ui-ux-philosophy.md's own "layered depth" panel
-			-- language, made literal as a hairline rule between the two bands instead of relying
-			-- on padding alone to separate them.
-			Divider.Plain(scope, { LayoutOrder = 2, Tint = Tokens.Border.Lit }),
-
-			scope:New "Frame" {
-				Name = "Body",
-				Size = UDim2.fromOffset(BODY_WIDTH, BODY_HEIGHT),
-				BackgroundTransparency = 1,
-				LayoutOrder = 3,
-
-				[Children] = {
-					scope:New "UIListLayout" {
-						FillDirection = Enum.FillDirection.Horizontal,
-						HorizontalAlignment = Enum.HorizontalAlignment.Left,
-						Padding = UDim.new(0, Tokens.Space.M),
-						SortOrder = Enum.SortOrder.LayoutOrder,
-					},
-					sidebar.Root,
-					propertyEditorRoot,
-					previewRoot,
-				},
+		Body = Stack.Row(scope, {
+			Name = "Body",
+			Gap = Tokens.Space.M,
+			Children = {
+				Inset(scope, { Top = Tokens.Space.M, Bottom = Tokens.Space.L, X = Tokens.Space.L }),
+				sidebar.Root,
+				propertyEditorRoot,
+				previewRoot,
 			},
-		},
+		}),
 	})
 
 	return {
 		IsOpen = isOpen,
 		CloseRequested = closeRequestedEvent.Event,
 		StatusText = statusText,
+		-- Sidebar's own value, handed straight out rather than mirrored -- PropertyEditor already reads
+		-- this exact Fusion.Value, so a second copy could only drift from it.
+		SelectedSection = sidebar.SelectedSection,
+		ShortcutsOpen = shortcutsOpen,
 		MovesDisplay = movesDisplay,
 		Draft = draft,
 		LastTestResultText = lastTestResultText,
@@ -264,7 +307,10 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.M
 		BindHotbarSlotRequested = bindHotbarSlotRequestedEvent.Event,
 		SavedFingerprint = savedFingerprint,
 		IsDirty = isDirty,
+		UnsavedCount = unsavedCount,
+		LastSavedMoveId = lastSavedMoveId,
 		DuplicateMoveRequested = duplicateMoveRequestedEvent.Event,
+		RenameMoveRequested = renameMoveRequestedEvent.Event,
 		ToggleTestDummyRequested = toggleTestDummyRequestedEvent.Event,
 		HasTestDummy = hasTestDummy,
 	}

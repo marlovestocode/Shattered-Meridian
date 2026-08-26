@@ -290,14 +290,35 @@ return function()
 		end)
 	end)
 
-	-- A move carrying every optional sub-table, including the one three-level path in this schema
-	-- (ObjectStun -> FollowUp -> Dimensions). Built through Validate so it is a real, normalized
-	-- MoveDefinition rather than a hand-assembled approximation of one.
+	-- A move carrying every optional sub-table Validate can produce, including the one three-level
+	-- path in this schema (ObjectStun -> FollowUp -> Dimensions). Built through Validate so it is a
+	-- real, normalized MoveDefinition rather than a hand-assembled approximation of one.
+	--
+	-- Slam is the one exception and deliberately absent: MoveRegistryManager has no validateSlam, so
+	-- a Slam block on the candidate is dropped rather than carried, and asserting on it here would
+	-- test the fixture builder rather than MoveTypes. Add it the moment that validator exists.
 	local function makeRichMove(): MoveTypes.MoveDefinition
 		local candidate = makeBoxCandidate({
 			Movement = { LungeDistanceStuds = 8, LungeDurationSeconds = 0.2 },
 			Knockback = { UpVelocity = 20, HorizontalVelocity = 10, RagdollSeconds = 0.6, StartsAirCombo = true },
 			Projectile = { Speed = 40, MaxRange = 60 },
+			Grab = {
+				HoldSeconds = 2,
+				ThrowUpVelocity = 40,
+				ThrowHorizontalVelocity = 60,
+				ThrowImpactDamage = 8,
+				ThrowSelfDamage = 4,
+			},
+			-- TreeId must name a live ArtConstants.ArtTrees entry, and Prerequisite must not be this
+			-- move's own id -- validateArt rejects both, so a fixture that got either wrong would come
+			-- back with no Art block at all and quietly pass every assertion below.
+			Art = {
+				TreeId = "common_foundation",
+				Node = 2,
+				QiCost = 15,
+				RequiredTier = 2,
+				Prerequisite = "some-other-art",
+			},
 			Animations = {
 				{ AnimationId = "rbxassetid://1", StartSeconds = 0, Speed = 1, Weight = 1 },
 				{ AnimationId = "rbxassetid://2", StartSeconds = 0.3, Speed = 1, Weight = 1 },
@@ -358,6 +379,17 @@ return function()
 			expect((original.Movement :: any).LungeDistanceStuds).to.equal(8)
 			expect((original.Knockback :: any).UpVelocity).to.equal(20)
 			expect((original.Projectile :: any).Speed).to.equal(40)
+		end)
+
+		-- Grab/Art are the two blocks Clone copies with a FLAT table.clone rather than a deep walk --
+		-- correct today because neither nests, and this is what says so out loud if one ever starts to.
+		it("does not alias Grab or Art", function()
+			local original = makeRichMove()
+			local copy = MoveTypes.Clone(original);
+			(copy.Grab :: any).HoldSeconds = 99
+			(copy.Art :: any).QiCost = 99
+			expect((original.Grab :: any).HoldSeconds).to.equal(2)
+			expect((original.Art :: any).QiCost).to.equal(15)
 		end)
 
 		it("does not alias individual Animations clips", function()
@@ -459,6 +491,40 @@ return function()
 			local move = makeRichMove()
 			local before = MoveTypes.Fingerprint(move);
 			((move.ObjectStun :: any).FollowUp :: any).Damage = 42
+			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
+		end)
+
+		-- Description is pure metadata -- nothing in combat resolution reads it -- but it is AUTHORED,
+		-- and an admin who writes a paragraph of intent and closes without saving has to be told they
+		-- are about to lose it. That is exactly what the digest is for.
+		it("changes when the description changes", function()
+			local move = makeRichMove()
+			local before = MoveTypes.Fingerprint(move)
+			move.Description = "Opener -- meant to be cancelled into the heavy."
+			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
+		end)
+
+		it("changes when a Grab field changes", function()
+			local move = makeRichMove()
+			local before = MoveTypes.Fingerprint(move);
+			(move.Grab :: any).ThrowUpVelocity = 99
+			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
+		end)
+
+		-- Art was the one authored block Clone carried and this digest did not, so an art binding
+		-- edit never tripped the editor's UNSAVED chip and was lost on the next load. These two
+		-- cases are what keep it from silently falling back out.
+		it("changes when the Art binding's QiCost changes", function()
+			local move = makeRichMove()
+			local before = MoveTypes.Fingerprint(move);
+			(move.Art :: any).QiCost = 42
+			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
+		end)
+
+		it("changes when the Art binding is removed entirely", function()
+			local move = makeRichMove()
+			local before = MoveTypes.Fingerprint(move)
+			move.Art = nil
 			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
 		end)
 	end)

@@ -42,6 +42,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local SettingsModule = require(script.Parent.Parent.UI.Screens.Settings)
+local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local ParkourController = require(script.Parent.Parent.Parkour.ParkourController)
 local RunController = require(script.Parent.Parent.Movement.RunController)
@@ -379,26 +380,39 @@ function SettingsClient.Start(handle: SettingsHandle, chrome: Chrome.ChromeHandl
 		userInputType = tostring(toggleBinding and toggleBinding.UserInputType),
 	})
 
-	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-		if gameProcessed then
-			return
-		end
-		-- Logged only on an actual match, not on every keyboard press this connection sees. It used to
-		-- fire unconditionally -- one Debug line per key, including every WASD/Space tick during ordinary
-		-- movement -- which made this the single loudest source in the whole client log for no
-		-- diagnostic gain: the field being logged, `matches`, was false on all but one key on the
-		-- keyboard. A log meant to help diagnose "why doesn't my rebound toggle key open Settings" is
-		-- more useful, not less, once the one line that fires is the one that actually answers that
-		-- question.
-		if KeybindManager.Matches("SettingsToggle", input) then
+	-- "System" rather than "Gameplay"/"Menu" -- see InputRouter.lua's own header for the general
+	-- reasoning behind that layer. Concretely for THIS toggle: "Menu" only fires Began while a modal is
+	-- already open, which would make K unable to ever OPEN the panel (nothing is open yet when this
+	-- fires); "Gameplay" only fires Began while nothing is open, which would make K unable to ever
+	-- CLOSE it once Settings itself raises Constants.Attributes.UiModalOpen. "System" is the one layer
+	-- InputRouter does not modal-gate in either direction, which is exactly what a two-way toggle needs
+	-- -- the same reasoning DevMenuToggle/CharacterMenuToggle's own un-migrated toggles already lean on
+	-- by having no modal check at all today.
+	--
+	-- gameProcessed IS STILL CHECKED HERE, BY HAND, because "System" is also the one layer InputRouter
+	-- does not auto-drop it for (see InputRouter.lua's header) -- and this toggle needs it: without it,
+	-- typing the letter K into a focused chat/TextBox would toggle Settings open on every keystroke,
+	-- since a focused TextBox consumes the keystroke as gameProcessed = true. This is the one migrated
+	-- caller in this pass that keeps its own copy of that check, and it is a copy of exactly the one
+	-- line every other layer gets for free, not a parallel re-implementation of the gate.
+	InputRouter.Bind("SettingsToggle", {
+		Layer = "System",
+		Began = function(gameProcessed: boolean, input: InputObject)
+			if gameProcessed then
+				return
+			end
+			-- Logged only on an actual match, not on every keyboard press this connection used to see --
+			-- InputRouter has already done that filtering by the time Began runs. A log meant to help
+			-- diagnose "why doesn't my rebound toggle key open Settings" is more useful, not less, once
+			-- the one line that fires is the one that actually answers that question.
 			local nowOpen = not peek(handle.IsOpen)
 			handle.IsOpen:set(nowOpen)
 			if not nowOpen then
 				cancelCapture()
 			end
 			logger:debug("Settings panel toggled", { open = nowOpen, keyCode = tostring(input.KeyCode) })
-		end
-	end)
+		end,
+	})
 
 	handle.RebindClicked:Connect(beginCapture)
 

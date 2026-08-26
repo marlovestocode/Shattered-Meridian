@@ -293,6 +293,18 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 	if not attackerHumanoid or not victimHumanoid then
 		return
 	end
+	-- A body welded to a blimp station (Server/Systems/BlimpSystem.lua) cannot be held. This is not a
+	-- balance call, it is a physical one: a mount is a rigid Weld into the hull's assembly and a hold is
+	-- an AlignPosition dragging the same root toward a fist, so honouring both would have the two fight
+	-- every physics step -- and whichever won, the mount's own release path would be operating on a body
+	-- it no longer describes. Refused at the START rather than by yanking the victim off the blimp,
+	-- because the attacker landing a hit on a passenger has no business dismounting them.
+	--
+	-- Read as an Attribute, not through a BlimpSystem require, the same seam AttackRequestSystem's and
+	-- DefenseSystem's own Mounted gates use.
+	if victimHumanoid:GetAttribute(Constants.Attributes.Mounted) == true then
+		return
+	end
 	local attackerAttachPart = resolveAttachPart(attacker)
 	local victimRoot = victim.PrimaryPart
 	if not attackerAttachPart or not victimRoot then

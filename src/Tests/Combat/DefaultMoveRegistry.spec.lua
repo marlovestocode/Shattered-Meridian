@@ -4,6 +4,13 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local DefaultMoveRegistry = require(ServerScriptService.Server.Combat.DefaultMoveRegistry) :: any
 local CombatConstants = require(game:GetService("ReplicatedStorage").Shared.Combat.CombatConstants)
 local LiveTuningContract = require(ServerScriptService.Tests.TestHelpers.LiveTuningContract)
+local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
+
+-- The real roster this file tunes against. Weapons are models in Workspace.Weapons now, so a spec
+-- that installs none finds an empty registry with no weapon moves in it at all.
+local ROSTER = WeaponFixture.Install()
+local FIRST_WEAPON = ROSTER[1]
+local SECOND_WEAPON = ROSTER[2]
 
 -- DefaultMoveRegistry mutates the REAL, shared CombatConstants.Weapons/DashPunch/DashHit/AirSlam
 -- tables (that is the whole point of this module -- see its own header, and HitboxTuning.lua's
@@ -42,10 +49,10 @@ return function()
 	describe("DefaultMoveRegistry.List", function()
 		it("returns at least one Basic stage and exactly one Finisher per weapon", function()
 			local moves = DefaultMoveRegistry.List()
-			expect(countMatching(moves, "^default:Primary:Basic:") > 0).to.equal(true)
-			expect(countMatching(moves, "^default:Secondary:Basic:") > 0).to.equal(true)
-			expect(countMatching(moves, "^default:Primary:Finisher$")).to.equal(1)
-			expect(countMatching(moves, "^default:Secondary:Finisher$")).to.equal(1)
+			expect(countMatching(moves, `^default:{FIRST_WEAPON}:Basic:`) > 0).to.equal(true)
+			expect(countMatching(moves, `^default:{SECOND_WEAPON}:Basic:`) > 0).to.equal(true)
+			expect(countMatching(moves, `^default:{FIRST_WEAPON}:Finisher$`)).to.equal(1)
+			expect(countMatching(moves, `^default:{SECOND_WEAPON}:Finisher$`)).to.equal(1)
 		end)
 
 		it("includes all three standalone attacks", function()
@@ -77,9 +84,9 @@ return function()
 
 	describe("DefaultMoveRegistry.Get", function()
 		it("resolves a known synthetic MoveId", function()
-			local move = DefaultMoveRegistry.Get("default:Primary:Basic:1")
+			local move = DefaultMoveRegistry.Get(`default:{FIRST_WEAPON}:Basic:1`)
 			expect(move).to.be.ok()
-			expect((move :: any).DisplayName).to.equal("Primary Basic 1")
+			expect((move :: any).DisplayName).to.equal(`{FIRST_WEAPON} Basic 1`)
 		end)
 
 		it("returns nil for an unknown MoveId", function()
@@ -89,69 +96,69 @@ return function()
 
 	describe("DefaultMoveRegistry.ApplyEdit", function()
 		it("mutates the live stage and returns the updated value", function()
-			local before = DefaultMoveRegistry.Get("default:Primary:Basic:1")
+			local before = DefaultMoveRegistry.Get(`default:{FIRST_WEAPON}:Basic:1`)
 			expect(before).to.be.ok()
 			local baseline = (before :: any).WindupSeconds :: number
 
 			LiveTuningContract.withRestore(function()
 				local candidate = toCandidate(before :: any)
 				candidate.WindupSeconds = baseline + 0.05
-				local result = DefaultMoveRegistry.ApplyEdit("default:Primary:Basic:1", candidate)
+				local result = DefaultMoveRegistry.ApplyEdit(`default:{FIRST_WEAPON}:Basic:1`, candidate)
 				expect(result).to.be.ok()
 				expect((result :: any).WindupSeconds).to.equal(baseline + 0.05)
 			end, function()
-				DefaultMoveRegistry.Reset("default:Primary:Basic:1")
+				DefaultMoveRegistry.Reset(`default:{FIRST_WEAPON}:Basic:1`)
 			end)
 		end)
 
 		it("persists the mutation for a later List call (proves the live-reference claim)", function()
 			LiveTuningContract.withRestore(function()
-				local before = DefaultMoveRegistry.Get("default:Primary:Basic:1") :: any
+				local before = DefaultMoveRegistry.Get(`default:{FIRST_WEAPON}:Basic:1`) :: any
 				local candidate = toCandidate(before)
 				candidate.ActiveSeconds = 0.2 + before.ActiveSeconds
-				DefaultMoveRegistry.ApplyEdit("default:Primary:Basic:1", candidate)
+				DefaultMoveRegistry.ApplyEdit(`default:{FIRST_WEAPON}:Basic:1`, candidate)
 
 				local found = false
 				for _, move in ipairs(DefaultMoveRegistry.List()) do
-					if move.MoveId == "default:Primary:Basic:1" then
+					if move.MoveId == `default:{FIRST_WEAPON}:Basic:1` then
 						found = true
 						expect(move.ActiveSeconds >= 0.2).to.equal(true)
 					end
 				end
 				expect(found).to.equal(true)
 			end, function()
-				DefaultMoveRegistry.Reset("default:Primary:Basic:1")
+				DefaultMoveRegistry.Reset(`default:{FIRST_WEAPON}:Basic:1`)
 			end)
 		end)
 
 		it("never touches the live DebugName", function()
 			LiveTuningContract.withRestore(function()
-				local before = DefaultMoveRegistry.Get("default:Primary:Basic:1") :: any
+				local before = DefaultMoveRegistry.Get(`default:{FIRST_WEAPON}:Basic:1`) :: any
 				local candidate = toCandidate(before)
 				candidate.Damage = 999
-				DefaultMoveRegistry.ApplyEdit("default:Primary:Basic:1", candidate)
-				expect(CombatConstants.Weapons.Primary.Stages.Basic[1].DebugName).to.equal("Basic1")
+				DefaultMoveRegistry.ApplyEdit(`default:{FIRST_WEAPON}:Basic:1`, candidate)
+				expect(CombatConstants.Weapons.Baseline.Stages.Basic[1].DebugName).to.equal("Basic1")
 			end, function()
-				DefaultMoveRegistry.Reset("default:Primary:Basic:1")
+				DefaultMoveRegistry.Reset(`default:{FIRST_WEAPON}:Basic:1`)
 			end)
 		end)
 
 		it("clamps a value beyond the sanity ceiling via MoveRegistryManager.Validate", function()
 			LiveTuningContract.withRestore(function()
-				local before = DefaultMoveRegistry.Get("default:Primary:Basic:1") :: any
+				local before = DefaultMoveRegistry.Get(`default:{FIRST_WEAPON}:Basic:1`) :: any
 				local candidate = toCandidate(before)
 				candidate.WindupSeconds = 999
-				local result = DefaultMoveRegistry.ApplyEdit("default:Primary:Basic:1", candidate)
+				local result = DefaultMoveRegistry.ApplyEdit(`default:{FIRST_WEAPON}:Basic:1`, candidate)
 				expect(result).to.be.ok()
 				expect((result :: any).WindupSeconds).to.equal(45) -- CLAMP_MAX_SECONDS
 			end, function()
-				DefaultMoveRegistry.Reset("default:Primary:Basic:1")
+				DefaultMoveRegistry.Reset(`default:{FIRST_WEAPON}:Basic:1`)
 			end)
 		end)
 
 		it("widens the editable surface to Shape/Size/Radius (beyond HitboxTuning's old timing-only scope)", function()
 			LiveTuningContract.withRestore(function()
-				local before = DefaultMoveRegistry.Get("default:Primary:Basic:1") :: any
+				local before = DefaultMoveRegistry.Get(`default:{FIRST_WEAPON}:Basic:1`) :: any
 				local candidate = toCandidate(before)
 				candidate.Shape = "Sphere"
 				-- Authored through Dimensions, NOT the legacy top-level Radius field. toCandidate clones
@@ -163,14 +170,20 @@ return function()
 				candidate.Dimensions = table.clone(candidate.Dimensions)
 				candidate.Dimensions.Radius = 6
 				candidate.Size = nil
-				local result = DefaultMoveRegistry.ApplyEdit("default:Primary:Basic:1", candidate) :: any
+				local result = DefaultMoveRegistry.ApplyEdit(`default:{FIRST_WEAPON}:Basic:1`, candidate) :: any
 				expect(result).to.be.ok()
 				expect(result.Shape).to.equal("Sphere")
 				expect(result.Radius).to.equal(6)
 				expect(result.Size).to.equal(nil)
-				expect(CombatConstants.Weapons.Primary.Stages.Basic[1].Shape).to.equal("Sphere")
+				-- The edit lands on THIS WEAPON's own live table and NOT on the shared baseline -- every
+				-- roster weapon deep-copies Baseline.Stages at boot (WeaponRoster.buildStage), precisely
+				-- so retuning one weapon in the Move Editor cannot move another's numbers or corrupt the
+				-- template the next weapon is built from. Asserted through Get (which reads the live
+				-- table by reference) plus the baseline staying Box-shaped.
+				expect((DefaultMoveRegistry.Get(`default:{FIRST_WEAPON}:Basic:1`) :: any).Shape).to.equal("Sphere")
+				expect(CombatConstants.Weapons.Baseline.Stages.Basic[1].Shape).never.to.equal("Sphere")
 			end, function()
-				DefaultMoveRegistry.Reset("default:Primary:Basic:1")
+				DefaultMoveRegistry.Reset(`default:{FIRST_WEAPON}:Basic:1`)
 			end)
 		end)
 
@@ -207,14 +220,14 @@ return function()
 
 	describe("DefaultMoveRegistry.Reset", function()
 		it("restores the captured file default after a mutation", function()
-			local original = DefaultMoveRegistry.Get("default:Primary:Basic:2") :: any
+			local original = DefaultMoveRegistry.Get(`default:{FIRST_WEAPON}:Basic:2`) :: any
 			local originalWindup = original.WindupSeconds
 
 			local candidate = toCandidate(original)
 			candidate.WindupSeconds = originalWindup + 1
-			DefaultMoveRegistry.ApplyEdit("default:Primary:Basic:2", candidate)
+			DefaultMoveRegistry.ApplyEdit(`default:{FIRST_WEAPON}:Basic:2`, candidate)
 
-			local restored = DefaultMoveRegistry.Reset("default:Primary:Basic:2")
+			local restored = DefaultMoveRegistry.Reset(`default:{FIRST_WEAPON}:Basic:2`)
 			expect(restored).to.be.ok()
 			expect((restored :: any).WindupSeconds).to.equal(originalWindup)
 		end)

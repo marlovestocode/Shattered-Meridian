@@ -58,6 +58,21 @@ local modulesToLoad = {
 	-- path. Its one pure dependency, Shared/Logger.lua's capture buffer, IS specced directly
 	-- (Tests/Shared/Logger.spec.lua).
 	ServerScriptService.Server.Systems.LiveConsoleSystem,
+	-- BlimpSystem.lua owns the mount/interaction layer (Touched-driven contact tracking as of the
+	-- player-launch-exploit fix, the fuel prompts, the drive tick) and pulls in two new requires that
+	-- named-file specs never touch (Players and Server/Blimp/BlimpSafety) -- BlimpDrive.spec.lua/
+	-- BlimpFuel.spec.lua/BlimpTagging.spec.lua/BlimpSafety.spec.lua all require the pure modules this
+	-- System calls into directly, never the System itself, so nothing else in this suite would catch a
+	-- broken require path or a bad service name here. Same gap every other entry in this list exists to
+	-- close, for the module that would otherwise surface a typo as "the blimp doesn't do anything" in a
+	-- playtest instead of a failing build.
+	ServerScriptService.Server.Systems.BlimpSystem,
+	-- VehicleManager.lua owns the registry scan, the spawn/despawn path and five admin-gated remotes.
+	-- Its pure pieces ARE specced directly (Tests/Vehicle/VehicleCatalog.spec.lua and
+	-- VehiclePlacement.spec.lua both require the modules it calls into, never the System itself), so
+	-- this is the same gap every other entry in this list closes -- and a broken require path here
+	-- would surface as "the Vehicles tab is empty" in a playtest rather than as a failing build.
+	ServerScriptService.Server.Systems.VehicleManager,
 }
 
 -- CLIENT-side load-checks, same reasoning as the server list above and added for the same class of
@@ -71,7 +86,22 @@ local clientModulesToLoad = {
 	StarterPlayer.StarterPlayerScripts.Client.UI,
 	StarterPlayer.StarterPlayerScripts.Client.DevMenu.DevMenuClient,
 	StarterPlayer.StarterPlayerScripts.Client.MoveEditor.MoveEditorClient,
+	-- Added after KitEditorClient was found with NO inbound require anywhere: nothing started it, so
+	-- its keybind never bound and the Kit Editor -- the only thing that authors Race Trait and
+	-- Bloodline content -- was unreachable, which left BloodlineManager's registry permanently empty.
+	-- Requiring it here is what would have caught the follow-up failure (a broken require path in the
+	-- module Main.client.lua now calls); reachability itself is the boot wiring's job, not this list's.
+	StarterPlayer.StarterPlayerScripts.Client.KitEditor.KitEditorClient,
+	-- The sole writer of Client/Combat/HotbarBindings.lua now that the Move Editor stopped being a
+	-- second one -- see that module's own header. A broken require here would silently leave every
+	-- player's hotbar empty.
+	StarterPlayer.StarterPlayerScripts.Client.CharacterMenu.CharacterMenuClient,
 	StarterPlayer.StarterPlayerScripts.Client.LiveConsole.LiveConsoleClient,
+	-- The Storybook's driver. Its Start() returns immediately outside Studio, so nothing in a live
+	-- client would ever surface a broken require path in it -- which makes it exactly the kind of
+	-- module this list exists for. The gallery SCREEN it requires is already covered transitively by
+	-- the Client.UI entry above.
+	StarterPlayer.StarterPlayerScripts.Client.Storybook.StorybookClient,
 	-- The camera/movement/input modules whose character binding moved onto
 	-- Shared/PlayerLifecycle.lua. Nothing in this place drives a real character, so their BEHAVIOUR
 	-- still needs a playtest -- but a broken require path or a bad call shape in the shared binder
@@ -87,6 +117,23 @@ local clientModulesToLoad = {
 	StarterPlayer.StarterPlayerScripts.Client.Defense.DefenseClient,
 	StarterPlayer.StarterPlayerScripts.Client.Movement.RunController,
 	StarterPlayer.StarterPlayerScripts.Client.Parkour.ParkourController,
+	-- EmoteController was already on this list; the module that DRIVES it was not, which left the half
+	-- a player actually touches (the wheel's input, its selection, its confirm) with no inbound
+	-- require anywhere in this place at all.
+	--
+	-- BE CLEAR ABOUT WHAT THIS DOES AND DOES NOT CATCH, because this entry was added on the back of a
+	-- bug it would NOT have caught: an undefined global inside openWheel, which loads fine and throws
+	-- only when a player presses the key. `selene src/` is what catches that class and did; this list
+	-- catches the require-path/syntax class, exactly like every other entry above. Both gates, not one.
+	StarterPlayer.StarterPlayerScripts.Client.Emotes.EmoteWheelClient,
+	-- The two blimp client modules, for the same reason and the same gap: nothing in this place
+	-- requires either, so their require paths and top-level bodies were only ever exercised by opening
+	-- Studio. BlimpController is the largest client module in that feature; FurnacePromptClient owns
+	-- the furnace's custom prompt, whose whole job is to be the only thing drawn at that station now
+	-- that the stock ProximityPrompt UI is turned off there (Style = Custom, set server-side) -- a
+	-- broken require in it would leave a furnace with no visible prompt at all.
+	StarterPlayer.StarterPlayerScripts.Client.Blimp.BlimpController,
+	StarterPlayer.StarterPlayerScripts.Client.Blimp.FurnacePromptClient,
 }
 for _, moduleScript in ipairs(clientModulesToLoad) do
 	table.insert(modulesToLoad, moduleScript)

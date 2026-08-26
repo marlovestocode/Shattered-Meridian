@@ -4,7 +4,7 @@
 
 	Owns: the shared 800x640 panel shell every "creator" stage (RaceSelect/Attributes/NameEntry/
 	Confirmation -- NOT Cinematic, which is deliberately chromeless, see Cinematic.lua's header) is
-	built inside: the lattice-textured, corner-bracketed Panel.lua instance, its StepRail band, and
+	built inside: the textured, corner-bracketed Panel.lua instance, its StepRail band, and
 	the Header/scrolling-Body/Footer slot split. Every current pre-redesign screen hardcoded its own
 	offset width (640/560/480/520) and overflowed small viewports -- this is the fix, mirroring
 	Screens/DevMenu/init.lua's root-panel role: it owns the top-level layout budget and hands each
@@ -17,12 +17,13 @@
 	Phase F) is still a separate, later step; this only fixes the "overflows a small viewport" bug,
 	it doesn't yet retarget touch ergonomics.
 
-	Every one of Rail/Header/Body/Footer's heights is an explicit, spelled-out pixel budget (matching
-	DevMenu/init.lua's own "spell out the math, never guess" discipline) rather than automatic --
-	Roblox's UIListLayout has no flex-grow, so the one section that should "fill the rest" (Body)
-	still needs its height computed from the other three, even inside a Scale-relative outer panel:
-	`UDim2.new(1, 0, 1, -nonBodyHeight)` reads as "100% of whatever this panel actually resolved to,
-	minus the fixed part," which stays correct at any panel size the UISizeConstraint allows.
+	Rail/Header/Footer are explicit, spelled-out pixel budgets; Body is not, and used to be. This file's
+	header used to state that "Roblox's UIListLayout has no flex-grow, so the one section that should
+	fill the rest still needs its height computed from the other three" -- which was true when it was
+	written and is not any more. UIFlexItem is the engine's own flex-grow, and Components/Stack.lua's
+	Fill is one line of it, so Body now asks the layout what is left instead of this file predicting it
+	from three numbers (one of which, HeaderHeight, is a per-screen prop each caller passes in, so the
+	prediction was only ever as good as every caller's own arithmetic).
 
 	Does not own StepRail's own content (built internally from Stage/BlockingReason/
 	StepRailNavigateRequested, but see StepRail.lua for what it renders) or what a caller puts in the
@@ -37,6 +38,7 @@ local Panel = require(script.Parent.Parent.Parent.Components.Panel)
 local Divider = require(script.Parent.Parent.Parent.Components.Divider)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
 local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
+local Stack = require(script.Parent.Parent.Parent.Components.Stack)
 local StepRail = require(script.Parent.StepRail)
 local OnboardingTypes = require(script.Parent.Types)
 
@@ -75,19 +77,20 @@ local BRACKET_ARM_LENGTH = 16
 local FOOTER_HEIGHT = 40 + 20 * 2
 
 local function CreatorFrame(scope: Scope, props: CreatorFrameProps): Frame
-	local railHeight = StepRail.RAIL_HEIGHT
-	local nonBodyHeight = railHeight + props.HeaderHeight + FOOTER_HEIGHT
-
 	local panel = Panel(scope, {
 		Name = "CreatorFrame",
 		-- Fills the wrapper below exactly -- the wrapper, not this Panel, owns centering/margin/cap,
 		-- because a UISizeConstraint clamps whatever Frame it's DIRECTLY parented to, and Panel.lua
 		-- parents a caller's Children under its own inner "Content" wrapper, one level below the
 		-- Frame it actually sizes via Size/AnchorPoint/Position. Putting the constraint there would
-		-- have clamped Content's size while the outer Panel (its fill, border, lattice, brackets --
+		-- have clamped Content's size while the outer Panel (its fill, border, texture, brackets --
 		-- everything actually painted) kept growing unconstrained. See file header.
 		Size = UDim2.fromScale(1, 1),
-		Lattice = true,
+		-- Was `Lattice = true`, which drew nothing at all: LatticeOverlay.lua needed an uploaded hex
+		-- tile that was never produced. Panel's replacement layer (Components/MeridianField.lua) is
+		-- procedural, so this creator panel finally has the surface grain the design always specified
+		-- -- see MeridianField.lua's header on why the motif itself changed too.
+		SurfaceTexture = true,
 		CornerAccent = true,
 		BracketArmLength = BRACKET_ARM_LENGTH,
 
@@ -121,13 +124,16 @@ local function CreatorFrame(scope: Scope, props: CreatorFrameProps): Frame
 				},
 			},
 
-			ScrollArea(scope, {
-				Name = "Body",
-				Size = UDim2.new(1, 0, 1, -nonBodyHeight),
-				LayoutOrder = 3,
+			Stack.Fill(
+				scope,
+				ScrollArea(scope, {
+					Name = "Body",
+					Size = UDim2.fromScale(1, 1),
+					LayoutOrder = 3,
 
-				Children = props.BodyContent,
-			}),
+					Children = props.BodyContent,
+				})
+			),
 
 			scope:New "Frame" {
 				Name = "Footer",

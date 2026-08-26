@@ -3,10 +3,10 @@
 	Copy.lua
 
 	Owns: every word of explanatory text the Move Editor shows an author -- each section's
-	description, each individual field's unit and one-or-two-sentence hint, and the empty-state card's
-	body. One module rather than ~60 string literals scattered across PropertyEditor.lua,
-	HitboxEditor.lua and ObjectStunEditor.lua, so the prose can be read, reviewed and rewritten as
-	prose instead of being hunted for among layout code.
+	description, each individual field's unit and one-or-two-sentence hint, the empty-state card's
+	body, and what a server rejection MEANS (Copy.Failures). One module rather than ~60 string
+	literals scattered across PropertyEditor.lua, HitboxEditor.lua and ObjectStunEditor.lua, so the
+	prose can be read, reviewed and rewritten as prose instead of being hunted for among layout code.
 
 	Lives in the MoveEditor folder rather than ReplicatedStorage/Shared, deliberately. Copy is never
 	validated, never persisted, never on the wire, and no server module or other client feature reads
@@ -33,6 +33,10 @@
 	disagree, THIS file is right and the doc is stale.
 ]]
 
+local MoveEditorTypes = require(script.Parent.Types)
+
+type SectionId = MoveEditorTypes.SectionId
+
 local Copy = {}
 
 export type FieldCopy = {
@@ -45,6 +49,17 @@ export type FieldCopy = {
 -- Keyed "<Section>.<Field>" so a key names its own location in the UI, and a mistyped one is
 -- obvious on sight rather than resolving to some unrelated field's text.
 Copy.Fields = {
+	-- Basic Info --------------------------------------------------------------------------------
+	["BasicInfo.Description"] = {
+		Hint = "What this move is FOR, in your own words -- the intent the numbers can't carry. "
+			.. "Nothing in combat reads it; it is here so the reasoning outlives the tuning session.",
+	} :: FieldCopy,
+	-- Animation ---------------------------------------------------------------------------------
+	["Animation.Priority"] = {
+		Hint = "Which layer this clip plays on. Action sits above locomotion, which is what a swing "
+			.. "almost always wants; Core sits under everything and will be hidden by the run cycle. "
+			.. "Default Action.",
+	} :: FieldCopy,
 	-- Offset -----------------------------------------------------------------------------------
 	["Offset.X"] = {
 		Unit = "studs",
@@ -216,6 +231,228 @@ Copy.Empty = {
 		.. "Start by picking a move from the list on the left, or create a new one.",
 	Shortcuts = "Esc close  ·  Ctrl+S save  ·  Ctrl+D duplicate",
 }
+
+-- Every keyboard and pointer shortcut this editor answers to, grouped the way the overlay (F1)
+-- lists them. Data rather than a block of pre-formatted text so the overlay can lay the key column
+-- and the description column out on a real grid instead of relying on padded spaces to line up in a
+-- proportional font.
+--
+-- This list IS the documentation for these bindings -- there is no second place they are written
+-- down, which is deliberate: a shortcut an admin cannot discover from inside the tool may as well
+-- not exist, and a separate doc would be stale within a pass. Adding a binding means adding a row
+-- here in the same change.
+export type ShortcutRow = {
+	Keys: string,
+	Description: string,
+}
+
+export type ShortcutGroup = {
+	Title: string,
+	Rows: { ShortcutRow },
+}
+
+Copy.Shortcuts = {
+	{
+		Title = "Editor",
+		Rows = {
+			{ Keys = "-", Description = "Open or close the Move Editor." },
+			{ Keys = "F1", Description = "Show or hide this list." },
+			{ Keys = "Ctrl + S", Description = "Save the open move to storage." },
+			{ Keys = "Ctrl + D", Description = "Duplicate the open move (custom moves only)." },
+			{ Keys = "Ctrl + Z", Description = "Undo the last field change to this move." },
+			{ Keys = "Ctrl + Y", Description = "Redo. Ctrl + Shift + Z does the same." },
+			{
+				Keys = "Esc",
+				Description = "Backs out of one thing at a time: this list, then an armed confirmation, "
+					.. "then the editor itself. Closing with unsaved changes asks twice.",
+			},
+		},
+	} :: ShortcutGroup,
+	{
+		Title = "Numeric fields",
+		Rows = {
+			{ Keys = "Scroll", Description = "Nudge the field under the pointer by its finest step." },
+			{ Keys = "Shift", Description = "Ten times the step, on the -/+ buttons and the wheel." },
+			{
+				Keys = "Alt",
+				Description = "One tenth of the step. Held BEFORE grabbing the bar, it turns the drag "
+					.. "into a fine sweep over a tenth of the range.",
+			},
+			{ Keys = "Click the bar", Description = "Jump to that value. Hold and drag to sweep it." },
+			{ Keys = "Click the number", Description = "Type an exact value." },
+			{ Keys = "Up / Down", Description = "Nudge the number you are typing, before committing it." },
+			{ Keys = "Enter / Esc", Description = "Commit what you typed, or abandon it." },
+		},
+	} :: ShortcutGroup,
+	{
+		Title = "Move list",
+		Rows = {
+			{ Keys = "Double-click", Description = "Rename a move in place. Enter commits, Esc abandons." },
+			{ Keys = "Hover a row", Description = "Reveals rename, duplicate and delete for that move." },
+			{ Keys = "Delete", Description = "Asks twice -- the second press within a few seconds deletes." },
+		},
+	} :: ShortcutGroup,
+} :: { ShortcutGroup }
+
+-- What a server rejection MEANS, and WHERE the author has to go to fix it.
+--
+-- Every Save/UpdateDraft failure comes back as a bare machine code (MoveRegistryManager.Validate's
+-- own return values plus MoveEditorSystem's handful of transport-level ones), and the editor used to
+-- put that code straight into the status line: "Failed to save: InvalidShapeField". That is true and
+-- almost useless -- it names neither which field nor which of the thirteen sections that field lives
+-- in, and the offending section is very often NOT the one the author is looking at when the save
+-- fails, because a save validates the whole record at once.
+--
+-- So each entry carries a plain sentence AND, where the rejection is about one section's fields, that
+-- section's id -- MoveEditorClient.lua jumps the nav there, so the failure message and the controls
+-- it is about are on screen together.
+--
+-- Section is nil for a failure that is not about anything the author typed: a storage outage, an
+-- internal error, a move that no longer exists, or one of the four server-stamped identity fields
+-- (MoveId/Author/CreatedAt/UpdatedAt), which have no controls to jump to at all. Jumping the nav on
+-- one of those would move the author away from their work to prove a point they cannot act on.
+export type FailureCopy = {
+	Section: SectionId?,
+	Message: string,
+}
+
+Copy.Failures = {
+	-- Basic Info ---------------------------------------------------------------------------------
+	InvalidDisplayName = {
+		Section = "BasicInfo" :: SectionId,
+		Message = "A move needs a display name.",
+	} :: FailureCopy,
+	InvalidCategory = {
+		Section = "BasicInfo" :: SectionId,
+		Message = "A move needs a category tag.",
+	} :: FailureCopy,
+	ReservedCategory = {
+		Section = "BasicInfo" :: SectionId,
+		Message = "'Default' is reserved for the game's built-in moves -- pick another category.",
+	} :: FailureCopy,
+
+	-- Hitbox -------------------------------------------------------------------------------------
+	InvalidShape = {
+		Section = "Hitbox" :: SectionId,
+		Message = "That hitbox shape isn't one the server knows.",
+	} :: FailureCopy,
+	InvalidShapeField = {
+		Section = "Hitbox" :: SectionId,
+		Message = "One of the hitbox measurements is out of range for this shape.",
+	} :: FailureCopy,
+	MissingDimensions = {
+		Section = "Hitbox" :: SectionId,
+		Message = "This shape needs measurements the move doesn't carry yet.",
+	} :: FailureCopy,
+
+	-- Offset / Timing / Damage -------------------------------------------------------------------
+	InvalidOffset = {
+		Section = "Offset" :: SectionId,
+		Message = "The hitbox offset is out of range.",
+	} :: FailureCopy,
+	InvalidTiming = {
+		Section = "Timing" :: SectionId,
+		Message = "Windup, Active, Recovery or Cooldown is outside what the engine will resolve.",
+	} :: FailureCopy,
+	InvalidDamage = {
+		Section = "Damage" :: SectionId,
+		Message = "Damage or posture damage is out of range.",
+	} :: FailureCopy,
+	InvalidArcDegrees = {
+		Section = "Damage" :: SectionId,
+		Message = "The arc is out of range.",
+	} :: FailureCopy,
+	InvalidMaxTargets = {
+		Section = "Damage" :: SectionId,
+		Message = "Max targets is out of range.",
+	} :: FailureCopy,
+
+	-- Animation ----------------------------------------------------------------------------------
+	InvalidAnimationId = {
+		Section = "Animation" :: SectionId,
+		Message = "An animation id isn't a usable asset reference.",
+	} :: FailureCopy,
+
+	-- Optional sub-tables ------------------------------------------------------------------------
+	InvalidMovement = {
+		Section = "Movement" :: SectionId,
+		Message = "The lunge distance or duration is out of range.",
+	} :: FailureCopy,
+	InvalidKnockback = {
+		Section = "Knockback" :: SectionId,
+		Message = "One of the knockback numbers is out of range.",
+	} :: FailureCopy,
+	InvalidGrab = {
+		Section = "Grab" :: SectionId,
+		Message = "One of the grab or throw numbers is out of range.",
+	} :: FailureCopy,
+	InvalidProjectile = {
+		Section = "Projectile" :: SectionId,
+		Message = "Projectile speed or range is out of range.",
+	} :: FailureCopy,
+	InvalidObjectStun = {
+		Section = "ObjectStun" :: SectionId,
+		Message = "The object stun block has a value the server won't accept.",
+	} :: FailureCopy,
+	InvalidObjectStunFollowUp = {
+		Section = "ObjectStun" :: SectionId,
+		Message = "The object stun follow-up attack has a value the server won't accept.",
+	} :: FailureCopy,
+
+	-- Art ----------------------------------------------------------------------------------------
+	InvalidArt = {
+		Section = "Art" :: SectionId,
+		Message = "The art binding isn't readable.",
+	} :: FailureCopy,
+	InvalidArtTreeId = {
+		Section = "Art" :: SectionId,
+		Message = "An art needs a tree.",
+	} :: FailureCopy,
+	UnknownArtTree = {
+		Section = "Art" :: SectionId,
+		Message = "That art tree no longer exists -- pick one from the list.",
+	} :: FailureCopy,
+	InvalidArtPrerequisite = {
+		Section = "Art" :: SectionId,
+		Message = "The prerequisite art id is blank or malformed.",
+	} :: FailureCopy,
+	SelfReferentialArtPrerequisite = {
+		Section = "Art" :: SectionId,
+		Message = "An art can't require itself -- it could never be unlocked.",
+	} :: FailureCopy,
+	-- The Hotbar toolbar's "bind to slot" refusal (ArtSystem.DevGrantAndEquip) -- a move with no Art
+	-- binding structurally can't be equipped to a slot (see ArtSystem.lua's own header on why a slot
+	-- only ever holds a real Art now). Jumps to Art since that's exactly what's missing.
+	NotAnArt = {
+		Section = "Art" :: SectionId,
+		Message = "This move isn't bound into an art tree yet -- add an Art binding first.",
+	} :: FailureCopy,
+
+	-- No section: nothing the author typed, so nothing to jump to ---------------------------------
+	InvalidMoveId = { Message = "The server didn't recognise this move's id." } :: FailureCopy,
+	InvalidAuthor = { Message = "The server rejected this move's stamped author." } :: FailureCopy,
+	InvalidCreatedAt = { Message = "The server rejected this move's stamped creation time." } :: FailureCopy,
+	InvalidUpdatedAt = { Message = "The server rejected this move's stamped update time." } :: FailureCopy,
+	MoveNotFound = { Message = "That move no longer exists on the server." } :: FailureCopy,
+	StorageError = { Message = "Storage is unavailable -- the move is still live, but nothing was written." } :: FailureCopy,
+	InternalError = { Message = "The server hit an internal error handling that request." } :: FailureCopy,
+}
+
+-- Unlike Copy.Field, this NEVER asserts and never fails: it is called on the failure path, where the
+-- reason string came off the wire and is by definition not something this client controls. An
+-- unmapped code (a new one added server-side, or a nil) still has to produce something an admin can
+-- read and, ideally, quote in a bug report -- so the fallback shows the raw code rather than hiding
+-- it behind a generic apology.
+function Copy.Failure(reason: string?): FailureCopy
+	if reason == nil then
+		return { Message = "The server rejected that without saying why." }
+	end
+	local entry = Copy.Failures[reason]
+	if entry then
+		return entry
+	end
+	return { Message = `The server rejected that: {reason}` }
+end
 
 -- Asserts rather than returning a blank on an unknown key: a mistyped key should fail loudly the
 -- first time that section is opened in Studio, not quietly render a field that lost its explanation

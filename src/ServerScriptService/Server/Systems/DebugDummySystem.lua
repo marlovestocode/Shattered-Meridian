@@ -187,6 +187,22 @@ local function buildRig(): Model
 
 	local model = Players:CreateHumanoidModelFromDescription(description, Enum.HumanoidRigType.R15)
 	model.Name = "DebugDummy"
+	-- DELIBERATELY UNTAGGED, so hitting a dummy PUTS YOU IN COMBAT like hitting anything else does.
+	--
+	-- This rig briefly carried Shared/Engagement/EngagementConstants.DummyTag, which exempted it from
+	-- the combat tag on the reasoning that a practice target is not an adversary. That was wrong here,
+	-- and it contradicted this file's own opening principle -- A DUMMY IS A REAL COMBATANT, NOT A MOCK.
+	-- Two concrete reasons it came back out:
+	--   * A dummy is the ONLY sparring partner a solo tester has. Exempting it made the entire
+	--     engagement layer unreachable without a second client: no HUD readout, no parkour combat
+	--     gate, no emote refusal. A debug target that cannot exercise the thing you are debugging is
+	--     not serving its purpose.
+	--   * The "don't punish someone practising" worry does not apply to THIS rig. It is admin-spawned
+	--     dev tooling that no ordinary player ever meets, so the only person it can inconvenience is
+	--     the person who deliberately spawned it.
+	-- The tag itself still exists and still works -- see EngagementConstants.DummyTag -- for a genuine
+	-- non-adversary (a scenery target dummy in a training area that regular players swing at). Nothing
+	-- applies it today.
 	return model
 end
 

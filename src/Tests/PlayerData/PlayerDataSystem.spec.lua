@@ -45,6 +45,7 @@ return function()
 			expect(profile.attributes).to.equal(nil)
 			expect(profile.tier).to.equal(1)
 			expect(#profile.bloodlineIds).to.equal(0)
+			expect(next(profile.bloodlineStageProgress)).to.equal(nil)
 			expect(next(profile.artMastery)).to.equal(nil)
 			expect(profile.corruption).to.equal(0)
 			expect(profile.qiDeviationRisk).to.equal(0)
@@ -55,6 +56,8 @@ return function()
 			expect(profile.unlockedEmoteIds.VictoryPose).to.equal(nil)
 			expect(#profile.emoteLoadout).to.equal(8)
 			expect(profile.emoteLoadout[1]).to.equal("Wave")
+			expect(profile.blimpFuel.Coal).to.equal(0)
+			expect(profile.blimpFuel.Water).to.equal(0)
 			expect(next(profile.settings.Keybinds)).to.equal(nil)
 			expect(next(profile.settings.GamepadKeybinds)).to.equal(nil)
 			expect(profile.settings.Autorun).to.equal(false)
@@ -184,11 +187,72 @@ return function()
 			expect(profile.settings.Comfort.FieldOfViewEffects).to.equal(false)
 		end)
 
-		-- The full walk, not just the one new step: MigrateRecord chains Migrations[1..5], and a v1
+		it("migrates a pre-Bloodline v6 record, backfilling an empty bloodlineStageProgress", function()
+			-- Empty, not fabricated from bloodlineIds: an existing player has awakened no bloodline any
+			-- differently than a brand-new one has, the same "empty is honest" reasoning Migrations[3]'s
+			-- own equippedArts backfill already uses.
+			local raw = {
+				SchemaVersion = 6,
+				Profile = {
+					tier = 5,
+					bloodlineIds = { "some-bloodline" },
+				},
+			}
+			local migrated = PlayerDataSystem.MigrateRecord(raw)
+			local profile = migrated.Profile :: any
+
+			expect(migrated.SchemaVersion).to.equal(CURRENT_SCHEMA)
+			expect(profile.bloodlineStageProgress).never.to.equal(nil)
+			expect(next(profile.bloodlineStageProgress)).to.equal(nil)
+			-- The pre-existing bloodline must survive the step untouched.
+			expect(profile.bloodlineIds[1]).to.equal("some-bloodline")
+		end)
+
+		it("does not overwrite an already-present bloodlineStageProgress on a v6 record", function()
+			local raw = {
+				SchemaVersion = 6,
+				Profile = { tier = 2, bloodlineStageProgress = { ["kept-bloodline"] = 3 } },
+			}
+			local migrated = PlayerDataSystem.MigrateRecord(raw)
+			local profile = migrated.Profile :: any
+
+			expect(profile.bloodlineStageProgress["kept-bloodline"]).to.equal(3)
+		end)
+
+		it("migrates a pre-Blimp-Fuel v8 record to v9, backfilling an empty blimpFuel", function()
+			-- Empty, matching CreateDefaultProfile's own starting default -- an existing player has
+			-- gathered no fuel any differently than a brand-new one has, the same "empty is honest"
+			-- reasoning Migrations[3]/[6]'s own backfills already use.
+			local raw = {
+				SchemaVersion = 8,
+				Profile = { tier = 5 },
+			}
+			local migrated = PlayerDataSystem.MigrateRecord(raw)
+			local profile = migrated.Profile :: any
+
+			expect(migrated.SchemaVersion).to.equal(CURRENT_SCHEMA)
+			expect(profile.blimpFuel).never.to.equal(nil)
+			expect(profile.blimpFuel.Coal).to.equal(0)
+			expect(profile.blimpFuel.Water).to.equal(0)
+		end)
+
+		it("does not overwrite an already-present blimpFuel field on a v8 record", function()
+			local raw = {
+				SchemaVersion = 8,
+				Profile = { tier = 2, blimpFuel = { Coal = 30, Water = 60 } },
+			}
+			local migrated = PlayerDataSystem.MigrateRecord(raw)
+			local profile = migrated.Profile :: any
+
+			expect(profile.blimpFuel.Coal).to.equal(30)
+			expect(profile.blimpFuel.Water).to.equal(60)
+		end)
+
+		-- The full walk, not just the one new step: MigrateRecord chains Migrations[1..8], and a v1
 		-- record is the oldest thing that can still be sitting in the DataStore. A migration that works
-		-- from v5 but breaks the chain from v1 would only be discovered by a player who last logged in
+		-- from v8 but breaks the chain from v1 would only be discovered by a player who last logged in
 		-- before any of this existed.
-		it("walks a v1 record all the way forward, arriving with both new settings blocks", function()
+		it("walks a v1 record all the way forward, arriving with every backfilled field", function()
 			local raw = {
 				SchemaVersion = 1,
 				Profile = { tier = 1 },
@@ -201,6 +265,10 @@ return function()
 			expect(profile.settings.Parkour).never.to.equal(nil)
 			expect(profile.settings.Comfort).never.to.equal(nil)
 			expect(profile.settings.Comfort.CameraShake).to.equal(true)
+			expect(profile.bloodlineStageProgress).never.to.equal(nil)
+			expect(profile.blimpFuel).never.to.equal(nil)
+			expect(profile.blimpFuel.Coal).to.equal(0)
+			expect(profile.blimpFuel.Water).to.equal(0)
 		end)
 	end)
 
@@ -349,6 +417,7 @@ return function()
 		local function makeProfile(): PlayerProfile
 			local profile = PlayerDataSystem.CreateDefaultProfile(999)
 			profile.bloodlineIds = { "bloodline-a" }
+			profile.bloodlineStageProgress = { ["bloodline-a"] = 1 }
 			profile.artMastery = { ["art-a"] = 3 }
 			return profile
 		end
@@ -375,6 +444,17 @@ return function()
 
 			expect(#copy.bloodlineIds).to.equal(2)
 			expect(#original.bloodlineIds).to.equal(1)
+		end)
+
+		it("mutating the copy's bloodlineStageProgress never affects the original", function()
+			local original = makeProfile()
+			local copy = PlayerDataSystem.CopyProfile(original)
+
+			copy.bloodlineStageProgress["bloodline-a"] = 99
+			copy.bloodlineStageProgress["bloodline-b"] = 1
+
+			expect(original.bloodlineStageProgress["bloodline-a"]).to.equal(1)
+			expect(original.bloodlineStageProgress["bloodline-b"]).to.equal(nil)
 		end)
 
 		it("mutating the copy's artMastery never affects the original", function()
@@ -417,6 +497,7 @@ return function()
 			}
 			original.tier = 4
 			original.bloodlineIds = { "bl-1", "bl-2" }
+			original.bloodlineStageProgress = { ["bl-1"] = 2 }
 			original.artMastery = { ["art-1"] = 7 }
 			original.corruption = 15
 			original.qiDeviationRisk = 0.5
@@ -424,6 +505,7 @@ return function()
 			original.hasAscended = true
 			original.unlockedEmoteIds = { Wave = true, VictoryPose = true }
 			original.emoteLoadout = { "Wave", "VictoryPose" }
+			original.blimpFuel = { Coal = 40, Water = 75 }
 			original.settings.Keybinds.Dash = { KeyCode = Enum.KeyCode.E }
 			original.settings.GamepadKeybinds.BasicAttack = { KeyCode = Enum.KeyCode.ButtonX }
 			original.settings.Autorun = true
@@ -440,6 +522,7 @@ return function()
 			expect((decodedProfile.attributes :: any).Might).to.equal(13)
 			expect(decodedProfile.tier).to.equal(4)
 			expect(#decodedProfile.bloodlineIds).to.equal(2)
+			expect(decodedProfile.bloodlineStageProgress["bl-1"]).to.equal(2)
 			expect(decodedProfile.artMastery["art-1"]).to.equal(7)
 			expect(decodedProfile.corruption).to.equal(15)
 			expect(decodedProfile.qiDeviationRisk).to.equal(0.5)
@@ -449,6 +532,8 @@ return function()
 			expect(decodedProfile.unlockedEmoteIds.VictoryPose).to.equal(true)
 			expect(#decodedProfile.emoteLoadout).to.equal(2)
 			expect(decodedProfile.emoteLoadout[1]).to.equal("Wave")
+			expect(decodedProfile.blimpFuel.Coal).to.equal(40)
+			expect(decodedProfile.blimpFuel.Water).to.equal(75)
 			expect(decodedProfile.settings.Keybinds.Dash.KeyCode).to.equal(Enum.KeyCode.E)
 			expect(decodedProfile.settings.GamepadKeybinds.BasicAttack.KeyCode).to.equal(Enum.KeyCode.ButtonX)
 			expect(decodedProfile.settings.Autorun).to.equal(true)
@@ -644,6 +729,9 @@ return function()
 			expect(profile.corruption).to.equal(0)
 			expect(profile.hasAscended).to.equal(false)
 			expect(#profile.bloodlineIds).to.equal(0)
+			expect(next(profile.bloodlineStageProgress)).to.equal(nil)
+			expect(profile.blimpFuel.Coal).to.equal(0)
+			expect(profile.blimpFuel.Water).to.equal(0)
 		end)
 
 		it("filters out non-string entries from a corrupt bloodlineIds array", function()
@@ -659,6 +747,31 @@ return function()
 			local profile = decoded :: PlayerProfile
 			expect(profile.artMastery["good"]).to.equal(5)
 			expect(profile.artMastery["bad"]).to.equal(nil)
+		end)
+
+		it("filters out malformed entries from a corrupt bloodlineStageProgress table", function()
+			local decoded = PlayerDataSystem.DecodeProfile(1, {
+				bloodlineStageProgress = { ["good-bloodline"] = 2, ["bad-bloodline"] = "not-a-number", [42] = 1 },
+			})
+			local profile = decoded :: PlayerProfile
+			expect(profile.bloodlineStageProgress["good-bloodline"]).to.equal(2)
+			expect(profile.bloodlineStageProgress["bad-bloodline"]).to.equal(nil)
+		end)
+
+		it("clamps a negative carried amount to 0 rather than keeping it", function()
+			-- A player cannot legitimately owe the game coal -- a hand-edited or corrupted record must
+			-- not be able to express a negative carried amount.
+			local decoded = PlayerDataSystem.DecodeProfile(1, { blimpFuel = { Coal = -5, Water = 12 } })
+			local profile = decoded :: PlayerProfile
+			expect(profile.blimpFuel.Coal).to.equal(0)
+			expect(profile.blimpFuel.Water).to.equal(12)
+		end)
+
+		it("defaults a non-number or missing blimpFuel field to 0 independently", function()
+			local decoded = PlayerDataSystem.DecodeProfile(1, { blimpFuel = { Coal = "lots", Water = 8 } })
+			local profile = decoded :: PlayerProfile
+			expect(profile.blimpFuel.Coal).to.equal(0)
+			expect(profile.blimpFuel.Water).to.equal(8)
 		end)
 	end)
 

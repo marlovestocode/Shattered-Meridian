@@ -44,6 +44,16 @@
 	the same way it already turns Kind into "which shake preset." One place answering what an outcome
 	MEANS, not three FX modules each re-deriving it.
 
+	PlayImpact is handed payload.Defender along with the outcome, because a Blocked/Parried result is
+	made by a WEAPON and should sound like the specific one that made it -- CombatAudio resolves the
+	defender's drawn weapon and reaches for its own SFX/Block or SFX/Parry, falling back to the shared
+	per-outcome stinger for a bare-handed guard or a weapon that authored none. Deliberately the
+	defender's and not the local player's: this event reaches BOTH participants (that is what Role is
+	for), so "my weapon" would be the wrong answer on the attacker's machine and the two clients would
+	hear two different swords for one clang. This module supplies the participant; deciding what to do
+	with it stays inside the audio module, the same division of labour flashFor already keeps with
+	HitFlash.
+
 	AND NOW A FOURTH: HitStop.FreezeVictimMovement, the combat hit-stop. DEFENDER-ONLY, unlike the three
 	above -- there is no attacker-side freeze wired from here (see Constants.FX.HitStop's own comment on
 	why AttackerSeconds stays orphaned). Fired for exactly the three outcomes that grant
@@ -309,7 +319,10 @@ local function onFeedback(raw: unknown): ()
 	end
 
 	shakeFor(payload)
-	CombatAudio.PlayImpact(payload.Kind)
+	-- payload.Defender, not the local character: the block/parry sound belongs to the weapon that
+	-- CAUGHT the swing, and this same event reaches the attacker's machine too -- see CombatAudio's own
+	-- header. It resolves the weapon itself; this module hands it the participant and nothing more.
+	CombatAudio.PlayImpact(payload.Kind, payload.Defender)
 	flashFor(payload)
 	freezeVictimFor(payload)
 	cancelSwingFor(payload)

@@ -20,11 +20,24 @@
 	meant to; markers and manual track bookkeeping are deliberately NOT reached for here -- the
 	manager owns the AnimationTrack and nothing outside it is supposed to touch one directly.
 
-	A PRESS PLAYS TWO CLIPS IN SEQUENCE, not one: DefenseConstants.ParryAnimationId (the swing-up,
-	whose markers separately arm the server's parry window -- entirely unaffected by this client-side
-	sequencing) plays once, then AnimationManager's OnFinished hands the layer to
-	DefenseConstants.BlockHoldAnimationId on a loop for as long as the key stays down. See
-	setBlockHeld's own comment for the two-phase claim and the guards around the handoff.
+	A PRESS PLAYS TWO CLIPS IN SEQUENCE, not one: the parry swing-up (whose markers separately arm the
+	server's parry window -- entirely unaffected by this client-side sequencing) plays once, then
+	AnimationManager's OnFinished hands the layer to the block-hold clip on a loop for as long as the
+	key stays down. See setBlockHeld's own comment for the two-phase claim and the guards around the
+	handoff.
+
+	BOTH CLIPS ARE PER-WEAPON. Which pair a press plays is resolved by
+	Shared/Defense/WeaponDefenseAnimations.lua off the drawn weapon's own Animations/PARRY and
+	Animations/BLOCK folders, falling back to DefenseConstants.ParryAnimationId/BlockHoldAnimationId
+	when a weapon authors neither (see that module's header on why it falls back where the IDLE slot's
+	equivalent deliberately does not). The drawn weapon comes from this module's own
+	Weapon_InventoryChanged listener -- see setArmedWeapon and onInventoryChanged below.
+
+	THE SERVER RESOLVES THE PARRY CLIP SEPARATELY AND MUST AGREE WITH THIS MODULE ABOUT IT. A parry
+	window is the ParryStart/ParryClose markers on the parry clip, so a per-weapon parry clip is a
+	per-weapon parry TIMING -- Server/Main.server.lua wires AttackRequestSystem.OnWeaponChanged into
+	DefenseSystem.SetParryAnimation through the same WeaponDefenseAnimations.GetParry this module
+	calls. Two callers of one resolver, deliberately, rather than the server trusting a client-sent id.
 
 	BLOCK AND PARRY SHARE ONE INPUT, as Constants.Keybinds.Defaults.Block has documented since before
 	either existed: a press opens a short parry window, holding past it is a plain block. There is no
@@ -36,7 +49,6 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local UserInputService = game:GetService("UserInputService")
 
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
 local Constants = require(ReplicatedStorage.Shared.Constants)
@@ -44,8 +56,11 @@ local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstan
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
+local WeaponDefenseAnimations = require(ReplicatedStorage.Shared.Defense.WeaponDefenseAnimations)
 
-local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local CombatAnimator = require(script.Parent.Parent.FX.CombatAnimator)
+local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 
 local logger = Logger.scope("DefenseClient")
 
@@ -79,23 +94,111 @@ local manager = AnimationManager.new({ Name = "DefenseClient" })
 -- ParryAnimationId/BlockHoldAnimationId change (or land blank, pre-asset) with nothing here needing
 -- to change. Two clips, not one: BLOCK_CLIP is the parry swing-up (plays once), BLOCK_HOLD_CLIP is
 -- the held-guard loop it hands off to -- see setBlockHeld below for the sequencing.
+--
+-- THESE TWO ARE THE BASELINE PAIR, NOT NECESSARILY WHAT PLAYS. A drawn weapon that authors its own
+-- Animations/PARRY and Animations/BLOCK clips overrides them per weapon -- see setArmedWeapon below,
+-- which is what actually decides which key each claim names. Resolved through
+-- Shared/Defense/WeaponDefenseAnimations.Get* rather than read straight off DefenseConstants so the
+-- baseline goes through the SAME normalisation a per-weapon override does; a bare digits-only id in
+-- either place would otherwise resolve here and not there (or the reverse), which is a difference
+-- nothing would report.
 local BLOCK_CLIP = "Parry"
 local BLOCK_HOLD_CLIP = "BlockHold"
-manager:Register(BLOCK_CLIP, DefenseConstants.ParryAnimationId)
-manager:Register(BLOCK_HOLD_CLIP, DefenseConstants.BlockHoldAnimationId)
+local baselineParryId = WeaponDefenseAnimations.GetParry(nil)
+local baselineBlockId = WeaponDefenseAnimations.GetBlock(nil)
+manager:Register(BLOCK_CLIP, baselineParryId)
+manager:Register(BLOCK_HOLD_CLIP, baselineBlockId)
+
+-- The two keys the NEXT press will claim. Start as the baseline pair and are re-pointed by
+-- setArmedWeapon on every draw/sheathe/select push.
+--
+-- PER-WEAPON KEYS, NOT ONE KEY RE-REGISTERED, and that is a correctness requirement rather than a
+-- style choice: AnimationManager caches loaded tracks by CLIP KEY for the life of a bind (its own
+-- getTrack), so re-pointing a single "Parry" key at a second weapon's asset id would leave the first
+-- weapon's track cached under it and the wrong clip playing until the next respawn. A weapon whose
+-- clip resolves to the baseline anyway keeps the baseline key rather than getting a redundant second
+-- registration of the same id, which would load and hold a duplicate AnimationTrack per weapon.
+--
+-- The one thing this does NOT survive is an author editing a weapon's Animation.AnimationId LIVE in
+-- Studio mid-session: the registry updates, the already-loaded track under that key does not. Redraw
+-- after a respawn to see the change. Every other animation path in this codebase has the same
+-- property, and paying a per-press cache bust to close it is the wrong trade for an authoring-only nit.
+local parryClipKey = BLOCK_CLIP
+local blockClipKey = BLOCK_HOLD_CLIP
 
 local DEFENSE_LAYER = "Defense"
 local BLOCK_SOURCE = "Block"
+-- Client/FX/CombatAnimator.lua's own key for this source in its activeActionSources set -- see
+-- CombatAnimator.SetActionAnimationActive's header for why the block/parry hold has to report itself
+-- there the same way AttackInputClient's swing claim does.
+local ACTION_SOURCE = "Defense"
 
 -- Client/Loading/AssetPreloader.lua's manifest -- see that module's header: "an asset missing from
 -- here doesn't fail loudly, it just cold-loads at first use," which for a block/parry animation means
--- the FIRST press of a session eating a hitch instead of the loading screen. Returns raw content ids,
--- the same contract Client/Parkour/ParkourAnimator.lua's own GetPreloadInstances uses (see that
--- function's own note in AssetPreloader.lua for why some providers hand back ids instead of Animation
--- instances) -- AnimationManager pools its own template Instances internally and does not hand them
--- out, so ids are the only thing this module has to preload with.
+-- the FIRST press of a session eating a hitch instead of the loading screen. Returns raw content ids
+-- despite the name, the same contract Client/Parkour/ParkourAnimator.lua's own GetPreloadInstances
+-- uses -- AnimationManager pools its own template Instances internally and does not hand them out,
+-- so ids are the only thing this module has to preload with. AssetPreloader wraps each one in a
+-- throwaway Animation before preloading, because PreloadAsync rejects a bare content id outright;
+-- see animationFor's header there.
 function DefenseClient.GetPreloadInstances(): { string }
 	return manager:GetPreloadIds()
+end
+
+-- Weapon -------------------------------------------------------------------------------------------
+
+-- Points parryClipKey/blockClipKey at whichever pair `weaponId` should defend with, registering the
+-- weapon's own clips under per-weapon keys the first time it is seen. See those two fields' own header
+-- for why a per-weapon key rather than one re-registered key.
+--
+-- A SHEATHED WEAPON TAKES THE BASELINE, which is why `drawn` is a parameter rather than this reading
+-- Selected alone: an unarmed player still blocks, and blocking bare-handed with a sword's guard pose
+-- would be a pose with no sword in it. Same rule the server applies from its own side --
+-- AttackRequestSystem reports a nil weapon on sheathe, and WeaponDefenseAnimations resolves nil to the
+-- baseline.
+--
+-- DOES NOT TOUCH A CLAIM IN FLIGHT. A swap mid-block re-points the keys and nothing else; the parry
+-- clip already playing plays out, and claimBlockHold's own deferred read of blockClipKey is what picks
+-- the new weapon up at the handoff. Re-claiming here instead would restart the parry swing-up from
+-- frame zero on a guard that is already up -- a fresh parry window's worth of animation for an input
+-- the player never made.
+-- One slot's key: the shared baseline key when this weapon resolves to the baseline clip anyway (so
+-- the two never get a duplicate registration of the same id), a per-weapon key otherwise.
+local function clipKeyFor(baselineKey: string, armed: string?, resolved: string, baselineId: string): string
+	if armed == nil or resolved == baselineId then
+		return baselineKey
+	end
+	local key = `{baselineKey}:{armed}`
+	manager:Register(key, resolved)
+	return key
+end
+
+local function setArmedWeapon(weaponId: string?, drawn: boolean): ()
+	local armed = if drawn then weaponId else nil
+	parryClipKey = clipKeyFor(BLOCK_CLIP, armed, WeaponDefenseAnimations.GetParry(armed), baselineParryId)
+	blockClipKey = clipKeyFor(BLOCK_HOLD_CLIP, armed, WeaponDefenseAnimations.GetBlock(armed), baselineBlockId)
+end
+
+-- Feeds setArmedWeapon straight off the server's own inventory push. Read here directly rather than
+-- through Client/Combat/WeaponInventoryClient.lua or by borrowing CombatAnimator's copy, for the
+-- reason CombatAnimator's own identical listener records: that module documents itself as the whole
+-- module for driving the inventory HUD and nothing else, and Roblox remotes support any number of
+-- independent listeners for free.
+--
+-- THIS REMOTE, NOT AttackConstants' WeaponChanged, and the difference is not cosmetic: the combat
+-- layer's WeaponChanged remote fires only from handleSwap (the swap key), NOT from
+-- AttackRequestSystem.SetWeapon (draw/sheathe) and NOT from bindCharacter (spawn) -- so a client
+-- listening to it would miss the two events that matter most here. Weapon_InventoryChanged is
+-- re-pushed on every pickup/draw/sheathe/select and on every bind, which is the complete signal.
+local function onInventoryChanged(raw: unknown): ()
+	if typeof(raw) ~= "table" then
+		return
+	end
+	local payload = raw :: WeaponConstants.InventoryPayload
+	if typeof(payload.Drawn) ~= "boolean" then
+		return
+	end
+	setArmedWeapon(payload.Selected, payload.Drawn)
 end
 
 -- Input --------------------------------------------------------------------------------------------
@@ -115,12 +218,20 @@ end
 local function claimBlockHold(): ()
 	local fadeSeconds = DefenseConstants.Presentation.BlockAnimationFadeSeconds
 	manager:SetClaim(DEFENSE_LAYER, BLOCK_SOURCE, {
-		Clip = BLOCK_HOLD_CLIP,
+		-- Read at claim time, not captured when the press started: a weapon swapped DURING a held
+		-- guard should hand off into the weapon the player is actually holding now.
+		Clip = blockClipKey,
 		Looped = true,
 		Priority = Enum.AnimationPriority.Action,
 		FadeIn = fadeSeconds,
 		FadeOut = fadeSeconds,
+		-- See ACTION_SOURCE's own header -- this is the second of the two-phase claim's clips, so it
+		-- needs the same stand-down-CombatAnimator's-armed-idle wiring the first phase gets below.
+		OnFinished = function(_clip: string, _reason: AnimationManager.FinishReason)
+			CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, false)
+		end,
 	})
+	CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, manager:GetActiveClip(DEFENSE_LAYER) ~= nil)
 end
 
 local function setBlockHeld(held: boolean): ()
@@ -153,12 +264,17 @@ local function setBlockHeld(held: boolean): ()
 		BLOCK_SOURCE,
 		if held
 			then {
-				Clip = BLOCK_CLIP,
+				Clip = parryClipKey,
 				Looped = false,
 				Priority = Enum.AnimationPriority.Action,
 				FadeIn = fadeSeconds,
 				FadeOut = fadeSeconds,
 				OnFinished = function(_clip: string, reason: AnimationManager.FinishReason)
+					-- Cleared unconditionally, for every reason -- see ACTION_SOURCE's own header. If
+					-- this chains into claimBlockHold below, that call re-asserts true for the second
+					-- phase; if it doesn't, nothing is holding Enum.AnimationPriority.Action on this
+					-- layer any more and the armed-idle loop is correctly free to resume.
+					CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, false)
 					if reason == "Completed" and blockHeld then
 						claimBlockHold()
 					end
@@ -166,6 +282,12 @@ local function setBlockHeld(held: boolean): ()
 			}
 			else nil
 	)
+	if held then
+		-- Queried rather than assumed true -- see AttackInputClient.playSwing's identical comment on
+		-- why a claim whose track failed to load (retiring synchronously inside SetClaim above, before
+		-- this line runs) must not be re-asserted active.
+		CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, manager:GetActiveClip(DEFENSE_LAYER) ~= nil)
+	end
 end
 
 -- Whether the movement framework has this body in a committed traversal. Mirrors the identical gate
@@ -174,31 +296,6 @@ end
 local function parkourOwnsBody(): boolean
 	local currentHumanoid = boundHumanoid
 	return currentHumanoid ~= nil and currentHumanoid:GetAttribute(Constants.Attributes.ParkourActionOwned) == true
-end
-
-local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
-	if gameProcessed then
-		return
-	end
-	if KeybindManager.Matches("Block", input) then
-		-- Only the PRESS is gated. The release below is not, for the same reason it is not gated on
-		-- gameProcessed and for the same reason the server refuses only a Press: a guard already up when
-		-- a traversal started must still be able to come down, and a gate that can strand it raised is
-		-- worse than the one it closes.
-		if parkourOwnsBody() then
-			return
-		end
-		setBlockHeld(true)
-	end
-end
-
--- Deliberately NOT gated on gameProcessed, unlike the press above. A press that a text box swallowed
--- should not raise the guard; a RELEASE that one swallowed must still lower it, or the character is
--- left blocking with nothing held.
-local function onInputEnded(input: InputObject): ()
-	if KeybindManager.Matches("Block", input) then
-		setBlockHeld(false)
-	end
 end
 
 -- Presentation --------------------------------------------------------------------------------------
@@ -292,8 +389,36 @@ function DefenseClient.Start(): ()
 	local stateChanged = NetworkBridge.GetRemoteEvent(DefenseConstants.Network.RemoteNames.StateChanged)
 	stateChanged.OnClientEvent:Connect(onStateChanged)
 
-	UserInputService.InputBegan:Connect(onInputBegan)
-	UserInputService.InputEnded:Connect(onInputEnded)
+	-- Connected in Start() rather than at module load, for the reason CombatAnimator's own listener
+	-- has to task.spawn instead: NetworkBridge.GetRemoteEvent WaitForChild's the first time a name is
+	-- resolved, and a blocking wait at require time would stall the client boot behind this one remote
+	-- existing. This module already has a Start() to hang it off, so no task.spawn is needed here.
+	local inventoryChanged = NetworkBridge.GetRemoteEvent(WeaponConstants.Network.RemoteNames.InventoryChanged)
+	inventoryChanged.OnClientEvent:Connect(onInventoryChanged)
+
+	-- Bound through InputRouter's "Gameplay" layer, which now owns both the gameProcessed check and
+	-- the Constants.Attributes.UiModalOpen gate this used to hand-roll -- right-clicking inside your
+	-- own character sheet should not raise your guard any more than left-clicking there should throw
+	-- a punch, the same reasoning Client/Combat/AttackInputClient.lua's identical gate documents for
+	-- itself. parkourOwnsBody() stays here, inline, because it is a parkour-ownership question, not a
+	-- generic modal/gameProcessed one -- InputRouter has no opinion about it.
+	--
+	-- The Ended callback is unconditional on purpose, and is exactly what InputRouter guarantees for
+	-- every "Gameplay" binding regardless of gameProcessed or the modal Attribute at release time: a
+	-- guard already up when a traversal started -- or when a menu opened over it -- must still be
+	-- able to come down, and a gate that can strand it raised is worse than the one it closes.
+	InputRouter.Bind("Block", {
+		Layer = "Gameplay",
+		Began = function()
+			if parkourOwnsBody() then
+				return
+			end
+			setBlockHeld(true)
+		end,
+		Ended = function()
+			setBlockHeld(false)
+		end,
+	})
 
 	-- See Shared/PlayerLifecycle.lua: the Humanoid wait, the boot-thread task.spawn and the
 	-- post-yield "is this still the current character" re-check are its job now, not this file's.

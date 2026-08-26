@@ -25,6 +25,16 @@
 	nothing here ever crosses NetworkBridge); wiring cross-session persistence is a future
 	PlayerDataSystem-adjacent concern, not this module's job.
 
+	ALSO OWNS HOW A BINDING IS SPELLED (Describe) AND WHEN ONE CHANGES (OnChanged), because a legend
+	that names a rebindable key is only correct if both exist. Describe was a private formatKeybind in
+	Screens/Settings/KeybindsTab.lua, along with the mouse-button label map it needs -- fine while the
+	rebind screen was the only surface that ever printed a key, and wrong the moment a second one did
+	(Components/KeyLegend.lua under the hotbar). The map in particular has no business living in a tab
+	file: "MouseButton1 is spelled Mouse 1" is a fact about this module's data, not about that screen.
+	OnChanged closes the other half -- without it, a legend built at mount silently keeps naming the
+	key the player just rebound away from, which is worse than no legend at all. Both Rebind entry
+	points and both reset entry points fire it.
+
 	Does not own: what an action DOES once its key is pressed (CombatClient.lua/DevMenuClient.lua
 	own that), or any gameplay validation -- this module only tracks key-to-action assignment.
 
@@ -55,9 +65,27 @@ local currentBindings: { [Types.KeybindAction]: Types.Keybind } = table.clone(Co
 local currentGamepadBindings: { [Types.KeybindAction]: Types.Keybind? } =
 	table.clone(Constants.Keybinds.GamepadDefaults)
 
+-- Subscribers to any binding change, in either device category -- see file header.
+local changedListeners: { () -> () } = {}
+
+local function notifyChanged(): ()
+	for _, listener in ipairs(changedListeners) do
+		listener()
+	end
+end
+
 local function isSameKeybind(a: Types.Keybind, b: Types.Keybind): boolean
 	return a.KeyCode == b.KeyCode and a.UserInputType == b.UserInputType
 end
+
+-- Enum.UserInputType names that read as machine identifiers rather than as something a player would
+-- call the button. Everything not listed falls through to its own Name, which is already right
+-- (KeyCode.Name gives "Q", "LeftShift", "F5").
+local INPUT_TYPE_LABELS: { [string]: string } = {
+	MouseButton1 = "Mouse 1",
+	MouseButton2 = "Mouse 2",
+	MouseButton3 = "Mouse 3",
+}
 
 -- Whether `input` matches `keybind` -- shared by Matches() below for both device categories. Safe
 -- to call with keybind = nil (an action with no binding in that category never matches).
@@ -139,6 +167,7 @@ function KeybindManager.Rebind(action: Types.KeybindAction, newKeybind: Types.Ke
 
 	currentBindings[action] = newKeybind
 	logger:info("Keybind rebound", { action = action })
+	notifyChanged()
 	return true
 end
 
@@ -158,6 +187,7 @@ function KeybindManager.RebindGamepad(action: Types.KeybindAction, newKeybind: T
 
 	currentGamepadBindings[action] = newKeybind
 	logger:info("Gamepad keybind rebound", { action = action })
+	notifyChanged()
 	return true
 end
 
@@ -167,12 +197,49 @@ end
 function KeybindManager.ResetToDefaults(): ()
 	currentBindings = table.clone(Constants.Keybinds.Defaults)
 	logger:info("Keybinds reset to defaults")
+	notifyChanged()
 end
 
 -- Same as ResetToDefaults above, for the gamepad map.
 function KeybindManager.ResetGamepadToDefaults(): ()
 	currentGamepadBindings = table.clone(Constants.Keybinds.GamepadDefaults)
 	logger:info("Gamepad keybinds reset to defaults")
+	notifyChanged()
+end
+
+-- How a binding is SPELLED for a player to read -- on a rebind row, a key cap, a control legend.
+-- Safe to call with nil (an action with no binding in the requested category), which is the whole
+-- reason it takes a Keybind? rather than an action: the gamepad map is honestly partial.
+function KeybindManager.Describe(keybind: Types.Keybind?): string
+	if not keybind then
+		return "Unbound"
+	end
+	if keybind.KeyCode then
+		return keybind.KeyCode.Name
+	end
+	if keybind.UserInputType then
+		local name = keybind.UserInputType.Name
+		return INPUT_TYPE_LABELS[name] or name
+	end
+	return "Unbound"
+end
+
+-- Registers `listener` to run after any binding changes, in either device category. Fires once per
+-- change, with no arguments: every consumer so far re-reads whichever bindings it cares about rather
+-- than diffing one, and passing an action would tempt a listener into tracking a subset and missing
+-- ResetToDefaults, which changes all of them at once.
+--
+-- Returns an unsubscribe function. Same shape and same reasoning as Client/Combat/HotbarBindings.lua's
+-- own OnChanged: today's consumers subscribe once for the life of the client session and never
+-- disconnect, but it is returned anyway rather than assumed away.
+function KeybindManager.OnChanged(listener: () -> ()): () -> ()
+	table.insert(changedListeners, listener)
+	return function()
+		local index = table.find(changedListeners, listener)
+		if index then
+			table.remove(changedListeners, index)
+		end
+	end
 end
 
 return KeybindManager

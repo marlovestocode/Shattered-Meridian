@@ -2,28 +2,37 @@
 --[[
 	Menus/init.lua
 
-	Owns: the character menu -- the player's own hub, on M. Four tabs: Character (the sheet:
-	identity, tier progress, attributes, standing), Arts (the art trees, unlocking, and equipping to
-	hotbar slots), Emotes (the wheel loadout), and Bounties (the Notoriety board). Plus the open/
-	closed state, the tab selection, and every Value/signal the tab modules render from.
+	Owns: the character menu -- the player's own hub, on M. A pinned identity rail plus four tabs:
+	Character (the sheet: vitals, condition, attributes, derived figures), Arts (the art trees,
+	unlocking, and equipping to hotbar slots), Emotes (the wheel loadout), and Bounties (the Notoriety
+	board). Plus the open/closed state, the tab selection, and every Value/signal the tab modules
+	render from.
 
-	WHAT THIS REPLACED, and why the shape changed. This screen used to be a single unnamed panel
-	whose only content was the bounty board, opened by a raw UserInputService check hard-coded to M
-	inside this file. Both of those were called out here as known gaps -- the header said routing the
-	key through Types.KeybindAction "IS still worth doing... and it's the next step here", and the
-	Menus category in ui-ux-philosophy.md listed inventory/progression/loadout panels as unbuildable
-	because the Systems behind them were empty Init()s. ArtSystem, TierSystem, QiSystem,
-	MeridianSystem, EmoteSystem and CharacterSheetSystem are all real now, so the panels have real
-	data, and the keybind now goes through KeybindManager like every other action
-	(Types.KeybindAction's "CharacterMenuToggle").
+	THE LAYOUT IS A THREE-BAND FRAME, NOT A STACK OF CARDS, and that frame is now
+	Components/ScreenFrame.lua rather than 120 lines of bands in this file. It was written here first,
+	for this screen, and the argument for it (bands bleeding to the panel edge, nothing inside a band
+	drawing a second box, no title bar because the tab strip says louder what the panel is) moved into
+	that component's own header along with the code -- because the argument was never specific to the
+	character menu, and three other screens were still each hand-rolling the parts of it they had
+	copied. What is left here is what is actually this screen's: which tabs exist, what the body is,
+	and every Value the tabs render from.
+
+	THE BODY IS A ROW OF TWO, and it is the one thing about this screen's shape that no other screen
+	shares: a fixed identity rail, then whatever is left for the selected tab. "Whatever is left" is
+	Stack.Fill rather than `CONTENT_WIDTH = ROOT_WIDTH - RAIL_WIDTH` -- see Components/Stack.lua's
+	header on why a computed remainder is a claim about a sibling's size and a flex item is not.
+
+	The rail is pinned rather than being a fifth tab because everything on it is what you are holding
+	in your head while reading any of the four -- an art's tier gate means nothing without your tier
+	beside it. See IdentityRail.lua's own header.
 
 	SCREEN EXPOSES STATE AND SIGNALS; THE CLIENT MODULE DRIVES IT. Every action that leaves this
-	client (unlock an art, equip an art, assign an emote slot) fires a BindableEvent rather than
-	calling NetworkBridge here, and every piece of server-owned state the tabs render (Sheet,
-	ArtTrees, ArtMastery, EquippedArts) is a Fusion.Value owned by this Mount but written to
-	exclusively from outside by Client/CharacterMenu/CharacterMenuClient.lua -- the same boundary
-	Screens/Settings/init.lua and Screens/DevMenu/init.lua already hold. The close button is the one
-	exception, exactly like theirs: IsOpen is owned here, so closing just sets it.
+	client (unlock an art, equip an art, assign an emote slot, reroll a bloodline) fires a
+	BindableEvent rather than calling NetworkBridge here, and every piece of server-owned state the
+	tabs render (Sheet, ArtTrees, ArtMastery, EquippedArts) is a Fusion.Value owned by this Mount but
+	written to exclusively from outside by Client/CharacterMenu/CharacterMenuClient.lua -- the same
+	boundary Screens/Settings/init.lua and Screens/DevMenu/init.lua already hold. The close button is
+	the one exception, exactly like theirs: IsOpen is owned here, so closing just sets it.
 
 	The two exceptions to "state comes from the driver" are deliberate. BountyTab.lua keeps its own
 	two remotes (see its header), and CharacterTab/EmotesTab read ClientState directly for values
@@ -40,18 +49,17 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local Tokens = require(script.Parent.Parent.Tokens)
-local ModalScreen = require(script.Parent.Parent.Components.ModalScreen)
-local Label = require(script.Parent.Parent.Components.Label)
-local Button = require(script.Parent.Parent.Components.Button)
-local Tab = require(script.Parent.Parent.Components.Tab)
+local ScreenFrame = require(script.Parent.Parent.Components.ScreenFrame)
+local Stack = require(script.Parent.Parent.Components.Stack)
+local Inset = require(script.Parent.Parent.Components.Inset)
 local ClientStateModule = require(script.Parent.Parent.State.ClientState)
 
+local IdentityRail = require(script.IdentityRail)
 local CharacterTab = require(script.CharacterTab)
 local ArtsTab = require(script.ArtsTab)
 local EmotesTab = require(script.EmotesTab)
 local BountyTab = require(script.BountyTab)
 
-local Children = Fusion.Children
 local peek = Fusion.peek
 
 type Scope = Fusion.Scope<typeof(Fusion)>
@@ -61,11 +69,13 @@ export type MenuTabName = "Character" | "Arts" | "Emotes" | "Bounties"
 export type MenusHandle = {
 	IsOpen: Fusion.Value<boolean>,
 	-- Transient one-line result of the last action ("Art unlocked.", "Not enough Qi.") -- written by
-	-- CharacterMenuClient, which also clears it, the same shape SettingsHandle.StatusText has.
+	-- CharacterMenuClient, which also clears it, the same shape SettingsHandle.StatusText has. Lives
+	-- in the footer band, opposite the wordmark: an action's answer belongs at the frame's edge, not
+	-- inside whichever tab happened to raise it.
 	StatusText: Fusion.Value<string>,
 	-- Server-owned state, written exclusively by CharacterMenuClient (see this file's header).
 	-- Sheet is nil until the first Character_GetSheet/Character_SheetUpdated lands -- nil is a real
-	-- state the Character tab renders honestly, never a reason to invent zeros.
+	-- state the rail and the Character tab render honestly, never a reason to invent zeros.
 	Sheet: Fusion.Value<Types.CharacterSheetPayload?>,
 	ArtTrees: Fusion.Value<{ Types.ArtCatalogueTree }>,
 	ArtMastery: Fusion.Value<{ [string]: number }>,
@@ -78,28 +88,36 @@ export type MenusHandle = {
 	UnlockArtRequested: RBXScriptSignal<string>,
 	-- Fires (slot, artId) -- artId nil clears the slot.
 	EquipArtRequested: RBXScriptSignal<(number, string?)>,
+	-- Fires with no argument -- the server picks what you roll (BloodlineSystem.Spin), so there is
+	-- nothing for the client to name. Available from the identity rail at any time, unlike the
+	-- onboarding spin which is a one-shot beat in a flow that has already torn itself down.
+	RerollBloodlineRequested: RBXScriptSignal<>,
 	-- Fires (slot, emoteId).
 	EmoteSlotAssigned: RBXScriptSignal<(number, string)>,
 }
 
-local ROOT_WIDTH = 720
-local ROOT_HEIGHT = 560
-local HEADER_HEIGHT = 36
-local TAB_STRIP_HEIGHT = 36
-local STATUS_HEIGHT = 20
+-- The panel, and the one column this screen pins inside it. The band heights are
+-- Components/ScreenFrame.lua's own and are not restated here -- BodySize is a function of them, so
+-- moving a band by two pixels can no longer leave a stale sum in this file (that is exactly the
+-- failure docs/architecture/2026-08-20-ui-velocity-plan.md section 2.1 is about).
+local ROOT_WIDTH = 760
+local ROOT_HEIGHT = 620
+local RAIL_WIDTH = 244
 
--- Inner content budget: total minus UIPadding.L (top+bottom), minus the header/tab-strip/status
--- rows, minus the 3 UIListLayout gaps between header/strip/body/status -- the same "spell the math
--- out, don't guess" convention Screens/Settings/init.lua and Screens/DevMenu/init.lua both use.
-local CONTENT_WIDTH = ROOT_WIDTH - Tokens.Space.L * 2
-local CONTENT_HEIGHT = ROOT_HEIGHT
-	- Tokens.Space.L * 2
-	- HEADER_HEIGHT
-	- TAB_STRIP_HEIGHT
-	- STATUS_HEIGHT
-	- Tokens.Space.M * 3
+local BODY_WIDTH, BODY_HEIGHT = ScreenFrame.BodySize(ROOT_WIDTH, ROOT_HEIGHT)
+-- The four tab modules each take an explicit pixel Width/Height rather than sizing themselves, so
+-- these two survive the migration. They are the LAST arithmetic in this file, and they are honest
+-- arithmetic: the content column really is the body minus the rail, and a tab really does draw
+-- inside that column's own inset. What went away was the arithmetic that was a guess about a
+-- sibling's height.
+local TAB_WIDTH = BODY_WIDTH - RAIL_WIDTH - Tokens.Space.L * 2
+local TAB_HEIGHT = BODY_HEIGHT - Tokens.Space.M - Tokens.Space.L
 
-local TAB_NAMES: { MenuTabName } = { "Character", "Arts", "Emotes", "Bounties" }
+-- Typed as plain strings rather than as { MenuTabName }: Components/ScreenFrame.lua's tab state is
+-- keyed by string (it has no way to know any one screen's tab union), and Luau treats array element
+-- types as invariant, so a cast at the call site would be the thing that had to be written instead.
+-- MenuTabName stays exported -- it is what the handle's consumers name a tab with.
+local TAB_NAMES: { string } = { "Character", "Arts", "Emotes", "Bounties" }
 
 local Menus = {}
 
@@ -110,12 +128,17 @@ function Menus.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientStat
 	local artTrees = scope:Value({} :: { Types.ArtCatalogueTree })
 	local artMastery = scope:Value({} :: { [string]: number })
 	local equippedArts = scope:Value({} :: { [number]: string })
-	local selectedTab = scope:Value("Character" :: MenuTabName)
+	-- Owns which tab is showing AND the one shared Computed per tab that both the strip button and
+	-- the tab body read -- see Components/ScreenFrame.lua's header on why those must be the same
+	-- object rather than two Computeds asking the same question independently.
+	local tabs = ScreenFrame.NewTabState(scope, TAB_NAMES)
 
 	local openedEvent = Instance.new("BindableEvent")
 	local unlockArtEvent = Instance.new("BindableEvent")
 	local equipArtEvent = Instance.new("BindableEvent")
 	local emoteSlotEvent = Instance.new("BindableEvent")
+	local rerollBloodlineEvent = Instance.new("BindableEvent")
+	table.insert(scope, rerollBloodlineEvent)
 
 	scope:Observer(isOpen):onChange(function()
 		if peek(isOpen) then
@@ -123,55 +146,20 @@ function Menus.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientStat
 		end
 	end)
 
-	-- One Computed per tab, built once and shared by BOTH that tab's strip button (its Selected) and
-	-- its body (its Visible) -- rather than each asking the question separately, which would leave two
-	-- independent Computeds that could in principle disagree about which tab is showing.
-	local tabSelected: { [MenuTabName]: Fusion.Computed<boolean> } = {}
-	for _, name in ipairs(TAB_NAMES) do
-		tabSelected[name] = scope:Computed(function(use)
-			return use(selectedTab) == name
-		end)
-	end
-
-	local tabButtons: { Instance } = {
-		scope:New "UIListLayout" {
-			FillDirection = Enum.FillDirection.Horizontal,
-			Padding = UDim.new(0, Tokens.Space.S),
-			SortOrder = Enum.SortOrder.LayoutOrder,
-		},
-	}
-	for index, name in ipairs(TAB_NAMES) do
-		table.insert(
-			tabButtons,
-			Tab(scope, {
-				Text = name,
-				-- Static text, so this is one of the few Tab call sites that can safely take the
-				-- tracked-caps treatment -- see Tab.lua's own header on why it stays opt-in.
-				TrackedCaps = true,
-				Size = UDim2.new(1 / #TAB_NAMES, -Tokens.Space.S, 0, TAB_STRIP_HEIGHT),
-				LayoutOrder = index,
-				Selected = tabSelected[name],
-				OnActivated = function()
-					selectedTab:set(name)
-				end,
-			})
-		)
-	end
-
 	local characterTab = CharacterTab(scope, {
-		Width = CONTENT_WIDTH,
-		Height = CONTENT_HEIGHT,
-		Visible = tabSelected["Character"],
-		LayoutOrder = 3,
+		Width = TAB_WIDTH,
+		Height = TAB_HEIGHT,
+		Visible = tabs.Selected["Character"],
+		LayoutOrder = 1,
 		Sheet = sheet,
 		State = clientState,
 	})
 
 	local artsTab = ArtsTab(scope, {
-		Width = CONTENT_WIDTH,
-		Height = CONTENT_HEIGHT,
-		Visible = tabSelected["Arts"],
-		LayoutOrder = 3,
+		Width = TAB_WIDTH,
+		Height = TAB_HEIGHT,
+		Visible = tabs.Selected["Arts"],
+		LayoutOrder = 2,
 		Trees = artTrees,
 		Mastery = artMastery,
 		Equipped = equippedArts,
@@ -184,9 +172,9 @@ function Menus.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientStat
 	})
 
 	local emotesTab = EmotesTab(scope, {
-		Width = CONTENT_WIDTH,
-		Height = CONTENT_HEIGHT,
-		Visible = tabSelected["Emotes"],
+		Width = TAB_WIDTH,
+		Height = TAB_HEIGHT,
+		Visible = tabs.Selected["Emotes"],
 		LayoutOrder = 3,
 		State = clientState,
 		OnAssign = function(slot: number, emoteId: string)
@@ -195,65 +183,71 @@ function Menus.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientStat
 	})
 
 	local bountyTab = BountyTab.Mount(scope, {
-		Width = CONTENT_WIDTH,
-		Height = CONTENT_HEIGHT,
-		Visible = tabSelected["Bounties"],
-		LayoutOrder = 3,
+		Width = TAB_WIDTH,
+		Height = TAB_HEIGHT,
+		Visible = tabs.Selected["Bounties"],
+		LayoutOrder = 4,
 	})
 
-	ModalScreen(scope, playerGui, {
+	ScreenFrame.Mount(scope, playerGui, {
 		Name = "CharacterMenu",
 		Size = UDim2.fromOffset(ROOT_WIDTH, ROOT_HEIGHT),
 		IsOpen = isOpen,
+		-- The only screen that opts in so far. This is the panel a player reads for minutes at a time
+		-- rather than glances at, and the one they said was too small to read on their monitor -- see
+		-- ModalScreen.lua's own header on why this and not more type size.
+		AutoScale = true,
+		Tabs = tabs,
+		StatusText = statusText,
+		OnClose = function()
+			isOpen:set(false)
+		end,
 
-		Children = {
-			scope:New "Frame" {
-				Name = "Header",
-				Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
-				BackgroundTransparency = 1,
-				LayoutOrder = 1,
-
-				[Children] = {
-					Label(scope, {
-						Text = "Character",
-						Scale = "Heading",
-						AnchorPoint = Vector2.new(0, 0.5),
-						Position = UDim2.fromScale(0, 0.5),
-					}),
-					Button(scope, {
-						Text = "X",
-						Size = UDim2.fromOffset(28, 28),
-						AnchorPoint = Vector2.new(1, 0.5),
-						Position = UDim2.fromScale(1, 0.5),
-						OnActivated = function()
-							isOpen:set(false)
-						end,
-					}),
-				},
+		Body = Stack.Row(scope, {
+			Name = "Body",
+			Children = {
+				IdentityRail(scope, {
+					Width = RAIL_WIDTH,
+					Height = BODY_HEIGHT,
+					LayoutOrder = 1,
+					Sheet = sheet,
+					State = clientState,
+					Mastery = artMastery,
+					OnRerollBloodline = function()
+						rerollBloodlineEvent:Fire()
+					end,
+				}),
+				-- Takes the body's width less the rail's, without being told what either of them is.
+				Stack.Fill(
+					scope,
+					Stack.New(scope, {
+						Name = "TabContent",
+						LayoutOrder = 2,
+						-- The structural backstop for the whole right-hand column, matching the rail's
+						-- own. Every tab sizes itself from Width/Height, but a row that mis-measures --
+						-- a long art name, a display name from another player's bounty -- must be
+						-- clipped at the column edge rather than painting over the panel border.
+						ClipsDescendants = true,
+						Children = {
+							Inset(scope, {
+								Top = Tokens.Space.M,
+								Bottom = Tokens.Space.L,
+								X = Tokens.Space.L,
+							}),
+							-- Exactly one of these is Visible at a time, so the Stack's own layout has
+							-- one child to place and puts it at the origin -- which is what every one of
+							-- them expects. They are siblings rather than a swapped single child so a
+							-- tab keeps its scroll position and its live subscriptions across a tab
+							-- change (see BountyTab.lua's own remotes).
+							characterTab,
+							artsTab,
+							emotesTab,
+							bountyTab,
+						},
+					})
+				),
 			},
-
-			scope:New "Frame" {
-				Name = "TabStrip",
-				Size = UDim2.new(1, 0, 0, TAB_STRIP_HEIGHT),
-				BackgroundTransparency = 1,
-				LayoutOrder = 2,
-
-				[Children] = tabButtons,
-			},
-
-			characterTab,
-			artsTab,
-			emotesTab,
-			bountyTab,
-
-			Label(scope, {
-				Text = statusText,
-				Scale = "Detail",
-				Color = Tokens.Color.TextSecondary,
-				Size = UDim2.new(1, 0, 0, STATUS_HEIGHT),
-				LayoutOrder = 4,
-			}),
-		},
+		}),
 	})
 
 	return {
@@ -267,6 +261,7 @@ function Menus.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientStat
 		UnlockArtRequested = unlockArtEvent.Event,
 		EquipArtRequested = equipArtEvent.Event,
 		EmoteSlotAssigned = emoteSlotEvent.Event,
+		RerollBloodlineRequested = rerollBloodlineEvent.Event,
 	}
 end
 

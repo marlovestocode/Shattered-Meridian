@@ -25,12 +25,18 @@ local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.Hitb
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local LiveTuningContract = require(ServerScriptService.Tests.TestHelpers.LiveTuningContract)
 local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
+local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
+
+-- A real roster weapon, because the ids below have to RESOLVE through AttackCatalog -- weapons are
+-- models in Workspace.Weapons now (Shared/Combat/WeaponRoster.lua), so a spec that installs none gets
+-- a catalogue with no weapon moves in it and every lookup returns nil.
+local WEAPON = WeaponFixture.Install()[1]
 
 local FRAME = 1 / 60
 local PARRY_ANIMATION = "rbxassetid://spec-debugdummy-parry"
 local WINDOW_OPEN = 0
 local WINDOW_CLOSE = 0.3
-local MOVE_ID = "default:Primary:Basic:1"
+local MOVE_ID = `default:{WEAPON}:Basic:1`
 
 -- Every attacker in this file is a plain hand-built Instance.new dummy, the same shape
 -- DamageSystem.spec's own makeDummy uses -- the thing under test is the VICTIM (a real

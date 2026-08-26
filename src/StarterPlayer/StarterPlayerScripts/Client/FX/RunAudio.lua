@@ -8,8 +8,8 @@
 	establish. Definitions come from Constants.Run (an empty SoundId placeholder until a real asset is
 	supplied -- SoundManager.Play already no-ops safely on that).
 
-	ONE registered sound, not three. Only Constants.Run.Footsteps.Stages[1] carries a Sound; stages 2
-	and 3 reuse that same registration and just play it faster
+	ONE registered sound, not one per gear. Only Constants.Run.Footsteps.Stages[1] carries a Sound; every
+	stage above it reuses that same registration and just plays it faster
 	(Footsteps.Stages[n].PlaybackSpeedMultiplier), rather than each stage owning its own asset. There
 	used to also be a separate one-shot "gear change" whoosh (RunStage<n>Onset, keyed off
 	Constants.Run.StageOnset) that fired once on the instant a faster stage engaged -- removed, because
@@ -51,12 +51,12 @@ local RunAudio = {}
 local RUN_CONFIG = Constants.Run
 local WALL_RUN_STEP = ParkourConstants.WallRun.Step
 
--- The one registered name every stage plays through -- see this file's header for why stages 2 and 3
--- no longer get their own registration. Named for what it is regardless of which stage triggered it,
+-- The one registered name every stage plays through -- see this file's header for why the gears above
+-- stage 1 no longer get their own registration. Named for what it is regardless of which stage fired it,
 -- the same reason CombatAudio's ImpactClean covers three OutcomeKinds under one name.
 local STEP_SOUND_NAME = "RunStep"
 
--- DERIVED FROM THE CONFIG, not hand-listed alongside it. Adding a fourth gear is an edit to
+-- DERIVED FROM THE CONFIG, not hand-listed alongside it. Resizing the ladder is an edit to
 -- Constants.Run.Footsteps.Stages alone; iterating it here rather than naming stage numbers is what
 -- keeps that true.
 local STEP_PITCH_JITTER: { [number]: number } = {}

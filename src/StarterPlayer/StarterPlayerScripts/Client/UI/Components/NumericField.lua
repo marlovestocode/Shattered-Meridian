@@ -2,24 +2,45 @@
 --[[
 	NumericField.lua
 
-	Owns: a labeled numeric row offering THREE independent ways to reach the same value, because a
-	single input affordance is wrong for at least one of the three things authors actually do with
-	these fields:
+	Owns: a labeled numeric row offering FOUR independent ways to reach the same value, because a
+	single input affordance is wrong for at least one of the things authors actually do with these
+	fields:
 
 	  1. STEP buttons -- "-"/"+" at one or more magnitudes (e.g. both a coarse and a fine step,
 	     "-1"/"-0.1" ... "+0.1"/"+1"). Right for nudging a value you are already close to.
 	  2. TYPED ENTRY -- click the readout and it becomes a text box; type an exact number, press
 	     Enter or click away, and it commits (clamped). Right for "I want exactly 12.5", which
-	     stepping to is absurd and dragging to is impossible.
-	  3. A CLICK BAR -- click anywhere along the track and it jumps straight to that point in the
-	     Min..Max range. Right for exploring ("how big does this actually need to be?") where the
-	     number matters less than landing roughly in the right zone fast. Click-only, not drag-to-
-	     scrub -- see the track's own comment below for why continuous dragging was removed.
+	     stepping to is absurd and dragging to is impossible. Up/Down arrows nudge the box's own
+	     text by the finest step while it is open, so a typed value can be tuned without retyping;
+	     Escape abandons the entry, and is the only route here that discards a typed number.
+	  3. THE SCROLL WHEEL, over the control. The same nudge as a step button without moving the
+	     pointer onto one -- which matters because these rows are stacked twenty deep in a form.
+	  4. THE BAR -- click anywhere along the track to jump straight to that point in the Min..Max
+	     range, or hold and drag to sweep it. Right for exploring ("how big does this actually need
+	     to be?") where the number matters less than landing roughly in the right zone fast.
 
-	All three write through the SAME commit path (clamped to Min/Max, then props.OnChanged), so no
+	All four write through the SAME commit path (clamped to Min/Max, then props.OnChanged), so no
 	route can produce a value the others couldn't, and none of them can produce an out-of-range one.
 	The bar is opt-out (Slider = false) for the handful of fields where jumping around the range is
 	meaningless.
+
+	MODIFIERS, on the two INCREMENTAL routes (step buttons, wheel): Shift multiplies the step by 10,
+	Alt divides it by 10. Not on typed entry or the bar, because both of those name an ABSOLUTE value
+	rather than a delta and there is nothing meaningful to scale -- except that Alt held AT THE MOMENT
+	a drag begins does change the bar, into a fine relative sweep (see beginScrub). The step buttons'
+	printed labels do NOT change while a modifier is held: making four labels reactive to two keys
+	would cost a live input listener per field, on a screen that mounts ~40 of them, to restate a
+	convention the editor's own shortcut overlay already lists.
+
+	DRAG-TO-SCRUB IS BACK, THROTTLED, and the throttle is the whole point. An earlier version tracked
+	InputChanged during a held drag and called props.OnChanged on every single pointer event, which
+	meant every field wired to a live consumer (the Move Editor's whole-draft clone and re-render, the
+	flight tuner) re-ran dozens of times a second -- it felt laggy and stuttery and was removed. What
+	it was missing is that the two rates are not the same rate: the LOCAL readout wants every event,
+	so the number under the cursor stays glued to it, while the COMMIT wants a fraction of that. So a
+	drag now paints from its own scrubValue (every event, no clone, no commit) and calls commit at
+	most every SCRUB_COMMIT_INTERVAL -- plus always once more on release, since the sample an author
+	let go on is the one that must not be dropped.
 
 	Generalizes two pre-existing, near-identical shapes that were never unified: Stepper.lua's own
 	single-Step clamp control (Attributes screen), and Screens/DevMenu/ContentArea.lua's hand-rolled
@@ -58,6 +79,7 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
 local Label = require(script.Parent.Label)
@@ -125,6 +147,24 @@ local VALUE_WIDTH = 66
 local TRACK_HEIGHT = 6
 local HANDLE_SIZE = 12
 
+-- Shift multiplies an incremental step by this, Alt divides by it. 10 rather than a per-field prop:
+-- every Steps list in this codebase is already authored in powers of ten ({0.05, 0.2} being the one
+-- exception, where x10 still lands somewhere useful), and a per-field override would be a fourth
+-- number per call site with nothing keeping it honest.
+local MODIFIER_FACTOR = 10
+
+-- Ceiling on how often a drag calls props.OnChanged -- see the file header on why this exists and
+-- why the LOCAL readout is deliberately not throttled with it. 20/second is well under the rate an
+-- unthrottled drag produced and still far above the rate at which a human perceives a value as
+-- lagging their hand, which the local readout is covering anyway.
+local SCRUB_COMMIT_INTERVAL = 1 / 20
+
+-- How much finer an Alt-held drag is than a normal one -- a full sweep of the track covers a tenth
+-- of the range instead of all of it. The reason this mode exists at all is fields like Projectile
+-- Speed (5..2000): one pixel of an absolute drag there is ~7 studs/second, so the bar cannot express
+-- a small adjustment no matter how carefully it is dragged.
+local FINE_SCRUB_FACTOR = 10
+
 local function formatValue(value: number, decimals: number): string
 	return string.format("%." .. decimals .. "f", value)
 end
@@ -145,8 +185,45 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 		props.OnChanged(math.clamp(candidate, props.Min, props.Max))
 	end
 
+	-- Read at the moment of the press/scroll rather than tracked as state -- the input event already
+	-- tells us exactly when to ask, so there is nothing to keep in sync. Holding BOTH cancels out
+	-- rather than compounding: there is no defensible answer to "coarse and fine at once", and
+	-- silently picking one would make a slipped finger change the step by 100x.
+	local function modifierScale(): number
+		local shift = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+			or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+		local alt = UserInputService:IsKeyDown(Enum.KeyCode.LeftAlt)
+			or UserInputService:IsKeyDown(Enum.KeyCode.RightAlt)
+		if shift == alt then
+			return 1
+		end
+		return if shift then MODIFIER_FACTOR else 1 / MODIFIER_FACTOR
+	end
+
+	-- The FINEST authored step, which is what the wheel and the typed-entry arrow keys nudge by. Not
+	-- Steps[1]: that list's order is a RENDERING convention (largest magnitude outermost), not a
+	-- priority. nil when a field authors no steps at all -- which the Steps prop explicitly allows for
+	-- a field whose useful values span orders of magnitude -- so those fields simply have no wheel and
+	-- no arrow nudge, rather than being given an invented step size.
+	local nudgeStep: number? = nil
+	for _, magnitude in ipairs(props.Steps) do
+		if nudgeStep == nil or magnitude < nudgeStep then
+			nudgeStep = magnitude
+		end
+	end
+
+	-- Non-nil only while a drag is in progress, and it OVERRIDES props.Value everywhere the value is
+	-- displayed -- see the file header. This is what lets the readout and handle follow the pointer at
+	-- full event rate while the commit behind them runs at SCRUB_COMMIT_INTERVAL.
+	local scrubValue: Fusion.Value<number?> = scope:Value(nil)
+	local function displayedValue(use: Fusion.Use): number
+		local base = use(props.Value)
+		local scrubbing = use(scrubValue)
+		return if scrubbing ~= nil then scrubbing else base
+	end
+
 	local valueText = scope:Computed(function(use)
-		return formatValue(use(props.Value), decimals)
+		return formatValue(displayedValue(use), decimals)
 	end)
 
 	--
@@ -165,8 +242,17 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 		isEditing:set(true)
 	end
 
+	-- Set by cancelEditing so the FocusLost that follows knows not to commit. A flag rather than
+	-- disconnecting the handler, because releasing focus is what FIRES FocusLost -- there is no
+	-- ordering in which the handler could be removed first.
+	local editCancelled = false
+
 	local function finishEditing(): ()
 		isEditing:set(false)
+		if editCancelled then
+			editCancelled = false
+			return
+		end
 		local typed = tonumber(peek(editText))
 		if typed then
 			commit(typed)
@@ -225,13 +311,66 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 		},
 	} :: TextBox
 
+	-- Escape abandons the entry: the readout re-renders from props.Value, which never changed. This
+	-- is the ONLY route that discards a typed number -- Enter, Tab and clicking away all commit --
+	-- and it lives here rather than in whatever screen hosts the field because the half-typed text is
+	-- this component's own state, which nothing outside it can even see is open.
+	local function cancelEditing(): ()
+		editCancelled = true
+		valueInput:ReleaseFocus(false)
+	end
+
+	-- Up/Down while the box is open edit the BOX'S TEXT, not the committed value: the author is
+	-- mid-entry, and committing under them would fight whatever they were about to type. Enter or a
+	-- click away commits, exactly as it does for anything else typed in here.
+	local function nudgeEditText(direction: number): ()
+		local magnitude = nudgeStep
+		if magnitude == nil then
+			return
+		end
+		-- ClearTextOnFocus wipes the seeded text the moment the box takes focus, so an untouched box
+		-- reads "" and tonumber gives nil -- fall back to the value the box is standing in for.
+		local current = tonumber(peek(editText)) or peek(props.Value)
+		local stepped = current + magnitude * direction * modifierScale()
+		editText:set(formatValue(math.clamp(stepped, props.Min, props.Max), decimals))
+	end
+
+	-- Live only while the box is open. A form mounts ~40 of these rows, so a listener per row held for
+	-- the whole session would run 40 handlers on every keypress in the game to serve the one row that
+	-- is actually being typed into.
+	local editKeyConnection: RBXScriptConnection? = nil
+	local function disconnectEditKeys(): ()
+		if editKeyConnection then
+			editKeyConnection:Disconnect()
+			editKeyConnection = nil
+		end
+	end
+	-- Registered on the scope ONCE (the function, not the connection) rather than per edit session --
+	-- the scope outlives every individual edit, and re-registering would grow its task list forever.
+	table.insert(scope, disconnectEditKeys)
+
 	-- Roblox does not focus a TextBox that was Visible = false at the moment CaptureFocus is called,
 	-- and the Visible flip above only lands on the next render step -- so focus is deferred by one
 	-- Observer tick rather than requested inline in beginEditing.
 	scope:Observer(isEditing):onChange(function()
-		if peek(isEditing) then
-			valueInput:CaptureFocus()
+		if not peek(isEditing) then
+			disconnectEditKeys()
+			return
 		end
+		valueInput:CaptureFocus()
+		disconnectEditKeys()
+		editKeyConnection = UserInputService.InputBegan:Connect(function(input: InputObject)
+			-- gameProcessed is deliberately NOT checked: it is true for every key that lands while a
+			-- TextBox holds focus (the box is what processed it), so checking it would mean this never
+			-- fires at all -- which is the exact situation it is here to serve.
+			if input.KeyCode == Enum.KeyCode.Up then
+				nudgeEditText(1)
+			elseif input.KeyCode == Enum.KeyCode.Down then
+				nudgeEditText(-1)
+			elseif input.KeyCode == Enum.KeyCode.Escape then
+				cancelEditing()
+			end
+		end)
 	end)
 
 	local function stepButton(delta: number, order: number): TextButton
@@ -241,7 +380,7 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 			Size = UDim2.fromOffset(STEP_BUTTON_WIDTH, Tokens.Control.StepButtonSize),
 			LayoutOrder = order,
 			OnActivated = function()
-				commit(peek(props.Value) + delta)
+				commit(peek(props.Value) + delta * modifierScale())
 			end,
 		})
 	end
@@ -283,33 +422,133 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 	end
 
 	--
-	-- Click bar. The track is the input surface (not the handle): clicking anywhere on it jumps
-	-- straight to that value -- an author wants the value under their cursor, not a handle they
-	-- first have to grab. Deliberately click-only, NOT drag-to-scrub: an earlier version tracked
-	-- InputChanged during a held-down drag and re-committed on every single pixel of mouse movement,
-	-- which meant every field wired to a live server round-trip (MoveEditorClient's UpdateDraft, the
-	-- flight tuner, etc.) re-fired dozens of times a second while dragging -- felt laggy/stuttery and
-	-- was reported as such. One InputBegan sample per click/tap is both cheaper and, per that report,
-	-- the actually-preferred interaction: a click bar, not a scrub slider.
+	-- The bar. The TRACK is the input surface, not the handle: clicking anywhere on it jumps straight
+	-- to that value -- an author wants the value under their cursor, not a handle they first have to
+	-- grab -- and holding then sweeps from there. See the file header on why the drag commits on a
+	-- throttle while the readout does not.
 	--
 	local sliderEnabled = props.Slider ~= false
 	local fillScale = scope:Computed(function(use)
-		return math.clamp((use(props.Value) - props.Min) / range, 0, 1)
+		return math.clamp((displayedValue(use) - props.Min) / range, 0, 1)
 	end)
 
 	local track: Frame? = nil
 
-	local function commitFromPointer(pointerX: number): ()
+	-- Everything one in-progress drag owns. Connected on grab, dropped on release -- NOT held open
+	-- for the session: a mounted form has ~40 of these, and 40 live UserInputService.InputChanged
+	-- handlers would run on every pointer move whether anything was being dragged or not.
+	local scrubConnections: { RBXScriptConnection } = {}
+	local scrubLastCommit = 0
+	-- The most recent sample the throttle did NOT commit, so release can flush it -- see endScrub.
+	local scrubPending: number? = nil
+	-- Non-nil only for a FINE drag (Alt held at the moment of the grab), holding where the pointer
+	-- was and what the value was at that instant, since a fine drag is relative to both.
+	local scrubAnchor: { PointerX: number, Value: number }? = nil
+
+	local function disconnectScrub(): ()
+		for _, connection in ipairs(scrubConnections) do
+			connection:Disconnect()
+		end
+		table.clear(scrubConnections)
+	end
+	-- The function, once, rather than each drag's connections: the scope outlives every drag.
+	table.insert(scope, disconnectScrub)
+
+	local function valueFromPointer(pointerX: number): number?
 		local trackFrame = track
 		if not trackFrame then
-			return
+			return nil
 		end
 		local width = trackFrame.AbsoluteSize.X
 		if width <= 0 then
-			return
+			return nil
+		end
+		local anchor = scrubAnchor
+		if anchor then
+			-- Fine drag: relative to the grab, at a tenth of the sensitivity. Deliberately NOT clamped
+			-- to the pointer staying over the track -- the whole point is small movements, and a fine
+			-- drag can legitimately run off the end of a short track without having reached a bound.
+			local delta = (pointerX - anchor.PointerX) / width * range / FINE_SCRUB_FACTOR
+			return math.clamp(anchor.Value + delta, props.Min, props.Max)
 		end
 		local alpha = math.clamp((pointerX - trackFrame.AbsolutePosition.X) / width, 0, 1)
-		commit(props.Min + range * alpha)
+		return props.Min + range * alpha
+	end
+
+	-- X only, and that is load-bearing: a GuiObject's AbsolutePosition excludes the top GUI inset
+	-- while an InputObject's Position includes it, so the two disagree on Y by 36px. Every value here
+	-- is horizontal, so the mismatch cannot reach the number -- but it is why this must never grow a
+	-- Y term without converting one of the two first.
+	local function sampleScrub(pointerX: number): ()
+		local sampled = valueFromPointer(pointerX)
+		if sampled == nil then
+			return
+		end
+		scrubValue:set(sampled)
+		local now = os.clock()
+		if now - scrubLastCommit >= SCRUB_COMMIT_INTERVAL then
+			scrubLastCommit = now
+			scrubPending = nil
+			commit(sampled)
+		else
+			scrubPending = sampled
+		end
+	end
+
+	local function endScrub(): ()
+		disconnectScrub()
+		scrubAnchor = nil
+		local pending = scrubPending
+		scrubPending = nil
+		if pending ~= nil then
+			-- The throttle can only ever drop the LAST sample, which is the one that matters most: the
+			-- value the author actually let go on. Committed unconditionally, interval or not.
+			commit(pending)
+		end
+		scrubValue:set(nil)
+	end
+
+	local function beginScrub(pointerX: number): ()
+		-- Defensive: a swallowed InputEnded (alt-tab mid-drag, say) must never leave two drags live
+		-- fighting over the same field.
+		disconnectScrub()
+		-- Sampled ONCE, here, rather than per pointer event: a drag that changed sensitivity halfway
+		-- through would jump, because the two modes measure from different origins.
+		if UserInputService:IsKeyDown(Enum.KeyCode.LeftAlt) or UserInputService:IsKeyDown(Enum.KeyCode.RightAlt) then
+			scrubAnchor = { PointerX = pointerX, Value = peek(props.Value) }
+		else
+			scrubAnchor = nil
+		end
+		-- Zeroed so the grab itself always commits: a plain click on the bar must still jump straight
+		-- to that value, which is the interaction this control had before it could be dragged at all.
+		scrubLastCommit = 0
+		sampleScrub(pointerX)
+
+		-- Listened for on UserInputService rather than on the track, so a drag survives the pointer
+		-- leaving a 6px-tall strip -- which it does almost immediately, and which under a track-only
+		-- listener would silently strand the drag with no release event.
+		table.insert(
+			scrubConnections,
+			UserInputService.InputChanged:Connect(function(input: InputObject)
+				if
+					input.UserInputType == Enum.UserInputType.MouseMovement
+					or input.UserInputType == Enum.UserInputType.Touch
+				then
+					sampleScrub(input.Position.X)
+				end
+			end)
+		)
+		table.insert(
+			scrubConnections,
+			UserInputService.InputEnded:Connect(function(input: InputObject)
+				if
+					input.UserInputType == Enum.UserInputType.MouseButton1
+					or input.UserInputType == Enum.UserInputType.Touch
+				then
+					endScrub()
+				end
+			end)
+		)
 	end
 
 	if sliderEnabled then
@@ -329,7 +568,7 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 					input.UserInputType == Enum.UserInputType.MouseButton1
 					or input.UserInputType == Enum.UserInputType.Touch
 				then
-					commitFromPointer(input.Position.X)
+					beginScrub(input.Position.X)
 				end
 			end,
 
@@ -424,6 +663,23 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 				BackgroundColor3 = Tokens.Wash.Inset.Color,
 				BackgroundTransparency = Tokens.Wash.Inset.Transparency,
 				LayoutOrder = 2,
+				-- Same reason the track sets it: without it the pointer is not considered to be over this
+				-- Frame at all and the wheel event never arrives. The step buttons and the readout are
+				-- children and still get their own clicks first.
+				Active = true,
+
+				-- The scroll wheel, anywhere over the control -- one nudge per detent at the finest
+				-- authored step. Position.Z is Roblox's wheel axis: +1 for a scroll up, -1 for down.
+				[OnEvent "InputChanged"] = function(input: InputObject)
+					if input.UserInputType ~= Enum.UserInputType.MouseWheel then
+						return
+					end
+					local magnitude = nudgeStep
+					if magnitude == nil then
+						return
+					end
+					commit(peek(props.Value) + magnitude * math.sign(input.Position.Z) * modifierScale())
+				end,
 
 				[Children] = {
 					scope:New "UICorner" { CornerRadius = Tokens.Radius.Sharp },

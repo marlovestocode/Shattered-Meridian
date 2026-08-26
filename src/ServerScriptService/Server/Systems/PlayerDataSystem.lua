@@ -110,6 +110,7 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
+local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
 local EmoteRegistry = require(ReplicatedStorage.Shared.Emotes.EmoteRegistry)
 -- Only for EquipSlotCount, the bound DecodeProfile validates a persisted art slot index against --
 -- this module owns no art rules of its own beyond "a slot outside the real hotbar isn't a slot."
@@ -202,6 +203,13 @@ function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProf
 		attributes = nil,
 		tier = Config.DefaultTier,
 		bloodlineIds = {},
+		-- Race Traits + Bloodline Abilities plan -- empty, matching bloodlineIds: a brand-new profile
+		-- has awakened nothing, so there is no stage to record for anything.
+		bloodlineStageProgress = {},
+		-- The one field here that is NOT empty/zero on a fresh profile: a new player is meant to
+		-- arrive holding their rerolls, so the onboarding spin has something to offer past the first
+		-- free roll. See BloodlineConstants.StartingRerolls.
+		bloodlineRerolls = BloodlineConstants.StartingRerolls,
 		artMastery = {},
 		-- Art System (Types.PlayerProfile's own header) -- empty, not a seeded starter slot, for the
 		-- same reason ArtConstants.StartingArtIds is empty: an art is earned, and there is nothing to
@@ -218,6 +226,9 @@ function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProf
 		-- join-time backfill (that backfill exists for OLDER saves, not this path).
 		unlockedEmoteIds = EmoteRegistry.GetDefaultUnlockedIds(),
 		emoteLoadout = table.clone(EmoteConstants.DefaultLoadout),
+		-- Blimp Fuel System -- a brand-new player is carrying nothing; see Types.PlayerProfile's own
+		-- header on this field.
+		blimpFuel = { Coal = 0, Water = 0 },
 		-- Settings System (Types.PlayerSettings' own header) -- a brand-new profile starts with no
 		-- overrides at all (every action still resolves through Constants.Keybinds.Defaults/
 		-- GamepadDefaults), Autorun off, and the Parkour System's own preferences at whatever
@@ -252,6 +263,8 @@ function PlayerDataSystem.CopyProfile(profile: Types.PlayerProfile): Types.Playe
 		attributes = if profile.attributes then table.clone(profile.attributes) else nil,
 		tier = profile.tier,
 		bloodlineIds = table.clone(profile.bloodlineIds),
+		bloodlineStageProgress = table.clone(profile.bloodlineStageProgress),
+		bloodlineRerolls = profile.bloodlineRerolls,
 		artMastery = table.clone(profile.artMastery),
 		equippedArts = table.clone(profile.equippedArts),
 		corruption = profile.corruption,
@@ -261,6 +274,7 @@ function PlayerDataSystem.CopyProfile(profile: Types.PlayerProfile): Types.Playe
 		meridianXp = profile.meridianXp,
 		unlockedEmoteIds = table.clone(profile.unlockedEmoteIds),
 		emoteLoadout = table.clone(profile.emoteLoadout),
+		blimpFuel = table.clone(profile.blimpFuel),
 		settings = {
 			Keybinds = table.clone(profile.settings.Keybinds),
 			GamepadKeybinds = table.clone(profile.settings.GamepadKeybinds),
@@ -417,6 +431,7 @@ function PlayerDataSystem.CreateDefaultComfortSettings(): Types.ComfortSettings
 	return {
 		CameraShake = true,
 		FieldOfViewEffects = true,
+		VehicleCameraMotion = true,
 	}
 end
 
@@ -438,6 +453,10 @@ local function decodeComfortSettings(raw: unknown): Types.ComfortSettings
 	return {
 		CameraShake = boolean("CameraShake", defaults.CameraShake),
 		FieldOfViewEffects = boolean("FieldOfViewEffects", defaults.FieldOfViewEffects),
+		-- A record written before this field existed decodes to the shipped default (on), which is what
+		-- makes this an additive change with no migration of its own -- see this function's own header
+		-- on why a missing key MUST NOT fall through to nil in this block specifically.
+		VehicleCameraMotion = boolean("VehicleCameraMotion", defaults.VehicleCameraMotion),
 	}
 end
 
@@ -475,6 +494,7 @@ function PlayerDataSystem.EncodeSettings(settings: Types.PlayerSettings): { [str
 		Comfort = {
 			CameraShake = comfort.CameraShake,
 			FieldOfViewEffects = comfort.FieldOfViewEffects,
+			VehicleCameraMotion = comfort.VehicleCameraMotion,
 		},
 	}
 end
@@ -515,6 +535,8 @@ function PlayerDataSystem.EncodeProfile(profile: Types.PlayerProfile): { [string
 		attributes = profile.attributes,
 		tier = profile.tier,
 		bloodlineIds = profile.bloodlineIds,
+		bloodlineStageProgress = profile.bloodlineStageProgress,
+		bloodlineRerolls = profile.bloodlineRerolls,
 		artMastery = profile.artMastery,
 		equippedArts = profile.equippedArts,
 		corruption = profile.corruption,
@@ -524,6 +546,7 @@ function PlayerDataSystem.EncodeProfile(profile: Types.PlayerProfile): { [string
 		meridianXp = profile.meridianXp,
 		unlockedEmoteIds = profile.unlockedEmoteIds,
 		emoteLoadout = profile.emoteLoadout,
+		blimpFuel = { Coal = profile.blimpFuel.Coal, Water = profile.blimpFuel.Water },
 		settings = PlayerDataSystem.EncodeSettings(profile.settings),
 	}
 end
@@ -558,6 +581,18 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		for artId, rank in pairs(rawTable.artMastery) do
 			if typeof(artId) == "string" and typeof(rank) == "number" then
 				artMastery[artId] = rank
+			end
+		end
+	end
+
+	-- Race Traits + Bloodline Abilities plan -- same per-entry defensive filtering as artMastery
+	-- above, byte-for-byte: a dict keyed by BloodlineId with a numeric stage value, drop any entry
+	-- whose key or value doesn't match rather than discarding the whole field.
+	local bloodlineStageProgress: { [Types.BloodlineId]: number } = {}
+	if typeof(rawTable.bloodlineStageProgress) == "table" then
+		for bloodlineId, stage in pairs(rawTable.bloodlineStageProgress) do
+			if typeof(bloodlineId) == "string" and typeof(stage) == "number" then
+				bloodlineStageProgress[bloodlineId] = stage
 			end
 		end
 	end
@@ -657,6 +692,22 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		emoteLoadout = table.clone(EmoteConstants.DefaultLoadout)
 	end
 
+	-- blimpFuel -- two independent carried-resource counters (Types.PlayerProfile's own header), each
+	-- individually type-checked and clamped at 0 rather than trusted, the same per-field defensive
+	-- posture corruption/qiDeviationRisk below get, just nested one level under its own key. A
+	-- negative value (a hand-edited or corrupted record) clamps to 0 rather than being kept -- a
+	-- player cannot legitimately owe the game coal.
+	local blimpFuel = { Coal = 0, Water = 0 }
+	if typeof(rawTable.blimpFuel) == "table" then
+		local rawBlimpFuel = rawTable.blimpFuel :: { [string]: any }
+		if typeof(rawBlimpFuel.Coal) == "number" then
+			blimpFuel.Coal = math.max(0, rawBlimpFuel.Coal :: number)
+		end
+		if typeof(rawBlimpFuel.Water) == "number" then
+			blimpFuel.Water = math.max(0, rawBlimpFuel.Water :: number)
+		end
+	end
+
 	return {
 		userId = if typeof(rawTable.userId) == "number" then rawTable.userId else fallbackUserId,
 		faction = if typeof(rawTable.faction) == "string" then rawTable.faction :: Types.Faction else nil,
@@ -665,6 +716,12 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		attributes = attributes,
 		tier = if typeof(rawTable.tier) == "number" then rawTable.tier else Config.DefaultTier,
 		bloodlineIds = bloodlineIds,
+		bloodlineStageProgress = bloodlineStageProgress,
+		-- Clamped at 0 rather than trusted: a negative reroll count from a corrupted or rolled-back
+		-- record would make the spin button look available forever while every press refused.
+		bloodlineRerolls = if typeof(rawTable.bloodlineRerolls) == "number"
+			then math.max(0, math.floor(rawTable.bloodlineRerolls :: number))
+			else BloodlineConstants.StartingRerolls,
 		artMastery = artMastery,
 		equippedArts = equippedArts,
 		corruption = if typeof(rawTable.corruption) == "number" then rawTable.corruption else 0,
@@ -674,6 +731,7 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		meridianXp = if typeof(rawTable.meridianXp) == "number" then rawTable.meridianXp else 0,
 		unlockedEmoteIds = unlockedEmoteIds,
 		emoteLoadout = emoteLoadout,
+		blimpFuel = blimpFuel,
 		settings = PlayerDataSystem.DecodeSettings(rawTable.settings),
 	}
 end
@@ -782,6 +840,56 @@ Migrations[5] = function(raw: { [string]: any }): { [string]: any }
 		local settings = profileTable.settings
 		if typeof(settings) == "table" and (settings :: { [string]: any }).Comfort == nil then
 			(settings :: { [string]: any }).Comfort = PlayerDataSystem.CreateDefaultComfortSettings()
+		end
+	end
+	return raw
+end
+
+-- v6 -> v7: backfills Types.PlayerProfile's `bloodlineStageProgress` (Race Traits + Bloodline
+-- Abilities plan) onto any record saved before this pass -- same "only touch an already-table
+-- Profile, only fill in a genuinely missing field" shape as every migration above, and the same
+-- "empty is honest" backfill Migrations[3] uses for equippedArts: an existing player has awakened no
+-- bloodline any differently than a brand-new one has, so there is nothing to fabricate here.
+Migrations[6] = function(raw: { [string]: any }): { [string]: any }
+	local profile = raw.Profile
+	if typeof(profile) == "table" then
+		local profileTable = profile :: { [string]: any }
+		if profileTable.bloodlineStageProgress == nil then
+			profileTable.bloodlineStageProgress = {}
+		end
+	end
+	return raw
+end
+
+-- v7 -> v8: backfills Types.PlayerProfile's `bloodlineRerolls` (the bloodline spin) onto any
+-- record saved before this pass -- same "only touch an already-table Profile, only fill in a
+-- genuinely missing field" shape as every migration above.
+--
+-- Backfilled to the FULL StartingRerolls, unlike Migrations[3]/[6]'s empty-table backfills. An
+-- existing player has never been offered a spin, so they have spent nothing -- handing them 0
+-- would silently punish them for having played before the feature existed.
+Migrations[7] = function(raw: { [string]: any }): { [string]: any }
+	local profile = raw.Profile
+	if typeof(profile) == "table" then
+		local profileTable = profile :: { [string]: any }
+		if profileTable.bloodlineRerolls == nil then
+			profileTable.bloodlineRerolls = BloodlineConstants.StartingRerolls
+		end
+	end
+	return raw
+end
+
+-- v8 -> v9: backfills Types.PlayerProfile's `blimpFuel` (the Blimp Fuel System's carried coal/water)
+-- onto any record saved before this pass -- same "only touch an already-table Profile, only fill in a
+-- genuinely missing field" shape as every migration above, and the same "empty is honest" backfill
+-- Migrations[3]/[6] use for equippedArts/bloodlineStageProgress: an existing player has gathered no
+-- fuel any differently than a brand-new one has, so there is nothing to fabricate here.
+Migrations[8] = function(raw: { [string]: any }): { [string]: any }
+	local profile = raw.Profile
+	if typeof(profile) == "table" then
+		local profileTable = profile :: { [string]: any }
+		if profileTable.blimpFuel == nil then
+			profileTable.blimpFuel = { Coal = 0, Water = 0 }
 		end
 	end
 	return raw

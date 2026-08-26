@@ -50,6 +50,54 @@ EditorTokens.Saved = Color3.fromRGB(88, 156, 118)
 -- Tokens.Color.AccentPrimary rather than a replacement for it -- see this file's header.
 EditorTokens.Accent = Color3.fromRGB(160, 128, 224)
 
+-- The editor's own extended hue set, beyond the three phase colours above -- the vocabulary every
+-- MULTI-SERIES surface here draws from (the animation timeline's clip bars, the Stats panel's
+-- projected/measured plots and its per-source event scatter). File-local on purpose: callers take
+-- ClipPalette or StatsSeries below, which say what a colour MEANS, rather than picking a hue by
+-- name and re-deciding per surface what it stands for.
+--
+-- Named once here because it was previously not named at all: (150, 130, 235) was written out as a
+-- literal in AnimationTimelineEditor.lua and twice more in StatsPanel.lua, byte-identical and with
+-- nothing tying the three together.
+local Series = {
+	Violet = Color3.fromRGB(150, 130, 235),
+	Teal = Color3.fromRGB(120, 200, 210),
+	Amber = Color3.fromRGB(225, 170, 110),
+	Rose = Color3.fromRGB(200, 130, 180),
+	Green = Color3.fromRGB(140, 210, 150),
+	Citron = Color3.fromRGB(210, 210, 130),
+	Lilac = Color3.fromRGB(170, 160, 200),
+	Coral = Color3.fromRGB(230, 140, 140),
+	Mint = Color3.fromRGB(120, 210, 170),
+}
+
+-- Animation clip bars cycle through these by index, so two overlapping clips are visibly distinct
+-- without the author assigning colours. Order matters (it is what clip 1 vs. clip 2 get) and the
+-- list is deliberately long enough that a realistic timeline never wraps.
+EditorTokens.ClipPalette = {
+	Series.Violet,
+	Series.Teal,
+	Series.Amber,
+	Series.Rose,
+	Series.Green,
+	Series.Citron,
+	Series.Lilac,
+	Series.Coral,
+}
+
+-- What each series on the Stats panel MEANS. Projected (what the move's own numbers say it will do)
+-- against Measured (what a real test fire actually recorded) is the panel's central comparison, so
+-- those two are the pair that has to stay maximally distinguishable; the three Source hues identify
+-- which resolution stage produced an event and reuse the clip palette's own entries, since a reader
+-- moving between the timeline and this panel benefits from one hue family rather than two.
+EditorTokens.StatsSeries = {
+	Projected = Series.Violet,
+	Measured = Series.Mint,
+	Primary = Series.Violet,
+	ObjectStun = Series.Amber,
+	FollowUp = Series.Rose,
+}
+
 -- Frames per second the frame timeline counts in. Roblox renders variably, so this is a DISPLAY
 -- convention, not a simulation rate: the reference authors timing in frames ("36 FRAMES TOTAL ·
 -- 0.60S AT 60FPS") while MoveDefinition stores seconds, and 60 is the divisor that makes the two

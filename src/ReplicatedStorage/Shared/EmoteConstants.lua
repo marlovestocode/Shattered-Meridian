@@ -48,6 +48,19 @@ EmoteConstants.RemoteNames = {
 	-- See EmoteSystem.lua's own STOP SCHEDULING header for why this, and not the authored Duration,
 	-- is the primary stop for a clip-bearing emote.
 	NotifyFinished = "Emote_NotifyFinished",
+	-- Client -> server. No payload. The player asking to end their OWN current emote, whatever it is
+	-- -- the only way out of a Loop emote (Sit, Dance) that exists, since a loop has no EndsAt of its
+	-- own and no track whose end could be reported through NotifyFinished.
+	--
+	-- WITHOUT THIS A SEATED PLAYER IS STUCK. Sit and Dance are both Loop AND MovementLocked, so
+	-- EmoteSystem zeroes their WalkSpeed (Server/Combat/Movement.lua's ComputeDesiredWalkSpeed) and
+	-- then nothing in the system ever clears it: the heartbeat expiry only fires for a non-Loop
+	-- emote's EndsAt, and the InCombat interruption needs an attacker. Dying was the only exit.
+	--
+	-- Deliberately NOT validated against WHICH emote is running -- unlike NotifyFinished (a report
+	-- about a specific track, which must match the active emote or be discarded), this is a command
+	-- about the player themselves, and the worst a client can do by firing it is end its own pose.
+	RequestStop = "Emote_RequestStop",
 	-- Client -> server. Payload: slotIndex (number, 1-based), emoteId (string).
 	RequestSetLoadoutSlot = "Emote_RequestSetLoadoutSlot",
 	-- Server -> owning client only, fired once on join and again on every successful mutation.

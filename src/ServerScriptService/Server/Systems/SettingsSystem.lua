@@ -79,6 +79,7 @@ local PARKOUR_SETTING_TYPES: { [string]: "boolean" | "SprintMode" } = {
 local COMFORT_SETTING_FIELDS: { [string]: true } = {
 	CameraShake = true,
 	FieldOfViewEffects = true,
+	VehicleCameraMotion = true,
 }
 
 -- See file header -- structurally valid AND not a hotbar slot. Constants.Keybinds.Defaults is a

@@ -48,6 +48,19 @@
 	residual cost moved to the benign side (the movement lock outlives the animation by the one-way
 	trip of the finish report, rather than the animation being cut short by a full round trip).
 
+	WHAT ENDS A LOOPING EMOTE, and why it needed a remote of its own. A Loop emote (Sit, Dance) has no
+	EndsAt and no track that could ever finish, so neither of the two stops above can reach it -- and
+	both of those emotes are also MovementLocked, which means the WalkSpeed this file zeroes at start
+	was left zeroed. Until Emote_RequestStop existed, a player who sat down had exactly three exits: be
+	attacked (the InCombat interruption below), die, or leave. Sitting down was a trap.
+
+	So the third stop is the player's own: Emote_RequestStop, fired by Client/Emotes/EmoteWheelClient.
+	lua the moment they press a movement or jump key. It is a command rather than a report -- see
+	handleRequestStop for why that distinction lets it skip the emote-id validation NotifyFinished
+	needs -- and it ends a one-shot just as readily as a loop, which is also the fix for the other half
+	of the same complaint: a one-shot emote rejects any other RequestPlay until it ends (see below), so
+	without a cancel a mistaken Bow held the wheel shut for its whole duration.
+
 	RE-TRIGGER SEMANTICS (RequestPlay while an emote is already active). A LOOPING emote (Sit/Dance)
 	may be freely replaced by another RequestPlay at any time -- StopEmote runs first, then the new
 	one starts, the same "wheel picks a different pose" interaction a player expects. A NON-LOOP
@@ -63,13 +76,24 @@
 	Server/Combat/Movement.lua's ComputeDesiredWalkSpeed (not this file) is what actually zeroes
 	WalkSpeed once the EmoteMovementLocked Attribute is set.
 
-	No longer gated on combat state (combat system removed): RequestPlay/the active-emote monitor
-	below used to read CombatSystem.GetCombatState and reject/interrupt an emote for being dead,
-	stunned, posture-broken, ragdolled, held aloft, mid-swing, or (for a non-CombatAllowed emote)
-	simply in combat, and CancelOnDamage used to compare live Health against the emote's starting
-	Health. None of that state exists anymore, so none of it gates emotes -- an emote now only ever
-	stops via its own EndsAt expiry, the client's Emote_NotifyFinished report, or an explicit
-	StopEmote call.
+	PARTIALLY GATED ON COMBAT STATE AGAIN, THROUGH ONE ATTRIBUTE. RequestPlay and the active-emote
+	monitor below used to read CombatSystem.GetCombatState and reject/interrupt an emote for being dead,
+	stunned, posture-broken, ragdolled, held aloft, mid-swing, or (for a non-CombatAllowed emote) simply
+	in combat. That module was deleted in the combat teardown and every one of those gates went with it.
+
+	Exactly ONE of them is back: EmoteDefinition.CombatAllowed. Server/Combat/Engagement/
+	EngagementSystem.lua now publishes Constants.Attributes.InCombat, so a non-CombatAllowed emote (Sit,
+	Dance, Meditate, Kneel, Sleep -- the sustained, vulnerable poses) is refused while that Attribute is
+	set, and an already-running one is interrupted the moment it becomes set. That field had been
+	authored on all 11 emotes and validated by EmoteRegistry while being read by literally nothing.
+
+	READ AS AN ATTRIBUTE, NOT THROUGH A require. This is a Systems/ module; EngagementSystem is a
+	Combat/ one, and taking a dependency on it would invert the same layering the Mounted gate below
+	already avoids the same way. The Attribute seam is the whole interface.
+
+	The other gates stay gone, and their state genuinely does not exist to re-derive: stunned/posture-
+	broken/ragdolled/held-aloft/mid-swing all lived on CombatState. CancelOnDamage is likewise still
+	inert -- it compared live Health against the emote's starting Health, which nothing tracks now.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -196,6 +220,14 @@ function EmoteSystem.StopEmote(player: Player): ()
 	logger:debug("Emote stopped", { player = player.Name, emoteId = active.EmoteId })
 end
 
+-- Whether this rig is currently combat-tagged (Server/Combat/Engagement/EngagementSystem.lua writes
+-- the Attribute on each true/false edge). One helper rather than the read inline twice, so the
+-- refusal in handleRequestPlay and the interruption in onHeartbeatTick can never disagree about what
+-- "in combat" means.
+local function isInCombat(humanoid: Humanoid): boolean
+	return humanoid:GetAttribute(Constants.Attributes.InCombat) == true
+end
+
 local function handleRequestPlay(player: Player, rawEmoteId: unknown): ()
 	if playRateLimiter:IsLimited(player) then
 		return
@@ -214,6 +246,26 @@ local function handleRequestPlay(player: Player, rawEmoteId: unknown): ()
 
 	if not EmoteUnlockService.HasUnlocked(player, emoteId) then
 		logger:debug("RequestPlay rejected: NotUnlocked", { player = player.Name, emoteId = emoteId })
+		return
+	end
+
+	-- A mounted body is welded to a blimp station and its arms are being driven by the mount's own pose
+	-- solver (Shared/Blimp/BlimpArmPose.lua). An emote here would play a full-body clip the pose then
+	-- half-overwrites, which looks like a bug in both systems at once. Read as an Attribute rather than
+	-- through a BlimpSystem require -- the same seam the two combat gates use.
+	local _, gateHumanoid = CharacterUtil.LiveRig(player)
+	if gateHumanoid and gateHumanoid:GetAttribute(Constants.Attributes.Mounted) == true then
+		logger:debug("RequestPlay rejected: Mounted", { player = player.Name, emoteId = emoteId })
+		return
+	end
+
+	-- A sustained, vulnerable pose has no place mid-skirmish -- EmoteDefinition.CombatAllowed's own
+	-- header. A quick social gesture (Wave, Taunt, Point) is deliberately still allowed to carry into a
+	-- lingering in-combat window, which is why this reads the emote's own flag rather than refusing
+	-- everything. Same Attribute seam as the Mounted gate directly above; see this file's header on why
+	-- it is not a require into EngagementSystem.
+	if not definition.CombatAllowed and gateHumanoid and isInCombat(gateHumanoid) then
+		logger:debug("RequestPlay rejected: InCombat", { player = player.Name, emoteId = emoteId })
 		return
 	end
 
@@ -301,6 +353,26 @@ local function handleNotifyFinished(player: Player, rawEmoteId: unknown): ()
 	EmoteSystem.StopEmote(player)
 end
 
+-- The player asking to end their own current emote -- see EmoteConstants.RemoteNames.RequestStop for
+-- why this remote has to exist at all (a Loop emote had no exit that did not involve dying).
+--
+-- No payload, no emote-id match, and no legality check beyond the rate limit: unlike
+-- handleNotifyFinished above (a REPORT about one specific track, which must be validated against the
+-- active emote or a client could cut short an emote whose length this server owns), this is a
+-- COMMAND about the caller themselves, and StopEmote is already a safe no-op on a player with
+-- nothing running. There is no state a player can reach with it that they cannot already reach by
+-- playing a different emote.
+--
+-- Shares playRateLimiter with RequestPlay/NotifyFinished for the same reason NotifyFinished does:
+-- starting and ending your own pose is one budget, and a stop is only ever reachable after a start
+-- that already spent from it.
+local function handleRequestStop(player: Player): ()
+	if playRateLimiter:IsLimited(player) then
+		return
+	end
+	EmoteSystem.StopEmote(player)
+end
+
 local function handleRequestSetLoadoutSlot(player: Player, rawSlotIndex: unknown, rawEmoteId: unknown): ()
 	if loadoutRateLimiter:IsLimited(player) then
 		return
@@ -367,6 +439,19 @@ local function onHeartbeatTick(): ()
 			EmoteSystem.StopEmote(player)
 			continue
 		end
+
+		-- Entering combat DURING a vulnerable pose breaks it. Refusing the start (handleRequestPlay)
+		-- without this would leave a player who sat down a half-second before being attacked seated for
+		-- the whole fight -- the one case the gate is most obviously meant to cover. Loop emotes are the
+		-- ones this actually catches, since they have no EndsAt of their own to expire.
+		if not definition.CombatAllowed then
+			local _, humanoid = CharacterUtil.LiveRig(player)
+			if humanoid and isInCombat(humanoid) then
+				logger:debug("Emote interrupted: InCombat", { player = player.Name, emoteId = active.EmoteId })
+				EmoteSystem.StopEmote(player)
+				continue
+			end
+		end
 	end
 end
 
@@ -387,6 +472,9 @@ function EmoteSystem.Init(): ()
 
 	local notifyFinishedRemote = NetworkBridge.CreateRemoteEvent(EmoteConstants.RemoteNames.NotifyFinished)
 	notifyFinishedRemote.OnServerEvent:Connect(handleNotifyFinished)
+
+	local requestStopRemote = NetworkBridge.CreateRemoteEvent(EmoteConstants.RemoteNames.RequestStop)
+	requestStopRemote.OnServerEvent:Connect(handleRequestStop)
 
 	local requestSetLoadoutSlotRemote =
 		NetworkBridge.CreateRemoteEvent(EmoteConstants.RemoteNames.RequestSetLoadoutSlot)

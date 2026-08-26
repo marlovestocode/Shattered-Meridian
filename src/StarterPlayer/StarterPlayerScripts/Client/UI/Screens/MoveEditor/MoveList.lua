@@ -3,18 +3,30 @@
 	MoveList.lua
 
 	Owns: the Move Editor's left column -- a "+ New Move" header and a scrollable list of every
-	known move, each row selectable and independently deletable. The list-of-items-with-per-row-
-	actions template this file follows is the same one Screens/DevMenu/Sidebar.lua's own player
-	roster already established (scope:ForPairs over a reactive array, re-keyed by MoveId, one
-	ActionIcon-style action per row) -- generalized here from a Player-keyed roster to a
-	MoveId-keyed move list.
+	known move, each row selectable and carrying its own Rename/Duplicate/Delete actions. The
+	list-of-items-with-per-row-actions template this file follows is the same one Screens/DevMenu/
+	Sidebar.lua's own player roster already established (scope:ForPairs over a reactive array,
+	re-keyed by MoveId, an ActionIcon strip per row) -- generalized here from a Player-keyed roster to
+	a MoveId-keyed move list.
+
+	The action strip is REVEALED ON HOVER (and stays up while the row is selected or its delete is
+	armed) rather than always drawn. Three permanently-visible tiles per row on a list that is mostly
+	read rather than acted on turns a scan for a move name into a scan past nine icons; hovering is
+	already how a pointer says which row it means. Delete used to be the only action here and was
+	always visible, which is the shape this replaces.
+
+	RENAME edits DisplayName in place -- double-click a row, or use its ✎ tile. Enter or clicking away
+	commits, Escape abandons (TextField.lua forwards Roblox's own FocusLost cause so those three can
+	be told apart). It never touches MoveId: that is the server's stamped identity (see
+	MoveEditorSystem.stampTrustedMetadata), and a list row is not a place to rewrite a record's key.
 
 	Delete reuses ActionIcon's "ResetData" glyph (a trash can -- the clearest "permanently discards
 	something" reading in this UI's own glyph vocabulary, see that component's header) with its
 	Armed two-press-confirm idiom, the same pattern Sidebar.lua's own Ban action uses for an
-	irreversible action. Omitted entirely (not merely disabled) for a Category == "Default" move -- a
-	Default move (Server/Combat/DefaultMoveRegistry.lua's live-Constants-backed projection, see that
-	module's own header) can never be deleted, only reset, so there is no Delete action to offer.
+	irreversible action. The whole strip is omitted (not merely disabled) for a Category == "Default"
+	move -- a Default move (Server/Combat/DefaultMoveRegistry.lua's live-Constants-backed projection,
+	see that module's own header) can't be renamed, duplicated or deleted, only reset, so there is
+	nothing to offer.
 
 	A "Default" | "Custom" filter tab sits above the list -- the two kinds never mix in one scroll
 	(mixing a fixed, non-deletable Constants-backed attack with a hand-authored, deletable,
@@ -56,6 +68,7 @@ local TextField = require(script.Parent.Parent.Parent.Components.TextField)
 local ActionIcon = require(script.Parent.Parent.Parent.Components.ActionIcon)
 local SectionIcon = require(script.Parent.Parent.Parent.Components.SectionIcon)
 local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
+local EditorTokens = require(script.Parent.EditorTokens)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -67,9 +80,21 @@ type UsedAs<T> = Fusion.UsedAs<T>
 export type MoveListProps = {
 	MovesDisplay: UsedAs<{ MoveTypes.MoveDefinition }>,
 	SelectedMoveId: UsedAs<string?>,
+	-- The move whose row should be flashing "saved" right now, or "" for none -- see
+	-- MoveEditorHandle.LastSavedMoveId for why the timer that clears it lives outside this file.
+	LastSavedMoveId: UsedAs<string>,
 	OnNew: () -> (),
 	OnSelect: (string) -> (),
 	OnDelete: (string) -> (),
+	-- Commits a new DisplayName for one move. Takes the MoveId rather than acting on "the selected
+	-- move" because a row can be renamed without being the open draft -- MoveEditorClient.lua
+	-- resolves which record to edit and how to send it. A MoveId is never renamed: that is the
+	-- server's stamped identity (see MoveEditorSystem.stampTrustedMetadata), and this only ever
+	-- changes the label.
+	OnRename: (moveId: string, newName: string) -> (),
+	-- Same reasoning, for the row's copy action -- the toolbar's own Duplicate button and Ctrl+D
+	-- both act on the open draft, but a row's icon must be able to copy the row it is on.
+	OnDuplicate: (moveId: string) -> (),
 }
 
 -- 44 -> 60: a bare name fit in 44, but the two-line card (name + category/glyph meta row) below
@@ -81,11 +106,28 @@ local ROW_ACCENT_WIDTH = 4
 -- How long a Delete press stays Armed before disarming itself if not confirmed -- same idea and
 -- magnitude as Sidebar.lua's own Ban-arm window.
 local DELETE_ARM_SECONDS = 3
+-- Roblox has no double-click event, so two Activated fires inside this window count as one. 0.35s
+-- is the usual desktop threshold; longer starts catching two deliberate separate clicks on the
+-- same row, which here would mean an admin re-selecting a move suddenly finds themselves renaming
+-- it.
+local DOUBLE_CLICK_SECONDS = 0.35
+-- Rename / Duplicate / Delete. Fixed rather than counted from a table so the row can reserve the
+-- gutter width before the strip is built.
+local ROW_ACTION_COUNT = 3
 
 local function MoveRow(scope: Scope, move: MoveTypes.MoveDefinition, layoutOrder: number, props: MoveListProps): Frame
 	local isArmed = scope:Value(false)
+	-- Drives the per-row action strip's reveal. Tracked per row rather than "which row is hovered"
+	-- somewhere shared, because each row already owns a TextButton that gets the enter/leave events
+	-- for free -- a shared value would need every row to write to it and would race on fast movement.
+	local isHovered = scope:Value(false)
+	local isRenaming = scope:Value(false)
+	local renameText = scope:Value(move.DisplayName)
 	local isSelected = scope:Computed(function(use)
 		return use(props.SelectedMoveId) == move.MoveId
+	end)
+	local justSaved = scope:Computed(function(use)
+		return use(props.LastSavedMoveId) == move.MoveId
 	end)
 
 	local backgroundColor = scope:Computed(function(use)
@@ -98,13 +140,18 @@ local function MoveRow(scope: Scope, move: MoveTypes.MoveDefinition, layoutOrder
 		return if use(isSelected) then Tokens.Color.TextPrimary else Tokens.Color.TextSecondary
 	end)
 
-	-- A Default move has no Delete icon at all (see file header), so its content column can use the
-	-- full row width; a Custom row still reserves a StepButtonSize-wide gutter on the right for it.
+	-- A Default move gets no action strip AT ALL -- it cannot be renamed (its name comes from
+	-- Constants), cannot be duplicated (there is nothing to mint a second copy of -- see
+	-- MoveEditorClient's own requestDuplicate) and cannot be deleted (only reset). So its content
+	-- column takes the full row width; a Custom row reserves a gutter for three tiles.
 	local isDefaultMove = move.Category == MoveTypes.DefaultCategory
 	local labelInset = ROW_ACCENT_WIDTH + Tokens.Space.S
+	local actionStripWidth = ROW_ACTION_COUNT * Tokens.Control.StepButtonSize
+		+ (ROW_ACTION_COUNT - 1) * Tokens.Space.XS
+		+ Tokens.Space.XS
 	local contentWidth = if isDefaultMove
 		then UDim2.new(1, -labelInset, 1, 0)
-		else UDim2.new(1, -(labelInset + Tokens.Control.StepButtonSize + Tokens.Space.XS), 1, 0)
+		else UDim2.new(1, -(labelInset + actionStripWidth), 1, 0)
 
 	-- Meta line: Category (only when the author actually set one) followed by whichever of
 	-- Movement/Knockback/Projectile glyphs apply -- see file header.
@@ -146,8 +193,60 @@ local function MoveRow(scope: Scope, move: MoveTypes.MoveDefinition, layoutOrder
 		)
 	end
 
+	-- Both presentations of the name are mounted up front and Visible-toggled, the same idiom the rest
+	-- of this editor uses for a control with two states -- creating the box on demand would drop focus
+	-- during the very transition that is supposed to be handing it focus.
+	local renameField = TextField(scope, {
+		Text = renameText,
+		Size = UDim2.new(1, 0, 0, Tokens.Control.StepButtonSize),
+		LayoutOrder = 1,
+		OnFocusLost = function(text: string, _enterPressed: boolean, cause: InputObject?)
+			isRenaming:set(false)
+			if cause and cause.KeyCode == Enum.KeyCode.Escape then
+				-- Abandoned. Reseeded so re-opening the box shows the real name again rather than the
+				-- half-typed one that was just discarded.
+				renameText:set(move.DisplayName)
+				return
+			end
+			props.OnRename(move.MoveId, text)
+		end,
+	})
+
+	local function beginRename(): ()
+		if isDefaultMove then
+			return
+		end
+		renameText:set(move.DisplayName)
+		isRenaming:set(true)
+	end
+
+	-- Same one-tick deferral NumericField.lua's own typed entry needs: Roblox will not focus a TextBox
+	-- that was Visible = false when CaptureFocus was called, and the Visible flip only lands on the
+	-- next render step.
+	scope:Observer(isRenaming):onChange(function()
+		if peek(isRenaming) then
+			renameField:CaptureFocus()
+		end
+	end)
+
+	local nameVisible = scope:Computed(function(use)
+		return not use(isRenaming)
+	end)
+
 	local rowChildren: { Instance } = {
 		scope:New "UICorner" { CornerRadius = Tokens.Radius.Sharp },
+		-- The just-saved confirmation: a green outline around the row for a moment after its Save
+		-- lands. An outline rather than a fill or a badge because it needs no layout space on a row
+		-- that is already carrying a name, a meta line and three action tiles -- and because the row
+		-- it draws around IS the thing being confirmed, which a badge somewhere else would not be.
+		-- Transparency-toggled rather than Visible-toggled: a UIStroke has no Visible of its own.
+		scope:New "UIStroke" {
+			Color = EditorTokens.Saved,
+			Thickness = 1,
+			Transparency = scope:Computed(function(use)
+				return if use(justSaved) then 0 else 1
+			end),
+		},
 		scope:New "Frame" {
 			Name = "AccentBar",
 			Size = UDim2.new(0, ROW_ACCENT_WIDTH, 1, 0),
@@ -175,7 +274,9 @@ local function MoveRow(scope: Scope, move: MoveTypes.MoveDefinition, layoutOrder
 					Scale = "BodyLarge",
 					Color = nameColor,
 					LayoutOrder = 1,
+					Visible = nameVisible,
 				}),
+				renameField,
 				scope:New "Frame" {
 					Name = "Meta",
 					Size = UDim2.fromOffset(0, 0),
@@ -188,31 +289,74 @@ local function MoveRow(scope: Scope, move: MoveTypes.MoveDefinition, layoutOrder
 			},
 		},
 	}
-	-- A Default move can never be deleted (see file header) -- no Delete icon at all, rather than a
-	-- disabled one that would invite clicking.
+
 	if not isDefaultMove then
+		-- Revealed on hover, and ALSO whenever this row is selected or its delete is armed. Hover alone
+		-- would hide the armed state the moment the pointer slipped off the row mid-confirm, and would
+		-- leave the move an admin is actually working on with no visible actions at all.
+		local actionsVisible = scope:Computed(function(use)
+			return use(isHovered) or use(isSelected) or use(isArmed)
+		end)
+
 		table.insert(
 			rowChildren,
-			ActionIcon(scope, {
-				Glyph = "ResetData",
-				Text = "Delete " .. move.DisplayName,
+			scope:New "Frame" {
+				Name = "Actions",
 				AnchorPoint = Vector2.new(1, 0.5),
 				Position = UDim2.new(1, -Tokens.Space.XS, 0.5, 0),
-				Armed = isArmed,
-				OnActivated = function()
-					if peek(isArmed) then
-						isArmed:set(false)
-						props.OnDelete(move.MoveId)
-					else
-						isArmed:set(true)
-						task.delay(DELETE_ARM_SECONDS, function()
-							isArmed:set(false)
-						end)
-					end
-				end,
-			})
+				Size = UDim2.fromOffset(actionStripWidth - Tokens.Space.XS, Tokens.Control.StepButtonSize),
+				BackgroundTransparency = 1,
+				Visible = actionsVisible,
+
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						VerticalAlignment = Enum.VerticalAlignment.Center,
+						Padding = UDim.new(0, Tokens.Space.XS),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					ActionIcon(scope, {
+						Glyph = "Rename",
+						Text = "Rename " .. move.DisplayName,
+						LayoutOrder = 1,
+						OnActivated = beginRename,
+					}),
+					ActionIcon(scope, {
+						Glyph = "Duplicate",
+						Text = "Duplicate " .. move.DisplayName,
+						LayoutOrder = 2,
+						OnActivated = function()
+							props.OnDuplicate(move.MoveId)
+						end,
+					}),
+					-- Delete reuses ActionIcon's ResetData (trash can) glyph and its Armed two-press confirm,
+					-- the same shape DevMenu Sidebar.lua's own Ban action uses for an irreversible action.
+					ActionIcon(scope, {
+						Glyph = "ResetData",
+						Text = "Delete " .. move.DisplayName,
+						LayoutOrder = 3,
+						Armed = isArmed,
+						OnActivated = function()
+							if peek(isArmed) then
+								isArmed:set(false)
+								props.OnDelete(move.MoveId)
+							else
+								isArmed:set(true)
+								task.delay(DELETE_ARM_SECONDS, function()
+									isArmed:set(false)
+								end)
+							end
+						end,
+					}),
+				},
+			}
 		)
 	end
+
+	-- Roblox fires no double-click event, so two Activated presses inside DOUBLE_CLICK_SECONDS are
+	-- read as one here. The FIRST click still selects -- a double-click is "select, then rename", not
+	-- a separate gesture -- so nothing is lost if the second press never arrives.
+	local lastActivated = 0
 
 	return scope:New "TextButton" {
 		Name = move.MoveId,
@@ -224,7 +368,20 @@ local function MoveRow(scope: Scope, move: MoveTypes.MoveDefinition, layoutOrder
 		Text = "",
 		LayoutOrder = layoutOrder,
 
+		[OnEvent "MouseEnter"] = function()
+			isHovered:set(true)
+		end,
+		[OnEvent "MouseLeave"] = function()
+			isHovered:set(false)
+		end,
 		[OnEvent "Activated"] = function()
+			local now = os.clock()
+			if now - lastActivated <= DOUBLE_CLICK_SECONDS then
+				lastActivated = 0
+				beginRename()
+				return
+			end
+			lastActivated = now
 			props.OnSelect(move.MoveId)
 		end,
 

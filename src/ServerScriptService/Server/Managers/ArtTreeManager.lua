@@ -157,14 +157,12 @@ function ArtTreeManager.Init(): ()
 		logger:warn("ArtConstants roster failed validation", { problem = rosterProblem })
 	end
 
-	-- Audited at boot for visibility only -- never fatal, for the same reason TierSystem's ladder
-	-- check isn't: a bad authored art should show up in a log and a test run, not stop the server.
-	-- Runs after MoveRegistryManager.Init but the registry is populated from the DataStore by
-	-- MoveEditorSystem later, so this boot-time pass legitimately sees an empty registry and finds
-	-- nothing; the same audit is exposed publicly for the spec and for a post-load caller.
-	for _, problem in ipairs(ArtTreeManager.AuditPrerequisites()) do
-		logger:warn("Art prerequisite problem", { problem = problem })
-	end
+	-- DELIBERATELY NO AUDIT HERE, for the same reason BloodlineManager.Init states: this Manager
+	-- boots at Main.server.lua step 160, before MoveRegistryManager has even Init'd (223) and long
+	-- before MoveEditorSystem loads the persisted moves arts are derived from (358, asynchronously).
+	-- The audit that used to sit here saw an empty registry every boot and logged clean -- a check
+	-- that cannot fail reads as a check that passed. AuditPrerequisites stays public and is called by
+	-- MoveEditorSystem.loadPersistedMoves once the moves are actually in.
 
 	logger:info("ArtTreeManager.Init() complete", { trees = #ArtConstants.ArtTrees })
 end

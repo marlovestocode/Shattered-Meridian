@@ -149,6 +149,29 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 		definition.WindupSeconds = windupOverride
 	end
 
+	-- THE WEAPON'S OWN SPAWN DELAY, added LAST -- after the marker override above, deliberately.
+	--
+	-- Both numbers answer "when does the hitbox go live", from different authorities: the marker says
+	-- when the CLIP connects, and SpawnDelay is the builder saying this weapon's arc lands later than
+	-- the house sword's. Applied before the override, a marked clip would silently discard the
+	-- builder's value and an unmarked one would keep it -- the same move behaving two ways depending on
+	-- whether an animator had touched the asset, which is precisely the "subtly wrong for a month"
+	-- class this file's projection-notes warning exists to prevent. Applied after, "delay" means the
+	-- same thing either way.
+	--
+	-- ADDITIVE, never a replacement: zero is the default and changes nothing, so every weapon and every
+	-- custom move authored before this field existed keeps its exact timing.
+	--
+	-- No Cooldown adjustment needed, and none is wanted. CombatConstants.Weapons' own header requires
+	-- Cooldown <= Windup+Active+Recovery so the swing's end (not Cooldown) is the gate a player feels;
+	-- lengthening Windup only widens that margin, so the invariant holds in the safe direction. The
+	-- attacker's commitment lock grows with it, which is the intent -- a weapon that hits later also
+	-- stays committed later. Both fall out of AttackRequestSystem reading Definition.WindupSeconds.
+	local spawnDelay = move.SpawnDelaySeconds
+	if spawnDelay and spawnDelay > 0 then
+		definition.WindupSeconds += spawnDelay
+	end
+
 	return {
 		MoveId = move.MoveId,
 		Definition = definition,

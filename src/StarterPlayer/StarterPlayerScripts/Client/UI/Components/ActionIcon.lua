@@ -2,8 +2,9 @@
 --[[
 	ActionIcon.lua
 
-	Owns: the compact icon-tile action button used by the roster row's per-player moderation actions
-	(Kick/Ban/Mute/Flag-Suspected-Cheater, plus an overflow "⋯") -- Button.lua's hover/press
+	Owns: the compact icon-tile action button used by per-row action strips -- the DevMenu roster's
+	per-player moderation actions (Kick/Ban/Mute/Flag-Suspected-Cheater, plus an overflow "⋯") and the
+	Move Editor move list's per-move Rename/Duplicate/Delete -- Button.lua's hover/press
 	interaction model, composed with VitalIcon.lua's exact procedural Frame/UIStroke glyph technique
 	(no SVG, no asset upload -- see that module's own header for why this repo never guesses at an
 	rbxassetid), generalizing Tab.lua's persistent Selected concept to an icon-only control that also
@@ -42,6 +43,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
+local Selection = require(script.Parent.Selection)
 local HoverLabel = require(script.Parent.HoverLabel)
 
 local Children = Fusion.Children
@@ -52,7 +54,20 @@ local peek = Fusion.peek
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
 
-export type ActionIconGlyphKind = "Kick" | "Ban" | "Mute" | "FlagSuspected" | "ResetData" | "Overflow"
+export type ActionIconGlyphKind =
+	"Kick"
+	| "Ban"
+	| "Mute"
+	| "FlagSuspected"
+	| "ResetData"
+	| "Overflow"
+	-- The two the Move Editor's move list needed, added alongside the moderation set rather than
+	-- given their own component: they are the same tile, the same size, the same hover/press/Armed
+	-- model, sitting in the same kind of per-row action strip. A second icon-button component for
+	-- two more glyphs would be two interaction models to keep in agreement, which is exactly what
+	-- this file's own header says it exists to avoid.
+	| "Rename"
+	| "Duplicate"
 
 export type ActionIconProps = {
 	Glyph: ActionIconGlyphKind,
@@ -253,6 +268,77 @@ local function ResetDataGlyph(scope: Scope, color: UsedAs<Color3>): Frame
 	})
 end
 
+-- A pencil laid diagonally with a nib at its lower-left and a rule under it -- "edit this text in
+-- place." A pencil rather than a text cursor or an "A": every other glyph here is a physical
+-- object read at a glance (a can, a flag, a ring), and a blinking-caret shape at 18px is a two-pixel
+-- bar that reads as nothing at all.
+local function RenameGlyph(scope: Scope, color: UsedAs<Color3>): Frame
+	return glyphFrame(scope, {
+		scope:New "Frame" {
+			Name = "Shaft",
+			-- throughCenter: anchor and position both at the box's true center, so Rotation pivots
+			-- cleanly through it -- the first of the two proven-safe shapes this file's header names.
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.42),
+			Size = UDim2.fromOffset(GLYPH_SIZE * 0.72, GLYPH_THICKNESS * 1.6),
+			Rotation = -45,
+			BackgroundColor3 = color,
+			BorderSizePixel = 0,
+			ZIndex = 3,
+		},
+		scope:New "Frame" {
+			Name = "Nib",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.26, 0.68),
+			Size = UDim2.fromOffset(GLYPH_THICKNESS * 2, GLYPH_THICKNESS * 2),
+			Rotation = -45,
+			BackgroundColor3 = color,
+			BorderSizePixel = 0,
+			ZIndex = 4,
+		},
+		scope:New "Frame" {
+			Name = "Rule",
+			-- The line being written ON. Un-rotated and anchored at one point, so it has no pivot
+			-- ambiguity at all -- see this file's header on why that case is the safe one.
+			AnchorPoint = Vector2.new(0.5, 1),
+			Position = UDim2.fromScale(0.5, 0.94),
+			Size = UDim2.fromOffset(GLYPH_SIZE * 0.8, GLYPH_THICKNESS * 0.5),
+			BackgroundColor3 = color,
+			BorderSizePixel = 0,
+			ZIndex = 3,
+		},
+	})
+end
+
+-- Two offset outlined rectangles -- one sheet sitting behind another, the standard "make a second
+-- copy of this" reading. Outlined rather than filled for ResetDataGlyph's own stated reason: a
+-- filled shape reads as "currently active," which a one-shot action never is. The BACK sheet is the
+-- one drawn dimmer, so the pair reads as "an original and its copy" rather than as two equal
+-- squares.
+local function DuplicateGlyph(scope: Scope, color: UsedAs<Color3>): Frame
+	local sheet = GLYPH_SIZE * 0.6
+	local function outlined(x: number, y: number, transparency: number, zIndex: number): Frame
+		return scope:New "Frame" {
+			Name = "Sheet",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(x, y),
+			Size = UDim2.fromOffset(sheet, sheet),
+			BackgroundTransparency = 1,
+			ZIndex = zIndex,
+
+			[Children] = {
+				scope:New "UICorner" { CornerRadius = UDim.new(0, 2) },
+				scope:New "UIStroke" {
+					Color = color,
+					Thickness = GLYPH_THICKNESS * 0.6,
+					Transparency = transparency,
+				},
+			},
+		} :: Frame
+	end
+	return glyphFrame(scope, { outlined(0.36, 0.34, 0.45, 3), outlined(0.62, 0.62, 0, 4) })
+end
+
 -- Three dots ("⋯") -- the overflow popover trigger.
 local function OverflowGlyph(scope: Scope, color: UsedAs<Color3>): Frame
 	local dotSize = GLYPH_SIZE * 0.22
@@ -272,7 +358,11 @@ local function OverflowGlyph(scope: Scope, color: UsedAs<Color3>): Frame
 end
 
 local function ActionIcon(scope: Scope, props: ActionIconProps): TextButton
-	local isHovering = scope:Value(false)
+	-- Pointer-over AND gamepad-selection, OR-ed into the single boolean every visual Computed
+	-- below already reads as `isHovering` -- see Components/Selection.lua for why the two stay
+	-- separate rather than both writing one Value.
+	local engagement = Selection.New(scope)
+	local isHovering = engagement.Active
 	local isPressing = scope:Value(false)
 	-- Fed by [Out "AbsolutePosition"]/[Out "AbsoluteSize"] below -- see this file's header and
 	-- HoverLabel.lua's for why the hover label needs these to position/clamp itself.
@@ -296,7 +386,16 @@ local function ActionIcon(scope: Scope, props: ActionIconProps): TextButton
 		elseif use(selected) then
 			return Tokens.Color.AccentPrimary
 		end
-		return Tokens.Color.BorderSubtle
+		return Tokens.Border.Standard.Color
+	end)
+
+	-- The resting border uses Tokens.Border.Standard's own Color+Transparency pair together
+	-- (rather than assuming opaque) -- armed/selected escalate to a fully opaque emphasis color.
+	local borderTransparency = scope:Computed(function(use)
+		if use(armed) or use(selected) then
+			return 0
+		end
+		return Tokens.Border.Standard.Transparency
 	end)
 
 	local borderThickness = scope:Computed(function(use)
@@ -318,6 +417,10 @@ local function ActionIcon(scope: Scope, props: ActionIconProps): TextButton
 		glyph = FlagGlyph(scope, glyphColor, peek(selected))
 	elseif props.Glyph == "ResetData" then
 		glyph = ResetDataGlyph(scope, glyphColor)
+	elseif props.Glyph == "Rename" then
+		glyph = RenameGlyph(scope, glyphColor)
+	elseif props.Glyph == "Duplicate" then
+		glyph = DuplicateGlyph(scope, glyphColor)
 	else
 		glyph = OverflowGlyph(scope, glyphColor)
 	end
@@ -341,11 +444,17 @@ local function ActionIcon(scope: Scope, props: ActionIconProps): TextButton
 		[Out "AbsolutePosition"] = anchorPosition,
 		[Out "AbsoluteSize"] = anchorSize,
 
+		[OnEvent "SelectionGained"] = function()
+			engagement.Selected:set(true)
+		end,
+		[OnEvent "SelectionLost"] = function()
+			engagement.Selected:set(false)
+		end,
 		[OnEvent "MouseEnter"] = function()
-			isHovering:set(true)
+			engagement.PointerOver:set(true)
 		end,
 		[OnEvent "MouseLeave"] = function()
-			isHovering:set(false)
+			engagement.PointerOver:set(false)
 			isPressing:set(false)
 		end,
 		[OnEvent "MouseButton1Down"] = function()
@@ -367,6 +476,7 @@ local function ActionIcon(scope: Scope, props: ActionIconProps): TextButton
 			scope:New "UIStroke" {
 				Color = borderColor,
 				Thickness = borderThickness,
+				Transparency = borderTransparency,
 			},
 			glyph,
 			HoverLabel(scope, {

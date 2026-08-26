@@ -69,6 +69,7 @@ local Tokens = require(script.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Panel)
 local Layers = require(script.Parent.Parent.Shell.Layers)
 local Surface = require(script.Parent.Parent.Shell.Surface)
+local Focus = require(script.Parent.Parent.Shell.Focus)
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
@@ -94,6 +95,13 @@ export type ModalScreenProps = {
 	-- each sized by hand against their own content and are not re-measured for this, so they keep
 	-- rendering at their literal pixel size until someone opts them in deliberately.
 	AutoScale: boolean?,
+	-- Which control a gamepad focuses when this panel opens. Defaults to the first selectable
+	-- control in reading order -- see Shell/Focus.lua. Ignored on keyboard/mouse, where no selection
+	-- is claimed at all.
+	FocusDefault: GuiObject?,
+	-- Opts this panel out of gamepad selection entirely. Defaults to false; the only reason to pass
+	-- true is a panel with no selectable controls at all, where a group would be an empty one.
+	NoFocus: boolean?,
 	-- Pass-throughs to Panel.lua -- see that file's own prop comments.
 	BracketArmLength: number?,
 	CornerAccentColor: UsedAs<Color3>?,
@@ -254,6 +262,18 @@ local function ModalScreen(scope: Scope, playerGui: PlayerGui, props: ModalScree
 			noteCountChanged()
 		end
 	end)
+
+	-- EVERY modal is a focus group, wired ONCE here rather than per screen -- which is what makes
+	-- "all nine panels are navigable on a pad" a property of the shared frame instead of nine
+	-- separate things to remember. Components/ScreenFrame.lua reaches this through its own
+	-- ModalScreen call, so the six screens wearing the shared frame are covered by this line too.
+	-- Nothing is claimed on keyboard/mouse; see Shell/Focus.lua's header.
+	if not props.NoFocus then
+		Focus.Group(scope, root :: Frame, {
+			Default = props.FocusDefault,
+			IsOpen = props.IsOpen,
+		})
+	end
 
 	return root :: Frame
 end

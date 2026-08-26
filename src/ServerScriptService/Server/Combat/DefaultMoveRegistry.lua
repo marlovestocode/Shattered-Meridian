@@ -62,6 +62,7 @@ local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local HitboxShapes = require(ReplicatedStorage.Shared.HitboxShapes)
+local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
 local MoveRegistryManager = require(script.Parent.MoveRegistryManager)
 
@@ -93,6 +94,18 @@ type Descriptor = {
 	MoveId: string,
 	DisplayName: string,
 	Definition: Types.HitboxAttackDefinition,
+	-- weaponSwingAttachment() for every Basic/Heavy/Finisher stage -- "Weapon" (a real weapon swing,
+	-- thrown off whatever is equipped) or nil for the shipped body box, see that function just below --
+	-- and always nil (projects as "Root") for the three standalone attacks -- DashPunch/DashHit/
+	-- AirSlam are fist/body attacks with no weapon in them, exactly as before this field existed. Set
+	-- once per descriptor at enumeration time below, never authored or edited -- see MoveDefinition.
+	-- AttachmentPart's own header for why this is computed rather than exposed in the Move Editor.
+	AttachmentPart: MoveTypes.MoveAttachmentPoint?,
+	-- This weapon's own SpawnDelay, straight off WeaponRoster.SwingHitbox -- nil for the three
+	-- standalone attacks, which have no weapon to carry one. Resolved at enumeration time like
+	-- AttachmentPart beside it, and for the same reason: it is a property of the WEAPON the stage
+	-- belongs to, not of the stage, so there is nowhere in the shared baseline table to put it.
+	SpawnDelaySeconds: number?,
 }
 
 local function weaponStageMoveId(weaponId: Types.WeaponId, category: WeaponStageCategory, stageIndex: number): string
@@ -126,34 +139,70 @@ local function resolveStandaloneDefinition(name: StandaloneName): Types.HitboxAt
 	return CombatConstants.AirSlam
 end
 
--- Every tunable attack, in a stable display order (Primary before Secondary, Basic before Heavy
--- before Finisher, array order within each, then DashPunch/DashHit/AirSlam) -- the one enumeration
--- every other function in this module (capture, resolve, list) is built from, so the order can never
--- drift between them.
+-- Every tunable attack, in a stable display order (roster order -- see WeaponRoster.Order -- then
+-- Basic before Heavy before Finisher, array order within each, then DashPunch/DashHit/AirSlam) -- the
+-- one enumeration every other function in this module (capture, resolve, list) is built from, so the
+-- order can never drift between them.
 --
 -- Cached after the first build: this used to be rebuilt from scratch on every call on the theory that
 -- a couple dozen entries is cheap, back when the only caller was an admin UI. It is now also the inner
 -- loop of AttackCatalog.Get (findDescriptor scans this list), called per landed hit and per buffered
 -- input replay every Heartbeat -- see AttackCatalog.lua's own header for that path. Caching is safe
--- because the list's SHAPE (which MoveIds exist, which live Constants table each one points at) is
--- fixed at boot -- CombatConstants.Weapons.*.Stages arrays are never resized or replaced at runtime,
--- only mutated in place (see Descriptor's own header) -- so nothing here ever needs invalidating.
+-- because the list's SHAPE (which MoveIds exist, which live table each one points at) is fixed at boot
+-- -- the roster is built once and its per-weapon Stages arrays are never resized or replaced at
+-- runtime, only mutated in place (see Descriptor's own header, and WeaponRoster.Start's own note on
+-- why the roster deliberately does NOT track Workspace.Weapons live the way the model registry next
+-- door does) -- so nothing here ever needs invalidating.
+--
+-- ORDERING DEPENDENCY, therefore: WeaponRoster.Start() must have run before anything calls into this
+-- module, or the roster is empty and this list caches with no weapon moves in it at all. Main.server
+-- boots it before the combat stack for exactly that reason.
 local cachedDescriptors: { Descriptor }? = nil
+
+-- Which anchor THIS weapon's swings are handed to the engine with, off its own resolved hitbox config
+-- (WeaponRoster.SwingHitbox, which falls back to CombatConstants.Weapons.SwingHitbox for a weapon that
+-- authored no Mode) -- read that constant's own header first, it is where the two modes are described.
+--
+-- PER WEAPON, not once for the roster: a weapon with a real modelled blade can keep blade-anchored
+-- geometry while every other weapon swings the body box, and mixing them is a supported roster.
+--
+-- nil projects as "Root" (MoveTypes.ToEngineAttackDefinition's own fallback), which is the whole
+-- mechanism behind the body box: an AttachmentPart that is not exactly "Weapon" also leaves
+-- SizeFromAttachmentPart false, so the swing stops taking its dimensions off the equipped weapon's
+-- Blade part and uses the stage's authored Size/Offset -- i.e. SWING_HITBOX's box, in root space --
+-- instead. The two halves of "BodyBox" are therefore one decision, not two that could disagree.
+--
+-- Resolved per enumeration rather than cached at module load so a Studio session that edits the
+-- constant and re-requires picks it up; enumerateDescriptors itself is still cached, so flipping Mode
+-- at runtime needs a fresh boot to take effect, same as retuning the Baseline stages does.
+local function weaponSwingAttachment(weaponId: Types.WeaponId): MoveTypes.MoveAttachmentPoint?
+	if WeaponRoster.SwingHitbox(weaponId).Mode == "Blade" then
+		return "Weapon"
+	end
+	return nil
+end
 
 local function enumerateDescriptors(): { Descriptor }
 	if cachedDescriptors then
 		return cachedDescriptors
 	end
 	local result: { Descriptor } = {}
-	for _, weaponId in ipairs({ "Primary", "Secondary" } :: { Types.WeaponId }) do
-		local weapon = if weaponId == "Primary"
-			then CombatConstants.Weapons.Primary
-			else CombatConstants.Weapons.Secondary
+	-- The live roster (every model in Workspace.Weapons), not a hardcoded pair -- see
+	-- Shared/Combat/WeaponRoster.lua. Each entry's Stages are that weapon's OWN deep-copied tables, so
+	-- the by-reference mutation this module does for the Move Editor retunes exactly one weapon.
+	for _, weaponId in WeaponRoster.Order() do
+		local entry = WeaponRoster.Get(weaponId)
+		if not entry then
+			continue
+		end
+		local weapon = entry
 		for index, definition in ipairs(weapon.Stages.Basic) do
 			table.insert(result, {
 				MoveId = weaponStageMoveId(weaponId, "Basic", index),
 				DisplayName = weaponStageDisplayName(weaponId, "Basic", index),
 				Definition = definition,
+				AttachmentPart = weaponSwingAttachment(weaponId),
+				SpawnDelaySeconds = WeaponRoster.SwingHitbox(weaponId).SpawnDelaySeconds,
 			})
 		end
 		for index, definition in ipairs(weapon.Stages.Heavy) do
@@ -161,6 +210,8 @@ local function enumerateDescriptors(): { Descriptor }
 				MoveId = weaponStageMoveId(weaponId, "Heavy", index),
 				DisplayName = weaponStageDisplayName(weaponId, "Heavy", index),
 				Definition = definition,
+				AttachmentPart = weaponSwingAttachment(weaponId),
+				SpawnDelaySeconds = WeaponRoster.SwingHitbox(weaponId).SpawnDelaySeconds,
 			})
 		end
 		-- Finisher is a single stage, not an array -- stageIndex 0 marks it, mirroring the sentinel
@@ -169,6 +220,8 @@ local function enumerateDescriptors(): { Descriptor }
 			MoveId = weaponStageMoveId(weaponId, "Finisher", 0),
 			DisplayName = weaponStageDisplayName(weaponId, "Finisher", 0),
 			Definition = weapon.Stages.Finisher,
+			AttachmentPart = weaponSwingAttachment(weaponId),
+			SpawnDelaySeconds = WeaponRoster.SwingHitbox(weaponId).SpawnDelaySeconds,
 		})
 	end
 	for _, name in ipairs(STANDALONE_ATTACK_NAMES) do
@@ -176,6 +229,8 @@ local function enumerateDescriptors(): { Descriptor }
 			MoveId = standaloneMoveId(name),
 			DisplayName = name,
 			Definition = resolveStandaloneDefinition(name),
+			-- nil (Root): a fist/body attack has no weapon to swing.
+			AttachmentPart = nil,
 		})
 	end
 	cachedDescriptors = result
@@ -277,11 +332,13 @@ end
 -- Projects a live HitboxAttackDefinition into the MoveTypes.MoveDefinition shape the Move Editor UI
 -- consumes -- see this file's header for why AnimationId/Movement/Knockback/Projectile are always
 -- "" / nil regardless of the live definition's own (always-nil, for a hand-authored attack) state.
-local function toMoveDefinition(
-	moveId: string,
-	displayName: string,
-	definition: Types.HitboxAttackDefinition
-): MoveTypes.MoveDefinition
+-- Takes the whole Descriptor rather than four unpacked fields: every call site already had one in
+-- hand and passed its parts through positionally, which is four chances to transpose two strings and
+-- no compile error if you do. It also means a field added to Descriptor (SpawnDelaySeconds was the
+-- second) needs no signature change and no fifth argument at four call sites.
+local function toMoveDefinition(descriptor: Descriptor): MoveTypes.MoveDefinition
+	local moveId = descriptor.MoveId
+	local definition = descriptor.Definition
 	-- Box is the implicit default for a hand-authored Constants.lua definition -- see
 	-- Types.HitboxAttackDefinition.Shape's own comment, mirrored here rather than leaving Shape
 	-- nil on the projection (MoveDefinition.Shape is non-optional).
@@ -306,7 +363,7 @@ local function toMoveDefinition(
 
 	return {
 		MoveId = moveId,
-		DisplayName = displayName,
+		DisplayName = descriptor.DisplayName,
 		Category = MoveTypes.DefaultCategory,
 		Author = "System",
 		CreatedAt = 0,
@@ -317,6 +374,11 @@ local function toMoveDefinition(
 		Radius = definition.Radius,
 		Offset = definition.Offset,
 		OffsetRotation = rotationByMoveId[moveId] or Vector3.zero,
+		AttachmentPart = descriptor.AttachmentPart,
+		SizeMultiplier = definition.SizeMultiplier,
+		-- Straight through from the weapon's own build; see MoveDefinition.SpawnDelaySeconds' own
+		-- header for why AttackCatalog rather than this projection is what finally adds it to a windup.
+		SpawnDelaySeconds = descriptor.SpawnDelaySeconds,
 		WindupSeconds = definition.WindupSeconds,
 		ActiveSeconds = definition.ActiveSeconds,
 		RecoverySeconds = definition.RecoverySeconds,
@@ -348,7 +410,7 @@ function DefaultMoveRegistry.List(): { MoveTypes.MoveDefinition }
 	ensureDefaultsCaptured()
 	local result: { MoveTypes.MoveDefinition } = {}
 	for _, descriptor in ipairs(enumerateDescriptors()) do
-		table.insert(result, toMoveDefinition(descriptor.MoveId, descriptor.DisplayName, descriptor.Definition))
+		table.insert(result, toMoveDefinition(descriptor))
 	end
 	return result
 end
@@ -359,7 +421,7 @@ function DefaultMoveRegistry.Get(moveId: string): MoveTypes.MoveDefinition?
 	if not descriptor then
 		return nil
 	end
-	return toMoveDefinition(descriptor.MoveId, descriptor.DisplayName, descriptor.Definition)
+	return toMoveDefinition(descriptor)
 end
 
 -- Validates `candidate` through MoveRegistryManager.Validate (the SAME allow-list/clamp gate a
@@ -403,7 +465,7 @@ function DefaultMoveRegistry.ApplyEdit(moveId: string, candidate: unknown): (Mov
 		ArcDegrees = validated.ArcDegrees,
 		MaxTargets = validated.MaxTargets,
 	})
-	return toMoveDefinition(descriptor.MoveId, descriptor.DisplayName, descriptor.Definition), nil
+	return toMoveDefinition(descriptor), nil
 end
 
 -- Restores ONE Default move's 12 mutable fields to their captured file defaults. Returns the restored
@@ -422,7 +484,22 @@ function DefaultMoveRegistry.Reset(moveId: string): MoveTypes.MoveDefinition?
 	-- absent, not zero, is the stored representation of an untouched attack.
 	rotationByMoveId[moveId] = nil
 	applySnapshot(descriptor.Definition, defaults)
-	return toMoveDefinition(descriptor.MoveId, descriptor.DisplayName, descriptor.Definition)
+	return toMoveDefinition(descriptor)
+end
+
+-- Spec-only: drops the memoised descriptor list and every captured default, so the next call rebuilds
+-- from whatever WeaponRoster currently holds.
+--
+-- Exists because the descriptor list is deliberately cached for the whole session (see
+-- enumerateDescriptors' own header) and is built from a roster read out of Workspace.Weapons -- a spec
+-- that stands up its own roster has to be able to invalidate a list cached from a previous case's, or
+-- it asserts against whichever roster happened to be first. Nothing in production ever calls this:
+-- the roster is fixed at boot precisely so that the cache never needs invalidating there.
+function DefaultMoveRegistry.ResetCache(): ()
+	cachedDescriptors = nil
+	table.clear(defaultsByMoveId)
+	table.clear(rotationByMoveId)
+	capturedOnce = false
 end
 
 return DefaultMoveRegistry

@@ -400,6 +400,11 @@ local function step(deltaTime: number): ()
 	if grounded ~= wasGrounded then
 		if grounded then
 			context.LastGroundedAt = now
+			-- Holding the slide key through a fall queues a slide for the moment of contact. Called
+			-- here rather than from a state because this edge is the only place the touchdown is
+			-- detected at all -- see InputBuffer.ArmHeldSlideOnLanding for why the press is re-stamped
+			-- on the edge rather than the buffer window being widened to cover a whole fall.
+			InputBuffer.ArmHeldSlideOnLanding(now)
 			-- Touching the ground is what resets the wall-run, wall-jump and air-dash chain limits.
 			-- That single rule is what makes those limits a constraint on AIRTIME rather than a global
 			-- budget: a player who returns to the ground gets a full fresh set, which is what keeps a

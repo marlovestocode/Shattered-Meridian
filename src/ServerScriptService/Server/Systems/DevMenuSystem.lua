@@ -52,6 +52,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Constants = require(ReplicatedStorage.Shared.Constants)
@@ -63,6 +64,7 @@ local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 
 local AdminActionSystem = require(script.Parent.AdminActionSystem)
 local DebugDummySystem = require(script.Parent.DebugDummySystem)
+local ResourceGatheringSystem = require(script.Parent.ResourceGatheringSystem)
 local VersionWatchSystem = require(script.Parent.VersionWatchSystem)
 local FlightTuning = require(script.Parent.Parent.DevMenu.FlightTuning)
 local BugReportSystem = require(script.Parent.BugReportSystem)
@@ -70,6 +72,7 @@ local ModerationSystem = require(script.Parent.ModerationSystem)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local AdminGate = require(script.Parent.Parent.Network.AdminGate)
 local EmoteUnlockService = require(script.Parent.EmoteUnlockService)
+local BloodlineSystem = require(script.Parent.BloodlineSystem)
 local HitboxEngine = require(script.Parent.Parent.Combat.HitboxEngine.HitboxEngine)
 
 local DevMenuSystem = {}
@@ -230,6 +233,29 @@ local function isPlausibleUserId(value: unknown): boolean
 		return false
 	end
 	return value > 0 and value < 2 ^ 53 and value == math.floor(value)
+end
+
+-- Grants bloodline rerolls to the resolved target -- the same lock-on-or-self picker every other
+-- admin action on this screen uses, so an admin can top up a player they are watching without a
+-- player-select UI. The amount is fixed by BloodlineConstants rather than sent by the client: a
+-- client-supplied number would be one more untrusted field to validate for no benefit, since there
+-- is no case where an admin wants a specific odd number of rerolls rather than "some more".
+local function handleGrantBloodlineRerolls(player: Player): Types.DevMenuGrantRerollsResult
+	logger:debug("GrantBloodlineRerolls received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "GrantBloodlineRerolls")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+
+	local target = resolveActionTarget(player)
+	local total, refusal = BloodlineSystem.GrantRerolls(target, BloodlineConstants.DevGrantRerollAmount)
+	if not total then
+		return { Success = false, Reason = refusal }
+	end
+
+	logger:info("GrantBloodlineRerolls accepted", { player = player.Name, target = target.Name, total = total })
+	return { Success = true, RerollsRemaining = total }
 end
 
 local function handleSetTargetGodmode(player: Player, rawEnabled: unknown): Types.DevMenuActionResult
@@ -925,6 +951,84 @@ local function handleSpawnDebugDummy(player: Player): Types.DevMenuActionResult
 	return { Success = true }
 end
 
+-- Blimp Fuel System dev/test nodes ("Spawn" tab) -----------------------------------------------
+
+-- Studs in front of the requesting admin's own character to spawn a debug resource node -- its own
+-- number rather than reusing Constants.Debug.TrainingDummy.SpawnDistance, since that constant is
+-- named for (and tunable independently of) the dummy, not this unrelated dev tool.
+local RESOURCE_NODE_SPAWN_DISTANCE = 6
+
+-- Spawns one tagged CoalDeposit Part RESOURCE_NODE_SPAWN_DISTANCE studs in front of the requesting
+-- admin, same "spawn near me" geometry as SpawnDebugDummy above. Delegates entirely to
+-- Server/Systems/ResourceGatheringSystem.SpawnDebugNode; this handler owns only authorization and the
+-- position math.
+local function handleSpawnCoalDeposit(player: Player): Types.DevMenuActionResult
+	logger:debug("SpawnCoalDeposit received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "SpawnCoalDeposit")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+
+	local rootPart, rootPartFailureReason = getRootPart(player, "SpawnCoalDeposit")
+	if not rootPart then
+		return { Success = false, Reason = rootPartFailureReason }
+	end
+
+	local spawnCFrame = rootPart.CFrame * CFrame.new(0, 0, -RESOURCE_NODE_SPAWN_DISTANCE)
+	ResourceGatheringSystem.SpawnDebugNode("Coal", spawnCFrame)
+
+	logger:info("SpawnCoalDeposit accepted", { player = player.Name })
+	return { Success = true }
+end
+
+-- Same shape as handleSpawnCoalDeposit above, for the WaterSource tag.
+local function handleSpawnWaterSource(player: Player): Types.DevMenuActionResult
+	logger:debug("SpawnWaterSource received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "SpawnWaterSource")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+
+	local rootPart, rootPartFailureReason = getRootPart(player, "SpawnWaterSource")
+	if not rootPart then
+		return { Success = false, Reason = rootPartFailureReason }
+	end
+
+	local spawnCFrame = rootPart.CFrame * CFrame.new(0, 0, -RESOURCE_NODE_SPAWN_DISTANCE)
+	ResourceGatheringSystem.SpawnDebugNode("Water", spawnCFrame)
+
+	logger:info("SpawnWaterSource accepted", { player = player.Name })
+	return { Success = true }
+end
+
+-- Fills the requesting admin's OWN carried coal and water to the cap (Shared/Blimp/BlimpConstants.
+-- Carry, read by ResourceGatheringSystem.FillCarriedFuel, which owns the field -- see that function's
+-- own header for why the write is not done here).
+--
+-- NO getRootPart, unlike the two node spawns above: this touches a profile, not the world, so it works
+-- for an admin who has not spawned yet and needs no position at all.
+local function handleFillCarriedFuel(player: Player): Types.DevMenuActionResult
+	logger:debug("FillCarriedFuel received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "FillCarriedFuel")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+
+	if not ResourceGatheringSystem.FillCarriedFuel(player) then
+		-- The one way this fails: the profile has not finished loading (or failed to). Reported rather
+		-- than swallowed, because a tester who presses this and sees nothing move needs to know it was
+		-- the server and not their own aim -- the same reasoning behind the furnace prompt's own
+		-- outcome push (Shared/Blimp/BlimpConstants.Network.RemoteNames.FuelTransfer).
+		return { Success = false, Reason = "StorageError" }
+	end
+
+	logger:info("FillCarriedFuel accepted", { player = player.Name })
+	return { Success = true }
+end
+
 -- Clears every active debug dummy at once -- the Spawn tab's deliberate full-reset companion to
 -- SpawnDebugDummy above (MaxActive eviction already handles the "too many at once" case one at a
 -- time; this is for a tester who wants a clean training area right now).
@@ -1269,6 +1373,11 @@ type RemoteHandlerSpec = {
 }
 local REMOTE_HANDLERS: { RemoteHandlerSpec } = {
 	{ RemoteKey = "RollEmote", Name = "RollEmote", Handler = handleRollEmote :: any },
+	{
+		RemoteKey = "GrantBloodlineRerolls",
+		Name = "GrantBloodlineRerolls",
+		Handler = handleGrantBloodlineRerolls :: any,
+	},
 	{ RemoteKey = "SetTargetGodmode", Name = "SetTargetGodmode", Handler = handleSetTargetGodmode :: any },
 	{ RemoteKey = "SetTargetFlight", Name = "SetTargetFlight", Handler = handleSetTargetFlight :: any },
 	{
@@ -1336,6 +1445,9 @@ local REMOTE_HANDLERS: { RemoteHandlerSpec } = {
 	{ RemoteKey = "SetDummyGuard", Name = "SetDummyGuard", Handler = handleSetDummyGuard :: any },
 	{ RemoteKey = "GetDebugDummyState", Name = "GetDebugDummyState", Handler = handleGetDebugDummyState :: any },
 	{ RemoteKey = "GetServerVersionInfo", Name = "GetServerVersionInfo", Handler = handleGetServerVersionInfo :: any },
+	{ RemoteKey = "SpawnCoalDeposit", Name = "SpawnCoalDeposit", Handler = handleSpawnCoalDeposit :: any },
+	{ RemoteKey = "SpawnWaterSource", Name = "SpawnWaterSource", Handler = handleSpawnWaterSource :: any },
+	{ RemoteKey = "FillCarriedFuel", Name = "FillCarriedFuel", Handler = handleFillCarriedFuel :: any },
 }
 
 function DevMenuSystem.Init(): ()

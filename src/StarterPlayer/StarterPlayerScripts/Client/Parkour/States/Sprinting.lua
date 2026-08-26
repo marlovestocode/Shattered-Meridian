@@ -14,7 +14,7 @@
 	walking according to the other.
 
 	The STAGE (ParkourContext.SprintStage) is a separate question with a separate owner again:
-	Server/Systems/RunSystem.lua resolves which of the three gears the player has earned and publishes
+	Server/Systems/RunSystem.lua resolves which of the two gears the player has earned and publishes
 	it on the Humanoid. This state does not read it -- States/StateSupport.GroundTargetSpeed does, for
 	its target-speed reporting -- but everything downstream of running fast (the slide's entry speed,
 	the wall-run's minimum) becomes easier to reach at the upper gears, which is the intent.

@@ -868,179 +868,117 @@ return function()
 			expect(score(Vector3.new(0, 20, -20), Vector3.zero)).to.equal(0)
 		end)
 	end)
-	describe("ParkourMath.BurstPeak / BurstSpeed", function()
-		-- The dash's speed curve (States/Dashing.lua). Endpoints alone cannot catch the failure this
-		-- block exists for, so most of it is about the AREA under the curve rather than its shape.
-		local function travelled(peak: number, endSpeed: number, duration: number): number
-			-- Numeric integration rather than a closed form: a closed form here would just be the same
-			-- arithmetic BurstPeak uses, restated, and would agree with a wrong implementation.
-			local steps = 2000
-			local step = duration / steps
-			local total = 0
-			for index = 0, steps - 1 do
-				total += ParkourMath.BurstSpeed(peak, endSpeed, duration, (index + 0.5) * step) * step
-			end
-			return total
-		end
-
-		it("covers exactly the authored distance beyond the exit speed", function()
-			-- THE HALF-DISTANCE CATCHER. Dropping the factor of two in BurstPeak does not error --
-			-- the dash simply travels half as far as ParkourConstants.Dash says, silently and
-			-- forever. Checked at three exit speeds because the endSpeed term is what generalizes
-			-- this curve away from Client/Combat/SwingLunge.SpeedAt, and is where an algebra slip
-			-- would hide.
-			for _, endSpeed in { 0, 20, 40 } do
-				local duration, distance = 0.26, 7
-				local peak = ParkourMath.BurstPeak(distance, duration, endSpeed, math.huge)
-				local expected = distance + endSpeed * duration
-				expectClose(travelled(peak, endSpeed, duration), expected, expected * 0.005)
-			end
-		end)
-
-		it("is exactly SwingLunge's own curve at a zero exit speed", function()
-			-- The anchor that keeps the two burst implementations honest against each other: with
-			-- endSpeed 0 this must reduce to 2*d/dur * (1 - t/dur), which is what the M1 lunge has
-			-- been using since it shipped.
-			local duration, distance = 0.18, 4
-			local peak = ParkourMath.BurstPeak(distance, duration, 0, math.huge)
-			expectClose(peak, 2 * distance / duration)
-			for _, alpha in { 0, 0.25, 0.5, 0.75 } do
-				local elapsed = alpha * duration
-				expectClose(ParkourMath.BurstSpeed(peak, 0, duration, elapsed), peak * (1 - elapsed / duration))
-			end
-		end)
-
-		it("lands on exactly the exit speed, and stays there past the window", function()
-			-- The continuity claim the whole design rests on: the last frame the state commands is
-			-- already the speed the body is handed off holding, so there is nothing to reconcile and
-			-- no lurch at the transition.
-			local peak = ParkourMath.BurstPeak(7, 0.26, 27, math.huge)
-			expect(ParkourMath.BurstSpeed(peak, 27, 0.26, 0.26)).to.equal(27)
-			expect(ParkourMath.BurstSpeed(peak, 27, 0.26, 5)).to.equal(27)
-		end)
-
-		it("never rises through the window", function()
-			local peak = ParkourMath.BurstPeak(7, 0.26, 27, math.huge)
-			local previous = math.huge
-			for index = 0, 26 do
-				local speed = ParkourMath.BurstSpeed(peak, 27, 0.26, index * 0.01)
-				expect(speed <= previous + 1e-6).to.equal(true)
-				previous = speed
-			end
-		end)
-
-		it("never opens below the exit speed", function()
-			-- A distance small enough that the raw solution would come out under the exit speed would
-			-- otherwise make the burst ACCELERATE at its own tail, which reads as the character being
-			-- shoved as the move finishes.
-			expect(ParkourMath.BurstPeak(0.01, 5, 30, math.huge) >= 30).to.equal(true)
-		end)
-
-		it("respects the speed ceiling", function()
-			expect(ParkourMath.BurstPeak(60, 0.2, 40, 95)).to.equal(95)
-		end)
-
-		it("degrades to the exit speed rather than to NaN", function()
-			expect(ParkourMath.BurstPeak(7, 0, 20, 95)).to.equal(20)
-			expect(ParkourMath.BurstPeak(0, 0.26, 20, 95)).to.equal(20)
-			expect(ParkourMath.BurstSpeed(80, 20, 0, 0)).to.equal(20)
-		end)
-	end)
-
-	describe("ParkourMath.DashQuadrant / QuadrantDirection", function()
-		local FACING = Vector3.new(0, 0, -1)
+	describe("ParkourMath.SteerToward", function()
+		-- THE STEER, and the whole of what makes the dash drivable (States/Dashing.lua). It replaced
+		-- DashQuadrant/QuadrantDirection and BurstPeak/BurstSpeed, which between them quantized the
+		-- dash onto five body-relative vectors and stamped a decaying speed curve on it -- none of
+		-- those four functions has a caller any more.
+		--
+		-- Every test here is ultimately about ONE property: whatever comes out is a usable unit
+		-- direction. It is multiplied by a speed and written into a LinearVelocity constraint, and a
+		-- NaN there does not error -- it removes the character. So the degenerate cases below are the
+		-- point of this block, not its edge cases.
+		local FORWARD = Vector3.new(0, 0, -1)
 		local RIGHT = Vector3.new(1, 0, 0)
-		-- A level aim (Y = 0) can never clear any positive pitch threshold, so every pre-existing case
-		-- below keeps resolving exactly as it did before Up existed.
-		local LEVEL_AIM = FACING
-		local UP_PITCH_DEGREES = 55
 
-		it("resolves each of the four cardinal intents", function()
-			expect(ParkourMath.DashQuadrant(FACING, FACING, RIGHT, LEVEL_AIM, UP_PITCH_DEGREES)).to.equal("Front")
-			expect(ParkourMath.DashQuadrant(-FACING, FACING, RIGHT, LEVEL_AIM, UP_PITCH_DEGREES)).to.equal("Back")
-			expect(ParkourMath.DashQuadrant(RIGHT, FACING, RIGHT, LEVEL_AIM, UP_PITCH_DEGREES)).to.equal("Right")
-			expect(ParkourMath.DashQuadrant(-RIGHT, FACING, RIGHT, LEVEL_AIM, UP_PITCH_DEGREES)).to.equal("Left")
+		it("lands exactly on the target when it is inside the budget", function()
+			-- Not asymptotically NEAR it. Aiming at something and having the dash settle a fraction of
+			-- a degree short of it forever is what an ease would do here, and it is exactly what "it
+			-- launches along the reticle" rules out.
+			local result = ParkourMath.SteerToward(FORWARD, RIGHT, math.rad(90))
+			expectClose(result.X, RIGHT.X)
+			expectClose(result.Y, RIGHT.Y)
+			expectClose(result.Z, RIGHT.Z)
 		end)
 
-		it("pins the handedness against a real CFrame rather than our own arithmetic", function()
-			-- A stub pair of hand-written vectors would assert that this function agrees with the test
-			-- author about Roblox's convention, which is exactly the thing in doubt -- the same
-			-- reasoning Tests/Parkour/StateFacingGates.spec gives for building a real Part. A sign
-			-- error here dashes LEFT when the player holds D, in every direction, forever.
-			local part = Instance.new("Part")
-			part.CFrame = CFrame.lookAt(Vector3.zero, Vector3.new(1, 0, 0))
-			local facing, right = part.CFrame.LookVector, part.CFrame.RightVector
-			expect(ParkourMath.DashQuadrant(right, facing, right, facing, UP_PITCH_DEGREES)).to.equal("Right")
-			expect(ParkourMath.DashQuadrant(-right, facing, right, facing, UP_PITCH_DEGREES)).to.equal("Left")
-			expect(ParkourMath.DashQuadrant(facing, facing, right, facing, UP_PITCH_DEGREES)).to.equal("Front")
-
-			local travel = ParkourMath.QuadrantDirection("Right", facing, right)
-			expectClose(travel:Dot(right), 1)
-			expectClose(travel:Dot(facing), 0)
-		end)
-
-		it("breaks a perfect diagonal toward Front, matching the old resolver", function()
-			-- The deleted combat system's Movement.ResolveDashDirection used `abs(forward) >= abs(right)`
-			-- for the same tie. Keeping the sign convention identical means "back" cannot come to mean
-			-- two different things across the codebase's history.
-			local diagonal = (FACING + RIGHT).Unit
-			expect(ParkourMath.DashQuadrant(diagonal, FACING, RIGHT, LEVEL_AIM, UP_PITCH_DEGREES)).to.equal("Front")
-		end)
-
-		it("dashes forward on no directional input rather than refusing", function()
-			-- Deliberately unlike Movement.ResolveDashDirection, which returned nil here to gate a
-			-- hitbox. The player has already pressed the dash key; refusing because no WASD key
-			-- happened to be held would just be a dropped input.
-			expect(ParkourMath.DashQuadrant(Vector3.zero, FACING, RIGHT, LEVEL_AIM, UP_PITCH_DEGREES)).to.equal("Front")
-		end)
-
-		it("ignores the intent's own magnitude and verticality", function()
-			-- The whole point of quantizing to quadrants: a half-deflected stick and a fully pressed
-			-- key produce the same crisp direction, and a vertical component never leaks into travel.
-			expect(
-				ParkourMath.DashQuadrant(RIGHT * 0.2 + Vector3.new(0, 5, 0), FACING, RIGHT, LEVEL_AIM, UP_PITCH_DEGREES)
-			).to.equal("Right")
-			expectClose(ParkourMath.QuadrantDirection("Back", FACING, RIGHT).Y, 0)
-			expectClose(ParkourMath.QuadrantDirection("Back", FACING, RIGHT).Magnitude, 1)
-		end)
-
-		it("replaces Front with Up once the aim clears the pitch threshold, and only Front", function()
-			-- Built directly at unit length (cos/sin of the pitch) rather than normalized after the
-			-- fact -- normalizing an arbitrarily-scaled Y afterward would shift the angle it actually
-			-- represents, which is exactly the bug this comment is here to keep from creeping back in.
-			local function aimAtPitch(degrees: number): Vector3
-				local radians = math.rad(degrees)
-				return Vector3.new(0, math.sin(radians), -math.cos(radians))
+		it("never turns further than the budget allows", function()
+			-- The cap IS the mechanic -- it is what makes a dash bank rather than pivot -- so this is
+			-- the assertion that a retune of Dash.TurnDegreesPerSecond actually means something.
+			for _, degrees in { 1, 5, 30, 89 } do
+				local budget = math.rad(degrees)
+				local result = ParkourMath.SteerToward(FORWARD, RIGHT, budget)
+				local turned = math.acos(math.clamp(result.Unit:Dot(FORWARD.Unit), -1, 1))
+				expectClose(turned, budget)
 			end
-			local justBelow = aimAtPitch(UP_PITCH_DEGREES - 1)
-			local justAbove = aimAtPitch(UP_PITCH_DEGREES + 1)
-			expect(ParkourMath.DashQuadrant(FACING, FACING, RIGHT, justBelow, UP_PITCH_DEGREES)).to.equal("Front")
-			expect(ParkourMath.DashQuadrant(FACING, FACING, RIGHT, justAbove, UP_PITCH_DEGREES)).to.equal("Up")
-
-			-- Back/Left/Right must survive a steep upward aim untouched -- redirecting a retreat into
-			-- the sky because the player happened to be looking up would be a hard regression while
-			-- climbing, which is most of the time in a parkour game.
-			local steepUp = Vector3.new(0, 1, 0)
-			expect(ParkourMath.DashQuadrant(-FACING, FACING, RIGHT, steepUp, UP_PITCH_DEGREES)).to.equal("Back")
-			expect(ParkourMath.DashQuadrant(RIGHT, FACING, RIGHT, steepUp, UP_PITCH_DEGREES)).to.equal("Right")
-			expect(ParkourMath.DashQuadrant(-RIGHT, FACING, RIGHT, steepUp, UP_PITCH_DEGREES)).to.equal("Left")
 		end)
 
-		it("travels along the aim itself when Up, not a fixed straight-up vector", function()
-			-- The one direction that is NOT quantized -- see QuadrantDirection's own header for why: a
-			-- shallow up-and-over and a near-vertical shaft climb both need to be reachable angles, and
-			-- the dash has to carry the player toward wherever the camera is actually pointed, not just
-			-- straight up regardless of aim.
-			local aim = Vector3.new(0, 1, -1).Unit
-			local travel = ParkourMath.QuadrantDirection("Up", FACING, RIGHT, aim)
-			expectClose(travel.X, aim.X)
-			expectClose(travel.Y, aim.Y)
-			expectClose(travel.Z, aim.Z)
+		it("makes progress toward the target rather than merely staying legal", function()
+			-- A stub returning `current` unchanged would satisfy the cap above perfectly. This is the
+			-- test that separates a capped turn from no turn at all.
+			local result = ParkourMath.SteerToward(FORWARD, RIGHT, math.rad(10))
+			local before = math.acos(math.clamp(FORWARD.Unit:Dot(RIGHT.Unit), -1, 1))
+			local after = math.acos(math.clamp(result.Unit:Dot(RIGHT.Unit), -1, 1))
+			expect(after < before).to.equal(true)
+			expectClose(after, before - math.rad(10))
 		end)
 
-		it("falls back to straight up for a degenerate or non-rising Up aim", function()
-			expectClose(ParkourMath.QuadrantDirection("Up", FACING, RIGHT, Vector3.zero).Y, 1)
-			expectClose(ParkourMath.QuadrantDirection("Up", FACING, RIGHT, Vector3.new(0, -1, 0)).Y, 1)
+		it("returns a unit vector from non-unit inputs", function()
+			-- Callers hand this whatever the camera gave them. The result is multiplied by a speed, so
+			-- a non-unit return would silently scale the dash by the length of the aim vector.
+			local result = ParkourMath.SteerToward(FORWARD * 17, RIGHT * 0.03, math.rad(20))
+			expectClose(result.Magnitude, 1)
+		end)
+
+		it("stays unit-length across many successive rotations", function()
+			-- One real dash performs sixty-odd of these back to back, and fromAxisAngle drifts in
+			-- floating point even though it is exact in theory. Drift here would show up in play as a
+			-- dash that slowly speeds up or slows down for no visible reason.
+			local direction = FORWARD
+			for _ = 1, 200 do
+				direction = ParkourMath.SteerToward(direction, RIGHT, math.rad(1))
+			end
+			expectClose(direction.Magnitude, 1)
+		end)
+
+		it("handles an exactly antiparallel target without producing a NaN", function()
+			-- THE CASE ONE HARD MOUSE FLICK MID-DASH REACHES: looking exactly back along your own
+			-- travel. The cross product the rotation is built on is exactly zero there, so `axis.Unit`
+			-- is NaN and every component of the result follows it. Any perpendicular is a correct
+			-- rotation axis in that case, and one has to be constructed rather than derived.
+			for _, current in { FORWARD, RIGHT, Vector3.new(0, 1, 0), Vector3.new(1, 1, 1).Unit } do
+				local result = ParkourMath.SteerToward(current, -current, math.rad(15))
+				expect(result.Magnitude == result.Magnitude).to.equal(true, `NaN from {tostring(current)}`)
+				expectClose(result.Magnitude, 1)
+				-- And it must actually MAKE PROGRESS -- turning by the budget, away from where it
+				-- started. A "safe" implementation that returned `current` for this case would leave a
+				-- dash permanently unable to be reversed.
+				local turned = math.acos(math.clamp(result.Unit:Dot(current.Unit), -1, 1))
+				expectClose(turned, math.rad(15))
+			end
+		end)
+
+		it("holds the current direction for a degenerate target", function()
+			-- A zero aim is reachable for a frame during character bind. Holding the launch angle is
+			-- the least surprising answer; snapping to an arbitrary axis is not.
+			local result = ParkourMath.SteerToward(FORWARD, Vector3.zero, math.rad(30))
+			expectClose(result.X, FORWARD.X)
+			expectClose(result.Z, FORWARD.Z)
+			expectClose(result.Magnitude, 1)
+		end)
+
+		it("adopts the target outright when there is no current direction to rotate", function()
+			local result = ParkourMath.SteerToward(Vector3.zero, RIGHT, math.rad(5))
+			expectClose(result.X, RIGHT.X)
+			expectClose(result.Magnitude, 1)
+		end)
+
+		it("holds position on a non-positive budget", function()
+			-- States/Dashing.lua's steer-release taper runs to exactly zero by design, so this is a
+			-- real input every dash produces on its final frames, not a defensive guard.
+			for _, budget in { 0, -1 } do
+				local result = ParkourMath.SteerToward(FORWARD, RIGHT, budget)
+				expectClose(result.Z, FORWARD.Z)
+				expectClose(result.Magnitude, 1)
+			end
+		end)
+
+		it("carries pitch, not just yaw", function()
+			-- The dash is aimed in full 3D -- a steer that silently flattened would reintroduce
+			-- exactly the horizontal-only quantization this replaced.
+			local up = Vector3.new(0, 1, 0)
+			local result = ParkourMath.SteerToward(FORWARD, up, math.rad(30))
+			expect(result.Y > 0).to.equal(true)
+			expectClose(result.Magnitude, 1)
 		end)
 	end)
 end

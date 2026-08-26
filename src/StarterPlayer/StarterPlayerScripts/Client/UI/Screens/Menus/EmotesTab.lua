@@ -2,14 +2,22 @@
 --[[
 	EmotesTab.lua
 
-	Owns: the character menu's emote loadout editor -- the EmoteConstants.LoadoutSize wheel slots and
-	every emote this player has unlocked, with a click to put one in the selected slot.
+	Owns: the character menu's emote loadout editor -- the EmoteConstants.LoadoutSize wheel slots as
+	a grid of cards, every emote this player has unlocked below them, and one click to put one in the
+	selected slot.
 
 	WHY THIS EXISTS HERE. The Emote System shipped complete on both sides -- unlock tracking,
 	persistence, the Emote_RequestSetLoadoutSlot remote, and the radial wheel that plays whatever is
 	in a slot -- with no way for a player to ever CHANGE a slot. The loadout every player has is the
 	one Constants' DefaultLoadout gave them, and unlocking an emote outside it did nothing visible.
 	One click here is the whole missing half.
+
+	THE SLOTS ARE CARDS, NOT A CHIP STRIP, because a wheel slot is a place rather than a filter. The
+	previous version rendered them as a wrapping row of Tab chips reading "3. Cultivation Stance",
+	which is the vocabulary this UI uses for "pick one of these views" -- and a player looking at
+	their loadout is reading a board of eight positions, each either filled or empty, not choosing
+	between eight tabs. The card carries the position number in its own box, the way the wheel itself
+	shows it.
 
 	Reads ClientState, not a fetch of its own: UnlockedEmoteIds and EmoteLoadout are already
 	replicated there for the wheel (see ClientState.lua's own header on why those two are shared
@@ -33,12 +41,14 @@ local Types = require(ReplicatedStorage.Shared.Types)
 
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
-local Tab = require(script.Parent.Parent.Parent.Components.Tab)
 local Button = require(script.Parent.Parent.Parent.Components.Button)
 local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
+local SectionHeading = require(script.Parent.Parent.Parent.Components.SectionHeading)
+local Stack = require(script.Parent.Parent.Parent.Components.Stack)
 local ClientStateModule = require(script.Parent.Parent.Parent.State.ClientState)
 
 local Children = Fusion.Children
+local OnEvent = Fusion.OnEvent
 local peek = Fusion.peek
 
 type Scope = Fusion.Scope<typeof(Fusion)>
@@ -53,10 +63,21 @@ export type EmotesTabProps = {
 	OnAssign: (slot: number, emoteId: Types.EmoteId) -> (),
 }
 
-local SLOT_ROW_HEIGHT = 40
-local SLOT_BUTTON_WIDTH = 108
-local EMOTE_BUTTON_WIDTH = 150
-local EMOTE_BUTTON_HEIGHT = Tokens.Control.StepButtonSize
+local HINT_HEIGHT = 20
+local GAP = Tokens.Space.S
+
+local SLOT_COLUMNS = 2
+local SLOT_CARD_HEIGHT = 62
+local SLOT_CARD_GAP = Tokens.Space.S
+local SLOT_KEY_SIZE = 32
+local SLOT_CARD_PADDING = Tokens.Space.M
+
+local EMOTE_COLUMNS = 3
+local EMOTE_BUTTON_HEIGHT = 36
+local EMOTE_GAP = Tokens.Space.XS
+
+local SLOT_ROWS = math.ceil(EmoteConstants.LoadoutSize / SLOT_COLUMNS)
+local SLOT_GRID_HEIGHT = SLOT_ROWS * SLOT_CARD_HEIGHT + (SLOT_ROWS - 1) * SLOT_CARD_GAP
 
 local function displayNameFor(emoteId: Types.EmoteId): string
 	local definition = EmoteRegistry.Get(emoteId)
@@ -66,41 +87,159 @@ local function displayNameFor(emoteId: Types.EmoteId): string
 	return if definition then definition.DisplayName else emoteId
 end
 
+-- One wheel position. The whole card is the hit target rather than a control inside it: selecting a
+-- slot is the only thing a card does, so anything smaller than the card would be a smaller target
+-- for no reason (and Tokens.Control.TouchTargetSize exists because this UI skews touch).
+local function slotCard(
+	scope: Scope,
+	slot: number,
+	state: ClientStateModule.ClientState,
+	selectedSlot: Fusion.Value<number>
+): TextButton
+	local isHovering = scope:Value(false)
+
+	local assignedId = scope:Computed(function(use): Types.EmoteId?
+		return use(state.EmoteLoadout)[slot]
+	end)
+	local isAssigned = scope:Computed(function(use)
+		return use(assignedId) ~= nil
+	end)
+	local isSelected = scope:Computed(function(use)
+		return use(selectedSlot) == slot
+	end)
+
+	local nameText = scope:Computed(function(use)
+		local emoteId = use(assignedId)
+		return if emoteId then displayNameFor(emoteId) else "Empty"
+	end)
+	local stateText = scope:Computed(function(use)
+		return if use(isAssigned) then "On the wheel" else "Nothing assigned"
+	end)
+
+	local borderColor = scope:Computed(function(use)
+		if use(isSelected) then
+			return Tokens.Border.Accent.Color
+		end
+		return if use(isAssigned) or use(isHovering) then Tokens.Border.Standard.Color else Tokens.Border.Hairline.Color
+	end)
+	local borderTransparency = scope:Computed(function(use)
+		if use(isSelected) then
+			return Tokens.Border.Accent.Transparency
+		end
+		return if use(isAssigned) or use(isHovering)
+			then Tokens.Border.Standard.Transparency
+			else Tokens.Border.Hairline.Transparency
+	end)
+
+	local keyColor = scope:Computed(function(use)
+		return if use(isAssigned) then Tokens.Color.AccentPrimaryBright else Tokens.Color.TextDisabled
+	end)
+
+	return scope:New "TextButton" {
+		Name = `Slot{slot}`,
+		LayoutOrder = slot,
+		AutoButtonColor = false,
+		Text = "",
+		BackgroundColor3 = scope:Computed(function(use)
+			return if use(isSelected) or use(isHovering) then Tokens.Color.SurfaceElevated else Tokens.Color.Surface
+		end),
+		BackgroundTransparency = scope:Computed(function(use)
+			return if use(isAssigned) or use(isSelected) then 0 else 0.4
+		end),
+		BorderSizePixel = 0,
+
+		[OnEvent "MouseEnter"] = function()
+			isHovering:set(true)
+		end,
+		[OnEvent "MouseLeave"] = function()
+			isHovering:set(false)
+		end,
+		[OnEvent "Activated"] = function()
+			selectedSlot:set(slot)
+		end,
+
+		[Children] = {
+			scope:New "UICorner" {
+				CornerRadius = Tokens.Radius.Sharp,
+			},
+			scope:New "UIStroke" {
+				Color = borderColor,
+				Thickness = 1,
+				Transparency = borderTransparency,
+			},
+			scope:New "UIPadding" {
+				PaddingLeft = UDim.new(0, SLOT_CARD_PADDING),
+				PaddingRight = UDim.new(0, SLOT_CARD_PADDING),
+			},
+
+			Label(scope, {
+				Text = nameText,
+				Scale = "Body",
+				Color = scope:Computed(function(use)
+					return if use(isAssigned) then Tokens.Color.TextPrimary else Tokens.Color.TextDisabled
+				end),
+				AnchorPoint = Vector2.new(0, 0),
+				Position = UDim2.fromOffset(0, 12),
+				Size = UDim2.new(1, -(SLOT_KEY_SIZE + Tokens.Space.M), 0, 18),
+			}),
+			Label(scope, {
+				Text = stateText,
+				Scale = "Detail",
+				Color = Tokens.Color.TextSecondary,
+				AnchorPoint = Vector2.new(0, 0),
+				Position = UDim2.fromOffset(0, 33),
+				Size = UDim2.new(1, -(SLOT_KEY_SIZE + Tokens.Space.M), 0, 16),
+			}),
+
+			-- The position number, boxed the way the wheel itself shows it -- this is the one thing
+			-- on the card that maps to something the player does with their hand.
+			scope:New "Frame" {
+				Name = "Key",
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.fromScale(1, 0.5),
+				Size = UDim2.fromOffset(SLOT_KEY_SIZE, SLOT_KEY_SIZE),
+				BackgroundColor3 = Tokens.Wash.Inset.Color,
+				BackgroundTransparency = Tokens.Wash.Inset.Transparency,
+				BorderSizePixel = 0,
+
+				[Children] = {
+					scope:New "UIStroke" {
+						Color = borderColor,
+						Thickness = 1,
+						Transparency = borderTransparency,
+					},
+					Label(scope, {
+						Text = tostring(slot),
+						Scale = "Numeral",
+						Color = keyColor,
+						AnchorPoint = Vector2.new(0.5, 0.5),
+						Position = UDim2.fromScale(0.5, 0.5),
+						Size = UDim2.fromScale(1, 1),
+						TextXAlignment = Enum.TextXAlignment.Center,
+					}),
+				},
+			},
+		},
+	} :: TextButton
+end
+
 local function EmotesTab(scope: Scope, props: EmotesTabProps): Frame
 	local state = props.State
 	local selectedSlot = scope:Value(1)
 
-	local slotButtons: { Instance } = {
-		scope:New "UIListLayout" {
-			FillDirection = Enum.FillDirection.Horizontal,
-			VerticalAlignment = Enum.VerticalAlignment.Center,
-			Padding = UDim.new(0, Tokens.Space.XS),
+	local slotChildren: { Instance } = {
+		scope:New "UIGridLayout" {
+			CellSize = UDim2.new(1 / SLOT_COLUMNS, -SLOT_CARD_GAP / 2, 0, SLOT_CARD_HEIGHT),
+			CellPadding = UDim2.fromOffset(SLOT_CARD_GAP, SLOT_CARD_GAP),
 			SortOrder = Enum.SortOrder.LayoutOrder,
-			Wraps = true,
 		},
 	}
 	for slot = 1, EmoteConstants.LoadoutSize do
-		table.insert(
-			slotButtons,
-			Tab(scope, {
-				Text = scope:Computed(function(use)
-					local emoteId = use(state.EmoteLoadout)[slot]
-					return if emoteId then `{slot}. {displayNameFor(emoteId)}` else `{slot}. empty`
-				end),
-				Selected = scope:Computed(function(use)
-					return use(selectedSlot) == slot
-				end),
-				Size = UDim2.fromOffset(SLOT_BUTTON_WIDTH, Tokens.Control.StepButtonSize),
-				LayoutOrder = slot,
-				OnActivated = function()
-					selectedSlot:set(slot)
-				end,
-			})
-		)
+		table.insert(slotChildren, slotCard(scope, slot, state, selectedSlot))
 	end
 
 	-- The unlocked set is a dict (ClientState keeps it that way for O(1) wheel lookups), and a dict
-	-- has no order -- sorted by id here so the grid doesn't reshuffle itself between opens.
+	-- has no order -- sorted by display name here so the grid doesn't reshuffle itself between opens.
 	local unlockedIds = scope:Computed(function(use): { Types.EmoteId }
 		local ids: { Types.EmoteId } = {}
 		for emoteId in pairs(use(state.UnlockedEmoteIds)) do
@@ -115,13 +254,18 @@ local function EmotesTab(scope: Scope, props: EmotesTabProps): Frame
 	local hasUnlocked = scope:Computed(function(use)
 		return #use(unlockedIds) > 0
 	end)
+	local unlockedNote = scope:Computed(function(use)
+		return `{#use(unlockedIds)} known`
+	end)
+	local selectedNote = scope:Computed(function(use)
+		return `slot {use(selectedSlot)} selected`
+	end)
 
 	local emoteButtons = scope:ForPairs(unlockedIds, function(_use, innerScope: Scope, index: number, emoteId)
 		return emoteId,
 			Button(innerScope, {
 				Text = displayNameFor(emoteId),
 				Variant = "Secondary",
-				Size = UDim2.fromOffset(EMOTE_BUTTON_WIDTH, EMOTE_BUTTON_HEIGHT),
 				LayoutOrder = index,
 				OnActivated = function()
 					props.OnAssign(peek(selectedSlot), emoteId)
@@ -129,75 +273,82 @@ local function EmotesTab(scope: Scope, props: EmotesTabProps): Frame
 			})
 	end)
 
-	return scope:New "Frame" {
+	return Stack.New(scope, {
 		Name = "EmotesTab",
 		Size = UDim2.fromOffset(props.Width, props.Height),
-		BackgroundTransparency = 1,
+		Gap = GAP,
 		Visible = props.Visible,
 		LayoutOrder = props.LayoutOrder,
 
-		[Children] = {
-			scope:New "UIListLayout" {
-				FillDirection = Enum.FillDirection.Vertical,
-				HorizontalAlignment = Enum.HorizontalAlignment.Left,
-				Padding = UDim.new(0, Tokens.Space.S),
-				SortOrder = Enum.SortOrder.LayoutOrder,
-			},
-			Label(scope, {
+		Children = {
+			SectionHeading(scope, {
 				Text = "Wheel Slots",
-				Scale = "CardTitle",
+				Note = selectedNote,
 				LayoutOrder = 1,
 			}),
 			Label(scope, {
 				Text = "Pick a slot, then an emote below. The wheel plays whatever sits here.",
 				Scale = "Detail",
 				Color = Tokens.Color.TextSecondary,
+				Size = UDim2.new(1, 0, 0, HINT_HEIGHT),
 				LayoutOrder = 2,
 			}),
 			scope:New "Frame" {
 				Name = "SlotGrid",
-				-- Two rows of a wrapping horizontal layout at LoadoutSize = 8; sized off the constant
-				-- rather than hardcoded to two so a changed loadout size doesn't clip silently.
-				Size = UDim2.new(1, 0, 0, SLOT_ROW_HEIGHT * math.ceil(EmoteConstants.LoadoutSize / 4)),
+				-- Sized off EmoteConstants.LoadoutSize rather than hardcoded to four rows, so a
+				-- changed loadout size grows the grid instead of clipping it silently.
+				Size = UDim2.new(1, 0, 0, SLOT_GRID_HEIGHT),
 				BackgroundTransparency = 1,
 				LayoutOrder = 3,
 
-				[Children] = slotButtons,
+				[Children] = slotChildren,
 			},
-			Label(scope, {
+
+			SectionHeading(scope, {
 				Text = "Unlocked",
-				Scale = "CardTitle",
+				Note = unlockedNote,
 				LayoutOrder = 4,
 			}),
 			Label(scope, {
 				Text = "No emotes unlocked yet.",
 				Scale = "Detail",
-				Color = Tokens.Color.TextDisabled,
+				Color = Tokens.Color.TextSecondary,
+				Size = UDim2.new(1, 0, 0, 20),
 				LayoutOrder = 5,
 				Visible = scope:Computed(function(use)
 					return not use(hasUnlocked)
 				end),
 			}),
-			ScrollArea(scope, {
-				Name = "Unlocked",
-				Size = UDim2.new(1, 0, 1, -(SLOT_ROW_HEIGHT * math.ceil(EmoteConstants.LoadoutSize / 4) + 100)),
-				LayoutOrder = 6,
+			-- Takes whatever the two headings, the hint and the slot grid left. That used to be a
+			-- five-term HEADER_ALLOWANCE sum which a changed EmoteConstants.LoadoutSize could quietly
+			-- invalidate -- see Components/Stack.lua's header.
+			Stack.Fill(
+				scope,
+				ScrollArea(scope, {
+					Name = "Unlocked",
+					Size = UDim2.fromScale(1, 1),
+					LayoutOrder = 6,
 
-				Children = {
-					scope:New "UIPadding" {
-						PaddingRight = UDim.new(0, Tokens.Space.S),
+					Children = {
+						scope:New "UIPadding" {
+							PaddingRight = UDim.new(0, Tokens.Space.S),
+						},
+						scope:New "UIGridLayout" {
+							CellSize = UDim2.new(
+								1 / EMOTE_COLUMNS,
+								-EMOTE_GAP * (EMOTE_COLUMNS - 1) / EMOTE_COLUMNS,
+								0,
+								EMOTE_BUTTON_HEIGHT
+							),
+							CellPadding = UDim2.fromOffset(EMOTE_GAP, EMOTE_GAP),
+							SortOrder = Enum.SortOrder.LayoutOrder,
+						},
+						emoteButtons,
 					},
-					scope:New "UIListLayout" {
-						FillDirection = Enum.FillDirection.Horizontal,
-						Padding = UDim.new(0, Tokens.Space.XS),
-						SortOrder = Enum.SortOrder.LayoutOrder,
-						Wraps = true,
-					},
-					emoteButtons,
-				},
-			}),
+				})
+			),
 		},
-	} :: Frame
+	})
 end
 
 return EmotesTab

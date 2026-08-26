@@ -24,7 +24,11 @@ local Types = require(ReplicatedStorage.Shared.Types)
 -- lua already establish for their own screens. No "Done" stage: OnboardingClient.Run() simply
 -- returns (and tears down this Handle's Fusion scope) the instant CharacterCreation_Finalize
 -- succeeds, rather than the Handle ever representing a sixth, already-finished stage.
-export type Stage = "Cinematic" | "RaceSelect" | "Attributes" | "NameEntry" | "Confirmation"
+-- BloodlineSpin is an EPILOGUE, after the seal -- it carries no StepRail entry, exactly as the
+-- Cinematic prologue carries none (see StepRail.lua's own "3 steps + a seal" header). It has to
+-- come after Confirmation rather than anywhere earlier: BloodlineSystem.Spin refuses until the
+-- profile has a raceId, and nothing writes one until Finalize succeeds at Confirmation.
+export type Stage = "Cinematic" | "RaceSelect" | "Attributes" | "NameEntry" | "Confirmation" | "BloodlineSpin"
 
 export type CinematicProps = {
 	-- Which staged text line is currently revealed (0 = none yet) -- advanced by
@@ -136,6 +140,29 @@ export type ConfirmationProps = {
 -- Handle returned by Onboarding.Mount(scope, playerGui) -- OnboardingClient.lua drives every field
 -- here from outside, per this folder's "screen exposes state/signals, client module drives from
 -- outside" convention (init.lua's own header).
+-- Every field here is written by OnboardingClient.lua from the Spin remote's own response --
+-- including RerollsRemaining, which rides on every response (success AND refusal) precisely so
+-- this never has to be decremented locally and drift from the profile that owns it. See
+-- BloodlineTypes.BloodlineSpinResult.
+export type BloodlineSpinProps = {
+	-- "" until something has been rolled -- which is also how the screen knows to show its empty
+	-- state and whether the next press is a free roll or a paid reroll.
+	ResultName: Fusion.Value<string>,
+	ResultRarity: Fusion.Value<string>,
+	ResultFlavor: Fusion.Value<string>,
+	RerollsRemaining: Fusion.Value<number>,
+	-- Disables the Spin button while a roll is in flight, the same "driven from outside while a
+	-- request is in flight" contract ConfirmationProps.IsSubmitting already establishes.
+	IsSpinning: Fusion.Value<boolean>,
+	-- Empty string = nothing to report. Carries the server's refusal in plain words -- including
+	-- the one every player gets until bloodline content is authored.
+	StatusText: Fusion.Value<string>,
+	SpinRequested: BindableEvent,
+	-- Ends the intro. Always available, even before a first spin -- see BloodlineSpin.lua's header
+	-- on why a player must never be trapped here.
+	ContinueRequested: BindableEvent,
+}
+
 export type OnboardingHandle = {
 	Stage: Fusion.Value<Stage>,
 	Cinematic: CinematicProps,
@@ -143,6 +170,7 @@ export type OnboardingHandle = {
 	Attributes: AttributesProps,
 	NameEntry: NameEntryProps,
 	Confirmation: ConfirmationProps,
+	BloodlineSpin: BloodlineSpinProps,
 	Root: ScreenGui,
 	-- Fired by StepRail.lua (embedded via CreatorFrame in each of the four creator screens) when the
 	-- player clicks an already-completed step to jump straight there, bypassing the linear

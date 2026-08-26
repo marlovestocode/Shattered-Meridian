@@ -30,6 +30,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
+local BloodlineTypes = require(ReplicatedStorage.Shared.Bloodline.BloodlineTypes)
+local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -340,6 +343,92 @@ local SUCCESS_BEAT_SECONDS = 1.2
 -- SUCCESS_BEAT_SECONDS hold -- so a caller can start something meant to run CONCURRENTLY with
 -- Confirmation.lua's own fracture-out (e.g. Client/Intro/IntroClient.lua fading BlackScreen.lua's
 -- cover in) rather than only after this function fully returns.
+-- Reason CODE -> the sentence a player reads, for the bloodline spin. Every key is a string
+-- BloodlineSystem.Spin can actually return; an unknown code falls through to itself rather than
+-- to a blank line, so a new server-side refusal is visible instead of silent -- the same shape
+-- CharacterMenuClient.describeArtFailure already uses.
+local function describeSpinFailure(reason: string?): string
+	if reason == "NoBloodlinesAvailable" then
+		-- The one every player sees today: BloodlineManager's registry is populated only by the Kit
+		-- Editor, and no bloodline has been authored yet. Worded as an in-world absence rather than
+		-- a missing feature, and Continue stays available regardless.
+		return "Nothing answers. The blood is quiet in this age."
+	elseif reason == "NoRerollsLeft" then
+		return "No rerolls left -- what you have is yours."
+	elseif reason == "NoRaceChosen" then
+		return "Your origin has not settled yet."
+	elseif reason == "ProfileNotLoaded" then
+		return "Your profile is still loading."
+	elseif reason == "RateLimited" then
+		return "Too quickly -- wait a moment."
+	elseif reason == "AlreadyAwakened" then
+		return "That blood already runs in you."
+	end
+	return "The roll failed: " .. (reason or "Unknown")
+end
+
+-- Blocking loop: drives the bloodline spin stage and returns once the player presses Continue.
+-- Mirrors RunConfirmationLoop's own shape (a blocking export IntroClient drives in sequence)
+-- rather than wiring signals and returning immediately, because the caller genuinely cannot
+-- proceed past it -- the next thing IntroClient does tears the creator UI down.
+--
+-- MUST be called only after Finalize has succeeded: BloodlineSystem.Spin refuses with
+-- "NoRaceChosen" until the profile actually has a race, and nothing writes one until then. See
+-- Screens/Onboarding/BloodlineSpin.lua's own header.
+function OnboardingClient.RunBloodlineSpinStage(handle: OnboardingHandle): ()
+	local props = handle.BloodlineSpin
+	local spinRemote = NetworkBridge.GetRemoteFunction(BloodlineConstants.RemoteNames.Spin)
+
+	local finished = false
+	local connections: { RBXScriptConnection } = {}
+	table.insert(
+		connections,
+		props.ContinueRequested.Event:Connect(function()
+			finished = true
+		end)
+	)
+	table.insert(
+		connections,
+		props.SpinRequested.Event:Connect(function()
+			-- Guarded rather than debounced by the button alone: the button's own Disabled state is
+			-- reactive and a fast double-click can land two presses before it re-renders, which would
+			-- spend two rerolls for one intended roll.
+			if peek(props.IsSpinning) then
+				return
+			end
+			props.IsSpinning:set(true)
+			props.StatusText:set("")
+			task.spawn(function()
+				local ok, resultOrError = RemoteInvoker.Invoke(spinRemote)
+				props.IsSpinning:set(false)
+				if not ok then
+					props.StatusText:set("The roll failed: request error")
+					return
+				end
+				local result = resultOrError :: BloodlineTypes.BloodlineSpinResult
+				-- Corrected from the response on BOTH paths -- see BloodlineSpinResult's own header on
+				-- why the count never decrements locally.
+				props.RerollsRemaining:set(result.RerollsRemaining)
+				if not result.Success then
+					props.StatusText:set(describeSpinFailure(result.Reason))
+					return
+				end
+				props.ResultName:set(result.DisplayName or result.BloodlineId or "")
+				props.ResultRarity:set(result.RarityTier or "")
+				props.ResultFlavor:set(result.FlavorText or "")
+			end)
+		end)
+	)
+
+	handle.Stage:set("BloodlineSpin")
+	while not finished do
+		task.wait()
+	end
+	for _, connection in connections do
+		connection:Disconnect()
+	end
+end
+
 function OnboardingClient.RunConfirmationLoop(handle: OnboardingHandle, onSuccess: (() -> ())?): ()
 	local finalizeRemote = NetworkBridge.GetRemoteFunction(Config.RemoteNames.Finalize)
 

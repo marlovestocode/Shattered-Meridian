@@ -2,8 +2,8 @@
 --[[
 	Settings/init.lua
 
-	Owns: the Settings panel's thin root -- ScreenGui > Panel > Header/TabStrip/(Keybinds tab |
-	Gameplay tab)/status line, plus IsOpen and every piece of state the two tab sub-modules
+	Owns: the Settings panel's thin root -- the banded frame (Components/ScreenFrame.lua) wrapped
+	around the two tab sub-modules, plus IsOpen and every piece of state the two tab sub-modules
 	(KeybindsTab.lua/GameplayTab.lua) render from. Follows Screens/DevMenu/init.lua's "screen exposes
 	state/signals, client module drives from outside" precedent exactly: Client/Settings/
 	SettingsClient.lua doesn't exist yet at the moment this mounts (UI/init.lua mounts every Screen
@@ -18,6 +18,14 @@
 	Both tabs mount up front and toggle via each one's own Visible prop rather than re-mounting on
 	tab clicks -- same idiom KeybindsTab.lua's own device sub-tabs already use.
 
+	WEARS THE CHARACTER MENU'S FRAME as of the ScreenFrame extraction, and loses three things in the
+	trade: the 36px header band whose only content was the word "Settings" (the tab strip is already
+	the loudest thing on the panel, and this screen's identity moved to the footer wordmark), the
+	free-floating close button that used to sit in that header, and the bare status Label at the
+	bottom of the content stack -- which was the one piece of chrome most clearly in the wrong place,
+	since an answer to "did that rebind take" was rendering INSIDE the scrolling column it was
+	answering about. See ScreenFrame.lua's own header for the rest of the argument.
+
 	Does not own: what a rebind/reset/toggle actually DOES (SettingsClient.lua), or whether the local
 	player currently sees this panel open (SettingsClient's own keybind toggle).
 ]]
@@ -27,14 +35,11 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local Tokens = require(script.Parent.Parent.Tokens)
-local ModalScreen = require(script.Parent.Parent.Components.ModalScreen)
-local Label = require(script.Parent.Parent.Components.Label)
-local Button = require(script.Parent.Parent.Components.Button)
-local Tab = require(script.Parent.Parent.Components.Tab)
+local ScreenFrame = require(script.Parent.Parent.Components.ScreenFrame)
+local Stack = require(script.Parent.Parent.Components.Stack)
+local Inset = require(script.Parent.Parent.Components.Inset)
 local KeybindsTab = require(script.KeybindsTab)
 local GameplayTab = require(script.GameplayTab)
-
-local Children = Fusion.Children
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 
@@ -81,21 +86,16 @@ export type SettingsHandle = {
 
 local ROOT_WIDTH = 480
 local ROOT_HEIGHT = 520
-local HEADER_HEIGHT = 36
-local TAB_STRIP_HEIGHT = 36
-local STATUS_HEIGHT = 20
 
--- Root's inner content height budget: total height minus UIPadding.L (top+bottom), minus Header/
--- TabStrip/status row heights, minus the 3 UIListLayout gaps between Header/TabStrip/(tab
--- content)/status (Space.M each) -- the same "spell the math out, don't guess" convention
--- Screens/DevMenu/init.lua's own ROOT_SIZE/BODY_HEIGHT already use.
-local CONTENT_WIDTH = ROOT_WIDTH - Tokens.Space.L * 2
-local CONTENT_HEIGHT = ROOT_HEIGHT
-	- Tokens.Space.L * 2
-	- HEADER_HEIGHT
-	- TAB_STRIP_HEIGHT
-	- STATUS_HEIGHT
-	- Tokens.Space.M * 3
+local TAB_NAMES: { string } = { "Keybinds", "Gameplay" }
+
+-- The band heights are ScreenFrame's own and are no longer restated here. What is left is the tab
+-- modules' own budget: both take an explicit pixel Width/Height, so the body's inset still has to be
+-- subtracted by hand -- see Screens/Menus/init.lua's identical pair for why that subtraction is the
+-- honest kind (an inset this file writes) rather than the kind that guesses a sibling's height.
+local BODY_WIDTH, BODY_HEIGHT = ScreenFrame.BodySize(ROOT_WIDTH, ROOT_HEIGHT)
+local CONTENT_WIDTH = BODY_WIDTH - Tokens.Space.L * 2
+local CONTENT_HEIGHT = BODY_HEIGHT - Tokens.Space.M - Tokens.Space.L
 
 local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 	local isOpen = scope:Value(false)
@@ -126,7 +126,7 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 		FieldOfViewEffects = false,
 	} :: Types.ComfortSettings)
 	local listeningFor = scope:Value(nil :: { Device: Types.KeybindDevice, Action: Types.KeybindAction }?)
-	local selectedTab = scope:Value("Keybinds" :: SettingsTabName)
+	local tabs = ScreenFrame.NewTabState(scope, TAB_NAMES)
 
 	local rebindClickedEvent = Instance.new("BindableEvent")
 	local resetKeybindsClickedEvent = Instance.new("BindableEvent")
@@ -135,48 +135,10 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 	local sprintModeChangedEvent = Instance.new("BindableEvent")
 	local comfortToggledEvent = Instance.new("BindableEvent")
 
-	local function close(): ()
-		isOpen:set(false)
-	end
-
-	local closeButton = Button(scope, {
-		Text = "X",
-		Size = UDim2.fromOffset(28, 28),
-		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.fromScale(1, 0.5),
-		OnActivated = close,
-	})
-
-	local keybindsSelected = scope:Computed(function(use)
-		return use(selectedTab) == "Keybinds"
-	end)
-	local gameplaySelected = scope:Computed(function(use)
-		return use(selectedTab) == "Gameplay"
-	end)
-
-	local keybindsTabButton = Tab(scope, {
-		Text = "Keybinds",
-		Size = UDim2.new(0.5, -Tokens.Space.XS, 0, TAB_STRIP_HEIGHT),
-		LayoutOrder = 1,
-		Selected = keybindsSelected,
-		OnActivated = function()
-			selectedTab:set("Keybinds")
-		end,
-	})
-	local gameplayTabButton = Tab(scope, {
-		Text = "Gameplay",
-		Size = UDim2.new(0.5, -Tokens.Space.XS, 0, TAB_STRIP_HEIGHT),
-		LayoutOrder = 2,
-		Selected = gameplaySelected,
-		OnActivated = function()
-			selectedTab:set("Gameplay")
-		end,
-	})
-
 	local keybindsTabContent = KeybindsTab(scope, {
 		Width = CONTENT_WIDTH,
 		Height = CONTENT_HEIGHT,
-		Visible = keybindsSelected,
+		Visible = tabs.Selected["Keybinds"],
 		LayoutOrder = 3,
 		KeyboardBindings = keyboardBindings,
 		GamepadBindings = gamepadBindings,
@@ -192,7 +154,7 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 	local gameplayTabContent = GameplayTab(scope, {
 		Width = CONTENT_WIDTH,
 		Height = CONTENT_HEIGHT,
-		Visible = gameplaySelected,
+		Visible = tabs.Selected["Gameplay"],
 		LayoutOrder = 3,
 		Autorun = autorun,
 		OnAutorunToggled = function(enabled: boolean)
@@ -211,57 +173,33 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 		end,
 	})
 
-	ModalScreen(scope, playerGui, {
+	ScreenFrame.Mount(scope, playerGui, {
 		Name = "Settings",
 		Size = UDim2.fromOffset(ROOT_WIDTH, ROOT_HEIGHT),
 		IsOpen = isOpen,
+		-- Opted in alongside the character menu rather than left at ModalScreen's default: this is the
+		-- other panel a player READS (a rebind list is a table of small text scanned row by row), and
+		-- the two of them scaling differently on the same monitor would read as a bug rather than as
+		-- two independent decisions.
+		AutoScale = true,
+		Tabs = tabs,
+		-- Where the deleted header band's word went -- see this file's header.
+		Wordmark = "SETTINGS",
+		StatusText = statusText,
+		OnClose = function()
+			isOpen:set(false)
+		end,
 
-		Children = {
-			scope:New "Frame" {
-				Name = "Header",
-				Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
-				BackgroundTransparency = 1,
-				LayoutOrder = 1,
-
-				[Children] = {
-					Label(scope, {
-						Text = "Settings",
-						Scale = "Heading",
-						AnchorPoint = Vector2.new(0, 0.5),
-						Position = UDim2.fromScale(0, 0.5),
-					}),
-					closeButton,
-				},
+		Body = Stack.New(scope, {
+			Name = "Body",
+			Children = {
+				Inset(scope, { Top = Tokens.Space.M, Bottom = Tokens.Space.L, X = Tokens.Space.L }),
+				-- Exactly one is Visible at a time, so the Stack has one child to place -- same shape
+				-- the character menu's own tab column uses.
+				keybindsTabContent,
+				gameplayTabContent,
 			},
-
-			scope:New "Frame" {
-				Name = "TabStrip",
-				Size = UDim2.new(1, 0, 0, TAB_STRIP_HEIGHT),
-				BackgroundTransparency = 1,
-				LayoutOrder = 2,
-
-				[Children] = {
-					scope:New "UIListLayout" {
-						FillDirection = Enum.FillDirection.Horizontal,
-						Padding = UDim.new(0, Tokens.Space.S),
-						SortOrder = Enum.SortOrder.LayoutOrder,
-					},
-					keybindsTabButton,
-					gameplayTabButton,
-				},
-			},
-
-			keybindsTabContent,
-			gameplayTabContent,
-
-			Label(scope, {
-				Text = statusText,
-				Scale = "Detail",
-				Color = Tokens.Color.TextSecondary,
-				Size = UDim2.new(1, 0, 0, STATUS_HEIGHT),
-				LayoutOrder = 4,
-			}),
-		},
+		}),
 	})
 
 	return {

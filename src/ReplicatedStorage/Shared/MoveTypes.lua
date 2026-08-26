@@ -83,6 +83,8 @@ MoveTypes.DefaultCategory = "Default"
 export type MoveShape = HitboxShapes.ShapeId
 export type MoveDimensions = HitboxShapes.Dimensions
 export type MoveAnimationClip = AnimationTimeline.Clip
+-- Re-exported the same way -- see HitboxTypes.AttachmentPoint's own header for what each value means.
+export type MoveAttachmentPoint = HitboxTypes.AttachmentPoint
 
 -- v1's only movement-authoring primitive: a fixed-speed forward lunge, reusing the Dash-burst
 -- SHAPE (a WalkSpeed override for a fixed window) via Movement.ApplyCustomMoveLunge -- not
@@ -233,6 +235,15 @@ export type MoveDefinition = {
 	-- short random suffix), immutable thereafter: Save never changes MoveId, only fields.
 	MoveId: string,
 	DisplayName: string,
+	-- Free-form author's note about what this move is FOR -- the intent a list of numbers can't
+	-- carry ("opener, meant to be cancelled into the heavy", "the punish, deliberately slow").
+	-- Pure metadata: nothing in combat resolution reads it, it is not projected onto
+	-- HitboxAttackDefinition, and an empty string is the normal case for most moves.
+	--
+	-- It is on the record rather than in a designer's head or a separate doc because the numbers
+	-- outlive the reasoning otherwise: a move whose windup was deliberately made ugly to make a
+	-- read possible is indistinguishable, six months later, from one that is ugly by accident.
+	Description: string,
 	-- Free-form author tag ("Primary Combo", "Signature", "Experimental") -- v1 has no closed
 	-- taxonomy; purely a list-UI grouping/filter aid, never read by combat logic.
 	Category: string,
@@ -261,6 +272,34 @@ export type MoveDefinition = {
 	-- what the editor's fields show and what the DataStore record stores, and recovering three
 	-- clean angles back out of a CFrame is lossy at the poles.
 	OffsetRotation: Vector3,
+	-- nil (every move authored before this field existed) means "Root", exactly today's behaviour --
+	-- see ToEngineAttackDefinition below for why this is the one field that decides both WHERE a swing
+	-- is anchored and, when it is "Weapon", WHAT its Box dimensions come from. Not exposed in the Move
+	-- Editor UI: no admin-authored move sets it today, only DefaultMoveRegistry's own projection of a
+	-- weapon's Basic/Heavy/Finisher stages (see that module's enumerateDescriptors), which is computed
+	-- from the descriptor's own category rather than authored by a person.
+	AttachmentPart: MoveAttachmentPoint?,
+	-- nil (equivalent to 1) for every move authored before this field existed. Only meaningful
+	-- alongside AttachmentPart == "Weapon" -- see HitboxTypes.AttackDefinition.SizeMultiplier's own
+	-- header for the full chain this carries WeaponReach through. Not editor-authored, same as
+	-- AttachmentPart just above: DefaultMoveRegistry projects it straight off the live Types.
+	-- HitboxAttackDefinition.SizeMultiplier WeaponRoster already computed.
+	SizeMultiplier: number?,
+	-- Seconds of EXTRA delay before the hitbox goes live, added to WindupSeconds by
+	-- Server/Combat/AttackCatalog.Get -- nil (equivalent to 0) for every move authored before this
+	-- field existed, and for every custom move, since nothing in the editor authors one.
+	--
+	-- DELIBERATELY NOT ADDED HERE, in ToEngineAttackDefinition, even though this is where every other
+	-- projection happens. AttackCatalog overlays an animation-marker WindupSeconds override AFTER
+	-- calling that function (Shared/Attack/AttackWindows.lua), and that override REPLACES the value
+	-- rather than adjusting it -- so a delay folded in at projection time would be silently discarded
+	-- for exactly those moves whose clips carry a marker, and kept for the rest. Applying it last is
+	-- what makes "delay" mean the same thing on a marked clip and an unmarked one.
+	--
+	-- Not editor-authored, same as AttachmentPart/SizeMultiplier above: it comes from the weapon's own
+	-- build in Workspace.Weapons (WeaponRoster.SwingHitboxConfig.SpawnDelaySeconds), which
+	-- DefaultMoveRegistry projects straight through.
+	SpawnDelaySeconds: number?,
 
 	-- Timing (identical semantics to HitboxAttackDefinition).
 	WindupSeconds: number,
@@ -384,6 +423,7 @@ function MoveTypes.Clone(move: MoveDefinition): MoveDefinition
 	return {
 		MoveId = move.MoveId,
 		DisplayName = move.DisplayName,
+		Description = move.Description,
 		Category = move.Category,
 		Author = move.Author,
 		CreatedAt = move.CreatedAt,
@@ -395,6 +435,8 @@ function MoveTypes.Clone(move: MoveDefinition): MoveDefinition
 		Radius = move.Radius,
 		Offset = move.Offset,
 		OffsetRotation = move.OffsetRotation,
+		AttachmentPart = move.AttachmentPart,
+		SizeMultiplier = move.SizeMultiplier,
 
 		WindupSeconds = move.WindupSeconds,
 		ActiveSeconds = move.ActiveSeconds,
@@ -497,6 +539,9 @@ function MoveTypes.Fingerprint(move: MoveDefinition): string
 	local out: { string } = {}
 	digestValue(out, {
 		DisplayName = move.DisplayName,
+		-- Authored, so it is dirty-tracked like any other authored field -- an admin who writes a
+		-- paragraph of intent and closes without saving should be told they are about to lose it.
+		Description = move.Description,
 		Category = move.Category,
 
 		Shape = move.Shape,
@@ -536,6 +581,10 @@ function MoveTypes.Fingerprint(move: MoveDefinition): string
 		Slam = move.Slam,
 		Projectile = move.Projectile,
 		ObjectStun = move.ObjectStun,
+		-- Art is an AUTHORED block exactly like every optional sub-table above it, and was the one
+		-- Clone carried that this digest did not -- so binding a move to an art tree, or retuning its
+		-- QiCost, never tripped the editor UNSAVED chip and was silently lost on the next load.
+		Art = move.Art,
 	})
 	return table.concat(out)
 end
@@ -770,10 +819,11 @@ function MoveTypes.ToEngineAttackDefinition(
 			ChargedScaleMultiplier = 1,
 		},
 		Offset = move.Offset,
-		-- Authored offsets are root-relative (MoveDefinition.Offset's own comment), which is exactly
-		-- what AttachmentPart "Root" means to the engine. A move authored against a hand or a weapon
-		-- would need an authored attachment field, which the editor does not have.
-		AttachmentPart = "Root",
+		-- nil means "Root" (MoveDefinition.Offset's own comment describes what that composes against),
+		-- exactly as it always has for every move the editor can author. AttachmentPart's own header
+		-- explains the one live exception: DefaultMoveRegistry marks a weapon's own Basic/Heavy/Finisher
+		-- stages "Weapon" rather than leaving them nil.
+		AttachmentPart = move.AttachmentPart or "Root",
 		WindupSeconds = move.WindupSeconds,
 		ActiveSeconds = move.ActiveSeconds,
 		RecoverySeconds = move.RecoverySeconds,
@@ -782,6 +832,13 @@ function MoveTypes.ToEngineAttackDefinition(
 		-- control away from a player is something a move should have to ask for, and a projection that
 		-- granted it by default would hand every authored move a movement lock its author never chose.
 		LocksMovement = false,
+		-- Coupled to AttachmentPart == "Weapon" rather than a separately authored flag: a move anchored
+		-- to the weapon is, today, always a weapon SWING, and "the hitbox tracks the weapon but is sized
+		-- by hand anyway" is not a case anything in this codebase wants yet. See HitboxTypes.
+		-- AttackDefinition.SizeFromAttachmentPart's own header for what this actually does at swing
+		-- time -- Box-shaped moves only; inert for every other Shape.
+		SizeFromAttachmentPart = move.AttachmentPart == "Weapon",
+		SizeMultiplier = move.SizeMultiplier,
 	}
 
 	-- AUTHORED FIELDS WITH NOWHERE TO GO YET, reported rather than dropped in silence. Each of these

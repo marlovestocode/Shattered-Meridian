@@ -17,6 +17,9 @@
 			"StarterPlayerScripts": {
 				"Client": {
 					"$className": "Folder",
+					"Blimp": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Blimp"
+					},
 					"Combat": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Combat"
 					},
@@ -50,8 +53,17 @@
 					"MoveEditor": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/MoveEditor"
 					},
+					"KitEditor": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/KitEditor"
+					},
+					"CharacterMenu": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/CharacterMenu"
+					},
 					"LiveConsole": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/LiveConsole"
+					},
+					"Storybook": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Storybook"
 					},
 					"Network": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Network"
@@ -65,6 +77,9 @@
 		"ServerScriptService": {
 			"Server": {
 				"$className": "Folder",
+				"Blimp": {
+					"$path": "src/ServerScriptService/Server/Blimp"
+				},
 				"Combat": {
 					"$path": "src/ServerScriptService/Server/Combat"
 				},
@@ -85,6 +100,9 @@
 				},
 				"Systems": {
 					"$path": "src/ServerScriptService/Server/Systems"
+				},
+				"Vehicles": {
+					"$path": "src/ServerScriptService/Server/Vehicles"
 				}
 			},
 			"Tests": {

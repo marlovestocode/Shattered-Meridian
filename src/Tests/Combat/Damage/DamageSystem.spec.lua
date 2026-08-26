@@ -27,6 +27,12 @@ local LiveTuningContract = require(ServerScriptService.Tests.TestHelpers.LiveTun
 local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
+local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
+
+-- A real roster weapon, because the ids below have to RESOLVE through AttackCatalog -- weapons are
+-- models in Workspace.Weapons now (Shared/Combat/WeaponRoster.lua), so a spec that installs none gets
+-- a catalogue with no weapon moves in it and every lookup returns nil.
+local WEAPON = WeaponFixture.Install()[1]
 
 local FRAME = 1 / 60
 local PARRY_ANIMATION = "rbxassetid://spec-damage-parry"
@@ -36,7 +42,7 @@ local WINDOW_CLOSE = 0.3
 -- The definition thrown by every case carries this as its DebugName, because that is the only key the
 -- damage layer has for looking an attack back up. A DebugName that is not a MoveId resolves to nothing
 -- and the whole layer silently deals zero -- which is itself one of the cases below.
-local MOVE_ID = "default:Primary:Basic:1"
+local MOVE_ID = `default:{WEAPON}:Basic:1`
 
 type Dummy = {
 	Model: Model,
@@ -442,7 +448,7 @@ return function()
 			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
 			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
-			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ DebugName = "default:Primary:Heavy:1" }), 1, 1)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ DebugName = `default:{WEAPON}:Heavy:1` }), 1, 1)
 			step(FRAME, base + FRAME)
 
 			expect(DamageSystem.IsLunging(attacker.Model, base + FRAME)).to.equal(false)

@@ -96,6 +96,7 @@ local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnersh
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
+local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
 local SwingSequencer = require(script.Parent.SwingSequencer)
 local AttackCatalog = require(script.Parent.Parent.AttackCatalog)
@@ -143,6 +144,11 @@ local weaponChangedRemote: RemoteEvent? = nil
 local requestLimiter = RateLimiter.New(AttackConstants.Network.MaxCallsPerSecondPerPlayer)
 local swapLimiter = RateLimiter.New(AttackConstants.Network.MaxSwapsPerSecondPerPlayer)
 
+-- OnWeaponChanged's subscriber list -- see that function's own header. A plain array, not a
+-- RateLimiter/Trove-tracked resource: subscribers are Systems that live for the server's whole
+-- lifetime (WeaponVisualSystem today), never a per-player thing to clear on PlayerRemoving.
+local weaponChangedCallbacks: { (Model, Types.WeaponId) -> () } = {}
+
 -- Helpers ------------------------------------------------------------------------------------------
 
 local function debugLog(flag: boolean, message: string, data: { [string]: any }?): ()
@@ -158,7 +164,7 @@ end
 -- actually exists; Heavy/Finisher are never included, matching AttackWindows' own Basic-only scope.
 local function collectBasicMoveEntries(): { { MoveId: string, AnimationId: string } }
 	local entries: { { MoveId: string, AnimationId: string } } = {}
-	for _, weaponId in ipairs(AttackConstants.Weapons.Order) do
+	for _, weaponId in WeaponRoster.Order() do
 		for stageIndex = 1, AttackConstants.Sequence.MaxStageProbe do
 			local moveId = `default:{weaponId}:Basic:{stageIndex}`
 			local entry = AttackCatalog.Get(moveId)
@@ -218,43 +224,61 @@ local function sendStarted(model: Model, payload: AttackStartedPayload): ()
 	remote:FireClient(player, payload)
 end
 
+-- Every OnWeaponChanged subscriber, in registration order. pcall'd for the same reason DamageSystem.
+-- OnApplied's own dispatch loop is: one subscriber erroring (WeaponVisualSystem today) must not abort
+-- the rest and above all must not unwind out of handleSwap/bindCharacter into this System's own
+-- Heartbeat/PlayerAdded plumbing.
+local function notifyWeaponChanged(character: Model, weaponId: Types.WeaponId?): ()
+	for _, callback in weaponChangedCallbacks do
+		local ok, err = pcall(callback, character, weaponId)
+		if not ok then
+			logger:error("An AttackRequestSystem.OnWeaponChanged consumer errored", { errorMessage = tostring(err) })
+		end
+	end
+end
+
 -- Throwing -----------------------------------------------------------------------------------------
+
+-- Resolution for a Hotbar slot that has a real, persisted Art equipped in it -- the whole of
+-- resolveRequest's Hotbar case below, so an admin and everyone else go through the IDENTICAL
+-- Qi-cost/mastery/tier/Deviation gate the instant a genuine Art sits in the slot they pressed.
+-- nil, nil (not an error reason) when the slot simply has nothing equipped -- that is not a
+-- refusal, just "keep looking."
+local function resolveFromEquippedArt(model: Model, player: Player, slot: number): (SwingSequencer.Resolution?, string?)
+	local artId = ArtSystem.GetEquipped(player)[slot]
+	if not artId then
+		return nil, nil
+	end
+	local refusal = ArtSystem.CanUse(player, artId)
+	if refusal then
+		return nil, refusal
+	end
+	return {
+		MoveId = artId,
+		WeaponId = SwingSequencer.GetWeapon(model),
+		StageIndex = 0,
+		IsFinisher = false,
+	},
+		nil
+end
 
 -- Resolves which move a request means. Split from Throw below so the answer is available before any
 -- gate runs -- the cooldown check needs a MoveId, and a press that is refused must not have advanced
 -- the string, so nothing here mutates.
-local function resolveRequest(
-	model: Model,
-	request: AttackRequest,
-	authorized: boolean,
-	now: number
-): (SwingSequencer.Resolution?, string?)
+local function resolveRequest(model: Model, request: AttackRequest, now: number): (SwingSequencer.Resolution?, string?)
 	if request.Kind == "Hotbar" then
-		-- ADMIN PATH, STILL TRUSTED -- kept for Move Editor live-fire testing (MoveEditorClient.lua's
-		-- "Bind to slot" control), which is the only test-fire tool left since TestFireMove/
-		-- SpawnPreviewDummy were removed with the old combat system. An admin can bind and throw a
-		-- move that isn't authored as an Art at all, so this cannot be routed through ArtSystem below.
-		if authorized then
-			local moveId = request.MoveId
-			if typeof(moveId) ~= "string" or not AttackCatalog.Has(moveId) then
-				return nil, "UnknownMove"
-			end
-			return {
-				MoveId = moveId,
-				WeaponId = SwingSequencer.GetWeapon(model),
-				-- A hotbar move is not part of either string, so it has no stage of its own and must not
-				-- disturb the one in progress. Advance is deliberately never called for it below.
-				StageIndex = 0,
-				IsFinisher = false,
-			},
-				nil
-		end
-
-		-- EVERYONE ELSE, RESOLVED FROM ARTSYSTEM -- not trusted at all: the client's own MoveId is
-		-- ignored entirely and the slot is resolved against ArtSystem.GetEquipped, the same
-		-- server-persisted binding CharacterMenuClient's equip UI writes through ArtSystem.Equip. A
+		-- RESOLVED FROM ARTSYSTEM, ADMIN OR NOT. A hotbar slot can only ever hold a real, persisted
+		-- Art now -- ArtSystem.Equip for the normal ArtsTab flow, ArtSystem.DevGrantAndEquip for an
+		-- admin's Move Editor "bind to slot" test-fire (see that function's own header) -- so the
+		-- client's own MoveId is ignored entirely and the slot is resolved against
+		-- ArtSystem.GetEquipped, the same server-persisted binding either writer goes through. There
+		-- used to be a second, trusted branch here that let an admin fire an arbitrary MoveId
+		-- (AttackCatalog.Has) with no Art binding at all; it's gone because that path no longer
+		-- exists on the write side either -- a move with no Art binding is refused a slot at bind
+		-- time (ArtTreeManager.IsArt), so there is no second kind of MoveId left to trust here. A
 		-- slot with nothing equipped, or an equipped art CanUse currently refuses (not unlocked, not
-		-- enough Qi), refuses the whole request -- there is no other way onto this branch.
+		-- enough Qi, Deviation-locked), refuses the whole request -- there is no other way onto this
+		-- branch, for anyone.
 		local player = Players:GetPlayerFromCharacter(model)
 		if not player then
 			return nil, "NotAuthorized"
@@ -263,21 +287,11 @@ local function resolveRequest(
 		if typeof(slot) ~= "number" then
 			return nil, "InvalidSlot"
 		end
-		local artId = ArtSystem.GetEquipped(player)[slot]
-		if not artId then
-			return nil, "NoArtEquipped"
+		local resolution, refusal = resolveFromEquippedArt(model, player, slot)
+		if resolution then
+			return resolution, nil
 		end
-		local refusal = ArtSystem.CanUse(player, artId)
-		if refusal then
-			return nil, refusal
-		end
-		return {
-			MoveId = artId,
-			WeaponId = SwingSequencer.GetWeapon(model),
-			StageIndex = 0,
-			IsFinisher = false,
-		},
-			nil
+		return nil, refusal or "NoArtEquipped"
 	end
 
 	local resolution = SwingSequencer.Resolve(model, request.Kind, DamageSystem.GetComboStage(model, now), now)
@@ -293,10 +307,16 @@ end
 -- PUBLIC, so a bot's decision-making can throw through exactly the same path a player's press does,
 -- with no special casing anywhere in this file -- the same reason DefenseSystem.SetBlocking is
 -- exposed alongside its own remote handler.
+--
+-- `_authorized` is unused inside this function itself (resolveRequest no longer branches on it, and
+-- the Hotbar Qi charge below no longer exempts it either -- see this function's own note there) but
+-- stays in the signature: Press below still needs to accept, remember, and replay it for a buffered
+-- press's later re-validation (rememberRefused's own Authorized field), and every existing caller --
+-- production and this module's own spec -- already calls Throw positionally with it.
 function AttackRequestSystem.Throw(
 	model: Model,
 	request: AttackRequest,
-	authorized: boolean,
+	_authorized: boolean,
 	now: number
 ): (boolean, string?)
 	if not isAlive(model) then
@@ -348,7 +368,22 @@ function AttackRequestSystem.Throw(
 		return false, "ParkourAction"
 	end
 
-	local resolution, resolveReason = resolveRequest(model, request, authorized, now)
+	-- A MOUNTED BODY CANNOT SWING. Welded to a blimp station (Server/Systems/BlimpSystem.lua), the body
+	-- is part of a vehicle: its position is not its own, its animation channel is being driven by the arm
+	-- pose, and a hitbox thrown from it would sweep whatever the hull happened to be flying past.
+	--
+	-- Read as an Attribute rather than through a BlimpSystem require, the same way the traversal gate
+	-- immediately above reads ParkourOwnership rather than requiring ParkourSystem -- this layer stays
+	-- free of a dependency on a world system, and a bot (never mounted, no Attribute) is never gated.
+	--
+	-- Deliberately NOT in AttackConstants.Input.TransientRefusals, for the same reason ParkourAction is
+	-- not: a buffered press would fire on the frame the pilot let go of the wheel, which is a free hit
+	-- out of a state the player was not in when they pressed.
+	if humanoid and humanoid:GetAttribute(Constants.Attributes.Mounted) == true then
+		return false, "Mounted"
+	end
+
+	local resolution, resolveReason = resolveRequest(model, request, now)
 	if not resolution then
 		return false, resolveReason or "UnknownMove"
 	end
@@ -398,9 +433,15 @@ function AttackRequestSystem.Throw(
 	-- and would otherwise charge Qi for a swing that goes on to be refused as "Cooldown" or "Busy".
 	-- UseArt re-checks unlock and Qi itself rather than trusting resolveRequest's CanUse asked
 	-- moments ago; nothing yields between the two in this synchronous call, so it cannot newly fail
-	-- here. Never runs for the admin Hotbar path (that MoveId may not even be an art) or for a
-	-- Basic/Heavy swing (those cost no Qi).
-	if request.Kind == "Hotbar" and not authorized then
+	-- here. Never runs for a Basic/Heavy swing (those cost no Qi). DOES run for an admin's Hotbar
+	-- press -- an earlier version of this gate exempted `authorized` from the charge (so a dev-tested
+	-- art wouldn't drain real Qi or level up from live-fire testing alone), but that exemption also
+	-- silently ate the admin's own Qi UI feedback: an admin equipping a real Art normally, testing it
+	-- through the SAME hotbar slot, would never see their Qi bar move. resolveRequest already resolves
+	-- an admin's Hotbar press to a real, persisted Art the same as anyone else's (see ArtSystem.lua's
+	-- own header) -- there's no separate "dev-tested" MoveId to distinguish it by, so there's no honest
+	-- way to charge everyone else and not the admin. See ArtSystem.DevGrantAndEquip's own header.
+	if request.Kind == "Hotbar" then
 		local player = Players:GetPlayerFromCharacter(model)
 		if player then
 			local refusal = ArtSystem.UseArt(player, resolution.MoveId)
@@ -622,8 +663,15 @@ local function handleSwap(player: Player): ()
 		return
 	end
 	local weaponId = SwingSequencer.SwapWeapon(character, os.clock())
+	if not weaponId then
+		-- An empty roster (nothing in Workspace.Weapons). Nothing to swap TO, so the press is a no-op
+		-- rather than an un-equip -- taking a player's weapon away on a swap they can't complete is a
+		-- worse answer than ignoring the key.
+		return
+	end
 	-- A swap abandons the in-progress string, so anything buffered against it is stale by definition.
 	buffered[character] = nil
+	notifyWeaponChanged(character, weaponId)
 
 	local remote = weaponChangedRemote
 	if remote then
@@ -643,6 +691,10 @@ local function bindCharacter(character: Model, humanoid: Humanoid): ()
 		return
 	end
 	combatantIds[character] = HitboxEngine.RegisterCombatant(character, rootPart, humanoid)
+	-- Reports the weapon a fresh life starts on (the roster's first, via SwingSequencer's own recordFor
+	-- default) through the same signal a later swap uses -- see notifyWeaponChanged's own header for
+	-- why this is a bind-time report rather than a separate "initial equip" path.
+	notifyWeaponChanged(character, SwingSequencer.GetWeapon(character))
 end
 
 local function unbindCharacter(character: Model): ()
@@ -665,8 +717,55 @@ function AttackRequestSystem.GetCooldownRemaining(model: Model, moveId: string, 
 	return cooldownRemaining(model, moveId, now)
 end
 
-function AttackRequestSystem.GetWeapon(model: Model): Types.WeaponId
+function AttackRequestSystem.GetWeapon(model: Model): Types.WeaponId?
 	return SwingSequencer.GetWeapon(model)
+end
+
+-- Puts `weaponId` in this combatant's hand -- or empties it, for nil -- AND tells everything
+-- downstream that it changed. The entry point anything outside this layer uses to arm or disarm
+-- somebody; Server/Combat/Weapon/WeaponInventorySystem.lua's draw/sheathe is its only caller today.
+--
+-- EXISTS BECAUSE SwingSequencer.SetWeapon IS NOT ENOUGH ON ITS OWN, and that gap shipped once: the
+-- inventory system called SwingSequencer directly, which mutated the record and notified nobody. The
+-- sequencer knew the player was armed (they could actually swing), the HUD knew (it is fed
+-- separately), and WeaponVisualSystem -- the one thing that puts a Tool in the hand -- was never told,
+-- so drawing a weapon reported success and produced no sword. Two components agreeing with each other
+-- is not evidence the third consumer was updated.
+--
+-- So the SETTER lives here, next to the signal it has to fire, rather than callers being trusted to
+-- remember a second call. Returns whether the change was accepted -- false for an id the roster does
+-- not know (SwingSequencer.SetWeapon's own check), in which case nothing is notified either.
+function AttackRequestSystem.SetWeapon(model: Model, weaponId: Types.WeaponId?, now: number): boolean
+	if weaponId == nil then
+		SwingSequencer.ClearWeapon(model, now)
+		-- A swap abandons the in-progress string, so anything buffered against it is stale -- the same
+		-- reasoning handleSwap's own buffer clear gives.
+		buffered[model] = nil
+		notifyWeaponChanged(model, nil)
+		return true
+	end
+
+	if not SwingSequencer.SetWeapon(model, weaponId, now) then
+		return false
+	end
+	buffered[model] = nil
+	notifyWeaponChanged(model, weaponId)
+	return true
+end
+
+-- This layer's weapon-swap signal, for anything downstream that wants to react to which weapon a
+-- combatant currently fights with -- WeaponVisualSystem today. Fires on every accepted swap AND once
+-- per character bind (spawn/respawn -- see bindCharacter), so a subscriber never has to special-case
+-- what a fresh life starts holding separately from what a swap changes it to. Returns a disconnect
+-- function rather than a connection object, matching DamageSystem.OnApplied's own contract.
+function AttackRequestSystem.OnWeaponChanged(callback: (Model, Types.WeaponId) -> ()): () -> ()
+	table.insert(weaponChangedCallbacks, callback)
+	return function()
+		local index = table.find(weaponChangedCallbacks, callback)
+		if index then
+			table.remove(weaponChangedCallbacks, index)
+		end
+	end
 end
 
 -- The loop -----------------------------------------------------------------------------------------
@@ -760,15 +859,18 @@ function AttackRequestSystem.Shutdown(): ()
 	started = false
 end
 
--- Drops every piece of per-combatant state. Spec-only, so one case cannot serve another its state --
--- the same role HitboxEngine.Reset, DefenseSystem.Reset and DamageSystem.Reset play for their own
--- modules.
+-- Drops every piece of per-combatant state, and every OnWeaponChanged subscription -- otherwise a
+-- WeaponVisualSystem.spec.lua case that calls WeaponVisualSystem.Attach() would leak its callback into
+-- the next spec file's AttackRequestSystem entirely, the one piece of state here that is not
+-- per-combatant. Spec-only, so one case cannot serve another its state -- the same role HitboxEngine.
+-- Reset, DefenseSystem.Reset and DamageSystem.Reset play for their own modules.
 function AttackRequestSystem.Reset(): ()
 	table.clear(combatantIds)
 	table.clear(cooldownUntil)
 	combatantIdsReclaim:Reset()
 	cooldownReclaim:Reset()
 	table.clear(buffered)
+	table.clear(weaponChangedCallbacks)
 	SwingSequencer.Reset()
 end
 

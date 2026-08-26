@@ -34,7 +34,6 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Constants = require(ReplicatedStorage.Shared.Constants)
-local Types = require(ReplicatedStorage.Shared.Types)
 
 -- DashPunch's own Windup/Active/Recovery seconds, factored out to local variables so
 -- DashFrontCommitmentSeconds (below, in the main CombatConstants table) can be DERIVED from
@@ -66,6 +65,71 @@ local DashPunchRecoverySeconds = 0.17
 local DashHitWindupSeconds = 0.350
 local DashHitActiveSeconds = 0.10
 local DashHitRecoverySeconds = 0.08
+
+-- THE WEAPON SWING HITBOX -- one config block, referenced by every Basic/Heavy/Finisher stage below
+-- and by the two modules that decide where a swing's volume is anchored. Exposed on the table as
+-- CombatConstants.Weapons.SwingHitbox; kept as a module-local as well for the same reason
+-- DashPunchWindupSeconds is one -- a Lua table constructor cannot reference its own other keys.
+--
+-- THESE ARE HOUSE DEFAULTS, NOT THE FINAL WORD. Every field below is overridable per weapon, off
+-- Attributes on the weapon's own build in Workspace.Weapons -- see Shared/Combat/WeaponRoster.lua's
+-- HITBOX_ATTRIBUTE_NAMES for the Attribute names and where they may sit. A weapon that sets none of
+-- them swings exactly this. Retuning here therefore moves every weapon that has not opted out, which
+-- is the point: it is the house sword, and the roster is built from it.
+--
+-- WHY IT EXISTS. A weapon swing used to be anchored to, and sized off, the equipped weapon's own
+-- "Blade" part (AttachmentPart == "Weapon" plus HitboxTypes.AttackDefinition.SizeFromAttachmentPart).
+-- That made the hitbox exactly as good as the mesh: a thin blade is a thin hitbox, the volume swept
+-- along with the weapon so what it covered depended on which frame of the swing clip you were on, and
+-- every weapon in the roster read differently for reasons no player could see. Mode == "BodyBox"
+-- replaces all of that with ONE honest volume in front of the ATTACKER.
+--
+-- "AFTER A WINDUP" NEEDS NO FIELD HERE. AttackStateMachine only ever enters Active from Windup, so a
+-- stage's own WindupSeconds already is the delay before this box exists -- retune that per stage (or
+-- let Shared/Attack/AttackWindows.lua's animation-marker override do it), not this table.
+local SWING_HITBOX = {
+	-- "BodyBox" -- every weapon stage anchors to the attacker's HumanoidRootPart and uses the Size and
+	--             Offset below verbatim.
+	-- "Blade"   -- the previous behaviour: anchor to the equipped weapon's Blade part and take the
+	--             swing's dimensions from that part's own live Size. The per-stage Size/Offset lines
+	--             below go vestigial in that mode, read only by the Move Editor's preview.
+	-- Read by Server/Combat/DefaultMoveRegistry.lua (which anchor it hands the engine) and by
+	-- Shared/Combat/WeaponRoster.lua (whether WeaponReach still scales the box).
+	Mode = "BodyBox" :: "BodyBox" | "Blade",
+
+	-- Studs. X is how wide the swing is, Y how tall, Z how far it reaches. 8x8 on X/Z is deliberately
+	-- generous against a character's own ~2x1-stud footprint: this is a volume a player is meant to be
+	-- able to READ and step out of, not a precise edge. Y is 8 rather than the stages' old 6.5 so one
+	-- box covers a jumping target without a second authored case.
+	Size = Vector3.new(8, 8, 8),
+
+	-- Root-local pose the box is CENTRED on. -Z is forward (the engine's convention throughout -- see
+	-- HitboxTypes.lua's LOCAL SPACE CONVENTION header), and a Box straddles its offset rather than
+	-- growing forward from it, so the forward number wants to be about Size.Z/2 for the box's back face
+	-- to sit flush against the attacker instead of swallowing them. At -4 with Size.Z == 8 the box
+	-- spans 0..8 studs in front of the root. Push it further out for a swing that should not catch
+	-- someone already inside your guard.
+	Offset = CFrame.new(0, 0, -4),
+
+	-- Whether a weapon model's own WeaponReach Attribute still scales this box's X/Z and its forward
+	-- offset (Shared/Combat/WeaponRoster.applyReach). FALSE means every weapon in the roster swings the
+	-- exact same volume and reach becomes a damage/speed-only distinction, which is most of the point
+	-- of a fixed box -- one shape every player learns once. Flip to true to let a long weapon genuinely
+	-- out-range a short one again. Inert in "Blade" mode, where reach reaches the swing through
+	-- SizeMultiplier instead.
+	ScaleWithWeaponReach = false,
+
+	-- Seconds of EXTRA delay before the hitbox goes live, ON TOP of the swinging stage's own
+	-- WindupSeconds. Zero here because the house timings were already playtested against the house
+	-- clips; this exists for a weapon whose arc connects later than the baseline's does, and it is
+	-- almost always a per-weapon answer rather than a house one.
+	--
+	-- Additive rather than a replacement, and applied at the very END of the chain
+	-- (Server/Combat/AttackCatalog.Get, after the animation-marker override) -- see
+	-- WeaponRoster.HITBOX_ATTRIBUTE_NAMES.SpawnDelay for why it cannot be folded into WindupSeconds
+	-- any earlier without a marked clip silently eating it.
+	SpawnDelaySeconds = 0,
+}
 
 -- Shared Offset for DashPunch, DashHit, AND AirSlam -- one local so retuning it can't let the
 -- three drift out of sync with each other. All three sample the hitbox off the attacker's own hand
@@ -271,15 +335,12 @@ local CombatConstants = {
 	-- can't attack back or Dash/Slide/swap weapons away for free.
 	HitStunDuration = 0.6,
 
-	-- How long a player is considered "in combat" after their last real exchange with an opponent --
-	-- refreshed (assigned forward, not math.max'd -- this is a coarser signal than the specific
-	-- lockouts above, so a fresh trigger should always reset the full duration) only by an actual
-	-- hit/parry/air-tech exchange against a real opponent (player or training bot), never by merely
-	-- throwing a swing or opening Block -- see CombatState.inCombatUntil's own header for the full
-	-- trigger list and why. Not tied to any single action's own timing (attackEndsAt, stunExpiry,
-	-- etc.) -- this is a general-purpose "still fighting" signal any current or future system can
-	-- read off Types.CombatSnapshot.InCombat, independent of what specific action caused it.
-	InCombatDurationSeconds = 5,
+	-- InCombatDurationSeconds MOVED to Shared/Engagement/EngagementConstants.TagDurationSeconds. It
+	-- described how long a player stays "in combat" after their last real exchange, and it sat here at
+	-- 5 with no reader at all from the combat teardown (which deleted CombatSystem.lua, its only
+	-- consumer) until Server/Combat/Engagement/EngagementSystem.lua was built. It lives next to that
+	-- system now, per the standalone-constants split AttackConstants/DamageConstants/DefenseConstants/
+	-- GrabConstants already keep. The value did not change; only its home did.
 	-- CombatSystem's own explicit baseline (Roblox's Humanoid default already happens to be 16,
 	-- though this codebase no longer relies on that coincidence) -- CombatSystem now owns setting/
 	-- restoring WalkSpeed so HitSlowMultiplier below has a known value to multiply and restore to.
@@ -343,8 +404,9 @@ local CombatConstants = {
 	-- not any resource (Stamina is gone).
 	--
 	-- SPRINT/THE RUN TIER USED TO LIVE HERE TOO (SprintSpeedMultiplier, SprintStage2*) and has fully
-	-- moved out -- Shared/Run/RunConstants.lua now owns every run-stage number (a THREE-stage ladder,
-	-- not the two-stage one these fields used to describe) and Server/Systems/RunSystem.lua is the
+	-- moved out -- Shared/Run/RunConstants.lua now owns every run-stage number, as an ordered array of
+	-- stage records rather than the flat per-stage fields these were, and Server/Systems/RunSystem.lua is
+	-- the
 	-- live WalkSpeed authority for it. See RunConstants.lua's own "SEPARATE FROM CombatConstants ON
 	-- PURPOSE" header for why. There is now exactly one place the run's stage numbers live; retuning
 	-- the run never touches this file. (The fields that used to sit here were dead weight, not a
@@ -699,22 +761,20 @@ local CombatConstants = {
 		-- playing on a hard interrupt (the character stops moving).
 		Walking = "rbxassetid://92817463622620",
 		Running = "rbxassetid://134203885804635",
-		-- The SECOND run stage's own clip (Constants.Attributes.SprintStage == 2). Blank until a real
-		-- full-stride run is authored -- and blank is a supported, shipped state, not a stub: the
-		-- locomotion evaluator falls through to Running above when this has no id, so stage 2 still
-		-- reads as a different gear through Constants.Run.Animation.PlaybackSpeeds, the FOV pull
-		-- and the stage-2 footstep/onset audio. Paste an id here and the clip swaps in with no code
-		-- change, the same wired-but-unauthored convention FlightConstants.AnimationIds uses.
+		-- The SECOND -- and, since the ladder went back to two gears, TOP -- run stage's own clip
+		-- (Constants.Attributes.SprintStage == 2). Blank is a supported, shipped state, not a stub: the
+		-- locomotion evaluator falls through to Running above when this has no id, so stage 2 still reads
+		-- as a different gear through Constants.Run.Animation.PlaybackSpeeds, the FOV pull and the stage-2
+		-- footstep cadence. Paste an id here and the clip swaps in with no code change, the same
+		-- wired-but-unauthored convention FlightConstants.AnimationIds uses.
 		RunningStage2 = "rbxassetid://95107102086715",
-		-- The THIRD run stage's own clip (Constants.Attributes.SprintStage == 3). USER-SUPPLIED, not
-		-- yet authored -- this codebase never guesses an asset id (see CombatAudio.lua/VitalIcon.lua's
-		-- headers). Blank until pasted in, same convention as RunningStage2 above: the locomotion
-		-- evaluator falls through to RunningStage2 (then, if that's also blank, to Running) when this
-		-- has no id, so stage 3 still reads as a distinct gear through
-		-- Constants.Run.Animation.PlaybackSpeeds alone until a real clip lands. That PlaybackSpeeds[3]
-		-- rate (1.5x) was tuned for THAT fallback -- once a real clip is pasted here, dial it back
-		-- toward 1 (see that field's own comment), or the clip will read as sped-up/cartoonish.
-		RunningStage3 = "rbxassetid://126596518578942",
+		-- THERE IS NO RunningStage3 ANY MORE, and its absence is deliberate rather than unfinished: the run
+		-- ladder is two gears (Shared/Run/RunConstants.lua's Stages), so a third clip had no stage to play
+		-- on. It could not simply be left here unread, either -- Client/FX/CombatAnimator.BindCharacter
+		-- loads EVERY entry in this table as a real AnimationTrack for every character, so a dead entry is
+		-- a track loaded once per life and never played. The asset authored for it is parked here rather
+		-- than lost: rbxassetid://126596518578942. Restoring a third gear means restoring this field, the
+		-- ladder entry, and Constants.Run's Stages[3]/StageOnset[3]/PlaybackSpeeds[3] together.
 	} :: { [string]: string },
 
 	-- PostureRegenPerSecond/HealthRegen/LockOnRange/ParryTellBroadcastRadius/MaxTrackedOpponents/
@@ -730,19 +790,20 @@ local CombatConstants = {
 	-- cross-reference Hitboxes.MaxCandidateRadius by name for historical context (why its Max=500 was
 	-- chosen), but never actually read the constant.
 
-	-- Two weapon loadout slots (combat-philosophy.md's "Established systems" list names "weapon
-	-- switching with swap cooldown" alongside Lock-on/Block/Parry/Posture as already-canon). Each
-	-- weapon owns its own Basic/Heavy/Finisher stage arrays (Types.HitboxAttackDefinition, same
-	-- shape Hitboxes.Basic/Heavy/Finisher used before this table existed) -- CombatSystem.lua's
-	-- selectAttackDefinition reads Weapons[state.equippedWeaponId].Stages instead of a single flat
-	-- table, and RequestSwapWeapon (SwapCooldownSeconds below) toggles which one is active.
-	-- Deliberately NOT a reskin: Secondary trades Primary's longer reach and higher per-hit damage
-	-- for faster windup/cooldown and comparable-or-higher posture-damage-per-second, a genuine
-	-- posture-hunting/tempo alternative to Primary's damage race -- combat-philosophy.md's Balance
-	-- Principle #2 ("expand a kit's decision space, not just its damage"). First-pass technical
-	-- values, not a balance pass; see combat-philosophy.md's Tuning process. Basic/Heavy each hold
-	-- one entry per combo stage -- CombatSystem.lua wraps the attacker's comboIndex over however
-	-- many stages are listed, so adding a stage is a data-only change, no code change.
+	-- ONE WEAPON IN HAND AT A TIME, drawn from an open roster (combat-philosophy.md's "Established
+	-- systems" list names "weapon switching with swap cooldown" alongside Lock-on/Block/Parry/Posture
+	-- as already-canon). The roster itself is NOT here: it is the set of models in Workspace.Weapons,
+	-- read at boot by Shared/Combat/WeaponRoster.lua, each weapon deep-copying the Baseline stages
+	-- below and scaling them by its own Studio Attributes. This table holds the one authored move set
+	-- they are all built from, and nothing about which weapons exist.
+	--
+	-- Basic/Heavy each hold one entry per combo stage -- SwingSequencer wraps the attacker's stage
+	-- index over however many are listed, so widening a string stays a data-only change.
+	--
+	-- Balance intent per combat-philosophy.md's Balance Principle #2 ("expand a kit's decision space,
+	-- not just its damage") is now a per-weapon question answered by that weapon's own four
+	-- Attributes -- a posture-hunting tempo weapon and a damage-race weapon are two models with
+	-- different WeaponSpeed/WeaponDamage/WeaponPostureDamage, not two hand-authored stage tables.
 	--
 	-- Cooldown vs. WindupSeconds+ActiveSeconds+RecoverySeconds: every stage below sets Cooldown to
 	-- (at most) its own full swing timeline, never longer. With no animation system yet (every
@@ -753,19 +814,54 @@ local CombatConstants = {
 	-- Cooldown <= the timeline means attackEndsAt (the commitment lock, always exactly the timeline)
 	-- is the true binding constraint, never Cooldown layering extra wait time on top of it.
 	Weapons = {
-		-- Which weapon a fresh CombatState starts equipped with (CombatTypes.lua's createFreshState/
-		-- onCharacterAdded) -- also the only weapon training bots ever use (BotState has no
-		-- equippedWeaponId field; see handleSwapWeaponRequest's own comment for why bot
-		-- weapon-switching is out of scope).
-		Default = "Primary" :: Types.WeaponId,
 		-- Minimum seconds between accepted RequestSwapWeapon calls -- long enough that swap-spamming
 		-- can't be used as an exploit or evasive tool, short enough to be a real mid-fight option,
 		-- matching combat-philosophy.md's framing of the swap cooldown's purpose ("prevents instant
 		-- weapon-cycling as a combo exploit").
 		SwapCooldownSeconds = 4,
 
-		Primary = {
-			DisplayName = "Longsword",
+		-- The one place a weapon swing's volume, reach and anchor are configured. Defined as SWING_HITBOX
+		-- at the top of this file (a table constructor can't reference its own keys) and re-exported here
+		-- so DefaultMoveRegistry/WeaponRoster read it by its public name. Read its header before retuning:
+		-- Mode is the switch between the body box and the old blade-anchored behaviour.
+		SwingHitbox = SWING_HITBOX,
+
+		-- THE HOUSE SWORD -- the one authored move set every weapon in the roster is built from.
+		--
+		-- There is no list of weapons in this file any more. Weapons are models in Workspace.Weapons,
+		-- discovered at boot by Shared/Combat/WeaponRoster.lua, and each one deep-copies these stages
+		-- and scales them by its own four Attributes (WeaponDamage/WeaponPostureDamage/WeaponReach/
+		-- WeaponSpeed). What used to be the hardcoded Primary/Secondary pair is now: Primary IS this
+		-- baseline, and Secondary -- the faster, shorter-reach, lower-per-hit-damage alternative -- is
+		-- reproducible as a model with WeaponSpeed ~1.33, WeaponReach ~0.85, WeaponDamage ~0.7 and
+		-- WeaponPostureDamage ~1.0, which is exactly the tuning relationship its own comment described
+		-- in prose. Deleting that second hand-authored copy is what makes a THIRD weapon free.
+		--
+		-- Still the live table the Move Editor tunes: WeaponRoster hands each weapon's copies to
+		-- DefaultMoveRegistry by reference, so an admin retunes one weapon without touching another,
+		-- and retuning this baseline changes only what the NEXT boot builds from.
+		Baseline = {
+			DisplayName = "Sword",
+			-- EVERY Size/Offset BELOW NOW COMES FROM SWING_HITBOX, and which SPACE that Offset is in depends
+			-- on SWING_HITBOX.Mode -- read this before retuning any of them.
+			--
+			-- In the shipped "BodyBox" mode both are root-local and literal: the box is SWING_HITBOX.Size,
+			-- centred on SWING_HITBOX.Offset in the attacker's own root space, opened once the stage's
+			-- WindupSeconds elapses. Everything in the paragraph below describes "Blade" mode instead, which
+			-- is what these stages did before and what flipping Mode restores: Server/Combat/DefaultMoveRegistry.lua marks every stage here AttachmentPart == "Weapon"
+			-- (see its own enumerateDescriptors), which HitboxEngine.resolveAttachmentPart resolves to the
+			-- equipped weapon's own "Blade" part when the model has one (falling back to Handle, then to
+			-- RightHand, then to the root for a weapon authored without one -- see that function's own
+			-- header). MoveTypes.ToEngineAttackDefinition also sets SizeFromAttachmentPart for every stage
+			-- projected from here, so Size below is VESTIGIAL for a weapon with a real Blade part -- it is
+			-- read only by the Move Editor's own preview reconstruction (DefaultMoveRegistry.toMoveDefinition)
+			-- and by the fallback case where resolution missed the Blade entirely, never by a normal swing.
+			-- Offset is still live either way: it composes against the resolved part's OWN local space now,
+			-- so CFrame.new() (identity) means "centred exactly on the Blade" rather than "N studs in front
+			-- of the root" the way it used to. Left at identity throughout rather than re-guessed per stage,
+			-- since this baseline has no one Blade model to calibrate a nudge against -- an admin tuning a
+			-- specific weapon that reads as offset (its mesh's own pivot sitting at the hilt rather than the
+			-- centre, say) can still nudge THIS shared Offset from the Move Editor, exactly as before.
 			Stages = {
 				Basic = {
 					{
@@ -793,8 +889,12 @@ local CombatConstants = {
 						-- factor so relative combo-stage growth (Basic < Heavy < Finisher) and the
 						-- Secondary-vs-Primary reach ratio both stay exactly as designed -- only the
 						-- absolute scale shrank. X/Y untouched.
-						Size = Vector3.new(6, 6.5, 4.5),
-						Offset = CFrame.new(0, 0, -2.25),
+						-- The shared body box (SWING_HITBOX at the top of this file), not a per-stage volume any
+						-- more -- this stage was Vector3.new(6, 6.5, 4.5) with an identity blade-local Offset. Typing a
+						-- literal back in here still gives ONE stage its own volume; the shared value is the
+						-- default so five stages across every weapon can't quietly drift apart.
+						Size = SWING_HITBOX.Size,
+						Offset = SWING_HITBOX.Offset,
 						-- 6.5 flat on every Basic stage of every weapon -- DamageSystem.applyOutcome pins an
 						-- M1's combo-pricing stage to 1 (ComboMultiplier(1) == 1), so this authored number IS
 						-- the number a player takes, unscaled, every single M1 regardless of string position.
@@ -809,8 +909,9 @@ local CombatConstants = {
 						WindupSeconds = 0.31,
 						ActiveSeconds = 0.22,
 						RecoverySeconds = 0.16,
-						Size = Vector3.new(6, 6.5, 4.5),
-						Offset = CFrame.new(0, 0, -2.25),
+						-- Shared body box; was Vector3.new(6, 6.5, 4.5).
+						Size = SWING_HITBOX.Size,
+						Offset = SWING_HITBOX.Offset,
 						Damage = 6.5,
 						PostureDamage = 10,
 						Cooldown = 0.47,
@@ -822,8 +923,9 @@ local CombatConstants = {
 						WindupSeconds = 0.31,
 						ActiveSeconds = 0.24,
 						RecoverySeconds = 0.20,
-						Size = Vector3.new(6.5, 6.5, 5.25),
-						Offset = CFrame.new(0, 0, -2.625),
+						-- Shared body box; was Vector3.new(6.5, 6.5, 5.25).
+						Size = SWING_HITBOX.Size,
+						Offset = SWING_HITBOX.Offset,
 						Damage = 6.5,
 						PostureDamage = 12,
 						Cooldown = 0.54,
@@ -848,8 +950,9 @@ local CombatConstants = {
 						-- Cooldown cut below out of a longer whiff/block punish window instead of a free
 						-- reduction, so a missed Heavy stays risky.
 						RecoverySeconds = 0.55,
-						Size = Vector3.new(7, 6.5, 5.5),
-						Offset = CFrame.new(0, 0, -2.75),
+						-- Shared body box; was Vector3.new(7, 6.5, 5.5).
+						Size = SWING_HITBOX.Size,
+						Offset = SWING_HITBOX.Offset,
 						Damage = 12,
 						PostureDamage = 22,
 						-- 1.37, down from 3.00 -- restores the "Cooldown == Windup+Active+Recovery" invariant
@@ -877,119 +980,12 @@ local CombatConstants = {
 					WindupSeconds = 0.28,
 					ActiveSeconds = 0.18,
 					RecoverySeconds = 0.45,
-					Size = Vector3.new(7, 6.5, 5.5),
-					Offset = CFrame.new(0, 0, -2.75),
+					-- Shared body box; was Vector3.new(7, 6.5, 5.5).
+					Size = SWING_HITBOX.Size,
+					Offset = SWING_HITBOX.Offset,
 					Damage = 20,
 					PostureDamage = 35,
 					Cooldown = 0.9,
-					ArcDegrees = 110,
-					MaxTargets = 1,
-				},
-			},
-		},
-
-		-- Faster, shorter-reach, lower-per-hit-damage alternative to Primary -- see this table's own
-		-- header for the design intent. Roughly: ~75% of Primary's windup/cooldown (faster tempo),
-		-- ~85% of Primary's reach (Size/Offset), ~70% of Primary's per-hit Damage, but PostureDamage
-		-- held close to Primary's -- net higher posture-damage-per-second despite lower raw damage.
-		Secondary = {
-			DisplayName = "Dual Daggers",
-			Stages = {
-				Basic = {
-					{
-						DebugName = "Dagger1",
-						-- 0.16, up from 0.06. Secondary's own header promises "~75% of Primary's windup",
-						-- but Primary's Basics were retuned 0.08 -> 0.31 in a live playtest pass and
-						-- Secondary was never brought along, leaving it at ~20% of Primary rather than 75%.
-						-- The result was a de facto true unparryable: a 60ms windup, over a network, against
-						-- a 30Hz hitbox sampler, cannot be reacted to at all, which combat-philosophy.md's
-						-- Balance Principle 3 forbids without an explicit telegraphed cost. It also made
-						-- Feint (legal only inside windup) mechanically nonexistent on this weapon.
-						--
-						-- The added windup is funded mostly out of RecoverySeconds rather than bolted onto
-						-- the front, so the total timeline barely moves (0.33 -> 0.35) and Secondary keeps
-						-- its fast tempo and its roughly-75%-of-Primary cooldown ratio. What changed is the
-						-- SHAPE of the swing: more of it is readable telegraph, less is endlag. The
-						-- trade-off is a shorter whiff-punish window, accepted because an unreactable
-						-- attack is the worse failure. Cooldown stays exactly Windup+Active+Recovery, the
-						-- invariant this table's header states and every stage here already satisfied.
-						-- Kept strictly under DaggerFinisher's 0.22 so the finisher remains the most
-						-- telegraphed swing in the kit, as every other weapon's finisher is.
-						--
-						-- Still owed: a live Studio playtest pass on these three stages, the same one
-						-- Primary's Basics got when they moved 0.08 -> 0.31.
-						WindupSeconds = 0.16,
-						ActiveSeconds = 0.11,
-						RecoverySeconds = 0.08,
-						-- Z cut ~35% same as Primary above -- see Basic1's own comment for why.
-						Size = Vector3.new(5, 6.5, 3.75),
-						Offset = CFrame.new(0, 0, -1.875),
-						Damage = 6.5,
-						PostureDamage = 9,
-						Cooldown = 0.35,
-						ArcDegrees = 100,
-						MaxTargets = 3,
-					},
-					{
-						DebugName = "Dagger2",
-						-- See Dagger1's WindupSeconds header for why this rose from 0.07 and why the
-						-- recovery fell to pay for it. Cooldown stays Windup+Active+Recovery.
-						WindupSeconds = 0.17,
-						ActiveSeconds = 0.11,
-						RecoverySeconds = 0.09,
-						Size = Vector3.new(5, 6.5, 3.75),
-						Offset = CFrame.new(0, 0, -1.875),
-						Damage = 6.5,
-						PostureDamage = 9,
-						Cooldown = 0.37,
-						ArcDegrees = 100,
-						MaxTargets = 3,
-					},
-					{
-						DebugName = "Dagger3",
-						-- See Dagger1's WindupSeconds header for why this rose from 0.08 and why the
-						-- recovery fell to pay for it. Cooldown stays Windup+Active+Recovery.
-						WindupSeconds = 0.18,
-						ActiveSeconds = 0.12,
-						RecoverySeconds = 0.11,
-						Size = Vector3.new(5.5, 6.5, 4.25),
-						Offset = CFrame.new(0, 0, -2.125),
-						Damage = 6.5,
-						PostureDamage = 11,
-						Cooldown = 0.41,
-						ArcDegrees = 110,
-						MaxTargets = 3,
-					},
-				},
-
-				-- Single-stage, same as Primary's own Heavy above -- see that field's own header for why
-				-- (a cut second stage, not a stub waiting to be authored).
-				Heavy = {
-					{
-						DebugName = "DaggerHeavy",
-						WindupSeconds = 0.14,
-						ActiveSeconds = 0.17,
-						RecoverySeconds = 0.27,
-						Size = Vector3.new(6, 6.5, 4.5),
-						Offset = CFrame.new(0, 0, -2.25),
-						Damage = 13,
-						PostureDamage = 20,
-						Cooldown = 0.58,
-						ArcDegrees = 120,
-						MaxTargets = 4,
-					},
-				},
-
-				Finisher = {
-					DebugName = "DaggerFinisher",
-					WindupSeconds = 0.22,
-					ActiveSeconds = 0.14,
-					RecoverySeconds = 0.35,
-					Size = Vector3.new(6, 6.5, 4.5),
-					Offset = CFrame.new(0, 0, -2.25),
-					Damage = 14,
-					PostureDamage = 32,
-					Cooldown = 0.68,
 					ArcDegrees = 110,
 					MaxTargets = 1,
 				},
@@ -1173,7 +1169,7 @@ local CombatConstants = {
 	-- rebuilt now as the P0 out of a combat-feel audit -- CombatAudio.lua's own header has the full
 	-- account. Every SoundId below is still "" except Swing.Basic (the M1 punch, now a real supplied
 	-- asset) -- this codebase never guesses an asset id (see CombatAudio.lua's own header, and
-	-- AnimationIds.RunningStage3 above for the identical convention on the animation side), so the rest
+	-- FlightConstants.AnimationIds for the identical convention on the animation side), so the rest
 	-- of CombatAudio.lua stays fully wired and silent until real assets are pasted in for them too.
 	-- SoundManager.Play already no-ops safely on an empty SoundId, so shipping this costs nothing but a
 	-- debug log line per swing/impact still missing one.
@@ -1183,6 +1179,12 @@ local CombatConstants = {
 		-- already makes for its own per-kind table: an authored Move-Editor move earning its own swing
 		-- identity later is a real possibility, and a shared placeholder here now would be one more
 		-- "one system, two configs" trap to unwind then. CombatAudio.PlaySwing is silent for Hotbar.
+		--
+		-- THIS TABLE IS ALSO THE GATE FOR THE PER-WEAPON OVERRIDE. A weapon that authored its own whoosh
+		-- in SFX/Swing (Shared/Combat/WeaponSounds.lua) wins over whichever entry below applies -- but
+		-- CombatAudio only consults the weapon at all for a kind that HAS an entry here, so "is this
+		-- kind a weapon swing" stays one switch rather than two lists that could quietly disagree. Give
+		-- Hotbar an entry and it opts into both layers at the same moment.
 		Swing = {
 			Basic = { SoundId = "rbxassetid://123533685284641", Volume = 0.5 } :: Constants.SoundDefinition,
 			-- Slightly louder than Basic -- a heavy swing commits harder, and the sound should say so

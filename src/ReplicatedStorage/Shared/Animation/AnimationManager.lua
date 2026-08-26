@@ -369,9 +369,12 @@ function AnimationManager.RegisterMany(self: AnimationManagerInstance, ids: { [s
 end
 
 -- Every distinct content id this manager could ever play, for Client/Loading/AssetPreloader.lua's
--- boot-time warm pass. Raw id strings rather than Animation instances: ContentProvider:PreloadAsync
--- takes content ids directly, and handing out the pooled instances would invite a caller to mutate
--- one that every other rig in the game is sharing.
+-- boot-time warm pass. Raw id strings rather than Animation instances, because handing out the
+-- pooled instances would invite a caller to mutate one that every other rig in the game is sharing.
+-- NOT because a bare id can be preloaded directly -- it cannot; ContentProvider:PreloadAsync reports
+-- Failure for one. AssetPreloader wraps each id returned here in a throwaway Animation of its own
+-- (see animationFor there), which is both correct and the reason this function can keep returning
+-- ids instead of surrendering its templates.
 function AnimationManager.GetPreloadIds(self: AnimationManagerInstance): { string }
 	local ids: { string } = {}
 	local seen: { [string]: true } = {}

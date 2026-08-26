@@ -32,12 +32,12 @@
 
 local RunConstants = {}
 
--- ONE STAGE OF THE LADDER. Adding a fourth gear is one more entry in the Stages array below and
+-- ONE STAGE OF THE LADDER. Adding or removing a gear is one entry in the Stages array below and
 -- nothing else -- RunLadder walks the array rather than branching on a stage number, RunSystem reads
 -- whatever RunLadder returns, and the client's presentation layer falls back to the highest stage it
 -- has assets for. That property is the whole reason this is an ordered array of records instead of
--- three pairs of flat SprintStageN* constants, which is what it replaced and what made "add a third
--- stage" a change in five files.
+-- flat SprintStageN* constants, which is what it replaced and what made resizing the ladder a change
+-- in five files -- and it is why dropping the third gear back out was a one-entry deletion here.
 export type StageDefinition = {
 	-- The stage's own id, and its index in the array. Published verbatim on the Humanoid as
 	-- Constants.Attributes.SprintStage, so it is the number every client-side consumer keys off.
@@ -59,17 +59,24 @@ export type StageDefinition = {
 	SustainFraction: number,
 }
 
--- THE LADDER, lowest gear first. Multipliers are against the effective base of 18, so the three gears
--- are 27, 54 and 81 studs per second.
+-- THE LADDER, lowest gear first. Multipliers are against the effective base of 18, so the two gears
+-- are 32.4 and 54 studs per second.
 --
--- Stage 1 is the sprint that has always existed. Stages 2 and 3 are two and three times THAT, which
--- makes the top gear a genuine cross-the-map traversal speed rather than a slightly faster jog -- and
--- it is deliberately a large number. The safety argument is not the magnitude, it is what the charge
--- is gated on: the clock only accrues while the run tier is ACTUALLY being granted and the character
--- is genuinely moving, and it decays whenever either stops being true. Anything that interrupts a run
--- -- a swing, a block, a hit, a stun, standing still for a moment -- stops the clock, so the upper
--- gears are reachable essentially only out of combat, on open ground. They are traversal gears, not
--- fighting gears.
+-- Stage 1 is the sprint that has always existed. Stage 2 is most of twice THAT, which makes the top gear a
+-- genuine cross-the-map traversal speed rather than a slightly faster jog -- and it is deliberately a
+-- large number. The safety argument is not the magnitude, it is what the charge is gated on: the clock
+-- only accrues while the run tier is ACTUALLY being granted and the character is genuinely moving, and
+-- it decays whenever either stops being true. Anything that interrupts a run -- a swing, a block, a
+-- hit, a stun, standing still for a moment -- stops the clock, so the top gear is reachable essentially
+-- only out of combat, on open ground. It is a traversal gear, not a fighting gear.
+--
+-- TWO GEARS, NOT THREE. There was a third at 4.5x -- 81 studs per second, entered at 16 seconds of
+-- unbroken running. It is gone, and the ladder is two gears now. A player can tell "sprinting" from
+-- "at full stride" at a glance; a rung between them that most of a run never reached bought a
+-- distinction nobody could name mid-traversal, and cost a third set of presentation assets to say it
+-- with. Everything downstream reads this array, so removing it was this entry plus its keyed entries
+-- in Constants.Run (Footsteps.Stages[3], StageOnset[3], Animation.PlaybackSpeeds[3]) and its animation
+-- slot in CombatConstants.AnimationIds -- no resolver, System or controller changed.
 --
 -- The one interruption that deliberately does NOT break the charge is a parkour action (see
 -- RunLadder.StepCharge's `held` branch). Vaulting a wall mid-run is the movement system working as
@@ -82,7 +89,16 @@ export type StageDefinition = {
 local stages: { StageDefinition } = {
 	{
 		Id = 1,
-		SpeedMultiplier = 1.5,
+		-- RAISED FROM 1.5 (27 studs/s). The run CLIP is authored for a faster gait than 27 delivered,
+		-- so the bottom gear read as a character whose legs were outrunning them -- and that mismatch
+		-- became the normal case once Client/FX/CombatAnimator.lua started pinning armed runs to the
+		-- stage-2 clip at every stage. 1.8 is 32.4 studs/s: a fifth faster, still a long way under the
+		-- top gear, and still under every traversal threshold that gates on speed (all of which are
+		-- MINIMUMS, so a faster stage 1 only makes them easier to reach -- which is intended).
+		--
+		-- ParkourConstants.Locomotion.SprintSpeed MIRRORS THIS BY HAND and must move with it. Nothing
+		-- checks that: the comment there cites a Shared/ConstantsValidation.lua that does not exist.
+		SpeedMultiplier = 1.8,
 		ChargeSeconds = 0,
 		SustainFraction = 0,
 	},
@@ -90,23 +106,13 @@ local stages: { StageDefinition } = {
 		Id = 2,
 		SpeedMultiplier = 3.0,
 		-- Long enough that it is never reached inside a fight, short enough that a player crossing open
-		-- ground feels it every single time rather than only on marathon runs.
+		-- ground feels it every single time rather than only on marathon runs. This is the top gear, so it
+		-- is also the ceiling of the charge clock -- MaxChargeSeconds at the bottom of this file derives
+		-- from it rather than being authored a second time.
 		ChargeSeconds = 7,
 		-- ~2.1s of non-running slack at the decay rate below: far more than any flicker, far less than
 		-- a real stop.
 		SustainFraction = 0.6,
-	},
-	{
-		Id = 3,
-		SpeedMultiplier = 4.5,
-		-- Another nine seconds past stage 2. The top gear should feel earned rather than routine: a
-		-- player who is genuinely committed to crossing distance gets it, a player who runs between two
-		-- fights does not.
-		ChargeSeconds = 16,
-		-- Tighter than stage 2's. Falling out of the top gear is a bigger, more visible event, so it
-		-- gets more protection against a momentary hitch -- but not so much that a real stop leaves the
-		-- player coasting at 81 studs per second for seconds afterwards.
-		SustainFraction = 0.75,
 	},
 }
 
@@ -116,8 +122,8 @@ RunConstants.Stages = stages
 -- it builds at. A decay rather than a hard reset because the alternative punishes exactly the wrong
 -- thing: a one-frame gate flicker (a hitch, a doorframe, the instant between two movement inputs)
 -- would drop a player who has been running for twenty seconds all the way back to zero. At 2.0 a full
--- stage-3 charge is gone after eight seconds of not running -- long enough to survive a stumble, far
--- too short to bank.
+-- top-gear charge is gone after three and a half seconds of not running -- long enough to survive a
+-- stumble, far too short to bank.
 RunConstants.ChargeDecayMultiplier = 2.0
 
 -- A FLICKER AND A STOP ARE NOT THE SAME EVENT, and the decay above only ever described the first one.
@@ -126,18 +132,18 @@ RunConstants.ChargeDecayMultiplier = 2.0
 -- hitch, a doorframe, the instant between releasing one movement key and pressing another. But a
 -- gentle decay applied to a GENUINE stop means stopping costs almost nothing -- stand still for half a
 -- second, start again, and you are back in top gear immediately, having lost about a second of charge
--- out of sixteen. That makes the whole ladder free: there is no reason to maintain a run when you can
+-- out of seven. That makes the whole ladder free: there is no reason to maintain a run when you can
 -- stop, do something else, and resume at full stride.
 --
 -- So not-accruing is split in two. For the first StopGraceSeconds it decays at ChargeDecayMultiplier,
 -- which is the flicker protection and behaves exactly as before. Past that, the player has genuinely
 -- stopped running, and the charge bleeds at StopDecayMultiplier instead.
 --
--- At 6.0 a full stage-3 charge falls below stage 3's own sustain floor about half a second after the
--- grace expires, below stage 2's ENTRY requirement within about a second and a half, and to nothing in
--- under three seconds. The practical effect is the intended one: a momentary interruption keeps your
--- gear, and actually stopping means re-earning it from the full entry requirement rather than from the
--- sustain floor -- you cannot stop and drop straight back into the gear you had.
+-- At 6.0 a full top-gear charge falls below the top gear's own sustain floor about a third of a second
+-- after the grace expires, and to nothing about a second after that. The practical effect is the
+-- intended one: a momentary interruption keeps your gear, and actually stopping means re-earning it
+-- from the full entry requirement rather than from the sustain floor -- you cannot stop and drop
+-- straight back into the gear you had.
 RunConstants.StopGraceSeconds = 0.35
 RunConstants.StopDecayMultiplier = 6.0
 
@@ -151,9 +157,11 @@ RunConstants.MoveInputThreshold = 0.1
 -- than a teleport. Deceleration is faster than acceleration because dropping a gear is usually a
 -- consequence (a hit, a stop) and should land immediately, where earning one should be felt.
 --
--- Both are deliberately larger than the parkour framework's own WalkSpeedAcceleration pair, which was
--- authored when the top gear was 36: ramping from 27 to 81 at the old rate took most of a second, and
--- a gear change nobody can feel is not a gear change.
+-- Both are deliberately larger than the parkour framework's own WalkSpeedAcceleration pair (85/55),
+-- which was authored when the top gear was 36. They were raised for a top gear of 81 and are KEPT at
+-- 54 rather than walked back with it: stage 1 -> stage 2 is the only gear change this ladder has left,
+-- so it should land in about a third of a second rather than most of one -- a gear change nobody can
+-- feel is not a gear change.
 RunConstants.WalkSpeedAcceleration = 90
 RunConstants.WalkSpeedDeceleration = 140
 
@@ -179,7 +187,7 @@ RunConstants.Network = {
 
 -- The highest charge the clock will hold, derived rather than authored so it cannot drift from the
 -- ladder. Capped rather than unbounded so charge can't be banked: a player who has run for two
--- minutes loses the top gear on the same timer as one who has run for sixteen seconds.
+-- minutes loses the top gear on the same timer as one who has run for seven seconds.
 local maxCharge = 0
 for _, stage in stages do
 	if stage.ChargeSeconds > maxCharge then

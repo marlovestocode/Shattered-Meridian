@@ -42,8 +42,12 @@
 	     fight against WallRunning (160, well above this state's own 75) is needed; the physics of the
 	     launch itself is the guard.
 	  3. THE DASH-CHAIN WINDOW -- context.WallLaunchDashBoostUntil, a deadline States/Dashing.lua reads
-	     (never writes) to grant its own Up-quadrant dash some extra hang once chained from here. See
-	     Dash.WallLaunchChainExtraHangSeconds' own comment for the number and the full reasoning.
+	     (never writes) to grant a dash chained from here some extra hang. ANY dash inside the window
+	     now, at any aim: it used to be granted only to that state's Up quadrant, back when a quadrant
+	     was the only way to point a dash skyward at all. The dash is camera-aimed at every angle now,
+	     so the old restriction would just be an invisible pitch gate on a reward already earned by
+	     launching off the wall. See Dash.WallLaunchChainExtraHangSeconds' own comment for the number
+	     and the full reasoning.
 
 	THE WALL DETECTION is the same signal States/Vaulting.lua and States/Mantling.lua would refuse on:
 	ObstacleProbe.Height == math.huge is EnvironmentProbe's own "no top surface found within the

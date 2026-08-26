@@ -9,9 +9,9 @@
 
 	- Plain: a flat rule at one Tint's color+transparency. The common case (card insets, row seams,
 	  header/footer borders, the step rail's inter-step connector).
-	- Gradient: the same rule but fading to fully transparent at one end via a UIGradient Transparency
-	  NumberSequence -- see the Fade prop's own comment for why this only needs to range 0-1 rather
-	  than re-encode the Tint's own Transparency a second time.
+	- Gradient: the same rule but fading to fully transparent at one end -- or at BOTH -- via a
+	  UIGradient Transparency NumberSequence. See the Fade prop's own comment for why this only needs
+	  to range 0-1 rather than re-encode the Tint's own Transparency a second time.
 	- Flourish: the Origin header's centrepiece -- two mirrored Gradient rules meeting a small
 	  45-degree-rotated diamond outline at the centre. The one non-hairline shape in this file, built
 	  from Plain/Gradient rather than duplicating their geometry.
@@ -61,11 +61,30 @@ export type DividerGradientProps = {
 	AnchorPoint: UsedAs<Vector2>?,
 	LayoutOrder: UsedAs<number>?,
 	Tint: Tint?,
+	-- Overrides Tint.Color alone, leaving Tint.Transparency in force. Exists because Tokens.Tint is a
+	-- plain, non-reactive {Color, Transparency} record shared by every caller in the game, so a rule
+	-- that has to CHANGE colour cannot express it through Tint without making that record reactive
+	-- everywhere. One caller today: HUD/EngagementLine.lua, whose rule crosses from the accent to the
+	-- danger red as the player enters combat, on the same spring that drives the word above it.
+	Color: UsedAs<Color3>?,
 	-- "In": transparent at this Frame's own local start (t=0), full Tint brightness at its local end
 	-- (t=1) -- the default, matching the common case of a rule growing OUT of a heading. "Out" is the
-	-- mirror (bright at t=0, transparent at t=1), used by Flourish's trailing rule below.
-	Fade: ("In" | "Out")?,
+	-- mirror (bright at t=0, transparent at t=1), used by Flourish's trailing rule below. "Both"
+	-- fades at each end and holds full brightness across the middle: a rule that belongs to the
+	-- whole column it separates rather than growing out of anything, which is what the character
+	-- menu's section seams are.
+	Fade: ("In" | "Out" | "Both")?,
+	-- Which way the rule RUNS. "Horizontal" (the default) is a rule separating stacked things;
+	-- "Vertical" is a seam between two things sat side by side -- the hotbar dock's module separators.
+	-- This rotates the fade with the rule and flips the default Size to a 1px-wide, full-height
+	-- hairline, so Fade keeps meaning "at this rule's own start/end" in both orientations rather than
+	-- silently meaning "at its left/right edge" on a rule that runs top to bottom.
+	Orientation: ("Horizontal" | "Vertical")?,
 }
+
+-- Where a "Both" rule reaches (and leaves) full brightness. Symmetric by construction -- one
+-- constant, used as t and 1-t, so the two ends can never drift apart.
+local BOTH_FADE_STOP = 0.2
 
 -- UIGradient.Transparency ADDS to the Frame's own BackgroundTransparency rather than replacing it
 -- (confirmed precedent: VitalIcon.lua's sheenGradient, which layers a 0.88-1 ramp on top of that
@@ -75,23 +94,37 @@ export type DividerGradientProps = {
 function Divider.Gradient(scope: Scope, props: DividerGradientProps): Frame
 	local tint = props.Tint or Tokens.Border.Lit
 	local fadeOut = props.Fade == "Out"
+	local isVertical = props.Orientation == "Vertical"
 
-	local transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, if fadeOut then 0 else 1),
-		NumberSequenceKeypoint.new(1, if fadeOut then 1 else 0),
-	})
+	local transparency
+	if props.Fade == "Both" then
+		transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1),
+			NumberSequenceKeypoint.new(BOTH_FADE_STOP, 0),
+			NumberSequenceKeypoint.new(1 - BOTH_FADE_STOP, 0),
+			NumberSequenceKeypoint.new(1, 1),
+		})
+	else
+		transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, if fadeOut then 0 else 1),
+			NumberSequenceKeypoint.new(1, if fadeOut then 1 else 0),
+		})
+	end
 
 	return scope:New "Frame" {
 		Name = "Divider",
 		Position = props.Position,
 		AnchorPoint = props.AnchorPoint,
-		Size = props.Size or UDim2.new(1, 0, 0, 1),
+		Size = props.Size or (if isVertical then UDim2.new(0, 1, 1, 0) else UDim2.new(1, 0, 0, 1)),
 		LayoutOrder = props.LayoutOrder,
-		BackgroundColor3 = tint.Color,
+		BackgroundColor3 = props.Color or tint.Color,
 		BackgroundTransparency = tint.Transparency,
 		BorderSizePixel = 0,
 
 		[Children] = scope:New "UIGradient" {
+			-- 90 degrees runs the ramp top-to-bottom instead of left-to-right, which is what keeps
+			-- Fade's "start"/"end" reading correct on a vertical rule -- see the Orientation prop.
+			Rotation = if isVertical then 90 else 0,
 			Transparency = transparency,
 		},
 	} :: Frame

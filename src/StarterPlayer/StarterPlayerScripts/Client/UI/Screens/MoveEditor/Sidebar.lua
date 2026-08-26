@@ -26,14 +26,13 @@
 	present on the current draft -- a cheap "this section actually has content" affordance, read
 	directly off `props.Draft` so it updates the instant PropertyEditor.lua's own Toggle flips it.
 
-	Those same three nav items are HIDDEN entirely (not merely disabled) whenever the current draft's
-	Category == "Default" -- Movement/Knockback/Projectile are non-functional for a Default move
-	(consumed only by CombatSystem.ThrowCustomMove's own code path, see Server/Combat/
-	DefaultMoveRegistry.lua's own header), so there is nothing legitimate to navigate to; showing a
-	live nav item for a section that visibly does nothing would be worse than not showing it.
+	The optional-sub-table sections are HIDDEN entirely (not merely disabled) whenever the current
+	draft's Category == "Default" -- which ones, and why, is MoveEditor/Types.lua's own
+	HiddenForDefaultSections, shared with PropertyEditor.lua so the nav and the pane behind it can
+	never disagree about what a Default move shows.
 
 	Each nav item also renders Components/SectionIcon.lua's matching glyph -- SectionId and
-	SectionIconGlyphKind share the same nine members by construction, so `section.Id` is passed
+	SectionIconGlyphKind share the same members by construction, so `section.Id` is passed
 	straight through with no lookup table. Tinted the same way the item's own text is (TextSecondary
 	idle, TextPrimary selected) so the icon reinforces rather than competes with the text state.
 ]]
@@ -48,6 +47,7 @@ local TrackedLabel = require(script.Parent.Parent.Parent.Components.TrackedLabel
 local Divider = require(script.Parent.Parent.Parent.Components.Divider)
 local SectionIcon = require(script.Parent.Parent.Parent.Components.SectionIcon)
 local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
+local Stack = require(script.Parent.Parent.Parent.Components.Stack)
 local MoveList = require(script.Parent.MoveList)
 local MoveEditorTypes = require(script.Parent.Types)
 
@@ -66,6 +66,12 @@ export type SidebarProps = {
 	OnNew: () -> (),
 	OnSelect: (string) -> (),
 	OnDelete: (string) -> (),
+	-- Straight through to MoveList.lua's per-row actions -- see that file's own props for what each
+	-- takes and why both are keyed by MoveId rather than acting on the selection.
+	-- Straight through to MoveList.lua's per-row saved flash -- see MoveEditorHandle.LastSavedMoveId.
+	LastSavedMoveId: UsedAs<string>,
+	OnRename: (moveId: string, newName: string) -> (),
+	OnDuplicate: (moveId: string) -> (),
 }
 
 export type SidebarHandle = {
@@ -88,10 +94,6 @@ export type SidebarHandle = {
 -- the search row's cost leaves the scrollable area unchanged. The Sections nav below absorbs the
 -- difference and already scrolls (see below), so nothing becomes unreachable.
 local MOVES_GROUP_HEIGHT = 250
--- Divider.Plain's own default thickness, and the two UIListLayout gaps between this panel's three
--- children -- subtracted below so the nav claims exactly the leftover height rather than overflowing
--- the panel it lives in.
-local DIVIDER_HEIGHT = 1
 local NAV_ITEM_HEIGHT = Tokens.Control.RowHeight
 local NAV_ACCENT_WIDTH = 4
 local NAV_ICON_SIZE = 16 -- matches SectionIcon.lua's own fixed icon box size
@@ -225,6 +227,9 @@ function SidebarModule.Mount(scope: Scope, width: number, height: number, props:
 		OnNew = props.OnNew,
 		OnSelect = props.OnSelect,
 		OnDelete = props.OnDelete,
+		LastSavedMoveId = props.LastSavedMoveId,
+		OnRename = props.OnRename,
+		OnDuplicate = props.OnDuplicate,
 	})
 
 	local hasMovement = scope:Computed(function(use)
@@ -258,11 +263,9 @@ function SidebarModule.Mount(scope: Scope, width: number, height: number, props:
 		ObjectStun = hasObjectStun,
 	}
 
-	-- Movement/Knockback/Grab/Projectile/ObjectStun are non-functional for a Default move -- see this
-	-- file's own header -- so those five (and only those five) nav items hide entirely whenever the
-	-- current draft's Category == "Default". Every other section stays visible regardless.
-	local HIDDEN_FOR_DEFAULT: { [string]: boolean } =
-		{ Movement = true, Knockback = true, Grab = true, Projectile = true, ObjectStun = true }
+	-- Which sections vanish for a Default move -- the list itself is MoveEditor/Types.lua's, shared
+	-- with PropertyEditor.lua rather than hand-written twice (see that table's own header for the
+	-- drift that caused). This file hides the NAV ITEM; PropertyEditor.lua hides the pane behind it.
 	local isDefaultMove = scope:Computed(function(use)
 		local draft = use(props.Draft)
 		return draft ~= nil and draft.Category == MoveTypes.DefaultCategory
@@ -274,7 +277,7 @@ function SidebarModule.Mount(scope: Scope, width: number, height: number, props:
 			return use(selectedSection) == section.Id
 		end)
 		local showDot: UsedAs<boolean> = statusDots[section.Id] or false
-		local visible: UsedAs<boolean> = if HIDDEN_FOR_DEFAULT[section.Id]
+		local visible: UsedAs<boolean> = if MoveEditorTypes.HiddenForDefaultSections[section.Id]
 			then scope:Computed(function(use)
 				return not use(isDefaultMove)
 			end)
@@ -307,34 +310,39 @@ function SidebarModule.Mount(scope: Scope, width: number, height: number, props:
 			},
 			moveListRoot,
 			Divider.Plain(scope, { LayoutOrder = 2 }),
-			ScrollArea(scope, {
-				Name = "SectionsGroup",
-				-- Exactly the height left over once the Moves group, the divider and the two list gaps
-				-- above have taken theirs -- see MOVES_GROUP_HEIGHT's own comment on why this scrolls.
-				-- Matches PropertyEditor.lua's own section panes, so the two scrollable regions of this
-				-- screen read as the same control rather than two different ones.
-				Size = UDim2.new(1, 0, 1, -(MOVES_GROUP_HEIGHT + DIVIDER_HEIGHT + Tokens.Space.M * 2)),
-				LayoutOrder = 3,
+			-- Takes the height left over once the Moves group and the divider above have taken theirs --
+			-- see MOVES_GROUP_HEIGHT's own comment on why this scrolls. Was a three-term subtraction
+			-- that had to know both of their heights AND how many gaps the layout would put between
+			-- them; Components/Stack.lua's Fill asks the layout instead of predicting it. Matches
+			-- PropertyEditor.lua's own section panes, so the two scrollable regions of this screen read
+			-- as the same control rather than two different ones.
+			Stack.Fill(
+				scope,
+				ScrollArea(scope, {
+					Name = "SectionsGroup",
+					Size = UDim2.fromScale(1, 1),
+					LayoutOrder = 3,
 
-				Children = {
-					-- Keeps the last nav item clear of the scrollbar's own track, the same inset the
-					-- section panes use.
-					scope:New "UIPadding" { PaddingRight = UDim.new(0, Tokens.Space.XS) },
-					scope:New "UIListLayout" {
-						FillDirection = Enum.FillDirection.Vertical,
-						HorizontalAlignment = Enum.HorizontalAlignment.Left,
-						Padding = UDim.new(0, Tokens.Space.XS),
-						SortOrder = Enum.SortOrder.LayoutOrder,
+					Children = {
+						-- Keeps the last nav item clear of the scrollbar's own track, the same inset the
+						-- section panes use.
+						scope:New "UIPadding" { PaddingRight = UDim.new(0, Tokens.Space.XS) },
+						scope:New "UIListLayout" {
+							FillDirection = Enum.FillDirection.Vertical,
+							HorizontalAlignment = Enum.HorizontalAlignment.Left,
+							Padding = UDim.new(0, Tokens.Space.XS),
+							SortOrder = Enum.SortOrder.LayoutOrder,
+						},
+						TrackedLabel(scope, {
+							Text = "SECTIONS",
+							Scale = "Action",
+							Color = Tokens.Color.TextPrimary,
+							LayoutOrder = 1,
+						}),
+						table.unpack(navItems),
 					},
-					TrackedLabel(scope, {
-						Text = "SECTIONS",
-						Scale = "Action",
-						Color = Tokens.Color.TextPrimary,
-						LayoutOrder = 1,
-					}),
-					table.unpack(navItems),
-				},
-			}),
+				})
+			),
 		},
 	}) :: Frame
 

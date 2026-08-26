@@ -50,6 +50,12 @@ export type TrackedLabelProps = {
 	Color: UsedAs<Color3>?,
 	-- Applied to every character uniformly. Decorative fade only, same contract as LabelProps.
 	TextTransparency: UsedAs<number>?,
+	-- Native TextLabel outline, applied per character -- the same pass-through Label.lua already
+	-- exposes, and for the same reason its own comment gives: text over a busy, arbitrary background
+	-- (the game world, rather than a panel) has to carry its own contrast, because there is no fill
+	-- behind it to do the job. A tracked caps run sat over open gameplay is exactly that case.
+	StrokeColor3: UsedAs<Color3>?,
+	StrokeTransparency: UsedAs<number>?,
 	Position: UsedAs<UDim2>?,
 	AnchorPoint: UsedAs<Vector2>?,
 	LayoutOrder: UsedAs<number>?,
@@ -99,6 +105,8 @@ local function TrackedLabel(scope: Scope, props: TrackedLabelProps): Frame
 					TextSize = scaleStep.Size,
 					TextColor3 = props.Color or Tokens.Color.TextPrimary,
 					TextTransparency = props.TextTransparency,
+					TextStrokeColor3 = props.StrokeColor3,
+					TextStrokeTransparency = props.StrokeTransparency,
 					TextXAlignment = Enum.TextXAlignment.Center,
 					ZIndex = props.ZIndex,
 				}

@@ -3,10 +3,11 @@
 	HUD/init.lua
 
 	Owns: the always-visible HUD surface -- the central hotbar dock (docs/ui-ux-philosophy.md's
-	"Player Status Display" and "Ability System UI" sections), assembled as five bands stacked
+	"Player Status Display" and "Ability System UI" sections), assembled as six bands stacked
 	bottom-centre:
 
 	              engagement line      HUD/EngagementLine.lua -- combat state, off ClientState.InCombat
+	              engagement detail    HUD/EngagementDetail.lua -- opponent, countdown, damage traded
 	              bounty pill          Components/BountyMarkedBadge.lua -- zero height when unmarked
 	  +-----------o------------------------------------------------------+
 	  | armament  | TierBadge  |  [ Health  Qi  Posture ]  |  [ 1 .. 5 ]  |   the dock
@@ -68,9 +69,14 @@
 	keys go through, so "the button does the same thing as its keybind" is one code path rather than
 	two that can drift.
 
-	The ability row is a real, styled mount point, not a placeholder comment -- but a slot with nothing
-	bound still renders in the doc's "Locked" appearance, because ArtSystem is still an empty Init()
-	and there is no real per-slot ability data to show yet.
+	A slot also renders WHAT IT HOLDS, as of 2026-08-25: the equipped art's name (which AbilitySlot
+	abbreviates to a monogram, since a 56px tile fits about two characters) and its Qi cost, both from
+	Types.ArtStatePayload's EquippedInfo via HotbarBindings.GetInfo. Before that this screen had a slot
+	-> ArtId binding and nothing else -- an ArtId is a move-registry key, the registry is server-side,
+	and so the only renderable fact about an equipped art was that one existed. Every filled slot drew
+	AbilitySlot's EMPTY-slot reticle, and an equipped ability was distinguishable from an empty socket
+	only by how brightly its border glowed. A slot with nothing bound still renders the doc's "Locked"
+	appearance, which is now the only thing that does.
 
 	Mount() returns the dock's root FRAME, not a ScreenGui and not a *Handle table. It is always-on
 	with no open/closed state to expose, which is one of the two documented Mount() return shapes (see
@@ -100,6 +106,7 @@ local KeyLegend = require(script.Parent.Parent.Components.KeyLegend)
 local BountyMarkedBadge = require(script.Parent.Parent.Components.BountyMarkedBadge)
 local ClientStateModule = require(script.Parent.Parent.State.ClientState)
 local EngagementLine = require(script.EngagementLine)
+local EngagementDetail = require(script.EngagementDetail)
 local ArmamentIsland = require(script.ArmamentIsland)
 local KeybindManager = require(script.Parent.Parent.Parent.Input.KeybindManager)
 local HotbarBindings = require(script.Parent.Parent.Parent.Combat.HotbarBindings)
@@ -246,6 +253,29 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 	local cooldownEndsAt: { [number]: number } = {}
 	-- The countdown's last PUBLISHED tenth, per slot -- the whole point of the quantisation below.
 	local publishedTenths: { [number]: number } = {}
+	-- What each slot is HOLDING, as the two strings a tile can render. Until 2026-08-25 neither
+	-- existed and neither was passed, so every equipped art rendered AbilitySlot's empty-slot reticle
+	-- -- see that file's header. Both are plain Fusion Values written by applySlotInfo below rather
+	-- than Computeds over a binding, because HotbarBindings is a plain Luau module with a changed-
+	-- callback (its own header on why it is not a Fusion store).
+	local abilityNames: { Fusion.Value<string> } = {}
+	local resourceLabels: { Fusion.Value<string> } = {}
+
+	-- Pushes one slot's occupant into the two Values its tile reads. Empty strings for an empty slot:
+	-- AbilitySlot reads an empty name as "nothing is here" and shows its empty-slot chrome, which is
+	-- the one place that decision belongs.
+	local function applySlotInfo(slot: number, info: HotbarBindings.SlotInfo?): ()
+		local nameValue = abilityNames[slot]
+		local resourceValue = resourceLabels[slot]
+		if not nameValue or not resourceValue then
+			return
+		end
+		nameValue:set(if info then info.DisplayName else "")
+		-- A free art shows no cost at all rather than "0 Qi". The line answers "what will this press
+		-- spend", and an art that spends nothing has no answer worth a corner of the tile -- the same
+		-- reason AbilitySlot hides a countdown that has reached zero instead of parking it at "0.0s".
+		resourceValue:set(if info and info.QiCost > 0 then `{info.QiCost} Qi` else "")
+	end
 
 	local function refreshSlotState(slot: number): ()
 		local slotState = abilitySlotStates[slot]
@@ -258,6 +288,12 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 		boundMoveIds[index] = HotbarBindings.Get(index)
 		cooldownSeconds[index] = scope:Value(0)
 		cooldownFractions[index] = scope:Value(0)
+		abilityNames[index] = scope:Value("")
+		resourceLabels[index] = scope:Value("")
+		-- Seeded from what is already mirrored, for the same reason the State Value below is: a player
+		-- who rejoins has their equipped arts pushed once, on profile load, and a hotbar that only
+		-- filled in on the NEXT push would sit empty until they equipped something again.
+		applySlotInfo(index, HotbarBindings.GetInfo(index))
 
 		local slotState = scope:Value(stateForSlot(boundMoveIds[index], 0))
 		abilitySlotStates[index] = slotState
@@ -265,6 +301,8 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 			LayoutOrder = index,
 			Keybind = keybind,
 			State = slotState,
+			AbilityName = abilityNames[index],
+			ResourceLabel = resourceLabels[index],
 			CooldownFraction = cooldownFractions[index],
 			CooldownSeconds = cooldownSeconds[index],
 			-- Routed through the same function the number keys reach, so the button and the keybind
@@ -279,7 +317,11 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 	-- Never unsubscribed -- HUD is mounted once for the life of the client session (see this file's
 	-- own header on Mount()'s return shape), the same "connect once, never disconnect" lifetime every
 	-- other HUD-wide listener here already has (ClientState.Bootstrap's own remote handlers).
-	HotbarBindings.OnChanged(function(slot: number, moveId: string?)
+	HotbarBindings.OnChanged(function(slot: number, moveId: string?, info: HotbarBindings.SlotInfo?)
+		-- Applied before the early-out below, not after: an art renamed or re-priced in the Move
+		-- Editor keeps its ArtId, so this fires with an unchanged moveId and a changed info, and
+		-- returning first would leave the tile showing the old name indefinitely.
+		applySlotInfo(slot, info)
 		if boundMoveIds[slot] == nil and moveId == nil then
 			return
 		end
@@ -307,11 +349,43 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 		refreshSlotState(slot)
 	end)
 
+	-- The combat tag's remaining seconds, decayed locally. The server sends a DURATION and not a
+	-- deadline (Types.EngagementPayload's own header: os.clock() epochs differ between machines, so a
+	-- raw server deadline would be wrong by an arbitrary constant), so the deadline is reconstructed
+	-- here against the LOCAL clock at the moment of receipt and ticked down by the Heartbeat below.
+	--
+	-- A plain mirror plus one Fusion Value, the same split the cooldowns above use: the deadline is
+	-- read every frame by the loop and never rendered, and only the quantised tenth is published.
+	local engagementSeconds: Fusion.Value<number> = scope:Value(0)
+	local engagementEndsAt: number? = nil
+	local engagementPublishedTenths = -1
+	scope:Observer(clientState.Engagement):onChange(function()
+		local payload = Fusion.peek(clientState.Engagement)
+		if payload and payload.InCombat then
+			engagementEndsAt = os.clock() + payload.SecondsRemaining
+			engagementPublishedTenths = math.ceil(payload.SecondsRemaining * COUNTDOWN_STEPS_PER_SECOND)
+			engagementSeconds:set(payload.SecondsRemaining)
+		else
+			-- Cleared rather than run to zero: the expiry push IS the authority on the tag ending, and
+			-- letting the local decay keep counting past it would tick a countdown for a band that is
+			-- already folding away. EngagementDetail latches its own last engaged content for that
+			-- animation, so nothing here needs to hold the number alive for it.
+			engagementEndsAt = nil
+			engagementPublishedTenths = -1
+			engagementSeconds:set(0)
+		end
+	end)
+
 	-- A Heartbeat inside a Screen is off-pattern for this codebase and is kept deliberately narrow: it
 	-- exists only because AbilitySlot's cooldown sweep is, by its nature, a value that has to change
 	-- every frame, and pushing it from the network sixty times a second would be far worse. It
-	-- early-outs on an empty table, so it costs nothing at all except while a slot is genuinely
-	-- cooling.
+	-- early-outs when nothing is cooling AND nothing is engaged, so it costs nothing at all outside
+	-- those two windows.
+	--
+	-- ONE Heartbeat serving both, rather than one per countdown. The engagement band is mounted for
+	-- the whole session to serve five seconds a fight, so a connection of its own would idle for
+	-- almost all of it -- and this loop is already the HUD's owner of "a number that has to come down
+	-- on its own between two network pushes".
 	--
 	-- The SWEEP moves every frame because it is a continuous position the eye tracks. The COUNTDOWN
 	-- does not: it is quantised to tenths and only written when the displayed tenth actually changes.
@@ -320,10 +394,30 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 	-- generated at exactly the moment the client can least afford it, to redraw digits that were
 	-- already identical five frames in six.
 	RunService.Heartbeat:Connect(function()
-		if next(cooldownEndsAt) == nil then
+		local cooling = next(cooldownEndsAt) ~= nil
+		if not cooling and engagementEndsAt == nil then
 			return
 		end
 		local now = os.clock()
+
+		-- Quantised to tenths on exactly the same grounds as the slot countdowns below, and it matters
+		-- slightly more here: this one formats `%.1fs` inside a Fusion Computed, so an unquantised
+		-- version would allocate a fresh string every frame for the whole five seconds of every fight.
+		-- Floored at zero rather than allowed negative -- the expiry push is what actually ends the
+		-- tag, and it can land a frame or two after the local decay has crossed.
+		local engagementDeadline = engagementEndsAt
+		if engagementDeadline then
+			local remaining = math.max(engagementDeadline - now, 0)
+			local tenths = math.ceil(remaining * COUNTDOWN_STEPS_PER_SECOND)
+			if engagementPublishedTenths ~= tenths then
+				engagementPublishedTenths = tenths
+				engagementSeconds:set(tenths / COUNTDOWN_STEPS_PER_SECOND)
+			end
+		end
+
+		if not cooling then
+			return
+		end
 		for slot, endsAt in cooldownEndsAt do
 			local remaining = endsAt - now
 			if remaining <= 0 then
@@ -387,7 +481,7 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 
 	local dock = Panel(scope, {
 		Name = "HotbarDock",
-		LayoutOrder = 3,
+		LayoutOrder = 4,
 		AutomaticSize = Enum.AutomaticSize.XY,
 		Elevated = false,
 		Chamfered = true,
@@ -594,7 +688,7 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 
 		dockBand = scope:New "Frame" {
 			Name = "DockBand",
-			LayoutOrder = 3,
+			LayoutOrder = 4,
 			Size = UDim2.fromOffset(0, 0),
 			AutomaticSize = Enum.AutomaticSize.XY,
 			BackgroundTransparency = 1,
@@ -631,8 +725,17 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 				LayoutOrder = 1,
 				InCombat = clientState.InCombat,
 			}),
-			BountyMarkedBadge(scope, {
+			-- Directly under the line it elaborates, and above the bounty pill: the two engagement
+			-- bands are one readout split across two elements (the line says THAT you are fighting,
+			-- this says who and for how much longer), and letting an unrelated pill land between them
+			-- would break that reading whenever both happened to be up at once.
+			EngagementDetail(scope, {
 				LayoutOrder = 2,
+				Engagement = clientState.Engagement,
+				SecondsRemaining = engagementSeconds,
+			}),
+			BountyMarkedBadge(scope, {
+				LayoutOrder = 3,
 				Marked = clientState.BountyMarked,
 				Reward = clientState.BountyReward,
 			}),
@@ -642,7 +745,7 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 			-- business knowing what it happens to sit under here.
 			scope:New("Frame")({
 				Name = "LegendBand",
-				LayoutOrder = 4,
+				LayoutOrder = 5,
 				Size = UDim2.fromOffset(0, 0),
 				AutomaticSize = Enum.AutomaticSize.XY,
 				BackgroundTransparency = 1,

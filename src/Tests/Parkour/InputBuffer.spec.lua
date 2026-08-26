@@ -156,6 +156,53 @@ return function()
 		end)
 	end)
 
+	describe("InputBuffer -- the air-held slide", function()
+		it("arms a press on landing while the key is held, however long the fall was", function()
+			-- The whole mechanic: slideHeld is true the entire way down, but the press expires after
+			-- the action window, so without this a fall of any real length lands with
+			-- States/Sliding.CanEnter refusing "NoSlideInput". Five seconds is deliberately far past
+			-- any window in this file -- the point is that fall LENGTH stops mattering.
+			InputBuffer.PressSlide(100)
+			expect(InputBuffer.PeekSlide(105)).to.equal(false)
+			InputBuffer.ArmHeldSlideOnLanding(105)
+			expect(InputBuffer.PeekSlide(105)).to.equal(true)
+		end)
+
+		it("arms nothing once the key has been released", function()
+			-- Releasing mid-air cancels the queued slide, which is why the re-stamp is gated on the
+			-- held flag rather than on a press having happened at some point.
+			InputBuffer.PressSlide(100)
+			InputBuffer.ReleaseSlide()
+			InputBuffer.ArmHeldSlideOnLanding(105)
+			expect(InputBuffer.PeekSlide(105)).to.equal(false)
+		end)
+
+		it("arms nothing when the key was never pressed at all", function()
+			InputBuffer.ArmHeldSlideOnLanding(105)
+			expect(InputBuffer.PeekSlide(105)).to.equal(false)
+		end)
+
+		it("grants ONE attempt per landing, not a press that stays live while held", function()
+			-- A continuously-live hold would re-enter Sliding on the frame after every slide ended, for
+			-- as long as the key was down. The armed press expires through the ordinary window like any
+			-- other, while the held flag (which States/Sliding.lua reads to CONTINUE) stays true.
+			InputBuffer.PressSlide(100)
+			InputBuffer.ArmHeldSlideOnLanding(200)
+			expect(InputBuffer.PeekSlide(200)).to.equal(true)
+			expect(InputBuffer.IsSlideHeld()).to.equal(true)
+			expect(InputBuffer.PeekSlide(200 + ACTION_WINDOW + 0.01)).to.equal(false)
+		end)
+
+		it("is dropped by Clear, so a press held into a respawn cannot fire on the first landing", function()
+			-- Same bug class Clear already closes for the ordinary presses (see its own describe block):
+			-- this one would otherwise outlive a respawn by holding a flag rather than a timestamp.
+			InputBuffer.PressSlide(100)
+			InputBuffer.Clear()
+			InputBuffer.ArmHeldSlideOnLanding(105)
+			expect(InputBuffer.PeekSlide(105)).to.equal(false)
+		end)
+	end)
+
 	describe("InputBuffer -- roll", function()
 		it("buffers and consumes a press", function()
 			InputBuffer.PressRoll(100)

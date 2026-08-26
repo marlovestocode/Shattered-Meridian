@@ -91,10 +91,14 @@ local PARKOUR_SOURCE = "Parkour"
 -- out (the same reason DefenseClient.GetPreloadInstances also returns raw ids), so ids are the only
 -- thing this module has to preload with.
 --
--- A raw id string is a first-class manifest entry -- ContentProvider:PreloadAsync takes content ids
--- directly, and AssetPreloader's own dedupe keys a string as itself -- so this warms the exact same
--- CDN fetch without owning an instance. Constants.Intro.AnimationIds is already preloaded this same
--- way for the same "no ongoing pool to be the source of truth for" reason.
+-- A raw id string is NOT a first-class manifest entry, and this function's caller is what makes it
+-- one. ContentProvider:PreloadAsync reports Failure for a bare "rbxassetid://" string whatever the
+-- asset is, so AssetPreloader wraps each id handed back here in a throwaway Animation instance
+-- before the manifest ever reaches the engine -- see animationFor's header in that module for the
+-- full account of how that bit once. Nothing here needs to change for that; ids remain the right
+-- thing for this module to return, because the wrapping is the preloader's job, not the provider's.
+-- Constants.Intro.AnimationIds is handled the same way for the same "no ongoing pool to be the
+-- source of truth for" reason.
 --
 -- WHY IT MATTERS: without this, every parkour clip cold-loaded on FIRST USE -- i.e. mid-vault,
 -- mid-wall-run, mid-ledge-grab. That is the worst possible moment to pay a fetch, and it was the
@@ -324,23 +328,35 @@ local VARIANT_CLIPS: {
 			FadeOut = PROFILES.Settle.FadeOut,
 			Clips = { Hang = "LedgeHang", Shimmy = "LedgeShimmy" },
 		},
-		-- THE ONLY VARIANT-DRIVEN STATE WITH NO STATE_CLIPS FALLBACK, and that absence is deliberate
-		-- rather than an oversight. Leaping/LedgeHanging/Landing each keep a dual entry so a transition
-		-- frame that arrives before the variant is published still plays something sensible. A dash has
-		-- no sensible shared clip: the four directions are genuinely different motions, and playing a
-		-- FRONT dash for a back-dash would read worse than playing nothing at all. States/Dashing.lua
-		-- publishes its quadrant in Enter, before any frame can reach this resolver, so the gap those
-		-- other three cover does not exist here.
+		-- THREE PITCH BANDS, not the five body-relative quadrants this used to key on. The dash is
+		-- aimed by the camera now and steered mid-flight, so "front/back/left/right relative to the
+		-- chest" is not a thing a clip could honestly show: the body faces its own travel direction
+		-- for the whole burst (States/Dashing.lua commands FaceDirection from live travel), which
+		-- means every dash is, from the animation's point of view, a FORWARD one. What still varies,
+		-- and what these three bands say, is whether it was aimed up, level or down.
+		--
+		-- THE ONLY VARIANT-DRIVEN STATE WITH NO STATE_CLIPS FALLBACK, and that absence survives the
+		-- rewrite deliberately. Leaping/LedgeHanging/Landing each keep a dual entry so a transition
+		-- frame arriving before the variant is published still plays something sensible. A dash has no
+		-- sensible shared clip -- a rising launch and a dive are different motions, and playing one
+		-- for the other would read worse than playing nothing -- and States/Dashing.lua publishes its
+		-- band in Enter, before any frame can reach this resolver, so the gap those other three cover
+		-- does not exist here.
 		--
 		-- Snap profile, one-shot, non-scaling: a dash is a single readable beat whose opening frame is
-		-- the whole point, and whose speed is an authored curve rather than a cadence -- scaling
-		-- playback to a decaying burst speed would make the clip slow down as the dash finished.
+		-- the whole point. Non-scaling matters more than it used to -- commanded speed is now a SPRING
+		-- (it winds up, overshoots, then bleeds off), so scaling playback to it would make the clip
+		-- visibly stutter through the wind-up and drag through the settle.
+		--
+		-- Resolved ONCE, at Enter, off the launch angle -- steering does not re-trigger it. A dash
+		-- banked from level into a climb keeps the clip it started with rather than cutting to another
+		-- one mid-flight, which at these durations (0.4s total) would only ever read as a glitch.
 		Dashing = {
 			Looped = false,
 			ScalesWithSpeed = false,
 			FadeIn = PROFILES.Snap.FadeIn,
 			FadeOut = PROFILES.Snap.FadeOut,
-			Clips = { Front = "DashFront", Back = "DashBack", Left = "DashLeft", Right = "DashRight", Up = "DashUp" },
+			Clips = { Up = "DashUp", Level = "DashLevel", Down = "DashDown" },
 		},
 		-- Also present in STATE_CLIPS above (as the no-variant fallback, played once the charge has
 		-- committed to the flight). States/Leaping.lua publishes "Charge" for the brief wind-up

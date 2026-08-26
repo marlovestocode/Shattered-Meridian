@@ -738,152 +738,68 @@ function ParkourMath.PrimaryReachDirection(moveDirection: Vector3, moveIntent: V
 	return ParkourMath.SafeUnit(ParkourMath.Flatten(moveIntent), Vector3.zero)
 end
 
--- THE BURST CURVE -- a short, authored-distance displacement that decays linearly from a peak to the
--- speed it means to leave the body at. Used by States/Dashing.lua; generalized from (and exactly
--- equal to, at endSpeed = 0) Client/Combat/SwingLunge.SpeedAt, which is where the shape was first
--- worked out for the M1 lunge.
+-- THE STEER -- rotates one direction toward another by a capped angle, and nothing else. The whole
+-- of "the dash is drivable" is this function plus the per-frame budget States/Dashing.lua hands it,
+-- and the CAP is the mechanic rather than a safety rail. A travel vector that snapped straight onto
+-- the live aim every frame would be a flying camera with a body attached; one that could not turn at
+-- all is the frozen, quantized burst this replaced. Capping the turn is what makes a dash BANK
+-- instead of pivot -- it is how "this thing has mass" gets said without any of the velocity
+-- arithmetic downstream having to know about mass.
 --
--- THREE PROPERTIES, and all three are the reason this is a curve rather than a constant speed:
---   1. It ENDS at endSpeed, not at some arbitrary value. The last frame the caller commands is
---      already the speed the body is about to be left holding, so the hand-off has no discontinuity
---      -- no lurch, no dead stop, nothing for the next state to reconcile.
---   2. The integral over the window is exactly `distanceStuds`, so that constant means studs. The
---      area under a line falling from p to e over d seconds is ((p + e) / 2) * d; setting that equal
---      to (e * d) + distance and solving gives the 2 * distance / duration term below. Getting that
---      factor wrong does not error -- the burst simply travels half as far as its own tuning claims,
---      silently, which is why src/Tests/Parkour/ParkourMath.spec.lua integrates the curve numerically
---      rather than only checking its endpoints.
---   3. It is never BELOW endSpeed. A distance small enough that the raw solution would come out under
---      the exit speed would otherwise make the burst accelerate at its own tail, which reads as the
---      character being shoved as the move finishes.
+-- Pure and Instance-free, which is this module's charter. CFrame appears below strictly as a
+-- DATATYPE (fromAxisAngle is arithmetic, not a reach into the game), the same licence the spec
+-- already takes when it pins this module's handedness conventions against a real CFrame.lookAt.
 --
--- Split into two functions because the peak is solved ONCE at entry (from tuning plus whatever
--- momentum the caller came in with) and the curve is then sampled every frame from that frozen peak.
--- Re-solving per frame against a live momentum that this very curve is driving would be a feedback
--- loop.
-function ParkourMath.BurstPeak(
-	distanceStuds: number,
-	durationSeconds: number,
-	endSpeed: number,
-	maxSpeed: number
-): number
-	local floor = math.max(endSpeed, 0)
-	if durationSeconds <= ZERO_EPSILON or distanceStuds <= 0 then
-		return math.min(floor, maxSpeed)
+-- THREE DEGENERATE INPUTS, all of which are reachable from ordinary play, and none of which may
+-- produce a NaN -- whatever this returns is multiplied by a speed and handed to ParkourMotor, which
+-- writes it into a LinearVelocity constraint. A NaN there does not error; it removes the character.
+--   * A zero-length TARGET (no camera for a frame during bind) -- holds `current`, so a dash keeps
+--     the angle it launched at rather than snapping to some arbitrary axis.
+--   * A zero-length CURRENT -- there is nothing to rotate, so the target already IS the answer.
+--   * ANTIPARALLEL current/target -- looking exactly back along your own travel, which one hard
+--     mouse flick mid-dash reaches easily. The cross product is exactly zero there, so `axis.Unit`
+--     is NaN and every component of the resulting rotation follows it. ANY perpendicular is a
+--     correct axis in that case, so one is constructed explicitly rather than left to a cross
+--     product that cannot supply it.
+function ParkourMath.SteerToward(current: Vector3, target: Vector3, maxRadians: number): Vector3
+	local currentUnit = ParkourMath.SafeUnit(current, Vector3.zero)
+	local targetUnit = ParkourMath.SafeUnit(target, Vector3.zero)
+	if targetUnit.Magnitude < ZERO_EPSILON then
+		return currentUnit
 	end
-	return math.clamp(floor + (2 * distanceStuds) / durationSeconds, floor, math.max(maxSpeed, floor))
-end
-
--- The curve itself, sampled at `elapsed` seconds into a `durationSeconds` window. Clamped at both
--- ends: before the window it is the peak, at or after it is exactly endSpeed -- so a caller that runs
--- a frame long commands the hand-off speed rather than a negative one.
-function ParkourMath.BurstSpeed(peakSpeed: number, endSpeed: number, durationSeconds: number, elapsed: number): number
-	if durationSeconds <= ZERO_EPSILON or elapsed >= durationSeconds then
-		return endSpeed
+	if currentUnit.Magnitude < ZERO_EPSILON then
+		return targetUnit
 	end
-	if elapsed <= 0 then
-		return peakSpeed
-	end
-	return endSpeed + (peakSpeed - endSpeed) * (1 - elapsed / durationSeconds)
-end
-
--- Which direction a dash is being asked for. The four lateral ones are resolved against the BODY's
--- own facing rather than the camera's, so a dash means the same thing in and out of shift lock, and
--- so "back" is unambiguously behind the character rather than behind the view.
---
--- "Up" is the exception, and the only one the CAMERA decides: it is the forward dash taken while
--- looking up. See DashQuadrant below for why it replaces exactly that one and never the other three.
-export type DashQuadrant = "Front" | "Back" | "Left" | "Right" | "Up"
-
--- `facing` and `right` are passed in rather than derived from each other here. Deriving right as
--- facing:Cross(Vector3.yAxis) is correct for Roblox's handedness, but re-deriving an engine convention
--- inside this module -- whose whole charter is being Instance-free and independently checkable -- is
--- how a sign error becomes untestable. The caller hands both straight off one CFrame, and the spec
--- pins the convention against a real CFrame.lookAt rather than against our own arithmetic.
---
--- The forward/lateral tie-break is `>=`, matching the deleted combat system's own
--- Movement.ResolveDashDirection, so a diagonal press resolves the same way it always did here.
--- Unlike that function, a ZERO intent resolves to "Front" rather than to nil: that one gated a
--- hitbox, where this decides which way a dash the player has already asked for should go, and
--- refusing to dash because no direction was held would just be a dropped input.
---
--- THE UP DASH REPLACES THE FORWARD DASH AND ONLY THE FORWARD DASH, whenever the camera is pitched
--- above `upPitchDegrees`. Both halves of that rule are deliberate:
---   * It replaces FORWARD because forward already means "where I am going", and where you are going
---     while looking up a wall is up it. One rule, and it needs no extra key.
---   * It never replaces BACK or the SIDES, because those are the defensive directions and a player
---     who happens to be looking up -- which in a parkour game is most of the time you are climbing --
---     must not silently lose the ability to dash away from something. Making the pitch gate override
---     all four would mean the retreat you asked for launched you into the air instead.
--- `aim` is the camera's own look vector, pitch included (ParkourContext.AimDirection). Its Y IS the
--- sine of the pitch for a unit vector, which is why no trigonometry happens on the aim itself.
-function ParkourMath.DashQuadrant(
-	intent: Vector3,
-	facing: Vector3,
-	right: Vector3,
-	aim: Vector3,
-	upPitchDegrees: number
-): DashQuadrant
-	local quadrant: DashQuadrant = "Front"
-	local flatIntent = ParkourMath.Flatten(intent)
-	if flatIntent.Magnitude > ZERO_EPSILON then
-		local direction = flatIntent.Unit
-		local forwardComponent = direction:Dot(ParkourMath.SafeUnit(ParkourMath.Flatten(facing), Vector3.zero))
-		local rightComponent = direction:Dot(ParkourMath.SafeUnit(ParkourMath.Flatten(right), Vector3.zero))
-		if math.abs(forwardComponent) >= math.abs(rightComponent) then
-			quadrant = if forwardComponent >= 0 then "Front" else "Back"
-		else
-			quadrant = if rightComponent >= 0 then "Right" else "Left"
-		end
+	-- A non-positive budget is "no steering authority this frame", which States/Dashing.lua's own
+	-- release taper produces by design on the dash's last frames. Answered here rather than guarded
+	-- at the call site so the taper can run to exactly zero without a special case.
+	if maxRadians <= 0 then
+		return currentUnit
 	end
 
-	if quadrant ~= "Front" then
-		return quadrant
+	local angle = math.acos(math.clamp(currentUnit:Dot(targetUnit), -1, 1))
+	-- Within budget: land exactly ON the target rather than approaching it asymptotically. Aiming at
+	-- something and having the dash settle a fraction of a degree short of it forever is the failure
+	-- an ease would produce here, and it is precisely what "launch at that exact angle" rules out.
+	if angle <= maxRadians then
+		return targetUnit
 	end
-	-- SafeUnit's zero fallback has Y = 0, so a degenerate aim can never clear the gate -- "cannot tell
-	-- where you are looking" resolves to the ordinary forward dash rather than launching you.
-	local aimUnit = ParkourMath.SafeUnit(aim, Vector3.zero)
-	if aimUnit.Y >= math.sin(math.rad(upPitchDegrees)) then
-		return "Up"
-	end
-	return quadrant
-end
 
--- The unit travel vector for a resolved quadrant, built from facing/right rather than from the intent
--- that selected it. That is what makes a "Left" dash go exactly perpendicular to the body instead of
--- wherever the stick happened to be sitting -- four crisp, repeatable directions, which is the whole
--- point of quantizing to quadrants rather than dashing along the raw input.
---
--- "Up" is the one direction that is NOT quantized: it returns the aim itself, so how steeply -- and in
--- which direction -- you are looking is exactly how you travel. Looking straight up sends you straight
--- up; looking up at 60 degrees off to one side carries you up AND that way, at that angle -- the whole
--- point being that the dash goes where the camera is actually pointed rather than snapping to a single
--- fixed vertical regardless of aim. This DID, briefly, get simplified to a fixed Vector3.yAxis, on the
--- theory that camera YAW was the thing making an "up" dash occasionally read as "out and sideways" --
--- but that reading was wrong: the design the aim-following version implements IS "float up at an angle
--- and get carried there," and collapsing every angle to one vertical made it feel like it only worked
--- when looking perfectly straight up. Restored; if a future report of drifting sideways/backwards
--- returns, the fix belongs in DashQuadrant's own pitch gate or in what feeds `aim`, not in flattening
--- this function's answer back out.
-function ParkourMath.QuadrantDirection(quadrant: DashQuadrant, facing: Vector3, right: Vector3, aim: Vector3): Vector3
-	local flatFacing = ParkourMath.SafeUnit(ParkourMath.Flatten(facing), Vector3.new(0, 0, -1))
-	local flatRight = ParkourMath.SafeUnit(ParkourMath.Flatten(right), Vector3.new(1, 0, 0))
-	if quadrant == "Up" then
-		local aimUnit = ParkourMath.SafeUnit(aim, Vector3.yAxis)
-		-- A non-rising aim here means the caller resolved "Up" from something this function was not
-		-- handed the same way -- straight up is the only safe reading, and it is never degenerate.
-		if aimUnit.Y <= ZERO_EPSILON then
-			return Vector3.yAxis
-		end
-		return aimUnit
-	elseif quadrant == "Back" then
-		return -flatFacing
-	elseif quadrant == "Left" then
-		return -flatRight
-	elseif quadrant == "Right" then
-		return flatRight
+	local axis = currentUnit:Cross(targetUnit)
+	if axis.Magnitude < ZERO_EPSILON then
+		-- Antiparallel. (Parallel cannot reach this line -- an angle of zero was already inside the
+		-- budget above.) Built off whichever world axis is LEAST aligned with `current`, so the
+		-- cross below can never come back degenerate a second time.
+		local absolute = Vector3.new(math.abs(currentUnit.X), math.abs(currentUnit.Y), math.abs(currentUnit.Z))
+		local fallbackAxis = if absolute.X <= absolute.Y and absolute.X <= absolute.Z
+			then Vector3.xAxis
+			elseif absolute.Y <= absolute.Z then Vector3.yAxis
+			else Vector3.zAxis
+		axis = currentUnit:Cross(fallbackAxis)
 	end
-	return flatFacing
+	-- Re-unitized on the way out: fromAxisAngle preserves length exactly in exact arithmetic, and
+	-- drifts in floating point over the sixty-odd successive rotations one dash actually performs.
+	return (CFrame.fromAxisAngle(axis.Unit, maxRadians) * currentUnit).Unit
 end
 
 return ParkourMath

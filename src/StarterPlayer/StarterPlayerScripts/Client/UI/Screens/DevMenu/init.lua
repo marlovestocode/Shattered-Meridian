@@ -50,15 +50,14 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
 local Tokens = require(script.Parent.Parent.Tokens)
-local ModalScreen = require(script.Parent.Parent.Components.ModalScreen)
+local ScreenFrame = require(script.Parent.Parent.Components.ScreenFrame)
+local Stack = require(script.Parent.Parent.Components.Stack)
+local Inset = require(script.Parent.Parent.Components.Inset)
 local Label = require(script.Parent.Parent.Components.Label)
-local Button = require(script.Parent.Parent.Components.Button)
 
 local DevMenuTypes = require(script.Types)
 local Sidebar = require(script.Sidebar)
 local ContentArea = require(script.ContentArea)
-
-local Children = Fusion.Children
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 
@@ -72,6 +71,9 @@ export type HitboxStandaloneDisplayProps = DevMenuTypes.HitboxStandaloneDisplayP
 export type FlightTuningDisplayProps = DevMenuTypes.FlightTuningDisplayProps
 export type BugReportRowDisplay = DevMenuTypes.BugReportRowDisplay
 export type PlayerRosterRowDisplay = DevMenuTypes.PlayerRosterRowDisplay
+export type VehicleCatalogRowDisplay = DevMenuTypes.VehicleCatalogRowDisplay
+export type VehicleLiveRowDisplay = DevMenuTypes.VehicleLiveRowDisplay
+export type VehicleBerthRowDisplay = DevMenuTypes.VehicleBerthRowDisplay
 
 export type DevMenuHandle = {
 	IsOpen: Fusion.Value<boolean>,
@@ -85,109 +87,72 @@ local DevMenu = {}
 -- Root panel layout constants -- a fixed size (not AutomaticSize) is the structural fix for the
 -- overflow bug described in the file header: every dimension below is a deliberate budget, not a
 -- guess, so the math is spelled out rather than left implicit.
-local HEADER_HEIGHT = 36
-local FOOTER_HEIGHT = 24
-
+--
+-- The header and footer bands are gone from this list entirely: they are Components/ScreenFrame.lua's
+-- now, and BodySize below is a function of that module's own heights rather than the 600-32-60-24
+-- sum this file used to carry (four terms, three of them somebody else's numbers).
+--
 -- The Sidebar/ContentArea column split -- widths are the only two numbers a future design pass
 -- should need to touch to rebalance the two columns.
 local SIDEBAR_WIDTH = 240
 local CONTENT_WIDTH = 460
--- Root's usable width (ROOT_SIZE.X minus UIPadding.L left+right) must equal the two column widths
--- plus the one UIListLayout gap between them: 240 + 12 + 460 = 712.
-local BODY_WIDTH = SIDEBAR_WIDTH + Tokens.Space.M + CONTENT_WIDTH
-local ROOT_SIZE = UDim2.fromOffset(BODY_WIDTH + Tokens.Space.L * 2, 600)
+local ROOT_WIDTH = SIDEBAR_WIDTH + Tokens.Space.M + CONTENT_WIDTH + Tokens.Space.L * 2
+local ROOT_HEIGHT = 600
 
--- Root height (600) minus UIPadding.L top+bottom (16*2=32) minus header/footer (36+24=60) minus the
--- 2 UIListLayout gaps around the Body row (Space.M=12 * 2 = 24) leaves the Body row's own height --
--- shared by both columns; each then subtracts its OWN internal row (Sidebar's stats header,
--- ContentArea's tab strip) from this same number, rather than this root guessing at either column's
--- internal split.
-local BODY_HEIGHT = 600 - 32 - 60 - 24
+-- Width is discarded: this panel is sized FROM its two columns rather than the other way round.
+local _, BODY_BAND_HEIGHT = ScreenFrame.BodySize(ROOT_WIDTH, ROOT_HEIGHT)
+-- What each column actually gets, once the body's own inset is removed. Both columns are handed this
+-- same number and each then subtracts its OWN internal row (Sidebar's stats header, ContentArea's tab
+-- strip) from it, rather than this root guessing at either column's internal split.
+local COLUMN_HEIGHT = BODY_BAND_HEIGHT - Tokens.Space.M - Tokens.Space.L
 
 function DevMenu.Mount(scope: Scope, playerGui: PlayerGui): DevMenuHandle
 	local isOpen = scope:Value(false)
 	local statusText = scope:Value("")
 
-	local sidebar = Sidebar.Mount(scope, SIDEBAR_WIDTH, BODY_HEIGHT)
-	local content = ContentArea.Mount(scope, CONTENT_WIDTH, BODY_HEIGHT)
+	local sidebar = Sidebar.Mount(scope, SIDEBAR_WIDTH, COLUMN_HEIGHT)
+	local content = ContentArea.Mount(scope, CONTENT_WIDTH, COLUMN_HEIGHT)
 
 	local targetLabelText = scope:Computed(function(use)
 		return `Target: {use(content.TargetNameDisplay)}`
 	end)
 
-	ModalScreen(scope, playerGui, {
+	ScreenFrame.Mount(scope, playerGui, {
 		Name = "DevMenu",
-		Size = ROOT_SIZE,
+		Size = UDim2.fromOffset(ROOT_WIDTH, ROOT_HEIGHT),
 		IsOpen = isOpen,
+		-- No tabs at frame level: this panel's four tabs (Spawn/Admin/Tuning/Reports) belong to the
+		-- ContentArea column and switch only that column, with the Sidebar persisting across all four.
+		-- Hoisting them into the strip would make the sidebar look like it changes with them.
+		Title = "Developer Menu",
+		-- The live resolved-target readout, pinned to the strip's right edge clear of the close
+		-- control. It belongs to the whole panel rather than to any one tab -- every action in every
+		-- tab applies to whoever this says.
+		HeaderAccessory = Label(scope, {
+			Text = targetLabelText,
+			Scale = "Detail",
+			Color = Tokens.Color.TextSecondary,
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -(Tokens.Control.CloseButtonClearance + ScreenFrame.BandPaddingX), 0.5, 0),
+			TextXAlignment = Enum.TextXAlignment.Right,
+		}),
+		Wordmark = "DEV MENU",
+		StatusText = statusText,
+		OnClose = function()
+			isOpen:set(false)
+		end,
 
-		Children = {
-			-- Header: title, live resolved-target label, close button.
-			scope:New "Frame" {
-				Name = "Header",
-				Size = UDim2.new(1, 0, 0, HEADER_HEIGHT),
-				BackgroundTransparency = 1,
-				LayoutOrder = 1,
-
-				[Children] = {
-					-- Neither label passes Size -- Label.lua's own default (AutomaticSize.XY when
-					-- Size is omitted) is what makes each size itself to its text instead of
-					-- rendering at a literal zero-size frame, which is what happens if Size is
-					-- ever passed as fromScale(0, 0) here (Label.lua ties AutomaticSize to
-					-- "was Size provided at all", not to the value passed).
-					Label(scope, {
-						Text = "Developer Menu",
-						Scale = "Heading",
-						AnchorPoint = Vector2.new(0, 0.5),
-						Position = UDim2.fromScale(0, 0.5),
-					}),
-					Label(scope, {
-						Text = targetLabelText,
-						Scale = "Detail",
-						Color = Tokens.Color.TextSecondary,
-						AnchorPoint = Vector2.new(1, 0.5),
-						Position = UDim2.new(1, -Tokens.Control.CloseButtonClearance, 0.5, 0),
-						TextXAlignment = Enum.TextXAlignment.Right,
-					}),
-					Button(scope, {
-						Text = "X",
-						Size = UDim2.fromOffset(28, 28),
-						AnchorPoint = Vector2.new(1, 0.5),
-						Position = UDim2.fromScale(1, 0.5),
-						OnActivated = function()
-							isOpen:set(false)
-						end,
-					}),
-				},
+		-- The persistent Sidebar column next to the tabbed ContentArea column, side by side -- see this
+		-- file's own header for the layout-budget split both receive.
+		Body = Stack.Row(scope, {
+			Name = "Body",
+			Gap = Tokens.Space.M,
+			Children = {
+				Inset(scope, { Top = Tokens.Space.M, Bottom = Tokens.Space.L, X = Tokens.Space.L }),
+				sidebar.Root,
+				content.Root,
 			},
-
-			-- Body: the persistent Sidebar column next to the tabbed ContentArea column, side by
-			-- side -- see this file's own header for the layout-budget split both receive.
-			scope:New "Frame" {
-				Name = "Body",
-				Size = UDim2.fromOffset(BODY_WIDTH, BODY_HEIGHT),
-				BackgroundTransparency = 1,
-				LayoutOrder = 2,
-
-				[Children] = {
-					scope:New "UIListLayout" {
-						FillDirection = Enum.FillDirection.Horizontal,
-						HorizontalAlignment = Enum.HorizontalAlignment.Left,
-						Padding = UDim.new(0, Tokens.Space.M),
-						SortOrder = Enum.SortOrder.LayoutOrder,
-					},
-					sidebar.Root,
-					content.Root,
-				},
-			},
-
-			Label(scope, {
-				Text = statusText,
-				Scale = "Detail",
-				Color = Tokens.Color.TextSecondary,
-				Size = UDim2.new(1, 0, 0, FOOTER_HEIGHT),
-				LayoutOrder = 30,
-			}),
-		},
+		}),
 	})
 
 	return {

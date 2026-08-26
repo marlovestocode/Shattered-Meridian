@@ -22,7 +22,8 @@
 	guard pool for posture (guard IS the posture pool in the rebuilt stack -- DamageConstants.Guard's
 	own header records that decision). See Bootstrap()'s own comment for why reading a replicated
 	Humanoid property here is reflection rather than the optimistic HUD state this file forbids.
-	InCombat has no source in the rebuilt stack and stays false for the whole session. Qi/MaxQi are
+	InCombat is wired again, to Server/Combat/Engagement/EngagementSystem.lua's Engagement_Changed
+	remote, alongside the Engagement value carrying the rest of that payload. Qi/MaxQi are
 	wired to QiSystem.lua's Progression_QiUpdated
 	remote, MeridianXP to MeridianSystem.lua's Progression_MeridianXPUpdated remote, and
 	Tier/TierName/TierFloorXP/TierNextXP/TierPromotion to TierSystem.lua's Progression_TierUpdated
@@ -51,6 +52,7 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
+local EngagementConstants = require(ReplicatedStorage.Shared.Engagement.EngagementConstants)
 local TierConstants = require(ReplicatedStorage.Shared.TierConstants)
 local BountyConstants = require(ReplicatedStorage.Shared.BountyConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
@@ -87,9 +89,15 @@ export type ClientState = {
 	-- Qi is progression/ability resource, not a combat vital.)
 	Qi: Fusion.Value<number>,
 	MaxQi: Fusion.Value<number>,
-	-- NOT WIRED: the rebuilt combat stack has no notion of "in combat" and publishes nothing that
-	-- would feed it -- permanently false. See Bootstrap()'s own comment.
+	-- Both wired in Bootstrap() to EngagementSystem's Engagement_Changed remote (Server/Combat/
+	-- Engagement/EngagementSystem.lua). InCombat is kept as its own boolean rather than read off
+	-- Engagement.InCombat because it long predates the payload and HUD/EngagementLine.lua already
+	-- renders from it -- the two are written together, in the same handler, and cannot drift.
 	InCombat: Fusion.Value<boolean>,
+	-- nil before the first engagement of the session. The full payload -- opponent, damage traded, and
+	-- the SecondsRemaining a consumer decays locally (see Types.EngagementPayload on why a duration
+	-- crosses the wire rather than a deadline).
+	Engagement: Fusion.Value<Types.EngagementPayload?>,
 	-- Wired in Bootstrap() to MeridianSystem's Progression_MeridianXPUpdated remote
 	-- (Server/Systems/MeridianSystem.lua) -- the core progression currency, not capped like the
 	-- vitals above (see Types.MeridianXPUpdatePayload's own header).
@@ -137,6 +145,7 @@ function ClientState.new(scope: Scope): ClientState
 		Qi = scope:Value(100),
 		MaxQi = scope:Value(100),
 		InCombat = scope:Value(false),
+		Engagement = scope:Value(nil :: Types.EngagementPayload?),
 		MeridianXP = scope:Value(0),
 		-- Tier 1 / its real name / a 0 floor are the genuine bottom of the ladder
 		-- (Constants.PlayerData.DefaultTier), not an invented placeholder -- a brand-new profile
@@ -160,12 +169,15 @@ function ClientState.new(scope: Scope): ClientState
 end
 
 function ClientState.Bootstrap(state: ClientState): ()
-	-- Combat_VitalsUpdated/Combat_InCombatChanged are still not wired here, and never will be:
-	-- CombatSystem.lua, their one creator, was removed in the combat teardown and the rebuilt stack
-	-- deliberately created no replacement. DamageConstants.Network's own header states why -- the
-	-- damage layer publishes ONE event (Combat_Feedback) and adding a vitals push would be a second
-	-- way to describe the same fact. InCombat has no source at all in the rebuilt stack and stays at
-	-- its ClientState.new() default (false) for the whole session.
+	-- Combat_VitalsUpdated is still not wired here, and never will be: CombatSystem.lua, its one
+	-- creator, was removed in the combat teardown and the rebuilt stack deliberately created no
+	-- replacement. DamageConstants.Network's own header states why -- the damage layer publishes ONE
+	-- event (Combat_Feedback) and adding a vitals push would be a second way to describe the same fact.
+	--
+	-- Combat_InCombatChanged is gone for the same reason, but the FACT it carried is not: Engagement_
+	-- Changed (Server/Combat/Engagement/EngagementSystem.lua) replaced it, carrying the boolean edge
+	-- plus the opponent and damage the old one-field payload could not. Wired at the bottom of this
+	-- function.
 	--
 	-- Health and Posture DO update again, from the two places that already own them, with no new
 	-- remote on either side:
@@ -362,6 +374,44 @@ function ClientState.Bootstrap(state: ClientState): ()
 
 		logger:debug("Emote loadout payload received", { count = #loadout })
 		state.EmoteLoadout:set(loadout)
+	end)
+
+	logger:debug("Waiting for Engagement_Changed remote")
+	local engagementChanged = NetworkBridge.GetRemoteEvent(EngagementConstants.Network.RemoteNames.Changed)
+	logger:debug("Engagement_Changed remote found")
+
+	-- Validated field by field rather than trusted wholesale, the same shape every other handler in
+	-- this function uses. InCombat is the only field that must be present for the payload to mean
+	-- anything -- the opponent fields are legitimately nil on the leaving edge, and the numbers are
+	-- defaulted rather than rejected so a partial payload degrades to a readable panel instead of a
+	-- dropped update.
+	engagementChanged.OnClientEvent:Connect(function(payload: unknown)
+		if typeof(payload) ~= "table" then
+			logger:warn("Malformed Engagement_Changed payload ignored")
+			return
+		end
+		local fields = payload :: { [string]: unknown }
+		if typeof(fields.InCombat) ~= "boolean" then
+			logger:warn("Malformed Engagement_Changed payload ignored")
+			return
+		end
+
+		local engagement: Types.EngagementPayload = {
+			InCombat = fields.InCombat :: boolean,
+			SecondsRemaining = if typeof(fields.SecondsRemaining) == "number" then fields.SecondsRemaining else 0,
+			OpponentName = if typeof(fields.OpponentName) == "string" then fields.OpponentName else nil,
+			OpponentUserId = if typeof(fields.OpponentUserId) == "number" then fields.OpponentUserId else nil,
+			DamageDealt = if typeof(fields.DamageDealt) == "number" then fields.DamageDealt else 0,
+			DamageTaken = if typeof(fields.DamageTaken) == "number" then fields.DamageTaken else 0,
+			LastOutcomeKind = if typeof(fields.LastOutcomeKind) == "string" then fields.LastOutcomeKind else nil,
+		}
+
+		logger:debug("Engagement payload received", {
+			inCombat = engagement.InCombat,
+			opponent = engagement.OpponentName,
+		})
+		state.Engagement:set(engagement)
+		state.InCombat:set(engagement.InCombat)
 	end)
 end
 

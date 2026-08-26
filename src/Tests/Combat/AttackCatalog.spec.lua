@@ -13,11 +13,13 @@ local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
 local DefaultMoveRegistry = require(ServerScriptService.Server.Combat.DefaultMoveRegistry)
 local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
 
--- DefaultMoveRegistry projects this from Constants.Combat.Weapons.Primary's first basic stage. Used
--- rather than invented because a catalogue that only resolves moves the spec itself authored would
--- never catch the bridge breaking against real authored data.
-local DEFAULT_MOVE_ID = "default:Primary:Basic:1"
+-- A real roster weapon's real first basic stage, which DefaultMoveRegistry projects from
+-- CombatConstants.Weapons.Baseline. Used rather than invented because a catalogue that only resolves
+-- moves the spec itself authored would never catch the bridge breaking against real authored data.
+local WEAPON = WeaponFixture.Install()[1]
+local DEFAULT_MOVE_ID = `default:{WEAPON}:Basic:1`
 
 return function()
 	afterEach(function()
@@ -96,10 +98,10 @@ return function()
 	end)
 
 	describe("AttackCatalog.Get -- the WindupSeconds override's Cooldown bound", function()
-		-- Constants.Combat.Weapons.Primary.Stages.Basic[1]: WindupSeconds 0.31, ActiveSeconds 0.22,
+		-- CombatConstants.Weapons.Baseline.Stages.Basic[1]: WindupSeconds 0.31, ActiveSeconds 0.22,
 		-- RecoverySeconds 0.14, Cooldown 0.44. Active+Recovery = 0.36, so the override survives only
 		-- when it is at least Cooldown - (Active+Recovery) = 0.08.
-		local ANIMATION_ID = "rbxassetid://104588315151150" -- AttackAnimations["default:Primary:Basic:1"]
+		local ANIMATION_ID = "rbxassetid://104588315151150" -- AttackAnimations' baseline Basic:1 clip
 
 		local function serveMarker(time: number): ()
 			AttackWindows.SetExtractor(function(): KeyframeSequence?

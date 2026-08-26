@@ -68,6 +68,8 @@ function CharacterSheetSystem.BuildSheet(profile: Types.PlayerProfile): Types.Ch
 		Faction = profile.faction,
 		Attributes = if profile.attributes then table.clone(profile.attributes) else nil,
 		BloodlineIds = table.clone(profile.bloodlineIds),
+		BloodlineStageProgress = table.clone(profile.bloodlineStageProgress),
+		BloodlineRerolls = profile.bloodlineRerolls,
 		Corruption = profile.corruption,
 		QiDeviationRisk = profile.qiDeviationRisk,
 		FactionStanding = profile.factionStanding,

@@ -9,11 +9,19 @@
 	Screens/DevMenu/ContentArea.lua's own `tabContent` already established.
 
 	Follows Screens/DevMenu/init.lua's "screen exposes state/signals, client module drives from
-	outside" precedent: this component owns no NetworkBridge/KeybindManager calls of its own. Every
-	row's displayed key comes from props.KeyboardBindings/GamepadBindings (owned and written by
+	outside" precedent: this component owns no binding STATE and takes no rebind action of its own.
+	Every row's displayed key comes from props.KeyboardBindings/GamepadBindings (owned and written by
 	Client/Settings/SettingsClient.lua), and clicking Rebind/Reset only ever calls the matching prop
 	callback -- the driver decides what actually happens (listening for the next InputBegan,
 	persisting the change, updating those same Bindings Values).
+
+	The one thing it does reach into KeybindManager for is Describe -- a pure "how is this binding
+	spelled" formatter over a Types.Keybind it was already handed, with no read of live state and no
+	side effect. It used to be a private formatKeybind here, along with the MouseButton1 -> "Mouse 1"
+	label map, which stopped being tenable the moment a second surface printed a key
+	(Components/KeyLegend.lua under the hotbar): how an input is spelled is a fact about
+	KeybindManager's own data, not about this tab, and two copies of it would drift the first time a
+	new input type needed a friendly name.
 
 	REBINDABLE_ACTIONS is computed once, off Constants.Keybinds.Defaults (a complete map of every
 	currently-known KeybindAction, per KeybindManager.lua's own header) filtered by the same
@@ -27,6 +35,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 
+local KeybindManager = require(script.Parent.Parent.Parent.Parent.Input.KeybindManager)
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Parent.Components.Button)
@@ -125,26 +134,6 @@ end
 
 local REBINDABLE_ACTIONS = computeRebindableActions()
 
-local MOUSE_BUTTON_LABELS: { [string]: string } = {
-	MouseButton1 = "Mouse 1",
-	MouseButton2 = "Mouse 2",
-	MouseButton3 = "Mouse 3",
-}
-
-local function formatKeybind(keybind: Types.Keybind?): string
-	if not keybind then
-		return "Unbound"
-	end
-	if keybind.KeyCode then
-		return keybind.KeyCode.Name
-	end
-	if keybind.UserInputType then
-		local name = keybind.UserInputType.Name
-		return MOUSE_BUTTON_LABELS[name] or name
-	end
-	return "Unbound"
-end
-
 local ROW_HEIGHT = Tokens.Control.RowHeight
 local SUB_TAB_HEIGHT = 32
 
@@ -166,7 +155,7 @@ local function KeybindRow(
 		if use(isListening) then
 			return "Press a key..."
 		end
-		return formatKeybind(use(bindings)[action])
+		return KeybindManager.Describe(use(bindings)[action])
 	end)
 
 	local buttonText = scope:Computed(function(use)

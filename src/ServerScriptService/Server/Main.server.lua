@@ -28,6 +28,7 @@ local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstan
 local EngineLogCapture = require(ReplicatedStorage.Shared.EngineLogCapture)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Types = require(ReplicatedStorage.Shared.Types)
+local WeaponDefenseAnimations = require(ReplicatedStorage.Shared.Defense.WeaponDefenseAnimations)
 
 local Systems = ServerRoot.Systems
 local Managers = ServerRoot.Managers
@@ -40,18 +41,26 @@ local ServerHopSystem = require(Systems.ServerHopSystem)
 local VersionWatchSystem = require(Systems.VersionWatchSystem)
 local PlayerDataSystem = require(Systems.PlayerDataSystem)
 local SettingsSystem = require(Systems.SettingsSystem)
+local ResourceGatheringSystem = require(Systems.ResourceGatheringSystem)
 local FactionManager = require(Managers.FactionManager)
 local MeridianSystem = require(Systems.MeridianSystem)
 local QiSystem = require(Systems.QiSystem)
+local EffectSystem = require(Systems.EffectSystem)
 local TierSystem = require(Systems.TierSystem)
 local BloodlineManager = require(Managers.BloodlineManager)
+local DefaultBloodlineRegistry = require(Managers.DefaultBloodlineRegistry)
 local BloodlineSystem = require(Systems.BloodlineSystem)
 local ArtTreeManager = require(Managers.ArtTreeManager)
 local ArtSystem = require(Systems.ArtSystem)
+local RaceManager = require(Managers.RaceManager)
+local RaceSystem = require(Systems.RaceSystem)
+local KitAbilitySystem = require(Systems.KitAbilitySystem)
+local KitEditorSystem = require(Systems.KitEditorSystem)
 local CharacterSheetSystem = require(Systems.CharacterSheetSystem)
 local ProgressionSystem = require(Systems.ProgressionSystem)
 local AchievementSystem = require(Systems.AchievementSystem)
 local QiDeviationSystem = require(Systems.QiDeviationSystem)
+local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 local MoveRegistryManager = require(Combat.MoveRegistryManager)
 local PlayerDeathSystem = require(Systems.PlayerDeathSystem)
 local HitboxEngine = require(Combat.HitboxEngine.HitboxEngine)
@@ -59,8 +68,13 @@ local DefenseSystem = require(Combat.Defense.DefenseSystem)
 local DamageSystem = require(Combat.Damage.DamageSystem)
 local AttackRequestSystem = require(Combat.Attack.AttackRequestSystem)
 local GrabSystem = require(Combat.Grab.GrabSystem)
+local EngagementSystem = require(Combat.Engagement.EngagementSystem)
+local WeaponVisualSystem = require(Combat.Weapon.WeaponVisualSystem)
+local WeaponInventorySystem = require(Combat.Weapon.WeaponInventorySystem)
 local ParkourSystem = require(Systems.ParkourSystem)
 local RunSystem = require(Systems.RunSystem)
+local BlimpSystem = require(Systems.BlimpSystem)
+local VehicleManager = require(Systems.VehicleManager)
 local AbsorbSystem = require(Systems.AbsorbSystem)
 local RewardSystem = require(Systems.RewardSystem)
 local RespawnSystem = require(Systems.RespawnSystem)
@@ -128,6 +142,13 @@ boot("PlayerDataSystem", PlayerDataSystem)
 --     some unrelated cluster, since nothing else in this sequence needs it running sooner or later.
 boot("SettingsSystem", SettingsSystem)
 
+-- 3c. ResourceGatheringSystem's only dependency is also PlayerDataSystem (Transform/GetProfile on
+--     Types.PlayerProfile.blimpFuel) -- boots here for the same reason SettingsSystem does. It has no
+--     dependency on BlimpSystem (step 12 below) despite feeding the same field: gathering only ever
+--     writes a player's own carried total, and BlimpSystem's depositFuel is what reads it later, so
+--     which one boots first between them is not a correctness requirement.
+boot("ResourceGatheringSystem", ResourceGatheringSystem)
+
 -- 5. Meridian XP is the resource TierSystem's tier-up checks read -- the resource has to exist
 --    before the system gating on it can meaningfully check it (software-architecture.md).
 boot("MeridianSystem", MeridianSystem)
@@ -139,12 +160,29 @@ boot("MeridianSystem", MeridianSystem)
 --    through QiSystem's public API once it's built out.
 boot("QiSystem", QiSystem)
 
+-- 6b. EffectSystem (Race Traits + Bloodline Abilities plan's generic modifier engine) needs QiSystem
+--     immediately above -- its "QiRestore" Instant effect calls QiSystem.Restore -- and nothing else:
+--     its own per-player state seeds lazily on first use rather than off PlayerDataSystem, so it has
+--     no ordering requirement relative to steps 3-5. Boots here, ahead of TierSystem, so it is already
+--     up by the time RaceSystem/RaceManager (a later phase of that plan, not yet built) land in this
+--     sequence needing both TierSystem (step 7) and this System already running. Wired but uninvoked
+--     this pass -- nothing yet calls Apply/SetBoundModifiers; see EffectSystem.lua's own header.
+boot("EffectSystem", EffectSystem)
+
 -- 7. Tier before bloodline/art: awakening and mastery gates read current tier.
 boot("TierSystem", TierSystem)
 
 -- 8. Registries (Managers) before the per-player Systems that read them.
 boot("ArtTreeManager", ArtTreeManager)
 boot("ArtSystem", ArtSystem)
+
+-- 8a. RaceManager/RaceSystem (Race Traits + Bloodline Abilities plan) -- same "registry, then the
+--     per-player System that reads it" pairing as ArtTreeManager/ArtSystem immediately above, and
+--     boots right alongside it for the same reason: nothing else in this sequence needs either
+--     running sooner or later. RaceSystem needs TierSystem (step 7) and EffectSystem (step 6b), both
+--     already up by here.
+boot("RaceManager", RaceManager)
+boot("RaceSystem", RaceSystem)
 
 -- 8b. The character sheet's replication layer -- pure projection of PlayerDataSystem's profile out
 --     to its owning client, so it needs nothing beyond step 3. Boots here, next to the progression
@@ -153,6 +191,38 @@ boot("ArtSystem", ArtSystem)
 --     before this connects would never push its sheet at all (the Init()-time GetPlayers() sweep in
 --     that module is the backstop, not the plan).
 boot("CharacterSheetSystem", CharacterSheetSystem)
+
+-- 11. QiDeviationSystem -- promised this slot back at step 6's own comment. Needs QiSystem (step 6)
+--     already running so GameplayEvents.OnQiSpent actually fires, and PlayerDataSystem (step 3) +
+--     CharacterSheetSystem (step 8b, immediately above) for the Transform/Refresh pair it uses to
+--     persist and replicate risk. ArtSystem (step 8) reads THIS System's IsLocked as a third
+--     CanUse-shaped gate despite booting first -- safe regardless of relative order, since IsLocked
+--     only ever reads a plain module-level table that starts empty at module load, the same
+--     pre-Init-safe shape QiSystem.GetQi/GetMaxQi already rely on.
+boot("QiDeviationSystem", QiDeviationSystem)
+
+-- 11b. BloodlineManager/BloodlineSystem (Race Traits + Bloodline Abilities plan) -- move out of the
+--      "PLANNED SYSTEMS" no-op loop below into a real numbered slot now that both have real Init()
+--      bodies. BloodlineSystem is the latest-dependent System this plan has landed so far: it needs
+--      QiSystem (step 6) and EffectSystem (step 6b) to spend/apply Qi effects, QiDeviationSystem
+--      (immediately above) for its own UseAbility gate, and CharacterSheetSystem (step 8b) to
+--      replicate an awakening/stage-advance -- all already up by here. BloodlineManager itself has no
+--      dependency (same "registry boots first, needs nothing" shape RaceManager/ArtTreeManager
+--      already have) but boots right alongside its one dependent rather than earlier, since nothing
+--      else in this sequence needs it running sooner.
+boot("BloodlineManager", BloodlineManager)
+-- Immediately after, and it must stay that way: this seeds the canon thirteen into the registry
+-- BloodlineManager.Init just reset to empty, and BloodlineSystem below reads that registry on its
+-- own profile-load pass.
+boot("DefaultBloodlineRegistry", DefaultBloodlineRegistry)
+boot("BloodlineSystem", BloodlineSystem)
+
+-- 11c. KitAbilitySystem -- the shared Race Trait / Bloodline Stage ability trigger remote. Boots
+--      after both RaceSystem and BloodlineSystem immediately above, which is a real ordering
+--      requirement here (unlike most "registry, then system" pairs in this file): shipping this
+--      remote before either exists would mean a request that always refuses, since Dispatch has
+--      nobody real to call into yet.
+boot("KitAbilitySystem", KitAbilitySystem)
 
 -- 12. MoveRegistryManager (the Move Creation System's live in-memory move registry --
 --     Server/Combat/MoveRegistryManager.lua) boots here -- MoveEditorSystem (step 22b) is what
@@ -170,6 +240,14 @@ boot("CharacterSheetSystem", CharacterSheetSystem)
 --     sequence reads from it -- so its position here is about where a reader expects combat to start,
 --     not about ordering. Init() only connects the Heartbeat; a server with nobody registered pays
 --     nothing for it.
+-- 11c. WeaponRoster reads Workspace.Weapons and builds every weapon's stage tables. FIRST of the
+--      combat pieces, and that ordering IS a correctness requirement rather than a readability one:
+--      DefaultMoveRegistry enumerates this roster to build its MoveId list, and caches that list on
+--      first use (see its own enumerateDescriptors header). Boot it after anything that touches the
+--      catalogue and the roster is empty at cache time -- every weapon silently has no moves, and
+--      every M1 resolves to nothing with no error anywhere.
+WeaponRoster.Start()
+
 boot("MoveRegistryManager", MoveRegistryManager)
 boot("PlayerDeathSystem", PlayerDeathSystem)
 boot("HitboxEngine", HitboxEngine)
@@ -216,6 +294,34 @@ boot("DamageSystem", DamageSystem)
 --     module's own header always said they would be.
 boot("AttackRequestSystem", AttackRequestSystem)
 
+--     PER-WEAPON PARRY CLIPS ARE WIRED HERE, IN THE BOOT SCRIPT, AND NOWHERE ELSE -- and that is the
+--     whole reason this is four lines in Main rather than a require inside DefenseSystem.
+--
+--     A parry's live window is the ParryStart/ParryClose markers on the parry CLIP
+--     (Shared/Defense/ParryWindows.lua -- there is deliberately no window length in DefenseConstants),
+--     so a weapon that authors its own Animations/PARRY clip has its own parry TIMING. Which weapon a
+--     combatant holds is the ATTACK layer's fact, published on AttackRequestSystem.OnWeaponChanged --
+--     the same public extension-point shape WeaponVisualSystem and GrabSystem already subscribe
+--     through. But DefenseSystem is the SECOND layer of the combat stack and AttackRequestSystem is
+--     the fourth, so DefenseSystem requiring it to ask "what am I holding?" would invert the stack --
+--     exactly the widened seam CLAUDE.md's combat-layering rule refuses.
+--
+--     So the composition root, which legitimately knows every layer, joins the two: Attack publishes,
+--     Shared/Defense/WeaponDefenseAnimations resolves, Defense is told. Neither layer gains a require
+--     on the other, and the resolver is the SAME one Client/Defense/DefenseClient.lua calls to pick
+--     which clip to play -- two callers of one function rather than the server trusting a client-sent
+--     id, so what the player SEES and what the server TIMES cannot drift apart.
+--
+--     The signal fires on every accepted swap AND once per character bind (see notifyWeaponChanged's
+--     own header), so a fresh life's weapon is covered without a separate spawn hookup here. A nil
+--     weaponId (sheathed) resolves to the shared baseline, which is what an unarmed player parries
+--     with. SetParryAnimation ignores an unregistered model, so a bind that beats DefenseSystem's own
+--     PlayerLifecycle registration costs nothing -- RegisterCombatant seeds the default for the new
+--     life regardless, and the next push corrects it.
+AttackRequestSystem.OnWeaponChanged(function(character: Model, weaponId: Types.WeaponId?)
+	DefenseSystem.SetParryAnimation(character, WeaponDefenseAnimations.GetParry(weaponId))
+end)
+
 --     GrabSystem is a SIBLING of AttackRequestSystem, not a fifth layer stacked on top of it -- it
 --     subscribes to DamageSystem.OnApplied (the same public extension point that module's own header
 --     names as its intended use) and is READ by AttackRequestSystem.Throw as a third CanAttack-shaped
@@ -225,6 +331,38 @@ boot("AttackRequestSystem", AttackRequestSystem)
 --     flights), so an out-of-order boot costs at most one stale frame rather than a wrong outcome. See
 --     that module's own Init() for the one assertion it does make (DamageSystem must be available).
 boot("GrabSystem", GrabSystem)
+
+--     EngagementSystem is another sibling of the same shape -- it subscribes to DamageSystem.OnApplied
+--     exactly as GrabSystem does, and is read by nobody through a require at all: it publishes the
+--     Constants.Attributes.InCombat seam and its own Engagement_Changed remote, and every consumer
+--     (Client/Parkour's combat gate, EmoteSystem's CombatAllowed refusal, the HUD engagement panel)
+--     reads one of those two. Boots after GrabSystem for readability, not correctness -- its Step
+--     reclaims only its own expired rows.
+--
+--     WORTH KNOWING WHEN READING A BUG REPORT ABOUT MOVEMENT: this is what re-arms
+--     ParkourConstants.CombatGate. Nothing has written the InCombat Attribute since the combat
+--     teardown, so Dash/Slide/Roll/Leap/WallRun have effectively been ungated for the whole life of
+--     the rebuilt stack. From this boot onward they are refused for
+--     EngagementConstants.TagDurationSeconds after every real exchange, which is the documented design
+--     intent but is a live change in feel, not just plumbing.
+boot("EngagementSystem", EngagementSystem)
+
+--     WeaponVisualSystem is a further sibling, purely cosmetic -- it subscribes to
+--     AttackRequestSystem.OnWeaponChanged (the same public extension-point shape GrabSystem's own
+--     subscription to DamageSystem.OnApplied established) to keep a Tool matching the combatant's
+--     current CombatConstants.Weapons entry (Longsword today) attached to their right hand. Boots
+--     immediately after AttackRequestSystem for the same readability reasoning as GrabSystem above --
+--     not a correctness requirement, since it owns no per-frame Step and reads no state but the
+--     signal it is handed. See its own Init() for the one assertion it makes (AttackRequestSystem must
+--     be available).
+boot("WeaponVisualSystem", WeaponVisualSystem)
+
+--     WeaponInventorySystem owns the pickup prompts and the draw/sheath toggle. AFTER
+--     WeaponVisualSystem, and that ordering is a correctness requirement rather than a readability
+--     one: a draw reaches the player's hand THROUGH that System's OnWeaponChanged subscription, so
+--     booting this first would leave the first draw of a session mutating the record and drawing
+--     nothing visible.
+boot("WeaponInventorySystem", WeaponInventorySystem)
 
 -- 12a. Parkour System -- the server authority for the client-side movement framework. Its one
 --      integration point is the pair of Humanoid Attributes it stamps (ParkourVelocityOwned, and the
@@ -248,6 +386,22 @@ boot("ParkourSystem", ParkourSystem)
 --      it must run before any System that expects a seeded BonusWalkSpeed Attribute, and nothing
 --      currently does.
 boot("RunSystem", RunSystem)
+
+-- 12c. Blimp System -- world vehicles. Boots after RunSystem because the mount's WalkSpeed lock is one
+--      more Attribute tier in RunSystem.isMovementLocked, and a mount that landed before that resolver
+--      existed would pin a player at speed 0 with nothing running to let them go again. Owns its own
+--      per-Heartbeat drive via GameplayEvents.OnHeartbeatTick, and discovers its models from
+--      CollectionService tags at Init -- so a blimp added to the place after this line still registers,
+--      and a place with no blimps in it boots this System to an empty registry at no cost.
+boot("BlimpSystem", BlimpSystem)
+
+-- 12d. Vehicle Manager -- the vehicle CATALOG (which vehicles exist, spawning and despawning them),
+--      not any vehicle's behaviour. Boots immediately after BlimpSystem because that ordering is the
+--      one real constraint it has: a spawn parents a clone whose builder-authored tags fire
+--      BlimpSystem's own GetInstanceAddedSignal, so the System that answers that signal has to
+--      already be listening. Nothing in this file's Init() calls into BlimpSystem -- the two share no
+--      require in either direction, only the tag (see VehicleManager.lua's own header).
+boot("VehicleManager", VehicleManager)
 
 -- 12b. Emote System -- EmoteUnlockService only needs PlayerDataSystem (step 3), but boots here,
 --      immediately alongside its one dependent, rather than earlier: nothing else in this sequence
@@ -307,6 +461,13 @@ boot("DevMenuSystem", DevMenuSystem)
 --      sequence depends on it existing first.
 boot("MoveEditorSystem", MoveEditorSystem)
 
+-- 22b2. KitEditorSystem (Race Traits + Bloodline Abilities plan's admin authoring tool) boots right
+--       after MoveEditorSystem, the same whitelist-gated dev-tooling cluster -- it populates
+--       RaceManager/BloodlineManager (steps 8a/11b above) from its own DataStores on boot, which is
+--       the one real ordering requirement here. Nothing else in this sequence depends on it existing
+--       first.
+boot("KitEditorSystem", KitEditorSystem)
+
 -- 22c. LiveConsoleSystem (the Live Admin Console's server half) boots right after MoveEditorSystem,
 --      the same whitelist-gated dev-tooling cluster -- its own Logger.OnEntry registration only
 --      needs Shared/Logger.lua (already required, not a System with an Init order of its own) and
@@ -336,11 +497,8 @@ boot("CharacterCreationSystem", CharacterCreationSystem)
 for _, planned in
 	{
 		{ Name = "FactionManager", Module = FactionManager },
-		{ Name = "BloodlineManager", Module = BloodlineManager },
-		{ Name = "BloodlineSystem", Module = BloodlineSystem },
 		{ Name = "ProgressionSystem", Module = ProgressionSystem },
 		{ Name = "AchievementSystem", Module = AchievementSystem },
-		{ Name = "QiDeviationSystem", Module = QiDeviationSystem },
 		{ Name = "AbsorbSystem", Module = AbsorbSystem },
 		{ Name = "RewardSystem", Module = RewardSystem },
 		{ Name = "AwakeningSystem", Module = AwakeningSystem },

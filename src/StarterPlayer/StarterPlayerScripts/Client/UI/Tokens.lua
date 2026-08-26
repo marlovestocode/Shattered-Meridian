@@ -69,6 +69,13 @@ Tokens.Color = {
 	-- CriticalBelow prop). Warning shares a swatch with AccentSecondary but keeps its own token:
 	-- "this meter is in trouble" and "this choice is permanent" shouldn't be coupled by one hue.
 	Danger = Color3.fromRGB(168, 80, 96),
+	-- The text-on-dark weight of Danger, never a fill -- exactly the relationship AccentPrimaryBright
+	-- has to AccentPrimary above, and added for the same reason that one exists. Danger is calibrated
+	-- as a FILL or a border sat on a dark surface; at that luminance it is genuinely hard to read as
+	-- text floating over open gameplay, where the background can be a daylit sky rather than a panel.
+	-- HUD/EngagementLine.lua's header records having to make this correction once already for the
+	-- accent, and rediscovering it for the red would have been the same bug a second time.
+	DangerBright = Color3.fromRGB(216, 98, 112),
 	Warning = Color3.fromRGB(196, 164, 110),
 	Positive = Color3.fromRGB(80, 136, 112),
 

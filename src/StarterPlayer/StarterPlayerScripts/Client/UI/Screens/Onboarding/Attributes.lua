@@ -488,7 +488,10 @@ local function AttributeRow(scope: Scope, field: string, props: AttributeRowProp
 						LayoutOrder = 1,
 					}),
 					Label(scope, {
-						Text = field,
+						-- The DISPLAY name, never the field key (Constants.AttributeDisplayNames). This
+						-- screen and the character menu have to agree about what an attribute is called,
+						-- and rendering the raw key here is how they stopped agreeing.
+						Text = Config.AttributeDisplayNames[field] or field,
 						Scale = "BodyLarge",
 						Size = UDim2.fromOffset(NAME_WIDTH, 20),
 						LayoutOrder = 2,

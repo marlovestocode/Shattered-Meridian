@@ -25,8 +25,18 @@
 	  would be invisible here. Press instead thickens the border (1px -> 2px), the same
 	  brightness/thickness-over-color-alone language ActionIcon's Armed state and Bar's critical
 	  stroke already use elsewhere in this UI.
-	- "Secondary": no fill, a bordered outline (Tokens.Border.Standard, brightening to .Lit on hover
-	  and AccentPrimary on press) with TextSecondary/TextPrimary copy -- the BACK button's treatment.
+	- "Secondary": a filled, bordered control -- Tokens.Color.SurfaceElevated behind
+	  Tokens.Border.Standard, going fully opaque with an AccentPrimary edge and a halo on hover, and
+	  flashing an AccentPrimary wash under the press.
+
+	  IT USED TO HAVE NO FILL AT ALL (a bare outline over TextSecondary copy), and that was the bug
+	  the user reported on 2026-08-20: "make buttons actually have interactions or obvious its a
+	  badge". A 1px outline around dim text is the same silhouette Components/StatusTag.lua's inert
+	  badges drew, so the character menu's emote grid, art actions and Back buttons all read as
+	  labels -- there was nothing to say which of the boxes on screen would do something if clicked.
+	  The two vocabularies are now structurally different (a badge is filled with NO outline; a
+	  button is outlined WITH a fill and changes on hover) -- see StatusTag.lua's own header for the
+	  other half of that split.
 
 	Primary/Secondary render their visible text through Components/TrackedLabel.lua (tracked caps)
 	instead of this TextButton's own Text property, which is left blank under a Variant -- an earlier
@@ -45,6 +55,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
+local Selection = require(script.Parent.Selection)
 local TrackedLabel = require(script.Parent.TrackedLabel)
 local Glow = require(script.Parent.Glow)
 
@@ -68,7 +79,11 @@ export type ButtonProps = {
 }
 
 local function Button(scope: Scope, props: ButtonProps): TextButton
-	local isHovering = scope:Value(false)
+	-- Pointer-over AND gamepad-selection, OR-ed into the single boolean every visual Computed
+	-- below already reads as `isHovering` -- see Components/Selection.lua for why the two stay
+	-- separate rather than both writing one Value.
+	local engagement = Selection.New(scope)
+	local isHovering = engagement.Active
 	local isPressing = scope:Value(false)
 	local disabled: UsedAs<boolean> = if props.Disabled == nil then false else props.Disabled
 	local variant = props.Variant
@@ -81,7 +96,13 @@ local function Button(scope: Scope, props: ButtonProps): TextButton
 		if variant == "Primary" then
 			return if use(disabled) then Tokens.Wash.Inset.Color else Tokens.Color.AccentPrimary
 		elseif variant == "Secondary" then
-			return Tokens.Color.Background -- never actually painted -- backgroundTransparency is 1.
+			if use(disabled) then
+				return Tokens.Color.Surface
+			end
+			-- The press flash. Hover keeps the resting surface and signals through opacity/border/
+			-- halo instead, so the two states read as different KINDS of feedback rather than as two
+			-- steps of the same one.
+			return if use(isPressing) then Tokens.Color.AccentPrimary else Tokens.Color.SurfaceElevated
 		end
 		-- Legacy (see file header): original behavior, unchanged.
 		if use(disabled) then
@@ -96,7 +117,16 @@ local function Button(scope: Scope, props: ButtonProps): TextButton
 
 	local backgroundTransparency = scope:Computed(function(use)
 		if variant == "Secondary" then
-			return 1
+			if use(disabled) then
+				return 0.55
+			elseif use(isPressing) then
+				return 0.82
+			elseif use(isHovering) then
+				return 0
+			end
+			-- Not fully opaque at rest: the control sits a readable step above the panel behind it
+			-- without becoming a slab, which leaves hover somewhere to go.
+			return 0.25
 		elseif variant == "Primary" then
 			return if use(disabled) then Tokens.Wash.Inset.Transparency else 0
 		end
@@ -112,7 +142,12 @@ local function Button(scope: Scope, props: ButtonProps): TextButton
 			-- text sitting on the bright accent fill, not as a light-on-dark label.
 			return Tokens.Color.Surface
 		elseif variant == "Secondary" then
-			return if use(isPressing) or use(isHovering) then Tokens.Color.TextPrimary else Tokens.Color.TextSecondary
+			-- Bright at REST, brighter still on hover. The old dim-until-hovered copy is what made
+			-- these read as captions; a control the player is meant to find should be legible before
+			-- they have found it.
+			return if use(isPressing) or use(isHovering)
+				then Tokens.Color.AccentPrimaryBright
+				else Tokens.Color.TextPrimary
 		end
 		return Tokens.Color.TextPrimary
 	end)
@@ -124,10 +159,8 @@ local function Button(scope: Scope, props: ButtonProps): TextButton
 		-- Secondary.
 		if use(disabled) then
 			return Tokens.Border.Hairline.Color
-		elseif use(isPressing) then
+		elseif use(isPressing) or use(isHovering) then
 			return Tokens.Color.AccentPrimary
-		elseif use(isHovering) then
-			return Tokens.Border.Lit.Color
 		end
 		return Tokens.Border.Standard.Color
 	end)
@@ -135,7 +168,16 @@ local function Button(scope: Scope, props: ButtonProps): TextButton
 		if variant == "Primary" then
 			return if use(disabled) then Tokens.Border.Standard.Transparency else 0
 		end
-		return if use(disabled) then Tokens.Border.Hairline.Transparency else 0
+		-- Secondary. The resting edge stays at the panel-border tint rather than fully opaque, so
+		-- hover has a real step to make; a border that is already at full strength cannot brighten.
+		if use(disabled) then
+			return Tokens.Border.Hairline.Transparency
+		elseif use(isPressing) then
+			return 0
+		elseif use(isHovering) then
+			return 0.15
+		end
+		return Tokens.Border.Standard.Transparency
 	end)
 	local borderThickness = scope:Computed(function(use)
 		if variant == "Primary" then
@@ -143,7 +185,7 @@ local function Button(scope: Scope, props: ButtonProps): TextButton
 			-- the background is already AccentPrimary at rest.
 			return if use(isPressing) then 2 else 1
 		end
-		return 1
+		return if use(isPressing) then 2 else 1
 	end)
 
 	local children: { Instance } = {
@@ -169,6 +211,28 @@ local function Button(scope: Scope, props: ButtonProps): TextButton
 				Color = Tokens.Color.AccentPrimary,
 				Visible = isActive,
 				Transparency = glowTransparency,
+				ZIndex = 0,
+			})
+		)
+	end
+
+	if variant == "Secondary" then
+		-- Secondary's hover halo. Invisible at rest (transparency 1) rather than conditionally built,
+		-- so it can appear and disappear with a state that changes after construction -- the same
+		-- reason Tab.lua's underline stays mounted at both states.
+		local glowTransparency = scope:Computed(function(use)
+			if use(disabled) or not (use(isHovering) or use(isPressing)) then
+				return 1
+			end
+			return if use(isPressing) then 0.55 else 0.72
+		end)
+		table.insert(
+			children,
+			Glow(scope, {
+				Color = Tokens.Color.AccentPrimary,
+				Transparency = glowTransparency,
+				Rings = 2,
+				Spread = 10,
 				ZIndex = 0,
 			})
 		)
@@ -218,11 +282,17 @@ local function Button(scope: Scope, props: ButtonProps): TextButton
 		TextColor3 = textColor,
 		Active = isActive,
 
+		[OnEvent "SelectionGained"] = function()
+			engagement.Selected:set(true)
+		end,
+		[OnEvent "SelectionLost"] = function()
+			engagement.Selected:set(false)
+		end,
 		[OnEvent "MouseEnter"] = function()
-			isHovering:set(true)
+			engagement.PointerOver:set(true)
 		end,
 		[OnEvent "MouseLeave"] = function()
-			isHovering:set(false)
+			engagement.PointerOver:set(false)
 			isPressing:set(false)
 		end,
 		[OnEvent "MouseButton1Down"] = function()

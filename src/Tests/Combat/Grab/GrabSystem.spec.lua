@@ -27,6 +27,12 @@ local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
+local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
+
+-- A real roster weapon, because the ids below have to RESOLVE through AttackCatalog -- weapons are
+-- models in Workspace.Weapons now (Shared/Combat/WeaponRoster.lua), so a spec that installs none gets
+-- a catalogue with no weapon moves in it and every lookup returns nil.
+local WEAPON = WeaponFixture.Install()[1]
 
 local FRAME = 1 / 60
 local PARRY_ANIMATION = "rbxassetid://spec-grab-parry"
@@ -36,7 +42,7 @@ local WINDOW_CLOSE = 0.3
 -- Same DebugName every case throws, same reasoning DamageSystem.spec's own MOVE_ID has: the only key
 -- the damage layer (and therefore GrabSystem, one layer further out) has for looking an attack back up
 -- is this string.
-local MOVE_ID = "default:Primary:Basic:1"
+local MOVE_ID = `default:{WEAPON}:Basic:1`
 
 -- A short, easy-to-cross hold so "auto-releases past HoldSeconds" doesn't need an enormous synthetic
 -- time skip, and throw velocities small enough that a spec asserting on state (never on real physics

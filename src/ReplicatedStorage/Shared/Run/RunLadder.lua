@@ -18,9 +18,10 @@
 	gets a wrong animation and no extra speed at all, which is the correct failure mode.
 
 	THE LADDER IS DATA, NOT BRANCHES. Every function below walks RunConstants.Stages rather than
-	testing `stage >= 2` -- which is what makes adding a fourth gear a one-line change to that array.
-	The previous two-stage implementation branched on the number in five places across three files, and
-	that is precisely why growing it to three stages was a rewrite rather than an edit.
+	testing `stage >= 2` -- which is what makes resizing the ladder a one-line change to that array. The
+	original implementation branched on the number in five places across three files, which is why growing
+	it to three stages was a rewrite rather than an edit -- and why dropping the third gear back out
+	afterwards was a single deleted entry.
 
 	Does not own: any of the numbers (Shared/Run/RunConstants.lua), when a tick happens or what the
 	conditions are (Server/Systems/RunSystem.lua resolves those from live state), or anything the
@@ -84,7 +85,7 @@ end
 -- Takes the PREVIOUS stage because every stage above the first is hysteretic: crossing INTO it takes
 -- its full ChargeSeconds, but STAYING in it only takes SustainFraction of that. Walking the ladder
 -- from the top down and returning the first stage whose requirement is met means a player who has
--- earned stage 3 is tested against stage 3's sustain floor first, and only falls to stage 2 once they
+-- earned stage 2 is tested against stage 2's sustain floor first, and only falls to stage 1 once they
 -- are genuinely below it -- rather than being re-tested from the bottom every tick and flickering
 -- between two gears at the boundary.
 --

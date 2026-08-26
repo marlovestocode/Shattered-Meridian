@@ -95,4 +95,62 @@ return function()
 			end
 		)
 	end)
+
+	describe("WheelSelection.CursorFromStick", function()
+		-- The gamepad half of the wheel. Every assertion here is about the ONE thing this conversion
+		-- exists to guarantee: that a stick pushed in a direction resolves to the segment drawn in that
+		-- same direction, through the identical GetSelectedIndex the mouse already goes through.
+		local CENTER = Vector2.new(400, 300)
+		local DEAD_ZONE = 92
+		local THRESHOLD = 0.35
+
+		it("returns the centre itself for a stick inside the threshold", function()
+			local resting = WheelSelection.CursorFromStick(CENTER, Vector2.new(0.1, 0.2), DEAD_ZONE, THRESHOLD)
+			expect(resting).to.equal(CENTER)
+			-- Which is exactly what makes 'nothing selected' a real state on a gamepad too.
+			expect(WheelSelection.GetSelectedIndex(CENTER, resting, 8, DEAD_ZONE)).to.equal(nil)
+		end)
+
+		it("places the cursor outside the dead zone for a stick past the threshold", function()
+			local cursor = WheelSelection.CursorFromStick(CENTER, Vector2.new(0, 1), DEAD_ZONE, THRESHOLD)
+			expect((cursor - CENTER).Magnitude > DEAD_ZONE).to.equal(true)
+		end)
+
+		it("flips the stick's Y so 'stick up' resolves to segment 1, not the segment opposite it", function()
+			-- A thumbstick reports +Y as up; screen space has +Y going down. Without the flip this is
+			-- segment 5 (straight down at 8 segments) and the whole wheel reads as inverted.
+			local cursor = WheelSelection.CursorFromStick(CENTER, Vector2.new(0, 1), DEAD_ZONE, THRESHOLD)
+			expect(WheelSelection.GetSelectedIndex(CENTER, cursor, 8, DEAD_ZONE)).to.equal(1)
+		end)
+
+		it("resolves right on the stick to the same segment right of centre resolves to", function()
+			local cursor = WheelSelection.CursorFromStick(CENTER, Vector2.new(1, 0), DEAD_ZONE, THRESHOLD)
+			local mouse = CENTER + Vector2.new(100, 0)
+			expect(WheelSelection.GetSelectedIndex(CENTER, cursor, 8, DEAD_ZONE)).to.equal(
+				WheelSelection.GetSelectedIndex(CENTER, mouse, 8, DEAD_ZONE)
+			)
+		end)
+
+		it("agrees with GetSegmentPosition for every segment of the wheel", function()
+			-- The round trip that actually matters: push the stick at a drawn segment, get that segment.
+			local segmentCount = 8
+			for index = 1, segmentCount do
+				local drawn = WheelSelection.GetSegmentPosition(index, segmentCount, 1)
+				-- GetSegmentPosition is in screen space (+Y down); a stick is +Y up, so it is handed the
+				-- same direction with Y flipped back.
+				local stick = Vector2.new(drawn.X, -drawn.Y)
+				local cursor = WheelSelection.CursorFromStick(CENTER, stick, DEAD_ZONE, THRESHOLD)
+				expect(WheelSelection.GetSelectedIndex(CENTER, cursor, segmentCount, DEAD_ZONE)).to.equal(index)
+			end
+		end)
+
+		it("is unaffected by how hard the stick is pushed, once past the threshold", function()
+			local light = WheelSelection.CursorFromStick(CENTER, Vector2.new(0.4, 0.4), DEAD_ZONE, THRESHOLD)
+			local hard = WheelSelection.CursorFromStick(CENTER, Vector2.new(1, 1), DEAD_ZONE, THRESHOLD)
+			expect(near((light - CENTER).Magnitude, (hard - CENTER).Magnitude)).to.equal(true)
+			expect(WheelSelection.GetSelectedIndex(CENTER, light, 8, DEAD_ZONE)).to.equal(
+				WheelSelection.GetSelectedIndex(CENTER, hard, 8, DEAD_ZONE)
+			)
+		end)
+	end)
 end

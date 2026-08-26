@@ -153,6 +153,13 @@ local candidateBuffer: { BasePart } = {}
 -- this file), so allocating only on that rare path is the right trade, not a hot-path concern.
 type ContactCandidate = { Part: BasePart, Owner: Combatant, Distance: number }
 
+-- Scratch source Dimensions for applyScaling's SizeFromAttachmentPart branch, reused across every
+-- swing that opens one -- filled with the resolved part's live Size immediately before being handed
+-- to HitboxGeometry.ScaleDimensions, and never read outside that one call. Single-threaded by
+-- construction (the engine's own Heartbeat is the only caller), same reasoning as
+-- HitboxGeometry.SCRATCH_DIMENSIONS.
+local partSizeScratch: Dimensions = HitboxTypes.DefaultDimensions()
+
 local nextCombatantId = 1
 local heartbeatTrove = Trove.New()
 
@@ -319,6 +326,21 @@ local function resolveAttachmentPart(combatant: Combatant, attachment: HitboxTyp
 	elseif attachment == "Weapon" then
 		local tool = model:FindFirstChildOfClass("Tool")
 		if tool then
+			-- Blade first: WeaponModelRegistry's Model-wrapping path already lifts a part named "Blade"
+			-- to be a direct child of the built Tool, the same promotion Handle itself gets (see that
+			-- module's wrapModel), so a real weapon equipped through the normal pipeline carries its
+			-- Blade straight into the Tool with zero extra wiring. Anchoring here rather than on Handle
+			-- is what makes a swing's hitbox track and (with SizeFromAttachmentPart) size itself off the
+			-- actual edge of the weapon instead of its grip. Searched at any depth, not just the direct
+			-- child the Model path already guarantees, as a second line of defense for the OTHER
+			-- authoring path -- a hand-authored Tool (buildMaster's passthrough case, which deliberately
+			-- does not restructure anything) that nests its own Blade a level down. Handle remains the
+			-- fallback for a weapon authored with no Blade part at all (a fist weapon, an old reskin) --
+			-- see this function's own header on why every branch here degrades rather than fails.
+			local blade = tool:FindFirstChild("Blade", true)
+			if blade and blade:IsA("BasePart") then
+				return blade
+			end
 			local handle = tool:FindFirstChild("Handle")
 			if handle and handle:IsA("BasePart") then
 				return handle
@@ -371,6 +393,29 @@ end
 local function applyScaling(record: ActiveSwing, activeElapsed: number): ()
 	local definition = record.Swing.Definition
 	local scale = evaluateScale(definition.Scaling, record.Swing.ComboStage, record.Swing.PowerLevel, activeElapsed)
+
+	-- SizeFromAttachmentPart substitutes the SOURCE dimensions ScaleDimensions reads from -- the
+	-- resolved AttachmentPart's own live Size instead of the definition's hand-authored BaseDimensions
+	-- -- so ComboStage/PowerLevel scaling still applies on top exactly as it would otherwise. Box only:
+	-- every other shape has no notion of "this part's size" (a Cone's AngleDegrees, an Arc's Radius/
+	-- InnerRadius, have no BasePart.Size equivalent), so the flag is simply inert for them. Radius/
+	-- InnerRadius/AngleDegrees still flow from BaseDimensions even in this branch -- a Box never reads
+	-- them, but copying them keeps partSizeScratch a fully-populated Dimensions rather than one with
+	-- stale leftovers from whatever swing last used it.
+	local attachmentPart = record.AttachmentPart
+	if definition.SizeFromAttachmentPart and definition.Shape == "Box" and attachmentPart.Parent then
+		local size = attachmentPart.Size
+		local sizeMultiplier = definition.SizeMultiplier or 1
+		partSizeScratch.Width = size.X * sizeMultiplier
+		partSizeScratch.Height = size.Y * sizeMultiplier
+		partSizeScratch.Length = size.Z * sizeMultiplier
+		partSizeScratch.Radius = definition.BaseDimensions.Radius
+		partSizeScratch.InnerRadius = definition.BaseDimensions.InnerRadius
+		partSizeScratch.AngleDegrees = definition.BaseDimensions.AngleDegrees
+		HitboxGeometry.ScaleDimensions(partSizeScratch, scale, record.Dimensions)
+		return
+	end
+
 	HitboxGeometry.ScaleDimensions(definition.BaseDimensions, scale, record.Dimensions)
 end
 

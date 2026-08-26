@@ -81,6 +81,10 @@ local AdminGate = require(script.Parent.Parent.Network.AdminGate)
 local MoveRegistryManager = require(script.Parent.Parent.Combat.MoveRegistryManager)
 local DefaultMoveRegistry = require(script.Parent.Parent.Combat.DefaultMoveRegistry)
 local AdminActionSystem = require(script.Parent.AdminActionSystem)
+local ArtSystem = require(script.Parent.ArtSystem)
+-- For one post-load call: an art is a move, so the moves this System loads ARE the art roster,
+-- and this is the only point in the boot where that roster is known to be complete.
+local ArtTreeManager = require(script.Parent.Parent.Managers.ArtTreeManager)
 
 local MoveEditorSystem = {}
 
@@ -178,6 +182,7 @@ local function encodeAnimations(clips: { MoveTypes.MoveAnimationClip }): { { [st
 			FadeInSeconds = clip.FadeInSeconds,
 			FadeOutSeconds = clip.FadeOutSeconds,
 			Looped = clip.Looped,
+			Priority = clip.Priority,
 			Blend = clip.Blend,
 			OnInterrupt = clip.OnInterrupt,
 		})
@@ -266,6 +271,7 @@ local function encodeMoveRecord(move: MoveTypes.MoveDefinition): { [string]: any
 		SchemaVersion = Config.SchemaVersion,
 		MoveId = move.MoveId,
 		DisplayName = move.DisplayName,
+		Description = move.Description,
 		Category = move.Category,
 		Author = move.Author,
 		CreatedAt = move.CreatedAt,
@@ -306,8 +312,32 @@ local function encodeMoveRecord(move: MoveTypes.MoveDefinition): { [string]: any
 		-- Already a flat table of numbers -- no Vector3/CFrame-style conversion needed, unlike Size.
 		encoded.Projectile = { Speed = move.Projectile.Speed, MaxRange = move.Projectile.MaxRange }
 	end
+	if move.Grab then
+		-- AttachOffset deliberately excluded -- validateGrab (MoveRegistryManager.lua) never reads it
+		-- from a candidate; it always re-derives from GrabConstants.Defaults.AttachOffset, the same
+		-- "author never edits this field" contract MoveGrabConfig's own header documents. Every other
+		-- field is already a flat number, no Vector3/CFrame-style conversion needed.
+		encoded.Grab = {
+			HoldSeconds = move.Grab.HoldSeconds,
+			ThrowUpVelocity = move.Grab.ThrowUpVelocity,
+			ThrowHorizontalVelocity = move.Grab.ThrowHorizontalVelocity,
+			ThrowImpactDamage = move.Grab.ThrowImpactDamage,
+			ThrowSelfDamage = move.Grab.ThrowSelfDamage,
+		}
+	end
 	if move.ObjectStun then
 		encoded.ObjectStun = encodeObjectStun(move.ObjectStun)
+	end
+	if move.Art then
+		-- Every field is already a flat string/number -- no Vector3/CFrame/Color3-style conversion
+		-- needed, unlike Size/Offset/ObjectStun's EffectColor above.
+		encoded.Art = {
+			TreeId = move.Art.TreeId,
+			Node = move.Art.Node,
+			QiCost = move.Art.QiCost,
+			RequiredTier = move.Art.RequiredTier,
+			Prerequisite = move.Art.Prerequisite,
+		}
 	end
 	return encoded
 end
@@ -318,7 +348,10 @@ end
 -- DecodeProfile's own reasoning). Returns nil for anything not even table-shaped; Validate itself
 -- handles every other structural failure, including a record from the v1 schema (no Dimensions, no
 -- Animations, no ObjectStun), which it reconstructs from the v1 fields this decoder still passes
--- through untouched -- see MoveRegistryManager's own dimensionsFromCandidate.
+-- through untouched -- see MoveRegistryManager's own dimensionsFromCandidate. Grab/Art need no
+-- explicit handling here (unlike Size/ObjectStun above): every one of their fields is already a
+-- flat string/number, so the table.clone below already carries them through correctly -- validateGrab/
+-- validateArt read candidate.Grab/candidate.Art directly with no Roblox-type reconstruction needed.
 local function candidateFromStoredRecord(raw: unknown): { [string]: unknown }?
 	if typeof(raw) ~= "table" then
 		return nil
@@ -752,6 +785,30 @@ local function handleResetDefaultMove(player: Player, rawMoveId: unknown): MoveT
 	return { Success = true, Move = reset }
 end
 
+-- The Move Editor toolbar's "bind to slot N" control. Thin: every real decision (is this actually
+-- an art, has the admin earned it, which slot) lives in ArtSystem.DevGrantAndEquip -- this handler
+-- only gates + shape-checks, the same split every other handler in this file already uses. A
+-- hotbar slot has exactly one owner, ArtSystem's persisted equippedArts (see that module's own
+-- header on why HotbarBindings.lua stopped being a second one), so binding here IS equipping.
+local function handleEquipArtSlot(player: Player, rawSlot: unknown, rawArtId: unknown): MoveTypes.MoveEditorActionResult
+	logger:debug("EquipArtSlot received", { player = player.Name, userId = player.UserId })
+	local allowed, reason = checkMoveEditorPreconditions(player, "EquipArtSlot")
+	if not allowed then
+		return { Success = false, Reason = reason }
+	end
+	if typeof(rawSlot) ~= "number" then
+		return { Success = false, Reason = "InvalidSlot" }
+	end
+	if rawArtId ~= nil and typeof(rawArtId) ~= "string" then
+		return { Success = false, Reason = "InvalidArtId" }
+	end
+	local equipReason = ArtSystem.DevGrantAndEquip(player, rawSlot :: number, rawArtId :: string?)
+	if equipReason then
+		return { Success = false, Reason = equipReason }
+	end
+	return { Success = true }
+end
+
 -- Freezes/unfreezes the admin's own character while their editor screen is open/closed -- reuses
 -- AdminActionSystem.SetFrozen (the exact mechanism/Humanoid Attribute an admin's own "Frozen"
 -- DevMenu toggle already drives, checked at TOP priority in Movement.ComputeDesiredWalkSpeed)
@@ -857,6 +914,14 @@ local function loadPersistedMoves(): ()
 		end
 	end
 	logger:info("loadPersistedMoves complete", { loadedCount = loadedCount })
+
+	-- Audited HERE rather than in ArtTreeManager.Init, which is the only point where the art roster
+	-- is complete -- see that function's own note. An art is a move, so "every move is loaded" and
+	-- "every art exists" are the same moment. Never fatal: a broken prerequisite should cost that art
+	-- its unlock path and show up in a log, not stop the server.
+	for _, problem in ipairs(ArtTreeManager.AuditPrerequisites()) do
+		logger:warn("Art prerequisite problem", { problem = problem })
+	end
 end
 
 -- Sibling to loadPersistedMoves above, for Default moves -- no index to page through (see
@@ -939,6 +1004,9 @@ function MoveEditorSystem.Init(): ()
 	local resetDefaultMoveRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.ResetDefaultMove)
 	resetDefaultMoveRemote.OnServerInvoke = wrapHandler("ResetDefaultMove", handleResetDefaultMove)
 
+	local equipArtSlotRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.EquipArtSlot)
+	equipArtSlotRemote.OnServerInvoke = wrapHandler("EquipArtSlot", handleEquipArtSlot)
+
 	local setEditorOpenRemote = NetworkBridge.CreateRemoteEvent(Config.RemoteNames.SetEditorOpen)
 	setEditorOpenRemote.OnServerEvent:Connect(function(player: Player, rawIsOpen: unknown)
 		local ok, errorMessage = pcall(handleSetEditorOpen, player, rawIsOpen)
@@ -959,5 +1027,16 @@ function MoveEditorSystem.Init(): ()
 
 	logger:info("MoveEditorSystem.Init() complete")
 end
+
+-- Exported specifically so this System's regression tests can exercise the DataStore encode/decode
+-- round-trip headlessly -- no live remote, no DataStore, just a MoveDefinition in and the record (or
+-- the record back out) -- the same "pure logic gets its own export" precedent every other System in
+-- this codebase already follows. This pairing is exactly what let Art/Grab silently stop persisting
+-- despite validating and working live: encodeMoveRecord forgot to write them, and nothing caught it
+-- until an admin restarted their server and found their edits gone. A round-trip test on this pair is
+-- what a new optional MoveDefinition field (the next one being Slam -- see MoveRegistryManager.lua's
+-- own note that it isn't validated/persisted yet) should be checked against before shipping.
+MoveEditorSystem.EncodeMoveRecord = encodeMoveRecord
+MoveEditorSystem.CandidateFromStoredRecord = candidateFromStoredRecord
 
 return MoveEditorSystem

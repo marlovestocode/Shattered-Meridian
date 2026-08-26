@@ -34,6 +34,7 @@ local Button = require(script.Parent.Parent.Parent.Components.Button)
 local TrackedLabel = require(script.Parent.Parent.Parent.Components.TrackedLabel)
 local Graph = require(script.Parent.Parent.Parent.Components.Graph)
 local DraftBinding = require(script.Parent.DraftBinding)
+local EditorTokens = require(script.Parent.EditorTokens)
 
 local Children = Fusion.Children
 
@@ -55,12 +56,15 @@ local TILE_HEIGHT = 46
 local TILE_COLUMNS = 3
 local GRAPH_HEIGHT = 150
 
-local PROJECTED_COLOR = Color3.fromRGB(150, 130, 235)
-local MEASURED_COLOR = Color3.fromRGB(120, 210, 170)
+-- Series identity comes from EditorTokens, not from literals here: Primary was byte-identical to
+-- PROJECTED_COLOR one line above it and to AnimationTimelineEditor.lua's own first clip colour, in
+-- three separate places, with nothing saying they were meant to be the same colour.
+local PROJECTED_COLOR = EditorTokens.StatsSeries.Projected
+local MEASURED_COLOR = EditorTokens.StatsSeries.Measured
 local SOURCE_COLORS: { [string]: Color3 } = {
-	Primary = Color3.fromRGB(150, 130, 235),
-	ObjectStun = Color3.fromRGB(225, 170, 110),
-	FollowUp = Color3.fromRGB(200, 130, 180),
+	Primary = EditorTokens.StatsSeries.Primary,
+	ObjectStun = EditorTokens.StatsSeries.ObjectStun,
+	FollowUp = EditorTokens.StatsSeries.FollowUp,
 }
 
 local StatsPanelModule = {}
@@ -332,10 +336,14 @@ function StatsPanelModule.Build(scope: Scope, props: StatsPanelProps): { Instanc
 			if not current then
 				return {}
 			end
+			-- EditorTokens.Phase, like every other surface in this editor that shows a phase. These
+			-- three were still grey/violet/bronze -- the pre-reference palette AnimationTimelineEditor
+			-- moved off when EditorTokens.Phase was introduced -- which left the same three phases
+			-- reading as two different colour schemes depending on which panel you were looking at.
 			local colors: { [string]: Color3 } = {
-				Windup = Tokens.Color.TextDisabled,
-				Active = Tokens.Color.AccentPrimary,
-				Recovery = Tokens.Color.AccentSecondary,
+				Windup = EditorTokens.Phase.Windup,
+				Active = EditorTokens.Phase.Active,
+				Recovery = EditorTokens.Phase.Recovery,
 			}
 			local bars: { Graph.GraphBar } = {}
 			for _, slice in ipairs(current.PhaseBreakdown) do

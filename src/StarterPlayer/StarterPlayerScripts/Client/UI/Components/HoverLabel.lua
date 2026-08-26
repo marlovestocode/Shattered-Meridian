@@ -6,9 +6,9 @@
 	FlagSuspected/Overflow buttons already carry a real accessible `Text` label (see that file's own
 	header) that renders fully transparent for screen-reader/gamepad-nav purposes only. Nothing ever
 	showed that text to a sighted mouse user on hover -- this is the fix, and it's deliberately a
-	SCOPED-DOWN tooltip: a plain Surface/BorderSubtle tile + Caption text, faded in with the same
-	one-shot entrance convention StatusBanner/PostureBreakBanner already use (Tokens.Motion.
-	FadeSpring). No rich styling, no elaborate transitions, no premium visual treatment.
+	SCOPED-DOWN tooltip: a plain Surface tile with a Tokens.Border.Standard edge + Caption text,
+	faded in with the same one-shot entrance convention StatusBanner/PostureBreakBanner already use
+	(Tokens.Motion.FadeSpring). No rich styling, no elaborate transitions, no premium visual treatment.
 
 	Does not own hover-tracking -- callers pass their own existing hover Value (e.g. ActionIcon.lua's
 	isHovering) as Visible. This file never starts its own MouseEnter/MouseLeave listeners; reusing
@@ -116,6 +116,15 @@ local function HoverLabel(scope: Scope, props: HoverLabelProps): Frame
 		return 1 - use(fadeIn)
 	end)
 
+	-- The border composes the fade-in with Tokens.Border.Standard's own translucency (rather than
+	-- drawing it fully opaque at rest) -- alpha-multiply the two so a fully-shown tooltip still gets
+	-- the same hairline weight every other panel edge uses, and a hidden one still reaches fully
+	-- transparent.
+	local borderTransparency = scope:Computed(function(use)
+		local standardAlpha = 1 - Tokens.Border.Standard.Transparency
+		return 1 - use(fadeIn) * standardAlpha
+	end)
+
 	return scope:New "Frame" {
 		Name = "HoverLabel",
 		AnchorPoint = Vector2.new(0, 1),
@@ -138,9 +147,9 @@ local function HoverLabel(scope: Scope, props: HoverLabelProps): Frame
 				CornerRadius = Tokens.Radius.Sharp,
 			},
 			scope:New "UIStroke" {
-				Color = Tokens.Color.BorderSubtle,
+				Color = Tokens.Border.Standard.Color,
 				Thickness = 1,
-				Transparency = contentTransparency,
+				Transparency = borderTransparency,
 			},
 			scope:New "UIPadding" {
 				PaddingTop = UDim.new(0, PADDING_Y),

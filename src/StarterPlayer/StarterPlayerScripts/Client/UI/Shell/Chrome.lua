@@ -107,6 +107,19 @@
 	error -- both because BindEscape's own close edge fires on a screen this file just closed, so the
 	second pop is the NORMAL case rather than a defensive one.
 
+	ButtonB IS A SECOND KEY INTO THIS SAME STACK, NOT A SECOND STACK. A gamepad's "back" is the same
+	sentence Escape already is -- dismiss the topmost thing -- so it is one more KeyCode on this
+	file's own connection rather than a parallel arbiter registered in Shell/Focus.lua. A separate
+	gamepad Back stack would reproduce, exactly, the four-independent-handlers bug the paragraphs
+	above describe, only with the two stacks now also able to disagree about ORDER.
+
+	ButtonB IS ALSO Dash, AND THE TWO DO NOT COLLIDE, because they are never both live. Dash is bound
+	on the "Gameplay" layer, which Client/Input/InputRouter.lua drops entirely while
+	Constants.Attributes.UiModalOpen is set; and an empty stack makes HandleEscape a no-op (see the
+	sinkability note above). So ButtonB with a panel open is Back and only Back, ButtonB with nothing
+	open is Dash and only Dash, and neither needs to know about the other. Unlike Escape, ButtonB is
+	NOT sunk by Roblox at the CoreGui level, so this really is the whole arbitration for it.
+
 	A FOCUSED TextBox WINS, AND IT WINS HERE RATHER THAN IN THE BUG REPORT FORM. Escape while a field
 	has focus means "give up on this field", and Roblox's own TextBox already does that. The plan put
 	the check in BugReportClient because that is the screen with the obvious multi-line field; it is
@@ -123,6 +136,12 @@ local peek = Fusion.peek
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
+
+-- The two keys that mean "dismiss the topmost thing" -- see the ButtonB note in this file's header.
+local DISMISS_KEYCODES: { [Enum.KeyCode]: boolean } = {
+	[Enum.KeyCode.Escape] = true,
+	[Enum.KeyCode.ButtonB] = true,
+}
 
 -- One entry on the Escape stack. Not exported: the identity of the table is what Pop finds, so
 -- handing one out would let a caller hold something that looks like a handle and is not one.
@@ -314,7 +333,7 @@ function Chrome.New(scope: Scope, props: ChromeProps): ChromeHandle
 	table.insert(
 		scope,
 		UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-			if gameProcessed or input.KeyCode ~= Enum.KeyCode.Escape then
+			if gameProcessed or not DISMISS_KEYCODES[input.KeyCode] then
 				return
 			end
 			if UserInputService:GetFocusedTextBox() ~= nil then

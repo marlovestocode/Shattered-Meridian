@@ -94,6 +94,33 @@ return function()
 		end)
 	end)
 
+	describe("ToEngineAttackDefinition -- weapon attachment", function()
+		it("defaults an unauthored move to Root, exactly as before this field existed", function()
+			local definition = MoveTypes.ToEngineAttackDefinition(makeMove())
+			expect(definition.AttachmentPart).to.equal("Root")
+			expect(definition.SizeFromAttachmentPart).to.equal(false)
+		end)
+
+		it("carries an authored Weapon attachment across and opts into part-derived sizing", function()
+			local definition = MoveTypes.ToEngineAttackDefinition(makeMove({ AttachmentPart = "Weapon" }))
+			expect(definition.AttachmentPart).to.equal("Weapon")
+			expect(definition.SizeFromAttachmentPart).to.equal(true)
+		end)
+
+		it("leaves SizeFromAttachmentPart off for a hand/root attachment even if authored", function()
+			for _, attachmentPart in { "Root", "RightHand", "LeftHand" } do
+				local definition = MoveTypes.ToEngineAttackDefinition(makeMove({ AttachmentPart = attachmentPart }))
+				expect(definition.SizeFromAttachmentPart).to.equal(false)
+			end
+		end)
+
+		it("carries SizeMultiplier through unchanged, nil when unauthored", function()
+			expect(MoveTypes.ToEngineAttackDefinition(makeMove()).SizeMultiplier).to.equal(nil)
+			local definition = MoveTypes.ToEngineAttackDefinition(makeMove({ SizeMultiplier = 1.4 }))
+			expect(definition.SizeMultiplier).to.equal(1.4)
+		end)
+	end)
+
 	describe("ToEngineAttackDefinition -- shapes that map exactly", function()
 		it("renames a box's Depth to the engine's Length", function()
 			-- THE ONE GENUINE VOCABULARY CLASH. HitboxShapes calls a box's forward extent Depth and

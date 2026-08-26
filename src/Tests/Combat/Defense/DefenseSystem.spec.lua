@@ -329,6 +329,66 @@ return function()
 		end)
 	end)
 
+	-- The seam per-weapon parry clips arrive through. Server/Main.server.lua subscribes to
+	-- AttackRequestSystem.OnWeaponChanged and calls SetParryAnimation with
+	-- WeaponDefenseAnimations.GetParry(weaponId), so a weapon swap is a WINDOW swap -- these cases are
+	-- what keep that true. See that function's own header for why the wiring lives in the boot script.
+	describe("DefenseSystem -- SetParryAnimation", function()
+		-- Opens later than PARRY_ANIMATION's 0, so which clip is armed is observable from the state
+		-- alone: a window open at 0 chains through Raising within the press, one open later does not.
+		local LATE_ANIMATION = "rbxassetid://spec-parry-late"
+
+		-- The two halves are separate cases on separate bodies rather than one press-swap-press
+		-- sequence, because releasing inside a LIVE window deliberately does not close it (a released
+		-- tap can still parry) -- so a second press on the same body would hit Press's own "already
+		-- guarding" early return and report the first window's state, proving nothing about the swap.
+		it("arms the spawn-time clip's window when nothing has re-pointed it", function()
+			local base = os.clock()
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			-- PARRY_ANIMATION's window opens at 0, so the press chains through Raising within the call.
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			expect(DefenseSystem.GetState(defender.Model)).to.equal("ParryWindow")
+		end)
+
+		it("arms the window of the clip it was pointed at, not the one it registered with", function()
+			local base = os.clock()
+			ParryWindows.Register(LATE_ANIMATION, 0.2, 0.5)
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			-- Same press, same instant, on a body re-pointed at a clip whose window opens 0.2s in: still
+			-- Raising rather than live. The ONLY difference from the case above is the swapped clip.
+			DefenseSystem.SetParryAnimation(defender.Model, LATE_ANIMATION)
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			expect(DefenseSystem.GetState(defender.Model)).to.equal("Raising")
+		end)
+
+		-- A weapon with no PARRY clip of its own resolves to a blank id rather than to nothing, so this
+		-- is a real argument the boot wiring can pass, not a defensive check against a caller mistake.
+		it("fail-closes on a blank id -- the guard still raises, no window opens", function()
+			local base = os.clock()
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			DefenseSystem.SetParryAnimation(defender.Model, "")
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			expect(DefenseSystem.GetState(defender.Model)).to.equal("Blocking")
+		end)
+
+		-- The boot subscription fires on character bind, which can beat this System's own
+		-- PlayerLifecycle registration. Silently ignoring an unregistered model is what makes that
+		-- ordering a non-issue rather than a race to get right.
+		it("ignores a model it has no registration for", function()
+			local stray = Instance.new("Model")
+			stray.Name = "Unregistered"
+			stray.Parent = Workspace
+			table.insert(spawned, stray)
+
+			expect(function()
+				DefenseSystem.SetParryAnimation(stray, PARRY_ANIMATION)
+			end).never.to.throw()
+		end)
+	end)
+
 	describe("DefenseSystem -- registration", function()
 		it("reports an unregistered target's contacts as Clean rather than dropping them", function()
 			local base = os.clock()

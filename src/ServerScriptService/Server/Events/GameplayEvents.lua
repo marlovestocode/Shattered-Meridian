@@ -55,9 +55,14 @@
 	documentation, not runtime machinery, and nothing enforces it but this sentence.
 
 	  PlayerKilled     -> RespawnSystem (new body), CombatSystem (its own kill-feed remote),
-	                      RivalrySystem (standings), BountySystem (auto-claim), MeridianSystem (XP)
+	                      RivalrySystem (standings), BountySystem (auto-claim), MeridianSystem (XP),
+	                      BloodlineSystem (interim awakening/stage-advancement dispatch)
 	  MeridianXPAwarded-> TierSystem (promotion check)
-	  TierChanged      -> QiSystem (recompute the Max Qi ceiling for the new tier)
+	  TierChanged      -> QiSystem (recompute the Max Qi ceiling for the new tier),
+	                      RaceSystem (recompute Bound trait effects)
+	  QiSpent          -> QiDeviationSystem (deviation risk accrual/decay)
+	  BloodlineAwakened-> (no subscriber yet -- carried for a future notification/achievement hook)
+	  CombatLogged     -> (no subscriber yet -- EngagementSystem reports the fact, nothing punishes it)
 	  TrainingBotKilled-> TrainingBotSystem (respawn scheduling)
 	  TrainingBotDespawned -> TrainingBotSystem, BotCombat (per-bot AI state cleanup)
 	  HeartbeatTick    -> QiSystem (passive regen)
@@ -144,6 +149,76 @@ function GameplayEvents.OnTierChanged(
 	handler: (player: Player, newTier: number, previousTier: number) -> ()
 ): RBXScriptConnection
 	return tierChangedSignal.Event:Connect(handler)
+end
+
+-- Fired once per successful QiSystem.Spend -- never for a refund, and never for a spend that was
+-- refused (QiSystem.Spend returns false and fires nothing in that case). `remaining`/`max` are the
+-- POST-spend values, so a subscriber never has to re-derive "how close to empty did this leave
+-- them" from `amount` alone.
+--
+-- Deliberately a signal rather than QiSystem calling QiDeviationSystem directly: QiSystem's own
+-- header refuses to own Deviation risk/trigger/consequence, and the payload here carries only raw
+-- facts (what was spent, what's left) -- what counts as "overreach" and what a Deviation costs are
+-- entirely QiDeviationSystem's/QiDeviationConstants.lua's business, per this file's own "carries
+-- facts, not meaning" contract.
+local qiSpentSignal = Instance.new("BindableEvent")
+
+function GameplayEvents.FireQiSpent(player: Player, amount: number, remaining: number, max: number, reason: string?): ()
+	qiSpentSignal:Fire(player, amount, remaining, max, reason)
+end
+
+function GameplayEvents.OnQiSpent(handler: (
+	player: Player,
+	amount: number,
+	remaining: number,
+	max: number,
+	reason: string?
+) -> ()): RBXScriptConnection
+	return qiSpentSignal.Event:Connect(handler)
+end
+
+-- Fired once per successful BloodlineSystem.Awaken -- AFTER PlayerDataSystem.Transform has already
+-- committed bloodlineIds/bloodlineStageProgress together (BloodlineSystem.Awaken's own header on why
+-- those two fields are written in one Transform, never one without the other), the same "fires only
+-- once state is already consistent" shape MeridianXPAwarded above establishes. A refused Awaken
+-- (already awakened, unknown bloodline, profile not loaded) fires nothing.
+--
+-- No subscriber yet -- carried for a future notification/achievement hook, the same "publish the fact,
+-- let interested Systems decide their own response" reasoning this file's own header gives throughout.
+local bloodlineAwakenedSignal = Instance.new("BindableEvent")
+
+function GameplayEvents.FireBloodlineAwakened(player: Player, bloodlineId: string, reason: string?): ()
+	bloodlineAwakenedSignal:Fire(player, bloodlineId, reason)
+end
+
+function GameplayEvents.OnBloodlineAwakened(
+	handler: (player: Player, bloodlineId: string, reason: string?) -> ()
+): RBXScriptConnection
+	return bloodlineAwakenedSignal.Event:Connect(handler)
+end
+
+-- Fired when a player disconnects while their combat tag is still live (Server/Combat/Engagement/
+-- EngagementSystem.lua). `opponentName` is the last combatant they exchanged with; `opponentUserId`
+-- is nil when that opponent was not a Player, and also when the opponent had ALREADY left -- see
+-- EngagementSystem's PlayerRemoving scrub, which drops a departed player's UserId from every other
+-- engagement while leaving the name intact.
+--
+-- A FACT, NOT A PUNISHMENT, and the distinction is the reason this is a signal at all rather than a
+-- method call. Whether combat logging deserves a penalty -- and whether that penalty is a persisted
+-- record, a respawn delay, or a standings hit -- is a design decision belonging to whichever System
+-- eventually makes it, exactly as this file's header describes. EngagementSystem publishes and warns
+-- (which reaches the F5 Live Console capture ring) and does nothing else. NOTHING SUBSCRIBES TODAY,
+-- and that is the deliberate state, not an unfinished wire.
+local combatLoggedSignal = Instance.new("BindableEvent")
+
+function GameplayEvents.FireCombatLogged(player: Player, opponentName: string, opponentUserId: number?): ()
+	combatLoggedSignal:Fire(player, opponentName, opponentUserId)
+end
+
+function GameplayEvents.OnCombatLogged(
+	handler: (player: Player, opponentName: string, opponentUserId: number?) -> ()
+): RBXScriptConnection
+	return combatLoggedSignal.Event:Connect(handler)
 end
 
 --

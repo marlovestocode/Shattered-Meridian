@@ -223,6 +223,18 @@ end
 -- GrabConstants.Defaults.AttachOffset, the same "the server decides what the numbers mean" posture
 -- the move's own top-level Offset already takes for its translation, just total here rather than
 -- partial since no legitimate candidate should ever disagree with this default.
+-- Long enough for a real paragraph of intent, short enough that a pasted essay cannot bloat every
+-- DataStore read of this move. Truncation is silent because the editor's own field caps input at
+-- the same number, so the only way to reach this is a hand-crafted payload.
+local MAX_DESCRIPTION_LENGTH = 400
+
+local function readDescription(raw: unknown): string
+	if typeof(raw) ~= "string" then
+		return ""
+	end
+	return string.sub(raw :: string, 1, MAX_DESCRIPTION_LENGTH)
+end
+
 local function validateGrab(raw: unknown): (MoveTypes.MoveGrabConfig?, string?)
 	if raw == nil then
 		return nil, nil
@@ -719,6 +731,11 @@ function MoveRegistryManager.Validate(
 	local validated: MoveTypes.MoveDefinition = {
 		MoveId = raw.MoveId :: string,
 		DisplayName = raw.DisplayName :: string,
+		-- TRUNCATED, never rejected, and absent is legal. Description is a note an author writes for
+		-- themselves -- the "in-range values clamp, structural errors reject" split this file follows
+		-- everywhere else puts an over-long one squarely on the clamp side, and every record persisted
+		-- before this field existed has to keep validating unchanged.
+		Description = readDescription(raw.Description),
 		Category = raw.Category :: string,
 		Author = raw.Author :: string,
 		CreatedAt = raw.CreatedAt :: number,

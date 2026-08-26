@@ -360,7 +360,7 @@ end
 -- The wall-run cadence, evaluated alongside the ordinary footstep one below but entirely independent
 -- of it (see lastWallRunStepClock's own comment for why they cannot share a clock). Fixed interval
 -- rather than speed-scaled: WallRun.Speed is a single authored value the whole run holds close to
--- (unlike the ground ladder's three gears), so there is no equivalent "measured speed" signal worth
+-- (unlike the ground ladder's two gears), so there is no equivalent "measured speed" signal worth
 -- deriving a cadence from the way ParkourMath.StepInterval does for ordinary running.
 local function stepWallRun(): ()
 	local wallRunning = parkourStateId == "WallRunning"

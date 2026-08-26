@@ -45,14 +45,27 @@ export type TextFieldProps = {
 	-- (the Move Editor's PropertyEditor) that wants to commit an edit once the admin is done typing
 	-- rather than on every keystroke (the two-way Text binding above already updates live for local
 	-- display; this is only for callers that also need a "done editing" moment).
-	OnFocusLost: ((text: string) -> ())?,
+	--
+	-- `enterPressed` and `cause` are Roblox's own FocusLost arguments, forwarded rather than dropped:
+	-- "the author pressed Enter", "the author clicked away" and "the author pressed Escape" are three
+	-- different intentions, and a caller that treats an abandoned entry as a commit silently saves
+	-- something nobody asked for. `cause` is nil when focus was released programmatically
+	-- (TextBox:ReleaseFocus) rather than by an input. Callers that only need the text ignore both.
+	OnFocusLost: ((text: string, enterPressed: boolean, cause: InputObject?) -> ())?,
 }
 
 local function TextField(scope: Scope, props: TextFieldProps): TextBox
 	local isFocused = scope:Value(false)
 
 	local borderColor = scope:Computed(function(use)
-		return if use(isFocused) then Tokens.Color.AccentPrimary else Tokens.Color.BorderSubtle
+		return if use(isFocused) then Tokens.Color.AccentPrimary else Tokens.Border.Standard.Color
+	end)
+
+	-- Focused draws the accent fully opaque (unchanged); resting uses Tokens.Border.Standard's own
+	-- translucency instead of assuming opaque, since Standard.Color alone at full opacity would read
+	-- as a bright violet outline rather than the intended quiet, unfocused edge.
+	local borderTransparency = scope:Computed(function(use)
+		return if use(isFocused) then 0 else Tokens.Border.Standard.Transparency
 	end)
 
 	local multiline = props.Multiline == true
@@ -79,10 +92,10 @@ local function TextField(scope: Scope, props: TextFieldProps): TextBox
 		[OnEvent "Focused"] = function()
 			isFocused:set(true)
 		end,
-		[OnEvent "FocusLost"] = function()
+		[OnEvent "FocusLost"] = function(enterPressed: boolean, cause: InputObject?)
 			isFocused:set(false)
 			if props.OnFocusLost then
-				props.OnFocusLost(peek(props.Text))
+				props.OnFocusLost(peek(props.Text), enterPressed, cause)
 			end
 		end,
 		[OnChange "Text"] = function(newText: string)
@@ -111,6 +124,7 @@ local function TextField(scope: Scope, props: TextFieldProps): TextBox
 			scope:New "UIStroke" {
 				Color = borderColor,
 				Thickness = 1,
+				Transparency = borderTransparency,
 			},
 		},
 	} :: TextBox

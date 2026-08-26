@@ -100,7 +100,9 @@ local function makeState(overrides: { [string]: any }?): CombatState
 		basicComboLanded = 0,
 		basicComboExpiry = 0,
 
-		equippedWeaponId = CombatConstants.Weapons.Default,
+		-- A literal: weapons come from Workspace.Weapons now and this legacy CombatState fixture never
+		-- resolves the id against the roster, it only needs the field populated.
+		equippedWeaponId = "TestBlade",
 		weaponSwapReadyAt = 0,
 		bufferedAttack = nil,
 

@@ -8,9 +8,12 @@
 --
 -- Asserts against the REAL catalogue rather than a stubbed one: the whole point of the module is that
 -- it discovers a string's length by probing what is actually authored, so a fake registry would test
--- the probe against itself. That does mean these cases read Constants.Combat.Weapons' real stage
--- counts -- so they assert the SHAPE ("the last stage wraps", "one past the end is stage 1") wherever
--- possible, and pin a literal count in exactly one place, where a changed count SHOULD fail loudly.
+-- the probe against itself. The weapons themselves come from TestHelpers/WeaponFixture (models in
+-- Workspace.Weapons -- see Shared/Combat/WeaponRoster.lua), because a weapon is a DataModel fact now
+-- rather than a constant; the stage COUNTS those weapons carry are still the real authored ones off
+-- CombatConstants.Weapons.Baseline, so these cases assert the SHAPE ("the last stage wraps", "one past
+-- the end is stage 1") wherever possible and pin a literal count in exactly one place, where a changed
+-- count SHOULD fail loudly.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -18,6 +21,14 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local AttackCatalog = require(ServerScriptService.Server.Combat.AttackCatalog)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local SwingSequencer = require(ServerScriptService.Server.Combat.Attack.SwingSequencer)
+local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
+
+-- Installed once for the whole file (not per case) -- building a roster invalidates the catalogue's
+-- descriptor cache, and doing that between cases would be pure overhead for a fixture none of them
+-- mutate. FIRST_WEAPON is the roster's own first entry, which is what a fresh combatant starts on.
+local ROSTER = WeaponFixture.Install()
+local FIRST_WEAPON = ROSTER[1]
+local SECOND_WEAPON = ROSTER[2]
 
 local T = 1000
 local RESET = AttackConstants.Sequence.ResetSeconds
@@ -39,7 +50,13 @@ local function sweepFully(): ()
 end
 
 -- A bare Model is all this module ever touches -- it keys by attacker and never reads a rig.
-local function makeAttacker(name: string): Model
+--
+-- ARMED ON CREATION, because a fresh record is now EMPTY-HANDED: a combatant holds nothing until
+-- something draws a weapon for them (Server/Combat/Weapon/WeaponInventorySystem.lua), so a bare Model
+-- resolves no swings at all. Every case below is about the STRING rather than about being armed, so
+-- arming is fixture work rather than something each case restates. The one case that IS about starting
+-- state calls makeUnarmedAttacker instead.
+local function makeUnarmedAttacker(name: string): Model
 	local model = Instance.new("Model")
 	model.Name = name
 	model.Parent = workspace
@@ -47,11 +64,18 @@ local function makeAttacker(name: string): Model
 	return model
 end
 
--- How many stages the Primary Basic string actually has, discovered the same way the module does.
-local function primaryBasicCount(): number
+local function makeAttacker(name: string): Model
+	local model = makeUnarmedAttacker(name)
+	SwingSequencer.SetWeapon(model, FIRST_WEAPON, T)
+	return model
+end
+
+-- How many stages the first roster weapon's Basic string actually has, discovered the same way the
+-- module does.
+local function firstWeaponBasicCount(): number
 	local count = 0
 	for index = 1, AttackConstants.Sequence.MaxStageProbe do
-		if not AttackCatalog.Has(`default:Primary:Basic:{index}`) then
+		if not AttackCatalog.Has(`default:{FIRST_WEAPON}:Basic:{index}`) then
 			break
 		end
 		count = index
@@ -72,7 +96,7 @@ local function throwBasic(model: Model, times: number, comboStage: number): Swin
 	for index = 1, times do
 		local at = T + (index - 1) * 0.2
 		local resolution = SwingSequencer.Resolve(model, "Basic", comboStage, at)
-		assert(resolution ~= nil, "the Primary Basic string must resolve")
+		assert(resolution ~= nil, "the first weapon's Basic string must resolve")
 		last = resolution :: SwingSequencer.Resolution
 		SwingSequencer.Advance(model, "Basic", last, NO_COMMITMENT, at)
 	end
@@ -90,27 +114,36 @@ return function()
 	end)
 
 	describe("SwingSequencer -- the authored move set it probes", function()
-		it("finds the Primary Basic string by probing the catalogue, not by reading a count", function()
-			-- The one place a literal count is pinned. If Constants.Combat.Weapons.Primary.Stages.Basic
+		it("finds the first weapon's Basic string by probing the catalogue, not by reading a count", function()
+			-- The one place a literal count is pinned. If CombatConstants.Weapons.Baseline.Stages.Basic
 			-- ever grows or shrinks, this is the test that should say so -- every other case below is
 			-- written against the discovered count so it survives a retune.
-			expect(primaryBasicCount()).to.equal(3)
+			expect(firstWeaponBasicCount()).to.equal(3)
 		end)
 
 		it("returns nil for a string the weapon has no authored stages for", function()
-			-- Not reachable through the two real weapons today, so it is asserted through SetWeapon
-			-- refusing an id that is not in the swap order at all -- the same "do not substitute
+			-- Not reachable through the fixture's weapons, so it is asserted through SetWeapon
+			-- refusing an id the roster does not know at all -- the same "do not substitute
 			-- something" contract AttackCatalog.Get keeps for an unknown MoveId.
 			local attacker = makeAttacker("NoSuchWeapon")
 			expect(SwingSequencer.SetWeapon(attacker, "Tertiary" :: any, T)).to.equal(false)
-			expect(SwingSequencer.GetWeapon(attacker)).to.equal(AttackConstants.Weapons.Default)
+			expect(SwingSequencer.GetWeapon(attacker)).to.equal(FIRST_WEAPON)
 		end)
 	end)
 
 	describe("SwingSequencer -- a fresh combatant", function()
-		it("starts on the default weapon", function()
-			local attacker = makeAttacker("Fresh")
-			expect(SwingSequencer.GetWeapon(attacker)).to.equal(AttackConstants.Weapons.Default)
+		it("starts EMPTY-HANDED, holding nothing until something arms them", function()
+			-- The property the whole pickup/draw loop rests on: spawning does not hand anybody a
+			-- weapon. A combatant with no weapon resolves no swings, which is what makes "sheathed"
+			-- need no gate of its own -- see WeaponInventorySystem's own header.
+			local attacker = makeUnarmedAttacker("Fresh")
+			expect(SwingSequencer.GetWeapon(attacker)).to.equal(nil)
+			expect(SwingSequencer.Resolve(attacker, "Basic", 1, T)).to.equal(nil)
+		end)
+
+		it("resolves once armed", function()
+			local attacker = makeAttacker("Armed")
+			expect(SwingSequencer.GetWeapon(attacker)).to.equal(FIRST_WEAPON)
 		end)
 
 		it("resolves its first Basic press to stage 1", function()
@@ -118,12 +151,34 @@ return function()
 			local resolution = SwingSequencer.Resolve(attacker, "Basic", 1, T)
 			expect(resolution).to.be.ok()
 			expect((resolution :: SwingSequencer.Resolution).StageIndex).to.equal(1)
-			expect((resolution :: SwingSequencer.Resolution).MoveId).to.equal("default:Primary:Basic:1")
+			expect((resolution :: SwingSequencer.Resolution).MoveId).to.equal(`default:{FIRST_WEAPON}:Basic:1`)
 		end)
 
 		it("reports no string in progress before anything is thrown", function()
 			local attacker = makeAttacker("Untouched")
 			expect(SwingSequencer.GetStageIndex(attacker, "Basic", T)).to.equal(0)
+		end)
+	end)
+
+	describe("SwingSequencer.ClearWeapon", function()
+		it("empties the hands and stops resolving -- the whole of what sheathing is", function()
+			local attacker = makeAttacker("Sheathing")
+			expect(SwingSequencer.Resolve(attacker, "Basic", 1, T)).to.be.ok()
+
+			SwingSequencer.ClearWeapon(attacker, T)
+			expect(SwingSequencer.GetWeapon(attacker)).to.equal(nil)
+			expect(SwingSequencer.Resolve(attacker, "Basic", 1, T)).to.equal(nil)
+		end)
+
+		it("abandons the string, so re-drawing starts at stage 1 rather than mid-combo", function()
+			local attacker = makeAttacker("Redrawn")
+			throwBasic(attacker, 2, 1)
+
+			SwingSequencer.ClearWeapon(attacker, T)
+			SwingSequencer.SetWeapon(attacker, FIRST_WEAPON, T)
+
+			local resolution = SwingSequencer.Resolve(attacker, "Basic", 1, T)
+			expect((resolution :: SwingSequencer.Resolution).StageIndex).to.equal(1)
 		end)
 	end)
 
@@ -142,7 +197,7 @@ return function()
 	describe("SwingSequencer -- an unbroken string", function()
 		it("advances one stage per accepted throw", function()
 			local attacker = makeAttacker("Stringing")
-			local count = primaryBasicCount()
+			local count = firstWeaponBasicCount()
 			for index = 1, count do
 				local at = T + (index - 1) * 0.2
 				local resolution = SwingSequencer.Resolve(attacker, "Basic", 1, at)
@@ -155,7 +210,7 @@ return function()
 			-- comboStage 1 is below Finisher.MinComboStage, so completing the string wraps rather than
 			-- tipping into the finisher. This is the whiffing player's experience: the string cycles.
 			local attacker = makeAttacker("Wrapping")
-			local count = primaryBasicCount()
+			local count = firstWeaponBasicCount()
 			throwBasic(attacker, count, 1)
 			local wrapped = SwingSequencer.Resolve(attacker, "Basic", 1, T + count * 0.2)
 			expect((wrapped :: SwingSequencer.Resolution).StageIndex).to.equal(1)
@@ -200,7 +255,7 @@ return function()
 			local attacker = makeAttacker("Patient")
 			SwingSequencer.SwapWeapon(attacker, T)
 			sweepFully()
-			expect(SwingSequencer.GetWeapon(attacker)).to.equal("Secondary")
+			expect(SwingSequencer.GetWeapon(attacker)).to.equal(SECOND_WEAPON)
 		end)
 	end)
 
@@ -256,17 +311,17 @@ return function()
 	describe("SwingSequencer -- the finisher", function()
 		it("tips a completed Basic string into the Finisher once the landed combo is deep enough", function()
 			local attacker = makeAttacker("Finishing")
-			local count = primaryBasicCount()
+			local count = firstWeaponBasicCount()
 			throwBasic(attacker, count, FINISHER_STAGE)
 			local finisher = SwingSequencer.Resolve(attacker, "Basic", FINISHER_STAGE, T + count * 0.2)
 			expect((finisher :: SwingSequencer.Resolution).IsFinisher).to.equal(true)
-			expect((finisher :: SwingSequencer.Resolution).MoveId).to.equal("default:Primary:Finisher")
+			expect((finisher :: SwingSequencer.Resolution).MoveId).to.equal(`default:{FIRST_WEAPON}:Finisher`)
 			expect((finisher :: SwingSequencer.Resolution).StageIndex).to.equal(0)
 		end)
 
 		it("does not unlock the Finisher one stage below the threshold", function()
 			local attacker = makeAttacker("NearlyFinishing")
-			local count = primaryBasicCount()
+			local count = firstWeaponBasicCount()
 			throwBasic(attacker, count, FINISHER_STAGE - 1)
 			local wrapped = SwingSequencer.Resolve(attacker, "Basic", FINISHER_STAGE - 1, T + count * 0.2)
 			expect((wrapped :: SwingSequencer.Resolution).IsFinisher).to.equal(false)
@@ -292,7 +347,7 @@ return function()
 		it("starts the next string at stage 1 after a Finisher", function()
 			-- Falls out of Advance recording StageIndex 0 -- no special-cased reset path.
 			local attacker = makeAttacker("PostFinisher")
-			local count = primaryBasicCount()
+			local count = firstWeaponBasicCount()
 			throwBasic(attacker, count, FINISHER_STAGE)
 			local at = T + count * 0.2
 			local finisher = SwingSequencer.Resolve(attacker, "Basic", FINISHER_STAGE, at)
@@ -307,19 +362,19 @@ return function()
 	describe("SwingSequencer -- weapons", function()
 		it("cycles through the authored swap order and back", function()
 			local attacker = makeAttacker("Swapper")
-			expect(SwingSequencer.SwapWeapon(attacker, T)).to.equal("Secondary")
-			expect(SwingSequencer.SwapWeapon(attacker, T + 1)).to.equal("Primary")
+			expect(SwingSequencer.SwapWeapon(attacker, T)).to.equal(SECOND_WEAPON)
+			expect(SwingSequencer.SwapWeapon(attacker, T + 1)).to.equal(FIRST_WEAPON)
 		end)
 
 		it("resolves against the newly held weapon's own string", function()
 			local attacker = makeAttacker("SwappedString")
 			SwingSequencer.SwapWeapon(attacker, T)
 			local resolution = SwingSequencer.Resolve(attacker, "Basic", 1, T + 0.1)
-			expect((resolution :: SwingSequencer.Resolution).MoveId).to.equal("default:Secondary:Basic:1")
+			expect((resolution :: SwingSequencer.Resolution).MoveId).to.equal(`default:{SECOND_WEAPON}:Basic:1`)
 		end)
 
 		it("abandons the in-progress string on a swap rather than carrying the stage across", function()
-			-- Stage 2 of a Primary string is not stage 2 of a Secondary one; carrying the count would
+			-- Stage 2 of one weapon's string is not stage 2 of another's; carrying the count would
 			-- throw a move the player never worked up to.
 			local attacker = makeAttacker("SwapMidString")
 			throwBasic(attacker, 2, 1)
@@ -335,8 +390,9 @@ return function()
 			SwingSequencer.SwapWeapon(attacker, T)
 			attacker:Destroy()
 			sweepFully()
-			-- A fresh record is built on demand, back on the default weapon.
-			expect(SwingSequencer.GetWeapon(attacker)).to.equal(AttackConstants.Weapons.Default)
+			-- A fresh record is built on demand, and a fresh record is EMPTY-HANDED -- so the rebuilt
+			-- one no longer remembers the weapon that was set on the reclaimed one.
+			expect(SwingSequencer.GetWeapon(attacker)).to.equal(nil)
 		end)
 
 		it("reclaims a destroyed record within a bounded number of frames, not necessarily the next one", function()
@@ -349,11 +405,11 @@ return function()
 			-- where nothing destroyed is left. Asserting "one Sweep is enough" would be asserting the
 			-- full walk that was removed.
 			local sweeps = 0
-			while SwingSequencer.GetWeapon(attacker) ~= AttackConstants.Weapons.Default and sweeps < SWEEP_BOUND do
+			while SwingSequencer.GetWeapon(attacker) ~= nil and sweeps < SWEEP_BOUND do
 				SwingSequencer.Sweep()
 				sweeps += 1
 			end
-			expect(SwingSequencer.GetWeapon(attacker)).to.equal(AttackConstants.Weapons.Default)
+			expect(SwingSequencer.GetWeapon(attacker)).to.equal(nil)
 			expect(sweeps < SWEEP_BOUND).to.equal(true)
 		end)
 

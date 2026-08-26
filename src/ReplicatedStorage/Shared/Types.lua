@@ -72,6 +72,23 @@ export type PlayerProfile = {
 	attributes: AttributeBlock?,
 	tier: Tier,
 	bloodlineIds: { BloodlineId },
+	-- Race Traits + Bloodline Abilities plan -- current stage reached per awakened bloodline. A key
+	-- present in this map implies the same BloodlineId is present in bloodlineIds (BloodlineSystem.
+	-- Awaken writes both in one Transform, never one without the other); the reverse is never true
+	-- for a profile written by that path. Race Traits need no equivalent field of their own --
+	-- RaceSystem derives eligibility entirely from raceId + TierSystem.GetTier, nothing persisted.
+	bloodlineStageProgress: { [BloodlineId]: number },
+	-- Bloodline spin (Shared/Bloodline/BloodlineConstants.lua) -- how many REROLLS remain, on top
+	-- of the one free roll every player gets during onboarding. Decremented server-side by
+	-- BloodlineSystem.Spin and never incremented by anything today: nothing grants more rerolls
+	-- yet, which is a deliberate stub rather than an oversight -- there is no currency, shop or
+	-- reward path anywhere in this codebase to earn one from (see this file's own note on why
+	-- there is no currency). Whatever grants them later increments this field and nothing else.
+	--
+	-- "Has this player had their free roll yet" is NOT a second flag: it is `#bloodlineIds > 0`,
+	-- the same "presence IS the fact" reasoning artMastery uses for unlocked-ness. A player with
+	-- no bloodline has never spun.
+	bloodlineRerolls: number,
 	artMastery: { [ArtId]: number },
 	-- Art System (Server/Systems/ArtSystem.lua) -- which art is bound to each of the
 	-- ArtConstants.EquipSlotCount hotbar slots. A DICT keyed by slot index, not an ordered array like
@@ -112,6 +129,12 @@ export type PlayerProfile = {
 	-- unplayable regardless, so a stale slot degrades to "does nothing when pressed," never a way to
 	-- play an emote the player doesn't actually own.
 	emoteLoadout: { EmoteId },
+	-- Blimp Fuel System (Server/Systems/ResourceGatheringSystem.lua mines/collects into this,
+	-- Server/Systems/BlimpSystem.lua's depositFuel debits out of it) -- how much coal/water THIS
+	-- PLAYER is currently carrying, not yet loaded into any blimp's own tank (that pool is
+	-- BlimpTypes.FuelState, and lives on the blimp, never here). A record, not two top-level fields,
+	-- so the two always travel and default together -- see CreateDefaultProfile/Migrations[8].
+	blimpFuel: { Coal: number, Water: number },
 	-- Settings System (Server/Systems/SettingsSystem.lua, Client/Input/KeybindManager.lua) -- see
 	-- PlayerSettings' own header below for why this is a SPARSE override map, not a full snapshot.
 	settings: PlayerSettings,
@@ -345,6 +368,32 @@ export type ArtStatePayload = {
 	-- unlock and an equip both change what the Arts panel and the hotbar should show, and splitting
 	-- them would let a client render an equipped art it doesn't yet believe is unlocked.
 	Equipped: { [number]: ArtId },
+	-- What the hotbar needs in order to RENDER each art in Equipped, keyed by ArtId.
+	--
+	-- Keyed by art rather than by slot on purpose. Equipped is the one authority on which art is in
+	-- which slot -- it IS the profile field -- and a second slot-keyed table would be a second answer
+	-- to that same question, free to drift from the first the moment one of them is rebuilt and the
+	-- other isn't. This one answers a DIFFERENT question ("what does this art look like"), which
+	-- Equipped structurally cannot: an art's DisplayName and QiCost live in the move registry, which
+	-- is server-side and DataStore-backed, so an ArtId on its own is an identifier the client has no
+	-- way to resolve.
+	--
+	-- It travels here rather than being read off the Arts catalogue because the catalogue is fetched
+	-- on panel open (ArtSystem.lua's handleGetCatalogue, and CharacterMenuClient.lua's header on why
+	-- that is the right cadence for it). The hotbar has to render an equipped art from the moment the
+	-- profile loads, which for a returning player is long before they ever open that panel -- and
+	-- without this the slot could only fall back to its empty-slot chrome, which is exactly what it
+	-- did until 2026-08-25.
+	EquippedInfo: { [ArtId]: ArtDisplayInfo },
+}
+
+-- The presentation half of an equipped art -- see ArtStatePayload.EquippedInfo. Deliberately NOT a
+-- trimmed ArtCatalogueEntry: every gate field on that type (Node, RequiredTier, Prerequisite,
+-- Unlocked, LockedReason) answers "may I have this yet", which is settled by the time an art is in a
+-- slot. Reusing it would ship five fields per slot that nothing on the hotbar can act on.
+export type ArtDisplayInfo = {
+	DisplayName: string,
+	QiCost: number,
 }
 
 -- Server (CharacterSheetSystem.lua) -> owning client only. The identity and standing half of a
@@ -364,6 +413,13 @@ export type CharacterSheetPayload = {
 	Faction: Faction?,
 	Attributes: AttributeBlock?,
 	BloodlineIds: { BloodlineId },
+	-- Types.PlayerProfile.bloodlineStageProgress, replicated (this IS that field) -- see that field's
+	-- own header for the "a key here implies the matching id is in BloodlineIds" contract.
+	BloodlineStageProgress: { [BloodlineId]: number },
+	-- Types.PlayerProfile.bloodlineRerolls, replicated (this IS that field) -- read by the Character
+	-- menu's own reroll control so the count on screen is the profile's, never a client tally that
+	-- could drift from what the server would actually charge.
+	BloodlineRerolls: number,
 	Corruption: number,
 	QiDeviationRisk: number,
 	FactionStanding: number,
@@ -433,14 +489,18 @@ export type CombatFeedbackPayload = {
 	ObjectStun: ObjectStunFeedback?,
 }
 
--- Which weapon a player currently fights with (Constants.Combat.Weapons) -- CombatSystem.lua's
--- selectAttackDefinition reads a weapon's own Basic/Heavy/Finisher stage arrays instead of a
--- single flat table, and RequestSwapWeapon toggles a player's CombatState.equippedWeaponId between
--- these two. A closed union (matching FinisherVariant/DefenseKind's style) rather than an open
--- string since there are exactly two, both known here. Bots stay on Constants.Combat.Weapons.
--- Default permanently -- see BotState/handleSwapWeaponRequest's own comments for why bot
--- weapon-switching is out of scope.
-export type WeaponId = "Primary" | "Secondary"
+-- Which weapon a player currently fights with -- ONE at a time, always. The id is the Name of a
+-- model in Workspace.Weapons (Shared/Combat/WeaponRoster.lua reads that folder and is the authority
+-- on which ids exist); a player picks weapons up into an inventory and draws one at a time --
+-- Server/Combat/Weapon/WeaponInventorySystem.lua.
+--
+-- AN OPEN STRING, deliberately, and this used to be the closed union "Primary" | "Secondary" -- back
+-- when a "weapon" meant one of two hardcoded move sets rather than a real, named, artist-built object
+-- a player equips. The roster is discovered from the DataModel at runtime, so the set of valid ids is
+-- not knowable here at all: a new sword is a model dropped in a folder, not an edit to this line.
+-- Nothing validates a WeaponId by its type any more -- WeaponRoster.Has is the check, and
+-- SwingSequencer.SetWeapon already refuses an id the roster doesn't know.
+export type WeaponId = string
 
 -- Sent to the attacking player only, the moment CombatSystem accepts their attack request (after
 -- every validation and cooldown/commitment commit -- never optimistic). Carries just enough
@@ -622,11 +682,37 @@ export type ComboStatePayload = {
 	FinisherReady: boolean,
 }
 
--- Server -> owning client, fired only on a true/false transition of CombatState.inCombatUntil (see
--- that field's own header) -- the same "fire on transition" shape as ComboStatePayload above, for
--- the HUD's combat-state badge (Components/CombatStateBadge.lua).
-export type InCombatPayload = {
+-- Server -> owning client, on every meaningful change to THEIR OWN engagement -- Server/Combat/
+-- Engagement/EngagementSystem.lua is the sole producer. Replaces the old InCombatPayload, which
+-- carried only the boolean edge for a HUD badge; the engagement panel needs the opponent and the
+-- damage traded alongside it, and two remotes describing one fact is exactly what DamageConstants.
+-- Network's own header rules out.
+--
+-- FIRED ON CHANGE, NEVER PER FRAME: once per resolved exchange (bounded by hit rate) and once on the
+-- expiry edge. Everything in between is a client-side decay of SecondsRemaining.
+--
+-- SecondsRemaining RATHER THAN AN ABSOLUTE DEADLINE, and that is not a style choice. The server
+-- stamps this state in os.clock(), whose epoch is process-local -- a client comparing a raw server
+-- deadline against its own os.clock() would be wrong by an arbitrary constant, silently and
+-- differently on every machine. A duration crossing the wire is epoch-free; the client decays it
+-- from the moment of receipt, paying only the one-way latency (single-digit ms against a 5s tag).
+export type EngagementPayload = {
 	InCombat: boolean,
+	SecondsRemaining: number,
+	-- The most recent opponent, nil while InCombat is false. UserId is nil for a combatant that is not
+	-- a Player, in which case OpponentName falls back to the Model's own name -- an admin-spawned
+	-- "DebugDummy" today, and a bot or NPC boss later. See EngagementConstants.DummyTag on which
+	-- non-players tag at all (all of them, currently).
+	OpponentName: string?,
+	OpponentUserId: number?,
+	-- Health damage traded during THIS engagement only -- both reset when a lapsed tag starts a fresh
+	-- one, so the panel reads as "this fight", not "this session".
+	DamageDealt: number,
+	DamageTaken: number,
+	-- DefenseTypes.OutcomeKind of the last resolved exchange, as a plain string -- Types.lua is a leaf
+	-- that requires nothing (see this file's header), so it cannot name that union directly. The same
+	-- deliberate two-copies arrangement HitboxAttackShape already documents.
+	LastOutcomeKind: string?,
 }
 
 -- Read-only projection of a player's combat state for future systems (RewardSystem,
@@ -955,6 +1041,15 @@ export type HitboxAttackDefinition = {
 	-- definition -- see MoveTypes.FollowUpToHitboxAttackDefinition for why chaining stops at one
 	-- level.
 	ObjectStun: ObjectStunConfig?,
+	-- Additive. nil (equivalent to 1) for every definition that predates it. The one live use is
+	-- Shared/Combat/WeaponRoster.lua's own applyReach: a weapon's WeaponReach Attribute used to scale
+	-- Size/Offset directly, which was the whole hitbox for a Root-anchored swing. Now that every weapon
+	-- stage is AttachmentPart == "Weapon" and SizeFromAttachmentPart-sized off the equipped weapon's own
+	-- Blade part (see HitboxTypes.AttackDefinition.SizeMultiplier's own header), Size/Offset on THIS
+	-- struct are vestigial preview-only numbers, so WeaponReach's effect is carried through this field
+	-- instead -- MoveTypes.ToEngineAttackDefinition copies it straight onto the engine definition of the
+	-- same name.
+	SizeMultiplier: number?,
 }
 
 -- Result of DevMenu_SpawnDummy (a RemoteFunction, not a RemoteEvent -- the client needs to know
@@ -979,8 +1074,9 @@ export type DevMenuSpawnDummyResult = {
 -- request with a flag set). "ShiftLock" toggles the custom shift-lock camera mode (Client/Camera/
 -- ShiftLockCamera.lua) -- a camera behavior, not a combat request; it's the one action here that
 -- never fires a remote. "Sprint" is a held neutral-game movement state (start/stop, like Block).
--- "SwapWeapon" fires RequestSwapWeapon (Constants.Combat.Weapons) -- a one-shot toggle between the
--- two weapon slots, the same fire-and-forget shape as Dash/Sprint. "Slide" fires RequestSlide
+-- "ToggleWeapon" fires Weapon_ToggleDraw (Server/Combat/Weapon/WeaponInventorySystem.lua) -- draws
+-- the selected weapon, or sheathes it if already out, the same fire-and-forget shape as Dash/Sprint.
+-- "SelectNextWeapon" fires Weapon_SelectNext, cycling which owned weapon ToggleWeapon will draw. "Slide" fires RequestSlide
 -- (CombatSystem.lua's handleSlideRequest) -- chained off Sprint, not a standalone press like Dash:
 -- the client only even fires it while its own Sprint key is currently held, and the server
 -- independently re-checks CombatState.sprinting regardless of what the client believes. "Feint"
@@ -996,7 +1092,8 @@ export type KeybindAction =
 	| "Sprint"
 	| "ShiftLock"
 	| "DevMenuToggle"
-	| "SwapWeapon"
+	| "ToggleWeapon"
+	| "SelectNextWeapon"
 	| "Slide"
 	| "Feint"
 	-- Opens the player-facing bug report form (Client/UI/Screens/BugReport/init.lua via
@@ -1011,6 +1108,11 @@ export type KeybindAction =
 	-- remote of its own (opening the screen is free; every actual action inside it goes through
 	-- MoveEditorSystem's own gated RemoteFunctions).
 	| "OpenMoveEditor"
+	-- Opens the Kit Editor screen (Client/KitEditor/KitEditorClient.lua via Client/UI/Screens/
+	-- KitEditor/init.lua) -- the shared Race Trait / Bloodline stage authoring tool from the Race
+	-- Traits + Bloodline Abilities plan, not built yet. Same "client-side convenience toggle,
+	-- admin-only, server re-checks regardless" contract as "OpenMoveEditor" immediately above.
+	| "OpenKitEditor"
 	-- Opens the Live Admin Console (Client/LiveConsole/LiveConsoleClient.lua via
 	-- Client/UI/Screens/LiveConsole/init.lua) -- a bespoke live log stream, not Roblox's own native
 	-- Developer Console. Binding this key toggles the panel locally for every client (harmless --
@@ -1079,6 +1181,12 @@ export type KeybindAction =
 	-- declines to send what it can already see is illegal" convention ParkourOwnership.OwnsBody's
 	-- consumers already use.
 	| "GrabThrow"
+	-- Board or leave a blimp station (Client/Blimp/BlimpController.lua via Server/Systems/BlimpSystem.lua).
+	-- Two consumers, unlike every action above: this module both MATCHES the press (to leave a station)
+	-- and writes the bound KeyCode onto each blimp ProximityPrompt's KeyboardKeyCode, so the prompt that
+	-- STARTS a mount and the key that ends one can never drift apart. Shares E with "Leap" -- see
+	-- Constants.Keybinds.Defaults.Interact for why that is deliberate and what makes it safe.
+	| "Interact"
 
 -- Exactly one of KeyCode/UserInputType is populated -- KeyCode for ordinary keyboard keys,
 -- UserInputType for inputs with no KeyCode equivalent (Roblox only reports mouse buttons via
@@ -1146,6 +1254,18 @@ export type ComfortSettings = {
 	-- fast the player is going, they ease rather than snap, and they are the part of the FOV system
 	-- that is information rather than punctuation.
 	FieldOfViewEffects: boolean,
+	-- Client/Camera/BlimpCamera.lua -- the roll, sway and pitch the view takes on while riding a blimp.
+	-- Off does NOT flatten that camera entirely: the POSITIONAL channels (the pull-back with speed, the
+	-- surge under acceleration, the idle bob) keep running, and only the three ROTATIONAL ones are
+	-- driven to zero. That split is the point rather than a half-measure -- rotating the horizon under
+	-- somebody is what actually provokes simulator sickness, because it disagrees with their inner ear
+	-- about which way is down; sliding the view a couple of studs does not, and taking it away too
+	-- would cost a player who needed this toggle every cue that the ship is moving at all.
+	--
+	-- Named for the VEHICLE rather than for the blimp, deliberately: the second rideable thing this
+	-- game grows will want the same answer from the same player, and a "BlimpCamera" field would either
+	-- have to be joined by a near-duplicate or quietly start meaning something wider than its name.
+	VehicleCameraMotion: boolean,
 }
 
 -- The player's own movement preferences (Server/Systems/SettingsSystem.lua persists them,
@@ -1249,6 +1369,16 @@ export type DevMenuDebugDummyStateResult = {
 export type DevMenuRollEmoteResult = {
 	Success: boolean,
 	EmoteId: string?,
+	Reason: string?,
+}
+
+-- Result of DevMenu_GrantBloodlineRerolls (Server/Systems/BloodlineSystem.lua's GrantRerolls).
+-- Carries the new total back for the same reason DevMenuHitboxDebugResult carries Enabled: the
+-- number is the whole point of the press, and reporting it saves the admin a second round trip (or a
+-- guess) to find out whether the grant hit BloodlineConstants.MaxHeldRerolls.
+export type DevMenuGrantRerollsResult = {
+	Success: boolean,
+	RerollsRemaining: number?,
 	Reason: string?,
 }
 
@@ -1661,6 +1791,121 @@ export type EmoteUnlockedUpdatePayload = {
 -- replicated).
 export type EmoteLoadoutUpdatePayload = {
 	Loadout: { EmoteId },
+}
+
+-- Race Traits + Bloodline Abilities plan -- the generic modifier engine's own wire/domain shapes
+-- (Server/Systems/EffectSystem.lua, not built yet -- these types are landed ahead of it so
+-- Shared/Kit/KitTypes.lua's KitAbilityDefinition.Effects has something real to author against).
+-- Live here rather than in KitTypes.lua because EffectSystem is content-agnostic (no notion of
+-- "race" or "bloodline") and every consumer of a live ActiveModifier -- a future combat-side
+-- Might/Pressure damage read, a future buff-bar HUD -- reaches it through Types the same way it
+-- reaches CombatSnapshot, not through a Kit-specific module it would have no other reason to
+-- require.
+
+-- Which content layer granted a modifier or is asking to fire an ability -- shared by ActiveModifier
+-- below and KitAbilityRequest, so a Race trait and a Bloodline stage can never collide on Id alone:
+-- every seam that traces an effect or a request back to what produced it disambiguates by this pair
+-- (Kind, Id), never Id by itself. Exactly two values because those are the only two content layers
+-- this plan builds -- a third kit-shaped content type would extend this union, not invent a parallel
+-- one.
+export type ActiveModifierSource = "RaceTrait" | "BloodlineStage"
+
+-- How long an applied modifier survives, the three lifetimes EffectSystem's own header documents:
+--   * "Instant" -- applied once, never tracked afterward (v1's only target is a Qi restore via
+--     QiSystem.Restore -- see that function's own header on why it's a new primitive, not a reuse
+--     of QiSystem.Refund).
+--   * "Timed" -- a standing modifier with an expiry, reclaimed by EffectSystem's own tick sweep on
+--     GameplayEvents.OnHeartbeatTick. What an Active ability's buff uses.
+--   * "Bound" -- a standing modifier with no timer, lasting exactly as long as its grant is true.
+--     Applied/removed only via EffectSystem.SetBoundModifiers (an atomic diffed replace), never by
+--     the tick sweep. What a Passive ability uses.
+export type ActiveModifierLifetime = "Instant" | "Timed" | "Bound"
+
+-- Which of the three effect shapes v1 supports a given ActiveModifierSpec carries. Only the fields
+-- meaningful for the chosen Kind are populated -- the same "Kind selects which of several nilable
+-- fields matter" convention CombatFeedbackKind/CombatFeedbackPayload already use in this file, rather
+-- than a Luau discriminated union (which the language doesn't have).
+--   * "AttributeDelta" -- shifts one AttributeBlock field by Delta for as long as the modifier is
+--     active. EffectSystem.GetAttributeDelta(player, key) is the seam a future derivation point
+--     (e.g. QiSystem.ComputeMaxQi-style math for Fortitude/Might/Pressure/Fleetness) sums these
+--     against -- not wired to any gameplay math this phase, per the plan's own non-goals.
+--   * "Tag" -- an opaque marker other systems can query via EffectSystem.HasTag/GetTagMagnitude,
+--     with no attribute or resource attached. The escape hatch for "this player currently has X"
+--     checks a future combat/status system reads without EffectSystem needing to know what X means.
+--   * "QiRestore" -- grants Qi through QiSystem.Restore. Only meaningful alongside Lifetime ==
+--     "Instant" -- a standing Qi restore would just mean "restore once more on every tick sweep,"
+--     which is never the intent of a one-shot grant.
+export type ActiveModifierKind = "AttributeDelta" | "Tag" | "QiRestore"
+
+-- Mirrors AttributeBlock's own six field names exactly, by construction -- the same deliberate
+-- two-copies arrangement HitboxShapeId already keeps against HitboxShapes.ShapeId, for the identical
+-- reason: this file is a leaf (see its own header) and has no business depending on a module that
+-- isn't. AttributeBlock is the RUNTIME authority; this union is its compile-time mirror.
+export type ActiveModifierAttributeKey = "Vitality" | "Fortitude" | "MeridianFlow" | "Might" | "Pressure" | "Fleetness"
+
+-- The AUTHORED half of a modifier -- what a KitAbilityDefinition.Effects entry or a
+-- BloodlineStageDefinition.PassiveEffects entry actually says, before it's ever applied to a real
+-- player. EffectSystem.Apply/SetBoundModifiers turn one of these into a live ActiveModifier below.
+export type ActiveModifierSpec = {
+	Kind: ActiveModifierKind,
+	Lifetime: ActiveModifierLifetime,
+	-- Meaningful only for Kind == "AttributeDelta".
+	AttributeKey: ActiveModifierAttributeKey?,
+	Delta: number?,
+	-- Meaningful only for Kind == "Tag". Magnitude lets one tag express strength (e.g. a stacking
+	-- resistance) rather than every tag being purely boolean-present.
+	Tag: string?,
+	Magnitude: number?,
+	-- Meaningful only for Kind == "QiRestore".
+	QiRestoreAmount: number?,
+	-- Meaningful only for Lifetime == "Timed" -- how long the modifier lasts once applied, seconds.
+	DurationSeconds: number?,
+}
+
+-- The LIVE half -- one modifier instance EffectSystem is currently tracking for a specific player,
+-- returned read-only by EffectSystem.GetActiveModifiers for replication/inspection. Id is unique per
+-- applied instance (not per Spec -- the same Spec can be applied to the same player more than once,
+-- e.g. two stacking Tag grants from different sources), which is what Clear/ClearAllFromSource key
+-- against.
+export type ActiveModifier = {
+	Id: string,
+	Spec: ActiveModifierSpec,
+	SourceKind: ActiveModifierSource,
+	-- TraitId for "RaceTrait", BloodlineId for "BloodlineStage" -- opaque to EffectSystem itself,
+	-- which never interprets this beyond using it as ClearAllFromSource's own grouping key.
+	SourceId: string,
+	AppliedAt: number,
+	-- Non-nil exactly when Spec.Lifetime == "Timed" -- what EffectSystem's own tick sweep on
+	-- GameplayEvents.OnHeartbeatTick compares against to reclaim an expired modifier.
+	ExpiresAt: number?,
+}
+
+-- Client -> server, KitAbilitySystem's own RemoteFunction (Constants.Kit.RemoteNames.RequestAbility,
+-- not built yet). Disambiguated by the full (SourceKind, SourceId, AbilityId) triple rather than
+-- AbilityId alone -- see ActiveModifierSource's own header -- so a Race trait and a Bloodline stage
+-- can reuse the same AbilityId string with no collision.
+export type KitAbilityRequest = {
+	SourceKind: ActiveModifierSource,
+	SourceId: string,
+	AbilityId: string,
+}
+
+-- Result of KitAbilitySystem's RequestAbility RemoteFunction -- mirrors ArtActionResult's
+-- {Success, Reason?} shape exactly, the same request/response contract every other gated action
+-- remote in this file already uses (ArtActionResult, MoveEditorActionResult).
+export type KitActionResult = {
+	Success: boolean,
+	Reason: string?,
+}
+
+-- Server (KitAbilitySystem) -> owning client only, fired on a successful UseAbility -- the post-
+-- success FX echo, same "just enough for FX" shape AttackStartedPayload already carries for a
+-- combat swing. Not itself a legality signal; RequestAbility's own KitActionResult already told the
+-- caller whether the use was accepted.
+export type KitAbilityUsedPayload = {
+	SourceKind: ActiveModifierSource,
+	SourceId: string,
+	AbilityId: string,
 }
 
 return Types

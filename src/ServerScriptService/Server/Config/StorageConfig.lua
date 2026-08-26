@@ -49,6 +49,13 @@ StorageConfig.SuspectedCheaterDataStoreName = "SuspectedCheaters_v1"
 -- thousands) -- see MoveEditorSystem.lua's own header for the full persistence shape.
 StorageConfig.CustomMoveDataStoreName = "CustomMoves_v1"
 
+-- Race Traits + Bloodline Abilities plan (Server/Systems/KitEditorSystem.lua) -- same "one key per
+-- record plus a small fixed-key index" shape CustomMoveDataStoreName's own header describes, one
+-- store per content type since a race trait and a bloodline stage share no schema. Index keys are
+-- "RaceTraitIndex"/"BloodlineIndex"; record keys are "RaceTrait_<TraitId>"/"Bloodline_<BloodlineId>".
+StorageConfig.RaceTraitDataStoreName = "RaceTraits_v1"
+StorageConfig.BloodlineDataStoreName = "Bloodlines_v1"
+
 -- Server publish-version watchdog (Server/Systems/VersionWatchSystem.lua) -- a single small store
 -- holding one fixed key, the highest game.PlaceVersion any server has ever reported booting with.
 -- See that module's own header for why this is enough to detect a publish with no external tooling.

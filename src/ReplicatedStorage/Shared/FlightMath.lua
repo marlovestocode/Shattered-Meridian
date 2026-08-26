@@ -91,6 +91,44 @@ function FlightMath.EaseAlpha(ratePerSecond: number, deltaTime: number): number
 	return 1 - math.exp(-ratePerSecond * deltaTime)
 end
 
+-- One frame of a damped harmonic oscillator: the springy sibling of EaseAlpha above, for the cases
+-- where "arrive and stop" is the wrong answer and "lean too far, come back, settle" is the right one.
+--
+-- WHEN TO REACH FOR WHICH, since these two now sit next to each other. EaseAlpha is correct for a
+-- value chasing a target that has no mass of its own -- a shoulder offset engaging, an FOV opening up,
+-- a cooldown bar filling. It arrives from one side and never passes the target, which is exactly what
+-- you want from a readout. This is correct when the OVERSHOOT IS THE INFORMATION: a camera aboard a
+-- heavy thing, a body braced against acceleration, anything whose whole job is to communicate that
+-- something has mass and is being pushed. An ease physically cannot produce that cue, and a hand-
+-- rolled "ease with a bit of bounce" is a spring somebody has written badly.
+--
+-- `frequency` is the undamped natural frequency in radians/second -- higher settles faster.
+-- `damping` is the damping RATIO: 1 is critical (fastest approach with no overshoot), below 1 rings,
+-- above 1 crawls in. Tune the two independently; they are not two names for "how fast".
+--
+-- IMPLICIT EULER, NOT SEMI-IMPLICIT, and that is a stability decision rather than an accuracy one.
+-- Semi-implicit Euler on a spring is only stable while deltaTime < 2/frequency, which a Studio
+-- breakpoint, a streaming hitch or an alt-tabbed client clears easily -- and the failure is not a
+-- wobble, it is the spring diverging and whatever it drives being flung off screen. The form below is
+-- unconditionally stable at ANY deltaTime: it degrades toward "snap to the target", never toward
+-- "explode", which is the correct failure mode for something a player is looking through.
+--
+-- Returns (value, velocity) as multiple returns rather than a table, because Luau does not box those
+-- and every caller so far runs this several times per rendered frame.
+function FlightMath.SpringStep(
+	value: number,
+	velocity: number,
+	target: number,
+	frequency: number,
+	damping: number,
+	deltaTime: number
+): (number, number)
+	local omegaSquared = frequency * frequency
+	local denominator = 1 + 2 * damping * frequency * deltaTime + omegaSquared * deltaTime * deltaTime
+	local nextVelocity = (velocity + deltaTime * omegaSquared * (target - value)) / denominator
+	return value + deltaTime * nextVelocity, nextVelocity
+end
+
 -- Yaw angle (radians) of a direction vector's flattened (Y-zeroed) XZ projection -- shared by
 -- Client/Camera/ShiftLockCamera.lua (deriving character facing from the camera's own look vector)
 -- and Client/DevMenu/FlightController.lua (deriving character facing from flight velocity), which

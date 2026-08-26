@@ -16,20 +16,21 @@
 	the one exception, exactly like DevMenu's own close button: IsOpen is already a Fusion.Value
 	owned by this same Mount call, so closing just sets it directly.
 
-	Gamepad navigation is wired explicitly (NextSelectionUp/Down/Left/Right set imperatively once
-	every control exists, not Roblox's automatic spatial SelectionOrder heuristic) since this form
-	has a small, fixed, known field order -- deterministic wiring is more reliable than a spatial
-	guess. Initial focus (GuiService.SelectedObject) is set to the first category button whenever
-	this panel opens, and released again on close, via scope:Observer(isOpen):onChange(...) -- but
-	only if this screen still owns whatever is currently selected, so it never steals focus back
-	from some other panel that opened in the meantime.
+	Gamepad navigation is NOT this screen's business any more. It used to be: twenty-one
+	NextSelectionUp/Down/Left/Right assignments wired imperatively here, plus this file's own
+	Observer over GuiService.SelectedObject, on the argument that a small fixed field order beats a
+	spatial guess. Both are gone -- Components/ModalScreen.lua now puts every panel in a
+	Shell/Focus.lua group, which derives the same graph from where the controls actually ARE and
+	keeps deriving it as they move. What that argument missed is that the hand-wired version was
+	only correct for the exact eleven controls it named: adding a twelfth changed nothing and warned
+	about nothing, it just left the new control unreachable. The one thing worth keeping was the
+	landing spot, which is now the FocusDefault prop below.
 
 	Does not own: submission validation (BugReportSystem.lua re-validates everything server-side
 	regardless of what this screen shows), or whether the local player currently sees this menu open
 	(BugReportClient.lua's keybind toggle).
 ]]
 
-local GuiService = game:GetService("GuiService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
@@ -147,34 +148,18 @@ local function BugReport(scope: Scope, playerGui: PlayerGui): BugReportHandle
 		OnActivated = close,
 	})
 
-	-- Explicit, deterministic gamepad navigation graph -- see file header for why this is imperative
-	-- wiring rather than Roblox's automatic spatial SelectionOrder heuristic. Every control above is
-	-- a real named local by this point, so forward/backward references both resolve.
-	closeButton.NextSelectionDown = categoryButtons[1]
-	for index, categoryButton in ipairs(categoryButtons) do
-		local previousButton = categoryButtons[index - 1]
-		local nextButton = categoryButtons[index + 1]
-		if previousButton then
-			categoryButton.NextSelectionLeft = previousButton
-		end
-		if nextButton then
-			categoryButton.NextSelectionRight = nextButton
-		end
-		categoryButton.NextSelectionUp = closeButton
-		categoryButton.NextSelectionDown = descriptionField
-	end
-	descriptionField.NextSelectionUp = categoryButtons[1]
-	descriptionField.NextSelectionDown = submitButton
-	submitButton.NextSelectionUp = descriptionField
-	submitButton.NextSelectionRight = cancelButton
-	cancelButton.NextSelectionUp = descriptionField
-	cancelButton.NextSelectionLeft = submitButton
-
-	local root = ModalScreen(scope, playerGui, {
+	-- Not held: the only thing this screen used the returned Root for was its own
+	-- GuiService.SelectedObject bookkeeping, which Shell/Focus.lua now owns.
+	ModalScreen(scope, playerGui, {
 		Name = "BugReport",
 		Size = UDim2.fromOffset(ROOT_WIDTH, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		IsOpen = isOpen,
+		-- The first category button rather than the derived first-in-reading-order control, which
+		-- would be the close "X" -- opening a form with focus on its own dismiss button is a worse
+		-- landing spot than the first real field. This is exactly the case Focus.Group's Default
+		-- exists for.
+		FocusDefault = categoryButtons[1],
 
 		Children = {
 			scope:New "Frame" {
@@ -298,17 +283,6 @@ local function BugReport(scope: Scope, playerGui: PlayerGui): BugReportHandle
 			}),
 		},
 	})
-
-	-- Initial gamepad focus on open, released again (only if still ours) on close -- see file
-	-- header. onChange (not onBind) is deliberate: this must NOT fire immediately at Mount time,
-	-- only on a real open/close transition.
-	scope:Observer(isOpen):onChange(function()
-		if peek(isOpen) then
-			GuiService.SelectedObject = categoryButtons[1]
-		elseif GuiService.SelectedObject and GuiService.SelectedObject:IsDescendantOf(root) then
-			GuiService.SelectedObject = nil
-		end
-	end)
 
 	return {
 		IsOpen = isOpen,

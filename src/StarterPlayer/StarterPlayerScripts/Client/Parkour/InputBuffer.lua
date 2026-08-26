@@ -3,7 +3,9 @@
 	InputBuffer.lua
 
 	Owns: the local player's buffered parkour intents -- when jump, slide, roll, leap and dash were
-	last pressed, whether slide is currently held, and whether each buffered press is still live.
+	last pressed, whether slide is currently held, whether each buffered press is still live, and the
+	one intent that survives an arbitrarily long gap: a slide key held through a fall, re-armed as a
+	fresh press at the moment of touchdown (ArmHeldSlideOnLanding).
 
 	This module is the entire answer to the design's "add sensible buffering where necessary so
 	players can press an input slightly before an action becomes available and still have the action
@@ -112,6 +114,40 @@ end
 
 function InputBuffer.IsSlideHeld(): boolean
 	return slideHeld
+end
+
+-- THE AIR-HELD SLIDE: holding the slide key through a fall queues a slide that fires the instant the
+-- character touches down, however long the fall was.
+--
+-- Called by ParkourController on the airborne -> grounded edge -- the one place that edge is already
+-- detected (see the ground-contact bookkeeping block there, and its own note on why it lives in the
+-- controller rather than in any state). Nothing else about the transition needed building:
+-- States/Sliding.lua's priority (120) outranks Landing's (90) and Falling's (60), so route 2 pre-empts
+-- the landing on the first grounded frame and Sliding.CanEnter is asked IN FULL -- speed, cooldown and
+-- the combat gate all still apply. That is why this is a buffer change and not a new transition; the
+-- route-1 chain in States/Dashing.lua has to re-check those gates by hand precisely because it skips
+-- them, and this skips nothing.
+--
+-- THE GAP IT CLOSES: slideHeld was already true the whole way down. Only the PRESS was missing -- it
+-- expires after Assists.ActionBufferSeconds (0.18s), so any fall longer than that landed with
+-- CanEnter refusing "NoSlideInput". The intent was never lost, just its timestamp.
+--
+-- RE-STAMPED ON THE EDGE, deliberately, rather than either obvious alternative:
+--   * A LONGER WINDOW would also keep a stale GROUND press alive, which is the "character slides on
+--     its own a beat after you stopped asking for it" failure PeekJump's comment above already warns
+--     about for the jump buffer. The window is not what is wrong here, so widening it trades one
+--     dropped input for a spurious one.
+--   * TREATING THE HOLD ITSELF AS A LIVE PRESS would re-enter Sliding on every frame the key is down:
+--     the slide ends, the key is still held, it starts again, forever. This grants exactly ONE attempt
+--     per landing, which then expires through the ordinary window like any other press.
+--
+-- Releasing before touchdown cancels it, because slideHeld is what gates this -- with the ordinary
+-- press window still covering a release in the last few frames, which is forgiveness, not a leak.
+function InputBuffer.ArmHeldSlideOnLanding(now: number): ()
+	if not slideHeld then
+		return
+	end
+	slidePressedAt = now
 end
 
 -- Jump uses its OWN, tighter window (ParkourConstants.Jump.BufferSeconds) rather than the shared

@@ -87,6 +87,10 @@ local Sliding: ParkourTypes.StateDefinition = {
 		if context.Ground.SlopeAngle >= ParkourConstants.Slope.ForcedSlideAngleDegrees then
 			return true, nil
 		end
+		-- Live either because the key was just pressed, or because it was HELD through a fall and the
+		-- controller re-stamped the press on touchdown (InputBuffer.ArmHeldSlideOnLanding). The
+		-- air-held case arrives here by pre-empting Landing on priority, so this predicate and every
+		-- one above it still runs -- an air-held slide is gated exactly as hard as a pressed one.
 		if not InputBuffer.PeekSlide(context.Now) then
 			return false, "NoSlideInput"
 		end

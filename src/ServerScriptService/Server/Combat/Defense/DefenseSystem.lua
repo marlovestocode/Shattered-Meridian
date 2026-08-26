@@ -55,6 +55,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local Constants = require(ReplicatedStorage.Shared.Constants)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
@@ -67,6 +68,7 @@ local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
+local WeaponDefenseAnimations = require(ReplicatedStorage.Shared.Defense.WeaponDefenseAnimations)
 
 local DefenseStateMachine = require(script.Parent.DefenseStateMachine)
 local GuardMeter = require(script.Parent.GuardMeter)
@@ -271,6 +273,31 @@ function DefenseSystem.SetDefaultParryAnimation(animationId: string): ()
 	defaultParryAnimationId = animationId
 end
 
+-- Re-points ONE combatant's parry clip, which re-points that combatant's parry WINDOW -- the markers
+-- on this id are the window (see Shared/Defense/ParryWindows.lua), so this is a timing change, not a
+-- cosmetic one.
+--
+-- EXISTS FOR THE WEAPON SWAP, and the layering is the reason it is a setter here rather than this
+-- System reaching for the answer itself. Which weapon a combatant holds is the ATTACK layer's fact
+-- (SwingSequencer's record, published through AttackRequestSystem.OnWeaponChanged), and Defense sits
+-- two layers BELOW Attack -- a require in that direction would invert the stack. So the composition
+-- root wires the two together: Server/Main.server.lua subscribes to that signal and calls this with
+-- WeaponDefenseAnimations.GetParry(weaponId). Same shape as SetDefaultParryAnimation directly above,
+-- which Main.server.lua already calls for the same "the boot script knows both, the layer knows one"
+-- reason.
+--
+-- A blank id is a legitimate argument, not an error: it is what a combatant with no parry clip at all
+-- resolves to, and it fail-closes exactly as an unregistered combatant does -- the block still works,
+-- no window ever opens. Silently ignores a model that is not registered (an unbound character mid-
+-- respawn), since RegisterCombatant re-reads the default for the new life anyway.
+function DefenseSystem.SetParryAnimation(model: Model, animationId: string): ()
+	local registration = registrations[model]
+	if not registration then
+		return
+	end
+	registration.ParryAnimationId = animationId
+end
+
 -- Input --------------------------------------------------------------------------------------------
 
 -- The block/parry input edge. Exposed as a function as well as being wired to the remote, so a bot
@@ -309,6 +336,13 @@ local function handleSetBlocking(player: Player, rawBlocking: unknown): ()
 	end
 	local character = player.Character
 	if not character then
+		return
+	end
+	-- Same gate, same reasoning, as AttackRequestSystem's own Mounted refusal: a body welded to a blimp
+	-- station belongs to the vehicle, and a guard raised from one would be a defence the arm pose is
+	-- already overwriting the animation for. Read as an Attribute, not through a BlimpSystem require.
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid and humanoid:GetAttribute(Constants.Attributes.Mounted) == true then
 		return
 	end
 	DefenseSystem.SetBlocking(character, rawBlocking, os.clock())
@@ -665,9 +699,28 @@ function DefenseSystem.Init(): ()
 	-- startup warning rather than a mid-fight mystery. Spawned rather than awaited: it makes web
 	-- calls, and blocking the server boot on a rate-limited endpoint would be worse than the first
 	-- few seconds of play having no parry armed.
-	if defaultParryAnimationId ~= "" then
+	--
+	-- EVERY WEAPON'S PARRY CLIP, not just the default -- WeaponDefenseAnimations.GetParryIds sweeps
+	-- Workspace.Weapons for per-weapon Animations/PARRY overrides and returns them alongside the
+	-- baseline. Warming only the baseline (which is all this did before per-weapon clips existed)
+	-- would leave a weapon that authors its own parry strictly worse off than one that authors none:
+	-- ParryWindows.Get never yields, so an id nobody prefetched returns nil at press time and that
+	-- weapon's parry would never once arm, with no error anywhere.
+	--
+	-- Reads Workspace.Weapons at Init, which Main.server.lua has already populated by running
+	-- WeaponRoster.Start() before the combat stack boots. A weapon added to the folder after this
+	-- point is not swept -- the same boot-time-snapshot property WeaponRoster itself has.
+	local parryIds = WeaponDefenseAnimations.GetParryIds()
+	-- GetParryIds' own baseline is DefenseConstants.ParryAnimationId, which is what Main.server.lua
+	-- happens to pass to SetDefaultParryAnimation -- but this System's contract is that the default is
+	-- whatever that setter was LAST given, not that constant. Appended (deduplicated) rather than
+	-- assumed already present, so a caller that sets a different default still gets it warmed.
+	if defaultParryAnimationId ~= "" and table.find(parryIds, defaultParryAnimationId) == nil then
+		table.insert(parryIds, defaultParryAnimationId)
+	end
+	if #parryIds > 0 then
 		task.spawn(function()
-			ParryWindows.ValidateAll({ defaultParryAnimationId })
+			ParryWindows.ValidateAll(parryIds)
 		end)
 	end
 

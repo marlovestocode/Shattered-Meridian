@@ -89,6 +89,7 @@ local StorybookModule = require(script.Screens.Storybook)
 local BlimpFuelModule = require(script.Screens.BlimpFuel)
 local BlimpHelmModule = require(script.Screens.BlimpHelm)
 local CarriedResourcesModule = require(script.Screens.CarriedResources)
+local FurnacePromptModule = require(script.Screens.FurnacePrompt)
 local WeaponInventoryModule = require(script.Screens.WeaponInventory)
 local ShiftLockCrosshair = require(script.Components.ShiftLockCrosshair)
 local ViewportScale = require(script.ViewportScale)
@@ -156,6 +157,14 @@ export type UIHandles = {
 	-- CarriedFuelUpdated remote -- unrelated to a blimp's own tank (BlimpFuel above), just the same
 	-- driving module for convenience.
 	CarriedResources: CarriedResourcesModule.CarriedResourcesHandle,
+	-- The furnace's custom interaction prompt (Screens/FurnacePrompt/init.lua) -- driven by
+	-- Client/Blimp/FurnacePromptClient.lua, which owns the ProximityPromptService wiring behind it.
+	FurnacePrompt: FurnacePromptModule.FurnacePromptHandle,
+	-- The one viewport multiplier, exposed because FurnacePromptClient projects a world point into a
+	-- scaled surface's own space and has to divide by exactly the scale that surface was built with --
+	-- computing a second one would open a second ViewportSize connection, which is the specific cost
+	-- Shell/Surface.lua's own header exists to prevent.
+	ViewportScale: Fusion.UsedAs<number>,
 	-- The player's own picked-up weapons, which one T will draw and whether it is out
 	-- (Screens/WeaponInventory/init.lua) -- always mounted, hidden until the first pickup, driven by
 	-- Client/Combat/WeaponInventoryClient.lua.
@@ -395,8 +404,16 @@ function UI.Mount(): UIHandles
 	regions:Add("TopLeft", 10, carriedResourcesTile)
 	logger:debug("CarriedResources mounted")
 
+	-- NOT a region tile, unlike everything else in this cluster: it tracks a point in the WORLD (a
+	-- blimp's furnace) rather than a corner of the screen, so it owns its own surface on the World
+	-- band. Screens/FurnacePrompt's own Mount header has the argument; Shell/Regions is not involved
+	-- and deliberately does not know it exists.
+	local furnacePrompt = FurnacePromptModule.Mount(scope, playerGui, viewportScale)
+	logger:debug("FurnacePrompt mounted")
+
 	return {
 		ClientState = clientState,
+		ViewportScale = viewportScale,
 		ShiftLockEngaged = shiftLockEngaged,
 		DeathFeed = deathFeed,
 		Chrome = chrome,
@@ -415,6 +432,7 @@ function UI.Mount(): UIHandles
 		BlimpFuel = blimpFuel,
 		BlimpHelm = blimpHelm,
 		CarriedResources = carriedResources,
+		FurnacePrompt = furnacePrompt,
 		WeaponInventory = weaponInventory,
 		Scope = scope,
 	}

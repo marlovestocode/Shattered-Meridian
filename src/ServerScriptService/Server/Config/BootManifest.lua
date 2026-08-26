@@ -52,18 +52,24 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
+local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
+local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
+local BlimpConstants = require(ReplicatedStorage.Shared.Blimp.BlimpConstants)
 local BountyConstants = require(ReplicatedStorage.Shared.BountyConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
+local EngagementConstants = require(ReplicatedStorage.Shared.Engagement.EngagementConstants)
+local GatheringConstants = require(ReplicatedStorage.Shared.Gathering.GatheringConstants)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local RunConstants = require(ReplicatedStorage.Shared.Run.RunConstants)
 local TierConstants = require(ReplicatedStorage.Shared.TierConstants)
+local VehicleConstants = require(ReplicatedStorage.Shared.Vehicle.VehicleConstants)
 
 local BootManifest = {}
 
@@ -126,19 +132,64 @@ local ENTRIES: { BootEntry } = {
 		Path = { "Systems", "SettingsSystem" },
 		Remotes = namesOf(Constants.Settings.RemoteNames),
 	},
+	-- Blimp Fuel System's gathering half. Owns CarriedFuelUpdated (server -> the owning player, pushed
+	-- on a successful gather, on profile load, and by BlimpSystem.depositFuel's own narrow callback in)
+	-- -- see GatheringConstants.RemoteNames' own comment.
+	{
+		Name = "ResourceGatheringSystem",
+		Path = { "Systems", "ResourceGatheringSystem" },
+		Remotes = namesOf(GatheringConstants.RemoteNames),
+	},
 	{
 		Name = "MeridianSystem",
 		Path = { "Systems", "MeridianSystem" },
 		Remotes = namesOf(Constants.Meridian.RemoteNames),
 	},
 	{ Name = "QiSystem", Path = { "Systems", "QiSystem" }, Remotes = namesOf(Constants.Qi.RemoteNames) },
+	-- Owns no remote -- EffectSystem is a pure server-side modifier engine with no network surface of
+	-- its own; RaceSystem/BloodlineSystem/KitAbilitySystem (later phases of the Race Traits +
+	-- Bloodline Abilities plan) are its callers, not clients.
+	{ Name = "EffectSystem", Path = { "Systems", "EffectSystem" }, Remotes = {} },
 	{ Name = "TierSystem", Path = { "Systems", "TierSystem" }, Remotes = namesOf(TierConstants.RemoteNames) },
 	{ Name = "ArtTreeManager", Path = { "Managers", "ArtTreeManager" }, Remotes = {} },
 	{ Name = "ArtSystem", Path = { "Systems", "ArtSystem" }, Remotes = namesOf(ArtConstants.RemoteNames) },
+	-- Race Traits + Bloodline Abilities plan. Neither owns a remote of its own -- KitAbilitySystem (a
+	-- later phase of that plan) is the shared trigger/remote path both this and BloodlineSystem
+	-- dispatch through.
+	{ Name = "RaceManager", Path = { "Managers", "RaceManager" }, Remotes = {} },
+	{ Name = "RaceSystem", Path = { "Systems", "RaceSystem" }, Remotes = {} },
 	{
 		Name = "CharacterSheetSystem",
 		Path = { "Systems", "CharacterSheetSystem" },
 		Remotes = namesOf(Constants.CharacterSheet.RemoteNames),
+	},
+	-- Owns no remote -- QiDeviationSystem replicates through CharacterSheetSystem's existing
+	-- SheetUpdated push (Refresh) rather than a remote of its own; see that module's own header.
+	{ Name = "QiDeviationSystem", Path = { "Systems", "QiDeviationSystem" }, Remotes = {} },
+	-- Race Traits + Bloodline Abilities plan -- same "no remote of its own, KitAbilitySystem is the
+	-- shared dispatch path" reasoning RaceManager/RaceSystem's own entries above give. BloodlineSystem
+	-- also replicates through CharacterSheetSystem's existing SheetUpdated push, same as
+	-- QiDeviationSystem immediately above -- no new remote for bloodlineStageProgress either.
+	--
+	-- The ONE remote it does own is the bloodline spin, called by the onboarding creator. Everything
+	-- else on this System is a server-side API other Systems call directly.
+	{ Name = "BloodlineManager", Path = { "Managers", "BloodlineManager" }, Remotes = {} },
+	-- Content, not a System: seeds world-bible.md's canon thirteen into the Manager above. Its own
+	-- step rather than folded into that Init, which is a pure reset -- see its own header.
+	{
+		Name = "DefaultBloodlineRegistry",
+		Path = { "Managers", "DefaultBloodlineRegistry" },
+		Remotes = {},
+	},
+	{
+		Name = "BloodlineSystem",
+		Path = { "Systems", "BloodlineSystem" },
+		Remotes = namesOf(BloodlineConstants.RemoteNames),
+	},
+	{
+		Name = "KitAbilitySystem",
+		Path = { "Systems", "KitAbilitySystem" },
+		Remotes = namesOf(Constants.Kit.RemoteNames),
 	},
 	{ Name = "MoveRegistryManager", Path = { "Combat", "MoveRegistryManager" }, Remotes = {} },
 	{ Name = "PlayerDeathSystem", Path = { "Systems", "PlayerDeathSystem" }, Remotes = {} },
@@ -163,12 +214,44 @@ local ENTRIES: { BootEntry } = {
 		Path = { "Combat", "Grab", "GrabSystem" },
 		Remotes = namesOf(GrabConstants.Network.RemoteNames),
 	},
+	-- The combat tag. A sibling of the attack layer like GrabSystem above, subscribing to the same
+	-- DamageSystem.OnApplied extension point -- see its own header. Boots after GrabSystem for no
+	-- ordering reason beyond reading in dependency order; its Step reclaims only its own rows, so an
+	-- out-of-order boot costs one stale frame rather than a wrong outcome.
+	{
+		Name = "EngagementSystem",
+		Path = { "Combat", "Engagement", "EngagementSystem" },
+		Remotes = namesOf(EngagementConstants.Network.RemoteNames),
+	},
+	-- Owns no remote -- purely cosmetic, replicates for free as a Tool parented under the character
+	-- rather than through NetworkBridge. See its own header for why it is a sibling of the attack
+	-- layer, not a combat-legality gate.
+	{ Name = "WeaponVisualSystem", Path = { "Combat", "Weapon", "WeaponVisualSystem" }, Remotes = {} },
+	-- Owns the pickup prompts and the draw/sheath state. Boots after WeaponVisualSystem because a draw
+	-- reaches the hand THROUGH that System (SwingSequencer.SetWeapon -> OnWeaponChanged -> EquipVisual),
+	-- so its subscription has to already exist or the very first draw of a session changes the record
+	-- and draws nothing.
+	{
+		Name = "WeaponInventorySystem",
+		Path = { "Combat", "Weapon", "WeaponInventorySystem" },
+		Remotes = namesOf(WeaponConstants.Network.RemoteNames),
+	},
 	{
 		Name = "ParkourSystem",
 		Path = { "Systems", "ParkourSystem" },
 		Remotes = namesOf(ParkourConstants.Network.RemoteNames),
 	},
 	{ Name = "RunSystem", Path = { "Systems", "RunSystem" }, Remotes = namesOf(RunConstants.Network.RemoteNames) },
+	{
+		Name = "BlimpSystem",
+		Path = { "Systems", "BlimpSystem" },
+		Remotes = namesOf(BlimpConstants.Network.RemoteNames),
+	},
+	{
+		Name = "VehicleManager",
+		Path = { "Systems", "VehicleManager" },
+		Remotes = namesOf(VehicleConstants.RemoteNames),
+	},
 	{ Name = "EmoteUnlockService", Path = { "Systems", "EmoteUnlockService" }, Remotes = {} },
 	{ Name = "EmoteSystem", Path = { "Systems", "EmoteSystem" }, Remotes = namesOf(EmoteConstants.RemoteNames) },
 	{ Name = "RespawnSystem", Path = { "Systems", "RespawnSystem" }, Remotes = {} },
@@ -192,6 +275,11 @@ local ENTRIES: { BootEntry } = {
 		Remotes = namesExcept(Constants.MoveEditor.RemoteNames, MOVE_EDITOR_RETIRED),
 	},
 	{
+		Name = "KitEditorSystem",
+		Path = { "Systems", "KitEditorSystem" },
+		Remotes = namesOf(Constants.KitEditor.RemoteNames),
+	},
+	{
 		Name = "LiveConsoleSystem",
 		Path = { "Systems", "LiveConsoleSystem" },
 		Remotes = namesOf(Constants.LiveConsole.RemoteNames),
@@ -208,11 +296,8 @@ local ENTRIES: { BootEntry } = {
 	-- terms as everything above: the day one of them stops being empty and grows a remote, the boot
 	-- check starts holding it to that.
 	{ Name = "FactionManager", Path = { "Managers", "FactionManager" }, Remotes = {} },
-	{ Name = "BloodlineManager", Path = { "Managers", "BloodlineManager" }, Remotes = {} },
-	{ Name = "BloodlineSystem", Path = { "Systems", "BloodlineSystem" }, Remotes = {} },
 	{ Name = "ProgressionSystem", Path = { "Systems", "ProgressionSystem" }, Remotes = {} },
 	{ Name = "AchievementSystem", Path = { "Systems", "AchievementSystem" }, Remotes = {} },
-	{ Name = "QiDeviationSystem", Path = { "Systems", "QiDeviationSystem" }, Remotes = {} },
 	{ Name = "AbsorbSystem", Path = { "Systems", "AbsorbSystem" }, Remotes = {} },
 	{ Name = "RewardSystem", Path = { "Systems", "RewardSystem" }, Remotes = {} },
 	{ Name = "AwakeningSystem", Path = { "Systems", "AwakeningSystem" }, Remotes = {} },

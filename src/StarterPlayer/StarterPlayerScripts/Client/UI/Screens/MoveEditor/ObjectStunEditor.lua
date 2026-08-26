@@ -57,14 +57,12 @@ local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
 local Toggle = require(script.Parent.Parent.Parent.Components.Toggle)
-local TextField = require(script.Parent.Parent.Parent.Components.TextField)
 local Dropdown = require(script.Parent.Parent.Parent.Components.Dropdown)
 local NumericField = require(script.Parent.Parent.Parent.Components.NumericField)
 local TrackedLabel = require(script.Parent.Parent.Parent.Components.TrackedLabel)
 local DraftBinding = require(script.Parent.DraftBinding)
 
 local Children = Fusion.Children
-local peek = Fusion.peek
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
@@ -314,9 +312,12 @@ function ObjectStunEditorModule.Build(scope: Scope, context: DraftContext): { In
 		})
 	end
 
-	-- A string field on the config (an animation id, a sound id, a tag). Same reseed-on-draft-change
-	-- shape TextFieldRow uses in PropertyEditor.lua -- TextField owns a real Fusion.Value it writes
-	-- into as the author types, so it can't be a Computed off the draft.
+	-- A string field on the config (an animation id, a sound id, a tag). The row itself is
+	-- DraftBinding.TextRow -- this is only the adapter that narrows its draft-level Get/OnCommit down to
+	-- the ObjectStun sub-table, so the four call sites below keep reading and writing an
+	-- ObjectStunConfig rather than each unpacking the draft themselves. The reseed-on-draft-change and
+	-- mount-both/Visible-toggle machinery it used to hand-roll is shared now; see TextRow's own header
+	-- for why none of it can be a Computed.
 	local function stunTextRow(
 		labelText: string,
 		placeholder: string,
@@ -324,49 +325,21 @@ function ObjectStunEditorModule.Build(scope: Scope, context: DraftContext): { In
 		getter: (ObjectStunConfig) -> string,
 		setter: (ObjectStunConfig, string) -> ()
 	): Frame
-		local localText = scope:Value("")
-		local function reseed(): ()
-			local draft = peek(context.Draft)
-			local config = if draft then draft.ObjectStun else nil
-			localText:set(if config then getter(config) else "")
-		end
-		scope:Observer(context.Draft):onChange(reseed)
-		reseed()
-
-		return scope:New "Frame" {
-			Name = labelText,
-			Size = UDim2.fromScale(1, 0),
-			AutomaticSize = Enum.AutomaticSize.Y,
-			BackgroundTransparency = 1,
+		return DraftBinding.TextRow(scope, context, {
+			Label = labelText,
+			Placeholder = placeholder,
 			LayoutOrder = layoutOrder,
 			Visible = hasStun,
-
-			[Children] = {
-				scope:New "UIListLayout" {
-					FillDirection = Enum.FillDirection.Vertical,
-					Padding = UDim.new(0, Tokens.Space.XS),
-					SortOrder = Enum.SortOrder.LayoutOrder,
-				},
-				Label(scope, { Text = labelText, Scale = "Body", Color = Tokens.Color.TextPrimary, LayoutOrder = 1 }),
-				scope:New "Frame" {
-					Name = "FieldSlot",
-					Size = UDim2.fromScale(1, 0),
-					AutomaticSize = Enum.AutomaticSize.Y,
-					BackgroundTransparency = 1,
-					LayoutOrder = 2,
-
-					[Children] = TextField(scope, {
-						Text = localText,
-						PlaceholderText = placeholder,
-						OnFocusLost = function(newText: string)
-							applyStun(context, function(config)
-								setter(config, newText)
-							end)
-						end,
-					}),
-				},
-			},
-		} :: Frame
+			Get = function(draft)
+				local config = draft.ObjectStun
+				return if config then getter(config) else ""
+			end,
+			OnCommit = function(text: string)
+				applyStun(context, function(config)
+					setter(config, text)
+				end)
+			end,
+		})
 	end
 
 	local children: { Instance } = {

@@ -140,6 +140,24 @@ function ParkourCamera.OnStateChanged(previous: MovementStateId, next: MovementS
 		)
 		CameraShake.Shake(SHAKE.Vault)
 	end
+	-- The dash, on the same one-shot Punch path as the vault above and for the same structural
+	-- reason: it is a discrete event whose whole effect belongs at the start. The DIRECTION of the
+	-- punch is the opposite one, and deliberately so -- see Camera.DashFOVPunchDelta for why a dash
+	-- widens where a vault narrows.
+	--
+	-- No CameraShake to go with it, unlike the vault. Shake is this framework's impact vocabulary
+	-- (Vault, WallJump, hard landing, slide-start -- every preset is a collision with something), and
+	-- a dash does not hit anything; it is a launch into open air. Shaking it would say the player ran
+	-- into their own dash. If the launch later wants a physical cue beyond the FOV, the honest place
+	-- for it is the spring's own overshoot, which is already doing that job in the velocity.
+	if next == "Dashing" then
+		FOVOffset.Punch(
+			CAMERA.DashFOVSlot,
+			CAMERA.DashFOVPunchDelta,
+			CAMERA.DashFOVPunchOutSeconds,
+			CAMERA.DashFOVPunchBackSeconds
+		)
+	end
 	-- The climb's continuous feed cannot be relied on to reach 0 on its own: a mantle can end early
 	-- (falling off a narrow ledge mid-climb -- see that state's own Update) or be interrupted (combat
 	-- taking the body), and SetMantleProgress is only ever pushed while the state is actually current.
@@ -236,6 +254,7 @@ function ParkourCamera.Reset(): ()
 	FOVOffset.ClearContinuous(CAMERA.SlideFOVSlot)
 	FOVOffset.ClearContinuous(CAMERA.VaultFOVSlot)
 	FOVOffset.ClearContinuous(CAMERA.MantleFOVSlot)
+	FOVOffset.ClearContinuous(CAMERA.DashFOVSlot)
 	CameraOffsetComposer.ClearContinuous(CAMERA.OffsetSlot)
 	slideDrop = 0
 	landingDip = 0

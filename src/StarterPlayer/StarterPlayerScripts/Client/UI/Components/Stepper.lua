@@ -32,6 +32,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
+local Selection = require(script.Parent.Selection)
 local Label = require(script.Parent.Label)
 
 local Children = Fusion.Children
@@ -122,7 +123,11 @@ local function StepButton(
 	layoutOrder: number,
 	onActivated: () -> ()
 ): TextButton
-	local isHovering = scope:Value(false)
+	-- Pointer-over AND gamepad-selection, OR-ed into the single boolean every visual Computed
+	-- below already reads as `isHovering` -- see Components/Selection.lua for why the two stay
+	-- separate rather than both writing one Value.
+	local engagement = Selection.New(scope)
+	local isHovering = engagement.Active
 	local isPressing = scope:Value(false)
 
 	local borderColor = scope:Computed(function(use)
@@ -160,11 +165,17 @@ local function StepButton(
 		Text = "",
 		Active = enabled,
 
+		[OnEvent "SelectionGained"] = function()
+			engagement.Selected:set(true)
+		end,
+		[OnEvent "SelectionLost"] = function()
+			engagement.Selected:set(false)
+		end,
 		[OnEvent "MouseEnter"] = function()
-			isHovering:set(true)
+			engagement.PointerOver:set(true)
 		end,
 		[OnEvent "MouseLeave"] = function()
-			isHovering:set(false)
+			engagement.PointerOver:set(false)
 			isPressing:set(false)
 		end,
 		[OnEvent "MouseButton1Down"] = function()

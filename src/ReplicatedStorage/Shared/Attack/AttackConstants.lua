@@ -121,15 +121,16 @@ AttackConstants.Finisher = {
 
 -- Weapons ---------------------------------------------------------------------------------------
 
-AttackConstants.Weapons = {
-	-- What every combatant starts on. Not a balance statement -- Primary is simply the fuller
-	-- authored move set (three Basic stages, two Heavy, a Finisher), so it is the one a player who
-	-- never touches the swap key should be holding.
-	Default = "Primary" :: "Primary",
-	-- Swap order. A two-entry cycle today; kept as a list rather than an if/else so a third weapon is
-	-- a data edit rather than a control-flow one.
-	Order = { "Primary", "Secondary" },
-}
+-- INTENTIONALLY EMPTY of Default/Order -- both used to live here as the hardcoded two-entry
+-- { "Primary", "Secondary" } cycle, and both now come from Shared/Combat/WeaponRoster.lua, which
+-- reads the real roster out of Workspace.Weapons at boot. A weapon is a model somebody dropped in a
+-- folder, so neither "which exist" nor "which is first" is knowable from a constants file, and
+-- leaving a stale copy of either here is exactly how the swap key would start disagreeing with what
+-- is actually in the player's hand.
+--
+-- Kept as a named empty table rather than deleted outright so this comment has somewhere to live --
+-- the next person looking for the weapon list will look here first.
+AttackConstants.Weapons = {}
 
 -- Input -----------------------------------------------------------------------------------------
 
@@ -209,8 +210,12 @@ AttackConstants.Input = {
 }
 
 AttackConstants.Hotbar = {
-	-- Matches Client/Combat/HotbarBindings.lua's own SLOT_COUNT and the HUD's five AbilitySlots. The
-	-- server validates against this rather than trusting the slot number it is sent.
+	-- The HUD's five AbilitySlots. Must agree with ArtConstants.EquipSlotCount, which is the number
+	-- that actually bounds a slot index everywhere it matters: a hotbar slot holds an equipped ART and
+	-- nothing else (see ArtSystem.lua's header), so ArtSystem.IsValidSlot is the real gate and this is
+	-- the combat layer's own read of the same fact. Not aliased to it only because Shared/Attack must
+	-- not depend on the progression side. The server validates against this rather than trusting the
+	-- slot number it is sent.
 	SlotCount = 5,
 }
 
