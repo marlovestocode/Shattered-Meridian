@@ -145,6 +145,50 @@ return function()
 	-- Worth writing; deliberately not written here, since a new spec for a different module is not the
 	-- same change as deleting a dead one.
 
+	-- THE AUTHORING CAPS AND THE ENGINE CAPS DISAGREE, and this pins the disagreement rather than
+	-- papering over it, because closing it is a design call with two defensible answers and I do not
+	-- have the context to pick one.
+	--
+	-- HitboxShapes.FIELD_SPECS is what the Move Editor lets an author type.
+	-- HitboxEngine/HitboxTypes.FIELD_BOUNDS is what the engine actually resolves against, after
+	-- MoveTypes maps an authored move down to an engine one. Where the editor's cap is HIGHER, an
+	-- author enters a number, the editor accepts it, the DataStore stores it, and the engine silently
+	-- clamps it -- so the move plays smaller than it reads.
+	--
+	-- Radius and InnerRadius are that case today: 500 and 100 here against 256 and 256 there. Width,
+	-- Height and Length are fine (500 here, 512 there -- the editor is the stricter one, which is the
+	-- harmless direction).
+	--
+	-- The two fixes, both one line:
+	--   * Lower FIELD_SPECS.Radius/.InnerRadius to 256. Changes NO gameplay -- the engine already
+	--     clamps there -- and makes the editor stop accepting numbers that do nothing.
+	--   * Raise FIELD_BOUNDS.Radius/.InnerRadius to 500. Honours what the 2026-08-12 "much larger
+	--     hitboxes" pass evidently intended (FIELD_SPECS' own comment says Radius was raised
+	--     "alongside Height/Depth/Length/Radius/InnerRadius"; FIELD_BOUNDS was not), but it CHANGES
+	--     GAMEPLAY: any stored move authored above 256 would start resolving larger than it does now.
+	--
+	-- Either way this test fails and forces the choice to be stated. There is also a third, smaller
+	-- discrepancy inside FIELD_SPECS itself: InnerRadius' own comment says it "mirrors Radius' own Max
+	-- above" so the strictly-inside invariant means something, and it does not (100 against 500).
+	describe("the authoring caps against the engine's own", function()
+		local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
+
+		it("is stricter than the engine for every box dimension", function()
+			for _, field in { "Width", "Height", "Length" } do
+				local authoring = HitboxShapes.GetFieldSpec(field :: any).Max
+				local engine = HitboxTypes.FieldBounds()[field].Max
+				expect(authoring <= engine).to.equal(true)
+			end
+		end)
+
+		it("is LOOSER than the engine for Radius and InnerRadius -- the open discrepancy above", function()
+			expect(HitboxShapes.GetFieldSpec("Radius").Max).to.equal(500)
+			expect(HitboxTypes.FieldBounds().Radius.Max).to.equal(256)
+			expect(HitboxShapes.GetFieldSpec("InnerRadius").Max).to.equal(100)
+			expect(HitboxTypes.FieldBounds().InnerRadius.Max).to.equal(256)
+		end)
+	end)
+
 	describe("HitboxShapes.Reach and ApproximateVolume", function()
 		it("reports a positive reach and volume for every shape", function()
 			for _, spec in ipairs(HitboxShapes.ListShapes()) do

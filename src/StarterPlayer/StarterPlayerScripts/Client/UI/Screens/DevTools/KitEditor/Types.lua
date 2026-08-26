@@ -21,6 +21,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local RaceTraitTypes = require(ReplicatedStorage.Shared.Race.RaceTraitTypes)
 local BloodlineTypes = require(ReplicatedStorage.Shared.Bloodline.BloodlineTypes)
+local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 
 local KitEditorTypes = {}
 
@@ -49,55 +50,16 @@ export type KitDraft = RaceTraitDraft | BloodlineDraft
 -- differ between two structurally identical tables), and an array (a table whose only keys are a
 -- contiguous 1..#t) is digested in INDEX order instead -- sorting "1", "2", "10" lexicographically
 -- would put "10" before "2", corrupting an Effects list's own meaning.
-local function isArray(value: { [any]: unknown }): boolean
-	local count = 0
-	for _ in pairs(value) do
-		count += 1
-	end
-	return count == #value
-end
-
-local function digestNumber(value: number): string
-	return string.format("%.6g", value)
-end
-
-local function digestValue(out: { string }, value: unknown): ()
-	local valueType = typeof(value)
-	if valueType == "number" then
-		table.insert(out, digestNumber(value :: number))
-	elseif valueType == "string" then
-		table.insert(out, "'" .. (value :: string) .. "'")
-	elseif valueType == "boolean" then
-		table.insert(out, if value then "T" else "F")
-	elseif valueType == "nil" then
-		table.insert(out, "~")
-	elseif valueType == "table" then
-		local source = value :: { [any]: unknown }
-		table.insert(out, "{")
-		if isArray(source) then
-			for _, entry in ipairs(source :: { unknown }) do
-				digestValue(out, entry)
-			end
-		else
-			local keys: { string } = {}
-			for key in pairs(source) do
-				table.insert(keys, tostring(key))
-			end
-			table.sort(keys)
-			for _, key in ipairs(keys) do
-				table.insert(out, key .. "=")
-				digestValue(out, (source :: any)[key])
-			end
-		end
-		table.insert(out, "}")
-	else
-		table.insert(out, tostring(value))
-	end
-end
+-- The digest walk itself is Shared/MoveTypes.DigestValue. The copy that used to live here and
+-- MoveTypes' own differed in COMPLEMENTARY directions -- this one knew about arrays and not about
+-- Roblox value types, that one the reverse -- so neither was a subset of the other, and merging them
+-- meant taking both halves rather than picking a winner. The Vector3/Color3/CFrame branches are
+-- inert for a kit definition (KitEditorSystem's own header: "no Vector3/CFrame/Color3 anywhere in
+-- either schema"), and the array branch is what this file contributed.
 
 function KitEditorTypes.Fingerprint(value: { [any]: unknown }): string
 	local out: { string } = {}
-	digestValue(out, value)
+	MoveTypes.DigestValue(out, value)
 	return table.concat(out)
 end
 

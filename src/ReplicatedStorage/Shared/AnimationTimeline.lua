@@ -37,6 +37,10 @@
 	durations themselves (MoveDefinition's own WindupSeconds/ActiveSeconds/RecoverySeconds).
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Sanitize = require(ReplicatedStorage.Shared.Sanitize)
+
 local AnimationTimeline = {}
 
 export type MovePhase = "Windup" | "Active" | "Recovery"
@@ -287,35 +291,11 @@ function AnimationTimeline.FromLegacyAnimationId(animationId: string): { Clip }
 	return { clip }
 end
 
-local function clampNumber(value: unknown, min: number, max: number, fallback: number): number
-	if typeof(value) ~= "number" then
-		return fallback
-	end
-	local number = value :: number
-	if number ~= number then
-		-- NaN survives math.clamp -- reject it here rather than let it poison every downstream
-		-- comparison in Resolve.
-		return fallback
-	end
-	return math.clamp(number, min, max)
-end
-
 local function readEnum(value: unknown, allowed: { [string]: boolean }, fallback: string): string
 	if typeof(value) == "string" and allowed[value :: string] then
 		return value :: string
 	end
 	return fallback
-end
-
-local function readString(value: unknown, maxLength: number, fallback: string): string
-	if typeof(value) ~= "string" then
-		return fallback
-	end
-	local text = value :: string
-	if #text > maxLength then
-		return text:sub(1, maxLength)
-	end
-	return text
 end
 
 -- Normalizes one arbitrary (client-submitted, DataStore-decoded, or hand-written) table into a
@@ -332,25 +312,45 @@ function AnimationTimeline.SanitizeClip(raw: unknown, clipId: string, order: num
 
 	return {
 		ClipId = clipId,
-		Name = readString(source.Name, Limits.MaxNameLength, fallback.Name),
-		AnimationId = readString(source.AnimationId, Limits.MaxAnimationIdLength, ""),
+		Name = Sanitize.BoundedString(source.Name, Limits.MaxNameLength, fallback.Name),
+		AnimationId = Sanitize.BoundedString(source.AnimationId, Limits.MaxAnimationIdLength, ""),
 		Enabled = if typeof(source.Enabled) == "boolean" then source.Enabled :: boolean else true,
-		Order = math.floor(clampNumber(source.Order, Limits.MinOrder, Limits.MaxOrder, order)),
+		Order = math.floor(Sanitize.ClampNumberOr(source.Order, Limits.MinOrder, Limits.MaxOrder, order)),
 		StartMode = readEnum(source.StartMode, START_MODES, fallback.StartMode) :: ClipStartMode,
-		StartTime = clampNumber(source.StartTime, Limits.MinStartTime, Limits.MaxStartTime, fallback.StartTime),
+		StartTime = Sanitize.ClampNumberOr(
+			source.StartTime,
+			Limits.MinStartTime,
+			Limits.MaxStartTime,
+			fallback.StartTime
+		),
 		StartPhase = readEnum(source.StartPhase, PHASES, fallback.StartPhase) :: MovePhase,
-		StartDelay = clampNumber(source.StartDelay, Limits.MinStartDelay, Limits.MaxStartDelay, fallback.StartDelay),
+		StartDelay = Sanitize.ClampNumberOr(
+			source.StartDelay,
+			Limits.MinStartDelay,
+			Limits.MaxStartDelay,
+			fallback.StartDelay
+		),
 		StopMode = readEnum(source.StopMode, STOP_MODES, fallback.StopMode) :: ClipStopMode,
-		DurationSeconds = clampNumber(
+		DurationSeconds = Sanitize.ClampNumberOr(
 			source.DurationSeconds,
 			Limits.MinDuration,
 			Limits.MaxDuration,
 			fallback.DurationSeconds
 		),
-		Speed = clampNumber(source.Speed, Limits.MinSpeed, Limits.MaxSpeed, fallback.Speed),
-		Weight = clampNumber(source.Weight, Limits.MinWeight, Limits.MaxWeight, fallback.Weight),
-		FadeInSeconds = clampNumber(source.FadeInSeconds, Limits.MinFade, Limits.MaxFade, fallback.FadeInSeconds),
-		FadeOutSeconds = clampNumber(source.FadeOutSeconds, Limits.MinFade, Limits.MaxFade, fallback.FadeOutSeconds),
+		Speed = Sanitize.ClampNumberOr(source.Speed, Limits.MinSpeed, Limits.MaxSpeed, fallback.Speed),
+		Weight = Sanitize.ClampNumberOr(source.Weight, Limits.MinWeight, Limits.MaxWeight, fallback.Weight),
+		FadeInSeconds = Sanitize.ClampNumberOr(
+			source.FadeInSeconds,
+			Limits.MinFade,
+			Limits.MaxFade,
+			fallback.FadeInSeconds
+		),
+		FadeOutSeconds = Sanitize.ClampNumberOr(
+			source.FadeOutSeconds,
+			Limits.MinFade,
+			Limits.MaxFade,
+			fallback.FadeOutSeconds
+		),
 		Looped = if typeof(source.Looped) == "boolean" then source.Looped :: boolean else false,
 		-- Absent (every clip persisted before this field existed) falls back to the default rather
 		-- than being rejected -- same as every other field here, and the reason no migration pass is

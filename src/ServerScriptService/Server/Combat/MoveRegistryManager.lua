@@ -58,6 +58,7 @@ local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
 local HitboxShapes = require(ReplicatedStorage.Shared.HitboxShapes)
 local AnimationTimeline = require(ReplicatedStorage.Shared.AnimationTimeline)
+local Sanitize = require(ReplicatedStorage.Shared.Sanitize)
 
 local MoveRegistryManager = {}
 
@@ -116,39 +117,15 @@ local function isNonEmptyString(value: unknown): boolean
 	return typeof(value) == "string" and (value :: string) ~= ""
 end
 
-local function clampedNumber(value: unknown, min: number, max: number): number?
-	if typeof(value) ~= "number" then
-		return nil
-	end
-	local number = value :: number
-	if number ~= number then
-		-- NaN passes typeof but survives math.clamp -- treated as "not a number was supplied",
-		-- which for a required field is a hard reject and for an optional one is a fallback.
-		return nil
-	end
-	return math.clamp(number, min, max)
-end
-
 -- Clamps against one of Constants.MoveEditor.ObjectStun.Limits' {Min, Max} pairs, falling back to
 -- `fallback` for anything non-numeric. Normalizing, never rejecting -- see this file's header on
 -- why the Object Stun block follows the clamp rule rather than the hard-reject rule.
 local function clampLimit(value: unknown, limit: { Min: number, Max: number }, fallback: number): number
-	local clamped = clampedNumber(value, limit.Min, limit.Max)
+	local clamped = Sanitize.ClampNumber(value, limit.Min, limit.Max)
 	if clamped == nil then
 		return math.clamp(fallback, limit.Min, limit.Max)
 	end
 	return clamped
-end
-
-local function boundedString(value: unknown, maxLength: number): string
-	if typeof(value) ~= "string" then
-		return ""
-	end
-	local text = value :: string
-	if #text > maxLength then
-		return text:sub(1, maxLength)
-	end
-	return text
 end
 
 local function readBoolean(value: unknown, fallback: boolean): boolean
@@ -168,9 +145,12 @@ local function validateMovement(raw: unknown): (MoveTypes.MoveMovementGrant?, st
 		return nil, "InvalidMovement"
 	end
 	local candidate = raw :: { [string]: unknown }
-	local lungeDistance =
-		clampedNumber(candidate.LungeDistanceStuds, CLAMP_MIN_LUNGE_DISTANCE_STUDS, CLAMP_MAX_LUNGE_DISTANCE_STUDS)
-	local lungeDuration = clampedNumber(
+	local lungeDistance = Sanitize.ClampNumber(
+		candidate.LungeDistanceStuds,
+		CLAMP_MIN_LUNGE_DISTANCE_STUDS,
+		CLAMP_MAX_LUNGE_DISTANCE_STUDS
+	)
+	local lungeDuration = Sanitize.ClampNumber(
 		candidate.LungeDurationSeconds,
 		CLAMP_MIN_LUNGE_DURATION_SECONDS,
 		CLAMP_MAX_LUNGE_DURATION_SECONDS
@@ -190,10 +170,12 @@ local function validateKnockback(raw: unknown): (MoveTypes.MoveKnockback?, strin
 		return nil, "InvalidKnockback"
 	end
 	local candidate = raw :: { [string]: unknown }
-	local upVelocity = clampedNumber(candidate.UpVelocity, CLAMP_MIN_KNOCKBACK_VELOCITY, CLAMP_MAX_KNOCKBACK_VELOCITY)
+	local upVelocity =
+		Sanitize.ClampNumber(candidate.UpVelocity, CLAMP_MIN_KNOCKBACK_VELOCITY, CLAMP_MAX_KNOCKBACK_VELOCITY)
 	local horizontalVelocity =
-		clampedNumber(candidate.HorizontalVelocity, CLAMP_MIN_KNOCKBACK_VELOCITY, CLAMP_MAX_KNOCKBACK_VELOCITY)
-	local ragdollSeconds = clampedNumber(candidate.RagdollSeconds, CLAMP_MIN_RAGDOLL_SECONDS, CLAMP_MAX_RAGDOLL_SECONDS)
+		Sanitize.ClampNumber(candidate.HorizontalVelocity, CLAMP_MIN_KNOCKBACK_VELOCITY, CLAMP_MAX_KNOCKBACK_VELOCITY)
+	local ragdollSeconds =
+		Sanitize.ClampNumber(candidate.RagdollSeconds, CLAMP_MIN_RAGDOLL_SECONDS, CLAMP_MAX_RAGDOLL_SECONDS)
 	if upVelocity == nil or horizontalVelocity == nil or ragdollSeconds == nil then
 		return nil, "InvalidKnockback"
 	end
@@ -243,18 +225,28 @@ local function validateGrab(raw: unknown): (MoveTypes.MoveGrabConfig?, string?)
 		return nil, "InvalidGrab"
 	end
 	local candidate = raw :: { [string]: unknown }
-	local holdSeconds = clampedNumber(candidate.HoldSeconds, GRAB_LIMITS.HoldSeconds.Min, GRAB_LIMITS.HoldSeconds.Max)
-	local throwUpVelocity =
-		clampedNumber(candidate.ThrowUpVelocity, GRAB_LIMITS.ThrowUpVelocity.Min, GRAB_LIMITS.ThrowUpVelocity.Max)
-	local throwHorizontalVelocity = clampedNumber(
+	local holdSeconds =
+		Sanitize.ClampNumber(candidate.HoldSeconds, GRAB_LIMITS.HoldSeconds.Min, GRAB_LIMITS.HoldSeconds.Max)
+	local throwUpVelocity = Sanitize.ClampNumber(
+		candidate.ThrowUpVelocity,
+		GRAB_LIMITS.ThrowUpVelocity.Min,
+		GRAB_LIMITS.ThrowUpVelocity.Max
+	)
+	local throwHorizontalVelocity = Sanitize.ClampNumber(
 		candidate.ThrowHorizontalVelocity,
 		GRAB_LIMITS.ThrowHorizontalVelocity.Min,
 		GRAB_LIMITS.ThrowHorizontalVelocity.Max
 	)
-	local throwImpactDamage =
-		clampedNumber(candidate.ThrowImpactDamage, GRAB_LIMITS.ThrowImpactDamage.Min, GRAB_LIMITS.ThrowImpactDamage.Max)
-	local throwSelfDamage =
-		clampedNumber(candidate.ThrowSelfDamage, GRAB_LIMITS.ThrowSelfDamage.Min, GRAB_LIMITS.ThrowSelfDamage.Max)
+	local throwImpactDamage = Sanitize.ClampNumber(
+		candidate.ThrowImpactDamage,
+		GRAB_LIMITS.ThrowImpactDamage.Min,
+		GRAB_LIMITS.ThrowImpactDamage.Max
+	)
+	local throwSelfDamage = Sanitize.ClampNumber(
+		candidate.ThrowSelfDamage,
+		GRAB_LIMITS.ThrowSelfDamage.Min,
+		GRAB_LIMITS.ThrowSelfDamage.Max
+	)
 	if
 		holdSeconds == nil
 		or throwUpVelocity == nil
@@ -285,8 +277,8 @@ local function validateProjectile(raw: unknown): (MoveTypes.MoveProjectileConfig
 		return nil, "InvalidProjectile"
 	end
 	local candidate = raw :: { [string]: unknown }
-	local speed = clampedNumber(candidate.Speed, CLAMP_MIN_PROJECTILE_SPEED, CLAMP_MAX_PROJECTILE_SPEED)
-	local maxRange = clampedNumber(candidate.MaxRange, CLAMP_MIN_PROJECTILE_RANGE, CLAMP_MAX_PROJECTILE_RANGE)
+	local speed = Sanitize.ClampNumber(candidate.Speed, CLAMP_MIN_PROJECTILE_SPEED, CLAMP_MAX_PROJECTILE_SPEED)
+	local maxRange = Sanitize.ClampNumber(candidate.MaxRange, CLAMP_MIN_PROJECTILE_RANGE, CLAMP_MAX_PROJECTILE_RANGE)
 	if speed == nil or maxRange == nil then
 		return nil, "InvalidProjectile"
 	end
@@ -310,7 +302,7 @@ end
 -- and means "no rotation" -- exactly what every v1 record and every pre-rotation client sends.
 local function readRotation(raw: { [string]: unknown }, prefix: string): Vector3
 	local function axis(suffix: string): number
-		return clampedNumber(raw[prefix .. suffix], CLAMP_MIN_ROTATION_DEGREES, CLAMP_MAX_ROTATION_DEGREES) or 0
+		return Sanitize.ClampNumber(raw[prefix .. suffix], CLAMP_MIN_ROTATION_DEGREES, CLAMP_MAX_ROTATION_DEGREES) or 0
 	end
 	return Vector3.new(axis("X"), axis("Y"), axis("Z"))
 end
@@ -387,9 +379,12 @@ local function validateFollowUp(raw: unknown): (Types.ObjectStunFollowUp?, strin
 	-- hitbox.
 	local dimensions = dimensionsFromCandidate(shape, candidate) or HitboxShapes.DefaultDimensions(shape)
 
-	local offsetX = clampedNumber(candidate.OffsetX, CLAMP_MIN_OFFSET_STUDS, CLAMP_MAX_OFFSET_STUDS) or defaults.OffsetX
-	local offsetY = clampedNumber(candidate.OffsetY, CLAMP_MIN_OFFSET_STUDS, CLAMP_MAX_OFFSET_STUDS) or defaults.OffsetY
-	local offsetZ = clampedNumber(candidate.OffsetZ, CLAMP_MIN_OFFSET_STUDS, CLAMP_MAX_OFFSET_STUDS) or defaults.OffsetZ
+	local offsetX = Sanitize.ClampNumber(candidate.OffsetX, CLAMP_MIN_OFFSET_STUDS, CLAMP_MAX_OFFSET_STUDS)
+		or defaults.OffsetX
+	local offsetY = Sanitize.ClampNumber(candidate.OffsetY, CLAMP_MIN_OFFSET_STUDS, CLAMP_MAX_OFFSET_STUDS)
+		or defaults.OffsetY
+	local offsetZ = Sanitize.ClampNumber(candidate.OffsetZ, CLAMP_MIN_OFFSET_STUDS, CLAMP_MAX_OFFSET_STUDS)
+		or defaults.OffsetZ
 	local rotation = readRotation(candidate, "OffsetRotation")
 
 	local knockback, knockbackError = validateKnockback(candidate.Knockback)
@@ -400,16 +395,16 @@ local function validateFollowUp(raw: unknown): (Types.ObjectStunFollowUp?, strin
 	return {
 		Enabled = readBoolean(candidate.Enabled, false),
 		DelaySeconds = clampLimit(candidate.DelaySeconds, limits.FollowUpDelaySeconds, defaults.DelaySeconds),
-		AnimationId = boundedString(candidate.AnimationId, MAX_ASSET_ID_LENGTH),
+		AnimationId = Sanitize.BoundedString(candidate.AnimationId, MAX_ASSET_ID_LENGTH),
 
-		WindupSeconds = clampedNumber(candidate.WindupSeconds, CLAMP_MIN_SECONDS, CLAMP_MAX_SECONDS)
+		WindupSeconds = Sanitize.ClampNumber(candidate.WindupSeconds, CLAMP_MIN_SECONDS, CLAMP_MAX_SECONDS)
 			or defaults.WindupSeconds,
-		ActiveSeconds = clampedNumber(candidate.ActiveSeconds, CLAMP_MIN_SECONDS, CLAMP_MAX_SECONDS)
+		ActiveSeconds = Sanitize.ClampNumber(candidate.ActiveSeconds, CLAMP_MIN_SECONDS, CLAMP_MAX_SECONDS)
 			or defaults.ActiveSeconds,
-		RecoverySeconds = clampedNumber(candidate.RecoverySeconds, CLAMP_MIN_SECONDS, CLAMP_MAX_SECONDS)
+		RecoverySeconds = Sanitize.ClampNumber(candidate.RecoverySeconds, CLAMP_MIN_SECONDS, CLAMP_MAX_SECONDS)
 			or defaults.RecoverySeconds,
-		Damage = clampedNumber(candidate.Damage, CLAMP_MIN_DAMAGE, CLAMP_MAX_DAMAGE) or defaults.Damage,
-		PostureDamage = clampedNumber(candidate.PostureDamage, CLAMP_MIN_DAMAGE, CLAMP_MAX_DAMAGE)
+		Damage = Sanitize.ClampNumber(candidate.Damage, CLAMP_MIN_DAMAGE, CLAMP_MAX_DAMAGE) or defaults.Damage,
+		PostureDamage = Sanitize.ClampNumber(candidate.PostureDamage, CLAMP_MIN_DAMAGE, CLAMP_MAX_DAMAGE)
 			or defaults.PostureDamage,
 		MaxTargets = math.floor(clampLimit(candidate.MaxTargets, limits.FollowUpMaxTargets, defaults.MaxTargets)),
 
@@ -530,7 +525,7 @@ local function validateObjectStun(raw: unknown): (Types.ObjectStunConfig?, strin
 
 		Surfaces = surfaces,
 		RequireAnchored = readBoolean(candidate.RequireAnchored, defaults.RequireAnchored),
-		RequirePartTag = boundedString(candidate.RequirePartTag, MAX_TAG_LENGTH),
+		RequirePartTag = Sanitize.BoundedString(candidate.RequirePartTag, MAX_TAG_LENGTH),
 		MinSurfaceExtentStuds = clampLimit(
 			candidate.MinSurfaceExtentStuds,
 			limits.MinSurfaceExtentStuds,
@@ -565,9 +560,9 @@ local function validateObjectStun(raw: unknown): (Types.ObjectStunConfig?, strin
 		),
 		ReboundVelocity = clampLimit(candidate.ReboundVelocity, limits.ReboundVelocity, defaults.ReboundVelocity),
 		PinSeconds = clampLimit(candidate.PinSeconds, limits.PinSeconds, defaults.PinSeconds),
-		VictimAnimationId = boundedString(candidate.VictimAnimationId, MAX_ASSET_ID_LENGTH),
-		AttackerAnimationId = boundedString(candidate.AttackerAnimationId, MAX_ASSET_ID_LENGTH),
-		SoundId = boundedString(candidate.SoundId, MAX_ASSET_ID_LENGTH),
+		VictimAnimationId = Sanitize.BoundedString(candidate.VictimAnimationId, MAX_ASSET_ID_LENGTH),
+		AttackerAnimationId = Sanitize.BoundedString(candidate.AttackerAnimationId, MAX_ASSET_ID_LENGTH),
+		SoundId = Sanitize.BoundedString(candidate.SoundId, MAX_ASSET_ID_LENGTH),
 		EffectColor = effectColor,
 		CameraShakeScale = clampLimit(candidate.CameraShakeScale, limits.CameraShakeScale, defaults.CameraShakeScale),
 
@@ -650,31 +645,31 @@ function MoveRegistryManager.Validate(
 	end
 	local size, radius = deriveLegacyGeometry(shape, dimensions)
 
-	local offsetX = clampedNumber(raw.OffsetX, CLAMP_MIN_OFFSET_STUDS, CLAMP_MAX_OFFSET_STUDS)
-	local offsetY = clampedNumber(raw.OffsetY, CLAMP_MIN_OFFSET_STUDS, CLAMP_MAX_OFFSET_STUDS)
-	local offsetZ = clampedNumber(raw.OffsetZ, CLAMP_MIN_OFFSET_STUDS, CLAMP_MAX_OFFSET_STUDS)
+	local offsetX = Sanitize.ClampNumber(raw.OffsetX, CLAMP_MIN_OFFSET_STUDS, CLAMP_MAX_OFFSET_STUDS)
+	local offsetY = Sanitize.ClampNumber(raw.OffsetY, CLAMP_MIN_OFFSET_STUDS, CLAMP_MAX_OFFSET_STUDS)
+	local offsetZ = Sanitize.ClampNumber(raw.OffsetZ, CLAMP_MIN_OFFSET_STUDS, CLAMP_MAX_OFFSET_STUDS)
 	if offsetX == nil or offsetY == nil or offsetZ == nil then
 		return nil, "InvalidOffset"
 	end
 	local offsetRotation = readRotation(raw, "OffsetRotation")
 
-	local windupSeconds = clampedNumber(raw.WindupSeconds, CLAMP_MIN_SECONDS, CLAMP_MAX_SECONDS)
-	local activeSeconds = clampedNumber(raw.ActiveSeconds, CLAMP_MIN_SECONDS, CLAMP_MAX_SECONDS)
-	local recoverySeconds = clampedNumber(raw.RecoverySeconds, CLAMP_MIN_SECONDS, CLAMP_MAX_SECONDS)
-	local cooldown = clampedNumber(raw.Cooldown, CLAMP_MIN_SECONDS, CLAMP_MAX_SECONDS)
+	local windupSeconds = Sanitize.ClampNumber(raw.WindupSeconds, CLAMP_MIN_SECONDS, CLAMP_MAX_SECONDS)
+	local activeSeconds = Sanitize.ClampNumber(raw.ActiveSeconds, CLAMP_MIN_SECONDS, CLAMP_MAX_SECONDS)
+	local recoverySeconds = Sanitize.ClampNumber(raw.RecoverySeconds, CLAMP_MIN_SECONDS, CLAMP_MAX_SECONDS)
+	local cooldown = Sanitize.ClampNumber(raw.Cooldown, CLAMP_MIN_SECONDS, CLAMP_MAX_SECONDS)
 	if windupSeconds == nil or activeSeconds == nil or recoverySeconds == nil or cooldown == nil then
 		return nil, "InvalidTiming"
 	end
 
-	local damage = clampedNumber(raw.Damage, CLAMP_MIN_DAMAGE, CLAMP_MAX_DAMAGE)
-	local postureDamage = clampedNumber(raw.PostureDamage, CLAMP_MIN_DAMAGE, CLAMP_MAX_DAMAGE)
+	local damage = Sanitize.ClampNumber(raw.Damage, CLAMP_MIN_DAMAGE, CLAMP_MAX_DAMAGE)
+	local postureDamage = Sanitize.ClampNumber(raw.PostureDamage, CLAMP_MIN_DAMAGE, CLAMP_MAX_DAMAGE)
 	if damage == nil or postureDamage == nil then
 		return nil, "InvalidDamage"
 	end
 
 	local arcDegrees: number? = nil
 	if raw.ArcDegrees ~= nil then
-		arcDegrees = clampedNumber(raw.ArcDegrees, CLAMP_MIN_ARC_DEGREES, CLAMP_MAX_ARC_DEGREES)
+		arcDegrees = Sanitize.ClampNumber(raw.ArcDegrees, CLAMP_MIN_ARC_DEGREES, CLAMP_MAX_ARC_DEGREES)
 		if arcDegrees == nil then
 			return nil, "InvalidArcDegrees"
 		end
@@ -682,7 +677,7 @@ function MoveRegistryManager.Validate(
 
 	local maxTargets: number? = nil
 	if raw.MaxTargets ~= nil then
-		local clamped = clampedNumber(raw.MaxTargets, CLAMP_MIN_MAX_TARGETS, CLAMP_MAX_MAX_TARGETS)
+		local clamped = Sanitize.ClampNumber(raw.MaxTargets, CLAMP_MIN_MAX_TARGETS, CLAMP_MAX_MAX_TARGETS)
 		if clamped == nil then
 			return nil, "InvalidMaxTargets"
 		end
@@ -692,7 +687,7 @@ function MoveRegistryManager.Validate(
 	if typeof(raw.AnimationId) ~= "string" then
 		return nil, "InvalidAnimationId"
 	end
-	local animationId = boundedString(raw.AnimationId, MAX_ASSET_ID_LENGTH)
+	local animationId = Sanitize.BoundedString(raw.AnimationId, MAX_ASSET_ID_LENGTH)
 
 	-- An empty (or absent) Animations list with a non-empty AnimationId is exactly what every v1
 	-- record and every pre-timeline client looks like -- projected onto a one-clip timeline so the

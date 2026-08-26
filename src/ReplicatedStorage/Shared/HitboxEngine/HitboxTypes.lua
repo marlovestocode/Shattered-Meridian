@@ -34,6 +34,10 @@
 	deliberately no damage, knockback, blocking or status field anywhere in this file.
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Sanitize = require(ReplicatedStorage.Shared.Sanitize)
+
 local HitboxTypes = {}
 
 -- The shape vocabulary. Seven, not the twelve HitboxShapes.lua offers, and deliberately so: each one
@@ -194,27 +198,21 @@ end
 
 -- Sanitisation -------------------------------------------------------------------------------------
 --
--- Spelled as "not (value >= min)" rather than "value < min" throughout, so a NaN fails the test
--- instead of passing it: every comparison involving NaN is false, so the negated form catches it
--- while the direct form waves it through. A NaN that reaches the geometry does not error -- it makes
--- every containment test silently return false, producing an attack that swings and never hits
--- anything, which is far harder to diagnose than a rejected value.
+-- The numeric clamp is Shared/Sanitize.ClampNumberOr. This module used to spell its own comparisons
+-- as "not (value >= min)" rather than "value < min" so a NaN would fail the test instead of passing
+-- it -- the same guard Sanitize reaches by checking `value ~= value` explicitly, and one of five
+-- independent rediscoveries of that trap across this codebase. The reason it matters is unchanged:
+-- a NaN that reaches the geometry does not error, it makes every containment test silently return
+-- false, producing an attack that swings and never hits anything.
 
-local function sanitizeNumber(raw: unknown, min: number, max: number, default: number): number
-	if typeof(raw) ~= "number" then
-		return default
-	end
-	local value = raw :: number
-	if value ~= value then
-		return default
-	end
-	if not (value >= min) then
-		return min
-	end
-	if not (value <= max) then
-		return max
-	end
-	return value
+-- The per-field bounds this module actually clamps against, exposed read-only.
+--
+-- Exported so a spec can cross-check them against Shared/HitboxShapes.FIELD_SPECS -- the caps the
+-- Move Editor lets an author TYPE. Those two disagree today for Radius/InnerRadius, and where the
+-- authoring cap is the looser one a move is stored larger than it will ever be resolved. See
+-- Tests/Combat/HitboxShapes.spec.lua, which pins the discrepancy and states both one-line fixes.
+function HitboxTypes.FieldBounds(): { [string]: { Min: number, Max: number, Default: number } }
+	return FIELD_BOUNDS
 end
 
 function HitboxTypes.DefaultDimensions(): Dimensions
@@ -233,7 +231,7 @@ function HitboxTypes.SanitizeDimensions(raw: unknown): Dimensions
 	local result = {} :: any
 	for _, field in FIELD_ORDER do
 		local bounds = FIELD_BOUNDS[field]
-		result[field] = sanitizeNumber(source[field], bounds.Min, bounds.Max, bounds.Default)
+		result[field] = Sanitize.ClampNumberOr(source[field], bounds.Min, bounds.Max, bounds.Default)
 	end
 	-- Enforced after the per-field pass, because it is a relationship between two already-valid
 	-- numbers rather than a bound on either. An Arc whose hub is wider than its rim has an inside-out
@@ -251,7 +249,7 @@ function HitboxTypes.SanitizeScaling(raw: unknown): ScalingProfile
 	local rawMultipliers = source.ComboStageMultipliers
 	if typeof(rawMultipliers) == "table" then
 		for _, entry in ipairs(rawMultipliers :: { unknown }) do
-			table.insert(multipliers, sanitizeNumber(entry, 0, 64, 1))
+			table.insert(multipliers, Sanitize.ClampNumberOr(entry, 0, 64, 1))
 		end
 	end
 	-- An empty table is not an error -- it is how an attack says "combo stage does not change my
@@ -263,12 +261,12 @@ function HitboxTypes.SanitizeScaling(raw: unknown): ScalingProfile
 
 	return {
 		ComboStageMultipliers = multipliers,
-		PowerMultiplierPerUnit = sanitizeNumber(source.PowerMultiplierPerUnit, 0, 16, 0),
+		PowerMultiplierPerUnit = Sanitize.ClampNumberOr(source.PowerMultiplierPerUnit, 0, 16, 0),
 		-- Floored at 1: a ceiling below the base size would shrink every hitbox using this profile
 		-- even at combo stage 1 with zero power, which no author setting a "maximum" means.
-		MaxScaleMultiplier = sanitizeNumber(source.MaxScaleMultiplier, 1, 64, 4),
-		ChargeSeconds = sanitizeNumber(source.ChargeSeconds, 0, 30, 0),
-		ChargedScaleMultiplier = sanitizeNumber(source.ChargedScaleMultiplier, 0, 64, 1),
+		MaxScaleMultiplier = Sanitize.ClampNumberOr(source.MaxScaleMultiplier, 1, 64, 4),
+		ChargeSeconds = Sanitize.ClampNumberOr(source.ChargeSeconds, 0, 30, 0),
+		ChargedScaleMultiplier = Sanitize.ClampNumberOr(source.ChargedScaleMultiplier, 0, 64, 1),
 	}
 end
 
@@ -324,14 +322,14 @@ function HitboxTypes.SanitizeDefinition(raw: unknown): (AttackDefinition, { stri
 	-- than an intent. Noted, not corrected: an author who genuinely wants a pure-animation entry in
 	-- the same pipeline is entitled to one, and inventing an active window they didn't ask for would
 	-- be the engine deciding gameplay.
-	local activeSeconds = sanitizeNumber(source.ActiveSeconds, 0, 30, 0.1)
+	local activeSeconds = Sanitize.ClampNumberOr(source.ActiveSeconds, 0, 30, 0.1)
 	if activeSeconds <= 0 then
 		table.insert(problems, "ActiveSeconds is 0; this attack can never report a hit")
 	end
 
 	local maxTargets: number? = nil
 	if source.MaxTargetsPerSwing ~= nil then
-		maxTargets = sanitizeNumber(source.MaxTargetsPerSwing, 1, 128, 1)
+		maxTargets = Sanitize.ClampNumberOr(source.MaxTargetsPerSwing, 1, 128, 1)
 	end
 
 	return {
@@ -341,9 +339,9 @@ function HitboxTypes.SanitizeDefinition(raw: unknown): (AttackDefinition, { stri
 		Scaling = HitboxTypes.SanitizeScaling(source.Scaling),
 		Offset = if typeof(source.Offset) == "CFrame" then source.Offset :: CFrame else CFrame.identity,
 		AttachmentPart = attachment,
-		WindupSeconds = sanitizeNumber(source.WindupSeconds, 0, 30, 0),
+		WindupSeconds = Sanitize.ClampNumberOr(source.WindupSeconds, 0, 30, 0),
 		ActiveSeconds = activeSeconds,
-		RecoverySeconds = sanitizeNumber(source.RecoverySeconds, 0, 30, 0),
+		RecoverySeconds = Sanitize.ClampNumberOr(source.RecoverySeconds, 0, 30, 0),
 		MaxTargetsPerSwing = maxTargets,
 		LocksMovement = source.LocksMovement == true,
 		SizeFromAttachmentPart = source.SizeFromAttachmentPart == true,
@@ -351,7 +349,7 @@ function HitboxTypes.SanitizeDefinition(raw: unknown): (AttackDefinition, { stri
 		-- negative multiplier would collapse or invert the box, so a mis-authored value is clamped to
 		-- merely small rather than broken. 16 is generous the same way FIELD_BOUNDS' own uppers are --
 		-- a "no NaN, no negative, nothing absurd" guard, not a balance pass.
-		SizeMultiplier = sanitizeNumber(source.SizeMultiplier, 0.05, 16, 1),
+		SizeMultiplier = Sanitize.ClampNumberOr(source.SizeMultiplier, 0.05, 16, 1),
 	},
 		problems
 end

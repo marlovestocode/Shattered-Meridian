@@ -40,6 +40,10 @@
 	client editor UI, and a plain unit spec alike.
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Sanitize = require(ReplicatedStorage.Shared.Sanitize)
+
 local HitboxShapes = {}
 
 -- Every shape an authored move may use. Box/Sphere are the two v1 shapes (every move authored
@@ -350,9 +354,14 @@ for _, shapeId in ipairs(SHAPE_ORDER) do
 	table.insert(ORDERED_SPECS, SHAPE_SPECS[shapeId])
 end
 
-local function clampField(field: DimensionField, value: number): number
+-- Through Shared/Sanitize.ClampNumberOr rather than a bare math.clamp, which makes this
+-- STRUCTURALLY NaN-safe instead of safe by call-site discipline. It was already safe in practice --
+-- Sanitize's own `read` below checks for NaN before calling, and DefaultDimensions only ever passes
+-- authored constants -- but this was the one clamp in the codebase with no guard of its own, and
+-- "correct as long as nobody adds a third caller" is not a property worth relying on.
+local function clampField(field: DimensionField, value: unknown): number
 	local spec = FIELD_SPECS[field]
-	return math.clamp(value, spec.Min, spec.Max)
+	return Sanitize.ClampNumberOr(value, spec.Min, spec.Max, spec.Default)
 end
 
 --

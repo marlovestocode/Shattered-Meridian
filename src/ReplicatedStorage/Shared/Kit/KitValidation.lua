@@ -27,6 +27,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local KitTypes = require(ReplicatedStorage.Shared.Kit.KitTypes)
+local Sanitize = require(ReplicatedStorage.Shared.Sanitize)
 
 local KitValidation = {}
 
@@ -48,32 +49,12 @@ local function isNonEmptyString(value: unknown): boolean
 	return typeof(value) == "string" and (value :: string) ~= ""
 end
 
--- Exported: both callers' own Validate (BloodlineId/RaceId/TraitId/RequiredTier/StageIndex) need the
--- identical numeric-clamp/string-bound primitives this module already has for its own fields, rather
--- than each keeping a second copy.
-function KitValidation.ClampedNumber(value: unknown, min: number, max: number): number?
-	if typeof(value) ~= "number" then
-		return nil
-	end
-	local number = value :: number
-	if number ~= number then
-		-- NaN passes typeof but survives math.clamp -- same defensive check MoveRegistryManager's own
-		-- clampedNumber makes.
-		return nil
-	end
-	return math.clamp(number, min, max)
-end
-
-function KitValidation.BoundedString(value: unknown, maxLength: number): string
-	if typeof(value) ~= "string" then
-		return ""
-	end
-	local text = value :: string
-	if #text > maxLength then
-		return text:sub(1, maxLength)
-	end
-	return text
-end
+-- Re-exported rather than reimplemented: Shared/Sanitize.lua owns both primitives now (see its own
+-- header on why the NaN branch is what earned them a module). Kept as KitValidation members because
+-- RaceManager and BloodlineManager already reach for them through this module by name, and a
+-- validator asking its own domain module for a clamp reads better than reaching past it.
+KitValidation.ClampedNumber = Sanitize.ClampNumber
+KitValidation.BoundedString = Sanitize.BoundedString
 
 -- Validates+clamps one Types.ActiveModifierSpec. Kind/Lifetime must be one of the closed sets above
 -- (hard reject); which OTHER fields are required is determined by Kind, matching

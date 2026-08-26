@@ -482,6 +482,16 @@ end
 -- EVERY level, which is the entire point: Lua's `pairs` order is unspecified and genuinely can
 -- differ between two structurally identical tables, so an unsorted walk would report a move as
 -- changed purely because its fields were rebuilt in a different order.
+-- Whether a table should be digested in INDEX order rather than sorted-key order -- true for a
+-- contiguous 1..#t array.
+local function isArray(value: { [any]: unknown }): boolean
+	local count = 0
+	for _ in pairs(value) do
+		count += 1
+	end
+	return count == #value
+end
+
 local function digestValue(out: { string }, value: unknown): ()
 	local valueType = typeof(value)
 	if valueType == "number" then
@@ -507,21 +517,42 @@ local function digestValue(out: { string }, value: unknown): ()
 		local cframe = value :: CFrame
 		table.insert(out, `P({digestNumber(cframe.X)},{digestNumber(cframe.Y)},{digestNumber(cframe.Z)})`)
 	elseif valueType == "table" then
-		local source = value :: { [string]: unknown }
-		local keys: { string } = {}
-		for key in pairs(source) do
-			table.insert(keys, tostring(key))
-		end
-		table.sort(keys)
+		local source = value :: { [any]: unknown }
 		table.insert(out, "{")
-		for _, key in ipairs(keys) do
-			table.insert(out, key .. "=")
-			digestValue(out, (source :: any)[key])
+		if isArray(source) then
+			-- An ARRAY is digested in index order, not sorted key order. Sorting "1", "2", "10"
+			-- lexicographically would put "10" before "2", which for an ordered list (a move's
+			-- Animations, a kit's Effects) reports a reorder as no change and a no-change as a
+			-- reorder. Client/UI/Screens/DevTools/KitEditor/Types.lua's own copy of this walk had
+			-- this branch and this module's did not; the merged one has it.
+			for _, entry in ipairs(source :: { unknown }) do
+				digestValue(out, entry)
+			end
+		else
+			local keys: { string } = {}
+			for key in pairs(source) do
+				table.insert(keys, tostring(key))
+			end
+			table.sort(keys)
+			for _, key in ipairs(keys) do
+				table.insert(out, key .. "=")
+				digestValue(out, (source :: any)[key])
+			end
 		end
 		table.insert(out, "}")
 	else
 		table.insert(out, tostring(value))
 	end
+end
+
+-- Exposed so Client/UI/Screens/DevTools/KitEditor/Types.lua can fingerprint a kit draft with the
+-- SAME walk rather than its own near-copy. The two differed in complementary directions -- this one
+-- knew about Vector3/Color3/CFrame and not about arrays, that one the reverse -- so neither was a
+-- subset of the other and merging meant taking both halves. Safe to change: a Fingerprint is only
+-- ever compared against another Fingerprint computed in the same session (a Fusion Value on the
+-- editor's own handle), never persisted, so the algorithm has no stored format to be compatible with.
+function MoveTypes.DigestValue(out: { string }, value: unknown): ()
+	digestValue(out, value)
 end
 
 -- A deterministic string digest of every AUTHORED field of a move, for answering "has this draft
