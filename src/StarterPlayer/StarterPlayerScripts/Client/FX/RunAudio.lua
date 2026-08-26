@@ -39,6 +39,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
@@ -155,7 +156,7 @@ function RunAudio.SilenceDefaultRunSound(character: Model): boolean
 	if not RUN_CONFIG.Footsteps.SilenceDefaultRunSound then
 		return true
 	end
-	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	local rootPart = CharacterUtil.RootOf(character)
 	if not rootPart then
 		return false
 	end

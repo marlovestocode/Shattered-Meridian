@@ -37,6 +37,7 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
@@ -56,12 +57,11 @@ local function getCamera(): Camera?
 end
 
 local function characterRootPosition(player: Player): Vector3?
+	-- RootOf rather than LiveRig: this runs every RenderStepped frame of the get-up follow, and
+	-- LiveRig would scan for a Humanoid nobody here reads.
 	local character = player.Character
-	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
-	if rootPart and rootPart:IsA("BasePart") then
-		return (rootPart :: BasePart).Position
-	end
-	return nil
+	local rootPart = if character then CharacterUtil.RootOf(character) else nil
+	return if rootPart then rootPart.Position else nil
 end
 
 -- Symmetric ease-in-out: a plain power curve mirrored around the midpoint (Config.PanEasingPower --

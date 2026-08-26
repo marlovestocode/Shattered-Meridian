@@ -51,6 +51,7 @@
 ]]
 
 local BlimpConstants = require(script.Parent.BlimpConstants)
+local CharacterUtil = require(script.Parent.Parent.CharacterUtil)
 local FlightMath = require(script.Parent.Parent.FlightMath)
 
 local BlimpPilotPose = {}
@@ -151,7 +152,7 @@ end
 -- The R6 chain. Named first and checked first because this game's rigs are R6 -- despite what a
 -- handful of source comments elsewhere still claim -- so this is the hot path, not the fallback.
 local function resolveR6(character: Model): (Motor6D?, Motor6D?)
-	local root = character:FindFirstChild("HumanoidRootPart")
+	local root = CharacterUtil.RootOf(character)
 	local torso = character:FindFirstChild("Torso")
 	if not root or not torso then
 		return nil, nil

@@ -307,9 +307,8 @@ function AdminActionSystem.SetFlying(targetPlayer: Player, enabled: boolean): bo
 	end
 	AdminActionSystem.ApplyFlying(state, humanoid, enabled)
 
-	local rootPartInstance = character and character:FindFirstChild("HumanoidRootPart")
-	if rootPartInstance and rootPartInstance:IsA("BasePart") then
-		local rootPart = rootPartInstance :: BasePart
+	local rootPart = if character then CharacterUtil.RootOf(character) else nil
+	if rootPart then
 		pcall(function()
 			if enabled then
 				rootPart:SetNetworkOwner(targetPlayer)
@@ -410,11 +409,10 @@ function AdminActionSystem.TeleportToPosition(targetPlayer: Player, position: Ve
 	if not character then
 		return false
 	end
-	local rootPartInstance = character:FindFirstChild("HumanoidRootPart")
-	if not rootPartInstance or not rootPartInstance:IsA("BasePart") then
+	local rootPart = CharacterUtil.RootOf(character)
+	if not rootPart then
 		return false
 	end
-	local rootPart = rootPartInstance :: BasePart
 	rootPart.CFrame = CFrame.new(position, position + rootPart.CFrame.LookVector)
 	return true
 end

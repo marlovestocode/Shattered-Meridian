@@ -88,6 +88,7 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -364,18 +365,17 @@ local function spawnAt(spawnCFrame: CFrame): Model?
 	model:PivotTo(spawnCFrame)
 	model.Parent = dummyFolderInstance()
 
-	local humanoid = model:FindFirstChildOfClass("Humanoid")
-	local rootPartInstance = model:FindFirstChild("HumanoidRootPart")
+	local humanoid = CharacterUtil.HumanoidOf(model)
+	local rootPart = CharacterUtil.RootOf(model)
 	-- Defensive rather than expected to ever trip -- every R15 rig CreateHumanoidModelFromDescription
 	-- produces has both, but a malformed rig must not reach RegisterCombatant with a nil dressed as a
 	-- real Instance (the same failure mode DamageSystem.humanoidOf's own typeof guard exists to avoid
 	-- one layer up).
-	if not humanoid or not rootPartInstance or not rootPartInstance:IsA("BasePart") then
+	if not humanoid or not rootPart then
 		logger:error("Debug dummy rig built with no Humanoid/HumanoidRootPart", { model = model.Name })
 		model:Destroy()
 		return nil
 	end
-	local rootPart = rootPartInstance :: BasePart
 
 	humanoid.MaxHealth = Config.MaxHealth
 	humanoid.Health = Config.MaxHealth

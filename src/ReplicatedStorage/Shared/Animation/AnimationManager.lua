@@ -92,6 +92,7 @@ local RunService = game:GetService("RunService")
 
 local AnimatorUtil = require(ReplicatedStorage.Shared.AnimatorUtil)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 
 local logger = Logger.scope("AnimationManager")
 
@@ -969,7 +970,7 @@ function AnimationManager.Bind(self: AnimationManagerInstance, character: Model)
 	local generation = self.generation
 
 	local animator = AnimatorUtil.GetOrCreateAnimator(character)
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local humanoid = CharacterUtil.HumanoidOf(character)
 	if not animator or not humanoid then
 		logger:warn("Bind: no Humanoid/Animator available", { rig = self.name, character = character.Name })
 		return false

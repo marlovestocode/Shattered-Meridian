@@ -38,6 +38,7 @@ local Workspace = game:GetService("Workspace")
 
 local BlimpConstants = require(ReplicatedStorage.Shared.Blimp.BlimpConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local logger = Logger.scope("BlimpAssembly")
@@ -70,7 +71,7 @@ local NOMINAL_LEVER_STUDS = 16
 local function belongsToACharacter(part: BasePart): boolean
 	local model = part:FindFirstAncestorOfClass("Model")
 	while model do
-		if model:FindFirstChildOfClass("Humanoid") then
+		if CharacterUtil.HumanoidOf(model) then
 			return true
 		end
 		model = model:FindFirstAncestorOfClass("Model")

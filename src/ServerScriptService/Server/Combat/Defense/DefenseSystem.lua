@@ -56,6 +56,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
@@ -341,7 +342,7 @@ local function handleSetBlocking(player: Player, rawBlocking: unknown): ()
 	-- Same gate, same reasoning, as AttackRequestSystem's own Mounted refusal: a body welded to a blimp
 	-- station belongs to the vehicle, and a guard raised from one would be a defence the arm pose is
 	-- already overwriting the animation for. Read as an Attribute, not through a BlimpSystem require.
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local humanoid = CharacterUtil.HumanoidOf(character)
 	if humanoid and humanoid:GetAttribute(Constants.Attributes.Mounted) == true then
 		return
 	end
@@ -382,10 +383,8 @@ local function onHit(report: HitReport): ()
 		return
 	end
 
-	local attackerRoot = report.Attacker:FindFirstChild("HumanoidRootPart")
-	local attackerPosition = if attackerRoot and attackerRoot:IsA("BasePart")
-		then attackerRoot.Position
-		else report.ContactPosition
+	local attackerRoot = CharacterUtil.RootOf(report.Attacker)
+	local attackerPosition = if attackerRoot then attackerRoot.Position else report.ContactPosition
 	local defenderCFrame = registration.RootPart.CFrame
 	local bearing = OutcomeResolver.BearingDegrees(defenderCFrame.LookVector, defenderCFrame.Position, attackerPosition)
 
@@ -669,8 +668,8 @@ function DefenseSystem.Init(): ()
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "DefenseSystem",
 		OnCharacter = function(_player: Player, character: Model, humanoid: Humanoid)
-			local rootPart = character:FindFirstChild("HumanoidRootPart")
-			if not rootPart or not rootPart:IsA("BasePart") then
+			local rootPart = CharacterUtil.RootOf(character)
+			if not rootPart then
 				return
 			end
 			DefenseSystem.RegisterCombatant(character, rootPart, humanoid)

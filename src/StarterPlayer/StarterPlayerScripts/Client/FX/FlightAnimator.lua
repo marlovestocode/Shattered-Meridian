@@ -31,6 +31,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local AnimatorUtil = require(ReplicatedStorage.Shared.AnimatorUtil)
@@ -95,7 +96,7 @@ function FlightAnimator.BindCharacter(character: Model): ()
 		return
 	end
 
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local humanoid = CharacterUtil.HumanoidOf(character)
 	currentHumanoid = humanoid
 
 	for name, animation in pairs(animationTemplates) do

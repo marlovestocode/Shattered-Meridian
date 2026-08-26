@@ -83,6 +83,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 
 local AttackInputClient = require(script.Parent.AttackInputClient)
@@ -263,15 +264,15 @@ function SwingLunge.BindCharacter(character: Model): ()
 	humanoid = nil
 	rootPart = nil
 
-	local humanoidInstance = character:FindFirstChildOfClass("Humanoid")
-	local rootInstance = character:FindFirstChild("HumanoidRootPart")
-	if not humanoidInstance or not rootInstance or not rootInstance:IsA("BasePart") then
+	local humanoidInstance = CharacterUtil.HumanoidOf(character)
+	local rootInstance = CharacterUtil.RootOf(character)
+	if not humanoidInstance or not rootInstance then
 		logger:warn("BindCharacter: character has no Humanoid/HumanoidRootPart")
 		return
 	end
 
 	humanoid = humanoidInstance
-	rootPart = rootInstance :: BasePart
+	rootPart = rootInstance
 end
 
 function SwingLunge.Start(): ()

@@ -29,6 +29,7 @@ local TextService = game:GetService("TextService")
 
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
@@ -325,8 +326,8 @@ function BugReportSystem.Submit(
 	local position: Vector3? = nil
 	local character = player.Character
 	if character then
-		local rootPart = character:FindFirstChild("HumanoidRootPart")
-		if rootPart and rootPart:IsA("BasePart") then
+		local rootPart = CharacterUtil.RootOf(character)
+		if rootPart then
 			position = rootPart.Position
 		end
 	end

@@ -44,6 +44,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local FXPool = require(script.Parent.FXPool)
@@ -137,9 +138,8 @@ local lastTrickleClock = 0
 -- Caches humanoid/root part for the trickle loop and PlaySlideBurst -- called from CombatClient.
 -- lua's character-bind path alongside CombatAnimator.BindCharacter, same lifecycle.
 function MovementVFX.BindCharacter(character: Model): ()
-	currentHumanoid = character:FindFirstChildOfClass("Humanoid")
-	local rootPart = character:FindFirstChild("HumanoidRootPart")
-	currentRootPart = if rootPart and rootPart:IsA("BasePart") then rootPart else nil
+	currentHumanoid = CharacterUtil.HumanoidOf(character)
+	currentRootPart = CharacterUtil.RootOf(character)
 end
 
 -- Held-Sprint INTENT only, exactly CombatAnimator.StartRunning/StopRunning's shape -- whether a

@@ -56,6 +56,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local AnimatorUtil = require(ReplicatedStorage.Shared.AnimatorUtil)
@@ -378,7 +379,7 @@ function CombatAnimator.BindCharacter(character: Model): ()
 	currentAnimator = animator
 	suppressDefaultToolAnimations(animator)
 
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local humanoid = CharacterUtil.HumanoidOf(character)
 	currentHumanoid = humanoid
 	local rigType = humanoid and humanoid.RigType
 

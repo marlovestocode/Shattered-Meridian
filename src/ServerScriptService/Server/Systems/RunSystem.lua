@@ -78,6 +78,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
@@ -388,7 +389,7 @@ local function resolveHumanoid(player: Player, state: PlayerRunState): Humanoid?
 	end
 	-- No WaitForChild here, unlike onCharacterAdded: this path runs on Heartbeat and simply tries
 	-- again next frame, where blocking would stall every other player's tick behind one spawning one.
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local humanoid = CharacterUtil.HumanoidOf(character)
 	if not humanoid then
 		return nil
 	end
@@ -560,7 +561,7 @@ local function onCharacterAdded(player: Player, character: Model): ()
 	state.WalkSpeed = 0
 	state.NotAccruingSeconds = 0
 
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local humanoid = CharacterUtil.HumanoidOf(character)
 	if not humanoid then
 		-- WaitForChild rather than giving up: a character model replicates in pieces and the Humanoid is
 		-- routinely a frame or two behind the model itself. Bounded by the same timeout every other

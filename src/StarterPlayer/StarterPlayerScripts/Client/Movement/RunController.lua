@@ -57,6 +57,7 @@ local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -486,7 +487,7 @@ function RunController.BindCharacter(nextCharacter: Model): ()
 	-- The Humanoid is the ONLY thing required here (its RootPart is read live in the loop -- see that
 	-- field's own note): every caller already waits for it, and requiring anything else would make this
 	-- bind fail for a whole life over a part that was one frame late.
-	local humanoidInstance = nextCharacter:FindFirstChildOfClass("Humanoid")
+	local humanoidInstance = CharacterUtil.HumanoidOf(nextCharacter)
 	if not humanoidInstance then
 		logger:warn("BindCharacter: character has no Humanoid", { character = nextCharacter.Name })
 		return

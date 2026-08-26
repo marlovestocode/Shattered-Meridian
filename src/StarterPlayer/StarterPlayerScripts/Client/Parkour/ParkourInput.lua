@@ -35,6 +35,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local InputBuffer = require(script.Parent.InputBuffer)
@@ -61,7 +62,7 @@ local function isMounted(): boolean
 	if not character then
 		return false
 	end
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local humanoid = CharacterUtil.HumanoidOf(character)
 	return humanoid ~= nil and humanoid:GetAttribute(Constants.Attributes.Mounted) == true
 end
 

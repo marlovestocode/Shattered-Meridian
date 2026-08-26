@@ -89,6 +89,7 @@ local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
 local AmortizedReclaim = require(ReplicatedStorage.Shared.AmortizedReclaim)
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
@@ -181,8 +182,7 @@ local function isAlive(model: Model): boolean
 	if model.Parent == nil then
 		return false
 	end
-	local humanoid = model:FindFirstChildOfClass("Humanoid")
-	return humanoid ~= nil and humanoid.Health > 0
+	return CharacterUtil.LiveHumanoidOf(model) ~= nil
 end
 
 local function cooldownRemaining(model: Model, moveId: string, now: number): number
@@ -363,7 +363,7 @@ function AttackRequestSystem.Throw(
 	-- Reads the Attribute through Shared/Parkour/ParkourOwnership rather than requiring ParkourSystem,
 	-- so this layer stays free of a movement dependency and a bot (no parkour, no Attribute) is never
 	-- gated. See that module's header for what the Attribute does and does not cover.
-	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	local humanoid = CharacterUtil.HumanoidOf(model)
 	if humanoid and ParkourOwnership.OwnsBody(humanoid) then
 		return false, "ParkourAction"
 	end
@@ -481,7 +481,7 @@ function AttackRequestSystem.Throw(
 	-- HitboxEngine today (it refuses a second swing as Busy), but a future move with an early-cancel
 	-- window would reach here mid-swing, and a gate that quietly gets weaker under a feature nobody has
 	-- built yet is the kind that fails silently when they do.
-	local humanoidForBusy = model:FindFirstChildOfClass("Humanoid")
+	local humanoidForBusy = CharacterUtil.HumanoidOf(model)
 	if humanoidForBusy then
 		local existingBusy = humanoidForBusy:GetAttribute(Constants.Attributes.CombatBusyUntil)
 		local busyUntil = if typeof(existingBusy) == "number" then existingBusy else 0
@@ -686,8 +686,8 @@ end
 -- root is simply not registered -- the engine requires a root explicitly and there is nothing useful
 -- to register without one.
 local function bindCharacter(character: Model, humanoid: Humanoid): ()
-	local rootPart = character:FindFirstChild("HumanoidRootPart")
-	if not rootPart or not rootPart:IsA("BasePart") then
+	local rootPart = CharacterUtil.RootOf(character)
+	if not rootPart then
 		return
 	end
 	combatantIds[character] = HitboxEngine.RegisterCombatant(character, rootPart, humanoid)

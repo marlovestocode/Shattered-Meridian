@@ -65,6 +65,7 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -408,11 +409,10 @@ local function startFlying(humanoid: Humanoid, character: Model): ()
 	if heartbeatConnection then
 		return
 	end
-	local rootPartInstance = character:FindFirstChild("HumanoidRootPart")
-	if not rootPartInstance or not rootPartInstance:IsA("BasePart") then
+	local rootPart = CharacterUtil.RootOf(character)
+	if not rootPart then
 		return
 	end
-	local rootPart = rootPartInstance :: BasePart
 
 	FlightAudio.StartWind()
 
@@ -472,8 +472,7 @@ function FlightController.BindCharacter(character: Model): ()
 		return
 	end
 	local humanoid = humanoidInstance :: Humanoid
-	local rootPartInstance = character:FindFirstChild("HumanoidRootPart")
-	local rootPart = if rootPartInstance and rootPartInstance:IsA("BasePart") then rootPartInstance else nil
+	local rootPart = CharacterUtil.RootOf(character)
 
 	-- A fresh character's Humanoid never carries over the old one's Attributes -- seed from whatever
 	-- the server has already set (same "read rather than assume" reasoning as the Flying/FlyCollide
