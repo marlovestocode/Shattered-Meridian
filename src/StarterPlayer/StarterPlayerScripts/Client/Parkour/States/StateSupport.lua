@@ -225,6 +225,45 @@ function StateSupport.WithinTraversalRange(context: ParkourContext): boolean
 	return context.Obstacle.Found and context.Obstacle.Distance <= commitDistance
 end
 
+-- THE DOUBLE APPROACH GATE both obstacle traversals ask, one level up from IsMovingToward.
+--
+-- Mantling and Vaulting each held a byte-identical copy of these two checks -- twenty lines and two
+-- long comments apiece, differing only in the prose. IsMovingToward's own header already argues that
+-- three hand-written angle checks are three chances for the threshold, the sign convention or the
+-- flattening to disagree; this is that argument applied one layer out, where the thing that can
+-- diverge is not the arithmetic but WHICH TWO VECTORS get asked about and in what order.
+--
+-- The first check is on TRAVEL, and it is LIVE rather than the frozen ObstacleProbe.TravelDirection:
+-- the obstacle was found while approaching it, but the player's own input has since had a probe
+-- interval to diverge (let go and backed away, turned to strafe past it). Without this the traversal
+-- fires on cached geometry the character is no longer walking into.
+--
+-- The second is on FACING, and it is a genuinely independent question rather than a stricter version
+-- of the first. Under shift lock (Client/Camera/ShiftLockCamera.lua) WASD is camera-relative with
+-- AutoRotate off, so travel and facing are decoupled: holding S walks the character backward into
+-- whatever is behind them while the camera -- and therefore the character's facing -- still points
+-- the other way entirely. The travel check alone passes that, because the body genuinely IS closing
+-- on the wall; just not the wall the player is looking at. Both halves have to agree the obstacle is
+-- ahead.
+--
+-- Neither refuses an ordinary forward traversal: the two degenerate to the same question when the
+-- player is not shift-locked (AutoRotate keeps facing and travel equal) or is standing still facing
+-- the obstacle (TravelDirection's own fallback already lands on LookVector).
+--
+-- Returns CanEnter's own (boolean, string?) shape so a caller forwards the refusal reason verbatim
+-- rather than restating it -- those two strings are what the F6 overlay shows for "why didn't it
+-- fire," and a generic one would be no answer at all.
+function StateSupport.ApproachGate(context: ParkourContext): (boolean, string?)
+	local maxAngle = ParkourConstants.Obstacle.MaxApproachAngleDegrees
+	if not StateSupport.IsMovingToward(StateSupport.TravelDirection(context), context.Obstacle.Normal, maxAngle) then
+		return false, "NotApproachingObstacle"
+	end
+	if not StateSupport.IsMovingToward(context.RootPart.CFrame.LookVector, context.Obstacle.Normal, maxAngle) then
+		return false, "NotFacingObstacle"
+	end
+	return true, nil
+end
+
 -- THE COMBAT GATE, asked once per blocked state's CanEnter. Returns true when this state must refuse
 -- because the player is in combat -- see ParkourConstants.CombatGate.BlockedStates for the roster and
 -- for why the blocked set is the authored one rather than the allowed set.
@@ -424,6 +463,98 @@ function StateSupport.HandOff(context: ParkourContext, exitVelocity: Vector3): (
 	context.Motor.TargetCFrame = nil
 	context.Motor.HipHeightDelta = 0
 	context.Motor.CancelGravity = false
+end
+
+-- THE AUTHORED PATH OF A KINEMATIC OBSTACLE TRAVERSAL, captured once at Enter and read every frame
+-- until the state ends. Captured rather than re-derived per frame on purpose: the probe results keep
+-- updating underneath (the character is moving), and a path that re-derived itself every frame would
+-- chase its own tail and never converge on a landing point.
+--
+-- One record per state, not one shared between them -- see NewTraversalPath below.
+export type TraversalPath = {
+	StartCFrame: CFrame,
+	ControlPoint: Vector3,
+	EndPosition: Vector3,
+	TravelDirection: Vector3,
+}
+
+-- A state's own path buffer, made once at module scope. Deliberately NOT a single shared buffer here:
+-- Mantling and Vaulting are both Committed and can never be current at the same time, so one buffer
+-- would work today -- and would be a trap the first time a third traversal overlaps either of them,
+-- with the symptom being a curve built from another state's geometry rather than an error.
+function StateSupport.NewTraversalPath(): TraversalPath
+	return {
+		StartCFrame = CFrame.identity,
+		ControlPoint = Vector3.zero,
+		EndPosition = Vector3.zero,
+		TravelDirection = Vector3.zero,
+	}
+end
+
+-- The half of a traversal's Enter that is the same for all of them: where the arc starts, and which
+-- way it runs.
+--
+-- TravelDirection is read from the FROZEN direction the probe actually cast along, not from a fresh
+-- StateSupport.TravelDirection call. TopPosition/Normal/Depth were all measured along
+-- ObstacleProbe.TravelDirection -- recomputing independently at Enter is exactly what let a mantle
+-- build its curve and its facing CFrame from a direction that disagreed with the geometry it was
+-- climbing, which is what "doesn't face forward properly" actually was. Falls back to a live read
+-- only in the defensive case where the probe field is somehow still zero.
+--
+-- Does NOT author ControlPoint or EndPosition. That geometry is the entire difference between a
+-- mantle and a vault (up the face and onto the top, versus over the lip and past it) and belongs in
+-- each state where a reader can see it beside the comment explaining the shape it makes.
+function StateSupport.BeginTraversal(context: ParkourContext, path: TraversalPath): ()
+	path.StartCFrame = context.RootPart.CFrame
+	path.TravelDirection = ParkourMath.SafeUnit(context.Obstacle.TravelDirection, StateSupport.TravelDirection(context))
+end
+
+-- One frame of a kinematic traversal along `path`, returning the transition the state should report:
+-- nil while the arc is still running, then a grounded state or Falling once it completes.
+--
+-- Grounded is checked rather than assumed at the end: a mantle onto a narrow ledge, or a vault over
+-- something with a drop behind it, can legitimately finish with the character already stepping off.
+function StateSupport.DriveTraversal(
+	context: ParkourContext,
+	path: TraversalPath,
+	durationSeconds: number
+): ParkourTypes.TransitionResult
+	local alpha = math.clamp(context.StateElapsed / math.max(durationSeconds, 1e-3), 0, 1)
+	local eased = ParkourMath.TraversalEase(alpha)
+	local position = ParkourMath.TraversalPoint(path.StartCFrame.Position, path.ControlPoint, path.EndPosition, eased)
+
+	local motor = context.Motor
+	motor.Mode = "Kinematic"
+	motor.TargetCFrame = CFrame.lookAt(position, position + path.TravelDirection)
+	motor.DesiredSpeed = context.Momentum
+
+	if alpha < 1 then
+		return nil
+	end
+	return if context.Ground.Grounded then StateSupport.ResolveGroundedState(context) else "Falling"
+end
+
+-- A traversal's Exit: spend the momentum the move costs, then hand the body back carrying the rest
+-- along the traversal's own direction, plus `settleSpeed` of downward so the character settles onto
+-- whatever is actually below rather than floating off the top of the arc. Every traversal lands
+-- slightly high on purpose (see each state's EndPosition), and this is the correction.
+--
+-- `settleSpeed` is the one number that is not shared: a mantle ends standing on the surface it just
+-- climbed and wants a gentle press down; a vault is still carrying an arc's worth of forward speed
+-- past a lip and needs more.
+function StateSupport.TraversalHandOff(
+	context: ParkourContext,
+	path: TraversalPath,
+	retainFraction: number,
+	settleSpeed: number
+): ()
+	context.Momentum =
+		ParkourMath.ExitMomentum(context.Momentum, retainFraction, ParkourConstants.Obstacle.ExitMinSpeed)
+	StateSupport.HandOff(
+		context,
+		ParkourMath.SafeUnit(ParkourMath.Flatten(path.TravelDirection), Vector3.zero) * context.Momentum
+			- Vector3.new(0, settleSpeed, 0)
+	)
 end
 
 return StateSupport

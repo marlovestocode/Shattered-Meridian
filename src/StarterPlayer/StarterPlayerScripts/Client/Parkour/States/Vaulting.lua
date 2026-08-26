@@ -24,12 +24,15 @@
 	Exit velocity is the traversal's own direction at the retained fraction of entry momentum, floored
 	at ParkourConstants.Obstacle.ExitMinSpeed -- landing a vault into a dead stop reads as a bug rather
 	than as a cost, no matter what the retain fraction says.
+
+	The approach gate, the path preamble, the per-frame drive and the hand-off are all shared with
+	States/Mantling.lua through StateSupport -- see Mantling's own header. What is left here is the
+	arc's geometry and the hop/vault data split, which is the whole of what makes this state itself.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
-local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
 
 local EnvironmentProbe = require(script.Parent.Parent.EnvironmentProbe)
@@ -39,14 +42,7 @@ type ParkourContext = ParkourTypes.ParkourContext
 
 local OBSTACLE = ParkourConstants.Obstacle
 
--- The authored path for the traversal in progress, captured once at Enter. Captured rather than
--- re-derived per frame on purpose: the probe results keep updating underneath (the character is
--- moving), and a path that re-derived itself every frame would chase its own tail and never converge
--- on a landing point.
-local startCFrame = CFrame.identity
-local controlPoint = Vector3.zero
-local endPosition = Vector3.zero
-local travelDirection = Vector3.zero
+local path = StateSupport.NewTraversalPath()
 local durationSeconds = OBSTACLE.VaultDurationSeconds
 local retainFraction = OBSTACLE.VaultExitRetainFraction
 local cooldownUntil = 0
@@ -70,33 +66,11 @@ local Vaulting: ParkourTypes.StateDefinition = {
 		if not StateSupport.WithinTraversalRange(context) then
 			return false, "ObstacleOutOfRange"
 		end
-		-- LIVE check, not the frozen ObstacleProbe.TravelDirection -- see Mantling.CanEnter's identical
-		-- gate and StateSupport.IsMovingToward's own header for why this has to read current input
-		-- rather than trust that the obstacle's cached geometry still describes where the player is
-		-- headed.
-		if
-			not StateSupport.IsMovingToward(
-				StateSupport.TravelDirection(context),
-				context.Obstacle.Normal,
-				OBSTACLE.MaxApproachAngleDegrees
-			)
-		then
-			return false, "NotApproachingObstacle"
-		end
-		-- A SECOND, independent gate -- see Mantling.CanEnter's identical check for the full reasoning.
-		-- Short version: under shift lock, travel direction is camera-relative and can point straight
-		-- backward while the character's own facing (RootPart.CFrame.LookVector) points somewhere else
-		-- entirely, so a backpedal into a wall behind the player satisfies the "moving toward it" check
-		-- above without the player ever having looked at it. This is what stops a vault from firing
-		-- backward -- both this and the check above have to agree the obstacle is ahead.
-		if
-			not StateSupport.IsMovingToward(
-				context.RootPart.CFrame.LookVector,
-				context.Obstacle.Normal,
-				OBSTACLE.MaxApproachAngleDegrees
-			)
-		then
-			return false, "NotFacingObstacle"
+		-- Travel AND facing both have to agree the obstacle is ahead -- see StateSupport.ApproachGate's
+		-- own header. This is what stops a vault firing backward off a shift-locked backpedal.
+		local approaching, approachReason = StateSupport.ApproachGate(context)
+		if not approaching then
+			return false, approachReason
 		end
 		local classification = StateSupport.ClassifyObstacle(context)
 		if classification.Action ~= "Vault" and classification.Action ~= "Hop" then
@@ -116,12 +90,7 @@ local Vaulting: ParkourTypes.StateDefinition = {
 		retainFraction = if isHop then OBSTACLE.HopExitRetainFraction else OBSTACLE.VaultExitRetainFraction
 		context.AnimationVariant = variant
 
-		local rootPart = context.RootPart
-		startCFrame = rootPart.CFrame
-		-- The FROZEN direction the probe actually cast along to find this obstacle -- see
-		-- Mantling.Enter's identical read and ObstacleProbe.TravelDirection's own header. Falls back to
-		-- a live read only in the defensive case where the probe field is somehow still zero.
-		travelDirection = ParkourMath.SafeUnit(context.Obstacle.TravelDirection, StateSupport.TravelDirection(context))
+		StateSupport.BeginTraversal(context, path)
 
 		local probe = context.Obstacle
 		-- Distance from the root's centre down to the soles, so the path can be authored in terms of
@@ -135,42 +104,25 @@ local Vaulting: ParkourTypes.StateDefinition = {
 		-- surface. Landing slightly high is deliberate and self-correcting -- the hand-off in Exit adds
 		-- a downward component, so the body settles onto whatever is actually below, whether that is
 		-- ground level, a step, or a drop the character now falls down.
-		endPosition = probe.TopPosition
-			+ travelDirection * (depth + OBSTACLE.VaultExitForwardStuds)
+		path.EndPosition = probe.TopPosition
+			+ path.TravelDirection * (depth + OBSTACLE.VaultExitForwardStuds)
 			+ Vector3.new(0, footOffset, 0)
 		-- The arc's apex: above the obstacle's top edge, high enough to clear the lip with room to
 		-- spare. Placed relative to the TOP rather than to either endpoint so the arc's height scales
 		-- with the obstacle instead of with how fast the character happened to be going.
-		controlPoint = probe.TopPosition + travelDirection * 0.2 + Vector3.new(0, footOffset + 1.2, 0)
+		path.ControlPoint = probe.TopPosition + path.TravelDirection * 0.2 + Vector3.new(0, footOffset + 1.2, 0)
 	end,
 
 	Update = function(context: ParkourContext): ParkourTypes.TransitionResult
-		local alpha = math.clamp(context.StateElapsed / math.max(durationSeconds, 1e-3), 0, 1)
-		local eased = ParkourMath.TraversalEase(alpha)
-		local position = ParkourMath.TraversalPoint(startCFrame.Position, controlPoint, endPosition, eased)
-
-		local motor = context.Motor
-		motor.Mode = "Kinematic"
-		motor.TargetCFrame = CFrame.lookAt(position, position + travelDirection)
-		motor.DesiredSpeed = context.Momentum
-
-		if alpha < 1 then
-			return nil
-		end
-		return if context.Ground.Grounded then StateSupport.ResolveGroundedState(context) else "Falling"
+		return StateSupport.DriveTraversal(context, path, durationSeconds)
 	end,
 
 	Exit = function(context: ParkourContext): ()
 		cooldownUntil = context.Now + OBSTACLE.CooldownSeconds
 		context.AnimationVariant = nil
-		context.Momentum = ParkourMath.ExitMomentum(context.Momentum, retainFraction, OBSTACLE.ExitMinSpeed)
-		-- Hand back with the vault's own direction and speed, plus a small downward component so the
-		-- character settles onto the far side rather than floating off the top of the arc.
-		StateSupport.HandOff(
-			context,
-			ParkourMath.SafeUnit(ParkourMath.Flatten(travelDirection), Vector3.zero) * context.Momentum
-				- Vector3.new(0, 6, 0)
-		)
+		-- A harder settle than a mantle's: this ends still carrying an arc's worth of forward speed past
+		-- a lip, so the body has further to come down onto whatever the far side actually is.
+		StateSupport.TraversalHandOff(context, path, retainFraction, 6)
 	end,
 }
 
