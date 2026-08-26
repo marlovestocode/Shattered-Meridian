@@ -44,12 +44,12 @@
 	them).
 ]]
 
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Types = require(ReplicatedStorage.Shared.Types)
+local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
 
 type WeaponId = Types.WeaponId
 type HitboxAttackDefinition = Types.HitboxAttackDefinition
@@ -60,7 +60,6 @@ local WeaponRoster = {}
 
 -- The one fixed folder -- the same one WeaponModelRegistry reads, deliberately: a weapon is ONE model
 -- that answers both "what does it look like" and "what does it hit for".
-local CONTAINER_NAME = "Weapons"
 
 -- The name (or name SUFFIX -- see findHitboxValues) of the object a weapon hangs its hitbox
 -- Attributes on. Any ClassName works; the shipped Cutlass uses a StringValue purely because it is the
@@ -528,17 +527,6 @@ end
 
 -- Workspace.Weapons itself, or nil if nobody has made it yet -- a game with no weapon folder simply
 -- has no weapons rather than erroring at boot.
-local function findContainer(): Folder?
-	local child = Workspace:FindFirstChild(CONTAINER_NAME)
-	if not child then
-		return nil
-	end
-	if not child:IsA("Folder") then
-		logger:warn("Workspace.Weapons exists but is not a Folder; ignoring", { className = child.ClassName })
-		return nil
-	end
-	return child :: Folder
-end
 
 -- Reads Workspace.Weapons once and freezes the result for the session.
 --
@@ -555,7 +543,7 @@ function WeaponRoster.Start(): ()
 	end
 	started = true
 
-	local container = findContainer()
+	local container = WeaponAssets.Container(logger)
 	if not container then
 		logger:warn("Workspace.Weapons folder not found; no weapons will be available")
 		return

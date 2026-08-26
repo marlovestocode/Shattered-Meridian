@@ -44,9 +44,9 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
 
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
 
 local logger = Logger.scope("WeaponIdleAnimations")
 
@@ -55,7 +55,6 @@ local WeaponIdleAnimations = {}
 -- The one fixed folder this module reads -- see its header on why this is kept as this module's own
 -- copy rather than going through Shared/Combat/WeaponRoster.lua. Same constant, same reasoning, as
 -- WeaponRoster.lua's, WeaponModelRegistry.lua's and AttackAnimations.lua's own CONTAINER_NAME.
-local WEAPONS_CONTAINER = "Weapons"
 
 -- The subfolder of a weapon's own Animations folder that holds its standing-idle clip -- the sixth
 -- slot in Shared/Attack/AttackAnimations.lua's WEAPON_STAGE_FOLDERS convention, kept here rather than
@@ -65,32 +64,13 @@ local IDLE_FOLDER = "IDLE"
 -- Workspace.Weapons itself, or nil if nobody has made it yet -- mirrors WeaponRoster.findContainer/
 -- WeaponModelRegistry.findContainer/AttackAnimations.weaponsContainer exactly, because this is the
 -- fourth module reading that one fixed path and none of the four may assume any other has run.
-local function weaponsContainer(): Folder?
-	local child = Workspace:FindFirstChild(WEAPONS_CONTAINER)
-	if not child or not child:IsA("Folder") then
-		return nil
-	end
-	return child :: Folder
-end
 
 -- Accepts an asset id in either form an author might reasonably paste and returns the one the engine
--- actually understands. Identical to AttackAnimations.lua's own normalize() -- see that module's
+-- actually understands. Identical to AttackAnimations.lua's own WeaponAssets.NormalizeAssetId() -- see that module's
 -- header for why a bare digits-only id is worth normalising rather than requiring the "rbxassetid://"
 -- prefix by convention alone. Not shared between the two files: each owns a handful of lines of pure
 -- string logic with no state, and importing one from the other would be a cross-require for a
 -- three-branch function neither is likely to change independently of the other.
-local function normalize(assetId: string): string
-	if assetId == "" then
-		return ""
-	end
-	if string.match(assetId, "^rbxassetid://") then
-		return assetId
-	end
-	if string.match(assetId, "^%d+$") then
-		return `rbxassetid://{assetId}`
-	end
-	return assetId
-end
 
 -- The Animation instance authored in `model`'s own Animations/IDLE folder, or nil when the model has
 -- no Animations folder, no IDLE subfolder, or that folder holds no Animation instance. Whichever
@@ -122,7 +102,7 @@ function WeaponIdleAnimations.Get(weaponId: string?): string
 		logger:debug("Get: no weaponId given", { weaponId = weaponId })
 		return ""
 	end
-	local container = weaponsContainer()
+	local container = WeaponAssets.Container(logger)
 	if not container then
 		logger:debug("Get: Workspace.Weapons folder not found", { weaponId = weaponId })
 		return ""
@@ -163,7 +143,7 @@ function WeaponIdleAnimations.Get(weaponId: string?): string
 		})
 		return ""
 	end
-	local resolved = normalize(animation.AnimationId)
+	local resolved = WeaponAssets.NormalizeAssetId(animation.AnimationId)
 	logger:debug("Get: resolved", {
 		weaponId = weaponId,
 		animationPath = animation:GetFullName(),
@@ -177,7 +157,7 @@ end
 -- sweep -- so drawing a freshly-authored weapon for the first time doesn't cold-load its idle pose the
 -- moment the player stops moving.
 function WeaponIdleAnimations.GetPreloadIds(): { string }
-	local container = weaponsContainer()
+	local container = WeaponAssets.Container(logger)
 	if not container then
 		return {}
 	end
@@ -186,7 +166,7 @@ function WeaponIdleAnimations.GetPreloadIds(): { string }
 	for _, model in container:GetChildren() do
 		local animation = idleAnimation(model)
 		if animation and animation.AnimationId ~= "" then
-			local id = normalize(animation.AnimationId)
+			local id = WeaponAssets.NormalizeAssetId(animation.AnimationId)
 			if id ~= "" and not seen[id] then
 				seen[id] = true
 				table.insert(ids, id)
@@ -200,7 +180,7 @@ end
 -- same diagnostic seam AttackAnimations.GetPreloadLabels keeps for swing clips, and for the same
 -- reason: "rbxassetid://82318659005476 failed" means a lookup, "Cutlass:Idle failed" means something.
 function WeaponIdleAnimations.GetPreloadLabels(): { [string]: string }
-	local container = weaponsContainer()
+	local container = WeaponAssets.Container(logger)
 	if not container then
 		return {}
 	end
@@ -208,7 +188,7 @@ function WeaponIdleAnimations.GetPreloadLabels(): { [string]: string }
 	for _, model in container:GetChildren() do
 		local animation = idleAnimation(model)
 		if animation and animation.AnimationId ~= "" then
-			local id = normalize(animation.AnimationId)
+			local id = WeaponAssets.NormalizeAssetId(animation.AnimationId)
 			if id ~= "" then
 				labels[id] = `{model.Name}:Idle`
 			end

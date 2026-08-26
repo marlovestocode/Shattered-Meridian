@@ -45,7 +45,6 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
 
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -56,6 +55,7 @@ local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
 local AttackRequestSystem = require(script.Parent.Parent.Attack.AttackRequestSystem)
+local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
 
 type WeaponId = Types.WeaponId
 
@@ -278,8 +278,11 @@ function WeaponInventorySystem.Init(): ()
 	local selectRemote = NetworkBridge.CreateRemoteEvent(WeaponConstants.Network.RemoteNames.SelectNext)
 	selectRemote.OnServerEvent:Connect(handleSelectNext)
 
-	local container = Workspace:FindFirstChild("Weapons")
-	if container and container:IsA("Folder") then
+	-- Through Shared/Combat/WeaponAssets.Container rather than a seventh hand-written
+	-- Workspace:FindFirstChild("Weapons") -- this was the one copy that wrote the folder name as a
+	-- bare literal, so a rename would have missed it while the six named constants were updated.
+	local container = WeaponAssets.Container(logger)
+	if container then
 		for _, child in container:GetChildren() do
 			addPrompt(child)
 		end

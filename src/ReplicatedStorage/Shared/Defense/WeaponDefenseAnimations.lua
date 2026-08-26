@@ -53,10 +53,10 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
 
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
 
 local logger = Logger.scope("WeaponDefenseAnimations")
 
@@ -66,7 +66,6 @@ local WeaponDefenseAnimations = {}
 -- copy rather than going through Shared/Combat/WeaponRoster.lua. Same constant, same reasoning, as
 -- WeaponRoster.lua's, WeaponModelRegistry.lua's, AttackAnimations.lua's and WeaponIdleAnimations.lua's
 -- own CONTAINER_NAME.
-local WEAPONS_CONTAINER = "Weapons"
 
 -- Slot key -> the subfolder of a weapon's own Animations folder that holds that clip. Exported below
 -- as WeaponDefenseAnimations.Slots so Tests/TestHelpers/WeaponFixture.lua can install exactly these
@@ -83,122 +82,25 @@ WeaponDefenseAnimations.Slots = {
 -- WeaponModelRegistry.findContainer, AttackAnimations.weaponsContainer and
 -- WeaponIdleAnimations.weaponsContainer exactly, because this is the fifth module reading that one
 -- fixed path and none of the five may assume any other has run.
-local function weaponsContainer(): Folder?
-	local child = Workspace:FindFirstChild(WEAPONS_CONTAINER)
-	if not child or not child:IsA("Folder") then
-		return nil
-	end
-	return child :: Folder
-end
 
 -- Accepts an asset id in either form an author might reasonably paste and returns the one the engine
 -- actually understands. Identical to AttackAnimations.lua's and WeaponIdleAnimations.lua's own
--- normalize() -- see AttackAnimations' header for why a bare digits-only id is worth normalising
+-- WeaponAssets.NormalizeAssetId() -- see AttackAnimations' header for why a bare digits-only id is worth normalising
 -- rather than requiring the "rbxassetid://" prefix by convention alone. Not shared between the three
 -- files for the reason WeaponIdleAnimations already records: a handful of lines of pure string logic
 -- with no state, where the cross-require would cost more than the duplication.
-local function normalize(assetId: string): string
-	if assetId == "" then
-		return ""
-	end
-	if string.match(assetId, "^rbxassetid://") then
-		return assetId
-	end
-	if string.match(assetId, "^%d+$") then
-		return `rbxassetid://{assetId}`
-	end
-	return assetId
-end
 
--- The Animation instance authored in `model`'s own Animations/<folderName> folder, or nil when the
--- model has no Animations folder, no such subfolder, or that folder holds no Animation instance.
--- Whichever Animation instance sits directly in the folder is used regardless of its own Name -- one
--- clip per slot, the same convention AttackAnimations.weaponOverride and
--- WeaponIdleAnimations.idleAnimation both keep, so an Animation named "CutlassParry" and one named
--- plain "Parry" resolve identically.
-local function slotAnimation(model: Instance, folderName: string): Animation?
-	local animationsFolder = model:FindFirstChild("Animations")
-	if not animationsFolder then
-		return nil
-	end
-	local slotFolder = animationsFolder:FindFirstChild(folderName)
-	if not slotFolder then
-		return nil
-	end
-	return slotFolder:FindFirstChildOfClass("Animation") :: Animation?
-end
-
--- The clip authored in `weaponId`'s own slot folder, or nil when it has none.
+-- The clip authored in `weaponId`'s own slot folder, or nil when it has none -- and it logs the full
+-- resolution chain rather than just the answer, because "my weapon's parry does nothing" has six
+-- indistinguishable causes from a caller's side and only five of them are visible from here.
+-- ParryWindows.ValidateAll is what reports the sixth (a real clip carrying no ParryStart/ParryClose
+-- markers).
 --
--- LOGS THE FULL RESOLUTION CHAIN, not just the final answer -- the same reasoning
--- AttackAnimations.weaponOverride and WeaponIdleAnimations.Get each give for doing this, and it
--- matters MORE here than in either of them: "my weapon's parry does nothing" has six
--- indistinguishable causes from a caller's side (no such weapon, no Animations folder, no PARRY
--- subfolder, no Animation instance in it, a blank AnimationId, or a real clip carrying no
--- ParryStart/ParryClose markers), and only the first five are visible from here.
--- ParryWindows.ValidateAll is what reports the sixth. Called on weapon change and at boot, never
--- per-frame, so a full trace every call costs nothing.
+-- Both the walk and that trace live in Shared/Combat/WeaponAssets.ResolveAnimation now;
+-- Attack/AttackAnimations.lua held the identical copy, differing in one line -- the field name it
+-- logged the slot under.
 local function weaponOverride(weaponId: string, folderName: string): string?
-	local container = weaponsContainer()
-	if not container then
-		logger:debug("weaponOverride: Workspace.Weapons folder not found", {
-			weaponId = weaponId,
-			slot = folderName,
-		})
-		return nil
-	end
-	local model = container:FindFirstChild(weaponId)
-	if not model then
-		logger:debug("weaponOverride: no child of Workspace.Weapons named this weaponId", {
-			weaponId = weaponId,
-			slot = folderName,
-		})
-		return nil
-	end
-	local animationsFolder = model:FindFirstChild("Animations")
-	if not animationsFolder then
-		logger:debug("weaponOverride: weapon model has no Animations folder", {
-			weaponId = weaponId,
-			slot = folderName,
-			modelPath = model:GetFullName(),
-		})
-		return nil
-	end
-	local slotFolder = animationsFolder:FindFirstChild(folderName)
-	if not slotFolder then
-		logger:debug("weaponOverride: Animations folder has no subfolder for this slot", {
-			weaponId = weaponId,
-			slot = folderName,
-			animationsPath = animationsFolder:GetFullName(),
-		})
-		return nil
-	end
-	local animation = slotFolder:FindFirstChildOfClass("Animation") :: Animation?
-	if not animation then
-		logger:debug("weaponOverride: slot folder has no Animation instance in it", {
-			weaponId = weaponId,
-			slot = folderName,
-			slotFolderPath = slotFolder:GetFullName(),
-		})
-		return nil
-	end
-	if animation.AnimationId == "" then
-		logger:debug("weaponOverride: Animation instance found, but its AnimationId is blank", {
-			weaponId = weaponId,
-			slot = folderName,
-			animationPath = animation:GetFullName(),
-		})
-		return nil
-	end
-	local resolved = normalize(animation.AnimationId)
-	logger:debug("weaponOverride: resolved", {
-		weaponId = weaponId,
-		slot = folderName,
-		animationPath = animation:GetFullName(),
-		rawAnimationId = animation.AnimationId,
-		resolved = resolved,
-	})
-	return resolved
+	return WeaponAssets.ResolveAnimation(logger, weaponId, folderName)
 end
 
 -- One slot's answer for one weapon: the weapon's own clip if it has one, otherwise the shared baseline
@@ -210,13 +112,13 @@ end
 -- blank, which is the pre-asset state every animation table in this codebase uses "" to mean.
 local function resolve(weaponId: string?, folderName: string, baseline: string): string
 	if typeof(weaponId) ~= "string" or weaponId == "" then
-		return normalize(baseline)
+		return WeaponAssets.NormalizeAssetId(baseline)
 	end
 	local override = weaponOverride(weaponId, folderName)
 	if override then
 		return override
 	end
-	return normalize(baseline)
+	return WeaponAssets.NormalizeAssetId(baseline)
 end
 
 -- The parry swing-up for this weapon. THE TIMING CLIP -- its markers are the parry window, so this is
@@ -234,15 +136,15 @@ end
 -- Visits every non-blank per-weapon override across both slots. Shared by the three sweeps below so
 -- they cannot disagree about what counts as authored.
 local function eachWeaponOverride(visit: (weaponId: string, folderName: string, resolved: string) -> ()): ()
-	local container = weaponsContainer()
+	local container = WeaponAssets.Container(logger)
 	if not container then
 		return
 	end
 	for _, model in container:GetChildren() do
 		for _, folderName in { PARRY_FOLDER, BLOCK_FOLDER } do
-			local animation = slotAnimation(model, folderName)
+			local animation = WeaponAssets.SlotAnimation(model, folderName)
 			if animation and animation.AnimationId ~= "" then
-				local resolved = normalize(animation.AnimationId)
+				local resolved = WeaponAssets.NormalizeAssetId(animation.AnimationId)
 				if resolved ~= "" then
 					visit(model.Name, folderName, resolved)
 				end
@@ -269,7 +171,7 @@ function WeaponDefenseAnimations.GetParryIds(): { string }
 	local seen: { [string]: boolean } = {}
 	local ids: { string } = {}
 
-	local baseline = normalize(DefenseConstants.ParryAnimationId)
+	local baseline = WeaponAssets.NormalizeAssetId(DefenseConstants.ParryAnimationId)
 	if baseline ~= "" then
 		seen[baseline] = true
 		table.insert(ids, baseline)

@@ -51,10 +51,10 @@
 	character's equip mutate every other character already holding the same weapon.
 ]]
 
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
 
 local logger = Logger.scope("WeaponModelRegistry")
 
@@ -63,7 +63,6 @@ local WeaponModelRegistry = {}
 -- The one fixed location this whole module reads -- see this file's header. Not configurable per-call
 -- on purpose: a single, well-known path is the entire point of this design over the tag-anywhere
 -- version it replaced.
-local CONTAINER_NAME = "Weapons"
 
 -- Grip tuning, as TWO Vector3 Attributes rather than one CFrame.
 --
@@ -424,19 +423,6 @@ end
 
 -- Workspace.Weapons itself, or nil (and a one-time warning) if nobody has created it yet -- an empty
 -- game fights entirely empty-handed rather than erroring at boot.
-local function findContainer(): Folder?
-	local child = Workspace:FindFirstChild(CONTAINER_NAME)
-	if not child then
-		return nil
-	end
-	if not child:IsA("Folder") then
-		logger:warn("Workspace.Weapons exists but is not a Folder; ignoring", {
-			className = child.ClassName,
-		})
-		return nil
-	end
-	return child :: Folder
-end
 
 -- Present-at-boot children and future ones through the same registerSource, which is the whole reason
 -- the folder's existing children are read before ChildAdded is connected rather than after -- a child
@@ -451,7 +437,7 @@ function WeaponModelRegistry.Start(): ()
 	end
 	started = true
 
-	local container = findContainer()
+	local container = WeaponAssets.Container(logger)
 	if not container then
 		logger:warn("Workspace.Weapons folder not found; every weapon will equip empty-handed")
 		return

@@ -67,7 +67,7 @@
 
 	EITHER FORM OF ID WORKS -- a bare "82318659005476" or a full "rbxassetid://82318659005476". The
 	engine only understands the second, but the first is what Roblox's own asset page, Toolbox and
-	Creator Dashboard all display, so it is what actually gets pasted. See normalize() below for why
+	Creator Dashboard all display, so it is what actually gets pasted. See WeaponAssets.NormalizeAssetId() below for why
 	that mismatch is worth a helper rather than a rule an author has to remember: a bare id resolves to
 	nothing, silently, in a file that looks correctly filled in.
 
@@ -86,9 +86,9 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
 
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
 
 local logger = Logger.scope("AttackAnimations")
 
@@ -97,7 +97,6 @@ local AttackAnimations = {}
 -- The one fixed folder every per-weapon override is read from -- see this file's header on why this
 -- module keeps its own copy of the path rather than going through Shared/Combat/WeaponRoster.lua.
 -- Same constant, same reasoning, as that module's and WeaponModelRegistry.lua's own CONTAINER_NAME.
-local WEAPONS_CONTAINER = "Weapons"
 
 -- Stage key -> the subfolder of a weapon's own Animations folder that holds that stage's clip. Only
 -- the five weapon-stage keys have an entry -- the standalone attacks (DashPunch, DashHit, AirSlam)
@@ -158,13 +157,6 @@ end
 -- WeaponModelRegistry.findContainer exactly (down to the warn-and-ignore on a same-named non-Folder),
 -- because this is the third module reading that one fixed path and none of the three may assume
 -- either of the others has run.
-local function weaponsContainer(): Folder?
-	local child = Workspace:FindFirstChild(WEAPONS_CONTAINER)
-	if not child or not child:IsA("Folder") then
-		return nil
-	end
-	return child :: Folder
-end
 
 -- The Animation instance authored for `stage` on `weaponId`'s own model, or nil when the weapon
 -- doesn't exist, the stage has no folder slot, the weapon has no Animations folder, that slot's own
@@ -181,62 +173,11 @@ local function weaponOverride(weaponId: string, stage: string): string?
 	if not folderName then
 		return nil
 	end
-	local container = weaponsContainer()
-	if not container then
-		logger:debug("weaponOverride: Workspace.Weapons folder not found", { weaponId = weaponId, stage = stage })
-		return nil
-	end
-	local model = container:FindFirstChild(weaponId)
-	if not model then
-		logger:debug("weaponOverride: no child of Workspace.Weapons named this weaponId", {
-			weaponId = weaponId,
-			stage = stage,
-		})
-		return nil
-	end
-	local animationsFolder = model:FindFirstChild("Animations")
-	if not animationsFolder then
-		logger:debug("weaponOverride: weapon model has no Animations folder", {
-			weaponId = weaponId,
-			stage = stage,
-			modelPath = model:GetFullName(),
-		})
-		return nil
-	end
-	local stageFolder = animationsFolder:FindFirstChild(folderName)
-	if not stageFolder then
-		logger:debug("weaponOverride: Animations folder has no subfolder for this stage", {
-			weaponId = weaponId,
-			stage = stage,
-			folderName = folderName,
-			animationsPath = animationsFolder:GetFullName(),
-		})
-		return nil
-	end
-	local animation = stageFolder:FindFirstChildOfClass("Animation") :: Animation?
-	if not animation then
-		logger:debug("weaponOverride: stage folder has no Animation instance in it", {
-			weaponId = weaponId,
-			stage = stage,
-			stageFolderPath = stageFolder:GetFullName(),
-		})
-		return nil
-	end
-	if animation.AnimationId == "" then
-		logger:debug("weaponOverride: Animation instance found, but its AnimationId is blank", {
-			weaponId = weaponId,
-			stage = stage,
-			animationPath = animation:GetFullName(),
-		})
-		return nil
-	end
-	logger:debug("weaponOverride: resolved", {
-		weaponId = weaponId,
-		stage = stage,
-		animationPath = animation:GetFullName(),
-		rawAnimationId = animation.AnimationId,
-	})
-	return animation.AnimationId
+	-- The forty-line walk and its six-step trace live in Shared/Combat/WeaponAssets.ResolveAnimation
+	-- now -- Defense/WeaponDefenseAnimations.lua held the same one, differing only in the field name
+	-- it logged the slot under. What stays here is the one thing that IS this module's: which folder
+	-- name an attack STAGE maps to.
+	return WeaponAssets.ResolveAnimation(logger, weaponId, folderName)
 end
 
 AttackAnimations.Ids = IDS
@@ -253,21 +194,6 @@ AttackAnimations.Ids = IDS
 -- so this normalises rather than making the promise conditional on knowing the prefix.
 --
 -- Left as-is if the prefix is already there, so both forms are equally correct to author.
-local function normalize(assetId: string): string
-	if assetId == "" then
-		return ""
-	end
-	if string.match(assetId, "^rbxassetid://") then
-		return assetId
-	end
-	-- Digits only. Anything else -- a full URL, a typo, a name -- is passed through untouched rather
-	-- than guessed at: prefixing a malformed id would turn "this did nothing" into "this points at
-	-- someone else's asset", which is far harder to notice.
-	if string.match(assetId, "^%d+$") then
-		return `rbxassetid://{assetId}`
-	end
-	return assetId
-end
 
 -- The clip for `moveId`, or "" when it has none. Never nil, never errors on an unknown id -- callers
 -- treat "" and "unknown" identically ("do not claim a clip"), so distinguishing them would only give
@@ -285,10 +211,10 @@ function AttackAnimations.Get(moveId: string): string
 	if weaponId then
 		local override = weaponOverride(weaponId, stage)
 		if override then
-			return normalize(override)
+			return WeaponAssets.NormalizeAssetId(override)
 		end
 	end
-	return normalize(IDS[stage] or "")
+	return WeaponAssets.NormalizeAssetId(IDS[stage] or "")
 end
 
 -- Every weapon's non-blank override, as (weaponId, stage, rawId) triples -- the one walk every weapon
@@ -296,7 +222,7 @@ end
 -- Workspace.Weapons directly, same as weaponOverride() above and for the same reason (see this file's
 -- header on why this module cannot go through WeaponRoster's server-only cache).
 local function eachWeaponOverride(visit: (weaponId: string, stage: string, raw: string) -> ()): ()
-	local container = weaponsContainer()
+	local container = WeaponAssets.Container(logger)
 	if not container then
 		return
 	end
@@ -334,7 +260,7 @@ function AttackAnimations.GetPreloadIds(): { string }
 		-- Normalised here too, not just in Get: ContentProvider is as literal about the prefix as the
 		-- animation loader is, so preloading a bare id would warm nothing while the real one still
 		-- cold-loads on the first swing.
-		local id = normalize(raw)
+		local id = WeaponAssets.NormalizeAssetId(raw)
 		if id ~= "" and not seen[id] then
 			seen[id] = true
 			table.insert(ids, id)
@@ -357,13 +283,13 @@ end
 function AttackAnimations.GetPreloadLabels(): { [string]: string }
 	local labels: { [string]: string } = {}
 	for moveId, raw in IDS do
-		local id = normalize(raw)
+		local id = WeaponAssets.NormalizeAssetId(raw)
 		if id ~= "" then
 			labels[id] = moveId
 		end
 	end
 	eachWeaponOverride(function(weaponId, stage, raw)
-		local id = normalize(raw)
+		local id = WeaponAssets.NormalizeAssetId(raw)
 		if id ~= "" then
 			labels[id] = `{weaponId}:{stage}`
 		end

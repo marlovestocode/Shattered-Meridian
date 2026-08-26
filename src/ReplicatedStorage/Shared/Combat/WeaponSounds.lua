@@ -38,7 +38,7 @@
 	imported model gives "http://www.roblox.com/asset/?id=123". Only the first resolves. The other two
 	are perfectly good strings that no linter, no type and no test objects to, and Roblox's ONLY signal
 	for them is a Studio console line that is trivially lost under a boot log (see SoundManager.Register's
-	own warn on exactly this, which has already cost one playtest) -- so normalize() below converts all
+	own warn on exactly this, which has already cost one playtest) -- so WeaponAssets.NormalizeAssetId() below converts all
 	three rather than making a weapon builder remember which one the engine wants.
 
 	TOLERANT OF FOLDER-NAME CASE, deliberately, and unlike the animation lookups. The animation slots
@@ -64,10 +64,10 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
 
 local logger = Logger.scope("WeaponSounds")
 
@@ -79,7 +79,6 @@ export type SoundDefinition = Constants.SoundDefinition
 -- copy rather than going through Shared/Combat/WeaponRoster.lua. Same constant, same reasoning, as
 -- WeaponRoster.lua's, WeaponModelRegistry.lua's, AttackAnimations.lua's and WeaponIdleAnimations.lua's
 -- own CONTAINER_NAME.
-local WEAPONS_CONTAINER = "Weapons"
 
 -- The weapon model's own sound folder, sibling to the Animations folder the two clip modules read.
 local SFX_FOLDER = "SFX"
@@ -137,42 +136,15 @@ end
 
 -- Accepts an asset id in any of the three forms a SoundId honestly arrives in and returns the one the
 -- engine actually resolves -- see this file's header for why all three exist and why only one works.
--- Deliberately NOT shared with AttackAnimations.lua/WeaponIdleAnimations.lua's own normalize(): those
+-- Deliberately NOT shared with AttackAnimations.lua/WeaponIdleAnimations.lua's own WeaponAssets.NormalizeAssetId(): those
 -- two handle the two ANIMATION forms, this one also has to handle the legacy asset-URL form that only
 -- ever shows up on Sounds pulled out of older imported models. Anything it does not recognise is
 -- returned untouched, so a future content-id scheme degrades to "passed straight through", never to "".
-local function normalize(assetId: string): string
-	if assetId == "" then
-		return ""
-	end
-	if string.match(assetId, "^rbxassetid://") then
-		return assetId
-	end
-	-- A bare id, as displayed by the Creator Dashboard, the asset page and the Toolbox.
-	if string.match(assetId, "^%d+$") then
-		return string.format("rbxassetid://%s", assetId)
-	end
-	-- The legacy asset URL, as stored on Sounds inside older imported models. Matched loosely (either
-	-- scheme, with or without www, the id anywhere in the query) because every variant of it appears in
-	-- the wild and all of them mean the same asset.
-	local legacyId = string.match(assetId, "^https?://[%w%.%-]*roblox%.com/asset/?%?.*id=(%d+)")
-	if legacyId then
-		return string.format("rbxassetid://%s", legacyId)
-	end
-	return assetId
-end
 
 -- Workspace.Weapons itself, or nil if nobody has made it yet -- mirrors WeaponRoster.findContainer/
 -- WeaponModelRegistry.findContainer/AttackAnimations.weaponsContainer/WeaponIdleAnimations.weaponsContainer
 -- exactly, because this is the fifth module reading that one fixed path and none of the five may assume
 -- any other has run.
-local function weaponsContainer(): Folder?
-	local child = Workspace:FindFirstChild(WEAPONS_CONTAINER)
-	if not child or not child:IsA("Folder") then
-		return nil
-	end
-	return child :: Folder
-end
 
 -- Last failure reason logged per "weaponId|slot", so the resolution chain stays traceable WITHOUT
 -- being re-logged on every call.
@@ -234,7 +206,7 @@ function WeaponSounds.Get(weaponId: string?, slot: string): SoundDefinition?
 		return nil
 	end
 
-	local container = weaponsContainer()
+	local container = WeaponAssets.Container(logger)
 	if not container then
 		logMiss(weaponId, slot, "Get: Workspace.Weapons folder not found", { weaponId = weaponId, slot = slot })
 		return nil
@@ -266,7 +238,7 @@ function WeaponSounds.Get(weaponId: string?, slot: string): SoundDefinition?
 		return nil
 	end
 
-	local resolved = normalize(sound.SoundId)
+	local resolved = WeaponAssets.NormalizeAssetId(sound.SoundId)
 	if resolved ~= sound.SoundId then
 		-- Worth saying out loud once: the weapon works, but the id AS AUTHORED would not have resolved
 		-- on its own, and the next sound pasted in the same form somewhere this module does not read
@@ -290,7 +262,7 @@ end
 -- Client/FX/CombatAudio.lua registers these lazily as weapons are actually drawn, so there is no fixed
 -- pool of instances for the preloader to be handed.
 function WeaponSounds.GetPreloadIds(): { string }
-	local container = weaponsContainer()
+	local container = WeaponAssets.Container(logger)
 	if not container then
 		return {}
 	end
@@ -300,7 +272,7 @@ function WeaponSounds.GetPreloadIds(): { string }
 		for _, slot in WeaponSounds.Slots do
 			local sound = slotSound(model, slot)
 			if sound and sound.SoundId ~= "" then
-				local id = normalize(sound.SoundId)
+				local id = WeaponAssets.NormalizeAssetId(sound.SoundId)
 				if id ~= "" and not seen[id] then
 					seen[id] = true
 					table.insert(ids, id)
@@ -316,7 +288,7 @@ end
 -- and for the same reason: "rbxassetid://123533685284641 failed" means a lookup, "Cutlass:Parry failed"
 -- means something.
 function WeaponSounds.GetPreloadLabels(): { [string]: string }
-	local container = weaponsContainer()
+	local container = WeaponAssets.Container(logger)
 	if not container then
 		return {}
 	end
@@ -325,7 +297,7 @@ function WeaponSounds.GetPreloadLabels(): { [string]: string }
 		for _, slot in WeaponSounds.Slots do
 			local sound = slotSound(model, slot)
 			if sound and sound.SoundId ~= "" then
-				local id = normalize(sound.SoundId)
+				local id = WeaponAssets.NormalizeAssetId(sound.SoundId)
 				if id ~= "" then
 					labels[id] = string.format("%s:%s", model.Name, slot)
 				end
