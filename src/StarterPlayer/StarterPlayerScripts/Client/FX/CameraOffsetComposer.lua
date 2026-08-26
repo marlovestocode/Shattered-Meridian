@@ -37,6 +37,28 @@
 	Does not own: deciding WHEN to offset the camera (ShiftLockCamera/FlightCamera still own that), or
 	any other camera/Humanoid property (FieldOfView stays FOVOffset's alone; camera rotation stays
 	CameraShake's alone; AutoRotate/WalkSpeed/etc. stay owned exactly where they already are).
+
+	AND IT IS A SHARED ROLE, NOT A SHARED IMPLEMENTATION -- said plainly here because a duplication
+	sweep read the paragraph above as "these are one module written twice" and proposed collapsing
+	both onto a generic slot pool parameterised on (zero, add, equals, write). Counted against current
+	source, the genuinely identical code is about twenty-four lines: ClearContinuous, the ease-or-snap
+	step, most of SetContinuous's body, and the slot type. Everything else in each file is the part
+	that differs --
+
+	  * FOVOffset carries a whole second slot kind (analytic Punch, the punchesEnabled comfort gate,
+	    self-removal on completion) that has no counterpart here, and lazily captures a NON-zero base
+	    some other system may have set. This module sums onto Vector3.zero and has nothing to capture.
+	  * This module tracks the local character through PlayerLifecycle because its write target is a
+	    Humanoid that gets replaced on every respawn. FOVOffset reads Workspace.CurrentCamera and does
+	    not.
+	  * FOVOffset keys Continuous and Punch into ONE flat table, and Client/Camera/BlimpCamera.lua
+	    depends on that: its telegraph punch uses a deliberately different slot name so it cannot
+	    delete the speed zoom. Splitting the pool out would quietly make that hazard -- and the comment
+	    documenting it -- untrue.
+
+	So the extraction removes ~24 duplicated lines and adds a generic module with its own header, a
+	lerp closure per adapter, and a changed contract at the one place a caller was told to be careful.
+	Both files get longer. Left as two, deliberately.
 ]]
 
 local RunService = game:GetService("RunService")
