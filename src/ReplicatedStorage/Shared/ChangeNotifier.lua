@@ -36,6 +36,27 @@
 	would be pure overhead with no benefit) -- this stays scoped to the handful of per-player
 	PRESENTATION flags that already re-derive a boolean every tick and only care about edges, never
 	applied preemptively to the timing fields a resolver reads, which stay plain field reads.
+
+	WHAT THIS IS NOT FOR, written down because a duplication sweep flagged five "hand-rolled copies"
+	of it and every one of them turned out to be a different shape. This module is specifically
+	`{[Player]: T}`, compared with `==`, fanning out through a BindableEvent, with a Clear(player) that
+	exists so PlayerRemoving cannot leak an entry. Those three properties are what it is; a comparison
+	against a previous value is not, on its own, this.
+
+	  * BlimpSystem's LastFuelPush and LastHelmPush compare compound RECORDS (three and four fields)
+	    keyed by BLIMP. A table never compares `==` equal to another table, so migrating them would
+	    mean flattening every push to a string or regeneralising this module -- widening it to fit
+	    call sites whose inline answer is already two correct lines.
+	  * DefenseSystem's PublishedState is keyed by Model, and HitboxEngine's HoldsMovementLock by
+	    combatant Model. Both live on a per-registration record that already has its own lifecycle, so
+	    the record IS the storage and there is nothing for Clear to protect against.
+	  * QiSystem's lastSyncedCurrent is not an edge at all: it fires on "the interval has elapsed AND
+	    the value changed", with a companion lastSyncAt this module has no concept of.
+	  * RunSystem's stage compare reads a number off the per-player state record it already holds.
+	    Routing it through here would add a SECOND {[Player]: number} table holding the same number.
+
+	The one genuine adopter is EngagementSystem, and it is genuine for the reason above rather than by
+	coincidence: per-player, scalar, edge-driven, and cleared on leave.
 ]]
 
 local ChangeNotifier = {}
