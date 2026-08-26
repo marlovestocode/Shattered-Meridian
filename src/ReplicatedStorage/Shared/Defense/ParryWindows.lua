@@ -48,11 +48,11 @@
 	(DefenseConstants.Parry.RecoverySeconds), or any playback (Client/Defense/DefenseClient.lua).
 ]]
 
-local KeyframeSequenceProvider = game:GetService("KeyframeSequenceProvider")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
+local KeyframeMarkers = require(ReplicatedStorage.Shared.Animation.KeyframeMarkers)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
@@ -70,13 +70,6 @@ local MARKER_OPEN = "ParryStart"
 local MARKER_CLOSE = "ParryClose"
 local MARKER_RECOVERY_END = "ParryRecoveryEnd"
 
--- How many times a failed extraction is retried before the id is negatively cached forever. Bounded
--- because GetKeyframeSequenceAsync is rate limited: an id that is simply wrong would otherwise be
--- re-requested on every press for the rest of the session, spending the budget that the ids which DO
--- resolve need.
-local MAX_EXTRACTION_ATTEMPTS = 3
-local RETRY_BASE_SECONDS = 0.5
-
 -- Successfully resolved windows, by animation id. Also holds `false` for an id whose extraction
 -- failed its last attempt -- the negative cache, distinguished from "never asked" (nil) so a
 -- permanent failure is never retried and a fresh id still can be.
@@ -88,20 +81,10 @@ local inFlight: { [string]: boolean } = {}
 local registered: { [string]: ParryWindow } = {}
 local overrides: { [string]: ParryWindow } = {}
 
--- Swappable so specs can drive extraction without a published asset. Returns the authored sequence,
--- or nil if it could not be fetched. Never called on the Get path -- see this file's header.
-local extractor: (animationId: string) -> KeyframeSequence? = function(animationId: string): KeyframeSequence?
-	local ok, result = pcall(function()
-		return KeyframeSequenceProvider:GetKeyframeSequenceAsync(animationId)
-	end)
-	if not ok then
-		return nil
-	end
-	if typeof(result) ~= "Instance" or not result:IsA("KeyframeSequence") then
-		return nil
-	end
-	return result
-end
+-- Swappable so specs can drive extraction without a published asset. Held as a local rather than
+-- called through Animation/KeyframeMarkers directly so a spec can replace THIS module's fetch without
+-- reaching into AttackWindows'. Never called on the Get path -- see this file's header.
+local extractor: (animationId: string) -> KeyframeSequence? = KeyframeMarkers.Fetch
 
 -- Validation ---------------------------------------------------------------------------------------
 
@@ -148,36 +131,11 @@ end
 
 -- Extraction ---------------------------------------------------------------------------------------
 
--- Pulls marker times out of an authored sequence. Pure over the Instance tree it is handed -- no web
--- call, no cache, no yielding -- so a spec can build a KeyframeSequence with Instance.new and call
--- this directly, which is exactly what ParryWindows.spec does.
---
--- A marker's time is its KEYFRAME's time; KeyframeMarker itself carries no time of its own. Duplicate
--- markers of the same name take the EARLIEST keyframe: an animator who left two ParryStart
--- markers on a clip meant the first one, and picking the later one silently shortens the window.
---
--- Keyframe.Time is a FLOAT32, so a marker authored at 0.05 comes back as 0.05000000074505806. That
--- is far below any timing anyone can perceive and nothing here rounds it, but it does mean marker
--- times must never be compared for exact equality -- against an authored number, or against each
--- other.
+-- Every marker time on an authored sequence, by name. Kept as a named function on this module because
+-- it is the seam ParryWindows.spec asserts the earliest-wins rule through; the walk itself, and the
+-- float32 caveat that comes with it, live in Animation/KeyframeMarkers.TimesOn.
 function ParryWindows.ExtractMarkers(sequence: KeyframeSequence): { [string]: number }
-	local times: { [string]: number } = {}
-	for _, child in sequence:GetChildren() do
-		if not child:IsA("Keyframe") then
-			continue
-		end
-		local keyframeTime = child.Time
-		for _, marker in child:GetChildren() do
-			if not marker:IsA("KeyframeMarker") then
-				continue
-			end
-			local existing = times[marker.Name]
-			if existing == nil or keyframeTime < existing then
-				times[marker.Name] = keyframeTime
-			end
-		end
-	end
-	return times
+	return KeyframeMarkers.TimesOn(sequence)
 end
 
 -- Turns an extracted marker map into a window, or nil with a reason. Split from ExtractMarkers so the
@@ -221,7 +179,7 @@ function ParryWindows.Prefetch(animationId: string): boolean
 
 	inFlight[animationId] = true
 	local resolved: ParryWindow | false = false
-	for attempt = 1, MAX_EXTRACTION_ATTEMPTS do
+	for attempt = 1, KeyframeMarkers.MaxAttempts do
 		local sequence = extractor(animationId)
 		if sequence then
 			local window, reason = ParryWindows.WindowFromMarkers(ParryWindows.ExtractMarkers(sequence))
@@ -237,10 +195,8 @@ function ParryWindows.Prefetch(animationId: string): boolean
 			end
 			break
 		end
-		if attempt < MAX_EXTRACTION_ATTEMPTS then
-			-- Backoff, because the overwhelmingly likely cause of a failed fetch is the rate limit,
-			-- and an immediate retry is the one thing guaranteed to hit it again.
-			task.wait(RETRY_BASE_SECONDS * attempt)
+		if attempt < KeyframeMarkers.MaxAttempts then
+			KeyframeMarkers.Backoff(attempt)
 		end
 	end
 

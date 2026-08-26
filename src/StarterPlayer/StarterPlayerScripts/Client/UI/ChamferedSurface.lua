@@ -234,6 +234,30 @@ function ChamferedSurface.IsAvailable(): boolean
 	return ensureGenerated().Fill ~= nil
 end
 
+-- EVERY LAYER, OR NONE -- returns the baked layers in order, or nil if ANY of them came back nil.
+--
+-- IsAvailable() said the masks are ready, so a nil out of Fill/Stroke afterwards is not the ordinary
+-- "this environment has no chamfer" case; it is one layer of a multi-layer surface missing. Rendering
+-- the rest reads as a bug (a tile with no fill, a plate with no stroke) rather than as the plain-rect
+-- fallback, so the whole set is discarded and the caller drops to its legacy path instead.
+--
+-- A function rather than four hand-written `if a and b and c then` blocks because that is exactly what
+-- the four surfaces doing this had -- with the rule restated four times in four slightly different
+-- comments, one of which no longer named the function it was talking about. The rule is one rule.
+--
+-- Returns a NEW array; callers assign it rather than appending to one they already hold, which is
+-- what makes "or none" mean none.
+function ChamferedSurface.AllLayers(layers: { ImageLabel? }): { Instance }?
+	local resolved: { Instance } = {}
+	for _, layer in layers do
+		if layer == nil then
+			return nil
+		end
+		table.insert(resolved, layer :: Instance)
+	end
+	return resolved
+end
+
 export type ChamferedFillProps = {
 	FillColor: UsedAs<Color3>,
 	FillTransparency: UsedAs<number>?,

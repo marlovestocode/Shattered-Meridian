@@ -418,13 +418,10 @@ local function AbilitySlot(scope: Scope, props: AbilitySlotProps): TextButton
 			Weight = strokeWeight,
 			ZIndex = Z_CHROME,
 		})
-		if fill and wash and stroke then
-			table.insert(tileChildren, fill)
-			table.insert(tileChildren, wash)
-			table.insert(tileChildren, stroke)
+		local layers = ChamferedSurface.AllLayers({ fill, wash, stroke })
+		if layers then
+			tileChildren = layers
 		else
-			-- ChamferedSurface.IsAvailable() said yes but a bake came back nil anyway -- treat it the
-			-- same as unavailable rather than rendering a tile with no fill at all.
 			isChamfered = false
 		end
 	end

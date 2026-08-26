@@ -387,14 +387,10 @@ function VitalIcon.new(scope: Scope, props: VitalIconProps): Frame
 			Weight = strokeWeight,
 			ZIndex = 5,
 		})
-		if tileFill and wash and flare and stroke then
-			table.insert(tileChildren, tileFill)
-			table.insert(tileChildren, wash)
-			table.insert(tileChildren, flare)
-			table.insert(tileChildren, stroke)
+		local layers = ChamferedSurface.AllLayers({ tileFill, wash, flare, stroke })
+		if layers then
+			tileChildren = layers
 		else
-			-- ChamferedSurface.IsAvailable() said yes but a bake came back nil anyway -- treat it the
-			-- same as unavailable rather than rendering a tile with a missing layer.
 			isChamfered = false
 		end
 	end

@@ -41,10 +41,10 @@
 	module exists at all).
 ]]
 
-local KeyframeSequenceProvider = game:GetService("KeyframeSequenceProvider")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
+local KeyframeMarkers = require(ReplicatedStorage.Shared.Animation.KeyframeMarkers)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local logger = Logger.scope("AttackWindows")
@@ -61,74 +61,22 @@ local markerCache: { [string]: number | false } = {}
 -- request rather than each starting their own.
 local inFlight: { [string]: boolean } = {}
 
--- How many times a failed extraction is retried before the pair is negatively cached forever --
--- identical budget to ParryWindows, for the identical reason (GetKeyframeSequenceAsync is rate
--- limited, and an id that is simply wrong should not keep spending it).
-local MAX_EXTRACTION_ATTEMPTS = 3
-local RETRY_BASE_SECONDS = 0.5
-
 -- Swappable so specs can drive extraction without a published asset -- same seam, same contract as
--- ParryWindows.extractor. Never called on the WindupOverride path -- see this file's header.
-local extractor: (animationId: string) -> KeyframeSequence? = function(animationId: string): KeyframeSequence?
-	local ok, result = pcall(function()
-		return KeyframeSequenceProvider:GetKeyframeSequenceAsync(animationId)
-	end)
-	if not ok then
-		return nil
-	end
-	if typeof(result) ~= "Instance" or not result:IsA("KeyframeSequence") then
-		return nil
-	end
-	return result
-end
+-- ParryWindows.extractor, and the same shared default behind both. Held as a local rather than called
+-- through the module so a spec can replace THIS module's fetch without reaching into ParryWindows'.
+-- Never called on the WindupOverride path -- see this file's header.
+local extractor: (animationId: string) -> KeyframeSequence? = KeyframeMarkers.Fetch
 
 local function cacheKey(animationId: string, markerName: string): string
 	return animationId .. "|" .. markerName
 end
 
--- Pulls one marker's time out of an authored sequence -- the earliest keyframe carrying it, same
--- "duplicate markers take the earliest" rule ParryWindows.ExtractMarkers documents and for the same
--- reason (an animator who left two copies meant the first one). Pure over the Instance tree handed
--- in, so a spec can build one with Instance.new and call this directly, no web call involved.
+-- One marker's time off an authored sequence, or nil. Kept as a named function on this module rather
+-- than folded into its one call site because it is the seam AttackWindows.spec asserts the
+-- earliest-wins rule through -- the rule itself, and the float32 caveat that comes with it, live in
+-- Animation/KeyframeMarkers.TimesOn.
 function AttackWindows.ExtractMarkerTime(sequence: KeyframeSequence, markerName: string): number?
-	local earliest: number? = nil
-	for _, child in sequence:GetChildren() do
-		if not child:IsA("Keyframe") then
-			continue
-		end
-		local keyframeTime = child.Time
-		for _, marker in child:GetChildren() do
-			if marker:IsA("KeyframeMarker") and marker.Name == markerName then
-				if earliest == nil or keyframeTime < earliest then
-					earliest = keyframeTime
-				end
-			end
-		end
-	end
-	return earliest
-end
-
--- Every KeyframeMarker name actually present on `sequence`, deduped and sorted -- diagnostic only,
--- so a "no usable marker" log can say what WAS found instead of just what wasn't, and a typo/wrong-
--- stage marker name shows up immediately instead of reading as "no marker at all."
-local function markerNamesOn(sequence: KeyframeSequence): string
-	local seen: { [string]: boolean } = {}
-	for _, child in sequence:GetChildren() do
-		if not child:IsA("Keyframe") then
-			continue
-		end
-		for _, marker in child:GetChildren() do
-			if marker:IsA("KeyframeMarker") then
-				seen[marker.Name] = true
-			end
-		end
-	end
-	local names = {}
-	for name in seen do
-		table.insert(names, name)
-	end
-	table.sort(names)
-	return if #names > 0 then table.concat(names, ", ") else "<none>"
+	return KeyframeMarkers.TimesOn(sequence)[markerName]
 end
 
 -- The Basic-string marker name for `moveId`, or nil if it is not shaped like one -- see this file's
@@ -165,7 +113,7 @@ function AttackWindows.Prefetch(animationId: string, markerName: string): boolea
 
 	inFlight[key] = true
 	local resolved: number | false = false
-	for attempt = 1, MAX_EXTRACTION_ATTEMPTS do
+	for attempt = 1, KeyframeMarkers.MaxAttempts do
 		local sequence = extractor(animationId)
 		if sequence then
 			local markerTime = AttackWindows.ExtractMarkerTime(sequence, markerName)
@@ -174,17 +122,16 @@ function AttackWindows.Prefetch(animationId: string, markerName: string): boolea
 			if markerTime ~= nil and markerTime == markerTime and markerTime >= 0 then
 				resolved = markerTime
 			else
-				logger:debug(
-					"Attack clip has no usable marker -- keeping the hardcoded WindupSeconds",
-					{ animationId = animationId, markerName = markerName, foundMarkers = markerNamesOn(sequence) }
-				)
+				logger:debug("Attack clip has no usable marker -- keeping the hardcoded WindupSeconds", {
+					animationId = animationId,
+					markerName = markerName,
+					foundMarkers = KeyframeMarkers.NamesOn(sequence),
+				})
 			end
 			break
 		end
-		if attempt < MAX_EXTRACTION_ATTEMPTS then
-			-- Backoff, because the overwhelmingly likely cause of a failed fetch is the rate limit,
-			-- and an immediate retry is the one thing guaranteed to hit it again.
-			task.wait(RETRY_BASE_SECONDS * attempt)
+		if attempt < KeyframeMarkers.MaxAttempts then
+			KeyframeMarkers.Backoff(attempt)
 		end
 	end
 

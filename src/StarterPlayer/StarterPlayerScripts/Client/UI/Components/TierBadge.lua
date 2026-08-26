@@ -195,12 +195,10 @@ local function TierBadge(scope: Scope, props: TierBadgeProps): Frame
 			end),
 			ZIndex = 3,
 		})
-		if fill and stroke then
-			table.insert(plateChildren, fill)
-			table.insert(plateChildren, stroke)
+		local layers = ChamferedSurface.AllLayers({ fill, stroke })
+		if layers then
+			plateChildren = layers
 		else
-			-- Availability said yes but a bake came back nil anyway -- treat it as unavailable rather
-			-- than rendering a plate with no fill.
 			isChamfered = false
 		end
 	end

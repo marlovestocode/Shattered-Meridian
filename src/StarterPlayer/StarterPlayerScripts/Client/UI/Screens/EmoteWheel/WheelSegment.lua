@@ -213,9 +213,9 @@ local function WheelSegment(scope: Scope, props: WheelSegmentProps): Frame
 			Weight = "Thick",
 			ZIndex = zIndex + 1,
 		})
-		if fill and stroke then
-			table.insert(shellChildren, fill)
-			table.insert(shellChildren, stroke)
+		local layers = ChamferedSurface.AllLayers({ fill, stroke })
+		if layers then
+			shellChildren = layers
 		else
 			isChamfered = false
 		end
