@@ -45,6 +45,7 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local StartMenuScreen = require(script.Parent.Parent.UI.Screens.StartMenu)
+local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
 
 local peek = Fusion.peek
 
@@ -90,9 +91,7 @@ function StartMenuClient.Run(): ()
 		errorText:set("")
 
 		local remote = NetworkBridge.GetRemoteFunction(Constants.StartMenu.RemoteNames.RequestTeleport)
-		local ok, successOrError, reason = pcall(function()
-			return remote:InvokeServer()
-		end)
+		local ok, successOrError, reason = RemoteInvoker.Invoke(remote)
 
 		if ok and successOrError == true then
 			logger:debug("Teleport accepted -- awaiting server-side transfer")

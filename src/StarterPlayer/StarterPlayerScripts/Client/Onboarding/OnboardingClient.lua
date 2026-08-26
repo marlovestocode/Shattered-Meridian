@@ -179,9 +179,7 @@ end
 -- sequence proceed rather than hanging forever.
 function OnboardingClient.FetchOnboardingState(): Types.CharacterCreationOnboardingStateResult?
 	local stateRemote = NetworkBridge.GetRemoteFunction(Config.RemoteNames.GetOnboardingState)
-	local ok, resultOrError = pcall(function()
-		return stateRemote:InvokeServer()
-	end)
+	local ok, resultOrError = RemoteInvoker.Invoke(stateRemote)
 	if not ok then
 		logger:error("GetOnboardingState request errored", { errorMessage = tostring(resultOrError) })
 		return nil
@@ -467,9 +465,7 @@ function OnboardingClient.RunConfirmationLoop(handle: OnboardingHandle, onSucces
 			Attributes = peek(handle.Attributes.Attributes),
 		}
 
-		local invokeOk, resultOrError = pcall(function()
-			return finalizeRemote:InvokeServer(payload)
-		end)
+		local invokeOk, resultOrError = RemoteInvoker.Invoke(finalizeRemote, payload)
 
 		handle.Confirmation.IsSubmitting:set(false)
 

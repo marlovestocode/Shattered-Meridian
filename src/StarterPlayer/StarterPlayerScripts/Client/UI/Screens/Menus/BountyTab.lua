@@ -57,6 +57,7 @@ local SectionHeading = require(script.Parent.Parent.Parent.Components.SectionHea
 local StatusTag = require(script.Parent.Parent.Parent.Components.StatusTag)
 local Stack = require(script.Parent.Parent.Parent.Components.Stack)
 local Inset = require(script.Parent.Parent.Parent.Components.Inset)
+local RemoteInvoker = require(script.Parent.Parent.Parent.Parent.Network.RemoteInvoker)
 
 local Children = Fusion.Children
 
@@ -227,9 +228,7 @@ function BountyTab.Mount(scope: Scope, props: BountyTabProps): Frame
 	-- server drops it, and neither is a reason for the whole UI mount to fail.
 	task.spawn(function()
 		local getActive = NetworkBridge.GetRemoteFunction(BountyConstants.RemoteNames.GetActiveBounties)
-		local ok, result = pcall(function()
-			return getActive:InvokeServer()
-		end)
+		local ok, result = RemoteInvoker.Invoke(getActive)
 		if not ok then
 			logger:warn("Initial bounty board fetch failed", { error = tostring(result) })
 			return

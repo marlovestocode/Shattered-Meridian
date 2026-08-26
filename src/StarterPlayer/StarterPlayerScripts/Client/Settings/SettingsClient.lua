@@ -50,6 +50,7 @@ local CameraShake = require(script.Parent.Parent.FX.CameraShake)
 local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
 local BlimpCamera = require(script.Parent.Parent.Camera.BlimpCamera)
 local Chrome = require(script.Parent.Parent.UI.Shell.Chrome)
+local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
 
 type SettingsHandle = SettingsModule.SettingsHandle
 type ListeningState = { Device: Types.KeybindDevice, Action: Types.KeybindAction }
@@ -139,9 +140,7 @@ end
 -- Constants.Settings.RemoteNames.GetSettings's own header for the full reasoning.
 function SettingsClient.RestoreSettings(): ()
 	local getSettingsRemote = NetworkBridge.GetRemoteFunction(RemoteNames.GetSettings)
-	local ok, result = pcall(function()
-		return getSettingsRemote:InvokeServer()
-	end)
+	local ok, result = RemoteInvoker.Invoke(getSettingsRemote)
 
 	local settings: Types.PlayerSettings
 	if ok and typeof(result) == "table" then

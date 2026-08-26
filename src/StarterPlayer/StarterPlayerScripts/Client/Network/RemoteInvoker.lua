@@ -25,9 +25,10 @@ local logger = Logger.scope("RemoteInvoker")
 -- Invokes `remote` with the given arguments inside a pcall. Returns (true, Result...) on success,
 -- or (false, errorMessage) if the invoke threw (a timeout, a disconnected remote, etc.).
 function RemoteInvoker.Invoke<Result...>(remote: RemoteFunction, ...: any): (boolean, Result...)
-	return pcall(function(...)
-		return remote:InvokeServer(...)
-	end, ...)
+	-- pcall'd against the method value directly rather than through a closure -- `remote.InvokeServer`
+	-- is a plain function taking the remote as its first argument, so this passes the same arguments
+	-- with no per-call allocation. The closure form this replaced built one on every invoke.
+	return pcall(remote.InvokeServer, remote, ...)
 end
 
 -- Convenience wrapper matching invokeAndReport's existing shape (invoke -> describe -> set status)
