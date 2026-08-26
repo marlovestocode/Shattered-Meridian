@@ -563,12 +563,14 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 			Name = "SeamRule",
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.new(0, ArmamentIsland.SEAM_OVERLAP, 0.5, 0),
-			Size = UDim2.new(0, 1, 1, 0),
-			BackgroundColor3 = Tokens.Color.AccentPrimary,
+			Size = UDim2.new(0, Tokens.Control.SeamRuleThickness, 1, 0),
+			BackgroundColor3 = Tokens.Border.Seam.Color,
 			BackgroundTransparency = scope:Computed(function(use)
-				-- The panel edge's own 0.3, faded out with the island so a departing plate does not
-				-- leave a rule scored down the dock's left edge.
-				return 1 - 0.7 * math.clamp(use(island.Presence), 0, 1)
+				-- Tokens.Border.Seam's own opacity, faded out with the island so a departing plate
+				-- does not leave a rule scored down the dock's left edge. Derived from the tint rather
+				-- than hard-coded, so retuning the token moves both joints and not just this one.
+				local opacity = 1 - Tokens.Border.Seam.Transparency
+				return 1 - opacity * math.clamp(use(island.Presence), 0, 1)
 			end),
 			BorderSizePixel = 0,
 			ZIndex = 5,

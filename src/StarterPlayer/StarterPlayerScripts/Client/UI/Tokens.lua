@@ -125,6 +125,21 @@ Tokens.Border = {
 	Lit = { Color = Color3.fromRGB(180, 160, 220), Transparency = 0.68 } :: Tint,
 	-- The 40% accent edge on a selected/active surface.
 	Accent = { Color = Tokens.Color.AccentPrimary, Transparency = 0.6 } :: Tint,
+	-- THE LINE BETWEEN TWO JOINED SURFACES, and the only opaque entry in this table. Every tint above
+	-- is an EDGE -- something that describes where a panel stops -- and edges in this UI are quiet on
+	-- purpose. This one is a DIVISION: it runs through the middle of a single assembled object and
+	-- says the two halves are two instruments. The hotbar dock and its armament island wear it, and
+	-- so do the helm console and its furnace plate.
+	--
+	-- Brighter than AccentPrimary and fully opaque, at the owner's direction (2026-08-25: "make there
+	-- be a much more prominent divider through the diamond that separates the two containers"). It
+	-- was AccentPrimary at 0.3 -- the panels' own edge treatment -- which read as a seam in the
+	-- material rather than as a boundary between two things.
+	--
+	-- It is deliberately LOUDER than any panel border here, which is the inversion worth noting: a
+	-- joined assembly needs its internal division to out-read its outer edge, or the two halves merge
+	-- back into one object and the whole point of the joint is lost.
+	Seam = { Color = Tokens.Color.AccentPrimaryBright, Transparency = 0 } :: Tint,
 }
 
 -- Fill washes, consumed as a BackgroundColor3 + BackgroundTransparency pair on a Frame.
@@ -173,6 +188,11 @@ Tokens.Control = {
 	CloseButtonClearance = 36,
 	-- Hairline separator thickness for a seam between two grouped sections.
 	DividerThickness = 1,
+	-- Twice a divider, and the same weight as a CornerBracket arm. Not an arbitrary step up: the
+	-- elbows bracing each corner of a joined assembly are 2px, so the line dividing its two halves is
+	-- the same forged detail at the same weight rather than a heavier version of a hairline. See
+	-- Tokens.Border.Seam for why this one is allowed to be loud.
+	SeamRuleThickness = 2,
 }
 
 -- Two radii, not one. Sharp is the default for panel chrome per docs/ui-ux-philosophy.md's Shape
@@ -316,6 +336,23 @@ Tokens.Motion = {
 	-- out without ringing, matching the "instant acknowledgment" intent of the local parry cue.
 	-- StrokeThickness/PeakTransparency are the glint's own visual-tuning siblings to Speed/Damping.
 	GlintSpring = { Speed = 32, Damping = 1, StrokeThickness = 5, PeakTransparency = 0.2 },
+	-- An HUD ISLAND ARRIVING BESIDE THE DOCK -- Screens/WeaponInventory's armament island swinging
+	-- out from the hotbar's left edge on the first pickup.
+	--
+	-- THE ONLY UNDER-DAMPED SPRING IN THIS TABLE, and the one place in the HUD where an overshoot is
+	-- the point rather than a defect. Every other spring here is Damping = 1 (critical) because it is
+	-- easing a value toward a number the player is READING -- a vital's fill, a cooldown edge -- and
+	-- a bar that sailed past its own value and came back would be lying about the number for as long
+	-- as it took to settle. This one carries no number. It is a panel arriving, and the overshoot is
+	-- what makes it read as a thing with mass being pushed out rather than a rectangle whose width
+	-- changed (Shared/FlightMath.lua's header makes the same distinction for the flight camera).
+	--
+	-- 0.68, not lower: docs/ui-ux-philosophy.md's Animation Philosophy asks for "smooth, controlled,
+	-- intentional -- never bouncy, arcade-like". A second-order step response overshoots by
+	-- exp(-pi*z / sqrt(1 - z^2)), so at z = 0.68 the island passes its rest width by about 5%, once,
+	-- peaking a quarter second in and settled inside a second. A second visible bounce would be the
+	-- arcade register that section rules out.
+	IslandSpring = { Speed = 17, Damping = 0.68 },
 
 	-- Hover/press color changes.
 	HoverTween = TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),

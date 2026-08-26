@@ -207,7 +207,10 @@ return function()
 			-- importing it: the arrow between those two files runs one way. This is the assertion that
 			-- makes the literal safe.
 			local _scope, _fuel, stack, plate, holder = mount()
-			step(20)
+			-- 120, not 20: the plate rides Tokens.Motion.IslandSpring, which is deliberately
+			-- under-damped, so a shorter wait catches the drawer still travelling and every geometry
+			-- reading below it a pixel or two out.
+			step(120)
 
 			local console = stack:FindFirstChild("BlimpHelmPanel", true) :: Frame
 			expect(console).to.be.ok()
@@ -227,7 +230,7 @@ return function()
 			-- Measured off the SLOT rather than the plate, because the plate deliberately hangs past
 			-- the slot into the bleed.
 			local _scope, _fuel, stack, _plate, holder = mount()
-			step(20)
+			step(120)
 
 			local console = stack:FindFirstChild("BlimpHelmPanel", true) :: Frame
 			local slot = stack:FindFirstChild("FurnaceSlot", true) :: Frame
@@ -248,7 +251,7 @@ return function()
 			-- stopped clipping, or the plate stopped carrying a bleed, the join would grow a second
 			-- border and a pair of bronze elbows pointing into the middle of the assembly.
 			local _scope, _fuel, stack, plate, holder = mount()
-			step(20)
+			step(120)
 
 			local slot = stack:FindFirstChild("FurnaceSlot", true) :: Frame
 			expect(slot.ClipsDescendants).to.equal(true)
@@ -266,7 +269,7 @@ return function()
 			-- Both are asserted at the SAME Y, which is the whole point: a bead eight pixels off the
 			-- line it is fastening is the defect this replaced.
 			local _scope, _fuel, stack, _plate, holder = mount()
-			step(20)
+			step(120)
 
 			local slot = stack:FindFirstChild("FurnaceSlot", true) :: Frame
 			local rule = stack:FindFirstChild("SeamRule", true) :: Frame
@@ -274,8 +277,14 @@ return function()
 			expect(rule).to.be.ok()
 			expect(bolt).to.be.ok()
 			expect(bolt.BackgroundColor3).to.equal(Tokens.Color.AccentSecondary)
-			-- The assembly's own internal edge, in the violet both panels carry -- not a third colour.
-			expect(rule.BackgroundColor3).to.equal(Tokens.Color.AccentPrimary)
+			-- THE DIVISION OUT-READS THE OUTER EDGE, and that inversion is the assertion. A joined
+			-- assembly whose internal line is quieter than its own border merges back into one object,
+			-- which is what this looked like at the panels' own AccentPrimary/0.3 before the owner
+			-- asked for "a much more prominent divider". Pinned against the token rather than a
+			-- literal, and against the panel border it has to beat rather than against a number.
+			expect(rule.BackgroundColor3).to.equal(Tokens.Border.Seam.Color)
+			expect(Tokens.Border.Seam.Transparency < 0.3).to.equal(true)
+			expect(rule.BackgroundTransparency < 0.05).to.equal(true)
 
 			-- The junction is the plate's clipped bottom, which is where the two faces actually meet.
 			local junction = slot.AbsolutePosition.Y + slot.AbsoluteSize.Y
@@ -286,6 +295,7 @@ return function()
 			-- Full width, because the console is already past its chamfer at this Y -- which is the
 			-- reason the sink is the chamfer depth and not some other number.
 			expect(rule.AbsoluteSize.X).to.equal(slot.AbsoluteSize.X)
+			expect(rule.AbsoluteSize.Y).to.equal(Tokens.Control.SeamRuleThickness)
 
 			holder:Destroy()
 		end)

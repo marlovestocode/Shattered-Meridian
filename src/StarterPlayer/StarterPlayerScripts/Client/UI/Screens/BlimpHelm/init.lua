@@ -828,12 +828,15 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 			Name = "SeamRule",
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.new(0.5, 0, 0, FurnacePlate.SEAM_OVERLAP),
-			Size = UDim2.new(1, 0, 0, 1),
-			BackgroundColor3 = Tokens.Color.AccentPrimary,
+			Size = UDim2.new(1, 0, 0, Tokens.Control.SeamRuleThickness),
+			BackgroundColor3 = Tokens.Border.Seam.Color,
 			BackgroundTransparency = scope:Computed(function(use)
-				-- The panel edge's own 0.3, faded out with the plate so a departing furnace does not
-				-- leave a rule ruled across the console's top edge.
-				return 1 - 0.7 * math.clamp(use(plate.Presence), 0, 1)
+				-- Tokens.Border.Seam's own opacity, faded out with the plate so a departing furnace
+				-- does not leave a rule ruled across the console's top edge. Derived from the tint
+				-- rather than hard-coded, so retuning the token moves both joints and not just this
+				-- one.
+				local opacity = 1 - Tokens.Border.Seam.Transparency
+				return 1 - opacity * math.clamp(use(plate.Presence), 0, 1)
 			end),
 			BorderSizePixel = 0,
 			ZIndex = 5,

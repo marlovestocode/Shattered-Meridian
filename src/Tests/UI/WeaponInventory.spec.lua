@@ -509,7 +509,14 @@ return function()
 			expect(rule).to.be.ok()
 			expect(bolt).to.be.ok()
 			expect(bolt.BackgroundColor3).to.equal(Tokens.Color.AccentSecondary)
-			expect(rule.BackgroundColor3).to.equal(Tokens.Color.AccentPrimary)
+			-- THE DIVISION OUT-READS THE OUTER EDGE, and that inversion is the assertion. A joined
+			-- assembly whose internal line is quieter than its own border merges back into one object,
+			-- which is what this looked like at the panels' own AccentPrimary/0.3 before the owner
+			-- asked for "a much more prominent divider". Pinned against the token rather than a
+			-- literal, and against the panel border it has to beat rather than against a number.
+			expect(rule.BackgroundColor3).to.equal(Tokens.Border.Seam.Color)
+			expect(Tokens.Border.Seam.Transparency < 0.3).to.equal(true)
+			expect(rule.BackgroundTransparency < 0.05).to.equal(true)
 
 			-- Both on the junction, which is the island's clipped edge. A bead eight pixels off the
 			-- line it fastens is the defect this arrangement replaced on the other joint.
@@ -520,6 +527,7 @@ return function()
 			expect(math.abs(boltCentre - junction) <= 1).to.equal(true)
 			-- Full height, because the dock is already past its chamfer at this X.
 			expect(rule.AbsoluteSize.Y).to.equal(slot.AbsoluteSize.Y)
+			expect(rule.AbsoluteSize.X).to.equal(Tokens.Control.SeamRuleThickness)
 
 			holder:Destroy()
 		end)
