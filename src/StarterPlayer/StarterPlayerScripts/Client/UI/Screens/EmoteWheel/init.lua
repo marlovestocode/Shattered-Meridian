@@ -68,6 +68,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Types = require(ReplicatedStorage.Shared.Types)
 local EmoteRegistry = require(ReplicatedStorage.Shared.Emotes.EmoteRegistry)
+local Lazy = require(ReplicatedStorage.Shared.Lazy)
 
 local Tokens = require(script.Parent.Parent.Tokens)
 local Layers = require(script.Parent.Parent.Shell.Layers)
@@ -86,7 +87,12 @@ local peek = Fusion.peek
 type Scope = Fusion.Scope<typeof(Fusion)>
 type ClientState = ClientStateModule.ClientState
 
-export type EmoteWheelHandle = {
+-- THE STATE, WHICH OUTLIVES THE TREE. Split out of the handle so it can exist from boot while the
+-- wheel's ~130 instances are not built until somebody actually opens the wheel (see Mount below and
+-- UI/init.lua's Lazy). Everything here is either written by Client/Emotes/EmoteWheelClient.lua or
+-- derived from the viewport, so none of it needs a single Instance to be correct -- which is exactly
+-- what makes deferring the tree possible without the client having to ask whether it exists yet.
+export type EmoteWheelState = {
 	IsOpen: Fusion.Value<boolean>,
 	SelectedIndex: Fusion.Value<number?>,
 	-- Radians, clockwise from "up", written by EmoteWheelClient.lua and ALREADY unwrapped by it
@@ -96,6 +102,17 @@ export type EmoteWheelHandle = {
 	-- The dead-zone radius in RAW SCREEN PIXELS -- see this file's header on why the screen publishes
 	-- it rather than the client owning a second copy.
 	DeadZoneRadius: Fusion.UsedAs<number>,
+}
+
+-- What UI/init.lua hands Client/Emotes/EmoteWheelClient.lua: the state, available immediately, plus
+-- the deferred build. The client reads and writes State freely and calls Screen:Get() exactly once,
+-- on the first open, before it sets IsOpen.
+export type EmoteWheelHandle = {
+	State: EmoteWheelState,
+	-- Resolved for its SIDE EFFECT -- the payload is nil and there is nothing to read off it. Mount
+	-- writes into the State above rather than returning anything, which is what lets the state be the
+	-- one handle the client holds whether the tree exists yet or not.
+	Screen: Lazy.Lazy<nil>,
 }
 
 local EmoteWheel = {}
@@ -165,15 +182,38 @@ local function vignetteLayer(scope: Scope, name: string, rotation: number, ramp:
 	} :: Frame
 end
 
+-- The wheel's state, with no tree behind it yet. Cheap enough to make at boot for every player --
+-- three Values and one Computed -- which is the whole reason the expensive half can be deferred.
+--
+-- DeadZoneRadius lives here rather than in Mount because the client peeks it on every open and must
+-- get the right answer on the FIRST one, before any Instance exists. It is still the screen's own
+-- number (HUB_RADIUS is this file's layout constant), which is the property this file's header cares
+-- about -- the client never keeps a second copy.
+function EmoteWheel.NewState(scope: Scope, scale: Fusion.UsedAs<number>): EmoteWheelState
+	return {
+		IsOpen = scope:Value(false),
+		SelectedIndex = scope:Value(nil :: number?),
+		CursorAngle = scope:Value(0),
+		DeadZoneRadius = scope:Computed(function(use)
+			return HUB_RADIUS * use(scale)
+		end),
+	}
+end
+
+-- Builds the wheel's actual tree against a state NewState already made. Called through a
+-- Shared/Lazy.lua thunk from UI/init.lua, so this runs on the first open rather than at boot -- see
+-- that call site. Takes the same root scope either way, so UI/init.lua's single-entry-point teardown
+-- contract still covers everything built here.
 function EmoteWheel.Mount(
 	scope: Scope,
 	playerGui: PlayerGui,
 	clientState: ClientState,
-	scale: Fusion.UsedAs<number>
-): EmoteWheelHandle
-	local isOpen = scope:Value(false)
-	local selectedIndex: Fusion.Value<number?> = scope:Value(nil :: number?)
-	local cursorAngle = scope:Value(0)
+	scale: Fusion.UsedAs<number>,
+	state: EmoteWheelState
+): ()
+	local isOpen = state.IsOpen
+	local selectedIndex = state.SelectedIndex
+	local cursorAngle = state.CursorAngle
 
 	-- See file header's "ScreenGui.Enabled deliberately does NOT bind directly to IsOpen" section.
 	local screenEnabled = scope:Value(false)
@@ -210,10 +250,6 @@ function EmoteWheel.Mount(
 
 	local segmentCount = scope:Computed(function(use)
 		return #use(clientState.EmoteLoadout)
-	end)
-
-	local deadZoneRadius = scope:Computed(function(use)
-		return HUB_RADIUS * use(scale)
 	end)
 
 	local segments = scope:ForPairs(clientState.EmoteLoadout, function(_use, innerScope, index, emoteId)
@@ -368,13 +404,6 @@ function EmoteWheel.Mount(
 			},
 		},
 	})
-
-	return {
-		IsOpen = isOpen,
-		SelectedIndex = selectedIndex,
-		CursorAngle = cursorAngle,
-		DeadZoneRadius = deadZoneRadius,
-	}
 end
 
 return EmoteWheel

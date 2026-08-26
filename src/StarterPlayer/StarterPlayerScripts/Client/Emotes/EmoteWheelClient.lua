@@ -29,7 +29,7 @@
 	gamepad DPadDown, Constants.Keybinds.Defaults/GamepadDefaults), and, only while the wheel is
 	already open, closes it without confirming on right-click (MouseButton2). ESCAPE IS NO LONGER ONE
 	OF THEM -- it is the shell's single Escape stack now (Client/UI/Shell/Chrome.lua), bound in Start
-	below off the same handle.IsOpen this module already keeps in lockstep with isOpenValue. The
+	below off the same handle.State.IsOpen this module already keeps in lockstep with isOpenValue. The
 	cancel behaviour is identical; what changed is that Escape with the wheel open over a panel now
 	closes the wheel only, instead of the wheel and whatever it was over. The mouse-
 	tracking InputChanged connection and the release-detecting InputEnded connection are NOT part of
@@ -152,7 +152,7 @@ local STICK_CANCEL_THRESHOLD = 0.5
 -- Module-scope, not a Fusion Value -- see this module's own header on why CombatClient.lua needs to
 -- call EmoteWheelClient.IsOpen() safely even before Start() runs (always false until Start() wires
 -- input). Kept as the single source of truth the always-on InputBegan handler below also reads,
--- rather than re-deriving "is the wheel open" from handle.IsOpen (a Fusion Value) at every input
+-- rather than re-deriving "is the wheel open" from handle.State.IsOpen (a Fusion Value) at every input
 -- event.
 local isOpenValue = false
 
@@ -279,8 +279,8 @@ local function closeWheel(handle: EmoteWheelHandle): ()
 	openTrove:Clean()
 	releaseCameraStick()
 
-	handle.IsOpen:set(false)
-	handle.SelectedIndex:set(nil)
+	handle.State.IsOpen:set(false)
+	handle.State.SelectedIndex:set(nil)
 
 	ShiftLockCamera.SetInputSuspended(false)
 	UserInputService.MouseBehavior = savedMouseBehavior
@@ -295,7 +295,7 @@ end
 -- fire-and-forget -- but keeps the "what did the player just do" log line paired with a still-valid
 -- SelectedIndex read.
 local function confirmSelection(handle: EmoteWheelHandle, clientState: ClientState): ()
-	local index = peek(handle.SelectedIndex)
+	local index = peek(handle.State.SelectedIndex)
 	if not index then
 		return
 	end
@@ -336,8 +336,14 @@ local function openWheel(handle: EmoteWheelHandle, clientState: ClientState): ()
 	end
 	isOpenValue = true
 
-	handle.SelectedIndex:set(nil)
-	handle.IsOpen:set(true)
+	-- THE TREE IS BUILT HERE, ON THE FIRST OPEN EVER, and never again -- Shared/Lazy.lua memoizes.
+	-- Before IsOpen is set, because the screen's own open/close Observer has to exist to see the
+	-- edge; after the refusals above, because a player who cannot open the wheel (mounted on a blimp)
+	-- must not pay to build it. See UI/init.lua's own comment for what is being deferred and why.
+	handle.Screen:Get()
+
+	handle.State.SelectedIndex:set(nil)
+	handle.State.IsOpen:set(true)
 
 	savedMouseBehavior = UserInputService.MouseBehavior
 	savedMouseIconEnabled = UserInputService.MouseIconEnabled
@@ -366,10 +372,10 @@ local function openWheel(handle: EmoteWheelHandle, clientState: ClientState): ()
 	-- Already multiplied by the viewport scale by the screen that owns it -- see EmoteWheel/init.lua's
 	-- header on why the radius is published on the handle instead of duplicated here. Peeked once per
 	-- open, for the same reason `center` is.
-	local deadZoneRadius = peek(handle.DeadZoneRadius)
+	local deadZoneRadius = peek(handle.State.DeadZoneRadius)
 
 	local lastSelectedIndex: number? = nil
-	local lastAngle = peek(handle.CursorAngle)
+	local lastAngle = peek(handle.State.CursorAngle)
 	local function refreshSelection(cursor: Vector2): ()
 		local loadout = peek(clientState.EmoteLoadout)
 
@@ -383,7 +389,7 @@ local function openWheel(handle: EmoteWheelHandle, clientState: ClientState): ()
 			local unwrapped = WheelSelection.UnwrapAngle(lastAngle, angle)
 			if math.abs(unwrapped - lastAngle) > ANGLE_EPSILON_RADIANS then
 				lastAngle = unwrapped
-				handle.CursorAngle:set(unwrapped)
+				handle.State.CursorAngle:set(unwrapped)
 			end
 		end
 
@@ -392,7 +398,7 @@ local function openWheel(handle: EmoteWheelHandle, clientState: ClientState): ()
 			return
 		end
 		lastSelectedIndex = index
-		handle.SelectedIndex:set(index)
+		handle.State.SelectedIndex:set(index)
 	end
 	refreshSelection(UserInputService:GetMouseLocation())
 
@@ -453,10 +459,10 @@ function EmoteWheelClient.Start(handle: EmoteWheelHandle, clientState: ClientSta
 	-- and separating them is the whole of this migration: MouseButton2 is a wheel-specific cancel
 	-- gesture that means nothing anywhere else in the client, while Escape is the one key nine panels
 	-- were each answering on their own terms (see Shell/Chrome.lua's Escape-stack header). Bound off
-	-- handle.IsOpen rather than isOpenValue below because BindEscape wants a Fusion value and the two
+	-- handle.State.IsOpen rather than isOpenValue below because BindEscape wants a Fusion value and the two
 	-- are written in lockstep by openWheel/closeWheel -- which is what isOpenValue's own note above
 	-- promises.
-	chrome:BindEscape("EmoteWheel", handle.IsOpen, function()
+	chrome:BindEscape("EmoteWheel", handle.State.IsOpen, function()
 		logger:debug("Emote wheel cancelled")
 		closeWheel(handle)
 	end)

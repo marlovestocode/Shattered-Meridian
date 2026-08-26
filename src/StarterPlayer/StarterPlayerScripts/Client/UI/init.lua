@@ -349,8 +349,25 @@ function UI.Mount(): UIHandles
 	end)
 	logger:debug("TierPromotion notification producer wired")
 
-	local emoteWheel = EmoteWheelModule.Mount(scope, playerGui, clientState, viewportScale)
-	logger:debug("EmoteWheel mounted")
+	-- DEFERRED, the same Shared/Lazy.lua shape Screens/DevTools/init.lua uses for the admin panels --
+	-- and for a sharper reason than theirs. The wheel's state is three Values and a Computed and is
+	-- built here and now, because Client/Emotes/EmoteWheelClient.lua binds Escape to IsOpen at boot;
+	-- its TREE is ~130 Instances (a graduated dial, eight chamfered tiles, a hub, a legend) plus a
+	-- dozen Fusion springs, and Fusion 0.3's springs never sleep -- the sleep in Spring.luau is
+	-- commented out behind a TODO -- so every one of them re-integrates every frame for the whole
+	-- session whether or not the wheel has ever been opened.
+	--
+	-- The trade is one frame of build cost on a player's FIRST open, against every player who never
+	-- opens it paying nothing at all.
+	local emoteWheelState = EmoteWheelModule.NewState(scope, viewportScale)
+	local emoteWheel: EmoteWheelModule.EmoteWheelHandle = {
+		State = emoteWheelState,
+		Screen = Lazy.new("EmoteWheel", function()
+			EmoteWheelModule.Mount(scope, playerGui, clientState, viewportScale, emoteWheelState)
+			logger:debug("EmoteWheel mounted (deferred until first open)")
+		end),
+	}
+	logger:debug("EmoteWheel state ready, tree deferred")
 
 	local settings = SettingsModule.Mount(scope, playerGui)
 	logger:debug("Settings mounted")
