@@ -51,6 +51,7 @@ local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
 local EmoteRegistry = require(ReplicatedStorage.Shared.Emotes.EmoteRegistry)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local AnimatorUtil = require(ReplicatedStorage.Shared.AnimatorUtil)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local logger = Logger.scope("EmoteAnimator")
 
@@ -96,8 +97,12 @@ end
 
 local tracks: { [string]: AnimationTrack } = {}
 local currentTrack: AnimationTrack? = nil
-local weightConnection: RBXScriptConnection? = nil
-local stoppedConnection: RBXScriptConnection? = nil
+-- Two independent one-connection scopes rather than two nil-able fields. Both are pure handles --
+-- neither is ever read as "is something playing" (currentTrack is that) -- so there is nothing here
+-- that wants to stay a field, and Shared/Trove.lua's Clean is idempotent, which is what the two
+-- stop* helpers below were hand-writing as an if-Disconnect-nil each.
+local weightTrove = Trove.New()
+local stoppedTrove = Trove.New()
 
 -- Set once by Client/Emotes/EmoteController.lua's Start(). Invoked with the EmoteId whenever a
 -- one-shot track reaches its own NATURAL end (never when Stop() cut it short) -- see SetFinished's
@@ -116,20 +121,14 @@ function EmoteAnimator.SetFinishedCallback(callback: (emoteId: string) -> ()): (
 end
 
 local function stopWeightReassert(): ()
-	if weightConnection then
-		weightConnection:Disconnect()
-		weightConnection = nil
-	end
+	weightTrove:Clean()
 end
 
 -- Disconnects the Stopped watch a Play() call sets up (see Play's own header) -- split out from
 -- Stop() only to give BindCharacter's own rebind teardown and Stop() a single shared implementation,
 -- the same split stopWeightReassert already has for the sibling connection.
 local function stopStoppedWatch(): ()
-	if stoppedConnection then
-		stoppedConnection:Disconnect()
-		stoppedConnection = nil
-	end
+	stoppedTrove:Clean()
 end
 
 -- Rebuilds every AnimationTrack against `character`'s own Animator -- a Track is tied to the
@@ -212,7 +211,7 @@ function EmoteAnimator.Play(emoteId: string): ()
 
 	-- See this file's header -- a single Play()-time weight isn't reliable for a track that needs to
 	-- hold dominance for its own duration against Roblox's own re-asserting default Animate script.
-	weightConnection = RunService.Heartbeat:Connect(function()
+	weightTrove:Connect(RunService.Heartbeat, function()
 		if track.IsPlaying then
 			track:AdjustWeight(DOMINANT_WEIGHT)
 		end
@@ -221,7 +220,7 @@ function EmoteAnimator.Play(emoteId: string): ()
 	-- Reaching here means the track ended on its OWN -- Stop() disconnects this watch BEFORE it calls
 	-- track:Stop(), so an induced stop (a superseding emote, the server's Emote_Stopped echo) never
 	-- runs this and never reports a finish the server would then act on twice.
-	stoppedConnection = track.Stopped:Connect(function()
+	stoppedTrove:Connect(track.Stopped, function()
 		if currentTrack ~= track then
 			return
 		end
@@ -241,9 +240,9 @@ end
 -- connection outlives its own single firing (the natural-finish callback above clears currentTrack
 -- but never disconnects itself), and every entry in `tracks` is a cached AnimationTrack reused across
 -- repeat plays of the same emote rather than rebuilt each time. Without this, every Play() call
--- (which always starts by calling this function -- see Play's own header) overwrote the
--- `stoppedConnection` local with a fresh connection while the PREVIOUS one stayed live and
--- unreachable, leaking one connection per emote cycle until the next full BindCharacter rebind.
+-- (which always starts by calling this function -- see Play's own header) added a fresh connection
+-- to a scope the previous one was still live in, leaking one connection per emote cycle until the
+-- next full BindCharacter rebind.
 function EmoteAnimator.Stop(): ()
 	stopWeightReassert()
 	stopStoppedWatch()

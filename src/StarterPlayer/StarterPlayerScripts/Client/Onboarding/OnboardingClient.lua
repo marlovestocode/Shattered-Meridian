@@ -36,6 +36,7 @@ local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local OnboardingScreen = require(script.Parent.Parent.UI.Screens.Onboarding)
 type OnboardingHandle = OnboardingScreen.OnboardingHandle
@@ -101,7 +102,11 @@ local function runHoldGesture(
 	isActive: () -> boolean,
 	pointerHeld: Fusion.Value<boolean>?
 ): HoldGestureResult
-	local wakeSignal = Instance.new("BindableEvent")
+	-- The gesture's whole scope: the wake signal plus the three watches below. Cleaned in one call
+	-- once the Wait returns, and newest-first, so the signal it is waiting ON is the last thing
+	-- released -- the same order the four hand-written teardown lines had.
+	local trove = Trove.New()
+	local wakeSignal = trove:Add(Instance.new("BindableEvent"))
 	local result: HoldGestureResult? = nil
 	local isKeyHeld = false
 	local elapsed = 0
@@ -117,20 +122,18 @@ local function runHoldGesture(
 		return pointerHeld == nil and isHoldGesturePointer(input)
 	end
 
-	local inputBeganConnection = UserInputService.InputBegan:Connect(
-		function(input: InputObject, gameProcessed: boolean)
-			if not gameProcessed and (isHoldGestureKey(input) or acceptsPointer(input)) then
-				isKeyHeld = true
-			end
+	trove:Connect(UserInputService.InputBegan, function(input: InputObject, gameProcessed: boolean)
+		if not gameProcessed and (isHoldGestureKey(input) or acceptsPointer(input)) then
+			isKeyHeld = true
 		end
-	)
-	local inputEndedConnection = UserInputService.InputEnded:Connect(function(input: InputObject)
+	end)
+	trove:Connect(UserInputService.InputEnded, function(input: InputObject)
 		if isHoldGestureKey(input) or acceptsPointer(input) then
 			isKeyHeld = false
 		end
 	end)
 
-	local heartbeatConnection = RunService.Heartbeat:Connect(function(deltaTime: number)
+	trove:Connect(RunService.Heartbeat, function(deltaTime: number)
 		if not isActive() then
 			finish("Cancelled")
 			return
@@ -156,10 +159,7 @@ local function runHoldGesture(
 
 	wakeSignal.Event:Wait()
 
-	inputBeganConnection:Disconnect()
-	inputEndedConnection:Disconnect()
-	heartbeatConnection:Disconnect()
-	wakeSignal:Destroy()
+	trove:Clean()
 	holdProgress:set(0)
 	if pointerHeld then
 		-- Leave the control un-stuck for the next attempt: a Finalize failure loops straight back
@@ -257,35 +257,35 @@ end
 -- .Event:Connect (not :Connect directly) on every one of these -- handle.RaceSelect.
 -- ContinueRequested etc. are the raw BindableEvent Instances (see Onboarding/Types.lua's own header
 -- on why), and only their .Event property is the connectable RBXScriptSignal.
-function OnboardingClient.WireNavigation(handle: OnboardingHandle): { RBXScriptConnection }
-	return {
-		handle.RaceSelect.ContinueRequested.Event:Connect(function()
-			handle.Stage:set("Attributes")
-		end),
-		handle.Attributes.ContinueRequested.Event:Connect(function()
-			handle.Stage:set("NameEntry")
-		end),
-		handle.Attributes.BackRequested.Event:Connect(function()
-			handle.Stage:set("RaceSelect")
-		end),
-		handle.NameEntry.ContinueRequested.Event:Connect(function()
-			handle.Stage:set("Confirmation")
-		end),
-		handle.NameEntry.BackRequested.Event:Connect(function()
-			handle.Stage:set("Attributes")
-		end),
-		-- No handle.Confirmation.BackRequested -- that field no longer exists (Types.lua's own
-		-- ConfirmationProps comment). Confirmation.lua's three labeled escape hatches fire
-		-- StepRailNavigateRequested directly instead, handled by the connection below.
-		-- StepRail.lua and Confirmation.lua's three escape hatches only ever fire this with a Stage
-		-- that's already "behind" the current one (a real earlier stage, never Cinematic), so no
-		-- re-validation of the target happens here -- same trust level as every other purely-local
-		-- navigation signal above; the server re-validates everything real (race/attributes/name) at
-		-- Finalize regardless of how the player got to Confirmation.
-		handle.StepRailNavigateRequested.Event:Connect(function(targetStage: Stage)
-			handle.Stage:set(targetStage)
-		end),
-	}
+function OnboardingClient.WireNavigation(handle: OnboardingHandle): Trove.TroveInstance
+	local trove = Trove.New()
+	trove:Connect(handle.RaceSelect.ContinueRequested.Event, function()
+		handle.Stage:set("Attributes")
+	end)
+	trove:Connect(handle.Attributes.ContinueRequested.Event, function()
+		handle.Stage:set("NameEntry")
+	end)
+	trove:Connect(handle.Attributes.BackRequested.Event, function()
+		handle.Stage:set("RaceSelect")
+	end)
+	trove:Connect(handle.NameEntry.ContinueRequested.Event, function()
+		handle.Stage:set("Confirmation")
+	end)
+	trove:Connect(handle.NameEntry.BackRequested.Event, function()
+		handle.Stage:set("Attributes")
+	end)
+	-- No handle.Confirmation.BackRequested -- that field no longer exists (Types.lua's own
+	-- ConfirmationProps comment). Confirmation.lua's three labeled escape hatches fire
+	-- StepRailNavigateRequested directly instead, handled by the connection below.
+	-- StepRail.lua and Confirmation.lua's three escape hatches only ever fire this with a Stage
+	-- that's already "behind" the current one (a real earlier stage, never Cinematic), so no
+	-- re-validation of the target happens here -- same trust level as every other purely-local
+	-- navigation signal above; the server re-validates everything real (race/attributes/name) at
+	-- Finalize regardless of how the player got to Confirmation.
+	trove:Connect(handle.StepRailNavigateRequested.Event, function(targetStage: Stage)
+		handle.Stage:set(targetStage)
+	end)
+	return trove
 end
 
 -- Same "InvokeServer errored or not, land on a message string" translation
@@ -378,53 +378,45 @@ function OnboardingClient.RunBloodlineSpinStage(handle: OnboardingHandle): ()
 	local spinRemote = NetworkBridge.GetRemoteFunction(BloodlineConstants.RemoteNames.Spin)
 
 	local finished = false
-	local connections: { RBXScriptConnection } = {}
-	table.insert(
-		connections,
-		props.ContinueRequested.Event:Connect(function()
-			finished = true
-		end)
-	)
-	table.insert(
-		connections,
-		props.SpinRequested.Event:Connect(function()
-			-- Guarded rather than debounced by the button alone: the button's own Disabled state is
-			-- reactive and a fast double-click can land two presses before it re-renders, which would
-			-- spend two rerolls for one intended roll.
-			if peek(props.IsSpinning) then
+	local trove = Trove.New()
+	trove:Connect(props.ContinueRequested.Event, function()
+		finished = true
+	end)
+	trove:Connect(props.SpinRequested.Event, function()
+		-- Guarded rather than debounced by the button alone: the button's own Disabled state is
+		-- reactive and a fast double-click can land two presses before it re-renders, which would
+		-- spend two rerolls for one intended roll.
+		if peek(props.IsSpinning) then
+			return
+		end
+		props.IsSpinning:set(true)
+		props.StatusText:set("")
+		task.spawn(function()
+			local ok, resultOrError = RemoteInvoker.Invoke(spinRemote)
+			props.IsSpinning:set(false)
+			if not ok then
+				props.StatusText:set("The roll failed: request error")
 				return
 			end
-			props.IsSpinning:set(true)
-			props.StatusText:set("")
-			task.spawn(function()
-				local ok, resultOrError = RemoteInvoker.Invoke(spinRemote)
-				props.IsSpinning:set(false)
-				if not ok then
-					props.StatusText:set("The roll failed: request error")
-					return
-				end
-				local result = resultOrError :: BloodlineTypes.BloodlineSpinResult
-				-- Corrected from the response on BOTH paths -- see BloodlineSpinResult's own header on
-				-- why the count never decrements locally.
-				props.RerollsRemaining:set(result.RerollsRemaining)
-				if not result.Success then
-					props.StatusText:set(describeSpinFailure(result.Reason))
-					return
-				end
-				props.ResultName:set(result.DisplayName or result.BloodlineId or "")
-				props.ResultRarity:set(result.RarityTier or "")
-				props.ResultFlavor:set(result.FlavorText or "")
-			end)
+			local result = resultOrError :: BloodlineTypes.BloodlineSpinResult
+			-- Corrected from the response on BOTH paths -- see BloodlineSpinResult's own header on
+			-- why the count never decrements locally.
+			props.RerollsRemaining:set(result.RerollsRemaining)
+			if not result.Success then
+				props.StatusText:set(describeSpinFailure(result.Reason))
+				return
+			end
+			props.ResultName:set(result.DisplayName or result.BloodlineId or "")
+			props.ResultRarity:set(result.RarityTier or "")
+			props.ResultFlavor:set(result.FlavorText or "")
 		end)
-	)
+	end)
 
 	handle.Stage:set("BloodlineSpin")
 	while not finished do
 		task.wait()
 	end
-	for _, connection in connections do
-		connection:Disconnect()
-	end
+	trove:Clean()
 end
 
 function OnboardingClient.RunConfirmationLoop(handle: OnboardingHandle, onSuccess: (() -> ())?): ()

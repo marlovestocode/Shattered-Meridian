@@ -55,6 +55,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local logger = Logger.scope("WeaponModelRegistry")
 
@@ -88,8 +89,10 @@ local GRIP_POSITION_ATTRIBUTE = "WeaponGripPosition"
 local DEFAULT_GRIP_ROTATION = Vector3.new(0, 180, 0)
 
 local started = false
-local addedConnection: RBXScriptConnection? = nil
-local removedConnection: RBXScriptConnection? = nil
+-- The container's two child watches. `started` above is the flag; these are pure handles, so they
+-- live in a Shared/Trove.lua scope instead of two nil-able fields with two if-Disconnect-nil blocks
+-- in Reset.
+local containerTrove = Trove.New()
 
 -- Keyed by the SOURCE child instance, not the derived master -- a ChildRemoved signal only ever hands
 -- back the source, so this is what makes unregisterSource able to find (and undo) exactly the
@@ -446,8 +449,8 @@ function WeaponModelRegistry.Start(): ()
 	for _, child in container:GetChildren() do
 		registerSource(child)
 	end
-	addedConnection = container.ChildAdded:Connect(registerSource)
-	removedConnection = container.ChildRemoved:Connect(unregisterSource)
+	containerTrove:Connect(container.ChildAdded, registerSource)
+	containerTrove:Connect(container.ChildRemoved, unregisterSource)
 end
 
 -- The cached master Tool registered for `modelId` (i.e. Workspace.Weapons's matching child Name), or
@@ -460,14 +463,7 @@ end
 -- Spec-only, mirrors every other System's Reset -- so one test's Workspace.Weapons children, and the
 -- masters they produced, cannot leak into the next.
 function WeaponModelRegistry.Reset(): ()
-	if addedConnection then
-		addedConnection:Disconnect()
-		addedConnection = nil
-	end
-	if removedConnection then
-		removedConnection:Disconnect()
-		removedConnection = nil
-	end
+	containerTrove:Clean()
 	for _, entry in sourceEntries do
 		entry.Master:Destroy()
 	end

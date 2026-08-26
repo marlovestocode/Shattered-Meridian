@@ -90,7 +90,11 @@ local heartbeatConnection: RBXScriptConnection? = nil
 -- job, but "rebind without leaking" is now a property of the structure instead of of remembering to
 -- reset one specific field, which is the whole argument that module's header makes.
 local attributeTrove = Trove.New()
-local postFlightSampleConnection: RBXScriptConnection? = nil
+-- The post-flight descent sampler's own scope. Unlike heartbeatConnection above -- which is read as
+-- "are we flying" by both StopFlying and startFlying and therefore stays a field -- this one is a
+-- pure handle, and it disconnects itself from inside its own handler, which was three separate
+-- if-Disconnect-nil blocks before this.
+local postFlightSampleTrove = Trove.New()
 
 -- Per-flight-session movement state. Reset at the top of startFlying(); meaningless while not
 -- flying (no Heartbeat is reading them then).
@@ -207,16 +211,10 @@ end
 -- descent speed to classify a post-flight free-fall landing against. Self-disconnects once the
 -- grace window elapses -- bounded cost, not a permanent per-character connection.
 local function startPostFlightSampling(rootPart: BasePart): ()
-	if postFlightSampleConnection then
-		postFlightSampleConnection:Disconnect()
-		postFlightSampleConnection = nil
-	end
-	postFlightSampleConnection = RunService.Heartbeat:Connect(function()
+	postFlightSampleTrove:Clean()
+	postFlightSampleTrove:Connect(RunService.Heartbeat, function()
 		if os.clock() >= recentlyFlyingUntil or not rootPart.Parent then
-			if postFlightSampleConnection then
-				postFlightSampleConnection:Disconnect()
-				postFlightSampleConnection = nil
-			end
+			postFlightSampleTrove:Clean()
 			return
 		end
 		lastDescentSpeed = rootPart.AssemblyLinearVelocity.Y
@@ -465,10 +463,7 @@ end
 function FlightController.BindCharacter(character: Model): ()
 	FlightController.StopFlying()
 	attributeTrove:Clean()
-	if postFlightSampleConnection then
-		postFlightSampleConnection:Disconnect()
-		postFlightSampleConnection = nil
-	end
+	postFlightSampleTrove:Clean()
 	recentlyFlyingUntil = 0
 	lastDescentSpeed = 0
 

@@ -83,6 +83,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local EmoteRegistry = require(ReplicatedStorage.Shared.Emotes.EmoteRegistry)
 
@@ -153,8 +154,11 @@ local STICK_CANCEL_THRESHOLD = 0.5
 -- event.
 local isOpenValue = false
 
-local pointerMovedConnection: RBXScriptConnection? = nil
-local inputEndedConnection: RBXScriptConnection? = nil
+-- Everything the OPEN wheel holds -- the pointer/stick watch and the release watch. Cleaned in
+-- closeWheel and refilled by the next openWheel, which is exactly Shared/Trove.lua's reusable-scope
+-- contract: closing a wheel that was never opened is a no-op, so closeWheel needs no guard of its own
+-- beyond the isOpenValue early-out it already has.
+local openTrove = Trove.New()
 
 -- Captured the instant the wheel opens, restored exactly on close -- see this file's header. Default/
 -- true are reasonable startup fallbacks (Roblox's own engine defaults) in case this module is ever
@@ -175,13 +179,10 @@ end
 -- InputChanged fires on every pixel of mouse movement for the entire session. This module's own
 -- header promises no continuous polling outside an open wheel; a pose is a second, equally bounded
 -- window, so these connections live and die with it.
-local cancelConnections: { RBXScriptConnection } = {}
+local cancelTrove = Trove.New()
 
 local function endCancelWatch(): ()
-	for _, connection in cancelConnections do
-		connection:Disconnect()
-	end
-	table.clear(cancelConnections)
+	cancelTrove:Clean()
 end
 
 -- The one thing a player could not do before this existed: get up. See Shared/EmoteConstants.lua's
@@ -195,33 +196,27 @@ end
 local function beginCancelWatch(): ()
 	endCancelWatch()
 
-	table.insert(
-		cancelConnections,
-		UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-			-- Typing a W into the chat bar is not a request to stand up.
-			if gameProcessed then
-				return
-			end
-			if CANCEL_KEYCODES[input.KeyCode] then
-				logger:debug("Emote cancelled by movement input", { keyCode = input.KeyCode.Name })
-				EmoteController.RequestStop()
-			end
-		end)
-	)
-
-	table.insert(
-		cancelConnections,
-		UserInputService.InputChanged:Connect(function(input: InputObject)
-			if input.KeyCode ~= Enum.KeyCode.Thumbstick1 then
-				return
-			end
-			if Vector2.new(input.Position.X, input.Position.Y).Magnitude < STICK_CANCEL_THRESHOLD then
-				return
-			end
-			logger:debug("Emote cancelled by movement stick")
+	cancelTrove:Connect(UserInputService.InputBegan, function(input: InputObject, gameProcessed: boolean)
+		-- Typing a W into the chat bar is not a request to stand up.
+		if gameProcessed then
+			return
+		end
+		if CANCEL_KEYCODES[input.KeyCode] then
+			logger:debug("Emote cancelled by movement input", { keyCode = input.KeyCode.Name })
 			EmoteController.RequestStop()
-		end)
-	)
+		end
+	end)
+
+	cancelTrove:Connect(UserInputService.InputChanged, function(input: InputObject)
+		if input.KeyCode ~= Enum.KeyCode.Thumbstick1 then
+			return
+		end
+		if Vector2.new(input.Position.X, input.Position.Y).Magnitude < STICK_CANCEL_THRESHOLD then
+			return
+		end
+		logger:debug("Emote cancelled by movement stick")
+		EmoteController.RequestStop()
+	end)
 end
 
 -- Whichever emote the server says is running now, or nil -- EmoteController's own report, wired in
@@ -245,14 +240,7 @@ local function closeWheel(handle: EmoteWheelHandle): ()
 	end
 	isOpenValue = false
 
-	if pointerMovedConnection then
-		pointerMovedConnection:Disconnect()
-		pointerMovedConnection = nil
-	end
-	if inputEndedConnection then
-		inputEndedConnection:Disconnect()
-		inputEndedConnection = nil
-	end
+	openTrove:Clean()
 
 	handle.IsOpen:set(false)
 	handle.SelectedIndex:set(nil)
@@ -380,7 +368,7 @@ local function openWheel(handle: EmoteWheelHandle, clientState: ClientState): ()
 	-- player aimed the wheel. The cost is that the left stick still walks the character at the same
 	-- time, which is the same cost the keyboard path already pays (W still walks while the wheel is
 	-- up), and the wheel is a standing-still surface either way.
-	pointerMovedConnection = UserInputService.InputChanged:Connect(function(input: InputObject)
+	openTrove:Connect(UserInputService.InputChanged, function(input: InputObject)
 		if input.UserInputType == Enum.UserInputType.MouseMovement then
 			refreshSelection(UserInputService:GetMouseLocation())
 		elseif input.KeyCode == Enum.KeyCode.Thumbstick1 then
@@ -389,7 +377,7 @@ local function openWheel(handle: EmoteWheelHandle, clientState: ClientState): ()
 		end
 	end)
 
-	inputEndedConnection = UserInputService.InputEnded:Connect(function(input: InputObject)
+	openTrove:Connect(UserInputService.InputEnded, function(input: InputObject)
 		if not KeybindManager.Matches("EmoteWheel", input) then
 			return
 		end

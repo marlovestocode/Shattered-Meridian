@@ -279,15 +279,13 @@ function IntroClient.Run(): ()
 	IntroCamera.HoldOverheadComposition()
 
 	handle.Stage:set("RaceSelect")
-	local navigationConnections = OnboardingClient.WireNavigation(handle)
+	local navigationTrove = OnboardingClient.WireNavigation(handle)
 
 	-- No onSuccess fade here any more -- see the bloodline spin below for why the fade to black now
 	-- waits. Confirmation's own 1.2s fracture-out beat is untouched; only what follows it moved.
 	OnboardingClient.RunConfirmationLoop(handle)
 
-	for _, connection in navigationConnections do
-		connection:Disconnect()
-	end
+	navigationTrove:Clean()
 
 	-- THE BLOODLINE ROLL, and its position here is forced from both sides rather than chosen:
 	-- BloodlineSystem.Spin refuses until the profile has a raceId (which only Finalize writes, so
