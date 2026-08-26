@@ -3,9 +3,9 @@
 	WheelDial.lua
 
 	Owns: the emote wheel's INSTRUMENT -- everything drawn on the circle itself rather than on a slot:
-	the dark glass disc the wheel sits on, its rim, the 72-mark graduation ladder around that rim, and
-	the needle that tracks the player's cursor. WheelSegment.lua draws the slots; this draws the thing
-	the slots sit on.
+	the dark glass disc the wheel sits on, its rim, the graduation ladder around that rim, and the
+	needle that tracks the player's cursor. WheelSegment.lua draws the slots; this draws the thing the
+	slots sit on.
 
 	WHY A GRADUATED DIAL AND NOT A PIE OF WEDGES. A filled wedge per sector is what most radial menus
 	do, and Roblox cannot draw one: there is no vector path primitive, so a wedge means an uploaded
@@ -18,13 +18,29 @@
 	cursor through. The lit band is therefore not an approximation of the selectable sector; it IS the
 	selectable sector, drawn.
 
-	COST, AND WHY 72 IS A CONSTANT. The ladder is a fixed 72 marks regardless of how many emotes are
-	in the loadout -- a compass rose, not a per-slot decoration. That is what keeps the instance count
-	fixed (72 Frames, built once at mount, never rebuilt when the loadout length changes) and what
-	makes 8, 12, 6, 4 and 3 segments all land their sector seams exactly on a mark. Each mark carries
-	three Computeds reading only (SelectedIndex, SegmentCount), so a sector change costs ~216 trivial
-	re-evaluations and an idle frame costs exactly zero -- the same "the alive cue costs nothing at
-	rest" property Screens/HUD/init.lua's own header sets as the bar for this UI.
+	COST, AND WHY THE COUNT IS A CONSTANT. The ladder is a fixed number of marks regardless of how
+	many emotes are in the loadout -- a compass rose, not a per-slot decoration. That is what keeps the
+	instance count fixed (built once at mount, never rebuilt when the loadout length changes) and what
+	lets 8, 12, 6, 4 and 3 segments all land their sector seams exactly on a mark, which is the real
+	constraint on the number: it has to be divisible by every segment count the wheel supports.
+
+	IT WAS 72 (one mark every 5 degrees) AND IS NOW 24 (one every 15), because 72 rotated,
+	semi-transparent Frames turned out to be the wheel's dominant render cost while it is open -- and
+	they are composited through the CanvasGroup in init.lua, so every one of them is paid for twice.
+	Players reported the frame drop; the owner's call (2026-08-26) was to thin the ladder rather than
+	give up the entrance the CanvasGroup buys.
+
+	NOTHING THE PARAGRAPH ABOVE PROMISES WAS GIVEN UP TO DO IT. 24 is still divisible by 3, 4, 6, 8 and
+	12, so all five supported segment counts still land their seams exactly on a mark -- the property
+	72 was chosen for is a property of divisibility, not of density, and 24 is simply the smallest
+	number that still has it. What IS given up is visual density: the ladder reads as a coarser
+	instrument up close. TICK_COUNT is one constant and any multiple of 12 (24, 36, 48, 72) restores
+	as much of that as you want to pay for.
+
+	Each mark carries three Computeds reading only (SelectedIndex, SegmentCount), so a sector change
+	now costs ~72 trivial re-evaluations rather than ~216, and an idle frame still costs exactly zero
+	-- the same "the alive cue costs nothing at rest" property Screens/HUD/init.lua's own header sets
+	as the bar for this UI.
 
 	THE NEEDLE IS THE ONLY THING HERE THAT MOVES PER FRAME, and it is one Instance: a 0-size pivot
 	Frame whose Rotation is a spring chasing the live cursor angle, with the beam parented under it.
@@ -63,9 +79,10 @@ export type WheelDialProps = {
 	ZIndex: number?,
 }
 
--- One mark every 5 degrees. See this file's header for why this is a constant and not a multiple of
--- the segment count.
-local TICK_COUNT = 72
+-- One mark every 15 degrees. See this file's header for why this is a constant rather than a
+-- multiple of the segment count, why it came down from 72, and why 24 is the smallest value that
+-- keeps every seam landing on a mark.
+local TICK_COUNT = 24
 
 local TICK_WIDTH = 2
 -- Distance from the rim inward to where every mark's OUTER end sits. Marks are anchored at that outer
