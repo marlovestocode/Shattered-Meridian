@@ -75,6 +75,8 @@
 ]]
 
 local Players = game:GetService("Players")
+local ContextActionService = game:GetService("ContextActionService")
+local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -185,6 +187,40 @@ local function endCancelWatch(): ()
 	cancelTrove:Clean()
 end
 
+-- Cancelling -------------------------------------------------------------------------------------
+
+-- THE RIGHT STICK AIMS THE WHEEL, SO SOMETHING HAS TO STOP IT TURNING THE CAMERA.
+--
+-- This module used to steer selection with the LEFT stick for exactly that reason, and paid for it
+-- by walking the character around while the player aimed. The owner's call (2026-08-26) is that the
+-- right stick is where a wheel belongs; this is the half of that change that makes it liveable.
+--
+-- ContextActionService, sinking Thumbstick2 at a priority above the default camera's own binding,
+-- for the whole time the wheel is up. The default PlayerModule camera binds Thumbstick2 through the
+-- same service, so a higher-priority Sink is the supported way to take it: it does not disable the
+-- camera, reconfigure the PlayerModule, or leave any state to restore -- unbinding gives the stick
+-- straight back. The same "coordinate with the canonical owner instead of fighting it" contract
+-- Camera/ShiftLockCamera.SetInputSuspended already gives this module for MouseBehavior, applied to
+-- the one input the camera and the wheel would otherwise both read.
+--
+-- Priority: High (3000) against the camera's own Default (2000). The shipped PlayerModule binds
+-- Thumbstick2 as "RbxCameraThumbstick" through this same service at that Default tier, which is what
+-- makes outranking it the supported move rather than a trick. If a future PlayerModule reads the
+-- stick off UserInputService directly instead, this sink stops working SILENTLY -- the wheel would
+-- still aim correctly and the camera would simply spin underneath it, so that is the symptom to look
+-- for rather than an error in the log.
+local CAMERA_SINK_ACTION = "EmoteWheelCameraSink"
+
+local function sinkCameraStick(): ()
+	ContextActionService:BindActionAtPriority(CAMERA_SINK_ACTION, function(): Enum.ContextActionResult
+		return Enum.ContextActionResult.Sink
+	end, false, Enum.ContextActionPriority.High.Value, Enum.KeyCode.Thumbstick2)
+end
+
+local function releaseCameraStick(): ()
+	ContextActionService:UnbindAction(CAMERA_SINK_ACTION)
+end
+
 -- The one thing a player could not do before this existed: get up. See Shared/EmoteConstants.lua's
 -- RemoteNames.RequestStop and Server/Systems/EmoteSystem.lua's WHAT ENDS A LOOPING EMOTE header --
 -- Sit and Dance are both Loop and MovementLocked, so nothing in the system ever cleared the zeroed
@@ -241,6 +277,7 @@ local function closeWheel(handle: EmoteWheelHandle): ()
 	isOpenValue = false
 
 	openTrove:Clean()
+	releaseCameraStick()
 
 	handle.IsOpen:set(false)
 	handle.SelectedIndex:set(nil)
@@ -305,6 +342,7 @@ local function openWheel(handle: EmoteWheelHandle, clientState: ClientState): ()
 	savedMouseBehavior = UserInputService.MouseBehavior
 	savedMouseIconEnabled = UserInputService.MouseIconEnabled
 	ShiftLockCamera.SetInputSuspended(true)
+	sinkCameraStick()
 	UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 	UserInputService.MouseIconEnabled = true
 
@@ -358,23 +396,45 @@ local function openWheel(handle: EmoteWheelHandle, clientState: ClientState): ()
 	end
 	refreshSelection(UserInputService:GetMouseLocation())
 
-	-- ONE CONNECTION, TWO POINTERS. The gamepad opens this wheel already (Constants.Keybinds.
-	-- GamepadDefaults.EmoteWheel is DPadDown) and, before the Thumbstick1 branch below existed, could
-	-- then do nothing with it: selection came from the mouse alone, so a controller player opened a
-	-- wheel, released the button, and performed whatever the untouched cursor happened to be nearest.
+	-- ONE RESOLVE PER RENDERED FRAME, NOT ONE PER INPUT EVENT, and this is a real cost and not
+	-- tidiness. A deflected thumbstick reports through InputChanged continuously, many times per
+	-- frame, and every one of those used to run the whole selection resolve -- and a resolve that
+	-- crosses a sector boundary invalidates the `isLit` Computed on all 72 of WheelDial's graduation
+	-- marks, each of which re-derives its own Size, BackgroundColor3 and BackgroundTransparency. At
+	-- gamepad poll rate that is hundreds of Computed evaluations per frame for a wheel that can only
+	-- be drawn once. The handler now records where the pointer is; the frame decides what that means.
 	--
-	-- The LEFT stick rather than the right, despite the right being where a shooter's weapon wheel
-	-- usually lives: the right stick is the camera on this project and would spin the view while the
-	-- player aimed the wheel. The cost is that the left stick still walks the character at the same
-	-- time, which is the same cost the keyboard path already pays (W still walks while the wheel is
-	-- up), and the wheel is a standing-still surface either way.
+	-- Nothing is lost by coalescing: the pending cursor is the LATEST one, and the display cannot show
+	-- an intermediate value it never rendered. A stick held at a constant deflection stops reporting
+	-- entirely, which is also correct -- the selection it resolved to has not changed.
+	local pendingCursor: Vector2? = nil
+
+	-- ONE CONNECTION, TWO POINTERS. The gamepad opens this wheel already (Constants.Keybinds.
+	-- GamepadDefaults.EmoteWheel is DPadDown) and, before this branch existed, could then do nothing
+	-- with it: selection came from the mouse alone, so a controller player opened a wheel, released
+	-- the button, and performed whatever the untouched cursor happened to be nearest.
+	--
+	-- THE RIGHT STICK, which is where a wheel belongs and is also the camera on this project. That
+	-- conflict is real and is handled rather than avoided -- sinkCameraStick above takes Thumbstick2
+	-- away from the default camera for exactly as long as the wheel is up. The LEFT stick is left
+	-- alone deliberately: it still walks the character, and it is still what cancels a movement-locked
+	-- pose (see beginCancelWatch), which is a movement gesture and should not be a camera one.
 	openTrove:Connect(UserInputService.InputChanged, function(input: InputObject)
 		if input.UserInputType == Enum.UserInputType.MouseMovement then
-			refreshSelection(UserInputService:GetMouseLocation())
-		elseif input.KeyCode == Enum.KeyCode.Thumbstick1 then
+			pendingCursor = UserInputService:GetMouseLocation()
+		elseif input.KeyCode == Enum.KeyCode.Thumbstick2 then
 			local stick = Vector2.new(input.Position.X, input.Position.Y)
-			refreshSelection(WheelSelection.CursorFromStick(center, stick, deadZoneRadius, STICK_SELECT_THRESHOLD))
+			pendingCursor = WheelSelection.CursorFromStick(center, stick, deadZoneRadius, STICK_SELECT_THRESHOLD)
 		end
+	end)
+
+	openTrove:Connect(RunService.RenderStepped, function()
+		local cursor = pendingCursor
+		if cursor == nil then
+			return
+		end
+		pendingCursor = nil
+		refreshSelection(cursor)
 	end)
 
 	openTrove:Connect(UserInputService.InputEnded, function(input: InputObject)
