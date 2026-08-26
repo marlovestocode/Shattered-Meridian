@@ -12,13 +12,20 @@
 	for why this repo doesn't guess at rbxassetids). This is docs/ui-ux-philosophy.md's Shape
 	Language ("weapon-like geometry," "borders communicate importance... brighter edge highlight")
 	applied as an additive overlay on a rectangular panel, distinct from Chamfered below. Off by
-	default so existing panels (Menus' Root frame, etc.) are unaffected. When both CornerAccent and
-	Chamfered are requested on the same panel (the Hotbar does this), Chamfered wins whenever it's
-	actually available -- a bracket accent anchored at a now-nonexistent rectangular corner would
-	float over the chamfer's cut void -- and CornerAccent becomes the graceful-degradation path for
-	the (rare) case the chamfered textures fail to generate, so the panel still gets SOME corner
-	treatment rather than reverting all the way to a bare rectangle. Corner accents render in an
+	default so existing panels (Menus' Root frame, etc.) are unaffected. Corner accents render in an
 	overlay layer so a caller's content UIListLayout never tries to arrange the decorative pieces.
+
+	CORNERACCENT + CHAMFERED ON ONE PANEL used to be mutually exclusive, and now is not -- but only
+	when the caller says how. The original rule was that Chamfered wins whenever it is available,
+	because a bracket anchored at a now-nonexistent rectangular corner floats over the chamfer's cut
+	void; CornerAccent then survived purely as the graceful-degradation path for the rare case the
+	textures fail to generate. That rule was right about the geometry and wrong about the conclusion:
+	the answer is to move the bracket, not to drop it. BracketInset (Components/CornerBracket.lua's own
+	Inset, see that file's header) pulls each elbow in along both axes, and at
+	ChamferedSurface.CHAMFER_PX it lands exactly where the diagonal cut ends and the straight edge
+	begins -- so each arm runs ALONG a real edge and the pair braces the cut instead of ignoring it.
+	Pass BracketInset and you get both treatments; omit it and the original either/or is unchanged,
+	which is what keeps every pre-existing CornerAccent caller rendering byte-for-byte as before.
 
 	Chamfered (optional): the true cut-corner panel *shape* docs/ui-ux-philosophy.md's Shape
 	Language section calls for and its Implementation Notes previously flagged as blocked on
@@ -30,17 +37,17 @@
 	CornerAccent's brackets, if also requested) instead -- BorderThickness has no effect in chamfered
 	mode since the stroke's pixel width is baked into the texture, not a live property.
 
-	Lattice (optional): the redesign's hex-lattice surface texture (Components/LatticeOverlay.lua),
-	layered above the fill and below Content. Off by default. Inert until a real texture id exists
-	(docs/design/intro-redesign-handoff.md Phase F item 22, "icon art -- not started") --
-	LatticeOverlay.lua renders nothing without one, so requesting Lattice today is a no-op, not a
-	broken image; every caller lights up automatically the moment LATTICE_TEXTURE_ID below is filled
-	in.
+	SurfaceTexture (optional): the decorative surface grain (Components/MeridianField.lua), layered
+	above the fill and below Content. Off by default. REPLACES the old `Lattice` prop, which drew
+	Components/LatticeOverlay.lua's hex tile -- that component could only render a real uploaded
+	texture, no id was ever uploaded, so every caller that asked for it silently got nothing. The
+	replacement is procedural (Frames + UIGradients), so it renders on the first mount and needs no
+	upload step; see MeridianField.lua's own header for why the motif changed as well as the
+	mechanism.
 
-	BorderColor3/BorderTransparency default to Tokens.Border.Standard's real Color+Transparency
-	(not the deprecated pre-composited Tokens.Color.BorderSubtle) -- see that token's own comment in
-	Tokens.lua for why the real Tint is the correct default for a panel that might use a
-	BackgroundColor3 other than plain Surface (Elevated, or a caller override).
+	BorderColor3/BorderTransparency default to Tokens.Border.Standard's real Color+Transparency pair
+	-- the correct default for a panel that might use a BackgroundColor3 other than plain Surface
+	(Elevated, or a caller override), since a Tint composites correctly over any surface.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -48,7 +55,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
 local ChamferedSurface = require(script.Parent.Parent.ChamferedSurface)
 local CornerBracket = require(script.Parent.CornerBracket)
-local LatticeOverlay = require(script.Parent.LatticeOverlay)
+local MeridianField = require(script.Parent.MeridianField)
 
 local Children = Fusion.Children
 
@@ -77,19 +84,63 @@ export type PanelProps = {
 	BorderColor3: UsedAs<Color3>?,
 	BorderThickness: UsedAs<number>?,
 	BorderTransparency: UsedAs<number>?,
+	-- Uniformly scales this panel AND everything inside it, applied at the ROOT frame (so the panel's
+	-- own rendered size grows too, unlike a UIScale a caller could put in Children -- those land
+	-- inside the inner Content wrapper and would scale the contents right out of an unchanged frame).
+	-- Omit for a panel that renders at its literal pixel size. See ModalScreen.lua's AutoScale.
+	Scale: UsedAs<number>?,
+	-- Makes this panel CONSUME mouse input that lands on it, so Roblox reports the click as already
+	-- handled (UserInputService gameProcessedEvent) instead of letting it fall through to whatever is
+	-- listening for a swing. Off by default -- a HUD panel must NOT eat clicks meant for the world --
+	-- and set by Components/ModalScreen.lua for every top-level modal; see that file header.
+	Active: UsedAs<boolean>?,
 	Elevated: boolean?,
 	-- See file header. Defaults to off.
 	CornerAccent: boolean?,
 	-- See file header. Defaults to off.
 	Chamfered: boolean?,
 	-- See file header. Defaults to off.
-	Lattice: boolean?,
+	--
+	-- INCOMPATIBLE WITH AutomaticSize -- do not set both. Measured 2026-08-25, because the hotbar
+	-- dock set both and rendered at full screen height. Roblox's AutomaticSize measures a child's
+	-- SUBTREE, and `ClipsDescendants` does not stop it. The precise rule, from an isolated probe:
+	--   * a Scale-sized decoration layer with no GuiObject children of its own is SAFE (the engine
+	--     resolves it against the content-derived size -- no feedback). That is why the chamfered
+	--     fill/stroke, which are leaf ImageLabels, have always been fine here.
+	--   * a Scale-sized layer containing a Scale-sized GuiObject is NOT: the grandchild resolves
+	--     against the enclosing host instead, the parent grows to match, and it latches there. Scale
+	--     on one axis only inflates that axis, which is why the dock's width looked correct and its
+	--     height did not.
+	--   * offset-sized grandchildren are safe as long as they are smaller than the real content.
+	-- MeridianField is the second kind (a full-size bloom plus ten full-height threads), so a panel
+	-- that wants both a surface grain and content-driven sizing has to give the panel an explicit
+	-- Size. See MeridianField.lua's own header.
+	SurfaceTexture: boolean?,
+	-- SurfaceTexture's opacity dial, 0-1 (see MeridianField.lua's Intensity). Only meaningful
+	-- alongside SurfaceTexture; defaults to the field's own authored strength.
+	SurfaceTextureIntensity: number?,
+	-- CornerAccent's own color. Defaults to this file's original Tokens.Color.AccentPrimary, so
+	-- every pre-existing CornerAccent caller keeps its violet brackets; the character menu passes
+	-- bronze.
+	CornerAccentColor: UsedAs<Color3>?,
+	-- Whether CornerAccent's brackets carry the hotbar-frame.svg rivet chip at each elbow. Defaults
+	-- to true (the original look, kept by BugReport/Announcement/DevMenu/PostureBreakBanner/HUD);
+	-- the redesign's own brackets are unornamented, so those callers pass false.
+	CornerAccentRivets: boolean?,
 	-- CornerAccent's own arm length in pixels. Defaults to this file's original 12px (every existing
 	-- CornerAccent caller -- BugReport/Announcement/DevMenu/PostureBreakBanner/HUD -- keeps its
 	-- current look unchanged); the redesign's own brackets want 16px
 	-- (docs/design/intro-redesign-figma-spec.md section 3.3), so a caller opting into the new look
 	-- passes 16 explicitly rather than this default silently growing every bracket in the game.
 	BracketArmLength: number?,
+	-- Pixels each bracket's elbow is pulled in from its corner. Required to combine CornerAccent with
+	-- Chamfered -- see this file's header. Defaults to 0 (flush to the corner), the original look.
+	BracketInset: number?,
+	-- EXTRA pixels down on the TOP pair only, added to BracketInset. For a panel that is the lower
+	-- half of an assembly, whose top corners are therefore NOT the assembly's corners -- see
+	-- CornerBracket.lua's own TopInset note. Screens/BlimpHelm passes its seam depth so its top elbows
+	-- mark the start of its own section rather than the joint the furnace plate sinks into above it.
+	BracketTopInset: number?,
 	Children: UsedAs<{ Instance }>?,
 }
 
@@ -97,10 +148,6 @@ local BRACKET_ARM_LENGTH = 12
 local BRACKET_ARM_THICKNESS = 2
 local BRACKET_RIVET_SIZE = 5
 local BRACKET_RIVET_INSET = 9
-
--- See PanelProps.Lattice/this file's own header. Fill in once a real hex-lattice texture is
--- uploaded; every Lattice=true caller then renders it with no other code change.
-local LATTICE_TEXTURE_ID: string? = nil
 
 local function Panel(scope: Scope, props: PanelProps): Frame
 	local fillColor = props.BackgroundColor3
@@ -127,6 +174,14 @@ local function Panel(scope: Scope, props: PanelProps): Frame
 	local isChamfered = chamferedFill ~= nil
 
 	local shellChildren: { Instance } = {}
+	if props.Scale ~= nil then
+		table.insert(
+			shellChildren,
+			scope:New "UIScale" {
+				Scale = props.Scale,
+			}
+		)
+	end
 	if isChamfered then
 		table.insert(shellChildren, chamferedFill :: Instance)
 		if chamferedStroke then
@@ -149,35 +204,40 @@ local function Panel(scope: Scope, props: PanelProps): Frame
 		)
 	end
 
-	-- See file header on CornerAccent -- it's the fallback corner treatment, so it only renders when
-	-- Chamfered wasn't requested at all, or was requested but the textures weren't available.
+	-- See file header on CornerAccent. Without a BracketInset it is still the FALLBACK corner
+	-- treatment and only renders when the chamfer isn't in play; with one, the brackets are inset far
+	-- enough to brace the cut rather than float over it, so both treatments render together.
 	local cornerAccents: { Instance } = {}
-	if props.CornerAccent and not isChamfered then
+	if props.CornerAccent and (not isChamfered or props.BracketInset ~= nil) then
+		local wantsRivets = props.CornerAccentRivets ~= false
 		cornerAccents = CornerBracket.BuildAll(scope, {
 			ArmLength = props.BracketArmLength or BRACKET_ARM_LENGTH,
 			ArmThickness = BRACKET_ARM_THICKNESS,
-			RivetSize = BRACKET_RIVET_SIZE,
-			RivetInset = BRACKET_RIVET_INSET,
-			Color = Tokens.Color.AccentPrimary,
+			-- Passed as nil rather than 0 when the caller opts out: CornerBracket treats a missing
+			-- RivetSize as "plain L, no chip" and would happily build a zero-sized Frame for a 0.
+			RivetSize = if wantsRivets then BRACKET_RIVET_SIZE else nil,
+			RivetInset = if wantsRivets then BRACKET_RIVET_INSET else nil,
+			Inset = props.BracketInset,
+			TopInset = props.BracketTopInset,
+			Color = props.CornerAccentColor or Tokens.Color.AccentPrimary,
 		})
 	end
 
-	-- See PanelProps.Lattice/this file's own header -- inert (empty array) until LATTICE_TEXTURE_ID
-	-- is filled in, same "empty-array-not-nil" convention cornerAccents above already follows so a
-	-- disabled/unavailable optional layer never punches a nil hole in the Children array below.
-	local latticeChildren: { Instance } = {}
-	if props.Lattice then
-		local overlay = LatticeOverlay(scope, {
-			TextureId = LATTICE_TEXTURE_ID,
-			-- Strictly above the fill (chamfered fill is ZIndex 0; the sharp-rect fill is this
-			-- Frame's own background, always painted first regardless of ZIndex) and strictly below
-			-- Content (ZIndex 2 below) -- ties with the chamfered stroke's ZIndex 1 are harmless
-			-- since a 1px edge outline and a full-surface texture don't visually compete.
-			ZIndex = 1,
-		})
-		if overlay then
-			table.insert(latticeChildren, overlay)
-		end
+	-- Same "empty-array-not-nil" convention cornerAccents above already follows, so a layer the
+	-- caller didn't ask for never punches a nil hole in the Children array below.
+	local textureChildren: { Instance } = {}
+	if props.SurfaceTexture then
+		table.insert(
+			textureChildren,
+			MeridianField(scope, {
+				-- Strictly above the fill (chamfered fill is ZIndex 0; the sharp-rect fill is this
+				-- Frame's own background, always painted first regardless of ZIndex) and strictly
+				-- below Content (ZIndex 2 below) -- ties with the chamfered stroke's ZIndex 1 are
+				-- harmless since a 1px edge outline and a full-surface texture don't visually compete.
+				ZIndex = 1,
+				Intensity = props.SurfaceTextureIntensity,
+			})
+		)
 	end
 
 	local contentAutomaticSize = props.AutomaticSize or Enum.AutomaticSize.None
@@ -201,6 +261,7 @@ local function Panel(scope: Scope, props: PanelProps): Frame
 		AutomaticSize = props.AutomaticSize,
 		LayoutOrder = props.LayoutOrder,
 		Visible = props.Visible,
+		Active = props.Active,
 		BackgroundColor3 = fillColor,
 		-- Chamfered mode paints its own fill via an ImageLabel child instead (see shellChildren
 		-- above), so this Frame's own background must stay fully transparent -- otherwise its plain
@@ -210,13 +271,13 @@ local function Panel(scope: Scope, props: PanelProps): Frame
 
 		[Children] = {
 			shellChildren,
-			latticeChildren,
+			textureChildren,
 			scope:New "Frame" {
 				Name = "Content",
 				Size = contentSize,
 				AutomaticSize = contentAutomaticSize,
 				BackgroundTransparency = 1,
-				-- 2, not 1 -- strictly above the Lattice overlay's ZIndex 1 (see that block's own
+				-- 2, not 1 -- strictly above the surface texture's ZIndex 1 (see that block's own
 				-- comment above), a bump from this file's original value that changes nothing for
 				-- any existing panel (nothing else in this tree sits between 1 and 5).
 				ZIndex = 2,

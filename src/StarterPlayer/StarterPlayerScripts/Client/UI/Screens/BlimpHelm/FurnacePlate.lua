@@ -136,6 +136,14 @@ local PLATE_INSET_Y = Tokens.Space.S
 -- Matches Components/StatusTag.lua's own fixed HEIGHT, so the endurance chip sets the header band's
 -- height rather than being vertically clipped by a band sized for a bare label.
 local HEADER_HEIGHT = 24
+-- THE HEADER BAND IS INDENTED TO THE WELL'S OWN CONTENT COLUMN, not to the panel's (owner,
+-- 2026-08-25: "move the Furnace text over to the right a little"). The panel insets its children by
+-- Space.M; a ModuleWell then insets ITS children by a further Space.S -- so the caption and the chip
+-- sat eight pixels outboard of every gauge caption underneath them, which is the sort of near-miss
+-- that reads as sloppy without being nameable. Applied to the whole band rather than to the label, so
+-- the chip on the right lands on the well's right edge for the same reason the caption lands on its
+-- left, and the panel has ONE content column instead of two.
+local HEADER_INDENT = Tokens.Space.S
 
 -- CornerBracket geometry, restated as the region of the plate a bracket can occupy: BracketInset in
 -- from the corner, then BracketArmLength along the edge.
@@ -158,17 +166,17 @@ local PLATE_HEIGHT = FURNACE_HEIGHT + BLEED
 -- HOW FAR THE PLATE SITS INTO THE CONSOLE, AND THE REASON THE JOINT NEEDED IT (owner, 2026-08-25:
 -- "a little boxy on the connection section"). A butt joint at gap zero is the right idea and was the
 -- wrong number here, because BOTH surfaces are chamfered: the plate is clipped flat at the seam and
--- so ends its full 220px wide, while the console'"'"'s top edge is only 220 - 2 * CHAMFER_PX = 204 wide
+-- so ends its full 220px wide, while the console's top edge is only 220 - 2 * CHAMFER_PX = 204 wide
 -- between its own two cut corners. The extra 8px at each end had nothing under it -- two little
 -- square ears on an assembly whose whole silhouette is cut corners.
 --
 -- Sinking the plate by exactly the chamfer depth puts its clipped bottom BELOW the line where the
--- console'"'"'s cuts finish, so the plate covers those two voids and the assembly'"'"'s left and right edges
+-- console's cuts finish, so the plate covers those two voids and the assembly's left and right edges
 -- run straight through the joint. It costs nothing: PLATE_INSET_Y is Tokens.Space.S, which is also 8,
--- so what sinks into the console is exactly the plate'"'"'s own bottom padding and no content moves.
+-- so what sinks into the console is exactly the plate's own bottom padding and no content moves.
 --
--- IT ALSO TAKES THE SHARED RULE AWAY, and that is the trade. Screens/HUD'"'"'s dock keeps a visible rule
--- at its own seam because its island stops at the dock'"'"'s edge rather than crossing it; here the two
+-- IT ALSO TAKES THE SHARED RULE AWAY, and that is the trade. Screens/HUD's dock keeps a visible rule
+-- at its own seam because its island stops at the dock's edge rather than crossing it; here the two
 -- fills merge and the bead is the only mark left. That is the same conclusion by the same rule ARM
 -- the dock states -- "a point joins, a line divides" -- carried one step further, and it is the more
 -- "one object" of the two readings.
@@ -198,8 +206,8 @@ function FurnacePlate.Build(scope: Scope, state: FurnaceState): Plate
 	end)
 
 	-- The overlap is part of the travel, not an offset applied after it: the slot has to reach
-	-- FURNACE_HEIGHT + SEAM_OVERLAP for the plate'"'"'s content to land where it did before the sink,
-	-- and springing the whole distance is what keeps the drawer'"'"'s leading edge moving at one rate.
+	-- FURNACE_HEIGHT + SEAM_OVERLAP for the plate's content to land where it did before the sink,
+	-- and springing the whole distance is what keeps the drawer's leading edge moving at one rate.
 	local slotHeight = scope:Computed(function(use): number
 		return math.max(0, math.round(use(presence) * (FURNACE_HEIGHT + SEAM_OVERLAP)))
 	end)
@@ -256,6 +264,7 @@ function FurnacePlate.Build(scope: Scope, state: FurnaceState): Plate
 						AlignY = Enum.VerticalAlignment.Center,
 
 						Children = {
+							Inset(scope, { X = HEADER_INDENT, Y = 0 }),
 							Stack.Fill(
 								scope,
 								Label(scope, {
@@ -334,7 +343,7 @@ function FurnacePlate.Build(scope: Scope, state: FurnaceState): Plate
 		Content = scope:New "Frame" {
 			Name = "FurnaceSlot",
 			AnchorPoint = Vector2.new(0.5, 1),
-			-- SEAM_OVERLAP below the stack'"'"'s top edge, not on it -- see that constant for the two
+			-- SEAM_OVERLAP below the stack's top edge, not on it -- see that constant for the two
 			-- square ears this removes.
 			Position = UDim2.new(0.5, 0, 0, SEAM_OVERLAP),
 			Size = scope:Computed(function(use): UDim2

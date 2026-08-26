@@ -162,6 +162,36 @@ local PANEL_WIDTH = 220
 -- x = 12 the top edge is already past the diagonal.
 local PANEL_INSET_X = Tokens.Space.M
 local PANEL_INSET_Y = Tokens.Space.S
+-- THE HEADER BAND IS INDENTED TO THE WELL'S OWN CONTENT COLUMN -- same change, same reason, as the
+-- furnace plate's HEADER_INDENT. The panel insets its children by Space.M; a ModuleWell then insets
+-- ITS children by a further Space.S, so the caption and the chip sat eight pixels outboard of every
+-- legend row underneath them. Applied to the whole band, so the chip lands on the well's right edge
+-- for the same reason the caption lands on its left and the panel has ONE content column.
+local HEADER_INDENT = Tokens.Space.S
+-- WHERE THIS CONSOLE'S OWN BRACKETS SIT WHEN THE FURNACE IS BOLTED ON (owner, 2026-08-25: "move the
+-- helm's corner brackets down to be out of the connection section and outline its intended spot").
+--
+-- A Panel's CornerAccent anchors its four elbows to the panel's own corners, which is right for a
+-- panel standing alone and wrong for the lower half of an assembly: the top pair landed in the joint,
+-- a few pixels under the seam, bracketing nothing. The assembly's real outer corners are the plate's
+-- top pair and this console's bottom pair -- Screens/BlimpHelm/FurnacePlate.lua's seam rule 5 -- so
+-- the top pair here was never an outer corner.
+--
+-- Rather than delete them, they drop to the top of the console's OWN section, where they read as
+-- what they now are: the marks saying where the helm begins, below the furnace. Panel forwards this
+-- to CornerBracket as TopInset; the bottom pair does not move, because those ARE the assembly's
+-- bottom corners.
+--
+-- TWO WRONG ROUTES WERE TRIED FIRST AND BOTH ARE WORTH THE WARNING, because both looked reasonable
+-- and both are already documented failures in this codebase. Wrapping the elbows in a frame inset
+-- from the top inflated this AutomaticSize.Y panel from 212px to 970 -- the Scale-sized-child
+-- interaction Components/Panel.lua's SurfaceTexture note measures. Handing them to the panel's
+-- Children flat then let its UIListLayout ARRANGE them, stacking eight bracket arms down the panel as
+-- though they were rows: a UIListLayout positions every GuiObject child it has, which is precisely
+-- what CLAUDE.md's Layer.lua entry exists to warn about. Panel's own CornerAccent puts them on the
+-- panel ROOT, outside the laid-out Content, so the fix was to give Panel the knob rather than to
+-- route around it.
+local SECTION_BRACKET_ARM = 10
 -- Matches Components/StatusTag.lua's own fixed HEIGHT, so the mode chip sets the header band's height
 -- rather than being vertically clipped by a band sized for the bare label it replaced.
 local HEADER_HEIGHT = 24
@@ -478,6 +508,12 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 		} :: Frame
 	end
 
+	-- Both depend on whether the furnace is bolted on, and both are the same fact: the console's own
+	-- top edge stops being where its section begins the moment something sinks into it. Nothing here
+	-- moves for a console standing alone, which is what keeps the bare-helm path byte-identical.
+	local sectionTop = PANEL_INSET_Y + (if furnace then FurnacePlate.SEAM_OVERLAP else 0)
+	local bracketDrop = if furnace then FurnacePlate.SEAM_OVERLAP else 0
+
 	local tile = Panel(scope, {
 		Name = "BlimpHelmPanel",
 		Size = UDim2.fromOffset(PANEL_WIDTH, 0),
@@ -506,8 +542,11 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 		CornerAccent = true,
 		CornerAccentColor = Tokens.Color.AccentSecondary,
 		CornerAccentRivets = false,
-		BracketArmLength = 10,
+		BracketArmLength = SECTION_BRACKET_ARM,
 		BracketInset = ChamferedSurface.CHAMFER_PX,
+		-- The top pair drops clear of the joint -- see SECTION_BRACKET_ARM. Zero for a console
+		-- standing alone, which keeps the bare-helm path byte-identical.
+		BracketTopInset = bracketDrop,
 		-- The same violet edge the dock carries, at the same softened opacity, so the two surfaces
 		-- read as cut from one material rather than as two panels that happen to share a palette.
 		BorderColor3 = Tokens.Color.AccentPrimary,
@@ -533,7 +572,13 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 		Children = {
 			-- Six lines of UIPadding replaced by the one call this codebase has for it -- and the
 			-- horizontal step went up to clear the chamfer, see PANEL_INSET_X.
-			Inset(scope, { X = PANEL_INSET_X, Y = PANEL_INSET_Y }),
+			--
+			-- THE TOP INSET CARRIES THE SEAM when a furnace is bolted on. The plate sinks into this
+			-- panel, so the console's own top edge is no longer where its section visually begins --
+			-- eight pixels of it are underneath the plate. Without this the caption sat flush against
+			-- the joint while the furnace's identical caption had a full inset above it, which is what
+			-- made the two halves of one assembly look like they were set to different rules.
+			Inset(scope, { X = PANEL_INSET_X, Top = sectionTop, Bottom = PANEL_INSET_Y }),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				-- Space.S rather than XS, because what this now separates is two WELLS and a header
@@ -561,6 +606,7 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 				AlignY = Enum.VerticalAlignment.Center,
 
 				Children = {
+					Inset(scope, { X = HEADER_INDENT, Y = 0 }),
 					-- FILL, NOT A HAND-PICKED 0.52/0.48 SPLIT. The old pair of scale widths was two
 					-- guesses that had to add to one and stay ahead of the longest string either
 					-- side could hold -- "AUTO-LANDING" against 48% of 180px is 86 pixels for 12

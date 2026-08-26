@@ -222,8 +222,8 @@ return function()
 		-- list is THREE, and both departures left for the same reason -- they stopped being tiles and
 		-- became plates BOLTED to another surface, which wants a drawer rather than a reveal:
 		--
-		--   WeaponInventory  -> Screens/HUD/ArmamentIsland, out of the dock'"'"'s left edge
-		--   BlimpFuel        -> Screens/BlimpHelm/FurnacePlate, out of the console'"'"'s top edge
+		--   WeaponInventory  -> Screens/HUD/ArmamentIsland, out of the dock's left edge
+		--   BlimpFuel        -> Screens/BlimpHelm/FurnacePlate, out of the console's top edge
 		--
 		-- Both spring a SIZE on Tokens.Motion.IslandSpring instead. That is the correct distinction
 		-- rather than an exemption: Reveal scales a tile in place, which is what a surface arriving on

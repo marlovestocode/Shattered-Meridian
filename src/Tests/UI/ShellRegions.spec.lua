@@ -99,7 +99,7 @@ local CASES: { Case } = {
 		OwnsASurface = true,
 	},
 	-- BlimpFuel IS NO LONGER IN THIS LIST either, and for the same shape of reason WeaponInventory
-	-- left it: it stopped returning a tile. The furnace is a plate bolted to the helm console'"'"'s top
+	-- left it: it stopped returning a tile. The furnace is a plate bolted to the helm console's top
 	-- edge now (Screens/BlimpHelm/FurnacePlate.lua), so this screen hands out state and the console
 	-- is the one tile the pair contributes. Tests/UI/BlimpFuelPanel.spec.lua covers the assembly.
 	-- WeaponInventory IS NO LONGER IN THIS LIST, and its absence is the point rather than an omission.
