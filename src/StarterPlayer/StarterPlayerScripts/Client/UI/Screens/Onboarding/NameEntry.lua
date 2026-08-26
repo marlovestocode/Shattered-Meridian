@@ -39,16 +39,16 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
-local TrackedLabel = require(script.Parent.Parent.Parent.Components.TrackedLabel)
 local Button = require(script.Parent.Parent.Parent.Components.Button)
 local CreatorFrame = require(script.Parent.CreatorFrame)
+local StepHeader = require(script.Parent.StepHeader)
+local StepFooter = require(script.Parent.StepFooter)
 local OnboardingTypes = require(script.Parent.Types)
 local Inset = require(script.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
 local OnChange = Fusion.OnChange
-local peek = Fusion.peek
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type NameEntryProps = OnboardingTypes.NameEntryProps
@@ -74,40 +74,12 @@ local function isObviouslyInvalid(name: string): boolean
 	return false
 end
 
--- UIPadding (32 top + 24 bottom) + gap(8) + eyebrow(9) + title(28).
-local HEADER_HEIGHT = 32 + 24 + 8 + 9 + 28
+local HEADER_SPEC: StepHeader.StepHeaderSpec = {
+	Eyebrow = "CHARACTER CREATION -- STEP 3",
+	Title = "What shall the world call you?",
+}
+
 local NAME_FIELD_HEIGHT = 48
-
-local function Header(scope: Scope): Frame
-	return scope:New "Frame" {
-		Name = "Header",
-		Size = UDim2.fromScale(1, 1),
-		BackgroundTransparency = 1,
-
-		[Children] = {
-			Inset(scope, { X = Tokens.Space.XXXL, Top = Tokens.Space.XXL, Bottom = Tokens.Space.XL }),
-			scope:New "UIListLayout" {
-				FillDirection = Enum.FillDirection.Vertical,
-				HorizontalAlignment = Enum.HorizontalAlignment.Center,
-				Padding = UDim.new(0, Tokens.Space.S),
-				SortOrder = Enum.SortOrder.LayoutOrder,
-			},
-			TrackedLabel(scope, {
-				Text = "CHARACTER CREATION -- STEP 3",
-				Scale = "Eyebrow",
-				Color = Tokens.Color.TextDisabled,
-				LayoutOrder = 1,
-			}),
-			Label(scope, {
-				Text = "What shall the world call you?",
-				Scale = "Title",
-				TextXAlignment = Enum.TextXAlignment.Center,
-				Size = UDim2.new(1, 0, 0, 36),
-				LayoutOrder = 2,
-			}),
-		},
-	} :: Frame
-end
 
 local function NameEntry(scope: Scope, props: NameEntryProps): Frame
 	local isFocused = scope:Value(false)
@@ -273,34 +245,20 @@ local function NameEntry(scope: Scope, props: NameEntryProps): Frame
 		Stage = "NameEntry",
 		StepRailNavigateRequested = props.StepRailNavigateRequested,
 		BlockingReason = blockingReason,
-		HeaderHeight = HEADER_HEIGHT,
-		HeaderContent = { Header(scope) },
+		HeaderHeight = StepHeader.Height(HEADER_SPEC),
+		HeaderContent = { StepHeader.New(scope, HEADER_SPEC) },
 		BodyContent = {
 			Inset(scope, { Top = Tokens.Space.XXXL }),
 			bodyColumn,
 		},
 		FooterHint = footerHint,
 		FooterButtons = {
-			Button(scope, {
-				Text = "Back",
-				Variant = "Secondary",
-				Size = UDim2.fromOffset(120, Tokens.Control.RowHeight),
-				OnActivated = function()
-					props.BackRequested:Fire()
-				end,
-			}),
-			Button(scope, {
-				Text = "Continue",
-				Variant = "Primary",
-				Size = UDim2.fromOffset(160, Tokens.Control.RowHeight),
-				Disabled = continueDisabled,
-				OnActivated = function()
-					if peek(continueDisabled) then
-						return
-					end
-					props.ContinueRequested:Fire()
-				end,
-			}),
+			StepFooter.Back(scope, function()
+				props.BackRequested:Fire()
+			end),
+			StepFooter.Continue(scope, continueDisabled, function()
+				props.ContinueRequested:Fire()
+			end),
 		},
 	}) :: Frame
 end

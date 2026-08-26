@@ -38,11 +38,11 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
-local TrackedLabel = require(script.Parent.Parent.Parent.Components.TrackedLabel)
 local Button = require(script.Parent.Parent.Parent.Components.Button)
 local Divider = require(script.Parent.Parent.Parent.Components.Divider)
 local Glow = require(script.Parent.Parent.Parent.Components.Glow)
 local CreatorFrame = require(script.Parent.CreatorFrame)
+local StepHeader = require(script.Parent.StepHeader)
 local Attributes = require(script.Parent.Attributes)
 local OnboardingTypes = require(script.Parent.Types)
 local Inset = require(script.Parent.Parent.Parent.Components.Inset)
@@ -56,40 +56,12 @@ type ConfirmationProps = OnboardingTypes.ConfirmationProps
 
 local Config = Constants.CharacterCreation
 
--- UIPadding (32 top + 24 bottom) + gap(8) + eyebrow(9) + title(36). No step number in the eyebrow --
--- StepRail.lua's own header: Confirmation is the lit seal, not "step 4".
-local HEADER_HEIGHT = 32 + 24 + 8 + 9 + 36
-
-local function Header(scope: Scope): Frame
-	return scope:New "Frame" {
-		Name = "Header",
-		Size = UDim2.fromScale(1, 1),
-		BackgroundTransparency = 1,
-
-		[Children] = {
-			Inset(scope, { X = Tokens.Space.XXXL, Top = Tokens.Space.XXL, Bottom = Tokens.Space.XL }),
-			scope:New "UIListLayout" {
-				FillDirection = Enum.FillDirection.Vertical,
-				HorizontalAlignment = Enum.HorizontalAlignment.Center,
-				Padding = UDim.new(0, Tokens.Space.S),
-				SortOrder = Enum.SortOrder.LayoutOrder,
-			},
-			TrackedLabel(scope, {
-				Text = "CHARACTER CREATION",
-				Scale = "Eyebrow",
-				Color = Tokens.Color.TextDisabled,
-				LayoutOrder = 1,
-			}),
-			Label(scope, {
-				Text = "Before You Begin",
-				Scale = "Title",
-				TextXAlignment = Enum.TextXAlignment.Center,
-				Size = UDim2.new(1, 0, 0, 36),
-				LayoutOrder = 2,
-			}),
-		},
-	} :: Frame
-end
+-- No step number in the eyebrow -- StepRail.lua's own header: Confirmation is the lit seal, not
+-- "step 4".
+local HEADER_SPEC: StepHeader.StepHeaderSpec = {
+	Eyebrow = "CHARACTER CREATION",
+	Title = "Before You Begin",
+}
 
 local function EscapeHatch(
 	scope: Scope,
@@ -357,8 +329,8 @@ local function Confirmation(scope: Scope, props: ConfirmationProps): Frame
 	return CreatorFrame(scope, {
 		Stage = "Confirmation",
 		StepRailNavigateRequested = props.StepRailNavigateRequested,
-		HeaderHeight = HEADER_HEIGHT,
-		HeaderContent = { Header(scope) },
+		HeaderHeight = StepHeader.Height(HEADER_SPEC),
+		HeaderContent = { StepHeader.New(scope, HEADER_SPEC) },
 		BodyContent = {
 			Inset(scope, { Top = Tokens.Space.XXL }),
 			bodyColumn,

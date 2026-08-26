@@ -39,6 +39,7 @@ local Divider = require(script.Parent.Parent.Parent.Components.Divider)
 local Bar = require(script.Parent.Parent.Parent.Components.Bar)
 local Stepper = require(script.Parent.Parent.Parent.Components.Stepper)
 local CreatorFrame = require(script.Parent.CreatorFrame)
+local StepFooter = require(script.Parent.StepFooter)
 local OriginCard = require(script.Parent.OriginCard)
 local OnboardingTypes = require(script.Parent.Types)
 local Inset = require(script.Parent.Parent.Parent.Components.Inset)
@@ -584,26 +585,12 @@ function AttributesModule.Mount(scope: Scope, props: AttributesProps): Frame
 		},
 		FooterHint = footerHint,
 		FooterButtons = {
-			Button(scope, {
-				Text = "Back",
-				Variant = "Secondary",
-				Size = UDim2.fromOffset(120, Tokens.Control.RowHeight),
-				OnActivated = function()
-					props.BackRequested:Fire()
-				end,
-			}),
-			Button(scope, {
-				Text = "Continue",
-				Variant = "Primary",
-				Size = UDim2.fromOffset(160, Tokens.Control.RowHeight),
-				Disabled = continueDisabled,
-				OnActivated = function()
-					if peek(continueDisabled) then
-						return
-					end
-					props.ContinueRequested:Fire()
-				end,
-			}),
+			StepFooter.Back(scope, function()
+				props.BackRequested:Fire()
+			end),
+			StepFooter.Continue(scope, continueDisabled, function()
+				props.ContinueRequested:Fire()
+			end),
 		},
 	}) :: Frame
 end

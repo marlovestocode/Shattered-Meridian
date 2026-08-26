@@ -22,63 +22,23 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
-local Label = require(script.Parent.Parent.Parent.Components.Label)
-local Button = require(script.Parent.Parent.Parent.Components.Button)
-local Divider = require(script.Parent.Parent.Parent.Components.Divider)
 local CreatorFrame = require(script.Parent.CreatorFrame)
+local StepHeader = require(script.Parent.StepHeader)
+local StepFooter = require(script.Parent.StepFooter)
 local OriginCard = require(script.Parent.OriginCard)
 local OnboardingTypes = require(script.Parent.Types)
 local Inset = require(script.Parent.Parent.Parent.Components.Inset)
-
-local Children = Fusion.Children
-local peek = Fusion.peek
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type RaceSelectProps = OnboardingTypes.RaceSelectProps
 
 local Config = Constants.CharacterCreation
 
--- UIPadding (32 top + 24 bottom) + 2 UIListLayout gaps (8 each) + flourish(6) + title(36) +
--- subtitle(36) -- spelled out per CreatorFrame.lua's own "no guessing" discipline.
-local HEADER_HEIGHT = 32 + 24 + 8 * 2 + 6 + 36 + 36
-
-local function Header(scope: Scope): Frame
-	return scope:New "Frame" {
-		Name = "Header",
-		Size = UDim2.fromScale(1, 1),
-		BackgroundTransparency = 1,
-
-		[Children] = {
-			Inset(scope, { X = Tokens.Space.XXXL, Top = Tokens.Space.XXL, Bottom = Tokens.Space.XL }),
-			scope:New "UIListLayout" {
-				FillDirection = Enum.FillDirection.Vertical,
-				HorizontalAlignment = Enum.HorizontalAlignment.Center,
-				Padding = UDim.new(0, Tokens.Space.S),
-				SortOrder = Enum.SortOrder.LayoutOrder,
-			},
-			Divider.Flourish(scope, {
-				Size = UDim2.fromOffset(160, 6),
-				LayoutOrder = 1,
-			}),
-			Label(scope, {
-				Text = "What will you be?",
-				Scale = "Title",
-				TextXAlignment = Enum.TextXAlignment.Center,
-				Size = UDim2.new(1, 0, 0, 36),
-				LayoutOrder = 2,
-			}),
-			Label(scope, {
-				Text = "Choose your origin. It shapes your beginning, not your end.",
-				Scale = "Body",
-				Color = Tokens.Color.TextSecondary,
-				TextXAlignment = Enum.TextXAlignment.Center,
-				TextWrapped = true,
-				Size = UDim2.new(1, 0, 0, 36),
-				LayoutOrder = 3,
-			}),
-		},
-	} :: Frame
-end
+local HEADER_SPEC: StepHeader.StepHeaderSpec = {
+	Flourish = true,
+	Title = "What will you be?",
+	Subtitle = "Choose your origin. It shapes your beginning, not your end.",
+}
 
 local function RaceSelect(scope: Scope, props: RaceSelectProps): Frame
 	local continueDisabled = scope:Computed(function(use)
@@ -104,8 +64,8 @@ local function RaceSelect(scope: Scope, props: RaceSelectProps): Frame
 	return CreatorFrame(scope, {
 		Stage = "RaceSelect",
 		StepRailNavigateRequested = props.StepRailNavigateRequested,
-		HeaderHeight = HEADER_HEIGHT,
-		HeaderContent = { Header(scope) },
+		HeaderHeight = StepHeader.Height(HEADER_SPEC),
+		HeaderContent = { StepHeader.New(scope, HEADER_SPEC) },
 		BodyContent = {
 			Inset(scope, { X = Tokens.Space.XXL, Y = Tokens.Space.L }),
 			scope:New "UIListLayout" {
@@ -117,18 +77,9 @@ local function RaceSelect(scope: Scope, props: RaceSelectProps): Frame
 		},
 		FooterHint = footerHint,
 		FooterButtons = {
-			Button(scope, {
-				Text = "Continue",
-				Variant = "Primary",
-				Size = UDim2.fromOffset(160, Tokens.Control.RowHeight),
-				Disabled = continueDisabled,
-				OnActivated = function()
-					if peek(continueDisabled) then
-						return
-					end
-					props.ContinueRequested:Fire()
-				end,
-			}),
+			StepFooter.Continue(scope, continueDisabled, function()
+				props.ContinueRequested:Fire()
+			end),
 		},
 	}) :: Frame
 end
