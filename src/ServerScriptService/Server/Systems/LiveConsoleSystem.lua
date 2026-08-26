@@ -39,6 +39,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local AdminGate = require(script.Parent.Parent.Network.AdminGate)
+local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 
 local LiveConsoleSystem = {}
 
@@ -188,14 +189,15 @@ end
 
 function LiveConsoleSystem.Init(): ()
 	local subscribeRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.Subscribe)
-	subscribeRemote.OnServerInvoke = function(player: Player): Types.LiveConsoleSubscribeResult
-		local ok, resultOrError = pcall(handleSubscribe, player)
-		if not ok then
-			logger:error("Subscribe handler errored", { player = player.Name, errorMessage = tostring(resultOrError) })
-			return { Success = false, Reason = "InternalError" }
-		end
-		return resultOrError :: Types.LiveConsoleSubscribeResult
-	end
+	-- Through Shared/RemoteHandler.WrapInvoke rather than a hand-rolled pcall: this was the one
+	-- OnServerInvoke in the tree still writing that boundary out inline, with no comment claiming a
+	-- reason. Same catch, same log line, same fallback result.
+	subscribeRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
+		logger,
+		"Subscribe",
+		{ Success = false, Reason = "InternalError" } :: Types.LiveConsoleSubscribeResult,
+		handleSubscribe
+	)
 
 	local unsubscribeRemote = NetworkBridge.CreateRemoteEvent(Config.RemoteNames.Unsubscribe)
 	unsubscribeRemote.OnServerEvent:Connect(function(player: Player)

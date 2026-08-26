@@ -8,9 +8,10 @@
 	registry itself). checkMoveEditorPreconditions is a thin wrapper over
 	Server/Network/AdminGate.Check (auth + rate limit), with its own dedicated `rateLimiter` bucket
 	passed in -- see AdminGate.lua's own header for why it never constructs or defaults one itself.
-	wrapHandler stays a local copy (pcall-safety so an internal error never throws across the remote
-	boundary) since generalizing that one too was ruled out during the Network-module design pass --
-	see Shared/RemoteHandler.lua's own header for the module that WAS extracted for that shape.
+	wrapHandler is Shared/RemoteHandler.Scoped, bound once to this module's logger and error result.
+	It used to be a local copy on the grounds that "generalizing that one too was ruled out during the
+	Network-module design pass" -- the difference it claimed to have (a fixed error result) turned out
+	to be a parameter WrapInvoke already took.
 
 	Persistence shape: one DataStore key per move ("Move_<MoveId>") plus a small fixed-key index
 	record ("MoveIndex" -> { MoveIds: {string} }, maintained via UpdateAsync for atomicity) since
@@ -85,6 +86,7 @@ local ArtSystem = require(script.Parent.ArtSystem)
 -- For one post-load call: an art is a move, so the moves this System loads ARE the art roster,
 -- and this is the only point in the boot where that roster is known to be complete.
 local ArtTreeManager = require(script.Parent.Parent.Managers.ArtTreeManager)
+local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 
 local MoveEditorSystem = {}
 
@@ -115,16 +117,12 @@ local function checkMoveEditorPreconditions(player: Player, actionName: string):
 	return AdminGate.Check(player, actionName, rateLimiter)
 end
 
-local function wrapHandler<Result, Args...>(name: string, handler: (Player, Args...) -> Result): (Player, Args...) -> Result
-	return function(player: Player, ...: Args...): Result
-		local ok, resultOrError = pcall(handler, player, ...)
-		if not ok then
-			logger:error(name .. " handler errored", { player = player.Name, errorMessage = tostring(resultOrError) })
-			return ({ Success = false, Reason = "InternalError" } :: any) :: Result
-		end
-		return resultOrError :: Result
-	end
-end
+-- The pcall boundary every RemoteFunction handler below goes through, bound once to this module's own
+-- logger and error result -- see Shared/RemoteHandler.Scoped. This used to be a ten-line local that
+-- WAS that binding written out longhand, kept on the grounds that "generalizing that one too was
+-- ruled out"; the only difference it actually had from WrapInvoke was baking in the two things
+-- WrapInvoke already takes as parameters. Every call site below is unchanged.
+local wrapHandler = RemoteHandler.Scoped(logger, { Success = false, Reason = "InternalError" })
 
 -- Obtained lazily inside Init(), never at module load time -- keeps require()-ing this module
 -- side-effect-free, same reasoning as BugReportSystem.lua's own mainStore.

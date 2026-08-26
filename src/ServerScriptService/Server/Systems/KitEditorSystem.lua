@@ -53,6 +53,7 @@ local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
 local AdminGate = require(script.Parent.Parent.Network.AdminGate)
 local RaceManager = require(script.Parent.Parent.Managers.RaceManager)
 local BloodlineManager = require(script.Parent.Parent.Managers.BloodlineManager)
+local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 
 local KitEditorSystem = {}
 
@@ -85,19 +86,12 @@ local function checkKitEditorPreconditions(player: Player, actionName: string): 
 	return AdminGate.Check(player, actionName, rateLimiter)
 end
 
--- pcall-safety so an internal error never throws across the remote boundary -- stays a local copy
--- rather than Shared/RemoteHandler.lua, the same choice MoveEditorSystem.wrapHandler's own header
--- explains (generalizing this one shape too was ruled out during that module's design pass).
-local function wrapHandler<Result, Args...>(name: string, handler: (Player, Args...) -> Result): (Player, Args...) -> Result
-	return function(player: Player, ...: Args...): Result
-		local ok, resultOrError = pcall(handler, player, ...)
-		if not ok then
-			logger:error(name .. " handler errored", { player = player.Name, errorMessage = tostring(resultOrError) })
-			return ({ Success = false, Reason = "InternalError" } :: any) :: Result
-		end
-		return resultOrError :: Result
-	end
-end
+-- The pcall boundary every RemoteFunction handler below goes through, bound once to this module's own
+-- logger and error result -- see Shared/RemoteHandler.Scoped. This used to be a ten-line local that
+-- WAS that binding written out longhand, kept on the grounds that "generalizing that one too was
+-- ruled out"; the only difference it actually had from WrapInvoke was baking in the two things
+-- WrapInvoke already takes as parameters. Every call site below is unchanged.
+local wrapHandler = RemoteHandler.Scoped(logger, { Success = false, Reason = "InternalError" })
 
 -- The retry/backoff wrapper every DataStore call below goes through, bound once to this module's own
 -- logger and to the ONE policy (Constants.Storage.RetryPolicy). Five Systems each held this same
