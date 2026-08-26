@@ -77,38 +77,35 @@ local modulesToLoad = {
 
 -- CLIENT-side load-checks, same reasoning as the server list above and added for the same class of
 -- gap: nothing in this place ever require()d the client's UI tree, so a broken require path, a syntax
--- error, or a signature change in the largest UI surface on the client (UI/init.lua and the three
--- admin-gated screen drivers it hands deferred handles to) surfaced only when someone opened Studio.
+-- error, or a signature change in the largest UI surface on the client (UI/init.lua and the
+-- admin-gated screen drivers Client/DevTools/init.lua hands deferred handles to) surfaced only when
+-- someone opened Studio.
 -- Requiring is enough and is all that is safe: Mount()/Start() need a real LocalPlayer and PlayerGui
 -- that this headless server place does not have, and every one of these modules is written so its
 -- top-level body touches neither.
 local clientModulesToLoad = {
 	StarterPlayer.StarterPlayerScripts.Client.UI,
-	StarterPlayer.StarterPlayerScripts.Client.DevMenu.DevMenuClient,
-	StarterPlayer.StarterPlayerScripts.Client.MoveEditor.MoveEditorClient,
-	-- Added after KitEditorClient was found with NO inbound require anywhere: nothing started it, so
-	-- its keybind never bound and the Kit Editor -- the only thing that authors Race Trait and
-	-- Bloodline content -- was unreachable, which left BloodlineManager's registry permanently empty.
-	-- Requiring it here is what would have caught the follow-up failure (a broken require path in the
-	-- module Main.client.lua now calls); reachability itself is the boot wiring's job, not this list's.
-	StarterPlayer.StarterPlayerScripts.Client.KitEditor.KitEditorClient,
+	-- The whole dev-tooling subtree behind one entry. Requiring Client.DevTools pulls in all five
+	-- driver modules AND Screens/DevTools, which is exactly the coverage the five separate entries
+	-- here used to give -- including the one added after KitEditorClient was found with NO inbound
+	-- require anywhere (nothing started it, so its keybind never bound and the Kit Editor -- the only
+	-- thing that authors Race Trait and Bloodline content -- was unreachable, leaving BloodlineManager's
+	-- registry permanently empty). Reachability itself is still the boot wiring's job, not this list's.
+	--
+	-- This list requires by PATH, so it is also the check that the bundle exists at all: test.project.json
+	-- ships it, live.project.json deliberately does not, and this place is built from the former.
+	StarterPlayer.StarterPlayerScripts.Client.DevTools,
 	-- The sole writer of Client/Combat/HotbarBindings.lua now that the Move Editor stopped being a
 	-- second one -- see that module's own header. A broken require here would silently leave every
 	-- player's hotbar empty.
 	StarterPlayer.StarterPlayerScripts.Client.CharacterMenu.CharacterMenuClient,
-	StarterPlayer.StarterPlayerScripts.Client.LiveConsole.LiveConsoleClient,
-	-- The Storybook's driver. Its Start() returns immediately outside Studio, so nothing in a live
-	-- client would ever surface a broken require path in it -- which makes it exactly the kind of
-	-- module this list exists for. The gallery SCREEN it requires is already covered transitively by
-	-- the Client.UI entry above.
-	StarterPlayer.StarterPlayerScripts.Client.Storybook.StorybookClient,
 	-- The camera/movement/input modules whose character binding moved onto
 	-- Shared/PlayerLifecycle.lua. Nothing in this place drives a real character, so their BEHAVIOUR
 	-- still needs a playtest -- but a broken require path or a bad call shape in the shared binder
 	-- would previously have gone unnoticed here, and these entries close that.
 	StarterPlayer.StarterPlayerScripts.Client.Camera.ShiftLockCamera,
 	StarterPlayer.StarterPlayerScripts.Client.Camera.FlightCamera,
-	StarterPlayer.StarterPlayerScripts.Client.DevMenu.FlightController,
+	StarterPlayer.StarterPlayerScripts.Client.Flight.FlightController,
 	StarterPlayer.StarterPlayerScripts.Client.Emotes.EmoteController,
 	StarterPlayer.StarterPlayerScripts.Client.FX.CameraOffsetComposer,
 	StarterPlayer.StarterPlayerScripts.Client.Combat.AttackInputClient,

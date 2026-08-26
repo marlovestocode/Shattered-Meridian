@@ -42,7 +42,7 @@
 	the kind rendered by several independent components (VitalBar, DamageNumberLabel, etc.) that would
 	otherwise each need their own remote listener. Existing examples of the Screen-returned-handle
 	pattern, so a future Screen author has one place to look instead of re-deriving the choice from
-	scratch: Screens/DevMenu/init.lua, Screens/CombatFeedback/init.lua, and Screens/Menus/init.lua's
+	scratch: Screens/DevTools/DevMenu/init.lua, Screens/CombatFeedback/init.lua, and Screens/Menus/init.lua's
 	own IsOpen.
 ]]
 

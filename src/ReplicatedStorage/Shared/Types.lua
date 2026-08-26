@@ -1102,19 +1102,19 @@ export type KeybindAction =
 	-- toggle, the same "never fires a remote" carve-out this file already documents for
 	-- "ShiftLock".
 	| "OpenBugReport"
-	-- Opens the Move Creation System's editor screen (Client/MoveEditor/MoveEditorClient.lua via
-	-- Client/UI/Screens/MoveEditor/init.lua) -- admin-only, same "client-side convenience toggle,
+	-- Opens the Move Creation System's editor screen (Client/DevTools/MoveEditor/MoveEditorClient.lua via
+	-- Client/UI/Screens/DevTools/MoveEditor/init.lua) -- admin-only, same "client-side convenience toggle,
 	-- server re-checks authorization regardless" contract as "DevMenuToggle" above. Fires no combat
 	-- remote of its own (opening the screen is free; every actual action inside it goes through
 	-- MoveEditorSystem's own gated RemoteFunctions).
 	| "OpenMoveEditor"
-	-- Opens the Kit Editor screen (Client/KitEditor/KitEditorClient.lua via Client/UI/Screens/
+	-- Opens the Kit Editor screen (Client/DevTools/KitEditor/KitEditorClient.lua via Client/UI/Screens/
 	-- KitEditor/init.lua) -- the shared Race Trait / Bloodline stage authoring tool from the Race
 	-- Traits + Bloodline Abilities plan, not built yet. Same "client-side convenience toggle,
 	-- admin-only, server re-checks regardless" contract as "OpenMoveEditor" immediately above.
 	| "OpenKitEditor"
-	-- Opens the Live Admin Console (Client/LiveConsole/LiveConsoleClient.lua via
-	-- Client/UI/Screens/LiveConsole/init.lua) -- a bespoke live log stream, not Roblox's own native
+	-- Opens the Live Admin Console (Client/DevTools/LiveConsole/LiveConsoleClient.lua via
+	-- Client/UI/Screens/DevTools/LiveConsole/init.lua) -- a bespoke live log stream, not Roblox's own native
 	-- Developer Console. Binding this key toggles the panel locally for every client (harmless --
 	-- an empty panel pre-authorization); the real gate is server-side, on the
 	-- Constants.LiveConsole.RemoteNames.Subscribe RemoteFunction the panel calls the moment it
@@ -1122,7 +1122,7 @@ export type KeybindAction =
 	-- "DevMenuToggle"/"OpenMoveEditor" above.
 	--
 	-- Used to open Roblox's own native console via StarterGui:SetCore("DevConsoleVisible") instead
-	-- (bound from Client/DevMenu/DevMenuClient.lua) -- replaced because that panel only ever showed
+	-- (bound from Client/DevTools/DevMenu/DevMenuClient.lua) -- replaced because that panel only ever showed
 	-- anything in Studio: Shared/Logger.lua never calls print()/warn() outside RunService:IsStudio()
 	-- by design, so on a live server -- the one place a whitelisted admin actually needs this, since
 	-- Roblox's own F9 shortcut only binds for accounts with edit access to the place -- the native
@@ -1625,7 +1625,7 @@ export type SuspicionRecord = {
 -- (BugReportSystem.GetOpenCount / ModerationSystem.GetSuspectedCheaterCount) -- DevMenuSystem only
 -- combines the two into one response so the Sidebar pays a single round trip instead of two.
 -- Result of LiveConsole_Subscribe (RemoteFunction, Server/Systems/LiveConsoleSystem.lua) -- fired
--- by Client/LiveConsole/LiveConsoleClient.lua the moment the admin's console panel actually opens,
+-- by Client/DevTools/LiveConsole/LiveConsoleClient.lua the moment the admin's console panel actually opens,
 -- doubling as both the authorization check (a rejection here IS the "not admin" answer, same
 -- "first remote call is the real gate" idiom DevMenu_GetSidebarStats/MoveEditor_ListMoves already
 -- use) and the fetch that populates the panel with whatever Shared/Logger.lua's capture buffer

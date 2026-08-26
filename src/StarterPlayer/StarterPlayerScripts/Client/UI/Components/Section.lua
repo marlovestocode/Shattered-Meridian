@@ -4,7 +4,7 @@
 
 	Owns: a full-width, auto-height grouping panel for related controls within a screen -- Panel.lua
 	reused as a plain sub-section container with a title above its children (e.g. DevMenu's
-	"Training Dummy"/"Health"/"Bug Reports" groupings). Promoted out of Screens/DevMenu/init.lua
+	"Training Dummy"/"Health"/"Bug Reports" groupings). Promoted out of Screens/DevTools/DevMenu/init.lua
 	during that screen's Sidebar/ContentArea split (see that module's own header) once a SECOND
 	consumer (Sidebar.lua's roster section, alongside ContentArea.lua's Spawn/Admin/Tuning/Reports
 	sections) needed the exact same shape -- the same "duplicated in two places, centralized once a

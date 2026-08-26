@@ -31,7 +31,7 @@
 	BindableEvent rather than calling NetworkBridge here, and every piece of server-owned state the
 	tabs render (Sheet, ArtTrees, ArtMastery, EquippedArts) is a Fusion.Value owned by this Mount but
 	written to exclusively from outside by Client/CharacterMenu/CharacterMenuClient.lua -- the same
-	boundary Screens/Settings/init.lua and Screens/DevMenu/init.lua already hold. The close button is
+	boundary Screens/Settings/init.lua and Screens/DevTools/DevMenu/init.lua already hold. The close button is
 	the one exception, exactly like theirs: IsOpen is owned here, so closing just sets it.
 
 	The two exceptions to "state comes from the driver" are deliberate. BountyTab.lua keeps its own

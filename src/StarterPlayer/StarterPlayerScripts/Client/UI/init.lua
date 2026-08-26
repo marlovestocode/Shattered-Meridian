@@ -3,12 +3,12 @@
 	UI/init.lua
 
 	Owns: the UI framework's single entry point -- creates the root Fusion scope, builds
-	ClientState, and mounts every Screens surface (HUD, Menus, DeathFeed, DevMenu, BugReport) into
+	ClientState, and mounts every Screens surface (HUD, Menus, DeathFeed, BugReport) into
 	the local player's PlayerGui. Called once from Main.client.lua, which now also gets back the
 	handles client-side integration modules need (ClientState for read access, DeathFeed's handle to
-	drive the death-to-respawn overlay, DevMenu's handle to drive the whitelist-gated dev tooling
-	panel, BugReport's handle to drive the player-facing report form) -- see
-	Client/DevMenu/DevMenuClient.lua and Client/BugReport/BugReportClient.lua. UI/init.lua itself
+	drive the death-to-respawn overlay, the DevTools bundle to drive the whitelist-gated dev tooling
+	panels, BugReport's handle to drive the player-facing report form) -- see
+	Client/DevTools/init.lua and Client/BugReport/BugReportClient.lua. UI/init.lua itself
 	still never sends or receives a remote; it only hands each mounted handle to the module that does.
 
 	ShiftLockEngaged: a plain Fusion.Value<boolean> on the root scope, not a Screen's own handle --
@@ -45,19 +45,24 @@
 	DeathFeed is mounted several blocks earlier than it used to be. Its tile still joins TopRight at
 	order 10, unchanged.
 
-	THREE SCREENS ARE NOT MOUNTED HERE -- Dev Menu, Move Editor and Live Console are handed out as
-	Shared/Lazy.lua thunks instead, and only actually built the first time the module that drives each
-	one decides this player has earned it. Between them they built roughly 257 Instances (105/143/9)
-	on the synchronous boot path, for every player, the overwhelming majority of whom will never pass
-	the admin check -- the largest boot-time and memory cost on the client, spent entirely on panels
-	nobody can open. Deferring them was never about the mounting code; it was about how the handles
-	are handed out, since Main.client.lua passes each screen's handle to its driving module and there
-	is no handle to pass before the screen exists. A Lazy is what closes that: UIHandles still has a
-	non-nil, fully-typed entry for each, so no caller learns a new nil case, and the entry is a promise
-	rather than a panel.
+	FIVE SCREENS ARE NEITHER MOUNTED NOR EVEN REQUIRED HERE -- Dev Menu, Move Editor, Kit Editor,
+	Live Console and the Storybook live behind Screens/DevTools/init.lua, which this file resolves by
+	FindFirstChild rather than by path, and which a build config is allowed to omit entirely. They are
+	still handed out as Shared/Lazy.lua thunks and still only actually built the first time the module
+	that drives each one decides this player has earned it. Between them the first three alone built
+	roughly 257 Instances (105/143/9) on the synchronous boot path, for every player, the overwhelming
+	majority of whom will never pass the admin check.
+
+	Deferring the mount was the first half of that fix and is unchanged. The second half is that a
+	Lazy defers the MOUNT and cannot defer the `require` that produces the Mount function it closes
+	over -- roughly 18.5k lines of admin-only Luau that every client still parsed and closure-built at
+	boot, for the same panels nobody can open. Only not shipping the modules removes that, and only
+	putting them behind one path lets a build config not ship them. Hence the bundle, and hence the
+	single nil-able DevTools field on UIHandles below: five fields that each claim to be present would
+	be five lies in a build that omits them, where one honest optional is the truth.
 
 	The mount itself is UNCHANGED and still happens on this file's own root scope -- a deferred screen
-	is built later, not built differently, so the teardown story above still holds for all three.
+	is built later, not built differently, so the teardown story above still holds for all five.
 	Nothing else about the boot order moves: DevMenuClient and MoveEditorClient were ALREADY doing
 	their real work on their own thread behind a server authorization round trip (see their own
 	headers), so the force point is one line further into work that was already deferred. Live Console
@@ -76,16 +81,11 @@ local HUD = require(script.Screens.HUD)
 local Menus = require(script.Screens.Menus)
 local DeathFeed = require(script.Screens.DeathFeed)
 local CombatFeedbackModule = require(script.Screens.CombatFeedback)
-local DevMenuModule = require(script.Screens.DevMenu)
-local MoveEditorModule = require(script.Screens.MoveEditor)
-local KitEditorModule = require(script.Screens.KitEditor)
-local LiveConsoleModule = require(script.Screens.LiveConsole)
 local BugReportModule = require(script.Screens.BugReport)
 local AnnouncementModule = require(script.Screens.Announcement)
 local NotificationsModule = require(script.Screens.Notifications)
 local EmoteWheelModule = require(script.Screens.EmoteWheel)
 local SettingsModule = require(script.Screens.Settings)
-local StorybookModule = require(script.Screens.Storybook)
 local BlimpFuelModule = require(script.Screens.BlimpFuel)
 local BlimpHelmModule = require(script.Screens.BlimpHelm)
 local CarriedResourcesModule = require(script.Screens.CarriedResources)
@@ -98,6 +98,20 @@ local Layers = require(script.Shell.Layers)
 local Notify = require(script.Shell.Notify)
 local Regions = require(script.Shell.Regions)
 local Surface = require(script.Shell.Surface)
+
+-- Structurally identical to Screens/DevTools/init.lua's own DevToolScreens, and RESTATED rather
+-- than required: requiring that module here would reintroduce exactly the boot-time require this
+-- split exists to remove, and would hard-fail a build that omits the subtree. The handle type
+-- parameters are erased to `any` for the same reason -- naming DevMenuHandle needs the module that
+-- defines it. This file hands the table straight through to Client/DevTools/init.lua, which DOES
+-- have the real types in scope and is the only thing that ever calls into one of them.
+type DevToolScreens = {
+	DevMenu: Lazy.Lazy<any>,
+	MoveEditor: Lazy.Lazy<any>,
+	KitEditor: Lazy.Lazy<any>,
+	LiveConsole: Lazy.Lazy<any>,
+	Storybook: Lazy.Lazy<any>,
+}
 
 export type UIHandles = {
 	ClientState: ClientStateModule.ClientState,
@@ -113,21 +127,12 @@ export type UIHandles = {
 	-- Damage numbers and the outcome banner, driven by Client/Combat/CombatFeedbackClient.lua from
 	-- the damage layer's Combat_Feedback event.
 	CombatFeedback: CombatFeedbackModule.CombatFeedbackHandle,
-	-- The admin-gated screens, deferred -- see this file's header. Get() mounts on first call
-	-- and returns the same handle forever after; IsResolved() asks whether it has been mounted
-	-- WITHOUT mounting it, which is what lets a stray server push for an unopened panel be dropped.
-	DevMenu: Lazy.Lazy<DevMenuModule.DevMenuHandle>,
+	-- The five deferred dev-tool screens, or nil in a build that does not ship them -- see this
+	-- file's header and Screens/DevTools/init.lua. THE ONLY nil-able field on this table, and
+	-- deliberately: a build variant is a different thing from a screen that failed to mount, so it
+	-- gets one honest optional rather than five fields that each lie about being present.
+	DevTools: DevToolScreens?,
 	Menus: Menus.MenusHandle,
-	MoveEditor: Lazy.Lazy<MoveEditorModule.MoveEditorHandle>,
-	-- Authors Race Trait and Bloodline content (Server/Managers/RaceManager.lua,
-	-- Server/Managers/BloodlineManager.lua). Deferred exactly like MoveEditor above -- and, until
-	-- this entry existed, not mounted AT ALL: Client/KitEditor/KitEditorClient.lua had no inbound
-	-- require from anywhere, so its OpenKitEditor keybind never bound and BloodlineManager's
-	-- registry had no way to be populated. Every downstream reader degraded quietly rather than
-	-- erroring, which is why it went unnoticed -- see this codebase's own "bootstrap tracing proves
-	-- the app STARTS it, not that a player can REACH it" rule.
-	KitEditor: Lazy.Lazy<KitEditorModule.KitEditorHandle>,
-	LiveConsole: Lazy.Lazy<LiveConsoleModule.LiveConsoleHandle>,
 	BugReport: BugReportModule.BugReportHandle,
 	Announcement: AnnouncementModule.AnnouncementHandle,
 	-- The one notification channel (Shell/Notify.lua). Returned so a future producer can reach it
@@ -136,12 +141,6 @@ export type UIHandles = {
 	Notify: Notify.NotifyHandle,
 	EmoteWheel: EmoteWheelModule.EmoteWheelHandle,
 	Settings: SettingsModule.SettingsHandle,
-	-- The component gallery (Client/UI/Screens/Storybook/init.lua). Deferred exactly like the admin
-	-- screens above, and gated harder than any of them: Client/Storybook/StorybookClient.lua only ever
-	-- calls Get() inside Studio, so on a live client this promise is never redeemed and the gallery's
-	-- several hundred Instances are never built. A Lazy rather than a nil-able field for the same
-	-- reason theirs are -- no caller learns a new nil case.
-	Storybook: Lazy.Lazy<StorybookModule.StorybookHandle>,
 	-- The Driver fuel HUD (Screens/BlimpFuel/init.lua) -- always mounted (it is one small panel, not
 	-- worth a Lazy the way the admin screens are), visibility driven by Client/Blimp/BlimpController.lua
 	-- off the same FuelUpdated remote/mount broadcast that module already tracks.
@@ -293,38 +292,19 @@ function UI.Mount(): UIHandles
 	})
 	logger:debug("ShiftLockCrosshair mounted")
 
-	-- DEFERRED, not mounted -- see this file's header. Each of these three closures runs at most once,
-	-- the first time its own driving module forces it, and logs then rather than now so the boot log
-	-- keeps saying something true about what this client has actually built.
-	local devMenu = Lazy.new("DevMenu", function()
-		local handle = DevMenuModule.Mount(scope, playerGui)
-		logger:debug("DevMenu mounted (deferred until authorized)")
-		return handle
-	end)
-
-	local moveEditor = Lazy.new("MoveEditor", function()
-		local handle = MoveEditorModule.Mount(scope, playerGui)
-		logger:debug("MoveEditor mounted (deferred until authorized)")
-		return handle
-	end)
-
-	local kitEditor = Lazy.new("KitEditor", function()
-		local handle = KitEditorModule.Mount(scope, playerGui)
-		logger:debug("KitEditor mounted (deferred until authorized)")
-		return handle
-	end)
-
-	local liveConsole = Lazy.new("LiveConsole", function()
-		local handle = LiveConsoleModule.Mount(scope, playerGui)
-		logger:debug("LiveConsole mounted (deferred until first open)")
-		return handle
-	end)
-
-	local storybook = Lazy.new("Storybook", function()
-		local handle = StorybookModule.Mount(scope, playerGui)
-		logger:debug("Storybook mounted (deferred until first open, Studio only)")
-		return handle
-	end)
+	-- DEFERRED, not mounted, and now also OPTIONAL -- see this file's header. The five thunks
+	-- themselves are unchanged and still live on this scope; what moved is the require, into
+	-- Screens/DevTools/init.lua, so that a build config can leave the whole subtree out. This is the
+	-- one place in the UI tree that resolves a module by name instead of by path, and it has to be:
+	-- `script.Screens.DevTools` would throw in a build that omits it, which is the entire point.
+	local devToolsModule = script.Screens:FindFirstChild("DevTools")
+	local devTools: DevToolScreens? = nil
+	if devToolsModule then
+		devTools = (require(devToolsModule :: ModuleScript) :: any).Mount(scope, playerGui)
+		logger:debug("DevTools screens bound (five deferred panels)")
+	else
+		logger:info("DevTools screens absent -- this build does not ship dev tooling")
+	end
 
 	local bugReport = BugReportModule.Mount(scope, playerGui)
 	logger:debug("BugReport mounted")
@@ -418,17 +398,13 @@ function UI.Mount(): UIHandles
 		DeathFeed = deathFeed,
 		Chrome = chrome,
 		CombatFeedback = combatFeedback,
-		DevMenu = devMenu,
+		DevTools = devTools,
 		Menus = menus,
-		MoveEditor = moveEditor,
-		KitEditor = kitEditor,
-		LiveConsole = liveConsole,
 		BugReport = bugReport,
 		Announcement = announcement,
 		Notify = notify,
 		EmoteWheel = emoteWheel,
 		Settings = settings,
-		Storybook = storybook,
 		BlimpFuel = blimpFuel,
 		BlimpHelm = blimpHelm,
 		CarriedResources = carriedResources,

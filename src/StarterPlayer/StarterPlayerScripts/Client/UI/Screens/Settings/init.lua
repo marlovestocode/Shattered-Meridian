@@ -4,7 +4,7 @@
 
 	Owns: the Settings panel's thin root -- the banded frame (Components/ScreenFrame.lua) wrapped
 	around the two tab sub-modules, plus IsOpen and every piece of state the two tab sub-modules
-	(KeybindsTab.lua/GameplayTab.lua) render from. Follows Screens/DevMenu/init.lua's "screen exposes
+	(KeybindsTab.lua/GameplayTab.lua) render from. Follows Screens/DevTools/DevMenu/init.lua's "screen exposes
 	state/signals, client module drives from outside" precedent exactly: Client/Settings/
 	SettingsClient.lua doesn't exist yet at the moment this mounts (UI/init.lua mounts every Screen
 	before Main.client.lua boots any client integration module), so every action that has a real

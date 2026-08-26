@@ -12,7 +12,7 @@
 	Transparency, per performance-optimization.md/animation-systems.md's "all VFX are object-pooled,
 	never instanced-and-destroyed per use" mandate.
 
-	Does not own: deciding WHEN a takeoff/landing/sonic-boom happened (Client/DevMenu/
+	Does not own: deciding WHEN a takeoff/landing/sonic-boom happened (Client/DevTools/DevMenu/
 	FlightController.lua's own detection/classification), or any sound/camera-shake/hit-stop that
 	accompanies these (FlightAudio.lua, CameraShake.lua, HitStop.lua) -- purely local presentation,
 	nothing here crosses the network.

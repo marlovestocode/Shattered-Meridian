@@ -6,7 +6,7 @@
 	factory and one Constants.FX.HitStop tuning table --
 
 	  * FreezeFlightLanding -- the dev-menu flight feature's landing-impact freeze.
-	    Client/DevMenu/FlightController.lua is the only caller. Delegates to
+	    Client/Flight/FlightController.lua is the only caller. Delegates to
 	    Client/FX/FlightAnimator.FreezeActiveFlightTrack.
 
 	  * FreezeVictimMovement -- the combat hit-stop. Client/Combat/CombatFeedbackClient.lua is the only

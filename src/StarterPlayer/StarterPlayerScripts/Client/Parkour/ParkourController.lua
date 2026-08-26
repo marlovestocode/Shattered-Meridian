@@ -23,7 +23,7 @@
 
 	RUNS ON HEARTBEAT, not RenderStepped. Movement is physics, and Heartbeat is the tick that runs
 	after physics has stepped -- reading a velocity on RenderStepped means reading last frame's. This
-	also matches Client/DevMenu/FlightController.lua's own loop and the server's own authoritative tick.
+	also matches Client/Flight/FlightController.lua's own loop and the server's own authoritative tick.
 
 	SPRINT IS NOT OWNED HERE. Client/Movement/RunController.lua owns run intent -- the key,
 	hold-versus-toggle, Autorun and the remote that tells the server -- and this module READS it once
@@ -208,7 +208,7 @@ end
 --   * RootControlLocked   -- CombatSystem.syncRootControlLocked: a finisher/DashPunch ragdoll is
 --                            tumbling this body, or RagdollController.HoldAloft has an AlignPosition
 --                            pin on it (an air-combo juggle, from either side).
---   * Flying              -- AdminActionSystem.SetFlying, driven by Client/DevMenu/FlightController.
+--   * Flying              -- AdminActionSystem.SetFlying, driven by Client/Flight/FlightController.
 --   * Frozen              -- DevMenuSystem.SetTargetFrozen, an absolute admin lockdown.
 --   * EmoteMovementLocked -- EmoteSystem, a MovementLocked emote.
 -- Reading rather than inventing is the point: these four are already the definitive answer to "is

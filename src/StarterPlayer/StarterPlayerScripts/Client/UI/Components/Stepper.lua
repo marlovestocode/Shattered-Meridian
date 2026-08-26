@@ -12,7 +12,7 @@
 	whatever OnChanged hands it.
 
 	Does NOT own DevMenu's existing +-0.01/+-0.1 tuning steppers or its "<"/">" cycle steppers
-	(Screens/DevMenu/init.lua) -- those are hand-rolled, differently-shaped controls with their own
+	(Screens/DevTools/DevMenu/init.lua) -- those are hand-rolled, differently-shaped controls with their own
 	Tokens.Control.StepButtonSize geometry, and folding them into this component is an explicitly
 	separate follow-up per the redesign handoff, not an oversight.
 

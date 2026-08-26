@@ -6,9 +6,9 @@
 	per rebindable Types.KeybindAction (label + current key + Rebind/Cancel button), and the "Reset
 	to Defaults" button for whichever sub-tab is currently selected. Both device columns mount up
 	front and toggle via Visible rather than re-mounting on sub-tab clicks -- the same idiom
-	Screens/DevMenu/ContentArea.lua's own `tabContent` already established.
+	Screens/DevTools/DevMenu/ContentArea.lua's own `tabContent` already established.
 
-	Follows Screens/DevMenu/init.lua's "screen exposes state/signals, client module drives from
+	Follows Screens/DevTools/DevMenu/init.lua's "screen exposes state/signals, client module drives from
 	outside" precedent: this component owns no binding STATE and takes no rebind action of its own.
 	Every row's displayed key comes from props.KeyboardBindings/GamepadBindings (owned and written by
 	Client/Settings/SettingsClient.lua), and clicking Rebind/Reset only ever calls the matching prop

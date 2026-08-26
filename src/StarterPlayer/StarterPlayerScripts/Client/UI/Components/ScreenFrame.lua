@@ -56,12 +56,12 @@
 	  way Screens/Menus/init.lua does it).
 	- Whether the panel is open. IsOpen belongs to the screen; OnClose is a callback rather than a
 	  Value this module writes, because a close is a thing some screens do more than set a flag for
-	  (Screens/LiveConsole has to unsubscribe) -- see LiveConsoleClient.lua's own setOpen.
+	  (Screens/DevTools/LiveConsole has to unsubscribe) -- see LiveConsoleClient.lua's own setOpen.
 	- Scaling, brackets, the surface texture, the modal-open Attribute: all Components/ModalScreen.lua's,
 	  which this wraps rather than replaces. A screen that wants a differently-shaped frame should call
 	  ModalScreen directly, exactly as the two remaining direct callers do -- Screens/BugReport (a form
 	  sized by its own content, AutomaticSize.Y, so there is no fixed body band for a frame to divide)
-	  and Screens/MoveEditor/ShortcutsOverlay (a transient cheat-sheet over another panel: no tabs, no
+	  and Screens/DevTools/MoveEditor/ShortcutsOverlay (a transient cheat-sheet over another panel: no tabs, no
 	  footer, and nothing that should look like a screen in its own right). Screens/Onboarding is a
 	  third shape again and calls Components/Panel.lua directly.
 ]]
@@ -102,7 +102,7 @@ local CLOSE_ZONE_WIDTH = CLOSE_BUTTON_SIZE + ScreenFrame.BandPaddingX * 2
 export type TabState = {
 	Names: { string },
 	-- The currently selected tab name. Writable -- a screen that wants to open on a specific tab sets
-	-- it, and Screens/MoveEditor-style "jump to the tab that owns this thing" navigation is just a set.
+	-- it, and Screens/DevTools/MoveEditor-style "jump to the tab that owns this thing" navigation is just a set.
 	Current: Fusion.Value<string>,
 	-- One shared Computed per tab name -- see this file's header on why the caller must read these
 	-- rather than build its own.

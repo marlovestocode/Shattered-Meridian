@@ -24,7 +24,7 @@
 	The design asked for this explicitly: "the parkour system should recognize when a player is in an
 	aerial combat state instead of trying to force them back onto normal ground movement." Forcing
 	ground movement onto a player being juggled would fight RagdollController's AlignPosition hold for
-	every frame both were active -- the exact failure mode Client/DevMenu/FlightController.lua's own
+	every frame both were active -- the exact failure mode Client/Flight/FlightController.lua's own
 	RootControlLocked gate was added to fix for flight.
 
 	Highest priority in the framework by a wide margin (1000): nothing may pre-empt combat ownership.

@@ -274,7 +274,7 @@ Constants.Debug = {
 		MaxRepeatsPerSecond = 20,
 		-- Fixed capacity of Logger.lua's always-on capture buffer (one per VM -- the server has its
 		-- own, each client has its own), read once at require-time. Feeds
-		-- Server/Systems/LiveConsoleSystem.lua's Subscribe snapshot and Client/LiveConsole/
+		-- Server/Systems/LiveConsoleSystem.lua's Subscribe snapshot and Client/DevTools/LiveConsole/
 		-- LiveConsoleClient.lua's local "My Client" tab -- NOT gated by Enabled/IsStudio/Level/Scope
 		-- above (see Logger.lua's own header for why that split is safe). Oldest entries are evicted
 		-- past this count; 1000 is generous enough to cover a genuine investigation window without
@@ -303,8 +303,8 @@ Constants.Debug = {
 	-- Safety comes entirely from the whitelist below plus DevMenuSystem.lua re-checking every
 	-- request's Player.UserId server-side -- never from being hidden or from Studio-gating. See
 	-- DevMenuSystem.lua's header for the full authorization contract.
-	-- The component Storybook (Client/UI/Screens/Storybook/init.lua, driven by
-	-- Client/Storybook/StorybookClient.lua) -- the gallery of every shared component, token and layout
+	-- The component Storybook (Client/UI/Screens/DevTools/Storybook/init.lua, driven by
+	-- Client/DevTools/Storybook/StorybookClient.lua) -- the gallery of every shared component, token and layout
 	-- primitive. Studio-only diagnostics, which is why it lives under Constants.Debug rather than in
 	-- Constants.Keybinds below.
 	Storybook = {
@@ -444,7 +444,7 @@ Constants.Debug = {
 			SetTargetHealth = "DevMenu_SetTargetHealth",
 			SetTargetGodmode = "DevMenu_SetTargetGodmode",
 			SetTargetFlight = "DevMenu_SetTargetFlight",
-			-- Toggles Collide mode for an already-flying target (Client/DevMenu/FlightPhysics.lua) --
+			-- Toggles Collide mode for an already-flying target (Client/Flight/FlightPhysics.lua) --
 			-- see AdminActionSystem.SetFlightCollide's own header.
 			SetTargetFlightCollide = "DevMenu_SetTargetFlightCollide",
 			-- Live flight-feel tuner (Server/DevMenu/FlightTuning.lua) -- fetch-once/adjust/reset
@@ -528,7 +528,7 @@ Constants.Debug = {
 			-- UnflagSuspectedCheater) -- same explicit-UserId-from-a-roster-row targeting as
 			-- KickPlayer/BanPlayer/MutePlayer above, never the lock-on target.
 			SetSuspectedCheater = "DevMenu_SetSuspectedCheater",
-			-- Sidebar header stats (persistent Sidebar, Screens/DevMenu/Sidebar.lua) -- one combined
+			-- Sidebar header stats (persistent Sidebar, Screens/DevTools/DevMenu/Sidebar.lua) -- one combined
 			-- RemoteFunction rather than folding into ListPlayers/ListBugReports, since neither of
 			-- those two remotes' existing callers need the other's count.
 			GetSidebarStats = "DevMenu_GetSidebarStats",
@@ -661,8 +661,8 @@ Constants.Network = {
 	-- requiring this before the server's own remote-creating System has necessarily finished booting
 	-- on a slow server start), Server/Systems/CombatSystem.lua's onCharacterAdded loading a fresh
 	-- Humanoid/HumanoidRootPart, and four client CharacterAdded handlers waiting on that same pair of
-	-- parts (Client/Camera/FlightCamera.lua, Client/Camera/ShiftLockCamera.lua, Client/DevMenu/
-	-- FlightController.lua, Client/DevMenu/DevMenuClient.lua). All seven were tuned to agree on 10s by
+	-- parts (Client/Camera/FlightCamera.lua, Client/Camera/ShiftLockCamera.lua, Client/DevTools/DevMenu/
+	-- FlightController.lua, Client/DevTools/DevMenu/DevMenuClient.lua). All seven were tuned to agree on 10s by
 	-- coincidence, not by reference to a shared source -- a future "give slow connections more slack"
 	-- pass would otherwise have had to hunt down and edit every call site instead of one number. Not
 	-- every WaitForChild in the codebase reads this: Client/Combat/CombatClient.lua's own Humanoid wait
@@ -932,8 +932,8 @@ Constants.Keybinds = {
 		-- action" row of the keyboard (DevMenuToggle = Equals, OpenMoveEditor = Minus, this =
 		-- LeftBracket). Admin-only, same authorization contract as OpenMoveEditor above.
 		OpenKitEditor = { KeyCode = Enum.KeyCode.LeftBracket },
-		-- Opens the Live Admin Console (Client/LiveConsole/LiveConsoleClient.lua,
-		-- Client/UI/Screens/LiveConsole/init.lua) for an authorized admin -- a bespoke live log
+		-- Opens the Live Admin Console (Client/DevTools/LiveConsole/LiveConsoleClient.lua,
+		-- Client/UI/Screens/DevTools/LiveConsole/init.lua) for an authorized admin -- a bespoke live log
 		-- stream, not Roblox's own native Developer Console. It used to open the native one via
 		-- StarterGui:SetCore("DevConsoleVisible") until it was replaced: that panel only ever showed
 		-- anything in Studio, since Shared/Logger.lua never calls print()/warn() outside
@@ -1931,7 +1931,7 @@ Constants.Moderation = {
 }
 
 -- Move Creation System (Server/Combat/MoveRegistryManager.lua, Server/Systems/MoveEditorSystem.lua,
--- Client/UI/Screens/MoveEditor/) -- an in-game, admin-gated editor for authoring new combat moves
+-- Client/UI/Screens/DevTools/MoveEditor/) -- an in-game, admin-gated editor for authoring new combat moves
 -- as data (MoveTypes.MoveDefinition) rather than hand-written Constants.lua tables + bespoke
 -- server/client code per move. Same "own DataStore config, own tuning surface" split
 -- Constants.BugReport/Constants.PlayerData already establish -- CustomMoveDataStoreName itself
@@ -2151,7 +2151,7 @@ Constants.Kit = {
 }
 
 -- Race Traits + Bloodline Abilities plan -- the shared admin editor for both Race Traits and
--- Bloodline stages (Server/Systems/KitEditorSystem.lua, Client/UI/Screens/KitEditor/, not built yet).
+-- Bloodline stages (Server/Systems/KitEditorSystem.lua, Client/UI/Screens/DevTools/KitEditor/, not built yet).
 -- Mirrors Constants.MoveEditor above field-for-field: same DataStore retry/backoff shape (Shared/
 -- DataStoreRetry.lua), same debounce reasoning between a PropertyEditor field edit and the
 -- UpdateDraft round trip it triggers.
@@ -2212,7 +2212,7 @@ Constants.LiveConsole = {
 	-- regardless of how fast logs are actually arriving -- caps this feature at 4 pushes/sec/admin
 	-- no matter the log volume, independent of Logger.lua's own per-message Output rate limit.
 	StreamFlushIntervalSeconds = 0.25,
-	-- Client-side render cap (Client/LiveConsole/LiveConsoleClient.lua) -- oldest rendered lines are
+	-- Client-side render cap (Client/DevTools/LiveConsole/LiveConsoleClient.lua) -- oldest rendered lines are
 	-- trimmed past this so a long-open console can't grow its own UI list unbounded. Kept small
 	-- (not the server capture buffer's size) because appendEntries clones this many entries on every
 	-- single log line while the panel is open, and nobody reads 1000 lines in a scrolling panel.

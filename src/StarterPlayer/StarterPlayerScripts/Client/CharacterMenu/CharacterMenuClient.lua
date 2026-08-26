@@ -3,7 +3,7 @@
 	CharacterMenuClient.lua
 
 	Owns: the local player's character-menu UX -- the panel's open/close keybind (KeybindManager.
-	Matches("CharacterMenuToggle", ...), the same pattern SettingsClient/DevMenuClient/
+	Matches("CharacterMenuToggle", ...), the same pattern SettingsClient/DevTools/DevMenu/DevMenuClient/
 	BugReportClient already use), every network round trip the menu needs (the character sheet, the
 	art catalogue, unlock, equip, emote-slot assignment), and one thing that isn't UI at all: keeping
 	Client/Combat/HotbarBindings.lua in sync with the arts the server says are equipped.

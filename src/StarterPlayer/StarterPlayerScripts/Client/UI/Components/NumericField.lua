@@ -43,7 +43,7 @@
 	let go on is the one that must not be dropped.
 
 	Generalizes two pre-existing, near-identical shapes that were never unified: Stepper.lua's own
-	single-Step clamp control (Attributes screen), and Screens/DevMenu/ContentArea.lua's hand-rolled
+	single-Step clamp control (Attributes screen), and Screens/DevTools/DevMenu/ContentArea.lua's hand-rolled
 	hitboxTimingRow (a Label plus four step buttons at fixed +-0.1/+-0.01 deltas) -- both of those
 	files' own headers flag this exact unification as a deliberately-deferred follow-up.
 
@@ -127,7 +127,7 @@ export type NumericFieldProps = {
 	-- fact about the field, not about its current value, so nothing here should ever be reactive.
 	--
 	-- Where the text itself lives is the caller's business, but the Move Editor keeps every one of
-	-- its hints in Screens/MoveEditor/Copy.lua rather than inline, so the prose is editable in one
+	-- its hints in Screens/DevTools/MoveEditor/Copy.lua rather than inline, so the prose is editable in one
 	-- place -- see that module's own header.
 	--
 	-- LAYOUT RULE: within a single horizontal row of these (PropertyEditor.lua's `numericRow`),
@@ -560,7 +560,7 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 			BorderSizePixel = 0,
 			LayoutOrder = 3,
 			-- Without this the click falls through to whatever is behind the panel -- the same reason
-			-- Screens/MoveEditor/PreviewViewport.lua's own ViewportFrame sets it.
+			-- Screens/DevTools/MoveEditor/PreviewViewport.lua's own ViewportFrame sets it.
 			Active = true,
 
 			[OnEvent "InputBegan"] = function(input: InputObject)

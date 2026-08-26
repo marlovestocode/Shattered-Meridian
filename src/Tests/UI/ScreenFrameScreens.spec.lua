@@ -8,10 +8,10 @@ local UI = StarterPlayer.StarterPlayerScripts.Client.UI
 local Screens = UI.Screens
 
 local Settings = require(Screens.Settings)
-local LiveConsole = require(Screens.LiveConsole)
-local DevMenu = require(Screens.DevMenu)
-local MoveEditor = require(Screens.MoveEditor)
-local KitEditor = require(Screens.KitEditor)
+local LiveConsole = require(Screens.DevTools.LiveConsole)
+local DevMenu = require(Screens.DevTools.DevMenu)
+local MoveEditor = require(Screens.DevTools.MoveEditor)
+local KitEditor = require(Screens.DevTools.KitEditor)
 
 -- Every screen that wears Components/ScreenFrame.lua, mounted once. Same argument as
 -- Storybook.spec.lua beside it -- Roblox property names are unchecked until the code runs, and the

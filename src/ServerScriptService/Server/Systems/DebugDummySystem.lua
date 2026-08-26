@@ -80,7 +80,7 @@
 	whether a hold/throw is legal (GrabSystem), authorization or rate-limiting for the admin actions
 	that drive this module (DevMenuSystem.lua, identical trust boundary to AdminActionSystem's own:
 	this module trusts its caller is already an authorized, rate-limited request), or the Admin Menu UI
-	itself (Client/UI/Screens/DevMenu/).
+	itself (Client/UI/Screens/DevTools/DevMenu/).
 ]]
 
 local Players = game:GetService("Players")

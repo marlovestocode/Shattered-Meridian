@@ -898,7 +898,7 @@ end
 
 -- Binds the toggle key. Studio only -- see the file header. Idempotent.
 -- Whether an authorized admin is allowed this overlay in a LIVE server. Set by
--- Client/DevMenu/DevMenuClient.lua once the server has answered its authorization round-trip -- see
+-- Client/DevTools/DevMenu/DevMenuClient.lua once the server has answered its authorization round-trip -- see
 -- SetAuthorized below.
 local authorized = false
 

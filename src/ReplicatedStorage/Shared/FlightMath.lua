@@ -2,7 +2,7 @@
 --[[
 	FlightMath.lua
 
-	Owns: pure, Instance-free math for the dev-menu flight feature (Client/DevMenu/FlightController.lua/
+	Owns: pure, Instance-free math for the dev-menu flight feature (Client/Flight/FlightController.lua/
 	FlightPhysics.lua) -- velocity/momentum integration, bank-angle-from-turn-rate, and the hover idle
 	bob. Deliberately has no Roblox Instance dependency (no Humanoid, no BasePart, no Workspace), the
 	same "pure logic, safe for both sides to read" shape luau-coding-standards.md asks of Shared
@@ -79,7 +79,7 @@ end
 -- exponential ease (alpha = 1 - e^(-rate*dt)) -- before this extraction, the single most-repeated
 -- formula across the client camera/flight code, independently reimplemented in Client/Camera/
 -- FlightCamera.lua (FOV-delta and chase-offset ease), Client/Camera/ShiftLockCamera.lua (shoulder-
--- offset CameraOffset ease), Client/DevMenu/FlightController.lua (yaw/pitch/bank easeAngle), and
+-- offset CameraOffset ease), Client/Flight/FlightController.lua (yaw/pitch/bank easeAngle), and
 -- Client/FX/FOVOffset.lua (continuous-slot ease). Deliberately returns just the alpha rather than
 -- an eased value: the four call sites apply it to three different shapes (a plain number via
 -- `current + (target - current) * alpha`, a Vector3 via `current:Lerp(target, alpha)`, and a
@@ -131,7 +131,7 @@ end
 
 -- Yaw angle (radians) of a direction vector's flattened (Y-zeroed) XZ projection -- shared by
 -- Client/Camera/ShiftLockCamera.lua (deriving character facing from the camera's own look vector)
--- and Client/DevMenu/FlightController.lua (deriving character facing from flight velocity), which
+-- and Client/Flight/FlightController.lua (deriving character facing from flight velocity), which
 -- had independently arrived at the identical formula: CFrame.Angles(0, yaw, 0) has LookVector
 -- (-sin(yaw), 0, -cos(yaw)); solving for the flattened direction gives yaw = atan2(-x, -z). Returns
 -- nil when the flattened vector is too close to straight up/down to have a usable yaw (magnitude
@@ -144,7 +144,7 @@ function FlightMath.YawFromFlatDirection(direction: Vector3): number?
 		return nil
 	end
 	local unit = flat.Unit
-	-- Same formula Client/Camera/ShiftLockCamera.lua and Client/DevMenu/FlightController.lua's own
+	-- Same formula Client/Camera/ShiftLockCamera.lua and Client/Flight/FlightController.lua's own
 	-- (now-removed) local copies used: CFrame.Angles(0, yaw, 0) has LookVector (-sin(yaw), 0,
 	-- -cos(yaw)) -- yaw=0 faces -Z (Roblox's default forward), yaw=+pi/2 faces -X (NOT +X -- see
 	-- this function's own spec for the direction this sign convention actually produces). Solving

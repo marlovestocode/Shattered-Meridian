@@ -80,7 +80,7 @@ Tokens.Color = {
 	Positive = Color3.fromRGB(80, 136, 112),
 
 	-- Faction accents (world-bible.md). Flat keys, not a Tokens.FactionColor map -- one consumer
-	-- today (Screens/DevMenu/ContentArea.lua's color preview); a second caller earns the map.
+	-- today (Screens/DevTools/DevMenu/ContentArea.lua's color preview); a second caller earns the map.
 	FactionCelestial = Color3.fromRGB(158, 196, 219),
 	FactionDemonic = Color3.fromRGB(176, 58, 46),
 	FactionUnbound = Color3.fromRGB(158, 150, 176),

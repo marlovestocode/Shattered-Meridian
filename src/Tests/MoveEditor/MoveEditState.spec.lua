@@ -1,6 +1,6 @@
 --!strict
 local StarterPlayer = game:GetService("StarterPlayer")
-local MoveEditState = require(StarterPlayer.StarterPlayerScripts.Client.MoveEditor.MoveEditState)
+local MoveEditState = require(StarterPlayer.StarterPlayerScripts.Client.DevTools.MoveEditor.MoveEditState)
 
 -- Undo/redo is a state machine whose failures are all silent: a redo branch that survives a fresh
 -- edit hands back a state the author already replaced, a stack that never trims grows for the whole

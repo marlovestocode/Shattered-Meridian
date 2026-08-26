@@ -33,7 +33,7 @@
 	(loadPersistedBloodlines). An EMPTY registry is still a fully legal, tested state -- see Init().
 
 	HOW A BLOODLINE ACTUALLY GETS AUTHORED, because the chain is long and every link is real: the
-	admin opens the Kit Editor ([ -- Client/KitEditor/KitEditorClient.lua), which round-trips through
+	admin opens the Kit Editor ([ -- Client/DevTools/KitEditor/KitEditorClient.lua), which round-trips through
 	KitEditorSystem's admin-gated remotes into Validate/Upsert here, and KitEditorSystem persists it.
 	That client module had NO INBOUND REQUIRE until it was wired into Main.client.lua/UI/init.lua --
 	so nothing ever called any of this, and the registry was empty in practice rather than in

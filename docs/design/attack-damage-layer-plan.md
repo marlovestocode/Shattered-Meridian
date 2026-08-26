@@ -56,7 +56,7 @@ Where this plan reuses that shape, it says so; where it deliberately diverges, i
 
 **2. The Move Creation System is a fully-built authoring pipeline with no live combat consumer, and
 its own file headers already say so.** `MoveRegistryManager.lua`, `DefaultMoveRegistry.lua`,
-`MoveTypes.lua`, `MoveStats.lua`, `MoveEditorSystem.lua`, and the entire `Client/UI/Screens/MoveEditor/`
+`MoveTypes.lua`, `MoveStats.lua`, `MoveEditorSystem.lua`, and the entire `Client/UI/Screens/DevTools/MoveEditor/`
 tree are alive, wired to `ArtSystem`/`ArtTreeManager` (an "Art" *is* a `MoveDefinition` with an
 `Art` binding — `MoveTypes.lua`'s own header), persisted to DataStore, and booted in
 `Main.server.lua`. `MoveEditorSystem.lua`'s own header states plainly: *"No longer owns (combat system
@@ -216,7 +216,7 @@ bypassing `MoveRegistryManager`/`MoveTypes` entirely.
 
 *Why not.* This duplicates a schema, a validation/clamp pass, and a persistence story that already
 exist and are already exercised by a real editor UI. It leaves `MoveEditorSystem`, the entire
-`Client/UI/Screens/MoveEditor/` tree, and — critically — `ArtSystem`'s `MoveArtBinding` orphaned a
+`Client/UI/Screens/DevTools/MoveEditor/` tree, and — critically — `ArtSystem`'s `MoveArtBinding` orphaned a
 second time. Since an Art *is* a move (`MoveTypes.MoveArtBinding`'s own header: *"This is the entire
 Move-Creation-System-to-ArtSystem seam"*), building attacks any other way means the progression layer's
 entire ability system has no path to ever deal damage — directly contradicting the instruction to set

@@ -135,7 +135,7 @@ end
 -- thing that already knows.
 --
 -- WORKS ON ANY CHILD OF ANY UIListLayout, not only on a Stack's. Four call sites rely on that:
--- Components/Panel.lua owns a list layout of its own (Screens/MoveEditor/Sidebar.lua and
+-- Components/Panel.lua owns a list layout of its own (Screens/DevTools/MoveEditor/Sidebar.lua and
 -- PreviewViewport.lua both fill inside one), Components/ModalScreen.lua does too (Components/
 -- ScreenFrame.lua's body band fills inside THAT), and Screens/Onboarding/CreatorFrame.lua's panel is
 -- a third. The flex item is a property of the child and the layout above it, so a container this

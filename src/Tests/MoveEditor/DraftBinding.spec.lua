@@ -3,7 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterPlayer = game:GetService("StarterPlayer")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
-local DraftBinding = require(StarterPlayer.StarterPlayerScripts.Client.UI.Screens.MoveEditor.DraftBinding)
+local DraftBinding = require(StarterPlayer.StarterPlayerScripts.Client.UI.Screens.DevTools.MoveEditor.DraftBinding)
 
 -- Apply and Field are the two primitives every form panel in the Move Editor commits and reads
 -- through, and neither needs a mounted screen to exercise: Apply is clone-then-mutate-then-publish

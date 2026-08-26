@@ -6,7 +6,7 @@
 	capture buffer, tagged Source = "Engine" -- script errors, deprecation warnings, and any raw
 	print()/warn() call anywhere in this VM that Logger.lua's own emit() never sees directly (it
 	only sees calls that go through Logger.scope(...):info/warn/etc). This is what lets the Live
-	Admin Console (Server/Systems/LiveConsoleSystem.lua, Client/LiveConsole/LiveConsoleClient.lua)
+	Admin Console (Server/Systems/LiveConsoleSystem.lua, Client/DevTools/LiveConsole/LiveConsoleClient.lua)
 	show genuine live-server errors even though Logger.lua's own structured logging never prints
 	outside Studio by design -- LogService.MessageOut fires regardless of IsStudio, which is exactly
 	why this module hooks LogService instead of Logger.lua's own print/warn calls.

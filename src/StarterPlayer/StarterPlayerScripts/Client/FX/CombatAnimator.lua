@@ -534,7 +534,7 @@ RunService.Heartbeat:Connect(function()
 	local runningStage2Track = tracks.RunningStage2
 	local walkingTrack = tracks.Walking
 	if runningTrack or runningStage2Track or walkingTrack or armedIdleTrack then
-		-- Also silenced while Flying (Client/DevMenu/FlightController.lua/FlightAnimator.lua own the
+		-- Also silenced while Flying (Client/Flight/FlightController.lua/FlightAnimator.lua own the
 		-- character's animation entirely during flight) -- Boost reuses the Sprint keybind and raw
 		-- WASD can still register nonzero MoveDirection mid-flight, so without this guard the
 		-- ground-locomotion loop could blend in underneath a Hover/Cruise/Boost flight pose.

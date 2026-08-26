@@ -118,7 +118,7 @@ local FlightConstants = {
 	-- returns nil) -- false = noclip, matching this feature's locked-in default (map-observation
 	-- flight bypasses collision unless an admin opts into Collide).
 	DefaultCollideMode = false,
-	-- Collide-mode LinearVelocity.MaxForce (Client/DevMenu/FlightPhysics.lua's EnterCollideMode) -- how
+	-- Collide-mode LinearVelocity.MaxForce (Client/Flight/FlightPhysics.lua's EnterCollideMode) -- how
 	-- hard the velocity drive is allowed to push the flying character's rootPart toward its commanded
 	-- velocity every frame. Large-but-finite rather than math.huge: too low and the character's own
 	-- momentum/gravity fights the drive (reads sluggish, sinks below the commanded path); too high and

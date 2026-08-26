@@ -16,7 +16,7 @@
 	contract. See Logger.lua's own header for the full reasoning.
 
 	Subscribe (RemoteFunction) doubles as both the authorization check and the fetch that populates
-	a freshly-opened console -- fired by Client/LiveConsole/LiveConsoleClient.lua the moment the
+	a freshly-opened console -- fired by Client/DevTools/LiveConsole/LiveConsoleClient.lua the moment the
 	panel actually opens, not eagerly at boot, so the snapshot it returns is never stale from having
 	sat in a closed panel. Unsubscribe (RemoteEvent, fire-and-forget) stops this System from pushing
 	to a player whose panel just closed -- no precondition check, matching RateLimiter.lua's own
@@ -27,7 +27,7 @@
 	already rests on.
 
 	Does not own: what gets captured (Shared/Logger.lua's emit()/CaptureEngineEntry), or the console
-	panel itself (Client/UI/Screens/LiveConsole/init.lua) -- this System only gates and transports.
+	panel itself (Client/UI/Screens/DevTools/LiveConsole/init.lua) -- this System only gates and transports.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")

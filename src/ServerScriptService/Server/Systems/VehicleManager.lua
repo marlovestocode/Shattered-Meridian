@@ -54,7 +54,7 @@
 	BlimpSystem.lua); the authoring contract (Shared/Vehicle/VehicleConstants.lua); reading the
 	registry folder (Shared/Vehicle/VehicleCatalog.lua); berth resolution (Server/Vehicles/
 	VehicleBerths.lua); placement arithmetic (Server/Vehicles/VehiclePlacement.lua); or the Vehicles
-	tab itself (Client/UI/Screens/DevMenu/VehiclesTab.lua).
+	tab itself (Client/UI/Screens/DevTools/DevMenu/VehiclesTab.lua).
 ]]
 
 local CollectionService = game:GetService("CollectionService")

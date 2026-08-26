@@ -6,7 +6,7 @@
 	needed before the Move Creation System's PropertyEditor (MoveDefinition.Shape: "Box"|"Sphere").
 
 	Expands INLINE below its own trigger row (growing this component's own AutomaticSize.Y) rather
-	than an absolutely-positioned floating popover -- the same choice Screens/DevMenu/Sidebar.lua's
+	than an absolutely-positioned floating popover -- the same choice Screens/DevTools/DevMenu/Sidebar.lua's
 	own overflowRow already made, for the same reason its header documents: this UI's ScreenGuis all
 	use ZIndexBehavior.Sibling, which makes a floating popover's stacking order fragile against
 	sibling content. A caller placing this inside a ScrollingFrame (the only place it's used today)

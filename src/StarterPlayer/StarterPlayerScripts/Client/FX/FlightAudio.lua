@@ -3,7 +3,7 @@
 	FlightAudio.lua
 
 	Owns: registering the dev-menu flight feature's sound effects with SoundManager.lua and exposing
-	verb-named play functions for Client/DevMenu/FlightController.lua to call -- the same "domain
+	verb-named play functions for Client/Flight/FlightController.lua to call -- the same "domain
 	module owns WHICH sounds exist and gives them a typed API" shape Client/FX/CombatAudio.lua
 	already established. Sound definitions come from FlightConstants.Sound (empty SoundId
 	placeholders until real assets are supplied -- SoundManager.Play/PlayLooped already no-op safely
@@ -12,7 +12,7 @@
 
 	The continuous wind-rush loop is the first user of SoundManager.lua's new PlayLooped/StopLooped/
 	SetLoopedVolume/SetLoopedPlaybackSpeed capability -- SetWindIntensity is called every Heartbeat
-	while flying (Client/DevMenu/FlightController.lua's stepFlight) with a [0,1] speed fraction, and
+	while flying (Client/Flight/FlightController.lua's stepFlight) with a [0,1] speed fraction, and
 	this module maps that to the configured volume/playback-speed ranges every frame; SoundManager
 	itself does no easing of its own (see that module's own header), so the caller is expected to
 	already be smoothing whatever fraction it passes in if smoothing is wanted.

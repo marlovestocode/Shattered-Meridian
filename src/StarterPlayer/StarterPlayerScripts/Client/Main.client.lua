@@ -48,13 +48,8 @@ local FOVOffset = require(script.Parent.FX.FOVOffset)
 local CameraOffsetComposer = require(script.Parent.FX.CameraOffsetComposer)
 local ParkourController = require(script.Parent.Parkour.ParkourController)
 local RunController = require(script.Parent.Movement.RunController)
-local DevMenuClient = require(script.Parent.DevMenu.DevMenuClient)
 local CharacterMenuClient = require(script.Parent.CharacterMenu.CharacterMenuClient)
-local MoveEditorClient = require(script.Parent.MoveEditor.MoveEditorClient)
-local KitEditorClient = require(script.Parent.KitEditor.KitEditorClient)
-local LiveConsoleClient = require(script.Parent.LiveConsole.LiveConsoleClient)
-local StorybookClient = require(script.Parent.Storybook.StorybookClient)
-local FlightController = require(script.Parent.DevMenu.FlightController)
+local FlightController = require(script.Parent.Flight.FlightController)
 local DefenseClient = require(script.Parent.Defense.DefenseClient)
 local AttackInputClient = require(script.Parent.Combat.AttackInputClient)
 local WeaponInventoryClient = require(script.Parent.Combat.WeaponInventoryClient)
@@ -313,14 +308,27 @@ logger:debug("CombatFeedbackClient start")
 CombatFeedbackClient.Start(uiHandles.CombatFeedback)
 logger:debug("CombatFeedbackClient end")
 
--- uiHandles.DevMenu is a Shared/Lazy.lua thunk, not a mounted panel -- the Dev Menu, Move Editor and
--- Live Console are the three screens UI.Mount() no longer builds on this boot thread (see its own
--- header). Nothing about this call site's position changes: this module already returned immediately
--- and did its real work behind a server authorization round trip, and it is now also what decides the
--- panel gets built at all.
-logger:debug("DevMenuClient start")
-DevMenuClient.Start(uiHandles.DevMenu, uiHandles.Chrome)
-logger:debug("DevMenuClient end")
+-- THE ONE DEV-TOOLING CALL. Dev Menu, Move Editor, Kit Editor, Live Console and the Storybook are
+-- started together by Client/DevTools/init.lua, and this file reaches that module by FindFirstChild
+-- rather than by path because a build config is allowed to omit the whole subtree -- see
+-- live.project.json and that module's own header. uiHandles.DevTools is nil in exactly the same
+-- builds, so the two guards are one condition, not two.
+--
+-- Nothing about the call site's position changes: each of the five already returned immediately and
+-- did its real work behind a server authorization round trip, and each panel is still a Shared/Lazy.lua
+-- thunk that only builds if that answer comes back yes.
+--
+-- Client/Flight/ is NOT part of this and is started unconditionally further down -- an admin can grant
+-- flight to a NON-admin, whose own client must drive the movement.
+local devToolsModule = script.Parent:FindFirstChild("DevTools")
+if devToolsModule and uiHandles.DevTools then
+	local DevTools = require(devToolsModule :: ModuleScript) :: any
+	logger:debug("DevTools start")
+	DevTools.Start(uiHandles.DevTools, uiHandles.Chrome)
+	logger:debug("DevTools end")
+else
+	logger:info("DevTools absent -- this build does not ship dev tooling")
+end
 
 -- Unconditional for every client, unlike DevMenuClient above -- the character menu (M: sheet, Arts,
 -- Emotes, Bounties) has no whitelist gate. This was the one Screens/ handle UI.Mount() used to
@@ -329,40 +337,6 @@ logger:debug("DevMenuClient end")
 logger:debug("CharacterMenuClient start")
 CharacterMenuClient.Start(uiHandles.Menus, uiHandles.Chrome)
 logger:debug("CharacterMenuClient end")
-
--- Same whitelist-gated, delayed-authorization shape as DevMenuClient above -- and the same deferred
--- mount, from the same thunk (this is the largest of the three panels).
-logger:debug("MoveEditorClient start")
-MoveEditorClient.Start(uiHandles.MoveEditor, uiHandles.Chrome)
-logger:debug("MoveEditorClient end")
-
--- Identical shape to MoveEditorClient above, and it had NO CALLER AT ALL until this line: nothing
--- anywhere required Client/KitEditor/KitEditorClient.lua, so its OpenKitEditor keybind never bound
--- and the Kit Editor was unreachable. That matters beyond the panel -- it is the only thing that
--- authors Race Trait and Bloodline content, so BloodlineManager's registry booted empty and stayed
--- empty, and every reader downstream (BloodlineSystem, KitAbilitySystem, the character sheet's own
--- bloodline line) degraded quietly instead of erroring. Same class of gap as the M menu having no
--- caller before commit ab9f335.
-logger:debug("KitEditorClient start")
-KitEditorClient.Start(uiHandles.KitEditor, uiHandles.Chrome)
-logger:debug("KitEditorClient end")
-
--- Unlike DevMenuClient/MoveEditorClient above, this one binds its input unconditionally for every
--- client -- the real gate is server-side, on Subscribe, fired only once the panel actually opens.
--- Its panel is deferred too, but on that same open-time gate rather than on an authorization answer,
--- since there is no boot-time answer here to hang it off. See LiveConsoleClient.lua's own header.
-logger:debug("LiveConsoleClient start")
-LiveConsoleClient.Start(uiHandles.LiveConsole, uiHandles.Chrome)
-logger:debug("LiveConsoleClient end")
-
--- The component Storybook, and the one module here that usually does NOTHING: StorybookClient.Start
--- returns immediately outside Studio, so on a live client no key is bound and the gallery is never
--- built. Started unconditionally anyway rather than being wrapped in an IsStudio check here, because
--- the gate belongs with the module that owns the reason for it -- the same call every other
--- authorization-gated client module on this list already makes.
-logger:debug("StorybookClient start")
-StorybookClient.Start(uiHandles.Storybook, uiHandles.Chrome)
-logger:debug("StorybookClient end")
 
 -- Unconditional for every client, unlike DevMenuClient above -- the bug report form has no
 -- whitelist gate; every player can open and submit it.
@@ -387,7 +361,9 @@ logger:debug("SettingsClient end")
 -- Unconditional for every client, not just admins -- see FlightController.lua's own header for
 -- why: it's purely reactive to a server-set Attribute on each player's own Humanoid, so a non-
 -- admin who's simply the TARGET of another player's admin action still needs this running to
--- actually move when granted flight.
+-- actually move when granted flight. That is exactly why it (and FlightPhysics beside it) moved out
+-- of Client/DevTools/DevMenu/ to Client/Flight/ when the dev tooling was put behind an omittable path: flight
+-- is a shipped feature that was misfiled, not tooling.
 logger:debug("FlightController start")
 FlightController.Start()
 logger:debug("FlightController end")

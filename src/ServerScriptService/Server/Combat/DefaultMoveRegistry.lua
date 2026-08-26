@@ -8,7 +8,7 @@
 	forward offset) only; renamed and widened so every real HitboxAttackDefinition field an admin
 	could plausibly want to hand-tune (Shape/Size/Radius/Offset/WindupSeconds/ActiveSeconds/
 	RecoverySeconds/Cooldown/Damage/PostureDamage/ArcDegrees/MaxTargets) is reachable through the SAME
-	Sidebar/PropertyEditor UI a hand-authored custom move uses (Client/UI/Screens/MoveEditor/), instead
+	Sidebar/PropertyEditor UI a hand-authored custom move uses (Client/UI/Screens/DevTools/MoveEditor/), instead
 	of the old DevMenu Tuning tab's narrow +-delta stepper rows. That old UI is gone; this module's own
 	job -- mutate the real CombatConstants tables live, by reference -- is unchanged.
 

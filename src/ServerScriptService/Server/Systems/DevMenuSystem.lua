@@ -878,7 +878,7 @@ local function handleSetSuspectedCheater(
 	return { Success = true }
 end
 
--- Sidebar header stats (persistent Sidebar, Screens/DevMenu/Sidebar.lua) -- combines two independent
+-- Sidebar header stats (persistent Sidebar, Screens/DevTools/DevMenu/Sidebar.lua) -- combines two independent
 -- in-memory counters (BugReportSystem.GetOpenCount/ModerationSystem.GetSuspectedCheaterCount) into
 -- one response so the Sidebar pays a single round trip. Neither counter is computed here -- this
 -- handler only gates the request and forwards each System's own already-maintained number.

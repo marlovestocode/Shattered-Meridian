@@ -255,7 +255,7 @@ end
 -- Priority, highest first:
 --   1. Frozen (admin-only lock, DevMenuSystem.lua's SetTargetFrozen) -- overrides EVERYTHING,
 --      including Flying, since an admin freeze is meant to be an absolute lockdown.
---   2. Flying (Client/DevMenu/FlightController.lua) -- above even air-combo-chase, see below.
+--   2. Flying (Client/Flight/FlightController.lua) -- above even air-combo-chase, see below.
 --   3. EmoteMovementLocked (Server/Systems/EmoteSystem.lua) -- same tier as Frozen/Flying: a
 --      MovementLocked emote is a deliberate full stop, not something any tier below should peek
 --      through.
@@ -294,7 +294,7 @@ function Movement.ComputeDesiredWalkSpeed(state: CombatState, now: number): numb
 		return 0
 	end
 
-	-- Flying (Client/DevMenu/FlightController.lua) takes top priority, above even air-combo-chase:
+	-- Flying (Client/Flight/FlightController.lua) takes top priority, above even air-combo-chase:
 	-- WalkSpeed is meaningless once PlatformStand suspends the Humanoid's own ground movement, but
 	-- leaving it raised (e.g. Sprint, which has no Flying check of its own -- it's an unrelated
 	-- ground-combat mechanic) still lets the Humanoid's OWN built-in Running state/sound fire off

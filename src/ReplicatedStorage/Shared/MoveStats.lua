@@ -27,7 +27,7 @@
 	only samples in that window) and the per-hit damage, since those come straight from the same
 	fields the server reads.
 
-	Does not own: the drawing (Components/Graph.lua), the panel (Screens/MoveEditor/StatsPanel.lua),
+	Does not own: the drawing (Components/Graph.lua), the panel (Screens/DevTools/MoveEditor/StatsPanel.lua),
 	or any notion of balance -- nothing here judges whether a number is good, it only reports it.
 ]]
 

@@ -298,7 +298,7 @@ function BountyTab.Mount(scope: Scope, props: BountyTabProps): Frame
 			-- A ScrollingFrame now that this is a full tab rather than a 420px-tall side panel: a
 			-- populated server can carry more marks than fit, and a plain Frame silently clipped the
 			-- overflow. AutomaticCanvasSize means the canvas tracks however many rows exist without
-			-- this file counting them, the same shape Screens/MoveEditor/MoveList.lua uses.
+			-- this file counting them, the same shape Screens/DevTools/MoveEditor/MoveList.lua uses.
 			-- Takes whatever the heading and the subtitle left, rather than giving back a hand-summed
 			-- HEADER_ALLOWANCE -- see Components/Stack.lua's header. That constant was this file's
 			-- share of the ten that a single Tokens.Type change used to invalidate silently.

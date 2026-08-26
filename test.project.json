@@ -47,23 +47,14 @@
 					"Emotes": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Emotes"
 					},
-					"DevMenu": {
-						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/DevMenu"
+					"DevTools": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/DevTools"
 					},
-					"MoveEditor": {
-						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/MoveEditor"
-					},
-					"KitEditor": {
-						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/KitEditor"
+					"Flight": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Flight"
 					},
 					"CharacterMenu": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/CharacterMenu"
-					},
-					"LiveConsole": {
-						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/LiveConsole"
-					},
-					"Storybook": {
-						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Storybook"
 					},
 					"Network": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Network"

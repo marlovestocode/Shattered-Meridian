@@ -10,7 +10,7 @@
 	narrow exception to UI/init.lua's "nothing else creates its own root scope" rule.
 
 	Follows every other multi-screen Screen's "screen exposes state/signals, client module drives
-	from outside" convention (BugReport/init.lua, Screens/DevMenu/init.lua) -- every Fusion.Value and
+	from outside" convention (BugReport/init.lua, Screens/DevTools/DevMenu/init.lua) -- every Fusion.Value and
 	BindableEvent making up OnboardingHandle is created here, but OnboardingClient.lua's own exported
 	RunCinematicStage/WireNavigation/RunConfirmationLoop are the only things that ever write
 	Stage/HoldProgress/StatusText/IsSubmitting/IsSucceeding or listen to the *Requested signals; this

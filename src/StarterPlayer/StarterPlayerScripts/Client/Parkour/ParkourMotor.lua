@@ -77,7 +77,7 @@ local logger = Logger.scope("ParkourMotor")
 
 local ParkourMotor = {}
 
--- Own instance names, distinct from Client/DevMenu/FlightPhysics.lua's Flight* set and
+-- Own instance names, distinct from Client/Flight/FlightPhysics.lua's Flight* set and
 -- Server/Combat/RagdollController.lua's AirComboHold* set, so all three rigs can coexist on one
 -- rootPart without colliding -- the same naming discipline FlightPhysics.lua's own header describes,
 -- extended to a third rig.
@@ -225,7 +225,7 @@ local function ensureOrientationDrive(part: BasePart, attachment: Attachment): (
 		-- LinearVelocity and VectorForce (both set below/above) but NOT on AlignOrientation, and
 		-- assigning it throws "RelativeTo is not a valid member of AlignOrientation" -- inside rig
 		-- creation, so the whole movement frame aborts and slide/wall-run silently never run. Found in
-		-- a live playtest; the identical line in Client/DevMenu/FlightPhysics.lua (which this rig was
+		-- a live playtest; the identical line in Client/Flight/FlightPhysics.lua (which this rig was
 		-- modelled on) has the same latent bug and is fixed alongside it.
 		drive.Mode = Enum.OrientationAlignmentMode.OneAttachment
 		-- Non-rigid: a rigid alignment fights every collision impulse and reads as the character
@@ -523,7 +523,7 @@ end
 -- while a finisher/DashPunch ragdoll is tumbling the character or RagdollController.HoldAloft has an
 -- AlignPosition pin on it, and writing velocity underneath either of those is the exact "two systems
 -- fighting over character velocity" failure this framework exists to avoid. Same Attribute, same
--- check, same reasoning as Client/DevMenu/FlightController.lua's own rootControlLocked gate.
+-- check, same reasoning as Client/Flight/FlightController.lua's own rootControlLocked gate.
 function ParkourMotor.Apply(): boolean
 	local part = rootPart
 	local currentHumanoid = humanoid

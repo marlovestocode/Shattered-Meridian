@@ -115,14 +115,21 @@ return function()
 		it("never collides with an already-registered MoveId", function()
 			reset()
 			MoveRegistryManager.Upsert(MoveRegistryManager.Validate(makeCandidate({ MoveId = "slam" })) :: any)
-			-- GenerateMoveId retries internally until unique -- run it many times against a name that
-			-- happens to slugify to "slam" and confirm none of the results collide with the existing
-			-- "slam" entry or each other.
+			-- GenerateMoveId's uniqueness is against the REGISTRY, not against ids it has previously
+			-- handed out -- it retries `base-<math.random(1000, 9999)>` until moves[candidate] is nil.
+			-- So each generated id has to actually be registered before asking for the next one, which
+			-- is also the real call shape (MoveEditorSystem.handleSaveMove generates, then Upserts).
+			--
+			-- This loop used to draw 25 ids WITHOUT registering any of them and assert they were
+			-- pairwise distinct, which is a property the function does not have and never claimed:
+			-- 25 draws from a 9000-value space collide about 3% of the time, so the suite failed
+			-- roughly one run in thirty for a reason that had nothing to do with the change under test.
 			local seen: { [string]: boolean } = { slam = true }
 			for _ = 1, 25 do
 				local generated = MoveRegistryManager.GenerateMoveId("Slam")
 				expect(seen[generated]).to.equal(nil)
 				seen[generated] = true
+				MoveRegistryManager.Upsert(MoveRegistryManager.Validate(makeCandidate({ MoveId = generated })) :: any)
 			end
 		end)
 

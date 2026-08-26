@@ -7,7 +7,7 @@
 	built inside: the textured, corner-bracketed Panel.lua instance, its StepRail band, and
 	the Header/scrolling-Body/Footer slot split. Every current pre-redesign screen hardcoded its own
 	offset width (640/560/480/520) and overflowed small viewports -- this is the fix, mirroring
-	Screens/DevMenu/init.lua's root-panel role: it owns the top-level layout budget and hands each
+	Screens/DevTools/DevMenu/init.lua's root-panel role: it owns the top-level layout budget and hands each
 	slot a size, but has no opinion on what's INSIDE Header/Body/Footer beyond their own dimensions.
 
 	Sized via `UDim2.new(1, -Space.XXL*2, 1, -Space.XXL*2)` (Scale-relative to the viewport, not a

@@ -5,7 +5,7 @@
 	Owns: one small procedural glyph per Move Editor section (Frame/UIStroke composition, no SVG/asset upload -- the exact
 	technique Components/ActionIcon.lua and Components/VitalIcon.lua already established) identifying
 	the Move Editor's customization sections at a glance. The SAME glyph renders in both
-	Screens/MoveEditor/Sidebar.lua's nav rail and Components/Section.lua's own card header (via
+	Screens/DevTools/MoveEditor/Sidebar.lua's nav rail and Components/Section.lua's own card header (via
 	PropertyEditor.lua's Icon prop), so opening a section visually reconfirms the nav row that led
 	there rather than introducing a second, unrelated icon vocabulary.
 

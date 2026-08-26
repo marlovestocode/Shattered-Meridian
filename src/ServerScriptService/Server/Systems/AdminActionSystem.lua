@@ -141,10 +141,10 @@ function AdminActionSystem.ApplyGodmode(state: AdminOverrideState, humanoid: Hum
 end
 
 -- Toggles flight: PlatformStand suspends the Humanoid's own ground movement/gravity response, and
--- the "Flying" Attribute is what Client/DevMenu/FlightController.lua watches to know whether IT
+-- the "Flying" Attribute is what Client/Flight/FlightController.lua watches to know whether IT
 -- should start/stop driving free 3D movement locally. Also quiets/restores the Humanoid's own
 -- airborne/recovery controller (AutoRotate, GettingUp state, a nudge into the Physics state) --
--- needed for Collide mode's LinearVelocity/AlignOrientation constraints (Client/DevMenu/
+-- needed for Collide mode's LinearVelocity/AlignOrientation constraints (Client/DevTools/DevMenu/
 -- FlightPhysics.lua): a live Humanoid's own controller otherwise keeps fighting a physics-driven pin
 -- every frame. Harmless for Noclip, whose direct CFrame write already overrides position regardless
 -- of controller state. Same Instance-only testability as ApplyGodmode above.
@@ -169,7 +169,7 @@ function AdminActionSystem.ApplyFlying(state: AdminOverrideState, humanoid: Huma
 end
 
 -- Toggles Collide mode for the Constants.Debug.DevMenu "Collide" toggle -- server owns nothing but
--- the Attribute, every constraint/physics decision is client-side (Client/DevMenu/FlightPhysics.lua),
+-- the Attribute, every constraint/physics decision is client-side (Client/Flight/FlightPhysics.lua),
 -- same trust tier as Flying itself. Independent of whether Flying is currently true or false --
 -- FlightController.lua watches BOTH Attributes live.
 function AdminActionSystem.ApplyFlightCollide(humanoid: Humanoid, enabled: boolean): ()
@@ -283,7 +283,7 @@ end
 -- Physics-state usage -- see that module's header: "a bare velocity/CFrame write from the server is
 -- immediately overridden by the owner's own simulation," which is exactly backwards for THIS
 -- feature). Ragdoll WANTS server ownership, because the server drives the joints. Flight is the
--- opposite: Client/DevMenu/FlightController.lua's CFrame writes (Noclip) or FlightPhysics.lua's
+-- opposite: Client/Flight/FlightController.lua's CFrame writes (Noclip) or FlightPhysics.lua's
 -- LinearVelocity/AlignOrientation constraints (Collide) are entirely CLIENT-driven, so the flying
 -- player must keep (or reclaim) ownership of their own rootPart. Without this, PlatformStand=true
 -- silently strands the character server-owned: the server's own unowned physics simulation of a

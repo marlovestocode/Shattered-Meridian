@@ -5,7 +5,7 @@ Studio round trip. This document covers what it does, the one concept that most 
 up (draft vs. save), and how to extend it.
 
 **Field-by-field help text is not duplicated here.** Every field's unit and explanation lives in
-`src/StarterPlayer/StarterPlayerScripts/Client/UI/Screens/MoveEditor/Copy.lua`, which is what the UI
+`src/StarterPlayer/StarterPlayerScripts/Client/UI/Screens/DevTools/MoveEditor/Copy.lua`, which is what the UI
 actually renders. If this document and that module ever disagree, **`Copy.lua` is right and this
 document is stale.**
 
@@ -168,14 +168,14 @@ through all of these, and skipping any one of them fails quietly rather than lou
 3. **`Server/Combat/MoveRegistryManager.lua`** — validate it in `Validate`. Structural errors reject;
    in-range numeric errors clamp.
 4. **`MoveTypes.ToHitboxAttackDefinition`** — project it, if combat needs to see it.
-5. **`Client/MoveEditor/MoveEditorClient.lua`** — `encodeDraftForWire` and `defaultDraft`.
+5. **`Client/DevTools/MoveEditor/MoveEditorClient.lua`** — `encodeDraftForWire` and `defaultDraft`.
 6. **`Server/Systems/MoveEditorSystem.lua`** — `encodeMoveRecord` / `candidateFromStoredRecord`, or
    it will not survive a restart.
 7. **The section's own panel** — `PropertyEditor.lua` for Basic Info/Offset/Timing/Damage,
    otherwise the sibling module that owns that section (see the table below). Commit through
    `DraftBinding`, and if the field lives on a sub-table, through that panel's own
    clone-then-mutate helper — `DraftBinding.Apply`'s clone is shallow on purpose.
-8. **`Screens/MoveEditor/Copy.lua`** — its unit and hint. `Copy.Field` asserts on an unknown key, so
+8. **`Screens/DevTools/MoveEditor/Copy.lua`** — its unit and hint. `Copy.Field` asserts on an unknown key, so
    a missing entry fails loudly the first time that section opens. If the field can be REJECTED by
    the server, add its reason code to `Copy.Failures` too, with the section to jump to.
 9. **`src/Tests/Combat/MoveTypes.spec.lua`** — a `Fingerprint` sensitivity case and a `Clone`
@@ -196,7 +196,7 @@ visible effect.
 | Validation, clamping, the reserved-category gate | `src/ServerScriptService/Server/Combat/MoveRegistryManager.lua` |
 | Auth, remotes, DataStore | `src/ServerScriptService/Server/Systems/MoveEditorSystem.lua` |
 | Default-move projection | `src/ServerScriptService/Server/Combat/DefaultMoveRegistry.lua` |
-| Screen root, dirty tracking | `src/StarterPlayer/.../UI/Screens/MoveEditor/init.lua` |
+| Screen root, dirty tracking | `src/StarterPlayer/.../UI/Screens/DevTools/MoveEditor/init.lua` |
 | Toolbar, section cards, Basic Info / Offset / Timing / Damage | `.../MoveEditor/PropertyEditor.lua` |
 | Movement / Knockback / Grab / Projectile | `.../MoveEditor/EffectsEditor.lua` |
 | Art binding | `.../MoveEditor/ArtBindingEditor.lua` |
@@ -205,8 +205,8 @@ visible effect.
 | Which sections a Default move hides | `.../MoveEditor/Types.lua` (`HiddenForDefaultSections`) |
 | All explanatory text, rejection messages, the shortcut list | `.../MoveEditor/Copy.lua` |
 | The F1 overlay | `.../MoveEditor/ShortcutsOverlay.lua` |
-| Remotes, shortcuts, duplicate, rename, guarded close | `src/StarterPlayer/.../Client/MoveEditor/MoveEditorClient.lua` |
-| Undo/redo history and unsaved tracking | `src/StarterPlayer/.../Client/MoveEditor/MoveEditState.lua` |
+| Remotes, shortcuts, duplicate, rename, guarded close | `src/StarterPlayer/.../Client/DevTools/MoveEditor/MoveEditorClient.lua` |
+| Undo/redo history and unsaved tracking | `src/StarterPlayer/.../Client/DevTools/MoveEditor/MoveEditState.lua` |
 
 Every one of those files carries a long header explaining its own design decisions. Those headers are
 the detailed reference; this document is the map.

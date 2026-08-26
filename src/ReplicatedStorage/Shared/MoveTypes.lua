@@ -4,7 +4,7 @@
 
 	Owns: the authored-move schema for the Move Creation System (an in-game, admin-gated move
 	editor -- Server/Combat/MoveRegistryManager.lua, Server/Systems/MoveEditorSystem.lua,
-	Client/UI/Screens/MoveEditor/). Kept as its own file rather than folded into Types.lua because
+	Client/UI/Screens/DevTools/MoveEditor/). Kept as its own file rather than folded into Types.lua because
 	it's a large, self-contained, additive schema with no existing consumer outside this feature --
 	the same reasoning that already earned QiConstants.lua its own file.
 

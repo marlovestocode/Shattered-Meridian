@@ -11,7 +11,7 @@
 	DOMINANT_WEIGHT priority-forcing) rather than folding flight tracks into that module's shared
 	`tracks` dict -- CombatAnimator.lua's own header scopes it to combat, triggered only by
 	CombatClient.lua off server-confirmed combat events; flight is triggered by a Humanoid Attribute
-	from an unrelated caller (Client/DevMenu/FlightController.lua), and CombatAnimator.
+	from an unrelated caller (Client/Flight/FlightController.lua), and CombatAnimator.
 	FreezeActiveCombatTrack (combat hit-stop) would otherwise incidentally freeze flight animations
 	and vice versa if the two shared one track dict (this is also why each file constructs its OWN
 	FreezeGuard instance from that shared module rather than the two sharing one generation counter

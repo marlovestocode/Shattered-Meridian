@@ -19,7 +19,7 @@
 
 	BackgroundTransparency/BackgroundColor3 default to fully transparent (every caller but one wants
 	a see-through scroll area layered over its own panel background) but are overridable -- Client/UI/
-	Screens/LiveConsole/init.lua's log list is the one exception, an opaque framed panel in its own
+	Screens/DevTools/LiveConsole/init.lua's log list is the one exception, an opaque framed panel in its own
 	right.
 ]]
 

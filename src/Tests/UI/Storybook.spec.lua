@@ -5,7 +5,7 @@ local StarterPlayer = game:GetService("StarterPlayer")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
 local Screens = StarterPlayer.StarterPlayerScripts.Client.UI.Screens
-local Storybook = require(Screens.Storybook)
+local Storybook = require(Screens.DevTools.Storybook)
 
 local peek = Fusion.peek
 

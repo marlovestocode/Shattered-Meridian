@@ -5,7 +5,7 @@
 	Owns: every type Cinematic.lua/RaceSelect.lua/Attributes.lua/NameEntry.lua/Confirmation.lua/
 	init.lua share -- the Stage enum driving which of the five is currently mounted, and each
 	screen's own prop shape. Same "shared leaf, no Screen<->Screen require cycle" role
-	Screens/DevMenu/Types.lua already plays for Sidebar.lua/ContentArea.lua -- see that file's own
+	Screens/DevTools/DevMenu/Types.lua already plays for Sidebar.lua/ContentArea.lua -- see that file's own
 	header for the precedent this follows.
 
 	Does not own any Mount()/rendering logic, and does not own validation (Server/Systems/

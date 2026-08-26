@@ -5,9 +5,9 @@
 	Owns: LIVE, IN-MEMORY tuning of FlightConstants' feel numbers -- a Studio-only dev tool
 	(DevMenuSystem.lua's ListFlightTuning/AdjustFlightTuning/ResetFlightTuning) mirroring
 	Server/Combat/HitboxTuning.lua's shape: FlightConstants is read BY REFERENCE every frame
-	(Client/DevMenu/FlightController.lua never snapshots it), so mutating a field here takes effect
+	(Client/Flight/FlightController.lua never snapshots it), so mutating a field here takes effect
 	on the very next Heartbeat, including for an admin already mid-flight. Lives under a new
-	Server/DevMenu/ folder (mirroring the client's existing Client/DevMenu/ folder name) rather than
+	Server/DevMenu/ folder (mirroring the client's existing Client/DevTools/DevMenu/ folder name) rather than
 	Server/Combat/, since HitboxTuning.lua's own placement there is specifically because it tunes
 	COMBAT weapon stages -- flight tuning has nothing to do with combat, so colocating it there for
 	require-path convenience alone would be exactly the "convenience over modularity"

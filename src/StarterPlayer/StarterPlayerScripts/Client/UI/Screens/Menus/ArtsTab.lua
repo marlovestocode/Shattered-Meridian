@@ -40,7 +40,7 @@
 	Does not own: any network call. Selecting a slot or pressing Unlock/Equip fires a plain callback
 	prop, which Screens/Menus/init.lua turns into a signal that Client/CharacterMenu/
 	CharacterMenuClient.lua actually sends -- the same "screen exposes state/signals, client module
-	drives from outside" boundary Screens/Settings and Screens/DevMenu already hold to.
+	drives from outside" boundary Screens/Settings and Screens/DevTools/DevMenu already hold to.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")

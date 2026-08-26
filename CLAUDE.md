@@ -82,6 +82,37 @@ integration as prose, which reads deceptively like a finished one). For a data/a
 specifically, follow the SPECIFIC runtime call path a player's action takes end-to-end — two
 components independently agreeing with each other is not evidence a third consumer was updated.
 
+## Two build configs — and one asymmetry that will bite you
+
+`default.project.json` ships everything and is what Studio/dev and the test place use.
+`live.project.json` is the same tree plus `globIgnorePaths`, omitting two subtrees:
+`Client/DevTools/` and `Client/UI/Screens/DevTools/` — 44 files / ~18.4k lines of admin-only Luau
+that every player's client would otherwise require, parse and closure-build at boot for panels only
+a whitelisted admin can open. `Shared/Lazy.lua` already defers the *mount* of those panels and still
+does; what it cannot defer is the `require` that produces the Mount function it closes over, which
+is what this omission removes. Place file: 6.44 MB → 5.69 MB.
+
+- The two files necessarily carry the same `tree` twice (Rojo has no project inheritance), so
+  **run `python scripts/check-live-project.py` after touching either** — it asserts they differ only
+  by `globIgnorePaths`.
+- **The client seam is two `FindFirstChild` lookups, not a require**: `Main.client.lua` resolves
+  `Client/DevTools` and `UI/init.lua` resolves `Screens/DevTools`. `uiHandles.DevTools` is the only
+  nil-able field on `UIHandles`, and it is nil in exactly the builds those lookups fail in.
+- **A place published from `live.project.json` has no dev tooling for anybody, admins included** —
+  F5's Live Console goes too, even though `LiveConsoleSystem`'s own header is explicit that it is
+  built to keep working in a live server. That is the trade the split makes *available*; publish
+  from `default.project.json` to keep admin tooling in a live place.
+- **The server half is NOT the mirror image and must never be omitted.** `MoveEditorSystem.Init`
+  (`loadPersistedMoves`/`loadDefaultMoveOverrides`) and `KitEditorSystem.Init` are the only things
+  that hydrate `MoveRegistryManager`, `RaceManager` and `BloodlineManager` from DataStore at boot. A
+  server without them boots with empty content registries and degrades *quietly* — no error, no
+  missing-move warning, just content that was never there. They also cost a player nothing (server
+  modules never replicate), which is why they stay in `Server/Systems/`.
+- `Client/Flight/` is the same correction pointing the other way: `FlightController`/`FlightPhysics`
+  used to sit under `Client/DevMenu/` and are **not** dev tooling — an admin can grant flight to a
+  *non*-admin, whose own client must drive the movement, so they run for every player and stay in
+  the live build.
+
 ## Toolchain
 
 - **Lint:** `selene src/` — must be 0/0. Needs `selene generate-roblox-std` run once locally first

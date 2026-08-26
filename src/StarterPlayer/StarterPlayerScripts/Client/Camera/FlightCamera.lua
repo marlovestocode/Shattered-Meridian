@@ -7,13 +7,13 @@
 	character's own bank angle (Constants.Camera.Flight.BankRollFraction, 0 disables it outright).
 	A sibling to Client/Camera/ShiftLockCamera.lua, independently watching its own bound character's
 	"Flying" Attribute for engage/disengage (same self-contained-watch idiom that module already uses
-	for "RootControlLocked") -- Client/DevMenu/FlightController.lua never calls an explicit Stop()
+	for "RootControlLocked") -- Client/Flight/FlightController.lua never calls an explicit Stop()
 	here, it just flips the Attribute and this module reacts on its own.
 
 	Also owns: LocalPlayer.DevCameraOcclusionMode for the engaged duration. CameraType stays Custom
 	throughout (this module only ever nudges CameraOffset/FOV/roll on top of Roblox's own follow-cam,
 	same as ShiftLockCamera.lua) -- but the stock camera's default occlusion mode (Zoom) fights Noclip
-	flight specifically: Noclip is a raw CFrame write that bypasses collision entirely (Client/DevMenu/
+	flight specifically: Noclip is a raw CFrame write that bypasses collision entirely (Client/DevTools/DevMenu/
 	FlightController.lua's own header), yet the default camera still tries to avoid clipping through
 	whatever the character is now flying through, yanking itself toward the character the instant a
 	wall is between them -- a live playtest reported this as "colliding with something in the air"
@@ -40,7 +40,7 @@
 	above.
 
 	Does not own: the decision to grant flight (AdminActionSystem.SetFlying), the momentum/banking
-	MATH (Shared/FlightMath.lua, Client/DevMenu/FlightController.lua), or any Humanoid property other
+	MATH (Shared/FlightMath.lua, Client/Flight/FlightController.lua), or any Humanoid property other
 	than CameraOffset (WalkSpeed/PlatformStand/etc. stay owned exactly where they already are).
 ]]
 

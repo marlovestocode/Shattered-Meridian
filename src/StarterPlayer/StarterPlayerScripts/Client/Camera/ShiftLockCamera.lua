@@ -139,7 +139,7 @@ local rootPart: BasePart? = nil
 -- "Flying" watch.
 local rootControlLocked = false
 
--- Mirrors this character's own Humanoid "Flying" Attribute (Client/DevMenu/FlightController.lua/
+-- Mirrors this character's own Humanoid "Flying" Attribute (Client/Flight/FlightController.lua/
 -- FlightCamera.lua) -- while true, FlightCamera.lua owns CameraOffset/yaw entirely (a flying admin
 -- isn't also meant to be in shift-lock combat framing), so this module skips both writes below
 -- rather than fighting it for the same properties every frame. Same watch/cache shape as
