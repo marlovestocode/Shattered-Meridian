@@ -28,14 +28,14 @@
 
 	Does NOT own: what the value means, what side effect firing should have (remote/Attribute/log --
 	entirely the connected callback's job), or the value itself as authoritative state (the CALLER's
-	own field -- e.g. a live CombatState computation -- remains the single source of truth; this
+	own field -- e.g. a live per-player state record -- remains the single source of truth; this
 	module only remembers what was LAST reported, to decide whether to report again). This is
 	explicitly NOT a general Signal/Store/reactive-state class -- the Chief Architect's own review
-	rejected wrapping CombatState itself in change-notification (Movement.ComputeDesiredWalkSpeed's
-	hot path always wants the CURRENT value, not a subscription, so wrapping every field would be
-	pure overhead with no benefit) -- this stays scoped to the handful of per-player PRESENTATION
-	flags that already re-derive a boolean every tick and only care about edges, never applied
-	preemptively to stunExpiry/posture/attackEndsAt/etc., which stay plain field reads.
+	rejected wrapping the combat state record itself in change-notification (a per-Heartbeat WalkSpeed
+	resolver's hot path always wants the CURRENT value, not a subscription, so wrapping every field
+	would be pure overhead with no benefit) -- this stays scoped to the handful of per-player
+	PRESENTATION flags that already re-derive a boolean every tick and only care about edges, never
+	applied preemptively to the timing fields a resolver reads, which stay plain field reads.
 ]]
 
 local ChangeNotifier = {}

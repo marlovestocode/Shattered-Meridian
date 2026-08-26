@@ -53,7 +53,7 @@ local VALID_DRIVES = { Humanoid = true, Velocity = true, Kinematic = true }
 local DEFAULT_GRAVITY = 196.2
 
 -- Which states own the character's velocity and therefore MUST report to the server -- otherwise
--- Server/Combat/Movement.ComputeDesiredWalkSpeed keeps driving WalkSpeed underneath them, which is
+-- Server/Systems/RunSystem.lua keeps driving WalkSpeed underneath them, which is
 -- the precise failure this feature's whole server integration exists to prevent.
 -- No WallJumping entry: kicking off a wall is a phase of WallRunning now, not its own state, and
 -- reports as a continuation of the same "WallRun" window (see ParkourTypes.ActionKind's own header).

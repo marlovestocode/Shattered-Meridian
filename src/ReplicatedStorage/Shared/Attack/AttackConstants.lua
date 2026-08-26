@@ -45,7 +45,7 @@ AttackConstants.Sequence = {
 	-- DamageConstants.Combo.WindowSeconds (0.9). This one keeps the *animation string* cycling so a
 	-- player who whiffs still sees their three-hit combo play out; that one gates *escalation* and
 	-- only ever moves on a hit that actually landed. Conflating them is the mistake the deleted
-	-- CombatTypes' own basicSwingIndex/basicComboLanded split existed to avoid.
+	-- the deleted CombatTypes' own basicSwingIndex/basicComboLanded split existed to avoid.
 	--
 	-- Deliberately LONGER than the combo window: whiffing should not feel like being reset, while
 	-- failing to connect genuinely should cost escalation.

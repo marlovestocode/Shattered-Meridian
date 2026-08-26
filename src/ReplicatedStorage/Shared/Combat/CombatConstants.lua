@@ -214,8 +214,9 @@ local CombatConstants = {
 	-- HeavyComboResetSeconds/BasicComboLength/AttackInputBufferSeconds/Feint/Prediction (combo timing,
 	-- input buffering, Feint, and client-side action-start prediction) were removed alongside the rest
 	-- of the combat system -- every reader of these (CombatSystem.lua, PredictionMirror.lua,
-	-- CombatClient.lua's own predict/rollback path) is gone. Server/Combat/Movement.lua and
-	-- Server/Combat/DefaultMoveRegistry.lua, the two Combat/ modules kept on disk, read neither.
+	-- CombatClient.lua's own predict/rollback path) is gone. Server/Combat/DefaultMoveRegistry.lua,
+	-- the Combat/ module kept on disk, reads neither. (Server/Combat/Movement.lua was the other, and
+	-- has since been deleted -- it had had no caller since the combat rewrite.)
 
 	-- Finisher physics (Server/Combat/RagdollController.lua applies these; CombatSystem.lua picks the
 	-- variant at the 4th hit). The finisher's damage/reach/timing are the Hitboxes.Finisher swing
@@ -346,12 +347,13 @@ local CombatConstants = {
 	-- restoring WalkSpeed so HitSlowMultiplier below has a known value to multiply and restore to.
 	-- Lowered from 16 to 10 (retuned alongside DefaultBonusWalkSpeed below to land the default
 	-- resting speed at 18, down from 24) -- tuning, not design, per combat-philosophy.md's Tuning
-	-- process; every multiplier tier (Sprint/Dash, all computed off base+bonus in
-	-- Movement.ComputeDesiredWalkSpeed) scales down proportionally with it.
+	-- process; every multiplier tier computed off base+bonus scales down proportionally with it. That
+	-- is the run ladder in Server/Systems/RunSystem.lua today -- Dash's own burst tier below is one of
+	-- the ones nothing drives any more.
 	BaseWalkSpeed = 10,
 	-- Additive speed bonus applied on top of BaseWalkSpeed via a "BonusWalkSpeed" Attribute on each
-	-- player's own Humanoid (Movement.ComputeDesiredWalkSpeed reads it; onCharacterAdded seeds it at
-	-- spawn) rather than a flat Constants number, per luau-coding-standards.md's Attribute-API
+	-- player's own Humanoid (Server/Systems/RunSystem.lua reads it, and its own onCharacterAdded seeds
+	-- it at spawn) rather than a flat Constants number, per luau-coding-standards.md's Attribute-API
 	-- convention for per-instance runtime data -- this is meant to be driven per-player later by
 	-- race/bloodline stat systems (progression-systems.md), not stay a single global forever. For
 	-- now every player just gets this same default (10 + 8 = 18 effective base), a flat first-pass
@@ -360,8 +362,11 @@ local CombatConstants = {
 	-- being retuned here, only the resulting default speed.
 	DefaultBonusWalkSpeed = 8,
 	-- The "can't just run away" factor: every unmitigated hit clips WalkSpeed to base * this
-	-- multiplier for HitSlowDuration (Movement.ComputeDesiredWalkSpeed's hit-slow tier -- below
-	-- dash, above sprint). 0.6/0.3s (was ~14.4 studs/sec off a 24 base, barely slower than a brisk
+	-- multiplier for HitSlowDuration. NOTHING APPLIES THIS TODAY -- the hit-slow tier lived in the
+	-- deleted Server/Combat/Movement.lua, and Server/Systems/RunSystem.lua's resolver has no
+	-- equivalent; combat reaches WalkSpeed only through Constants.Attributes.CombatBusyUntil, which
+	-- zeroes the run's charge rather than clipping speed. The tuned pair below is kept because the
+	-- reasoning it records is still the design intent, not because anything reads it. 0.6/0.3s (was ~14.4 studs/sec off a 24 base, barely slower than a brisk
 	-- walk) let a hit target just hold their sprint key and disengage immediately. 0.25/0.5s (~6
 	-- studs/sec, a near-crawl for half a second) gives the attacker a real follow-up window without
 	-- fully rooting the target in place -- tuning, not design, per combat-philosophy.md's Tuning
@@ -376,9 +381,9 @@ local CombatConstants = {
 	-- picks which direction a Dash throws/animates as), and client-side in Client/FX/CombatAnimator.
 	-- lua's own LOCOMOTION_THRESHOLD (resolveDashDirection's animation pick, and the Walking/Running
 	-- loop eligibility evaluator) and Client/FX/MovementVFX.lua's own LOCOMOTION_THRESHOLD (the
-	-- sprint-dust trickle's "moving" gate) -- Movement.IsMoving's own comment literally flagged its
-	-- 0.1 as "the same 0.1 magnitude threshold ResolveDashDirection above already uses inline" before
-	-- this field existed, which is exactly the kind of duplication-by-coincidence engineering-
+	-- sprint-dust trickle's "moving" gate) -- the deleted Movement.IsMoving's own comment literally
+	-- flagged its 0.1 as "the same 0.1 magnitude threshold ResolveDashDirection above already uses
+	-- inline" before this field existed, which is exactly the kind of duplication-by-coincidence engineering-
 	-- standards.md's one-source-of-truth rule exists to close: a deliberate retune of "what counts as
 	-- movement" would otherwise require remembering all four sites instead of changing one number.
 	MovementInputMagnitudeThreshold = 0.1,
@@ -394,10 +399,10 @@ local CombatConstants = {
 	MinDirectionMagnitude = 0.01,
 
 	-- Neutral-game movement tunables (CombatSystem.lua's handleDashRequest for Dash). CombatSystem
-	-- itself is gone (the combat rewrite deleted it) and nothing currently drives Dash's WalkSpeed
-	-- burst through Server/Combat/Movement.ComputeDesiredWalkSpeed as a result -- see
-	-- Server/Systems/RunSystem.lua's own boot-order comment in Main.server.lua for the confirmed
-	-- "nothing wrote WalkSpeed at all" state this left behind.
+	-- itself is gone (the combat rewrite deleted it), and Server/Combat/Movement.lua -- the resolver
+	-- that would have applied the burst -- has since been deleted too, having had no caller since.
+	-- Nothing drives Dash's WalkSpeed burst today; Server/Systems/RunSystem.lua owns WalkSpeed and has
+	-- no dash tier.
 	--
 	-- Dash is a single proactive key (no i-frames, a low-stakes spacing tool meant to be used often
 	-- in the neutral game): a quick WalkSpeed burst, limited by its own cooldown + commitment lock,
@@ -405,13 +410,13 @@ local CombatConstants = {
 	--
 	-- SPRINT/THE RUN TIER USED TO LIVE HERE TOO (SprintSpeedMultiplier, SprintStage2*) and has fully
 	-- moved out -- Shared/Run/RunConstants.lua now owns every run-stage number, as an ordered array of
-	-- stage records rather than the flat per-stage fields these were, and Server/Systems/RunSystem.lua is
-	-- the
-	-- live WalkSpeed authority for it. See RunConstants.lua's own "SEPARATE FROM CombatConstants ON
+	-- stage records rather than the flat per-stage fields these were, and Server/Systems/RunSystem.lua
+	-- is the live WalkSpeed authority for it. See RunConstants.lua's own "SEPARATE FROM CombatConstants ON
 	-- PURPOSE" header for why. There is now exactly one place the run's stage numbers live; retuning
 	-- the run never touches this file. (The fields that used to sit here were dead weight, not a
-	-- second live copy: Server/Combat/Movement.lua's sprint functions that read them had no caller
-	-- left once CombatSystem was deleted, same as Dash's burst above.)
+	-- second live copy: Movement.lua's sprint functions that read them had no caller left once
+	-- CombatSystem was deleted, same as Dash's burst above -- and that file has since been deleted
+	-- outright for exactly the reason this parenthesis half-noticed.)
 	--
 	-- Numbers here are first-pass technical tunables, free to move without design ceremony per
 	-- combat-philosophy.md's Tuning process.
@@ -427,8 +432,8 @@ local CombatConstants = {
 	-- why Back specifically does not share this pace anymore.
 	DashCooldownSeconds = 0.8,
 
-	-- Backward-specific Dash tuning (Movement.ApplyDash's isBackDash parameter, resolved from
-	-- Movement.ResolveDashDirection == "Back"). Slide can no longer move backward at all
+	-- Backward-specific Dash tuning (the deleted Movement.ApplyDash's isBackDash parameter, resolved
+	-- from its ResolveDashDirection == "Back" -- neither exists any more; see DashSpeedMultiplier). Slide can no longer move backward at all
 	-- (handleSlideRequest's own header), but Dash still can -- a neutral repositioning tool needs
 	-- SOME way to create distance defensively. Playtest report, though: with Back sharing the exact
 	-- same speed/cooldown as every other direction, pure backward-dash-spam became "the movement
@@ -444,8 +449,8 @@ local CombatConstants = {
 	-- spammable retreat (mirrors the reasoning SlideCooldownSeconds already documents for Slide).
 	DashBackCooldownSeconds = 1.6,
 
-	-- A Dash resolved as "Front" (Movement.ResolveDashDirection, mirrored client-side in
-	-- CombatAnimator.lua for the DashFront clip) AND reported as a double-tap
+	-- A Dash resolved as "Front" (by the deleted Movement.ResolveDashDirection, mirrored client-side
+	-- in CombatAnimator.lua for the DashFront clip) AND reported as a double-tap
 	-- (CombatSystem.lua's handleDashRequest -- see that function's own header for the client-trust
 	-- tier this hint uses, and why the real safety net is DashPunch.Cooldown below, not verifying
 	-- the tap itself) is a lunging punch attempt, not a plain reposition -- it travels slightly
@@ -465,8 +470,9 @@ local CombatConstants = {
 	-- to cover the hitbox's own active+recovery tail past the plain DashCommitmentSeconds above.
 	DashHitCommitmentSeconds = DashHitWindupSeconds + DashHitActiveSeconds + DashHitRecoverySeconds,
 
-	-- Slide: chained off Sprint (Movement.IsMoving must also be true) -- a bigger, committed WalkSpeed
-	-- burst than Dash, built the exact same way (Movement.ApplySlide mirrors Movement.ApplyDash). No
+	-- Slide: chained off Sprint (the deleted Movement.IsMoving had to be true too) -- a bigger,
+	-- committed WalkSpeed burst than Dash, built the exact same way (ApplySlide mirrored ApplyDash in
+	-- that same deleted file; neither the burst nor its resolver exists today -- see Dash above). No
 	-- hitbox, no damage/posture damage -- mirrors plain Dash, never DashPunch/DashHit. Dash and Slide
 	-- can never be simultaneously active (both lock the shared attackEndsAt commitment). They DO
 	-- share one cooldown pool though (CombatState.movementCooldownExpiry, checked/set by both

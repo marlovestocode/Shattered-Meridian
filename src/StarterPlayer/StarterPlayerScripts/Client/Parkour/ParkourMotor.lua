@@ -51,8 +51,8 @@
 	See that flag's own header for the failure that taught the difference.
 
 	SERVER RELATIONSHIP: this module never writes Humanoid.WalkSpeed. That property belongs to
-	Server/Combat/Movement.ComputeDesiredWalkSpeed, which runs every server Heartbeat and would
-	overwrite anything written here within a frame. Instead, the server stands its own resolver down
+	Server/Systems/RunSystem.lua's resolver, which runs every server Heartbeat and would overwrite
+	anything written here within a frame. Instead, the server stands its own resolver down
 	for the duration of an owned action (the ParkourVelocityOwned Attribute -> the resolver returns 0)
 	and honors a decaying post-action momentum floor (ParkourSpeedFloor) -- both stamped by
 	Server/Systems/ParkourSystem.lua off the client's action reports. Owning velocity and owning
@@ -667,8 +667,10 @@ end
 
 -- Requests a jump through Roblox's own character controller -- the correct path whenever the
 -- character is genuinely grounded, because it produces the engine's own Jumping state transition
--- (which Server/Combat/Movement.ComputeGenuineJumpAirborne reads to credit a genuine jump, and which
--- CombatClient.lua's finisher jump-suppression gates on). Returns false when jumping is currently
+-- (which the deleted Server/Combat/Movement.ComputeGenuineJumpAirborne read to credit a genuine
+-- jump, and which CombatClient.lua's finisher jump-suppression gated on -- BOTH of those readers are
+-- gone with the combat rewrite, so nothing consumes the distinction today; the engine path is still
+-- the right one, now for its own sake rather than for a consumer's). Returns false when jumping is currently
 -- disabled -- CombatClient disables the Jumping state through an M1 combo so the 4th press throws an
 -- Uppercut instead, and the parkour system must honor that rather than jumping anyway through a
 -- different code path.

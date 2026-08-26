@@ -467,7 +467,7 @@ export type CombatFeedbackPayload = {
 	--     via a SECOND, separate event -- the landed swing's own "Hit" event was already sent before
 	--     AirCombo.Apply ever runs (reaching that code path at all requires the swing's own
 	--     finisherVariant to be nil), so it structurally cannot carry this. See AirComboTarget.
-	--     onGroundSlam's own header (CombatTypes.lua) for the full mechanism.
+	--     onGroundSlam's own header (in the since-deleted CombatTypes.lua) for the full mechanism.
 	-- Not consumed for any gameplay/hit decision -- purely presentation, like AirComboPriorityShift
 	-- above.
 	FinisherVariant: FinisherVariant?,
@@ -567,7 +567,7 @@ export type AttackStartedPayload = {
 -- needing a synced animation cue.
 export type MovementPerformedPayload = {
 	DurationSeconds: number,
-	-- The Dash cooldown Movement.ApplyDash actually just committed (Constants.Combat.
+	-- The Dash cooldown the deleted Movement.ApplyDash committed (Constants.Combat.
 	-- DashCooldownSeconds normally, DashBackCooldownSeconds for a backward dash) -- echoed so
 	-- PredictionMirror.OnMovementPerformed can mirror the REAL cooldown rather than always assuming
 	-- the plain constant regardless of direction. Additive and read-only like AttackStartedPayload's
@@ -1747,7 +1747,7 @@ export type EmoteDefinition = {
 	Loop: boolean,
 	Duration: number?,
 	-- True if playing this emote should zero the player's WalkSpeed for its duration (Constants.
-	-- Attributes.EmoteMovementLocked, read by Server/Combat/Movement.lua's ComputeDesiredWalkSpeed) --
+	-- Attributes.EmoteMovementLocked, read by Server/Systems/RunSystem.lua's resolver) --
 	-- a seated/dancing pose reads as broken if the player can still slide around mid-animation.
 	MovementLocked: boolean,
 	-- False rejects RequestPlay outright while Types.CombatSnapshot.InCombat is true (EmoteSystem.lua)

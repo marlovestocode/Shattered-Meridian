@@ -16,10 +16,11 @@
 	States/Sprinting.lua, and therefore wall-running and the sprint-chained slide with it, out of the
 	game entirely. This System is that ownership rehomed somewhere running actually belongs.
 
-	Server/Combat/Movement.lua's own resolver still exists and is still tested, but nothing drives it
-	any more; it is the combat rewrite's to keep, absorb or delete. Deliberately untouched here -- this
-	System reaches into no combat state and requires no combat module, so the two can land in either
-	order without either one blocking the other.
+	Server/Combat/Movement.lua's own resolver outlived its last caller for a while and has since been
+	deleted, along with the CombatTypes.lua it typed itself against. This System is now the only thing
+	in the tree that writes WalkSpeed at all, not merely the only thing driven -- which matters mostly
+	because roughly fifty comments across the codebase still described that file as the live resolver,
+	and those were corrected in the same change that removed it.
 
 	THE RESOLVER, highest priority first. Every tier is either a Humanoid Attribute some other System
 	already publishes for its own reasons, or the ladder itself. Reading Attributes rather than

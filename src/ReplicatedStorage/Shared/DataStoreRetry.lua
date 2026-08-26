@@ -22,6 +22,11 @@
 	persistence-specific -- so PlayerDataSystem depending on it (gameplay -> infra) never becomes
 	infra depending on a System (which would invert software-architecture.md's dependency rule).
 
+	Scoped() came later, and closes the second half of the same duplication. Attempt() removed the
+	retry ALGORITHM from five Systems but left each of them a byte-identical three-line `withRetry`
+	local binding the same logger and the same policy to it -- five copies of the binding instead of
+	five copies of the loop. Scoped returns that binding, so a System's persistence layer is one line.
+
 	Does not own: which DataStore/key/operation is being retried, what a caller does with a
 	final failure (kick, reject-and-log, degrade), or logger scope naming -- callers pass their
 	own already-scoped Logger instance so warn/error lines attribute to the calling System, not
@@ -65,6 +70,25 @@ function DataStoreRetry.Attempt<T>(
 	end
 	logger:error(operationName .. " exhausted all retries", { maxAttempts = config.MaxAttempts })
 	return false, nil, "StorageError"
+end
+
+-- Binds a logger and a policy to Attempt once, returning the `withRetry(operationName, attempt)`
+-- helper every persisting System was otherwise writing out for itself.
+--
+-- Five Systems (BugReport, KitEditor, Moderation, MoveEditor, PlayerData) each held the identical
+-- three-line local, differing only in which Constants table they read the same two numbers out of --
+-- and those five tables held the identical pair of values too. Both halves collapse here:
+-- Constants.Storage.RetryPolicy is the single policy, and this is the single binding.
+--
+-- Called ONCE per System, at module scope -- not per operation. The returned closure is what call
+-- sites use, so there is no per-call allocation.
+function DataStoreRetry.Scoped(
+	logger: Logger.LoggerScope,
+	config: RetryConfig
+): <T>(operationName: string, attempt: () -> T) -> (boolean, T?, string?)
+	return function<T>(operationName: string, attempt: () -> T): (boolean, T?, string?)
+		return DataStoreRetry.Attempt(logger, operationName, config, attempt)
+	end
 end
 
 return DataStoreRetry

@@ -620,21 +620,18 @@ Constants.Debug.TrainingDummy = {
 }
 
 -- Fixed by canon (world-bible.md / progression-systems.md).
-Constants.TierCount = 9
-Constants.RaceCount = 4
+--
+-- BloodlineCount is the only one of these left, and it is the only one anything read. Four siblings
+-- went with it -- TierCount, RaceCount, Constants.Factions and Constants.Regions -- each of which
+-- had zero readers AND restated a canon fact that IS read, from somewhere else:
+--   * TierCount = 9        -> Shared/TierConstants.MaxTier, which DERIVES it as #TierConstants.Tiers
+--   * RaceCount = 4        -> Types.RaceId, the string-literal union every race-facing signature uses
+--   * Constants.Factions   -> Types.Faction ("Celestial" | "Demonic" | "Unbound")
+--   * Constants.Regions    -> Types.Region ("TheVoid" | "TheMedianParadise" | ...)
+-- A second, hand-written copy of a canon count is not documentation, it is a place for canon to
+-- disagree with itself -- and an unread one cannot even be caught by a failing test. The versions
+-- kept are the ones a compiler or a length operator checks.
 Constants.BloodlineCount = 13
-
-Constants.Factions = {
-	Celestial = "Celestial",
-	Demonic = "Demonic",
-	Unbound = "Unbound",
-}
-
-Constants.Regions = {
-	TheVoid = "TheVoid",
-	TheMedianParadise = "TheMedianParadise",
-	TheDemonicDisastrousLandscape = "TheDemonicDisastrousLandscape",
-}
 
 -- Approved design-time budget, not yet a measured production ceiling (performance-optimization.md).
 Constants.NetworkBudget = {
@@ -660,6 +657,28 @@ Constants.NetworkBudget = {
 	-- one of the four is independently cooldown-gated server-side, so this budget only ever needs to
 	-- stop a packet flood, never legitimate play.
 	MaxDefensiveCallsPerSecondPerPlayer = 12,
+}
+
+-- Persistence-infrastructure tunables. Deliberately domain-agnostic: what gets stored belongs to the
+-- System storing it, but HOW HARD to try belongs here, once.
+--
+-- This table exists because the identical pair of numbers was declared FIVE times in this file --
+-- Constants.PlayerData, .BugReport, .Moderation, .MoveEditor and .KitEditor each carried
+-- StorageRetryMaxAttempts = 3 / StorageRetryBaseBackoffSeconds = 1, each under a comment observing
+-- that it was "the same shape as every other StorageRetry* pair in this file". Five places to change
+-- a retry policy is five places for it to disagree, and the comments proved everybody already knew.
+--
+-- Declared HERE, above every domain table below, because those tables are assigned in file order and
+-- a reference from one of them to a table declared later would read nil.
+Constants.Storage = {
+	-- The one retry policy every DataStore call in this codebase goes through, handed straight to
+	-- Shared/DataStoreRetry.Scoped by each persisting System. Three attempts with 1s exponential
+	-- backoff (1s, then 2s) rides out an ordinary DataStore blip without making a player wait through
+	-- a long stall for a service that is genuinely down.
+	RetryPolicy = {
+		MaxAttempts = 3,
+		BaseBackoffSeconds = 1,
+	},
 }
 
 -- Networking-infrastructure tunables -- distinct from NetworkBudget above (that table is about
@@ -706,14 +725,14 @@ Constants.Attributes = {
 	-- Admin-only invisibility (DevMenuSystem.lua's SetTargetInvisible) -- mirrored here purely so
 	-- DevMenuClient.lua can reflect live state in the Admin tab UI, same as Godmode; the actual
 	-- effect is a direct Transparency write on every BasePart/Decal (CombatSystem.
-	-- SetPlayerInvisible), not something Movement.lua or any per-frame resolver reads.
+	-- SetPlayerInvisible), not something Server/Systems/RunSystem.lua or any per-frame resolver reads.
 	Invisible = "Invisible",
 	-- Emote System (Server/Systems/EmoteSystem.lua) -- set/cleared directly on the emoting
 	-- character's Humanoid while a MovementLocked emote (Types.EmoteDefinition.MovementLocked) is
-	-- playing/stopping/cancelled. Same "external system freezes movement without touching
-	-- CombatState" shape as Frozen/Flying above -- Movement.ComputeDesiredWalkSpeed reads this
-	-- directly, at the same top priority tier, rather than EmoteSystem writing into CombatState
-	-- (which it has no ownership of).
+	-- playing/stopping/cancelled. Same "external system freezes movement by publishing an Attribute"
+	-- shape as Frozen/Flying above -- Server/Systems/RunSystem.lua's own resolver reads this directly,
+	-- at the same top priority tier, rather than EmoteSystem reaching into the run state (which it has
+	-- no ownership of).
 	EmoteMovementLocked = "EmoteMovementLocked",
 	-- Whether this player is currently IN COMBAT (CombatState.inCombatUntil still live) -- written by
 	-- CombatSystem's inCombatNotifier on each true/false edge, alongside the Combat_InCombatChanged
@@ -769,11 +788,11 @@ Constants.Attributes = {
 	-- Parkour System (Server/Systems/ParkourSystem.lua, Client/Parkour/*). Set on a player's own
 	-- Humanoid while the client-side movement framework legitimately owns that character's velocity --
 	-- a slide, wall-run, vault, mantle, ledge climb, roll or wall-jump the server has accepted and not
-	-- yet expired. Movement.ComputeDesiredWalkSpeed reads it directly and pins WalkSpeed to 0 for the
-	-- duration, at the same tier as Flying/Frozen/EmoteMovementLocked and for the identical reason:
-	-- something other than the ordinary ground controller is driving this body, and a raised WalkSpeed
-	-- underneath it fights the drive instead of riding along with it. Same "external system, read as
-	-- an Attribute rather than written into CombatState" shape those three already use, which is what
+	-- yet expired. Server/Systems/RunSystem.lua's resolver reads it directly and pins WalkSpeed to 0
+	-- for the duration, at the same tier as Flying/Frozen/EmoteMovementLocked and for the identical
+	-- reason: something other than the ordinary ground controller is driving this body, and a raised
+	-- WalkSpeed underneath it fights the drive instead of riding along with it. Same "external system,
+	-- read as an Attribute" shape those three already use, which is what
 	-- lets ParkourSystem stay entirely outside CombatSystem's private state.
 	ParkourVelocityOwned = "ParkourVelocityOwned",
 	-- The COMBAT-GATE counterpart to ParkourVelocityOwned above, and like ParkourFacingOwned below it
@@ -814,9 +833,11 @@ Constants.Attributes = {
 	-- The momentum a just-finished parkour action handed back, as an absolute WalkSpeed floor, plus the
 	-- timestamp it decays to nothing at. Together these are how a slide's or a vault's earned speed
 	-- survives into ordinary running instead of being erased the instant the action ends -- see
-	-- Movement.ComputeParkourSpeedFloor. Deliberately a FLOOR under the normal tiers rather than a
-	-- replacement for them, so it can only ever preserve speed a player earned and never slow anyone
-	-- down, and deliberately below the hit-slow/stun tiers so it can never be used to outrun a hit.
+	-- Server/Systems/RunSystem.lua's own parkourSpeedFloor. Deliberately a FLOOR under the normal
+	-- tiers rather than a replacement for them, so it can only ever preserve speed a player earned and
+	-- never slow anyone down, and deliberately applied only to the ladder's own answer -- never to the
+	-- zeroing tiers above it, so it cannot peek through a freeze, a flight or a parkour claim. There
+	-- are no hit-slow or stun tiers for it to sit below any more; the combat rewrite left none.
 	ParkourSpeedFloor = "ParkourSpeedFloor",
 	ParkourSpeedFloorExpiry = "ParkourSpeedFloorExpiry",
 	-- The movement state that player's client last reported (a Types.ParkourActionReport Kind, or the
@@ -1267,13 +1288,6 @@ Constants.PlayerData = {
 	-- A brand-new profile's starting Tier -- Tier 1 is the bottom of TierSystem's nine-tier ladder
 	-- (progression-systems.md), the correct starting point for a player who has never played before.
 	DefaultTier = 1,
-
-	-- DataStore retry/backoff -- same shape and same withRetry-delegates-to-DataStoreRetry pattern
-	-- as Constants.BugReport.StorageRetry*/Constants.Moderation.StorageRetry* below, now actually
-	-- shared (see Shared/DataStoreRetry.lua's own header for why this is the third caller that
-	-- earned the extraction both of those tables' own comments already called out).
-	StorageRetryMaxAttempts = 3,
-	StorageRetryBaseBackoffSeconds = 1,
 
 	-- Periodic autosave interval, seconds -- a crash/server-death safety net on top of the
 	-- PlayerRemoving/BindToClose save paths (PlayerDataSystem.lua), which only fire on a clean
@@ -1899,12 +1913,6 @@ Constants.BugReport = {
 	-- Admin list pagination page size (BugReportSystem.ListReports / GetSortedAsync pageSize).
 	ListPageSize = 20,
 
-	-- DataStore retry/backoff -- BugReportSystem's local withRetry helper now delegates to
-	-- Shared/DataStoreRetry.lua (see that module's header; PlayerDataSystem.lua is the third caller
-	-- that earned the extraction this table's own comment used to defer).
-	StorageRetryMaxAttempts = 3,
-	StorageRetryBaseBackoffSeconds = 1,
-
 	-- DataStore names moved to ServerScriptService/Server/Config/StorageConfig.lua (they replicated
 	-- to clients from here, where they are useless to legitimate code and pure reconnaissance
 	-- otherwise). The version-suffix convention this table established lives on there. Retry/backoff
@@ -1921,24 +1929,13 @@ Constants.BugReport = {
 	},
 }
 
--- Player moderation (Server/Systems/ModerationSystem.lua) -- Kick is stateless; Ban is
--- DataStore-backed (own store, separate from BugReport's above) so it survives a rejoin/new server;
--- Mute is in-memory only (session-scoped, see ModerationSystem.lua's own header for why it's
--- deliberately not persisted -- a mute is a "settle this down right now" tool, not a standing
--- record the way a ban is). Remote names for all three live in Constants.Debug.DevMenu.RemoteNames
--- (DevMenuSystem.lua creates/handles them, same split BugReport's admin remotes already use).
-Constants.Moderation = {
-	-- DataStore retry/backoff -- same shape as Constants.BugReport's/Constants.PlayerData's own
-	-- StorageRetry* fields; all three now feed the same Shared/DataStoreRetry.lua implementation
-	-- (see that module's header).
-	StorageRetryMaxAttempts = 3,
-	StorageRetryBaseBackoffSeconds = 1,
-
-	-- BanDataStoreName moved to Server/Config/StorageConfig.lua -- see the note in Constants.BugReport
-	-- above for why every DataStore name left this file.
-
-	-- SuspectedCheaterDataStoreName moved to Server/Config/StorageConfig.lua, same reasoning.
-}
+-- THERE IS NO Constants.Moderation. Player moderation (Server/Systems/ModerationSystem.lua) has no
+-- tunable of its own left in this file: its two DataStore names moved to
+-- Server/Config/StorageConfig.lua (they replicated to clients from here, where they are useless to
+-- legitimate code and pure reconnaissance otherwise), its remote names live in
+-- Constants.Debug.DevMenu.RemoteNames, and its retry policy is now the shared
+-- Constants.Storage.RetryPolicy above. What was left behind was a table containing two comments and
+-- no fields, still being read into a `local Config` that nothing indexed.
 
 -- Move Creation System (Server/Combat/MoveRegistryManager.lua, Server/Systems/MoveEditorSystem.lua,
 -- Client/UI/Screens/DevTools/MoveEditor/) -- an in-game, admin-gated editor for authoring new combat moves
@@ -1956,11 +1953,6 @@ Constants.MoveEditor = {
 	-- version is bumped anyway, per PlayerDataSystem's own convention, so a future BREAKING change
 	-- has a real boundary to branch on.
 	SchemaVersion = 2,
-
-	-- DataStore retry/backoff -- same shape/values as every other StorageRetry* pair in this file,
-	-- all feeding Shared/DataStoreRetry.lua (see that module's header).
-	StorageRetryMaxAttempts = 3,
-	StorageRetryBaseBackoffSeconds = 1,
 
 	-- Client-side debounce (MoveEditorClient.lua) between a PropertyEditor field edit and the
 	-- UpdateDraft RemoteFunction call it triggers -- long enough that rapidly clicking a NumericField
@@ -2167,8 +2159,6 @@ Constants.Kit = {
 -- UpdateDraft round trip it triggers.
 Constants.KitEditor = {
 	SchemaVersion = 1,
-	StorageRetryMaxAttempts = 3,
-	StorageRetryBaseBackoffSeconds = 1,
 	DraftDebounceSeconds = 0.15,
 
 	-- Admin-only, same trust model as Constants.MoveEditor above -- every RemoteFunction below is

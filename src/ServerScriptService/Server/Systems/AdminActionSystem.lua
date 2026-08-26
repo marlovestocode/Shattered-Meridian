@@ -18,12 +18,11 @@
 	documented), and re-applied onto every fresh Humanoid via this System's own Players.CharacterAdded
 	hook (reapplyRespawnOverrides) -- independent of CombatSystem's own CharacterAdded handler, so
 	there is no dependency in either direction between the two Systems. A player's Humanoid Attributes
-	are the only respawn-persistence CombatSystem/Movement.lua ever need to see -- Movement.
-	ComputeDesiredWalkSpeed already reads Frozen/SpeedMultiplier directly off the Humanoid instead of
-	reaching into CombatState (see that function's header), and CombatSystem's own hit-resolution
-	godmode check now reads the Godmode Attribute the exact same way, so this module never needs
-	CombatSystem to require it back, and CombatSystem never needs this module's internals -- one-way,
-	no cycle.
+	are the only respawn-persistence any consumer ever needs to see -- Server/Systems/RunSystem.lua's
+	resolver reads Frozen/SpeedMultiplier directly off the Humanoid rather than reaching into this
+	module's state, and the combat layer's own godmode check reads the Godmode Attribute the exact same
+	way, so this module never needs either of them to require it back and neither needs this module's
+	internals -- one-way, no cycle.
 
 	Flying/FlightCollide resolve their target's live Humanoid directly off Player.Character rather
 	than through any other System's private state table (a Humanoid is always reachable straight off
@@ -55,7 +54,7 @@ local AdminActionSystem = {}
 -- smaller, admin-only slice of state. Never returned directly to a caller.
 export type AdminOverrideState = {
 	Godmode: boolean,
-	-- Admin-only movement lock -- Movement.ComputeDesiredWalkSpeed reads the mirrored "Frozen"
+	-- Admin-only movement lock -- Server/Systems/RunSystem.lua's resolver reads the mirrored "Frozen"
 	-- Attribute directly (pinned to top priority, above even Flying), not this field; this field
 	-- exists purely so reapplyRespawnOverrides knows whether to re-seed that Attribute (and re-zero
 	-- JumpPower) onto a fresh Humanoid after a respawn.
@@ -131,10 +130,10 @@ end
 
 -- Toggles godmode (see AdminOverrideState.Godmode's own header) -- zeroes damage/posture on every
 -- future hit against this player until toggled off again (CombatSystem.lua's hit-resolution reads
--- the mirrored Attribute directly, the same pattern Movement.lua already established for Frozen/
+-- the mirrored Attribute directly, the same pattern Server/Systems/RunSystem.lua follows for Frozen/
 -- SpeedMultiplier/Flying). Pure with respect to Roblox state beyond the Humanoid Attribute write, so
 -- it's exercised directly in AdminActionSystem.spec.lua against a bare Instance.new("Humanoid") --
--- no live Player required, mirroring Movement.spec.lua/HitResolution.spec.lua's own fixture pattern.
+-- no live Player required, the fixture pattern every Instance-only spec in this suite uses.
 function AdminActionSystem.ApplyGodmode(state: AdminOverrideState, humanoid: Humanoid, enabled: boolean): ()
 	state.Godmode = enabled
 	humanoid:SetAttribute(Constants.Attributes.Godmode, enabled)
@@ -177,7 +176,7 @@ function AdminActionSystem.ApplyFlightCollide(humanoid: Humanoid, enabled: boole
 end
 
 -- Toggles the admin movement lock (see AdminOverrideState.Frozen's own header) -- mirrors the
--- Attribute Movement.ComputeDesiredWalkSpeed reads directly, and saves/zeroes JumpPower the same way
+-- Attribute Server/Systems/RunSystem.lua's resolver reads directly, and saves/zeroes JumpPower the same way
 -- ReapplyRespawnOverrides already does for a fresh respawn, so a player frozen mid-life can't still
 -- jump out of the freeze. Unfreezing restores whatever JumpPower was actually captured -- falling
 -- back to Constants.Debug.DevMenu.DefaultJumpPower only if this humanoid was somehow never actually
@@ -232,8 +231,8 @@ end
 -- new Humanoid, which starts with none of these Attributes set) -- called from this module's own
 -- Players.CharacterAdded hook, independent of CombatSystem.lua's own CharacterAdded handler (no
 -- ordering dependency between the two: every Attribute read anywhere defaults gracefully to "no
--- override" while unset, the same defensive read Movement.ComputeDesiredWalkSpeed already does for
--- every Attribute it consumes). Frozen re-seeds JumpPower = 0 (capturing whatever the fresh Humanoid's
+-- override" while unset, the same defensive read Server/Systems/RunSystem.lua's own numberAttribute
+-- does for every Attribute it consumes). Frozen re-seeds JumpPower = 0 (capturing whatever the fresh Humanoid's
 -- own JumpPower was first, mirroring the original per-life capture); Invisible re-applies
 -- Transparency directly, since a Transparency edit doesn't survive a character being replaced the way
 -- an Attribute mirror does.

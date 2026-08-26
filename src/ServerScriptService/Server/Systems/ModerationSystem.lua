@@ -50,8 +50,6 @@ local ModerationSystem = {}
 
 local logger = Logger.scope("ModerationSystem")
 
-local Config = Constants.Moderation
-
 export type BanRecord = {
 	BannedAt: number,
 	BannedByUserId: number,
@@ -68,7 +66,7 @@ local banStore: DataStore? = nil
 local mutedUserIds: { [number]: boolean } = {}
 
 -- Closes the race BanPlayer's own SetAsync yield otherwise leaves open: SetAsync can take up to
--- several retries/backoffs (Config.StorageRetryMaxAttempts) before the ban record actually exists in
+-- several retries/backoffs (Constants.Storage.RetryPolicy) before the ban record actually exists in
 -- the DataStore, and a target who joins during that window sails straight through the PlayerAdded
 -- IsBanned GetAsync check below (finds nothing yet) -- only getting kicked afterward, and only if
 -- handleBanPlayer's own online-kick still finds them connected. This set is written SYNCHRONOUSLY at
@@ -78,18 +76,12 @@ local mutedUserIds: { [number]: boolean } = {}
 -- BanPlayer call is actually in flight.
 local pendingBanUserIds: { [number]: boolean } = {}
 
--- Local, non-exported retry/backoff wrapper -- delegates to Shared/DataStoreRetry.lua now that
--- PlayerDataSystem.lua is a third caller needing the same shape (see this module's header, which
--- used to flag this exact duplication as "a real candidate for extraction... once a third caller
--- needs the same shape"). Kept as a local wrapper (not a call-site-by-call-site swap to
--- DataStoreRetry.Attempt directly) so every withRetry(operationName, attempt) call below stays
--- unchanged.
-local function withRetry<T>(operationName: string, attempt: () -> T): (boolean, T?, string?)
-	return DataStoreRetry.Attempt(logger, operationName, {
-		MaxAttempts = Config.StorageRetryMaxAttempts,
-		BaseBackoffSeconds = Config.StorageRetryBaseBackoffSeconds,
-	}, attempt)
-end
+-- The retry/backoff wrapper every DataStore call below goes through, bound once to this module's own
+-- logger and to the ONE policy (Constants.Storage.RetryPolicy). Five Systems each held this same
+-- three-line local, differing only in which Constants table they read the same two numbers out of;
+-- see Shared/DataStoreRetry.Scoped's own header. Call sites are unchanged -- still
+-- withRetry(operationName, attempt).
+local withRetry = DataStoreRetry.Scoped(logger, Constants.Storage.RetryPolicy)
 
 local function encodeBanRecord(record: BanRecord): { [string]: any }
 	return {

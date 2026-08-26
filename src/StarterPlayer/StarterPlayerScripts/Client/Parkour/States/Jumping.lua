@@ -13,9 +13,10 @@
 
 	Deliberately hands the actual jump to Roblox's Humanoid whenever the character is genuinely
 	grounded -- see StateSupport.TryJump's own header for why that matters beyond tidiness (the
-	engine's Jumping transition is what credits Server/Combat/Movement.ComputeGenuineJumpAirborne's
-	genuine-jump flag, which gates AirSlam; a jump that bypassed it would silently break that combat
-	interaction). The direct-velocity path is used only for the coyote case, where the Humanoid
+	engine's Jumping transition is what credited the deleted
+	Server/Combat/Movement.ComputeGenuineJumpAirborne's genuine-jump flag, which gated AirSlam --
+	nothing reads either today, since the combat rewrite removed both, so the engine path is now
+	preferred on its own merits rather than for that consumer). The direct-velocity path is used only for the coyote case, where the Humanoid
 	refuses to jump because it already believes it is falling.
 
 	AN ORDINARY JUMP, DELIBERATELY, EVEN AT A WALL. States/WallLaunching.lua owns the custom launch off

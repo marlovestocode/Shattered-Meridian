@@ -130,12 +130,12 @@ end
 -- side-effect-free, same reasoning as BugReportSystem.lua's own mainStore.
 local mainStore: DataStore? = nil
 
-local function withRetry<T>(operationName: string, attempt: () -> T): (boolean, T?, string?)
-	return DataStoreRetry.Attempt(logger, operationName, {
-		MaxAttempts = Config.StorageRetryMaxAttempts,
-		BaseBackoffSeconds = Config.StorageRetryBaseBackoffSeconds,
-	}, attempt)
-end
+-- The retry/backoff wrapper every DataStore call below goes through, bound once to this module's own
+-- logger and to the ONE policy (Constants.Storage.RetryPolicy). Five Systems each held this same
+-- three-line local, differing only in which Constants table they read the same two numbers out of;
+-- see Shared/DataStoreRetry.Scoped's own header. Call sites are unchanged -- still
+-- withRetry(operationName, attempt).
+local withRetry = DataStoreRetry.Scoped(logger, Constants.Storage.RetryPolicy)
 
 -- DataStore/JSON carries no Roblox value types, so the three that appear on a live MoveDefinition
 -- are decomposed here and rebuilt in candidateFromStoredRecord below:
@@ -811,7 +811,7 @@ end
 
 -- Freezes/unfreezes the admin's own character while their editor screen is open/closed -- reuses
 -- AdminActionSystem.SetFrozen (the exact mechanism/Humanoid Attribute an admin's own "Frozen"
--- DevMenu toggle already drives, checked at TOP priority in Movement.ComputeDesiredWalkSpeed)
+-- DevMenu toggle already drives, checked at TOP priority by Server/Systems/RunSystem.lua's resolver)
 -- rather than writing the Attribute directly, so this stays in sync with AdminActionSystem's own
 -- overrideStates bookkeeping instead of fighting it. Fire-and-forget (RemoteEvent) -- the editor
 -- screen doesn't need or wait for a response.

@@ -12,27 +12,28 @@
 	without this system. So this module does NOT claim to prevent movement exploits, and
 	Shared/Parkour/ParkourValidation.lua's own header says the same at more length. What it actually
 	buys, all three of which are real:
-	  1. AGREEMENT. Server/Combat/Movement.ComputeDesiredWalkSpeed runs every server Heartbeat and
+	  1. AGREEMENT. Server/Systems/RunSystem.lua's WalkSpeed resolver runs every server Heartbeat and
 	     would fight a client-driven slide for the same body. The ParkourVelocityOwned Attribute is how
 	     the server stands that resolver down for exactly as long as an accepted action lasts -- and
 	     the expiry below is how it stands back up even if the client never says the action ended.
 	  2. BOUNDED INFLUENCE. Exactly one client-supplied number reaches gameplay: the exit speed that
 	     becomes the ParkourSpeedFloor momentum carry. It is validated here, capped again independently
-	     in Movement.ComputeParkourSpeedFloor, decays to nothing within a second, and is applied only
-	     to the free-movement tiers -- so it can never peek through hit-slow, a stun or a posture break.
+	     in RunSystem's own parkourSpeedFloor, decays to nothing within a second, and is applied only to
+	     the ladder's answer -- never to the zeroing tiers, so it can never peek through a freeze, a
+	     flight, an emote lock or a parkour claim.
 	  3. VISIBILITY. A client producing a sustained stream of impossible claims trips the existing
 	     suspected-cheater path (ModerationSystem's "System"-sourced flag, which Types.SuspicionSource
 	     already reserves for exactly this kind of automated detection) rather than being silently
 	     tolerated.
 
-	Never touches CombatSystem's private state. Every piece of cross-system signalling goes through
+	Never touches another System's private state. Every piece of cross-system signalling goes through
 	Humanoid Attributes, the same shape AdminActionSystem's Flying/Frozen and EmoteSystem's
 	EmoteMovementLocked already use to influence that same resolver -- which is why this System needed
-	no change to CombatSystem beyond one call site, and why it can be removed again without unpicking
+	no change anywhere else beyond one call site, and why it can be removed again without unpicking
 	anything.
 
 	Does not own: any movement behavior or decision (Client/Parkour/* owns all of it), the WalkSpeed
-	resolver itself (Server/Combat/Movement.lua), or the tunables (Shared/Parkour/ParkourConstants.lua).
+	resolver itself (Server/Systems/RunSystem.lua), or the tunables (Shared/Parkour/ParkourConstants.lua).
 ]]
 
 local RunService = game:GetService("RunService")
@@ -204,7 +205,7 @@ end
 -- Closes an ownership window and stamps the momentum carry the action ended with. `reportedSpeed` is
 -- the single client-supplied number that reaches gameplay in this whole feature -- already validated
 -- against VALIDATION.MaxReportedSpeed by the time it arrives here, and capped a second time,
--- independently, inside Movement.ComputeParkourSpeedFloor.
+-- independently, inside Server/Systems/RunSystem.lua's own parkourSpeedFloor.
 -- CLOSING A WINDOW AND GRANTING A REWARD ARE TWO DIFFERENT JOBS, and conflating them was a real
 -- exploit. `hadOpenWindow` is what separates them.
 --
@@ -347,8 +348,9 @@ end
 
 -- Force-closes any ownership window whose deadline has passed. THE reason this System has a Heartbeat
 -- at all, and non-negotiable: without it, a client that disconnects, crashes, or simply drops its End
--- report mid-slide leaves ParkourVelocityOwned true forever, and Movement.ComputeDesiredWalkSpeed pins
--- that character's WalkSpeed at zero for the rest of their life with no error anywhere to explain it.
+-- report mid-slide leaves ParkourVelocityOwned true forever, and Server/Systems/RunSystem.lua's
+-- resolver pins that character's WalkSpeed at zero for the rest of their life with no error anywhere
+-- to explain it.
 -- The client's own reported duration (already clamped) is what sets each deadline, so the window is
 -- never shorter than the action legitimately needs.
 local function onHeartbeat(): ()
@@ -410,15 +412,6 @@ function ParkourSystem.Init(): ()
 	RunService.Heartbeat:Connect(onHeartbeat)
 
 	logger:info("ParkourSystem.Init() complete", { enabled = ParkourConstants.Enabled })
-end
-
--- Whether this player currently has an accepted, unexpired parkour action open. Exposed for dev
--- tooling and for any future System that needs to know whether movement owns a body before acting on
--- it -- nothing in the shipped code calls it yet, and it is a read-only projection, never a way to
--- reach into this System's state.
-function ParkourSystem.HasOpenAction(player: Player): boolean
-	local state = playerStates[player]
-	return state ~= nil and state.OpenKind ~= nil and os.clock() < state.OpenExpiresAt
 end
 
 return ParkourSystem :: Types.SystemModule

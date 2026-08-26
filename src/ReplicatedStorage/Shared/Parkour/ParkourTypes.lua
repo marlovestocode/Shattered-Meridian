@@ -6,9 +6,9 @@
 	state union, the probe result shapes, the per-frame context, the state-module interface, and the
 	client->server report payload. Types only; no runtime value, no state, no behavior.
 
-	Scoped one level down from ReplicatedStorage/Shared/Types.lua for exactly the reason
-	Server/Combat/CombatTypes.lua is scoped down from it: these shapes are internal to one feature's
-	own module cluster, not a system boundary. The ONE type here that genuinely crosses a system
+	Scoped one level down from ReplicatedStorage/Shared/Types.lua for the same reason any per-feature
+	type file is: these shapes are internal to one feature's own module cluster, not a system
+	boundary. The ONE type here that genuinely crosses a system
 	boundary -- ActionReport, the client->server remote payload -- is re-exported by Types.lua as
 	Types.ParkourActionReport so no System outside this feature ever has to require this file, the
 	same discipline every other cross-boundary payload in this codebase follows.
@@ -579,8 +579,8 @@ export type MotorCommand = {
 	--
 	-- It is deliberately NOT a way to move the character, and it is worth being blunt about that
 	-- because the shape invites the assumption: ordinary running speed belongs to
-	-- Server/Combat/Movement.ComputeDesiredWalkSpeed, which runs on the server every Heartbeat and has
-	-- no knowledge of slope. Writing a slope-adjusted number here does not make a character run faster
+	-- Server/Systems/RunSystem.lua's resolver, which runs on the server every Heartbeat and has no
+	-- knowledge of slope. Writing a slope-adjusted number here does not make a character run faster
 	-- downhill, and an earlier version of this comment claimed it was "published to the server as a
 	-- momentum floor" -- it never was. The momentum floor is published only on a parkour ACTION's End
 	-- report (Server/Systems/ParkourSystem.lua), never per frame.

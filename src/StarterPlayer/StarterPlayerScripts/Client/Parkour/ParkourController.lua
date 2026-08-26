@@ -263,7 +263,7 @@ end
 -- THE STRANDED-OWNERSHIP WATCHDOG.
 --
 -- A Start report asks the server to stand its WalkSpeed resolver down for the duration of an action
--- (Constants.Attributes.ParkourVelocityOwned -> Movement.ComputeDesiredWalkSpeed returns 0), and the
+-- (Constants.Attributes.ParkourVelocityOwned -> Server/Systems/RunSystem.lua resolves 0), and the
 -- End report is the only thing that gives it back. If an End never lands -- dropped by the server's own
 -- rate limiter, lost to a dropped packet, or refused by a validation rule -- the player stands frozen
 -- until the server's window expiry rescues them, which is most of a second of the character simply not
@@ -380,8 +380,9 @@ local function step(deltaTime: number): ()
 	context.PlanarSpeed = ParkourMath.PlanarSpeed(velocity)
 	context.MoveDirection = ParkourMath.SafeUnit(ParkourMath.Flatten(velocity), Vector3.zero)
 	-- Humanoid.MoveDirection is the engine's own already-camera-relative, already-normalized movement
-	-- intent -- the same value Server/Combat/Movement.lua's ResolveDashDirection/IsMoving read
-	-- server-side. Using it rather than polling WASD directly means this framework transparently
+	-- intent -- the same value Server/Systems/RunSystem.lua reads server-side to decide whether a
+	-- player is genuinely moving. Using it rather than polling WASD directly means this framework
+	-- transparently
 	-- supports gamepad sticks, touch thumbsticks and any future control scheme, with no per-device
 	-- branching, for free.
 	context.MoveIntent = ParkourMath.Flatten(currentHumanoid.MoveDirection)

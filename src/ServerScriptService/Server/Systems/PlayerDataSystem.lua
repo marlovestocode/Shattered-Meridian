@@ -172,17 +172,12 @@ PlayerDataSystem.OnProfileLoaded = Instance.new("BindableEvent")
 -- blocking out its full timeout for a player who is already being disconnected.
 PlayerDataSystem.OnProfileLoadFailed = Instance.new("BindableEvent")
 
--- Local, non-exported retry/backoff wrapper -- delegates to Shared/DataStoreRetry.lua (see that
--- module's header for why PlayerDataSystem is the third caller that earned its extraction).
--- Every call site below keeps the exact same withRetry(operationName, attempt) shape
--- BugReportSystem.lua/ModerationSystem.lua's own local withRetry already established, so nothing
--- about this module's DataStore call sites looks different from that precedent.
-local function withRetry<T>(operationName: string, attempt: () -> T): (boolean, T?, string?)
-	return DataStoreRetry.Attempt(logger, operationName, {
-		MaxAttempts = Config.StorageRetryMaxAttempts,
-		BaseBackoffSeconds = Config.StorageRetryBaseBackoffSeconds,
-	}, attempt)
-end
+-- The retry/backoff wrapper every DataStore call below goes through, bound once to this module's own
+-- logger and to the ONE policy (Constants.Storage.RetryPolicy). Five Systems each held this same
+-- three-line local, differing only in which Constants table they read the same two numbers out of;
+-- see Shared/DataStoreRetry.Scoped's own header. Call sites are unchanged -- still
+-- withRetry(operationName, attempt).
+local withRetry = DataStoreRetry.Scoped(logger, Constants.Storage.RetryPolicy)
 
 --
 -- Pure logic -- default construction, encode/decode, migration, mutation application. Every

@@ -96,19 +96,10 @@ function ComboEscalation.Advance(attacker: Model, now: number): number
 	return state.Stage
 end
 
--- Drops an attacker's string immediately, without waiting for its window.
---
--- Nothing in the damage layer calls this, and that is deliberate rather than an oversight: a parried
--- attacker's string is already gone by the time they can act again, because their stagger outlasts the
--- combo window (see DamageConstants.Combo.WindowSeconds on why that relationship is load-bearing).
--- Expressing that as "let the timer expire" rather than as a reset rule means there is no second place
--- for the two to disagree.
---
--- It exists for teardown -- a character being removed, a spec clearing between cases -- where the
--- record would otherwise outlive the body it describes.
-function ComboEscalation.Clear(attacker: Model): ()
-	states[attacker] = nil
-end
+-- There is no Clear(attacker). There used to be, for "teardown -- a character being removed, a spec
+-- clearing between cases", and nothing ever called it: ReclaimStale below already drops every record
+-- whose attacker has left the world, which is the same teardown arriving on its own schedule. Keeping
+-- both meant two ways to end a string and one of them unexercised.
 
 -- Drops every record whose attacker has left the world, and every record whose window has long since
 -- lapsed. Called from DamageSystem's Heartbeat.

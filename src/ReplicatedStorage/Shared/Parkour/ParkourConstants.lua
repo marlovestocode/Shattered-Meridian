@@ -97,8 +97,8 @@ ParkourConstants.Locomotion = {
 	AirTurnRateDegreesPerSecond = 220,
 
 	-- How long a finished parkour action's earned speed survives as a WalkSpeed floor before decaying
-	-- to nothing (Constants.Attributes.ParkourSpeedFloor, applied by
-	-- Server/Combat/Movement.ComputeParkourSpeedFloor). This is the server-side half of momentum: the
+	-- to nothing (Constants.Attributes.ParkourSpeedFloor, applied by Server/Systems/RunSystem.lua's
+	-- own parkourSpeedFloor). This is the server-side half of momentum: the
 	-- client simulates the action, reports the speed it ended with, and this window is how long that
 	-- speed keeps the server's own WalkSpeed resolver from snapping the player back to sprint pace.
 	-- Long enough that a slide-jump lands still fast, short enough that a single well-timed slide is
@@ -1836,7 +1836,7 @@ ParkourConstants.Validation = {
 
 	-- MOMENTUM-CARRY CROSS-CHECK. The speed a client reports at the end of an action is the one
 	-- client-supplied number in this whole feature that reaches gameplay (it becomes the
-	-- ParkourSpeedFloor that Movement.ComputeParkourSpeedFloor holds the player's WalkSpeed up to),
+	-- ParkourSpeedFloor that Server/Systems/RunSystem.lua holds the player's WalkSpeed up to),
 	-- so it gets checked against something the SERVER can see for itself rather than only against a
 	-- constant ceiling.
 	--

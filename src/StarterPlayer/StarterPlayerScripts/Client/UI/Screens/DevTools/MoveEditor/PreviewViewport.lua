@@ -38,7 +38,7 @@
 	"watch the move happen" needs a draggable handle. It loops until Stop is pressed, so an author can
 	watch a swing repeat while tweaking numbers on the panel beside it.
 	During playback: the dummy's root actually translates for a Movement lunge (constant speed,
-	distanceStuds/durationSeconds, starting at t=0 -- mirrors Movement.ApplyCustomMoveLunge's own
+	distanceStuds/durationSeconds, starting at t=0 -- mirrors the deleted Movement.ApplyCustomMoveLunge's own
 	formula and CombatSystem.ThrowCustomMove's own "applied at the moment of the throw" timing) and a
 	Projectile's gizmo actually flies from its windup-end spawn pose out to MaxRange/Speed (mirrors
 	HitboxResolver's own computeProjectilePose formula exactly, spawnCFrame * CFrame.new(0, 0,

@@ -38,8 +38,8 @@
 	plus an explicit BasePart:SetNetworkOwner(nil) to hand the part to the SERVER -- only then does a
 	server-driven AlignPosition/AlignOrientation constraint, or a velocity write, actually stick. This
 	is new territory (nothing before this attached or launched a player's body), but the technique is
-	not; it is the deleted RagdollController.HoldAloft's own closest prior art, referenced only in
-	comments today (CombatTypes.lua, Movement.lua) -- the same server-side pin, the same "leave the
+	not; it is the deleted RagdollController.HoldAloft's own closest prior art, which now survives only
+	as prose (the CombatTypes.lua and Movement.lua that described it have themselves been deleted) -- the same server-side pin, the same "leave the
 	victim's own Humanoid/Motor6D control intact, this is not a ragdoll" posture.
 
 	MOVEMENT LOCK REUSES TWO EXISTING SEAMS, NEITHER OF WHICH THIS MODULE OWNS:
@@ -49,8 +49,8 @@
 	    victim while held OR in flight; parks client-side parkour for free, no ParkourController edit.
 	  * Constants.Attributes.Grabbed -- a NEW boolean, added to RunSystem.isMovementLocked's existing
 	    tier list, because RootControlLocked has never carried WalkSpeed-zeroing semantics in this
-	    codebase (a dedicated Attribute always did that job -- see CombatTypes.lua's own
-	    airComboChaseExpiry). Pins the victim's WalkSpeed to 0 while held or in flight.
+	    codebase (a dedicated Attribute always did that job -- the since-deleted CombatTypes.lua's own
+	    airComboChaseExpiry was the precedent). Pins the victim's WalkSpeed to 0 while held or in flight.
 	Neither Attribute is interpreted anywhere else by this module -- RunSystem/ParkourController read
 	them generically, exactly as they already do for every other setter.
 

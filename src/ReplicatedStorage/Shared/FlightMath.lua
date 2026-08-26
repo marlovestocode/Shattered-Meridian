@@ -7,7 +7,7 @@
 	bob. Deliberately has no Roblox Instance dependency (no Humanoid, no BasePart, no Workspace), the
 	same "pure logic, safe for both sides to read" shape luau-coding-standards.md asks of Shared
 	ModuleScripts -- which is exactly what makes it headlessly TestEZ-testable, the same reasoning
-	Server/Combat/Movement.lua's ComputeDesiredWalkSpeed and Client/FX/FXPool.lua already get tested
+	Shared/Run/RunLadder.lua's charge/stage arithmetic and Client/FX/FXPool.lua already get tested
 	this way.
 
 	Does not own: any Constants.Flight lookup, any Instance mutation, or the noclip-vs-collide branch

@@ -96,8 +96,8 @@ local RUN_STAGE_CROSSFADE_TIME = Constants.Run.Animation.StageCrossfadeSeconds
 local RUN_PLAYBACK_SPEEDS = Constants.Run.Animation.PlaybackSpeeds
 
 -- The MoveDirection magnitude below which there's no meaningful held movement input -- shared with
--- Server/Combat/Movement.lua's own IsMoving and Client/FX/MovementVFX.lua, see
--- CombatConstants.MovementInputMagnitudeThreshold's own header for the other call sites.
+-- Client/FX/MovementVFX.lua; see CombatConstants.MovementInputMagnitudeThreshold's own header for the
+-- other call sites (the server-side IsMoving it also names went with Server/Combat/Movement.lua).
 local LOCOMOTION_THRESHOLD = CombatConstants.MovementInputMagnitudeThreshold
 
 -- Priority alone (Core, set below) isn't enough: Roblox's default character rig ALSO plays its own
@@ -418,9 +418,12 @@ end
 -- Tracks the player's held Sprint INTENT -- whether that intent actually plays/keeps playing the
 -- Running track is decided fresh every frame by the eligibility evaluator below, never here. Nothing
 -- in this codebase currently pushes this (Sprint's own request/response plumbing lived in the
--- now-removed CombatSystem.lua/CombatClient.lua) -- kept as public API surface, exactly like
--- Server/Combat/Movement.lua, ready to be wired into whatever replaces Sprint's server-side brain
--- rather than deleted and re-invented later.
+-- now-removed CombatSystem.lua/CombatClient.lua) -- kept as public API surface, ready to be wired
+-- into whatever replaces Sprint's server-side brain rather than deleted and re-invented later.
+--
+-- Note the sprint LADDER did get rebuilt, in Server/Systems/RunSystem.lua, and this module is not
+-- what it drives: Client/Movement/RunController.lua owns the intent and the stage readout. This flag
+-- is the animator's own local mirror and nothing pushes it today.
 local sprintHeld = false
 
 function CombatAnimator.StartRunning(): ()

@@ -87,9 +87,13 @@ export type MoveAnimationClip = AnimationTimeline.Clip
 export type MoveAttachmentPoint = HitboxTypes.AttachmentPoint
 
 -- v1's only movement-authoring primitive: a fixed-speed forward lunge, reusing the Dash-burst
--- SHAPE (a WalkSpeed override for a fixed window) via Movement.ApplyCustomMoveLunge -- not
--- Dash's own state fields. See Movement.lua's ComputeDesiredWalkSpeed for why this is its own
--- priority tier rather than writing WalkSpeed directly.
+-- SHAPE (a WalkSpeed override for a fixed window).
+--
+-- NOTHING APPLIES THIS TODAY. The lunge was applied by Server/Combat/Movement.ApplyCustomMoveLunge,
+-- in the file the combat rewrite left without a caller and which has since been deleted; the live
+-- WalkSpeed owner (Server/Systems/RunSystem.lua) has no lunge tier. The shape is kept because it is
+-- authored per move in the Move Editor and persisted with the record -- deleting it would drop
+-- authored content -- but a move carrying one currently lunges nowhere.
 export type MoveMovementGrant = {
 	LungeDistanceStuds: number,
 	LungeDurationSeconds: number,

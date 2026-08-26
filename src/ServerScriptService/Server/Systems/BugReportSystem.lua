@@ -98,18 +98,12 @@ function BugReportSystem.ComputeOpenCountDelta(
 	return 0
 end
 
--- Local, non-exported retry/backoff wrapper -- delegates to Shared/DataStoreRetry.lua, which this
--- module's own header used to flag as "a candidate for extraction... later, not before."
--- PlayerDataSystem.lua is now that later/third caller (alongside ModerationSystem.lua's own
--- withRetry), so the actual retry loop lives in one shared place; this local wrapper just supplies
--- this module's own logger/Config, keeping every call site below (withRetry(operationName,
--- attempt)) unchanged.
-local function withRetry<T>(operationName: string, attempt: () -> T): (boolean, T?, string?)
-	return DataStoreRetry.Attempt(logger, operationName, {
-		MaxAttempts = Config.StorageRetryMaxAttempts,
-		BaseBackoffSeconds = Config.StorageRetryBaseBackoffSeconds,
-	}, attempt)
-end
+-- The retry/backoff wrapper every DataStore call below goes through, bound once to this module's own
+-- logger and to the ONE policy (Constants.Storage.RetryPolicy). Five Systems each held this same
+-- three-line local, differing only in which Constants table they read the same two numbers out of;
+-- see Shared/DataStoreRetry.Scoped's own header. Call sites are unchanged -- still
+-- withRetry(operationName, attempt).
+local withRetry = DataStoreRetry.Scoped(logger, Constants.Storage.RetryPolicy)
 
 -- Dedicated key on mainStore holding the persisted openReportCount -- see seedOpenReportCount's own
 -- header for why this replaced a full OrderedDataStore page-walk on every server boot. Lives on

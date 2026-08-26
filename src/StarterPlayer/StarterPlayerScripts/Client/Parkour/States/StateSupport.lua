@@ -152,8 +152,8 @@ end
 -- instant so one frame of contact with a doorframe doesn't erase a sprint's worth of speed.
 --
 -- The reason this can be so simple -- and the reason no WalkSpeed is written here -- is that
--- Server/Combat/Movement.ComputeDesiredWalkSpeed already owns that property and already ramps it
--- (see its own momentum smoothing), including honoring the post-action momentum floor this
+-- Server/Systems/RunSystem.lua already owns that property and already ramps it (see its own
+-- rampWalkSpeed), including honoring the post-action momentum floor this
 -- framework's action reports hand it. Writing WalkSpeed from the client would be overwritten within
 -- a frame and would fight the very system it needs to cooperate with.
 function StateSupport.ApplyGroundLocomotion(context: ParkourContext): ()
@@ -380,10 +380,10 @@ end
 --
 -- Two mechanisms, because there genuinely are two cases:
 --   * Grounded -> ask the Humanoid. This produces the engine's own Jumping state transition, which
---     Server/Combat/Movement.ComputeGenuineJumpAirborne reads to credit a GENUINE jump (the flag
---     that gates AirSlam -- see that function's own header for the exploit list it closes). A
---     parkour jump that bypassed the Humanoid would silently stop crediting that, and AirSlam would
---     quietly stop working out of parkour movement.
+--     the deleted Server/Combat/Movement.ComputeGenuineJumpAirborne read to credit a GENUINE jump
+--     (the flag that gated AirSlam). Both went with the combat rewrite, so nothing consumes the
+--     distinction now -- but going through the Humanoid stays correct on its own terms, and is what a
+--     rebuilt AirSlam would need again.
 --   * Airborne (coyote time, or launching out of an owned action) -> a direct velocity write, since
 --     the Humanoid refuses to jump while it believes it is falling.
 -- Both honor CombatClient.lua's jump suppression through ParkourMotor's own state-enabled check.

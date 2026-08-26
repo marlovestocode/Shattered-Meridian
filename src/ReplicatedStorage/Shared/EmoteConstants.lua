@@ -53,8 +53,9 @@ EmoteConstants.RemoteNames = {
 	-- own and no track whose end could be reported through NotifyFinished.
 	--
 	-- WITHOUT THIS A SEATED PLAYER IS STUCK. Sit and Dance are both Loop AND MovementLocked, so
-	-- EmoteSystem zeroes their WalkSpeed (Server/Combat/Movement.lua's ComputeDesiredWalkSpeed) and
-	-- then nothing in the system ever clears it: the heartbeat expiry only fires for a non-Loop
+	-- EmoteSystem zeroes their WalkSpeed (via Constants.Attributes.EmoteMovementLocked, which
+	-- Server/Systems/RunSystem.lua's resolver reads at its top tier) and then nothing in the system
+	-- ever clears it: the heartbeat expiry only fires for a non-Loop
 	-- emote's EndsAt, and the InCombat interruption needs an attacker. Dying was the only exit.
 	--
 	-- Deliberately NOT validated against WHICH emote is running -- unlike NotifyFinished (a report

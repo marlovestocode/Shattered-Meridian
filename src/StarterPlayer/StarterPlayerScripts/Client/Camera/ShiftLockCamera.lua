@@ -60,8 +60,8 @@
 	the server's authoritative hold/ragdoll orientation continuously, which is why an air-combo
 	attacker's own view of their flight looked different from how the same flight looked to everyone
 	else (the server-replicated, uncontested state everyone else renders). Same server-Attribute-on-
-	Humanoid pattern as "Flying" (DevMenu/FlightController.lua) / "BonusWalkSpeed"
-	(Server/Combat/Movement.lua) -- server truth, read reactively by a client presentation module,
+	Humanoid pattern as "Flying" (Client/Flight/FlightController.lua) / "BonusWalkSpeed"
+	(Server/Systems/RunSystem.lua) -- server truth, read reactively by a client presentation module,
 	never a NetworkBridge remote for this.
 
 	Logging (Logger.scope("ShiftLockCamera"), Studio-only per Logger.lua): toggle and engage/

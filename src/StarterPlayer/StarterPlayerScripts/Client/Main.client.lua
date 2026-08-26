@@ -21,9 +21,10 @@
 	life -- the role Client/Combat/CombatClient.lua's own CharacterAdded handler used to play before
 	the combat system was removed. CombatAnimator's plain Walking/Running locomotion loop (a movement
 	feature, not a combat one -- see that module's own header) has nothing to play without this;
-	Sprint/Dash/Slide's own request-firing is NOT resurrected here, since CombatSystem.lua (their only
-	server-side handler) is gone -- see Server/Combat/Movement.lua's own header on being left
-	deliberately orphaned rather than rewired. AttackInputClient and DefenseClient each bind their OWN
+	Dash/Slide's own request-firing is NOT resurrected here, since CombatSystem.lua (their only
+	server-side handler) is gone and the orphaned resolver that would have applied their WalkSpeed
+	bursts has since been deleted. Sprint DID come back, elsewhere: Client/Movement/RunController.lua
+	owns the intent and Server/Systems/RunSystem.lua owns the ladder. AttackInputClient and DefenseClient each bind their OWN
 	AnimationManager per life rather than going through that hookup, which is that module's documented
 	"construct once, Bind() per respawn" shape and not an inconsistency.
 ]]

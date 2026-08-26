@@ -77,10 +77,6 @@ function CandidateGatherer.SetRegisteredModels(models: { Model }): ()
 	overlapParams.FilterDescendantsInstances = models
 end
 
-function CandidateGatherer.RegisteredModelCount(): number
-	return #overlapParams.FilterDescendantsInstances
-end
-
 -- Fills `out` with the parts whose bounds overlap the hitbox's broadphase volume and returns how many
 -- were written. `out` is a caller-owned buffer reused across samples -- the engine keeps exactly one
 -- and passes it every time, so a sample costs no allocation beyond whatever the Roblox API itself

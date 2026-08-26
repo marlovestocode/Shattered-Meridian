@@ -73,8 +73,8 @@
 	Does not own: which emotes a player has UNLOCKED (Server/Systems/EmoteUnlockService.lua) --
 	RequestPlay/RequestSetLoadoutSlot both defer to EmoteUnlockService.HasUnlocked rather than reading
 	Types.PlayerProfile.unlockedEmoteIds directly. Does not own movement state itself --
-	Server/Combat/Movement.lua's ComputeDesiredWalkSpeed (not this file) is what actually zeroes
-	WalkSpeed once the EmoteMovementLocked Attribute is set.
+	Server/Systems/RunSystem.lua's resolver (not this file) is what actually zeroes WalkSpeed once the
+	EmoteMovementLocked Attribute is set.
 
 	PARTIALLY GATED ON COMBAT STATE AGAIN, THROUGH ONE ATTRIBUTE. RequestPlay and the active-emote
 	monitor below used to read CombatSystem.GetCombatState and reject/interrupt an emote for being dead,
@@ -159,7 +159,7 @@ local function setMovementLocked(player: Player, locked: boolean): ()
 		humanoid:SetAttribute(Constants.Attributes.EmoteMovementLocked, true)
 	else
 		-- nil clears the Attribute entirely (SetAttribute(name, nil) removes it) rather than leaving
-		-- a stale `false` behind -- matches Movement.ComputeDesiredWalkSpeed's own `== true` reads for
+		-- a stale `false` behind -- matches Server/Systems/RunSystem.lua's own `== true` reads for
 		-- every sibling Attribute (Frozen/Flying), which treat "absent" and "false" identically.
 		humanoid:SetAttribute(Constants.Attributes.EmoteMovementLocked, nil)
 	end

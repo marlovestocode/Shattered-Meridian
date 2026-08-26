@@ -12,7 +12,7 @@
 	this existed. So this module does NOT and cannot prevent movement exploits in general. What it
 	does do, and what it is worth having for:
 	  * Keeps an HONEST client's state machine and the server's view of it in agreement, so the
-	    server-side WalkSpeed resolver (Server/Combat/Movement.lua) never fights a legitimate parkour
+	    server-side WalkSpeed resolver (Server/Systems/RunSystem.lua) never fights a legitimate parkour
 	    action or grants ownership for one that already ended.
 	  * Rejects the crude and obviously-impossible: a vault that claims 200 studs of lift, a report
 	    stream faster than any human input, an ownership window claimed and never closed.
@@ -191,7 +191,7 @@ function ParkourValidation.Validate(
 		-- It used to run before the phase test, applying to Starts and Ends alike, and that was a real
 		-- and very visible bug rather than an over-strict rule: a Start grants velocity ownership
 		-- (ParkourSystem.beginAction sets ParkourVelocityOwned, which pins the player's WalkSpeed at zero
-		-- in Movement.ComputeDesiredWalkSpeed) and the End is the only thing that gives it back. Any
+		-- in Server/Systems/RunSystem.lua's resolver) and the End is the only thing that gives it back. Any
 		-- action that legitimately ends within MinSameKindIntervalSeconds of starting therefore had its
 		-- RELEASE rejected as a duplicate and left the player frozen where they stood until the server's
 		-- own window expiry rescued them -- most reliably a wall-kick that reaches the ground almost
@@ -235,7 +235,7 @@ function ParkourValidation.Validate(
 	-- and three were still live here: a Roll's End arriving with a slightly stale claim after a network
 	-- hiccup, a fast landing-roll's own honest vertical delta, or ordinary lag stretching elapsed past
 	-- MaxActionSeconds could each still refuse the release and strand ParkourVelocityOwned (and
-	-- therefore WalkSpeed, pinned to 0 by Server/Combat/Movement.ComputeDesiredWalkSpeed) until either
+	-- therefore WalkSpeed, pinned to 0 by Server/Systems/RunSystem.lua's resolver) until either
 	-- ParkourController's stranded-ownership watchdog's next retry or the server's own hard window
 	-- expiry rescued the player a beat later -- read in play as "I keep rolling and randomly lock up
 	-- for a second." Short, frequent, back-to-back-capable actions like Roll are exactly what turns a

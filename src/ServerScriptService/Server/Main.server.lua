@@ -378,7 +378,8 @@ boot("ParkourSystem", ParkourSystem)
 --      per-Heartbeat WalkSpeed resolver that CombatSystem.onHeartbeat used to drive through
 --      Server/Combat/Movement.ComputeDesiredWalkSpeed; with CombatSystem deleted by the combat
 --      rewrite, nothing drove that resolver, so nothing wrote WalkSpeed at all and no run stage was
---      ever published. See this System's own header for the full ownership argument.
+--      ever published. (That resolver has since been deleted along with its CombatTypes.lua -- this
+--      System is now the only WalkSpeed writer in the tree, not merely the live one.) See this System's own header for the full ownership argument.
 --
 --      Boots after ParkourSystem purely so the pair reads in dependency order (the run's resolver
 --      reads Attributes the parkour System stamps). It requires no System's API at Init() time and

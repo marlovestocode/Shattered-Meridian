@@ -99,12 +99,12 @@ local function wrapHandler<Result, Args...>(name: string, handler: (Player, Args
 	end
 end
 
-local function withRetry<T>(operationName: string, attempt: () -> T): (boolean, T?, string?)
-	return DataStoreRetry.Attempt(logger, operationName, {
-		MaxAttempts = Config.StorageRetryMaxAttempts,
-		BaseBackoffSeconds = Config.StorageRetryBaseBackoffSeconds,
-	}, attempt)
-end
+-- The retry/backoff wrapper every DataStore call below goes through, bound once to this module's own
+-- logger and to the ONE policy (Constants.Storage.RetryPolicy). Five Systems each held this same
+-- three-line local, differing only in which Constants table they read the same two numbers out of;
+-- see Shared/DataStoreRetry.Scoped's own header. Call sites are unchanged -- still
+-- withRetry(operationName, attempt).
+local withRetry = DataStoreRetry.Scoped(logger, Constants.Storage.RetryPolicy)
 
 --
 -- Encode -- explicit field lists, never a raw pass-through of the live struct, matching
