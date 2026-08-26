@@ -544,8 +544,9 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 		CornerAccentRivets = false,
 		BracketArmLength = SECTION_BRACKET_ARM,
 		BracketInset = ChamferedSurface.CHAMFER_PX,
-		-- The top pair drops clear of the joint -- see SECTION_BRACKET_ARM. Zero for a console
-		-- standing alone, which keeps the bare-helm path byte-identical.
+		-- The top pair tracks the seam -- see SECTION_BRACKET_ARM. The rule both joints in this UI
+		-- keep: an elbow sits BracketInset from the VISIBLE join, not from its panel's nominal edge.
+		-- Zero for a console standing alone, which keeps the bare-helm path byte-identical.
 		BracketTopInset = bracketDrop,
 		-- The same violet edge the dock carries, at the same softened opacity, so the two surfaces
 		-- read as cut from one material rather than as two panels that happen to share a palette.

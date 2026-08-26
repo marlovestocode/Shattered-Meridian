@@ -141,6 +141,9 @@ export type PanelProps = {
 	-- CornerBracket.lua's own TopInset note. Screens/BlimpHelm passes its seam depth so its top elbows
 	-- mark the start of its own section rather than the joint the furnace plate sinks into above it.
 	BracketTopInset: number?,
+	-- The same, for a panel joined along its LEFT edge -- Screens/HUD's dock, which the armament
+	-- island sinks into. See CornerBracket.lua's LeftInset.
+	BracketLeftInset: number?,
 	Children: UsedAs<{ Instance }>?,
 }
 
@@ -219,6 +222,7 @@ local function Panel(scope: Scope, props: PanelProps): Frame
 			RivetInset = if wantsRivets then BRACKET_RIVET_INSET else nil,
 			Inset = props.BracketInset,
 			TopInset = props.BracketTopInset,
+			LeftInset = props.BracketLeftInset,
 			Color = props.CornerAccentColor or Tokens.Color.AccentPrimary,
 		})
 	end

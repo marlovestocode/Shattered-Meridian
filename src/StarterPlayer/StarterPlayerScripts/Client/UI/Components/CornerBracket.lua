@@ -46,10 +46,14 @@ export type CornerBracketProps = {
 	-- Pixels inward from the corner, on BOTH axes, before the elbow starts -- see this file's header
 	-- on why this is the chamfer's answer. Defaults to 0 (flush to the corner).
 	Inset: number?,
-	-- EXTRA pixels down, on the TOP pair only, added to Inset. For a panel that is the lower half of
-	-- an assembly: its top corners are not the assembly's corners, so bracketing them marks the joint
-	-- rather than the object. Screens/BlimpHelm passes the seam depth so its top elbows land at the
-	-- start of its own section instead of inside the furnace joint above it.
+	-- EXTRA pixels inward, on ONE pair only, added to Inset. For a panel that is one HALF of an
+	-- assembly: the corners on its joined edge are not the assembly's corners, so bracketing them
+	-- marks the joint rather than the object.
+	--
+	-- Two of the four edges have a caller and therefore a prop; Bottom and Right get one the day
+	-- something is joined along them. Screens/BlimpHelm passes TopInset (the furnace plate sinks into
+	-- its top edge) and Screens/HUD passes LeftInset (the armament island sinks into the dock's left
+	-- edge) -- the same joint twice, rotated ninety degrees.
 	--
 	-- A prop rather than a wrapper frame, and that is not a style call. A Scale-sized frame holding
 	-- these inside an AutomaticSize panel inflates the panel to the viewport -- Components/Panel.lua's
@@ -57,6 +61,7 @@ export type CornerBracketProps = {
 	-- console to 970. The arms themselves are offset-sized with scale-anchored Positions, so moving
 	-- them is safe in a way moving their container is not.
 	TopInset: number?,
+	LeftInset: number?,
 	ZIndex: number?,
 }
 
@@ -71,8 +76,8 @@ local function buildOne(scope: Scope, corner: Vector2, props: CornerBracketProps
 	-- Which way "inward" points depends on which corner this is -- the same sign question the rivet
 	-- below already had to answer, hoisted here now that the elbow itself can move too.
 	local inset = props.Inset or 0
-	local insetX = if corner.X == 0 then inset else -inset
-	-- The top pair can be pushed further in than the bottom -- see TopInset.
+	-- The pair on a JOINED edge can be pushed further in than its opposite -- see TopInset/LeftInset.
+	local insetX = if corner.X == 0 then inset + (props.LeftInset or 0) else -inset
 	local insetY = if corner.Y == 0 then inset + (props.TopInset or 0) else -inset
 	local elbow = UDim2.new(corner.X, insetX, corner.Y, insetY)
 

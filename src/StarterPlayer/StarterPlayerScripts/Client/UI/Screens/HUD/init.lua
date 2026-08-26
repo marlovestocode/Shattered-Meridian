@@ -400,6 +400,21 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 		CornerAccentRivets = false,
 		BracketArmLength = 10,
 		BracketInset = ChamferedSurface.CHAMFER_PX,
+		-- THE LEFT PAIR TRACKS THE SEAM when an island is bolted on, and this PREVENTS a regression
+		-- rather than fixing an old defect -- worth saying plainly, because the first draft of this
+		-- comment claimed the opposite. A Panel's CornerAccent measures BracketInset from the panel's
+		-- own left edge, which before the sink WAS the visible join: the elbows sat eight pixels clear
+		-- of it, exactly as a lone panel's do. The sink then walks the join eight pixels right, into
+		-- the elbows, and they would have ended up sitting on the line.
+		--
+		-- So the rule both joints in this UI now keep is one sentence: an elbow sits BracketInset from
+		-- the VISIBLE join, not from its panel's nominal edge. Screens/BlimpHelm passes BracketTopInset
+		-- for the identical reason -- there the two had already collided, which is how the rule got
+		-- found. Zero with no island, so the bare dock is byte-identical.
+		--
+		-- HUD/ArmamentIsland.lua's "the dock's own left-hand elbows... read as the clamps holding this
+		-- one in" therefore still stands: nothing about how they look has changed.
+		BracketLeftInset = if armament then ArmamentIsland.SEAM_OVERLAP else 0,
 		-- NO SurfaceTexture, for two independent reasons and either alone would settle it. Register:
 		-- docs/ui-ux-philosophy.md's Shape Language puts the tiled surface grain on MENU surfaces and
 		-- the cut-corner silhouette on COMBAT surfaces, and says using one register's treatment on the
@@ -512,7 +527,7 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 	-- shape the measurement above rules out.
 	local dockBand: Frame = dock
 	if armament then
-		local island = ArmamentIsland(scope, armament)
+		local island = ArmamentIsland.Build(scope, armament)
 
 		-- THE FASTENER. One bronze bead straddling the seam -- half on the dock, half on the island --
 		-- at the one point on that edge the dock's own bracket elbows leave clear. It is what turns a
@@ -530,10 +545,41 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 		-- Rides the island's OWN spring rather than a second one: it must not be sitting on the dock's
 		-- edge with nothing attached to it, and two springs off one boolean are one retune away from
 		-- disagreeing about how far out the island is.
+		-- THE SHARED RULE, WHICH THIS JOINT USED TO GET FOR FREE AND NO LONGER DOES. Until the island
+		-- sank into the dock, its clipped edge stopped exactly on the dock's left edge and that edge's
+		-- own stroke was the line at the seam. The sink (HUD/ArmamentIsland.lua's SEAM_OVERLAP, which
+		-- is what removes the two triangular notches the chamfers left in the assembly's silhouette)
+		-- puts the island's fill over that stroke, so the two faces merge into one and the bead is
+		-- left floating in the middle of it.
+		--
+		-- One hairline at the island's clipped edge puts the division back where the eye expects it,
+		-- in the same violet at the same 0.3 both panels carry, so it reads as the assembly's own
+		-- internal edge rather than as a third colour. Full height because the dock is already past
+		-- its chamfer at this X -- the cuts finish exactly where this line sits, which is the whole
+		-- reason the sink is the chamfer depth and not some other number.
+		--
+		-- Screens/BlimpHelm/init.lua draws the identical rule for the furnace joint, rotated.
+		local seamRule = scope:New "Frame" {
+			Name = "SeamRule",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0, ArmamentIsland.SEAM_OVERLAP, 0.5, 0),
+			Size = UDim2.new(0, 1, 1, 0),
+			BackgroundColor3 = Tokens.Color.AccentPrimary,
+			BackgroundTransparency = scope:Computed(function(use)
+				-- The panel edge's own 0.3, faded out with the island so a departing plate does not
+				-- leave a rule scored down the dock's left edge.
+				return 1 - 0.7 * math.clamp(use(island.Presence), 0, 1)
+			end),
+			BorderSizePixel = 0,
+			ZIndex = 5,
+		}
+
 		local seamBolt = scope:New "Frame" {
 			Name = "SeamBolt",
 			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.fromScale(0, 0.5),
+			-- On the rule, not on the dock's nominal left edge: after the sink those are eight pixels
+			-- apart, and the bead belongs on the line it is fastening.
+			Position = UDim2.new(0, ArmamentIsland.SEAM_OVERLAP, 0.5, 0),
 			Size = UDim2.fromOffset(SEAM_BOLT_SIZE, SEAM_BOLT_SIZE),
 			Rotation = 45,
 			BackgroundColor3 = Tokens.Color.AccentSecondary,
@@ -555,6 +601,7 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 			[Children] = {
 				dock,
 				island.Content,
+				seamRule,
 				seamBolt,
 			},
 		} :: Frame
