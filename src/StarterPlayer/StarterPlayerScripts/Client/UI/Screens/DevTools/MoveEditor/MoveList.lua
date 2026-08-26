@@ -69,6 +69,7 @@ local ActionIcon = require(script.Parent.Parent.Parent.Parent.Components.ActionI
 local SectionIcon = require(script.Parent.Parent.Parent.Parent.Components.SectionIcon)
 local ScrollArea = require(script.Parent.Parent.Parent.Parent.Components.ScrollArea)
 local EditorTokens = require(script.Parent.EditorTokens)
+local Inset = require(script.Parent.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -554,9 +555,7 @@ function MoveListModule.Mount(scope: Scope, width: number, height: number, props
 				LayoutOrder = 4,
 
 				Children = {
-					scope:New "UIPadding" {
-						PaddingRight = UDim.new(0, Tokens.Space.XS),
-					},
+					Inset(scope, { Right = Tokens.Space.XS }),
 					scope:New "UIListLayout" {
 						FillDirection = Enum.FillDirection.Vertical,
 						Padding = UDim.new(0, Tokens.Space.XS),

@@ -18,6 +18,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
+local Inset = require(script.Parent.Inset)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -112,12 +113,7 @@ local function TextField(scope: Scope, props: TextFieldProps): TextBox
 		end,
 
 		[Children] = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.S),
-				PaddingBottom = UDim.new(0, Tokens.Space.S),
-				PaddingLeft = UDim.new(0, Tokens.Space.S),
-				PaddingRight = UDim.new(0, Tokens.Space.S),
-			},
+			Inset(scope, Tokens.Space.S),
 			scope:New "UICorner" {
 				CornerRadius = Tokens.Radius.Sharp,
 			},

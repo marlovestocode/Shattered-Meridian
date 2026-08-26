@@ -53,6 +53,7 @@ local StatRow = require(script.Parent.Parent.Parent.Components.StatRow)
 local StatusTag = require(script.Parent.Parent.Parent.Components.StatusTag)
 local VitalPill = require(script.Parent.Parent.Parent.Components.VitalPill)
 local ClientStateModule = require(script.Parent.Parent.Parent.State.ClientState)
+local Inset = require(script.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 
@@ -372,9 +373,7 @@ local function CharacterTab(scope: Scope, props: CharacterTabProps): Frame
 				Size = UDim2.fromScale(1, 1),
 
 				Children = {
-					scope:New "UIPadding" {
-						PaddingRight = UDim.new(0, Tokens.Space.S),
-					},
+					Inset(scope, { Right = Tokens.Space.S }),
 					scope:New "UIListLayout" {
 						FillDirection = Enum.FillDirection.Vertical,
 						HorizontalAlignment = Enum.HorizontalAlignment.Left,

@@ -56,6 +56,7 @@ local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 local SectionHeading = require(script.Parent.Parent.Parent.Components.SectionHeading)
 local StatusTag = require(script.Parent.Parent.Parent.Components.StatusTag)
 local Stack = require(script.Parent.Parent.Parent.Components.Stack)
+local Inset = require(script.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 
@@ -137,10 +138,7 @@ local function bountyRow(scope: Scope, entry: Types.BountyBoardEntry, rank: numb
 				Thickness = 1,
 				Transparency = if isSelf then 0.4 else Tokens.Border.Standard.Transparency,
 			},
-			scope:New "UIPadding" {
-				PaddingLeft = UDim.new(0, ROW_PADDING_X),
-				PaddingRight = UDim.new(0, ROW_PADDING_X),
-			},
+			Inset(scope, { X = ROW_PADDING_X }),
 			-- A single lit edge on your own row rather than a full border: it marks the row without
 			-- turning it into a box the neighbouring rows aren't.
 			scope:New "Frame" {
@@ -311,9 +309,7 @@ function BountyTab.Mount(scope: Scope, props: BountyTabProps): Frame
 					Visible = hasEntries,
 
 					Children = {
-						scope:New "UIPadding" {
-							PaddingRight = UDim.new(0, Tokens.Space.S),
-						},
+						Inset(scope, { Right = Tokens.Space.S }),
 						scope:New "UIListLayout" {
 							FillDirection = Enum.FillDirection.Vertical,
 							HorizontalAlignment = Enum.HorizontalAlignment.Left,

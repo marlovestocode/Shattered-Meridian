@@ -766,53 +766,21 @@ function MoveRegistryManager.Validate(
 	return validated, nil
 end
 
--- Deep-enough copy for a caller to freely mutate without corrupting the registry -- the same
--- "return a copy, never the live table" contract as PlayerDataSystem.GetProfile. "Deep enough"
--- means every nested TABLE gets its own clone; Vector3/CFrame/Color3 are immutable value types in
--- Luau and need none.
+-- Deep copy for a caller to freely mutate without corrupting the registry -- the same "return a
+-- copy, never the live table" contract as PlayerDataSystem.GetProfile.
 --
--- The Animations array needs a two-level clone (a fresh array AND a fresh clip per entry): the
--- editor mutates individual clips in place, and a shallow array clone would leave those clip tables
--- shared with the registry's own copy. Same reasoning for ObjectStun's Surfaces/FollowUp.
+-- Delegates to Shared/MoveTypes.Clone rather than doing it here, which is not just deduplication:
+-- the local copyMove this replaced was BUILT ON table.clone(move), so every field it did not name
+-- explicitly came through ALIASED. That was correct when it was written and had quietly stopped
+-- being correct -- Slam and Art were added to MoveDefinition afterwards, neither was ever added
+-- here, and both were being handed out sharing the registry's own tables. An editor mutating a
+-- returned move's Art binding was reaching back into the live registry.
+--
+-- MoveTypes.Clone cannot acquire that failure mode: it enumerates the schema explicitly, so a new
+-- field is DROPPED (loudly, on the next read) rather than aliased (silently, forever). That is the
+-- whole argument for keeping one clone rather than two, and this module already required MoveTypes.
 local function copyMove(move: MoveTypes.MoveDefinition): MoveTypes.MoveDefinition
-	local copy = table.clone(move :: any) :: MoveTypes.MoveDefinition
-	copy.Dimensions = table.clone(move.Dimensions :: any) :: MoveTypes.MoveDimensions
-
-	local animations: { MoveTypes.MoveAnimationClip } = {}
-	for _, clip in ipairs(move.Animations) do
-		table.insert(animations, table.clone(clip :: any) :: MoveTypes.MoveAnimationClip)
-	end
-	copy.Animations = animations
-
-	if move.Movement then
-		copy.Movement = table.clone(move.Movement :: any) :: MoveTypes.MoveMovementGrant
-	end
-	if move.Knockback then
-		copy.Knockback = table.clone(move.Knockback :: any) :: MoveTypes.MoveKnockback
-	end
-	if move.Grab then
-		-- Flat table.clone is correct here, same reasoning MoveTypes.Clone's own comment gives:
-		-- MoveGrabConfig nests nothing, AttachOffset is an immutable CFrame value type.
-		copy.Grab = table.clone(move.Grab :: any) :: MoveTypes.MoveGrabConfig
-	end
-	if move.Projectile then
-		copy.Projectile = table.clone(move.Projectile :: any) :: MoveTypes.MoveProjectileConfig
-	end
-	if move.ObjectStun then
-		local objectStun = table.clone(move.ObjectStun :: any) :: Types.ObjectStunConfig
-		objectStun.Surfaces = table.clone(move.ObjectStun.Surfaces :: any) :: Types.ObjectStunSurfaces
-		local followUp = move.ObjectStun.FollowUp
-		if followUp then
-			local followUpCopy = table.clone(followUp :: any) :: Types.ObjectStunFollowUp
-			followUpCopy.Dimensions = table.clone(followUp.Dimensions :: any) :: MoveTypes.MoveDimensions
-			if followUp.Knockback then
-				followUpCopy.Knockback = table.clone(followUp.Knockback :: any) :: MoveTypes.MoveKnockback
-			end
-			objectStun.FollowUp = followUpCopy
-		end
-		copy.ObjectStun = objectStun
-	end
-	return copy
+	return MoveTypes.Clone(move)
 end
 
 function MoveRegistryManager.Init(): ()

@@ -34,6 +34,7 @@ local Tokens = require(script.Parent.Parent.Parent.Parent.Tokens)
 local Label = require(script.Parent.Parent.Parent.Parent.Components.Label)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local EditorTokens = require(script.Parent.EditorTokens)
+local Inset = require(script.Parent.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 
@@ -72,12 +73,7 @@ local function statCard(
 				BackgroundColor3 = accent,
 				BorderSizePixel = 0,
 			},
-			scope:New "UIPadding" {
-				PaddingLeft = UDim.new(0, BORDER_WIDTH + CARD_PADDING),
-				PaddingRight = UDim.new(0, CARD_PADDING),
-				PaddingTop = UDim.new(0, Tokens.Space.XS),
-				PaddingBottom = UDim.new(0, Tokens.Space.XS),
-			},
+			Inset(scope, { Y = Tokens.Space.XS, Left = BORDER_WIDTH + CARD_PADDING, Right = CARD_PADDING }),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				SortOrder = Enum.SortOrder.LayoutOrder,

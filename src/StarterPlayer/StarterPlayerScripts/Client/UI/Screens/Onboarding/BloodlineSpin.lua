@@ -43,6 +43,7 @@ local Label = require(script.Parent.Parent.Parent.Components.Label)
 local Button = require(script.Parent.Parent.Parent.Components.Button)
 local Divider = require(script.Parent.Parent.Parent.Components.Divider)
 local OnboardingTypes = require(script.Parent.Types)
+local Inset = require(script.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 
@@ -90,12 +91,7 @@ local function BloodlineSpin(scope: Scope, props: OnboardingTypes.BloodlineSpinP
 		CornerAccent = true,
 
 		Children = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.L),
-				PaddingBottom = UDim.new(0, Tokens.Space.L),
-				PaddingLeft = UDim.new(0, Tokens.Space.L),
-				PaddingRight = UDim.new(0, Tokens.Space.L),
-			},
+			Inset(scope, Tokens.Space.L),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Center,
@@ -141,12 +137,7 @@ local function BloodlineSpin(scope: Scope, props: OnboardingTypes.BloodlineSpinP
 						Thickness = 1,
 						Transparency = Tokens.Border.Standard.Transparency,
 					},
-					scope:New "UIPadding" {
-						PaddingTop = UDim.new(0, Tokens.Space.M),
-						PaddingBottom = UDim.new(0, Tokens.Space.M),
-						PaddingLeft = UDim.new(0, Tokens.Space.M),
-						PaddingRight = UDim.new(0, Tokens.Space.M),
-					},
+					Inset(scope, Tokens.Space.M),
 					scope:New "UIListLayout" {
 						FillDirection = Enum.FillDirection.Vertical,
 						HorizontalAlignment = Enum.HorizontalAlignment.Center,

@@ -46,6 +46,7 @@ local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 local SectionHeading = require(script.Parent.Parent.Parent.Components.SectionHeading)
 local Stack = require(script.Parent.Parent.Parent.Components.Stack)
 local ClientStateModule = require(script.Parent.Parent.Parent.State.ClientState)
+local Inset = require(script.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -167,10 +168,7 @@ local function slotCard(
 				Thickness = 1,
 				Transparency = borderTransparency,
 			},
-			scope:New "UIPadding" {
-				PaddingLeft = UDim.new(0, SLOT_CARD_PADDING),
-				PaddingRight = UDim.new(0, SLOT_CARD_PADDING),
-			},
+			Inset(scope, { X = SLOT_CARD_PADDING }),
 
 			Label(scope, {
 				Text = nameText,
@@ -330,9 +328,7 @@ local function EmotesTab(scope: Scope, props: EmotesTabProps): Frame
 					LayoutOrder = 6,
 
 					Children = {
-						scope:New "UIPadding" {
-							PaddingRight = UDim.new(0, Tokens.Space.S),
-						},
+						Inset(scope, { Right = Tokens.Space.S }),
 						scope:New "UIGridLayout" {
 							CellSize = UDim2.new(
 								1 / EMOTE_COLUMNS,

@@ -51,6 +51,7 @@ local Workspace = game:GetService("Workspace")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
 local Label = require(script.Parent.Label)
+local Inset = require(script.Parent.Inset)
 
 local Children = Fusion.Children
 local Out = Fusion.Out
@@ -151,12 +152,7 @@ local function HoverLabel(scope: Scope, props: HoverLabelProps): Frame
 				Thickness = 1,
 				Transparency = borderTransparency,
 			},
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, PADDING_Y),
-				PaddingBottom = UDim.new(0, PADDING_Y),
-				PaddingLeft = UDim.new(0, PADDING_X),
-				PaddingRight = UDim.new(0, PADDING_X),
-			},
+			Inset(scope, { X = PADDING_X, Y = PADDING_Y }),
 			-- No Size prop -- Label.lua switches to AutomaticSize.XY when Size is nil, which is what
 			-- drives the tile's own AutomaticSize above. Giving it a Size here would collapse both.
 			Label(scope, {

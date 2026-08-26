@@ -64,6 +64,7 @@ local Tokens = require(script.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Panel)
 local TrackedLabel = require(script.Parent.TrackedLabel)
 local Label = require(script.Parent.Label)
+local Inset = require(script.Parent.Inset)
 
 local Children = Fusion.Children
 
@@ -199,12 +200,7 @@ local function Section(
 		BorderTransparency = borderTint.Transparency,
 
 		Children = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.M),
-				PaddingBottom = UDim.new(0, Tokens.Space.M),
-				PaddingLeft = UDim.new(0, Tokens.Space.M),
-				PaddingRight = UDim.new(0, Tokens.Space.M),
-			},
+			Inset(scope, Tokens.Space.M),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Left,

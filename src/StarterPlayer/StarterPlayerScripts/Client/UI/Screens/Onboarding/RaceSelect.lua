@@ -28,6 +28,7 @@ local Divider = require(script.Parent.Parent.Parent.Components.Divider)
 local CreatorFrame = require(script.Parent.CreatorFrame)
 local OriginCard = require(script.Parent.OriginCard)
 local OnboardingTypes = require(script.Parent.Types)
+local Inset = require(script.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local peek = Fusion.peek
@@ -48,12 +49,7 @@ local function Header(scope: Scope): Frame
 		BackgroundTransparency = 1,
 
 		[Children] = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.XXL),
-				PaddingBottom = UDim.new(0, Tokens.Space.XL),
-				PaddingLeft = UDim.new(0, Tokens.Space.XXXL),
-				PaddingRight = UDim.new(0, Tokens.Space.XXXL),
-			},
+			Inset(scope, { X = Tokens.Space.XXXL, Top = Tokens.Space.XXL, Bottom = Tokens.Space.XL }),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Center,
@@ -111,12 +107,7 @@ local function RaceSelect(scope: Scope, props: RaceSelectProps): Frame
 		HeaderHeight = HEADER_HEIGHT,
 		HeaderContent = { Header(scope) },
 		BodyContent = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.L),
-				PaddingBottom = UDim.new(0, Tokens.Space.L),
-				PaddingLeft = UDim.new(0, Tokens.Space.XXL),
-				PaddingRight = UDim.new(0, Tokens.Space.XXL),
-			},
+			Inset(scope, { X = Tokens.Space.XXL, Y = Tokens.Space.L }),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				Padding = UDim.new(0, Tokens.Space.M),

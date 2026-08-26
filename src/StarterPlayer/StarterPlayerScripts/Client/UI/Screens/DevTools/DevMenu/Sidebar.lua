@@ -58,6 +58,7 @@ local ActionIcon = require(script.Parent.Parent.Parent.Parent.Components.ActionI
 local TextField = require(script.Parent.Parent.Parent.Parent.Components.TextField)
 local ScrollArea = require(script.Parent.Parent.Parent.Parent.Components.ScrollArea)
 local DevMenuTypes = require(script.Parent.Types)
+local Inset = require(script.Parent.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local peek = Fusion.peek
@@ -189,12 +190,7 @@ local function playerRosterRow(
 		LayoutOrder = layoutOrder,
 
 		Children = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.S),
-				PaddingBottom = UDim.new(0, Tokens.Space.S),
-				PaddingLeft = UDim.new(0, Tokens.Space.S),
-				PaddingRight = UDim.new(0, Tokens.Space.S),
-			},
+			Inset(scope, Tokens.Space.S),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Left,
@@ -372,10 +368,7 @@ function Sidebar.Mount(scope: Scope, width: number, bodyHeight: number): Sidebar
 		LayoutOrder = 1,
 
 		Children = {
-			scope:New "UIPadding" {
-				PaddingLeft = UDim.new(0, Tokens.Space.S),
-				PaddingRight = UDim.new(0, Tokens.Space.S),
-			},
+			Inset(scope, { X = Tokens.Space.S }),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Left,
@@ -397,9 +390,7 @@ function Sidebar.Mount(scope: Scope, width: number, bodyHeight: number): Sidebar
 		Children = {
 			-- Right padding keeps roster row panels clear of the scrollbar, same convention
 			-- ContentArea.lua's own tabContent uses.
-			scope:New "UIPadding" {
-				PaddingRight = UDim.new(0, Tokens.Space.XS),
-			},
+			Inset(scope, { Right = Tokens.Space.XS }),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Left,

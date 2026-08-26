@@ -43,6 +43,7 @@ local TrackedLabel = require(script.Parent.Parent.Parent.Components.TrackedLabel
 local Button = require(script.Parent.Parent.Parent.Components.Button)
 local CreatorFrame = require(script.Parent.CreatorFrame)
 local OnboardingTypes = require(script.Parent.Types)
+local Inset = require(script.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -84,12 +85,7 @@ local function Header(scope: Scope): Frame
 		BackgroundTransparency = 1,
 
 		[Children] = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.XXL),
-				PaddingBottom = UDim.new(0, Tokens.Space.XL),
-				PaddingLeft = UDim.new(0, Tokens.Space.XXXL),
-				PaddingRight = UDim.new(0, Tokens.Space.XXXL),
-			},
+			Inset(scope, { X = Tokens.Space.XXXL, Top = Tokens.Space.XXL, Bottom = Tokens.Space.XL }),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Center,
@@ -280,9 +276,7 @@ local function NameEntry(scope: Scope, props: NameEntryProps): Frame
 		HeaderHeight = HEADER_HEIGHT,
 		HeaderContent = { Header(scope) },
 		BodyContent = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.XXXL),
-			},
+			Inset(scope, { Top = Tokens.Space.XXXL }),
 			bodyColumn,
 		},
 		FooterHint = footerHint,

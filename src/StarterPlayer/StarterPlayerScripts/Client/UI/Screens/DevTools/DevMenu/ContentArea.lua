@@ -39,6 +39,7 @@ local AbilitySlot = require(script.Parent.Parent.Parent.Parent.Components.Abilit
 local ScrollArea = require(script.Parent.Parent.Parent.Parent.Components.ScrollArea)
 local DevMenuTypes = require(script.Parent.Types)
 local VehiclesTab = require(script.Parent.VehiclesTab)
+local Inset = require(script.Parent.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local peek = Fusion.peek
@@ -393,12 +394,7 @@ local function reportRow(
 		LayoutOrder = layoutOrder,
 
 		Children = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.S),
-				PaddingBottom = UDim.new(0, Tokens.Space.S),
-				PaddingLeft = UDim.new(0, Tokens.Space.S),
-				PaddingRight = UDim.new(0, Tokens.Space.S),
-			},
+			Inset(scope, Tokens.Space.S),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Left,
@@ -451,9 +447,7 @@ local function tabContent(
 		Children = {
 			-- Right padding keeps section panels clear of the scrollbar (ScrollArea's own
 			-- ScrollBarThickness) instead of its right edge overlapping panel borders.
-			scope:New "UIPadding" {
-				PaddingRight = UDim.new(0, Tokens.Space.XS),
-			},
+			Inset(scope, { Right = Tokens.Space.XS }),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Left,

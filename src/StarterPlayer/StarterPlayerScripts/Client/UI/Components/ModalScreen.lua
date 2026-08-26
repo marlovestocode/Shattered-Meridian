@@ -70,6 +70,7 @@ local Panel = require(script.Parent.Panel)
 local Layers = require(script.Parent.Parent.Shell.Layers)
 local Surface = require(script.Parent.Parent.Shell.Surface)
 local Focus = require(script.Parent.Parent.Shell.Focus)
+local Inset = require(script.Parent.Inset)
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
@@ -197,12 +198,7 @@ local function ModalScreen(scope: Scope, playerGui: PlayerGui, props: ModalScree
 		SurfaceTextureIntensity = props.SurfaceTextureIntensity,
 
 		Children = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, padding),
-				PaddingBottom = UDim.new(0, padding),
-				PaddingLeft = UDim.new(0, padding),
-				PaddingRight = UDim.new(0, padding),
-			},
+			Inset(scope, padding),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Left,

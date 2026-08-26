@@ -57,6 +57,7 @@ local Bar = require(script.Parent.Parent.Parent.Components.Bar)
 local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 local SectionHeading = require(script.Parent.Parent.Parent.Components.SectionHeading)
 local Stack = require(script.Parent.Parent.Parent.Components.Stack)
+local Inset = require(script.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local peek = Fusion.peek
@@ -319,10 +320,7 @@ local function artRow(
 						else Tokens.Border.Hairline.Transparency
 				end),
 			},
-			scope:New "UIPadding" {
-				PaddingLeft = UDim.new(0, ROW_PADDING_X),
-				PaddingRight = UDim.new(0, ROW_PADDING_X),
-			},
+			Inset(scope, { X = ROW_PADDING_X }),
 
 			-- Name column. Flexes with the row; every column to its right is fixed.
 			scope:New "Frame" {
@@ -583,9 +581,7 @@ local function ArtsTab(scope: Scope, props: ArtsTabProps): Frame
 					LayoutOrder = 7,
 
 					Children = {
-						scope:New "UIPadding" {
-							PaddingRight = UDim.new(0, Tokens.Space.S),
-						},
+						Inset(scope, { Right = Tokens.Space.S }),
 						scope:New "UIListLayout" {
 							FillDirection = Enum.FillDirection.Vertical,
 							Padding = UDim.new(0, Tokens.Space.XS),

@@ -30,6 +30,7 @@ local Button = require(script.Parent.Parent.Parent.Parent.Components.Button)
 local Panel = require(script.Parent.Parent.Parent.Parent.Components.Panel)
 local Divider = require(script.Parent.Parent.Parent.Parent.Components.Divider)
 local ScrollArea = require(script.Parent.Parent.Parent.Parent.Components.ScrollArea)
+local Inset = require(script.Parent.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -230,12 +231,7 @@ function Sidebar.Mount(scope: Scope, width: number, height: number, props: Sideb
 		Size = UDim2.fromOffset(width, height),
 
 		Children = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.M),
-				PaddingBottom = UDim.new(0, Tokens.Space.M),
-				PaddingLeft = UDim.new(0, Tokens.Space.M),
-				PaddingRight = UDim.new(0, Tokens.Space.M),
-			},
+			Inset(scope, Tokens.Space.M),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Left,

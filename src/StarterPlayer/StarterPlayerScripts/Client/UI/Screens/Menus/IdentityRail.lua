@@ -48,6 +48,7 @@ local StatRow = require(script.Parent.Parent.Parent.Components.StatRow)
 local StatusTag = require(script.Parent.Parent.Parent.Components.StatusTag)
 local CharacterPortrait = require(script.Parent.Parent.Parent.Components.CharacterPortrait)
 local ClientStateModule = require(script.Parent.Parent.Parent.State.ClientState)
+local Inset = require(script.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 
@@ -264,12 +265,7 @@ local function IdentityRail(scope: Scope, props: IdentityRailProps): Frame
 				Size = UDim2.fromScale(1, 1),
 
 				Children = {
-					scope:New "UIPadding" {
-						PaddingTop = UDim.new(0, PADDING),
-						PaddingBottom = UDim.new(0, PADDING),
-						PaddingLeft = UDim.new(0, PADDING),
-						PaddingRight = UDim.new(0, PADDING),
-					},
+					Inset(scope, PADDING),
 					scope:New "UIListLayout" {
 						FillDirection = Enum.FillDirection.Vertical,
 						HorizontalAlignment = Enum.HorizontalAlignment.Left,

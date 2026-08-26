@@ -76,6 +76,7 @@ local Stack = require(script.Parent.Parent.Parent.Parent.Components.Stack)
 local Label = require(script.Parent.Parent.Parent.Parent.Components.Label)
 local Tab = require(script.Parent.Parent.Parent.Parent.Components.Tab)
 local Button = require(script.Parent.Parent.Parent.Parent.Components.Button)
+local Inset = require(script.Parent.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -640,12 +641,7 @@ function PreviewViewportModule.Mount(scope: Scope, width: number, height: number
 		CornerAccent = true,
 
 		Children = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.M),
-				PaddingBottom = UDim.new(0, Tokens.Space.M),
-				PaddingLeft = UDim.new(0, Tokens.Space.M),
-				PaddingRight = UDim.new(0, Tokens.Space.M),
-			},
+			Inset(scope, Tokens.Space.M),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Left,
@@ -744,12 +740,7 @@ function PreviewViewportModule.Mount(scope: Scope, width: number, height: number
 						Thickness = 1,
 						Transparency = Tokens.Border.Standard.Transparency,
 					},
-					scope:New "UIPadding" {
-						PaddingTop = UDim.new(0, Tokens.Space.XS),
-						PaddingBottom = UDim.new(0, Tokens.Space.XS),
-						PaddingLeft = UDim.new(0, Tokens.Space.S),
-						PaddingRight = UDim.new(0, Tokens.Space.S),
-					},
+					Inset(scope, { X = Tokens.Space.S, Y = Tokens.Space.XS }),
 					Label(scope, {
 						Text = phaseTimeText,
 						Scale = "Body",

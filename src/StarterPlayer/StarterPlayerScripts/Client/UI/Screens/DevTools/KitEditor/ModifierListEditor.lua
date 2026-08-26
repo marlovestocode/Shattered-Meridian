@@ -36,6 +36,7 @@ local Button = require(script.Parent.Parent.Parent.Parent.Components.Button)
 local Tab = require(script.Parent.Parent.Parent.Parent.Components.Tab)
 local TextField = require(script.Parent.Parent.Parent.Parent.Components.TextField)
 local NumericField = require(script.Parent.Parent.Parent.Parent.Components.NumericField)
+local Inset = require(script.Parent.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local peek = Fusion.peek
@@ -279,12 +280,7 @@ local function effectRow(
 		LayoutOrder = index,
 
 		[Children] = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.S),
-				PaddingBottom = UDim.new(0, Tokens.Space.S),
-				PaddingLeft = UDim.new(0, Tokens.Space.S),
-				PaddingRight = UDim.new(0, Tokens.Space.S),
-			},
+			Inset(scope, Tokens.Space.S),
 			scope:New "UICorner" { CornerRadius = Tokens.Radius.Sharp },
 			scope:New "UIStroke" {
 				Color = Tokens.Border.Standard.Color,

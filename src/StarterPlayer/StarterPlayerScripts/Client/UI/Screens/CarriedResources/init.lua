@@ -34,6 +34,7 @@ local Tokens = require(script.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Parent.Components.Panel)
 local Label = require(script.Parent.Parent.Components.Label)
 local Reveal = require(script.Parent.Parent.Components.Reveal)
+local Inset = require(script.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 
@@ -117,12 +118,7 @@ function CarriedResources.Mount(scope: Scope): (CarriedResourcesHandle, Frame)
 
 		Children = {
 			reveal.Scale,
-			scope:New "UIPadding" {
-				PaddingLeft = UDim.new(0, Tokens.Space.M),
-				PaddingRight = UDim.new(0, Tokens.Space.M),
-				PaddingTop = UDim.new(0, Tokens.Space.S),
-				PaddingBottom = UDim.new(0, Tokens.Space.S),
-			},
+			Inset(scope, { X = Tokens.Space.M, Y = Tokens.Space.S }),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				Padding = UDim.new(0, Tokens.Space.XS),

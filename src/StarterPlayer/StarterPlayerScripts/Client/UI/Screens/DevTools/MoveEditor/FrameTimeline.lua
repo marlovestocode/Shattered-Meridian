@@ -35,6 +35,7 @@ local Tokens = require(script.Parent.Parent.Parent.Parent.Tokens)
 local Label = require(script.Parent.Parent.Parent.Parent.Components.Label)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local EditorTokens = require(script.Parent.EditorTokens)
+local Inset = require(script.Parent.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 
@@ -199,12 +200,7 @@ function FrameTimeline.Build(scope: Scope, draft: Fusion.UsedAs<MoveDefinition?>
 				Color = Tokens.Border.Standard.Color,
 				Transparency = Tokens.Border.Standard.Transparency,
 			},
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, CARD_PADDING),
-				PaddingBottom = UDim.new(0, CARD_PADDING),
-				PaddingLeft = UDim.new(0, CARD_PADDING),
-				PaddingRight = UDim.new(0, CARD_PADDING),
-			},
+			Inset(scope, CARD_PADDING),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				Padding = UDim.new(0, LABEL_GAP),

@@ -39,6 +39,7 @@ local TrackedLabel = require(script.Parent.Parent.Parent.Components.TrackedLabel
 local Divider = require(script.Parent.Parent.Parent.Components.Divider)
 local Bar = require(script.Parent.Parent.Parent.Components.Bar)
 local Glow = require(script.Parent.Parent.Parent.Components.Glow)
+local Inset = require(script.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -288,12 +289,7 @@ function OriginCardModule.Mount(scope: Scope, props: OriginCardProps): TextButto
 				ZIndex = 2,
 
 				[Children] = {
-					scope:New "UIPadding" {
-						PaddingTop = UDim.new(0, Tokens.Space.L),
-						PaddingBottom = UDim.new(0, Tokens.Space.L),
-						PaddingLeft = UDim.new(0, Tokens.Space.XL),
-						PaddingRight = UDim.new(0, Tokens.Space.XL),
-					},
+					Inset(scope, { X = Tokens.Space.XL, Y = Tokens.Space.L }),
 					scope:New "UIListLayout" {
 						FillDirection = Enum.FillDirection.Vertical,
 						Padding = UDim.new(0, Tokens.Space.M),

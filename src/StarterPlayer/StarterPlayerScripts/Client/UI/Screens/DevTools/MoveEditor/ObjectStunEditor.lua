@@ -61,6 +61,7 @@ local Dropdown = require(script.Parent.Parent.Parent.Parent.Components.Dropdown)
 local NumericField = require(script.Parent.Parent.Parent.Parent.Components.NumericField)
 local TrackedLabel = require(script.Parent.Parent.Parent.Parent.Components.TrackedLabel)
 local DraftBinding = require(script.Parent.DraftBinding)
+local Inset = require(script.Parent.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 
@@ -364,12 +365,7 @@ function ObjectStunEditorModule.Build(scope: Scope, context: DraftContext): { In
 					Thickness = 1,
 					Transparency = 0.5,
 				},
-				scope:New "UIPadding" {
-					PaddingTop = UDim.new(0, Tokens.Space.S),
-					PaddingBottom = UDim.new(0, Tokens.Space.S),
-					PaddingLeft = UDim.new(0, Tokens.Space.S),
-					PaddingRight = UDim.new(0, Tokens.Space.S),
-				},
+				Inset(scope, Tokens.Space.S),
 				Label(scope, {
 					Text = "NOT WIRED TO THE LIVE COMBAT STACK -- the resolver that used to consume this block was "
 						.. "removed in this week's combat rewrite and has not been rebuilt against the new engine. "

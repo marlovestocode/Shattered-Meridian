@@ -26,6 +26,7 @@ local Tokens = require(script.Parent.Parent.Tokens)
 local Label = require(script.Parent.Label)
 local TrackedLabel = require(script.Parent.TrackedLabel)
 local Glow = require(script.Parent.Glow)
+local Inset = require(script.Parent.Inset)
 
 local Children = Fusion.Children
 
@@ -108,12 +109,7 @@ local function VitalPill(scope: Scope, props: VitalPillProps): Frame
 				ZIndex = 3,
 
 				[Children] = {
-					scope:New "UIPadding" {
-						PaddingTop = UDim.new(0, PADDING_Y),
-						PaddingBottom = UDim.new(0, PADDING_Y),
-						PaddingLeft = UDim.new(0, PADDING_X),
-						PaddingRight = UDim.new(0, PADDING_X),
-					},
+					Inset(scope, { X = PADDING_X, Y = PADDING_Y }),
 					TrackedLabel(scope, {
 						Text = string.upper(props.Caption),
 						Scale = "Chip",

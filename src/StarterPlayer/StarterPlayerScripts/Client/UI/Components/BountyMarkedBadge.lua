@@ -33,6 +33,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Panel)
 local Label = require(script.Parent.Label)
+local Inset = require(script.Parent.Inset)
 
 local Children = Fusion.Children
 
@@ -138,10 +139,7 @@ local function BountyMarkedBadge(scope: Scope, props: BountyMarkedBadgeProps): F
 			BorderTransparency = contentTransparency,
 
 			Children = {
-				scope:New "UIPadding" {
-					PaddingLeft = UDim.new(0, Tokens.Space.S),
-					PaddingRight = UDim.new(0, Tokens.Space.S),
-				},
+				Inset(scope, { X = Tokens.Space.S }),
 				scope:New "UIListLayout" {
 					FillDirection = Enum.FillDirection.Horizontal,
 					VerticalAlignment = Enum.VerticalAlignment.Center,

@@ -116,6 +116,7 @@ local StatsPanel = require(script.Parent.StatsPanel)
 local MoveStats = require(ReplicatedStorage.Shared.MoveStats)
 local FrameTimeline = require(script.Parent.FrameTimeline)
 local EditorTokens = require(script.Parent.EditorTokens)
+local Inset = require(script.Parent.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local peek = Fusion.peek
@@ -853,12 +854,7 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 		end),
 
 		Children = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.XL),
-				PaddingBottom = UDim.new(0, Tokens.Space.XL),
-				PaddingLeft = UDim.new(0, Tokens.Space.XL),
-				PaddingRight = UDim.new(0, Tokens.Space.XL),
-			},
+			Inset(scope, Tokens.Space.XL),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Left,
@@ -1051,10 +1047,7 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 								Thickness = 1,
 								Transparency = 0.5,
 							},
-							scope:New "UIPadding" {
-								PaddingLeft = UDim.new(0, Tokens.Space.S),
-								PaddingRight = UDim.new(0, Tokens.Space.S),
-							},
+							Inset(scope, { X = Tokens.Space.S }),
 							scope:New "UIListLayout" {
 								FillDirection = Enum.FillDirection.Horizontal,
 								VerticalAlignment = Enum.VerticalAlignment.Center,
@@ -1106,12 +1099,7 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 		CornerAccent = true,
 
 		Children = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.M),
-				PaddingBottom = UDim.new(0, Tokens.Space.M),
-				PaddingLeft = UDim.new(0, Tokens.Space.M),
-				PaddingRight = UDim.new(0, Tokens.Space.M),
-			},
+			Inset(scope, Tokens.Space.M),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Left,

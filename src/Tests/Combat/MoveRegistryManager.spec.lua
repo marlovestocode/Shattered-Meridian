@@ -103,6 +103,31 @@ return function()
 			local fetchedAgain = MoveRegistryManager.Get("registry-test-move") :: any
 			expect(fetchedAgain.Damage).to.equal(5)
 		end)
+
+		-- THE NESTED half of that contract, which the top-level assertion above cannot see.
+		--
+		-- copyMove used to be built on table.clone(move), so it deep-copied only the sub-tables it
+		-- named explicitly and handed every other one out ALIASED. That was true when written and
+		-- quietly stopped being true: Art (and Slam) joined MoveDefinition afterwards and were never
+		-- added, so a caller mutating a returned move's Art binding was writing into the registry's
+		-- own record. It now delegates to MoveTypes.Clone, which enumerates the schema -- a field
+		-- added and forgotten there is dropped loudly on the next read rather than aliased silently.
+		it("Get returns nested tables by value too, not aliases into the registry's own record", function()
+			reset()
+			MoveRegistryManager.Upsert(MoveRegistryManager.Validate(makeCandidate({
+				Art = { TreeId = "common_foundation", Node = 2, QiCost = 5, RequiredTier = 1 },
+			})) :: any)
+
+			local fetched = MoveRegistryManager.Get("registry-test-move") :: any
+			expect(fetched.Art).to.be.ok()
+			local originalNode = fetched.Art.Node
+			fetched.Art.Node = 9
+			fetched.Dimensions.Width = 999
+
+			local fetchedAgain = MoveRegistryManager.Get("registry-test-move") :: any
+			expect(fetchedAgain.Art.Node).to.equal(originalNode)
+			expect(fetchedAgain.Dimensions.Width).never.to.equal(999)
+		end)
 	end)
 
 	describe("MoveRegistryManager.GenerateMoveId", function()

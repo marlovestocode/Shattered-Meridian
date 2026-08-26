@@ -24,6 +24,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
 local Label = require(script.Parent.Label)
+local Inset = require(script.Parent.Inset)
 
 local Children = Fusion.Children
 
@@ -81,13 +82,7 @@ local function StatRow(scope: Scope, props: StatRowProps): Frame
 	}
 
 	if framed then
-		table.insert(
-			children,
-			scope:New "UIPadding" {
-				PaddingLeft = UDim.new(0, FRAMED_PADDING_X),
-				PaddingRight = UDim.new(0, FRAMED_PADDING_X),
-			}
-		)
+		table.insert(children, Inset(scope, { X = FRAMED_PADDING_X }))
 		table.insert(
 			children,
 			scope:New "UIStroke" {

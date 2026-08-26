@@ -84,6 +84,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
 local Label = require(script.Parent.Label)
 local Button = require(script.Parent.Button)
+local Inset = require(script.Parent.Inset)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -688,12 +689,7 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 						Thickness = 1,
 						Transparency = Tokens.Border.Standard.Transparency,
 					},
-					scope:New "UIPadding" {
-						PaddingTop = UDim.new(0, Tokens.Space.XS),
-						PaddingBottom = UDim.new(0, Tokens.Space.XS),
-						PaddingLeft = UDim.new(0, Tokens.Space.XS),
-						PaddingRight = UDim.new(0, Tokens.Space.XS),
-					},
+					Inset(scope, Tokens.Space.XS),
 					table.unpack(rowChildren),
 				},
 			},

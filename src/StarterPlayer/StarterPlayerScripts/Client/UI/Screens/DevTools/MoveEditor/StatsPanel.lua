@@ -35,6 +35,7 @@ local TrackedLabel = require(script.Parent.Parent.Parent.Parent.Components.Track
 local Graph = require(script.Parent.Parent.Parent.Parent.Components.Graph)
 local DraftBinding = require(script.Parent.DraftBinding)
 local EditorTokens = require(script.Parent.EditorTokens)
+local Inset = require(script.Parent.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 
@@ -86,11 +87,7 @@ local function statTile(scope: Scope, caption: string, value: UsedAs<string>, la
 				Thickness = 1,
 				Transparency = Tokens.Border.Standard.Transparency,
 			},
-			scope:New "UIPadding" {
-				PaddingLeft = UDim.new(0, Tokens.Space.S),
-				PaddingRight = UDim.new(0, Tokens.Space.XS),
-				PaddingTop = UDim.new(0, Tokens.Space.XS),
-			},
+			Inset(scope, { Top = Tokens.Space.XS, Left = Tokens.Space.S, Right = Tokens.Space.XS }),
 			Label(scope, {
 				Text = caption,
 				Scale = "Detail",

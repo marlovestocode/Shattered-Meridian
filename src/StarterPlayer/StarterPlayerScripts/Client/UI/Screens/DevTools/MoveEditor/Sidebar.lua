@@ -50,6 +50,7 @@ local ScrollArea = require(script.Parent.Parent.Parent.Parent.Components.ScrollA
 local Stack = require(script.Parent.Parent.Parent.Parent.Components.Stack)
 local MoveList = require(script.Parent.MoveList)
 local MoveEditorTypes = require(script.Parent.Types)
+local Inset = require(script.Parent.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -296,12 +297,7 @@ function SidebarModule.Mount(scope: Scope, width: number, height: number, props:
 		CornerAccent = true,
 
 		Children = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.M),
-				PaddingBottom = UDim.new(0, Tokens.Space.M),
-				PaddingLeft = UDim.new(0, Tokens.Space.M),
-				PaddingRight = UDim.new(0, Tokens.Space.M),
-			},
+			Inset(scope, Tokens.Space.M),
 			scope:New "UIListLayout" {
 				FillDirection = Enum.FillDirection.Vertical,
 				HorizontalAlignment = Enum.HorizontalAlignment.Left,

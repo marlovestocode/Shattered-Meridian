@@ -41,6 +41,7 @@ local Stepper = require(script.Parent.Parent.Parent.Components.Stepper)
 local CreatorFrame = require(script.Parent.CreatorFrame)
 local OriginCard = require(script.Parent.OriginCard)
 local OnboardingTypes = require(script.Parent.Types)
+local Inset = require(script.Parent.Parent.Parent.Components.Inset)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -175,10 +176,7 @@ local function PipRail(scope: Scope, spent: Fusion.Computed<number>): Frame
 		BorderSizePixel = 0,
 
 		[Children] = {
-			scope:New "UIPadding" {
-				PaddingLeft = UDim.new(0, Tokens.Space.XXXL),
-				PaddingRight = UDim.new(0, Tokens.Space.XXXL),
-			},
+			Inset(scope, { X = Tokens.Space.XXXL }),
 			scope:New "Frame" {
 				Name = "Pips",
 				Size = UDim2.new(1, -160, 1, 0),
@@ -262,12 +260,7 @@ local function Header(scope: Scope, props: AttributesProps, remaining: Fusion.Co
 		BackgroundTransparency = 1,
 
 		[Children] = {
-			scope:New "UIPadding" {
-				PaddingTop = UDim.new(0, Tokens.Space.XXL),
-				PaddingBottom = UDim.new(0, Tokens.Space.XXL),
-				PaddingLeft = UDim.new(0, Tokens.Space.XXXL),
-				PaddingRight = UDim.new(0, Tokens.Space.XXXL),
-			},
+			Inset(scope, { X = Tokens.Space.XXXL, Y = Tokens.Space.XXL }),
 			scope:New "Frame" {
 				Name = "Left",
 				Size = UDim2.new(1, -160, 1, 0),
@@ -470,10 +463,7 @@ local function AttributeRow(scope: Scope, field: string, props: AttributeRowProp
 				BackgroundTransparency = 1,
 
 				[Children] = {
-					scope:New "UIPadding" {
-						PaddingLeft = UDim.new(0, Tokens.Space.XXL),
-						PaddingRight = UDim.new(0, Tokens.Space.XXL),
-					},
+					Inset(scope, { X = Tokens.Space.XXL }),
 					scope:New "UIListLayout" {
 						FillDirection = Enum.FillDirection.Horizontal,
 						VerticalAlignment = Enum.VerticalAlignment.Center,
