@@ -64,12 +64,15 @@ local stageCfg = BlimpConstants.Audio.StageChangeSound
 -- Registered at module load, the same as FlightAudio's. Volume is seeded to each loop's MaxVolume and
 -- then driven every frame through SetLoopedVolume -- never by re-registering, which would rebuild the
 -- pooled instances underneath a playing loop.
-SoundManager.Register(ENGINE_LOOP, { SoundId = engineCfg.SoundId, Volume = engineCfg.MaxVolume })
-SoundManager.Register(WIND_LOOP, { SoundId = windCfg.SoundId, Volume = windCfg.MaxVolume })
+--
 -- ONE registration for all three stages -- each play pitches it differently (see
 -- BlimpConstants.Audio.Stages on why that beats three uploads). Pooled three deep so a fast walk up
 -- the telegraph that crosses two boundaries in quick succession does not cut its own first ping off.
-SoundManager.Register(STAGE_CHANGE, { SoundId = stageCfg.SoundId, Volume = stageCfg.Volume, PoolSize = 3 })
+SoundManager.RegisterAll({
+	[ENGINE_LOOP] = { SoundId = engineCfg.SoundId, Volume = engineCfg.MaxVolume },
+	[WIND_LOOP] = { SoundId = windCfg.SoundId, Volume = windCfg.MaxVolume },
+	[STAGE_CHANGE] = { SoundId = stageCfg.SoundId, Volume = stageCfg.Volume, PoolSize = 3 },
+})
 
 local playing = false
 -- Which of BlimpConstants.Audio.Stages the ship is currently in. Seeded to the slowest rather than to
@@ -77,15 +80,6 @@ local playing = false
 -- player stepping onto one already at speed hears the stage change on the first real crossing after
 -- they arrive. See Start, which resets this without playing anything.
 local stageIndex = 1
-
--- Maps a 0..1 intensity onto a definition's own volume ceiling and playback-speed range -- the same
--- shape FlightAudio.SetWindIntensity uses against its own LoopSoundDefinition, factored out here only
--- because this module has two loops rather than one.
-local function driveLoop(name: string, intensity: number, maxVolume: number, minSpeed: number, maxSpeed: number): ()
-	local clamped = math.clamp(intensity, 0, 1)
-	SoundManager.SetLoopedVolume(name, clamped * maxVolume)
-	SoundManager.SetLoopedPlaybackSpeed(name, minSpeed + (maxSpeed - minSpeed) * clamped)
-end
 
 -- Starts both loops silent and lets Update bring them in -- rather than fading in at full volume,
 -- which would announce a stationary moored blimp with a roar the instant somebody stepped aboard it.
@@ -95,8 +89,8 @@ function BlimpAudio.Start(): ()
 	end
 	playing = true
 	stageIndex = 1
-	driveLoop(ENGINE_LOOP, 0, engineCfg.MaxVolume, engineCfg.MinPlaybackSpeed, engineCfg.MaxPlaybackSpeed)
-	driveLoop(WIND_LOOP, 0, windCfg.MaxVolume, windCfg.MinPlaybackSpeed, windCfg.MaxPlaybackSpeed)
+	SoundManager.DriveLoop(ENGINE_LOOP, 0, engineCfg.MaxVolume, engineCfg.MinPlaybackSpeed, engineCfg.MaxPlaybackSpeed)
+	SoundManager.DriveLoop(WIND_LOOP, 0, windCfg.MaxVolume, windCfg.MinPlaybackSpeed, windCfg.MaxPlaybackSpeed)
 	SoundManager.PlayLooped(ENGINE_LOOP, BlimpConstants.Audio.FadeSeconds)
 	SoundManager.PlayLooped(WIND_LOOP, BlimpConstants.Audio.FadeSeconds)
 end
@@ -133,7 +127,7 @@ function BlimpAudio.Update(speedFraction: number, absoluteSpeed: number): ()
 
 	-- The stage's band multiplies the continuous scaling rather than replacing it, so the loop still
 	-- answers to speed WITHIN a stage -- the stage is a shelf the note sits on, not a fixed note.
-	driveLoop(
+	SoundManager.DriveLoop(
 		ENGINE_LOOP,
 		speedFraction * stage.LoopVolumeScale,
 		engineCfg.MaxVolume,
@@ -143,7 +137,7 @@ function BlimpAudio.Update(speedFraction: number, absoluteSpeed: number): ()
 	-- Against the CRUISE speed rather than the max the hull can ever reach, so the wind is already at
 	-- full voice at ordinary speed and flank simply pitches it up. Scaled off the absolute value, so
 	-- backing out of a mooring still moves air.
-	driveLoop(
+	SoundManager.DriveLoop(
 		WIND_LOOP,
 		absoluteSpeed / math.max(BlimpConstants.Drive.CruiseSpeed, 1),
 		windCfg.MaxVolume,

@@ -50,9 +50,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
-local DashAudio = require(script.Parent.Parent.FX.DashAudio)
-local SlideAudio = require(script.Parent.Parent.FX.SlideAudio)
-local MantleAudio = require(script.Parent.Parent.FX.MantleAudio)
+local ParkourAudio = require(script.Parent.Parent.FX.ParkourAudio)
 local EnvironmentProbe = require(script.Parent.EnvironmentProbe)
 local InputBuffer = require(script.Parent.InputBuffer)
 local ParkourAnimator = require(script.Parent.ParkourAnimator)
@@ -322,9 +320,7 @@ local function onTransition(previousId: MovementStateId, nextId: MovementStateId
 	setActionOwned(ParkourOwnership.IsActionState(nextId))
 	ParkourAnimator.OnStateChanged(previousId, nextId, context.AnimationVariant)
 	ParkourCamera.OnStateChanged(previousId, nextId)
-	DashAudio.OnStateChanged(previousId, nextId)
-	SlideAudio.OnStateChanged(previousId, nextId)
-	MantleAudio.OnStateChanged(previousId, nextId)
+	ParkourAudio.OnStateChanged(previousId, nextId)
 	-- The run system, told the same thing on the same frame as the animator and the camera. This is
 	-- what stops the run loop and the footstep audio from continuing straight through a slide, a
 	-- wall-run, a vault or a fall -- before this, the run presentation asked only "is sprint held and
@@ -547,7 +543,7 @@ function ParkourController.BindCharacter(nextCharacter: Model): ()
 	ParkourMotor.BindCharacter(nextCharacter, humanoid :: Humanoid, rootPart :: BasePart)
 	ParkourAnimator.BindCharacter(nextCharacter)
 	ParkourCamera.Reset()
-	SlideAudio.Reset()
+	ParkourAudio.Reset()
 	ParkourNetwork.Reset()
 	InputBuffer.Clear()
 
@@ -566,7 +562,7 @@ local function unbind(): ()
 	EnvironmentProbe.Unbind()
 	ParkourAnimator.Unbind()
 	ParkourCamera.Reset()
-	SlideAudio.Reset()
+	ParkourAudio.Reset()
 	InputBuffer.Clear()
 	-- nil, not "Idle": the framework is no longer driving at all, and the run system's fallback path
 	-- (its own grounded/moving checks, with no parkour veto) is the correct behavior in that case --

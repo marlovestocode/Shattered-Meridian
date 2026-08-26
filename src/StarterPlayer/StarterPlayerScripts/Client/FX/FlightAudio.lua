@@ -36,25 +36,15 @@ local WIND_LOOP_SOUND_NAME = "FlightWind"
 
 local soundCfg = FlightConstants.Sound
 
-SoundManager.Register(TAKEOFF_SOUND_NAME, { SoundId = soundCfg.Takeoff.SoundId, Volume = soundCfg.Takeoff.Volume })
-SoundManager.Register(
-	LANDING_SOFT_SOUND_NAME,
-	{ SoundId = soundCfg.LandingSoft.SoundId, Volume = soundCfg.LandingSoft.Volume }
-)
-SoundManager.Register(
-	LANDING_HARD_SOUND_NAME,
-	{ SoundId = soundCfg.LandingHard.SoundId, Volume = soundCfg.LandingHard.Volume }
-)
-SoundManager.Register(
-	SONIC_BOOM_SOUND_NAME,
-	{ SoundId = soundCfg.SonicBoom.SoundId, Volume = soundCfg.SonicBoom.Volume }
-)
--- Registered at MaxVolume -- SetWindIntensity ramps the actual live volume down from there every
--- frame via SoundManager.SetLoopedVolume, never by re-registering.
-SoundManager.Register(
-	WIND_LOOP_SOUND_NAME,
-	{ SoundId = soundCfg.WindLoop.SoundId, Volume = soundCfg.WindLoop.MaxVolume }
-)
+-- The wind loop is registered at MaxVolume -- SetWindIntensity ramps the actual live volume down
+-- from there every frame via SoundManager.DriveLoop, never by re-registering.
+SoundManager.RegisterAll({
+	[TAKEOFF_SOUND_NAME] = { SoundId = soundCfg.Takeoff.SoundId, Volume = soundCfg.Takeoff.Volume },
+	[LANDING_SOFT_SOUND_NAME] = { SoundId = soundCfg.LandingSoft.SoundId, Volume = soundCfg.LandingSoft.Volume },
+	[LANDING_HARD_SOUND_NAME] = { SoundId = soundCfg.LandingHard.SoundId, Volume = soundCfg.LandingHard.Volume },
+	[SONIC_BOOM_SOUND_NAME] = { SoundId = soundCfg.SonicBoom.SoundId, Volume = soundCfg.SonicBoom.Volume },
+	[WIND_LOOP_SOUND_NAME] = { SoundId = soundCfg.WindLoop.SoundId, Volume = soundCfg.WindLoop.MaxVolume },
+})
 
 function FlightAudio.PlayTakeoff(): ()
 	SoundManager.Play(TAKEOFF_SOUND_NAME)
@@ -83,12 +73,12 @@ end
 -- speedFraction: [0, 1], the same fraction-of-max-speed FlightCamera.SetFlightMotion derives --
 -- maps linearly to [0, MaxVolume] and [MinPlaybackSpeed, MaxPlaybackSpeed].
 function FlightAudio.SetWindIntensity(speedFraction: number): ()
-	local clamped = math.clamp(speedFraction, 0, 1)
-	SoundManager.SetLoopedVolume(WIND_LOOP_SOUND_NAME, clamped * soundCfg.WindLoop.MaxVolume)
-	SoundManager.SetLoopedPlaybackSpeed(
+	SoundManager.DriveLoop(
 		WIND_LOOP_SOUND_NAME,
-		soundCfg.WindLoop.MinPlaybackSpeed
-			+ clamped * (soundCfg.WindLoop.MaxPlaybackSpeed - soundCfg.WindLoop.MinPlaybackSpeed)
+		speedFraction,
+		soundCfg.WindLoop.MaxVolume,
+		soundCfg.WindLoop.MinPlaybackSpeed,
+		soundCfg.WindLoop.MaxPlaybackSpeed
 	)
 end
 

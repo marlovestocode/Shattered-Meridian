@@ -454,8 +454,25 @@ function HitboxShapes.Sanitize(shape: ShapeId, raw: unknown): Dimensions
 end
 
 --
--- Geometry
+-- Geometry -- AUTHORING-SIDE ONLY
 --
+-- This section used to also carry ContainsPoint (95 lines), BoundingRadius and IsExactBroadphase --
+-- the narrow-phase half of resolving a hit, sitting in the module that resolves none.
+--
+-- The live narrow phase is Shared/HitboxEngine/HitboxGeometry.lua, which HitboxEngine's own sample
+-- loop and CandidateGatherer's broadphase call. It is NOT simply a copy of what was here: it speaks
+-- HitboxTypes.ShapeKind, which is SEVEN shapes, where this module's ShapeId is twelve. The five extra
+-- ones are authoring vocabulary that MoveTypes.ENGINE_SHAPE_BY_MOVE_SHAPE maps down before anything
+-- is ever resolved (Disc -> Cylinder, and Wedge/Blade/Slice/Pyramid -> their own Box bound). So the
+-- twelve-shape containment test here could never have been asked about five of its own shapes by
+-- anything live, and was not asked about the other seven either -- it had test callers and comment
+-- mentions, and nothing else.
+--
+-- What remains is the vocabulary an AUTHOR needs -- how far a shape reaches, roughly how much space
+-- it covers, its own extent box, and how to draw it. That is a genuinely different job from resolving
+-- a hit, and it is why this module still exists beside HitboxGeometry rather than merging into it.
+-- BoundingBox stays for that reason: it is the extent an author's preview gizmo is checked against
+-- (see BuildPreviewParts), not a query anything runs.
 
 -- The oriented box a broadphase Workspace:GetPartBoundsInBox should query for this shape, as
 -- (size, localCentreOffset) -- the offset is non-identity for the "reach" shapes, whose volume sits
@@ -502,20 +519,11 @@ end
 
 -- The base radius a Cone's own Length/AngleDegrees imply -- AngleDegrees is the FULL apex angle
 -- (what an author means by "a 45 degree cone"), so the half-angle is what drives the taper.
--- Exposed rather than file-local because the preview builder, the bounding box and the volume
--- estimate all need the same number and disagreeing on it would show up as a preview that doesn't
--- match the hitbox.
+-- Exposed rather than file-local because the preview builder and the volume estimate both need the
+-- same number, and disagreeing on it would show up as a preview that doesn't match the hitbox.
 function HitboxShapes.ConeBaseRadius(dimensions: Dimensions): number
 	local halfAngle = math.rad(math.clamp(dimensions.AngleDegrees, 1, 179) / 2)
 	return dimensions.Length * math.tan(halfAngle)
-end
-
--- A single sphere fully containing the shape, centred on the shape's own origin -- used where a
--- caller wants one cheap distance test (candidate pre-filtering, the object-stun probe radius)
--- rather than a full oriented-box query.
-function HitboxShapes.BoundingRadius(shape: ShapeId, dimensions: Dimensions): number
-	local size, centre = HitboxShapes.BoundingBox(shape, dimensions)
-	return (size / 2).Magnitude + centre.Position.Magnitude
 end
 
 -- How far in front of the origin the volume reaches, in studs -- the number an author actually
@@ -570,119 +578,6 @@ function HitboxShapes.ApproximateVolume(shape: ShapeId, dimensions: Dimensions):
 		return dimensions.Width * dimensions.Height * dimensions.Thickness
 	end
 	return dimensions.Width * dimensions.Height * dimensions.Depth
-end
-
--- The narrow-phase test: is `localPoint` (already transformed into the hitbox's own space by the
--- caller) inside this volume, allowing `margin` studs of slack in every direction?
---
--- `margin` exists because the broadphase hands back whole PARTS, not points, and a part that
--- overlaps the volume by a sliver still legitimately counts as a hit. Callers pass roughly the
--- part's own half-extent, which inflates the shape by that much -- cheap, slightly generous, and
--- generous is the right failure direction for a hitbox (a hit that reads as a near-miss is a much
--- worse bug than a near-miss that reads as a hit).
-function HitboxShapes.ContainsPoint(
-	shape: ShapeId,
-	dimensions: Dimensions,
-	localPoint: Vector3,
-	margin: number
-): boolean
-	local m = math.max(margin, 0)
-	local x, y, z = localPoint.X, localPoint.Y, localPoint.Z
-	-- Distance FORWARD of the origin -- positive is in front, matching the -Z forward convention.
-	local forward = -z
-
-	if shape == "Sphere" then
-		return localPoint.Magnitude <= dimensions.Radius + m
-	elseif shape == "Cone" then
-		if forward < -m or forward > dimensions.Length + m then
-			return false
-		end
-		local allowed = math.max(forward, 0) * math.tan(math.rad(math.clamp(dimensions.AngleDegrees, 1, 179) / 2))
-		return math.sqrt(x * x + y * y) <= allowed + m
-	elseif shape == "Cylinder" then
-		if math.abs(z) > dimensions.Length / 2 + m then
-			return false
-		end
-		return math.sqrt(x * x + y * y) <= dimensions.Radius + m
-	elseif shape == "Capsule" then
-		local halfLength = dimensions.Length / 2
-		local nearestOnAxis = math.clamp(z, -halfLength, halfLength)
-		local deltaZ = z - nearestOnAxis
-		return math.sqrt(x * x + y * y + deltaZ * deltaZ) <= dimensions.Radius + m
-	elseif shape == "Disc" then
-		if math.abs(z) > dimensions.Thickness / 2 + m then
-			return false
-		end
-		local radial = math.sqrt(x * x + y * y)
-		return radial <= dimensions.Radius + m and radial >= math.max(dimensions.InnerRadius - m, 0)
-	elseif shape == "Wedge" then
-		local halfWidth, halfHeight, halfDepth = dimensions.Width / 2, dimensions.Height / 2, dimensions.Depth / 2
-		if math.abs(x) > halfWidth + m or z > halfDepth + m or z < -halfDepth - m then
-			return false
-		end
-		if y < -halfHeight - m then
-			return false
-		end
-		-- 0 at the back face, 1 at the front face -- the ramp rises toward the FRONT, so the tall
-		-- end is the one leading the swing. See this shape's own Summary.
-		local ramp = math.clamp((halfDepth - z) / dimensions.Depth, 0, 1)
-		return y <= -halfHeight + dimensions.Height * ramp + m
-	elseif shape == "Pyramid" then
-		if forward < -m or forward > dimensions.Length + m then
-			return false
-		end
-		local scale = math.clamp(forward, 0, dimensions.Length) / dimensions.Length
-		return math.abs(x) <= dimensions.Width / 2 * scale + m and math.abs(y) <= dimensions.Height / 2 * scale + m
-	elseif shape == "Arc" then
-		if math.abs(y) > dimensions.Height / 2 + m then
-			return false
-		end
-		local radial = math.sqrt(x * x + z * z)
-		if radial > dimensions.Radius + m or radial < math.max(dimensions.InnerRadius - m, 0) then
-			return false
-		end
-		if dimensions.AngleDegrees >= 360 then
-			return true
-		end
-		-- Signed bearing from straight-ahead (-Z), in degrees: 0 is dead centre, +-180 is directly
-		-- behind. The margin is converted from studs into an angular slack at THIS radius, so a
-		-- part clipping the sector's edge near the rim isn't held to the same angular tolerance as
-		-- one near the hub.
-		local bearing = math.deg(math.atan2(x, -z))
-		local angularMargin = if radial > 1e-4 then math.deg(math.atan(m / radial)) else 180
-		return math.abs(bearing) <= dimensions.AngleDegrees / 2 + angularMargin
-	elseif shape == "Beam" then
-		if forward < -m or forward > dimensions.Length + m then
-			return false
-		end
-		return math.sqrt(x * x + y * y) <= dimensions.Radius + m
-	elseif shape == "Blade" then
-		if forward < -m or forward > dimensions.Length + m then
-			return false
-		end
-		if math.abs(x) > dimensions.Thickness / 2 + m then
-			return false
-		end
-		local taper = math.clamp(forward, 0, dimensions.Length) / dimensions.Length
-		local halfBreadth = (dimensions.Height + (dimensions.Width - dimensions.Height) * taper) / 2
-		return math.abs(y) <= halfBreadth + m
-	elseif shape == "Slice" then
-		return math.abs(x) <= dimensions.Width / 2 + m
-			and math.abs(y) <= dimensions.Height / 2 + m
-			and math.abs(z) <= dimensions.Thickness / 2 + m
-	end
-
-	return math.abs(x) <= dimensions.Width / 2 + m
-		and math.abs(y) <= dimensions.Height / 2 + m
-		and math.abs(z) <= dimensions.Depth / 2 + m
-end
-
--- True when this shape's bounding box IS its volume, so a broadphase overlap result needs no
--- narrow-phase filtering at all. The two shapes that predate this vocabulary are exactly the two
--- that qualify, which is what keeps every hand-authored attack's query byte-identical to what it
--- always was -- see this file's own header.
-function HitboxShapes.IsExactBroadphase(shape: ShapeId): boolean
-	return shape == "Box" or shape == "Sphere"
 end
 
 --

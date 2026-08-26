@@ -7,7 +7,7 @@ local HitboxShapes = require(ReplicatedStorage.Shared.HitboxShapes)
 -- floors every extent -- mirrored here rather than imported because it is a private constant.
 local MIN_PREVIEW_EXTENT = 0.05
 
--- Slack for the "everything ContainsPoint accepts lies inside BoundingBox" property below. The two
+-- Slack for the "every preview piece's centre lies inside BoundingBox" property below. The two
 -- are computed by different closed-form expressions over the same dimensions, so they agree to
 -- floating-point noise, not exactly.
 local BOUNDS_EPSILON = 1e-4
@@ -51,15 +51,6 @@ return function()
 			expect(HitboxShapes.IsShapeId("Trapezoid")).to.equal(false)
 			expect(HitboxShapes.IsShapeId(42)).to.equal(false)
 			expect(HitboxShapes.IsShapeId(nil)).to.equal(false)
-		end)
-
-		-- The property that keeps every pre-existing hand-authored attack on its original query path
-		-- -- see HitboxShapes' own header and HitboxResolver.isExactShape.
-		it("treats exactly Box and Sphere as exact-broadphase shapes", function()
-			for _, spec in ipairs(HitboxShapes.ListShapes()) do
-				local expected = spec.Id == "Box" or spec.Id == "Sphere"
-				expect(HitboxShapes.IsExactBroadphase(spec.Id)).to.equal(expected)
-			end
 		end)
 	end)
 
@@ -142,112 +133,17 @@ return function()
 		end)
 	end)
 
-	describe("HitboxShapes.ContainsPoint", function()
-		it("contains the origin for every centred shape", function()
-			for _, shapeId in ipairs({ "Box", "Sphere", "Cylinder", "Capsule", "Disc", "Slice", "Wedge" }) do
-				local shape = shapeId :: HitboxShapes.ShapeId
-				local dimensions = HitboxShapes.DefaultDimensions(shape)
-				-- Arc is deliberately absent: its default InnerRadius is 2, so its hub is genuinely
-				-- hollow and the origin is correctly outside it. Disc defaults to InnerRadius 0.
-				expect(HitboxShapes.ContainsPoint(shape, dimensions, Vector3.zero, 0)).to.equal(true)
-			end
-		end)
-
-		it("grows a reach shape forward along -Z and not backward", function()
-			for _, shapeId in ipairs({ "Cone", "Pyramid", "Beam", "Blade" }) do
-				local shape = shapeId :: HitboxShapes.ShapeId
-				local dimensions = HitboxShapes.DefaultDimensions(shape)
-				local midway = Vector3.new(0, 0, -dimensions.Length / 2)
-				local behind = Vector3.new(0, 0, dimensions.Length / 2)
-				local beyond = Vector3.new(0, 0, -dimensions.Length * 1.5)
-				expect(HitboxShapes.ContainsPoint(shape, dimensions, midway, 0)).to.equal(true)
-				expect(HitboxShapes.ContainsPoint(shape, dimensions, behind, 0)).to.equal(false)
-				expect(HitboxShapes.ContainsPoint(shape, dimensions, beyond, 0)).to.equal(false)
-			end
-		end)
-
-		it("tapers a Cone: wide at the base, tight at the apex", function()
-			local dimensions = HitboxShapes.Sanitize("Cone", { Length = 10, AngleDegrees = 90 })
-			-- A 90 degree full apex angle means a 45 degree half angle, so the allowed radius equals
-			-- the forward distance exactly.
-			expect(HitboxShapes.ContainsPoint("Cone", dimensions, Vector3.new(8, 0, -9), 0)).to.equal(true)
-			expect(HitboxShapes.ContainsPoint("Cone", dimensions, Vector3.new(8, 0, -1), 0)).to.equal(false)
-		end)
-
-		it("excludes the hole of a ringed Disc", function()
-			local dimensions = HitboxShapes.Sanitize("Disc", { Radius = 6, InnerRadius = 3, Thickness = 0.4 })
-			expect(HitboxShapes.ContainsPoint("Disc", dimensions, Vector3.new(4.5, 0, 0), 0)).to.equal(true)
-			expect(HitboxShapes.ContainsPoint("Disc", dimensions, Vector3.zero, 0)).to.equal(false)
-		end)
-
-		it("trims an Arc to its swept sector", function()
-			local dimensions =
-				HitboxShapes.Sanitize("Arc", { Radius = 9, InnerRadius = 2, Height = 5, AngleDegrees = 90 })
-			-- Dead ahead is inside a 90 degree sweep; directly behind never is.
-			expect(HitboxShapes.ContainsPoint("Arc", dimensions, Vector3.new(0, 0, -6), 0)).to.equal(true)
-			expect(HitboxShapes.ContainsPoint("Arc", dimensions, Vector3.new(0, 0, 6), 0)).to.equal(false)
-		end)
-
-		it("treats a full 360 degree Arc as a complete ring", function()
-			local dimensions =
-				HitboxShapes.Sanitize("Arc", { Radius = 9, InnerRadius = 2, Height = 5, AngleDegrees = 360 })
-			expect(HitboxShapes.ContainsPoint("Arc", dimensions, Vector3.new(0, 0, 6), 0)).to.equal(true)
-			expect(HitboxShapes.ContainsPoint("Arc", dimensions, Vector3.new(-6, 0, 0), 0)).to.equal(true)
-		end)
-
-		-- Margin exists because the broadphase hands back whole PARTS, not points, so a part
-		-- overlapping the volume by a sliver still legitimately counts as a hit.
-		it("inflates the volume by the margin, never deflates it", function()
-			local dimensions = HitboxShapes.Sanitize("Sphere", { Radius = 4 })
-			local justOutside = Vector3.new(0, 0, -4.5)
-			expect(HitboxShapes.ContainsPoint("Sphere", dimensions, justOutside, 0)).to.equal(false)
-			expect(HitboxShapes.ContainsPoint("Sphere", dimensions, justOutside, 1)).to.equal(true)
-		end)
-
-		-- The invariant the whole broadphase/narrow-phase split rests on: BoundingBox must be a
-		-- conservative OVER-estimate, so a point the narrow phase accepts can never sit outside the
-		-- box the broadphase queried. If this fails for a shape, that shape silently drops hits.
-		it("never accepts a point outside the shape's own bounding box", function()
-			for _, spec in ipairs(HitboxShapes.ListShapes()) do
-				local shape = spec.Id
-				local dimensions = HitboxShapes.DefaultDimensions(shape)
-				local size, centre = HitboxShapes.BoundingBox(shape, dimensions)
-				local half = size / 2
-				local extent = HitboxShapes.BoundingRadius(shape, dimensions)
-
-				local samples = 8
-				local insideCount = 0
-				for xStep = -samples, samples do
-					for yStep = -samples, samples do
-						for zStep = -samples, samples do
-							local point = Vector3.new(
-								xStep / samples * extent,
-								yStep / samples * extent,
-								zStep / samples * extent
-							)
-							if not HitboxShapes.ContainsPoint(shape, dimensions, point, 0) then
-								continue
-							end
-							insideCount += 1
-							local localPoint = centre:PointToObjectSpace(point)
-							local withinBounds = math.abs(localPoint.X) <= half.X + BOUNDS_EPSILON
-								and math.abs(localPoint.Y) <= half.Y + BOUNDS_EPSILON
-								and math.abs(localPoint.Z) <= half.Z + BOUNDS_EPSILON
-							if not withinBounds then
-								error(
-									`{shape}: ContainsPoint accepted {point} which lies outside its own BoundingBox`,
-									0
-								)
-							end
-						end
-					end
-				end
-				-- Guards against the assertion above passing vacuously because the sample grid never
-				-- landed inside the volume at all.
-				expect(insideCount > 0).to.equal(true)
-			end
-		end)
-	end)
+	-- THE ContainsPoint DESCRIBE BLOCK IS GONE, with the function it tested. It exercised a
+	-- twelve-shape narrow-phase containment test in a module that resolves no hits: the live narrow
+	-- phase is Shared/HitboxEngine/HitboxGeometry.lua, over HitboxTypes' seven ShapeKinds, and
+	-- MoveTypes maps the five authoring-only shapes down to those before anything is resolved. Its
+	-- headline case -- "never accepts a point outside the shape's own bounding box" -- could not be
+	-- repointed at HitboxGeometry, because five of the twelve shapes it swept do not exist there.
+	--
+	-- What that leaves genuinely uncovered is HitboxGeometry's own ContainsPoint/SweptContainsPoint,
+	-- which has no spec of its own and never did -- this file only ever looked like coverage of it.
+	-- Worth writing; deliberately not written here, since a new spec for a different module is not the
+	-- same change as deleting a dead one.
 
 	describe("HitboxShapes.Reach and ApproximateVolume", function()
 		it("reports a positive reach and volume for every shape", function()

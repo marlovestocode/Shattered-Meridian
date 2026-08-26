@@ -81,6 +81,15 @@ local registeredSounds: { [string]: RegisteredSound } = {}
 -- different call sites registering the same name is almost always a naming collision, not intended
 -- reuse -- but it isn't refused outright (Studio script re-execution during iteration shouldn't
 -- hard-error).
+-- Registers a whole table of { [name] = definition } in one call. Every domain audio module opens
+-- with a run of Register calls -- FlightAudio had five, BlimpAudio three -- and a run of five is a
+-- run of five chances to typo one name.
+function SoundManager.RegisterAll(definitions: { [string]: SoundDefinition }): ()
+	for name, definition in definitions do
+		SoundManager.Register(name, definition)
+	end
+end
+
 function SoundManager.Register(name: string, definition: SoundDefinition): ()
 	if registeredSounds[name] then
 		logger:warn("Sound re-registered, overwriting previous definition", { name = name })
@@ -345,6 +354,33 @@ function SoundManager.SetLoopedPlaybackSpeed(name: string, speed: number): ()
 		return
 	end
 	registered.instances[1].PlaybackSpeed = speed
+end
+
+-- The shape every driven loop in this codebase actually wants: map a 0..1 intensity onto a
+-- definition's own volume ceiling and playback-speed range, in one call.
+--
+-- Client/FX/FlightAudio.SetWindIntensity and Client/FX/BlimpAudio's own local driveLoop were this
+-- function, written twice -- same clamp, same volume scale, same lerp -- and BlimpAudio's own comment
+-- already said so ("the same shape FlightAudio.SetWindIntensity uses against its own
+-- LoopSoundDefinition, factored out here only because this module has two loops rather than one").
+-- Three loops across two modules is where "factored out here" stops being the right place.
+--
+-- Still no easing: the caller is expected to have smoothed whatever fraction it passes (see
+-- SetLoopedVolume above), and a second smoothing layer here would be redundant lag on top of it.
+--
+-- Four scalars rather than a config table, deliberately: this is called every frame while a loop is
+-- driven, and BlimpAudio's engine loop scales its min/max playback speed by the live speed stage --
+-- so a table parameter would mean allocating one per frame to hold two numbers that just changed.
+function SoundManager.DriveLoop(
+	name: string,
+	intensity: number,
+	maxVolume: number,
+	minPlaybackSpeed: number,
+	maxPlaybackSpeed: number
+): ()
+	local clamped = math.clamp(intensity, 0, 1)
+	SoundManager.SetLoopedVolume(name, clamped * maxVolume)
+	SoundManager.SetLoopedPlaybackSpeed(name, minPlaybackSpeed + (maxPlaybackSpeed - minPlaybackSpeed) * clamped)
 end
 
 -- Eagerly creates every registered sound's pooled Sound instance(s) (skipping still-placeholder

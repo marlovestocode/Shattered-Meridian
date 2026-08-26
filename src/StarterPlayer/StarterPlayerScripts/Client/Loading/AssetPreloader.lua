@@ -53,7 +53,8 @@ local DefenseClient = require(script.Parent.Parent.Defense.DefenseClient)
 
 -- SoundManager holds a REGISTRY, not a fixed set -- it only knows about the sounds someone has
 -- Register()ed into it, and these six modules are the ones who do that (FlightAudio at load,
--- RunAudio at load, CombatAudio at load, DashAudio at load, SlideAudio at load, MantleAudio at load).
+-- RunAudio at load, CombatAudio at load, ParkourAudio at load -- the last of those covering the
+-- dash/slide/mantle sounds that used to be three separate modules).
 -- None is required above for its return value; each is required for the side effect of its own
 -- top-level Register() calls. CombatAudio.lua was removed alongside the rest of the combat system and
 -- has since been rebuilt -- see that module's own header.
@@ -71,9 +72,7 @@ local DefenseClient = require(script.Parent.Parent.Defense.DefenseClient)
 require(script.Parent.Parent.FX.FlightAudio)
 require(script.Parent.Parent.FX.RunAudio)
 require(script.Parent.Parent.FX.CombatAudio)
-require(script.Parent.Parent.FX.DashAudio)
-require(script.Parent.Parent.FX.SlideAudio)
-require(script.Parent.Parent.FX.MantleAudio)
+require(script.Parent.Parent.FX.ParkourAudio)
 
 local logger = Logger.scope("AssetPreloader")
 
