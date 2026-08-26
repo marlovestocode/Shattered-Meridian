@@ -15,6 +15,12 @@ local ClientStateModule = require(Client.UI.State.ClientState)
 local ChamferedSurface = require(Client.UI.ChamferedSurface)
 local Tokens = require(Client.UI.Tokens)
 
+-- BackgroundTransparency is a float32 PROPERTY, so a Tokens value of 0.2 reads back as
+-- 0.20000000298023224. Same trap Tests/UI/Reveal.spec.lua hit on UIScale.Scale.
+local function near(actual: number, expected: number): boolean
+	return math.abs(actual - expected) < 1e-5
+end
+
 -- The armament island -- the plate bolted to the hotbar dock's left edge -- mounted through the dock
 -- that owns the joint, and driven through the payload shapes a player actually reaches.
 --
@@ -515,8 +521,19 @@ return function()
 			-- asked for "a much more prominent divider". Pinned against the token rather than a
 			-- literal, and against the panel border it has to beat rather than against a number.
 			expect(rule.BackgroundColor3).to.equal(Tokens.Border.Seam.Color)
+			-- Against the PANEL EDGE it has to beat, not against a literal: 0.3 is what both of these
+			-- surfaces carry on their own borders, and a division at or above that is the state this
+			-- rule was tuned out of twice.
 			expect(Tokens.Border.Seam.Transparency < 0.3).to.equal(true)
-			expect(rule.BackgroundTransparency < 0.05).to.equal(true)
+			-- Waited on rather than sampled: the rule fades in on the island's own under-damped spring,
+			-- and this place does not run at 60Hz, so a frame count is a bet on pacing.
+			for _ = 1, 400 do
+				if near(rule.BackgroundTransparency, Tokens.Border.Seam.Transparency) then
+					break
+				end
+				RunService.Heartbeat:Wait()
+			end
+			expect(near(rule.BackgroundTransparency, Tokens.Border.Seam.Transparency)).to.equal(true)
 
 			-- Both on the junction, which is the island's clipped edge. A bead eight pixels off the
 			-- line it fastens is the defect this arrangement replaced on the other joint.

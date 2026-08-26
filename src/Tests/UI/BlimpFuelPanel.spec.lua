@@ -90,6 +90,20 @@ return function()
 		end
 	end
 
+	-- Steps until a condition holds, and fails naming the wait rather than the value. Anything riding
+	-- a spring needs this rather than a frame count: Tokens.Motion.IslandSpring settles in about a
+	-- second and a quarter, and this place does not run at 60Hz -- a fixed 120 frames is a bet on
+	-- frame pacing that has now come up short four separate times across this suite.
+	local function settleUntil(condition: () -> boolean): ()
+		for _ = 1, 400 do
+			if condition() then
+				return
+			end
+			RunService.Heartbeat:Wait()
+		end
+		error("a spring never settled within 400 frames", 0)
+	end
+
 	-- The endurance chip is the only StatusTag on the plate, so it is findable without reaching for
 	-- an instance name that is StatusTag's to choose.
 	local function chipText(plate: Frame): string?
@@ -283,8 +297,14 @@ return function()
 			-- asked for "a much more prominent divider". Pinned against the token rather than a
 			-- literal, and against the panel border it has to beat rather than against a number.
 			expect(rule.BackgroundColor3).to.equal(Tokens.Border.Seam.Color)
+			-- Against the PANEL EDGE it has to beat, not against a literal: 0.3 is what both of these
+			-- surfaces carry on their own borders, and a division at or above that is the state this
+			-- rule was tuned out of twice.
 			expect(Tokens.Border.Seam.Transparency < 0.3).to.equal(true)
-			expect(rule.BackgroundTransparency < 0.05).to.equal(true)
+			settleUntil(function()
+				return near(rule.BackgroundTransparency, Tokens.Border.Seam.Transparency)
+			end)
+			expect(near(rule.BackgroundTransparency, Tokens.Border.Seam.Transparency)).to.equal(true)
 
 			-- The junction is the plate's clipped bottom, which is where the two faces actually meet.
 			local junction = slot.AbsolutePosition.Y + slot.AbsoluteSize.Y

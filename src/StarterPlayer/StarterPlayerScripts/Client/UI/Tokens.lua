@@ -125,21 +125,28 @@ Tokens.Border = {
 	Lit = { Color = Color3.fromRGB(180, 160, 220), Transparency = 0.68 } :: Tint,
 	-- The 40% accent edge on a selected/active surface.
 	Accent = { Color = Tokens.Color.AccentPrimary, Transparency = 0.6 } :: Tint,
-	-- THE LINE BETWEEN TWO JOINED SURFACES, and the only opaque entry in this table. Every tint above
-	-- is an EDGE -- something that describes where a panel stops -- and edges in this UI are quiet on
-	-- purpose. This one is a DIVISION: it runs through the middle of a single assembled object and
-	-- says the two halves are two instruments. The hotbar dock and its armament island wear it, and
-	-- so do the helm console and its furnace plate.
-	--
-	-- Brighter than AccentPrimary and fully opaque, at the owner's direction (2026-08-25: "make there
-	-- be a much more prominent divider through the diamond that separates the two containers"). It
-	-- was AccentPrimary at 0.3 -- the panels' own edge treatment -- which read as a seam in the
-	-- material rather than as a boundary between two things.
+	-- THE LINE BETWEEN TWO JOINED SURFACES, and the one tint here that is not an edge. Every entry
+	-- above describes where a panel STOPS, and edges in this UI are quiet on purpose. This one is a
+	-- DIVISION: it runs through the middle of a single assembled object and says the two halves are
+	-- two instruments. The hotbar dock and its armament island wear it, and so do the helm console
+	-- and its furnace plate.
 	--
 	-- It is deliberately LOUDER than any panel border here, which is the inversion worth noting: a
 	-- joined assembly needs its internal division to out-read its outer edge, or the two halves merge
-	-- back into one object and the whole point of the joint is lost.
-	Seam = { Color = Tokens.Color.AccentPrimaryBright, Transparency = 0 } :: Tint,
+	-- back into one object and the whole point of the joint is lost. At 0.2 against the panel edge's
+	-- own 0.3, on a 2px rule against their 1px, it still is.
+	--
+	-- TUNED IN TWO PASSES AND BOTH ARE WORTH KEEPING. It began as AccentPrimary at 0.3 -- the panels'
+	-- own edge treatment, one pixel wide -- and read as a seam in the material rather than as a
+	-- boundary between two things. Taken to fully opaque it read as too loud for the surrounding
+	-- chrome. 0.2 is the owner's landing point between the two.
+	--
+	-- ONE THING THIS KNOWINGLY BENDS: Tokens.Color's own note calls AccentPrimaryBright "the
+	-- text-on-dark weight of the primary, never a fill", and this is a fill. Kept at the owner's
+	-- direction after the alternative was raised -- the hue is what makes the division read against
+	-- two surfaces that are both AccentPrimary at the edge. Flagged so the next person to reach for
+	-- Bright as a fill knows this one is an exception rather than a precedent.
+	Seam = { Color = Tokens.Color.AccentPrimaryBright, Transparency = 0.2 } :: Tint,
 }
 
 -- Fill washes, consumed as a BackgroundColor3 + BackgroundTransparency pair on a Frame.
