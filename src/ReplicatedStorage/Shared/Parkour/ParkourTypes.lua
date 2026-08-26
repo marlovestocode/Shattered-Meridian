@@ -476,6 +476,17 @@ export type ParkourContext = {
 	-- never happened leaves no state to inspect, and a row gated on the state being active would be
 	-- blank in exactly the case somebody is debugging.
 	DebugWallCatch: string?,
+	-- Whether anything is actually going to READ the Debug* fields above this frame -- the F6 overlay
+	-- is open, or ParkourConstants.Debug.LogWallCatch is on. Written once per frame by
+	-- Client/Parkour/ParkourController.lua's step; every producer of a Debug* string checks it first.
+	--
+	-- This exists because those strings are not free. States/WallRunning.lua's CanEnter builds one with
+	-- string.format on every call, and StateMachine.Update evaluates CanEnter for every higher-priority
+	-- state on every frame -- so a player standing in an open field, who will never see the overlay, was
+	-- allocating a formatted heap string per frame for a value nothing would ever read. A boolean on the
+	-- context rather than a require of ParkourDebug from inside a state, because the dependency only
+	-- runs the other way: the overlay reads the states, never the reverse.
+	DebugEnabled: boolean,
 	-- True for exactly the window States/WallRunning.lua is in its Catching phase (pinned to a wall
 	-- arrived at head-on). Read by ONE thing: EnvironmentProbe's `allowDiagonal`, which is otherwise
 	-- switched off for the whole of WallRunning.

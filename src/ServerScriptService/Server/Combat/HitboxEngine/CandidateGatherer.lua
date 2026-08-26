@@ -52,6 +52,12 @@ type Dimensions = HitboxTypes.Dimensions
 
 local CandidateGatherer = {}
 
+-- The box broadphase grows its bounds by the margin on BOTH sides of every axis, so the expansion is
+-- a constant Vector3 -- not something to rebuild per sample. `Vector3.one * (margin * 2)` was
+-- evaluated inside the gather call, which runs once per active hitbox per frame: a multiply and a
+-- Vector3 allocation for a value that is fixed at require time.
+local BROADPHASE_MARGIN_EXPANSION = Vector3.one * (HitboxEngineConstants.BroadphaseMarginStuds * 2)
+
 -- One shared OverlapParams for every query the engine makes. Rebuilt only when the set of registered
 -- combatants changes -- which is a spawn or a death, not something that happens per frame -- so the
 -- sampling loop never allocates one. An empty include list correctly matches nothing, which is the
@@ -102,7 +108,7 @@ function CandidateGatherer.Gather(
 		found = Workspace:GetPartBoundsInRadius(worldPose.Position, dimensions.Radius + margin, overlapParams)
 	else
 		local size, localCentre = HitboxGeometry.BoundingBox(shape, dimensions)
-		found = Workspace:GetPartBoundsInBox(worldPose * localCentre, size + Vector3.one * (margin * 2), overlapParams)
+		found = Workspace:GetPartBoundsInBox(worldPose * localCentre, size + BROADPHASE_MARGIN_EXPANSION, overlapParams)
 	end
 
 	local count = 0

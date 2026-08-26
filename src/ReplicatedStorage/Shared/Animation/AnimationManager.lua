@@ -297,17 +297,33 @@ end
 	Returns false on failure so callers can retire the claim rather than poke the same broken track
 	again next frame.
 ]]
-local function protectedCall(clip: string, what: string, operation: () -> ()): boolean
-	local ok, errorMessage = pcall(operation)
-	if ok then
-		return true
-	end
+local function reportOperationFailure(clip: string, what: string, errorMessage: unknown): ()
 	logger:warn("Animation operation failed -- dropping the clip, gameplay continues", {
 		clip = clip,
 		operation = what,
 		errorMessage = tostring(errorMessage),
 	})
+end
+
+local function protectedCall(clip: string, what: string, operation: () -> ()): boolean
+	local ok, errorMessage = pcall(operation)
+	if ok then
+		return true
+	end
+	reportOperationFailure(clip, what, errorMessage)
 	return false
+end
+
+-- Hoisted to module scope purely so SetSpeed can hand it to pcall as a plain function value.
+--
+-- Every other protectedCall site below builds a closure at the call site, which is right for them:
+-- they run on an event (a claim, a freeze, a repair) and the closure captures three or four locals
+-- that would otherwise need threading through. SetSpeed is the exception -- it is called EVERY FRAME
+-- by Client/Parkour/ParkourAnimator.lua for the whole length of a sprint, wall-run or slide, times
+-- three manager instances -- so a closure there is a heap allocation per frame per manager for a
+-- one-line body with two arguments.
+local function adjustTrackSpeed(track: AnimationTrack, speed: number): ()
+	track:AdjustSpeed(speed)
 end
 
 --[[
@@ -693,14 +709,34 @@ function AnimationManager.SetSpeed(self: AnimationManagerInstance, layer: string
 	if not entry or entry.Retired then
 		return
 	end
-	entry.DesiredSpeed = speed
-	if self.frozen[entry.Track] ~= nil then
+	local track = entry.Track
+
+	-- DEDUPED, and against BOTH numbers rather than just DesiredSpeed -- which is the difference
+	-- between a dedupe and a silently broken repair. ParkourAnimator calls this every frame with a
+	-- value that usually has not changed, so the common case should cost two compares; but Step's own
+	-- watchdog (see the Repair pass) calls SetSpeed(layer, entry.DesiredSpeed) precisely to push a
+	-- value that ALREADY equals DesiredSpeed back onto a track it found sitting at 0. Comparing only
+	-- DesiredSpeed would turn that repair into a no-op and leave the clip frozen with nothing in the
+	-- log to say why.
+	if entry.DesiredSpeed == speed and track.Speed == speed then
 		return
 	end
-	local track = entry.Track
-	protectedCall(entry.Clip, "AdjustSpeed", function()
-		track:AdjustSpeed(speed)
-	end)
+
+	entry.DesiredSpeed = speed
+	-- Written through DesiredSpeed above rather than straight onto the track, so a hit-stop freeze
+	-- holding that track at 0 is not fought frame by frame: the freeze restores to whatever
+	-- DesiredSpeed says when it elapses.
+	if self.frozen[track] ~= nil then
+		return
+	end
+
+	-- pcall'd directly rather than through protectedCall, to keep this per-frame path free of the
+	-- closure that wrapper's signature would require -- see adjustTrackSpeed. Same failure handling,
+	-- same log line.
+	local ok, errorMessage = pcall(adjustTrackSpeed, track, speed)
+	if not ok then
+		reportOperationFailure(entry.Clip, "AdjustSpeed", errorMessage)
+	end
 end
 
 function AnimationManager.GetActiveClip(self: AnimationManagerInstance, layer: string): string?

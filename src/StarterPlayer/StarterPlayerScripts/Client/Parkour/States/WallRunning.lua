@@ -315,17 +315,22 @@ local function selectCatchWall(context: ParkourContext): (WallProbe?, number, st
 	-- on why the refusing case is the one that matters. Written here rather than at the call site
 	-- because this is the only place the numbers exist: CanEnter sees a probe or a nil.
 	local bestClosing = math.max(leftClosing, rightClosing)
-	local bestProbe = if leftClosing >= rightClosing then context.WallLeft else context.WallRight
-	local approach = if bestProbe.Found then ParkourMath.ApproachAngle(travel, bestProbe.Tangent) else -1
-	context.DebugWallCatch = if leftOk or rightOk
-		then string.format("ready  closing %.1f  approach %.0f", bestClosing, approach)
-		else string.format(
-			"%s  closing %.1f/%d  approach %.0f",
-			leftReason or rightReason or "NoWall",
-			bestClosing,
-			CATCH.MinClosingSpeed,
-			approach
-		)
+	-- Same ParkourContext.DebugEnabled gate as refuse() above, and the more expensive of the two --
+	-- an ApproachAngle plus a multi-argument string.format, on the airborne frames where the client's
+	-- frame budget is already tightest.
+	if context.DebugEnabled then
+		local bestProbe = if leftClosing >= rightClosing then context.WallLeft else context.WallRight
+		local approach = if bestProbe.Found then ParkourMath.ApproachAngle(travel, bestProbe.Tangent) else -1
+		context.DebugWallCatch = if leftOk or rightOk
+			then string.format("ready  closing %.1f  approach %.0f", bestClosing, approach)
+			else string.format(
+				"%s  closing %.1f/%d  approach %.0f",
+				leftReason or rightReason or "NoWall",
+				bestClosing,
+				CATCH.MinClosingSpeed,
+				approach
+			)
+	end
 
 	-- Prefers the HARDER impact when both qualify, which for a head-on arrival is the more nearly
 	-- square of the two -- the opposite tie-break from selectWall's (which prefers the shallower
@@ -605,7 +610,12 @@ end
 -- stale measurement from the last frame that got as far as the probes -- which reads as "the catch is
 -- nearly working" when the truth is that it was never evaluated at all.
 local function refuse(context: ParkourContext, reason: string): (boolean, string?)
-	context.DebugWallCatch = string.format("blocked  %s", reason)
+	-- Gated on ParkourContext.DebugEnabled -- see that field. This runs from CanEnter, which
+	-- StateMachine.Update evaluates for every higher-priority state on every frame, so for a player
+	-- who never opens the overlay this was one formatted heap string per frame forever.
+	if context.DebugEnabled then
+		context.DebugWallCatch = string.format("blocked  %s", reason)
+	end
 	return false, reason
 end
 

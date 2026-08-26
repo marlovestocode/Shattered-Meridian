@@ -320,7 +320,28 @@ function EffectSystem.ReclaimExpiredModifiers(now: number): ()
 	end
 end
 
-local function onHeartbeatTick(_deltaTime: number): ()
+-- How often the reclaim sweep above actually runs, and how long since it last did.
+--
+-- The sweep used to run at 60 Hz, walking every player's whole modifier set to drop entries that had
+-- expired -- and NOTHING reads the result of that promptness. Every reader of a modifier already
+-- compares its own `now` against ExpiresAt (that is the contract that makes an expired-but-not-yet-
+-- reclaimed modifier invisible), which is exactly the argument Server/Combat/Damage/DamageSystem.lua
+-- uses to amortize its own reclaim. So the sweep is bookkeeping, not behaviour: running it four times
+-- a second instead of sixty leaves at most a quarter-second of dead table entries lying around and
+-- changes no answer anybody can observe.
+--
+-- Deliberately still a full walk when it does run, not Shared/AmortizedReclaim.lua -- see
+-- ReclaimExpiredModifiers' own comment on why a small per-player TTL set is a different problem shape
+-- from a per-Model map keyed on despawned instances.
+local RECLAIM_INTERVAL_SECONDS = 0.25
+local secondsSinceReclaim = 0
+
+local function onHeartbeatTick(deltaTime: number): ()
+	secondsSinceReclaim += deltaTime
+	if secondsSinceReclaim < RECLAIM_INTERVAL_SECONDS then
+		return
+	end
+	secondsSinceReclaim = 0
 	EffectSystem.ReclaimExpiredModifiers(os.clock())
 end
 
@@ -330,6 +351,9 @@ end
 
 function EffectSystem.Init(): ()
 	playerModifiers = {}
+	-- Reset alongside the state it sweeps, so an idempotent re-Init cannot inherit a partly-elapsed
+	-- interval from the previous one.
+	secondsSinceReclaim = 0
 
 	PlayerLifecycle.BindAllPlayers({ Scope = "EffectSystem", OnPlayerRemoving = onPlayerRemoving })
 	GameplayEvents.OnHeartbeatTick(onHeartbeatTick)

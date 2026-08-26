@@ -87,6 +87,7 @@ local RunLadder = require(ReplicatedStorage.Shared.Run.RunLadder)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local logger = Logger.scope("RunSystem")
 
@@ -99,6 +100,62 @@ local REMOTE_NAMES = RunConstants.Network.RemoteNames
 -- believes: the client sends one boolean and this System derives everything else from the live
 -- character. Everything here survives a respawn except what onCharacterAdded explicitly clears -- see
 -- that function for which, and why.
+-- EVERY ATTRIBUTE stepPlayer used to read off the Humanoid, mirrored into plain Lua fields.
+--
+-- The resolver reads twelve Attributes per player per tick, and every one of them is written by some
+-- OTHER System at event rate -- an admin freeze, a grab, a mount, a swing, a parkour report. At 40
+-- players that was ~480 GetAttribute calls a frame to re-answer questions whose answers had not
+-- changed since the last time somebody actually did something. Mirroring turns each into a plain
+-- table read and pays the engine cost once per change instead of sixty times a second per player.
+--
+-- Kept CURRENT by one Humanoid.AttributeChanged connection per character (see bindCharacter), not by
+-- twelve GetAttributeChangedSignal connections -- AttributeChanged already carries the name, and the
+-- names this System cares about are a fixed set, so one connection plus one table lookup in the
+-- handler covers all twelve and extends to a thirteenth for free.
+--
+-- Seeded at bind time rather than left to the first change. An Attribute another System set BEFORE
+-- this character was bound (a player who spawns already Mounted, say) has no edge left to catch, and
+-- an unseeded mirror would read that player as unlocked -- which is a stuck-sprinting bug that only
+-- reproduces under a spawn race.
+type LiveAttributes = {
+	-- Tiers 1-4 of the resolver: some other System has taken this character outright.
+	Frozen: boolean,
+	Flying: boolean,
+	EmoteMovementLocked: boolean,
+	Grabbed: boolean,
+	Mounted: boolean,
+	-- A parkour action currently owns velocity, so this System writes nothing.
+	ParkourVelocityOwned: boolean,
+	-- Deadlines and states compared against `now` each tick -- the COMPARISON stays per-frame, only
+	-- the read of the number behind it moves to event rate.
+	CombatBusyUntil: number,
+	DefenseState: string,
+	ParkourSpeedFloor: number,
+	ParkourSpeedFloorExpiry: number,
+	-- Pre-multiplied (BaseWalkSpeed + BonusWalkSpeed) * SpeedMultiplier, recomputed whenever either
+	-- input Attribute changes. effectiveBaseSpeed used to do this arithmetic, and both reads behind
+	-- it, on every tick for every player.
+	BaseSpeed: number,
+}
+
+-- The Attribute names bindCharacter's one connection actually reacts to. Anything else on the
+-- Humanoid -- including SprintStage, which this System writes itself -- is filtered by a single table
+-- lookup, so this System's own writes cannot feed back into its own mirror.
+local MIRRORED_ATTRIBUTES: { [string]: true } = {
+	[ATTRIBUTES.Frozen] = true,
+	[ATTRIBUTES.Flying] = true,
+	[ATTRIBUTES.EmoteMovementLocked] = true,
+	[ATTRIBUTES.Grabbed] = true,
+	[ATTRIBUTES.Mounted] = true,
+	[ATTRIBUTES.ParkourVelocityOwned] = true,
+	[ATTRIBUTES.CombatBusyUntil] = true,
+	[DefenseConstants.DefenseStateAttribute] = true,
+	[ATTRIBUTES.ParkourSpeedFloor] = true,
+	[ATTRIBUTES.ParkourSpeedFloorExpiry] = true,
+	[ATTRIBUTES.BonusWalkSpeed] = true,
+	[ATTRIBUTES.SpeedMultiplier] = true,
+}
+
 type PlayerRunState = {
 	-- The player's held intent, as last reported. The only client-supplied value in this System.
 	Sprinting: boolean,
@@ -116,6 +173,21 @@ type PlayerRunState = {
 	-- see RunConstants.StopGraceSeconds. Kept here rather than inside the ladder so that function stays
 	-- pure.
 	NotAccruingSeconds: number,
+	-- The character this state's mirror and Humanoid are bound to, and the Humanoid itself. Held so
+	-- the tick does not have to re-resolve them: stepPlayer used to call FindFirstChildOfClass on
+	-- every player on every frame, which is a linear scan of an R6 character's children to find
+	-- something onCharacterAdded had already resolved and thrown away.
+	--
+	-- Compared against player.Character each tick rather than trusted, so a respawn cannot leave this
+	-- System writing WalkSpeed to a corpse -- see resolveHumanoid, which rebinds on a mismatch rather
+	-- than giving up, so a character this System never saw spawn still gets picked up on the next tick.
+	Character: Model?,
+	Humanoid: Humanoid?,
+	-- Holds the one AttributeChanged connection behind Live below. Cleaned on every rebind and on
+	-- PlayerRemoving; a bare connection field here would be a connection somebody has to remember to
+	-- disconnect on both paths.
+	CharacterTrove: Trove.TroveInstance,
+	Live: LiveAttributes,
 }
 
 local playerStates: { [Player]: PlayerRunState } = {}
@@ -138,6 +210,26 @@ local function getState(player: Player): PlayerRunState
 		Stage = 0,
 		WalkSpeed = 0,
 		NotAccruingSeconds = 0,
+		Character = nil,
+		Humanoid = nil,
+		CharacterTrove = Trove.New(),
+		-- Seeded to the same answers an unset Attribute would have produced, so a state that exists
+		-- before its first bind reads exactly as it used to: nothing locked, no floor, base speed at
+		-- the authored default pair. resolveHumanoid refuses to step an unbound state anyway, but the
+		-- table is never allowed to be half-built.
+		Live = {
+			Frozen = false,
+			Flying = false,
+			EmoteMovementLocked = false,
+			Grabbed = false,
+			Mounted = false,
+			ParkourVelocityOwned = false,
+			CombatBusyUntil = 0,
+			DefenseState = "",
+			ParkourSpeedFloor = 0,
+			ParkourSpeedFloorExpiry = 0,
+			BaseSpeed = (CombatConstants.BaseWalkSpeed + CombatConstants.DefaultBonusWalkSpeed),
+		},
 	}
 	playerStates[player] = created
 	return created
@@ -161,20 +253,54 @@ local function numberAttribute(humanoid: Humanoid, name: string, default: number
 	return numeric
 end
 
+-- Reads the mirror rather than the Humanoid -- see LiveAttributes. The five questions and their
+-- ordering are unchanged; only where the answers come from moved.
+local function readLiveAttributes(live: LiveAttributes, humanoid: Humanoid): ()
+	live.Frozen = humanoid:GetAttribute(ATTRIBUTES.Frozen) == true
+	live.Flying = humanoid:GetAttribute(ATTRIBUTES.Flying) == true
+	live.EmoteMovementLocked = humanoid:GetAttribute(ATTRIBUTES.EmoteMovementLocked) == true
+	live.Grabbed = humanoid:GetAttribute(ATTRIBUTES.Grabbed) == true
+	live.Mounted = humanoid:GetAttribute(ATTRIBUTES.Mounted) == true
+	live.ParkourVelocityOwned = humanoid:GetAttribute(ATTRIBUTES.ParkourVelocityOwned) == true
+	live.CombatBusyUntil = numberAttribute(humanoid, ATTRIBUTES.CombatBusyUntil, 0)
+	local defenceState = humanoid:GetAttribute(DefenseConstants.DefenseStateAttribute)
+	live.DefenseState = if typeof(defenceState) == "string" then defenceState :: string else ""
+	live.ParkourSpeedFloor = numberAttribute(humanoid, ATTRIBUTES.ParkourSpeedFloor, 0)
+	live.ParkourSpeedFloorExpiry = numberAttribute(humanoid, ATTRIBUTES.ParkourSpeedFloorExpiry, 0)
+
+	-- The effective base this character's gears multiply against: the game's base walk speed plus the
+	-- per-player BonusWalkSpeed Attribute, the whole thing scaled by the admin-only SpeedMultiplier
+	-- Attribute. Both are read rather than assumed for the same reason the old resolver read them -- a
+	-- future bloodline/stat system changes BonusWalkSpeed per player and this file never needs to know
+	-- bloodlines exist.
+	--
+	-- BonusWalkSpeed defaults to CombatConstants.DefaultBonusWalkSpeed rather than to 0, and that
+	-- default is load-bearing rather than cosmetic. The two constants are authored as a PAIR --
+	-- BaseWalkSpeed 10 plus a default bonus of 8 -- and every speed comment in this codebase is written
+	-- against their sum of 18 ("today's 18 base -> Sprint 27"). Defaulting the bonus to 0 would quietly
+	-- run the whole game at a base of 10, which is not a tuning difference, it is the wrong number:
+	-- every gear, and the parkour framework's own mirrored tiers, would be a third short with nothing
+	-- to point at. onCharacterAdded seeds the Attribute explicitly, so this default is the belt to that
+	-- braces -- it covers the window before the seed lands and any character this System never saw spawn.
+	local bonus = numberAttribute(humanoid, ATTRIBUTES.BonusWalkSpeed, CombatConstants.DefaultBonusWalkSpeed)
+	local multiplier = numberAttribute(humanoid, ATTRIBUTES.SpeedMultiplier, 1)
+	live.BaseSpeed = (CombatConstants.BaseWalkSpeed + bonus) * multiplier
+end
+
 -- Whether some other System has taken this character outright. Tiers 1-4 of the resolver, asked as one
 -- question because the answer is the same in every case: WalkSpeed is zero and the charge clock stops.
-local function isMovementLocked(humanoid: Humanoid): boolean
-	return humanoid:GetAttribute(ATTRIBUTES.Frozen) == true
-		or humanoid:GetAttribute(ATTRIBUTES.Flying) == true
-		or humanoid:GetAttribute(ATTRIBUTES.EmoteMovementLocked) == true
+local function isMovementLocked(live: LiveAttributes): boolean
+	return live.Frozen
+		or live.Flying
+		or live.EmoteMovementLocked
 		-- Grab layer (Server/Combat/Grab/GrabSystem.lua) -- true for the whole hold-then-flight
 		-- lifetime. Same "external system freezes movement without touching this System's own
 		-- resolver" shape as the three above; see Constants.Attributes.Grabbed's own header for why
 		-- this is a separate Attribute from RootControlLocked rather than a widened meaning for it.
-		or humanoid:GetAttribute(ATTRIBUTES.Grabbed) == true
+		or live.Grabbed
 		-- Blimp layer (Server/Systems/BlimpSystem.lua) -- true for as long as this player is welded to a
 		-- station. Same shape as Grabbed immediately above; see Constants.Attributes.Mounted's own header.
-		or humanoid:GetAttribute(ATTRIBUTES.Mounted) == true
+		or live.Mounted
 end
 
 -- The decaying WalkSpeed floor a just-finished parkour action leaves behind (Constants.Attributes.
@@ -198,17 +324,17 @@ end
 -- player chose, but a player being punished for a broken guard is even less entitled to a sprint gear
 -- than one who chose to guard, so listing the states to include would only create a way to get one
 -- back by being parried.
-local function combatCommitted(humanoid: Humanoid, now: number): boolean
-	if now < numberAttribute(humanoid, ATTRIBUTES.CombatBusyUntil, 0) then
+local function combatCommitted(live: LiveAttributes, now: number): boolean
+	if now < live.CombatBusyUntil then
 		return true
 	end
-	local defenceState = humanoid:GetAttribute(DefenseConstants.DefenseStateAttribute)
-	return typeof(defenceState) == "string" and defenceState ~= "" and defenceState ~= "Neutral"
+	local defenceState = live.DefenseState
+	return defenceState ~= "" and defenceState ~= "Neutral"
 end
 
-local function parkourSpeedFloor(humanoid: Humanoid, now: number): number
-	local floorSpeed = numberAttribute(humanoid, ATTRIBUTES.ParkourSpeedFloor, 0)
-	local expiry = numberAttribute(humanoid, ATTRIBUTES.ParkourSpeedFloorExpiry, 0)
+local function parkourSpeedFloor(live: LiveAttributes, now: number): number
+	local floorSpeed = live.ParkourSpeedFloor
+	local expiry = live.ParkourSpeedFloorExpiry
 	if floorSpeed <= 0 or now >= expiry then
 		return 0
 	end
@@ -218,24 +344,55 @@ local function parkourSpeedFloor(humanoid: Humanoid, now: number): number
 	return capped * remaining
 end
 
--- The effective base this character's gears multiply against: the game's base walk speed plus the
--- per-player BonusWalkSpeed Attribute, the whole thing scaled by the admin-only SpeedMultiplier
--- Attribute. Both are read rather than assumed for the same reason the old resolver read them -- a
--- future bloodline/stat system changes BonusWalkSpeed per player and this file never needs to know
--- bloodlines exist.
+-- Points this state's mirror at `character`/`humanoid` and keeps it current for that character's
+-- whole life. Called from onCharacterAdded on the ordinary spawn path, and from resolveHumanoid on
+-- the fallback one.
 --
--- BonusWalkSpeed defaults to CombatConstants.DefaultBonusWalkSpeed rather than to 0, and that default
--- is load-bearing rather than cosmetic. The two constants are authored as a PAIR -- BaseWalkSpeed 10
--- plus a default bonus of 8 -- and every speed comment in this codebase is written against their sum
--- of 18 ("today's 18 base -> Sprint 27"). Defaulting the bonus to 0 would quietly run the whole game
--- at a base of 10, which is not a tuning difference, it is the wrong number: every gear, and the
--- parkour framework's own mirrored tiers, would be a third short with nothing to point at.
--- onCharacterAdded seeds the Attribute explicitly, so this default is the belt to that braces -- it
--- covers the window before the seed lands and any character this System never saw spawn.
-local function effectiveBaseSpeed(humanoid: Humanoid): number
-	local bonus = numberAttribute(humanoid, ATTRIBUTES.BonusWalkSpeed, CombatConstants.DefaultBonusWalkSpeed)
-	local multiplier = numberAttribute(humanoid, ATTRIBUTES.SpeedMultiplier, 1)
-	return (CombatConstants.BaseWalkSpeed + bonus) * multiplier
+-- ONE connection, not twelve. Humanoid.AttributeChanged already carries the name of whatever changed,
+-- and MIRRORED_ATTRIBUTES filters it in a single table lookup -- including this System's own
+-- SprintStage writes, which must not feed back into its own mirror. Re-reading all twelve on any one
+-- of them changing is deliberate: it happens at event rate (an admin freeze, a grab, a swing), so the
+-- twelve reads are free where a per-name updater table would be twelve more things to keep in sync.
+local function bindCharacter(state: PlayerRunState, character: Model, humanoid: Humanoid): ()
+	state.CharacterTrove:Clean()
+	state.Character = character
+	state.Humanoid = humanoid
+	readLiveAttributes(state.Live, humanoid)
+	state.CharacterTrove:Connect(humanoid.AttributeChanged, function(name: string)
+		if MIRRORED_ATTRIBUTES[name] then
+			readLiveAttributes(state.Live, humanoid)
+		end
+	end)
+end
+
+-- The live Humanoid for this player, or nil if there is nothing to step this tick.
+--
+-- Cached, and re-validated against player.Character rather than trusted -- a respawn must not leave
+-- this System writing WalkSpeed to a corpse. On a mismatch it REBINDS rather than returning nil, so a
+-- character this System never saw spawn (a join race, a CharacterAdded this System's bind missed) is
+-- picked up on the next tick instead of never. The FindFirstChildOfClass that used to run for every
+-- player on every frame now runs once per character.
+local function resolveHumanoid(player: Player, state: PlayerRunState): Humanoid?
+	local character = player.Character
+	if not character then
+		if state.Character then
+			state.CharacterTrove:Clean()
+			state.Character = nil
+			state.Humanoid = nil
+		end
+		return nil
+	end
+	if state.Character == character then
+		return state.Humanoid
+	end
+	-- No WaitForChild here, unlike onCharacterAdded: this path runs on Heartbeat and simply tries
+	-- again next frame, where blocking would stall every other player's tick behind one spawning one.
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return nil
+	end
+	bindCharacter(state, character, humanoid)
+	return humanoid
 end
 
 -- Ramps `current` toward `desired` instead of snapping to it, so a gear change reads as an
@@ -267,18 +424,18 @@ end
 -- One tick for one player: advance the charge, resolve and publish the stage, resolve and write the
 -- speed. The whole System, really -- everything above is a helper for this.
 local function stepPlayer(player: Player, state: PlayerRunState, deltaTime: number, now: number): ()
-	local character = player.Character
-	local humanoid = if character then character:FindFirstChildOfClass("Humanoid") else nil
+	local humanoid = resolveHumanoid(player, state)
 	if not humanoid then
 		return
 	end
+	local live = state.Live
 	-- A dead character is not running, and writing WalkSpeed to a corpse fights the respawn path.
 	if humanoid.Health <= 0 then
 		return
 	end
 
-	local locked = isMovementLocked(humanoid)
-	local parkourOwned = humanoid:GetAttribute(ATTRIBUTES.ParkourVelocityOwned) == true
+	local locked = isMovementLocked(live)
+	local parkourOwned = live.ParkourVelocityOwned
 	-- Read the same way Client/Movement/RunController.lua already reads the identical question
 	-- (FloorMaterial ~= Air, "the same single check MovementVFX's dust trickle uses") -- the server
 	-- and the client must agree on what "on the ground" means, since the client's own presentation
@@ -304,7 +461,7 @@ local function stepPlayer(player: Player, state: PlayerRunState, deltaTime: numb
 	-- you do while running -- see this file's header. Ordered ahead of `frozen` below so a swing thrown
 	-- mid-air (which is airborne, and would otherwise be frozen and preserve its gear intact) still
 	-- costs the run.
-	local committed = combatCommitted(humanoid, now)
+	local committed = combatCommitted(live, now)
 	if committed then
 		state.ChargeSeconds = 0
 		state.NotAccruingSeconds = 0
@@ -344,12 +501,12 @@ local function stepPlayer(player: Player, state: PlayerRunState, deltaTime: numb
 	if locked or parkourOwned then
 		desired = 0
 	else
-		desired = effectiveBaseSpeed(humanoid) * RunLadder.SpeedMultiplier(nextStage)
+		desired = live.BaseSpeed * RunLadder.SpeedMultiplier(nextStage)
 		-- A floor rather than a tier, and applied ONLY here -- never to the zeros above. That placement
 		-- is the whole safety argument for this feature's one client-influenced number: a slide's earned
 		-- speed survives into ordinary running, but it cannot peek through an admin freeze, a flight, an
 		-- emote lock, or a parkour action that currently owns the body.
-		desired = math.max(desired, parkourSpeedFloor(humanoid, now))
+		desired = math.max(desired, parkourSpeedFloor(live, now))
 	end
 
 	local nextSpeed = rampWalkSpeed(state.WalkSpeed, desired, deltaTime)
@@ -429,6 +586,10 @@ local function onCharacterAdded(player: Player, character: Model): ()
 	if typeof(humanoid:GetAttribute(ATTRIBUTES.BonusWalkSpeed)) ~= "number" then
 		humanoid:SetAttribute(ATTRIBUTES.BonusWalkSpeed, CombatConstants.DefaultBonusWalkSpeed)
 	end
+
+	-- LAST, after both seeds above, so the mirror's first read already sees them rather than catching
+	-- them as changes a frame later. Everything the tick reads off this character comes from here now.
+	bindCharacter(state, character, humanoid :: Humanoid)
 end
 
 function RunSystem.Init(): ()
@@ -445,6 +606,10 @@ function RunSystem.Init(): ()
 			getState(player)
 		end,
 		OnPlayerRemoving = function(player: Player)
+			local state = playerStates[player]
+			if state then
+				state.CharacterTrove:Clean()
+			end
 			playerStates[player] = nil
 			rateLimiter:Clear(player)
 		end,

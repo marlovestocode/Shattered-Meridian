@@ -65,16 +65,29 @@
 	  CombatLogged     -> (no subscriber yet -- EngagementSystem reports the fact, nothing punishes it)
 	  TrainingBotKilled-> TrainingBotSystem (respawn scheduling)
 	  TrainingBotDespawned -> TrainingBotSystem, BotCombat (per-bot AI state cleanup)
-	  HeartbeatTick    -> QiSystem (passive regen)
+	  HeartbeatTick    -> QiSystem (passive regen), BountySystem (notoriety decay), EffectSystem
+	                      (expired-modifier reclaim), EmoteSystem (active-emote monitor),
+	                      BlimpSystem (hull physics/fuel step), VehicleManager (live-vehicle sweep)
 
 	ORDERING. BindableEvents fire subscribers in connection order, which is Main.server.lua's Init()
 	order -- but no subscriber above depends on running before or after any other, and new ones should
-	keep it that way. Where an ordering dependency is genuinely real, express it as a chain of distinct
+	keep it that way. HeartbeatTick is the one signal that is NOT a BindableEvent (see its own comment
+	below) and its handler table is `pairs`-traversed, so its subscribers run in no defined order at
+	all -- which is the same promise, stated more honestly. Where an ordering dependency is genuinely real, express it as a chain of distinct
 	signals (PlayerKilled -> MeridianXPAwarded -> TierChanged below is exactly that: each publisher
 	fires only after its own state is already consistent), never as an assumption about boot order.
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Logger = require(ReplicatedStorage.Shared.Logger)
+
 local GameplayEvents = {}
+
+-- The one thing in this file that is not a signal. Used solely to report a subscriber that threw
+-- inside the shared tick's direct loop -- see FireHeartbeatTick. Requiring Logger keeps this module's
+-- "no dependency on any System, safe to require from anywhere" promise intact: Shared/Logger.lua has
+-- no Init(), no boot order and no System dependency of its own.
+local logger = Logger.scope("GameplayEvents")
 
 --
 -- Player lifecycle
@@ -277,14 +290,55 @@ end
 -- EmoteSystem's active-emote monitor) silently stops ticking with no error anywhere. Owning the
 -- RunService.Heartbeat connection here instead is what actually keeps the "neutral hub, no System
 -- dependency" promise -- see this file's own header.
-local heartbeatTickSignal = Instance.new("BindableEvent")
+-- THE ONE SIGNAL HERE THAT IS NOT A BindableEvent, and the reason this file's MECHANISM note above
+-- says a change of mechanism must not touch call sites.
+--
+-- Every other signal in this module fires when something HAPPENS -- a death, a despawn -- a few times
+-- a minute at most, where a BindableEvent's cost is invisible and its per-connection thread isolation
+-- is free safety. This one fires sixty times a second, forever, to six subscribers. Under the engine's
+-- default Deferred signal behaviour (this project sets no SignalBehavior, so the default applies) that
+-- is six deferred resumptions enqueued and drained every frame for handlers that between them do a few
+-- hundred table reads. A plain table walked in a loop does the same work with none of the scheduling.
+--
+-- Keyed by a fresh throwaway table rather than an array, the same idiom Shared/Logger.lua's own
+-- entryListeners uses and for the same two reasons: the key is an unforgeable token to unsubscribe by,
+-- and `pairs` traversal stays well-defined when a handler unsubscribes itself mid-tick (Lua permits
+-- setting an EXISTING field to nil during traversal, which is exactly what unsubscribing does). Adding
+-- a subscriber from inside a tick is the case that would not be well-defined -- no subscriber does,
+-- they all connect once from their own Init().
+local heartbeatHandlers: { [{}]: (deltaTime: number) -> () } = {}
 
+-- Individually pcall-wrapped, which is not defensive padding -- it is what preserves the one property
+-- the BindableEvent was giving for free. Each connection used to run on its own deferred thread, so a
+-- subscriber that errored took only itself down; in a direct loop an unguarded error would abort every
+-- subscriber after it in the walk, every frame, and the resulting "QiSystem stopped regenerating"
+-- would point nowhere near the System that actually threw. The warn is rate-limited by Logger's own
+-- per-message limiter, so a handler erroring every frame reports at a readable rate rather than
+-- becoming the flood.
+--
+-- Handlers run SYNCHRONOUSLY inside the Heartbeat step now, in registration (i.e. boot) order, rather
+-- than at the next resumption point. No subscriber depends on the deferral -- all six are pure
+-- per-frame sweeps with no yield anywhere in them, which is the precondition for this change and the
+-- thing to re-check before adding a seventh. A handler that yields would stall every subscriber
+-- behind it AND the Heartbeat step itself.
 function GameplayEvents.FireHeartbeatTick(deltaTime: number): ()
-	heartbeatTickSignal:Fire(deltaTime)
+	for _, handler in pairs(heartbeatHandlers) do
+		local ok, errorMessage = pcall(handler, deltaTime)
+		if not ok then
+			logger:error("Heartbeat tick subscriber errored", { errorMessage = tostring(errorMessage) })
+		end
+	end
 end
 
-function GameplayEvents.OnHeartbeatTick(handler: (deltaTime: number) -> ()): RBXScriptConnection
-	return heartbeatTickSignal.Event:Connect(handler)
+-- Returns an unsubscribe function rather than an RBXScriptConnection, since there is no longer a
+-- connection to hand back. Idempotent, so a caller that tears down twice (an idempotent re-Init, say)
+-- does not have to track whether it already has.
+function GameplayEvents.OnHeartbeatTick(handler: (deltaTime: number) -> ()): () -> ()
+	local token = {}
+	heartbeatHandlers[token] = handler
+	return function()
+		heartbeatHandlers[token] = nil
+	end
 end
 
 game:GetService("RunService").Heartbeat:Connect(function(deltaTime: number)

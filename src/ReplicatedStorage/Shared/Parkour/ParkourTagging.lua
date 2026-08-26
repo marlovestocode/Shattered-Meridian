@@ -172,21 +172,26 @@ local function isCharacterPart(instance: Instance): boolean
 	return false
 end
 
+-- The Ignored answer, shared rather than rebuilt. Interned for the same reason DEFAULT_PERMISSIONS
+-- above is, and safe for the same reason: GetPermissions' caller contract already says the returned
+-- table is shared, must be read immediately, and must never be retained or mutated.
+local IGNORED_PERMISSIONS: SurfacePermissions = {
+	Ignored = true,
+	Vaultable = false,
+	WallRunnable = false,
+	Mantleable = false,
+	LedgeGrabbable = false,
+	ForcedVault = false,
+	ForcedWallRun = false,
+	ForcedMantle = false,
+	ForcedLedge = false,
+	FrictionScale = 1,
+	BounceScale = 1,
+}
+
 local function resolve(instance: Instance): SurfacePermissions
 	if isCharacterPart(instance) or hasMarker(instance, TAGS.NoParkour) then
-		return {
-			Ignored = true,
-			Vaultable = false,
-			WallRunnable = false,
-			Mantleable = false,
-			LedgeGrabbable = false,
-			ForcedVault = false,
-			ForcedWallRun = false,
-			ForcedMantle = false,
-			ForcedLedge = false,
-			FrictionScale = 1,
-			BounceScale = 1,
-		}
+		return IGNORED_PERMISSIONS
 	end
 
 	local deniedVault = hasMarker(instance, TAGS.NoVault)
@@ -201,6 +206,31 @@ local function resolve(instance: Instance): SurfacePermissions
 	local forcedMantle = not deniedMantle and hasMarker(instance, TAGS.ForceMantleable)
 	local forcedLedge = not deniedLedge and hasMarker(instance, TAGS.ForceLedge)
 
+	local frictionScale = findScale(instance, TAGS.SurfaceFrictionAttribute, 1)
+	local bounceScale = findScale(instance, TAGS.WallBounceAttribute, 1)
+
+	-- THE OVERWHELMINGLY COMMON ANSWER, returned as the shared default rather than as a twelfth
+	-- identical table. Almost every surface a probe ever hits carries no parkour marker at all -- an
+	-- untagged wall, a floor, a crate -- and each of those was getting its own freshly-allocated
+	-- permissions table, cached against it for the TTL. The fields are identical to
+	-- DEFAULT_PERMISSIONS by construction (every denial absent means every capability allowed, and
+	-- a force-allow cannot be set without its own marker), so returning the shared one is the same
+	-- answer with none of the garbage.
+	if
+		not deniedVault
+		and not deniedWallRun
+		and not deniedMantle
+		and not deniedLedge
+		and not forcedVault
+		and not forcedWallRun
+		and not forcedMantle
+		and not forcedLedge
+		and frictionScale == 1
+		and bounceScale == 1
+	then
+		return DEFAULT_PERMISSIONS
+	end
+
 	return {
 		Ignored = false,
 		Vaultable = not deniedVault,
@@ -211,8 +241,8 @@ local function resolve(instance: Instance): SurfacePermissions
 		ForcedWallRun = forcedWallRun,
 		ForcedMantle = forcedMantle,
 		ForcedLedge = forcedLedge,
-		FrictionScale = findScale(instance, TAGS.SurfaceFrictionAttribute, 1),
-		BounceScale = findScale(instance, TAGS.WallBounceAttribute, 1),
+		FrictionScale = frictionScale,
+		BounceScale = bounceScale,
 	}
 end
 

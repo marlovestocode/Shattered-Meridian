@@ -124,6 +124,14 @@ type ActiveEmote = {
 	-- only falls back to this ceiling if that never arrives, while a clipless one still ends exactly
 	-- at its authored Duration.
 	EndsAt: number?,
+	-- Whether this emote survives entering combat, copied off the definition when the emote starts.
+	--
+	-- The monitor below used to call EmoteRegistry.Get(active.EmoteId) once per active emoter per
+	-- frame to re-read this one boolean off static content (EmoteDefinitions.lua never changes at
+	-- runtime, which is why the registry's own miss branch is documented as defensive-only). Copying
+	-- it at start turns the whole per-frame lookup into a field read, and cannot go stale: an emote
+	-- that is running already had its definition resolved, and a definition cannot change under it.
+	CombatAllowed: boolean,
 }
 
 -- One entry per player currently playing an emote -- O(concurrent emoters), read once per
@@ -285,6 +293,7 @@ local function handleRequestPlay(player: Player, rawEmoteId: unknown): ()
 	activeEmotes[player] = {
 		EmoteId = emoteId,
 		EndsAt = computeEndsAt(definition, now),
+		CombatAllowed = definition.CombatAllowed,
 	}
 
 	if definition.MovementLocked then
@@ -426,15 +435,6 @@ local function onHeartbeatTick(): ()
 
 	local now = os.clock()
 	for player, active in activeEmotes do
-		local definition = EmoteRegistry.Get(active.EmoteId)
-		if not definition then
-			-- Defensive only -- an emote that was legal to start can't stop existing in the registry
-			-- mid-flight (EmoteDefinitions.lua is static content), but a stale/malformed entry should
-			-- never spin forever.
-			EmoteSystem.StopEmote(player)
-			continue
-		end
-
 		if active.EndsAt and now >= active.EndsAt then
 			EmoteSystem.StopEmote(player)
 			continue
@@ -444,8 +444,11 @@ local function onHeartbeatTick(): ()
 		-- without this would leave a player who sat down a half-second before being attacked seated for
 		-- the whole fight -- the one case the gate is most obviously meant to cover. Loop emotes are the
 		-- ones this actually catches, since they have no EndsAt of their own to expire.
-		if not definition.CombatAllowed then
-			local _, humanoid = CharacterUtil.LiveRig(player)
+		if not active.CombatAllowed then
+			-- HumanoidOf, not LiveRig -- only the Humanoid is used here, and LiveRig also resolves the
+			-- root (a second FindFirstChild scan of the character) purely to discard it.
+			local character = player.Character
+			local humanoid = if character then CharacterUtil.HumanoidOf(character) else nil
 			if humanoid and isInCombat(humanoid) then
 				logger:debug("Emote interrupted: InCombat", { player = player.Name, emoteId = active.EmoteId })
 				EmoteSystem.StopEmote(player)

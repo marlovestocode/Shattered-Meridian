@@ -87,6 +87,10 @@ local queryRateLimiter = RateLimiter.New(BountyConstants.QueryMaxCallsPerSecond)
 -- Every connection this System owns, so Init() can tear down a previous Init()'s subscriptions --
 -- see this file's header on why that matters here specifically.
 local connections: { RBXScriptConnection } = {}
+-- Held apart from `connections` above because GameplayEvents.OnHeartbeatTick no longer returns an
+-- RBXScriptConnection -- the shared tick is a plain handler table now, not a BindableEvent, so what
+-- comes back is an idempotent unsubscribe closure. Same idempotent-re-Init teardown either way.
+local tickUnsubscribe: (() -> ())? = nil
 -- The PlayerLifecycle master Trove backing the PlayerRemoving binding below. Cleaned at the top of
 -- Init() for the same idempotent-re-Init reason `connections` is disconnected there --
 -- PlayerLifecycle.BindAllPlayers hands back a Trove rather than a raw RBXScriptConnection the array
@@ -411,6 +415,10 @@ function BountySystem.Init(): ()
 		connection:Disconnect()
 	end
 	table.clear(connections)
+	if tickUnsubscribe then
+		tickUnsubscribe()
+		tickUnsubscribe = nil
+	end
 	if lifecycle then
 		lifecycle:Clean()
 	end
@@ -436,7 +444,7 @@ function BountySystem.Init(): ()
 		Scope = "BountySystem",
 		OnPlayerRemoving = BountySystem.ClearPlayerReferences,
 	})
-	table.insert(connections, GameplayEvents.OnHeartbeatTick(onHeartbeatTick))
+	tickUnsubscribe = GameplayEvents.OnHeartbeatTick(onHeartbeatTick)
 
 	logger:info("BountySystem.Init() complete", {
 		streakThreshold = BountyConstants.NotorietyStreakThreshold,

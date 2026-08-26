@@ -95,6 +95,11 @@ local function makeContext(travel: Vector3, speed: number): any
 		Ground = { Grounded = false, NearGround = false, Distance = 40 },
 		WallLeft = wall,
 		WallRight = absentWall,
+		-- The debug verdict strings this spec asserts on are only produced when something is going to
+		-- read them (ParkourContext.DebugEnabled -- the F6 overlay, or Debug.LogWallCatch). A live
+		-- client with neither pays no string.format per frame; a test that asserts on the string has to
+		-- ask for it. The "writes no verdict at all" case below covers the other side.
+		DebugEnabled = true,
 	}
 end
 
@@ -201,6 +206,28 @@ return function()
 			expect(allowed).to.equal(false)
 			expect(reason).to.equal("Grounded")
 			expect(context.DebugWallCatch).to.equal("blocked  Grounded")
+		end)
+
+		it("writes no verdict at all when nothing is going to read one", function()
+			-- The gate that keeps CanEnter free for the overwhelming majority of frames: StateMachine
+			-- evaluates it for every higher-priority state on every frame, so an ungated string.format
+			-- here is one heap allocation per frame per client, forever, for a value only
+			-- ParkourDebug.Update reads -- and that returns immediately when the overlay is closed.
+			local context = makeContext(HEAD_ON, CATCH.MinClosingSpeed + 10)
+			context.DebugEnabled = false
+			context.DebugWallCatch = nil
+
+			WallRunning.CanEnter(context)
+			expect(context.DebugWallCatch).to.equal(nil)
+
+			-- And the refusal path, which writes through a different function.
+			local grounded = makeContext(HEAD_ON, CATCH.MinClosingSpeed + 10)
+			grounded.DebugEnabled = false
+			grounded.DebugWallCatch = nil
+			grounded.Ground = { Grounded = true, NearGround = true, Distance = 0 }
+
+			WallRunning.CanEnter(grounded)
+			expect(grounded.DebugWallCatch).to.equal(nil)
 		end)
 	end)
 

@@ -202,6 +202,24 @@ local consoleSequence = 0
 -- without pulling in a real Connection type for what is otherwise a plain callback list.
 local entryListeners: { [{}]: (LogEntry) -> () } = {}
 
+-- THE CAPTURE FLOOR, and the single most-read value in this module -- emitBody below compares
+-- against it on every one of the ~981 logger: call sites in src/, so it is held as a plain upvalue
+-- rather than re-indexed out of Constants per call.
+--
+-- Two levels, not one. Constants.Debug.Logging.CaptureLevel is the IDLE floor: what a server records
+-- when nobody is watching, which is almost always. SetCaptureLevel below is what raises it, and
+-- Server/Systems/LiveConsoleSystem.lua is the only caller -- it drops the floor to Trace on the first
+-- admin subscribing and restores the idle level when the last one leaves. So the expensive path (a
+-- LogEntry table, an os.time(), a ring write, a fan-out to every listener) is paid for debug-level
+-- lines only while somebody is actually reading them, and the rest of the time a logger:debug costs
+-- one compare and a return.
+--
+-- What this trades away, stated plainly: the ring no longer holds Trace/Debug history from BEFORE an
+-- admin opened the console. Subscribe's snapshot goes back 1000 entries as it always did, but the
+-- older ones are Info and above. Everything from the moment of subscribing is complete.
+local idleCaptureLevel: LogLevel = Constants.Debug.Logging.CaptureLevel :: LogLevel
+local captureLevelRank = LEVEL_RANK[idleCaptureLevel] or LEVEL_RANK.Off
+
 local function oldestCapturedSequence(): number
 	return math.max(1, consoleSequence - CONSOLE_BUFFER_CAPACITY + 1)
 end
@@ -272,6 +290,27 @@ end
 --
 -- Rate-limited on the same (scope, level, message) triple emit() uses, under the fixed "Engine"
 -- scope. This path used to reach captureEntry with no cap at all, which meant Constants.Debug.
+-- Raises or restores the capture floor described above. Only Server/Systems/LiveConsoleSystem.lua
+-- calls this, and only off its own subscriberCount edges; anything else calling it would be quietly
+-- deciding what an admin gets to see, which belongs with the System that knows whether one is
+-- looking. Passing nil restores Constants.Debug.Logging.CaptureLevel, so a caller never has to
+-- remember what the idle level was.
+function Logger.SetCaptureLevel(level: LogLevel?): ()
+	local resolved: LogLevel = level or idleCaptureLevel
+	captureLevelRank = LEVEL_RANK[resolved] or LEVEL_RANK.Off
+end
+
+-- The floor currently in force, not the idle one -- exposed for the Live Console's own status line
+-- and for specs, which need to assert the raise/restore edges without reaching into an upvalue.
+function Logger.GetCaptureLevel(): LogLevel
+	for level, rank in pairs(LEVEL_RANK) do
+		if rank == captureLevelRank then
+			return level :: LogLevel
+		end
+	end
+	return "Off" :: LogLevel
+end
+
 -- Logging.MaxRepeatsPerSecond -- documented as protecting "the always-on console capture buffer" --
 -- protected it only from THIS codebase's own log sites, and not at all from the engine's. A single
 -- engine warning repeating every frame (a physics/asset/script warning in a loop, none of which this
@@ -308,18 +347,20 @@ end
 -- still whole-body pcall-wrapped so a bad `fields` value (or anything else going wrong here) can
 -- never throw into the caller's actual gameplay code.
 local function emitBody(scopeName: string, level: LogLevel, message: string, fields: LogFields?): ()
-	local config = Constants.Debug.Logging
 	local levelRank = LEVEL_RANK[level] or LEVEL_RANK.Off
 
-	-- THE FIRST GATE, and deliberately the cheapest thing in this function: two table indexes and a
-	-- comparison, above the rate limiter and above captureEntry. Everything past this line allocates
-	-- something (a bucket table, a LogEntry, a listener fan-out), and in a live server the capture
-	-- buffer is the ONLY consumer of any of it -- so a level the buffer has been told not to record
-	-- must cost nothing rather than being allocated and then discarded downstream. See
+	-- THE FIRST GATE, and deliberately the cheapest thing in this function: one upvalue read and a
+	-- comparison, above the rate limiter, above captureEntry, and above even resolving `config`.
+	-- Everything past this line allocates something (a bucket table, a LogEntry, a listener fan-out),
+	-- and in a live server the capture buffer is the ONLY consumer of any of it -- so a level the
+	-- buffer has been told not to record must cost nothing rather than being allocated and then
+	-- discarded downstream. See captureLevelRank above for the idle/raised split, and
 	-- Constants.Debug.Logging.CaptureLevel for why this is a separate knob from `Level` below.
-	if levelRank < (LEVEL_RANK[config.CaptureLevel] or LEVEL_RANK.Off) then
+	if levelRank < captureLevelRank then
 		return
 	end
+
+	local config = Constants.Debug.Logging
 
 	-- Shared by both destinations below (the always-on buffer AND Output) so a log site that
 	-- fires every frame can't flood either one, even at Trace, even outside Studio.

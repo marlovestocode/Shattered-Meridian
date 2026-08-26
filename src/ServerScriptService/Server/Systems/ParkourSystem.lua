@@ -287,7 +287,12 @@ local function handleReport(player: Player, rawPayload: unknown): ()
 		return
 	end
 
-	local _, _, rootPart = CharacterUtil.LiveRig(player)
+	-- ONE LiveRig for both the root and the Humanoid. This function used to call it twice, eleven
+	-- lines apart, each time discarding two of the three values -- and each call re-walks the
+	-- character's children twice (FindFirstChildOfClass for the Humanoid, FindFirstChild for the
+	-- root). Same answers, half the scans, and no window in which the two calls could disagree about
+	-- which character they were looking at.
+	local _, humanoid, rootPart = CharacterUtil.LiveRig(player)
 	if not rootPart then
 		notifyRejected(player, report.Kind, report.Phase, "NoCharacter")
 		return
@@ -298,7 +303,6 @@ local function handleReport(player: Player, rawPayload: unknown): ()
 	-- way granting velocity ownership would put the parkour framework and RagdollController's
 	-- AlignPosition pin on the same body at once. The client's own controller independently parks in
 	-- its AerialCombat state for the same signal, so an honest client never reaches this branch.
-	local _, humanoid = CharacterUtil.LiveRig(player)
 	if humanoid and humanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true then
 		notifyRejected(player, report.Kind, report.Phase, "CombatRestricted")
 		return

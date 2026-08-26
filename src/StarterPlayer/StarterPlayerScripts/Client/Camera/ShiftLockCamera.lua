@@ -139,6 +139,11 @@ local rootPart: BasePart? = nil
 -- "Flying" watch.
 local rootControlLocked = false
 
+-- How far the root's facing may differ from the camera's before onRenderStep bothers rewriting it.
+-- ~0.05 degrees: two orders of magnitude below the smallest rotation a player could perceive, and
+-- comfortably above the float noise two LookVector-derived yaws carry against each other.
+local YAW_WRITE_EPSILON_RADIANS = 0.001
+
 -- Mirrors this character's own Humanoid "Flying" Attribute (Client/Flight/FlightController.lua/
 -- FlightCamera.lua) -- while true, FlightCamera.lua owns CameraOffset/yaw entirely (a flying admin
 -- isn't also meant to be in shift-lock combat framing), so this module skips both writes below
@@ -262,8 +267,13 @@ local function onRenderStep(_deltaTime: number): ()
 		return
 	end
 
-	-- Re-asserted every frame while engaged -- see the file header for why once is not enough.
-	UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+	-- Re-asserted every frame while engaged -- see the file header for why once is not enough. READ
+	-- FIRST, though: something else clobbering MouseBehavior is the rare case this re-assert exists
+	-- for, and a write that restates the value already there still crosses into the engine and still
+	-- runs the property's own setter. The compare is free; the write is not.
+	if UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
+		UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+	end
 
 	-- Character yaw tracks camera yaw -- UNLESS the server is currently driving this body's own
 	-- rotation authoritatively (see file header's "Root-control lock" section). Skipping the write
@@ -291,9 +301,41 @@ local function onRenderStep(_deltaTime: number): ()
 	local currentCamera = camera :: Camera
 	local root = currentRootPart :: BasePart
 	local yaw = FlightMath.YawFromFlatDirection(currentCamera.CFrame.LookVector)
-	if yaw then
-		root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+	if not yaw then
+		return
 	end
+
+	-- GATED ON A REAL YAW CHANGE, not written blind. This is a write to HumanoidRootPart.CFrame on
+	-- every render frame for as long as shift lock is engaged, and a CFrame write is not an ordinary
+	-- property assignment: it builds two CFrames, multiplies them, touches the physics assembly and
+	-- marks the part for replication. A player standing still with the mouse untouched was paying all
+	-- of that sixty times a second to re-state the rotation the root already had.
+	--
+	-- COMPARED AGAINST THE ROOT'S OWN CURRENT YAW, not against the last yaw this function wrote --
+	-- which is the difference between a dedupe and a behaviour change. The unconditional write was
+	-- also, incidentally, a continuous re-assertion: anything else that rotated the body got undone on
+	-- the next frame. Remembering what we last wrote would lose that; asking the body what it is
+	-- actually facing keeps it, because an external rotation shows up as a mismatch and is corrected
+	-- exactly as before.
+	--
+	-- An epsilon rather than an exact compare because both yaws come out of LookVectors and will
+	-- differ in the last float bits even with a perfectly still mouse. The threshold is far below what
+	-- a player can see or a server can act on -- roughly a twentieth of a degree -- so any movement
+	-- anybody could notice still writes.
+	--
+	-- What the gate does NOT re-assert is pitch/roll: the write flattens them, and a body whose yaw
+	-- already matches now keeps whatever tilt it has. That is not a live case here -- a ragdoll or an
+	-- air-combo chase sets RootControlLocked, which returns several guards above this one, and an
+	-- upright Humanoid does not accumulate tilt on its own.
+	--
+	-- Its two siblings (FX/CameraOffsetComposer.lua, FX/FOVOffset.lua) already dedupe their own
+	-- per-frame writes and both cite Server/Systems/RunSystem.lua's "single most expensive thing"
+	-- comment for why; this one never got the same treatment.
+	local currentYaw = FlightMath.YawFromFlatDirection(root.CFrame.LookVector)
+	if currentYaw and math.abs(yaw - currentYaw) < YAW_WRITE_EPSILON_RADIANS then
+		return
+	end
+	root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
 end
 
 -- `life` is the per-life Shared/Trove.lua scope Shared/PlayerLifecycle.lua hands every bind. Every

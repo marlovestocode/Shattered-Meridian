@@ -1315,6 +1315,23 @@ local function runGroundProbe(blimp: BlimpRecord, now: number): ()
 	blimp.GroundY = if result then result.Position.Y else nil
 end
 
+-- ONE scratch table, refilled per hull per tick, rather than a fresh literal each time. Every field
+-- is overwritten below before anything reads it, and neither consumer keeps a reference:
+-- BlimpFlightMode.Step is pure and returns a new State, and WantsGroundProbe only reads. At six hulls
+-- on a sixty-hertz tick the literal it replaces was ~1,800 short-lived tables a second, all identical
+-- in shape, all garbage by the end of the frame.
+--
+-- The one rule this imposes: nothing may hold onto the table it is handed. If a future consumer wants
+-- to keep the context, it copies it -- reusing the scratch is the whole point, and a retained
+-- reference would silently see the NEXT hull's values.
+local flightContextScratch: BlimpFlightMode.Context = {
+	HasPilot = false,
+	OccupantCount = 0,
+	AutopilotArmed = false,
+	Depleted = false,
+	HeightAboveGround = nil,
+}
+
 -- Piggybacks GameplayEvents.OnHeartbeatTick rather than opening a second RunService.Heartbeat connection
 -- -- that signal's own header names this as the sanctioned seam for exactly this kind of per-frame work.
 local function onHeartbeatTick(deltaTime: number): ()
@@ -1334,13 +1351,12 @@ local function onHeartbeatTick(deltaTime: number): ()
 		-- that is about to be gated never gets one more tick of "free" burn on the way down.
 		local depleted = blimp.HasFuelSystem and BlimpFuel.IsDepleted(blimp.Fuel, blimp.FuelTuning)
 
-		local context: BlimpFlightMode.Context = {
-			HasPilot = blimp.Pilot ~= nil,
-			OccupantCount = blimp.Occupants,
-			AutopilotArmed = blimp.AutopilotArmed,
-			Depleted = depleted,
-			HeightAboveGround = if blimp.GroundY then blimp.Assembly.Root.Position.Y - blimp.GroundY else nil,
-		}
+		local context = flightContextScratch
+		context.HasPilot = blimp.Pilot ~= nil
+		context.OccupantCount = blimp.Occupants
+		context.AutopilotArmed = blimp.AutopilotArmed
+		context.Depleted = depleted
+		context.HeightAboveGround = if blimp.GroundY then blimp.Assembly.Root.Position.Y - blimp.GroundY else nil
 
 		-- Probed BEFORE the machine steps, so a hull crossing into Landing this tick already has a
 		-- reading to descend against rather than spending its first frames with a nil floor.
@@ -1434,7 +1450,11 @@ local function onHeartbeatTick(deltaTime: number): ()
 			if mounts[player] then
 				continue
 			end
-			local _character, _humanoid, root = CharacterUtil.LiveRig(player)
+			-- RootOf, not LiveRig -- only the root is used here, and LiveRig also resolves the Humanoid
+			-- (a FindFirstChildOfClass scan of the whole character) just to have it discarded on the
+			-- next line. Same answer, one linear scan less per contacting player per tick.
+			local character = player.Character
+			local root = if character then CharacterUtil.RootOf(character) else nil
 			if not root then
 				continue
 			end

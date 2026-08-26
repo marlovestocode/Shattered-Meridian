@@ -153,6 +153,14 @@ local candidateBuffer: { BasePart } = {}
 -- this file), so allocating only on that rare path is the right trade, not a hot-path concern.
 type ContactCandidate = { Part: BasePart, Owner: Combatant, Distance: number }
 
+-- Hoisted rather than written inline at the table.sort call below. The comparator is stateless, so
+-- an inline function literal there would allocate a fresh closure on every sample of every active
+-- hitbox -- and the pass-2 sort runs on the frames where the engine is already busiest, since it only
+-- happens when a hitbox found more contacts than it had target slots for.
+local function byNearestContact(a: ContactCandidate, b: ContactCandidate): boolean
+	return a.Distance < b.Distance
+end
+
 -- Scratch source Dimensions for applyScaling's SizeFromAttachmentPart branch, reused across every
 -- swing that opens one -- filled with the resolved part's live Size immediately before being handed
 -- to HitboxGeometry.ScaleDimensions, and never read outside that one call. Single-threaded by
@@ -591,9 +599,7 @@ local function sampleSwing(combatant: Combatant, record: ActiveSwing, now: numbe
 
 	-- Pass 2: nearest-attacker-first, up to whatever's left of MaxTargets.
 	if contacts then
-		table.sort(contacts, function(a: ContactCandidate, b: ContactCandidate): boolean
-			return a.Distance < b.Distance
-		end)
+		table.sort(contacts, byNearestContact)
 		for _, contact in contacts do
 			if record.HitCount >= record.MaxTargets then
 				break

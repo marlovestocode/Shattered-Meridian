@@ -167,6 +167,7 @@ local function buildInitialContext(boundCharacter: Model, boundHumanoid: Humanoi
 		SprintStage = 0,
 		Momentum = 0,
 		DebugWallCatch = nil,
+		DebugEnabled = false,
 		WallCatchActive = false,
 		MoveDirection = Vector3.zero,
 		Velocity = Vector3.zero,
@@ -346,6 +347,11 @@ local function step(deltaTime: number): ()
 	local now = os.clock()
 	context.DeltaTime = deltaTime
 	context.Now = now
+	-- Resolved ONCE here rather than by each producer, so the whole frame agrees about whether anybody
+	-- is looking -- see ParkourContext.DebugEnabled. Two readers, and a state should not have to know
+	-- about either: ParkourDebug.Update draws the overlay, and ParkourConstants.Debug.LogWallCatch
+	-- routes the same verdicts to the log without the overlay being open.
+	context.DebugEnabled = ParkourDebug.IsEnabled() or ParkourConstants.Debug.LogWallCatch
 	-- PULLED, not pushed. Client/Movement/RunController.lua owns run intent (the key, hold-vs-toggle,
 	-- Autorun) and this module already requires it in order to push its own state id out -- so a push
 	-- back would be a require cycle. Reading it here rides the dependency that already exists, and

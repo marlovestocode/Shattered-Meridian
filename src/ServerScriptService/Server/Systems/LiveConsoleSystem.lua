@@ -83,6 +83,27 @@ local droppedSinceFlush = 0
 -- table to see whether it is empty.
 local subscriberCount = 0
 
+-- THE CAPTURE FLOOR, raised while anybody is watching and dropped back when nobody is.
+--
+-- Logger.lua's capture path (a LogEntry table, an os.time(), a ring write, a fan-out to every
+-- listener) is the only part of logging that costs anything in a live server, and it used to be
+-- paid at Trace on all ~981 logger: call sites in src/ whether or not an admin was ever going to
+-- read the result. Constants.Debug.Logging.CaptureLevel is now the IDLE floor ("Info"), and this
+-- System owns the exception: the moment an admin console is genuinely open, everything is worth
+-- recording again.
+--
+-- Called on all three edges that move subscriberCount -- Subscribe, Unsubscribe, and the
+-- PlayerRemoving cleanup below -- rather than only the first two, because an admin whose console
+-- was open when they left would otherwise leave the server recording at Trace forever with nobody
+-- reading. Idempotent, so calling it on a non-edge costs nothing.
+local function syncCaptureLevel(): ()
+	if subscriberCount > 0 then
+		Logger.SetCaptureLevel("Trace")
+	else
+		Logger.SetCaptureLevel(nil)
+	end
+end
+
 local function handleSubscribe(player: Player): Types.LiveConsoleSubscribeResult
 	logger:debug("Subscribe received", { player = player.Name, userId = player.UserId })
 
@@ -94,7 +115,11 @@ local function handleSubscribe(player: Player): Types.LiveConsoleSubscribeResult
 	if not subscribers[player] then
 		subscribers[player] = true
 		subscriberCount += 1
+		syncCaptureLevel()
 	end
+	-- Snapshot taken AFTER the raise, which is deliberate but changes nothing about this line: the
+	-- ring already holds what it holds. Entries older than this moment are Info and above (see
+	-- syncCaptureLevel); everything from here on is complete.
 	logger:info("Subscribe accepted", { player = player.Name })
 	return { Success = true, Snapshot = Logger.GetBufferSnapshot() }
 end
@@ -117,6 +142,9 @@ local function handleUnsubscribe(player: Player): ()
 	subscribers[player] = nil
 	subscriberCount -= 1
 	logger:debug("Unsubscribe received", { player = player.Name })
+	-- After the debug line above, not before -- that line is worth capturing at the level the
+	-- console was still open at.
+	syncCaptureLevel()
 end
 
 -- Pushes whatever accumulated in pendingBatch since the last flush to every current subscriber,
@@ -211,6 +239,7 @@ function LiveConsoleSystem.Init(): ()
 			if subscribers[player] then
 				subscribers[player] = nil
 				subscriberCount -= 1
+				syncCaptureLevel()
 			end
 			rateLimiter:Clear(player)
 		end,

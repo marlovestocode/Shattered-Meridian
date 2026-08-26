@@ -287,15 +287,25 @@ Constants.Debug = {
 		-- fan-out to every Logger.OnEntry listener, paid on all 380-odd logger:debug call sites in
 		-- src/ whether or not an admin is ever going to read them.
 		--
-		-- "Trace" keeps today's behavior exactly (capture everything). Raising it to "Info" makes
-		-- every Trace/Debug call site in the codebase resolve to two table lookups and a return,
-		-- which is the cheapest a call can be without deleting it -- at the cost of an admin's Live
-		-- Console no longer seeing debug-level lines from a live server. Kept at "Trace" because the
-		-- Live Console's whole value is seeing what a live server is actually doing; this exists so
-		-- that trade is a one-line decision when a busy server needs it, rather than a refactor.
-		-- Logger.lua reads it per call (not once at require-time) so DevMenu tuning could move it
-		-- live later; the read is one table index and does not undo the saving.
-		CaptureLevel = "Trace",
+		-- THIS IS THE IDLE FLOOR, not the only one. It is what gets recorded when nobody is
+		-- watching, which on a live server is almost always -- and "Trace" here meant every one of
+		-- the ~981 logger: call sites in src/ allocated a LogEntry table, called os.time() and
+		-- fanned out to every listener, in both VMs, forever, for a buffer only an admin ever reads.
+		--
+		-- "Info" makes every Trace/Debug call site resolve to one upvalue compare and a return,
+		-- which is the cheapest a call can be without deleting it. The Live Console does not lose
+		-- its debug lines: Server/Systems/LiveConsoleSystem.lua calls Logger.SetCaptureLevel("Trace")
+		-- on the first admin subscribing and restores this level when the last one leaves, so
+		-- everything from the moment a console opens is complete. What is genuinely given up is
+		-- Trace/Debug HISTORY from before it opened -- the ring still reaches back 1000 entries, but
+		-- the older ones are Info and above. That is the right side of the trade for a live server:
+		-- a debug line nobody was there to read is not worth a table allocation per frame.
+		--
+		-- Set this to "Trace" to go back to capturing everything unconditionally (a Studio session,
+		-- or a server being actively investigated where the pre-open backlog matters more than the
+		-- allocation). Logger.lua reads it once at require-time into an upvalue, so a change here
+		-- needs a restart -- SetCaptureLevel is the live knob.
+		CaptureLevel = "Info",
 	},
 
 	-- Whitelist-gated developer tooling -- unlike Logging above, this is NOT Studio-only; it's
