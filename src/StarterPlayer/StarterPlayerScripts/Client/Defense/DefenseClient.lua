@@ -52,6 +52,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
@@ -349,8 +350,7 @@ local function bindCharacter(nextCharacter: Model, humanoid: Humanoid): ()
 	-- about exactly one part of a character so that every caller does not inherit every caller's
 	-- requirements. A missing root is survivable for a life (the gate that reads it simply refuses),
 	-- which is why it warns nothing and does not abort the bind.
-	local root = nextCharacter:WaitForChild("HumanoidRootPart", Constants.Network.WaitForChildTimeoutSeconds)
-	rootPart = if root and root:IsA("BasePart") then root else nil
+	rootPart = CharacterUtil.AwaitRoot(nextCharacter)
 	boundHumanoid = humanoid
 
 	-- A new life never inherits the previous one's guard. The server rebuilds its own state on

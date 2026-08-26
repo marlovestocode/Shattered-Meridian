@@ -24,7 +24,7 @@ local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local logger = Logger.scope("SpectateController")
@@ -40,11 +40,11 @@ local function bindTargetHumanoid(character: Model): ()
 	if not camera then
 		return
 	end
-	local humanoidInstance = character:WaitForChild("Humanoid", Constants.Network.WaitForChildTimeoutSeconds)
-	if not humanoidInstance or not humanoidInstance:IsA("Humanoid") then
+	local humanoidInstance = CharacterUtil.AwaitHumanoid(character)
+	if not humanoidInstance then
 		return
 	end
-	camera.CameraSubject = humanoidInstance :: Humanoid
+	camera.CameraSubject = humanoidInstance
 end
 
 -- Restores the camera to the local player's own Humanoid -- called both for an explicit Stop() and
@@ -66,7 +66,7 @@ function SpectateController.Stop(): ()
 	local localPlayer = Players.LocalPlayer
 	local ownCharacter = localPlayer.Character
 	if camera and ownCharacter then
-		local ownHumanoid = ownCharacter:FindFirstChildOfClass("Humanoid")
+		local ownHumanoid = CharacterUtil.HumanoidOf(ownCharacter)
 		if ownHumanoid then
 			camera.CameraSubject = ownHumanoid
 		end

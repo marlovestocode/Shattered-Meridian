@@ -42,6 +42,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnership)
@@ -520,20 +521,20 @@ end
 -- place, so a new life cannot start with any of them holding the previous one's data -- the class of
 -- bug this codebase has already paid for once (see CombatSystem.onCharacterAdded's own reset block).
 function ParkourController.BindCharacter(nextCharacter: Model): ()
-	local humanoidInstance = nextCharacter:WaitForChild("Humanoid", Constants.Network.WaitForChildTimeoutSeconds)
-	if not humanoidInstance or not humanoidInstance:IsA("Humanoid") then
+	local humanoidInstance = CharacterUtil.AwaitHumanoid(nextCharacter)
+	if not humanoidInstance then
 		logger:warn("BindCharacter: no Humanoid")
 		return
 	end
-	local rootInstance = nextCharacter:WaitForChild("HumanoidRootPart", Constants.Network.WaitForChildTimeoutSeconds)
-	if not rootInstance or not rootInstance:IsA("BasePart") then
+	local rootInstance = CharacterUtil.AwaitRoot(nextCharacter)
+	if not rootInstance then
 		logger:warn("BindCharacter: no HumanoidRootPart")
 		return
 	end
 
 	character = nextCharacter
-	humanoid = humanoidInstance :: Humanoid
-	rootPart = rootInstance :: BasePart
+	humanoid = humanoidInstance
+	rootPart = rootInstance
 
 	context = buildInitialContext(nextCharacter, humanoid :: Humanoid, rootPart :: BasePart)
 	wasGrounded = false

@@ -106,6 +106,7 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
@@ -347,8 +348,8 @@ local function onCharacterAdded(character: Model, humanoidInstance: Humanoid, li
 	-- The Humanoid is already resolved and already re-checked against the current character by the
 	-- binder. The HumanoidRootPart is this module's own additional requirement and still waits here --
 	-- see Shared/PlayerLifecycle.lua's header on why it knows about exactly one part of a character.
-	local rootPartInstance = character:WaitForChild("HumanoidRootPart", Constants.Network.WaitForChildTimeoutSeconds)
-	if not rootPartInstance or not rootPartInstance:IsA("BasePart") then
+	local rootPartInstance = CharacterUtil.AwaitRoot(character)
+	if not rootPartInstance then
 		logger:warn("Character has no HumanoidRootPart -- shift lock cannot drive this character")
 		return
 	end

@@ -467,11 +467,10 @@ function FlightController.BindCharacter(character: Model): ()
 	recentlyFlyingUntil = 0
 	lastDescentSpeed = 0
 
-	local humanoidInstance = character:WaitForChild("Humanoid", Constants.Network.WaitForChildTimeoutSeconds)
-	if not humanoidInstance or not humanoidInstance:IsA("Humanoid") then
+	local humanoid = CharacterUtil.AwaitHumanoid(character)
+	if not humanoid then
 		return
 	end
-	local humanoid = humanoidInstance :: Humanoid
 	local rootPart = CharacterUtil.RootOf(character)
 
 	-- A fresh character's Humanoid never carries over the old one's Attributes -- seed from whatever

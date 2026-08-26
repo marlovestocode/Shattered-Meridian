@@ -566,7 +566,7 @@ local function onCharacterAdded(player: Player, character: Model): ()
 		-- WaitForChild rather than giving up: a character model replicates in pieces and the Humanoid is
 		-- routinely a frame or two behind the model itself. Bounded by the same timeout every other
 		-- character-binding path in this codebase uses.
-		humanoid = character:WaitForChild("Humanoid", Constants.Network.WaitForChildTimeoutSeconds) :: Humanoid?
+		humanoid = CharacterUtil.AwaitHumanoid(character)
 	end
 	if not humanoid then
 		logger:warn("Character spawned with no Humanoid", { player = player.Name })

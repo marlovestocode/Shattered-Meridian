@@ -57,7 +57,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
@@ -93,8 +93,8 @@ export type PlayerHandlers = {
 -- (having warned under the caller's scope) if it never arrives -- the caller skips the life rather
 -- than binding half of it.
 local function resolveHumanoid(scope: string, character: Model): Humanoid?
-	local humanoid = character:WaitForChild("Humanoid", Constants.Network.WaitForChildTimeoutSeconds)
-	if humanoid and humanoid:IsA("Humanoid") then
+	local humanoid = CharacterUtil.AwaitHumanoid(character)
+	if humanoid then
 		return humanoid
 	end
 	Logger.scope(scope):warn("No Humanoid resolved -- not bound this life", { character = character.Name })

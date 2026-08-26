@@ -20,6 +20,9 @@
 	or logging a rejection reason -- DevMenuSystem.lua's own getRootPart wraps RootOf for that.
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Constants = require(ReplicatedStorage.Shared.Constants)
+
 local CharacterUtil = {}
 
 -- `model`'s Humanoid, or nil if it has none. No Health filter -- a dead Humanoid is still returned,
@@ -58,6 +61,43 @@ function CharacterUtil.LiveRig(player: Player): (Model?, Humanoid?, BasePart?)
 		return nil, nil, nil
 	end
 	return character, CharacterUtil.HumanoidOf(character), CharacterUtil.RootOf(character)
+end
+
+-- THE WAITING PAIR, and the reason they are separate functions rather than a flag on the two above.
+-- A character model replicates in pieces: on a fresh spawn the Model is parented before its Humanoid
+-- and HumanoidRootPart are, so a binder that runs on the spawn edge and asks HumanoidOf gets nil for
+-- a character that is about to be perfectly fine. Every bind path in this codebase already knew that
+-- and hand-wrote the same three lines -- WaitForChild with Constants.Network.WaitForChildTimeoutSeconds,
+-- then an IsA check because WaitForChild's return is typed Instance?, then a cast.
+--
+-- The timeout lives here rather than at the call site on purpose: eight copies of a bounded wait is
+-- eight chances for one of them to be unbounded, and an unbounded WaitForChild on a character that
+-- never finishes replicating is a coroutine parked forever with no log line.
+--
+-- These YIELD. HumanoidOf/RootOf above never do, which is why the split is by name and not by an
+-- optional argument -- a caller on a hot path must not be able to acquire a yield by passing a flag.
+
+-- `character`'s Humanoid, waiting up to the shared timeout for it to replicate. nil means it never
+-- arrived (or arrived as something that is not a Humanoid), which every caller treats as "do not bind
+-- this life" rather than as an error.
+function CharacterUtil.AwaitHumanoid(character: Model): Humanoid?
+	local humanoid = character:WaitForChild("Humanoid", Constants.Network.WaitForChildTimeoutSeconds)
+	if humanoid and humanoid:IsA("Humanoid") then
+		return humanoid
+	end
+	return nil
+end
+
+-- `character`'s HumanoidRootPart, on the same contract as AwaitHumanoid. A separate call rather than
+-- a second return value because the two are wanted independently: PlayerLifecycle waits for the
+-- Humanoid alone (see its own header on why it knows about exactly one part of a character), and
+-- ShiftLockCamera/DefenseClient are handed a resolved Humanoid and wait only for the root.
+function CharacterUtil.AwaitRoot(character: Model): BasePart?
+	local rootPart = character:WaitForChild("HumanoidRootPart", Constants.Network.WaitForChildTimeoutSeconds)
+	if rootPart and rootPart:IsA("BasePart") then
+		return rootPart
+	end
+	return nil
 end
 
 return CharacterUtil

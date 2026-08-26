@@ -52,6 +52,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Lazy = require(ReplicatedStorage.Shared.Lazy)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Types = require(ReplicatedStorage.Shared.Types)
 local VehicleConstants = require(ReplicatedStorage.Shared.Vehicle.VehicleConstants)
 local VehicleTypes = require(ReplicatedStorage.Shared.Vehicle.VehicleTypes)
@@ -450,9 +451,9 @@ local function watchTarget(handle: DevMenuHandle, targetPlayer: Player): ()
 	end
 
 	local function onCharacterAdded(character: Model): ()
-		local humanoidInstance = character:WaitForChild("Humanoid", Constants.Network.WaitForChildTimeoutSeconds)
-		if humanoidInstance and humanoidInstance:IsA("Humanoid") then
-			rebindAttributeConnections(handle, humanoidInstance :: Humanoid)
+		local humanoidInstance = CharacterUtil.AwaitHumanoid(character)
+		if humanoidInstance then
+			rebindAttributeConnections(handle, humanoidInstance)
 		end
 	end
 
