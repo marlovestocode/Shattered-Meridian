@@ -126,9 +126,9 @@ local function StepButton(
 	-- Pointer-over AND gamepad-selection, OR-ed into the single boolean every visual Computed
 	-- below already reads as `isHovering` -- see Components/Selection.lua for why the two stay
 	-- separate rather than both writing one Value.
-	local engagement = Selection.New(scope)
-	local isHovering = engagement.Active
 	local isPressing = scope:Value(false)
+	local engagement = Selection.New(scope, isPressing)
+	local isHovering = engagement.Active
 
 	local borderColor = scope:Computed(function(use)
 		if not use(enabled) then
@@ -165,19 +165,10 @@ local function StepButton(
 		Text = "",
 		Active = enabled,
 
-		[OnEvent "SelectionGained"] = function()
-			engagement.Selected:set(true)
-		end,
-		[OnEvent "SelectionLost"] = function()
-			engagement.Selected:set(false)
-		end,
-		[OnEvent "MouseEnter"] = function()
-			engagement.PointerOver:set(true)
-		end,
-		[OnEvent "MouseLeave"] = function()
-			engagement.PointerOver:set(false)
-			isPressing:set(false)
-		end,
+		[OnEvent "SelectionGained"] = engagement.OnSelectionGained,
+		[OnEvent "SelectionLost"] = engagement.OnSelectionLost,
+		[OnEvent "MouseEnter"] = engagement.OnPointerEnter,
+		[OnEvent "MouseLeave"] = engagement.OnPointerLeave,
 		[OnEvent "MouseButton1Down"] = function()
 			isPressing:set(true)
 		end,

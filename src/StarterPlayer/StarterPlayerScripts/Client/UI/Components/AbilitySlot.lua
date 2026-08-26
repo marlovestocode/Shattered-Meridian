@@ -85,6 +85,7 @@ local Tokens = require(script.Parent.Parent.Tokens)
 local ChamferedSurface = require(script.Parent.Parent.ChamferedSurface)
 local CornerBracket = require(script.Parent.CornerBracket)
 local Label = require(script.Parent.Label)
+local Selection = require(script.Parent.Selection)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -276,8 +277,15 @@ local function AbilitySlot(scope: Scope, props: AbilitySlotProps): TextButton
 
 	-- Input state. Two plain booleans the springs below smooth -- the only mutable state this
 	-- component owns, and neither is gameplay-relevant.
-	local hovered: Fusion.Value<boolean> = scope:Value(false)
+	--
+	-- `hovered` comes from Components/Selection.lua rather than being a bare Value, which is what
+	-- makes this tile respond to a GAMEPAD at all: every GuiButton in this codebase sets
+	-- AutoButtonColor = false, so a control with no SelectionGained/SelectionLost wiring shows a pad
+	-- player literally nothing as they traverse to it. This one had none. `Active` is hover OR
+	-- selection, so every Computed below reads exactly what it read before.
 	local pressed: Fusion.Value<boolean> = scope:Value(false)
+	local engagement = Selection.New(scope, pressed)
+	local hovered = engagement.Active
 
 	-- 0 while dim (Locked/Cooldown), 1 while lit (Available/Active). Sprung ONCE and reused by every
 	-- lit-state visual below, so the border, the wash, the edge bar and the ready flash cannot drift
@@ -716,16 +724,13 @@ local function AbilitySlot(scope: Scope, props: AbilitySlotProps): TextButton
 				props.OnActivated()
 			end
 		end,
-		[OnEvent "MouseEnter"] = function()
-			hovered:set(true)
-		end,
-		[OnEvent "MouseLeave"] = function()
-			hovered:set(false)
-			-- A drag that leaves the tile never fires InputEnded on it, so the press would latch
-			-- forever. Clearing here is what keeps a released-elsewhere click from leaving the tile
-			-- permanently sunk.
-			pressed:set(false)
-		end,
+		[OnEvent "SelectionGained"] = engagement.OnSelectionGained,
+		[OnEvent "SelectionLost"] = engagement.OnSelectionLost,
+		[OnEvent "MouseEnter"] = engagement.OnPointerEnter,
+		[OnEvent "MouseLeave"] = engagement.OnPointerLeave,
+		-- OnPointerLeave also clears `pressed` (Selection.New was handed it): a drag that leaves the
+		-- tile never fires InputEnded on it, so the press would otherwise latch forever and leave the
+		-- tile permanently sunk.
 		[OnEvent "MouseButton1Down"] = function()
 			pressed:set(true)
 		end,

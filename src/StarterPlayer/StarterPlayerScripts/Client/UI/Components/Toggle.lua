@@ -119,18 +119,10 @@ local function Toggle(scope: Scope, props: ToggleProps): Frame
 			return not use(disabled)
 		end),
 
-		[OnEvent "SelectionGained"] = function()
-			engagement.Selected:set(true)
-		end,
-		[OnEvent "SelectionLost"] = function()
-			engagement.Selected:set(false)
-		end,
-		[OnEvent "MouseEnter"] = function()
-			engagement.PointerOver:set(true)
-		end,
-		[OnEvent "MouseLeave"] = function()
-			engagement.PointerOver:set(false)
-		end,
+		[OnEvent "SelectionGained"] = engagement.OnSelectionGained,
+		[OnEvent "SelectionLost"] = engagement.OnSelectionLost,
+		[OnEvent "MouseEnter"] = engagement.OnPointerEnter,
+		[OnEvent "MouseLeave"] = engagement.OnPointerLeave,
 		[OnEvent "Activated"] = function()
 			if not peek(disabled) then
 				props.OnChanged(not peek(props.Value))

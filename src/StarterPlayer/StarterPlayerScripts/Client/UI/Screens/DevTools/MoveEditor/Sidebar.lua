@@ -51,6 +51,7 @@ local Stack = require(script.Parent.Parent.Parent.Parent.Components.Stack)
 local MoveList = require(script.Parent.MoveList)
 local MoveEditorTypes = require(script.Parent.Types)
 local Inset = require(script.Parent.Parent.Parent.Parent.Components.Inset)
+local Selection = require(script.Parent.Parent.Parent.Parent.Components.Selection)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -133,7 +134,11 @@ local function navItem(
 	visible: UsedAs<boolean>,
 	onActivated: () -> ()
 ): TextButton
-	local isHovering = scope:Value(false)
+	-- Components/Selection.lua rather than a bare hover Value, so the row also lights under a GAMEPAD
+	-- selection -- AutoButtonColor = false everywhere here means an unwired row shows a pad player
+	-- nothing.
+	local engagement = Selection.New(scope)
+	local isHovering = engagement.Active
 
 	local backgroundColor = scope:Computed(function(use)
 		if use(selected) then
@@ -167,12 +172,10 @@ local function navItem(
 		AutoButtonColor = false,
 		Text = "",
 
-		[OnEvent "MouseEnter"] = function()
-			isHovering:set(true)
-		end,
-		[OnEvent "MouseLeave"] = function()
-			isHovering:set(false)
-		end,
+		[OnEvent "SelectionGained"] = engagement.OnSelectionGained,
+		[OnEvent "SelectionLost"] = engagement.OnSelectionLost,
+		[OnEvent "MouseEnter"] = engagement.OnPointerEnter,
+		[OnEvent "MouseLeave"] = engagement.OnPointerLeave,
 		[OnEvent "Activated"] = onActivated,
 
 		[Children] = {

@@ -70,6 +70,7 @@ local SectionIcon = require(script.Parent.Parent.Parent.Parent.Components.Sectio
 local ScrollArea = require(script.Parent.Parent.Parent.Parent.Components.ScrollArea)
 local EditorTokens = require(script.Parent.EditorTokens)
 local Inset = require(script.Parent.Parent.Parent.Parent.Components.Inset)
+local Selection = require(script.Parent.Parent.Parent.Parent.Components.Selection)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -121,7 +122,12 @@ local function MoveRow(scope: Scope, move: MoveTypes.MoveDefinition, layoutOrder
 	-- Drives the per-row action strip's reveal. Tracked per row rather than "which row is hovered"
 	-- somewhere shared, because each row already owns a TextButton that gets the enter/leave events
 	-- for free -- a shared value would need every row to write to it and would race on fast movement.
-	local isHovered = scope:Value(false)
+	--
+	-- Through Components/Selection.lua rather than a bare Value, so the strip also reveals under a
+	-- GAMEPAD selection. With AutoButtonColor = false on every button here, a row with no
+	-- SelectionGained wiring gave a pad player no indication of where they were at all.
+	local rowEngagement = Selection.New(scope)
+	local isHovered = rowEngagement.Active
 	local isRenaming = scope:Value(false)
 	local renameText = scope:Value(move.DisplayName)
 	local isSelected = scope:Computed(function(use)
@@ -369,12 +375,10 @@ local function MoveRow(scope: Scope, move: MoveTypes.MoveDefinition, layoutOrder
 		Text = "",
 		LayoutOrder = layoutOrder,
 
-		[OnEvent "MouseEnter"] = function()
-			isHovered:set(true)
-		end,
-		[OnEvent "MouseLeave"] = function()
-			isHovered:set(false)
-		end,
+		[OnEvent "SelectionGained"] = rowEngagement.OnSelectionGained,
+		[OnEvent "SelectionLost"] = rowEngagement.OnSelectionLost,
+		[OnEvent "MouseEnter"] = rowEngagement.OnPointerEnter,
+		[OnEvent "MouseLeave"] = rowEngagement.OnPointerLeave,
 		[OnEvent "Activated"] = function()
 			local now = os.clock()
 			if now - lastActivated <= DOUBLE_CLICK_SECONDS then

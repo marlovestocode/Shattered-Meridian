@@ -47,6 +47,7 @@ local SectionHeading = require(script.Parent.Parent.Parent.Components.SectionHea
 local Stack = require(script.Parent.Parent.Parent.Components.Stack)
 local ClientStateModule = require(script.Parent.Parent.Parent.State.ClientState)
 local Inset = require(script.Parent.Parent.Parent.Components.Inset)
+local Selection = require(script.Parent.Parent.Parent.Components.Selection)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -97,7 +98,11 @@ local function slotCard(
 	state: ClientStateModule.ClientState,
 	selectedSlot: Fusion.Value<number>
 ): TextButton
-	local isHovering = scope:Value(false)
+	-- Components/Selection.lua rather than a bare hover Value: the emote loadout is exactly the kind
+	-- of grid a pad player traverses, and with AutoButtonColor = false an unwired slot moved nothing
+	-- as they crossed it.
+	local engagement = Selection.New(scope)
+	local isHovering = engagement.Active
 
 	local assignedId = scope:Computed(function(use): Types.EmoteId?
 		return use(state.EmoteLoadout)[slot]
@@ -149,12 +154,10 @@ local function slotCard(
 		end),
 		BorderSizePixel = 0,
 
-		[OnEvent "MouseEnter"] = function()
-			isHovering:set(true)
-		end,
-		[OnEvent "MouseLeave"] = function()
-			isHovering:set(false)
-		end,
+		[OnEvent "SelectionGained"] = engagement.OnSelectionGained,
+		[OnEvent "SelectionLost"] = engagement.OnSelectionLost,
+		[OnEvent "MouseEnter"] = engagement.OnPointerEnter,
+		[OnEvent "MouseLeave"] = engagement.OnPointerLeave,
 		[OnEvent "Activated"] = function()
 			selectedSlot:set(slot)
 		end,

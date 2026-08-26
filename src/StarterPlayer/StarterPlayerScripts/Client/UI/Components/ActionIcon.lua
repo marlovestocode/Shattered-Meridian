@@ -361,9 +361,9 @@ local function ActionIcon(scope: Scope, props: ActionIconProps): TextButton
 	-- Pointer-over AND gamepad-selection, OR-ed into the single boolean every visual Computed
 	-- below already reads as `isHovering` -- see Components/Selection.lua for why the two stay
 	-- separate rather than both writing one Value.
-	local engagement = Selection.New(scope)
-	local isHovering = engagement.Active
 	local isPressing = scope:Value(false)
+	local engagement = Selection.New(scope, isPressing)
+	local isHovering = engagement.Active
 	-- Fed by [Out "AbsolutePosition"]/[Out "AbsoluteSize"] below -- see this file's header and
 	-- HoverLabel.lua's for why the hover label needs these to position/clamp itself.
 	local anchorPosition = scope:Value(Vector2.new(0, 0))
@@ -444,19 +444,10 @@ local function ActionIcon(scope: Scope, props: ActionIconProps): TextButton
 		[Out "AbsolutePosition"] = anchorPosition,
 		[Out "AbsoluteSize"] = anchorSize,
 
-		[OnEvent "SelectionGained"] = function()
-			engagement.Selected:set(true)
-		end,
-		[OnEvent "SelectionLost"] = function()
-			engagement.Selected:set(false)
-		end,
-		[OnEvent "MouseEnter"] = function()
-			engagement.PointerOver:set(true)
-		end,
-		[OnEvent "MouseLeave"] = function()
-			engagement.PointerOver:set(false)
-			isPressing:set(false)
-		end,
+		[OnEvent "SelectionGained"] = engagement.OnSelectionGained,
+		[OnEvent "SelectionLost"] = engagement.OnSelectionLost,
+		[OnEvent "MouseEnter"] = engagement.OnPointerEnter,
+		[OnEvent "MouseLeave"] = engagement.OnPointerLeave,
 		[OnEvent "MouseButton1Down"] = function()
 			isPressing:set(true)
 		end,

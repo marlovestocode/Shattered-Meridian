@@ -183,18 +183,10 @@ local function Tab(scope: Scope, props: TabProps): TextButton
 		TextSize = Tokens.Type.Body.Size,
 		TextColor3 = textColor,
 
-		[OnEvent "SelectionGained"] = function()
-			engagement.Selected:set(true)
-		end,
-		[OnEvent "SelectionLost"] = function()
-			engagement.Selected:set(false)
-		end,
-		[OnEvent "MouseEnter"] = function()
-			engagement.PointerOver:set(true)
-		end,
-		[OnEvent "MouseLeave"] = function()
-			engagement.PointerOver:set(false)
-		end,
+		[OnEvent "SelectionGained"] = engagement.OnSelectionGained,
+		[OnEvent "SelectionLost"] = engagement.OnSelectionLost,
+		[OnEvent "MouseEnter"] = engagement.OnPointerEnter,
+		[OnEvent "MouseLeave"] = engagement.OnPointerLeave,
 		[OnEvent "Activated"] = function()
 			if props.OnActivated then
 				props.OnActivated()

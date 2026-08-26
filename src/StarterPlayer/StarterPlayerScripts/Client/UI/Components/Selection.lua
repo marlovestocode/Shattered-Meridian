@@ -49,14 +49,32 @@ export type SelectionState = {
 	PointerOver: Fusion.Value<boolean>,
 	-- Driven by the component's own SelectionGained/SelectionLost handlers.
 	Selected: Fusion.Value<boolean>,
+	-- The four handlers a component binds to the four events, pre-built here rather than written out
+	-- per component. Six primitives held the identical twelve-line block -- four OnEvent entries
+	-- whose bodies were one `:set()` each -- and every one of them is a place to bind three of the
+	-- four and not notice, which on a gamepad reads as a control that lights up and never goes dark.
+	--
+	-- Handlers rather than the OnEvent KEYS, deliberately: a props table is built inline inside
+	-- `scope:New "TextButton" { ... }`, so a helper returning keys would have to be spread into it
+	-- (which Lua cannot do) or wrap the whole call. Four one-line props keep the declarative shape
+	-- exactly as it reads today.
+	OnSelectionGained: () -> (),
+	OnSelectionLost: () -> (),
+	OnPointerEnter: () -> (),
+	OnPointerLeave: () -> (),
 }
 
 local Selection = {}
 
--- Builds the pair plus the OR over them. A component calls this once, in place of the
--- `scope:Value(false)` it used to declare for hover, and binds all four events below to the two
--- Values -- see this file's header for why they stay separate.
-function Selection.New(scope: Scope): SelectionState
+-- Builds the pair, the OR over them, and the four handlers to bind. A component calls this once, in
+-- place of the `scope:Value(false)` it used to declare for hover -- see this file's header for why
+-- the two Values stay separate.
+--
+-- `pressing` is the component's own press Value, when it has one (Button, Stepper, ActionIcon). It
+-- is cleared by OnPointerLeave, because a pointer that leaves mid-press must not leave the control
+-- stuck looking held -- three components each remembered that line, and the two-line difference
+-- between the two variants of this block was the only reason they were not already identical.
+function Selection.New(scope: Scope, pressing: Fusion.Value<boolean>?): SelectionState
 	local pointerOver: Fusion.Value<boolean> = scope:Value(false)
 	local selected: Fusion.Value<boolean> = scope:Value(false)
 
@@ -66,6 +84,22 @@ function Selection.New(scope: Scope): SelectionState
 		end),
 		PointerOver = pointerOver,
 		Selected = selected,
+
+		OnSelectionGained = function()
+			selected:set(true)
+		end,
+		OnSelectionLost = function()
+			selected:set(false)
+		end,
+		OnPointerEnter = function()
+			pointerOver:set(true)
+		end,
+		OnPointerLeave = function()
+			pointerOver:set(false)
+			if pressing then
+				pressing:set(false)
+			end
+		end,
 	}
 end
 

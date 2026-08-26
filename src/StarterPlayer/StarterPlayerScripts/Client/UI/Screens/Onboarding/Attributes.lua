@@ -372,6 +372,15 @@ local function AttributeRow(scope: Scope, field: string, props: AttributeRowProp
 		return (use(props.Attributes) :: any)[field] :: number
 	end)
 	local color = Tokens.AttributeColor[field]
+	-- DELIBERATELY a bare hover Value, and the one surface in this codebase that does NOT go through
+	-- Components/Selection.lua.
+	--
+	-- Selection would buy nothing here: the host below is a Frame, not a GuiButton, and it is not
+	-- Selectable -- a gamepad's selection lands on the Stepper INSIDE the row, never on the row
+	-- itself, so SelectionGained/SelectionLost bound here would never fire. Making the row light with
+	-- its own child's selection is a real gap and a real design question (which control owns the
+	-- row's highlight), not the mechanical Selection.New swap the four GuiButton surfaces beside it
+	-- took. Left as it is rather than wired to something that cannot fire.
 	local isHovering = scope:Value(false)
 
 	local trailingControl: Instance
