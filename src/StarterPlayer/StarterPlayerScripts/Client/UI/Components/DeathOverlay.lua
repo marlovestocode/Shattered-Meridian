@@ -36,6 +36,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Panel)
 local Label = require(script.Parent.Label)
+local Fade = require(script.Parent.Fade)
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
@@ -56,27 +57,15 @@ export type DeathOverlayProps = {
 	SecondsRemaining: UsedAs<number>,
 }
 
-local FADE_SPRING_SPEED = Tokens.Motion.FadeSpring.Speed
-local FADE_SPRING_DAMPING = Tokens.Motion.FadeSpring.Damping
-
 local function DeathOverlay(scope: Scope, props: DeathOverlayProps): Frame
 	local isVisible = scope:Computed(function(use)
 		return use(props.Display) ~= nil
 	end)
 
-	-- One-shot entrance, same shape as StatusBanner's own fadeIn -- see PostureBreakBanner.lua's
-	-- header for why a controlled fade rather than a flash.
-	local fadeIn = scope:Spring(
-		scope:Computed(function(use)
-			return if use(isVisible) then 1 else 0
-		end),
-		FADE_SPRING_SPEED,
-		FADE_SPRING_DAMPING
-	)
-
-	local contentTransparency = scope:Computed(function(use)
-		return 1 - use(fadeIn)
-	end)
+	-- One-shot entrance -- see Components/Fade.lua, including why presence stays an instant boolean
+	-- and only the content's transparency eases.
+	local fade = Fade.New(scope, isVisible)
+	local contentTransparency = fade.Transparency
 
 	local subtitle = scope:Computed(function(use)
 		local display = use(props.Display)

@@ -52,6 +52,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
 local Label = require(script.Parent.Label)
 local Inset = require(script.Parent.Inset)
+local Fade = require(script.Parent.Fade)
 
 local Children = Fusion.Children
 local Out = Fusion.Out
@@ -75,9 +76,6 @@ local GAP = Tokens.Space.XS
 local PADDING_X = Tokens.Space.S
 local PADDING_Y = Tokens.Space.XS / 2
 local EDGE_MARGIN = Tokens.Space.XS
-
-local FADE_SPRING_SPEED = Tokens.Motion.FadeSpring.Speed
-local FADE_SPRING_DAMPING = Tokens.Motion.FadeSpring.Damping
 
 local function HoverLabel(scope: Scope, props: HoverLabelProps): Frame
 	-- Fed by [Out "AbsoluteSize"] on the tile below once AutomaticSize has resolved it -- see this
@@ -103,19 +101,9 @@ local function HoverLabel(scope: Scope, props: HoverLabelProps): Frame
 		return (clampedCenterX - halfLabel) - anchorPosition.X
 	end)
 
-	-- Decorative fade-in only -- Visible below stays an instant, unsmoothed boolean gate (same
-	-- split StatusBanner uses: presence is instant, the border/text transparency is what eases).
-	local fadeIn = scope:Spring(
-		scope:Computed(function(use)
-			return if use(props.Visible) then 1 else 0
-		end),
-		FADE_SPRING_SPEED,
-		FADE_SPRING_DAMPING
-	)
-
-	local contentTransparency = scope:Computed(function(use)
-		return 1 - use(fadeIn)
-	end)
+	-- Decorative fade-in only -- see Components/Fade.lua for the presence-is-instant split.
+	local fade = Fade.New(scope, props.Visible)
+	local contentTransparency = fade.Transparency
 
 	-- The border composes the fade-in with Tokens.Border.Standard's own translucency (rather than
 	-- drawing it fully opaque at rest) -- alpha-multiply the two so a fully-shown tooltip still gets
@@ -123,7 +111,7 @@ local function HoverLabel(scope: Scope, props: HoverLabelProps): Frame
 	-- transparent.
 	local borderTransparency = scope:Computed(function(use)
 		local standardAlpha = 1 - Tokens.Border.Standard.Transparency
-		return 1 - use(fadeIn) * standardAlpha
+		return 1 - use(fade.Alpha) * standardAlpha
 	end)
 
 	return scope:New "Frame" {

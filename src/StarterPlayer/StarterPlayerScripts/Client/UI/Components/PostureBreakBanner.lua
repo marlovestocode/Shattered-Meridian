@@ -26,6 +26,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Panel)
 local Label = require(script.Parent.Label)
+local Fade = require(script.Parent.Fade)
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
@@ -50,32 +51,15 @@ export type StatusBannerProps = {
 	Tiled: boolean?,
 }
 
--- One-shot entrance -- "high-impact" per the doc without becoming a repeating flash. Values live
--- in Tokens.Motion.FadeSpring now (see that table's header) -- kept as local aliases so every call
--- site below is unchanged.
-local FADE_SPRING_SPEED = Tokens.Motion.FadeSpring.Speed
-local FADE_SPRING_DAMPING = Tokens.Motion.FadeSpring.Damping
-
 local function StatusBanner(scope: Scope, props: StatusBannerProps): Frame
 	local isVisible = scope:Computed(function(use)
 		return use(props.Display) ~= nil
 	end)
 
-	-- Decorative fade-in -- 0 while hidden, springs toward 1 the moment a display state arrives,
-	-- so the banner settles in instead of snapping. Visibility itself (whether it's in the tree at
-	-- all) stays an instant, unsmoothed boolean gate, same as Menus.lua's IsOpen -- only the fade
-	-- of its contents is decorative.
-	local fadeIn = scope:Spring(
-		scope:Computed(function(use)
-			return if use(isVisible) then 1 else 0
-		end),
-		FADE_SPRING_SPEED,
-		FADE_SPRING_DAMPING
-	)
-
-	local contentTransparency = scope:Computed(function(use)
-		return 1 - use(fadeIn)
-	end)
+	-- Decorative fade-in -- see Components/Fade.lua. Visibility itself (whether the banner is in the
+	-- tree at all) stays an instant, unsmoothed boolean gate, same as Menus.lua's IsOpen.
+	local fade = Fade.New(scope, isVisible)
+	local contentTransparency = fade.Transparency
 
 	local borderColor = scope:Computed(function(use)
 		local display = use(props.Display)
