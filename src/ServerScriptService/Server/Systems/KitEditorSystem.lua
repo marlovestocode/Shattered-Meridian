@@ -54,6 +54,7 @@ local AdminGate = require(script.Parent.Parent.Network.AdminGate)
 local RaceManager = require(script.Parent.Parent.Managers.RaceManager)
 local BloodlineManager = require(script.Parent.Parent.Managers.BloodlineManager)
 local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
+local AuthoredContentStore = require(script.Parent.Support.AuthoredContentStore)
 
 local KitEditorSystem = {}
 
@@ -190,48 +191,21 @@ end
 -- same reasoning MoveEditorSystem.addToIndex/removeFromIndex's own header gives.
 --
 
+-- Both halves live in Systems/Support/AuthoredContentStore.lua now -- MoveEditorSystem held the same
+-- twenty lines twice over, differing only in the field name and the log prefix.
+--
+-- "Ids" IS THE PERSISTED FIELD NAME and must stay exactly that: it is the key
+-- loadPersistedRaceTraits/loadPersistedBloodlines below read back out of the index document
+-- (`(indexRaw :: { [string]: any }).Ids`). MoveEditorSystem's is "MoveIds". The two are not
+-- interchangeable, which is why the shared helper takes the field explicitly rather than assuming.
+local INDEX_FIELD = "Ids"
+
 local function addToIndex(store: DataStore, indexKey: string, id: string): boolean
-	local ok = withRetry(`KitEditor addToIndex UpdateAsync ({indexKey})`, function()
-		store:UpdateAsync(indexKey, function(old: unknown)
-			local ids: { string } = {}
-			if typeof(old) == "table" and typeof((old :: any).Ids) == "table" then
-				for _, existingId in ipairs((old :: any).Ids) do
-					if typeof(existingId) == "string" then
-						table.insert(ids, existingId)
-					end
-				end
-			end
-			local alreadyPresent = false
-			for _, existingId in ipairs(ids) do
-				if existingId == id then
-					alreadyPresent = true
-					break
-				end
-			end
-			if not alreadyPresent then
-				table.insert(ids, id)
-			end
-			return { Ids = ids }
-		end)
-	end)
-	return ok
+	return AuthoredContentStore.AddToIndex(withRetry, "KitEditor", store, indexKey, INDEX_FIELD, id)
 end
 
 local function removeFromIndex(store: DataStore, indexKey: string, id: string): boolean
-	local ok = withRetry(`KitEditor removeFromIndex UpdateAsync ({indexKey})`, function()
-		store:UpdateAsync(indexKey, function(old: unknown)
-			local ids: { string } = {}
-			if typeof(old) == "table" and typeof((old :: any).Ids) == "table" then
-				for _, existingId in ipairs((old :: any).Ids) do
-					if typeof(existingId) == "string" and existingId ~= id then
-						table.insert(ids, existingId)
-					end
-				end
-			end
-			return { Ids = ids }
-		end)
-	end)
-	return ok
+	return AuthoredContentStore.RemoveFromIndex(withRetry, "KitEditor", store, indexKey, INDEX_FIELD, id)
 end
 
 --

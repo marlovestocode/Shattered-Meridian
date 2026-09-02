@@ -49,6 +49,11 @@ return function()
 
 			local undeclared: { string } = {}
 			for _, folder in bootableFolders() do
+				-- Direct children, and only ModuleScripts. A nested FOLDER under Systems/ is skipped by
+				-- both conditions, which is what lets Systems/Support/ hold a shared helper that is not
+				-- a System and has no Init to declare -- see AuthoredContentStore.lua. A loose
+				-- ModuleScript sitting directly under Systems/ is still caught, which is the case this
+				-- assertion actually exists for.
 				for _, child in folder:GetChildren() do
 					if child:IsA("ModuleScript") and not declared[child.Name] then
 						table.insert(undeclared, `{folder.Name}.{child.Name}`)

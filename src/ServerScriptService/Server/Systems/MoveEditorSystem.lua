@@ -87,6 +87,7 @@ local ArtSystem = require(script.Parent.ArtSystem)
 -- and this is the only point in the boot where that roster is known to be complete.
 local ArtTreeManager = require(script.Parent.Parent.Managers.ArtTreeManager)
 local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
+local AuthoredContentStore = require(script.Parent.Support.AuthoredContentStore)
 
 local MoveEditorSystem = {}
 
@@ -520,55 +521,42 @@ local function stampTrustedMetadata(player: Player, raw: { [string]: unknown }):
 end
 
 -- Atomic (UpdateAsync, not a separate Get-then-Set) so two admins saving/deleting different moves
--- at nearly the same moment can never clobber each other's index entry.
+-- at nearly the same moment can never clobber each other's index entry. Both halves live in
+-- Systems/Support/AuthoredContentStore.lua now -- KitEditorSystem held the same twenty lines twice
+-- over, differing only in the field name and the log prefix.
+--
+-- "MoveIds" IS THE PERSISTED FIELD NAME and must stay exactly that: it is the key
+-- loadPersistedMoves below reads back out of the index document
+-- (`(indexRaw :: { [string]: any }).MoveIds`). KitEditorSystem's is "Ids". The two are not
+-- interchangeable, which is why the shared helper takes the field explicitly rather than assuming.
+local INDEX_FIELD = "MoveIds"
+
 local function addToIndex(moveId: string): boolean
 	if not mainStore then
 		return false
 	end
-	local ok = withRetry("MoveEditor addToIndex UpdateAsync", function()
-		(mainStore :: DataStore):UpdateAsync(INDEX_KEY, function(old: unknown)
-			local moveIds: { string } = {}
-			if typeof(old) == "table" and typeof((old :: any).MoveIds) == "table" then
-				for _, existingId in ipairs((old :: any).MoveIds) do
-					if typeof(existingId) == "string" then
-						table.insert(moveIds, existingId)
-					end
-				end
-			end
-			local alreadyPresent = false
-			for _, existingId in ipairs(moveIds) do
-				if existingId == moveId then
-					alreadyPresent = true
-					break
-				end
-			end
-			if not alreadyPresent then
-				table.insert(moveIds, moveId)
-			end
-			return { MoveIds = moveIds }
-		end)
-	end)
-	return ok
+	return AuthoredContentStore.AddToIndex(
+		withRetry,
+		"MoveEditor",
+		mainStore :: DataStore,
+		INDEX_KEY,
+		INDEX_FIELD,
+		moveId
+	)
 end
 
 local function removeFromIndex(moveId: string): boolean
 	if not mainStore then
 		return false
 	end
-	local ok = withRetry("MoveEditor removeFromIndex UpdateAsync", function()
-		(mainStore :: DataStore):UpdateAsync(INDEX_KEY, function(old: unknown)
-			local moveIds: { string } = {}
-			if typeof(old) == "table" and typeof((old :: any).MoveIds) == "table" then
-				for _, existingId in ipairs((old :: any).MoveIds) do
-					if typeof(existingId) == "string" and existingId ~= moveId then
-						table.insert(moveIds, existingId)
-					end
-				end
-			end
-			return { MoveIds = moveIds }
-		end)
-	end)
-	return ok
+	return AuthoredContentStore.RemoveFromIndex(
+		withRetry,
+		"MoveEditor",
+		mainStore :: DataStore,
+		INDEX_KEY,
+		INDEX_FIELD,
+		moveId
+	)
 end
 
 local function handleListMoves(player: Player): MoveTypes.MoveEditorListResult
