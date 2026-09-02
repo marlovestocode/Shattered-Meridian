@@ -13,6 +13,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Glyph = require(StarterPlayer.StarterPlayerScripts.Client.Input.Glyph)
 local InputDevice = require(StarterPlayer.StarterPlayerScripts.Client.Input.InputDevice)
 local KeybindManager = require(StarterPlayer.StarterPlayerScripts.Client.Input.KeybindManager)
+local Chord = require(StarterPlayer.StarterPlayerScripts.Client.Input.Chord)
 
 return function()
 	afterEach(function()
@@ -20,6 +21,7 @@ return function()
 		KeybindManager.ResetToDefaults()
 		KeybindManager.ResetGamepadToDefaults()
 		Glyph.SetImageResolverForTesting(nil)
+		Chord.ResetModifier()
 	end)
 
 	describe("Resolve", function()
@@ -102,6 +104,128 @@ return function()
 			local rebound = KeybindManager.Rebind("Dash", { KeyCode = Enum.KeyCode.Semicolon })
 			expect(rebound).to.equal(true)
 			expect(Fusion.peek(glyph).Value).to.equal("Semicolon")
+		end)
+	end)
+	-- Constants.Keybinds.GamepadChords is a THIRD map, and an action living only there is not
+	-- unbound on a pad. Before Resolve consulted it, every one of these drew "Unbound" on a
+	-- controller -- see this module's header.
+	describe("the chord layer", function()
+		it("names an action's chord when it has no plain gamepad button", function()
+			-- Interact is chord-only by construction: Constants gives it no GamepadDefaults entry.
+			expect(KeybindManager.GetGamepad("Interact")).to.equal(nil)
+
+			local glyph = Glyph.Resolve("Interact", "Gamepad")
+			expect(glyph.Kind).to.equal("Text")
+			expect(glyph.Value).to.equal("L2+X")
+		end)
+
+		it("names the chord for every chord-only action rather than reporting it unbound", function()
+			for _, action in { "Leap", "Interact", "GrabThrow" } do
+				local glyph = Glyph.Resolve(action :: any, "Gamepad")
+				expect(glyph.Value).never.to.equal("Unbound")
+				expect(string.find(glyph.Value, "+", 1, true)).to.be.ok()
+			end
+		end)
+
+		it("follows the modifier when it is rebound", function()
+			Chord.SetModifier({ KeyCode = Enum.KeyCode.ButtonL3 })
+			expect(Glyph.Resolve("Interact", "Gamepad").Value).to.equal("L3+X")
+		end)
+
+		it("still prefers a plain gamepad binding when the action has one", function()
+			-- Dash has a plain ButtonB binding, so the chord layer is never consulted for it.
+			Glyph.SetImageResolverForTesting(function()
+				return ""
+			end)
+			expect(Glyph.Resolve("Dash", "Gamepad").Value).to.equal("ButtonB")
+		end)
+
+		it("leaves the keyboard answer alone -- a chord is a gamepad concept", function()
+			local glyph = Glyph.Resolve("Interact", "KeyboardMouse")
+			expect(glyph.Kind).to.equal("Text")
+			expect(glyph.Value).to.equal(KeybindManager.Describe(KeybindManager.Get("Interact")))
+		end)
+	end)
+	-- A CONTEXTUAL control -- one that is deliberately not a Types.KeybindAction, so KeybindManager has
+	-- no entry for it in either map. The blimp helm's whole legend is these (BlimpConstants.Controls),
+	-- and before Binding existed the only way to draw one was a literal string, which is a KEYBOARD
+	-- key shown to every player regardless of what is in their hands.
+	describe("bindings", function()
+		it("draws this device's own key, not the other one's", function()
+			Glyph.SetImageResolverForTesting(function()
+				return ""
+			end)
+			local binding = { Keyboard = Enum.KeyCode.W, Gamepad = Enum.KeyCode.ButtonY }
+
+			expect(Glyph.ResolveBinding(binding, "KeyboardMouse").Value).to.equal("W")
+			-- Stripped of the "Button" prefix, exactly as a chord's halves are -- a cap reading
+			-- "ButtonY" is four times the width of the thing it names.
+			expect(Glyph.ResolveBinding(binding, "Gamepad").Value).to.equal("Y")
+		end)
+
+		it("prefers the engine's button image over text when there is one", function()
+			Glyph.SetImageResolverForTesting(function()
+				return "rbxasset://glyph"
+			end)
+			local glyph = Glyph.ResolveBinding({ Gamepad = Enum.KeyCode.ButtonY }, "Gamepad")
+			expect(glyph.Kind).to.equal("Image")
+			expect(glyph.Value).to.equal("rbxasset://glyph")
+		end)
+
+		-- The helm's release row: a real rebindable action on a keyboard (it shares Interact with the
+		-- prompt that started the mount) and a plain contextual button on a pad. Resolving the action on
+		-- BOTH devices would draw Interact's chord, "L2+X", which is not what a pilot presses.
+		it("falls back to the action only on the device with no explicit key", function()
+			Glyph.SetImageResolverForTesting(function()
+				return ""
+			end)
+			local release = { Action = "Interact" :: any, Gamepad = Enum.KeyCode.ButtonX }
+
+			expect(Glyph.ResolveBinding(release, "KeyboardMouse").Value).to.equal(
+				KeybindManager.Describe(KeybindManager.Get("Interact"))
+			)
+			expect(Glyph.ResolveBinding(release, "Gamepad").Value).to.equal("X")
+		end)
+
+		it("follows a rebind of the action it falls back to", function()
+			Glyph.SetImageResolverForTesting(function()
+				return ""
+			end)
+			local rebound = KeybindManager.Rebind("Interact", { KeyCode = Enum.KeyCode.Semicolon })
+			expect(rebound).to.equal(true)
+			expect(Glyph.ResolveBinding({ Action = "Interact" :: any }, "KeyboardMouse").Value).to.equal("Semicolon")
+		end)
+
+		-- EMPTY, NOT "Unbound", and the difference is what stops a false alarm. A binding with nothing
+		-- for this device is saying the device folds this control into an input another cap already
+		-- names -- the helm's rudder is two keys on a keyboard and one thumbstick on a pad, so its
+		-- second cap has no gamepad half at all. "Unbound" would tell a player holding a controller
+		-- that a control they can reach is unreachable; Components/KeyCap.lua hides an empty cap.
+		it("draws nothing for a control this device has no separate input for", function()
+			local glyph = Glyph.ResolveBinding({ Keyboard = Enum.KeyCode.D }, "Gamepad")
+			expect(glyph.Kind).to.equal("Text")
+			expect(glyph.Value).to.equal("")
+		end)
+
+		-- An ACTION with no binding on this device is a different statement, and still says so.
+		it("still reports a genuinely unbound action as unbound", function()
+			-- DevMenuToggle is keyboard-only by construction and has no chord either.
+			expect(KeybindManager.GetGamepad("DevMenuToggle")).to.equal(nil)
+			expect(Glyph.ResolveBinding({ Action = "DevMenuToggle" :: any }, "Gamepad").Value).to.equal("Unbound")
+		end)
+
+		it("recomputes when the device changes", function()
+			Glyph.SetImageResolverForTesting(function()
+				return ""
+			end)
+			local scope = Fusion.scoped(Fusion)
+			local glyph = Glyph.ForBinding(scope, { Keyboard = Enum.KeyCode.W, Gamepad = Enum.KeyCode.ButtonY })
+
+			expect(Fusion.peek(glyph).Value).to.equal("W")
+			InputDevice.SetCurrentForTesting("Gamepad")
+			expect(Fusion.peek(glyph).Value).to.equal("Y")
+
+			scope:doCleanup()
 		end)
 	end)
 end

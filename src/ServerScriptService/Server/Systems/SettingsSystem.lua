@@ -54,6 +54,7 @@ local DEFAULT_SETTINGS: Types.PlayerSettings = {
 	Autorun = false,
 	Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
 	Comfort = PlayerDataSystem.CreateDefaultComfortSettings(),
+	Gamepad = PlayerDataSystem.CreateDefaultGamepadSettings(),
 }
 
 -- The closed set of Types.ParkourSettings fields a client may write, and the value type each one
@@ -80,6 +81,20 @@ local COMFORT_SETTING_FIELDS: { [string]: true } = {
 	CameraShake = true,
 	FieldOfViewEffects = true,
 	VehicleCameraMotion = true,
+}
+
+-- The closed set of Types.GamepadSettings fields a client may write. Same role and same
+-- untrusted-field-name posture as the two tables above, but this one needs a value-type column that
+-- COMFORT_SETTING_FIELDS did not: three of the five fields are numbers, and a number field needs the
+-- bounds it is clamped into as well as its type. Constants.Settings.Gamepad.Bounds is the shared
+-- source of those numbers -- Server/Systems/PlayerDataSystem.lua's own decoder clamps to the same
+-- table on read, so a value can only be out of range if it never went through either path.
+local GAMEPAD_SETTING_TYPES: { [string]: "boolean" | "LookSensitivity" | "Deadzone" } = {
+	LookSensitivity = "LookSensitivity",
+	MoveDeadzone = "Deadzone",
+	LookDeadzone = "Deadzone",
+	InvertLookY = "boolean",
+	Vibration = "boolean",
 }
 
 -- See file header -- structurally valid AND not a hotbar slot. Constants.Keybinds.Defaults is a
@@ -308,6 +323,65 @@ local function handleUpdateComfort(player: Player, rawField: unknown, rawValue: 
 	logger:debug("Comfort setting persisted", { player = player.Name, field = field })
 end
 
+-- Gamepad stick preferences. Mirrors handleUpdateComfort above -- rate limit, closed-set field
+-- validation, Transform-with-defensive-backfill -- and differs in exactly one place: a numeric field
+-- is CLAMPED rather than rejected when it arrives out of range.
+--
+-- CLAMP, DON'T DROP, and the reason is the player rather than the protocol. A rejected write leaves
+-- the server holding a different value than the client already applied locally, and the two only
+-- reconcile on next login -- so a slider dragged one pixel too far would appear to work all session
+-- and silently revert. Clamping keeps the two ends agreeing on a value that is always usable. A
+-- non-numeric or NaN value IS dropped, because there is nothing sensible to clamp it to.
+local function handleUpdateGamepad(player: Player, rawField: unknown, rawValue: unknown): ()
+	if rateLimiter:IsLimited(player) then
+		return
+	end
+	if typeof(rawField) ~= "string" then
+		logger:debug("UpdateGamepad rejected: non-string field", { player = player.Name })
+		return
+	end
+	local field = rawField :: string
+	local expected = GAMEPAD_SETTING_TYPES[field]
+	if not expected then
+		logger:debug("UpdateGamepad rejected: unknown field", { player = player.Name, field = field })
+		return
+	end
+
+	local value: any
+	if expected == "boolean" then
+		if typeof(rawValue) ~= "boolean" then
+			logger:debug("UpdateGamepad rejected: expected boolean", { player = player.Name, field = field })
+			return
+		end
+		value = rawValue
+	else
+		-- `value ~= value` is the NaN test: NaN is the one number math.clamp cannot rescue, since it
+		-- compares false against every bound and would propagate straight through to Analog.ApplyStick.
+		if typeof(rawValue) ~= "number" or rawValue ~= rawValue then
+			logger:debug("UpdateGamepad rejected: expected a real number", { player = player.Name, field = field })
+			return
+		end
+		local bounds = (Constants.Settings.Gamepad.Bounds :: { [string]: any })[expected]
+		value = math.clamp(rawValue :: number, bounds.Min, bounds.Max)
+	end
+
+	local transformed = PlayerDataSystem.Transform(player, function(profile)
+		-- Defensive backfill, same reasoning as handleUpdateComfort's: this group ships with no
+		-- migration of its own (see PlayerDataSystem.DecodeSettings' note on why), so an in-memory
+		-- profile loaded from a pre-Gamepad record legitimately has no table here yet.
+		if typeof(profile.settings.Gamepad) ~= "table" then
+			profile.settings.Gamepad = PlayerDataSystem.CreateDefaultGamepadSettings()
+		end
+		(profile.settings.Gamepad :: { [string]: any })[field] = value
+	end)
+	if not transformed then
+		logger:warn("UpdateGamepad: Transform failed (profile not loaded)", { player = player.Name })
+		return
+	end
+
+	logger:debug("Gamepad setting persisted", { player = player.Name, field = field })
+end
+
 local function onPlayerRemoving(player: Player): ()
 	rateLimiter:Clear(player)
 end
@@ -331,6 +405,9 @@ function SettingsSystem.Init(): ()
 
 	local updateComfortRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateComfort)
 	updateComfortRemote.OnServerEvent:Connect(handleUpdateComfort)
+
+	local updateGamepadRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateGamepad)
+	updateGamepadRemote.OnServerEvent:Connect(handleUpdateGamepad)
 
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "SettingsSystem",

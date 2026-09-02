@@ -294,6 +294,76 @@ return function()
 		-- nil produces `false` for every boolean, which is a PERFECTLY WORKING-LOOKING accessibility
 		-- setting. Nothing errors, nothing warns, the panel renders correctly -- the effects are just
 		-- gone, for everyone, forever.
+		-- The Gamepad block, which ships with NO migration of its own (see DecodeSettings' own note):
+		-- every pre-Gamepad record on disk has no such key, so this fallback is not an edge case, it is
+		-- what every existing player hits on their next login.
+		it("falls back to the shipped stick defaults for a missing Gamepad block", function()
+			local decoded = PlayerDataSystem.DecodeSettings({
+				Keybinds = {},
+				GamepadKeybinds = {},
+				Autorun = false,
+			})
+
+			local defaults = Constants.Settings.Gamepad.Defaults
+			expect(decoded.Gamepad.MoveDeadzone).to.equal(defaults.MoveDeadzone)
+			expect(decoded.Gamepad.LookSensitivity).to.equal(defaults.LookSensitivity)
+			expect(decoded.Gamepad.InvertLookY).to.equal(defaults.InvertLookY)
+		end)
+
+		-- Clamping on the way OUT of the DataStore, not only on the way in. SettingsSystem already
+		-- clamps what a client may write, so a stored out-of-range value should be impossible -- but an
+		-- older build, a hand-edited test profile or a future bug can all produce one, and the failure
+		-- is a stick that does nothing with no way for the player to see why.
+		it("clamps a stored deadzone that would leave the stick inert", function()
+			local decoded = PlayerDataSystem.DecodeSettings({
+				Keybinds = {},
+				GamepadKeybinds = {},
+				Autorun = false,
+				Gamepad = { MoveDeadzone = 1, LookSensitivity = 999 },
+			})
+
+			local bounds = Constants.Settings.Gamepad.Bounds
+			expect(decoded.Gamepad.MoveDeadzone).to.equal(bounds.Deadzone.Max)
+			expect(decoded.Gamepad.LookSensitivity).to.equal(bounds.LookSensitivity.Max)
+			expect(decoded.Gamepad.MoveDeadzone < 1).to.equal(true)
+		end)
+
+		-- NaN is the one number math.clamp cannot rescue: it compares false against every bound and
+		-- would propagate straight through to Analog.ApplyStick, where it fails every magnitude test.
+		it("rejects a NaN stick value rather than clamping it", function()
+			local decoded = PlayerDataSystem.DecodeSettings({
+				Keybinds = {},
+				GamepadKeybinds = {},
+				Autorun = false,
+				Gamepad = { MoveDeadzone = 0 / 0, LookSensitivity = 0 / 0 },
+			})
+
+			local defaults = Constants.Settings.Gamepad.Defaults
+			expect(decoded.Gamepad.MoveDeadzone).to.equal(defaults.MoveDeadzone)
+			expect(decoded.Gamepad.LookSensitivity).to.equal(defaults.LookSensitivity)
+		end)
+
+		it("keeps an in-range stored stick block exactly as written", function()
+			local decoded = PlayerDataSystem.DecodeSettings({
+				Keybinds = {},
+				GamepadKeybinds = {},
+				Autorun = false,
+				Gamepad = {
+					LookSensitivity = 2,
+					MoveDeadzone = 0.3,
+					LookDeadzone = 0.1,
+					InvertLookY = true,
+					Vibration = false,
+				},
+			})
+
+			expect(decoded.Gamepad.LookSensitivity).to.equal(2)
+			expect(decoded.Gamepad.MoveDeadzone).to.equal(0.3)
+			expect(decoded.Gamepad.LookDeadzone).to.equal(0.1)
+			expect(decoded.Gamepad.InvertLookY).to.equal(true)
+			expect(decoded.Gamepad.Vibration).to.equal(false)
+		end)
+
 		it("falls back to effects-ON for a missing Comfort block", function()
 			local decoded = PlayerDataSystem.DecodeSettings({
 				Keybinds = {},

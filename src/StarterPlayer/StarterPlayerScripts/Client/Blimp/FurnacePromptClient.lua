@@ -52,7 +52,6 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local BlimpConstants = require(ReplicatedStorage.Shared.Blimp.BlimpConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
-local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local FurnacePromptModule = require(script.Parent.Parent.UI.Screens.FurnacePrompt)
 local Surface = require(script.Parent.Parent.UI.Shell.Surface)
 
@@ -91,21 +90,6 @@ local holdDuration: number? = nil
 local function isFurnacePrompt(prompt: ProximityPrompt): boolean
 	local name = prompt.Name
 	return name == BlimpConstants.Prompt.FuelPromptName or name == BlimpConstants.Prompt.UnloadPromptName
-end
-
--- The load row names the LIVE Interact bind, because Client/Blimp/BlimpController.reKeyPrompt rewrites
--- that prompt's own KeyboardKeyCode to whatever the player rebound it to -- a legend naming E while
--- the prompt listens for something else is worse than no legend. The unload row is NOT rebindable
--- (see BlimpConstants.Prompt.UnloadKeyCode on why it is deliberately not an Interact-shaped action),
--- so it is read straight off the constant that the server built the prompt from.
-local function refreshKeys(): ()
-	local target = handle
-	if not target then
-		return
-	end
-	local bind = KeybindManager.Get("Interact")
-	local loadKey = if bind.KeyCode then (bind.KeyCode :: Enum.KeyCode).Name else "Interact"
-	target.SetKeys(loadKey, BlimpConstants.Prompt.UnloadKeyCode.Name)
 end
 
 -- Where the furnace is, in the panel's own coordinate space.
@@ -204,7 +188,6 @@ local function onPromptShown(prompt: ProximityPrompt): ()
 	-- the one they are standing at.
 	shownPart = part
 	shownCount = 1
-	refreshKeys()
 	return
 end
 
@@ -252,7 +235,6 @@ function FurnacePromptClient.Start(promptHandle: FurnacePromptHandle, scale: Fus
 	started = true
 	handle = promptHandle
 	viewportScale = scale
-	refreshKeys()
 
 	ProximityPromptService.PromptShown:Connect(function(prompt: ProximityPrompt)
 		onPromptShown(prompt)
@@ -268,12 +250,16 @@ function FurnacePromptClient.Start(promptHandle: FurnacePromptHandle, scale: Fus
 	-- paid out.
 	ProximityPromptService.PromptTriggered:Connect(onHoldEnded)
 
-	-- A rebind of Interact moves the LOAD prompt's own KeyboardKeyCode (BlimpController.reKeyPrompt),
-	-- and this legend has to move with it -- KeybindManager.OnChanged's own header calls a legend
-	-- built once at mount and never updated the exact gap it exists to close. The unsubscribe it
-	-- returns is discarded deliberately: this module lives for the whole client session, the same
-	-- posture every other consumer of that signal takes.
-	KeybindManager.OnChanged(refreshKeys)
+	-- THIS MODULE PUSHES NO KEY NAMES AT ALL ANY MORE, and neither half should come back.
+	--
+	-- It once held a KeybindManager.OnChanged subscription, because a rebind of Interact moves the LOAD
+	-- prompt's own KeyboardKeyCode (BlimpController.reKeyPrompt) and that row's legend had to move with
+	-- it. That went when the row became an `Actions` entry whose cap subscribes to the signal itself.
+	-- The UNLOAD row then kept a one-line push of BlimpConstants.Prompt.UnloadKeyCode.Name, justified
+	-- by that key being a constant -- true, and beside the point: a NAME is a keyboard spelling, and
+	-- this prompt has listened on a different button for a controller player all along
+	-- (BlimpConstants.Prompt.UnloadGamepadKeyCode). It is a `Bindings` entry now, resolved per device
+	-- by the cap, so there is nothing about either key for this module to know.
 
 	-- A furnace whose hull is destroyed mid-prompt never raises PromptHidden -- the prompt goes with
 	-- it. Without this the panel would hang wherever it last projected, tracking a part that no longer

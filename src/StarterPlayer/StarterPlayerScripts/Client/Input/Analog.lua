@@ -21,11 +21,25 @@
 	Shared/FlightMath.lua reasons about "the overshoot is the information" for a spring -- here the
 	information is "how far off centre," not "how far on each axis."
 
-	FOUR KNOBS, NO SETTINGS TYPE YET. Deadzone/curve exponent/sensitivity/per-axis invert are exactly
-	what a future Types.GamepadSettings would carry (Phase 4), so ApplyStick takes them as an optional
-	AnalogConfig table rather than reading module-level constants baked into the math -- a caller with
-	real settings passes them through today with no signature change needed later. DEFAULT_CONFIG below
-	is what every caller gets until then.
+	FOUR KNOBS, NOW FED BY REAL SETTINGS. Deadzone/curve exponent/sensitivity/per-axis invert are what
+	Types.GamepadSettings carries, and Client/Settings/SettingsClient.lua pushes the player's own
+	values in through SetSettings below. ApplyStick still takes an explicit AnalogConfig so the pure
+	math stays drivable from a spec with no settings state at all.
+
+	MOVE AND LOOK DERIVE DIFFERENT CONFIGS FROM THE SAME SETTINGS TABLE, which is the whole reason
+	SetSettings takes Types.GamepadSettings rather than an AnalogConfig:
+	  * Move uses MoveDeadzone, and takes NO sensitivity and NO invert. Its output feeds
+	    Humanoid.MoveDirection, where the magnitude IS the walk-versus-run request -- scaling it would
+	    silently retune movement speed, and inverting it would mean pushing forward walks backward.
+	  * Look uses LookDeadzone, LookSensitivity and InvertLookY. All three are aim-feel preferences
+	    that mean nothing to the left stick.
+	Handing both sticks one shared AnalogConfig is the bug this split exists to make unrepresentable;
+	a single Deadzone/Sensitivity pair applied to both is how a sensitivity slider ends up changing how
+	fast the character walks.
+
+	THE SHIPPED DEFAULTS LIVE IN Constants.Settings.Gamepad.Defaults, not here. The server validates
+	writes against the same table and cannot require this module, so restating the numbers locally
+	would be two sources of truth that agree only by coincidence.
 
 	Does NOT own: which gamepad is "the" gamepad (the first entry off
 	UserInputService:GetConnectedGamepads() -- this codebase has never supported split-screen/local
@@ -34,7 +48,10 @@
 	possibility for a future weapon-aim-assist feature, and is out of scope for this pass.
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
+local Constants = require(ReplicatedStorage.Shared.Constants)
+local Types = require(ReplicatedStorage.Shared.Types)
 
 export type AnalogConfig = {
 	Deadzone: number,
@@ -46,13 +63,70 @@ export type AnalogConfig = {
 
 local Analog = {}
 
+-- The response curve's exponent is NOT a Types.GamepadSettings field and deliberately not player-
+-- facing: it is a feel decision the game makes, the way ParkourConstants owns its own curves, and a
+-- slider for it would ask players to tune something they have no vocabulary for. Deadzone/sensitivity
+-- /invert are the three that genuinely differ per person and per controller.
+local CURVE_EXPONENT = 2
+
 local DEFAULT_CONFIG: AnalogConfig = {
-	Deadzone = 0.2,
-	CurveExponent = 2,
+	Deadzone = Constants.Settings.Gamepad.Defaults.MoveDeadzone,
+	CurveExponent = CURVE_EXPONENT,
 	Sensitivity = 1,
 	InvertX = false,
 	InvertY = false,
 }
+
+-- The player's own preferences, or the shipped defaults until SettingsClient pushes theirs in. Held
+-- as the SETTINGS table rather than as two pre-derived AnalogConfigs so that a later field (a second
+-- curve, a per-stick sensitivity) is one more read below rather than a change to what is stored.
+local currentSettings: Types.GamepadSettings = {
+	LookSensitivity = Constants.Settings.Gamepad.Defaults.LookSensitivity,
+	MoveDeadzone = Constants.Settings.Gamepad.Defaults.MoveDeadzone,
+	LookDeadzone = Constants.Settings.Gamepad.Defaults.LookDeadzone,
+	InvertLookY = Constants.Settings.Gamepad.Defaults.InvertLookY,
+	Vibration = Constants.Settings.Gamepad.Defaults.Vibration,
+}
+
+-- Called by Client/Settings/SettingsClient.lua once at boot with the player's persisted block, and
+-- again on every Controller-tab change. Stores a COPY: the caller's table is its own live state and
+-- must not become shared mutable state here.
+function Analog.SetSettings(settings: Types.GamepadSettings): ()
+	currentSettings = {
+		LookSensitivity = settings.LookSensitivity,
+		MoveDeadzone = settings.MoveDeadzone,
+		LookDeadzone = settings.LookDeadzone,
+		InvertLookY = settings.InvertLookY,
+		Vibration = settings.Vibration,
+	}
+end
+
+-- What Analog is currently reading sticks through. Returned as a copy for the same reason
+-- Chord.Chords is -- a caller listing these must not be able to edit them.
+function Analog.Settings(): Types.GamepadSettings
+	return table.clone(currentSettings)
+end
+
+-- See the header: the two sticks get different halves of the same settings table.
+local function moveConfig(): AnalogConfig
+	return {
+		Deadzone = currentSettings.MoveDeadzone,
+		CurveExponent = CURVE_EXPONENT,
+		Sensitivity = 1,
+		InvertX = false,
+		InvertY = false,
+	}
+end
+
+local function lookConfig(): AnalogConfig
+	return {
+		Deadzone = currentSettings.LookDeadzone,
+		CurveExponent = CURVE_EXPONENT,
+		Sensitivity = currentSettings.LookSensitivity,
+		InvertX = false,
+		InvertY = currentSettings.InvertLookY,
+	}
+end
 
 -- t must already be in 0..1 (post-deadzone-rescale). exponent > 0 guarantees Curve(0) == 0 and
 -- Curve(1) == 1 exactly, and monotonic in between -- asserted in the spec rather than merely assumed.
@@ -98,7 +172,7 @@ function Analog.Move(config: AnalogConfig?): Vector2
 	if not stick then
 		return Vector2.zero
 	end
-	return Analog.ApplyStick(Vector2.new(stick.Position.X, stick.Position.Y), config)
+	return Analog.ApplyStick(Vector2.new(stick.Position.X, stick.Position.Y), config or moveConfig())
 end
 
 -- Right stick, processed. Same shape as Move above.
@@ -107,7 +181,7 @@ function Analog.Look(config: AnalogConfig?): Vector2
 	if not stick then
 		return Vector2.zero
 	end
-	return Analog.ApplyStick(Vector2.new(stick.Position.X, stick.Position.Y), config)
+	return Analog.ApplyStick(Vector2.new(stick.Position.X, stick.Position.Y), config or lookConfig())
 end
 
 -- ButtonL2/ButtonR2 analog position, 0..1. Roblox reports a trigger's pull through the InputObject's
@@ -120,6 +194,28 @@ function Analog.Trigger(which: "Left" | "Right"): number
 		return 0
 	end
 	return math.clamp(trigger.Position.Z, 0, 1)
+end
+
+-- Whether a DIGITAL gamepad button is physically held right now, on any connected pad.
+--
+-- Deliberately NOT built on firstGamepadInput above, and deliberately not on
+-- UserInputService:IsKeyDown. IsKeyDown resolves a KEYBOARD key and nothing else -- handed a gamepad
+-- KeyCode it does not error, it simply returns false forever, which is the worst possible failure
+-- shape: every call site reads as "the button is not held" and no log, lint or type check ever
+-- objects. KeybindManager.IsJumpKeyDown was written that way and meant that jump, polled rather than
+-- routed, was invisible to the parkour framework on a controller -- see that function's own note.
+--
+-- IsGamepadButtonDown is the purpose-built read for a digital button and needs none of
+-- firstGamepadInput's InputObject plumbing (there is no Position to deadzone or curve here, only a
+-- boolean), so this walks the connected pads directly. Safe with nothing connected: the loop simply
+-- does not run and the answer is false, the same "no input" contract Move/Look/Trigger already keep.
+function Analog.IsButtonDown(keyCode: Enum.KeyCode): boolean
+	for _, gamepadType in UserInputService:GetConnectedGamepads() do
+		if UserInputService:IsGamepadButtonDown(gamepadType, keyCode) then
+			return true
+		end
+	end
+	return false
 end
 
 return Analog

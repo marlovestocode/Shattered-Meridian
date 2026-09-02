@@ -78,8 +78,8 @@
 	container's height. Nothing here knows how tall a KeyHint is, which is what makes changing one safe.
 
 	SAME "SCREEN EXPOSES STATE, CLIENT MODULE DRIVES IT" SPLIT every other Screens/ handle follows:
-	this file sends and receives nothing. Client/Blimp/BlimpController.lua calls SetVisible/SetKind/
-	SetReleaseKey on mount edges, SetHelmState on every HelmUpdated push, and SetTelemetry once a frame.
+	this file sends and receives nothing. Client/Blimp/BlimpController.lua calls SetVisible and
+	SetKind on mount edges, SetHelmState on every HelmUpdated push, and SetTelemetry once a frame.
 
 	THE DISCRETE HALF IS PUSHED AND THE CONTINUOUS HALF IS MEASURED LOCALLY, which is the whole reason
 	this panel costs almost nothing to run. Mode, rung and autopilot arrive on an edge from the server
@@ -104,6 +104,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
+local BlimpConstants = require(ReplicatedStorage.Shared.Blimp.BlimpConstants)
 local BlimpTypes = require(ReplicatedStorage.Shared.Blimp.BlimpTypes)
 
 local Tokens = require(script.Parent.Parent.Tokens)
@@ -112,6 +113,7 @@ local Panel = require(script.Parent.Parent.Components.Panel)
 local Label = require(script.Parent.Parent.Components.Label)
 local Inset = require(script.Parent.Parent.Components.Inset)
 local Stack = require(script.Parent.Parent.Components.Stack)
+local Glyph = require(script.Parent.Parent.Parent.Input.Glyph)
 local KeyHint = require(script.Parent.Parent.Components.KeyHint)
 local StatusTag = require(script.Parent.Parent.Components.StatusTag)
 local TrackedLabel = require(script.Parent.Parent.Components.TrackedLabel)
@@ -131,12 +133,28 @@ export type BlimpHelmHandle = {
 	-- dimmed ladder and only the row a passenger can actually use.
 	SetKind: (kind: BlimpTypes.StationKind?) -> (),
 	SetHelmState: (payload: BlimpTypes.HelmUpdatedPayload) -> (),
-	-- The live Interact bind's display name -- the one key on this panel that IS rebindable.
-	SetReleaseKey: (keyName: string) -> (),
 	-- Called once per rendered frame while aboard. `speed` is signed forward studs/second, `fraction`
 	-- is that over cruise (-1..1), `altitude` is world Y, `headingDegrees` is a 0..360 bearing.
 	SetTelemetry: (speed: number, fraction: number, altitude: number, headingDegrees: number) -> (),
 }
+
+-- WHAT EVERY CAP ON THIS PANEL IS NAMED FROM, and the reason none of them is a literal any more.
+-- This legend used to spell its own keys -- "W", "S", "A", "D", "SPACE", "SHIFT" -- which was two
+-- separate wrongs: a second opinion about bindings Client/Blimp/BlimpController.lua was matching
+-- independently, and a KEYBOARD spelling shown to every player regardless of what was in their hands.
+-- Read BlimpConstants.Controls' own header for the table and for the gamepad map behind it.
+local CONTROLS = BlimpConstants.Controls
+-- The two held axes, pulled out only because each is read three times below.
+local STEER = CONTROLS.Steer
+local LIFT = CONTROLS.Lift
+
+-- BlimpTypes.HelmPressBinding and Client/Input/Glyph.lua's Binding are the same three fields and
+-- differ in exactly one way: a helm control must HAVE a gamepad button where a general binding need
+-- not (see HelmPressBinding's own note). This is where the two vocabularies meet -- one function
+-- rather than five hand-spread literals, and the one place a future field has to be carried across.
+local function glyphBinding(binding: BlimpTypes.HelmPressBinding): Glyph.Binding
+	return { Keyboard = binding.Keyboard, Action = binding.Action, Gamepad = binding.Gamepad }
+end
 
 local BlimpHelm = {}
 
@@ -302,7 +320,6 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 	local visible = scope:Value(false)
 	local interactive = scope:Value(false)
 	local roleText = scope:Value("ABOARD")
-	local releaseKey = scope:Value("E")
 	local autopilot = scope:Value(false)
 
 	local commandedIndex = scope:Value(1)
@@ -341,10 +358,6 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 	local function setKind(kind: BlimpTypes.StationKind?): ()
 		interactive:set(kind == "Helm")
 		roleText:set(if kind == "Helm" then "AT THE HELM" elseif kind == "Handhold" then "PASSENGER" else "ABOARD")
-	end
-
-	local function setReleaseKey(keyName: string): ()
-		releaseKey:set(keyName)
 	end
 
 	local function setHelmState(payload: BlimpTypes.HelmUpdatedPayload): ()
@@ -453,12 +466,12 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 		spec: {
 			Order: number,
 			Visible: UsedAs<boolean>,
-			LeftKeys: { UsedAs<string> },
+			LeftBindings: { Glyph.Binding },
 			LeftText: string,
 			-- Omitted for a row that fills only its left cell. The release row is the one such row today,
 			-- and it renders as a half-width hint rather than as a full-width one so that its description
 			-- starts on the same edge as every other row's.
-			RightKeys: { UsedAs<string> }?,
+			RightBindings: { Glyph.Binding }?,
 			RightText: string?,
 			RightActiveText: string?,
 			RightActive: UsedAs<boolean>?,
@@ -470,14 +483,14 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 				Size = UDim2.new(0.5, -GRID_COLUMN_GUTTER / 2, 1, 0),
 				BackgroundTransparency = 1,
 				[Children] = KeyHint(scope, {
-					Keys = spec.LeftKeys,
+					Bindings = spec.LeftBindings,
 					Text = spec.LeftText,
 					KeyColumnWidth = KEY_COLUMN_WIDTH,
 				}),
 			},
 		}
 
-		if spec.RightKeys and spec.RightText then
+		if spec.RightBindings and spec.RightText then
 			table.insert(
 				cells,
 				scope:New "Frame" {
@@ -487,7 +500,7 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 					Size = UDim2.new(0.5, -GRID_COLUMN_GUTTER / 2, 1, 0),
 					BackgroundTransparency = 1,
 					[Children] = KeyHint(scope, {
-						Keys = spec.RightKeys,
+						Bindings = spec.RightBindings,
 						Text = spec.RightText,
 						ActiveText = spec.RightActiveText,
 						Active = spec.RightActive,
@@ -666,7 +679,7 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 				legendRow({
 					Order = 1,
 					Visible = interactive,
-					LeftKeys = { "W", "S" },
+					LeftBindings = { glyphBinding(CONTROLS.ThrottleUp), glyphBinding(CONTROLS.ThrottleDown) },
 					-- "Throttle", not "Telegraph" (owner, 2026-08-25). The ladder below IS an engine
 					-- telegraph and the codebase calls it one throughout -- Components/SpeedLadder,
 					-- BlimpConstants.Input.TelegraphRepeat*, BlimpSpeedStage -- but that is the
@@ -675,15 +688,27 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 					-- AHEAD, FLANK) carry the nautical register; the key that moves them says what it
 					-- does. This is the only player-facing use of the word, so nothing else moved.
 					LeftText = "Throttle",
-					RightKeys = { "A", "D" },
+					-- TWO CAPS ON A KEYBOARD AND ONE ON A PAD, WITHOUT THIS ROW KNOWING WHICH. Port and
+					-- starboard are two keys on a keyboard and two ends of ONE thumbstick on a pad, so
+					-- only the first cap carries the gamepad column; the second names D alone and hides
+					-- itself on a pad, where drawing the same stick twice side by side would tell the
+					-- player to push two of them. See Client/Input/Glyph.ResolveBinding for why that
+					-- second binding resolves to empty rather than to "Unbound", and
+					-- Components/KeyCap.lua's Visible for what empty does.
+					--
+					-- Port first, so the pair reads left-to-right the way the ship turns.
+					RightBindings = {
+						{ Keyboard = STEER.Negative, Gamepad = STEER.Gamepad },
+						{ Keyboard = STEER.Positive },
+					},
 					RightText = "Rudder",
 				}),
 				legendRow({
 					Order = 2,
 					Visible = interactive,
-					LeftKeys = { "X" },
+					LeftBindings = { glyphBinding(CONTROLS.AllStop) },
 					LeftText = "All stop",
-					RightKeys = { "G" },
+					RightBindings = { glyphBinding(CONTROLS.Autopilot) },
 					RightText = "Autopilot",
 					-- "Engaged", not the old "Autopilot on". Two reasons and either would settle it.
 					-- Width: the swap text has to fit the same 47px cell as the resting text, and
@@ -704,9 +729,14 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 				legendRow({
 					Order = 3,
 					Visible = interactive,
-					LeftKeys = { "SPACE" },
+					-- Both of these draw the same thumbstick on a pad, and unlike the rudder row above
+					-- that is not a duplicate to hide: they are two SEPARATE rows, and a pilot reading
+					-- "stick -- Climb" and "stick -- Dive" is being told the truth (one stick, and its
+					-- other axis does both). The rudder's two caps sit in ONE cell, where the same
+					-- glyph twice reads as two inputs.
+					LeftBindings = { { Keyboard = LIFT.Positive, Gamepad = LIFT.Gamepad } },
 					LeftText = "Climb",
-					RightKeys = { "SHIFT" },
+					RightBindings = { { Keyboard = LIFT.Negative, Gamepad = LIFT.Gamepad } },
 					RightText = "Dive",
 				}),
 				-- The one row a passenger keeps, so it is the one row never hidden -- and the reason
@@ -717,10 +747,17 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 				legendRow({
 					Order = 4,
 					Visible = true,
-					-- The only reactive cap on the panel -- see KeyHint's Keys prop. Every other key
-					-- here is a raw contextual key no rebind screen can reach; this one shares the
-					-- Interact action with the prompt that started the mount, so it follows a rebind.
-					LeftKeys = { releaseKey },
+					-- THE ONE ROW WHOSE KEYBOARD HALF FOLLOWS A REBIND, because it is the one control
+					-- here that is a real Types.KeybindAction on that device: it shares Interact with
+					-- the prompt that started the mount. Its gamepad half is NOT that action's own
+					-- gamepad reach (Interact is chord-only on a pad, ButtonL2+ButtonX) but the plain
+					-- ButtonX the prompt itself listens on -- see BlimpConstants.Controls.Release.
+					--
+					-- It used to be the only reactive cap on the panel, fed a keyboard key NAME pushed
+					-- in by BlimpController on every mount. Every cap here is reactive now, and this one
+					-- is fed a binding rather than a string, so it tracks a rebind made mid-flight
+					-- instead of only one made before boarding.
+					LeftBindings = { glyphBinding(CONTROLS.Release) },
 					LeftText = "Let go",
 				}),
 			}),
@@ -881,7 +918,6 @@ function BlimpHelm.Mount(scope: Scope, furnace: FurnacePlate.FurnaceState?): (Bl
 		SetVisible = setVisible,
 		SetKind = setKind,
 		SetHelmState = setHelmState,
-		SetReleaseKey = setReleaseKey,
 		SetTelemetry = setTelemetry,
 	},
 		stack

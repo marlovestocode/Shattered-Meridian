@@ -5,7 +5,6 @@ local StarterGui = game:GetService("StarterGui")
 local StarterPlayer = game:GetService("StarterPlayer")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
-local Constants = require(ReplicatedStorage.Shared.Constants)
 
 local Client = StarterPlayer.StarterPlayerScripts.Client
 local Screens = Client.UI.Screens
@@ -46,15 +45,13 @@ end
 -- Computed off the same boolean, so it resolves synchronously and proves the state reached the
 -- island at all.
 
--- Mirrors the island's own Constants lookup rather than hardcoding "T"/"Y" -- if a default bind is
--- retuned, this spec should follow it to the new key, not start failing.
-local function defaultKey(action: string): string
-	local keyCode = (Constants.Keybinds.Defaults :: any)[action].KeyCode
-	return if keyCode then keyCode.Name else "--"
-end
-
-local DRAW_KEY = defaultKey("ToggleWeapon")
-local CYCLE_KEY = defaultKey("SelectNextWeapon")
+-- The island names each hint row by its ACTION, which is fixed, rather than by the key it currently
+-- draws, which is not -- so this spec addresses them the same way. It used to mirror the island's own
+-- Constants.Keybinds.Defaults lookup so that a retuned default moved the spec with it; naming the
+-- action is the stronger version of that same idea, since it survives a rebind and a device switch as
+-- well as a retuned default.
+local DRAW_ACTION = "ToggleWeapon"
+local CYCLE_ACTION = "SelectNextWeapon"
 
 -- The rack strip's cap, restated. Not imported: ArmamentIsland keeps it private, and a spec that
 -- reached in for it would pass no matter what the cap became, which is the opposite of what these
@@ -101,8 +98,8 @@ return function()
 		end
 	end
 
-	local function captionOf(plate: Frame, key: string): string
-		local hint = find(plate, `KeyHint_{key}`)
+	local function captionOf(plate: Frame, action: string): string
+		local hint = find(plate, `KeyHint_{action}`)
 		-- The hint's direct children are its layout, its KeyCap frame and the caption -- so a
 		-- NON-recursive class lookup is a stable handle on a Label that carries no Name of its own,
 		-- while a recursive one would find the glyph inside the cap first.
@@ -164,12 +161,12 @@ return function()
 			local handle, island, plate = mount()
 
 			handle.SetInventory({ Owned = { "Cutlass" }, Selected = "Cutlass", Drawn = false })
-			expect(captionOf(plate, DRAW_KEY)).to.equal("Draw")
+			expect(captionOf(plate, DRAW_ACTION)).to.equal("Draw")
 
 			handle.SetInventory({ Owned = { "Cutlass" }, Selected = "Cutlass", Drawn = true })
 			-- The one drawn/sheathed fact a headless spec can reach: the glyph's own answer is a
 			-- spring, but this caption is a plain Computed off the same boolean.
-			expect(captionOf(plate, DRAW_KEY)).to.equal("Sheathe")
+			expect(captionOf(plate, DRAW_ACTION)).to.equal("Sheathe")
 			expect(island.Visible).to.equal(true)
 		end)
 
@@ -182,7 +179,7 @@ return function()
 			expect((find(plate, "RackStrip") :: Frame).Visible).to.equal(false)
 			-- Hidden rather than shown disabled -- a key hint is an instruction, and an instruction
 			-- that does nothing is worse than no instruction.
-			expect((find(plate, `KeyHint_{CYCLE_KEY}`) :: Frame).Visible).to.equal(false)
+			expect((find(plate, `KeyHint_{CYCLE_ACTION}`) :: Frame).Visible).to.equal(false)
 		end)
 
 		it("shows one bead per owned weapon, with the held one lit", function()
@@ -190,7 +187,7 @@ return function()
 			handle.SetInventory({ Owned = { "Cutlass", "Flambert", "Kris" }, Selected = "Flambert", Drawn = false })
 
 			expect((find(plate, "RackStrip") :: Frame).Visible).to.equal(true)
-			expect((find(plate, `KeyHint_{CYCLE_KEY}`) :: Frame).Visible).to.equal(true)
+			expect((find(plate, `KeyHint_{CYCLE_ACTION}`) :: Frame).Visible).to.equal(true)
 			expect(visibleBeadCount(plate)).to.equal(3)
 
 			-- Lit is fully opaque and quiet is not. Asserting the transparency rather than the size
@@ -415,8 +412,8 @@ return function()
 			expect(name).to.be.ok()
 			expect(fits(name :: TextLabel)).to.equal(true)
 
-			for _, key in ipairs({ DRAW_KEY, CYCLE_KEY }) do
-				local hint = plate:FindFirstChild(`KeyHint_{key}`, true) :: Frame
+			for _, action in ipairs({ DRAW_ACTION, CYCLE_ACTION }) do
+				local hint = plate:FindFirstChild(`KeyHint_{action}`, true) :: Frame
 				local caption = hint:FindFirstChildOfClass("TextLabel")
 				expect(fits(caption :: TextLabel)).to.equal(true)
 			end

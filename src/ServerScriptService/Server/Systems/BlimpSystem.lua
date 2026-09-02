@@ -199,6 +199,13 @@ type BlimpRecord = {
 	-- Server/Blimp/BlimpSafety.lua's own header for what this exists to let onHeartbeatTick defend
 	-- against; onHullTouched/onHullTouchEnded below are the only writers.
 	Contacts: { [Player]: number },
+	-- Players released from THIS hull within the last ReleaseSettleSeconds, mapped to the os.clock()
+	-- deadline the window expires at. Separate from Contacts above and deliberately not folded into it:
+	-- a released body has no Touched contact to be refcounted BY (it was welded into this assembly, and
+	-- same-assembly parts never touch each other), and the clearance lift Dismount applies means it may
+	-- never land back on the deck to acquire one either -- so the contact clamp cannot see the exact
+	-- moment this exists to cover. Entries expire by deadline in onHeartbeatTick; nothing else prunes it.
+	Released: { [Player]: number },
 	Trove: Trove.TroveInstance,
 }
 
@@ -379,6 +386,45 @@ local function setThrusting(blimp: BlimpRecord, thrusting: boolean): ()
 	end
 end
 
+-- The ceiling a just-released (or just-separated) body's own speed is held to: whatever the HULL is
+-- doing right now, plus the margin a self-propelled player could add to it. Read live rather than
+-- cached because it is the whole point -- see BlimpConstants.Mount.ReleaseSpeedMargin on why an
+-- absolute number is wrong at one end of the throttle or the other no matter where it is set.
+local function releaseSpeedCeiling(blimp: BlimpRecord): number
+	local hull = blimp.Assembly.Root
+	local hullSpeed = if hull.Parent then hull.AssemblyLinearVelocity.Magnitude else 0
+	return hullSpeed + BlimpConstants.Mount.ReleaseSpeedMargin
+end
+
+-- Makes a body that has just stopped being part of a hull carry a velocity a PERSON could have, rather
+-- than the one the assembly it was welded into happened to have at the moment it left. Two separate
+-- corrections, and they fix two separate halves of the same report:
+--
+--   * THE SPIN, zeroed outright. A hull under way is rotating -- yawing through a turn, pitching as it
+--     climbs -- and a separating assembly keeps the whole of that angular velocity, scaled by nothing.
+--     A several-tonne airship's leisurely half-radian-per-second is a violent spin on a body the size of
+--     a person, and Dismount's PlatformStand release then hands that spinning body to a Humanoid balance
+--     controller that immediately fights it. That fight is the "flung across the map" half. Nobody has
+--     ever wanted to inherit a ship's rotation by stepping off it, so there is no feel argument for
+--     keeping any fraction of it.
+--
+--   * THE EXCESS SPEED, clamped -- but only the excess. The linear half is inherited ON PURPOSE (see
+--     Dismount) and must stay inherited: a passenger who leaves a cruising hull at the hull's own speed
+--     lands back on its deck and walks, whereas one zeroed (or clamped to some flat pedestrian number)
+--     is instantly 130 studs/second slower than the deck they are standing over, and the deck sweeps
+--     into them. The clamp therefore trims only what is ABOVE the ship's own speed, which is where the
+--     illegitimate part lives: omega x r, the lever arm from the hull's centre of mass out to a station
+--     the artist may have placed eighty studs down the gondola, is unbounded in a radius no constant in
+--     this file knows about.
+local function applyReleaseVelocity(blimp: BlimpRecord, root: BasePart): ()
+	root.AssemblyAngularVelocity = Vector3.zero
+	local velocity = root.AssemblyLinearVelocity
+	local clamped = BlimpSafety.ClampSpeed(velocity, releaseSpeedCeiling(blimp))
+	if clamped ~= velocity then
+		root.AssemblyLinearVelocity = clamped
+	end
+end
+
 -- THE one release path -- see this file's header on why all six ways off a blimp end here. Safe to call
 -- on a player who is not mounted (every caller treats it as "make sure this player is not on a blimp",
 -- not something that needs its own existence check first) and safe to call on a half-destroyed character.
@@ -437,8 +483,32 @@ function BlimpSystem.Dismount(player: Player): ()
 		end
 	end
 
+	-- THE BODY IS SETTLED BEFORE THE HUMANOID IS WOKEN AND BEFORE OWNERSHIP GOES BACK, and the order of
+	-- those three is the entire fix for "everybody who steps off a moving blimp flies away". A body that
+	-- was welded into the hull was a member of the HULL'S assembly; destroying the weld above made it its
+	-- own assembly, and Roblox seeds a newly separated assembly with the velocity the old one had at that
+	-- point -- BOTH components. See applyReleaseVelocity above for what each of them does if left alone.
+	local root = mount.Root
+	if root.Parent then
+		-- Lifted before ownership goes back, while the server can still place the body: a dismount from
+		-- inside the station part's own volume otherwise resolves as an intersection and flings them.
+		root.CFrame = root.CFrame + Vector3.new(0, BlimpConstants.Mount.ReleaseClearance, 0)
+		applyReleaseVelocity(blimp, root)
+		-- pcall-guarded the same way GrabSystem's own release is, since both throw on a part whose
+		-- assembly has stopped being groundable mid-teardown. LAST, so the state the client is handed to
+		-- start simulating from is the corrected one -- handing the body back first and correcting it
+		-- afterwards is a server write onto a body somebody else already owns, which is a fight, not a fix.
+		pcall(function()
+			root:SetNetworkOwnershipAuto()
+		end)
+	end
+
 	local humanoid = mount.Humanoid
 	if humanoid.Parent then
+		-- AFTER the velocity above. Clearing PlatformStand re-arms the Humanoid's balance controller, and
+		-- re-arming it on a body still carrying the hull's angular velocity is the canonical Roblox fling:
+		-- the controller applies its full stand-up torque against a spin it did not put there and the
+		-- solver converts the disagreement into linear speed.
 		humanoid.PlatformStand = false
 		-- nil rather than false, clearing the Attribute entirely -- the convention every sibling read in
 		-- RunSystem.isMovementLocked uses (`== true`), which treats absent and false identically.
@@ -446,18 +516,10 @@ function BlimpSystem.Dismount(player: Player): ()
 		humanoid:SetAttribute(Constants.Attributes.Mounted, nil)
 	end
 
-	local root = mount.Root
-	if root.Parent then
-		-- Lifted before ownership goes back, while the server can still place the body: a dismount from
-		-- inside the station part's own volume otherwise resolves as an intersection and flings them.
-		root.CFrame = root.CFrame + Vector3.new(0, BlimpConstants.Mount.ReleaseClearance, 0)
-		-- Inherits the hull's current velocity so stepping off a moving blimp is a step, not a stop --
-		-- and pcall-guarded the same way GrabSystem's own release is, since both throw on a part whose
-		-- assembly has stopped being groundable mid-teardown.
-		pcall(function()
-			root:SetNetworkOwnershipAuto()
-		end)
-	end
+	-- Armed even when the root above was already gone: the map is keyed by Player, expiry is by deadline,
+	-- and a stale entry for a body that no longer exists costs one skipped iteration. See
+	-- BlimpConstants.Mount.ReleaseSettleSeconds for what this window is actually for.
+	blimp.Released[player] = os.clock() + BlimpConstants.Mount.ReleaseSettleSeconds
 
 	-- The passenger's mass has left the assembly, and the weld change means Roblox has had to re-decide
 	-- who owns the hull -- both have to be answered, in that order, on every mount change.
@@ -515,6 +577,10 @@ local function mount(player: Player, blimp: BlimpRecord, station: StationRecord)
 	station.Occupant = player
 	setPromptEnabled(station, false)
 	blimp.Occupants += 1
+	-- Cancelled, not left to expire: a player who steps off and straight back on within the window is
+	-- welded rigidly into the hull again, and clamping a member of the hull's own assembly against the
+	-- hull's own speed would be the tick loop fighting the drive constraint through their body.
+	blimp.Released[player] = nil
 	if station.Kind == "Helm" then
 		blimp.Pilot = player
 		-- Zeroed on mount, not carried: whatever axes the previous pilot was holding when they let go
@@ -1046,6 +1112,7 @@ local function registerBlimp(model: Model): ()
 		LastFuelPush = nil,
 		LastHelmPush = nil,
 		Contacts = {},
+		Released = {},
 		Trove = trove,
 	}
 
@@ -1460,6 +1527,34 @@ local function onHeartbeatTick(deltaTime: number): ()
 			end
 			local velocity = root.AssemblyLinearVelocity
 			local clamped = BlimpSafety.ClampSpeed(velocity, BlimpConstants.Safety.MaxContactSpeed)
+			if clamped ~= velocity then
+				root.AssemblyLinearVelocity = clamped
+			end
+		end
+
+		-- Release settle window -- a SECOND, tighter clamp on a much smaller set of players, and not a
+		-- duplicate of the contact loop above it. That one is the anti-exploit backstop: a wide ceiling
+		-- (MaxContactSpeed, 180) on anyone merely leaning on the hull, running for as long as they lean.
+		-- This one is the separation impulse: a much tighter, hull-relative ceiling on the handful of
+		-- players who stopped being PART of the hull in the last fraction of a second, and it exists
+		-- because the contact loop provably cannot cover them -- see BlimpRecord.Released. The window is
+		-- what makes this cheap; outside it this table is empty and the loop costs one `next`.
+		for player, deadline in blimp.Released do
+			if now >= deadline or mounts[player] then
+				blimp.Released[player] = nil
+				continue
+			end
+			local character = player.Character
+			local root = if character then CharacterUtil.RootOf(character) else nil
+			if not root then
+				continue
+			end
+			-- Linear only, unlike applyReleaseVelocity's one-shot at the moment of release. The spin a
+			-- body inherits FROM the hull is a single event and is already gone by here; re-zeroing every
+			-- tick for three quarters of a second would instead be overwriting the player's own turning,
+			-- which by this point is theirs and not the ship's.
+			local velocity = root.AssemblyLinearVelocity
+			local clamped = BlimpSafety.ClampSpeed(velocity, releaseSpeedCeiling(blimp))
 			if clamped ~= velocity then
 				root.AssemblyLinearVelocity = clamped
 			end

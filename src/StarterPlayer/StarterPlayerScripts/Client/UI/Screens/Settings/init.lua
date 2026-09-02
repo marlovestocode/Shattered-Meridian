@@ -33,6 +33,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Types = require(ReplicatedStorage.Shared.Types)
+local Constants = require(ReplicatedStorage.Shared.Constants)
 
 local Tokens = require(script.Parent.Parent.Tokens)
 local ScreenFrame = require(script.Parent.Parent.Components.ScreenFrame)
@@ -40,10 +41,11 @@ local Stack = require(script.Parent.Parent.Components.Stack)
 local Inset = require(script.Parent.Parent.Components.Inset)
 local KeybindsTab = require(script.KeybindsTab)
 local GameplayTab = require(script.GameplayTab)
+local ControllerTab = require(script.ControllerTab)
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 
-export type SettingsTabName = "Keybinds" | "Gameplay"
+export type SettingsTabName = "Keybinds" | "Gameplay" | "Controller"
 
 export type SettingsHandle = {
 	IsOpen: Fusion.Value<boolean>,
@@ -61,6 +63,9 @@ export type SettingsHandle = {
 	-- The camera-comfort accessibility block, written from outside by SettingsClient exactly like
 	-- Parkour above, and one Value for the whole table for the same reason.
 	Comfort: Fusion.Value<Types.ComfortSettings>,
+	-- The gamepad stick block, written from outside by SettingsClient exactly like Parkour/Comfort
+	-- above, and one Value for the whole table for the same reason.
+	Gamepad: Fusion.Value<Types.GamepadSettings>,
 	-- Non-nil while SettingsClient is mid-capture for one specific row (listening for the next
 	-- InputBegan after that row's Rebind button was clicked) -- lets KeybindsTab.lua show "Press a
 	-- key..."/"Cancel" on exactly that row and nowhere else.
@@ -80,6 +85,11 @@ export type SettingsHandle = {
 	-- Fires (field, enabled) -- one of the camera-comfort toggles was flipped. Same single-signal-with-
 	-- a-field-name shape as ParkourToggled above, behind the same kind of single remote.
 	ComfortToggled: RBXScriptSignal<(string, boolean)>,
+	-- Fires (field, value) -- one of the numeric gamepad knobs changed. A separate signal from
+	-- GamepadToggled below rather than one carrying `any`, so each stays type-checked end to end.
+	GamepadNumberChanged: RBXScriptSignal<(string, number)>,
+	-- Fires (field, enabled) -- one of the gamepad booleans was flipped.
+	GamepadToggled: RBXScriptSignal<(string, boolean)>,
 	-- Fires (mode) -- the sprint hold/toggle dropdown changed.
 	SprintModeChanged: RBXScriptSignal<Types.SprintMode>,
 }
@@ -87,7 +97,11 @@ export type SettingsHandle = {
 local ROOT_WIDTH = 480
 local ROOT_HEIGHT = 520
 
-local TAB_NAMES: { string } = { "Keybinds", "Gameplay" }
+-- Controller sits after Gameplay rather than beside Keybinds, even though the Keybinds tab's gamepad
+-- sub-tab is also "controller settings". The split is by WHAT IS BEING SET, not by device: Keybinds
+-- answers "which button does this", Controller answers "how are the sticks read", and a player
+-- looking for a deadzone is not looking for a rebind list.
+local TAB_NAMES: { string } = { "Keybinds", "Gameplay", "Controller" }
 
 -- The band heights are ScreenFrame's own and are no longer restated here. What is left is the tab
 -- modules' own budget: both take an explicit pixel Width/Height, so the body's inset still has to be
@@ -124,7 +138,21 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 	local comfort = scope:Value({
 		CameraShake = false,
 		FieldOfViewEffects = false,
+		-- Was missing, like its sibling in SettingsClient.RestoreSettings -- the `:: ComfortSettings`
+		-- cast is what let it go unnoticed, since the cast suppresses exactly the missing-field error
+		-- that would have caught it.
+		VehicleCameraMotion = false,
 	} :: Types.ComfortSettings)
+	-- Seeded from the shipped defaults rather than from zeroes, unlike the blocks above: a zero
+	-- deadzone or a zero sensitivity is a BROKEN pad rather than a neutral starting point, and this
+	-- value is live for the frames between mount and SettingsClient's restore.
+	local gamepadSettings = scope:Value({
+		LookSensitivity = Constants.Settings.Gamepad.Defaults.LookSensitivity,
+		MoveDeadzone = Constants.Settings.Gamepad.Defaults.MoveDeadzone,
+		LookDeadzone = Constants.Settings.Gamepad.Defaults.LookDeadzone,
+		InvertLookY = Constants.Settings.Gamepad.Defaults.InvertLookY,
+		Vibration = Constants.Settings.Gamepad.Defaults.Vibration,
+	} :: Types.GamepadSettings)
 	local listeningFor = scope:Value(nil :: { Device: Types.KeybindDevice, Action: Types.KeybindAction }?)
 	local tabs = ScreenFrame.NewTabState(scope, TAB_NAMES)
 
@@ -134,6 +162,8 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 	local parkourToggledEvent = Instance.new("BindableEvent")
 	local sprintModeChangedEvent = Instance.new("BindableEvent")
 	local comfortToggledEvent = Instance.new("BindableEvent")
+	local gamepadNumberChangedEvent = Instance.new("BindableEvent")
+	local gamepadToggledEvent = Instance.new("BindableEvent")
 
 	local keybindsTabContent = KeybindsTab(scope, {
 		Width = CONTENT_WIDTH,
@@ -173,6 +203,20 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 		end,
 	})
 
+	local controllerTabContent = ControllerTab(scope, {
+		Width = CONTENT_WIDTH,
+		Height = CONTENT_HEIGHT,
+		Visible = tabs.Selected["Controller"],
+		LayoutOrder = 3,
+		Gamepad = gamepadSettings,
+		OnGamepadNumberChanged = function(field: ControllerTab.GamepadNumberField, value: number)
+			gamepadNumberChangedEvent:Fire(field, value)
+		end,
+		OnGamepadToggled = function(field: ControllerTab.GamepadToggleField, enabled: boolean)
+			gamepadToggledEvent:Fire(field, enabled)
+		end,
+	})
+
 	ScreenFrame.Mount(scope, playerGui, {
 		Name = "Settings",
 		Size = UDim2.fromOffset(ROOT_WIDTH, ROOT_HEIGHT),
@@ -198,6 +242,7 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 				-- the character menu's own tab column uses.
 				keybindsTabContent,
 				gameplayTabContent,
+				controllerTabContent,
 			},
 		}),
 	})
@@ -210,12 +255,15 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 		Autorun = autorun,
 		Parkour = parkour,
 		Comfort = comfort,
+		Gamepad = gamepadSettings,
 		ListeningFor = listeningFor,
 		RebindClicked = rebindClickedEvent.Event,
 		ResetKeybindsClicked = resetKeybindsClickedEvent.Event,
 		AutorunToggled = autorunToggledEvent.Event,
 		ParkourToggled = parkourToggledEvent.Event,
 		ComfortToggled = comfortToggledEvent.Event,
+		GamepadNumberChanged = gamepadNumberChangedEvent.Event,
+		GamepadToggled = gamepadToggledEvent.Event,
 		SprintModeChanged = sprintModeChangedEvent.Event,
 	}
 end

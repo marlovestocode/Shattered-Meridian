@@ -18,6 +18,20 @@
 	keyboard and gamepad with no per-caller device branching, exactly like every existing hand-rolled
 	handler already relies on Matches for.
 
+	THE GAMEPAD CHORD LAYER IS RESOLVED HERE, AHEAD OF Matches, AND ITS ANSWER IS EXCLUSIVE.
+	Client/Input/Chord.lua owns what a button means while the held modifier (ButtonL2) is down; this
+	module owns dispatching that answer. A caller never learns which layer its press came from -- an
+	action bound once fires whether it was reached plainly or through a chord, which is what lets Leap,
+	Interact, GrabThrow and HotbarSlot1-5 exist on a pad at all without a single consumer knowing.
+	Three rules, all of them about what must NOT also happen, and all three enforced in one place here
+	rather than at ~20 call sites:
+	  * A chorded press never ALSO fires the unmodified action (L2+R1 is Feint, never also BasicAttack).
+	  * The modifier's own press/release is never an action in its own right.
+	  * A chorded press's RELEASE routes to the action the PRESS was consumed as, never to the plain
+	    action that shares its button -- see HandleInputEnded.
+	Chord matching is by KeyCode, so a keyboard press can never resolve to a chord (the map holds only
+	gamepad KeyCodes) and no device branch is needed here either.
+
 	FOUR LAYERS, AND WHAT EACH ONE MEANS FOR THE MODAL GATE (Constants.Attributes.UiModalOpen,
 	published by Components/ModalScreen.lua):
 	  * "Gameplay" -- ordinary world input (combat, movement). Began does NOT fire while a modal panel
@@ -83,6 +97,8 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
+local Analog = require(script.Parent.Analog)
+local Chord = require(script.Parent.Chord)
 local KeybindManager = require(script.Parent.KeybindManager)
 
 local logger = Logger.scope("InputRouter")
@@ -169,7 +185,11 @@ end
 -- rebindable action via KeybindManager.Get/GetGamepad.
 local function isKeybindDown(keybind: Types.Keybind): boolean
 	if keybind.KeyCode then
-		return UserInputService:IsKeyDown(keybind.KeyCode)
+		-- Both reads, for the reason KeybindManager.IsJumpKeyDown documents at length: IsKeyDown resolves
+		-- KEYBOARD keys only and silently answers false for a gamepad KeyCode. This function's own header
+		-- claims it works "on either device" -- via KeybindManager.GetGamepad, whose keybinds are gamepad
+		-- KeyCodes -- so with IsKeyDown alone that claim was false for exactly the half it was written for.
+		return UserInputService:IsKeyDown(keybind.KeyCode) or Analog.IsButtonDown(keybind.KeyCode)
 	end
 	if keybind.UserInputType then
 		return UserInputService:IsMouseButtonPressed(keybind.UserInputType)
@@ -185,45 +205,99 @@ function InputRouter.IsActionDown(action: Types.KeybindAction): boolean
 	return gamepad ~= nil and isKeybindDown(gamepad)
 end
 
+-- Fires the single highest-precedence relevant Began among `entries` -- the per-action half of
+-- dispatch, split out so a chord can drive it for ONE action directly. The plain path below reaches
+-- it through KeybindManager.Matches; the chord path reaches it with an action Chord.lua named, which
+-- is precisely the difference between the two (a chord is not a binding KeybindManager knows about,
+-- by that module's own design note).
+local function dispatchBegan(entries: { Binding }, gameProcessed: boolean, input: InputObject, modalOpen: boolean): ()
+	local best: Binding? = nil
+	local bestRank = 0
+	for _, entry in entries do
+		if entry.Began == nil then
+			continue
+		end
+		if gameProcessed and entry.Layer ~= "System" then
+			continue
+		end
+		if not isLayerRelevant(entry.Layer, modalOpen) then
+			continue
+		end
+		local rank = LAYER_RANK[entry.Layer]
+		if rank > bestRank then
+			bestRank = rank
+			best = entry
+		end
+	end
+
+	if best and best.Began then
+		best.Began(gameProcessed, input)
+	end
+end
+
 -- The InputBegan dispatch, exposed publicly -- see file header. `input` only ever needs to answer
 -- .KeyCode/.UserInputType (everything KeybindManager.Matches reads), so a spec can pass a plain
 -- table cast to InputObject instead of a real one.
 function InputRouter.HandleInputBegan(input: InputObject, gameProcessed: boolean): ()
 	local modalOpen = isModalOpen()
 
+	-- THE CHORD LAYER GETS FIRST REFUSAL, AND ITS ANSWER IS EXCLUSIVE. Client/Input/Chord.lua's
+	-- header states the two rules this branch exists to enforce, and both are about what must NOT
+	-- also happen: a chorded press never additionally fires the unmodified action (so a Chord
+	-- resolution returns instead of falling through to the Matches loop), and the modifier's own
+	-- press is never an action (so it returns having dispatched nothing at all). ConsumePress rather
+	-- than Resolve because the matching RELEASE has to reach the same action -- see HandleInputEnded.
+	local resolution = Chord.ConsumePress(input, Chord.IsHeld())
+	if resolution.Kind == "Modifier" then
+		return
+	end
+	if resolution.Kind == "Chord" then
+		local action = resolution.Action
+		local entries = action ~= nil and bindings[action] or nil
+		if entries then
+			dispatchBegan(entries, gameProcessed, input, modalOpen)
+		end
+		return
+	end
+
 	for action, entries in pairs(bindings) do
 		if not KeybindManager.Matches(action, input) then
 			continue
 		end
-
-		local best: Binding? = nil
-		local bestRank = 0
-		for _, entry in entries do
-			if entry.Began == nil then
-				continue
-			end
-			if gameProcessed and entry.Layer ~= "System" then
-				continue
-			end
-			if not isLayerRelevant(entry.Layer, modalOpen) then
-				continue
-			end
-			local rank = LAYER_RANK[entry.Layer]
-			if rank > bestRank then
-				bestRank = rank
-				best = entry
-			end
-		end
-
-		if best then
-			best.Began(gameProcessed, input)
-		end
+		dispatchBegan(entries, gameProcessed, input, modalOpen)
 	end
 end
 
 -- The InputEnded dispatch. Every registered Ended for a matching action fires -- see file header for
 -- why this is never gated, by layer relevance or otherwise.
 function InputRouter.HandleInputEnded(input: InputObject): ()
+	-- A press CONSUMED as a chord releases to the action it was consumed as, and to nothing else --
+	-- the mirror of HandleInputBegan's exclusive chord branch, and the reason Chord.lua remembers
+	-- presses at all. Without this, releasing R1 after an L2+R1 Feint would fire BasicAttack's Ended:
+	-- a release with no matching Began, which is the shape of the "stuck blocking" bug
+	-- Defense/DefenseClient.lua's own release handling exists to avoid. Note this is asked FIRST and
+	-- unconditionally, so it also clears the record when the released action happens to have no
+	-- binding at all.
+	local chordAction = Chord.ReleasePress(input)
+	if chordAction ~= nil then
+		local entries = bindings[chordAction]
+		if entries then
+			for _, entry in entries do
+				if entry.Ended then
+					entry.Ended(input)
+				end
+			end
+		end
+		return
+	end
+
+	-- The modifier's own release is not an action, exactly as its press was not -- see
+	-- HandleInputBegan. Asked after ReleasePress above so that a modifier rebound onto a button that
+	-- also carries a chord still clears that chord's record.
+	if Chord.IsModifier(input) then
+		return
+	end
+
 	for action, entries in pairs(bindings) do
 		if not KeybindManager.Matches(action, input) then
 			continue

@@ -1078,8 +1078,12 @@ Constants.Keybinds = {
 		Sprint = { KeyCode = Enum.KeyCode.ButtonL3 },
 		-- X (Square) -- a free face button, pressed while already holding L3 for Sprint.
 		Slide = { KeyCode = Enum.KeyCode.ButtonX },
-		-- Y (Triangle) -- a free face button, toggles the camera-facing-lock mode.
-		ShiftLock = { KeyCode = Enum.KeyCode.ButtonY },
+		-- DPadLeft. A face button would be nicer, but ShiftLock is the one action here that can afford
+		-- NOT to have one: it is a MODE TOGGLE, pressed once and then lived in for minutes, so the cost
+		-- of taking a thumb off the left stick to reach it is paid at a moment the player chose. It sat
+		-- on ButtonY until Roll took that button below -- read Roll's comment for why that trade is not
+		-- symmetric.
+		ShiftLock = { KeyCode = Enum.KeyCode.DPadLeft },
 		-- D-pad item/weapon-swap is a standard convention in this genre.
 		ToggleWeapon = { KeyCode = Enum.KeyCode.DPadRight },
 		-- Bug report form, gamepad side -- ButtonA is Roblox's own native Jump (would double-fire on
@@ -1101,13 +1105,24 @@ Constants.Keybinds = {
 		-- HotbarSlot1-5 below, Settings is NOT admin-only, so it earns a real gamepad default rather
 		-- than staying keyboard-only.
 		SettingsToggle = { KeyCode = Enum.KeyCode.DPadUp },
-		-- Parkour dodge/roll, gamepad side. DPadLeft is the last unclaimed D-pad direction (DPadRight
-		-- is SwapWeapon, DPadDown is EmoteWheel, DPadUp is SettingsToggle above), and every face/
-		-- shoulder button in this genre's convention family is already spoken for above. Not ideal -- a
-		-- roll deserves a face button -- but the alternative is doubling up on Dash's ButtonB, which
-		-- would make two distinct mechanics indistinguishable on a controller. Flagged for a real
-		-- controller playtest, same as OpenBugReport's ButtonSelect note.
-		Roll = { KeyCode = Enum.KeyCode.DPadLeft },
+		-- Y (Triangle). THE ROLL GOT ITS FACE BUTTON, and this is the one binding in this table that
+		-- was a genuine BUG rather than a compromise.
+		--
+		-- It sat on DPadLeft, under a comment that said "not ideal -- a roll deserves a face button"
+		-- and treated that as taste. It was not taste. States/Rolling.lua's whole reason to exist is
+		-- the LANDING ROLL: a roll pressed within ParkourConstants.Roll.LandingWindowSeconds (0.2s) of
+		-- ground contact converts a hard landing into a full-speed continuation. That is a reflex input
+		-- on a two-tenths-of-a-second window, and it is pressed while the player is IN THE AIR STEERING
+		-- -- which on a gamepad means the left thumb is on Thumbstick1 and cannot also be on the D-pad.
+		-- The binding did not make the landing roll hard on a controller, it made it unreachable, and
+		-- with it the timing skill the parkour system is built around.
+		--
+		-- WHAT PAID FOR IT was ShiftLock, which moved to DPadLeft above. That trade is not symmetric
+		-- and that is the point: a mode toggle can afford a thumb-off-stick reach because the player
+		-- picks the moment, and a 0.2s landing window cannot afford one at all. Dash (ButtonB) stays
+		-- put -- doubling roll onto it would make two distinct mechanics indistinguishable, which is
+		-- what the old comment here was right to refuse.
+		Roll = { KeyCode = Enum.KeyCode.ButtonY },
 		-- Leap, Interact, GrabThrow and HotbarSlot1-5 have no entry in THIS table and are not
 		-- unbound: they live one table down, in GamepadChords, reached by holding GamepadModifier.
 		-- This comment used to say there was "genuinely nowhere left to put" Leap without doubling up
@@ -1166,8 +1181,11 @@ Constants.Keybinds = {
 		Leap = { KeyCode = Enum.KeyCode.ButtonB },
 		-- X is Slide; both are "engage with the ground/world in front of you".
 		Interact = { KeyCode = Enum.KeyCode.ButtonX },
-		-- Y is ShiftLock, the least combat-critical face button, so it is the one to spare for the
-		-- grab layer's follow-up throw.
+		-- Y. Its plain binding is Roll, which is a TAP with a 0.2s window; this is a modified tap, so
+		-- the two never compete for a press (the same hold-versus-tap argument HotbarSlot5 makes about
+		-- sharing L1 with Block). This comment used to justify the button by saying Y was ShiftLock,
+		-- "the least combat-critical face button" -- that is stale, ShiftLock moved to DPadLeft when
+		-- Roll took this button, and the reasoning is now the modifier rather than what it displaces.
 		GrabThrow = { KeyCode = Enum.KeyCode.ButtonY },
 		-- The D-pad is already this game's quick-select semantic (ToggleWeapon/EmoteWheel/Settings
 		-- all live there unmodified), so the modified D-pad is the natural home for the slot picker.
@@ -1231,6 +1249,39 @@ Constants.Settings = {
 		-- therefore untrusted input, validated against a closed set server-side exactly as
 		-- PARKOUR_SETTING_TYPES already does.
 		UpdateComfort = "Settings_UpdateComfort",
+		-- Gamepad device preferences (Types.GamepadSettings) -- same field-name-plus-value shape as
+		-- UpdateParkour/UpdateComfort above, and chosen for the same reason. Unlike those two, this
+		-- group's values are not all booleans (three of the five are numbers), so the closed set
+		-- server-side carries a value TYPE per field and the numeric ones are clamped to Gamepad.Bounds
+		-- below rather than merely type-checked -- a client is free to send 400 for a sensitivity, and
+		-- the answer is to clamp it, not to trust it or to drop the write.
+		UpdateGamepad = "Settings_UpdateGamepad",
+	},
+
+	-- The shipped gamepad stick defaults, and the range each numeric one may be set to. Lives HERE, in
+	-- shared Constants, rather than in Client/Input/Analog.lua where it is consumed, because the
+	-- SERVER has to validate writes against the same numbers and cannot require a client module --
+	-- Analog.lua reads its own DEFAULT_CONFIG out of this table so there is exactly one source of
+	-- truth, the same rule Types.ParkourSettings follows against ParkourConstants.
+	Gamepad = {
+		Defaults = {
+			LookSensitivity = 1,
+			-- Roughly the point at which a healthy stick's resting noise stops registering, without
+			-- eating enough of the range to make small corrections impossible.
+			MoveDeadzone = 0.2,
+			LookDeadzone = 0.2,
+			InvertLookY = false,
+			Vibration = true,
+		},
+		-- Inclusive. The deadzone ceiling is deliberately well below 1: a deadzone at or near 1 is not
+		-- a preference, it is a stick that no longer works, and Analog.ApplyStick would return zero
+		-- for every input. The sensitivity floor is likewise above 0 for the same reason -- a
+		-- sensitivity of 0 is indistinguishable from a broken controller, and a player who set it by
+		-- accident would have no way to reach the menu to undo it on a pad.
+		Bounds = {
+			LookSensitivity = { Min = 0.25, Max = 4 },
+			Deadzone = { Min = 0, Max = 0.6 },
+		},
 	},
 	-- Same call-budget reasoning as Constants.Rivalry.QueryMaxCallsPerSecond -- a rebind/toggle write
 	-- costs nothing gameplay-wise but should still never be free spam.

@@ -43,15 +43,31 @@
 	It also runs AFTER the camera's own Camera + 1 pass, which is what makes the telemetry this file
 	hands the helm panel the same frame's numbers the view was drawn from.
 
-	THE HELM KEYS ARE RAW, deliberately, and are the one place this module does not go through
-	KeybindManager. A/D and Space/LeftShift are the movement keys the player already has their hand on,
-	which are not KeybindActions in this codebase at all (Roblox owns them, via the Humanoid's own
-	control module). W/S, X and G join them on the same principle rather than a different one: they are
-	CONTEXTUAL -- read only while this client is holding a helm, meaningless everywhere else, and
+	THE HELM CONTROLS ARE CONTEXTUAL, deliberately, and are the one place this module does not go
+	through KeybindManager. A/D and Space/LeftShift are the movement keys the player already has their
+	hand on, which are not KeybindActions in this codebase at all (Roblox owns them, via the Humanoid's
+	own control module). W/S, X and G join them on the same principle rather than a different one: they
+	are read only while this client is holding a helm, are meaningless everywhere else, and are
 	invisible to a rebind screen that has no notion of "while piloting". Inventing six rebindable
 	actions to shadow keys that screen cannot meaningfully show would be worse than honest raw reads.
-	The one key that IS a bind is the release press, which shares the Interact action with the prompt
-	that started the mount.
+	The one control that IS a bind, on one device, is the release press, which shares the Interact
+	action with the prompt that started the mount.
+
+	WHAT CHANGED IS WHERE THOSE INPUTS ARE WRITTEN DOWN, NOT WHETHER THEY ARE REBINDABLE. They live in
+	BlimpConstants.Controls now, one row per control with a column per device, because the previous
+	arrangement gave the same answer twice in two files that could not check each other -- the literals
+	this file matched in onInputBegan, and the literal strings Screens/BlimpHelm drew in its legend.
+	Read that table's header for the gamepad map and for why every button on it is conflict-free while
+	mounted rather than merely unused.
+
+	A PAD REACHES THE TWO HELD AXES THROUGH THE LEFT STICK AND THE FOUR PRESSES THROUGH THE FACE
+	BUTTONS, and readHelmAxes SUMS the keyboard pair with Client/Input/Analog.Move() rather than
+	branching on device. There is no `if gamepad then` anywhere in this file, and that is deliberate:
+	a keyboard-only player's stick reads exactly Vector2.zero, so summing reproduces the old behaviour
+	bit for bit, and a player with both plugged in gets whichever they touched without this module
+	having to decide which one is "theirs". It is the same conclusion Client/Input/InputRouter.lua
+	reaches for bound actions ("no per-caller device branching"), applied to a control that has no
+	action to route.
 
 	HOLDING A TELEGRAPH KEY WALKS THE LADDER, and it is implemented here rather than server-side on
 	purpose. The server's contract is one rung per request (BlimpSpeedLadder.SanitizeDelta clamps a
@@ -87,6 +103,7 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local BlimpCamera = require(script.Parent.Parent.Camera.BlimpCamera)
 local BlimpAudio = require(script.Parent.Parent.FX.BlimpAudio)
 local BlimpWindVFX = require(script.Parent.Parent.FX.BlimpWindVFX)
+local Analog = require(script.Parent.Parent.Input.Analog)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local BlimpFuelModule = require(script.Parent.Parent.UI.Screens.BlimpFuel)
 local BlimpHelmModule = require(script.Parent.Parent.UI.Screens.BlimpHelm)
@@ -157,27 +174,24 @@ local telegraphRepeatIn = 0
 
 -- Control legend ---------------------------------------------------------------------------------
 
--- Named from the live bind rather than hardcoded to "E", so the legend never tells a player to press
--- a key they rebound. UserInputType-only binds (a mouse button) have no readable name, which is why
--- the fallback is the action word rather than a blank cap.
-local function interactKeyName(): string
-	local bind = KeybindManager.Get("Interact")
-	if bind.KeyCode then
-		return (bind.KeyCode :: Enum.KeyCode).Name
-	end
-	return "Interact"
-end
-
 -- Used to be a hand-built ScreenGui holding one 820-pixel TextLabel with three hardcoded style
 -- values -- see Screens/BlimpHelm/init.lua's header for what was wrong with that and why the legend
 -- is a band of a real Screen now. This function is all that is left of it: tell the console what the
--- player is, and what their release key is currently called.
+-- player is.
+--
+-- IT NO LONGER PUSHES A RELEASE KEY NAME, and that removal is the point rather than a simplification.
+-- It used to hand over KeybindManager.Get("Interact").KeyCode.Name -- a keyboard key, spelled as a
+-- string, pushed once per mount -- which was wrong twice over: it drew "E" at a player holding a
+-- controller, and being a push rather than a subscription it also went stale the moment somebody
+-- rebound Interact while already aboard. That row is a KeyHint `Bindings` entry now
+-- (BlimpConstants.Controls.Release), so it resolves per device AND follows a rebind by construction,
+-- which is the same correction Client/Blimp/FurnacePromptClient.lua's own Start() records making, for
+-- both rows of the furnace panel, for both halves of this reason.
 local function refreshControls(): ()
 	local handle = helmHud
 	if not handle then
 		return
 	end
-	handle.SetReleaseKey(interactKeyName())
 	handle.SetKind(localKind)
 end
 
@@ -239,19 +253,45 @@ end
 
 -- Steering --------------------------------------------------------------------------------------
 
+-- One key pair as a signed axis. IsKeyDown is the right read here and only here -- both keys in every
+-- pair are KEYBOARD keys by construction (BlimpConstants.Controls' axis rows carry no gamepad button,
+-- only the stick the legend draws), so the keyboard-only trap that made
+-- KeybindManager.IsJumpKeyDown answer false forever on a pad cannot apply. See that function's own
+-- note, and Client/Input/Analog.IsButtonDown, for the shape that would be needed if it could.
+local function keyAxis(binding: BlimpTypes.HelmAxisBinding): number
+	return (if UserInputService:IsKeyDown(binding.Positive) then 1 else 0)
+		- (if UserInputService:IsKeyDown(binding.Negative) then 1 else 0)
+end
+
 -- The two HELD axes, and only those. The throttle is a telegraph rung the server owns and is moved by
 -- an edge press (onInputBegan below), never sampled here -- see BlimpTypes.HelmInput.
+--
+-- SUMMED ACROSS DEVICES AND THEN CLAMPED, rather than picking one -- see this file's header. The
+-- stick is Analog.Move(), whose X is the rudder and whose Y is the elevator, already past the
+-- player's own deadzone and response curve; on a client with no pad connected it is exactly
+-- Vector2.zero and this arithmetic collapses to the keyboard read it replaced.
+--
+-- ANALOG SURVIVES THE WHOLE WAY DOWN. BlimpTypes.HelmInput has always been two numbers in -1..1 and
+-- Server/Blimp/BlimpDrive.SanitizeHelmInput has always clamped rather than snapped, so a stick held
+-- a third over gives a third of the rudder -- the keyboard's three discrete values were a property of
+-- the keyboard, never of the contract.
 local function readHelmAxes(): BlimpTypes.HelmInput
-	local steer = (if UserInputService:IsKeyDown(Enum.KeyCode.D) then 1 else 0)
-		- (if UserInputService:IsKeyDown(Enum.KeyCode.A) then 1 else 0)
-	local lift = (if UserInputService:IsKeyDown(Enum.KeyCode.Space) then 1 else 0)
-		- (if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then 1 else 0)
-	return { Steer = steer, Lift = lift }
+	local stick = Analog.Move()
+	return {
+		Steer = math.clamp(keyAxis(BlimpConstants.Controls.Steer) + stick.X, -1, 1),
+		Lift = math.clamp(keyAxis(BlimpConstants.Controls.Lift) + stick.Y, -1, 1),
+	}
 end
 
 -- Sent on CHANGE only, rate-capped, with no keepalive: the server latches the last input it was
--- given, so a pilot holding a steady rudder costs exactly one packet. Keyboard axes are discrete, so
--- "changed" is an exact comparison rather than a threshold.
+-- given, so a pilot holding a steady rudder costs exactly one packet.
+--
+-- "CHANGED" IS A THRESHOLD NOW, NOT AN EXACT COMPARISON, and the threshold is what preserves that
+-- sentence. It was exact because keyboard axes are discrete -- three values, so equality meant what
+-- it looked like it meant. A thumbstick's value differs at every sample, so the same comparison would
+-- be true on every tick and a pilot holding a perfectly steady stick would stream at IntentSendHz
+-- forever. See BlimpConstants.Input.HelmAxisEpsilon, which is a send resolution and deliberately not
+-- a deadzone (a resting stick already reads as exactly zero).
 local function pumpHelmInput(deltaTime: number): ()
 	if localKind ~= "Helm" then
 		return
@@ -269,7 +309,8 @@ local function pumpHelmInput(deltaTime: number): ()
 	sendAccumulator = 0
 
 	local helm = readHelmAxes()
-	if helm.Steer == lastSentHelm.Steer and helm.Lift == lastSentHelm.Lift then
+	local epsilon = BlimpConstants.Input.HelmAxisEpsilon
+	if math.abs(helm.Steer - lastSentHelm.Steer) < epsilon and math.abs(helm.Lift - lastSentHelm.Lift) < epsilon then
 		return
 	end
 	lastSentHelm = helm
@@ -725,8 +766,44 @@ local function pumpTelegraphHold(deltaTime: number): ()
 	sendSpeedShift(telegraphHeld)
 end
 
+-- Whether `input` is the press that reaches `binding` on EITHER device -- the contextual counterpart
+-- of KeybindManager.Matches, and the only thing in this file that knows a control has two columns.
+--
+-- BOTH COLUMNS ARE CHECKED UNCONDITIONALLY, with no read of which device is "current". That is the
+-- same reasoning readHelmAxes sums rather than branches: an InputObject already carries which physical
+-- input it was, so a device check here could only ever disagree with the press in hand -- and
+-- Client/Input/InputDevice.lua's own hysteresis means it CAN disagree, for one press, right after a
+-- player picks a controller up. The keyboard and gamepad columns hold disjoint KeyCodes, so checking
+-- both is not ambiguous, merely thorough.
+local function matchesControl(binding: BlimpTypes.HelmPressBinding, input: InputObject): boolean
+	if input.KeyCode == binding.Gamepad then
+		return true
+	end
+	local keyboard = binding.Keyboard
+	if keyboard then
+		return input.KeyCode == keyboard
+	end
+	-- The Release row, whose keyboard half is the live Interact bind rather than a fixed key. Matches
+	-- checks BOTH of KeybindManager's maps, which is harmless here and not relied on: Interact has no
+	-- plain gamepad binding at all (it is on the chord layer), so the gamepad answer for this row is
+	-- the explicit ButtonX above and nothing else.
+	local action = binding.Action
+	return action ~= nil and KeybindManager.Matches(action, input)
+end
+
 local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
-	if gameProcessed or isModalUiOpen() then
+	-- BUTTONA IS EXEMPTED FROM THE gameProcessed GATE, and this is a Roblox engine quirk, not a
+	-- BlimpConstants reasoning error. BlimpConstants.Controls' header argues ButtonA is safe to spend
+	-- here because PlatformStand suspends what the HUMANOID does with it -- true, but irrelevant to
+	-- this gate: Roblox marks every gamepad ButtonA press as gameProcessedEvent = true unconditionally
+	-- (confirmed devforum-wide engine behaviour, independent of jump, PlatformStand, or anything a game
+	-- script can disable), because the engine's own GUI-navigation mode treats A like a confirm click.
+	-- That made ThrottleDown -- the one control that spends ButtonA -- silently unreachable on every
+	-- pad while ThrottleUp/AllStop/Release/Autopilot all worked, which is exactly "everything but
+	-- decelerate". Safe to carve out unconditionally rather than only while mounted: nothing else in
+	-- BlimpConstants.Controls binds ButtonA, so this can never let a real GUI click masquerade as a
+	-- helm command, and localKind == nil below still bars it the instant the player is not at a helm.
+	if (gameProcessed and input.KeyCode ~= Enum.KeyCode.ButtonA) or isModalUiOpen() then
 		return
 	end
 	-- Declines to send what this client can already see is illegal -- the same convention
@@ -735,7 +812,7 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 		return
 	end
 
-	if KeybindManager.Matches("Interact", input) then
+	if matchesControl(BlimpConstants.Controls.Release, input) then
 		local remote = dismountRemote
 		if not remote then
 			logger:warn("Release pressed before the dismount remote was ready")
@@ -751,12 +828,11 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 		return
 	end
 
-	local key = input.KeyCode
-	if key == Enum.KeyCode.W then
+	if matchesControl(BlimpConstants.Controls.ThrottleUp, input) then
 		beginTelegraphHold(1)
-	elseif key == Enum.KeyCode.S then
+	elseif matchesControl(BlimpConstants.Controls.ThrottleDown, input) then
 		beginTelegraphHold(-1)
-	elseif key == Enum.KeyCode.X then
+	elseif matchesControl(BlimpConstants.Controls.AllStop, input) then
 		-- The panic key. Rings the telegraph straight down to All Stop from wherever it was, rather
 		-- than making a pilot tap S past four rungs while the ship carries on toward whatever they
 		-- just noticed.
@@ -766,7 +842,7 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 		-- they just slammed shut.
 		telegraphHeld = 0
 		sendSpeedShift(0)
-	elseif key == Enum.KeyCode.G then
+	elseif matchesControl(BlimpConstants.Controls.Autopilot, input) then
 		local remote = toggleAutopilotRemote
 		if remote then
 			remote:FireServer()
@@ -774,11 +850,19 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 	end
 end
 
--- Releasing either telegraph key stops the repeat -- but only the key that is actually driving it,
--- so letting go of W after having already pressed S does not cancel the S hold that replaced it.
+-- Releasing either telegraph control stops the repeat -- but only the one that is actually driving
+-- it, so letting go of W after having already pressed S does not cancel the S hold that replaced it.
 local function onInputEnded(input: InputObject, _gameProcessed: boolean): ()
-	local key = input.KeyCode
-	if (key == Enum.KeyCode.W and telegraphHeld > 0) or (key == Enum.KeyCode.S and telegraphHeld < 0) then
+	-- Checked before either match, and it is the ONLY reason this connection is cheap. This fires for
+	-- every key and button release anywhere in the game, mounted or not, and the old body was two
+	-- KeyCode comparisons; matchesControl is up to two each. The telegraph is not being held for the
+	-- overwhelming majority of those releases, and when it is not there is nothing here to do.
+	if telegraphHeld == 0 then
+		return
+	end
+	local up = telegraphHeld > 0 and matchesControl(BlimpConstants.Controls.ThrottleUp, input)
+	local down = telegraphHeld < 0 and matchesControl(BlimpConstants.Controls.ThrottleDown, input)
+	if up or down then
 		telegraphHeld = 0
 	end
 end

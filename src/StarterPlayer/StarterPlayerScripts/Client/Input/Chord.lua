@@ -52,6 +52,8 @@ local UserInputService = game:GetService("UserInputService")
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 
+local Analog = require(script.Parent.Analog)
+
 local Chord = {}
 
 -- What a press resolved to. "Plain" means the chord layer has no opinion and the caller should
@@ -72,6 +74,14 @@ local chords: { [Types.KeybindAction]: Types.Keybind? } = table.clone(Constants.
 -- action -- see the sampling note in this file's header. Keyed by KeyCode rather than by action
 -- because a release only ever knows its own input.
 local consumedPresses: { [Enum.KeyCode]: Types.KeybindAction } = {}
+
+-- TEST-ONLY override for IsHeld below, nil in production. The seam lives HERE rather than in
+-- Client/Input/InputRouter.lua (which is what actually calls IsHeld, on every press) because this is
+-- where the undrivable read is: UserInputService cannot be made to report a held button from a spec,
+-- which is the same constraint Resolve's own `modifierHeld` ARGUMENT already exists to work around --
+-- see this file's header. Giving the router a second seam of its own would put the workaround one
+-- module away from the thing it works around.
+local heldOverride: boolean? = nil
 
 local function matchesKeybind(keybind: Types.Keybind?, input: InputObject): boolean
 	if not keybind then
@@ -123,8 +133,19 @@ end
 -- on-screen legend onto the alternate set while the modifier is down, which is what makes this
 -- layer discoverable rather than secret.
 function Chord.IsHeld(): boolean
+	local override = heldOverride
+	if override ~= nil then
+		return override
+	end
 	if currentModifier.KeyCode then
-		return UserInputService:IsKeyDown(currentModifier.KeyCode)
+		-- BOTH reads, because the modifier is a GAMEPAD KeyCode by definition
+		-- (Constants.Keybinds.GamepadModifier) and IsKeyDown resolves keyboard keys only -- see
+		-- KeybindManager.IsJumpKeyDown for the full account of that silent failure. With IsKeyDown alone
+		-- this returned false on every frame of every session, so `heldOverride` (a test seam) was the
+		-- ONLY way this function ever answered true: the specs passed while the production chord layer was
+		-- inert, taking Leap/Interact/GrabThrow -- which have no plain gamepad button at all -- with it,
+		-- and leaving Client/Input/Glyph.lua permanently showing the un-modified legend set.
+		return UserInputService:IsKeyDown(currentModifier.KeyCode) or Analog.IsButtonDown(currentModifier.KeyCode)
 	end
 	if currentModifier.UserInputType then
 		return UserInputService:IsMouseButtonPressed(currentModifier.UserInputType)
@@ -184,6 +205,13 @@ end
 -- already documents for KeybindManager and InputDevice.
 function Chord.ClearPressesForTesting(): ()
 	table.clear(consumedPresses)
+end
+
+-- TEST-ONLY. Forces IsHeld's answer, so a spec can drive a chorded press through the real
+-- InputRouter dispatch path. Pass nil to restore the live UserInputService read. No production
+-- caller uses this; restore it in an afterEach, per the singleton note on ClearPressesForTesting.
+function Chord.SetHeldForTesting(held: boolean?): ()
+	heldOverride = held
 end
 
 return Chord

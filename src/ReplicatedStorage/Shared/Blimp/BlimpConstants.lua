@@ -48,6 +48,13 @@
 	(Server/Systems/BlimpSystem.lua).
 ]]
 
+-- The ONE require this otherwise standalone file makes, and only for the two Controls shapes below.
+-- The alternative -- naming those shapes here -- would put a Blimp-layer type somewhere other than the
+-- file whose whole job is Blimp-layer types. It also buys a real check rather than only tidiness:
+-- Release names a Types.KeybindAction, and the annotation is what makes a typo there a type error
+-- instead of a legend that silently reads "Unbound" and a press that silently never matches.
+local BlimpTypes = require(script.Parent.BlimpTypes)
+
 local BlimpConstants = {}
 
 -- CollectionService tag names. Unlike ParkourTagging's set these have no Attribute twin: a parkour tag
@@ -475,6 +482,30 @@ BlimpConstants.Mount = {
 	-- Studs the released character is lifted before their body is handed back, so a dismount inside the
 	-- station part's own volume does not spawn them intersecting it and get them flung.
 	ReleaseClearance = 1.5,
+	-- Studs/second a released body may be carrying OVER the hull's own current speed. This is a MARGIN,
+	-- not a ceiling: the clamp Server/Systems/BlimpSystem.Dismount applies is
+	-- (hull speed + this), so it is self-tuning against however fast the ship happens to be going.
+	--
+	-- WHY RELATIVE AND NOT ABSOLUTE, which is the whole point of the number. A released body inherits the
+	-- hull's velocity by design (that is what makes stepping off a moving ship a step rather than a stop
+	-- -- see Dismount's own comment), so any flat ceiling is wrong at one end or the other: set it low
+	-- enough to feel safe at a hover and it rips a passenger off a cruising hull's deck at 130 studs/second
+	-- of relative speed, and the moving deck then sweeps into them and launches them far harder than the
+	-- inheritance ever would have. Set it high enough to be safe at cruise and it does nothing at a hover.
+	-- Anchoring to the hull's own speed keeps "you leave with the ship" exact while still trimming
+	-- anything ABOVE it -- which is the part that is never legitimate.
+	--
+	-- Sized just over a full dash (~40 in Parkour terms is the fast end of self-propelled; 24 is
+	-- comfortably inside ordinary running) so a player who genuinely jumps clear of a hovering blimp under
+	-- their own power is never clipped, while the lever-arm term a long hull's rotation contributes
+	-- (omega x r, unbounded in the radius the artist gave the model) is.
+	ReleaseSpeedMargin = 24,
+	-- Seconds after a release during which onHeartbeatTick keeps re-applying that same clamp. The one-shot
+	-- write in Dismount fixes the velocity the body is HANDED; this covers the velocity Roblox's own
+	-- depenetration solver can hand it back one step later, when a body that was welded flush to the deck
+	-- becomes a separate colliding assembly overlapping it. Deliberately short -- it is a settle window for
+	-- the separation impulse, not an ongoing leash on a player who has walked away.
+	ReleaseSettleSeconds = 0.75,
 }
 
 -- Arm placement. See Shared/Blimp/BlimpArmPose.lua for the solver these feed.
@@ -896,6 +927,125 @@ BlimpConstants.Audio = {
 	StageHysteresis = 0.07,
 }
 
+-- WHAT A PILOT PRESSES, PER DEVICE. One row per helm control, each naming the keyboard key and the
+-- gamepad input that reach it -- and this table is the ONLY place either is written down.
+--
+-- IT EXISTS BECAUSE THE ANSWER WAS PREVIOUSLY GIVEN TWICE, in two files that could not check each
+-- other: Client/Blimp/BlimpController.lua matched raw `Enum.KeyCode.W`/`S`/`X`/`G` in its own
+-- InputBegan, and Client/UI/Screens/BlimpHelm/init.lua drew the literal strings "W"/"S"/"A"/"D"/
+-- "SPACE"/"SHIFT" in its legend. Nothing connected them, so a key could be changed in one and left
+-- wrong in the other with no error anywhere -- and the legend was wrong for a whole DEVICE
+-- regardless, telling a player holding a controller to press W.
+--
+-- STILL NOT Types.KeybindActions, AND THAT IS THE SAME DECISION AS BEFORE, not an oversight this
+-- table half-corrects. See Client/Blimp/BlimpController.lua's header: these are CONTEXTUAL -- read
+-- only while this client is holding a helm, meaningless everywhere else, and invisible to a rebind
+-- screen that has no notion of "while piloting". What changed is only that a contextual binding is
+-- now DATA with two device columns, instead of a literal buried in a comparison and a string buried
+-- in a legend.
+--
+-- THE GAMEPAD COLUMN IS CONFLICT-FREE BY CONSTRUCTION, and Tests/Blimp/BlimpHelmControls.spec.lua is
+-- what keeps it that way. Every input below has a global meaning that is either physically inert
+-- while mounted (the left stick -- BlimpSystem.mount sets PlatformStand, and RunSystem pins WalkSpeed
+-- to 0 off Constants.Attributes.Mounted) or already gated on that same Attribute by its own consumer
+-- (Client/Parkour/ParkourInput.lua for Slide/Roll/Dash/Leap, Client/Emotes/EmoteWheelClient.lua for
+-- the wheel, Client/Camera/ShiftLockCamera.lua for shift lock). That is why this layer needs no
+-- ContextActionService sink and no suppression switch of its own: nothing it takes was answering.
+--
+-- WHAT IS DELIBERATELY *NOT* HERE, and would each be a real collision if it were:
+--   * DPadUp -- Constants.Keybinds.GamepadDefaults.SettingsToggle, which is NOT gated on Mounted and
+--     must not be (a pilot has every right to open their settings mid-flight). The D-pad is the
+--     obvious home for a notched engine telegraph, and this is the reason it is not the one chosen.
+--   * DPadRight -- ToggleWeapon, read by Client/Combat/AttackInputClient.lua with no mount gate.
+--   * ButtonL2 -- Constants.Keybinds.GamepadModifier. A throttle lever there would put the pad on the
+--     chord layer for the whole time a pilot leaned on it.
+
+BlimpConstants.Controls = {
+	-- THE LEFT STICK IS THE SHIP'S ATTITUDE AND THE FACE BUTTONS ARE ITS ENGINE ORDER TELEGRAPH, and
+	-- that split is the one design decision here worth defending. A rudder is held continuously and
+	-- read as a magnitude; a telegraph is a latched lever moved a rung at a time. Putting both on one
+	-- stick -- the tempting mapping, since W/S and A/D are one hand on a keyboard -- would mean a pilot
+	-- could not hold a hard turn without that same stick crossing a throttle notch, which is a mis-ring
+	-- caused by steering. Two different kinds of control, two different kinds of input.
+	--
+	-- Analog.Move is the right half of that module's two configs by construction: it takes the
+	-- player's MoveDeadzone and deliberately NO sensitivity and NO invert, which is exactly what a
+	-- rudder wants. A scaled rudder would silently retune how hard the ship turns, and an inverted one
+	-- would put the helm over to port when the stick went to starboard.
+	Steer = {
+		Positive = Enum.KeyCode.D,
+		Negative = Enum.KeyCode.A,
+		Gamepad = Enum.KeyCode.Thumbstick1,
+	} :: BlimpTypes.HelmAxisBinding,
+	Lift = {
+		Positive = Enum.KeyCode.Space,
+		Negative = Enum.KeyCode.LeftShift,
+		Gamepad = Enum.KeyCode.Thumbstick1,
+	} :: BlimpTypes.HelmAxisBinding,
+
+	-- ButtonY is the TOP of the face diamond and ButtonA is the BOTTOM, which is the whole reason this
+	-- pair reads as a lever rather than as two arbitrary buttons -- ring up is up, ring down is down,
+	-- and both are under one thumb. Taken together the four face buttons end up being the four helm
+	-- commands laid out as a compass: Y ahead, A astern, B all stop, X let go.
+	--
+	-- ButtonA IS A DELIBERATE, SCOPED EXEMPTION FROM A RULE THIS PROJECT OTHERWISE HOLDS, and it is
+	-- worth stating rather than discovering. Tests/Input/GamepadBindings.spec.lua asserts that
+	-- Constants.Keybinds.GamepadDefaults never binds ButtonA, because that is Roblox's own native jump
+	-- on every pad and an action there double-fires on every jump with nothing in this codebase able to
+	-- stop it. That rule is about the GLOBAL map, and its premise is that the player can jump. At a
+	-- helm they cannot: BlimpSystem.mount sets Humanoid.PlatformStand (which suspends the Humanoid's
+	-- own jump handling outright) and welds the root to the station, and ParkourInput's IsJumpKeyDown
+	-- poll is mount-gated (fixed 2026-08-30 -- pollJump was the one Jump/Slide/Roll/Dash/Leap reader
+	-- that had been missing the isMounted() check the other four already had). The button is genuinely
+	-- idle here in a way it never is anywhere else, which is exactly why the contextual map may spend
+	-- it and the global map may not. Tests/Blimp/BlimpHelmControls.spec.lua pins both halves of that.
+	--
+	-- THAT REASONING IS ABOUT THE HUMANOID AND THE PARKOUR BUFFER -- IT SAYS NOTHING ABOUT INPUT
+	-- ROUTING, and the gap between the two was a real bug (fixed 2026-08-30, in
+	-- Client/Blimp/BlimpController.onInputBegan). Roblox marks EVERY gamepad ButtonA press as
+	-- gameProcessedEvent = true, unconditionally -- an engine-level quirk (its own GUI-navigation mode
+	-- treats A like a confirm click) that has nothing to do with jump, PlatformStand, or anything a
+	-- game script can disable; devforum reports confirm even ContextActionService:UnbindAction on the
+	-- jump action does not clear it. onInputBegan's ordinary `if gameProcessed then return end` guard
+	-- therefore swallowed ThrottleDown on every pad while ThrottleUp/AllStop/Release/Autopilot all
+	-- worked -- "everything but decelerate". See that function's own comment for the fix.
+	--
+	-- ButtonY IS ALSO Prompt.UnloadGamepadKeyCode BELOW, and that overlap is known and safe rather than
+	-- missed. Prompt.UnloadKeyCode's own header sets a stricter bar for the KEYBOARD -- it refused X
+	-- because that is All Stop, on the grounds that a key spent on two jobs is "one rebind away from
+	-- being a real collision" -- and the reason that bar does not reach here is that the risk behind it
+	-- does not: neither of these two is rebindable, so nothing can move them together. What holds them
+	-- apart is not luck but BlimpController.setPromptsSuppressed, which turns ProximityPromptService
+	-- off outright for a mounted client. Four helm commands and four face buttons leaves no margin to
+	-- spend on a hypothetical either.
+	--
+	-- STILL ON THE STANDING PLAYTEST LIST, with the rest of the gamepad scheme -- see
+	-- Constants.Keybinds.GamepadChords' own note. This pair is reasoned, not measured.
+	ThrottleUp = { Keyboard = Enum.KeyCode.W, Gamepad = Enum.KeyCode.ButtonY } :: BlimpTypes.HelmPressBinding,
+	ThrottleDown = { Keyboard = Enum.KeyCode.S, Gamepad = Enum.KeyCode.ButtonA } :: BlimpTypes.HelmPressBinding,
+	-- B/Circle is the near-universal cancel, which is what All Stop is: the panic press that rings the
+	-- telegraph straight down from wherever it was. Its plain binding is Dash.
+	AllStop = { Keyboard = Enum.KeyCode.X, Gamepad = Enum.KeyCode.ButtonB } :: BlimpTypes.HelmPressBinding,
+	-- A MODE TOGGLE, so it can afford the one control here that takes a thumb off the stick -- exactly
+	-- the trade Constants.Keybinds.GamepadDefaults.ShiftLock makes for itself, and against the same
+	-- D-pad. A player picks the moment they arm an autopilot; they do not pick the moment they need
+	-- rudder. DPadLeft is shift lock's own button, and shift lock is gated on Mounted.
+	Autopilot = { Keyboard = Enum.KeyCode.G, Gamepad = Enum.KeyCode.DPadLeft } :: BlimpTypes.HelmPressBinding,
+	-- THE ONE ROW WITH AN Action INSTEAD OF A KEYBOARD KEY, because on that device it genuinely is one:
+	-- the release shares the rebindable Interact bind with the prompt that started the mount, and has
+	-- since this feature shipped. Client/Input/Glyph.lua resolves the Action for the keyboard half and
+	-- the KeyCode for the gamepad half, so the legend follows a rebind on one device and draws the
+	-- pad's own button on the other.
+	--
+	-- ButtonX RATHER THAN THE CHORD Interact ACTUALLY HAS ON A PAD (ButtonL2+ButtonX, per
+	-- Constants.Keybinds.GamepadChords). Two reasons, either sufficient. It is the button that put the
+	-- player here -- a ProximityPrompt's GamepadKeyCode defaults to ButtonX and BlimpSystem leaves the
+	-- station prompts at that default, so mounting and dismounting become the same press. And a chord
+	-- is the answer to a full button budget, which is not the situation at a helm: asking a player to
+	-- find a two-finger gesture to get off a ship heading out to sea is the wrong place to spend one.
+	Release = { Action = "Interact", Gamepad = Enum.KeyCode.ButtonX } :: BlimpTypes.HelmPressBinding,
+}
+
 -- Helm input feel, read only by Client/Blimp/BlimpController.lua. Lives here rather than as two
 -- module-locals over there for the same reason every other number in this file does: it is a thing a
 -- designer retunes, and a retune should not require opening an input handler.
@@ -915,6 +1065,19 @@ BlimpConstants.Input = {
 	-- Comfortably inside Network.MaxSpeedShiftPerSecond below, so a held key can never rate-limit
 	-- itself into dropped rungs.
 	TelegraphRepeatIntervalSeconds = 0.17,
+	-- How far either held axis has to move before the pilot's client spends a packet on it. Exists
+	-- because of the gamepad, and only because of it: a keyboard rudder is three discrete values, so
+	-- the exact comparison this replaces was free and the send stream really did cost "one packet for
+	-- a steady rudder" the way BlimpController.pumpHelmInput's own comment claims. A thumbstick's
+	-- value is different at every sample, so that same comparison would be true every tick and turn a
+	-- pilot holding a perfectly steady stick into a permanent IntentSendHz stream.
+	--
+	-- It is NOT a deadzone and must not grow into one -- a resting stick already reads as exactly
+	-- Vector2.zero (Client/Input/Analog.ApplyStick returns it below the player's own deadzone), so
+	-- there is no drift here for this number to absorb. It is the resolution below which two DIFFERENT
+	-- rudder positions are not worth telling the server apart, and 1/50th of full deflection is far
+	-- finer than a hull this heavy can express.
+	HelmAxisEpsilon = 0.02,
 }
 
 BlimpConstants.Network = {

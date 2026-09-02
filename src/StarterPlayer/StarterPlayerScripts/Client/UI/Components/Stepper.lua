@@ -55,6 +55,15 @@ export type StepperProps = {
 	-- whole integers; a fractional Step works too (the clamp math below is unit-agnostic).
 	Step: number?,
 	OnChanged: (newValue: number) -> (),
+	-- How the readout spells the current value. Defaults to tostring, which is right for the whole
+	-- integers every original caller steps by.
+	--
+	-- A FRACTIONAL Step NEEDS THIS, and not for taste. Stepping 0.05 accumulates binary floating-point
+	-- error, so a readout of tostring() reaches "0.30000000000000004" after a few presses -- the value
+	-- is fine (it is clamped, and the difference is far below what a stick can express), but the
+	-- READOUT is not, and it is the only part the player sees. Settings/ControllerTab.lua passes
+	-- string.format here for exactly that reason.
+	FormatValue: ((value: number) -> string)?,
 	Position: UsedAs<UDim2>?,
 	AnchorPoint: UsedAs<Vector2>?,
 	LayoutOrder: UsedAs<number>?,
@@ -217,8 +226,9 @@ function StepperModule.Mount(scope: Scope, props: StepperProps): Frame
 		props.OnChanged(math.clamp(candidate, peek(props.Min), props.Max))
 	end
 
+	local formatValue = props.FormatValue or tostring
 	local valueText = scope:Computed(function(use)
-		return tostring(use(props.Value))
+		return formatValue(use(props.Value))
 	end)
 
 	return scope:New "Frame" {

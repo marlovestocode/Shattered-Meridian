@@ -81,4 +81,82 @@ return function()
 			expect(BlimpConstants.Safety.MaxContactSpeed).to.equal(ParkourConstants.Validation.MaxTravelSpeed)
 		end)
 	end)
+
+	-- The RELEASE clamp, which is a different clamp with a different job from the contact one above --
+	-- see BlimpConstants.Mount.ReleaseSpeedMargin and BlimpSystem.applyReleaseVelocity. It runs on a
+	-- body that has just STOPPED being part of a hull, and its ceiling is relative to the hull rather
+	-- than absolute. The arithmetic is the same ClampSpeed; what is pinned here is the POLICY, which is
+	-- the part a future retune could quietly get wrong.
+	--
+	-- The ceiling BlimpSystem.releaseSpeedCeiling computes, restated: hull speed plus the margin. Kept
+	-- as a local here rather than reached for through BlimpSystem, which needs live Instances to build a
+	-- hull at all -- see this file's header on the split every Blimp spec draws.
+	describe("BlimpConstants.Mount release velocity", function()
+		local function ceiling(hullSpeed: number): number
+			return hullSpeed + BlimpConstants.Mount.ReleaseSpeedMargin
+		end
+
+		it("lets a body leaving a cruising hull keep the hull's own velocity, untouched", function()
+			-- THE load-bearing property of the whole release clamp, and the reason the ceiling is
+			-- relative instead of a flat number. A passenger who steps off at cruise carrying exactly the
+			-- ship's velocity lands back on its deck and walks. Trim them to some pedestrian absolute and
+			-- they are instantly CruiseSpeed slower than the deck they are standing over, and the moving
+			-- hull sweeps into them -- which launches them harder than the inheritance ever did.
+			local hullVelocity = Vector3.new(BlimpConstants.Drive.CruiseSpeed, 0, 0)
+			local clamped = BlimpSafety.ClampSpeed(hullVelocity, ceiling(hullVelocity.Magnitude))
+			expect(clamped).to.equal(hullVelocity)
+		end)
+
+		it("passes the hull's velocity through at nitrous too, not just at cruise", function()
+			local hullVelocity = Vector3.new(0, 0, -BlimpConstants.Drive.NitrousSpeed)
+			local clamped = BlimpSafety.ClampSpeed(hullVelocity, ceiling(hullVelocity.Magnitude))
+			expect(clamped).to.equal(hullVelocity)
+		end)
+
+		it("trims the lever-arm excess a station far from the hull's centre contributes", function()
+			-- omega x r: a station eighty studs down the gondola of a yawing hull separates carrying the
+			-- hull's velocity PLUS a tangential term unbounded in a radius no constant knows about. That
+			-- surplus is the part that is never legitimate, and it is the only part this removes.
+			local hullSpeed = BlimpConstants.Drive.CruiseSpeed
+			local carried = Vector3.new(hullSpeed, 0, 0) + Vector3.new(0, 0, 400)
+			local clamped = BlimpSafety.ClampSpeed(carried, ceiling(hullSpeed))
+			expect(math.abs(clamped.Magnitude - ceiling(hullSpeed)) < 1e-3).to.equal(true)
+			expect(clamped.Magnitude < carried.Magnitude).to.equal(true)
+		end)
+
+		it("holds a body leaving a stationary hull to the margin alone", function()
+			-- A moored blimp contributes nothing, so the ceiling collapses to what a person could be
+			-- doing under their own power -- which is the correct answer for stepping off something
+			-- parked, and is what stops a hover dismount reading as a launch.
+			local carried = Vector3.new(0, 300, 0)
+			local clamped = BlimpSafety.ClampSpeed(carried, ceiling(0))
+			expect(math.abs(clamped.Magnitude - BlimpConstants.Mount.ReleaseSpeedMargin) < 1e-3).to.equal(true)
+		end)
+
+		it("leaves an honest self-propelled jump off a moored hull alone", function()
+			-- The margin has to sit above what a player can legitimately be doing on their own legs, or
+			-- a dash off the deck of a parked blimp gets clipped mid-move. See the constant's header.
+			local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
+			expect(BlimpConstants.Mount.ReleaseSpeedMargin > ParkourConstants.Locomotion.WalkSpeed).to.equal(true)
+		end)
+
+		it("is the TIGHTER of the two clamps, and only ever runs for a moment", function()
+			-- The contact clamp is a wide anti-exploit ceiling that runs for as long as somebody leans on
+			-- the hull; this is a narrow one that runs for a settle window. If the margin ever grew past
+			-- MaxContactSpeed the release clamp would be dead code -- the wider one would already have
+			-- caught everything it could.
+			local mount = BlimpConstants.Mount
+			expect(mount.ReleaseSpeedMargin > 0).to.equal(true)
+			expect(mount.ReleaseSpeedMargin < BlimpConstants.Safety.MaxContactSpeed).to.equal(true)
+			expect(mount.ReleaseSettleSeconds > 0).to.equal(true)
+			-- A settle window for a separation impulse, not an ongoing leash on somebody who has walked
+			-- away -- if this ever grew to seconds it would be clamping a player's own movement long
+			-- after they left the ship.
+			expect(mount.ReleaseSettleSeconds <= 2).to.equal(true)
+		end)
+
+		it("lifts the released body clear before handing it back", function()
+			expect(BlimpConstants.Mount.ReleaseClearance > 0).to.equal(true)
+		end)
+	end)
 end

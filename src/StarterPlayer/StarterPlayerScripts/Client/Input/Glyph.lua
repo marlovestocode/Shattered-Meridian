@@ -31,9 +31,22 @@
 	Reading InputDevice.Current() directly inside the Computed, gated on the same OnChanged this file
 	already bridges for KeybindManager, sidesteps that guard entirely.
 
-	Does NOT own: rendering (KeyCap.lua's job, once it migrates), or resolving which of a player's TWO
-	device categories (keyboard vs gamepad, see KeybindManager.lua's own header) is "current" --
-	InputDevice.lua's job, read here as a black box.
+	READS THE CHORD LAYER, NOT JUST KeybindManager's TWO MAPS. An action with no plain gamepad button
+	is not necessarily unbound on a pad -- Constants.Keybinds.GamepadChords is where Leap, Interact,
+	GrabThrow and HotbarSlot1-5 actually live -- so Resolve falls back to Client/Input/Chord.lua before
+	answering "Unbound". See describeChord below for why a chord draws as one cap rather than two.
+
+	WHAT IS STILL MISSING, AND IT IS A DISCOVERABILITY GAP RATHER THAN A CORRECTNESS ONE: legends do
+	not yet swap to the alternate set the INSTANT the modifier goes down. Chord.IsHeld() is a live
+	poll with no changed-signal behind it, so there is nothing for the epoch Value below to subscribe
+	to; making it reactive means either driving it from InputRouter (which already sees the modifier's
+	press and release) or polling, and that choice belongs with the rest of the analog/settings work
+	rather than being guessed at here. A chord-bound action still names its chord correctly at rest,
+	which is what keeps the layer honest in the meantime.
+
+	Does NOT own: rendering (KeyCap.lua's job), or resolving which of a player's TWO device categories
+	(keyboard vs gamepad, see KeybindManager.lua's own header) is "current" -- InputDevice.lua's job,
+	read here as a black box.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -41,6 +54,7 @@ local UserInputService = game:GetService("UserInputService")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Types = require(ReplicatedStorage.Shared.Types)
 
+local Chord = require(script.Parent.Chord)
 local InputDevice = require(script.Parent.InputDevice)
 local KeybindManager = require(script.Parent.KeybindManager)
 
@@ -53,6 +67,30 @@ export type GlyphKind = "Image" | "Text"
 export type Glyph = {
 	Kind: GlyphKind,
 	Value: string,
+}
+
+-- ONE CONTROL, NAMED FOR BOTH DEVICES -- and the shape that lets a legend draw something honest for a
+-- control that is NOT a Types.KeybindAction.
+--
+-- Every consumer of this module until now named a rebindable action and got a per-device answer for
+-- free, because KeybindManager already holds two maps. A CONTEXTUAL control has no entry in either:
+-- the blimp helm's throttle and rudder (BlimpConstants.Controls) and the furnace's unload key are
+-- read only while a player is standing somewhere specific, and are deliberately not rebindable -- see
+-- Client/Blimp/BlimpController.lua's header for that argument. They still have to be DRAWN, and drawn
+-- for the right device, which is what this exists for.
+--
+-- `Action` IS NOT AN ALTERNATIVE TO THE TWO KeyCodes, IT IS A PER-DEVICE FALLBACK, and that is what
+-- makes the shape earn its keep instead of being two types wearing one name. A control can genuinely
+-- be a bound action on one device and a contextual key on the other: the helm's release is the live
+-- Interact bind on a keyboard (it shares that bind with the prompt that started the mount, and must
+-- follow a rebind) and a plain contextual ButtonX on a pad (Interact's real gamepad reach is the
+-- ButtonL2+ButtonX chord, which is the wrong instruction to give a pilot). Resolve below takes the
+-- explicit KeyCode for the current device when there is one and falls back to the action when there
+-- is not, so that row is expressible as one binding rather than as a device branch at the call site.
+export type Binding = {
+	Keyboard: Enum.KeyCode?,
+	Gamepad: Enum.KeyCode?,
+	Action: Types.KeybindAction?,
 }
 
 local Glyph = {}
@@ -71,6 +109,33 @@ end
 
 local imageForKeyCode: (Enum.KeyCode) -> string = defaultImageForKeyCode
 
+-- A chord drawn as ONE cap, "L2+X", rather than as two. Components/KeyHint.lua's header draws the
+-- opposite conclusion for the keys it lists ("they are two keys, and a legend that draws them as one
+-- is telling the player to press something that does not exist") and both are right, because they
+-- are about different things: that rule is about two ALTERNATIVE keys, where drawing "W/S" invents a
+-- key nobody can press. A chord is not two alternatives -- it is a single gesture that happens to
+-- need two fingers, and the player must press both AT ONCE, so one cap naming both is exactly what
+-- the instruction is. Components/KeyCap.lua already grows past its minimum width via AutomaticSize.X
+-- for the multi-character glyphs ("SPACE", "SHIFT") this is no longer than.
+--
+-- STRIPS THE "Button" PREFIX Enum.KeyCode.Name carries, because "ButtonL2+ButtonX" is four times the
+-- width of the thing it names and reads as jargon rather than as a button. KeybindManager.Describe is
+-- deliberately not changed to do this: its answers appear in the rebind UI, where the full enum name
+-- is the honest label for a row the player is editing.
+local function shortGamepadLabel(keyCode: Enum.KeyCode): string
+	local name = keyCode.Name
+	local stripped = name:match("^Button(.+)$")
+	return stripped or name
+end
+
+local function describeChord(chordKeyCode: Enum.KeyCode): string
+	local modifier = Chord.Modifier()
+	local modifierLabel = if modifier.KeyCode
+		then shortGamepadLabel(modifier.KeyCode :: Enum.KeyCode)
+		else KeybindManager.Describe(modifier)
+	return `{modifierLabel}+{shortGamepadLabel(chordKeyCode)}`
+end
+
 -- Resolves the glyph for `action` on `device`, with no Fusion involved -- the pure decision Glyph.For
 -- below wraps in a Computed. Exposed so a spec can assert the fallback/Unbound rules directly against
 -- whatever KeybindManager currently has bound, without needing a scope at all.
@@ -82,7 +147,21 @@ function Glyph.Resolve(action: Types.KeybindAction, device: InputDevice.Device):
 			if image ~= "" then
 				return { Kind = "Image", Value = image }
 			end
+			return { Kind = "Text", Value = KeybindManager.Describe(gamepadKeybind) }
 		end
+
+		-- NO PLAIN GAMEPAD BUTTON -- SO ASK THE CHORD LAYER BEFORE GIVING UP. Without this branch,
+		-- Leap, Interact, GrabThrow and HotbarSlot1-5 would every one of them draw "Unbound" on a
+		-- pad, which is worse than the keyboard key they used to draw: it tells the player a live
+		-- gameplay action cannot be reached at all, when in fact it is one held button away. That
+		-- would also be a self-inflicted wound -- those actions have no plain binding precisely
+		-- BECAUSE Constants.Keybinds.GamepadChords gave them a home, so the map that moved them is
+		-- the map that has to be consulted for them.
+		local chordKeybind = Chord.Get(action)
+		if chordKeybind and chordKeybind.KeyCode then
+			return { Kind = "Text", Value = describeChord(chordKeybind.KeyCode) }
+		end
+
 		return { Kind = "Text", Value = KeybindManager.Describe(gamepadKeybind) }
 	end
 
@@ -112,6 +191,67 @@ function Glyph.For(scope: Scope, action: Types.KeybindAction): Fusion.Computed<G
 	return scope:Computed(function(use): Glyph
 		use(epoch)
 		return Glyph.Resolve(action, InputDevice.Current())
+	end)
+end
+
+-- The glyph for ONE raw KeyCode, with no binding lookup of any kind -- the branch Resolve above
+-- reaches once it has turned an action into a KeyCode, exposed so a contextual control can reach it
+-- without inventing an action to hold its key. Same image-then-text fallback and the same
+-- "Button" prefix strip, so a contextual cap and a bound cap on the same panel are drawn identically.
+function Glyph.ResolveKeyCode(keyCode: Enum.KeyCode): Glyph
+	local image = imageForKeyCode(keyCode)
+	if image ~= "" then
+		return { Kind = "Image", Value = image }
+	end
+	-- shortGamepadLabel is a no-op on a keyboard KeyCode (nothing matches the "Button" prefix), which
+	-- is why one call covers both devices here rather than a branch on which one this is.
+	return { Kind = "Text", Value = shortGamepadLabel(keyCode) }
+end
+
+-- Resolves a Binding for `device` -- the contextual sibling of Resolve above, and pure for the same
+-- reason: a spec drives it with a plain device value rather than by making UserInputService lie.
+--
+-- The fallback order is the whole contract: this device's own KeyCode if the binding names one, then
+-- the action if it carries one, then EMPTY.
+--
+-- EMPTY, NOT "Unbound", AND THE DIFFERENCE IS NOT COSMETIC. "Unbound" is what Glyph.Resolve says
+-- about an ACTION with no binding on this device, and it is the right word there: the action exists,
+-- a rebind screen lists it, and the player is being told they cannot currently reach it. A binding
+-- that names neither a KeyCode nor an action for this device is saying something else entirely --
+-- that this control has no separate input here at all, because the device folds it into one it has
+-- already named. The blimp helm's rudder is exactly that: two keys on a keyboard, and on a pad one
+-- half of a stick the row's other cap is already drawing. "Unbound" would be a false alarm about a
+-- control the player is holding in their hand, so the honest answer is to draw nothing, and
+-- Components/KeyCap.lua hides a cap whose glyph comes back empty rather than leaving a blank well.
+function Glyph.ResolveBinding(binding: Binding, device: InputDevice.Device): Glyph
+	local keyCode = if device == "Gamepad" then binding.Gamepad else binding.Keyboard
+	if keyCode then
+		return Glyph.ResolveKeyCode(keyCode)
+	end
+	local action = binding.Action
+	if action then
+		return Glyph.Resolve(action, device)
+	end
+	return { Kind = "Text", Value = "" }
+end
+
+-- The Fusion-reactive form of ResolveBinding, and the exact shape Glyph.For has -- same one epoch
+-- Value bridging the same two callback lists. KeybindManager.OnChanged matters here too, and not
+-- only for tidiness: a binding carrying an `Action` fallback (the helm's release) redraws on a rebind
+-- of that action, on whichever device is currently using the fallback.
+function Glyph.ForBinding(scope: Scope, binding: Binding): Fusion.Computed<Glyph>
+	local epoch: Fusion.Value<number> = scope:Value(0)
+
+	local function bump(): ()
+		epoch:set(peek(epoch) + 1)
+	end
+
+	table.insert(scope, KeybindManager.OnChanged(bump))
+	table.insert(scope, InputDevice.OnChanged(bump))
+
+	return scope:Computed(function(use): Glyph
+		use(epoch)
+		return Glyph.ResolveBinding(binding, InputDevice.Current())
 	end)
 end
 

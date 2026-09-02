@@ -12,7 +12,7 @@
 	  +-----------o------------------------------------------------------+
 	  | armament  | TierBadge  |  [ Health  Qi  Posture ]  |  [ 1 .. 5 ]  |   the dock
 	  +-----------o------------------------------------------------------+
-	              key legend           Components/KeyLegend.lua -- M / K / B, live from KeybindManager
+	              key legend           Components/KeyLegend.lua -- M / K / B, live per device
 
 	The armament island (HUD/ArmamentIsland.lua) is not a sixth band and not a neighbour -- it is
 	BOLTED to the dock's left edge, sharing that edge as its own: one rule at the seam, one height,
@@ -49,10 +49,13 @@
 	  ChamferedSurface.CHAMFER_PX, lands each elbow exactly where the cut ends, so the bronze arms
 	  brace the chamfer instead of ignoring it. See Panel.lua's and CornerBracket.lua's headers.
 
-	* THE KEY LEGEND IS REAL, NOT PRINTED. The reference design's sub-dock strip names three keys; all
-	  three are live Types.KeybindActions here, read through Client/Input/KeybindManager.lua and
-	  re-read on its new OnChanged, so rebinding Settings from K re-letters the cap instead of leaving
-	  the HUD quietly lying about it. The HOTBAR's own 1-5 are NOT read that way and deliberately so:
+	* THE KEY LEGEND IS REAL, NOT PRINTED, AND IT IS NOT KEYBOARD-ONLY. The reference design's sub-dock
+	  strip names three keys; all three are live Types.KeybindActions here, handed to
+	  Components/KeyLegend.lua as ACTIONS rather than as spelled-out strings. Each cap then resolves
+	  its own glyph through Client/Input/Glyph.lua, so rebinding Settings from K re-letters the cap AND
+	  picking up a controller re-draws it as that pad's button -- neither of which the previous
+	  hand-rolled Value-per-caption plumbing here could do, since it only ever read the keyboard map.
+	  The HOTBAR's own 1-5 are NOT read that way and deliberately so:
 	  Constants.Keybinds excludes HotbarSlot* from the rebind UI (Server/Systems/SettingsSystem.lua
 	  enforces the same exclusion), and KeyCode.Name for those spells "One".."Five" -- the digit in a
 	  tile corner is the honest label and a literal is the honest way to write it.
@@ -108,7 +111,6 @@ local ClientStateModule = require(script.Parent.Parent.State.ClientState)
 local EngagementLine = require(script.EngagementLine)
 local EngagementDetail = require(script.EngagementDetail)
 local ArmamentIsland = require(script.ArmamentIsland)
-local KeybindManager = require(script.Parent.Parent.Parent.Input.KeybindManager)
 local HotbarBindings = require(script.Parent.Parent.Parent.Combat.HotbarBindings)
 local AttackInputClient = require(script.Parent.Parent.Parent.Combat.AttackInputClient)
 
@@ -125,7 +127,8 @@ local HUD = {}
 -- rather than KeybindManager lookups: see this file's header on why, for these five specifically.
 local ABILITY_KEYBINDS = { "1", "2", "3", "4", "5" }
 
--- The sub-dock legend. Three real Types.KeybindActions, spelled live -- see this file's header.
+-- The sub-dock legend. Three real Types.KeybindActions, resolved per-device by the caps themselves
+-- rather than spelled here -- see this file's header.
 local LEGEND_ACTIONS: { { Action: Types.KeybindAction, Text: string } } = {
 	{ Action = "CharacterMenuToggle", Text = "Character" },
 	{ Action = "SettingsToggle", Text = "Settings" },
@@ -440,22 +443,18 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 		end
 	end)
 
-	-- The legend's caps, spelled from whatever each action is bound to right now and re-spelled on
-	-- every rebind. One Value per entry rather than one table Value, so a rebind of one action can
-	-- never invalidate the other two labels' Computeds.
-	local legendKeys: { Fusion.Value<string> } = {}
+	-- The legend's caps, named by ACTION rather than spelled out here. Each cap resolves its own
+	-- glyph for whichever device the player is holding and re-resolves on both a device switch and a
+	-- rebind -- see Components/KeyCap.lua's header.
+	--
+	-- THIS REPLACED A VALUE-PER-ENTRY PLUS A KeybindManager.OnChanged SUBSCRIPTION that re-spelled
+	-- all three captions by hand. That plumbing was not wrong, it was half a legend: it read
+	-- KeybindManager.Get and never GetGamepad, so it re-spelled the KEYBOARD binding faithfully and
+	-- showed a controller player the wrong key no matter how many times it updated.
 	local legendEntries: { KeyLegend.KeyLegendEntry } = {}
 	for index, entry in ipairs(LEGEND_ACTIONS) do
-		local key = scope:Value(KeybindManager.Describe(KeybindManager.Get(entry.Action)))
-		legendKeys[index] = key
-		legendEntries[index] = { Key = key, Text = entry.Text }
+		legendEntries[index] = { Action = entry.Action, Text = entry.Text }
 	end
-	-- Same connect-once-never-disconnect lifetime as the two subscriptions above.
-	KeybindManager.OnChanged(function()
-		for index, entry in ipairs(LEGEND_ACTIONS) do
-			legendKeys[index]:set(KeybindManager.Describe(KeybindManager.Get(entry.Action)))
-		end
-	end)
 
 	-- The one-shot drive behind TierBadge's promotion flare. The component eases a 0..1 intensity and
 	-- owns no timer of its own (TierBadge.lua's header, same split ParryReadyGlint/CombatFeedback

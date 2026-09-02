@@ -16,6 +16,15 @@
 	below and touches no Instance at all, which is what makes it testable without a place file).
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- The ONE require this file makes, and only for Types.KeybindAction in HelmPressBinding at the
+-- bottom. The same reach Shared/Attack/AttackTypes.lua, Shared/Kit/KitTypes.lua and
+-- Shared/Bloodline/BloodlineTypes.lua already make: a per-system types module may name a type
+-- from the global one, which is not the coupling this file's header refuses (that is about this
+-- system's OWN types living somewhere else, where removing the system would leave them behind).
+local Types = require(ReplicatedStorage.Shared.Types)
+
 local BlimpTypes = {}
 
 -- What a mounted player is DOING there, resolved from which tag the station part carries. The two
@@ -232,6 +241,34 @@ export type MountChangedPayload = {
 	Active: boolean,
 	Kind: StationKind?,
 	Station: BasePart?,
+}
+
+-- The two shapes BlimpConstants.Controls is written in -- what a pilot presses at a helm, per
+-- device. Read that table's own header for why these bindings are contextual data rather than
+-- Types.KeybindActions, and for the conflict argument behind every gamepad value in it.
+
+-- A HELD AXIS: two opposed keyboard keys, or one gamepad stick. `Gamepad` names the STICK rather than
+-- a button, and only so that a legend has something to draw -- the value actually read is
+-- Client/Input/Analog.Move(), whose X is the rudder and whose Y is the elevator.
+export type HelmAxisBinding = {
+	Positive: Enum.KeyCode,
+	Negative: Enum.KeyCode,
+	Gamepad: Enum.KeyCode,
+}
+
+-- AN EDGE PRESS: one input per device. Exactly one of `Keyboard`/`Action` is given -- `Action` for the
+-- one control that genuinely IS a rebindable Types.KeybindAction on that device (see
+-- BlimpConstants.Controls.Release). That exclusivity is the one thing the two optional fields cannot
+-- express and Tests/Blimp/BlimpHelmControls.spec.lua asserts instead.
+--
+-- `Gamepad` IS REQUIRED WHERE Client/Input/Glyph.lua's OWN Binding MAKES IT OPTIONAL, which is the
+-- only difference between the two shapes. A general binding may legitimately name one device and not
+-- the other; a helm control may not, because a control with no gamepad button is a control a
+-- controller player cannot reach at a wheel they are welded to.
+export type HelmPressBinding = {
+	Keyboard: Enum.KeyCode?,
+	Action: Types.KeybindAction?,
+	Gamepad: Enum.KeyCode,
 }
 
 return BlimpTypes

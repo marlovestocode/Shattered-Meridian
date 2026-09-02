@@ -71,7 +71,6 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
@@ -207,17 +206,15 @@ local SCABBARD_WIDTH = 10
 local SCABBARD_HEIGHT = GLYPH_HEIGHT - (BLADE_CENTRE_Y - BLADE_LENGTH / 2)
 local SCABBARD_THROAT_HEIGHT = 2
 
--- The two keys, read off Constants rather than typed as literals. This is the DEFAULT bind, not the
--- live one: Client/Input/KeybindManager.lua owns rebinds and exposes no changed-signal a Screen is
--- allowed to reach for, and Screens/HUD/init.lua's ability row hardcodes "1".."5" for the same
--- reason. Going through Constants at least means a retuned default moves this label with it.
-local function defaultKeyLabel(action: Types.KeybindAction): string
-	local keyCode = Constants.Keybinds.Defaults[action].KeyCode
-	return if keyCode then keyCode.Name else "--"
-end
-
-local DRAW_KEY = defaultKeyLabel("ToggleWeapon")
-local CYCLE_KEY = defaultKeyLabel("SelectNextWeapon")
+-- The two keys this island names are passed to keyHint below as ACTIONS, not as strings, so there is
+-- nothing to resolve at this level any more.
+--
+-- WHAT USED TO BE HERE was a defaultKeyLabel helper reading Constants.Keybinds.Defaults directly,
+-- with a comment explaining that it showed the DEFAULT bind rather than the live one because
+-- KeybindManager "exposes no changed-signal a Screen is allowed to reach for". That signal exists
+-- now (KeybindManager.OnChanged), and Components/KeyCap.lua's Action prop consumes it for the caller
+-- along with the device question -- so these captions now follow a rebind AND redraw as pad glyphs,
+-- neither of which a Defaults lookup could ever do.
 
 -- A sword in a scabbard, built from plain Frames -- no ImageLabel, because this repo does not guess
 -- at an rbxassetid (Components/VitalIcon.lua's header is the long version of why) and there is no
@@ -378,12 +375,14 @@ end
 local function keyHint(
 	scope: Scope,
 	layoutOrder: number,
-	key: string,
+	action: Types.KeybindAction,
 	caption: UsedAs<string>,
 	visible: UsedAs<boolean>?
 ): Frame
 	return Stack.Row(scope, {
-		Name = `KeyHint_{key}`,
+		-- Named by the ACTION, which is fixed, rather than by the glyph, which is not -- see
+		-- Components/KeyCap.lua's note on why an Instance must never be named by a reactive binding.
+		Name = `KeyHint_{action}`,
 		LayoutOrder = layoutOrder,
 		Visible = visible,
 		Size = UDim2.fromOffset(0, KEYCAP_HEIGHT),
@@ -393,8 +392,8 @@ local function keyHint(
 
 		Children = {
 			KeyCap(scope, {
-				Name = `Keycap_{key}`,
-				Key = key,
+				Name = `Keycap_{action}`,
+				Action = action,
 				Tone = "Lit",
 				LayoutOrder = 1,
 				MinWidth = KEYCAP_WIDTH,
@@ -669,11 +668,11 @@ function ArmamentIsland.Build(scope: Scope, state: ArmamentState): Island
 									AlignY = Enum.VerticalAlignment.Center,
 
 									Children = {
-										keyHint(scope, 1, DRAW_KEY, drawCaption),
+										keyHint(scope, 1, "ToggleWeapon", drawCaption),
 										-- Hidden while there is nothing to cycle to, rather than
 										-- shown disabled: a key hint is an instruction, and an
 										-- instruction that does nothing is worse than none.
-										keyHint(scope, 2, CYCLE_KEY, "Next", hasMultiple),
+										keyHint(scope, 2, "SelectNextWeapon", "Next", hasMultiple),
 									},
 								}),
 							},

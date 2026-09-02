@@ -234,6 +234,7 @@ function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProf
 			Autorun = false,
 			Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
 			Comfort = PlayerDataSystem.CreateDefaultComfortSettings(),
+			Gamepad = PlayerDataSystem.CreateDefaultGamepadSettings(),
 		},
 	}
 end
@@ -455,6 +456,65 @@ local function decodeComfortSettings(raw: unknown): Types.ComfortSettings
 	}
 end
 
+-- The gamepad stick block's shipped defaults, read straight off Constants.Settings.Gamepad.Defaults
+-- rather than restated here -- that table is shared with Client/Input/Analog.lua (which builds its own
+-- DEFAULT_CONFIG from it) and with SettingsSystem's write validation, so all three agree by
+-- construction instead of by three people remembering the same five numbers.
+function PlayerDataSystem.CreateDefaultGamepadSettings(): Types.GamepadSettings
+	local defaults = Constants.Settings.Gamepad.Defaults
+	return {
+		LookSensitivity = defaults.LookSensitivity,
+		MoveDeadzone = defaults.MoveDeadzone,
+		LookDeadzone = defaults.LookDeadzone,
+		InvertLookY = defaults.InvertLookY,
+		Vibration = defaults.Vibration,
+	}
+end
+
+-- Field-by-field, same defensive posture as decodeParkourSettings/decodeComfortSettings above, plus
+-- one thing neither of those needs: the three NUMERIC fields are clamped, not just type-checked.
+--
+-- CLAMPING ON THE WAY OUT OF THE DATASTORE, not only on the way in. SettingsSystem already clamps
+-- what a client may write, so a stored out-of-range value should be impossible -- but "should be
+-- impossible" is exactly the class of thing a record written by an older build, a hand-edited test
+-- profile, or a future bug can violate, and the failure is bad: a stored MoveDeadzone of 1 makes the
+-- left stick dead, which reads to the player as a broken controller with nothing in the menu able to
+-- explain it. NaN is caught by the same clamp -- math.clamp returns NaN for a NaN input, so it is
+-- rejected explicitly first, since a NaN deadzone would fail every comparison in Analog.ApplyStick.
+local function decodeGamepadSettings(raw: unknown): Types.GamepadSettings
+	local defaults = PlayerDataSystem.CreateDefaultGamepadSettings()
+	if typeof(raw) ~= "table" then
+		return defaults
+	end
+	local rawTable = raw :: { [string]: any }
+	local bounds = Constants.Settings.Gamepad.Bounds
+
+	local function boolean(key: string, fallback: boolean): boolean
+		local value = rawTable[key]
+		return if typeof(value) == "boolean" then value else fallback
+	end
+	local function number(key: string, fallback: number, min: number, max: number): number
+		local value = rawTable[key]
+		if typeof(value) ~= "number" or value ~= value then
+			return fallback
+		end
+		return math.clamp(value, min, max)
+	end
+
+	return {
+		LookSensitivity = number(
+			"LookSensitivity",
+			defaults.LookSensitivity,
+			bounds.LookSensitivity.Min,
+			bounds.LookSensitivity.Max
+		),
+		MoveDeadzone = number("MoveDeadzone", defaults.MoveDeadzone, bounds.Deadzone.Min, bounds.Deadzone.Max),
+		LookDeadzone = number("LookDeadzone", defaults.LookDeadzone, bounds.Deadzone.Min, bounds.Deadzone.Max),
+		InvertLookY = boolean("InvertLookY", defaults.InvertLookY),
+		Vibration = boolean("Vibration", defaults.Vibration),
+	}
+end
+
 -- Exported for the same reason every other pure encode/decode function in this file is (TestEZ
 -- coverage with no live Player/DataStore) -- see file header.
 --
@@ -470,6 +530,7 @@ end
 function PlayerDataSystem.EncodeSettings(settings: Types.PlayerSettings): { [string]: any }
 	local parkour = settings.Parkour or PlayerDataSystem.CreateDefaultParkourSettings()
 	local comfort = settings.Comfort or PlayerDataSystem.CreateDefaultComfortSettings()
+	local gamepad = settings.Gamepad or PlayerDataSystem.CreateDefaultGamepadSettings()
 	return {
 		Keybinds = encodeKeybindOverrides(settings.Keybinds),
 		GamepadKeybinds = encodeKeybindOverrides(settings.GamepadKeybinds),
@@ -491,6 +552,13 @@ function PlayerDataSystem.EncodeSettings(settings: Types.PlayerSettings): { [str
 			FieldOfViewEffects = comfort.FieldOfViewEffects,
 			VehicleCameraMotion = comfort.VehicleCameraMotion,
 		},
+		Gamepad = {
+			LookSensitivity = gamepad.LookSensitivity,
+			MoveDeadzone = gamepad.MoveDeadzone,
+			LookDeadzone = gamepad.LookDeadzone,
+			InvertLookY = gamepad.InvertLookY,
+			Vibration = gamepad.Vibration,
+		},
 	}
 end
 
@@ -502,6 +570,7 @@ function PlayerDataSystem.DecodeSettings(raw: unknown): Types.PlayerSettings
 			Autorun = false,
 			Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
 			Comfort = PlayerDataSystem.CreateDefaultComfortSettings(),
+			Gamepad = PlayerDataSystem.CreateDefaultGamepadSettings(),
 		}
 	end
 	local rawTable = raw :: { [string]: any }
@@ -511,6 +580,14 @@ function PlayerDataSystem.DecodeSettings(raw: unknown): Types.PlayerSettings
 		Autorun = if typeof(rawTable.Autorun) == "boolean" then rawTable.Autorun else false,
 		Parkour = decodeParkourSettings(rawTable.Parkour),
 		Comfort = decodeComfortSettings(rawTable.Comfort),
+		-- NO MIGRATION AND NO SchemaVersion BUMP FOR THIS GROUP, unlike Comfort's own Migrations[5].
+		-- A record written before Gamepad existed has no such key, decodeGamepadSettings returns the
+		-- shipped defaults for a nil table, and those defaults are exactly the behaviour every existing
+		-- player already has -- so a migration would rewrite stored records to contain values they
+		-- already decode to. That is the same additive argument decodeComfortSettings' own
+		-- VehicleCameraMotion note makes for a new FIELD, applied to a new GROUP: what makes it safe is
+		-- that this decoder defaults the whole table, not just its members.
+		Gamepad = decodeGamepadSettings(rawTable.Gamepad),
 	}
 end
 

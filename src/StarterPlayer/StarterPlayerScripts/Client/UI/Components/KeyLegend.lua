@@ -37,6 +37,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
+local Types = require(ReplicatedStorage.Shared.Types)
 local KeyCap = require(script.Parent.KeyCap)
 local Label = require(script.Parent.Label)
 local Stack = require(script.Parent.Stack)
@@ -46,7 +47,16 @@ type UsedAs<T> = Fusion.UsedAs<T>
 
 export type KeyLegendEntry = {
 	-- Reactive: a rebindable action's glyph has to change without the legend being rebuilt.
-	Key: UsedAs<string>,
+	-- Optional only because `Action` below can supply it instead; Components/KeyCap.lua asserts that
+	-- exactly one of the two is given, so a malformed entry names itself rather than rendering blank.
+	Key: UsedAs<string>?,
+	-- PREFER THIS over Key for anything a player presses. Handing in a Key means handing in a
+	-- KEYBOARD key, which is what Screens/HUD/init.lua's legend did -- it read KeybindManager.Get
+	-- (never GetGamepad) and kept its own Value-per-entry plus an OnChanged subscription to re-spell
+	-- them, roughly fifteen lines that did the keyboard half of what one Action does for both
+	-- devices. An Action-driven cap also carries its own rebind reactivity, so a caller passing this
+	-- needs no subscription of its own at all.
+	Action: Types.KeybindAction?,
 	-- Plain string. Unlike the key, what an action DOES never changes at runtime -- and a caller who
 	-- genuinely needs it to wants two entries and a Visible toggle, not a reactive caption.
 	Text: string,
@@ -85,6 +95,7 @@ local function entryRow(scope: Scope, entry: KeyLegendEntry, order: number): Fra
 			KeyCap(scope, {
 				Name = "Cap",
 				Key = entry.Key,
+				Action = entry.Action,
 				-- See this file's header: nothing is behind this strip, so each cap brings its own
 				-- background rather than borrowing a panel's.
 				Tone = "Overlay",

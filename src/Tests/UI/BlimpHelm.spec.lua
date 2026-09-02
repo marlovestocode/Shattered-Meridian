@@ -62,7 +62,6 @@ return function()
 
 		handle.SetVisible(true)
 		handle.SetKind("Helm")
-		handle.SetReleaseKey("E")
 		return scope, handle, tile, gui
 	end
 

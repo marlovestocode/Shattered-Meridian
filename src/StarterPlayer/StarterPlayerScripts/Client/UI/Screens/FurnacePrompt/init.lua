@@ -78,6 +78,8 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
+local BlimpConstants = require(ReplicatedStorage.Shared.Blimp.BlimpConstants)
+local Glyph = require(script.Parent.Parent.Parent.Input.Glyph)
 local Tokens = require(script.Parent.Parent.Tokens)
 local ChamferedSurface = require(script.Parent.Parent.ChamferedSurface)
 local Layers = require(script.Parent.Parent.Shell.Layers)
@@ -103,9 +105,13 @@ export type FurnacePromptHandle = {
 	-- 0..1 along the unload hold, or 0 for "not holding". The bar fades out at 0 rather than snapping
 	-- to empty, so a released hold reads as abandoned rather than as never having happened.
 	SetHoldProgress: (progress: number) -> (),
-	-- The glyphs on the two caps. Reactive for the same reason KeyCap's own Key is: the load row names
-	-- the live Interact bind, and a rebind must move it without this panel being rebuilt.
-	SetKeys: (loadKey: string, unloadKey: string) -> (),
+	-- NEITHER CAP'S GLYPH IS ON THIS HANDLE ANY MORE, and their absence is the point rather than a
+	-- tidy-up. This used to carry SetKeys(loadKey, unloadKey) and then, briefly, SetUnloadKey alone --
+	-- both of them a keyboard key NAME pushed in as a string, which is precisely how a panel ends up
+	-- able to show only one device's keys. The load row resolves the live Interact bind itself from
+	-- the action (Components/KeyCap.lua -> Client/Input/Glyph.lua), and the unload row resolves a
+	-- per-device Binding built from the two constants the server made the prompt from. Both track the
+	-- player's device, and the load row tracks a rebind, with nothing to push and nothing to go stale.
 }
 
 local FurnacePrompt = {}
@@ -158,13 +164,20 @@ local EDGE_TRANSPARENCY = 0.68
 -- The dock's own bracket geometry (Screens/HUD/init.lua), matched rather than re-picked.
 local BRACKET_ARM_LENGTH = 10
 
+-- The unload prompt's own two buttons, one per device, as Client/Input/Glyph.lua reads them. Built
+-- here from the two constants the SERVER built the prompt from, so the cap and the ProximityPrompt it
+-- describes cannot drift -- neither is rebindable, which is what makes a constant the honest source
+-- for both (see BlimpConstants.Prompt.UnloadKeyCode).
+local UNLOAD_BINDING: Glyph.Binding = {
+	Keyboard = BlimpConstants.Prompt.UnloadKeyCode,
+	Gamepad = BlimpConstants.Prompt.UnloadGamepadKeyCode,
+}
+
 local function FurnacePromptPanel(
 	scope: Scope,
 	visible: UsedAs<boolean>,
 	position: UsedAs<Vector2>,
-	holdProgress: UsedAs<number>,
-	loadKey: UsedAs<string>,
-	unloadKey: UsedAs<string>
+	holdProgress: UsedAs<number>
 ): Frame
 	local reveal = Reveal(scope, { Visible = visible })
 
@@ -240,7 +253,12 @@ local function FurnacePromptPanel(
 			}),
 
 			KeyHint(scope, {
-				Keys = { loadKey },
+				-- NAMED BY ACTION, so this row draws the pad's own glyph for a controller player --
+				-- including the L2+X chord, which is where Interact actually lives on a gamepad
+				-- (Constants.Keybinds.GamepadChords). The unload row below stays raw-key, and the
+				-- two sitting side by side is exactly the mixed case Components/KeyHint.lua's header
+				-- describes: exclusivity is per row, not per panel.
+				Actions = { "Interact" },
 				Text = "Load fuel",
 				KeyColumnWidth = KEY_COLUMN_WIDTH,
 				RowHeight = HINT_ROW_HEIGHT,
@@ -248,7 +266,14 @@ local function FurnacePromptPanel(
 			}),
 
 			KeyHint(scope, {
-				Keys = { unloadKey },
+				-- NAMED BY BINDING, for the same reason the load row above is named by action: this cap
+				-- used to be a keyboard KEY NAME pushed in as a string ("V"), which drew a keyboard key
+				-- at a player holding a controller -- and the prompt this row describes has listened on
+				-- a different button for that player all along (BlimpConstants.Prompt.
+				-- UnloadGamepadKeyCode, ButtonY). A Binding rather than an Action because this key is
+				-- deliberately NOT a Types.KeybindAction: see UnloadKeyCode's own header for why it is
+				-- not Interact-shaped and never was.
+				Bindings = { UNLOAD_BINDING },
 				Text = "Unload fuel",
 				KeyColumnWidth = KEY_COLUMN_WIDTH,
 				RowHeight = HINT_ROW_HEIGHT,
@@ -309,8 +334,6 @@ function FurnacePrompt.Mount(scope: Scope, playerGui: PlayerGui, scale: UsedAs<n
 	local visible = scope:Value(false)
 	local position = scope:Value(Vector2.zero)
 	local holdProgress = scope:Value(0)
-	local loadKey = scope:Value("E")
-	local unloadKey = scope:Value("V")
 
 	Surface.New(scope, {
 		Name = "FurnacePrompt",
@@ -319,7 +342,7 @@ function FurnacePrompt.Mount(scope: Scope, playerGui: PlayerGui, scale: UsedAs<n
 		Scaled = true,
 		Scale = scale,
 		Children = {
-			FurnacePromptPanel(scope, visible, position, holdProgress, loadKey, unloadKey),
+			FurnacePromptPanel(scope, visible, position, holdProgress),
 		},
 	})
 
@@ -332,10 +355,6 @@ function FurnacePrompt.Mount(scope: Scope, playerGui: PlayerGui, scale: UsedAs<n
 		end,
 		SetHoldProgress = function(progress: number)
 			holdProgress:set(progress)
-		end,
-		SetKeys = function(newLoadKey: string, newUnloadKey: string)
-			loadKey:set(newLoadKey)
-			unloadKey:set(newUnloadKey)
 		end,
 	}
 end

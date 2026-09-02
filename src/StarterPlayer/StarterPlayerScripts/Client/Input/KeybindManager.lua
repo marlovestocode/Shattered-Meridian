@@ -53,6 +53,8 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
+local Analog = require(script.Parent.Analog)
+
 local logger = Logger.scope("KeybindManager")
 
 local KeybindManager = {}
@@ -143,8 +145,22 @@ end
 -- against currentBindings/currentGamepadBindings -- jump has no Types.KeybindAction entry to look
 -- up (see file header) -- so this is a direct UserInputService poll of a fixed KeyCode pair, the one
 -- place that pair is allowed to appear instead of scattered across every caller.
+--
+-- THE GAMEPAD HALF WENT THROUGH Analog.IsButtonDown, and the reason is a silent-failure trap worth
+-- naming: this function used to ask UserInputService:IsKeyDown(Enum.KeyCode.ButtonA). IsKeyDown
+-- resolves KEYBOARD keys only. Handed a gamepad KeyCode it does not error and does not warn -- it
+-- returns false, every frame, forever. Nothing in the toolchain can catch that (a KeyCode is a
+-- KeyCode to the typechecker, and selene has no opinion), and the read is a poll rather than a
+-- routed binding, so there was no InputRouter dispatch log to miss either.
+--
+-- What it cost: Client/Parkour/ParkourInput.lua polls this once per Heartbeat and is the ONLY thing
+-- that ever stamps InputBuffer.PressJump. On a controller that stamp never happened, so
+-- StateSupport.JumpQueued was false for the whole session and every jump-driven parkour action was
+-- unreachable -- wall-jumps, ledge climb-ups, ledge leaps, slide-jumps and the wall launch. Ordinary
+-- jumping still worked throughout, which is what made it read as "only parkour is broken": Roblox's
+-- own control module binds ButtonA through its own path and never consults this function.
 function KeybindManager.IsJumpKeyDown(): boolean
-	return UserInputService:IsKeyDown(Enum.KeyCode.Space) or UserInputService:IsKeyDown(Enum.KeyCode.ButtonA)
+	return UserInputService:IsKeyDown(Enum.KeyCode.Space) or Analog.IsButtonDown(Enum.KeyCode.ButtonA)
 end
 
 -- Backend-only entry point for rebinding the KEYBOARD/mouse binding -- see file header for why

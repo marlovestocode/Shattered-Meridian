@@ -14,6 +14,7 @@ local StarterPlayer = game:GetService("StarterPlayer")
 
 local InputRouter = require(StarterPlayer.StarterPlayerScripts.Client.Input.InputRouter)
 local KeybindManager = require(StarterPlayer.StarterPlayerScripts.Client.Input.KeybindManager)
+local Chord = require(StarterPlayer.StarterPlayerScripts.Client.Input.Chord)
 
 return function()
 	local unbinds: { () -> () } = {}
@@ -47,6 +48,10 @@ return function()
 		end
 		table.clear(unbinds)
 		InputRouter.SetModalOpenPredicateForTesting(nil)
+		-- Chord.lua is a singleton too, and a consumed-but-unreleased press would leak into the next
+		-- spec in this process exactly the way a leftover binding would.
+		Chord.SetHeldForTesting(nil)
+		Chord.ClearPressesForTesting()
 	end)
 
 	describe("the modal gate", function()
@@ -201,6 +206,107 @@ return function()
 	describe("IsActionDown", function()
 		it("returns false with nothing physically held", function()
 			expect(InputRouter.IsActionDown("Dash" :: any)).to.equal(false)
+		end)
+	end)
+
+	-- The router half of the chord layer. Chord.lua's own spec covers the resolution rules in
+	-- isolation; what these assert is that DISPATCH honours them -- that the exclusivity is real at
+	-- the point where a feature module's callback actually gets called, which is the only place it
+	-- can bite a player. ButtonR1 carries BasicAttack plainly and Feint under the modifier, which is
+	-- the collision pair Constants.Keybinds.GamepadChords was written around.
+	describe("the gamepad chord layer", function()
+		local CHORDED_KEY = Enum.KeyCode.ButtonR1
+		local PLAIN_ACTION = "BasicAttack"
+		local CHORD_ACTION = "Feint"
+
+		local function padPress(keyCode: Enum.KeyCode): ()
+			InputRouter.HandleInputBegan(
+				{ KeyCode = keyCode, UserInputType = Enum.UserInputType.Gamepad1 } :: any,
+				false
+			)
+		end
+
+		local function padRelease(keyCode: Enum.KeyCode): ()
+			InputRouter.HandleInputEnded({ KeyCode = keyCode, UserInputType = Enum.UserInputType.Gamepad1 } :: any)
+		end
+
+		-- Counts Began/Ended for the plain and chorded action sharing CHORDED_KEY.
+		local function bindPair(): { plainBegan: number, plainEnded: number, chordBegan: number, chordEnded: number }
+			local counts = { plainBegan = 0, plainEnded = 0, chordBegan = 0, chordEnded = 0 }
+			bind(PLAIN_ACTION, {
+				Layer = "Gameplay",
+				Began = function()
+					counts.plainBegan += 1
+				end,
+				Ended = function()
+					counts.plainEnded += 1
+				end,
+			})
+			bind(CHORD_ACTION, {
+				Layer = "Gameplay",
+				Began = function()
+					counts.chordBegan += 1
+				end,
+				Ended = function()
+					counts.chordEnded += 1
+				end,
+			})
+			return counts
+		end
+
+		it("fires only the chorded action, never the button's plain action, with the modifier held", function()
+			local counts = bindPair()
+
+			Chord.SetHeldForTesting(true)
+			padPress(CHORDED_KEY)
+
+			expect(counts.chordBegan).to.equal(1)
+			expect(counts.plainBegan).to.equal(0)
+		end)
+
+		it("fires the plain action when the modifier is not held", function()
+			local counts = bindPair()
+
+			Chord.SetHeldForTesting(false)
+			padPress(CHORDED_KEY)
+
+			expect(counts.plainBegan).to.equal(1)
+			expect(counts.chordBegan).to.equal(0)
+		end)
+
+		-- The half that needs Chord.lua to REMEMBER the press: releasing after a chord must not fire
+		-- the plain action's Ended, which would be a release with no matching Began.
+		it("routes a chorded press's release to the chorded action alone", function()
+			local counts = bindPair()
+
+			Chord.SetHeldForTesting(true)
+			padPress(CHORDED_KEY)
+			-- Released the modifier before the button -- the press is still a chord, because the
+			-- modifier is sampled at press time and remembered until this release.
+			Chord.SetHeldForTesting(false)
+			padRelease(CHORDED_KEY)
+
+			expect(counts.chordEnded).to.equal(1)
+			expect(counts.plainEnded).to.equal(0)
+		end)
+
+		it("dispatches nothing for the modifier's own press", function()
+			local began = 0
+			for action in pairs(Chord.Chords()) do
+				bind(action :: any, {
+					Layer = "Gameplay",
+					Began = function()
+						began += 1
+					end,
+				})
+			end
+
+			local modifier = Chord.Modifier()
+			assert(modifier.KeyCode ~= nil, "the default chord modifier is expected to be a KeyCode")
+			Chord.SetHeldForTesting(true)
+			padPress(modifier.KeyCode :: Enum.KeyCode)
+
+			expect(began).to.equal(0)
 		end)
 	end)
 end

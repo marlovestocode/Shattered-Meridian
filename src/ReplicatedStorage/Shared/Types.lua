@@ -1232,6 +1232,44 @@ export type PlayerSettings = {
 	-- this its own group is also what makes it the obvious home for every accessibility toggle added
 	-- after this one, rather than each finding a different existing group to hide in.
 	Comfort: ComfortSettings,
+	-- Gamepad device preferences. A nested group for the same reason Parkour and Comfort above are:
+	-- one concern, one Settings section (the Controller tab), one consumer
+	-- (Client/Input/Analog.lua, through Client/Settings/SettingsClient.lua).
+	--
+	-- DELIBERATELY NOT FOLDED INTO Comfort, even though look sensitivity and invert-Y are the kind of
+	-- thing a player adjusts for comfort. Comfort is the ACCESSIBILITY group -- things that hurt to
+	-- look at, where the answer is "turn the effect off" and the default is always on. Stick
+	-- sensitivity is a DEVICE preference: it has no correct default, every controller player expects
+	-- to set it, and it does nothing at all for the keyboard players Comfort's toggles all serve
+	-- equally. Putting it in Comfort would make that section mean two different things at once.
+	Gamepad: GamepadSettings,
+}
+
+-- Gamepad device preferences (Server/Systems/SettingsSystem.lua persists them,
+-- Client/Settings/SettingsClient.lua pushes them into Client/Input/Analog.lua). These configure how
+-- the STICKS are read; which BUTTON does what is GamepadKeybinds above, and the two are independent.
+--
+-- Every default here mirrors Analog.lua's own DEFAULT_CONFIG rather than stating a second opinion --
+-- the same rule ParkourSettings follows against ParkourConstants, and for the same reason: retuning
+-- what the game does out of the box stays a one-file change.
+export type GamepadSettings = {
+	-- Multiplier on the RIGHT stick only. The left stick has no sensitivity knob and should not grow
+	-- one: it feeds Humanoid.MoveDirection, where the magnitude IS the walk/run request, so scaling it
+	-- would silently retune movement speed rather than aim feel.
+	LookSensitivity: number,
+	-- Radial, not per-axis -- see Analog.lua's header for why per-axis makes diagonals unreachable.
+	-- Split into two knobs because the two sticks fail differently: a worn left stick that drifts
+	-- walks the character on its own, while a worn right stick merely turns the camera, and a player
+	-- should not have to blunt their aim to stop drifting.
+	MoveDeadzone: number,
+	LookDeadzone: number,
+	-- Y only. Inverted X is vanishingly rare as a preference and is not offered, which keeps the
+	-- Controller tab one row shorter for every player who would never have wanted it.
+	InvertLookY: boolean,
+	-- Reserved for haptics. Persisted and validated now so the schema does not need a second bump
+	-- when a rumble consumer lands; nothing reads it yet, which is stated here rather than left for
+	-- someone to discover by grepping for a caller and finding none.
+	Vibration: boolean,
 }
 
 -- Camera-comfort preferences (Server/Systems/SettingsSystem.lua persists them,

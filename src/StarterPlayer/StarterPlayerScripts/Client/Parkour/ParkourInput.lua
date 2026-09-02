@@ -70,10 +70,28 @@ end
 -- behavioural note this migration introduces (none of these four actions used to check the modal
 -- Attribute at all, and "Gameplay" now does).
 local function bindParkourActions(): ()
+	-- EVERY Began HERE IS MOUNT-GATED, not just Leap's below, and the three that gained the check did
+	-- so for exactly the reason Leap's own comment already gives: a mount parks parkour through
+	-- RootControlLocked, so none of these can DO anything while a player is welded to a station -- but
+	-- the press still lands in the buffer, and the buffer outlives the release. The press that lets go
+	-- of a helm can therefore fire a slide, roll or dash into the deck the player was only trying to
+	-- step off.
+	--
+	-- IT WAS LATENT UNTIL THE HELM GOT A GAMEPAD MAP AND IS NOT LATENT NOW. On a keyboard the helm's
+	-- contextual keys (W/S/X/G) happen to miss Slide (C), Roll (LeftAlt) and Dash (Q), so only Leap --
+	-- which genuinely shares E with Interact -- ever collided. BlimpConstants.Controls' gamepad column
+	-- overlaps all three by construction: its four face buttons are ButtonY (Roll), ButtonA, ButtonB
+	-- (Dash) and ButtonX (Slide), chosen BECAUSE those global meanings are inert at a helm. This gate
+	-- is the half of "inert" that was only true of the action and not yet true of its buffer.
+	--
+	-- Ended is deliberately NOT gated, here or anywhere -- see InputRouter.lua's header. A release is a
+	-- cleanup signal and firing a redundant one is always safe; dropping one is not.
 	InputRouter.Bind("Slide", {
 		Layer = "Gameplay",
 		Began = function()
-			InputBuffer.PressSlide(os.clock())
+			if not isMounted() then
+				InputBuffer.PressSlide(os.clock())
+			end
 		end,
 		Ended = function()
 			InputBuffer.ReleaseSlide()
@@ -83,17 +101,17 @@ local function bindParkourActions(): ()
 	InputRouter.Bind("Roll", {
 		Layer = "Gameplay",
 		Began = function()
-			InputBuffer.PressRoll(os.clock())
+			if not isMounted() then
+				InputBuffer.PressRoll(os.clock())
+			end
 		end,
 	})
 
 	-- Leap and Interact share E (see Constants.Keybinds.Defaults.Interact's own comment for the whole
-	-- argument). A press that is REALLY the "let go of the blimp" press must not also leave a leap in
-	-- the buffer: the mount's RootControlLocked parks parkour while it lasts, but the buffered press
-	-- would outlive the release by its own window and fire the instant the body came back, launching a
-	-- player off a deck they were only trying to step down from. isMounted() stays inline, the same
-	-- reason ParkourInput/DefenseClient keep their own ownership checks inline -- InputRouter has no
-	-- opinion about blimp mounting.
+	-- argument), which is what made this the FIRST of these four to need the gate rather than the only
+	-- one that needs it -- see the block comment above. isMounted() stays inline, the same reason
+	-- ParkourInput/DefenseClient keep their own ownership checks inline: InputRouter has no opinion
+	-- about blimp mounting.
 	InputRouter.Bind("Leap", {
 		Layer = "Gameplay",
 		Began = function()
@@ -109,7 +127,9 @@ local function bindParkourActions(): ()
 	InputRouter.Bind("Dash", {
 		Layer = "Gameplay",
 		Began = function()
-			InputBuffer.PressDash(os.clock())
+			if not isMounted() then
+				InputBuffer.PressDash(os.clock())
+			end
 		end,
 	})
 end
@@ -118,8 +138,13 @@ end
 -- file header) and because the edge-detection above needs the live down-state, not just the
 -- transition -- a jump pressed while a UI element had focus, then released after it lost focus,
 -- should not leave a stale buffered press behind.
+-- MOUNT-GATED LIKE THE FOUR ABOVE, and this one was missing it: BlimpConstants.Controls spends
+-- ButtonA for the helm's ThrottleDown (see that table's own header on why that reuse is safe), on the
+-- documented assumption that this poll already stood down while mounted. It did not -- PressJump has
+-- no mount check of its own, so holding ButtonA to decelerate also buffered a parkour jump every
+-- press, the same "buffered input outlives the mount" bug the other four controls were gated for.
 local function pollJump(): ()
-	local isDown = KeybindManager.IsJumpKeyDown()
+	local isDown = not isMounted() and KeybindManager.IsJumpKeyDown()
 	if isDown and not jumpWasDown then
 		InputBuffer.PressJump(os.clock())
 	end

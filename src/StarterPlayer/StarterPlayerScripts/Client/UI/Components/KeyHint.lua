@@ -31,15 +31,24 @@
 	both survived the extraction); this file owns the ROW -- the fixed cap column, the description
 	beside it, and the Active text swap -- and hands each cap's own drawing to that component.
 
-	Does not own: what any key is bound to. Every string here is handed in. That matters because the
-	one legend using this today is deliberately raw-key (see Client/Blimp/BlimpController.lua's header
-	on why the helm keys are not KeybindActions) while its release key IS a live bind -- so the caller,
-	not this component, is the thing that knows which of its own rows to name from KeybindManager.
+	Does not own: what any key is bound to. A row is named by raw strings (`Keys`), by rebindable
+	actions (`Actions`), or by contextual per-device bindings (`Bindings`) -- exactly one of the three,
+	never a mix -- and it resolves none of them itself: both of the latter two hand the question to
+	Components/KeyCap.lua, which hands it to Client/Input/Glyph.lua. The exclusivity is per-ROW rather
+	than per-panel precisely because one legend can need more than one kind at once.
+
+	`Keys` IS NOW THE NARROWEST OF THE THREE, and that is a correction rather than a deprecation. It
+	was the only way to name the helm's steering keys, which are deliberately raw (see
+	Client/Blimp/BlimpController.lua's header on why they are not KeybindActions) -- but a raw STRING
+	is a keyboard key, so that legend told a player holding a controller to press W. `Bindings` is what
+	those rows want; `Keys` is left for a cap naming something with no per-device answer at all.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Tokens = require(script.Parent.Parent.Tokens)
+local Types = require(ReplicatedStorage.Shared.Types)
+local Glyph = require(script.Parent.Parent.Parent.Input.Glyph)
 local KeyCap = require(script.Parent.KeyCap)
 local Label = require(script.Parent.Label)
 
@@ -56,7 +65,30 @@ export type KeyHintProps = {
 	-- Each cap's TEXT is reactive even though the LIST is not: a legend's shape is fixed at build time
 	-- (a row is two keys or it is one), but a row naming a rebindable action has to be able to change
 	-- its glyph when the player rebinds it without the panel being torn down and rebuilt.
-	Keys: { UsedAs<string> },
+	--
+	-- Optional only because `Actions` below can supply the caps instead; exactly one of the two must
+	-- be given.
+	Keys: { UsedAs<string> }?,
+	-- PREFER THIS over Keys for anything a player presses. A Key is a KEYBOARD key: a row built from
+	-- Keys shows W/S/A to a player holding a controller, which is exactly what
+	-- Screens/BlimpHelm/init.lua's hardcoded literals did. An Action-driven cap resolves against
+	-- whichever device is in the player's hands and re-resolves on both a device switch and a rebind,
+	-- with no subscription needed here or at the call site -- see Components/KeyCap.lua's own header.
+	--
+	-- Same fixed-list/reactive-glyph split Keys documents above: WHICH actions a row names is decided
+	-- at build time, what each one currently draws is not.
+	Actions: { Types.KeybindAction }?,
+	-- The third way to name a row, for CONTEXTUAL controls -- keys that are real and pressable but are
+	-- deliberately not Types.KeybindActions, so `Actions` cannot name them and `Keys` can only ever
+	-- name them for one device. The blimp helm's whole legend is this: its throttle, rudder, all-stop
+	-- and autopilot are read only while a player is holding a wheel (see Client/Blimp/BlimpController.
+	-- lua's header for why they are not rebindable actions), and until this prop existed that legend
+	-- drew the literal string "W" at a player holding a controller.
+	--
+	-- Same fixed-list/reactive-glyph split as the two above, and the same per-ROW exclusivity: a row is
+	-- named by exactly one of Keys/Actions/Bindings. Per-row rather than per-panel because the helm
+	-- legend genuinely needs two kinds at once -- see this file's header.
+	Bindings: { Glyph.Binding }?,
 	Text: UsedAs<string>,
 	-- Shown INSTEAD of Text while Active. Omit for a row with no state of its own.
 	ActiveText: UsedAs<string>?,
@@ -91,6 +123,14 @@ local CAP_MIN_WIDTH = 17
 local CAP_GAP = 3
 
 local function KeyHint(scope: Scope, props: KeyHintProps): Frame
+	local named = (if props.Keys ~= nil then 1 else 0)
+		+ (if props.Actions ~= nil then 1 else 0)
+		+ (if props.Bindings ~= nil then 1 else 0)
+	assert(
+		named == 1,
+		"KeyHint needs exactly one of Keys, Actions or Bindings -- see KeyHintProps on which to reach for"
+	)
+
 	local active: UsedAs<boolean> = props.Active or false
 
 	local caps: { Instance } = {
@@ -101,12 +141,20 @@ local function KeyHint(scope: Scope, props: KeyHintProps): Frame
 			VerticalAlignment = Enum.VerticalAlignment.Center,
 		},
 	}
-	for index, key in props.Keys do
+	-- One loop over whichever list was given -- the cap itself takes Key, Action or Binding and asserts
+	-- the same exclusivity, so no branch here needs to know what the others render.
+	local capCount = if props.Actions ~= nil
+		then #(props.Actions :: { Types.KeybindAction })
+		elseif props.Bindings ~= nil then #(props.Bindings :: { Glyph.Binding })
+		else #(props.Keys :: { UsedAs<string> })
+	for index = 1, capCount do
 		table.insert(
 			caps,
 			KeyCap(scope, {
 				Name = `Cap{index}`,
-				Key = key,
+				Key = if props.Keys ~= nil then (props.Keys :: { UsedAs<string> })[index] else nil,
+				Action = if props.Actions ~= nil then (props.Actions :: { Types.KeybindAction })[index] else nil,
+				Binding = if props.Bindings ~= nil then (props.Bindings :: { Glyph.Binding })[index] else nil,
 				Active = active,
 				LayoutOrder = index,
 				MinWidth = CAP_MIN_WIDTH,

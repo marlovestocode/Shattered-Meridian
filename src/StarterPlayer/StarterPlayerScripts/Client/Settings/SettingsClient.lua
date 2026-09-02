@@ -40,10 +40,12 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 
 local SettingsModule = require(script.Parent.Parent.UI.Screens.Settings)
 local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local Analog = require(script.Parent.Parent.Input.Analog)
 local ParkourController = require(script.Parent.Parent.Parkour.ParkourController)
 local RunController = require(script.Parent.Parent.Movement.RunController)
 local CameraShake = require(script.Parent.Parent.FX.CameraShake)
@@ -73,14 +75,24 @@ local autorunEnabled = false
 -- EFFECT is owned by Client/Parkour/ParkourController.lua, with the one exception of SprintMode, whose
 -- consumer is Client/Movement/RunController.lua -- hold-versus-toggle is a run concern, and the run
 -- owns its own key. This module only routes.
+-- Seeded from ParkourConstants rather than from literals, for the reason the gamepad block below
+-- states for itself: this module must not become a second opinion about what the game ships. Enabled
+-- was the one field that WAS a literal, and it was `false` -- which is the exact outcome
+-- RestoreSettings' own fallback comment says must not happen. A failed GetSettings round trip, or a
+-- server old enough to predate this block, fell back to this table and switched the whole parkour
+-- framework off (ParkourController.SetEnabled(false) returns from onHeartbeat before any state runs),
+-- so there was no wall-run, no ledge hang, and therefore no wall-jump or climb-up -- while ordinary
+-- jumping kept working, because that is the stock Humanoid and never goes through this framework at
+-- all. A movement system that silently degrades to the fallback controller on a transient network
+-- error is exactly the "far more visible and confusing failure" that comment exists to rule out.
 local parkourSettings: Types.ParkourSettings = {
-	Enabled = false,
+	Enabled = ParkourConstants.Enabled,
 	CameraEffects = true,
-	CoyoteTime = true,
-	JumpBuffer = true,
-	AutoVault = true,
-	LedgeAssist = true,
-	StepAssist = true,
+	CoyoteTime = ParkourConstants.Assists.CoyoteTime,
+	JumpBuffer = ParkourConstants.Assists.JumpBuffer,
+	AutoVault = ParkourConstants.Assists.AutoVault,
+	LedgeAssist = ParkourConstants.Assists.LedgeAssist,
+	StepAssist = ParkourConstants.Assists.StepAssist,
 	SprintMode = "Hold",
 }
 
@@ -123,6 +135,26 @@ local function applyComfortSettings(): ()
 	BlimpCamera.SetMotionEnabled(comfortSettings.VehicleCameraMotion)
 end
 
+-- The live gamepad stick block. Same role as parkourSettings/comfortSettings above. Seeded from
+-- Constants.Settings.Gamepad.Defaults rather than from literals so this module does not become a
+-- fourth opinion about what the shipped values are -- Analog.lua and Server/Systems/PlayerDataSystem.lua
+-- both read that same table.
+local gamepadSettings: Types.GamepadSettings = {
+	LookSensitivity = Constants.Settings.Gamepad.Defaults.LookSensitivity,
+	MoveDeadzone = Constants.Settings.Gamepad.Defaults.MoveDeadzone,
+	LookDeadzone = Constants.Settings.Gamepad.Defaults.LookDeadzone,
+	InvertLookY = Constants.Settings.Gamepad.Defaults.InvertLookY,
+	Vibration = Constants.Settings.Gamepad.Defaults.Vibration,
+}
+
+-- Sibling to applyComfortSettings above, with the same contract. One consumer today, and the whole
+-- block goes to it in one call rather than field by field -- Analog.lua derives the left stick's and
+-- right stick's configs from it differently (see its header), so handing it the table is what lets
+-- that split live in one place instead of being re-decided here.
+local function applyGamepadSettings(): ()
+	Analog.SetSettings(gamepadSettings)
+end
+
 -- Autorun's own applier. A sibling to applyParkourSettings above rather than a line inside it, because
 -- Autorun lives on Types.PlayerSettings directly rather than in the nested Parkour block -- see that
 -- type's own note on why it is flat.
@@ -159,6 +191,7 @@ function SettingsClient.RestoreSettings(): ()
 			Autorun = false,
 			Parkour = parkourSettings,
 			Comfort = comfortSettings,
+			Gamepad = gamepadSettings,
 		}
 	end
 
@@ -213,9 +246,61 @@ function SettingsClient.RestoreSettings(): ()
 		comfortSettings = {
 			CameraShake = boolean("CameraShake", comfortSettings.CameraShake),
 			FieldOfViewEffects = boolean("FieldOfViewEffects", comfortSettings.FieldOfViewEffects),
+			-- This line was MISSING, and its absence was a live bug rather than an omission: the
+			-- assignment replaces the whole table, so a restore left VehicleCameraMotion nil, threw
+			-- away whatever the player had persisted, and passed that nil to
+			-- BlimpCamera.SetMotionEnabled. It failed in the direction this block's own header warns
+			-- about -- a broken accessibility setting that looks exactly like a working one.
+			VehicleCameraMotion = boolean("VehicleCameraMotion", comfortSettings.VehicleCameraMotion),
 		}
 	end
 	applyComfortSettings()
+
+	-- Same field-by-field decode as the two blocks above, with one addition they do not need: the
+	-- numeric fields are clamped to Constants.Settings.Gamepad.Bounds. The server already clamps on
+	-- both write and read, so this is the third and last gate rather than the only one -- it exists
+	-- because a value that somehow arrived out of range would otherwise reach Analog.ApplyStick, where
+	-- a deadzone of 1 is a stick that does nothing and a player on a pad has no way to open the menu
+	-- and fix it.
+	local restoredGamepad = settings.Gamepad
+	if typeof(restoredGamepad) == "table" then
+		local raw = restoredGamepad :: { [string]: any }
+		local bounds = Constants.Settings.Gamepad.Bounds
+		local function boolean(key: string, fallback: boolean): boolean
+			return if typeof(raw[key]) == "boolean" then raw[key] else fallback
+		end
+		local function number(key: string, fallback: number, min: number, max: number): number
+			local value = raw[key]
+			-- `value ~= value` is the NaN test -- see SettingsSystem.handleUpdateGamepad.
+			if typeof(value) ~= "number" or value ~= value then
+				return fallback
+			end
+			return math.clamp(value, min, max)
+		end
+		gamepadSettings = {
+			LookSensitivity = number(
+				"LookSensitivity",
+				gamepadSettings.LookSensitivity,
+				bounds.LookSensitivity.Min,
+				bounds.LookSensitivity.Max
+			),
+			MoveDeadzone = number(
+				"MoveDeadzone",
+				gamepadSettings.MoveDeadzone,
+				bounds.Deadzone.Min,
+				bounds.Deadzone.Max
+			),
+			LookDeadzone = number(
+				"LookDeadzone",
+				gamepadSettings.LookDeadzone,
+				bounds.Deadzone.Min,
+				bounds.Deadzone.Max
+			),
+			InvertLookY = boolean("InvertLookY", gamepadSettings.InvertLookY),
+			Vibration = boolean("Vibration", gamepadSettings.Vibration),
+		}
+	end
+	applyGamepadSettings()
 
 	logger:info("Settings restored", {
 		autorun = autorunEnabled,
@@ -273,6 +358,14 @@ function SettingsClient.Start(handle: SettingsHandle, chrome: Chrome.ChromeHandl
 	handle.GamepadBindings:set(KeybindManager.GetAllGamepad())
 	handle.Autorun:set(autorunEnabled)
 	handle.Parkour:set(table.clone(parkourSettings))
+	-- Comfort WAS MISSING from this seed, which was a live bug of the same family as the dropped
+	-- VehicleCameraMotion in RestoreSettings above: the screen seeds its own Comfort Value to all-false
+	-- and nothing ever wrote the restored block into it, so every camera-comfort row rendered as OFF
+	-- until the player toggled it -- at which point the row jumped to the real value. The settings were
+	-- being applied correctly the whole time (applyComfortSettings reads the module's own table, not
+	-- the handle's), so this was purely a lying panel, which is the hardest version to notice.
+	handle.Comfort:set(table.clone(comfortSettings))
+	handle.Gamepad:set(table.clone(gamepadSettings))
 
 	local captureConnection: RBXScriptConnection? = nil
 	-- The capture's own entry on Shell/Chrome.lua's Escape stack, pushed ABOVE the panel's. Escape
@@ -463,6 +556,29 @@ function SettingsClient.Start(handle: SettingsHandle, chrome: Chrome.ChromeHandl
 
 		local updateComfortRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateComfort)
 		updateComfortRemote:FireServer(field, enabled)
+	end)
+
+	-- Apply-then-persist, same order and same reasoning as ComfortToggled directly above. Split into
+	-- two handlers rather than one taking `any` so each stays type-checked; the server re-validates
+	-- both the field name and the value regardless of what is sent, and CLAMPS the numeric ones --
+	-- see SettingsSystem's GAMEPAD_SETTING_TYPES and its handler's own note on why clamping beats
+	-- rejecting for a value the client has already applied locally.
+	handle.GamepadNumberChanged:Connect(function(field: string, value: number)
+		(gamepadSettings :: { [string]: any })[field] = value
+		handle.Gamepad:set(table.clone(gamepadSettings))
+		applyGamepadSettings()
+
+		local updateGamepadRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateGamepad)
+		updateGamepadRemote:FireServer(field, value)
+	end)
+
+	handle.GamepadToggled:Connect(function(field: string, enabled: boolean)
+		(gamepadSettings :: { [string]: any })[field] = enabled
+		handle.Gamepad:set(table.clone(gamepadSettings))
+		applyGamepadSettings()
+
+		local updateGamepadRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateGamepad)
+		updateGamepadRemote:FireServer(field, enabled)
 	end)
 
 	handle.SprintModeChanged:Connect(function(mode: Types.SprintMode)
