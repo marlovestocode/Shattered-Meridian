@@ -287,6 +287,11 @@ end
 -- adding a dedicated "am I an admin" remote, same reasoning as DevMenuClient.
 -- requestServerAuthorization.
 local function requestServerAuthorization(): (boolean, { MoveTypes.MoveDefinition }?)
+	-- The remote is resolved INSIDE the pcall on purpose, so this stays a bare pcall rather than
+	-- RemoteInvoker.Invoke: NetworkBridge.GetRemoteFunction asserts on a failed lookup, and hoisting
+	-- it out to pass a resolved RemoteFunction would move that assert outside the protected region --
+	-- turning a logged failure into a thrown one on the very path that decides whether this panel is
+	-- allowed to open at all.
 	local ok, resultOrError = pcall(function()
 		return NetworkBridge.GetRemoteFunction(Config.RemoteNames.ListMoves):InvokeServer()
 	end)
@@ -307,6 +312,11 @@ end
 -- Failure degrades to an empty list rather than blocking the editor from opening at all -- the
 -- Custom-move half of the screen should still work even if this one fetch has trouble.
 local function fetchDefaultMoves(): { MoveTypes.MoveDefinition }
+	-- The remote is resolved INSIDE the pcall on purpose, so this stays a bare pcall rather than
+	-- RemoteInvoker.Invoke: NetworkBridge.GetRemoteFunction asserts on a failed lookup, and hoisting
+	-- it out to pass a resolved RemoteFunction would move that assert outside the protected region --
+	-- turning a logged failure into a thrown one on the very path that decides whether this panel is
+	-- allowed to open at all.
 	local ok, resultOrError = pcall(function()
 		return NetworkBridge.GetRemoteFunction(Config.RemoteNames.ListDefaultMoves):InvokeServer()
 	end)
@@ -619,9 +629,7 @@ local function startMoveEditor(
 		-- Draft is about to be replaced by the new move, so an edit still sitting inside the current
 		-- one's debounce window has to land first or it is silently dropped -- see flushCurrentDraft.
 		flushCurrentDraft()
-		local ok, resultOrError = pcall(function()
-			return updateDraftRemote:InvokeServer(encodeDraftForWire(defaultDraft()))
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(updateDraftRemote, encodeDraftForWire(defaultDraft()))
 		if not ok then
 			handle.StatusText:set("Failed to create move: request error")
 			return
@@ -664,9 +672,7 @@ local function startMoveEditor(
 				return
 			end
 		end
-		local ok, resultOrError = pcall(function()
-			return getMoveRemote:InvokeServer(moveId)
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(getMoveRemote, moveId)
 		if not ok then
 			handle.StatusText:set("Failed to load move: request error")
 			return
@@ -697,9 +703,7 @@ local function startMoveEditor(
 		cancelPendingDraftUpdate(moveId)
 		editState:Forget(moveId)
 		publishUnsavedCount(handle)
-		local ok, resultOrError = pcall(function()
-			return deleteMoveRemote:InvokeServer(moveId)
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(deleteMoveRemote, moveId)
 		if not ok then
 			handle.StatusText:set("Failed to delete move: request error")
 			return
@@ -941,9 +945,7 @@ local function startMoveEditor(
 		if not currentDraft or currentDraft.Category ~= MoveTypes.DefaultCategory then
 			return
 		end
-		local ok, resultOrError = pcall(function()
-			return resetDefaultMoveRemote:InvokeServer(currentDraft.MoveId)
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(resetDefaultMoveRemote, currentDraft.MoveId)
 		if not ok then
 			handle.StatusText:set("Failed to reset: request error")
 			return
@@ -1044,9 +1046,7 @@ local function startMoveEditor(
 		-- underscore convention belongs to MoveId, which is server-stamped and never authored here.
 		copy.DisplayName = source.DisplayName .. " Copy"
 
-		local ok, resultOrError = pcall(function()
-			return updateDraftRemote:InvokeServer(encodeDraftForWire(copy))
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(updateDraftRemote, encodeDraftForWire(copy))
 		if not ok then
 			handle.StatusText:set("Failed to duplicate: request error")
 			return

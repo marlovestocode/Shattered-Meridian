@@ -46,6 +46,7 @@ local KitEditorModule = require(script.Parent.Parent.Parent.UI.Screens.DevTools.
 local KitEditorTypes = require(script.Parent.Parent.Parent.UI.Screens.DevTools.KitEditor.Types)
 local KeybindManager = require(script.Parent.Parent.Parent.Input.KeybindManager)
 local Chrome = require(script.Parent.Parent.Parent.UI.Shell.Chrome)
+local RemoteInvoker = require(script.Parent.Parent.Parent.Network.RemoteInvoker)
 
 type KitEditorHandle = KitEditorModule.KitEditorHandle
 type KitDraft = KitEditorTypes.KitDraft
@@ -142,9 +143,7 @@ end
 -- gives for ListMoves.
 local function requestServerAuthorization(): (boolean, { RaceTraitTypes.RaceTraitDefinition }?)
 	local listRaceTraitsRemote = NetworkBridge.GetRemoteFunction(Config.RemoteNames.ListRaceTraits)
-	local ok, resultOrError = pcall(function()
-		return listRaceTraitsRemote:InvokeServer()
-	end)
+	local ok, resultOrError = RemoteInvoker.Invoke(listRaceTraitsRemote)
 	if not ok then
 		logger:debug("KitEditor authorization check errored", { errorMessage = tostring(resultOrError) })
 		return false, nil
@@ -161,6 +160,11 @@ end
 -- to an empty list rather than blocking the editor from opening -- the Race Trait half should still
 -- work even if this one fetch has trouble.
 local function fetchBloodlines(): { BloodlineTypes.BloodlineDefinition }
+	-- The remote is resolved INSIDE the pcall on purpose, so this stays a bare pcall rather than
+	-- RemoteInvoker.Invoke: NetworkBridge.GetRemoteFunction asserts on a failed lookup, and hoisting
+	-- it out to pass a resolved RemoteFunction would move that assert outside the protected region --
+	-- turning a logged failure into a thrown one on the very path that decides whether this panel is
+	-- allowed to open at all.
 	local ok, resultOrError = pcall(function()
 		return NetworkBridge.GetRemoteFunction(Config.RemoteNames.ListBloodlines):InvokeServer()
 	end)
@@ -247,9 +251,7 @@ local function startKitEditor(
 
 	handle.NewRaceTraitRequested:Connect(function()
 		cancelPendingUpdate()
-		local ok, resultOrError = pcall(function()
-			return updateRaceTraitDraftRemote:InvokeServer(defaultRaceTrait())
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(updateRaceTraitDraftRemote, defaultRaceTrait())
 		if not ok then
 			handle.StatusText:set("Failed to create trait: request error")
 			return
@@ -269,9 +271,7 @@ local function startKitEditor(
 
 	handle.NewBloodlineRequested:Connect(function()
 		cancelPendingUpdate()
-		local ok, resultOrError = pcall(function()
-			return updateBloodlineDraftRemote:InvokeServer(defaultBloodline())
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(updateBloodlineDraftRemote, defaultBloodline())
 		if not ok then
 			handle.StatusText:set("Failed to create bloodline: request error")
 			return
@@ -291,9 +291,7 @@ local function startKitEditor(
 
 	handle.SelectRaceTraitRequested:Connect(function(traitId: string)
 		flushPendingUpdate()
-		local ok, resultOrError = pcall(function()
-			return getRaceTraitRemote:InvokeServer(traitId)
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(getRaceTraitRemote, traitId)
 		if not ok then
 			handle.StatusText:set("Failed to load trait: request error")
 			return
@@ -309,9 +307,7 @@ local function startKitEditor(
 
 	handle.SelectBloodlineRequested:Connect(function(bloodlineId: string)
 		flushPendingUpdate()
-		local ok, resultOrError = pcall(function()
-			return getBloodlineRemote:InvokeServer(bloodlineId)
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(getBloodlineRemote, bloodlineId)
 		if not ok then
 			handle.StatusText:set("Failed to load bloodline: request error")
 			return
@@ -330,9 +326,7 @@ local function startKitEditor(
 		if currentDraft and currentDraft.Kind == "RaceTrait" and currentDraft.Trait.TraitId == traitId then
 			cancelPendingUpdate()
 		end
-		local ok, resultOrError = pcall(function()
-			return deleteRaceTraitRemote:InvokeServer(traitId)
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(deleteRaceTraitRemote, traitId)
 		if not ok then
 			handle.StatusText:set("Failed to delete trait: request error")
 			return
@@ -357,9 +351,7 @@ local function startKitEditor(
 		if currentDraft and currentDraft.Kind == "Bloodline" and currentDraft.Bloodline.BloodlineId == bloodlineId then
 			cancelPendingUpdate()
 		end
-		local ok, resultOrError = pcall(function()
-			return deleteBloodlineRemote:InvokeServer(bloodlineId)
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(deleteBloodlineRemote, bloodlineId)
 		if not ok then
 			handle.StatusText:set("Failed to delete bloodline: request error")
 			return

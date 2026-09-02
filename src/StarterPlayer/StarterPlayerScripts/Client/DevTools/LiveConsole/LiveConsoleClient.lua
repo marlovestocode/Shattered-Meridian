@@ -56,6 +56,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local LiveConsoleModule = require(script.Parent.Parent.Parent.UI.Screens.DevTools.LiveConsole)
 local KeybindManager = require(script.Parent.Parent.Parent.Input.KeybindManager)
 local Chrome = require(script.Parent.Parent.Parent.UI.Shell.Chrome)
+local RemoteInvoker = require(script.Parent.Parent.Parent.Network.RemoteInvoker)
 
 type LiveConsoleHandle = LiveConsoleModule.LiveConsoleHandle
 
@@ -115,9 +116,9 @@ end
 
 local function subscribe(handle: LiveConsoleHandle): ()
 	local subscribeRemote = NetworkBridge.GetRemoteFunction(Config.RemoteNames.Subscribe)
-	local ok, result = pcall(function()
-		return subscribeRemote:InvokeServer() :: Types.LiveConsoleSubscribeResult
-	end)
+	-- Annotated on the local rather than cast inside the invoke, which is where the cast used to sit:
+	-- RemoteInvoker.Invoke is generic over its result pack, so the shape is declared once here instead.
+	local ok, result: Types.LiveConsoleSubscribeResult = RemoteInvoker.Invoke(subscribeRemote)
 	if not ok then
 		logger:warn("Subscribe invoke failed", { errorMessage = tostring(result) })
 		handle.StatusText:set("Failed to reach the server.")

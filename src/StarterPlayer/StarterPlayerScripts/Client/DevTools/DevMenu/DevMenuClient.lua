@@ -232,9 +232,7 @@ local function fetchReports(handle: DevMenuHandle, cursorMode: string): ()
 	handle.Content.ReportsLoading:set(true)
 
 	local listRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.ListBugReports)
-	local ok, resultOrError = pcall(function()
-		return listRemote:InvokeServer(cursorMode)
-	end)
+	local ok, resultOrError = RemoteInvoker.Invoke(listRemote, cursorMode)
 
 	handle.Content.ReportsLoading:set(false)
 
@@ -488,20 +486,19 @@ end
 -- almost verbatim between the dummy-spawn and bot-spawn handlers below before this was extracted.
 -- `invoke` performs the actual RemoteFunction call (each caller controls its own remote/arguments);
 -- `describe` turns whatever it returns (or the pcall error) into the status string to display.
+-- The invoke -> describe -> set-status shape, which is Client/Network/RemoteInvoker.CallAndReport's
+-- with two things bolted on that are this screen's own: the "Spawning..." pre-status every action
+-- here shows while it waits, and setStatus's own auto-clear timer.
+--
+-- CallAndReport rather than InvokeAndReport because every call site below builds a CLOSURE, and most
+-- of them resolve their remote inside it -- NetworkBridge.GetRemoteFunction asserts on a failed
+-- lookup, so hoisting that out to pass a RemoteFunction would move the assert outside the protected
+-- region. All thirty-nine call sites are unchanged.
 local function invokeAndReport(handle: DevMenuHandle, invoke: () -> unknown, describe: (unknown) -> string): ()
 	handle.StatusText:set("Spawning...")
-
-	local ok, resultOrError = pcall(invoke)
-
-	local message: string
-	if not ok then
-		logger:error("Dev menu request errored", { errorMessage = tostring(resultOrError) })
-		message = "Failed: request error"
-	else
-		message = describe(resultOrError)
-	end
-
-	setStatus(handle, message)
+	RemoteInvoker.CallAndReport(function(message: string)
+		setStatus(handle, message)
+	end, "DevMenu", invoke, describe)
 end
 
 -- Asks the SERVER whether this client may run the dev menu, replacing a former local read of
@@ -519,6 +516,11 @@ end
 -- called synchronously partway through Main.client.lua's boot sequence, and blocking here would
 -- stall every client module after it for every player in the game.
 local function requestServerAuthorization(): boolean
+	-- The remote is resolved INSIDE the pcall on purpose, so this stays a bare pcall rather than
+	-- RemoteInvoker.Invoke: NetworkBridge.GetRemoteFunction asserts on a failed lookup, and hoisting
+	-- it out to pass a resolved RemoteFunction would move that assert outside the protected region --
+	-- turning a logged failure into a thrown one on the very path that decides whether this panel is
+	-- allowed to open at all.
 	local ok, resultOrError = pcall(function()
 		return NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.GetSidebarStats):InvokeServer()
 	end)
@@ -945,9 +947,7 @@ local function startDevMenu(handle: DevMenuHandle, chrome: Chrome.ChromeHandle):
 	local function fetchSidebarStats(): ()
 		local getSidebarStatsRemote =
 			NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.GetSidebarStats)
-		local ok, resultOrError = pcall(function()
-			return getSidebarStatsRemote:InvokeServer()
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(getSidebarStatsRemote)
 
 		if not ok then
 			logger:error("GetSidebarStats request errored", { errorMessage = tostring(resultOrError) })
@@ -979,9 +979,7 @@ local function startDevMenu(handle: DevMenuHandle, chrome: Chrome.ChromeHandle):
 	local function fetchServerVersionInfo(): ()
 		local getServerVersionInfoRemote =
 			NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.GetServerVersionInfo)
-		local ok, resultOrError = pcall(function()
-			return getServerVersionInfoRemote:InvokeServer()
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(getServerVersionInfoRemote)
 
 		if not ok then
 			logger:error("GetServerVersionInfo request errored", { errorMessage = tostring(resultOrError) })
@@ -1016,9 +1014,7 @@ local function startDevMenu(handle: DevMenuHandle, chrome: Chrome.ChromeHandle):
 	-- server where a previous admin already turned it on.
 	local function fetchHitboxDebug(): ()
 		local getHitboxDebugRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.GetHitboxDebug)
-		local ok, resultOrError = pcall(function()
-			return getHitboxDebugRemote:InvokeServer()
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(getHitboxDebugRemote)
 
 		if not ok then
 			logger:error("GetHitboxDebug request errored", { errorMessage = tostring(resultOrError) })
@@ -1043,9 +1039,7 @@ local function startDevMenu(handle: DevMenuHandle, chrome: Chrome.ChromeHandle):
 	local function fetchDebugDummyState(): ()
 		local getDebugDummyStateRemote =
 			NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.GetDebugDummyState)
-		local ok, resultOrError = pcall(function()
-			return getDebugDummyStateRemote:InvokeServer()
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(getDebugDummyStateRemote)
 
 		if not ok then
 			logger:error("GetDebugDummyState request errored", { errorMessage = tostring(resultOrError) })
@@ -1079,9 +1073,7 @@ local function startDevMenu(handle: DevMenuHandle, chrome: Chrome.ChromeHandle):
 		sidebar.PlayersLoading:set(true)
 
 		local listPlayersRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.ListPlayers)
-		local ok, resultOrError = pcall(function()
-			return listPlayersRemote:InvokeServer()
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(listPlayersRemote)
 
 		sidebar.PlayersLoading:set(false)
 
@@ -1222,9 +1214,7 @@ local function startDevMenu(handle: DevMenuHandle, chrome: Chrome.ChromeHandle):
 	-- currently selected).
 	task.spawn(function()
 		local listRemote = NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.ListFlightTuning)
-		local ok, resultOrError = pcall(function()
-			return listRemote:InvokeServer()
-		end)
+		local ok, resultOrError = RemoteInvoker.Invoke(listRemote)
 		if not ok then
 			logger:error("ListFlightTuning request errored", { errorMessage = tostring(resultOrError) })
 			return
