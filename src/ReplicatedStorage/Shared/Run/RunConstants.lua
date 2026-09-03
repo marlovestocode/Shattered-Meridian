@@ -2,21 +2,31 @@
 --[[
 	RunConstants.lua
 
-	Owns: the run's NUMBERS -- the stage ladder itself, what each stage is worth, how long it takes to
-	earn, and the conditions under which the charge that earns it builds, holds or bleeds away.
+	Owns: the whole run -- both its NUMBERS (the stage ladder itself, what each stage is worth, how
+	long it takes to earn, and the conditions under which the charge that earns it builds, holds or
+	bleeds away) and its PRESENTATION (Footsteps/StageOnset/Animation, at the bottom of this file).
 
-	THE SPLIT, because there are now three tables with "run" in the name and they are not
-	interchangeable:
-	  * THIS FILE            -- what the run IS. Stage speeds, charge thresholds, hysteresis, decay.
-	                            Read by Server/Systems/RunSystem.lua (the authority) and by
-	                            Shared/Run/RunLadder.lua (the pure resolver both sides share).
-	  * Constants.Run        -- what the run LOOKS AND SOUNDS like. Footstep cadence, per-stage step
-	                            sounds, the FOV pull, the onset kick. Client presentation only;
-	                            nothing in it decides when a stage changes.
+	THE SPLIT, which used to be a three-way one and is now two:
+	  * THIS FILE            -- what the run IS, and what it looks and sounds like. Stage speeds,
+	                            charge thresholds, hysteresis and decay, read by
+	                            Server/Systems/RunSystem.lua (the authority) and Shared/Run/
+	                            RunLadder.lua (the pure resolver both sides share); plus footstep
+	                            cadence, per-stage step sounds, the FOV pull and the onset kick, read
+	                            by Client/Movement/RunController.lua and Client/FX/RunAudio.lua.
+	                            The presentation half decides nothing -- it only reacts to the stage
+	                            the server already resolved -- but it is keyed by the same ladder,
+	                            which is why it moved in from Constants.Run rather than staying a
+	                            file away from the array it indexes.
 	  * ParkourConstants.Locomotion -- what the parkour framework BELIEVES about ground speed, for its
 	                            own entry gates and its debug readout. Mirrors of the tiers below, and
 	                            deliberately informational: see MotorCommand.DesiredSpeed's header.
 	A number that decides a WalkSpeed belongs here and only here.
+
+	Constants.Run is now a re-export of this module, so existing Constants.Run.Footsteps/StageOnset/
+	Animation call sites keep working; new code should require this module directly. That re-export
+	widens Constants.Run from the presentation tables alone to this whole file -- nothing reads it
+	wholesale (all seventeen call sites go through one of those three keys), but a future one that
+	iterated it would now walk the ladder too.
 
 	SEPARATE FROM Constants.Combat ON PURPOSE. The sprint tier used to live in Constants.Combat
 	(SprintSpeedMultiplier, SprintStage2*) because the combat monolith owned WalkSpeed. It no longer
@@ -27,7 +37,7 @@
 	documents, rather than by sharing a table with it.
 
 	Does not own: when a stage actually changes (RunLadder.lua resolves it, RunSystem.lua drives it),
-	what a stage looks like (Constants.Run), or anything about parkour traversals.
+	or anything about parkour traversals.
 ]]
 
 local RunConstants = {}
@@ -75,7 +85,7 @@ export type StageDefinition = {
 -- "at full stride" at a glance; a rung between them that most of a run never reached bought a
 -- distinction nobody could name mid-traversal, and cost a third set of presentation assets to say it
 -- with. Everything downstream reads this array, so removing it was this entry plus its keyed entries
--- in Constants.Run (Footsteps.Stages[3], StageOnset[3], Animation.PlaybackSpeeds[3]) and its animation
+-- below (Footsteps.Stages[3], StageOnset[3], Animation.PlaybackSpeeds[3]) and its animation
 -- slot in CombatConstants.AnimationIds -- no resolver, System or controller changed.
 --
 -- The one interruption that deliberately does NOT break the charge is a parkour action (see
@@ -195,5 +205,171 @@ for _, stage in stages do
 	end
 end
 RunConstants.MaxChargeSeconds = maxCharge
+
+-- THE RUN SYSTEM'S PRESENTATION TABLE -- everything about how running LOOKS and SOUNDS, in one
+-- place, so retuning the run never means grepping three client modules.
+--
+-- The run is a three-stage sustained sprint (the Stages ladder above -- THAT array, not these three
+-- tables, is the single source of truth for each stage's threshold and speed). Stage 1 is the
+-- ordinary sprint that has always existed; stages 2 and 3 each engage after their own ChargeSeconds
+-- of unbroken running and are genuinely different gears -- a bigger WalkSpeed multiplier, their own
+-- animation, their own footstep sound, a deeper FOV pull and a one-shot "kick" at the moment they
+-- engage. The STAGE ITSELF is resolved server-side (Server/Systems/RunSystem.lua, via
+-- Shared/Run/RunLadder.lua) and published on the Humanoid as Constants.Attributes.SprintStage;
+-- nothing in these three tables decides when a stage changes, only what the client does about it.
+--
+-- Owned by Client/Movement/RunController.lua (the presentation driver) and Client/FX/RunAudio.lua
+-- (the sound registrations). Moved here from Constants.Run, which is now a re-export of this
+-- module. The reason its old header gave for living in Constants.lua -- that RunAudio's definitions
+-- need Constants' own SoundDefinition type -- is exactly what the move had to give up: see the note
+-- on Footsteps.Stages[1].Sound below. What it buys is that a stage now has ONE home, instead of its
+-- threshold and speed living here while its sound, animation and FOV pull lived a file away.
+-- FOOTSTEPS. There is no footstep audio in the base game (Roblox's own stock "Running" sound is a
+-- single looped scuff, not a step cadence), so this is a real system rather than a re-skin: the
+-- run controller re-derives a step interval every frame from live planar speed and fires a
+-- one-shot per footfall.
+--
+-- Interval-driven rather than animation-marker-driven on purpose. A marker-driven step
+-- (GetMarkerReachedSignal) is only as reliable as the authored markers in whatever clip is
+-- currently playing, and this system has to keep working through a placeholder-id stage-2 clip, a
+-- combat action silencing the run loop, and the parkour framework taking the body over mid-stride.
+-- Speed-scaled intervals need nothing from the asset and degrade to "slightly wrong cadence"
+-- instead of "no footsteps at all."
+RunConstants.Footsteps = {
+	-- Master switch. False silences the whole footstep layer (the run keeps every other cue).
+	Enabled = true,
+	-- Whether to mute Roblox's own stock "Running" Sound on the character (the looped scuff the
+	-- default RbxCharacterSounds script plays out of HumanoidRootPart). On by default because
+	-- leaving it audible under real footsteps reads as two unrelated surfaces at once. Muted per
+	-- life via Volume = 0 rather than destroyed -- the default script owns that Instance, and
+	-- deleting something another script expects to exist is how you get a stream of errors from
+	-- code you don't own.
+	SilenceDefaultRunSound = true,
+
+	-- Hard bounds on the scaled interval. The lower bound is what stops a momentum-carry burst
+	-- from turning the cadence into a machine-gun; the upper bound stops a near-stopped player
+	-- from taking one step every two seconds before the run states drop out entirely.
+	MinIntervalSeconds = 0.15,
+	MaxIntervalSeconds = 0.6,
+
+	-- ONE STEP SOUND, PITCHED UP PER STAGE. Only stage 1 carries a Sound -- every other stage reuses
+	-- that same registered instance and just plays it faster (PlaybackSpeedMultiplier), rather than
+	-- registering a second/third asset that was, until this simplification, an identical sample at a
+	-- louder volume anyway (see the removed stage-2/3 notes this replaced). A faster gear sounding
+	-- like the same stride playing quicker is closer to how a real footfall actually changes than a
+	-- separate louder recording ever was. Point Stage 1's Sound at whatever asset you want -- this is
+	-- the one place step audio is configured, and Client/FX/RunAudio.SetStepSound can additionally
+	-- swap it at runtime without a restart. An empty SoundId is the codebase's standard "not authored
+	-- yet" placeholder: SoundManager.Play already no-ops on it, so shipping with one costs a debug
+	-- log and nothing else.
+	--
+	-- PoolSize 3 because a footstep genuinely can re-trigger before the previous one finishes at
+	-- stage-2 cadence -- the same overlap reasoning Constants.Combat.Sound's hit/block/parry trio
+	-- documents. PitchJitter randomizes each play's PlaybackSpeed by +/- that fraction ON TOP OF
+	-- PlaybackSpeedMultiplier, which is the cheapest possible fix for the "identical sample on a
+	-- metronome" effect a fixed-interval step system otherwise has.
+	-- KEYED BY STAGE ID, not one flat field per stage. The ladder in Shared/Run/RunConstants.lua is
+	-- an array precisely so a fourth gear is one entry; this table has to be able to grow the same
+	-- way, or "add a stage" is a data change on the server and a code change on the client. Every
+	-- reader (Client/FX/RunAudio.lua's registration sweep, Client/Movement/RunController.lua's
+	-- cadence) iterates or indexes this table rather than naming StageN, and all of them fall back
+	-- to stage 1 for a stage with no entry -- so a ladder that grows before its assets do degrades
+	-- to "the new gear sounds like the old one" instead of going silent.
+	--
+	-- ReferenceSpeed is the speed that stage's StepIntervalSeconds was authored FOR. The live
+	-- interval is scaled by ReferenceSpeed / currentSpeed, so a player slowed to a crawl takes
+	-- slower steps and a downhill momentum carry takes faster ones, without any stage needing its
+	-- own curve.
+	Stages = {
+		[1] = {
+			StepIntervalSeconds = 0.33,
+			ReferenceSpeed = 32,
+			PitchJitter = 0.07,
+			-- Sliced out of the combined asset: the first second is a speed whoosh this system no
+			-- longer plays (StageOnset below is a pure camera cue now, not audio) and the second
+			-- after it is a RUN of several steps. The region here is ONE step's worth out of that
+			-- run, not the whole second -- a slice containing four footfalls, retriggered every
+			-- 0.33s, would layer four-step bursts on top of each other rather than producing a
+			-- stride.
+			--
+			-- 1.0 -> 1.25 is a first-pass slice; nudge the start by ear until it lands right on a
+			-- step transient (a start slightly BEFORE the transient just adds a hair of silence,
+			-- which is harmless -- starting slightly after clips the attack, which is what makes a
+			-- footstep sound soft and wrong).
+			-- Shape matches Constants.SoundDefinition (SoundId/Volume/PoolSize?/PlaybackRegion?) and is
+			-- read as one by RunAudio.SetStepSound, but carries no `:: SoundDefinition` annotation. That
+			-- type is exported from Constants.lua, and Constants.Run re-exports THIS module -- importing
+			-- it back to annotate one table would close a require cycle. ParkourConstants.Dash.Sound
+			-- already makes the same call for the same reason (keeping that file free of requires); the
+			-- consumer's own parameter type is what still checks the shape.
+			Sound = {
+				SoundId = "rbxassetid://76038309546970",
+				Volume = 0.35,
+				PoolSize = 3,
+				PlaybackRegion = NumberRange.new(1.0, 1.25),
+			},
+		},
+		[2] = {
+			StepIntervalSeconds = 0.25,
+			ReferenceSpeed = 48,
+			PitchJitter = 0.07,
+			-- No Sound of its own -- stage 1's is reused and pitched up by this factor instead (see
+			-- Footsteps' own header above). First-pass number: nudge by ear, the same discipline
+			-- stage 1's PlaybackRegion slice used before it was tuned in.
+			PlaybackSpeedMultiplier = 1.15,
+		},
+	},
+}
+
+-- THE ONSET KICK -- a pure camera cue now, keyed by the stage being ENTERED: the extra FOV pull
+-- that sells a gear change at the instant it engages. Used to also carry a one-shot whoosh Sound;
+-- removed in favor of Footsteps.Stages' own PlaybackSpeedMultiplier selling the speed change through
+-- the footsteps themselves instead of a second cue competing with them. FOVDelta/FOVEaseSpeed are
+-- unchanged by that removal -- RunController reads them exactly as before.
+--
+-- Stage 1 has no entry and deliberately so: engaging the run at all is not a gear CHANGE, it is the
+-- run starting, and it already has the run animation and the footstep cadence to announce it. A
+-- pull there would fire every time a player tapped the key.
+--
+-- FOVDelta is the additional pull layered on top of Constants.Camera.Sprint.FOVDelta while that
+-- stage is held (Client/FX/FOVOffset.lua's named-slot composition, so it stacks with the sprint
+-- slot rather than fighting it). Negative = narrower, matching Sprint's own convention. These are
+-- ABSOLUTE per stage, not cumulative -- RunController writes one slot and simply changes its target
+-- as the stage changes, so a ladder carrying several entries here never accumulates their pulls.
+RunConstants.StageOnset = {
+	-- The ladder's only gear change, so this is the whole camera language of "you are at full stride":
+	-- a player who cannot tell which gear they are in has a ladder with no feedback, which is the same
+	-- as no ladder. Sized while a third gear still sat above it and took the unmistakable pull for
+	-- itself -- worth a second pass by eye now that this IS the top.
+	[2] = {
+		FOVDelta = -5,
+		FOVEaseSpeed = 4,
+	},
+}
+
+-- ANIMATION. Stage 1 keeps Constants.Combat.AnimationIds.Running (the clip that has always played
+-- while sprinting); stage 2 plays RunningStage2 when authored, and falls through to Running when its
+-- own id is blank -- the same blank-id fallthrough ParkourAnimator uses for its half-authored
+-- directional wall-jump pair, so this ships correctly at every stage of authoring.
+RunConstants.Animation = {
+	-- Playback speed for the run loop, keyed by stage. Applied on stage CHANGE only, never per
+	-- frame: CombatAnimator.FreezeActiveCombatTrack (hit-stop) drives the same property, and a
+	-- per-frame write here would silently cancel every freeze that landed on a running player.
+	--
+	-- Also the fallback that makes an unauthored stage still feel distinct: while a stage's own clip is
+	-- blank it plays the stage below's at this rate instead -- see AnimationIds.RunningStage2's own
+	-- header. Retune toward 1 once a real clip lands there, or it will read as sped-up/cartoonish
+	-- rather than a distinct gear.
+	PlaybackSpeeds = {
+		[1] = 1,
+		-- Slightly hot even when a dedicated stage-2 clip exists -- a full-stride run reads as
+		-- urgent, and this is what makes stage 2 visibly different on day one.
+		[2] = 1.25,
+	},
+	-- Crossfade between the two run clips at a stage change. Longer than a combat interrupt cut
+	-- (the two clips are the same character doing the same thing harder, so the transition should
+	-- read as accelerating, not as swapping costumes) and shorter than a settle.
+	StageCrossfadeSeconds = 0.2,
+}
 
 return RunConstants
