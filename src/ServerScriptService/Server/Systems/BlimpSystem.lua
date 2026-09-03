@@ -48,23 +48,18 @@
 	below is the only Instance touch in that whole path -- see its own comment on why the probe excludes
 	every player's character, not just the hull).
 
-	WHY A MOUNT IS A WELD AND NOT A CONSTRAINT PAIR, unlike GrabSystem's hold immediately next door. A
-	grab drags a body toward a moving fist and wants the softness an AlignPosition gives it. A mount is
-	the opposite claim: this body IS part of that hull now, exactly here, and any softness at all reads as
-	the player's feet skating on the deck. A Weld with an authored C0 also lands the body on its mark on
-	the first frame with no pre-positioning race -- which matters, because CFrame-writing a character from
-	the server before its ownership has actually changed hands is the exact failure GrabSystem's own
-	header spends a paragraph on. It is the same technique Roblox's own Seat uses, for the same reason.
+	THE PHYSICAL HALF OF A MOUNT IS NOT IN THIS FILE. Server/Vessel/VesselMount.lua owns the station
+	prompt, the server-side reach re-check, the movement lock, the weld, and the ordered release --
+	everything that is about BODIES AND WELDS rather than about airships. Read its header for why a mount
+	is a weld and not a constraint pair (unlike GrabSystem's hold immediately next door), which three
+	seams the movement lock reuses, and why settling a released body before waking its Humanoid and
+	before handing ownership back is the entire fix for "everybody who steps off a moving blimp flies
+	away".
 
-	THE MOVEMENT LOCK REUSES TWO EXISTING SEAMS AND ADDS ONE, exactly as GrabSystem's did:
-	  * Constants.Attributes.RootControlLocked -- already read generically by ParkourController's
-	    resolveCombatOwned as "something else owns this body". Parks client-side parkour for free.
-	  * Humanoid.PlatformStand -- suspends the Humanoid's own ground movement so a welded body behaves as
-	    part of the hull instead of trying to walk on it.
-	  * Constants.Attributes.Mounted -- NEW, and a separate Attribute rather than a widened meaning for
-	    RootControlLocked for the reason that Attribute's own comment gives: in this codebase
-	    RootControlLocked has never carried WalkSpeed-zeroing semantics, a dedicated Attribute always
-	    does that job. Added to RunSystem.isMovementLocked's existing tier list, nowhere else.
+	What stayed here is everything that is about a BLIMP: ringing the telegraph down when the last person
+	steps off, whether an armed autopilot survives the pilot, cutting the exhaust, and pushing a new
+	pilot their first fuel snapshot. Those are four beats a shared mount primitive would have had to take
+	as four callbacks, which is a worse way of writing the same code in a further-away file.
 
 	EVERY RELEASE PATH ENDS IN ONE FUNCTION. Dismount is reached by the request remote, by death, by
 	disconnect, by the character being removed, by the model being untagged or destroyed, and by the stale
@@ -75,9 +70,10 @@
 	Does not own: the flight arithmetic (Server/Blimp/BlimpDrive.lua), the mode machine and the
 	intent resolution (Server/Blimp/BlimpFlightMode.lua), the telegraph's own rungs and clamping
 	(Shared/Blimp/BlimpSpeedLadder.lua), the welding and constraint rig
-	(Server/Blimp/BlimpAssembly.lua), the authoring contract (Shared/Blimp/BlimpConstants.lua), tag
-	resolution (Shared/Blimp/BlimpTagging.lua), or the arm pose -- which cannot live here at all, because
-	Motor6D.Transform does not replicate (Shared/Blimp/BlimpArmPose.lua's header explains that in full).
+	(Server/Blimp/BlimpAssembly.lua), the mount mechanics (Server/Vessel/VesselMount.lua), the authoring
+	contract (Shared/Blimp/BlimpConstants.lua), tag resolution (Shared/Blimp/BlimpTagging.lua), or the
+	arm pose -- which cannot live here at all, because Motor6D.Transform does not replicate
+	(Shared/Vessel/VesselArmPose.lua's header explains that in full).
 ]]
 
 local CollectionService = game:GetService("CollectionService")
@@ -91,19 +87,19 @@ local BlimpSpeedLadder = require(ReplicatedStorage.Shared.Blimp.BlimpSpeedLadder
 local BlimpTagging = require(ReplicatedStorage.Shared.Blimp.BlimpTagging)
 local BlimpTypes = require(ReplicatedStorage.Shared.Blimp.BlimpTypes)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
-local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
+local VesselSafety = require(ReplicatedStorage.Shared.Vessel.VesselSafety)
 
 local BlimpAssembly = require(ServerScriptService.Server.Blimp.BlimpAssembly)
 local BlimpDrive = require(ServerScriptService.Server.Blimp.BlimpDrive)
 local BlimpFlightMode = require(ServerScriptService.Server.Blimp.BlimpFlightMode)
 local BlimpFuel = require(ServerScriptService.Server.Blimp.BlimpFuel)
-local BlimpSafety = require(ServerScriptService.Server.Blimp.BlimpSafety)
+local VesselMount = require(ServerScriptService.Server.Vessel.VesselMount)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local ResourceGatheringSystem = require(script.Parent.ResourceGatheringSystem)
@@ -196,7 +192,7 @@ type BlimpRecord = {
 	-- corner, a doorway), and a single TouchEnded must not clear contact while another part is still
 	-- touching them. Zero and non-existent are treated identically -- onHeartbeatTick's own consumer
 	-- skips both -- so this only ever holds players currently in genuine contact. See
-	-- Server/Blimp/BlimpSafety.lua's own header for what this exists to let onHeartbeatTick defend
+	-- Shared/Vessel/VesselSafety.lua's own header for what this exists to let onHeartbeatTick defend
 	-- against; onHullTouched/onHullTouchEnded below are the only writers.
 	Contacts: { [Player]: number },
 	-- Players released from THIS hull within the last ReleaseSettleSeconds, mapped to the os.clock()
@@ -211,12 +207,14 @@ type BlimpRecord = {
 
 type MountRecord = {
 	Player: Player,
-	Character: Model,
-	Humanoid: Humanoid,
-	Root: BasePart,
 	Blimp: BlimpRecord,
 	Station: StationRecord,
-	Weld: Weld,
+	-- The body, the Humanoid, the root and the weld -- everything the physical half of a mount consists
+	-- of, held as ONE value that Server/Vessel/VesselMount.lua produced and is the only thing allowed to
+	-- take apart. Kept whole rather than spread back out across four fields here on purpose: the four
+	-- have to be released together, in one specific order, and a record that lets this file reach for
+	-- `Root` on its own is one where a future edit can start doing half of a release by hand.
+	Binding: VesselMount.Binding,
 }
 
 -- One entry per registered blimp, and one per mounted player. Both are small (a map has a handful of
@@ -225,6 +223,16 @@ type MountRecord = {
 -- only its Model, and both have to reach the same teardown.
 local blimps: { [Model]: BlimpRecord } = {}
 local mounts: { [Player]: MountRecord } = {}
+
+-- This layer's binding of the shared mount primitive -- the prompt, the reach re-check, the movement
+-- lock, the weld and the ordered release. Bound here rather than in its own module (the way
+-- Shared/Blimp/BlimpSpeedLadder.lua is) because nothing outside this file mounts a blimp: a ladder has
+-- to be the SAME one on the server and on the client's gauge, and a mounter has exactly one call site.
+local mounter = VesselMount.New({
+	Scope = "Blimp",
+	Prompt = BlimpConstants.Prompt,
+	Mount = BlimpConstants.Mount,
+})
 
 local intentRateLimiter = RateLimiter.New(BlimpConstants.Network.MaxIntentPerSecond)
 local dismountRateLimiter = RateLimiter.New(BlimpConstants.Network.MaxDismountPerSecond)
@@ -386,43 +394,13 @@ local function setThrusting(blimp: BlimpRecord, thrusting: boolean): ()
 	end
 end
 
--- The ceiling a just-released (or just-separated) body's own speed is held to: whatever the HULL is
--- doing right now, plus the margin a self-propelled player could add to it. Read live rather than
--- cached because it is the whole point -- see BlimpConstants.Mount.ReleaseSpeedMargin on why an
+-- The ceiling a just-released (or just-separated) body's own speed is held to, for THIS hull: whatever
+-- it is doing right now, plus the margin a self-propelled player could add to it. One line over
+-- VesselMount's own, and it exists only so the two call sites below name a BlimpRecord rather than
+-- reaching through it for an assembly root -- see BlimpConstants.Mount.ReleaseSpeedMargin for why an
 -- absolute number is wrong at one end of the throttle or the other no matter where it is set.
 local function releaseSpeedCeiling(blimp: BlimpRecord): number
-	local hull = blimp.Assembly.Root
-	local hullSpeed = if hull.Parent then hull.AssemblyLinearVelocity.Magnitude else 0
-	return hullSpeed + BlimpConstants.Mount.ReleaseSpeedMargin
-end
-
--- Makes a body that has just stopped being part of a hull carry a velocity a PERSON could have, rather
--- than the one the assembly it was welded into happened to have at the moment it left. Two separate
--- corrections, and they fix two separate halves of the same report:
---
---   * THE SPIN, zeroed outright. A hull under way is rotating -- yawing through a turn, pitching as it
---     climbs -- and a separating assembly keeps the whole of that angular velocity, scaled by nothing.
---     A several-tonne airship's leisurely half-radian-per-second is a violent spin on a body the size of
---     a person, and Dismount's PlatformStand release then hands that spinning body to a Humanoid balance
---     controller that immediately fights it. That fight is the "flung across the map" half. Nobody has
---     ever wanted to inherit a ship's rotation by stepping off it, so there is no feel argument for
---     keeping any fraction of it.
---
---   * THE EXCESS SPEED, clamped -- but only the excess. The linear half is inherited ON PURPOSE (see
---     Dismount) and must stay inherited: a passenger who leaves a cruising hull at the hull's own speed
---     lands back on its deck and walks, whereas one zeroed (or clamped to some flat pedestrian number)
---     is instantly 130 studs/second slower than the deck they are standing over, and the deck sweeps
---     into them. The clamp therefore trims only what is ABOVE the ship's own speed, which is where the
---     illegitimate part lives: omega x r, the lever arm from the hull's centre of mass out to a station
---     the artist may have placed eighty studs down the gondola, is unbounded in a radius no constant in
---     this file knows about.
-local function applyReleaseVelocity(blimp: BlimpRecord, root: BasePart): ()
-	root.AssemblyAngularVelocity = Vector3.zero
-	local velocity = root.AssemblyLinearVelocity
-	local clamped = BlimpSafety.ClampSpeed(velocity, releaseSpeedCeiling(blimp))
-	if clamped ~= velocity then
-		root.AssemblyLinearVelocity = clamped
-	end
+	return mounter.ReleaseSpeedCeiling(blimp.Assembly.Root)
 end
 
 -- THE one release path -- see this file's header on why all six ways off a blimp end here. Safe to call
@@ -434,8 +412,6 @@ function BlimpSystem.Dismount(player: Player): ()
 		return
 	end
 	mounts[player] = nil
-
-	mount.Weld:Destroy()
 
 	local station = mount.Station
 	if station.Occupant == player then
@@ -483,38 +459,12 @@ function BlimpSystem.Dismount(player: Player): ()
 		end
 	end
 
-	-- THE BODY IS SETTLED BEFORE THE HUMANOID IS WOKEN AND BEFORE OWNERSHIP GOES BACK, and the order of
-	-- those three is the entire fix for "everybody who steps off a moving blimp flies away". A body that
-	-- was welded into the hull was a member of the HULL'S assembly; destroying the weld above made it its
-	-- own assembly, and Roblox seeds a newly separated assembly with the velocity the old one had at that
-	-- point -- BOTH components. See applyReleaseVelocity above for what each of them does if left alone.
-	local root = mount.Root
-	if root.Parent then
-		-- Lifted before ownership goes back, while the server can still place the body: a dismount from
-		-- inside the station part's own volume otherwise resolves as an intersection and flings them.
-		root.CFrame = root.CFrame + Vector3.new(0, BlimpConstants.Mount.ReleaseClearance, 0)
-		applyReleaseVelocity(blimp, root)
-		-- pcall-guarded the same way GrabSystem's own release is, since both throw on a part whose
-		-- assembly has stopped being groundable mid-teardown. LAST, so the state the client is handed to
-		-- start simulating from is the corrected one -- handing the body back first and correcting it
-		-- afterwards is a server write onto a body somebody else already owns, which is a fight, not a fix.
-		pcall(function()
-			root:SetNetworkOwnershipAuto()
-		end)
-	end
-
-	local humanoid = mount.Humanoid
-	if humanoid.Parent then
-		-- AFTER the velocity above. Clearing PlatformStand re-arms the Humanoid's balance controller, and
-		-- re-arming it on a body still carrying the hull's angular velocity is the canonical Roblox fling:
-		-- the controller applies its full stand-up torque against a spin it did not put there and the
-		-- solver converts the disagreement into linear speed.
-		humanoid.PlatformStand = false
-		-- nil rather than false, clearing the Attribute entirely -- the convention every sibling read in
-		-- RunSystem.isMovementLocked uses (`== true`), which treats absent and false identically.
-		humanoid:SetAttribute(Constants.Attributes.RootControlLocked, nil)
-		humanoid:SetAttribute(Constants.Attributes.Mounted, nil)
-	end
+	-- The whole physical release -- weld, clearance lift, separation velocity, ownership, movement lock --
+	-- in the one strict order Server/Vessel/VesselMount.Release owns. Read that function's own comment
+	-- for why settling the body BEFORE waking the Humanoid and BEFORE handing ownership back is the
+	-- entire fix for "everybody who steps off a moving blimp flies away", and why doing any of the three
+	-- out of order reproduces it.
+	mounter.Release(mount.Binding, blimp.Assembly.Root)
 
 	-- Armed even when the root above was already gone: the map is keyed by Player, expiry is by deadline,
 	-- and a stale entry for a body that no longer exists costs one skipped iteration. See
@@ -526,7 +476,7 @@ function BlimpSystem.Dismount(player: Player): ()
 	BlimpAssembly.RefreshForceLimits(blimp.Assembly)
 	BlimpAssembly.ClaimOwnership(blimp.Assembly)
 
-	broadcastMountChanged(mount.Character, false, nil, nil)
+	broadcastMountChanged(mount.Binding.Character, false, nil, nil)
 	-- Forced: the state may not have changed at all, but the AUDIENCE has -- see
 	-- pushHelmUpdatedIfChanged's own `force` comment. Sent AFTER mounts[player] was cleared, so the
 	-- player who just left is not among the recipients.
@@ -542,37 +492,14 @@ local function mount(player: Player, blimp: BlimpRecord, station: StationRecord)
 		return
 	end
 
-	local character, humanoid, root = CharacterUtil.LiveRig(player)
-	if not character or not humanoid or not root then
+	-- The whole physical mount -- the live-rig lookup, the server-side reach re-check, the movement lock
+	-- and the weld -- in Server/Vessel/VesselMount.Attach. nil means it did not happen (no live rig, or a
+	-- player who walked out of reach during the round trip); both are ordinary, neither is an error, and
+	-- nothing below this line has run yet, so there is nothing to unwind.
+	local binding = mounter.Attach(player, station.Part, station.StandOffset)
+	if not binding then
 		return
 	end
-
-	-- Re-checked server-side even though ProximityPrompt already enforces it client-side. The prompt's
-	-- own distance test runs on the triggering client, which makes it a UX affordance rather than a gate;
-	-- the slack factor is for the honest case of a player who stepped away during the round trip.
-	local reach = BlimpConstants.Prompt.MaxActivationDistance * 1.5
-	if (root.Position - station.Part.Position).Magnitude > reach then
-		logger:debug("Mount refused: out of reach", { player = player.Name, station = station.Part.Name })
-		return
-	end
-
-	humanoid.PlatformStand = true
-	humanoid:SetAttribute(Constants.Attributes.RootControlLocked, true)
-	humanoid:SetAttribute(Constants.Attributes.Mounted, true)
-
-	-- Anchored is checked rather than assumed: a character anchored by an admin freeze would otherwise
-	-- anchor the entire hull it is welded into, and the blimp would stop flying for everyone aboard.
-	root.Anchored = false
-
-	-- C0 carries the whole placement, so the body lands on its mark on the frame the weld is created --
-	-- no pre-positioning CFrame write, and therefore no race against ownership changing hands. See this
-	-- file's header.
-	local weld = Instance.new("Weld")
-	weld.Name = "BlimpMountWeld"
-	weld.Part0 = station.Part
-	weld.Part1 = root
-	weld.C0 = station.StandOffset
-	weld.Parent = root
 
 	station.Occupant = player
 	setPromptEnabled(station, false)
@@ -592,18 +519,15 @@ local function mount(player: Player, blimp: BlimpRecord, station: StationRecord)
 
 	mounts[player] = {
 		Player = player,
-		Character = character,
-		Humanoid = humanoid,
-		Root = root,
 		Blimp = blimp,
 		Station = station,
-		Weld = weld,
+		Binding = binding,
 	}
 
 	BlimpAssembly.RefreshForceLimits(blimp.Assembly)
 	BlimpAssembly.ClaimOwnership(blimp.Assembly)
 
-	broadcastMountChanged(character, true, station.Kind, station.Part)
+	broadcastMountChanged(binding.Character, true, station.Kind, station.Part)
 	-- Forced -- this client has never seen a snapshot for this hull, and waiting for the edge detector
 	-- would leave its panel blank until somebody else moved the telegraph.
 	pushHelmUpdatedIfChanged(blimp, true)
@@ -624,22 +548,6 @@ local function mount(player: Player, blimp: BlimpRecord, station: StationRecord)
 		pushFuelUpdated(blimp, player)
 	end
 	logger:info("Mounted", { player = player.Name, model = blimp.Model.Name, kind = station.Kind })
-end
-
-local function buildPrompt(station: BasePart, kind: BlimpTypes.StationKind): ProximityPrompt
-	local prompt = Instance.new("ProximityPrompt")
-	prompt.Name = BlimpConstants.Prompt.StationPromptName
-	prompt.ActionText = if kind == "Helm"
-		then BlimpConstants.Prompt.HelmActionText
-		else BlimpConstants.Prompt.HandholdActionText
-	prompt.ObjectText = if kind == "Helm"
-		then BlimpConstants.Prompt.HelmObjectText
-		else BlimpConstants.Prompt.HandholdObjectText
-	prompt.MaxActivationDistance = BlimpConstants.Prompt.MaxActivationDistance
-	prompt.HoldDuration = BlimpConstants.Prompt.HoldDuration
-	prompt.RequiresLineOfSight = BlimpConstants.Prompt.RequiresLineOfSight
-	prompt.Parent = station
-	return prompt
 end
 
 -- The load half. A tap, not a hold, same as the mount prompts above -- a deposit is now literally
@@ -876,7 +784,7 @@ local function unloadFuel(player: Player, blimp: BlimpRecord): ()
 end
 
 -- The "who" half of the fix for a player launched by holding a movement key into the hull -- see
--- BlimpSafety.ClampSpeed's own header for the "why" and onHeartbeatTick's own contact-clamp loop
+-- VesselSafety.ClampSpeed's own header for the "why" and onHeartbeatTick's own contact-clamp loop
 -- for the "when". `otherPart` is whatever touched the hull, which could be any limb of a rig, not
 -- just its HumanoidRootPart -- FindFirstAncestorOfClass("Model") walks up to the character either
 -- way, and a hull part or another blimp's hull touching this one resolves to a Model that owns no
@@ -925,9 +833,9 @@ end
 -- afterwards a full set of welds, an AlignPosition, an AlignOrientation and a live-looking set of
 -- prompts, none of which are connected to anything.
 --
--- Namespaced names, all four of them ours (BlimpAssembly.Build and buildPrompt/buildFuelPrompt/
--- buildUnloadPrompt are the only things in the game that create them), so this can never eat a
--- builder's own object.
+-- Namespaced names, all four of them ours (BlimpAssembly.Build, VesselMount.BuildStationPrompt and
+-- buildFuelPrompt/buildUnloadPrompt are the only things in the game that create them), so this can
+-- never eat a builder's own object.
 local OWNED_INSTANCE_NAMES: { [string]: boolean } = {
 	BlimpHullWeld = true,
 	BlimpDriveAnchor = true,
@@ -1130,7 +1038,7 @@ local function registerBlimp(model: Model): ()
 	end
 
 	for _, station in stations do
-		local prompt = trove:Add(buildPrompt(station.Part, station.Kind))
+		local prompt = trove:Add(mounter.BuildStationPrompt(station.Part, station.Kind))
 		local standOffset = if station.Part == helm and helmStandOffset
 			then helmStandOffset
 			else BlimpTagging.ResolveStandOffset(station.Part, model)
@@ -1225,7 +1133,7 @@ local function sendExistingMounts(player: Player): ()
 	end
 	for _, mountRecord in mounts do
 		local payload: BlimpTypes.MountChangedPayload = {
-			Character = mountRecord.Character,
+			Character = mountRecord.Binding.Character,
 			Active = true,
 			Kind = mountRecord.Station.Kind,
 			Station = mountRecord.Station.Part,
@@ -1332,11 +1240,11 @@ end
 -- BlimpConstants.Mount.StaleSweepSeconds.
 local function sweepStaleMounts(): ()
 	for player, mountRecord in mounts do
-		local stale = mountRecord.Character.Parent == nil
-			or mountRecord.Humanoid.Parent == nil
-			or mountRecord.Root.Parent == nil
+		local stale = mountRecord.Binding.Character.Parent == nil
+			or mountRecord.Binding.Humanoid.Parent == nil
+			or mountRecord.Binding.Root.Parent == nil
 			or mountRecord.Station.Part.Parent == nil
-			or mountRecord.Humanoid.Health <= 0
+			or mountRecord.Binding.Humanoid.Health <= 0
 			or not player.Parent
 		if stale then
 			logger:debug("Releasing a stale mount", { player = player.Name })
@@ -1500,7 +1408,7 @@ local function onHeartbeatTick(deltaTime: number): ()
 		blimp.Assembly.AlignPosition.Position = blimp.Drive.Target.Position
 		blimp.Assembly.AlignOrientation.CFrame = BlimpDrive.PresentationCFrame(blimp.Drive, blimp.Tuning)
 
-		-- Player-contact velocity safety net -- see BlimpSafety.ClampSpeed's own header for why this is
+		-- Player-contact velocity safety net -- see VesselSafety.ClampSpeed's own header for why this is
 		-- necessary at all and independent of everything above it in this loop: the hull's own Target
 		-- debt and AlignPosition.MaxVelocity bound the HULL's speed, but a character merely TOUCHING the
 		-- hull is a separate physics body that neither constraint reaches. Walked every tick rather than
@@ -1526,7 +1434,7 @@ local function onHeartbeatTick(deltaTime: number): ()
 				continue
 			end
 			local velocity = root.AssemblyLinearVelocity
-			local clamped = BlimpSafety.ClampSpeed(velocity, BlimpConstants.Safety.MaxContactSpeed)
+			local clamped = VesselSafety.ClampSpeed(velocity, BlimpConstants.Safety.MaxContactSpeed)
 			if clamped ~= velocity then
 				root.AssemblyLinearVelocity = clamped
 			end
@@ -1549,12 +1457,12 @@ local function onHeartbeatTick(deltaTime: number): ()
 			if not root then
 				continue
 			end
-			-- Linear only, unlike applyReleaseVelocity's one-shot at the moment of release. The spin a
-			-- body inherits FROM the hull is a single event and is already gone by here; re-zeroing every
+			-- Linear only, unlike VesselMount.ClampSeparatedBody's one-shot at the moment of release. The spin
+			-- a body inherits FROM the hull is a single event and is already gone by here; re-zeroing every
 			-- tick for three quarters of a second would instead be overwriting the player's own turning,
 			-- which by this point is theirs and not the ship's.
 			local velocity = root.AssemblyLinearVelocity
-			local clamped = BlimpSafety.ClampSpeed(velocity, releaseSpeedCeiling(blimp))
+			local clamped = VesselSafety.ClampSpeed(velocity, releaseSpeedCeiling(blimp))
 			if clamped ~= velocity then
 				root.AssemblyLinearVelocity = clamped
 			end

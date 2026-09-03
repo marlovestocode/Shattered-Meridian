@@ -94,6 +94,9 @@
 				},
 				"Vehicles": {
 					"$path": "src/ServerScriptService/Server/Vehicles"
+				},
+				"Vessel": {
+					"$path": "src/ServerScriptService/Server/Vessel"
 				}
 			},
 			"Tests": {

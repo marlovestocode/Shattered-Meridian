@@ -312,7 +312,7 @@ BlimpConstants.Physics = {
 	-- is never felt fighting it, while a MaxLeadStuds-sized (100 stud) debt closing at this ceiling takes
 	-- ~0.7s -- a firm but not violent catch-up, not a snap. This is still only the HULL's own ceiling, not
 	-- what a player standing on it can be launched to -- see Safety.MaxContactSpeed below and
-	-- Server/Blimp/BlimpSafety.lua for why the hull's speed and a touching player's speed had to be bounded
+	-- Shared/Vessel/VesselSafety.lua for why the hull's speed and a touching player's speed had to be bounded
 	-- separately: they are two different physics bodies, joined only by ordinary collision, not by this
 	-- constraint.
 	MaxDriveVelocity = 150,
@@ -321,7 +321,7 @@ BlimpConstants.Physics = {
 -- Safety nets that protect something OTHER than the hull itself -- currently just the one, but kept as
 -- its own table (rather than folded into Physics above) because it is conceptually a different kind of
 -- number: everything in Physics tunes how the HULL flies, this tunes how fast something ELSE may leave
--- after touching it. See Server/Blimp/BlimpSafety.lua's own header for the mechanism this defends
+-- after touching it. See Shared/Vessel/VesselSafety.lua's own header for the mechanism this defends
 -- against.
 BlimpConstants.Safety = {
 	-- Studs/second. Ceiling on a PLAYER's own velocity while they are in contact with any part of a
@@ -340,7 +340,7 @@ BlimpConstants.Safety = {
 	-- retune of "how fast is too fast for a person to actually be going" keeps both systems honest instead
 	-- of two ceilings silently drifting apart. Kept as a literal value rather than a cross-require from
 	-- Blimp (a standalone module -- see this file's own header) into Shared/Parkour/ParkourConstants.lua;
-	-- src/Tests/Blimp/BlimpSafety.spec.lua pins the two to the same value so a future retune of one is
+	-- src/Tests/Vessel/VesselSafety.spec.lua pins the two to the same value so a future retune of one is
 	-- forced to look at the other.
 	MaxContactSpeed = 180,
 }
