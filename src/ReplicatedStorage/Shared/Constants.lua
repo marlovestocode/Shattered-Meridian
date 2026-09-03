@@ -682,16 +682,11 @@ Constants.Rivalry = {
 	QueryMaxCallsPerSecond = 4,
 }
 
--- Qi (Server/Systems/QiSystem.lua) -- just the remote name lives here, per NetworkBridge.lua's own
--- convention that remote names live in each domain's Constants.* table. Every actual Qi tuning
--- number (Max Qi curve, regen, Qi Conflict matrix) lives in Shared/QiConstants.lua instead -- see
--- that file's own header for why Qi specifically earned a dedicated tuning module rather than a
--- table here.
-Constants.Qi = {
-	RemoteNames = {
-		QiUpdated = "Progression_QiUpdated",
-	},
-}
+-- Qi (Server/Systems/QiSystem.lua) -- the remote name joined every actual Qi tuning number in
+-- Shared/QiConstants.lua, which now owns its feature's wire names as well as its numbers, per the
+-- convention TierConstants.lua's header settled. Re-exported here so every existing
+-- Constants.Qi.RemoteNames call site keeps working; new code should require that module directly.
+Constants.Qi = require(ReplicatedStorage.Shared.QiConstants)
 
 -- Meridian XP (Server/Systems/MeridianSystem.lua) -- the core progression currency
 -- (project-vision.md/progression-systems.md: "Tier gates are earned through Meridian XP from PvP

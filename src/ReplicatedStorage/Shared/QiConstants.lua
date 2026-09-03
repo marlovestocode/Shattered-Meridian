@@ -2,10 +2,18 @@
 --[[
 	QiConstants.lua
 
-	Owns: every Qi-system tunable number and lookup table. Deliberately its own dedicated Shared
-	module rather than a Constants.Qi sub-table -- so tuning Qi never grows the already-flagged
-	"Constants.lua holds content, not tunables" problem (docs/architecture/2026-08-audit.md section
-	5, carried over from docs/architecture/2026-07-audit.md section 5.3) any further.
+	Owns: every Qi-system tunable number and lookup table, and now the system's own RemoteEvent
+	names too. Deliberately its own dedicated Shared module rather than a Constants.Qi sub-table --
+	so tuning Qi never grows the already-flagged "Constants.lua holds content, not tunables" problem
+	(docs/architecture/2026-08-audit.md section 5, carried over from
+	docs/architecture/2026-07-audit.md section 5.3) any further.
+
+	Constants.Qi now re-exports this module rather than holding a table of its own, so every
+	existing Constants.Qi.RemoteNames call site keeps working; new code should require this module
+	directly. Note what that re-export widens: Constants.Qi used to be RemoteNames and nothing else,
+	and is now this whole module. Nothing reads Constants.Qi wholesale (only Constants.Qi
+	.RemoteNames, at three call sites), so no consumer sees a difference -- but a future one
+	iterating Constants.Qi would now walk the tuning numbers too.
 
 	THE DYNAMIC-TUNING CONTRACT: this file is the ENTIRE tuning surface for Qi balance.
 	QiSystem.lua reads every value here fresh on every call -- nothing is cached into a module-level
@@ -25,6 +33,21 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local QiConstants = {}
+
+-- Server-owned RemoteEvent names (Server/Systems/QiSystem.lua creates every one of these via
+-- NetworkBridge.CreateRemoteEvent at boot), same per-subsystem RemoteNames sub-table convention as
+-- Constants.Meridian/Constants.Rivalry and the same "Progression_" prefix style.
+--
+-- Moved here from Constants.Qi, which held nothing else. TierConstants.lua's own header called out
+-- the two disagreeing precedents this codebase carried -- Constants.Qi.RemoteNames (a wire name in
+-- Constants.lua) versus EmoteConstants/TierConstants (a dedicated module owning its own wire
+-- names) -- and picked the latter, on the grounds that a module owning its feature's tuning should
+-- own its feature's wire names too, so adding a Qi remote never means editing Constants.lua. This
+-- is that rule applied to the older precedent it was written against; there is now one convention,
+-- not two.
+QiConstants.RemoteNames = {
+	QiUpdated = "Progression_QiUpdated",
+}
 
 -- Qi types map 1:1 onto Faction -- progression-systems.md: "Qi types map to faction/race
 -- identity"; world-bible.md names the three fractured inheritances of power as exactly these three

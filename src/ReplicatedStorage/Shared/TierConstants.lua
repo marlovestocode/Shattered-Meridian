@@ -14,11 +14,12 @@
 	re-syncing (Rojo) IS the full tuning loop; no TierSystem.lua code change is ever required to
 	retune the ladder's pace, rename a tier, or add/remove one.
 
-	RemoteNames lives here, not in Constants.lua's per-feature RemoteNames tables. Two precedents
-	exist in this codebase and they disagree -- Constants.Qi.RemoteNames (older) vs
-	EmoteConstants.RemoteNames (newer, a dedicated Shared module owning its own remote name). This
-	file follows EmoteConstants: a dedicated module that owns its feature's tuning should own its
-	feature's wire names too, so adding a tier-related remote never means editing Constants.lua.
+	RemoteNames lives here, not in Constants.lua's per-feature RemoteNames tables, on the rule that
+	a dedicated module owning its feature's tuning should own its feature's wire names too -- so
+	adding a tier-related remote never means editing Constants.lua. This file and
+	EmoteConstants.RemoteNames set that precedent against the older one, a wire name kept in
+	Constants.lua; QiConstants.RemoteNames has since followed it too, so the two disagreeing
+	conventions this header used to have to choose between are now one.
 
 	Does not own: any per-player tier state or the promotion decision itself (TierSystem.lua), the
 	Meridian XP that feeds the thresholds below (MeridianSystem.lua owns awarding it,
