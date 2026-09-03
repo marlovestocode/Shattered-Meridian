@@ -7,9 +7,9 @@
 	under this redesign). Progressive disclosure per the designer's own direction: unselected shows
 	Name + Epithet + World line + Cost line only; the selected card additionally reveals the 6-up
 	stat grid with the race's REAL starting numbers (Constants.CharacterCreation.RacePrefills), never
-	the Figma's own fabricated stat blocks -- see Constants.lua's own RaceEpithets/RaceWorldLines/
-	RaceCostLines comment for why. Archetype chips (BALANCED/DEFENDER/STRIKER/MYSTIC) are deliberately
-	absent -- same source, "they promise a class system that doesn't exist."
+	the Figma's own fabricated stat blocks -- see CharacterCreationConstants' own RaceEpithets/
+	RaceWorldLines/RaceCostLines comment for why. Archetype chips (BALANCED/DEFENDER/STRIKER/MYSTIC)
+	are deliberately absent -- same source, "they promise a class system that doesn't exist."
 
 	Single-column stack, not the Figma's 2x2 grid -- a deliberate deviation. Progressive disclosure
 	means the selected card is meaningfully TALLER than the other three (it alone reveals the stat

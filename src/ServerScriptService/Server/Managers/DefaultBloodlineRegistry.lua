@@ -44,9 +44,9 @@
 	their identity is built on. They roll the seven shared lineages, which is also what makes every
 	Human draw an Unbound one in spirit: blood that was never supposed to be theirs.
 
-	RACE FLAVOR, NOT FACTION ASSIGNMENT. Constants.lua's own RaceWorldLines header is explicit that
-	the per-race lore deliberately stops short of "asserting new binding canon (faction ties, detailed
-	sub-history)". This file holds that same line: each native bloodline is written against its
+	RACE FLAVOR, NOT FACTION ASSIGNMENT. CharacterCreationConstants' own RaceWorldLines header is
+	explicit that the per-race lore deliberately stops short of "asserting new binding canon (faction
+	ties, detailed sub-history)". This file holds that same line: each native bloodline is written against its
 	race's ESTABLISHED identity (Firmborn held their ground and the ground held back; Rivenkin were
 	already moving when the world cracked; Hollowborn's fragment burns near the surface; Human is
 	unwritten) and against the three factional inheritances as INHERITANCES, never by declaring that
