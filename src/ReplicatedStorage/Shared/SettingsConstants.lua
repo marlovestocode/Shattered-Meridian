@@ -3,8 +3,8 @@
 	SettingsConstants.lua
 
 	Owns: the player-preferences surface -- the remote names the settings round trip uses for each
-	preference group (rebound keybinds, Parkour, Comfort, Gamepad), the per-player call budget that
-	guards them, and the UI's own status-clear delay.
+	preference group (rebound keybinds, Parkour, Comfort, Gamepad, UI), the per-player call budget that
+	guards them, and the settings screen's own status-clear delay.
 
 	Lifted out of Constants.lua, moved verbatim -- no type annotations, no cross-references, nothing
 	rewritten but the table statement itself. Constants.Settings re-exports this module, so all
@@ -12,7 +12,7 @@
 	module directly.
 
 	A REMOTE SURFACE, NOT A SCHEMA. What a preference group CONTAINS is Types.PlayerSettings /
-	ParkourSettings / ComfortSettings / GamepadSettings, and what a preference is worth is owned by
+	ParkourSettings / ComfortSettings / GamepadSettings / UISettings, and what a preference is worth is owned by
 	the system it tunes -- ParkourConstants for the parkour toggles, Analog's own shipped defaults for
 	the stick curves, KeybindConstants for the default bindings a rebind overrides. This file only
 	names the wires and bounds how often a client may pull them.
@@ -71,6 +71,10 @@ local SettingsConstants = {
 		-- below rather than merely type-checked -- a client is free to send 400 for a sensitivity, and
 		-- the answer is to clamp it, not to trust it or to drop the write.
 		UpdateGamepad = "Settings_UpdateGamepad",
+		-- Interface preferences (Types.UISettings) -- same field-name-plus-value shape as UpdateComfort
+		-- above, for the same reason: one field today (Scale), and a remote per future interface
+		-- preference would mean a NetworkBridge registration, a handler and a client call site each.
+		UpdateUI = "Settings_UpdateUI",
 	},
 
 	-- The shipped gamepad stick defaults, and the range each numeric one may be set to. Lives HERE, in
@@ -96,6 +100,22 @@ local SettingsConstants = {
 		Bounds = {
 			LookSensitivity = { Min = 0.25, Max = 4 },
 			Deadzone = { Min = 0, Max = 0.6 },
+		},
+	},
+	-- Interface preferences (Types.UISettings). Same "shared Defaults/Bounds, server validates against
+	-- the same numbers a client-side default reads" shape as Gamepad above.
+	UI = {
+		Defaults = {
+			-- Today's authored size -- see PlayerDataConstants.SchemaVersion's own migration note on
+			-- why this, and not some notion of "the game's real size," is what every existing player is
+			-- backfilled to.
+			Scale = 1,
+		},
+		-- Inclusive. The floor is well above the point a hotbar/menu becomes unreadable or unclickable
+		-- at typical viewport sizes; the ceiling is short of a scale that would push a full-width
+		-- screen (Components/ScreenFrame's own 800-1040px budgets) past a 1280-wide viewport entirely.
+		Bounds = {
+			Scale = { Min = 0.75, Max = 1.35 },
 		},
 	},
 	-- Same call-budget reasoning as Constants.Rivalry.QueryMaxCallsPerSecond -- a rebind/toggle write

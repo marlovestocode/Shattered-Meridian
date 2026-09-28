@@ -254,14 +254,30 @@ AttackConstants.Network = {
 
 -- Windows -----------------------------------------------------------------------------------------
 
--- Shared/Attack/AttackWindows.lua's one setting. SERVER-AUTHORITATIVE (unlike Presentation below):
--- when true, a Basic-string (M1) swing's WindupSeconds is overridden from its clip's own "AttackM<
--- stage>" animation marker whenever one is cached and usable, falling back to the hand-typed
--- Constants.Combat.Weapons[...].Stages.Basic[n].WindupSeconds otherwise. false disables the whole
--- mechanism unconditionally -- every M1 keeps its hardcoded timing, the same behaviour as before
--- AttackWindows.lua existed -- for ruling it out as a suspect on a live server without a code change.
+-- Shared/Attack/AttackWindows.lua's settings, applied by Server/Combat/AttackCatalog.Get. Both are
+-- SERVER-AUTHORITATIVE (unlike Presentation below), and both are suspect-elimination switches: false
+-- restores the hand-typed Constants.lua timing for the whole move set without a code change.
 AttackConstants.Windows = {
+	-- Any attack's WindupSeconds -- when its hitbox opens -- is read off an animation marker on its own
+	-- clip whenever one is cached and usable, falling back to the hand-typed WindupSeconds otherwise.
+	-- Two names are recognised: HitMarkerName below on ANY attack clip (M1s, Heavy, Finisher, the
+	-- standalones, a Move Editor move or Art), and the older stage-specific "AttackM<stage>" on an M1
+	-- clip, which wins over HitMarkerName when a clip carries both.
 	Enabled = true,
+	-- The marker an animator puts on the impact frame of any attack clip. An Animation Event in the
+	-- Animation Editor IS a KeyframeMarker, so this is the event's name. Read from the published asset
+	-- when the server boots (or on a clip's first throw), never from the playing track -- see
+	-- AttackWindows.lua's header -- so republish the clip with Overwrite (same asset id) after adding
+	-- or moving it, and restart the server.
+	HitMarkerName = "Hit",
+	-- EVERY move with a clip ends when its clip does. The clip's real length (read off the authored
+	-- KeyframeSequence, never guessed) replaces the authored Windup+Active+Recovery total: the hitbox
+	-- still opens exactly when the move's own delay (WindupSeconds, marker, SpawnDelay) runs out and
+	-- stays live for its authored ActiveSeconds, and RecoverySeconds is whatever the clip has left
+	-- after that. Before this, the server ran a hand-typed timeline while the client played the clip
+	-- at its native length, and the two never checked each other -- the swing unlocked mid-animation,
+	-- or the body stood frozen after the clip had finished.
+	SyncToClipLength = true,
 }
 
 -- Presentation ----------------------------------------------------------------------------------
@@ -294,6 +310,11 @@ AttackConstants.Presentation = {
 	-- The asymmetry is deliberate: landing a hit should register, but being hit is the thing a player
 	-- must not be able to miss, so the defender's cue is always the heavier of the pair. Blocked is
 	-- the one outcome where the DEFENDER gets the lighter cue -- that is the block working.
+	--
+	-- Evaded maps to "None" on both sides -- a name with no Constants.FX.CameraShake preset behind it,
+	-- which CameraShake.Shake reads as no shake at all. Mapped explicitly rather than left out, because an
+	-- unmapped kind falls back to DefaultShakePreset below, and a dodge that shakes the camera like a
+	-- landed hit tells the player the one thing that did not happen.
 	ShakePresets = {
 		Attacker = {
 			Clean = "HitLight",
@@ -302,6 +323,7 @@ AttackConstants.Presentation = {
 			Blocked = "HitLight",
 			Parried = "Parry",
 			Trade = "HitLight",
+			Evaded = "None",
 		} :: { [string]: string },
 		Defender = {
 			Clean = "HitHeavy",
@@ -310,6 +332,7 @@ AttackConstants.Presentation = {
 			Blocked = "HitLight",
 			Parried = "Parry",
 			Trade = "HitHeavy",
+			Evaded = "None",
 		} :: { [string]: string },
 	},
 
@@ -326,6 +349,21 @@ AttackConstants.Presentation = {
 	-- block fade -- a swing has to look like it started on the frame the key went down, where a guard
 	-- can afford to ease up.
 	SwingFadeSeconds = 0.05,
+
+	-- Client/Combat/AttackInputClient.lua's predicted swing: a Basic/Heavy press plays the clip the
+	-- server is about to confirm on the frame the key goes down, instead of a round trip later. Cosmetic
+	-- only -- the hitbox, the damage and every gate stay on the server, and Attack_Started still
+	-- confirms (or replaces) what was predicted. See that module's header for the whole contract.
+	SwingPrediction = {
+		-- false restores confirm-then-play for every swing, the suspect-elimination switch the rest of
+		-- this file keeps per feature.
+		Enabled = true,
+		-- How long a prediction waits for its Attack_Started, ON TOP of two ping lengths and
+		-- Input.BufferSeconds (a press the server buffered is confirmed only when it throws). Past it the
+		-- server evidently refused the press, and the predicted swing is cut rather than left playing a
+		-- move that never happened.
+		ConfirmGraceSeconds = 0.1,
+	},
 
 	-- The forward step a confirmed swing carries the LOCAL player's own body through
 	-- (Client/Combat/SwingLunge.lua). Fires on Attack_Started -- the swing being THROWN -- which is
@@ -352,7 +390,7 @@ AttackConstants.Presentation = {
 	--
 	-- Taking it from the PAYLOAD rather than from a number here is what keeps it honest: that value is
 	-- what the server actually scheduled for this specific swing, which since AttackConstants.Windows
-	-- may have come from the clip's own AttackM<stage> marker rather than from any hand-typed constant.
+	-- may have come from the clip's own Hit/AttackM<stage> marker rather than from any hand-typed constant.
 	-- So a re-authored animation moves the step with it, and a stage with a longer windup than its
 	-- neighbours waits longer, both without anyone editing this table.
 	--
@@ -402,6 +440,53 @@ AttackConstants.Presentation = {
 		-- same write with no ground under it is an air-dash on every M1, which is a movement mechanic
 		-- nobody designed. States/AerialCombat.lua already owns what the body does mid-air in combat.
 		GroundedOnly = true,
+	},
+
+	-- A short Trail tracing the attacking limb through its own swing -- Client/FX/AttackTrail.lua.
+	-- LOCAL-PLAYER-ONLY, the same Attack_Started visibility Client/FX/CombatAudio.lua's own PlaySwing
+	-- already accepts for the swing whoosh (see AttackRequestSystem's own FireClient, not
+	-- FireAllClients): this reads other characters' swings off nothing today, only the thrower's own.
+	-- Extending it to be visible to everyone watching would need a broadcast this layer does not yet
+	-- send, not just a client-side change here.
+	SwingTrail = {
+		Enabled = true,
+		-- Pale and neutral rather than tied to a weapon or an outcome -- HitColor (FXConstants.lua) is
+		-- the same choice for the same reason: a swing-in-progress is not yet a verdict, so it borrows
+		-- no faction/outcome colour the way a parry or a guard-break flash does.
+		Color = ColorSequence.new(Color3.fromRGB(235, 235, 245)),
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.15),
+			NumberSequenceKeypoint.new(1, 1),
+		}),
+		-- Seconds a given point along the trail takes to fade out -- Roblox's own Trail.Lifetime, not a
+		-- duration this module schedules. Short on purpose: this is a swing's own arc, not a comet tail
+		-- that outlives it.
+		LifetimeSeconds = 0.18,
+		-- Trail.WidthScale runs over each segment's LIFETIME, not along the limb: 0 is the segment just
+		-- laid down, 1 is the one about to vanish. Full width where the fist/blade is now, thinning to a
+		-- sliver as it fades, so the trail reads as a streak behind the strike rather than a flat ribbon.
+		--
+		-- THERE IS NO Width PROPERTY ON A Trail, and this table used to carry one (Client/FX/AttackTrail.lua
+		-- set it and threw on every swing). A trail's thickness IS the distance between its two
+		-- Attachments -- the offset pairs below -- times this scale.
+		WidthScale = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1),
+			NumberSequenceKeypoint.new(1, 0.15),
+		}),
+		-- Where the two Attachments sit, in studs along the part's axis from its centre, and therefore how
+		-- thick the trail is (their separation). See Client/FX/AttackTrail.lua's own header for why these
+		-- are two pairs.
+		--   * Fists: the R6 Right Arm is 2 studs long, so -1 is the fist. A 0.3-stud pair right at the
+		--     knuckles draws a thin line that follows the punch, not a sheet swept by the whole forearm.
+		--   * Weapons: along the Handle's own axis out to the blade, so the trail covers the edge that hit.
+		FistOffsetStuds = { Near = -0.75, Far = -1.05 },
+		-- Which limb each stage of the bare-hands Basic string strikes with, in string order: jab with the
+		-- left, cross with the right, then a kick with the left foot. R6 limb part names. Anything not in
+		-- this list -- the Finisher (StageIndex 0), a Heavy, a stage past the end -- uses FistDefaultLimb.
+		-- The same offsets serve legs: an R6 leg is 2 studs long like an arm, so -1 is the foot.
+		FistLimbByStage = { "Left Arm", "Right Arm", "Left Leg" },
+		FistDefaultLimb = "Right Arm",
+		WeaponOffsetStuds = { Near = 0.5, Far = -3.2 },
 	},
 }
 

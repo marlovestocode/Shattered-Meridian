@@ -4,10 +4,10 @@
 
 	Owns: the death-to-respawn overlay card (docs/ui-ux-philosophy.md's "Death/respawn and kill
 	feed" surface) -- who or what killed the local player, and a live countdown to their own
-	respawn. Shown only to the player who died: Client/Combat/CombatClient.lua gates its call into
-	Screens/DeathFeed's ShowDeath to the feedback payload's TargetUserId being the local player
-	before this component's Display is ever set, so the killer's own screen never renders this.
-	Cleared the moment the dying player's own CharacterAdded fires (respawn).
+	respawn. Shown only to the player who died: Client/Combat/DeathNoticeClient.lua gates its call into
+	Screens/DeathFeed's ShowDeath on the Death_Notice's VictimUserId being the local player, so the
+	killer's own screen never renders this. Cleared the moment the dying player's next character
+	arrives (respawn).
 
 	Modeled on Components/PostureBreakBanner.lua's Title/Subtitle/Color StatusBanner shape -- same
 	fade-in-only entrance (docs/ui-ux-philosophy.md's Critical States rule, "never use excessive
@@ -26,7 +26,7 @@
 
 	Does not own: deciding when to show/hide, what the countdown number currently is, or resolving a
 	killer's UserId to a display name -- Screens/DeathFeed/init.lua owns the countdown timer and
-	Client/Combat/CombatClient.lua resolves the killer's name before ever calling in. This component
+	Client/Combat/DeathNoticeClient.lua hands over the killer's name before ever calling in. This component
 	only renders whatever already-decided display state it's handed, the same boundary every other
 	CombatFeedback-family component in this UI tree already follows.
 ]]
@@ -41,9 +41,9 @@ local Fade = require(script.Parent.Fade)
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
 
--- KillerName nil means an environmental/non-attributed death -- CombatSystem.lua's confirmDeath
--- reports AttackerUserId as nil for a fall/void/unattributed ApplyServerDamage caller, the only
--- cause signal that exists today (see that function's own header).
+-- KillerName nil means an environmental/non-attributed death -- Server/Systems/PlayerDeathSystem.lua
+-- publishes no killer for a fall, the void, a non-player's blow, or credit that had gone stale (see
+-- its header for the whole rule).
 export type DeathOverlayDisplay = {
 	KillerName: string?,
 }

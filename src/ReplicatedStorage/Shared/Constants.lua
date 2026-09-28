@@ -199,8 +199,9 @@ Constants.Meridian = {
 	RemoteNames = {
 		XPUpdated = "Progression_MeridianXPUpdated",
 	},
-	-- Flat Meridian XP awarded to the killer on every confirmed PvP kill (GameplayEvents.
-	-- OnPlayerKilled). Still deliberately NOT scaled by the victim's tier -- but the reason has
+	-- Flat Meridian XP awarded to the killer on every confirmed, attributed PvP kill (PlayerDeathSystem
+	-- -> PlayerKilled -> RewardSystem -> ProgressionSystem -> MeridianSystem.AwardKillXP, the one
+	-- reader). Still deliberately NOT scaled by the victim's tier -- but the reason has
 	-- changed now that TierSystem exists and TierSystem.GetTier makes a live tier gap readable
 	-- (docs/architecture/2026-08-audit.md section 7.2's underdog-scaling proposal is no longer
 	-- gated on anything). It stays flat because scaling it is a BALANCE decision that wants the
@@ -258,10 +259,9 @@ Constants.Intro = require(ReplicatedStorage.Shared.IntroConstants)
 -- needs an explicit respawn or the player is stuck as a corpse for the rest of the session. These
 -- are that path's tunables; see RespawnSystem.lua's own header for the ownership reasoning.
 Constants.Respawn = {
-	-- Seconds between a confirmed death (CombatSystem.OnPlayerKilled) and the replacement character
-	-- being loaded. Long enough for the death feedback beat to land -- the killcam/death feedback
-	-- CombatClient.lua already renders off the "Death" Combat_FeedbackEvent -- without turning a
-	-- heavy-PvP death into a punitive wait, per combat-philosophy.md's "death is a setback, not a
+	-- Seconds between a confirmed death (GameplayEvents.PlayerKilled, published by PlayerDeathSystem)
+	-- and the replacement character being loaded. Long enough for a death to register as a beat
+	-- without turning a heavy-PvP death into a punitive wait, per combat-philosophy.md's "death is a setback, not a
 	-- session-ender" framing. Matches the 3s Constants.Debug.TrainingDummy/TrainingBot.RespawnDelay
 	-- already use for their own defeat-to-replacement gap, deliberately: a player and a sparring
 	-- partner returning on the same cadence keeps duel pacing consistent.

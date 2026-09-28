@@ -46,6 +46,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
@@ -80,17 +81,24 @@ type Record = {
 local records: { [Player]: Record } = {}
 
 local toggleLimiter = RateLimiter.New(WeaponConstants.Network.MaxTogglesPerSecondPerPlayer)
+-- Bounds the ProximityPrompt.Triggered signal itself -- see WeaponConstants.Network.
+-- MaxPickupsPerSecondPerPlayer's own header for why a prompt trigger needs this the same way a
+-- remote does.
+local pickupLimiter = RateLimiter.New(WeaponConstants.Network.MaxPickupsPerSecondPerPlayer)
 local inventoryChangedRemote: RemoteEvent? = nil
 
+-- Fists is owned and selected from the moment a record exists -- not picked up, never dropped, and
+-- always the fallback a player who has picked up nothing at all can still draw and fight with. See
+-- WeaponRoster.FISTS_ID's own header for why the roster carries it with no Workspace.Weapons model.
 local function recordFor(player: Player): Record
 	local existing = records[player]
 	if existing then
 		return existing
 	end
 	local created: Record = {
-		Owned = {},
-		Order = {},
-		Selected = nil,
+		Owned = { [WeaponRoster.FISTS_ID] = true },
+		Order = { WeaponRoster.FISTS_ID },
+		Selected = WeaponRoster.FISTS_ID,
 		Drawn = false,
 	}
 	records[player] = created
@@ -150,9 +158,11 @@ function WeaponInventorySystem.Pickup(player: Player, weaponId: WeaponId): boole
 
 	record.Owned[weaponId] = true
 	table.insert(record.Order, weaponId)
-	-- First weapon picked up becomes the selected one, so the very next draw press works without the
-	-- player having to also discover a separate "choose weapon" control.
-	if record.Selected == nil then
+	-- First REAL weapon picked up becomes the selected one, so the very next draw press works without
+	-- the player having to also discover a separate "choose weapon" control. Fists (always seeded,
+	-- never nil -- see recordFor) counts the same as "nothing chosen yet" here on purpose: a fresh
+	-- pickup should not lose to a fallback the player never asked for.
+	if record.Selected == nil or record.Selected == WeaponRoster.FISTS_ID then
 		record.Selected = weaponId
 	end
 
@@ -257,6 +267,24 @@ local function addPrompt(model: Instance): ()
 	prompt.Parent = anchor
 
 	prompt.Triggered:Connect(function(player: Player)
+		if pickupLimiter:IsLimited(player) then
+			return
+		end
+
+		-- Independent server-side range re-check. ProximityPrompt.MaxActivationDistance/
+		-- RequiresLineOfSight are client-enforced only -- a Triggered signal from an exploited client
+		-- can fire from anywhere, at any distance, regardless of what the prompt itself claims. Re-
+		-- deriving distance from the anchor Roblox actually hung this prompt on means faking the
+		-- trigger buys nothing without also faking proximity.
+		local _, _, root = CharacterUtil.LiveRig(player)
+		if not root or (root.Position - anchor.Position).Magnitude > WeaponConstants.Prompt.MaxActivationDistance then
+			logger:warn(
+				"Rejecting a pickup trigger from outside prompt range",
+				{ player = player.Name, weapon = model.Name }
+			)
+			return
+		end
+
 		-- The model's Name is the weapon id -- the same join key WeaponRoster and WeaponModelRegistry
 		-- both use. Read off the model rather than captured in this closure so a renamed weapon is
 		-- picked up under its current name rather than the one it had at boot.
@@ -309,6 +337,7 @@ function WeaponInventorySystem.Init(): ()
 		OnPlayerRemoving = function(player: Player)
 			records[player] = nil
 			toggleLimiter:Clear(player)
+			pickupLimiter:Clear(player)
 		end,
 	})
 

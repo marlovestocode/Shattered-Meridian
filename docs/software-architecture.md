@@ -1,319 +1,199 @@
 # Software Architecture
 
-The canonical system boundaries and folder structure. New systems slot into this shape; don't
-invent a parallel structure for a new feature.
+The canonical system boundaries, folder ownership and data flow, **as the source actually is**. New
+systems slot into this shape; don't invent a parallel structure for a new feature.
 
-## Folder structure
+**This document is revised in the same change as the architecture it describes.** A change that moves
+an ownership boundary, adds a System, or reroutes a flow updates the relevant section here in the same
+diff. Dated findings and open work live in `docs/architecture/` (latest:
+[`2026-09-28-progression-spine-audit.md`](architecture/2026-09-28-progression-spine-audit.md)); this
+file is the standing description, not a changelog.
+
+## Folder ownership
 
 ```
-ReplicatedStorage/
-  Shared/
-    Types.lua          -- all type definitions
-    Constants.lua       -- all tunable numbers, single source of truth
-    NetworkBridge.lua   -- every RemoteEvent/RemoteFunction, defined in one place
+ReplicatedStorage/Shared/
+  <Domain>/                 Damage/, Defense/, HitboxEngine/, Attack/, Grab/, Engagement/, Combat/,
+                            Parkour/, Run/, Vessel/, Blimp/, Boat/, Vehicle/, Progression/, Bloodline/,
+                            Race/, Kit/, Emotes/, Input/, ...
+    <Domain>Constants.lua   replicated, genuinely shared tunables and wire (remote) names
+    <Domain>Types.lua       the domain's DTOs/types, shared by server and client
+    pure helpers            deterministic math, validation, asset resolution -- no services, no state
+  core infrastructure       Trove, PlayerLifecycle, Lazy, AmortizedReclaim, CharacterUtil, NetworkBridge,
+                            RateLimiter, RemoteHandler, ChangeNotifier, DataStoreRetry, Logger
+  Constants.lua, Types.lua  COMPATIBILITY FACADES -- see "Types and configuration" below
 
-ServerScriptService/
-  Server/
-    Main.server.lua     -- boot sequence, initializes systems in dependency order
-    Systems/
-      PlayerDataSystem.lua
-      TierSystem.lua
-      ArtSystem.lua
-      BloodlineSystem.lua
-      CombatSystem.lua
-      AbsorbSystem.lua
-      RewardSystem.lua
-      ProgressionSystem.lua
-      MeridianSystem.lua
-      AchievementSystem.lua
-      QiDeviationSystem.lua
-      RivalrySystem.lua
-      BountySystem.lua
-      TerritorySystem.lua
-      WorldSystem.lua
-      AwakeningSystem.lua
-    Managers/
-      FactionManager.lua
-      ArtTreeManager.lua
-      BloodlineManager.lua
+ServerScriptService/Server/
+  Main.server.lua           the composition root: explicit, commented, dependency-ordered boot
+  Config/                   server-only: AdminConfig, StorageConfig, BootManifest
+  Events/GameplayEvents.lua typed server-internal facts; transport only, no policy
+  Network/AdminGate.lua     admin auth + rate limit for whitelist-gated remotes (server-only on purpose)
+  Combat/                   the four combat layers and their sibling extensions
+  Vessel/                   reusable crewed-vehicle mechanics (server half)
+  Blimp/, Boat/             the two vehicle-specific halves (drive integrator, mode machine, fuel/water)
+  Vehicles/                 vehicle catalog placement helpers
+  Systems/                  one bounded player- or world-facing responsibility each
+  Managers/                 registries/coordinators with no grab-bag ownership
 
-StarterPlayerScripts/
-  Client/
-    Main.client.lua
-    UI/           -- see ui-ux-philosophy.md for component conventions
-    FX/           -- see animation-systems.md for timing/sync rules
-
-Workspace/
-  Map/
-    SafeZones/ ContestedZones/ VoidFractureZones/ Territories/ MeridianStones/
-  HierarchyBoards/
+StarterPlayerScripts/Client/
+  Main.client.lua           client composition root (gated boot, below)
+  <Domain>/                 input, prediction, local presentation, receiving server DTOs
+  UI/                       shell, components, screens (see ui-ux-philosophy.md)
+  FX/                       presentation only
+  DevTools/                 admin-only; omitted from live.project.json builds
 ```
 
 ## Governing principles
 
-- **Modularity over convenience.** Every system is a ModuleScript. No system reaches into
-  another system's internals directly — communication happens through a central registry or
-  event bus, never ad hoc `require()`-and-poke. `ProgressionSystem` is this principle's concrete
-  instance for player progression specifically — see the dedicated section below.
-- **Networking goes through one bridge.** All RemoteEvents/RemoteFunctions are defined in
-  `NetworkBridge.lua`. Never scatter remote definitions across systems — this is what keeps the
-  network surface auditable and lets `performance-optimization.md`'s call-budget rules be
-  enforced in one place.
-- **Server owns truth, client owns feel.** Reinforces `engineering-standards.md`'s
-  server-authoritative rule at the architecture level: server Systems compute and validate state;
-  client UI/FX modules only ever *reflect* it.
-- **Boot order matters.** `Main.server.lua` initializes systems in explicit dependency order
-  (data layer before anything that reads player data, etc.) — never rely on implicit load order
-  from script instancing.
+- **Server owns truth, client owns feel.** Every client input is a *request*. Server Systems compute
+  and validate state; client modules reflect it. Meaningful progression is earned only from real,
+  server-confirmed PvP — never from passive or client-claimed activity.
+- **Explicit composition roots.** `Main.server.lua` and `Main.client.lua` boot everything in written
+  dependency order, with the reason for each position in a comment above it. No implicit discovery.
+  `Server/Config/BootManifest.lua` declares what must boot and what remotes it must produce; it is
+  checked at boot (`AssertBootComplete`) and in `Tests/Boot/BootManifest.spec.lua`.
+- **Remotes are owned by the System that creates them.** The owning System calls
+  `NetworkBridge.Create*` once in `Init`; both sides resolve with `Get*`. Every public handler is
+  rate-limited (`RateLimiter`), every `RemoteFunction` is pcall-wrapped (`RemoteHandler`), and
+  admin-only ones go through `AdminGate`. Wire names live in the owning domain's Constants.
+- **Direct calls for real one-way dependencies; typed events for facts with many consumers.** A System
+  may call another's documented public API when the dependency is real and one-directional. A fact with
+  several independent consumers, or one where a direct call would form a cycle, goes through
+  `Server/Events/GameplayEvents.lua` — a typed registry (named Fire/On helpers per signal), never a
+  string-keyed bus. Events carry facts, never decisions or precomputed rewards.
+- **One source of truth per state.** `Humanoid.Health` is health; `PlayerDataSystem` is the profile
+  (read via `GetProfile` copies, written only via `Transform`); no System shadows another's state.
+- **No framework for its own sake.** No service locator, DI container, generic event bus, catch-all
+  manager or global replicated store.
 
 ## System ownership map
 
 | System | Owns |
 |---|---|
-| `PlayerDataSystem` | Canonical player data read/write, DataStore integration |
-| `TierSystem` | Tier thresholds, tier-up validation and effects |
-| `BloodlineSystem` / `BloodlineManager` | Bloodline awakening, stage unlocks, passive/active application |
-| `ArtSystem` / `ArtTreeManager` | Art trees, mastery progression |
-| `CombatSystem` | Combat state machine, hit validation, lock-on/parry/posture resolution |
-| `AbsorbSystem` | Post-kill absorb mechanics -- computes and applies essence absorption from a confirmed PvP kill, called by `RewardSystem` |
-| `RewardSystem` | Reward composition -- decides which reward types a completed gameplay event produces and delegates each type's magnitude to the system that owns it (e.g. `AbsorbSystem` for absorb); coordinates, does not calculate (see "RewardSystem and AbsorbSystem" below) |
-| `ProgressionSystem` | Progression orchestration -- routes progression-contributing events to the subsystem that owns the relevant mechanic and triggers milestone checks; coordinates, does not calculate (see "ProgressionSystem: orchestration, not ownership" below) |
-| `MeridianSystem` | Meridian XP calculation and balance -- the core progression currency (project-vision.md, progression-systems.md); read by `TierSystem` to evaluate tier-up eligibility (see "MeridianSystem and AchievementSystem" below) |
-| `AchievementSystem` | Milestone/achievement definitions and unlock state -- evaluated when `ProgressionSystem` triggers a milestone check after a progression change lands (see "MeridianSystem and AchievementSystem" below) |
-| `QiDeviationSystem` | Deviation risk/trigger/consequence |
-| `TerritorySystem` / `WorldSystem` | Zone control, region state, hazards |
-| `RivalrySystem` / `BountySystem` | Meta-progression social/competitive systems |
-| `FactionManager` | Faction membership, standing, faction-gated content |
-| `AwakeningSystem` | Human Ascension gate |
+| `PlayerDataSystem` | Canonical profile load/save, schema migration, cross-server session lock, the single `Transform` write path |
+| `PlayerDeathSystem` | Confirming every player death exactly once per life; kill attribution; sole publisher of `PlayerKilled`; the `Death_Notice` broadcast behind the death overlay and kill feed |
+| `RespawnSystem` | Every `LoadCharacter` after the session's first |
+| `HitboxEngine` → `DefenseSystem` → `DamageSystem` → `AttackRequestSystem` | The combat stack (below) |
+| `GrabSystem`, `EngagementSystem`, `KnockbackAudit` | Combat siblings on `DamageSystem.OnApplied` (grab/throw; the combat tag; detecting clients that ignore knockback) |
+| `WeaponInventorySystem`, `WeaponVisualSystem` | Weapon ownership/draw state; the held Tool |
+| `RewardSystem` | Reward composition: which reward kinds a confirmed fact is eligible for (immutable manifest) |
+| `ProgressionSystem` | The fight-to-grow legitimacy gate (source admission, no self-reward, the repeat-victim anti-farming weight) and routing of manifest components to their owners |
+| `MeridianSystem` | Meridian XP amount, balance, replication; publishes `MeridianXPAwarded` |
+| `TierSystem` | Tier thresholds and promotion; publishes `TierChanged` |
+| `QiSystem`, `QiDeviationSystem`, `EffectSystem` | Qi pool/regen; deviation risk; the generic modifier engine |
+| `ArtSystem`/`ArtTreeManager`, `RaceSystem`/`RaceManager`, `BloodlineSystem`/`BloodlineManager`, `KitAbilitySystem` | Kits, arts, races, bloodlines and their shared ability trigger |
+| `RivalrySystem`, `BountySystem` | Standings; notoriety streaks and bounty claims |
+| `ParkourSystem`, `RunSystem` | Parkour authority/plausibility; the sole `WalkSpeed` writer |
+| `BlimpSystem`, `BoatSystem`, `VehicleManager` | The two vehicle bindings; the vehicle catalog/spawn layer |
+| `SettingsSystem`, `CharacterSheetSystem`, `CharacterCreationSystem`, `EmoteSystem`/`EmoteUnlockService`, `ServerHopSystem`, `VersionWatchSystem`, `ResourceGatheringSystem`, `BugReportSystem`, `ModerationSystem` | As named |
+| `DevMenuSystem`, `MoveEditorSystem`, `KitEditorSystem`, `LiveConsoleSystem`, `AdminActionSystem`, `DebugDummySystem` | Admin tooling (server halves always ship; `MoveEditor`/`KitEditor` Init hydrate content registries) |
+| `FactionManager`, `AchievementSystem`, `AbsorbSystem`, `AwakeningSystem`, `TerritorySystem`, `WorldSystem` | **Roadmap placeholders** — empty `Init`, required only by `Main.server.lua`, booted in its PLANNED loop and listed in `BootManifest.Planned`. A spec fails the day one grows an API without moving to a numbered boot step. Design intent lives in their headers. |
 
-## ProgressionSystem: orchestration, not ownership
-
-`ProgressionSystem` is the central coordinator for everything under project-vision.md's first
-pillar — fight-to-grow. It's the concrete instance of this file's "communication happens through
-a central registry or event bus" principle, scoped to player progression specifically: every
-gameplay system that can grant progression reports through it, and every progression subsystem
-receives dispatched, filtered progression from it.
-
-It doesn't sit cleanly in the System/Manager split defined above — it's named and folder-located
-as a System, but it behaves like a Manager (coordinates other systems rather than owning state of
-its own). That's a deliberate, documented exception, not an oversight: progression needs one
-narrow-waisted coordination point precisely because so many systems both feed into it (combat,
-quests, world events) and read out of it (tier, bloodline, arts), and wiring each of those
-systems directly to each other is exactly the ad hoc coupling "modularity over convenience" exists
-to prevent.
-
-### Responsibilities
-
-- **Receives progression events** from gameplay systems — PvP victories, boss kills, world
-  events, quests, discoveries, and anything else that can plausibly grant a player progression.
-- **Determines whether an event actually contributes to progression.** This is a filter, not a
-  calculation: the canonical check is project-vision.md's fight-to-grow pillar and
-  progression-systems.md's Absorb-system rule that a kill "must always require an actual PvP
-  kill, never a non-combat substitute" — ProgressionSystem is where that rule gets enforced
-  across *all* progression sources, not just Absorb.
-- **Routes accepted events to the subsystem that owns the relevant mechanic** (tier-relevant
-  progress to `TierSystem`, bloodline-relevant progress to `BloodlineSystem`, art-relevant
-  progress to `ArtSystem`, and so on) via each subsystem's own public API — never by reaching
-  into their internal state.
-- **Coordinates the progression pipeline; does not calculate it.** ProgressionSystem decides
-  *that* an event should become tier progress, bloodline progress, or art mastery, and routes it
-  to *who* computes that — it never computes an XP amount, a tier formula, or a bloodline's
-  awakening condition itself. The day ProgressionSystem starts computing a number instead of
-  routing to the system that owns that number is the day it's quietly become the monolith this
-  section exists to prevent.
-- **Triggers milestone checks after progression changes are applied.** Once a routed subsystem
-  confirms a change landed, ProgressionSystem is responsible for kicking off whatever
-  milestone/achievement evaluation follows — it owns *when* that check fires, not the milestone
-  definitions or unlock logic themselves.
-- **Acts as the single fight-to-grow coordinator.** Any new content type that grants progression
-  (a new quest type, a new world event, a new encounter) integrates by reporting to
-  ProgressionSystem, not by wiring a new direct path into TierSystem/BloodlineSystem/ArtSystem —
-  this is what keeps the fight-to-grow pillar enforceable in one place instead of re-litigated
-  per content type.
-
-### Explicitly does NOT own
-
-| Not owned | Owned instead by |
-|---|---|
-| Combat calculations, damage | `CombatSystem` |
-| Meridian XP calculations | `MeridianSystem` |
-| Tier formulas | `TierSystem` |
-| Bloodline logic | `BloodlineSystem` |
-| Martial art / art logic | `ArtSystem` |
-| Inventory | Not yet formalized in this file — flag when it's built |
-| Economy | Not yet formalized in this file — flag when it's built |
-| Persistence | `PlayerDataSystem` |
-
-ProgressionSystem calling into any of the above to *ask* them to compute or apply something is
-correct. ProgressionSystem *containing* combat math, an XP formula, a tier threshold, or a
-bloodline condition is a boundary violation, full stop — that logic belongs in, and only in, the
-system listed above for it.
-
-### Dependencies and communication pattern
-
-- **Inbound.** Gameplay systems call into ProgressionSystem with a progression event (a typed
-  payload describing what happened, not a pre-computed reward). This is a direct in-process call,
-  not a `NetworkBridge` remote — progression events are server-internal by construction and never
-  cross the client/server boundary.
-- **Outbound.** ProgressionSystem calls into the owning subsystem's public API to apply the
-  progression, then calls into whatever owns milestone checks to trigger evaluation.
-- **One-directional by design.** Subsystems that receive routed progression (TierSystem,
-  BloodlineSystem, ArtSystem, etc.) apply it and return — they don't call back into
-  ProgressionSystem to report their own internal state changes. Milestone checks are triggered by
-  ProgressionSystem itself as the last step of the pipeline it just ran, not by a subsystem
-  reaching back into it. This avoids the circular event chains that make coordination layers
-  unmaintainable.
-- **Boot order.** ProgressionSystem's own `Init()` doesn't require the subsystems it routes to be
-  initialized first — it registers itself, it doesn't call out during boot. By the time any real
-  gameplay event can fire, `Main.server.lua`'s full boot sequence has already brought up every
-  subsystem it might route to.
-
-### Typical progression flow
+## Combat stack
 
 ```
-CombatSystem
-  → RewardSystem
-  → ProgressionSystem
-  → MeridianSystem
-  → TierSystem
-  → BloodlineSystem
-  → ArtSystem
-  → AchievementSystem
+HitboxEngine     where the volume is, who is inside it
+DefenseSystem    what kind of hit that was (clean, blocked, parried, trade, guard-broken, backstab)
+DamageSystem     how much it hurts; hitstun; OnApplied (fires BEFORE the health write)
+AttackRequestSystem   the Attack_Request remote; which move a press means; three CanAttack gates
 ```
 
-Reading this: a PvP kill resolves in `CombatSystem`, which hands off *what happened* (not a
-reward) to `RewardSystem`, which determines what that outcome grants. `ProgressionSystem` decides
-whether that grant is progression-contributing and routes it onward — Meridian XP, tier
-progress, bloodline progress, and art mastery each get applied by the subsystem that owns that
-slice. ("Martial art logic" in this file's terms is `ArtSystem`'s existing scope, not a separate
-module — the two names refer to the same system.) `AchievementSystem` runs the milestone check
-ProgressionSystem triggers once those updates land.
+Each layer knows only the layers below it and gets **exactly one narrow seam** into the one beneath
+(`DefenseSystem.DrainGuard`, `DamageSystem.OnApplied`, the `CanAttack` gates). Heartbeat connection
+order is load-bearing and asserted in each `Init`. `GrabSystem` and `EngagementSystem` are **siblings**
+subscribing to `DamageSystem.OnApplied`, not a fifth layer; so are `KnockbackAudit` and
+`PlayerDeathSystem`'s kill-credit subscription.
 
-Every system named in this flow is now formalized: `RewardSystem` and `AbsorbSystem` below, and
-`MeridianSystem` and `AchievementSystem` in the section after that.
+**Knockback** is DamageSystem's ("what it does to you"): a landed hit whose move authors a knock
+(and no grab) resolves to one world-space launch (`Shared/Damage/Knockback.lua`, clamped by
+`DamageConstants.Knockback`) on `DamageResult.Launch` before `OnApplied` fires. A server-owned body is
+launched on the server; a player's launch rides the Defender copy of `Combat_Feedback` and is applied by
+that client (`Client/Combat/KnockbackClient.lua`) after its hit-stop freeze -- a server write cannot
+move a client-owned body. `Attributes.KnockbackUntil` keeps honest launches out of ParkourSystem's
+cheater count, and `KnockbackAudit` flags a client that repeatedly does not honour them. New combat interactions default to that sibling shape. There is no `CombatSystem`
+module — references to one in older comments describe code deleted by the combat rewrite.
 
-## RewardSystem and AbsorbSystem: reward composition vs. mechanic ownership
+## Deaths and the fight-to-grow spine
 
-This resolves the open item raised when `ProgressionSystem` was formalized above. `RewardSystem`
-sits between event sources (`CombatSystem` today; other event producers as they're built) and
-`ProgressionSystem` in the progression pipeline, and its job could plausibly overlap with
-`AbsorbSystem`'s existing "post-kill absorb mechanics" ownership. It doesn't, once the boundary is
-drawn the same way `ProgressionSystem`'s is drawn one layer up: **`RewardSystem` composes reward
-manifests. It doesn't compute reward magnitudes.**
+```
+DamageSystem.OnApplied ──► PlayerDeathSystem (credit: health removed by another present player, same
+                                              life, within DamageConstants.KillCredit.WindowSeconds)
+Humanoid.Died          ──► PlayerDeathSystem.ConfirmDeath (exactly once per life)
+                              │
+          GameplayEvents.PlayerKilled(victim, killer?, deathId)
+             ├─► RespawnSystem        every death respawns
+             ├─► RewardSystem         attributed kills only → frozen RewardManifest
+             │      └─► ProgressionSystem.Apply   legitimacy gate → route
+             │             └─► MeridianSystem.AwardKillXP → PlayerDataSystem.Transform
+             │                    └─► GameplayEvents.MeridianXPAwarded ─► TierSystem ─► TierChanged ─► Qi/Race
+             ├─► RivalrySystem, BountySystem   their own standings/streaks
+             ├─► BloodlineSystem      interim stage-advancement (to be routed through the spine)
+             └─► Blimp/Boat/Emote     cleanup for the dead
+```
 
-### Resolution: delegation, not supersession
+- `killer` is nil for every unattributed death; a non-nil killer is always a different, still-present
+  player. `deathId` is monotonic per server and is RewardSystem's replay guard.
+- **RewardSystem composes, ProgressionSystem judges and routes, owners compute.** RewardSystem holds the
+  taxonomy (`PvPKill → { MeridianXP }`); ProgressionSystem holds `LEGITIMATE_SOURCES` and the route
+  table; the amount lives in `MeridianSystem` (`Constants.Meridian.BaseXPPerKill`). Neither coordinator
+  computes a number or owns a remote — a client-requestable grant is what the first pillar forbids.
+- A new progression source is a new `RewardSource` **and** a deliberate `LEGITIMATE_SOURCES` entry; a
+  new reward kind is a taxonomy entry **and** a route to its owner's public API. Direct subscriptions
+  to `PlayerKilled` that grant progression outside this path are debt (Bloodline stage-ups and Bounty
+  payouts today — see the dated audit).
+- **Anti-farming lives in the gate.** ProgressionSystem weighs each kill by how many times this killer
+  has already killed this victim in an open run (`ProgressionConstants.RepeatVictim`, keyed by UserId so
+  a rejoin does not reset it) and passes the 0..1 weight to each owner, which scales its own amount. A
+  weight of 0 refuses the manifest.
+- Deaths are also told to every client (`Death_Notice`): the victim's overlay and everyone's kill feed
+  (`Client/Combat/DeathNoticeClient.lua`). The killer's "+N" comes from MeridianSystem's own per-grant
+  update, not the notice -- two remotes have no ordering guarantee.
+- `AchievementSystem`/`AbsorbSystem` are not called: they have no behaviour yet, and a call into them
+  would be a fake check.
 
-A confirmed PvP kill produces more than one reward type at once — Meridian XP and absorbed
-essence are both named as separate "meaningful gains" in project-vision.md. `RewardSystem` decides
-*which* reward types a completed event produces and asks the system that owns each type to
-compute (and, where that system already applies its own effect, apply) that type's magnitude:
+## Crewed vehicles (Vessel)
 
-- **Absorb** — delegated entirely to `AbsorbSystem`, which keeps its existing scope unchanged: it
-  computes the essence amount and applies the transfer. `RewardSystem` doesn't duplicate that
-  math; it recognizes "this was a PvP kill" and calls into `AbsorbSystem` for the absorb
-  component of the reward.
-- **Meridian XP** — delegated to `MeridianSystem` (see "MeridianSystem and AchievementSystem"
-  below).
-- Any future reward type (loot, currency, once those systems exist) follows the same pattern:
-  `RewardSystem` recognizes the event, the owning system computes and applies its own slice.
+`Shared/Vessel/` and `Server/Vessel/` hold every mechanic two crewed vehicles share, each a
+`New(config)` factory bound once: tagging and stations, assembly (anchored meshes → one constrained
+body), mounting/release, arm and pilot poses (client-side `Motor6D.Transform`), filtered hull motion,
+the speed ladder/stage audio, and the contact-speed clamp. `Blimp` and `Boat` each own exactly the
+drive integrator and the mode machine (plus fuel / water). A second copy of any shared piece is a
+regression; the next vehicle is one more binding of the same set. `VehicleManager` is the catalog and
+meets the vehicle Systems only through a cloned CollectionService tag.
 
-`AbsorbSystem` is untouched by this — same ownership row, same responsibility it always had. What
-changes is *who calls it*. Before this section existed, this file never specified how a completed
-kill actually reached `AbsorbSystem`; now it's explicit: `CombatSystem` reports the kill to
-`RewardSystem`, and `RewardSystem` is the one that calls `AbsorbSystem` — not `CombatSystem`
-directly, and not `ProgressionSystem`.
+## Client boot gates
 
-### RewardSystem responsibilities
+`Main.client.lua` runs these in order, each blocking the next:
 
-- Receives completed-event notifications from event-producing systems (`CombatSystem` today; any
-  future quest/world-event/discovery system as they're built).
-- Determines which reward types a given event is structurally eligible for — a PvP kill is
-  absorb-eligible and Meridian-XP-eligible; a non-combat event (a discovery, a quest turn-in) may
-  be Meridian-XP-eligible without being absorb-eligible, since absorb is explicitly gated to real
-  PvP kills (progression-systems.md). This is a taxonomy check ("does this event shape support
-  this reward type"), not the fight-to-grow legitimacy check — that judgment call stays with
-  `ProgressionSystem`, so it isn't duplicated in two places.
-- Delegates computation (and application, for systems that own both, like `AbsorbSystem`) of each
-  reward type to the system that owns it — never computes a reward amount itself.
-- Packages the resulting reward types into a single manifest and hands it to `ProgressionSystem`,
-  which decides whether/how each component contributes to progression and routes it onward.
+```
+StartMenuClient.Run → LoadingClient.Run (asset preload) → IntroClient.Run (onboarding, first-timers only)
+  → UI.Mount → SettingsClient.RestoreSettings → gameplay input/presentation clients → SettingsClient.Start
+```
 
-### Explicitly does NOT own
+Nothing that can react to a press starts before settings are restored; nothing that needs a UI handle
+starts before `UI.Mount` returns. `Client/DevTools` and `UI/Screens/DevTools` are resolved by
+`FindFirstChild`, so a `live.project.json` build (which omits them) boots without them.
 
-| Not owned | Owned instead by |
+## Types and configuration
+
+- **Touch-based migration, no sweep.** `Shared/Constants.lua` and `Shared/Types.lua` are compatibility
+  facades with ~135 and ~116 consumers. New tunables go in the owning domain's `<Domain>Constants.lua`;
+  new types in `<Domain>Types.lua`; server-only names and secrets in `Server/Config/`. When you touch a
+  consumer, import the domain module directly; do not add new domain content to either facade.
+
+| Adding... | Goes in |
 |---|---|
-| Absorb essence calculation and application | `AbsorbSystem` |
-| Meridian XP calculation | `MeridianSystem` |
-| Whether a reward contributes to progression | `ProgressionSystem` |
-| Combat resolution / kill confirmation | `CombatSystem` |
-
-### Dependencies and communication pattern
-
-- **Inbound.** Event-producing systems (`CombatSystem` today) call into `RewardSystem` with a
-  completed-event description once the event is confirmed — a kill, not a request to kill. Direct
-  in-process call, same as `ProgressionSystem`'s inbound pattern; never a `NetworkBridge` remote.
-- **Outbound.** `RewardSystem` calls into each reward-type owner (`AbsorbSystem` for absorb) to
-  compute/apply that type, then calls into `ProgressionSystem` with the composed reward manifest.
-- **Boot order.** `AbsorbSystem` boots before `RewardSystem` in `Main.server.lua`, since
-  `RewardSystem` is the one with the runtime dependency on it, not the reverse.
-
-## MeridianSystem and AchievementSystem: completing the progression flow
-
-The last two links in the typical-progression-flow chain, formalized the same way `RewardSystem`
-was above.
-
-### MeridianSystem
-
-Owns Meridian XP calculation and balance — the resource named throughout project-vision.md and
-progression-systems.md as the core progression currency ("Tier gates are earned through Meridian
-XP from PvP wins"). `ProgressionSystem` routes Meridian-XP-eligible reward components here;
-`MeridianSystem` computes the amount and updates the player's balance through `PlayerDataSystem`'s
-API (never a direct DataStore write of its own — see `engineering-standards.md`'s data-integrity
-rule on a single serialized entry point per player).
-
-`MeridianSystem` does not own tier-up validation itself — `TierSystem` owns that, and reads the
-Meridian XP balance from `MeridianSystem` to decide whether a threshold has been crossed. This is
-why `MeridianSystem` boots before `TierSystem` in `Main.server.lua`: the resource has to exist
-before the system gating on it can meaningfully check it, mirroring the "data layer before
-anything that reads player data" pattern this file already establishes for `PlayerDataSystem`.
-
-| Not owned | Owned instead by |
-|---|---|
-| Tier-up validation and effects | `TierSystem` |
-| Canonical persistence | `PlayerDataSystem` |
-| Deciding whether an event is progression-eligible | `ProgressionSystem` |
-
-### AchievementSystem
-
-Owns milestone/achievement definitions and unlock state. It doesn't own any of the progression
-values it watches — Tier, Bloodline stage, Meridian XP, art mastery all stay owned by the systems
-that already own them (`TierSystem`, `BloodlineSystem`, `MeridianSystem`, `ArtSystem`).
-`AchievementSystem` reads those values through each owner's public API when `ProgressionSystem`
-triggers a milestone check, compares them against milestone definitions, and applies unlock state
-for milestones it owns — the same "coordinate/read, don't duplicate state" discipline as every
-other cross-cutting system in this file.
-
-| Not owned | Owned instead by |
-|---|---|
-| The progression values a milestone checks against | Whichever System owns that value (`TierSystem`, `BloodlineSystem`, `MeridianSystem`, `ArtSystem`) |
-| Deciding *when* to check milestones | `ProgressionSystem` (triggers the check; `AchievementSystem` evaluates it) |
-
-### Dependencies and communication pattern (both)
-
-- **Inbound.** `ProgressionSystem` calls into `MeridianSystem` with a Meridian-XP-eligible
-  progression component, the same way it calls into `TierSystem`/`BloodlineSystem`/`ArtSystem`.
-  Separately, `ProgressionSystem` calls into `AchievementSystem`'s milestone-check entry point as
-  the last step of a completed pipeline run.
-- **Outbound.** `MeridianSystem` writes through `PlayerDataSystem`. `AchievementSystem` reads
-  through whichever System owns the value it's checking, via that System's public API.
-- **Boot order.** `MeridianSystem` boots before `TierSystem` (see above). `AchievementSystem` has
-  no Init()-time dependency on the systems it later reads from — same reasoning as
-  `ProgressionSystem`'s own boot-order note.
+| a gameplay tunable for one domain | `Shared/<Domain>/<Domain>Constants.lua` |
+| a remote name | the owning domain's Constants (`Network.RemoteNames` / `RemoteNames`) and that System's `BootManifest` entry |
+| a DTO or domain type | `Shared/<Domain>/<Domain>Types.lua` |
+| a server-internal fact | a typed signal in `Server/Events/GameplayEvents.lua` (+ its subscriber inventory) |
+| a secret, DataStore name, admin list | `Server/Config/` |
+| a pure helper | beside its domain's types/constants in `Shared/<Domain>/` |
 
 ## Extending the architecture
 
-A new system gets its own ModuleScript under `Systems/` (or a new `Managers/` entry if it's
-coordinating other systems rather than owning state), registered in `Main.server.lua`'s boot
-order, and added to the ownership table above. Don't fold new responsibilities into an existing
-system's file just because it's related — see `future-expansion.md` for the fuller process on
-when a new system earns its own module versus extending an existing one.
+A new server System gets its own ModuleScript under `Systems/` (or `Managers/` for a registry), a
+numbered, commented step in `Main.server.lua`, a `BootManifest` entry declaring its remotes, and a row
+in the ownership table above. It must have a non-zero inbound use from outside its own folder before
+it is called wired. A new top-level `Server/` or `Client/` folder needs a `test.project.json` mapping.
+See `future-expansion.md` for when a new System earns its own module versus extending one.

@@ -92,6 +92,11 @@ export type SettingsHandle = {
 	GamepadToggled: RBXScriptSignal<(string, boolean)>,
 	-- Fires (mode) -- the sprint hold/toggle dropdown changed.
 	SprintModeChanged: RBXScriptSignal<Types.SprintMode>,
+	-- The interface-preferences block, written from outside by SettingsClient exactly like Parkour/
+	-- Comfort/Gamepad above, and one Value for the whole table for the same reason.
+	UI: Fusion.Value<Types.UISettings>,
+	-- Fires (value) -- the UI scale Stepper changed.
+	UIScaleChanged: RBXScriptSignal<number>,
 }
 
 local ROOT_WIDTH = 480
@@ -153,6 +158,12 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 		InvertLookY = Constants.Settings.Gamepad.Defaults.InvertLookY,
 		Vibration = Constants.Settings.Gamepad.Defaults.Vibration,
 	} :: Types.GamepadSettings)
+	-- Seeded from the shipped default rather than zero, for the same reason gamepadSettings above is:
+	-- a Scale of 0 would render the whole panel unusably tiny for the frames between mount and
+	-- SettingsClient's restore, where the shipped default is simply today's ordinary size.
+	local uiSettings = scope:Value({
+		Scale = Constants.Settings.UI.Defaults.Scale,
+	} :: Types.UISettings)
 	local listeningFor = scope:Value(nil :: { Device: Types.KeybindDevice, Action: Types.KeybindAction }?)
 	local tabs = ScreenFrame.NewTabState(scope, TAB_NAMES)
 
@@ -164,6 +175,8 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 	local comfortToggledEvent = Instance.new("BindableEvent")
 	local gamepadNumberChangedEvent = Instance.new("BindableEvent")
 	local gamepadToggledEvent = Instance.new("BindableEvent")
+	local uiScaleChangedEvent = Instance.new("BindableEvent")
+	table.insert(scope, uiScaleChangedEvent)
 
 	local keybindsTabContent = KeybindsTab(scope, {
 		Width = CONTENT_WIDTH,
@@ -200,6 +213,10 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 		end,
 		OnSprintModeChanged = function(mode: Types.SprintMode)
 			sprintModeChangedEvent:Fire(mode)
+		end,
+		UI = uiSettings,
+		OnUIScaleChanged = function(value: number)
+			uiScaleChangedEvent:Fire(value)
 		end,
 	})
 
@@ -265,6 +282,8 @@ local function Settings(scope: Scope, playerGui: PlayerGui): SettingsHandle
 		GamepadNumberChanged = gamepadNumberChangedEvent.Event,
 		GamepadToggled = gamepadToggledEvent.Event,
 		SprintModeChanged = sprintModeChangedEvent.Event,
+		UI = uiSettings,
+		UIScaleChanged = uiScaleChangedEvent.Event,
 	}
 end
 

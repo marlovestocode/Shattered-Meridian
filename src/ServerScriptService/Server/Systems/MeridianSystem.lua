@@ -11,16 +11,16 @@
 	owns to decide whether a threshold has been crossed), canonical persistence (PlayerDataSystem
 	-- this System updates balances through PlayerDataSystem's API, never a DataStore write of its
 	own), or deciding whether an event is progression-eligible (ProgressionSystem, which is what
-	routes Meridian-XP-eligible reward components here in the first place).
+	routes Meridian-XP-eligible reward components here in the first place -- see AwardKillXP).
 
-	INTERIM DISPATCH NOTE: software-architecture.md's documented flow is CombatSystem -> RewardSystem
-	-> ProgressionSystem -> MeridianSystem -- both RewardSystem and ProgressionSystem are still empty
-	Init()s. Init() below subscribes directly to GameplayEvents.OnPlayerKilled for a first-pass award
-	on every confirmed PvP kill, the same interim shortcut RivalrySystem/BountySystem already took
-	for the same reason (docs/architecture/2026-08-audit.md). This is a known, documented gap, not a
-	permanent design decision: once RewardSystem/ProgressionSystem exist, THEY should own deciding
-	fight-to-grow eligibility and call AwardMeridianXP below -- this System's direct subscription
-	should be removed at that point, not left as a second, competing award path.
+	HOW A KILL REACHES THIS SYSTEM. PlayerDeathSystem confirms and attributes the death ->
+	GameplayEvents.PlayerKilled -> RewardSystem composes a manifest -> ProgressionSystem gates and routes
+	its MeridianXP component to AwardKillXP below. This System does NOT subscribe to PlayerKilled itself
+	any more: the interim direct subscription it carried while RewardSystem/ProgressionSystem were empty
+	was removed in the same change that made them real (2026-09-28), so one confirmed PvP death yields
+	exactly one kill award, never one per path. AwardMeridianXP stays the grant primitive every caller
+	shares -- BountySystem's claim payout calls it directly, a documented open migration
+	(docs/architecture/2026-09-28-progression-spine-audit.md).
 
 	Boots before TierSystem -- the resource has to exist before the system gating on it can
 	meaningfully check it, mirroring PlayerDataSystem's "data layer first" boot position.
@@ -42,11 +42,13 @@ local MeridianSystem = {}
 
 local meridianXpUpdatedRemote: RemoteEvent? = nil
 
-local function sendMeridianUpdate(player: Player, amount: number): ()
+-- `gained`/`reason` only for a grant (see Types.MeridianXPUpdatePayload) -- a sync leaves them nil so
+-- the client shows no gain cue for a number it merely learned.
+local function sendMeridianUpdate(player: Player, amount: number, gained: number?, reason: string?): ()
 	if not meridianXpUpdatedRemote then
 		return
 	end
-	local payload: Types.MeridianXPUpdatePayload = { MeridianXP = amount }
+	local payload: Types.MeridianXPUpdatePayload = { MeridianXP = amount, Gained = gained, Reason = reason }
 	meridianXpUpdatedRemote:FireClient(player, payload)
 end
 
@@ -85,13 +87,30 @@ function MeridianSystem.AwardMeridianXP(player: Player, amount: number, reason: 
 		reason = reason,
 		newTotal = newTotal,
 	})
-	sendMeridianUpdate(player, newTotal :: number)
+	sendMeridianUpdate(player, newTotal :: number, amount, reason)
 	-- Published AFTER the Transform has committed and the client has its new total, so TierSystem's
 	-- promotion check reads a profile that already holds `newTotal` (GameplayEvents.
 	-- FireMeridianXPAwarded's own header). Never fired on the failure paths above -- a grant that
 	-- didn't happen must not trigger a promotion check.
 	GameplayEvents.FireMeridianXPAwarded(player, amount, newTotal :: number, reason)
 	return true
+end
+
+-- The Meridian XP component of a confirmed PvP kill: this System's one answer to "how much is a kill
+-- worth", routed here by ProgressionSystem. The amount is decided HERE and nowhere upstream -- a flat
+-- Constants.Meridian.BaseXPPerKill, deliberately unscaled by either tier (that constant's own header
+-- says why), times `weight`: ProgressionSystem's legitimacy fraction for this kill (1 for an honest
+-- one, less for a repeat of the same victim -- see its repeat-victim rule). Rounded to the nearest
+-- whole point and never below 1 for any weight that reached here, so a counted kill always shows as
+-- earning something. `victim` is carried for the day tier-gap scaling lands; it is unread today.
+-- Returns whether the award landed (false for an unloaded profile, already logged by AwardMeridianXP).
+function MeridianSystem.AwardKillXP(killer: Player, _victim: Player, weight: number?): boolean
+	local fraction = if typeof(weight) == "number" and weight == weight then math.clamp(weight, 0, 1) else 1
+	if fraction <= 0 then
+		return false
+	end
+	local amount = math.max(1, math.floor(Constants.Meridian.BaseXPPerKill * fraction + 0.5))
+	return MeridianSystem.AwardMeridianXP(killer, amount, "PvPKill")
 end
 
 local function onProfileLoaded(player: Player): ()
@@ -105,13 +124,7 @@ function MeridianSystem.Init(): ()
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(onProfileLoaded)
 
-	GameplayEvents.OnPlayerKilled(function(_victim: Player, killer: Player?)
-		if killer ~= nil then
-			MeridianSystem.AwardMeridianXP(killer, Constants.Meridian.BaseXPPerKill, "PvPKill")
-		end
-	end)
-
 	logger:info("MeridianSystem.Init() complete")
 end
 
-return MeridianSystem :: Types.SystemModule
+return MeridianSystem :: Types.SystemModule & typeof(MeridianSystem)

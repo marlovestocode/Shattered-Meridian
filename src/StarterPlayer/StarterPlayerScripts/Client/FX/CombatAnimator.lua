@@ -3,9 +3,8 @@
 	CombatAnimator.lua
 
 	Owns: the LOCAL player's ordinary locomotion animation -- a Walking loop for ordinary movement
-	that crossfades into one of THREE Running loops for Sprint (the run system's stages 1, 2 and 3 --
-	see CombatAnimator.SetRunStage, and Client/Movement/RunController.lua for who decides which) on
-	their current character's Animator, driven by a single persistent Heartbeat evaluator that
+	and a normal Running loop for Sprint, plus an optional tighter armed-running pose, on their current
+	character's Animator. A single persistent Heartbeat evaluator
 	re-derives "should Walking/Running be playing THIS frame" from live state every tick rather than
 	being told when an action started or ended.
 
@@ -71,7 +70,7 @@ local logger = Logger.scope("CombatAnimator")
 local CombatAnimator = {}
 
 -- CombatConstants.AnimationIds is the single source of truth -- now scoped to just the locomotion
--- clips (Walking/Running/RunningStage2) since combat's own clips (swings, finishers,
+-- clips (Walking/Running plus the tighter armed-running pose) since combat's own clips (swings, finishers,
 -- dashes, etc.) were removed from Constants.lua alongside the rest of the combat data. This loop is
 -- fully data-driven, so trimming that table is what trimmed this module's actual loaded-track set --
 -- no code here needed to change to stop loading combat clips.
@@ -89,11 +88,8 @@ local ANIMATION_IDS = CombatConstants.AnimationIds
 -- wants a fast cut, not a blend.
 local LOCOMOTION_FADE_TIME = Constants.FX.Animation.Combat.LocomotionFadeSeconds
 local LOCOMOTION_INTERRUPT_FADE_TIME = Constants.FX.Animation.Combat.LocomotionInterruptFadeSeconds
--- The run system's own three numbers (Constants.Run.Animation) -- the crossfade between the two run
--- stages' clips, and each stage's playback rate.
+-- The normal run's playback rate and the armed-pose crossfade duration.
 local RUN_STAGE_CROSSFADE_TIME = Constants.Run.Animation.StageCrossfadeSeconds
--- Keyed by stage rather than one local per stage -- see Constants.Run.Animation.PlaybackSpeeds' own
--- header for why the ladder's size must not be baked into its consumers.
 local RUN_PLAYBACK_SPEEDS = Constants.Run.Animation.PlaybackSpeeds
 
 -- The MoveDirection magnitude below which there's no meaningful held movement input -- shared with
@@ -393,8 +389,7 @@ function CombatAnimator.BindCharacter(character: Model): ()
 			-- at Core priority, which otherwise wins over anything lower whenever the character has
 			-- real MoveDirection input. Matching Core is the standard workaround.
 			track.Priority = Enum.AnimationPriority.Core
-			-- RunningStage2 joins the looped set for the same reason Running does -- it IS the run loop, at
-			-- that stage. A sustained locomotion track whose Looped flag was never set plays through once
+			-- RunningStage2 is the armed-run loop. A sustained locomotion track whose Looped flag was never set plays through once
 			-- and leaves the character in a T-pose-adjacent idle.
 			if name == "Running" or name == "RunningStage2" or name == "Walking" then
 				track.Looped = true
@@ -435,19 +430,9 @@ function CombatAnimator.StopRunning(): ()
 	sprintHeld = false
 end
 
--- THE RUN SYSTEM'S TWO STAGES, pushed in by Client/Movement/RunController.lua (which mirrors the
--- server's own Constants.Attributes.SprintStage -- the stage is never decided on this side).
 --
--- Stage 2 plays its own clip when CombatConstants.AnimationIds.RunningStage2 is authored, and
--- otherwise falls through to stage 1's, played faster instead (Constants.Run.Animation.PlaybackSpeeds).
---
--- An intent value only, exactly like sprintHeld above: whether any clip actually plays this frame is
--- re-derived by the evaluator below, never decided here.
-local runStage = 1
-
-function CombatAnimator.SetRunStage(stage: number): ()
-	runStage = stage
-end
+-- Kept as the RunController seam, but a single-speed run does not need a per-stage animation choice.
+function CombatAnimator.SetRunStage(_stage: number): () end
 
 -- Whether something OTHER than ordinary locomotion currently owns this character's movement -- set by
 -- RunController from the parkour framework's live state id (a slide, a wall-run, a vault, a ledge
@@ -532,9 +517,8 @@ local locomotionLoopEntries: { AnimationTrackUtil.DominantLoopEntry } = {
 -- interrupt (the character actually stopping).
 RunService.Heartbeat:Connect(function()
 	local runningTrack = tracks.Running
-	-- nil whenever CombatConstants.AnimationIds.RunningStage2 is still blank -- a supported, shipped
-	-- state, and the case the branches below are written to handle by falling through to stage 1 rather
-	-- than by going silent.
+	-- nil whenever the optional armed-running clip is blank -- a supported state that falls through to
+	-- the normal running loop rather than going silent.
 	local runningStage2Track = tracks.RunningStage2
 	local walkingTrack = tracks.Walking
 	if runningTrack or runningStage2Track or walkingTrack or armedIdleTrack then
@@ -576,36 +560,17 @@ RunService.Heartbeat:Connect(function()
 				activeActionSource = next(activeActionSources),
 			})
 		end
-		-- ARMED RUNS ALWAYS USE THE STAGE-2 CLIP, whatever gear the run ladder is actually in.
-		--
-		-- The two run clips were authored for an EMPTY-HANDED character, and they do not degrade the
-		-- same way once a sword is in the right hand: stage 1's wide arm swing scythes the blade
-		-- through the character's own hip, while stage 2's tighter, more forward-carried arms read as
-		-- someone running WITH something. So a drawn weapon simply pins the clip to stage 2 and lets
-		-- the ladder express itself through PLAYBACK RATE alone (the per-stage AdjustSpeed below,
-		-- which already keys off runStage independently of which track is playing) -- one clip, three
-		-- speeds, instead of one clip that looks wrong for the whole bottom gear.
-		--
-		-- This is deliberately a presentation-only rule: nothing about the run ladder itself changes,
-		-- the Attribute still reports the true stage, and an unarmed player keeps the original
-		-- two-clip progression untouched.
-		--
-		-- Stage 2 only claims its own track when there IS one: failing that (RunningStage2 blank), it falls
-		-- to stage 1's, and the playback rate below is what still makes it read as a different gear. That
-		-- fallback is also what makes the armed rule safe -- a build with no stage-2 clip authored gets
-		-- the ordinary stage-1 run armed, not silence.
-		-- `>= 2` rather than `== 2` so a stage this build has no assets for -- a client that read a 3 off
-		-- the Attribute before the ladder dropped its third gear -- presents as the top gear it DOES have
-		-- rather than as nothing.
-		local shouldRunStage2 = shouldRun and runningStage2Track ~= nil and (armedWeaponDrawn or runStage >= 2)
+		-- A drawn weapon uses the tighter armed-run pose. This is visual only: the one normal sprint
+		-- speed still comes from RunConstants.Stages[1]. If its optional clip is unavailable, the
+		-- ordinary running loop remains active instead.
+		local shouldRunStage2 = shouldRun and runningStage2Track ~= nil and armedWeaponDrawn
 		local shouldRunStage1 = shouldRun and not shouldRunStage2
 
 		-- Client/FX/AnimationTrackUtil.lua's shared evaluator -- see that module's own header for why
 		-- this per-Heartbeat Play/AdjustWeight/Stop mechanic is extracted (the exact same shape
 		-- FlightAnimator.lua's Hover/CruiseLoop/BoostLoop pick uses below it). Only the StopFadeSeconds
-		-- per track varies here: a stage change between any two run clips crossfades at
-		-- RUN_STAGE_CROSSFADE_TIME (both are the same action at different intensities, so it
-		-- should read as accelerating); a toggle to the OTHER locomotion track (still moving, Sprint
+		-- per track varies here: an armed-pose change crossfades at RUN_STAGE_CROSSFADE_TIME; a toggle to
+		-- the OTHER locomotion track (still moving, Sprint
 		-- pressed/released) crossfades symmetrically at LOCOMOTION_FADE_TIME; a genuine interrupt
 		-- (stopped moving, or the parkour framework taking the body) cuts fast at
 		-- LOCOMOTION_INTERRUPT_FADE_TIME.
@@ -645,14 +610,11 @@ RunService.Heartbeat:Connect(function()
 
 		AnimationTrackUtil.DriveDominantLoop(locomotionLoopEntries, DOMINANT_WEIGHT)
 
-		-- Per-stage playback rate, written only when the track or the rate actually changes -- see
+		-- The normal run playback rate, written only when the track or rate changes -- see
 		-- appliedRunSpeedTrack's own header.
 		local activeRunTrack = if shouldRunStage2 then runningStage2Track else runningTrack
 		if shouldRun and activeRunTrack then
-			-- Falls back to stage 1's rate for any stage the table does not define, which is the same
-			-- direction every other run consumer defaults in: a gear with no authored presentation looks
-			-- like the ordinary run rather than freezing the clip at rate zero.
-			local desiredSpeed = RUN_PLAYBACK_SPEEDS[runStage] or RUN_PLAYBACK_SPEEDS[1]
+			local desiredSpeed = RUN_PLAYBACK_SPEEDS[1]
 			if activeRunTrack ~= appliedRunSpeedTrack or desiredSpeed ~= appliedRunSpeed then
 				activeRunTrack:AdjustSpeed(desiredSpeed)
 				appliedRunSpeedTrack = activeRunTrack

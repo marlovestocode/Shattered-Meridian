@@ -234,9 +234,8 @@ return function()
 		it("covers the run footstep sound without depending on Main.client.lua's require order", function()
 			-- Same reasoning as combat sounds above, for the newest registrar (RunAudio) -- the one
 			-- most likely to be missed, since it arrived after the preloader was written.
-			-- Only stage 1 carries a Sound (RunAudio.lua's own header explains why stages 2/3 reuse it
-			-- pitched up instead of registering their own) -- so this checks stage 1's asset directly
-			-- rather than iterating every stage for one.
+			-- The normal run has one footstep sound, so this checks its asset directly rather than
+			-- depending on a registrar's module-load order.
 			local keys = manifestKeys()
 			local stage1 = Constants.Run.Footsteps.Stages[1]
 			if stage1.Sound.SoundId ~= "" then

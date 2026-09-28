@@ -1112,6 +1112,23 @@ BlimpConstants.Network = {
 		RequestDismount = "Blimp_RequestDismount",
 		-- Server -> ALL clients. Someone mounted or dismounted; carries BlimpTypes.MountChangedPayload.
 		MountChanged = "Blimp_MountChanged",
+		-- Client -> server, RemoteFunction, no args. Returns the CALLER's own current mount as a
+		-- MountChangedPayload (Active always true -- this never reports a dismount), or nil if they are
+		-- not mounted to anything right now.
+		--
+		-- EXISTS BECAUSE MountChanged IS A BROADCAST FIRED ONCE, WITH NO REPLAY. A player who reaches a
+		-- blimp and mounts it before their own Client/Blimp/BlimpController.Start has finished wiring up
+		-- its OnClientEvent connection -- boot is a long, synchronous chain of unrelated .Start() calls
+		-- in Main.client.lua, any one of which can take long enough for a fast player to already be at
+		-- the wheel -- simply never receives that one MountChanged firing: RemoteEvents do not queue for
+		-- a listener that connects late. The symptom was exactly "welded to the wheel, no console, can't
+		-- steer, until I get off and back on" -- the SERVER's mount succeeded the whole time, only the
+		-- one client that needed to hear about it missed the one packet telling it so.
+		--
+		-- Called once, by BlimpController.Start itself, immediately after connecting MountChanged --
+		-- not polled, and not needed by anyone already listening in time, which is still the overwhelming
+		-- majority of mounts.
+		GetCurrentMount = "Blimp_GetCurrentMount",
 		-- Server -> the PILOT ONLY (FireClient, never broadcast). A snapshot of that blimp's fuel --
 		-- BlimpTypes.FuelUpdatedPayload -- pushed on mount, on deposit, on a depleted-state edge, and
 		-- whenever a whole unit of either resource has burned off since the last push. This is the

@@ -31,8 +31,27 @@
 	     recoverable in a way a mispredicted HIT would not be.
 	  3. Attack_Started is the confirmation and the correction. It carries what the server actually
 	     scheduled -- which move, which stage, how long the windup is, which clip -- so the swing
-	     animation plays against real numbers rather than a guess. Nothing it says is ever a rollback,
-	     because the client never claimed anything it could be wrong about.
+	     animation plays against real numbers rather than a guess.
+
+	THE SWING ANIMATION IS PREDICTED (2026-09-28), and that is presentation, not the hit prediction the
+	stack rules out. Waiting for Attack_Started meant the attacker saw their own swing a full round trip
+	after pressing -- and every OPPONENT saw it half a round trip later again, since they see the clip
+	this client plays. At a real server's ping the victim watched a punch start at about the moment it
+	landed. So a Basic/Heavy press now plays the move the server is about to confirm on the frame the key
+	goes down:
+
+	  * WHAT is predicted comes from a mirror of SwingSequencer's string (stage, lapse, the landed-combo
+	    Finisher rule), updated from every Attack_Started and every Combat_Feedback this client gets.
+	  * HOW it plays -- clip, speed, windup/active/recovery -- is the server's own last Attack_Started
+	    for that exact MoveId, replayed (confirmedByMoveId). A move this client has never seen confirmed
+	    is not predicted at all, so a prediction never invents a number.
+	  * WHEN: only while the body is free by every local measure the server also gates on (own swing and
+	    chain beat over, not stunned, not guarding, neutral defence state, not grabbed/mounted/in a
+	    traversal). A press made mid-swing mirrors the server's input buffer and is predicted at the
+	    moment the server will throw it.
+	  * THE CORRECTION: Attack_Started naming the predicted move confirms it (nothing replays); naming a
+	    different one replaces the clip; never arriving cuts the swing after two pings plus the buffer
+	    window, because the server refused it. The hitbox, damage and every gate never left the server.
 
 	SPAMMING IS FILTERED HERE TOO, but only where this module genuinely knows the answer. A hotbar
 	press whose own cooldown this module is already counting down is dropped locally rather than sent,
@@ -67,7 +86,10 @@ local UserInputService = game:GetService("UserInputService")
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
+local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
+local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -75,6 +97,7 @@ local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local HotbarBindings = require(script.Parent.HotbarBindings)
+local LocalCombatState = require(script.Parent.LocalCombatState)
 local CombatAnimator = require(script.Parent.Parent.FX.CombatAnimator)
 local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
@@ -134,6 +157,9 @@ local currentWeapon: Types.WeaponId? = nil
 -- DefenseClient's: two managers, two layers, no shared arbitration (a known, pre-existing gap
 -- documented in AnimationManager's own header, not one this module can close).
 local manager = AnimationManager.new({ Name = "AttackInputClient" })
+
+-- Assigned in the Prediction section below; declared here because the input handlers above it call it.
+local predictPress: (kind: AttackTypes.AttackKind) -> ()
 
 -- Sending -------------------------------------------------------------------------------------------
 
@@ -210,11 +236,12 @@ local function slotCooldownRemaining(slot: number, now: number): number
 end
 
 local function requestWeaponAttack(kind: AttackTypes.AttackKind): ()
-	-- ALWAYS SENT, never pre-filtered. Which move a Basic/Heavy press resolves to is server state this
-	-- module does not mirror, so there is no honest local answer to "would this be refused" -- and the
-	-- server forgives an early press by buffering it, which a local drop would throw away.
+	-- ALWAYS SENT, never pre-filtered. The server is the authority on whether this press throws, and
+	-- it forgives an early press by buffering it, which a local drop would throw away. The local swing
+	-- prediction below is presentation layered on top, never a reason not to send.
 	playPressCue(kind)
 	sendRequest({ Kind = kind })
+	predictPress(kind)
 end
 
 local function requestHotbar(slot: number): ()
@@ -297,6 +324,20 @@ end
 
 -- Presentation ---------------------------------------------------------------------------------------
 
+-- The speed a payload asks its clip to play at, or 1 for a malformed one -- a bad value must not freeze
+-- or reverse the clip.
+local function speedOf(payload: AttackStartedPayload): number
+	local speed = payload.PlaybackSpeed
+	if typeof(speed) ~= "number" or speed ~= speed or speed <= 0 then
+		return 1
+	end
+	return speed
+end
+
+local function swingSecondsOf(payload: AttackStartedPayload): number
+	return payload.WindupSeconds + payload.ActiveSeconds + payload.RecoverySeconds
+end
+
 local function playSwing(payload: AttackStartedPayload): ()
 	local animationId = payload.AnimationId
 	if typeof(animationId) ~= "string" or animationId == "" then
@@ -309,11 +350,17 @@ local function playSwing(payload: AttackStartedPayload): ()
 	-- The ceiling for a one-shot whose own Length has not resolved yet. Derived from what the server
 	-- actually scheduled rather than a fixed guess, plus the recovery tail, so a long move is never
 	-- cut short and a short one is never left holding the layer.
-	local scheduled = payload.WindupSeconds + payload.ActiveSeconds + payload.RecoverySeconds
+	local scheduled = swingSecondsOf(payload)
+
+	-- The speed the server built that schedule against (AttackCatalog.Get divides the clip's length by
+	-- it). Played at anything else, the clip's strike lands somewhere the hitbox is not -- which is the
+	-- whole desync AttackConstants.Windows.SyncToClipLength exists to remove.
+	local speed = speedOf(payload)
 
 	manager:SetClaim(ATTACK_LAYER, SWING_SOURCE, {
 		Clip = animationId,
 		Looped = false,
+		Speed = speed,
 		Priority = Enum.AnimationPriority.Action,
 		FadeIn = AttackConstants.Presentation.SwingFadeSeconds,
 		FadeOut = AttackConstants.Presentation.SwingFadeSeconds,
@@ -334,11 +381,12 @@ local function playSwing(payload: AttackStartedPayload): ()
 	CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, manager:GetActiveClip(ATTACK_LAYER) ~= nil)
 end
 
--- Cuts the LOCAL player's own in-flight swing animation short, the instant this client learns a hit
--- just put its owner into real hitstun. CombatFeedbackClient.lua is the only caller, gated the exact
--- same way it already gates HitStop.FreezeVictimMovement: Role == "Defender" and one of the three
--- outcome kinds DamageResolver.Resolve actually grants DamageConstants.Hitstun.Seconds for (Clean,
--- Backstab, GuardBroken).
+-- Cuts the LOCAL player's own in-flight swing animation short, the instant this client learns the
+-- server just cut it. CombatFeedbackClient.lua is the only caller: as the Defender of one of the three
+-- outcomes DamageResolver.Resolve grants DamageConstants.Hitstun for (Clean, Backstab, GuardBroken), and
+-- as the Attacker of a Parried or Traded swing (DefenseSystem cancels the attacker's swing for both).
+-- Also drops any pending or buffered prediction -- a body the server just interrupted is not about to
+-- throw what this client guessed it would.
 --
 -- WHY THIS HAS TO EXIST AT ALL. DamageSystem.applyOutcome cancels the victim's swing SERVER-SIDE the
 -- moment a qualifying hit resolves (cancelSwingOf -> HitboxEngine.CancelAttack), which stops the
@@ -355,8 +403,14 @@ end
 -- A plain SetClaim(nil): retiring a claim nothing currently holds is Clear's own documented no-op (see
 -- AnimationManager.Clear), so calling this on every qualifying hit costs nothing when the victim was
 -- not mid-swing at all -- there is no need to check GetActiveClip first.
+local pendingPrediction: { MoveId: string, Generation: number }? = nil
+local bufferedPress: { Kind: AttackTypes.AttackKind, Generation: number }? = nil
+
 function AttackInputClient.CancelSwing(): ()
+	pendingPrediction = nil
+	bufferedPress = nil
 	manager:SetClaim(ATTACK_LAYER, SWING_SOURCE, nil)
+	LocalCombatState.ClearSwing()
 end
 
 -- Records the cooldown the server just imposed, and tells whoever is drawing it. Fires once on start
@@ -389,6 +443,178 @@ end
 
 local attackStartedListeners: { (AttackStartedPayload) -> () } = {}
 
+-- Starts a swing locally -- the clip, the body's local commitment, and every OnAttackStarted listener
+-- (trail, lunge, swing audio) -- from a payload that is either the server's confirmation or the cached
+-- copy a prediction replays. One path for both, so a predicted swing looks exactly like a confirmed one.
+local function startSwing(payload: AttackStartedPayload, now: number): ()
+	playSwing(payload)
+	LocalCombatState.SetSwing(now + swingSecondsOf(payload))
+	for _, listener in attackStartedListeners do
+		listener(payload)
+	end
+end
+
+-- Prediction -----------------------------------------------------------------------------------------
+--
+-- See this file's header, THE SWING ANIMATION IS PREDICTED. Everything here mirrors server state from
+-- messages this client already receives; nothing here is sent anywhere.
+
+local PREDICTION = AttackConstants.Presentation.SwingPrediction
+
+-- The server's own last Attack_Started for each MoveId -- what a prediction replays.
+local confirmedByMoveId: { [string]: AttackStartedPayload } = {}
+
+-- SwingSequencer's string for this player, mirrored from the last CONFIRMED throw.
+local stringKind: AttackTypes.AttackKind? = nil
+local stringStage = 0
+local stringLapsesAt = -math.huge
+
+-- This player's landed combo depth (ComboEscalation), as the last Combat_Feedback reported it -- the
+-- one input the server's Finisher rule takes that nothing else tells this client.
+local landedCombo = 0
+local landedComboAt = -math.huge
+
+local predictionGeneration = 0
+local bufferGeneration = 0
+
+-- The same count SwingSequencer probes the catalogue for. Every weapon is built from the one Baseline
+-- move set (WeaponRoster), so the baseline's length IS every weapon's.
+local function stageCount(kind: AttackTypes.AttackKind): number
+	local stages = (CombatConstants.Weapons.Baseline.Stages :: any)[kind]
+	return if typeof(stages) == "table" then #stages else 0
+end
+
+-- SwingSequencer.Resolve, restated against the mirror. Same rules in the same order: a live string of
+-- the same kind continues, running past the end wraps -- or, for Basic with a deep enough landed combo,
+-- tips into the Finisher.
+local function predictMoveId(kind: AttackTypes.AttackKind, now: number): string?
+	local weapon = currentWeapon
+	if not weapon then
+		return nil
+	end
+	local count = stageCount(kind)
+	if count <= 0 then
+		return nil
+	end
+	local live = stringKind ~= nil
+		and now <= stringLapsesAt
+		and (stringKind == kind or not AttackConstants.Sequence.ResetOnCategorySwitch)
+	local nextStage = (if live then stringStage else 0) + 1
+	if nextStage > count then
+		if
+			kind == "Basic"
+			and landedCombo >= AttackConstants.Finisher.MinComboStage
+			and now - landedComboAt < DamageConstants.Combo.WindowSeconds
+		then
+			return `default:{weapon}:Finisher`
+		end
+		nextStage = 1
+	end
+	return `default:{weapon}:{kind}:{nextStage}`
+end
+
+-- When this body can next start a swing by this client's own measure: its swing and the chain beat
+-- after it over, and any hitstun spent. The server gates the same two things (HitboxEngine "Busy",
+-- SwingSequencer "ChainDelay", DamageSystem "Hitstun").
+local function nextSwingAt(now: number): number
+	return math.max(
+		LocalCombatState.FreeAt(now),
+		LocalCombatState.SwingEndsAt() + AttackConstants.Sequence.ChainDelaySeconds
+	)
+end
+
+-- Every other server gate this client can see the answer to: the guard (DefenseSystem "Guarding"), the
+-- published defence state (Staggered/GuardBroken), a grab, a mount, a traversal, death.
+local function bodyAllowsSwing(): boolean
+	local humanoid = boundHumanoid
+	if humanoid == nil or humanoid.Health <= 0 then
+		return false
+	end
+	if parkourOwnsBody() or LocalCombatState.IsGuardHeld() then
+		return false
+	end
+	local defenceState = humanoid:GetAttribute(DefenseConstants.DefenseStateAttribute)
+	if defenceState ~= nil and defenceState ~= "Neutral" then
+		return false
+	end
+	return humanoid:GetAttribute(Constants.Attributes.Mounted) ~= true
+		and humanoid:GetAttribute(Constants.Attributes.Grabbed) ~= true
+		and humanoid:GetAttribute(Constants.Attributes.Grabbing) ~= true
+end
+
+local function cutUnconfirmedSwing(): ()
+	pendingPrediction = nil
+	manager:SetClaim(ATTACK_LAYER, SWING_SOURCE, nil)
+	LocalCombatState.ClearSwing()
+end
+
+-- Plays the predicted move now, if every local gate agrees and the move has a confirmed copy to replay.
+-- Returns whether it did.
+local function predictSwing(kind: AttackTypes.AttackKind): boolean
+	if not PREDICTION.Enabled or pendingPrediction ~= nil then
+		return false
+	end
+	local now = os.clock()
+	if nextSwingAt(now) > now or not bodyAllowsSwing() then
+		return false
+	end
+	local moveId = predictMoveId(kind, now)
+	local cached = if moveId then confirmedByMoveId[moveId] else nil
+	if not cached then
+		return false
+	end
+
+	predictionGeneration += 1
+	local generation = predictionGeneration
+	pendingPrediction = { MoveId = cached.MoveId, Generation = generation }
+	startSwing(cached, now)
+
+	-- Two pings covers the round trip; BufferSeconds covers a press the server held before throwing.
+	local timeout = 2 * Players.LocalPlayer:GetNetworkPing()
+		+ AttackConstants.Input.BufferSeconds
+		+ PREDICTION.ConfirmGraceSeconds
+	task.delay(timeout, function()
+		local current = pendingPrediction
+		if current and current.Generation == generation then
+			if AttackConstants.Debug.Enabled and AttackConstants.Debug.LogRefused then
+				logger:debug("Predicted swing never confirmed -- cut", { moveId = current.MoveId })
+			end
+			cutUnconfirmedSwing()
+		end
+	end)
+	return true
+end
+
+predictPress = function(kind: AttackTypes.AttackKind): ()
+	if not PREDICTION.Enabled then
+		return
+	end
+	if predictSwing(kind) then
+		bufferedPress = nil
+		return
+	end
+
+	-- Not free yet. The server buffers a press refused for being mid-swing, in the chain beat or in
+	-- hitstun, keeps only the newest, and throws it the moment the body frees -- if that is within
+	-- AttackConstants.Input.BufferSeconds. Mirrored exactly, so a mashed string is predicted swing after
+	-- swing instead of only its first press.
+	local now = os.clock()
+	local freeAt = nextSwingAt(now)
+	if freeAt <= now or freeAt - now > AttackConstants.Input.BufferSeconds then
+		return
+	end
+	bufferGeneration += 1
+	local generation = bufferGeneration
+	bufferedPress = { Kind = kind, Generation = generation }
+	task.delay(freeAt - now, function()
+		local current = bufferedPress
+		if current and current.Generation == generation then
+			bufferedPress = nil
+			predictSwing(current.Kind)
+		end
+	end)
+end
+
 local function onAttackStarted(raw: unknown): ()
 	if typeof(raw) ~= "table" then
 		return
@@ -398,14 +624,30 @@ local function onAttackStarted(raw: unknown): ()
 		return
 	end
 
-	playSwing(payload)
+	local now = os.clock()
+	confirmedByMoveId[payload.MoveId] = payload
+	if payload.Kind ~= "Hotbar" then
+		stringKind = payload.Kind
+		stringStage = payload.StageIndex
+		stringLapsesAt = now + swingSecondsOf(payload) + AttackConstants.Sequence.ResetSeconds
+	end
+
+	local prediction = pendingPrediction
+	pendingPrediction = nil
+	if prediction and prediction.MoveId == payload.MoveId then
+		-- CONFIRMED: already playing, listeners already told. Only a speed the server changed since the
+		-- cached copy (a clip read for the first time mid-session) is worth applying.
+		if manager:GetActiveClip(ATTACK_LAYER) ~= nil then
+			manager:SetSpeed(ATTACK_LAYER, speedOf(payload))
+		end
+	else
+		-- Unpredicted, or predicted wrong (the server resolved a different stage): play what the server
+		-- actually threw. The claim supersedes a wrong prediction's clip on the same layer.
+		startSwing(payload, now)
+	end
 
 	if payload.Kind == "Hotbar" and typeof(payload.Slot) == "number" then
 		noteSlotCooldown(payload.Slot :: number, payload.CooldownSeconds)
-	end
-
-	for _, listener in attackStartedListeners do
-		listener(payload)
 	end
 end
 
@@ -422,6 +664,9 @@ local function onWeaponChanged(raw: unknown): ()
 		return
 	end
 	currentWeapon = payload.WeaponId
+	-- A swap resets the server's string (SwingSequencer.SetWeapon/SwapWeapon), so the mirror follows.
+	stringKind = nil
+	stringStage = 0
 	logger:debug("Weapon changed", { weaponId = currentWeapon })
 end
 
@@ -444,6 +689,12 @@ local function bindCharacter(character: Model, humanoid: Humanoid): ()
 	-- the next CharacterAdded; nothing here ever retries), so "no Humanoid, no bind" is a correctness
 	-- requirement of this module and not a defensive nicety.
 	boundHumanoid = humanoid
+	pendingPrediction = nil
+	bufferedPress = nil
+	stringKind = nil
+	stringStage = 0
+	landedCombo = 0
+	LocalCombatState.ResetForNewLife()
 
 	-- Bind() runs Unbind() first thing internally, so the previous life's claims and tracks are
 	-- dropped without this needing to clear ATTACK_LAYER separately.
@@ -454,6 +705,9 @@ local function unbind(): ()
 	-- Dropped with the body it describes. A stale Humanoid here would have the gate above reading a
 	-- dead character's last Attribute value, which for a life that ended mid-vault reads true forever.
 	boundHumanoid = nil
+	pendingPrediction = nil
+	bufferedPress = nil
+	LocalCombatState.ResetForNewLife()
 	manager:Unbind()
 end
 
@@ -547,6 +801,16 @@ function AttackInputClient.OnAttackStarted(listener: (AttackStartedPayload) -> (
 			table.remove(attackStartedListeners, index)
 		end
 	end
+end
+
+-- This player's landed combo depth, from a Combat_Feedback in which they were the Attacker --
+-- CombatFeedbackClient's to call. Feeds only the Finisher half of the swing prediction.
+function AttackInputClient.NoteLandedCombo(comboStage: number): ()
+	if typeof(comboStage) ~= "number" then
+		return
+	end
+	landedCombo = comboStage
+	landedComboAt = os.clock()
 end
 
 -- The weapon the server last said this player is holding. Presentation only.

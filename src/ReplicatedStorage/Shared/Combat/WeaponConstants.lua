@@ -81,6 +81,13 @@ WeaponConstants.Network = {
 	-- the gameplay. Sized like DefenseConstants' own per-player bound: comfortably above what a human
 	-- can press, comfortably below what an automated client would try.
 	MaxTogglesPerSecondPerPlayer = 8,
+
+	-- A ProximityPrompt.Triggered signal, not a remote, but the same trust boundary applies -- an
+	-- exploited client can fire it with no real proximity or hold duration at all (a known Roblox
+	-- surface, not specific to this System). Bounded far below MaxTogglesPerSecondPerPlayer: a
+	-- legitimate pickup is a single hold-then-release per weapon, ever, per this file's own
+	-- "grows, never shrinks" Owned contract.
+	MaxPickupsPerSecondPerPlayer = 4,
 }
 
 return WeaponConstants

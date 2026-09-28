@@ -281,6 +281,54 @@ return function()
 			expect(reason).to.equal("Hitstun")
 		end)
 
+		it("knocks the defender out of a run for exactly the hitstun", function()
+			-- RunSystem reads CombatBusyUntil as "a combat action is committing this body" and forces the
+			-- run ladder to 0 until it passes -- the same seam a thrown swing uses. Asserted on the
+			-- Attribute, which is the whole contract between the two layers.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			expect(defender.Humanoid:GetAttribute("CombatBusyUntil")).to.equal(nil)
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			local busyUntil = defender.Humanoid:GetAttribute("CombatBusyUntil")
+			expect(busyUntil).to.be.a("number")
+			expect(busyUntil).to.be.near(base + FRAME + DamageConstants.Hitstun.Seconds, 0.05)
+		end)
+
+		it("publishes the stun on its own Attribute for the defence layer", function()
+			-- DefenseSystem holds a guard press until this passes, and reads it rather than CombatBusyUntil
+			-- because that one also carries swing commitments that end early when a swing is cancelled.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			expect(defender.Humanoid:GetAttribute("HitstunUntil")).to.equal(nil)
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			local stunnedUntil = defender.Humanoid:GetAttribute("HitstunUntil")
+			expect(stunnedUntil).to.be.a("number")
+			expect(stunnedUntil).to.be.near(base + FRAME + DamageConstants.Hitstun.Seconds, 0.05)
+		end)
+
+		it("does not stop the run of a defender whose guard held", function()
+			-- A blocking defender is already walking (RunSystem gates on a raised guard), and a hit that
+			-- grants no hitstun has no lockout to publish.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			step(FRAME, base + WINDOW_CLOSE + FRAME)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + WINDOW_CLOSE + 2 * FRAME)
+
+			expect(defender.Humanoid:GetAttribute("CombatBusyUntil")).to.equal(nil)
+		end)
+
 		it("clears on its own once the lockout elapses", function()
 			local base = os.clock()
 			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))

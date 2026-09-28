@@ -104,9 +104,10 @@ local function respawn(player: Player, generation: number): ()
 end
 
 function RespawnSystem.Init(): ()
-	-- Fires from CombatSystem.confirmDeath for every death, PvP or environmental -- see this file's
-	-- header. killerPlayer is nil for a non-attributed death and is only logged here; who killed whom
-	-- is RewardSystem/AbsorbSystem's concern off the same signal, not this module's.
+	-- Fires from PlayerDeathSystem.ConfirmDeath for every death, PvP or environmental, exactly once per
+	-- life. killerPlayer is nil for a non-attributed death and is only logged here; who killed whom is
+	-- PlayerDeathSystem's to decide and RewardSystem's to act on, off the same signal -- not this
+	-- module's. Every death respawns, attributed or not.
 	GameplayEvents.OnPlayerKilled(function(player: Player, killerPlayer: Player?)
 		local generation = bumpGeneration(player)
 		logger:debug("Respawn scheduled", {

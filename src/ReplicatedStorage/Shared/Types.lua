@@ -260,6 +260,11 @@ export type QiUpdatePayload = {
 -- depletes and refills).
 export type MeridianXPUpdatePayload = {
 	MeridianXP: number,
+	-- Set only on a grant, never on the profile-load sync: how much this update added and why
+	-- (MeridianSystem.AwardMeridianXP's `reason` -- "PvPKill", "BountyClaim"). What the HUD's "+N" cue
+	-- reads, so it can tell a gain from a login without diffing totals across two remotes.
+	Gained: number?,
+	Reason: string?,
 }
 
 -- Server (TierSystem.lua) -> owning client only. Carries the tier's IDENTITY plus the XP window it
@@ -1243,6 +1248,12 @@ export type PlayerSettings = {
 	-- to set it, and it does nothing at all for the keyboard players Comfort's toggles all serve
 	-- equally. Putting it in Comfort would make that section mean two different things at once.
 	Gamepad: GamepadSettings,
+	-- Interface preferences -- a nested group for the same reason Parkour/Comfort/Gamepad above are:
+	-- one concern, one Settings section, one consumer (Client/UI/init.lua, which owns the single
+	-- UIScale this drives). NOT Comfort: Comfort is specifically the "this hurts to look at, default
+	-- always on" accessibility group, where UI size has no such default and is a legibility/preference
+	-- knob every player might reach for regardless of any accessibility need.
+	UI: UISettings,
 }
 
 -- Gamepad device preferences (Server/Systems/SettingsSystem.lua persists them,
@@ -1266,9 +1277,9 @@ export type GamepadSettings = {
 	-- Y only. Inverted X is vanishingly rare as a preference and is not offered, which keeps the
 	-- Controller tab one row shorter for every player who would never have wanted it.
 	InvertLookY: boolean,
-	-- Reserved for haptics. Persisted and validated now so the schema does not need a second bump
-	-- when a rumble consumer lands; nothing reads it yet, which is stated here rather than left for
-	-- someone to discover by grepping for a caller and finding none.
+	-- For haptics. Persisted and validated, and plumbed into the Controller settings tab
+	-- (Analog.lua, ControllerTab.lua) as a user-facing toggle -- but no rumble/motor call reads it
+	-- yet, so today it is a stored preference with no effect. Update this comment when one lands.
 	Vibration: boolean,
 }
 
@@ -1304,6 +1315,19 @@ export type ComfortSettings = {
 	-- game grows will want the same answer from the same player, and a "BlimpCamera" field would either
 	-- have to be joined by a near-duplicate or quietly start meaning something wider than its name.
 	VehicleCameraMotion: boolean,
+}
+
+-- Interface preferences (Server/Systems/SettingsSystem.lua persists them, Client/UI/init.lua applies
+-- them). One field today -- a global scale on the whole UI tree, driven through a single UIScale on
+-- the root ScreenGui rather than each screen sizing itself independently, which is what makes "make
+-- the hotbar/menus/everything bigger or smaller" a single number instead of a knob per surface.
+export type UISettings = {
+	-- Multiplies the built layout, same convention as a Roblox UIScale.Scale: 1 is today's authored
+	-- size (every existing player's unchanged default -- see PlayerDataConstants.SchemaVersion's own
+	-- migration note), below 1 shrinks, above 1 grows. Bounds enforced server-side
+	-- (SettingsConstants.UI.MinScale/MaxScale) so a tampered client value can neither vanish the UI
+	-- (0 or negative) nor blow it past the screen.
+	Scale: number,
 }
 
 -- The player's own movement preferences (Server/Systems/SettingsSystem.lua persists them,

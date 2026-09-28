@@ -52,6 +52,12 @@ local Landing: ParkourTypes.StateDefinition = {
 	end,
 
 	Enter = function(context: ParkourContext): ()
+		-- Recorded BEFORE the cut, for the late landing roll: a roll pressed within
+		-- Roll.LandingWindowSeconds of this contact refunds what the line below takes (States/
+		-- Rolling.Enter). Not cleared in Exit -- Exit runs before the roll's Enter on that very
+		-- transition, and the roll is the one reader, so it clears them itself.
+		context.PreLandingMomentum = context.Momentum
+		context.LandedAt = context.Now
 		local severity = context.LandingSeverity or "Soft"
 		local retain = if severity == "Hard"
 			then FALL.HardLandingRetainFraction

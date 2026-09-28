@@ -267,6 +267,85 @@ return function()
 		end)
 	end)
 
+	describe("DefenseStateMachine -- the roll's evade window", function()
+		local EVADE = DefenseConstants.Evade
+
+		it("is vulnerable through the startup, evading through the active phase, and vulnerable after", function()
+			local machine = DefenseStateMachine.New()
+			expect(machine:BeginEvade(T, 0)).to.equal(true)
+			expect(machine:IsEvadingAt(T)).to.equal(false)
+			expect(machine:IsEvadingAt(T + EVADE.StartupSeconds * 0.5)).to.equal(false)
+			expect(machine:IsEvadingAt(T + EVADE.StartupSeconds)).to.equal(true)
+			expect(machine:IsEvadingAt(T + EVADE.StartupSeconds + EVADE.ActiveSeconds)).to.equal(true)
+			expect(machine:IsEvadingAt(T + EVADE.StartupSeconds + EVADE.ActiveSeconds + 0.01)).to.equal(false)
+		end)
+
+		it("is never live on a machine that has not evaded", function()
+			local machine = DefenseStateMachine.New()
+			expect(machine:IsEvadingAt(0)).to.equal(false)
+			expect(machine:IsEvadingAt(T)).to.equal(false)
+		end)
+
+		it("refunds latency on the END only, capped", function()
+			local machine = DefenseStateMachine.New()
+			machine:BeginEvade(T, 10) -- an absurd ping
+			local activeEnd = T + EVADE.StartupSeconds + EVADE.ActiveSeconds
+			-- The start is not pulled earlier by any ping.
+			expect(machine:IsEvadingAt(T + EVADE.StartupSeconds * 0.5)).to.equal(false)
+			expect(machine:IsEvadingAt(activeEnd + EVADE.PingCompensationMaxSeconds)).to.equal(true)
+			expect(machine:IsEvadingAt(activeEnd + EVADE.PingCompensationMaxSeconds + 0.01)).to.equal(false)
+		end)
+
+		it("refuses a second evade inside the cooldown", function()
+			local machine = DefenseStateMachine.New()
+			machine:BeginEvade(T, 0)
+			local ok, reason = machine:BeginEvade(T + EVADE.CooldownSeconds * 0.5, 0)
+			expect(ok).to.equal(false)
+			expect(reason).to.equal("EvadeCooldown")
+			expect((machine:BeginEvade(T + EVADE.CooldownSeconds, 0))).to.equal(true)
+		end)
+
+		it("derives its cooldown from the roll's, a little under it", function()
+			local rollCooldown = require(ReplicatedStorage.Shared.Parkour.ParkourConstants).Roll.CooldownSeconds
+			expect(EVADE.CooldownSeconds < rollCooldown).to.equal(true)
+			expect(EVADE.CooldownSeconds > 0).to.equal(true)
+		end)
+
+		it("refuses while staggered or guard-broken -- a roll must not end a punish", function()
+			local staggered = DefenseStateMachine.New()
+			staggered:Stagger(T)
+			local ok, reason = staggered:BeginEvade(T + 0.1, 0)
+			expect(ok).to.equal(false)
+			expect(reason).to.equal("Staggered")
+			expect(staggered:IsEvadingAt(T + 0.2)).to.equal(false)
+
+			local broken = DefenseStateMachine.New()
+			broken:BreakGuard(T)
+			ok, reason = broken:BeginEvade(T + 0.1, 0)
+			expect(ok).to.equal(false)
+			expect(reason).to.equal("GuardBroken")
+		end)
+
+		it("drops a raised guard rather than refusing", function()
+			local machine = DefenseStateMachine.New()
+			machine:Press(T, WINDOW, 0)
+			machine:Update(T + WINDOW.Close)
+			expect(machine:GetState()).to.equal("Blocking")
+			expect(machine:BeginEvade(T + 1, 0)).to.equal(true)
+			expect(machine:GetState()).to.equal("Neutral")
+			expect(machine:IsBlockHeld()).to.equal(false)
+		end)
+
+		it("is cleared by Reset", function()
+			local machine = DefenseStateMachine.New()
+			machine:BeginEvade(T, 0)
+			machine:Reset(T + 0.01)
+			expect(machine:IsEvadingAt(T + EVADE.StartupSeconds + 0.01)).to.equal(false)
+			-- And the cooldown with it: a fresh life rolls immediately.
+			expect((machine:BeginEvade(T + 0.02, 0))).to.equal(true)
+		end)
+	end)
+
 	describe("DefenseStateMachine.Reset", function()
 		it("drops everything back to a fresh guard", function()
 			local machine = DefenseStateMachine.New()

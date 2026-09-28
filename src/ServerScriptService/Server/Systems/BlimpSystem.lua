@@ -91,6 +91,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
+local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
 local VesselSafety = require(ReplicatedStorage.Shared.Vessel.VesselSafety)
@@ -403,6 +404,31 @@ local function releaseSpeedCeiling(blimp: BlimpRecord): number
 	return mounter.ReleaseSpeedCeiling(blimp.Assembly.Root)
 end
 
+-- Whether anyone is still effectively aboard THIS hull -- the signal both Dismount's own immediate
+-- stop and onHeartbeatTick's flight-mode context need, and the reason it is three checks, not one.
+--
+-- blimp.Occupants ALONE undercounts by design: it only counts WELDED station occupants, so a solo
+-- pilot who arms the autopilot and lets go of the wheel to walk to the furnace reads as an abandoned
+-- ship the instant they release the helm -- BlimpFlightMode's own header calls that walk "the entire
+-- feature" of autopilot, so failing to count them is not a corner case, it is the main one.
+--
+-- blimp.Contacts (Touched-refcounted, see its own field comment) is what actually covers a pilot
+-- standing on the deck once they have landed there -- but NOT the instant right after Dismount: a
+-- body that was WELDED into this assembly was never touching it in the Touched sense (same-assembly
+-- parts do not fire Touched against each other), and the clearance lift plus velocity clamp Release
+-- applies may carry them clear of the deck entirely before their first real touch would land -- see
+-- BlimpRecord.Released's own comment, which documents this exact gap for the velocity clamp and is
+-- reused here for the identical reason.
+--
+-- blimp.Released (a short deadline map, set by Dismount below) is what bridges exactly that gap: for
+-- ReleaseSettleSeconds after leaving a mount, a body counts as still aboard even before Contacts has
+-- had a chance to reacquire it. Long enough to cover the landing, nowhere near long enough to cover
+-- someone who actually walked off the ship -- Contacts takes over the instant they land, and this
+-- function reads false the moment both windows have closed with nobody still touching the hull.
+local function isHullOccupied(blimp: BlimpRecord): boolean
+	return blimp.Occupants > 0 or next(blimp.Contacts) ~= nil or next(blimp.Released) ~= nil
+end
+
 -- THE one release path -- see this file's header on why all six ways off a blimp end here. Safe to call
 -- on a player who is not mounted (every caller treats it as "make sure this player is not on a blimp",
 -- not something that needs its own existence check first) and safe to call on a half-destroyed character.
@@ -422,16 +448,33 @@ function BlimpSystem.Dismount(player: Player): ()
 	local blimp = mount.Blimp
 	blimp.Occupants = math.max(0, blimp.Occupants - 1)
 
+	-- Set BEFORE the occupied check below, not after mounter.Release as it used to be -- see
+	-- isHullOccupied's own header. This player is the one case that check cannot see any other way:
+	-- they are mid-departure from Occupants right now, have never touched the hull in the Touched
+	-- sense (they were welded into its assembly), and will not land back on the deck to acquire a real
+	-- Contacts entry for a fraction of a second yet, if at all. Recorded here, they read as still
+	-- aboard for exactly that gap. Armed even when the root below turns out to be gone: the map is
+	-- keyed by Player, expiry is by deadline, and a stale entry for a body that no longer exists costs
+	-- one skipped iteration in onHeartbeatTick.
+	blimp.Released[player] = os.clock() + BlimpConstants.Mount.ReleaseSettleSeconds
+
 	-- THE LAST PERSON OFF STOPS THE SHIP, ON THIS FRAME. Not at the end of the hover window, and not
 	-- via the flight machine -- immediately, here, because "I am getting off" and "the ship should
 	-- stop" are the same intention and any delay between them reads as the ship ignoring you. The
 	-- descent is the separate, later beat (BlimpFlightMode's own Landing transition); see
 	-- BlimpConstants.Autopilot for why those two were wrong as one.
 	--
+	-- isHullOccupied, NOT the bare Occupants count that used to gate this -- a solo pilot who arms the
+	-- autopilot and lets go of the wheel to walk to the furnace is, for this one player, momentarily
+	-- BOTH the last mounted occupant leaving AND the only reason isHullOccupied still reads true (via
+	-- the Released entry just above). Gating on Occupants alone rang this down to All Stop the instant
+	-- the wheel was let go, which is the bug: it made "walk the deck to load coal" -- BlimpFlightMode's
+	-- own header calls this autopilot's entire feature -- impossible for anyone flying solo.
+	--
 	-- The latch is cleared as well as the rung, so a pilot who comes back finds a gauge that agrees
 	-- with the ship: leaving autopilot armed on a hull that has already given up making way would show
 	-- AUTOPILOT over a telegraph reading ALL STOP, which is two panels disagreeing about one fact.
-	if blimp.Occupants <= 0 then
+	if not isHullOccupied(blimp) then
 		blimp.AutopilotArmed = false
 		blimp.SpeedIndex = BlimpSpeedLadder.NeutralIndex()
 		blimp.Helm = { Steer = 0, Lift = 0 }
@@ -444,11 +487,13 @@ function BlimpSystem.Dismount(player: Player): ()
 		-- leave their last steering axes driving the hull for the rest of the round.
 		blimp.Helm = { Steer = 0, Lift = 0 }
 		-- THE TELEGRAPH IS THE ONE THING THAT MAY SURVIVE THE PILOT, and only if they armed the
-		-- autopilot before stepping away AND somebody is still aboard to be carried -- that IS the
-		-- feature (BlimpConstants.Autopilot). Note the Occupants block above has already cleared the
-		-- latch for an empty ship, so `AutopilotArmed` here can only still be true when there are
-		-- passengers left. Without it, leaving the wheel rings down All Stop and the ship coasts to a
-		-- halt over its own deceleration ramp, which is what a pilotless hull has always done.
+		-- autopilot before stepping away AND the hull is still occupied -- that IS the feature
+		-- (BlimpConstants.Autopilot). Note the isHullOccupied block above has already cleared the latch
+		-- for a genuinely empty hull, so `AutopilotArmed` here can only still be true when either a
+		-- passenger remains mounted elsewhere or THIS pilot themselves is still counted aboard (via
+		-- Contacts once landed, or Released in the meantime). Without it, leaving the wheel rings down
+		-- All Stop and the ship coasts to a halt over its own deceleration ramp, which is what a
+		-- pilotless hull has always done.
 		if not blimp.AutopilotArmed then
 			blimp.SpeedIndex = BlimpSpeedLadder.NeutralIndex()
 			-- Cut here rather than left to the next tick. The tick would get there within a frame, but a
@@ -465,11 +510,6 @@ function BlimpSystem.Dismount(player: Player): ()
 	-- entire fix for "everybody who steps off a moving blimp flies away", and why doing any of the three
 	-- out of order reproduces it.
 	mounter.Release(mount.Binding, blimp.Assembly.Root)
-
-	-- Armed even when the root above was already gone: the map is keyed by Player, expiry is by deadline,
-	-- and a stale entry for a body that no longer exists costs one skipped iteration. See
-	-- BlimpConstants.Mount.ReleaseSettleSeconds for what this window is actually for.
-	blimp.Released[player] = os.clock() + BlimpConstants.Mount.ReleaseSettleSeconds
 
 	-- The passenger's mass has left the assembly, and the weld change means Roblox has had to re-decide
 	-- who owns the hull -- both have to be answered, in that order, on every mount change.
@@ -1142,6 +1182,25 @@ local function sendExistingMounts(player: Player): ()
 	end
 end
 
+-- The RemoteFunction handler behind Network.RemoteNames.GetCurrentMount -- see that constant's own
+-- header for the boot-order race this exists to close. Same payload SHAPE as sendExistingMounts above
+-- (deliberately -- one shape, one client-side handler for both the edge and the catch-up), but answers
+-- for the CALLING player only and is pulled once by the client rather than pushed by the server, which
+-- is what makes it immune to the exact race it exists to fix: a client cannot miss its own answer to a
+-- question it has not finished asking yet.
+local function handleGetCurrentMount(player: Player): BlimpTypes.MountChangedPayload?
+	local mountRecord = mounts[player]
+	if not mountRecord then
+		return nil
+	end
+	return {
+		Character = mountRecord.Binding.Character,
+		Active = true,
+		Kind = mountRecord.Station.Kind,
+		Station = mountRecord.Station.Part,
+	}
+end
+
 -- Resolves the blimp `player` is currently PILOTING, or nil. Shared by all three helm remotes below,
 -- which had independently grown the same four-line mount lookup plus pilot check.
 --
@@ -1328,7 +1387,13 @@ local function onHeartbeatTick(deltaTime: number): ()
 
 		local context = flightContextScratch
 		context.HasPilot = blimp.Pilot ~= nil
-		context.OccupantCount = blimp.Occupants
+		-- isHullOccupied, not the bare Occupants count -- see its own header. Feeding the machine
+		-- Occupants alone would have it agree with Dismount's own OLD, now-fixed bug: the tick right
+		-- after a solo pilot lets go of the wheel would still see zero and drop Mode to Moored on its
+		-- own, independent of whatever Dismount just decided about the AutopilotArmed latch. The exact
+		-- magnitude is preserved when it is known (Occupants), and the machine only ever asks whether
+		-- this is above zero either way.
+		context.OccupantCount = if isHullOccupied(blimp) then math.max(blimp.Occupants, 1) else 0
 		context.AutopilotArmed = blimp.AutopilotArmed
 		context.Depleted = depleted
 		context.HeightAboveGround = if blimp.GroundY then blimp.Assembly.Root.Position.Y - blimp.GroundY else nil
@@ -1504,6 +1569,16 @@ end
 
 function BlimpSystem.Init(): ()
 	mountChangedRemote = NetworkBridge.CreateRemoteEvent(BlimpConstants.Network.RemoteNames.MountChanged)
+
+	-- See Network.RemoteNames.GetCurrentMount's own header. No rate limit: called at most once per
+	-- client boot, by BlimpController.Start itself, never polled.
+	local getCurrentMountRemote = NetworkBridge.CreateRemoteFunction(BlimpConstants.Network.RemoteNames.GetCurrentMount)
+	getCurrentMountRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
+		logger,
+		"GetCurrentMount",
+		nil :: BlimpTypes.MountChangedPayload?,
+		handleGetCurrentMount
+	)
 
 	local setHelmInputRemote = NetworkBridge.CreateRemoteEvent(BlimpConstants.Network.RemoteNames.SetHelmInput)
 	setHelmInputRemote.OnServerEvent:Connect(handleSetHelmInput)

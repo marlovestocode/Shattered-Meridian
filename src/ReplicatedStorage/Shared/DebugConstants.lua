@@ -127,9 +127,9 @@ local DebugConstants = {
 			-- design (see AttackCatalog.lua's own note on why it is deduped rather than debug-gated),
 			-- and this is the entry that lets it through the scope filter at all.
 			AttackCatalog = true,
-			-- The Basic-string marker-driven windup override (Shared/Attack/AttackWindows.lua) --
-			-- without this, its boot-time "M1 windup is marker-driven" / "...using the hardcoded
-			-- Constants.lua value" pair (AttackRequestSystem.Init's own warm pass) would be the exact
+			-- Swing clip timing (Shared/Attack/AttackWindows.lua) -- without this, its boot-time
+			-- "Swing clip read" / "...could not be read" lines, which say per move whether its hitbox
+			-- is timed by a marker or by WindupSeconds (AttackRequestSystem.Init's own warm pass), would be the exact
 			-- same silent-swallow gap DamageSystem/ParryWindows/AnimationManager/the Run System trio
 			-- below each hit before being found and added here.
 			AttackWindows = true,

@@ -204,12 +204,21 @@ function InputBuffer.ConsumeSlide(now: number): boolean
 	return true
 end
 
-function InputBuffer.PeekRoll(now: number): boolean
-	return ParkourMath.BufferLive(now, rollPressedAt, ParkourConstants.Assists.ActionBufferSeconds, true)
+-- `window` overrides the shared ActionBufferSeconds for ONE caller: the landing roll, which asks with
+-- ParkourConstants.Roll.LandingWindowSeconds on the frame of ground contact (States/Falling.Update,
+-- through StateSupport.CanRoll). That window is the roll's own tuning -- how early before touchdown a
+-- press still counts as rolling out of the fall -- and borrowing the shared buffer for it would tie a
+-- landing-skill number to the generic "I pressed a frame early" forgiveness every other intent uses.
+-- Every ordinary roll leaves it nil.
+function InputBuffer.PeekRoll(now: number, window: number?): boolean
+	return ParkourMath.BufferLive(now, rollPressedAt, window or ParkourConstants.Assists.ActionBufferSeconds, true)
 end
 
-function InputBuffer.ConsumeRoll(now: number): boolean
-	if not InputBuffer.PeekRoll(now) then
+-- Takes the same optional window as PeekRoll, so a press admitted under the landing window is also
+-- SPENT under it. Consuming with the shorter default would find a 0.19s-old press already expired, leave
+-- it unconsumed, and hand it to the next caller that asks with the wider window.
+function InputBuffer.ConsumeRoll(now: number, window: number?): boolean
+	if not InputBuffer.PeekRoll(now, window) then
 		return false
 	end
 	rollPressedAt = 0

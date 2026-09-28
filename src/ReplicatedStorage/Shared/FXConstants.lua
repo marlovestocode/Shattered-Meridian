@@ -62,10 +62,10 @@ local FXConstants = {
 	-- PostureBreakSeconds, the same asymmetry CombatFeedbackClient's own ShakePresets.Defender table
 	-- already draws between those three kinds.
 	--
-	-- AttackerSeconds, HeavyBonusSeconds and ParrySeconds remain ORPHANED -- read by zero files, exactly
-	-- as they were before VictimSeconds/PostureBreakSeconds were reconnected. No attacker-side freeze
-	-- or parry-side freeze was part of that reconnection; wiring those is a separate call for whoever
-	-- wants an attacker's own hit-stop next, not something to infer from these numbers merely existing.
+	-- HeavyBonusSeconds and ParrySeconds are live since 2026-09-28: CombatFeedbackClient's exchange
+	-- (animation) freeze adds the first to a Heavy move and uses the second for a parry clash, on both
+	-- combatants. AttackerSeconds is still read by nothing -- the exchange freeze deliberately holds both
+	-- bodies for the SAME beat (a shared stop), so a separate attacker length would only desync them.
 	-- Kept rather than deleted because they are pre-tuned and cheap to keep, the same reasoning that
 	-- left DamageConstants.AttackerLunge in place for the bodies it can still reach.
 	--

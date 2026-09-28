@@ -56,9 +56,11 @@ local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local BlimpConstants = require(ReplicatedStorage.Shared.Blimp.BlimpConstants)
+local BoatConstants = require(ReplicatedStorage.Shared.Boat.BoatConstants)
 local BountyConstants = require(ReplicatedStorage.Shared.BountyConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
+local DeathConstants = require(ReplicatedStorage.Shared.Death.DeathConstants)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
 local EngagementConstants = require(ReplicatedStorage.Shared.Engagement.EngagementConstants)
@@ -151,6 +153,11 @@ local ENTRIES: { BootEntry } = {
 	-- Bloodline Abilities plan) are its callers, not clients.
 	{ Name = "EffectSystem", Path = { "Systems", "EffectSystem" }, Remotes = {} },
 	{ Name = "TierSystem", Path = { "Systems", "TierSystem" }, Remotes = namesOf(TierConstants.RemoteNames) },
+	-- The fight-to-grow spine (Main.server.lua step 7b). Neither owns a remote, and neither ever may: a
+	-- progression grant a client could request is exactly what project-vision.md's first pillar
+	-- forbids. Both are reached only through GameplayEvents.PlayerKilled.
+	{ Name = "ProgressionSystem", Path = { "Systems", "ProgressionSystem" }, Remotes = {} },
+	{ Name = "RewardSystem", Path = { "Systems", "RewardSystem" }, Remotes = {} },
 	{ Name = "ArtTreeManager", Path = { "Managers", "ArtTreeManager" }, Remotes = {} },
 	{ Name = "ArtSystem", Path = { "Systems", "ArtSystem" }, Remotes = namesOf(ArtConstants.RemoteNames) },
 	-- Race Traits + Bloodline Abilities plan. Neither owns a remote of its own -- KitAbilitySystem (a
@@ -192,7 +199,6 @@ local ENTRIES: { BootEntry } = {
 		Remotes = namesOf(Constants.Kit.RemoteNames),
 	},
 	{ Name = "MoveRegistryManager", Path = { "Combat", "MoveRegistryManager" }, Remotes = {} },
-	{ Name = "PlayerDeathSystem", Path = { "Systems", "PlayerDeathSystem" }, Remotes = {} },
 	{ Name = "HitboxEngine", Path = { "Combat", "HitboxEngine", "HitboxEngine" }, Remotes = {} },
 	{
 		Name = "DefenseSystem",
@@ -203,6 +209,15 @@ local ENTRIES: { BootEntry } = {
 		Name = "DamageSystem",
 		Path = { "Combat", "Damage", "DamageSystem" },
 		Remotes = namesOf(DamageConstants.Network.RemoteNames),
+	},
+	-- Not a combat layer: the sole death confirmer and PlayerKilled publisher. Declared here because
+	-- Main.server.lua boots it here -- after DamageSystem, whose OnApplied it attributes kills from,
+	-- and before AttackRequestSystem, the first thing that lets a blow land. Owns the Death_Notice
+	-- broadcast (the same confirmed fact, for the death overlay and the kill feed).
+	{
+		Name = "PlayerDeathSystem",
+		Path = { "Systems", "PlayerDeathSystem" },
+		Remotes = namesOf(DeathConstants.Network.RemoteNames),
 	},
 	{
 		Name = "AttackRequestSystem",
@@ -223,6 +238,9 @@ local ENTRIES: { BootEntry } = {
 		Path = { "Combat", "Engagement", "EngagementSystem" },
 		Remotes = namesOf(EngagementConstants.Network.RemoteNames),
 	},
+	-- The anti-knockback detector, a third OnApplied sibling. Owns no remote: the launch itself rides
+	-- DamageSystem's existing Combat_Feedback, and a flag goes through ModerationSystem.
+	{ Name = "KnockbackAudit", Path = { "Combat", "Damage", "KnockbackAudit" }, Remotes = {} },
 	-- Owns no remote -- purely cosmetic, replicates for free as a Tool parented under the character
 	-- rather than through NetworkBridge. See its own header for why it is a sibling of the attack
 	-- layer, not a combat-legality gate.
@@ -246,6 +264,11 @@ local ENTRIES: { BootEntry } = {
 		Name = "BlimpSystem",
 		Path = { "Systems", "BlimpSystem" },
 		Remotes = namesOf(BlimpConstants.Network.RemoteNames),
+	},
+	{
+		Name = "BoatSystem",
+		Path = { "Systems", "BoatSystem" },
+		Remotes = namesOf(BoatConstants.Network.RemoteNames),
 	},
 	{
 		Name = "VehicleManager",
@@ -296,16 +319,27 @@ local ENTRIES: { BootEntry } = {
 	-- terms as everything above: the day one of them stops being empty and grows a remote, the boot
 	-- check starts holding it to that.
 	{ Name = "FactionManager", Path = { "Managers", "FactionManager" }, Remotes = {} },
-	{ Name = "ProgressionSystem", Path = { "Systems", "ProgressionSystem" }, Remotes = {} },
 	{ Name = "AchievementSystem", Path = { "Systems", "AchievementSystem" }, Remotes = {} },
 	{ Name = "AbsorbSystem", Path = { "Systems", "AbsorbSystem" }, Remotes = {} },
-	{ Name = "RewardSystem", Path = { "Systems", "RewardSystem" }, Remotes = {} },
 	{ Name = "AwakeningSystem", Path = { "Systems", "AwakeningSystem" }, Remotes = {} },
 	{ Name = "TerritorySystem", Path = { "Systems", "TerritorySystem" }, Remotes = {} },
 	{ Name = "WorldSystem", Path = { "Systems", "WorldSystem" }, Remotes = {} },
 }
 
 BootManifest.Entries = ENTRIES
+
+-- The entries that boot through Main.server.lua's PLANNED loop: roadmap placeholders with empty Inits,
+-- none of which anything requires. Exposed so Tests/Boot/BootManifest.spec.lua can hold both halves of
+-- that claim to account -- a planned System that grows a body or an inbound require has stopped being
+-- planned, and should move to a numbered step the way ProgressionSystem and RewardSystem did.
+BootManifest.Planned = table.freeze({
+	"FactionManager",
+	"AchievementSystem",
+	"AbsorbSystem",
+	"AwakeningSystem",
+	"TerritorySystem",
+	"WorldSystem",
+})
 
 -- The retired names themselves, for the spec to assert are NOT created by anyone. Exposed rather than
 -- kept file-local so "is this name dead" has one answer instead of two.

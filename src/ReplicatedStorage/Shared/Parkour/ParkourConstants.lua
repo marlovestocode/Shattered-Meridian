@@ -457,6 +457,14 @@ ParkourConstants.Slide = {
 	-- Steering authority while sliding, in degrees per second. Non-zero (a slide you cannot aim at
 	-- all reads as a cutscene) but well below normal turn rate, so a slide still commits.
 	SteerRateDegreesPerSecond = 130,
+	-- Floor on slide speed while something overhead stops the slide ending and a direction is held.
+	-- Without it a slide that friction ran down to zero under a low ceiling sat there forever: every
+	-- ending exit refuses while the ceiling is blocked (standing up would eject the character through
+	-- it), and at zero speed nothing moves the body out from under it. This lets the player crawl out
+	-- in the direction they are steering; with no input held it does nothing, so a slide is never
+	-- dragged anywhere the player did not ask to go. Matches Roll.CrawlSpeed, which hands its own
+	-- dead-end ceiling hold to this state.
+	CrawlSpeed = 8,
 
 	-- Fraction of live slide momentum carried into a jump taken out of the slide. Above 1 on purpose
 	-- -- the slide-jump is the intended skill-expression chain of this whole system, and it should
@@ -1170,13 +1178,21 @@ ParkourConstants.WallJump = {
 -- AerialCombat are not "parkour actions," they are how a character exists, and blocking any of them
 -- would strand the machine with nowhere legal to be.
 --
--- SLIDING AND ROLLING ARE THE JUDGMENT CALL in this table, flagged rather than buried. They are
--- listed because the design named an exhaustive allow-list (hang/climb/mantle/vault) and these are
--- not on it. But both read as combat moves as much as traversal ones -- a roll in particular is the
--- genre's standard dodge -- so if combat starts feeling stiff, these two are the first entries to
--- reconsider, and removing either is a one-line change here rather than anything structural. Note
--- the combat system has its OWN slide (CombatSystem.handleSlideRequest) which this does not touch;
--- only the parkour framework's states are gated here.
+-- ROLLING IS NOT LISTED, AND THAT IS THE DECISION THIS COMMENT USED TO FLAG AS PENDING. It sat here
+-- as "the judgment call" beside Sliding, on the grounds that the design's exhaustive allow-list
+-- (hang/climb/mantle/vault) did not name it. It came out because it is not a repositioning tool in the
+-- sense this gate exists to remove: it is the grounded DODGE, and with it blocked a grounded fighter had
+-- no evasive move at all for the InCombat tag's full thirty seconds after any exchange (Dash is
+-- air-only). What a roll is worth in a fight is now priced where combat prices things -- the server's
+-- evade frames (DefenseConstants.Evade, opened by DefenseSystem.BeginEvade off the accepted roll report)
+-- and the roll's own cooldown -- and what it must NOT be is gated by StateSupport.CanRoll's combat-
+-- commitment check (no rolling out of your own swing or out of hitstun) rather than by this table.
+-- Adding "Rolling = true" back here is still a one-line change, and StateSupport.CanRoll still asks
+-- this table first, so it would still bite everywhere a roll can start.
+--
+-- SLIDING REMAINS THE OPEN JUDGMENT CALL. Listed because the allow-list does not name it; reads as a
+-- combat move as much as a traversal one. If combat starts feeling stiff it is the next entry to
+-- reconsider.
 ParkourConstants.CombatGate = {
 	-- "WallJumping" is a GATE TAG, not a state id -- kicking off a wall stopped being its own state when
 	-- it was folded into States/WallRunning.lua as a phase (see that file's header), but combat still
@@ -1192,23 +1208,39 @@ ParkourConstants.CombatGate = {
 		WallJumping = true,
 		Leaping = true,
 		Sliding = true,
-		Rolling = true,
 	} :: { [string]: boolean },
 }
 
 ParkourConstants.Roll = {
 	Speed = 30,
 	DurationSeconds = 0.5,
+	-- THE ROLL'S ONLY COST. Stamina was removed on purpose, so the cooldown is what stops a roll from
+	-- being spammed as locomotion or as a permanent evade. The server derives its own evade cooldown from
+	-- this (DefenseConstants.Evade.CooldownSeconds), so retuning it here retunes both halves.
 	CooldownSeconds = 0.9,
-	-- Fraction of live momentum a roll preserves on exit. Above the slide's, because a roll is the
-	-- shorter, more committed option and should reward the correct read.
+	-- Fraction of the momentum the roll was ENTERED with that it hands back on exit -- not of the roll's
+	-- own Speed. This used to retain the roll's live speed (always at least Speed, 30), which meant a
+	-- roll from a standstill handed 30 studs/s into Idle: faster than walking, so rolling on cooldown
+	-- beat walking as a way to travel. Keyed off entry momentum, a roll returns what you brought into
+	-- it -- a sprinting roll exits sprinting, a standing one exits standing -- and the burst in between is
+	-- the dodge, not a speed boost. Floored at walking pace while movement is held (Rolling.Exit), so a
+	-- roll from rest with a direction held does not stop dead.
 	ExitRetainFraction = 1,
-	-- Rolling out of a landing is the reward for timing a roll input near ground contact -- within
-	-- this window before/after touchdown, a roll converts what would have been a hard landing into a
-	-- full-momentum continuation. This is the landing/combat interaction the design asks for.
+	-- THE LANDING ROLL. A roll pressed within this window of ground contact converts what would have been
+	-- a hard landing into a full-momentum continuation. Two halves, both reading this one number:
+	--   * EARLY -- pressed up to this long BEFORE contact. Decided on the contact frame itself
+	--     (States/Falling.Update asks StateSupport.CanRoll with this as the input window), so Landing
+	--     is never entered: no momentum cut, no camera dip, no landing shake.
+	--   * LATE -- pressed up to this long AFTER contact, from inside Landing. The dip has already played
+	--     (it fired on the contact frame and cannot be un-fired), but States/Rolling.Enter refunds the
+	--     momentum Landing took (ParkourContext.PreLandingMomentum), so the continuation is still full
+	--     speed. Accepted and documented rather than delaying the dip on every landing just in case.
 	LandingWindowSeconds = 0.2,
 	-- A roll may be started from these states only -- everything else must transition first. Kept
 	-- here (not hardcoded in States/Rolling.lua) so a design pass can widen it without touching code.
+	-- Falling is listed for the EARLY landing roll above -- StateSupport.CanRoll still demands ground
+	-- contact, so this never means a roll in open air; it means "the fall that is touching down this
+	-- frame".
 	AllowedFromStates = {
 		Idle = true,
 		Walking = true,
@@ -1217,6 +1249,30 @@ ParkourConstants.Roll = {
 		Landing = true,
 		Falling = true,
 	},
+	-- The crouch while rolling (a HipHeight delta, restored on exit). The roll's own number rather than
+	-- a read of Slide.HipHeightDelta, but CONSTRAINED by it: a roll that reaches its ceiling hold cap
+	-- hands off to Sliding (MaxCeilingHoldSeconds below), and a slide that stood taller than the roll it
+	-- inherited would stand up into the very geometry the roll was ducking. So this must never exceed
+	-- Slide.HipHeightDelta -- asserted in Tests/Parkour/RollingState.spec, because it is invisible here.
+	HipHeightDelta = 1.6,
+	-- Downward bias on the commanded velocity while grounded, holding the body against the surface across
+	-- small bumps. Same job as Slide.SurfaceStickSpeed, owned separately so the two can be tuned apart.
+	-- Replaced a hardcoded 8 that was also applied in the air -- which is what pinned a roll carried off
+	-- a ledge to an 8 studs/s descent. Airborne, the roll now drives only the horizontal plane
+	-- (MotorCommand.PlanarOnly) and gravity owns the fall.
+	SurfaceStickSpeed = 8,
+	-- THE CEILING HOLD. A roll that finishes under something too low to stand in cannot stand up, and
+	-- used to wait for the ceiling to clear -- at its full roll speed if the tunnel continued, and at
+	-- ZERO forever if it was a dead end, because nothing moved the body and the ceiling therefore never
+	-- cleared. Past DurationSeconds with the ceiling blocked, the roll now crawls in the direction of held
+	-- input at this speed (zero with no input -- the player is not dragged, but is never stuck either),
+	-- for at most MaxCeilingHoldSeconds, then hands off to Sliding, which owns the same low-clearance
+	-- posture with no cap of its own and a crawl rule of its own (Slide.CrawlSpeed). The cap exists
+	-- because the roll is a server-reported action whose ownership window is declared up front
+	-- (ParkourController's ACTION_DURATIONS, which adds this hold to the roll's own) and must not be
+	-- outlived; the slide it hands to opens a fresh report.
+	CrawlSpeed = 8,
+	MaxCeilingHoldSeconds = 0.6,
 }
 
 -- THE DASH -- an AIR-ONLY, camera-aimed, steerable launch on its own key
@@ -1438,6 +1494,33 @@ ParkourConstants.Fall = {
 	-- cases. Deliberately short -- the design's "small falls should transition directly into normal
 	-- movement" rule.
 	LandingHoldSeconds = 0.08,
+
+	-- Landing impact sounds, played by Client/FX/ParkourAudio.PlayLanding (called from States/
+	-- Landing.lua's own Enter, which is where LandingSeverity actually lives -- ParkourAudio's usual
+	-- ONE_SHOTS table keys purely off the state name and cannot express "which sound, depending on a
+	-- runtime severity flag", so this is the one landing beat that bypasses that table by design, the
+	-- same way Client/FX/RunAudio.lua's own header explains for a different reason).
+	--
+	-- TODO(asset): hard_landing_02.wav (soft fall) still needs uploading to Roblox (Studio's Toolbox ->
+	-- Inventory -> Audio, or the creator dashboard); paste its rbxassetid:// into BOTH Soft and Medium
+	-- below. Until then they are "" -- this codebase's "not authored yet" value, which SoundManager plays
+	-- as silence -- and NOT the bare "rbxassetid://" prefix, which passes every ~= "" guard, reaches a
+	-- real load attempt and fails (Tests/Loading/AssetPreloader.spec.lua rejects it). Hard
+	-- (hard_landing_01.wav) is uploaded. Medium reuses the soft clip rather than getting a third asset:
+	-- it is the "brief beat, no control lost" tier and reads closer to a controlled landing than a
+	-- bone-jarring one.
+	SoftLandingSound = {
+		SoundId = "", -- hard_landing_02.wav, pending upload
+		Volume = 0.45,
+	},
+	MediumLandingSound = {
+		SoundId = "", -- hard_landing_02.wav (shared with Soft), pending upload
+		Volume = 0.4,
+	},
+	HardLandingSound = {
+		SoundId = "rbxassetid://74740213158826", -- hard_landing_01.wav
+		Volume = 0.6,
+	},
 }
 
 ParkourConstants.Slope = {
@@ -1666,6 +1749,15 @@ ParkourConstants.AnimationIds = {
 	WallJumpLeft = "rbxassetid://88023924827467",
 	WallJumpRight = "rbxassetid://75811078175435",
 	Roll = "rbxassetid://125167812303491",
+	-- Directional rolls, for a roll that KEEPS its facing -- in combat, or under shift lock (States/
+	-- Rolling publishes Forward/Back/Left/Right from the angle between travel and facing). All blank:
+	-- "authored later" (user action -- see this table's own header). A blank one falls through
+	-- ParkourAnimator's hasAsset check to Roll above, so an unauthored side plays the forward clip rather
+	-- than nothing, and each is a one-line id edit here when it exists.
+	RollForward = "",
+	RollBack = "",
+	RollLeft = "",
+	RollRight = "",
 	-- The dash, one clip per PITCH BAND of the launch aim -- States/Dashing.lua sorts the angle it
 	-- launched at into Up / Level / Down (Dash.AnimationPitchDegrees) and publishes that as its
 	-- AnimationVariant, once at Enter. Three bands rather than the five body-relative quadrants this

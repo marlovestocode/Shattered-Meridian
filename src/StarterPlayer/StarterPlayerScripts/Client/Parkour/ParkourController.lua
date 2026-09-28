@@ -68,6 +68,10 @@ local States = require(script.Parent.States)
 -- back out of here would need its own polling loop and could observe a state one frame stale. The run
 -- system reads it, exactly like the animation, camera, network and debug layers already do.
 local RunController = require(script.Parent.Parent.Movement.RunController)
+-- The combat client's record of this player's own swing and stun (Client/Combat/LocalCombatState.lua),
+-- read once a frame into ParkourContext.CombatCommitted. A leaf module with no requires of its own, so
+-- pulling it here cannot form a cycle with the combat clients that write it.
+local LocalCombatState = require(script.Parent.Parent.Combat.LocalCombatState)
 
 type ParkourContext = ParkourTypes.ParkourContext
 type MovementStateId = ParkourTypes.MovementStateId
@@ -95,7 +99,10 @@ local ACTION_DURATIONS: { [string]: number } = {
 	-- assisted) stays comfortably inside the existing +0.5s slack.
 	WallRun = ParkourConstants.WallRun.MaxDurationSeconds + 0.5,
 	LedgeClimb = ParkourConstants.Ledge.ClimbDurationSeconds + 0.5,
-	Roll = ParkourConstants.Roll.DurationSeconds + 0.5,
+	-- Includes the ceiling hold: a roll that finishes under something too low to stand in keeps running
+	-- (crawling) for up to MaxCeilingHoldSeconds before it hands off to a slide -- see States/Rolling.lua.
+	-- A window sized for DurationSeconds alone would under-declare that roll by the whole hold.
+	Roll = ParkourConstants.Roll.DurationSeconds + ParkourConstants.Roll.MaxCeilingHoldSeconds + 0.5,
 	-- Derived from the LONGEST direction rather than from any one of the four, so retuning a single
 	-- direction longer can never under-declare the window and have the server force-expire a dash
 	-- mid-burst. States/Dashing.lua's own spec asserts every direction stays at or under it.
@@ -190,6 +197,9 @@ local function buildInitialContext(boundCharacter: Model, boundHumanoid: Humanoi
 		WallLaunchDashBoostUntil = 0,
 		CombatOwned = false,
 		InCombat = false,
+		CombatCommitted = false,
+		PreLandingMomentum = nil,
+		LandedAt = nil,
 		Assists = InputBuffer.GetAssists(),
 		Motor = ParkourMotor.BeginFrame(),
 		AnimationVariant = nil,
@@ -329,6 +339,7 @@ local function onTransition(previousId: MovementStateId, nextId: MovementStateId
 	RunController.SetParkourState(nextId)
 	if nextId == "Landing" and context.LandingSeverity then
 		ParkourCamera.PlayLanding(context.LandingSeverity)
+		ParkourAudio.PlayLanding(context.LandingSeverity)
 	end
 	logger:trace("Parkour state changed", { from = previousId, to = nextId })
 end
@@ -370,6 +381,11 @@ local function step(deltaTime: number): ()
 	-- keep correct across respawns. Unset (a life that has never fought) reads as false, which is
 	-- exactly right.
 	context.InCombat = currentHumanoid:GetAttribute(Constants.Attributes.InCombat) == true
+	-- Pulled from the combat client's own mirror, the same way SprintHeld is pulled from RunController:
+	-- LocalCombatState is the one place this client already records its own swing and its own stun, and
+	-- a second copy kept here would be a third answer to a question the server has already answered.
+	-- See ParkourContext.CombatCommitted for who reads it.
+	context.CombatCommitted = LocalCombatState.FreeAt(now) > now
 
 	local velocity = currentRoot.AssemblyLinearVelocity
 	context.Velocity = velocity

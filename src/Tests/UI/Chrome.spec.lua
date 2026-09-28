@@ -102,19 +102,35 @@ return function()
 			expect(Fusion.peek(chrome.Dim)).to.equal(0)
 		end)
 
-		it("keeps the corner tiles up in every mode except Dead", function()
+		it("keeps the corner tiles up only while Playing", function()
 			local _, modalOpen, dead, chrome = build()
 
 			expect(Fusion.peek(chrome.AmbientVisible)).to.equal(true)
-			-- A panel dims the corners; it does not take them away. The helm console is still telling
-			-- a pilot which way the ship is pointing while they read their character sheet.
+			-- Out-of-focus UI disappears: a panel takes the corners away rather than dimming them
+			-- (a design change from the original "dim, never hide" rule, made on request).
 			modalOpen:set(true)
+			expect(Fusion.peek(chrome.AmbientVisible)).to.equal(false)
+			modalOpen:set(false)
 			expect(Fusion.peek(chrome.AmbientVisible)).to.equal(true)
 
 			dead:set(true)
 			expect(Fusion.peek(chrome.AmbientVisible)).to.equal(false)
 			dead:set(false)
 			expect(Fusion.peek(chrome.AmbientVisible)).to.equal(true)
+		end)
+
+		it("takes the dock away behind a panel, but keeps it through a death", function()
+			local _, modalOpen, dead, chrome = build()
+
+			expect(Fusion.peek(chrome.DockVisible)).to.equal(true)
+			modalOpen:set(true)
+			expect(Fusion.peek(chrome.DockVisible)).to.equal(false)
+			modalOpen:set(false)
+			expect(Fusion.peek(chrome.DockVisible)).to.equal(true)
+
+			-- An empty health bar is what a dead player is meant to be looking at.
+			dead:set(true)
+			expect(Fusion.peek(chrome.DockVisible)).to.equal(true)
 		end)
 	end)
 
@@ -359,7 +375,7 @@ return function()
 			-- A Fusion Value has :set; a Computed does not. This is the difference between "the mode
 			-- reflects what is happening" and "the mode is whatever the last screen to touch it said",
 			-- and it is one property lookup to keep it that way.
-			for _, field in { "Mode", "Dim", "AmbientVisible" } do
+			for _, field in { "Mode", "Dim", "AmbientVisible", "DockVisible" } do
 				local object = (chrome :: any)[field]
 				expect(object).to.be.ok()
 				if object.set ~= nil then

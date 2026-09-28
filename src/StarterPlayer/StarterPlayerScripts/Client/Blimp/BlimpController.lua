@@ -892,6 +892,25 @@ function BlimpController.Start(
 	local mountChangedRemote = NetworkBridge.GetRemoteEvent(BlimpConstants.Network.RemoteNames.MountChanged)
 	mountChangedRemote.OnClientEvent:Connect(onMountChanged)
 
+	-- Catch-up for the exact race BlimpConstants.Network.RemoteNames.GetCurrentMount's own header
+	-- describes: Main.client.lua's boot is a long, synchronous chain of unrelated .Start() calls, and a
+	-- fast player can already be standing at a wheel and pressing E before THIS line has even run --
+	-- the server's mount succeeds regardless, but the one MountChanged broadcast for it fires into a
+	-- connection that does not exist yet and is gone for good, leaving this client welded with no
+	-- console and no steering until it dismounts and remounts. Pulled once, here, rather than polled: a
+	-- client that was already listening in time (the overwhelming majority of mounts) gets back nil and
+	-- this is a no-op. task.spawn so a slow round trip cannot itself delay the rest of Start().
+	task.spawn(function()
+		local ok, payload = pcall(function()
+			local getCurrentMountRemote =
+				NetworkBridge.GetRemoteFunction(BlimpConstants.Network.RemoteNames.GetCurrentMount)
+			return getCurrentMountRemote:InvokeServer()
+		end)
+		if ok and payload then
+			onMountChanged(payload)
+		end
+	end)
+
 	local helmUpdatedRemote = NetworkBridge.GetRemoteEvent(BlimpConstants.Network.RemoteNames.HelmUpdated)
 	helmUpdatedRemote.OnClientEvent:Connect(onHelmUpdated)
 

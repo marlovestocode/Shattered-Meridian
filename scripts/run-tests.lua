@@ -12,13 +12,10 @@ local StarterPlayer = game:GetService("StarterPlayer")
 -- path inside it would otherwise go unnoticed until someone opens Studio. Requiring (but never
 -- calling .Init() -- that needs a real player/DataStore environment this headless place doesn't
 -- have) is enough to catch a syntax error or bad require path, which is the class of mistake a
--- structural refactor risks introducing. CombatSystem.lua/TrainingBotSystem.lua were removed
--- alongside the rest of the combat system; PlayerDeathSystem.lua (their replacement for player-death
--- detection -- see that module's own header) has no dedicated spec either, so it earns the same
--- load-check entry for the same reason.
+-- structural refactor risks introducing. (PlayerDeathSystem.lua used to be listed here too; it has
+-- had a dedicated spec since kill attribution landed -- Tests/Progression/PlayerDeathSystem.spec.lua.)
 local modulesToLoad = {
 	ServerScriptService.Server.Systems.DevMenuSystem,
-	ServerScriptService.Server.Systems.PlayerDeathSystem,
 	ServerScriptService.Server.Systems.BugReportSystem,
 	ServerScriptService.Server.Systems.AdminActionSystem,
 	ServerScriptService.Server.Systems.ModerationSystem,

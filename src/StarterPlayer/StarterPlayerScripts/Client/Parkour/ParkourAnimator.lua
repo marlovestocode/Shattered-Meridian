@@ -307,6 +307,20 @@ local VARIANT_CLIPS: {
 				},
 			},
 		},
+		-- Also present in STATE_CLIPS above (as "Roll", the fallback every variant lands on while its own
+		-- id is blank -- see hasAsset). States/Rolling.Enter publishes the variant once: "Forward" for a
+		-- roll the body turns into, or the side of the body the roll went toward for one that KEEPS its
+		-- facing (in combat, or under shift lock). Four clips because a dodge to the side and a dodge
+		-- backwards are different motions, and the forward clip played for either reads as the character
+		-- rolling one way while travelling another. Snap profile and one-shot for the same reasons as the
+		-- STATE_CLIPS entry.
+		Rolling = {
+			Looped = false,
+			ScalesWithSpeed = false,
+			FadeIn = PROFILES.Snap.FadeIn,
+			FadeOut = PROFILES.Snap.FadeOut,
+			Clips = { Forward = "RollForward", Back = "RollBack", Left = "RollLeft", Right = "RollRight" },
+		},
 		-- Also present in STATE_CLIPS (as the no-variant fallback); both agree on one-shot, non-scaling.
 		Landing = {
 			Looped = false,

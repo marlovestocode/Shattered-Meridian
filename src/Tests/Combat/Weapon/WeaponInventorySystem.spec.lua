@@ -14,8 +14,11 @@
 -- indistinguishable from the real thing for this module's purposes -- and it is the only way to reach
 -- these paths headlessly at all.
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 local Workspace = game:GetService("Workspace")
+
+local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
 local AttackRequestSystem = require(ServerScriptService.Server.Combat.Attack.AttackRequestSystem)
 local SwingSequencer = require(ServerScriptService.Server.Combat.Attack.SwingSequencer)
@@ -28,6 +31,9 @@ local TOOL_NAME = "EquippedWeaponVisual"
 local ROSTER = WeaponFixture.Install()
 local FIRST_WEAPON = ROSTER[1]
 local SECOND_WEAPON = ROSTER[2]
+-- Bare hands: owned and selected from the moment a record exists, never picked up or dropped. See
+-- WeaponRoster.FISTS_ID and WeaponInventorySystem's recordFor.
+local FISTS = WeaponRoster.FISTS_ID
 
 local nextId = 0
 local spawned: { Instance } = {}
@@ -81,16 +87,18 @@ return function()
 	end)
 
 	describe("WeaponInventorySystem -- a fresh player", function()
-		it("owns nothing and has nothing drawn", function()
+		it("owns their fists and nothing else, with nothing drawn", function()
 			local player = fakePlayer()
-			expect(#WeaponInventorySystem.GetOwned(player)).to.equal(0)
+			local owned = WeaponInventorySystem.GetOwned(player)
+			expect(#owned).to.equal(1)
+			expect(owned[1]).to.equal(FISTS)
 			expect(WeaponInventorySystem.IsDrawn(player)).to.equal(false)
 		end)
 
-		it("cannot draw with an empty inventory, and does not error trying", function()
+		it("can raise bare hands with nothing picked up", function()
 			local player = fakePlayer()
-			expect(WeaponInventorySystem.ToggleDraw(player)).to.equal(false)
-			expect(WeaponInventorySystem.IsDrawn(player)).to.equal(false)
+			expect(WeaponInventorySystem.ToggleDraw(player)).to.equal(true)
+			expect(WeaponInventorySystem.IsDrawn(player)).to.equal(true)
 		end)
 	end)
 
@@ -100,23 +108,25 @@ return function()
 			expect(WeaponInventorySystem.Pickup(player, FIRST_WEAPON)).to.equal(true)
 
 			local owned = WeaponInventorySystem.GetOwned(player)
-			expect(#owned).to.equal(1)
-			expect(owned[1]).to.equal(FIRST_WEAPON)
-			-- Selected implicitly, so the very next draw press works with no other control discovered.
-			expect(WeaponInventorySystem.ToggleDraw(player)).to.equal(true)
+			expect(#owned).to.equal(2)
+			expect(owned[2]).to.equal(FIRST_WEAPON)
+			-- Selected implicitly -- over the fists -- so the very next draw press raises the new weapon
+			-- with no other control discovered.
+			expect(WeaponInventorySystem.SelectNext(player)).to.equal(FISTS)
+			expect(WeaponInventorySystem.SelectNext(player)).to.equal(FIRST_WEAPON)
 		end)
 
 		it("is a no-op for a weapon already owned, rather than a duplicate entry", function()
 			local player = fakePlayer()
 			WeaponInventorySystem.Pickup(player, FIRST_WEAPON)
 			expect(WeaponInventorySystem.Pickup(player, FIRST_WEAPON)).to.equal(false)
-			expect(#WeaponInventorySystem.GetOwned(player)).to.equal(1)
+			expect(#WeaponInventorySystem.GetOwned(player)).to.equal(2)
 		end)
 
 		it("refuses a weapon the roster does not know", function()
 			local player = fakePlayer()
 			expect(WeaponInventorySystem.Pickup(player, "NotARealWeapon")).to.equal(false)
-			expect(#WeaponInventorySystem.GetOwned(player)).to.equal(0)
+			expect(#WeaponInventorySystem.GetOwned(player)).to.equal(1)
 		end)
 
 		it("keeps pickup order, which is what SelectNext cycles through", function()
@@ -125,8 +135,9 @@ return function()
 			WeaponInventorySystem.Pickup(player, FIRST_WEAPON)
 
 			local owned = WeaponInventorySystem.GetOwned(player)
-			expect(owned[1]).to.equal(SECOND_WEAPON)
-			expect(owned[2]).to.equal(FIRST_WEAPON)
+			expect(owned[1]).to.equal(FISTS)
+			expect(owned[2]).to.equal(SECOND_WEAPON)
+			expect(owned[3]).to.equal(FIRST_WEAPON)
 		end)
 	end)
 
@@ -155,7 +166,7 @@ return function()
 			-- Same weapon back, not a reset to the first owned -- see the module's own SELECTED note.
 			WeaponInventorySystem.ToggleDraw(player)
 			expect(WeaponInventorySystem.IsDrawn(player)).to.equal(true)
-			expect(#WeaponInventorySystem.GetOwned(player)).to.equal(2)
+			expect(#WeaponInventorySystem.GetOwned(player)).to.equal(3)
 		end)
 	end)
 
@@ -224,23 +235,25 @@ return function()
 	end)
 
 	describe("WeaponInventorySystem.SelectNext", function()
-		it("returns nil for an empty inventory rather than erroring", function()
-			expect(WeaponInventorySystem.SelectNext(fakePlayer())).to.equal(nil)
+		it("stays on the fists for a player who owns nothing else", function()
+			expect(WeaponInventorySystem.SelectNext(fakePlayer())).to.equal(FISTS)
 		end)
 
-		it("cycles through owned weapons and wraps at the end", function()
+		it("cycles through owned weapons, fists included, and wraps at the end", function()
 			local player = fakePlayer()
 			WeaponInventorySystem.Pickup(player, FIRST_WEAPON)
 			WeaponInventorySystem.Pickup(player, SECOND_WEAPON)
 
-			-- Pickup selected FIRST_WEAPON, so one cycle lands on the second and another wraps back.
+			-- Pickup selected FIRST_WEAPON; the cycle is pickup order behind the fists that lead it.
 			expect(WeaponInventorySystem.SelectNext(player)).to.equal(SECOND_WEAPON)
+			expect(WeaponInventorySystem.SelectNext(player)).to.equal(FISTS)
 			expect(WeaponInventorySystem.SelectNext(player)).to.equal(FIRST_WEAPON)
 		end)
 
-		it("stays on the only weapon when just one is owned", function()
+		it("alternates between one real weapon and the fists", function()
 			local player = fakePlayer()
 			WeaponInventorySystem.Pickup(player, FIRST_WEAPON)
+			expect(WeaponInventorySystem.SelectNext(player)).to.equal(FISTS)
 			expect(WeaponInventorySystem.SelectNext(player)).to.equal(FIRST_WEAPON)
 		end)
 	end)

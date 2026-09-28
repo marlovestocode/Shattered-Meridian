@@ -18,7 +18,11 @@
 
 	THE ORDER OF THE RULES IS THE DESIGN, so it is written out once here rather than inferred from the
 	branches:
-	  1. BACKSTAB outranks everything. If the defender was covering and the hit came from the rear
+	  0. EVADED outranks everything, including backstab. A body inside its roll's evade frames is not
+	     where the swing is, and that is true from every direction -- the dodge is positional, so the
+	     bearing that decides every rule below has nothing to say about it. Nothing is spent: no guard
+	     moves and an armed parry is left armed.
+	  1. BACKSTAB outranks everything else. If the defender was covering and the hit came from the rear
 	     hemisphere, nothing they were doing applies -- not the block, and not the parry. Being hit
 	     from behind is supposed to be the punish that makes facing matter.
 	  2. PARRY next, and only within the arc. A parry from behind is not a parry.
@@ -117,6 +121,18 @@ end
 -- them.
 function OutcomeResolver.Resolve(input: ResolveInput): ResolveResult
 	local guard = input.Guard
+
+	-- 0. Inside the roll's evade frames. Direction-blind, and ahead of the backstab on purpose -- see
+	--    this file's header.
+	if input.Evading == true then
+		return {
+			Kind = "Evaded" :: DefenseTypes.OutcomeKind,
+			Guard = guard,
+			GuardDelta = 0,
+			ConsumesParry = false,
+		}
+	end
+
 	local mitigates = OutcomeResolver.Mitigates(input.DefenderState, input.BlockHeld)
 	local parryAvailable = input.ParryLive and not input.ParryConsumed
 	local covering = mitigates or parryAvailable

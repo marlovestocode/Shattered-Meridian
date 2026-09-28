@@ -36,6 +36,48 @@ local function makeInput(overrides: { [string]: any }): ResolveInput
 end
 
 return function()
+	describe("OutcomeResolver.Resolve -- evasion (rule 0)", function()
+		it("evades a contact inside the evade window, spending nothing", function()
+			local result = OutcomeResolver.Resolve(makeInput({ Evading = true, Guard = 40 }))
+			expect(result.Kind).to.equal("Evaded")
+			expect(result.Guard).to.equal(40)
+			expect(result.GuardDelta).to.equal(0)
+			expect(result.ConsumesParry).to.equal(false)
+		end)
+
+		it("outranks a backstab -- the dodge does not care which way it came from", function()
+			local result = OutcomeResolver.Resolve(makeInput({
+				Evading = true,
+				DefenderState = "Blocking",
+				BlockHeld = true,
+				BearingDegrees = 180,
+			}))
+			expect(result.Kind).to.equal("Evaded")
+		end)
+
+		it("outranks a live parry, and does not spend it", function()
+			local result = OutcomeResolver.Resolve(makeInput({ Evading = true, ParryLive = true }))
+			expect(result.Kind).to.equal("Evaded")
+			expect(result.ConsumesParry).to.equal(false)
+		end)
+
+		it("outranks a block, so the guard is not drained", function()
+			local result = OutcomeResolver.Resolve(makeInput({
+				Evading = true,
+				DefenderState = "Blocking",
+				BlockHeld = true,
+				PowerLevel = 3,
+			}))
+			expect(result.Kind).to.equal("Evaded")
+			expect(result.GuardDelta).to.equal(0)
+		end)
+
+		it("treats an input that predates the field as not evading", function()
+			expect(OutcomeResolver.Resolve(makeInput({})).Kind).to.equal("Clean")
+			expect(OutcomeResolver.Resolve(makeInput({ Evading = false })).Kind).to.equal("Clean")
+		end)
+	end)
+
 	describe("OutcomeResolver.BearingDegrees", function()
 		local origin = Vector3.new(0, 0, 0)
 		-- Roblox convention: -Z is forward.

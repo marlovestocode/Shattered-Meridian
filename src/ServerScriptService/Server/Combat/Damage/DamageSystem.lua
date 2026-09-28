@@ -51,11 +51,24 @@
 	after HitboxEngine.Init. Main.server.lua calls them in that order and Init asserts it rather than
 	trusting the comment.
 
+	ALSO OWNS KNOCKBACK, as "what it does to you". A landed hit whose move authors a MoveKnockback (and no
+	Grab -- a grab replaces knockback) is resolved here to ONE world-space launch
+	(Shared/Damage/Knockback.LaunchVelocity: away from the attacker, authored magnitudes, clamped by
+	DamageConstants.Knockback) and written to DamageResult.Launch BEFORE OnApplied fires, so every
+	subscriber sees the launch that was actually applied. Then it is applied by whoever owns the body:
+	  * a server-owned body (a bot; an unanchored dummy) -- written here, on the server;
+	  * a PLAYER -- handed to that player's own client on the Defender copy of Combat_Feedback, which
+	    applies it after its hit-stop freeze (Client/Combat/KnockbackClient.lua). A server write would be
+	    silently overwritten by the owner's next frame (the AttackerLunge paragraph above). The player's
+	    Humanoid is stamped Attributes.KnockbackUntil so ParkourSystem does not count an honest launch
+	    toward its cheater flag, and Server/Combat/Damage/KnockbackAudit.lua checks the client honoured it.
+	The client decides nothing about a knock but WHEN inside its own frame to write it.
+
 	Does not own: contact detection (HitboxEngine), what kind of hit something was (DefenseSystem), the
 	guard pool itself (DefenseSystem.DrainGuard -- this decides how much, that owns the meter), per-move
-	damage numbers (the Move Creation System, via AttackCatalog), knockback PHYSICS (resolved here as a
-	number, applied by nothing -- the deleted RagdollController's territory), or deciding when anyone
-	throws an attack (the attack layer, which does not exist yet).
+	damage or knockback numbers (the Move Creation System, via AttackCatalog), ragdoll or air-combo
+	treatment (deleted with RagdollController/AirCombo; MoveKnockback.RagdollSeconds/StartsAirCombo are
+	authored but inert), or deciding when anyone throws an attack (the attack layer).
 ]]
 
 local Players = game:GetService("Players")
@@ -63,10 +76,12 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AmortizedReclaim = require(ReplicatedStorage.Shared.AmortizedReclaim)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
+local Knockback = require(ReplicatedStorage.Shared.Damage.Knockback)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Trove = require(ReplicatedStorage.Shared.Trove)
@@ -162,6 +177,82 @@ local function cancelSwingOf(model: Model, at: number): ()
 	HitboxEngine.CancelAttack(combatantId, "Hitstun", at)
 end
 
+-- The launch this hit gives the defender, or nil. See this file's header, KNOCKBACK. Resolved from the
+-- two PrimaryParts for the same reason the lunge loop below uses PrimaryPart rather than rig internals.
+local function launchFor(outcome: DefenseOutcome, result: DamageResult): Vector3?
+	local authored = result.Knockback
+	if not DamageConstants.Knockback.Enabled or authored == nil or result.Grab ~= nil then
+		return nil
+	end
+	if outcome.Defender == outcome.Attacker then
+		return nil
+	end
+	local attackerRoot = outcome.Attacker.PrimaryPart
+	local defenderRoot = outcome.Defender.PrimaryPart
+	if attackerRoot == nil or defenderRoot == nil then
+		return nil
+	end
+	return Knockback.LaunchVelocity(
+		attackerRoot.Position,
+		defenderRoot.Position,
+		attackerRoot.CFrame.LookVector,
+		authored
+	)
+end
+
+-- Applies `launch` to the defender, by whichever machine owns the body. Returns the defending Player
+-- when it is one, so the caller can put the launch on that player's feedback.
+local function applyLaunch(defender: Model, launch: Vector3, at: number): Player?
+	local player = Players:GetPlayerFromCharacter(defender)
+	if player then
+		local humanoid = CharacterUtil.HumanoidOf(defender)
+		if humanoid then
+			humanoid:SetAttribute(
+				AttributeConstants.KnockbackUntil,
+				at + DamageConstants.Knockback.MovementAllowanceSeconds
+			)
+		end
+		return player
+	end
+	-- Server-owned: a bot, or a dummy that is not anchored (DebugDummySystem anchors its dummies, which
+	-- correctly leaves them standing -- an anchored part has no velocity to set).
+	local root = defender.PrimaryPart
+	if root and not root.Anchored then
+		root.AssemblyLinearVelocity = launch
+	end
+	return nil
+end
+
+-- Publishes a hitstun on the victim's Humanoid, as two deadlines -- the Attribute seams two systems this
+-- layer must not require read from:
+--   * AttributeConstants.CombatBusyUntil -- the same deadline AttackRequestSystem writes for a swing,
+--     which Server/Systems/RunSystem.lua reads as "a combat action is committing this body": the victim
+--     moves at walking pace until it passes (holding their gear -- see RunSystem's header).
+--   * AttributeConstants.HitstunUntil -- the stun alone, which Server/Combat/Defense/DefenseSystem.lua
+--     reads to hold a guard press until the stun ends (see that Attribute's own entry for why it is not
+--     folded into the first).
+--
+-- math.max against whatever is there, never a bare write: being hit mid-swing must not SHORTEN the
+-- attacker-side deadline the swing already set, and a second hit must not shorten the first's stun.
+-- Both are on this layer's own clock (os.clock, the one Step runs on), which both readers compare
+-- against.
+local function extendDeadline(humanoid: Humanoid, attribute: string, until_: number): ()
+	local existing = humanoid:GetAttribute(attribute)
+	local current = if typeof(existing) == "number" then existing else 0
+	if until_ > current then
+		humanoid:SetAttribute(attribute, until_)
+	end
+end
+
+local function publishHitstunOf(defender: Model, until_: number): ()
+	local humanoid = CharacterUtil.HumanoidOf(defender)
+	if humanoid == nil then
+		return
+	end
+	extendDeadline(humanoid, AttributeConstants.CombatBusyUntil, until_)
+	extendDeadline(humanoid, AttributeConstants.HitstunUntil, until_)
+end
+
 local function applyOutcome(outcome: DefenseOutcome): ()
 	local entry = AttackCatalog.Get(outcome.Report.DebugName)
 	if not entry then
@@ -203,17 +294,34 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	end
 
 	if result.HitstunSeconds > 0 then
-		hitstunUntil[outcome.Defender] = math.max(hitstunUntil[outcome.Defender] or 0, at + result.HitstunSeconds)
+		local stunnedUntil = math.max(hitstunUntil[outcome.Defender] or 0, at + result.HitstunSeconds)
+		hitstunUntil[outcome.Defender] = stunnedUntil
 		cancelSwingOf(outcome.Defender, at)
+		publishHitstunOf(outcome.Defender, stunnedUntil)
 	end
 
 	-- A landed M1 (Basic weapon-string) hit gives the ATTACKER a brief forced-forward nudge, driven
-	-- from Step below -- see DamageConstants.AttackerLunge's own comment. Parried is excluded because
-	-- nothing of the attacker's own swing actually connected; every other resolved kind (Clean,
+	-- from Step below -- see DamageConstants.AttackerLunge's own comment. Parried and Evaded are excluded
+	-- because nothing of the attacker's own swing actually connected; every other resolved kind (Clean,
 	-- Blocked, Backstab, GuardBroken, Trade) still counts as the swing having landed on something.
-	if DamageConstants.AttackerLunge.Enabled and outcome.Kind ~= "Parried" and isBasicMoveId(entry.MoveId) then
+	--
+	-- SERVER-OWNED ATTACKERS ONLY (bots, dummies). A player's character is network-owned by their own
+	-- client, and Humanoid:Move from the server on a body it does not simulate is silently inert -- so
+	-- for players this was a per-frame call in Step below that moved nothing, ever. Skipped for them
+	-- rather than kept running for no effect; a player-side nudge would belong on their own client, the
+	-- same way Client/Combat/SwingLunge.lua's step does.
+	if
+		DamageConstants.AttackerLunge.Enabled
+		and outcome.Kind ~= "Parried"
+		and outcome.Kind ~= "Evaded"
+		and isBasicMoveId(entry.MoveId)
+		and Players:GetPlayerFromCharacter(outcome.Attacker) == nil
+	then
 		lungeUntil[outcome.Attacker] = at + DamageConstants.AttackerLunge.DurationSeconds
 	end
+
+	-- Resolved before OnApplied so every subscriber reads it (DamageResult.Launch's own header).
+	result.Launch = launchFor(outcome, result)
 
 	-- FIRED BEFORE THE HEALTH WRITE, and the ordering is the whole point rather than an accident.
 	-- Humanoid:TakeDamage raises Humanoid.Died synchronously when the blow is lethal, so a subscriber
@@ -238,6 +346,9 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 		end
 	end
 
+	local launch = result.Launch
+	local launchedPlayer: Player? = if launch then applyLaunch(outcome.Defender, launch, os.clock()) else nil
+
 	local feedback: CombatFeedback = {
 		Kind = outcome.Kind,
 		Role = "Attacker",
@@ -253,6 +364,8 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	if outcome.Defender ~= outcome.Attacker then
 		local defenderFeedback = table.clone(feedback)
 		defenderFeedback.Role = "Defender"
+		-- Only a player's own client applies a launch; a server-owned body already has it.
+		defenderFeedback.Knockback = if launchedPlayer then launch else nil
 		sendFeedback(outcome.Defender, defenderFeedback)
 	end
 
@@ -352,7 +465,8 @@ function DamageSystem.GetComboStage(model: Model, now: number): number
 end
 
 -- This system's output signal, for anything downstream that wants to react to real damage --
--- RewardSystem, AchievementSystem, and eventually kill attribution. Returns a disconnect function
+-- PlayerDeathSystem's kill credit, GrabSystem, EngagementSystem and KnockbackAudit today. The
+-- DamageResult carries Launch already resolved. Returns a disconnect function
 -- rather than a connection object, matching HitboxEngine.OnHit and DefenseSystem.OnResolved's own
 -- contract so a consumer of all three learns one shape.
 --

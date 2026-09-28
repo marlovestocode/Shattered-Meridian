@@ -99,11 +99,21 @@
 	   Both are pure decision functions (IsLockHeldByOther/ComputeLoadClaim/ComputeLockRelease/
 	   ComputeSaveWrite) that the actual UpdateAsync callbacks are one-line calls into -- see each
 	   one's own header, and this file's "Cross-server session lock + WriteGeneration" section.
+
+	   Neither layer alone covers a SAME-server rapid leave+rejoin (a reserved-server teleport loop
+	   landing back on origin, say): IsLockHeldByOther only ever refuses a FOREIGN JobId, so a rejoin
+	   under the same UserId on this server claims trivially while the leaving session's own final
+	   save may still be in flight -- and loadedProfiles/saveInFlight are keyed by Player INSTANCE, so
+	   the rejoin's brand-new Player shares no entry with the leaving one for either table to serialize
+	   against. leaveSaveInFlight (keyed by UserId, not Player) closes this third gap: loadProfile
+	   waits it out before claiming, so the rejoining session's WriteGeneration baseline is always read
+	   after the leaving session's own write lands, not racing it.
 ]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local DataStoreService = game:GetService("DataStoreService")
+local RunService = game:GetService("RunService")
 
 local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
@@ -159,6 +169,19 @@ local failedLoads: { [Player]: boolean } = {}
 -- earlier, accepted save survives untouched in the DataStore, so the next server to load this
 -- profile waits out the full LockStaleAfterSeconds for a lock nothing is still holding.
 local saveInFlight: { [Player]: boolean } = {}
+
+-- Keyed by UserId, NOT Player -- unlike saveInFlight above, this closes a race saveInFlight cannot:
+-- a same-server rapid leave+rejoin gives the rejoining session a brand-new Player INSTANCE for the
+-- same account, so it never shares a key with the leaving session's own loadedProfiles/saveInFlight
+-- entries. IsLockHeldByOther only ever refuses a FOREIGN JobId, so the rejoin's own claim step
+-- trivially succeeds against this same server and can read a WriteGeneration baseline the leaving
+-- session's still-in-flight final save (onPlayerRemoving) is about to move out from under it -- that
+-- new session's own first save then gets rejected by ComputeSaveWrite's generation backstop, and
+-- runAutosaveLoop kicks the innocent, actively-playing new session as "stale" even though nothing
+-- was actually lost. Set for the duration of onPlayerRemoving's own saveProfile call; loadProfile
+-- waits it out before claiming, so the rejoining session's baseline is always taken AFTER the
+-- leaving session's final write has landed.
+local leaveSaveInFlight: { [number]: boolean } = {}
 
 -- Fired (player: Player) the instant that player's profile finishes loading successfully -- per
 -- this file's own "no live mutable state leaves this module" rule, listeners are expected to call
@@ -235,6 +258,7 @@ function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProf
 			Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
 			Comfort = PlayerDataSystem.CreateDefaultComfortSettings(),
 			Gamepad = PlayerDataSystem.CreateDefaultGamepadSettings(),
+			UI = PlayerDataSystem.CreateDefaultUISettings(),
 		},
 	}
 end
@@ -456,6 +480,36 @@ local function decodeComfortSettings(raw: unknown): Types.ComfortSettings
 	}
 end
 
+-- The interface block's shipped defaults, read straight off Constants.Settings.UI.Defaults rather
+-- than restated here -- the same "one source of truth SettingsSystem's write validation also reads"
+-- rule Gamepad's own defaults follow below. Exported for the same reasons CreateDefaultComfortSettings
+-- above is.
+function PlayerDataSystem.CreateDefaultUISettings(): Types.UISettings
+	return {
+		Scale = Constants.Settings.UI.Defaults.Scale,
+	}
+end
+
+-- Field-by-field, same NaN-safe clamp-on-the-way-out posture as decodeGamepadSettings below -- a
+-- stored Scale of 0 (or NaN) would not merely look wrong, it would make the whole UI unusable with
+-- nothing on screen left to fix it from, so this can never trust a stored value further than the
+-- bounds SettingsSystem already enforces on the way in.
+local function decodeUISettings(raw: unknown): Types.UISettings
+	local defaults = PlayerDataSystem.CreateDefaultUISettings()
+	if typeof(raw) ~= "table" then
+		return defaults
+	end
+	local rawTable = raw :: { [string]: any }
+	local bounds = Constants.Settings.UI.Bounds
+	local rawScale = rawTable.Scale
+	if typeof(rawScale) ~= "number" or rawScale ~= rawScale then
+		return defaults
+	end
+	return {
+		Scale = math.clamp(rawScale, bounds.Scale.Min, bounds.Scale.Max),
+	}
+end
+
 -- The gamepad stick block's shipped defaults, read straight off Constants.Settings.Gamepad.Defaults
 -- rather than restated here -- that table is shared with Client/Input/Analog.lua (which builds its own
 -- DEFAULT_CONFIG from it) and with SettingsSystem's write validation, so all three agree by
@@ -531,6 +585,7 @@ function PlayerDataSystem.EncodeSettings(settings: Types.PlayerSettings): { [str
 	local parkour = settings.Parkour or PlayerDataSystem.CreateDefaultParkourSettings()
 	local comfort = settings.Comfort or PlayerDataSystem.CreateDefaultComfortSettings()
 	local gamepad = settings.Gamepad or PlayerDataSystem.CreateDefaultGamepadSettings()
+	local ui = settings.UI or PlayerDataSystem.CreateDefaultUISettings()
 	return {
 		Keybinds = encodeKeybindOverrides(settings.Keybinds),
 		GamepadKeybinds = encodeKeybindOverrides(settings.GamepadKeybinds),
@@ -559,6 +614,9 @@ function PlayerDataSystem.EncodeSettings(settings: Types.PlayerSettings): { [str
 			InvertLookY = gamepad.InvertLookY,
 			Vibration = gamepad.Vibration,
 		},
+		UI = {
+			Scale = ui.Scale,
+		},
 	}
 end
 
@@ -571,6 +629,7 @@ function PlayerDataSystem.DecodeSettings(raw: unknown): Types.PlayerSettings
 			Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
 			Comfort = PlayerDataSystem.CreateDefaultComfortSettings(),
 			Gamepad = PlayerDataSystem.CreateDefaultGamepadSettings(),
+			UI = PlayerDataSystem.CreateDefaultUISettings(),
 		}
 	end
 	local rawTable = raw :: { [string]: any }
@@ -588,6 +647,7 @@ function PlayerDataSystem.DecodeSettings(raw: unknown): Types.PlayerSettings
 		-- VehicleCameraMotion note makes for a new FIELD, applied to a new GROUP: what makes it safe is
 		-- that this decoder defaults the whole table, not just its members.
 		Gamepad = decodeGamepadSettings(rawTable.Gamepad),
+		UI = decodeUISettings(rawTable.UI),
 	}
 end
 
@@ -967,6 +1027,23 @@ Migrations[8] = function(raw: { [string]: any }): { [string]: any }
 	return raw
 end
 
+-- v9 -> v10: backfills Types.PlayerSettings' `UI` sub-table (the interface-scale block) onto any
+-- record saved before this pass -- byte-for-byte the shape Migrations[5] used for Comfort, one group
+-- over. Backfilled at Scale = 1 (CreateDefaultUISettings' own shipped default), which is today's only
+-- size and therefore exactly what every existing player's UI already looks like -- this migration
+-- changes nobody's screen, it only means the slider now exists in their Settings tab.
+Migrations[9] = function(raw: { [string]: any }): { [string]: any }
+	local profile = raw.Profile
+	if typeof(profile) == "table" then
+		local profileTable = profile :: { [string]: any }
+		local settings = profileTable.settings
+		if typeof(settings) == "table" and (settings :: { [string]: any }).UI == nil then
+			(settings :: { [string]: any }).UI = PlayerDataSystem.CreateDefaultUISettings()
+		end
+	end
+	return raw
+end
+
 function PlayerDataSystem.MigrateRecord(raw: { [string]: any }): { [string]: any }
 	local version = if typeof(raw.SchemaVersion) == "number" then raw.SchemaVersion :: number else 1
 	local migrated = raw
@@ -1247,6 +1324,33 @@ function PlayerDataSystem.Transform(player: Player, mutator: (profile: Types.Pla
 	return applied
 end
 
+-- SPEC-ONLY: installs `profile` as `player`'s loaded profile with no DataStore load, so an end-to-end
+-- spec can drive the REAL Transform/GetProfile path (and every System that writes through it) with a
+-- stand-in Player -- Instance.new("Player") errors in the headless harness, and loadProfile needs a
+-- real one. Tests/Progression/ProgressionSpine.spec.lua is the caller.
+--
+-- Refuses outside Studio, and that guard is the point rather than ceremony: on a live server this
+-- would hand a player a profile that never came from their record, which the next autosave would then
+-- write over the real one. Nothing saves an installed record in the test place -- the autosave loop,
+-- PlayerRemoving and BindToClose are all started by Init, which no spec calls.
+function PlayerDataSystem.InstallProfileForSpec(player: Player, profile: Types.PlayerProfile): ()
+	assert(RunService:IsStudio(), "PlayerDataSystem.InstallProfileForSpec is spec-only")
+	loadedProfiles[player] = {
+		SchemaVersion = Config.SchemaVersion,
+		Profile = profile,
+		WriteGeneration = 0,
+		Lock = nil,
+	}
+end
+
+-- SPEC-ONLY counterpart to InstallProfileForSpec: forgets `player` entirely, exactly as a completed
+-- PlayerRemoving would, without the save.
+function PlayerDataSystem.EvictProfileForSpec(player: Player): ()
+	loadedProfiles[player] = nil
+	dirtyPlayers[player] = nil
+	failedLoads[player] = nil
+end
+
 -- Writes `stored` for `player` if a DataStore handle exists, clearing its dirty flag and bumping
 -- stored.WriteGeneration on success. Called from four places (PlayerRemoving, the autosave loop,
 -- BindToClose, ResetProfile below) -- see this file's header, design decision 2. Deliberately
@@ -1411,6 +1515,16 @@ local function loadProfile(player: Player): ()
 	local key = tostring(userId)
 	local thisJobId = game.JobId
 
+	-- Same-server rapid leave+rejoin guard -- see leaveSaveInFlight's own header. A rejoin under the
+	-- same UserId on THIS server would otherwise claim the lock trivially (IsLockHeldByOther only
+	-- ever refuses a foreign JobId) and could read a WriteGeneration baseline the leaving session's
+	-- own final save is still in the middle of moving past. Waiting here means that baseline is
+	-- always read AFTER that write lands, so this session's own first save is never rejected by a
+	-- generation bump that was really just its own account's previous session finishing cleanly.
+	while leaveSaveInFlight[userId] do
+		task.wait()
+	end
+
 	if not dataStore then
 		logger:error("loadProfile: DataStore unavailable -- kicking rather than fabricate a profile", {
 			userId = userId,
@@ -1543,6 +1657,11 @@ end
 local function onPlayerRemoving(player: Player): ()
 	local stored = loadedProfiles[player]
 	if stored then
+		-- See leaveSaveInFlight's own header: held for exactly the span of this final save so a
+		-- same-server rejoin's loadProfile can wait it out rather than claim a WriteGeneration
+		-- baseline this save is about to move past.
+		local userId = player.UserId
+		leaveSaveInFlight[userId] = true
 		-- Final save on a clean leave -- releases the lock (see saveProfile's own header) so a
 		-- server hop's destination server never has to wait out LockStaleAfterSeconds for a lock
 		-- this server no longer needs. The outcome is worth inspecting even though there is nothing
@@ -1552,8 +1671,9 @@ local function onPlayerRemoving(player: Player): ()
 		-- a data report needs surfaced in the logs rather than silently swallowed.
 		local outcome = saveProfile(player, stored, true)
 		if outcome ~= "Saved" then
-			logger:error("onPlayerRemoving: final save did not persist", { userId = player.UserId, outcome = outcome })
+			logger:error("onPlayerRemoving: final save did not persist", { userId = userId, outcome = outcome })
 		end
+		leaveSaveInFlight[userId] = nil
 	end
 	loadedProfiles[player] = nil
 	dirtyPlayers[player] = nil
@@ -1662,7 +1782,9 @@ function PlayerDataSystem.Init(): ()
 			table.insert(players, player)
 		end
 
-		local pending = 0
+		-- Keyed by Player rather than a bare counter: a timeout below needs to say WHO was lost, not
+		-- just how many -- an aggregate number gives an on-call responder nothing to act on.
+		local stillPending: { [Player]: true } = {}
 		for _, player in players do
 			-- Re-check after the snapshot: PlayerRemoving may have already saved and cleared this
 			-- player's entry between the snapshot above and this iteration.
@@ -1670,7 +1792,7 @@ function PlayerDataSystem.Init(): ()
 			if not stored then
 				continue
 			end
-			pending += 1
+			stillPending[player] = true
 			task.spawn(function()
 				-- Final save -- the server is going away, so release the lock (same as
 				-- onPlayerRemoving) rather than leave it for LockStaleAfterSeconds to clear.
@@ -1681,16 +1803,23 @@ function PlayerDataSystem.Init(): ()
 						{ userId = player.UserId, outcome = outcome }
 					)
 				end
-				pending -= 1
+				stillPending[player] = nil
 			end)
 		end
 
 		local deadline = os.clock() + Config.ShutdownSaveTimeoutSeconds
-		while pending > 0 and os.clock() < deadline do
+		while next(stillPending) ~= nil and os.clock() < deadline do
 			task.wait()
 		end
-		if pending > 0 then
-			logger:error("BindToClose: timed out waiting for in-flight saves", { stillPending = pending })
+		if next(stillPending) ~= nil then
+			local userIds: { number } = {}
+			for player in stillPending do
+				table.insert(userIds, player.UserId)
+			end
+			logger:error(
+				"BindToClose: timed out waiting for in-flight saves -- these players' saves may not have persisted",
+				{ stillPendingUserIds = userIds, count = #userIds }
+			)
 		end
 	end)
 

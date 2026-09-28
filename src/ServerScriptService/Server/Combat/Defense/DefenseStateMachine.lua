@@ -34,6 +34,11 @@
 	    than the transition to Blocking, because ping compensation refunds latency without delaying
 	    the guard coming up -- see ParryWindows.ParryEndFor. One marker, two derived times, so the
 	    membership test cannot be "is the state ParryWindow".
+	  * EVADE LIVENESS (_evadeOpensAt/_evadeEndsAt). The roll's evade frames, same shape as the parry's
+	    for the same reason: a ping-refunded window that a contact is tested against at its own
+	    SampleTime. Not a state because a roll changes nothing else about the defender's posture --
+	    rolling out of a guard releases it through the ordinary Release path, and a roll in any other
+	    posture leaves that posture exactly as it was.
 
 	Does not own: the guard pool (GuardMeter.lua), what a contact resolves to (OutcomeResolver.lua),
 	any Instance, any remote, or the window's timing (ParryWindows.lua).
@@ -89,6 +94,13 @@ export type Machine = typeof(setmetatable(
 		_guardDownSince: number,
 		_staggerUntil: number,
 		_guardBrokenUntil: number,
+		-- The roll's evade window, absolute. _evadeEndsAt carries the ping refund. Zero when no evade has
+		-- ever been opened, which no real contact time can fall inside.
+		_evadeOpensAt: number,
+		_evadeEndsAt: number,
+		-- When the last evade was ACCEPTED, for DefenseConstants.Evade.CooldownSeconds. -math.huge rather
+		-- than 0 so the very first evade is never refused against a synthetic clock that starts at 0.
+		_lastEvadeAt: number,
 		_segments: { Segment },
 		_hooks: Hooks,
 	},
@@ -139,6 +151,9 @@ function DefenseStateMachine.New(hooks: Hooks?): Machine
 		_guardDownSince = 0,
 		_staggerUntil = 0,
 		_guardBrokenUntil = 0,
+		_evadeOpensAt = 0,
+		_evadeEndsAt = 0,
+		_lastEvadeAt = -math.huge,
 		_segments = {},
 		_hooks = hooks or {},
 	}, DefenseStateMachine) :: any
@@ -380,6 +395,43 @@ function DefenseStateMachine.ConsumeParry(self: Machine, at: number): ()
 	self._parryEndsAt = math.min(self._parryEndsAt, at)
 end
 
+-- Opens the roll's evade window, or refuses and says why. The POSTURE gates live here; the BODY gates
+-- (mid-swing, hitstun, grabbed, mounted) are DefenseSystem.BeginEvade's, because they read things this
+-- machine has no view of -- the same split SetBlocking/Press already make.
+--
+-- Staggered and GuardBroken refuse because both are punishes, and a roll out of either would be the
+-- cheapest possible way to make a punish end early. The parkour client never gets this far in either
+-- (both take RootControlLocked, which parks the framework) -- this is the server not trusting that.
+--
+-- A RAISED GUARD IS DROPPED, not refused. Roll-from-guard is a legitimate read, and it goes through the
+-- ordinary Release so the anti-turtle clock and the segment trail record it exactly as a key release
+-- would. A parry window already armed is NOT cancelled -- it runs to its close, per Release's own rule --
+-- but a contact inside both resolves Evaded first (OutcomeResolver rule 0) and never spends it.
+function DefenseStateMachine.BeginEvade(self: Machine, now: number, pingSeconds: number): (boolean, string?)
+	local state = self._state
+	if state == "Staggered" then
+		return false, "Staggered"
+	end
+	if state == "GuardBroken" then
+		return false, "GuardBroken"
+	end
+	local EVADE = DefenseConstants.Evade
+	if (now - self._lastEvadeAt) < EVADE.CooldownSeconds then
+		return false, "EvadeCooldown"
+	end
+
+	DefenseStateMachine.Release(self, now)
+
+	local refund = 0
+	if pingSeconds == pingSeconds and pingSeconds > 0 then
+		refund = math.min(pingSeconds, EVADE.PingCompensationMaxSeconds)
+	end
+	self._lastEvadeAt = now
+	self._evadeOpensAt = now + EVADE.StartupSeconds
+	self._evadeEndsAt = self._evadeOpensAt + EVADE.ActiveSeconds + refund
+	return true, nil
+end
+
 -- Queries -----------------------------------------------------------------------------------------
 
 function DefenseStateMachine.GetState(self: Machine): DefenseState
@@ -438,6 +490,16 @@ function DefenseStateMachine.IsParryLiveAt(self: Machine, at: number): boolean
 	return at >= self._parryOpensAt and at <= self._parryEndsAt
 end
 
+-- Whether a contact at `at` lands inside the roll's evade window. Unlike the parry it is never
+-- consumed: a roll through two swings evades both, because the dodge is about where the body IS, not
+-- about spending a read on one attack.
+function DefenseStateMachine.IsEvadingAt(self: Machine, at: number): boolean
+	if self._evadeEndsAt <= 0 then
+		return false
+	end
+	return at >= self._evadeOpensAt and at <= self._evadeEndsAt
+end
+
 -- Whether a new parry could be armed right now. Exposed for the client's own prediction and for the
 -- debug readout; the authoritative check is inside Press.
 -- The STATE checks come before the lockout deliberately. A stagger sets both -- it forbids arming and
@@ -487,6 +549,9 @@ function DefenseStateMachine.Reset(self: Machine, now: number): ()
 	self._guardDownSince = 0
 	self._staggerUntil = 0
 	self._guardBrokenUntil = 0
+	self._evadeOpensAt = 0
+	self._evadeEndsAt = 0
+	self._lastEvadeAt = -math.huge
 	if self._state ~= "Neutral" then
 		applyTransition(self, "Neutral", now)
 	end

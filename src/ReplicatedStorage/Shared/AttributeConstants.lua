@@ -84,16 +84,19 @@ local AttributeConstants = {
 	-- parkour combat gate now both hang off inCombatUntil), so tuning InCombatDurationSeconds or
 	-- CombatEngagementRange reaches further than it used to. See syncInCombat's own header.
 	InCombat = "InCombat",
-	-- Attack layer (Server/Combat/Attack/AttackRequestSystem.lua). An os.clock() timestamp: the moment
-	-- the swing this combatant is currently committed to finishes its windup, active and recovery. 0 or
-	-- unset means no swing is committing them.
+	-- Combat layer. An os.clock() timestamp: the moment a combat action stops committing this body. Two
+	-- writers, both math.max-ing against the other so neither can shorten it:
+	--   * the attack layer (Server/Combat/Attack/AttackRequestSystem.lua) -- the swing this combatant
+	--     threw finishes its windup, active and recovery;
+	--   * the damage layer (Server/Combat/Damage/DamageSystem.lua) -- the hitstun a landed hit put this
+	--     combatant into ends. That is what stops a victim who was running when they got hit.
+	-- 0 or unset means nothing is committing them.
 	--
 	-- THIS IS THE SEAM Server/Systems/RunSystem.lua's header asked for by name -- "when [the combat
 	-- layer] comes back it should publish its own speed effect as an Attribute and this file grows one
 	-- tier", the same way Frozen, Flying and EmoteMovementLocked already work without the Systems that
-	-- own them knowing RunSystem exists. What that tier does with it is force the run down: throwing a
-	-- swing drops the stage to 0 and zeroes the charge, so a player has to be walking to fight and has
-	-- to re-earn the gear afterwards.
+	-- own them knowing RunSystem exists. What that tier does with it is pin the run to walking pace for
+	-- as long as the deadline lasts, holding (not zeroing) the gear -- see RunSystem's header.
 	--
 	-- A TIMESTAMP RATHER THAN A BOOLEAN, for the same reason ParkourSpeedFloorExpiry is one: nothing
 	-- has to remember to clear it. A swing that ends by interruption, a character that dies mid-string,
@@ -101,6 +104,17 @@ local AttributeConstants = {
 	-- stale `true` would leave that player unable to reach second gear again for the rest of their life
 	-- with no error anywhere to explain it.
 	CombatBusyUntil = "CombatBusyUntil",
+	-- Combat layer. An os.clock() timestamp: the moment this combatant's HITSTUN ends. Written only by
+	-- Server/Combat/Damage/DamageSystem.lua (math.max, so a second hit extends and never shortens), on
+	-- the same outcomes that grant DamageConstants.Hitstun. 0 or unset means not stunned.
+	--
+	-- ITS OWN ATTRIBUTE, not read out of CombatBusyUntil, because that one merges two different facts:
+	-- a swing's commitment (which ends early when the swing is cancelled) and a stun (which does not).
+	-- A reader that needs "is this body stunned" -- Server/Combat/Defense/DefenseSystem.lua, which
+	-- refuses to raise a guard until the stun ends -- would otherwise be held off by a swing that was
+	-- already cut short. The defence layer sits BELOW the damage layer, so it may not require it; this
+	-- Attribute is the seam, the same way CombatBusyUntil is RunSystem's.
+	HitstunUntil = "HitstunUntil",
 	-- Whether this client currently has a modal UI panel open -- the character menu, Settings, the
 	-- Move Editor, the Live Console, DevMenu, the bug reporter. Written by
 	-- Client/UI/Components/ModalScreen.lua (the one thing that creates a modal, so it is the one
@@ -225,6 +239,14 @@ local AttributeConstants = {
 	-- GrabSystem.CanAttack itself -- that reads its own internal `holds` table directly, since it is
 	-- the authority this Attribute only mirrors.
 	Grabbing = "Grabbing",
+	-- Server os.clock() deadline until which this body's movement may legitimately include a knockback
+	-- launch. Written by Server/Combat/Damage/DamageSystem.lua on every launch it hands a player's client
+	-- (DamageConstants.Knockback.MovementAllowanceSeconds after the hit); read by
+	-- Server/Systems/ParkourSystem.lua so a parkour report distorted by an honest launch is still
+	-- rejected but not counted toward the suspected-cheater flag. A DEADLINE, not a boolean, for the
+	-- CombatBusyUntil reason above: nothing has to remember to clear it. Server-only in meaning -- the
+	-- client's os.clock() is a different clock, so no client reads this.
+	KnockbackUntil = "KnockbackUntil",
 }
 
 return AttributeConstants

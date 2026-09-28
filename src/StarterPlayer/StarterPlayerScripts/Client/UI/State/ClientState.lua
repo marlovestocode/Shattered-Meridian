@@ -75,6 +75,13 @@ export type TierPromotion = {
 	To: number,
 }
 
+-- One Meridian XP grant, as it arrived. A FRESH TABLE PER GRANT for the same reason TierPromotion
+-- above is one: two identical +25s in a row are two kills, and an observer must fire for both.
+export type MeridianXPGain = {
+	Amount: number,
+	Reason: string?,
+}
+
 export type ClientState = {
 	-- Render-only defaults (a full bar looks correct before real data arrives) -- not balance
 	-- numbers. Wired in Bootstrap(): Health/MaxHealth from the local Humanoid, Posture/MaxPosture
@@ -102,6 +109,10 @@ export type ClientState = {
 	-- (Server/Systems/MeridianSystem.lua) -- the core progression currency, not capped like the
 	-- vitals above (see Types.MeridianXPUpdatePayload's own header).
 	MeridianXP: Fusion.Value<number>,
+	-- The most recent GRANT carried on that same remote (Types.MeridianXPUpdatePayload.Gained), nil
+	-- until the first one this session. A login sync never sets it. Observed by HUD/init.lua, which
+	-- turns it into the TierBadge's brief "+N" readout.
+	MeridianXPGain: Fusion.Value<MeridianXPGain?>,
 	-- Wired in Bootstrap() to TierSystem's Progression_TierUpdated remote (Server/Systems/
 	-- TierSystem.lua). Tier/TierName are the server's authoritative tier identity; TierFloorXP and
 	-- TierNextXP are the XP window it spans, so a consumer can compute its own progress fill against
@@ -147,6 +158,7 @@ function ClientState.new(scope: Scope): ClientState
 		InCombat = scope:Value(false),
 		Engagement = scope:Value(nil :: Types.EngagementPayload?),
 		MeridianXP = scope:Value(0),
+		MeridianXPGain = scope:Value(nil :: MeridianXPGain?),
 		-- Tier 1 / its real name / a 0 floor are the genuine bottom of the ladder
 		-- (Constants.PlayerData.DefaultTier), not an invented placeholder -- a brand-new profile
 		-- really does hold exactly this, so the pre-first-update render is correct rather than merely
@@ -263,6 +275,13 @@ function ClientState.Bootstrap(state: ClientState): ()
 
 		logger:debug("Meridian XP payload received", { meridianXp = payload.MeridianXP })
 		state.MeridianXP:set(payload.MeridianXP)
+		local gained = payload.Gained
+		if typeof(gained) == "number" and gained > 0 then
+			state.MeridianXPGain:set({
+				Amount = gained,
+				Reason = if typeof(payload.Reason) == "string" then payload.Reason else nil,
+			})
+		end
 	end)
 
 	logger:debug("Waiting for Progression_TierUpdated remote")

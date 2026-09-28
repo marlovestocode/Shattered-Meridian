@@ -22,6 +22,7 @@ local AttackCatalog = require(ServerScriptService.Server.Combat.AttackCatalog)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local SwingSequencer = require(ServerScriptService.Server.Combat.Attack.SwingSequencer)
 local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
+local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
 -- Installed once for the whole file (not per case) -- building a roster invalidates the catalogue's
 -- descriptor cache, and doing that between cases would be pure overhead for a fixture none of them
@@ -361,9 +362,12 @@ return function()
 
 	describe("SwingSequencer -- weapons", function()
 		it("cycles through the authored swap order and back", function()
+			-- The roster always ends in the synthesized fists (WeaponRoster.FISTS_ID), so the cycle is
+			-- the Workspace weapons in order, then bare hands, then round again.
 			local attacker = makeAttacker("Swapper")
 			expect(SwingSequencer.SwapWeapon(attacker, T)).to.equal(SECOND_WEAPON)
-			expect(SwingSequencer.SwapWeapon(attacker, T + 1)).to.equal(FIRST_WEAPON)
+			expect(SwingSequencer.SwapWeapon(attacker, T + 1)).to.equal(WeaponRoster.FISTS_ID)
+			expect(SwingSequencer.SwapWeapon(attacker, T + 2)).to.equal(FIRST_WEAPON)
 		end)
 
 		it("resolves against the newly held weapon's own string", function()

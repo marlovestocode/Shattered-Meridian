@@ -27,6 +27,7 @@ local ServerRoot = ServerScriptService.Server
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local EngineLogCapture = require(ReplicatedStorage.Shared.EngineLogCapture)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
 local Types = require(ReplicatedStorage.Shared.Types)
 local WeaponDefenseAnimations = require(ReplicatedStorage.Shared.Defense.WeaponDefenseAnimations)
 
@@ -69,11 +70,13 @@ local DamageSystem = require(Combat.Damage.DamageSystem)
 local AttackRequestSystem = require(Combat.Attack.AttackRequestSystem)
 local GrabSystem = require(Combat.Grab.GrabSystem)
 local EngagementSystem = require(Combat.Engagement.EngagementSystem)
+local KnockbackAudit = require(Combat.Damage.KnockbackAudit)
 local WeaponVisualSystem = require(Combat.Weapon.WeaponVisualSystem)
 local WeaponInventorySystem = require(Combat.Weapon.WeaponInventorySystem)
 local ParkourSystem = require(Systems.ParkourSystem)
 local RunSystem = require(Systems.RunSystem)
 local BlimpSystem = require(Systems.BlimpSystem)
+local BoatSystem = require(Systems.BoatSystem)
 local VehicleManager = require(Systems.VehicleManager)
 local AbsorbSystem = require(Systems.AbsorbSystem)
 local RewardSystem = require(Systems.RewardSystem)
@@ -172,6 +175,20 @@ boot("EffectSystem", EffectSystem)
 -- 7. Tier before bloodline/art: awakening and mastery gates read current tier.
 boot("TierSystem", TierSystem)
 
+-- 7b. The fight-to-grow spine, now real: PlayerKilled -> RewardSystem (eligibility, immutable manifest)
+--     -> ProgressionSystem (legitimacy gate, routing) -> MeridianSystem.AwardKillXP (amount, write,
+--     MeridianXPAwarded) -> TierSystem (promotion). Both used to boot as empty Inits in the PLANNED loop
+--     at the bottom of this file.
+--       * ProgressionSystem AFTER MeridianSystem (step 5): its one route is MeridianSystem's public
+--         API, and its Init asserts it. TierSystem needs no ordering against it -- it hears the result
+--         through GameplayEvents.MeridianXPAwarded, which has no boot order.
+--       * RewardSystem AFTER ProgressionSystem: its Init asserts every reward kind it can compose has a
+--         route there. It subscribes to PlayerKilled, which only PlayerDeathSystem (step 12) fires --
+--         a runtime relationship through GameplayEvents, so booting before the publisher is correct,
+--         and it is up long before any player can land a blow (AttackRequestSystem, step 12).
+boot("ProgressionSystem", ProgressionSystem)
+boot("RewardSystem", RewardSystem)
+
 -- 8. Registries (Managers) before the per-player Systems that read them.
 boot("ArtTreeManager", ArtTreeManager)
 boot("ArtSystem", ArtSystem)
@@ -228,12 +245,6 @@ boot("KitAbilitySystem", KitAbilitySystem)
 --     Server/Combat/MoveRegistryManager.lua) boots here -- MoveEditorSystem (step 22b) is what
 --     actually populates it from DataStore, and it must already exist (even empty) before that runs.
 --
---     PlayerDeathSystem replaces what used to be Server/Systems/CombatSystem.lua's own incidental
---     death-detection (Humanoid.Died -> GameplayEvents.FirePlayerKilled) -- see that module's own
---     header for why detecting a death was never actually combat logic, just something CombatSystem
---     happened to also do. Boots here, in the combat system's old boot slot, since RespawnSystem
---     (step 15)/RivalrySystem/BountySystem (step 18) below are its subscribers.
---
 --     HitboxEngine (Server/Combat/HitboxEngine/) is the first piece of the replacement combat layer
 --     and boots in the same slot for the same reason. It has no Init()-time dependency on anything --
 --     it owns its own Heartbeat, registers combatants on demand, and nothing currently in this
@@ -249,7 +260,6 @@ boot("KitAbilitySystem", KitAbilitySystem)
 WeaponRoster.Start()
 
 boot("MoveRegistryManager", MoveRegistryManager)
-boot("PlayerDeathSystem", PlayerDeathSystem)
 boot("HitboxEngine", HitboxEngine)
 
 --     DefenseSystem is the engine's first consumer -- it turns a contact into a KIND of hit (clean,
@@ -277,6 +287,18 @@ boot("DefenseSystem", DefenseSystem)
 --     everything it needs is derivable from the Model an outcome already carries, which is what lets a
 --     player, a bot and a dummy share one path with nobody registering any of them.
 boot("DamageSystem", DamageSystem)
+
+--     PlayerDeathSystem -- the sole confirmer of player deaths and the sole publisher of
+--     GameplayEvents.PlayerKilled, which RespawnSystem (step 15), RewardSystem (step 7b) and
+--     RivalrySystem/BountySystem (step 18) all consume. It is NOT a combat layer; it sits here because
+--     both edges of its position are real dependencies:
+--       * AFTER DamageSystem: it attributes kills by subscribing to DamageSystem.OnApplied, and its Init
+--         asserts that layer exists. Booted before it (its old slot, next to MoveRegistryManager), every
+--         death would publish killer = nil and the whole fight-to-grow loop would be unreachable.
+--       * BEFORE AttackRequestSystem: that is the first System that lets a player land a blow, so the
+--         credit subscription must already be listening when it opens. It owns no Heartbeat, so this
+--         slot changes nothing about the combat layers' connection-order requirement around it.
+boot("PlayerDeathSystem", PlayerDeathSystem)
 
 --     AttackRequestSystem is the fourth and topmost layer -- the one that lets anybody actually throw
 --     anything. It owns the Attack_Request remote, resolves which move a press means (SwingSequencer),
@@ -347,6 +369,13 @@ boot("GrabSystem", GrabSystem)
 --     intent but is a live change in feel, not just plumbing.
 boot("EngagementSystem", EngagementSystem)
 
+--     KnockbackAudit -- a third sibling on DamageSystem.OnApplied, reading the launch DamageSystem
+--     resolved onto DamageResult.Launch and watching that a PLAYER's client actually honoured it (a
+--     server write cannot move a client-owned body, so the launch is applied client-side and audited
+--     here). Readability order, not correctness: it samples on GameplayEvents' shared tick rather than
+--     a Heartbeat of its own, so it has no place in the combat layers' connection-order requirement.
+boot("KnockbackAudit", KnockbackAudit)
+
 --     WeaponVisualSystem is a further sibling, purely cosmetic -- it subscribes to
 --     AttackRequestSystem.OnWeaponChanged (the same public extension-point shape GrabSystem's own
 --     subscription to DamageSystem.OnApplied established) to keep a Tool matching the combatant's
@@ -374,6 +403,24 @@ boot("WeaponInventorySystem", WeaponInventorySystem)
 --      suspected-cheater flag.
 boot("ParkourSystem", ParkourSystem)
 
+--      THE ROLL'S EVADE FRAMES ARE WIRED HERE, for the reason the per-weapon parry clips above are: the
+--      boot script is the one place that legitimately knows both sides. ParkourSystem publishes an
+--      ACCEPTED action (its OnActionStarted runs after the plausibility gate), DefenseSystem owns what a
+--      contact means, and neither requires the other -- DefenseSystem is the second layer of the combat
+--      stack and has no business knowing parkour exists, and ParkourSystem has none knowing combat
+--      does. The accepted Roll report IS the trigger, so evasion costs no new remote (the N1 remote
+--      budget in docs/architecture). BeginEvade applies its own body gates and may refuse; a refused
+--      evade leaves the roll a roll that simply gets hit.
+ParkourSystem.OnActionStarted(function(player: Player, kind: ParkourTypes.ActionKind, now: number)
+	if kind ~= "Roll" then
+		return
+	end
+	local character = player.Character
+	if character then
+		DefenseSystem.BeginEvade(character, now)
+	end
+end)
+
 -- 12b. Run System -- the WalkSpeed owner, and the authority for the three-stage run. Takes over the
 --      per-Heartbeat WalkSpeed resolver that CombatSystem.onHeartbeat used to drive through
 --      Server/Combat/Movement.ComputeDesiredWalkSpeed; with CombatSystem deleted by the combat
@@ -396,12 +443,24 @@ boot("RunSystem", RunSystem)
 --      and a place with no blimps in it boots this System to an empty registry at no cost.
 boot("BlimpSystem", BlimpSystem)
 
--- 12d. Vehicle Manager -- the vehicle CATALOG (which vehicles exist, spawning and despawning them),
+-- 12d. Boat System -- the same class of thing as the Blimp System immediately above, sharing its whole
+--      mount/assembly/telegraph layer through Shared/Vessel + Server/Vessel and differing only in the
+--      drive (sail and wind rather than throttle) and the mode machine. Boots after RunSystem for the
+--      identical reason BlimpSystem does -- the mount's WalkSpeed lock is one more Attribute tier in
+--      RunSystem.isMovementLocked -- and after BlimpSystem purely so the two vehicle Systems read in
+--      one block; neither requires the other and the order between them is free.
+--
+--      Its Init also starts Server/Boat/BoatWater.lua's tag watch, which is what gives every boat in
+--      the place a surface to float on. A world with no tagged water still boots; the first boat
+--      registered into it says so once in the log.
+boot("BoatSystem", BoatSystem)
+
+-- 12e. Vehicle Manager -- the vehicle CATALOG (which vehicles exist, spawning and despawning them),
 --      not any vehicle's behaviour. Boots immediately after BlimpSystem because that ordering is the
 --      one real constraint it has: a spawn parents a clone whose builder-authored tags fire
---      BlimpSystem's own GetInstanceAddedSignal, so the System that answers that signal has to
---      already be listening. Nothing in this file's Init() calls into BlimpSystem -- the two share no
---      require in either direction, only the tag (see VehicleManager.lua's own header).
+--      BlimpSystem's (or BoatSystem's) own GetInstanceAddedSignal, so the System that answers that
+--      signal has to already be listening. Nothing in this file's Init() calls into either -- they
+--      share no require in any direction, only the tag (see VehicleManager.lua's own header).
 boot("VehicleManager", VehicleManager)
 
 -- 12b. Emote System -- EmoteUnlockService only needs PlayerDataSystem (step 3), but boots here,
@@ -412,15 +471,17 @@ boot("VehicleManager", VehicleManager)
 boot("EmoteUnlockService", EmoteUnlockService)
 boot("EmoteSystem", EmoteSystem)
 
--- 15. RespawnSystem subscribes to GameplayEvents.OnPlayerKilled, so it needs PlayerDeathSystem
---     already running (step 12) to ever fire that signal. It owns every Player:LoadCharacter() call
+-- 15. RespawnSystem subscribes to GameplayEvents.OnPlayerKilled, which only PlayerDeathSystem (step 12,
+--     after DamageSystem) ever fires. GameplayEvents itself has no boot order, so this is a statement
+--     of where the publisher is, not an ordering requirement. It owns every Player:LoadCharacter() call
 --     EXCEPT the session-first one CharacterCreationSystem makes at step 23 -- see its own header
 --     for why Players.CharacterAutoLoads = false makes that ownership split load-bearing.
 boot("RespawnSystem", RespawnSystem)
 
 -- 18. Meta/social systems read PvP kill outcomes off GameplayEvents.OnPlayerKilled (PlayerDeathSystem,
---     step 12, is what actually fires it now -- see that module's header) and player state from
---     PlayerDataSystem.
+--     step 12, fires it with an attributed killer -- see that module's header) and player state from
+--     PlayerDataSystem. They are consumers of the confirmed fact ALONGSIDE RewardSystem (step 7b), not
+--     part of its progression spine: standings and streaks are theirs to keep.
 boot("RivalrySystem", RivalrySystem)
 boot("BountySystem", BountySystem)
 
@@ -485,7 +546,8 @@ boot("LiveConsoleSystem", LiveConsoleSystem)
 --     last.
 boot("CharacterCreationSystem", CharacterCreationSystem)
 
--- PLANNED SYSTEMS -- every Init() below is currently empty (confirmed 2026-08-19). They boot here,
+-- PLANNED SYSTEMS -- every Init() below is currently empty (re-confirmed 2026-09-28, when
+-- ProgressionSystem and RewardSystem left this loop for step 7b). They boot here,
 -- outside the numbered sequence above, so the boot list stays a complete inventory of every System
 -- without pretending any ordering argument for them is real: none of them reads or writes anything
 -- yet, so none of them participates in the dependency ordering the numbered steps above document.
@@ -498,10 +560,8 @@ boot("CharacterCreationSystem", CharacterCreationSystem)
 for _, planned in
 	{
 		{ Name = "FactionManager", Module = FactionManager },
-		{ Name = "ProgressionSystem", Module = ProgressionSystem },
 		{ Name = "AchievementSystem", Module = AchievementSystem },
 		{ Name = "AbsorbSystem", Module = AbsorbSystem },
-		{ Name = "RewardSystem", Module = RewardSystem },
 		{ Name = "AwakeningSystem", Module = AwakeningSystem },
 		{ Name = "TerritorySystem", Module = TerritorySystem },
 		{ Name = "WorldSystem", Module = WorldSystem },

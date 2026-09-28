@@ -183,12 +183,19 @@ local GUARDED_HUMANOID_STATES = {
 }
 local capturedStateEnabled: { [Enum.HumanoidStateType]: boolean }? = nil
 
+-- THE LAST EXTERNAL IMPULSE THAT LANDED WHILE A VELOCITY STATE OWNED THE BODY, or nil. See
+-- ApplyExternalImpulse. Held until the owning state consumes it (ConsumeInterrupt) or the body is handed
+-- back, whichever comes first -- an interrupt describes THIS period of ownership and must never survive
+-- into the next one.
+local pendingInterrupt: Vector3? = nil
+
 -- Reused command struct handed to the states each frame. Reset by BeginFrame, filled by whichever
 -- state is active, committed by Apply. One table for the session -- see EnvironmentProbe.lua's own
 -- RESULT TABLES note for the same reasoning.
 local command: MotorCommand = {
 	Mode = "Humanoid",
 	Velocity = Vector3.zero,
+	PlanarOnly = false,
 	CancelGravity = false,
 	DesiredSpeed = 0,
 	TargetCFrame = nil,
@@ -422,6 +429,7 @@ function ParkourMotor.BindCharacter(_nextCharacter: Model, nextHumanoid: Humanoi
 	-- stale-mirror failure `facingOwned` below is reset for.
 	capturedStateEnabled = nil
 	appliedHipHeightDelta = 0
+	pendingInterrupt = nil
 	-- Dropped for the same reason capturedStateEnabled above is: it describes the PREVIOUS character, and
 	-- a stale `true` here would make the first Humanoid frame of this life run a restore against values
 	-- that were never captured on this Humanoid.
@@ -466,6 +474,7 @@ function ParkourMotor.Release(): ()
 	-- nothing to restore, but a flag left true would have the next character's first ordinary frame try
 	-- to restore values belonging to a Humanoid that no longer exists.
 	ownsBody = false
+	pendingInterrupt = nil
 	activeMode = "Humanoid"
 end
 
@@ -482,6 +491,7 @@ end
 function ParkourMotor.BeginFrame(): MotorCommand
 	command.Mode = "Humanoid"
 	command.Velocity = Vector3.zero
+	command.PlanarOnly = false
 	command.CancelGravity = false
 	command.DesiredSpeed = 0
 	command.TargetCFrame = nil
@@ -502,6 +512,40 @@ local function applyFacing(part: BasePart, faceDirection: Vector3?): ()
 	if drive and drive:IsA("AlignOrientation") then
 		drive.CFrame = CFrame.lookAt(Vector3.zero, flat.Unit)
 	end
+end
+
+-- Commits a Velocity-mode command to the LinearVelocity, in whichever of its two constraint modes the
+-- command asked for.
+--
+-- VECTOR (the default) drives all three axes -- which is what every grounded velocity state wants, since
+-- they each command their own vertical (a slide's surface stick, a wall-run's cancelled gravity). It is
+-- also exactly wrong for a body that has left the ground: at 90000 MaxForce the drive holds whatever Y it
+-- was last given against gravity, so a roll carried off a ledge used to descend at a fixed 8 studs/s --
+-- floating, visibly -- for the rest of its duration.
+--
+-- PLANE drives only the world X/Z plane, so gravity owns Y outright and the body falls like a body while
+-- the state keeps its horizontal authority. The two tangent axes are fixed world axes (RelativeTo is
+-- already World), so PlaneVelocity is simply the command's own X and Z.
+--
+-- The mode is only written when it changes: the same property-write discipline setFacingOwned keeps,
+-- for a function that runs every owned frame.
+local PLANE_PRIMARY_AXIS = Vector3.xAxis
+local PLANE_SECONDARY_AXIS = Vector3.zAxis
+
+local function applyVelocityDrive(drive: LinearVelocity, velocity: Vector3, planarOnly: boolean): ()
+	if planarOnly then
+		if drive.VelocityConstraintMode ~= Enum.VelocityConstraintMode.Plane then
+			drive.VelocityConstraintMode = Enum.VelocityConstraintMode.Plane
+			drive.PrimaryTangentAxis = PLANE_PRIMARY_AXIS
+			drive.SecondaryTangentAxis = PLANE_SECONDARY_AXIS
+		end
+		drive.PlaneVelocity = Vector2.new(velocity.X, velocity.Z)
+		return
+	end
+	if drive.VelocityConstraintMode ~= Enum.VelocityConstraintMode.Vector then
+		drive.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+	end
+	drive.VectorVelocity = velocity
 end
 
 local function applyHipHeight(currentHumanoid: Humanoid, delta: number): ()
@@ -575,6 +619,10 @@ function ParkourMotor.Apply(): boolean
 			destroyRig(part)
 			restoreRestorables(currentHumanoid)
 			activeMode = "Humanoid"
+			-- The ownership period an interrupt described has ended, so the interrupt has too -- see
+			-- pendingInterrupt's own header. The engine is carrying the body now, and with it whatever the
+			-- impulse wrote.
+			pendingInterrupt = nil
 		end
 		return true
 	end
@@ -598,7 +646,7 @@ function ParkourMotor.Apply(): boolean
 		setGravityCancel(part, command.CancelGravity)
 		local drive = part:FindFirstChild(VELOCITY_DRIVE_NAME)
 		if drive and drive:IsA("LinearVelocity") then
-			drive.VectorVelocity = command.Velocity
+			applyVelocityDrive(drive, command.Velocity, command.PlanarOnly)
 		end
 		-- AutoRotate off while the orientation drive owns facing: the two write the same rotation
 		-- from different sources every frame and visibly fight when both are live.
@@ -665,6 +713,41 @@ function ParkourMotor.ApplyImpulse(velocity: Vector3): boolean
 	return true
 end
 
+-- THE SEAM FOR A BODY BEING MOVED FROM OUTSIDE THE STATE MACHINE -- a knockback launch, a hit-stop
+-- freeze -- as opposed to an impulse a parkour state fires as part of its own move (a jump, a slide-jump,
+-- a wall launch), which stays on ApplyImpulse above.
+--
+-- The difference is what happens while a Velocity-drive state owns the body. ApplyImpulse's write
+-- lands on the assembly and is then overwritten on the very next physics step by the state's
+-- LinearVelocity, at 90000 MaxForce -- which is correct for the state's own impulses (every one of them
+-- is fired on the frame the state hands off) and wrong for a hit: a player knocked back mid-roll simply
+-- kept rolling, the launch erased before it moved them a stud (audit L-28, the roll case).
+--
+-- So this does the same write and, when a Velocity state is the owner, also records it as an
+-- INTERRUPT. The state reads that through ConsumeInterrupt on its next Update and hands off carrying the
+-- impulse rather than re-commanding its own velocity -- the knock wins, the state ends. A state that
+-- never consumes it loses nothing either: the record is dropped the moment the body is handed back.
+--
+-- Same refusals as ApplyImpulse (a kinematic traversal, a server-held root), and an impulse that was
+-- refused raises nothing, because nothing happened to the body.
+function ParkourMotor.ApplyExternalImpulse(velocity: Vector3): boolean
+	if not ParkourMotor.ApplyImpulse(velocity) then
+		return false
+	end
+	if activeMode == "Velocity" then
+		pendingInterrupt = velocity
+	end
+	return true
+end
+
+-- The impulse an external mover wrote while a Velocity state owned the body, cleared by the read. nil
+-- when there was none. See ApplyExternalImpulse.
+function ParkourMotor.ConsumeInterrupt(): Vector3?
+	local interrupt = pendingInterrupt
+	pendingInterrupt = nil
+	return interrupt
+end
+
 -- Requests a jump through Roblox's own character controller -- the correct path whenever the
 -- character is genuinely grounded, because it produces the engine's own Jumping state transition
 -- (which the deleted Server/Combat/Movement.ComputeGenuineJumpAirborne read to credit a genuine
@@ -691,6 +774,25 @@ end
 function ParkourMotor.IsJumpEnabled(): boolean
 	local currentHumanoid = humanoid
 	return currentHumanoid ~= nil and currentHumanoid:GetStateEnabled(Enum.HumanoidStateType.Jumping)
+end
+
+-- Whether something OUTSIDE this framework is steering the character's facing -- in practice,
+-- Client/Camera/ShiftLockCamera.lua, which writes AutoRotate false on engage (see capturedAutoRotate's
+-- own header). Answered from the value the rest of the game left, not the live property: while this
+-- module owns the body it has written AutoRotate false itself, so the live read would say "yes" for
+-- every owned frame. The captured value is the honest answer then; the live one is when nothing is
+-- captured.
+--
+-- A question about AutoRotate rather than a require of ShiftLockCamera, deliberately: this is the
+-- signal shift lock already publishes, and anything else that takes the character's rotation the same
+-- way gets the same answer for free.
+function ParkourMotor.IsFacingHeldElsewhere(): boolean
+	local captured = capturedAutoRotate
+	if captured ~= nil then
+		return captured == false
+	end
+	local currentHumanoid = humanoid
+	return currentHumanoid ~= nil and currentHumanoid.AutoRotate == false
 end
 
 -- Which mode was last committed -- read by the debug overlay and by ParkourController when deciding

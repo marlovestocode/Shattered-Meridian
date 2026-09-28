@@ -374,4 +374,35 @@ return function()
 			expect(label.Text).to.equal(original)
 		end)
 	end)
+
+	describe("stepping out of focus", function()
+		-- The one animated assertion in this file, so it waits by CONDITION on real frames (the
+		-- Reveal.spec.lua approach) rather than a fixed count: Reveal keeps the dock mounted through its
+		-- exit spring and only then drops it.
+		local function waitFor(predicate: () -> boolean): boolean
+			for _ = 1, 180 do
+				if predicate() then
+					return true
+				end
+				task.wait()
+			end
+			return predicate()
+		end
+
+		it("is up by default, leaves when told the dock is out of focus, and comes back", function()
+			local scope = Fusion.scoped(Fusion)
+			local visible = scope:Value(true)
+			local hotbar = HUD.Mount(scope, ClientStateModule.new(scope), nil, visible)
+			expect(hotbar.Visible).to.equal(true)
+
+			visible:set(false)
+			expect(waitFor(function()
+				return hotbar.Visible == false
+			end)).to.equal(true)
+
+			visible:set(true)
+			expect(hotbar.Visible).to.equal(true)
+			scope:doCleanup()
+		end)
+	end)
 end

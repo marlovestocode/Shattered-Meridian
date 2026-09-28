@@ -423,6 +423,27 @@ export type ParkourContext = {
 	-- ParkourConstants.CombatGate.BlockedStates for which states that removes and why.
 	InCombat: boolean,
 
+	-- Whether the local player is COMMITTED to a combat action this frame -- their own swing still
+	-- playing, or reeling from a stunning hit. Mirrored each frame by ParkourController from
+	-- Client/Combat/LocalCombatState (the client's own copy of what the server enforces through
+	-- HitboxEngine and DamageSystem.CanAttack), exactly as InCombat above is read off its Attribute.
+	--
+	-- Narrower than InCombat and orthogonal to CombatOwned: a player can be InCombat for thirty seconds
+	-- and committed for none of it, and a committed body is still the player's own to drive -- it just
+	-- may not roll out of the commitment. Read through StateSupport.CanRoll. Compared against `true`
+	-- rather than read for truthiness, so a hand-built spec context that predates the field reads as
+	-- "not committed".
+	CombatCommitted: boolean?,
+
+	-- The momentum the character had at the instant of ground contact, BEFORE States/Landing.lua charged
+	-- the fall's cost against it, and the time of that contact. Written by Landing.Enter and read by
+	-- exactly one thing: States/Rolling.Enter, which refunds the landing cut for a roll pressed within
+	-- ParkourConstants.Roll.LandingWindowSeconds AFTER touchdown (the late half of the landing roll --
+	-- the early half is decided on the contact frame itself, in States/Falling.Update, and never enters
+	-- Landing at all). nil until the first landing of a life.
+	PreLandingMomentum: number?,
+	LandedAt: number?,
+
 	-- Player-configurable assist flags, resolved once per settings change rather than per frame.
 	Assists: AssistSettings,
 
@@ -572,6 +593,12 @@ export type MotorCommand = {
 	Mode: DriveMode,
 	-- Velocity mode: the commanded world velocity.
 	Velocity: Vector3,
+	-- Velocity mode only: drive the HORIZONTAL plane and leave the vertical axis entirely to physics.
+	-- Velocity.Y is ignored when set. For a velocity-owning state that has left the ground and must fall
+	-- like a body rather than hold whatever vertical speed it last commanded -- a roll carried off a
+	-- ledge is the case it exists for. See ParkourMotor's own Velocity branch for the constraint mode it
+	-- selects.
+	PlanarOnly: boolean,
 	-- Whether gravity should be cancelled this frame (Velocity mode only).
 	CancelGravity: boolean,
 	-- INFORMATIONAL ONLY. The planar speed the active state believes it wants; read by the debug

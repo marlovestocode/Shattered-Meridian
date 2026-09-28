@@ -18,9 +18,10 @@
 	someone died. That is the inverted dependency this module fixes: the producer of an event should
 	not be a dependency of everyone interested in it.
 
-	It is also what keeps progression OUT of the combat monolith. When a progression system needs a
-	new fact about a kill, the correct change is a new field on this file's payload -- never a new
-	`require` inside CombatSystem, and never a call from CombatSystem outward into progression.
+	It is also what keeps progression OUT of combat and death confirmation. When a progression system
+	needs a new fact about a kill, the correct change is a new field on this file's payload (PlayerKilled's
+	deathId is exactly that) -- never a new `require` inside the publisher (PlayerDeathSystem, or the
+	combat stack beneath it), and never a call from either outward into progression.
 
 	A TYPED REGISTRY, NOT A GENERIC EVENT BUS.
 
@@ -54,9 +55,11 @@
 	archaeology across N Init() functions. Keep it current when you add a subscriber -- it is
 	documentation, not runtime machinery, and nothing enforces it but this sentence.
 
-	  PlayerKilled     -> RespawnSystem (new body), CombatSystem (its own kill-feed remote),
-	                      RivalrySystem (standings), BountySystem (auto-claim), MeridianSystem (XP),
-	                      BloodlineSystem (interim awakening/stage-advancement dispatch)
+	  PlayerKilled     -> published ONLY by PlayerDeathSystem. RespawnSystem (new body), RewardSystem
+	                      (the fight-to-grow spine: RewardSystem -> ProgressionSystem -> MeridianSystem),
+	                      RivalrySystem (standings), BountySystem (streaks/claim), BloodlineSystem
+	                      (interim stage-advancement dispatch, not yet routed through the spine),
+	                      BlimpSystem/BoatSystem (dismount the dead), EmoteSystem (stop a dying emote)
 	  MeridianXPAwarded-> TierSystem (promotion check)
 	  TierChanged      -> QiSystem (recompute the Max Qi ceiling for the new tier),
 	                      RaceSystem (recompute Bound trait effects)
@@ -74,7 +77,8 @@
 	keep it that way. HeartbeatTick is the one signal that is NOT a BindableEvent (see its own comment
 	below) and its handler table is `pairs`-traversed, so its subscribers run in no defined order at
 	all -- which is the same promise, stated more honestly. Where an ordering dependency is genuinely real, express it as a chain of distinct
-	signals (PlayerKilled -> MeridianXPAwarded -> TierChanged below is exactly that: each publisher
+	signals (PlayerKilled -> [RewardSystem -> ProgressionSystem -> MeridianSystem, direct calls] ->
+	MeridianXPAwarded -> TierChanged below is exactly that: each publisher
 	fires only after its own state is already consistent), never as an assumption about boot order.
 ]]
 
@@ -93,22 +97,31 @@ local logger = Logger.scope("GameplayEvents")
 -- Player lifecycle
 --
 
--- Fired once per confirmed player death, after CombatSystem's own state is already consistent
--- (alive flag cleared, lock-on references dropped).
+-- Fired exactly once per confirmed player death, by Server/Systems/PlayerDeathSystem.lua and nothing
+-- else, after that module's own per-life state is already consistent.
 --
--- `killer` is nil for any death this System did not attribute to a specific attacker -- a fall, the
--- void, or a CombatSystem.ApplyServerDamage caller that passed none. That is deliberate and load-
--- bearing rather than an edge case: CombatSystem confirms EVERY death through one Humanoid.Died
--- handler regardless of cause, so a subscriber that only cares about PvP must check `killer` itself
--- rather than assuming this only fires for combat deaths. RespawnSystem depends on exactly that
--- breadth -- a player who falls into the void still needs a new body.
+-- `killer` is nil for any death PlayerDeathSystem did not attribute -- a fall or the void with no
+-- fresh blow behind it, a non-player's hit, or a self-inflicted one. That is deliberate and load-
+-- bearing rather than an edge case: EVERY death is confirmed through one Humanoid.Died handler
+-- regardless of cause, so a subscriber that only cares about PvP must check `killer` itself rather
+-- than assuming this only fires for combat deaths. RespawnSystem depends on exactly that breadth -- a
+-- player who falls into the void still needs a new body. A non-nil killer is always a different,
+-- still-present Player who removed health from this life within DamageConstants.KillCredit's window
+-- -- see PlayerDeathSystem's header for the whole rule.
+--
+-- `deathId` is this fact's identity: unique and increasing for the server's lifetime. It exists for
+-- the one kind of subscriber that must never act twice on a single death (RewardSystem grants
+-- progression from it) -- (victim, killer) alone cannot tell a replayed fact from a second, genuine
+-- kill of the same victim by the same killer. Subscribers with no such need simply ignore it.
 local playerKilledSignal = Instance.new("BindableEvent")
 
-function GameplayEvents.FirePlayerKilled(victim: Player, killer: Player?): ()
-	playerKilledSignal:Fire(victim, killer)
+function GameplayEvents.FirePlayerKilled(victim: Player, killer: Player?, deathId: number): ()
+	playerKilledSignal:Fire(victim, killer, deathId)
 end
 
-function GameplayEvents.OnPlayerKilled(handler: (victim: Player, killer: Player?) -> ()): RBXScriptConnection
+function GameplayEvents.OnPlayerKilled(
+	handler: (victim: Player, killer: Player?, deathId: number) -> ()
+): RBXScriptConnection
 	return playerKilledSignal.Event:Connect(handler)
 end
 

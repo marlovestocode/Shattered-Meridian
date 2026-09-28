@@ -57,9 +57,11 @@ local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstan
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 local WeaponDefenseAnimations = require(ReplicatedStorage.Shared.Defense.WeaponDefenseAnimations)
 
+local LocalCombatState = require(script.Parent.Parent.Combat.LocalCombatState)
 local CombatAnimator = require(script.Parent.Parent.FX.CombatAnimator)
 local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 
@@ -235,13 +237,9 @@ local function claimBlockHold(): ()
 	CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, manager:GetActiveClip(DEFENSE_LAYER) ~= nil)
 end
 
-local function setBlockHeld(held: boolean): ()
-	if held == blockHeld then
-		return
-	end
-	blockHeld = held
-	sendBlocking(held)
-
+-- Plays the guard press: the parry swing-up, chaining into the held loop. Only ever called while the
+-- key is down and the body is free -- see raiseGuardWhenFree.
+local function claimGuardPress(): ()
 	-- Claimed off the LOCAL press/release, not the server's StateChanged echo -- the same "client
 	-- predicts its own press for feel" split this file's header describes for the parry facing snap.
 	-- A press that never arms a parry still raises the guard (DefenseStateMachine.Press's own
@@ -257,37 +255,83 @@ local function setBlockHeld(held: boolean): ()
 	-- either guard alone is not enough: a release mid-swing retires the entry with "Cleared"/
 	-- "Superseded", never "Completed", but a same-frame release-then-repress could otherwise still
 	-- land a stale hold claim after the key had already gone back down, which the blockHeld check
-	-- closes. On release there is nothing to chain: SetClaim(nil) below clears whichever of the two
+	-- closes. On release there is nothing to chain: setBlockHeld's SetClaim(nil) clears whichever of the two
 	-- clips is currently active.
 	local fadeSeconds = DefenseConstants.Presentation.BlockAnimationFadeSeconds
-	manager:SetClaim(
-		DEFENSE_LAYER,
-		BLOCK_SOURCE,
-		if held
-			then {
-				Clip = parryClipKey,
-				Looped = false,
-				Priority = Enum.AnimationPriority.Action,
-				FadeIn = fadeSeconds,
-				FadeOut = fadeSeconds,
-				OnFinished = function(_clip: string, reason: AnimationManager.FinishReason)
-					-- Cleared unconditionally, for every reason -- see ACTION_SOURCE's own header. If
-					-- this chains into claimBlockHold below, that call re-asserts true for the second
-					-- phase; if it doesn't, nothing is holding Enum.AnimationPriority.Action on this
-					-- layer any more and the armed-idle loop is correctly free to resume.
-					CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, false)
-					if reason == "Completed" and blockHeld then
-						claimBlockHold()
-					end
-				end,
-			}
-			else nil
-	)
+	manager:SetClaim(DEFENSE_LAYER, BLOCK_SOURCE, {
+		Clip = parryClipKey,
+		Looped = false,
+		Priority = Enum.AnimationPriority.Action,
+		FadeIn = fadeSeconds,
+		FadeOut = fadeSeconds,
+		OnFinished = function(_clip: string, reason: AnimationManager.FinishReason)
+			-- Cleared unconditionally, for every reason -- see ACTION_SOURCE's own header. If
+			-- this chains into claimBlockHold below, that call re-asserts true for the second
+			-- phase; if it doesn't, nothing is holding Enum.AnimationPriority.Action on this
+			-- layer any more and the armed-idle loop is correctly free to resume.
+			CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, false)
+			if reason == "Completed" and blockHeld then
+				claimBlockHold()
+			end
+		end,
+	})
+	-- Queried rather than assumed true -- see AttackInputClient.playSwing's identical comment on
+	-- why a claim whose track failed to load (retiring synchronously inside SetClaim above, before
+	-- this line runs) must not be re-asserted active.
+	CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, manager:GetActiveClip(DEFENSE_LAYER) ~= nil)
+end
+
+-- A guard animation waiting for the body to be free: pressed mid-swing or while stunned. See
+-- raiseGuardWhenFree.
+local guardAnimationDeferred = false
+local guardGeneration = 0
+
+-- Starts the guard animation the moment this body is free of its own swing and any hitstun -- the
+-- same rule Server/Combat/Defense/DefenseSystem.lua now enforces on the guard itself (it holds the
+-- press until then; see its bodyCommitted). Before this, the guard animation started on the key edge
+-- no matter what: holding F mid-swing played the block over the attack while the swing's hitbox was
+-- still live. Rescheduled rather than polled, and re-checked when it fires, since a new hit can extend
+-- the stun in the meantime; LocalCombatState.OnReleased also calls it, so a swing cut short (a parry)
+-- frees the guard on that frame rather than at the deadline it was scheduled against.
+local function raiseGuardWhenFree(): ()
+	if not blockHeld or not guardAnimationDeferred then
+		return
+	end
+	local now = os.clock()
+	local freeAt = LocalCombatState.FreeAt(now)
+	if freeAt > now then
+		guardGeneration += 1
+		local generation = guardGeneration
+		task.delay(freeAt - now, function()
+			if generation == guardGeneration then
+				raiseGuardWhenFree()
+			end
+		end)
+		return
+	end
+	guardAnimationDeferred = false
+	claimGuardPress()
+end
+
+local function setBlockHeld(held: boolean): ()
+	if held == blockHeld then
+		return
+	end
+	blockHeld = held
+	LocalCombatState.SetGuardHeld(held)
+	-- Sent on the edge, whatever the body is doing: the server holds a press it cannot honour yet and
+	-- raises the guard itself the moment the body is free, so waiting here would only add a round trip.
+	sendBlocking(held)
+
 	if held then
-		-- Queried rather than assumed true -- see AttackInputClient.playSwing's identical comment on
-		-- why a claim whose track failed to load (retiring synchronously inside SetClaim above, before
-		-- this line runs) must not be re-asserted active.
-		CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, manager:GetActiveClip(DEFENSE_LAYER) ~= nil)
+		guardAnimationDeferred = true
+		raiseGuardWhenFree()
+	else
+		guardAnimationDeferred = false
+		guardGeneration += 1
+		-- SetClaim(layer, source, nil) clears whichever of the two clips is currently active -- and is a
+		-- no-op for a guard that never got as far as animating.
+		manager:SetClaim(DEFENSE_LAYER, BLOCK_SOURCE, nil)
 	end
 end
 
@@ -343,7 +387,21 @@ end
 
 -- Lifecycle -----------------------------------------------------------------------------------------
 
-local function bindCharacter(nextCharacter: Model, humanoid: Humanoid): ()
+-- ROLL-FROM-GUARD. The server drops a raised guard the moment it accepts a roll (DefenseSystem.BeginEvade
+-- -> DefenseStateMachine.BeginEvade's Release), but nothing tells THIS client: the key is still
+-- physically down, so blockHeld stays true and the guard pose keeps playing over a guard that no longer
+-- exists. The server's own ParkourState Attribute turning "Roll" is exactly the "your roll was accepted"
+-- signal, already replicated, so this mirrors the server's release off it rather than adding a remote
+-- or reaching into the parkour framework. The release it sends is redundant (the server has already
+-- released) and harmless -- Release on a machine whose guard is down is a no-op. Re-pressing the key
+-- after the roll raises the guard as normal.
+local function onParkourStateChanged(humanoid: Humanoid): ()
+	if blockHeld and humanoid:GetAttribute(Constants.Attributes.ParkourState) == "Roll" then
+		setBlockHeld(false)
+	end
+end
+
+local function bindCharacter(nextCharacter: Model, humanoid: Humanoid, life: Trove.TroveInstance): ()
 	-- The Humanoid was already waited out by Shared/PlayerLifecycle.lua before this is called. The
 	-- HumanoidRootPart is NOT, and still needs its own wait here: it is this module's own extra
 	-- requirement, replicates independently of the Humanoid, and PlayerLifecycle deliberately knows
@@ -364,6 +422,10 @@ local function bindCharacter(nextCharacter: Model, humanoid: Humanoid): ()
 	-- AnimationManager.Bind() drops the previous life's claims/tracks itself (Unbind() runs first
 	-- thing inside Bind()) -- nothing here needs to clear DEFENSE_LAYER separately.
 	manager:Bind(nextCharacter)
+
+	life:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.ParkourState), function()
+		onParkourStateChanged(humanoid)
+	end)
 end
 
 local function unbind(): ()
@@ -407,6 +469,9 @@ function DefenseClient.Start(): ()
 	-- every "Gameplay" binding regardless of gameProcessed or the modal Attribute at release time: a
 	-- guard already up when a traversal started -- or when a menu opened over it -- must still be
 	-- able to come down, and a gate that can strand it raised is worse than the one it closes.
+	-- A swing cut short frees the body before the deadline raiseGuardWhenFree scheduled against.
+	LocalCombatState.OnReleased(raiseGuardWhenFree)
+
 	InputRouter.Bind("Block", {
 		Layer = "Gameplay",
 		Began = function()

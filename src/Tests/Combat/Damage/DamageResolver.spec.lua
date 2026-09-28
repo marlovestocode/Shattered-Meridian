@@ -157,6 +157,23 @@ return function()
 		end)
 	end)
 
+	describe("DamageResolver.Resolve -- an evaded swing", function()
+		it("prices to nothing and earns the attacker no escalation", function()
+			-- The defender was not there. A move with knockback and a grab authored on it must carry
+			-- neither through, or an evaded swing would still launch or hold the body it missed.
+			local knockback = { UpVelocity = 40, HorizontalVelocity = 20, RagdollSeconds = 0.5 }
+			local result = DamageResolver.Resolve("Evaded", "Neutral", profile({ Knockback = knockback }), 4)
+			expect(result.Kind).to.equal("Evaded")
+			expect(result.Damage).to.equal(0)
+			expect(result.GuardDrain).to.equal(0)
+			expect(result.HitstunSeconds).to.equal(0)
+			expect(result.AdvancesCombo).to.equal(false)
+			expect(result.Knockback).to.equal(nil)
+			expect(result.Grab).to.equal(nil)
+			expect(DamageResolver.AdvancesCombo("Evaded")).to.equal(false)
+		end)
+	end)
+
 	describe("DamageResolver.Resolve -- malformed authored numbers", function()
 		it("treats a NaN or negative authored value as zero rather than propagating it", function()
 			-- These come from the Move Editor by way of a DataStore, so a record written by an older

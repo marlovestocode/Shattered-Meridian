@@ -27,6 +27,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 -- onto Constants.Attributes.DefenseState, not a second definition of the string -- see that field's
 -- own header.
 local Constants = require(ReplicatedStorage.Shared.Constants)
+-- For Evade.CooldownSeconds only, which is derived from the roll's own cooldown -- see that field.
+-- ParkourConstants has no requires of its own, so this cannot form a cycle.
+local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 
 local DefenseConstants = {}
 
@@ -171,6 +174,45 @@ DefenseConstants.Parry = {
 	PingCompensationMaxSeconds = 0.12,
 }
 
+-- Evade ---------------------------------------------------------------------------------------------
+
+-- THE ROLL'S EVADE FRAMES. A contact landing inside the window resolves to OutcomeKind "Evaded" --
+-- no damage, no guard change, no stun -- regardless of bearing. Opened by DefenseSystem.BeginEvade,
+-- which the composition root calls when ParkourSystem accepts a Roll start (Main.server.lua), so the
+-- trigger is the roll report the client already sends and no remote was added for it.
+--
+-- A FIXED SHAPE, NOT A CLIP'S MARKERS, and that is consistent with this file's own rule rather than an
+-- exception to it: the parry window lives on an asset because the parry IS its animation. The roll's
+-- clip is a shared placeholder today and the directional clips are not authored yet, so there is no
+-- asset whose keyframes could be the authority. If that changes, this is the table that moves.
+--
+-- Three phases, counted from the moment the server ACCEPTS the roll:
+--   startup   -- vulnerable. The commitment tax: a roll pressed on the frame the swing lands does
+--                not escape it, which is what keeps evading a read rather than a reflex mash.
+--   active    -- evading.
+--   recovery  -- vulnerable again for the rest of the roll. Nothing to author: it is simply the roll
+--                continuing after the window closes, and ParkourOwnership already refuses attacks
+--                and guards for its whole length.
+DefenseConstants.Evade = {
+	StartupSeconds = 0.06,
+	ActiveSeconds = 0.25,
+
+	-- The server opens the window when the roll report ARRIVES, one-way latency after the player
+	-- pressed -- the same double charge the parry refunds, refunded the same way and under the same
+	-- cap (Parry.PingCompensationMaxSeconds), because a client-influenced number is exactly as
+	-- untrustworthy here as there. Extends the END only; a refund that also opened the window early
+	-- would let a high-ping player's roll start evading before it began.
+	PingCompensationMaxSeconds = 0.12,
+
+	-- Minimum gap between two accepted evades. The ROLL'S cooldown, minus a tolerance for the jitter
+	-- between two reports that left the client exactly one cooldown apart. Derived rather than
+	-- restated so retuning the roll moves the evade with it: the whole design is "the cooldown is the
+	-- cost", and two independently-authored numbers for one cost would drift the first time one was
+	-- tuned. The client's own cooldown (States/Rolling) is the real gate for an honest client; this is
+	-- the server refusing a client that skips it.
+	CooldownSeconds = math.max(ParkourConstants.Roll.CooldownSeconds - 0.15, 0),
+}
+
 -- Animation ------------------------------------------------------------------------------------------
 
 -- The clip every combatant registered without their own ParryAnimationId uses (DefenseSystem.
@@ -188,6 +230,27 @@ DefenseConstants.Parry = {
 -- docs/design/parry-block-system-plan.md: a press still blocks, it just never arms a parry window
 -- until the markers exist.
 DefenseConstants.ParryAnimationId = "rbxassetid://94883396723007"
+
+-- THE PARRY WAS NEVER ARMED IN PLAY, and this table is the fix (2026-09-28). ParryWindows fails closed:
+-- an animation id with no ParryStart/ParryClose markers and no registration gets NO window, so every
+-- block press just blocks. The clip above carries no marker pair that anything in code can verify, and
+-- ParryWindows' own header says registrations exist precisely "because there are no parry clips yet at
+-- all" -- but none was ever written. So the parry, the Parried outcome, the attacker stagger and the
+-- parry clash hit-stop were all unreachable.
+--
+-- Registered windows, per animation id, in seconds from the PRESS: the parry is live from Open to Close,
+-- and a whiff is punished until RecoveryEnd (omitted -> Close + Parry.RecoverySeconds). DefenseSystem.Init
+-- registers these before its boot validation. This is ParryWindows' "Registered" source, not the
+-- forbidden default: per-id, hand-written, greppable -- and authored markers on the clip OUTRANK it, so
+-- the day the animator adds ParryStart/ParryClose, the clip's own timing takes over and the boot
+-- validation reports this entry as shadowed (delete it then).
+--
+-- 0.2s: generous enough to be a learnable read at real ping (ParryWindows.ParryEndFor refunds up to
+-- another Parry.PingCompensationMaxSeconds on top), tight enough that it is a timing and not a block.
+-- A starting value -- tune in Studio with ParryWindows.Override, then write the number back here.
+DefenseConstants.RegisteredParryWindows = {
+	[DefenseConstants.ParryAnimationId] = { Open = 0, Close = 0.2 },
+} :: { [string]: { Open: number, Close: number, RecoveryEnd: number? } }
 
 -- CLIENT-SIDE PRESENTATION ONLY, unlike ParryAnimationId above: the server never reads this id or
 -- cares how long it plays, since nothing about parry timing lives in it (no ParryStart/ParryClose/

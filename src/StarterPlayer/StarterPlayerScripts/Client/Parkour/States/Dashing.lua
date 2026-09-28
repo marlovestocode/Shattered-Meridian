@@ -54,8 +54,8 @@
 
 	The one route-1 chain that IS here -- dash into a slide -- is genuinely route-1, because it is
 	triggered by a key still being HELD at the dash's end rather than by geometry appearing. Its two
-	skipped gates (grounded, and the combat gate) are re-asked inline, exactly as States/Sliding.lua's
-	own hand-off into Rolling re-asks that state's.
+	skipped gates (grounded, and the combat gate) are re-asked inline, the same obligation
+	States/Sliding.lua's own hand-off into Rolling meets by asking StateSupport.CanRoll.
 
 	THE WEIGHTED FEEL, in three parts:
 	  1. A SPRING, not a curve. Commanded speed is driven toward Dash.LaunchSpeed by
@@ -164,9 +164,9 @@ local Dashing: ParkourTypes.StateDefinition = {
 
 	CanEnter = function(context: ParkourContext): (boolean, string?)
 		-- Asked first, the house rule States/WallRunning.CanEnter documents. "Dashing" is deliberately
-		-- NOT in ParkourConstants.CombatGate.BlockedStates today -- Rolling already is, and blocking
-		-- both would leave a fighting player with no evasive movement at all -- but the question is
-		-- asked anyway so that roster stays a pure data change.
+		-- NOT in ParkourConstants.CombatGate.BlockedStates today, and neither is Rolling any more: the
+		-- roll is the grounded dodge (priced by the server's evade frames and its own cooldown) and the
+		-- dash is the airborne one. The question is asked anyway so that roster stays a pure data change.
 		if StateSupport.CombatBlocks(context, "Dashing") then
 			return false, "InCombat"
 		end

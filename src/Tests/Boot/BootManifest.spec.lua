@@ -111,6 +111,48 @@ return function()
 		end)
 	end)
 
+	describe("BootManifest -- planned Systems are honestly planned", function()
+		it("declares every planned name as an entry", function()
+			local declared: { [string]: boolean } = {}
+			for _, entry in BootManifest.Entries do
+				declared[entry.Name] = true
+			end
+			local missing: { string } = {}
+			for _, name in BootManifest.Planned do
+				if not declared[name] then
+					table.insert(missing, name)
+				end
+			end
+			expect(table.concat(missing, ", ")).to.equal("")
+		end)
+
+		it(
+			"gives no planned System any API beyond Init -- anything more means it is real and needs a numbered boot step",
+			function()
+				local grown: { string } = {}
+				for _, entry in BootManifest.Entries do
+					if table.find(BootManifest.Planned, entry.Name) then
+						local instance = resolve(entry.Path)
+						if instance and instance:IsA("ModuleScript") then
+							for key in require(instance) :: any do
+								if key ~= "Init" then
+									table.insert(grown, `{entry.Name}.{key}`)
+								end
+							end
+						end
+					end
+				end
+				expect(table.concat(grown, ", ")).to.equal("")
+			end
+		)
+
+		it("keeps the fight-to-grow spine out of the planned loop", function()
+			for _, name in { "ProgressionSystem", "RewardSystem", "MeridianSystem", "PlayerDeathSystem" } do
+				expect(table.find(BootManifest.Planned, name)).to.equal(nil)
+			end
+		end)
+	end)
+
 	describe("BootManifest -- the declared network surface", function()
 		it("gives every declared remote exactly one owning System", function()
 			-- The static half of the NET-4 two-owners bug: NetworkBridge.claimName can only notice a

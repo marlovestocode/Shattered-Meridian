@@ -49,21 +49,24 @@
 	THE SEAM FOR COMBAT, now taken. The rebuilt combat layer publishes two things this System reads,
 	and neither layer required a line of code in the other:
 	  * Constants.Attributes.CombatBusyUntil -- an os.clock() deadline written by
-	    Server/Combat/Attack/AttackRequestSystem.lua covering the swing it just accepted.
+	    Server/Combat/Attack/AttackRequestSystem.lua covering the swing it just accepted, AND by
+	    Server/Combat/Damage/DamageSystem.lua covering the hitstun of a hit the player just took -- so
+	    getting hit while running drops the run exactly as throwing a swing does.
 	  * DefenseConstants.DefenseStateAttribute -- the live defence state, already published for the HUD
 	    ("purely informational: nothing in this system gates on it"). It is gated on HERE, which is the
 	    first consumer to make a decision out of it, so that constant's own header now understates it.
-	Both mean the same thing to this file: a combat action is committing this body. THROWING A SWING OR
-	RAISING A GUARD FORCES THE RUN DOWN -- stage to 0 and the charge to 0, not merely frozen -- so a
-	player has to be walking to fight, and re-earns the gear from scratch afterwards. The intent is
-	deliberately left alone: a player still holding the key starts charging again the moment the swing
-	is over, which is what makes this feel like the fight interrupting the run rather than like the run
-	key being taken away.
+	Both mean the same thing to this file: a combat action is committing this body. WHILE COMMITTED THE
+	BODY MOVES AT WALKING PACE -- the published stage and the WalkSpeed drop to 0 / base for exactly as
+	long as the swing, the guard or the hitstun lasts -- but THE GEAR IS HELD, not lost: the charge is
+	frozen the same way a vault freezes it, and the moment the commitment ends the player is back in the
+	gear they were in, ramping up at the ordinary acceleration.
 
-	It is a charge reset rather than a WalkSpeed tier because "you cannot run away from a fight" is a
-	statement about the LADDER, not about a speed: pinning a number would leave the gear intact
-	underneath and hand it straight back the instant the pin lifted, which is the same player sprinting
-	through a fight with an extra step.
+	CHANGED 2026-09-28 FROM A CHARGE RESET. It used to zero the charge on every swing and every hit, so
+	a player re-earned the gear from scratch after each exchange -- and an M1 string, one swing every
+	half second, never let the ladder climb past first gear at all. Playtest read that as combat being
+	stop-start. The old argument for the reset ("pinning a number would hand the gear straight back the
+	instant the pin lifted") is exactly what is wanted now: you cannot SPRINT while swinging, guarding or
+	stunned, and you do not pay for a whole run every time you throw a punch.
 
 	There is still no hit-slow or dash tier in the list above, and their absence remains a statement of
 	fact rather than a decision -- nothing publishes one yet.
@@ -163,9 +166,12 @@ type PlayerRunState = {
 	Sprinting: boolean,
 	-- Seconds of accrued charge (Shared/Run/RunLadder.StepCharge).
 	ChargeSeconds: number,
-	-- The stage last resolved and published. Held so the hysteresis in ResolveStage has a previous
-	-- value to test against, and so the Attribute is written only on a real change.
+	-- The gear the player is HOLDING -- resolved every tick, and kept through a combat commitment (see
+	-- this file's header). Held so the hysteresis in ResolveStage has a previous value to test against.
 	Stage: number,
+	-- The stage last written to the SprintStage Attribute: Stage, or 0 while a combat action commits
+	-- the body. Its own field so the Attribute is still written only on a real change.
+	PublishedStage: number,
 	-- The last WalkSpeed this System wrote, so the ramp has something to ramp FROM that is not the
 	-- property itself -- reading the property back would let any other writer's value silently become
 	-- this System's starting point.
@@ -210,6 +216,7 @@ local function getState(player: Player): PlayerRunState
 		Sprinting = false,
 		ChargeSeconds = 0,
 		Stage = 0,
+		PublishedStage = 0,
 		WalkSpeed = 0,
 		NotAccruingSeconds = 0,
 		Character = nil,
@@ -458,19 +465,13 @@ local function stepPlayer(player: Player, state: PlayerRunState, deltaTime: numb
 	-- `locked` beats both in the freeze argument below: flying across the map with the run key held
 	-- is not running, and it must not preserve a gear the way a vault or a jump does.
 	local moving = humanoid.MoveDirection.Magnitude >= RunConstants.MoveInputThreshold
-	-- COMBAT ENDS THE RUN, and it outranks the freeze rather than joining it. A vault or a jump FREEZES
-	-- the charge because a traversal is not a stop; a swing ZEROES it, because fighting is not something
-	-- you do while running -- see this file's header. Ordered ahead of `frozen` below so a swing thrown
-	-- mid-air (which is airborne, and would otherwise be frozen and preserve its gear intact) still
-	-- costs the run.
+	-- COMBAT PAUSES THE RUN -- it FREEZES the charge exactly as a traversal does (neither accruing nor
+	-- decaying), and the stage/speed below are pinned to walking for as long as it lasts. See this
+	-- file's header for why this is a pause and no longer a reset.
 	local committed = combatCommitted(live, now)
-	if committed then
-		state.ChargeSeconds = 0
-		state.NotAccruingSeconds = 0
-	end
 
 	local accruing = state.Sprinting and moving and not locked and grounded and not committed
-	local frozen = (parkourOwned or not grounded) and not locked and not committed
+	local frozen = (parkourOwned or not grounded or committed) and not locked
 
 	-- HOW LONG HAS THIS BEEN GOING ON. Reset the moment accrual resumes, so the aggressive stop decay
 	-- only ever applies to a genuine, sustained stop and a player who clips a doorframe for two frames
@@ -485,16 +486,15 @@ local function stepPlayer(player: Player, state: PlayerRunState, deltaTime: numb
 	state.ChargeSeconds =
 		RunLadder.StepCharge(state.ChargeSeconds, deltaTime, accruing, frozen, state.NotAccruingSeconds)
 
-	-- THE STAGE. Resolved from the charge and the held intent, and published only on a real change --
-	-- SetAttribute is a replicated write with a changed-signal behind it, and restating the same stage
-	-- sixty times a second would be sixty round trips to tell every client nothing.
-	-- `committed` forces the intent argument false rather than being checked after the fact: ResolveStage
-	-- owns the hysteresis, and second-guessing its answer from out here is how a resolver ends up with
-	-- two disagreeing definitions of which gear a player is in.
-	local nextStage =
-		RunLadder.ResolveStage(state.Stage, state.ChargeSeconds, state.Sprinting and not locked and not committed)
-	if nextStage ~= state.Stage then
-		state.Stage = nextStage
+	-- THE STAGE. The HELD gear is resolved from the charge and the held intent every tick, committed or
+	-- not -- ResolveStage owns the hysteresis, and the frozen charge is what keeps the gear through a
+	-- swing. What is PUBLISHED is that gear, or walking while a combat action commits the body; it is
+	-- written only on a real change, since SetAttribute is a replicated write and restating the same
+	-- stage sixty times a second would be sixty round trips to tell every client nothing.
+	state.Stage = RunLadder.ResolveStage(state.Stage, state.ChargeSeconds, state.Sprinting and not locked)
+	local nextStage = if committed then 0 else state.Stage
+	if nextStage ~= state.PublishedStage then
+		state.PublishedStage = nextStage
 		humanoid:SetAttribute(ATTRIBUTES.SprintStage, nextStage)
 	end
 
@@ -558,6 +558,7 @@ local function onCharacterAdded(player: Player, character: Model): ()
 	-- re-pushes it on its own character bind anyway.
 	state.ChargeSeconds = 0
 	state.Stage = 0
+	state.PublishedStage = 0
 	state.WalkSpeed = 0
 	state.NotAccruingSeconds = 0
 
@@ -627,11 +628,13 @@ function RunSystem.Init(): ()
 	logger:info("RunSystem.Init() complete", { stages = #RunConstants.Stages })
 end
 
--- The live stage for a player, for dev tooling and any System that wants to know whether someone is at
--- full stride without watching the Attribute itself. Read-only projection, never a way to set one.
+-- The live stage for a player -- the one their body is actually moving at, the same value the
+-- SprintStage Attribute carries (0 while a combat action holds their gear) -- for dev tooling and any
+-- System that wants to know whether someone is at full stride without watching the Attribute itself.
+-- Read-only projection, never a way to set one.
 function RunSystem.GetStage(player: Player): number
 	local state = playerStates[player]
-	return if state then state.Stage else 0
+	return if state then state.PublishedStage else 0
 end
 
 -- How far through the current gear's charge this player is, 0..1 -- for a HUD stride meter. Same

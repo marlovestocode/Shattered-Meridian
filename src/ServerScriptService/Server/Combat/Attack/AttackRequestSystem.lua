@@ -68,15 +68,16 @@
 	against hitstun would be re-tested against the same expired hitstun for one extra frame. Main.
 	server.lua calls the four Inits in order and Init asserts it rather than trusting the comment.
 
-	ALSO WARMS AttackWindows' marker cache at boot (Init's own task.spawn, mirroring DefenseSystem.Init's
-	identical treatment of ParryWindows.ValidateAll) -- collectBasicMoveEntries discovers every Basic
-	stage across both weapons the same probing way SwingSequencer discovers a string's length, so this
-	list can never drift from what actually exists.
+	ALSO WARMS AttackWindows' clip cache at boot (Init's own task.spawn, mirroring DefenseSystem.Init's
+	identical treatment of ParryWindows.ValidateAll) -- collectClipEntries walks every Default and
+	custom move the catalogue can resolve, so every swing is synced to its clip's real length from its
+	first throw. A clip that first appears mid-session (a move authored in the Move Editor after boot)
+	is requested on its first throw instead -- see Throw.
 
 	Does not own: contact detection (HitboxEngine), what kind of hit something was (DefenseSystem),
 	what a hit costs (DamageSystem), which move a press means (SwingSequencer), what a move IS
-	(AttackCatalog and the Move Creation System behind it), where a Basic move's WindupSeconds
-	ultimately comes from (Shared/Attack/AttackWindows.lua, AttackCatalog.Get's own concern), or any
+	(AttackCatalog and the Move Creation System behind it), how a move's timeline is built from its
+	clip (Shared/Attack/AttackWindows.lua and AttackCatalog.Get's own concern), or any
 	presentation whatsoever -- every FX decision belongs to the client that receives Attack_Started.
 ]]
 
@@ -97,10 +98,11 @@ local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnersh
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
-local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
 local SwingSequencer = require(script.Parent.SwingSequencer)
 local AttackCatalog = require(script.Parent.Parent.AttackCatalog)
+local DefaultMoveRegistry = require(script.Parent.Parent.DefaultMoveRegistry)
+local MoveRegistryManager = require(script.Parent.Parent.MoveRegistryManager)
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
 local DefenseSystem = require(script.Parent.Parent.Defense.DefenseSystem)
 local GrabSystem = require(script.Parent.Parent.Grab.GrabSystem)
@@ -158,22 +160,30 @@ local function debugLog(flag: boolean, message: string, data: { [string]: any }?
 	end
 end
 
--- Every Basic-string MoveId this server might throw, across every weapon in the swap order, paired
--- with its resolved AnimationId -- what AttackWindows.ValidateAll needs to warm its marker cache at
--- boot. Counts up from stage 1 the same "until the catalogue stops resolving" way
--- SwingSequencer.stageCountFor discovers a string's length, so this can never drift from what
--- actually exists; Heavy/Finisher are never included, matching AttackWindows' own Basic-only scope.
-local function collectBasicMoveEntries(): { { MoveId: string, AnimationId: string } }
+-- Every move this server might throw that has a clip, paired with its resolved AnimationId -- what
+-- AttackWindows.ValidateAll needs to warm its clip cache at boot. Walks the Default registry (every
+-- weapon's every stage plus the standalones) and every custom move, so the list is whatever the
+-- catalogue can actually resolve rather than a second copy of it. Resolved through AttackCatalog.Get
+-- rather than read off the MoveDefinition because a Default move's clip is not ON its definition --
+-- it falls through to AttackAnimations there -- and Get is the one place that fallback lives.
+local function collectClipEntries(): { { MoveId: string, AnimationId: string } }
 	local entries: { { MoveId: string, AnimationId: string } } = {}
-	for _, weaponId in WeaponRoster.Order() do
-		for stageIndex = 1, AttackConstants.Sequence.MaxStageProbe do
-			local moveId = `default:{weaponId}:Basic:{stageIndex}`
-			local entry = AttackCatalog.Get(moveId)
-			if not entry then
-				break
-			end
+	local seen: { [string]: boolean } = {}
+	local function add(moveId: string)
+		if seen[moveId] then
+			return
+		end
+		seen[moveId] = true
+		local entry = AttackCatalog.Get(moveId)
+		if entry and entry.AnimationId ~= "" then
 			table.insert(entries, { MoveId = moveId, AnimationId = entry.AnimationId })
 		end
+	end
+	for _, move in DefaultMoveRegistry.List() do
+		add(move.MoveId)
+	end
+	for _, move in MoveRegistryManager.List() do
+		add(move.MoveId)
 	end
 	return entries
 end
@@ -395,6 +405,13 @@ function AttackRequestSystem.Throw(
 		-- rare, and worth a line rather than a silent nothing.
 		return false, "UnknownMove"
 	end
+	-- A clip the boot warm pass never saw (authored after boot) starts reading now, so this swing uses
+	-- its authored timeline and every later one is synced to the clip. A no-op for anything already
+	-- read or in flight. Only once Init has run: the specs drive Throw without Init, and a background
+	-- web fetch landing mid-spec would retime swings under their assertions.
+	if started then
+		AttackWindows.Request(entry.AnimationId)
+	end
 
 	if cooldownRemaining(model, resolution.MoveId, now) > 0 then
 		return false, "Cooldown"
@@ -502,6 +519,7 @@ function AttackRequestSystem.Throw(
 		-- "" for every Default move today (DefaultMoveRegistry's own header). The client treats a blank
 		-- id as "no clip", never as an error.
 		AnimationId = entry.AnimationId,
+		PlaybackSpeed = entry.PlaybackSpeed,
 	})
 
 	debugLog(AttackConstants.Debug.LogAccepted, "Attack thrown", {
@@ -843,12 +861,12 @@ function AttackRequestSystem.Init(): ()
 		AttackRequestSystem.Step(deltaTime, os.clock())
 	end)
 
-	-- Warms AttackWindows' marker cache for every Basic-string clip and reports what it found -- the
-	-- same "spawned rather than awaited" reasoning DefenseSystem.Init gives ParryWindows.ValidateAll:
+	-- Warms AttackWindows' clip cache for every move with a clip and reports what it found -- the same
+	-- "spawned rather than awaited" reasoning DefenseSystem.Init gives ParryWindows.ValidateAll:
 	-- GetKeyframeSequenceAsync is a rate-limited web call, and blocking boot on it would cost every
-	-- player more than the first few seconds of M1 falling back to hardcoded timing ever would.
+	-- player more than the first few seconds of swings on their authored timeline ever would.
 	task.spawn(function()
-		AttackWindows.ValidateAll(collectBasicMoveEntries())
+		AttackWindows.ValidateAll(collectClipEntries())
 	end)
 
 	logger:info("AttackRequestSystem.Init() complete")

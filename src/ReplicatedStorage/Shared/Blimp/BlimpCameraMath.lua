@@ -65,6 +65,7 @@
 
 local BlimpConstants = require(script.Parent.BlimpConstants)
 local FlightMath = require(script.Parent.Parent.FlightMath)
+local VesselMotion = require(script.Parent.Parent.Vessel.VesselMotion)
 
 local BlimpCameraMath = {}
 
@@ -72,10 +73,6 @@ local BlimpCameraMath = {}
 -- across it would report a spike the hull never experienced. Same reasoning, and deliberately the same
 -- order of magnitude, as BlimpDrive's own MAX_STEP_SECONDS.
 local MAX_STEP_SECONDS = 0.2
-
--- Below this the hull has no usable facing to decompose its velocity along. Only reachable for a
--- degenerate CFrame, which is why the fallback is "report no motion this frame" rather than an error.
-local EPSILON = 1e-4
 
 -- One frame's measured hull motion, already filtered. Every field is in the HULL's own frame, not the
 -- world's -- which is what lets one set of coefficients work regardless of which way the ship is
@@ -162,6 +159,16 @@ export type State = {
 -- needs the identical integrator for the mounted body's lean, and two hand-rolled copies of a damped
 -- oscillator is exactly how one of them ends up subtly wrong.
 local springStep = FlightMath.SpringStep
+
+-- THE MEASUREMENT HALF OF THIS MODULE LIVES IN Shared/Vessel/VesselMotion.lua NOW, and Observe/
+-- ZeroMotion below are delegations to it. The line the split was taken along: this file does two
+-- separable things -- it MEASURES a hull, and it decides what a camera wears as a result -- and only
+-- the first is wanted by the mounted body's lean or by a vehicle with no bespoke camera of its own.
+--
+-- State BELOW IS UNCHANGED and still carries every field it always had, which is what made the
+-- delegation free: VesselMotion.State is a strict subset of it, so a State from here satisfies that
+-- one structurally with no wrapper, no nesting, and no change at any call site.
+local motionSampler = VesselMotion.New(BlimpConstants.Camera.Smoothing)
 
 -- Framerate-independent exponential filter, deliberately routed through the SAME FlightMath.EaseAlpha
 -- every other eased value in this codebase uses rather than growing a second one here. The springs
@@ -251,6 +258,9 @@ end
 --
 -- Mutates rather than returning a table, and returns nothing at all, so a caller cannot accidentally
 -- start allocating a Motion per frame by using the return value.
+--
+-- The arithmetic is Shared/Vessel/VesselMotion.lua's -- read that file for the flattened forward axis,
+-- the two filters and the un-primed first frame, all of which were written here and moved there intact.
 function BlimpCameraMath.Observe(
 	state: State,
 	hullCFrame: CFrame,
@@ -259,51 +269,7 @@ function BlimpCameraMath.Observe(
 	cruiseSpeed: number,
 	deltaTime: number
 ): ()
-	local dt = math.clamp(deltaTime, 0, MAX_STEP_SECONDS)
-	if dt <= 0 then
-		return
-	end
-
-	local smoothing = BlimpConstants.Camera.Smoothing
-	local motion = state.Motion
-
-	-- Flattened to the horizontal plane before being used as the "forward" axis. A blimp is a
-	-- physically simulated body, so its hull is nose-up or nose-down for a moment after any collision,
-	-- any passenger's mass joining the assembly, and any tick where the orientation constraint is still
-	-- settling. Decomposing velocity against that raw LookVector would report a pure climb as forward
-	-- speed, which then differentiates into a phantom acceleration and shoves the view backward for no
-	-- reason a player could see.
-	local look = hullCFrame.LookVector
-	local flat = Vector3.new(look.X, 0, look.Z)
-	if flat.Magnitude <= EPSILON then
-		return
-	end
-	local forwardAxis = flat.Unit
-	-- forward x up, written out rather than built with :Cross() -- the flattened forward makes two of
-	-- the three components identically zero, and this axis is recomputed every frame for every player
-	-- aboard. Sanity check against the engine's own convention: an identity CFrame looks down -Z and
-	-- has RightVector +X, and (-(-1), 0, 0) is +X.
-	local rightAxis = Vector3.new(-forwardAxis.Z, 0, forwardAxis.X)
-
-	local rawForward = linearVelocity:Dot(forwardAxis)
-	state.SmoothForward = filter(state.SmoothForward, rawForward, smoothing.VelocityEaseSpeed, dt)
-	state.SmoothLateral = filter(state.SmoothLateral, linearVelocity:Dot(rightAxis), smoothing.VelocityEaseSpeed, dt)
-	state.SmoothYaw = filter(state.SmoothYaw, angularVelocity.Y, smoothing.VelocityEaseSpeed, dt)
-	state.SmoothClimb = filter(state.SmoothClimb, linearVelocity.Y, smoothing.VelocityEaseSpeed, dt)
-
-	-- The first frame reports no acceleration at all rather than differencing against a cold zero --
-	-- see State.Primed's own comment for what that costs when a player boards a ship already at speed.
-	local rawAccel = if state.Primed then (state.SmoothForward - state.PreviousForward) / dt else 0
-	state.SmoothAccel = filter(state.SmoothAccel, rawAccel, smoothing.AccelEaseSpeed, dt)
-	state.PreviousForward = state.SmoothForward
-	state.Primed = true
-
-	motion.ForwardSpeed = state.SmoothForward
-	motion.LateralSpeed = state.SmoothLateral
-	motion.YawRate = state.SmoothYaw
-	motion.ClimbRate = state.SmoothClimb
-	motion.ForwardAccel = state.SmoothAccel
-	motion.SpeedFraction = math.clamp(state.SmoothForward / math.max(cruiseSpeed, 1), 0, 1)
+	motionSampler.Observe(state, hullCFrame, linearVelocity, angularVelocity, cruiseSpeed, deltaTime)
 end
 
 -- Zeroes the measured motion without touching the springs -- the release path. Every channel then
@@ -312,22 +278,10 @@ end
 --
 -- Also un-primes the accelerometer, so a player who dismounts at flank and boards another ship a
 -- second later does not get the first hull's last known speed differenced against the second's first.
+-- Both behaviours are Shared/Vessel/VesselMotion.Zero's now; the springs this file owns are, correctly,
+-- none of that module's business.
 function BlimpCameraMath.ZeroMotion(state: State): ()
-	local motion = state.Motion
-	motion.ForwardSpeed = 0
-	motion.LateralSpeed = 0
-	motion.YawRate = 0
-	motion.ClimbRate = 0
-	motion.ForwardAccel = 0
-	motion.SpeedFraction = 0
-
-	state.SmoothForward = 0
-	state.SmoothLateral = 0
-	state.SmoothYaw = 0
-	state.SmoothClimb = 0
-	state.SmoothAccel = 0
-	state.PreviousForward = 0
-	state.Primed = false
+	VesselMotion.Zero(state)
 end
 
 -- Advances every spring one frame and writes `state.Pose`, in place.

@@ -62,8 +62,11 @@ local PlayerDataConstants = {
 	-- equippedArts. Bumped 7 -> 8 for the bloodline spin's `bloodlineRerolls` field, and 8 -> 9 for the
 	-- Blimp Fuel System's `blimpFuel` field (Types.PlayerProfile) -- PlayerDataSystem.lua's
 	-- Migrations[8] backfills { Coal = 0, Water = 0 } onto any record saved before this pass, the same
-	-- "empty is honest" shape as every migration before it.
-	SchemaVersion = 9,
+	-- "empty is honest" shape as every migration before it. Bumped 9 -> 10 for the UI System's
+	-- `settings.UI` sub-table (Types.UISettings) -- the same "new settings group" shape Migrations[5]
+	-- used for Comfort -- PlayerDataSystem.lua's Migrations[9] backfills Scale = 1 (100%, today's only
+	-- size, unchanged for every existing player) onto any record saved before this pass.
+	SchemaVersion = 10,
 
 	-- A brand-new profile's starting Tier -- Tier 1 is the bottom of TierSystem's nine-tier ladder
 	-- (progression-systems.md), the correct starting point for a player who has never played before.

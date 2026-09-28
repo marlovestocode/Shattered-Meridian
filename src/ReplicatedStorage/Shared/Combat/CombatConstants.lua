@@ -86,7 +86,7 @@ local DashHitRecoverySeconds = 0.08
 --
 -- "AFTER A WINDUP" NEEDS NO FIELD HERE. AttackStateMachine only ever enters Active from Windup, so a
 -- stage's own WindupSeconds already is the delay before this box exists -- retune that per stage (or
--- let Shared/Attack/AttackWindows.lua's animation-marker override do it), not this table.
+-- put a "Hit" marker on the clip's impact frame -- Shared/Attack/AttackWindows.lua), not this table.
 local SWING_HITBOX = {
 	-- "BodyBox" -- every weapon stage anchors to the attacker's HumanoidRootPart and uses the Size and
 	--             Offset below verbatim.
@@ -767,20 +767,9 @@ local CombatConstants = {
 		-- playing on a hard interrupt (the character stops moving).
 		Walking = "rbxassetid://92817463622620",
 		Running = "rbxassetid://134203885804635",
-		-- The SECOND -- and, since the ladder went back to two gears, TOP -- run stage's own clip
-		-- (Constants.Attributes.SprintStage == 2). Blank is a supported, shipped state, not a stub: the
-		-- locomotion evaluator falls through to Running above when this has no id, so stage 2 still reads
-		-- as a different gear through Constants.Run.Animation.PlaybackSpeeds, the FOV pull and the stage-2
-		-- footstep cadence. Paste an id here and the clip swaps in with no code change, the same
-		-- wired-but-unauthored convention FlightConstants.AnimationIds uses.
-		RunningStage2 = "rbxassetid://95107102086715",
-		-- THERE IS NO RunningStage3 ANY MORE, and its absence is deliberate rather than unfinished: the run
-		-- ladder is two gears (Shared/Run/RunConstants.lua's Stages), so a third clip had no stage to play
-		-- on. It could not simply be left here unread, either -- Client/FX/CombatAnimator.BindCharacter
-		-- loads EVERY entry in this table as a real AnimationTrack for every character, so a dead entry is
-		-- a track loaded once per life and never played. The asset authored for it is parked here rather
-		-- than lost: rbxassetid://126596518578942. Restoring a third gear means restoring this field, the
-		-- ladder entry, and Constants.Run's Stages[3]/StageOnset[3]/PlaybackSpeeds[3] together.
+		-- The tighter armed-run clip. It changes only the drawn weapon's pose; it never changes movement
+		-- speed. Blank is supported: CombatAnimator falls back to Running above when it has no id.
+		RunningStage2 = "rbxassetid://134203885804635",
 	} :: { [string]: string },
 
 	-- PostureRegenPerSecond/HealthRegen/LockOnRange/ParryTellBroadcastRadius/MaxTrackedOpponents/
@@ -825,6 +814,33 @@ local CombatConstants = {
 		-- matching combat-philosophy.md's framing of the swap cooldown's purpose ("prevents instant
 		-- weapon-cycling as a combo exploit").
 		SwapCooldownSeconds = 4,
+
+		-- BARE FISTS -- the one weapon every combatant owns without ever picking anything up
+		-- (Server/Combat/Weapon/WeaponInventorySystem.lua seeds it into a fresh record's Owned/Order,
+		-- selected by default) and the one entry in the roster with no Workspace.Weapons model at all
+		-- (Shared/Combat/WeaponRoster.lua synthesizes it from these four multipliers the same way a
+		-- Studio-authored weapon's own Attributes would). No model also means no Handle for
+		-- WeaponModelRegistry to find, so WeaponModels.Build("Fists") returns nil and WeaponVisualSystem
+		-- equips no Tool at all -- an empty hand, which is the whole point.
+		--
+		-- Tuned as a quick, short, weak alternative to a blade -- retune freely: meaningfully less reach
+		-- than even the old hardcoded Secondary sword (0.85) since a fist has no blade length at all, and
+		-- faster than either (1.4) since a punch commits far less body than a swing. Kept only modestly
+		-- faster so the animation has a little more weight than the original rapid punches.
+		--
+		-- DAMAGE IS AUTHORED AS WHAT A PUNCH DEALS, NOT AS A MULTIPLIER, and that is a fix. It used to be
+		-- `Damage = 2` -- a multiplier on the house sword, so every Basic punch dealt 6.5 x 2 = 13, twice
+		-- a sword's, while the comment above it claimed 0.5. A multiplier is the right mechanism (it keeps
+		-- Heavy/Finisher in proportion) and the wrong thing to TYPE: nobody reading "2" knows it means 13.
+		-- So the number here is the Basic hit, and Shared/Combat/WeaponRoster.lua derives the multiplier
+		-- from it against Baseline's own Basic stage 1. Heavy scales in proportion (12 -> ~7.4).
+		-- Tests/Combat/WeaponRoster.spec.lua (Fists case) holds the resolved hit to this number.
+		Fists = {
+			BasicHitDamage = 4,
+			PostureDamage = 0.65,
+			Reach = 0.5,
+			Speed = 1.5,
+		},
 
 		-- The one place a weapon swing's volume, reach and anchor are configured. Defined as SWING_HITBOX
 		-- at the top of this file (a table constructor can't reference its own keys) and re-exported here

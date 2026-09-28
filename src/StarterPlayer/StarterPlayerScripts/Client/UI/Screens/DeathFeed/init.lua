@@ -5,27 +5,18 @@
 	Owns: the mount point for the death/respawn overlay and kill feed named in
 	ui-ux-philosophy.md's "Death/respawn and kill feed" surface.
 
-	THE KILL FEED HAS NO PRODUCER. This header used to say it was "driven directly by
-	Client/Combat/CombatClient.lua's Combat_KillFeed handler via imperative Instance.new calls into
-	this Frame". That module was deleted in the combat rewrite (cc05003) and took the handler with it:
-	`grep -rn Combat_KillFeed src/` finds this paragraph and nothing else, and KillFeedList has been an
-	empty transparent Frame ever since. Written down rather than quietly corrected because the old
-	sentence read exactly like a description of working integration, which is how it survived a
-	rewrite that removed the thing it described.
+	THE PRODUCER IS Client/Combat/DeathNoticeClient.lua (since 2026-09-28), reading the Death_Notice
+	broadcast Server/Systems/PlayerDeathSystem.lua sends once per confirmed death. For the LOCAL
+	player's own death it calls ShowDeath(killerName) -- the victim's client only, gated there on the
+	notice's VictimUserId -- and ClearDeath() the moment that player's next character arrives. For
+	every ATTRIBUTED death it calls PushKill, which adds a row to the kill feed below. Unattributed
+	deaths never reach the feed: a fall is the victim's news, not the server's. This file only renders;
+	every one of those decisions is the producer's, the same "translate an already-computed server fact
+	into a call against this file's returned handle" boundary CombatFeedback.lua documents.
 
-	Nothing here fabricates a replacement -- a feed needs a server System that publishes kill
-	attribution, and that is not this file's to invent. What this file does provide is the seam:
-	KillFeedVisible on the returned handle, false today, which a producer must flip when it starts
-	parenting rows in.
-
-	The death overlay (DeathOverlay component, Components/DeathOverlay.lua) is the real content this
-	Mount() call now exists to drive: Client/Combat/CombatClient.lua's Kind == "Death" feedback
-	branch calls ShowDeath() the moment the LOCAL player's own death is confirmed (gated there to the
-	payload's TargetUserId -- the killer's own client receives the identical payload and must never
-	trigger this), and ClearDeath() the moment that player's own CharacterAdded fires (respawn) --
-	the same "translate an already-computed server fact into a call against this file's returned
-	handle" boundary CombatFeedback.lua's own header documents for its LockOn/PostureBreak/Disarmed
-	siblings.
+	(Before that, the kill feed had no producer at all: the deleted CombatClient.lua's Combat_KillFeed
+	handler went with the combat rewrite, and KillFeedList sat empty for months. The death overlay had
+	lost its caller the same way.)
 
 	ShowDeath's own countdown display (SecondsRemaining, fed to DeathOverlay) is a task.delay chain
 	here, not a per-frame RunService clock -- ticks in whole seconds from
@@ -63,6 +54,8 @@ local Tokens = require(script.Parent.Parent.Tokens)
 local Layers = require(script.Parent.Parent.Shell.Layers)
 local Surface = require(script.Parent.Parent.Shell.Surface)
 local DeathOverlay = require(script.Parent.Parent.Components.DeathOverlay)
+local KillFeedRow = require(script.Parent.Parent.Components.KillFeedRow)
+local DeathConstants = require(ReplicatedStorage.Shared.Death.DeathConstants)
 
 local Children = Fusion.Children
 
@@ -78,9 +71,11 @@ export type DeathFeedHandle = {
 	-- exposed rather than duplicated because "is this player dead" is this screen's fact to publish
 	-- and Chrome's rule is that it derives modes rather than being told them.
 	Dead: Fusion.Computed<boolean>,
-	-- Whether the kill feed tile is in its region's stack at all. False, and nothing sets it true --
-	-- the feed has had no producer since the combat rewrite. See the note at its construction below
-	-- for what a future producer has to do besides parenting rows in.
+	-- Adds one attributed kill to the feed. KillerName/VictimName are display strings; Involvement is
+	-- the local player's part in it, decided by the producer.
+	PushKill: (killerName: string, victimName: string, involvement: KillFeedRow.Involvement) -> (),
+	-- Whether the kill feed tile is in its region's stack at all -- true exactly while it holds a row.
+	-- Owned by PushKill and each row's expiry; exposed for the Storybook and specs, not for producers.
 	KillFeedVisible: Fusion.Value<boolean>,
 }
 
@@ -149,16 +144,10 @@ function DeathFeed.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.UsedA
 	-- can, in the name of fixing it. AutomaticSize.Y from a zero height means it costs exactly the
 	-- entries it holds.
 	--
-	-- KillFeedVisible EXISTS BECAUSE NOTHING FILLS THIS. The header above says the feed is driven by
-	-- Client/Combat/CombatClient.lua's Combat_KillFeed handler; that module was deleted in the combat
-	-- rewrite (cc05003) and took the handler with it, so there is no producer anywhere in the tree and
-	-- has not been for some time. Left false, the tile is skipped by the region's UIListLayout
-	-- entirely -- no height, and no share of the gap between tiles either.
-	--
-	-- Whoever writes the producer has to flip this as well as parenting rows in. A Visible tile with
-	-- no children is not free once it is in a stack: it still takes the region's tile gap, which would
-	-- shift the fuel gauge down by 8px for no visible reason. That is exactly the kind of thing a
-	-- comment does not prevent, which is why it is a handle field rather than a note.
+	-- KillFeedVisible TRACKS WHETHER THERE IS A ROW, and setRows above is the only writer. A Visible
+	-- tile with no children is not free once it is in a stack: it still takes the region's tile gap,
+	-- which would shift the fuel gauge down by 8px for no visible reason. So the tile leaves the stack
+	-- the moment its last row expires, rather than trusting a producer to remember to hide it.
 	-- See the handle's Dead field. A Computed rather than a second Value for the usual reason: a
 	-- second Value is a second edge somebody has to remember to set, and showDeath/clearDeath above
 	-- already have exactly one.
@@ -168,6 +157,54 @@ function DeathFeed.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.UsedA
 
 	local killFeedVisible: Fusion.Value<boolean> = scope:Value(false)
 
+	-- Keyed by a per-row serial, so ForPairs keeps a row's Instance for its whole life and an expiry
+	-- removes exactly the row it was scheduled for -- the same keyed-map shape CombatFeedback's damage
+	-- numbers use, for the same reason (ForValues dedupes by value, not by identity).
+	local rows: Fusion.Value<{ [number]: KillFeedRow.KillFeedEntry }> = scope:Value({})
+	local rowSerial = 0
+
+	local function setRows(nextRows: { [number]: KillFeedRow.KillFeedEntry }): ()
+		rows:set(nextRows)
+		-- Visible only while there is something in it -- see the tile's own note below on why an empty
+		-- Visible tile is not free in a region stack.
+		killFeedVisible:set(next(nextRows) ~= nil)
+	end
+
+	local function pushKill(killerName: string, victimName: string, involvement: KillFeedRow.Involvement): ()
+		rowSerial += 1
+		local serial = rowSerial
+		local updated = table.clone(Fusion.peek(rows))
+		updated[serial] = {
+			KillerName = killerName,
+			VictimName = victimName,
+			Involvement = involvement,
+			Order = serial,
+		}
+		-- Over the cap, the oldest goes: serials are increasing, so the smallest key is the oldest row.
+		local count = 0
+		local oldest: number? = nil
+		for key in updated do
+			count += 1
+			if oldest == nil or key < oldest then
+				oldest = key
+			end
+		end
+		if count > DeathConstants.KillFeed.MaxRows and oldest ~= nil then
+			updated[oldest] = nil
+		end
+		setRows(updated)
+
+		task.delay(DeathConstants.KillFeed.RowSeconds, function()
+			local latest = Fusion.peek(rows)
+			if latest[serial] == nil then
+				return
+			end
+			local remaining = table.clone(latest)
+			remaining[serial] = nil
+			setRows(remaining)
+		end)
+	end
+
 	local killFeedTile = scope:New "Frame" {
 		Name = "KillFeedList",
 		Size = UDim2.fromOffset(320, 0),
@@ -175,11 +212,16 @@ function DeathFeed.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.UsedA
 		BackgroundTransparency = 1,
 		Visible = killFeedVisible,
 
-		[Children] = scope:New "UIListLayout" {
-			FillDirection = Enum.FillDirection.Vertical,
-			HorizontalAlignment = Enum.HorizontalAlignment.Right,
-			Padding = UDim.new(0, Tokens.Space.XS),
-			SortOrder = Enum.SortOrder.LayoutOrder,
+		[Children] = {
+			scope:New "UIListLayout" {
+				FillDirection = Enum.FillDirection.Vertical,
+				HorizontalAlignment = Enum.HorizontalAlignment.Right,
+				Padding = UDim.new(0, Tokens.Space.XS),
+				SortOrder = Enum.SortOrder.LayoutOrder,
+			},
+			scope:ForPairs(rows, function(_use, innerScope, serial, entry)
+				return serial, KillFeedRow(innerScope, entry)
+			end),
 		},
 	} :: Frame
 
@@ -187,6 +229,7 @@ function DeathFeed.Mount(scope: Scope, playerGui: PlayerGui, scale: Fusion.UsedA
 		Dead = dead,
 		ShowDeath = showDeath,
 		ClearDeath = clearDeath,
+		PushKill = pushKill,
 		KillFeedVisible = killFeedVisible,
 	},
 		killFeedTile

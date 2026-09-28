@@ -261,6 +261,13 @@ return function()
 			expect(map.Rolling.Probes.Ceiling).to.equal(true)
 		end)
 
+		it("does not have the roll pay for an obstacle probe it can never act on", function()
+			-- Rolling is Committed, so nothing can pre-empt it on an obstacle it sees, and its own Update
+			-- has no traversal exit -- the probe was a cast every frame for nothing.
+			local map = byId()
+			expect(map.Rolling.Probes.Obstacle).to.equal(nil)
+		end)
+
 		it("has the obstacle-traversal states request obstacle probes", function()
 			local map = byId()
 			expect(map.Vaulting.Probes.Obstacle).to.equal(true)
@@ -347,7 +354,10 @@ return function()
 			expect(ParkourConstants.WallRun.MaxDurationSeconds < ceiling).to.equal(true)
 			expect(ParkourConstants.Obstacle.MantleDurationSeconds < ceiling).to.equal(true)
 			expect(ParkourConstants.Ledge.ClimbDurationSeconds < ceiling).to.equal(true)
-			expect(ParkourConstants.Roll.DurationSeconds < ceiling).to.equal(true)
+			-- The roll's window includes its ceiling hold (see ParkourController's ACTION_DURATIONS), so the
+			-- whole of it has to fit, not just the roll proper.
+			local roll = ParkourConstants.Roll
+			expect(roll.DurationSeconds + roll.MaxCeilingHoldSeconds + 0.5 < ceiling).to.equal(true)
 			expect(ParkourConstants.Dash.MaxDurationSeconds < ceiling).to.equal(true)
 		end)
 

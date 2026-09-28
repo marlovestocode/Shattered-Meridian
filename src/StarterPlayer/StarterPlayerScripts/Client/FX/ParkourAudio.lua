@@ -69,6 +69,27 @@ for _, entry in LOOPS do
 	SoundManager.Register(entry.Name, entry.Config)
 end
 
+-- Landing does NOT go through ONE_SHOTS above: the sound to play depends on ParkourConstants.Fall.
+-- LandingSeverity, a runtime flag ONE_SHOTS' pure state-name keying cannot express (see this file's
+-- header on RunAudio for the same class of exception). Registered here so AssetPreloader still finds
+-- it via GetPreloadInstances below; played directly by States/Landing.lua's own Enter, which is where
+-- the severity actually is.
+local LANDING_SOUNDS: { [string]: string } = {
+	Soft = "LandingSoft",
+	Medium = "LandingMedium",
+	Hard = "LandingHard",
+}
+SoundManager.Register(LANDING_SOUNDS.Soft, ParkourConstants.Fall.SoftLandingSound)
+SoundManager.Register(LANDING_SOUNDS.Medium, ParkourConstants.Fall.MediumLandingSound)
+SoundManager.Register(LANDING_SOUNDS.Hard, ParkourConstants.Fall.HardLandingSound)
+
+-- Called from States/Landing.lua's Enter with the severity it already computed. The one landing sound
+-- for however hard this one was; nothing here decides severity, same division of ownership as every
+-- other consumer of LandingSeverity (the camera shake layer, the momentum retain fraction).
+function ParkourAudio.PlayLanding(severity: "Soft" | "Medium" | "Hard"): ()
+	SoundManager.Play(LANDING_SOUNDS[severity])
+end
+
 -- Called from Client/Parkour/ParkourController.lua's onTransition, alongside
 -- ParkourAnimator.OnStateChanged and ParkourCamera.OnStateChanged.
 --

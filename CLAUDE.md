@@ -38,6 +38,7 @@ stop and use the module on the right instead.
 | write a `UIPadding` with four `UDim.new(0, ...)` lines | [`UI/Components/Inset.lua`](src/StarterPlayer/StarterPlayerScripts/Client/UI/Components/Inset.lua) — `Inset(scope, Tokens.Space.L)` or `Inset(scope, { X = 20, Top = 12 })` | six lines of boilerplate and four independent places for a typo |
 | build a new full-screen modal (tab strip, body, footer, close control) | [`UI/Components/ScreenFrame.lua`](src/StarterPlayer/StarterPlayerScripts/Client/UI/Components/ScreenFrame.lua) — `ScreenFrame.BodySize(w, h)` for the body budget, `NewTabState` for the shared tab Value+Computeds, `Mount` for the frame; pass `Tabs` OR `Title` | hand-rolling a header band, a tab row and a status line per screen — six screens did, which is how the layout bugs above got copied around. `ModalScreen` directly is still right for a differently-shaped panel (a content-sized form, a transient overlay) |
 | ease a value toward a target where the OVERSHOOT is the information -- a camera on something heavy, a body braced against acceleration, anything whose job is to say "this has mass and is being pushed" | [`Shared/FlightMath.lua`](src/ReplicatedStorage/Shared/FlightMath.lua) -- `SpringStep(value, velocity, target, frequency, damping, dt)`, returning both as multiple returns | `EaseAlpha` (the right tool for a value with no mass of its own -- it arrives from one side and CANNOT overshoot), or a hand-rolled "ease with a bit of bounce", which is a spring somebody wrote badly. The implicit-Euler form there is also unconditionally stable at any `dt`; the semi-implicit one everybody writes first diverges and flings whatever it drives the first time a hitch exceeds `2/frequency` |
+| build a **crewed vehicle** — a tagged hull a player mounts, steers and rides | [`Shared/Vessel/`](src/ReplicatedStorage/Shared/Vessel) + [`Server/Vessel/`](src/ServerScriptService/Server/Vessel) — every module there is a `New(config)` factory you bind once: `VesselTagging` (stations, the model walk, where a body stands and which way that makes the bow), `VesselAssembly` (a pile of anchored meshes → one AlignPosition/AlignOrientation-driven body), `VesselMount` (prompt, reach check, movement lock, weld, ordered release), `VesselArmPose`/`VesselPilotPose` (hands and lean, per-client, `Motor6D.Transform`), `VesselMotion` (the filtered hull sample both feed on), `VesselSpeedLadder`/`VesselSpeedStage` (an engine telegraph / sail rig, and the audio bands), `VesselSafety` (the contact-speed clamp). `Shared/Blimp` and `Shared/Boat` are each one binding of that set plus the parts that really are vehicle-specific | a second copy of any of it. The two vehicles differ in exactly two files each — the drive integrator and the mode machine — and everything else being shared is what keeps a mount cue, a station and a rung one shape on the wire rather than two that drift |
 | log inside a module | [`Shared/Logger.lua`](src/ReplicatedStorage/Shared/Logger.lua) — `Logger.scope("ModuleName")`, then `:info/:warn/:error/:debug` | `print`/`warn` directly — scoped logs feed the Live Console (F5) capture ring |
 
 Full rationale for each module (why it exists, what it deliberately does NOT own, the specific bugs
@@ -76,6 +77,18 @@ subscribes to `DamageSystem.OnApplied` (that function's own documented extension
 `DamageSystem.CanAttack` already are. It boots immediately after `AttackRequestSystem`. Extending combat
 with a new interaction kind should default to this sibling shape (subscribe to an existing extension
 point, get read through a narrow gate) before assuming it needs to become a fifth stacked layer.
+
+## Deaths, kill credit and the progression spine
+
+`PlayerDeathSystem` is the **only** publisher of `GameplayEvents.PlayerKilled(victim, killer?, deathId)`
+and the only owner of kill credit (it subscribes to `DamageSystem.OnApplied`; DamageSystem never learns
+about deaths). Progression from a kill flows `RewardSystem` (eligibility, frozen manifest) →
+`ProgressionSystem` (fight-to-grow gate, routes) → the owner's public API (`MeridianSystem.AwardKillXP`
+today) → `MeridianXPAwarded` → `TierSystem`. Don't add a new direct `PlayerKilled` subscription that
+grants progression — add a reward kind + route instead. The repeat-victim anti-farming weight lives in
+that same gate (`ProgressionConstants.RepeatVictim`), so anything that bypasses it is farmable. Bloodline stage-ups and Bounty payouts are the
+two known exceptions still to migrate; see
+[`docs/architecture/2026-09-28-progression-spine-audit.md`](docs/architecture/2026-09-28-progression-spine-audit.md).
 
 ## Before claiming something is "wired" or "done"
 

@@ -39,6 +39,7 @@ local Divider = require(script.Parent.Parent.Parent.Components.Divider)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
 local ScrollArea = require(script.Parent.Parent.Parent.Components.ScrollArea)
 local Stack = require(script.Parent.Parent.Parent.Components.Stack)
+local Inset = require(script.Parent.Parent.Parent.Components.Inset)
 local StepRail = require(script.Parent.StepRail)
 local OnboardingTypes = require(script.Parent.Types)
 
@@ -147,10 +148,7 @@ local function CreatorFrame(scope: Scope, props: CreatorFrameProps): Frame
 					Divider.Plain(scope, {
 						Size = UDim2.new(1, 0, 0, 1),
 					}),
-					scope:New "UIPadding" {
-						PaddingLeft = UDim.new(0, Tokens.Space.XXL), -- "px-8"
-						PaddingRight = UDim.new(0, Tokens.Space.XXL),
-					},
+					Inset(scope, { X = Tokens.Space.XXL }), -- "px-8"
 					Label(scope, {
 						Text = props.FooterHint or "",
 						Scale = "Detail",

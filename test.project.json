@@ -61,6 +61,9 @@
 					},
 					"UI": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/UI"
+					},
+					"Boat": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Boat"
 					}
 				}
 			}
@@ -97,6 +100,9 @@
 				},
 				"Vessel": {
 					"$path": "src/ServerScriptService/Server/Vessel"
+				},
+				"Boat": {
+					"$path": "src/ServerScriptService/Server/Boat"
 				}
 			},
 			"Tests": {

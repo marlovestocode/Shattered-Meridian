@@ -133,11 +133,20 @@ function Menus.Mount(scope: Scope, playerGui: PlayerGui, clientState: ClientStat
 	-- object rather than two Computeds asking the same question independently.
 	local tabs = ScreenFrame.NewTabState(scope, TAB_NAMES)
 
+	-- A raw Instance.new needs an explicit table.insert(scope, ...) to be cleaned up with the rest of
+	-- this scope -- unlike scope:New/scope:Value, it does not self-register. Mount runs once for the
+	-- client's lifetime today, so a missed one here is latent rather than actively leaking, but the
+	-- Studio hot-reload teardown path re-runs Mount, and every reload after the first would otherwise
+	-- leak one more BindableEvent (and whatever is connected to it) per instance skipped.
 	local openedEvent = Instance.new("BindableEvent")
 	local unlockArtEvent = Instance.new("BindableEvent")
 	local equipArtEvent = Instance.new("BindableEvent")
 	local emoteSlotEvent = Instance.new("BindableEvent")
 	local rerollBloodlineEvent = Instance.new("BindableEvent")
+	table.insert(scope, openedEvent)
+	table.insert(scope, unlockArtEvent)
+	table.insert(scope, equipArtEvent)
+	table.insert(scope, emoteSlotEvent)
 	table.insert(scope, rerollBloodlineEvent)
 
 	scope:Observer(isOpen):onChange(function()

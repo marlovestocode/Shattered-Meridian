@@ -147,7 +147,6 @@ local autorunMoving = false
 -- The last value handed to the server and to every local consumer. The single thing edges are computed
 -- against.
 local engaged = false
-
 -- The stage the SERVER says we are in, mirrored from the Attribute. 0 until told otherwise, which is
 -- the correct default for "no character bound yet."
 local stage = 0
@@ -528,6 +527,11 @@ end
 function RunController.IsSprinting(): boolean
 	return engaged
 end
+
+-- BEING HIT DOES NOT TOUCH THE RUN INTENT (changed 2026-09-28). It used to: a stunning hit cleared the
+-- held key and the toggle latch, so a victim had to physically re-press sprint after every exchange.
+-- The server's RunSystem now pins a committed body -- swinging, guarding or in hitstun -- to walking
+-- pace while HOLDING the gear, which is the whole of what a hit should cost the run.
 
 -- The parkour framework's live state id, pushed by ParkourController on every transition (and nil when
 -- the framework stands down, so this module falls back to its own checks alone). This is the link that

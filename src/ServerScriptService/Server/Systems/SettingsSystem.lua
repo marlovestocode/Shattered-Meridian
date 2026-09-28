@@ -55,6 +55,7 @@ local DEFAULT_SETTINGS: Types.PlayerSettings = {
 	Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
 	Comfort = PlayerDataSystem.CreateDefaultComfortSettings(),
 	Gamepad = PlayerDataSystem.CreateDefaultGamepadSettings(),
+	UI = PlayerDataSystem.CreateDefaultUISettings(),
 }
 
 -- The closed set of Types.ParkourSettings fields a client may write, and the value type each one
@@ -95,6 +96,13 @@ local GAMEPAD_SETTING_TYPES: { [string]: "boolean" | "LookSensitivity" | "Deadzo
 	LookDeadzone = "Deadzone",
 	InvertLookY = "boolean",
 	Vibration = "boolean",
+}
+
+-- The closed set of Types.UISettings fields a client may write. One field today; a closed set anyway,
+-- matching every other group's untrusted-field-name posture, so a second interface preference is a
+-- table entry rather than a reason to invent a new validation shape.
+local UI_SETTING_FIELDS: { [string]: true } = {
+	Scale = true,
 }
 
 -- See file header -- structurally valid AND not a hotbar slot. Constants.Keybinds.Defaults is a
@@ -382,6 +390,46 @@ local function handleUpdateGamepad(player: Player, rawField: unknown, rawValue: 
 	logger:debug("Gamepad setting persisted", { player = player.Name, field = field })
 end
 
+-- Interface preferences. Mirrors handleUpdateGamepad's numeric branch exactly (clamp rather than
+-- reject, for the same "the client already applied this locally" reason) simplified to the one
+-- always-numeric field this group has today.
+local function handleUpdateUI(player: Player, rawField: unknown, rawValue: unknown): ()
+	if rateLimiter:IsLimited(player) then
+		return
+	end
+	if typeof(rawField) ~= "string" then
+		logger:debug("UpdateUI rejected: non-string field", { player = player.Name })
+		return
+	end
+	local field = rawField :: string
+	if not UI_SETTING_FIELDS[field] then
+		logger:debug("UpdateUI rejected: unknown field", { player = player.Name, field = field })
+		return
+	end
+	if typeof(rawValue) ~= "number" or rawValue ~= rawValue then
+		logger:debug("UpdateUI rejected: expected a real number", { player = player.Name, field = field })
+		return
+	end
+	local bounds = (Constants.Settings.UI.Bounds :: { [string]: any })[field]
+	local value = math.clamp(rawValue :: number, bounds.Min, bounds.Max)
+
+	local transformed = PlayerDataSystem.Transform(player, function(profile)
+		-- Defensive backfill, same reasoning as handleUpdateComfort's own: a profile that somehow missed
+		-- Migrations[9] would have no table to write into, and one stale record must not make the whole
+		-- Settings panel non-functional for that player.
+		if typeof(profile.settings.UI) ~= "table" then
+			profile.settings.UI = PlayerDataSystem.CreateDefaultUISettings()
+		end
+		(profile.settings.UI :: { [string]: any })[field] = value
+	end)
+	if not transformed then
+		logger:warn("UpdateUI: Transform failed (profile not loaded)", { player = player.Name })
+		return
+	end
+
+	logger:debug("UI setting persisted", { player = player.Name, field = field })
+end
+
 local function onPlayerRemoving(player: Player): ()
 	rateLimiter:Clear(player)
 end
@@ -408,6 +456,9 @@ function SettingsSystem.Init(): ()
 
 	local updateGamepadRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateGamepad)
 	updateGamepadRemote.OnServerEvent:Connect(handleUpdateGamepad)
+
+	local updateUIRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateUI)
+	updateUIRemote.OnServerEvent:Connect(handleUpdateUI)
 
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "SettingsSystem",

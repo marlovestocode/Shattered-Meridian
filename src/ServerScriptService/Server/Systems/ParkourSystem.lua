@@ -96,6 +96,9 @@ type PlayerParkourState = {
 
 local playerStates: { [Player]: PlayerParkourState } = {}
 
+-- Subscribers to OnActionStarted. See that function's own header.
+local actionStartedCallbacks: { (player: Player, kind: ActionKind, now: number) -> () } = {}
+
 -- Only the rejection remote is held: this System FIRES that one (notifyRejected), where the report
 -- remote is purely subscribed to in Init and never referenced again, so keeping a local for it would
 -- be a variable that exists only for symmetry.
@@ -154,7 +157,25 @@ end
 -- Flagging is deliberately one-way per session (state.Flagged) -- a player who trips the threshold
 -- once has already generated the record a human moderator needs, and re-flagging every subsequent
 -- report would spam the suspicion DataStore for no additional information.
+-- The two rejections an honest knockback launch can cause: the body moved faster, or further, than a
+-- parkour action alone could have carried it. Every other reason is about the report itself.
+local KNOCKBACK_DISTORTABLE: { [RejectionReason]: boolean } = {
+	ImplausibleSpeed = true,
+	ImplausibleTravel = true,
+}
+
 local function noteRejection(player: Player, state: PlayerParkourState, reason: RejectionReason, now: number): ()
+	-- Inside a knockback allowance (Attributes.KnockbackUntil, stamped by DamageSystem on every launch it
+	-- hands this player), a speed/travel rejection is still a rejection -- nothing is granted -- but it
+	-- is not EVIDENCE: the combat layer moved this body, not the client. Counting it would flag the
+	-- players who get hit hardest. Knockback compliance has its own detector (KnockbackAudit).
+	if KNOCKBACK_DISTORTABLE[reason] then
+		local _, humanoid = CharacterUtil.LiveRig(player)
+		local allowance = if humanoid then humanoid:GetAttribute(Constants.Attributes.KnockbackUntil) else nil
+		if typeof(allowance) == "number" and now <= allowance then
+			return
+		end
+	end
 	table.insert(state.Rejections, now)
 	local count = ParkourValidation.PruneRejections(state.Rejections, now, VALIDATION.RejectionWindowSeconds)
 	if state.Flagged or not ParkourValidation.ShouldFlag(count, VALIDATION.RejectionsBeforeFlag) then
@@ -200,6 +221,17 @@ local function beginAction(player: Player, state: PlayerParkourState, report: Ac
 	-- whatever the new action's own exit grants.
 	humanoid:SetAttribute(Constants.Attributes.ParkourSpeedFloor, 0)
 	humanoid:SetAttribute(Constants.Attributes.ParkourSpeedFloorExpiry, 0)
+
+	-- Announced last, once every Attribute above is already written, so a subscriber reading them sees
+	-- the action it is being told about rather than the one before it.
+	for _, callback in actionStartedCallbacks do
+		-- pcall'd for the reason DefenseSystem's own emit gives: one subscriber erroring must not abort
+		-- the rest, and above all must not unwind out of the remote handler with the window half-opened.
+		local ok, err = pcall(callback, player, report.Kind, now)
+		if not ok then
+			logger:error("A ParkourSystem.OnActionStarted consumer errored", { errorMessage = tostring(err) })
+		end
+	end
 end
 
 -- Closes an ownership window and stamps the momentum carry the action ended with. `reportedSpeed` is
@@ -385,6 +417,30 @@ local function onCharacterAdded(player: Player): ()
 	releaseOwnership(player)
 end
 
+-- Fires once per ACCEPTED Start report, with the player, the action kind and the server time it was
+-- accepted -- after validation, after the ownership window opened. Rejected reports never fire it.
+-- Returns a disconnect function, matching DefenseSystem.OnResolved's own contract.
+--
+-- THIS SYSTEM'S FIRST PUBLIC SURFACE, and it is a signal rather than a query on purpose. Its one
+-- subscriber today is the composition root, which turns an accepted Roll into
+-- DefenseSystem.BeginEvade -- the roll's evade frames. The subscription lives in Main.server.lua and not
+-- in either System, so this module never learns combat exists and DefenseSystem never learns parkour
+-- does: the same "the boot script knows both, each layer knows one" shape SetParryAnimation is wired
+-- through.
+--
+-- Accepted, not claimed, is the whole value: the evade is keyed off the SAME plausibility gate that
+-- decides whether the roll's velocity ownership is granted, so a report the server refused as
+-- implausible can never open a window.
+function ParkourSystem.OnActionStarted(callback: (player: Player, kind: ActionKind, now: number) -> ()): () -> ()
+	table.insert(actionStartedCallbacks, callback)
+	return function()
+		local index = table.find(actionStartedCallbacks, callback)
+		if index then
+			table.remove(actionStartedCallbacks, index)
+		end
+	end
+end
+
 function ParkourSystem.Init(): ()
 	local report = NetworkBridge.CreateRemoteEvent(RemoteNames.ReportAction)
 	report.OnServerEvent:Connect(handleReport)
@@ -414,4 +470,4 @@ function ParkourSystem.Init(): ()
 	logger:info("ParkourSystem.Init() complete", { enabled = ParkourConstants.Enabled })
 end
 
-return ParkourSystem :: Types.SystemModule
+return ParkourSystem :: Types.SystemModule & typeof(ParkourSystem)

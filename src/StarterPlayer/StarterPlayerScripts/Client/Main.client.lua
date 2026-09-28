@@ -56,10 +56,13 @@ local AttackInputClient = require(script.Parent.Combat.AttackInputClient)
 local WeaponInventoryClient = require(script.Parent.Combat.WeaponInventoryClient)
 local GrabInputClient = require(script.Parent.Combat.GrabInputClient)
 local BlimpController = require(script.Parent.Blimp.BlimpController)
+local BoatController = require(script.Parent.Boat.BoatController)
 local FurnacePromptClient = require(script.Parent.Blimp.FurnacePromptClient)
 local SwingLunge = require(script.Parent.Combat.SwingLunge)
 local CombatAudio = require(script.Parent.FX.CombatAudio)
+local AttackTrail = require(script.Parent.FX.AttackTrail)
 local CombatFeedbackClient = require(script.Parent.Combat.CombatFeedbackClient)
+local DeathNoticeClient = require(script.Parent.Combat.DeathNoticeClient)
 local BugReportClient = require(script.Parent.BugReport.BugReportClient)
 local AnnouncementClient = require(script.Parent.Announcement.AnnouncementClient)
 local SettingsClient = require(script.Parent.Settings.SettingsClient)
@@ -125,7 +128,7 @@ logger:debug("UI mount end")
 -- this is a separate, earlier phase than SettingsClient.Start(uiHandles.Settings) further down (that
 -- call only wires the Settings PANEL's own interactivity, which has no such urgency).
 logger:debug("SettingsClient RestoreSettings start")
-SettingsClient.RestoreSettings()
+SettingsClient.RestoreSettings(uiHandles.SetUIScale)
 logger:debug("SettingsClient RestoreSettings end")
 
 -- Announces every new life to the presentation-layer modules that used to bind off
@@ -146,6 +149,7 @@ PlayerLifecycle.BindLocalCharacter({
 		MovementVFX.BindCharacter(character)
 		RunController.BindCharacter(character)
 		SwingLunge.BindCharacter(character)
+		AttackTrail.BindCharacter(character)
 	end,
 })
 logger:debug("Character-bind hookup end")
@@ -282,6 +286,18 @@ FurnacePromptClient.Start(uiHandles.FurnacePrompt, uiHandles.ViewportScale)
 logger:debug("FurnacePromptClient end")
 logger:debug("BlimpController end")
 
+-- The boat client. A SIBLING of the blimp cluster above rather than part of it: the two share their
+-- whole mount/pose layer through Shared/Vessel, share no state and no remote, and the order between
+-- them is free. Started here because this is where the vehicle client cluster lives.
+--
+-- TAKES NO UI HANDLES, unlike BlimpController immediately above, and that is the one visible
+-- difference between the two. A boat has no helm panel yet -- see Client/Boat/BoatController.lua's own
+-- header, which names that omission and the seam a future one plugs into. Everything a player needs to
+-- actually sail one (prompts, the mount, the rudder, the sail rungs, the release) is here.
+logger:debug("BoatController start")
+BoatController.Start()
+logger:debug("BoatController end")
+
 -- Next to AttackInputClient above because its only input is that module's OnAttackStarted seam --
 -- read as one unit, not because the order is load-bearing. OnAttackStarted appends to a plain
 -- listener list that nothing rebuilds, so subscribing on either side of that module's own Start()
@@ -292,6 +308,12 @@ logger:debug("BlimpController end")
 logger:debug("SwingLunge start")
 SwingLunge.Start()
 logger:debug("SwingLunge end")
+
+-- Same one real dependency as SwingLunge directly above -- AttackInputClient.OnAttackStarted -- and
+-- the same reason for sitting next to it: read as one unit, not because the order is load-bearing.
+logger:debug("AttackTrail start")
+AttackTrail.Start()
+logger:debug("AttackTrail end")
 
 -- Same one real dependency as SwingLunge directly above -- AttackInputClient.OnAttackStarted, which
 -- this module subscribes to for the swing whoosh (Client/FX/CombatAudio.lua's own header on why it
@@ -308,6 +330,13 @@ logger:debug("CombatAudio end")
 logger:debug("CombatFeedbackClient start")
 CombatFeedbackClient.Start(uiHandles.CombatFeedback)
 logger:debug("CombatFeedbackClient end")
+
+-- Death presentation -- the local player's death overlay and the kill feed, driven off
+-- PlayerDeathSystem's Death_Notice broadcast. After UI.Mount() for the same reason as the line above:
+-- it is handed the DeathFeed screen's handle.
+logger:debug("DeathNoticeClient start")
+DeathNoticeClient.Start(uiHandles.DeathFeed)
+logger:debug("DeathNoticeClient end")
 
 -- THE ONE DEV-TOOLING CALL. Dev Menu, Move Editor, Kit Editor, Live Console and the Storybook are
 -- started together by Client/DevTools/init.lua, and this file reaches that module by FindFirstChild

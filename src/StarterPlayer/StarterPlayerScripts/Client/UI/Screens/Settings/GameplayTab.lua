@@ -24,11 +24,13 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
+local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local Dropdown = require(script.Parent.Parent.Parent.Components.Dropdown)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
+local Stepper = require(script.Parent.Parent.Parent.Components.Stepper)
 local Toggle = require(script.Parent.Parent.Parent.Components.Toggle)
 
 local Children = Fusion.Children
@@ -71,6 +73,10 @@ export type GameplayTabProps = {
 	Comfort: Fusion.Value<Types.ComfortSettings>,
 	OnComfortToggled: (field: ComfortToggleField, enabled: boolean) -> (),
 	OnSprintModeChanged: (mode: Types.SprintMode) -> (),
+	-- The live interface-preferences block, written from outside by SettingsClient. Same one-Value-
+	-- for-the-whole-table shape as Parkour/Comfort above.
+	UI: Fusion.Value<Types.UISettings>,
+	OnUIScaleChanged: (value: number) -> (),
 }
 
 local ROW_SPACING = Tokens.Space.S
@@ -110,6 +116,80 @@ local SPRINT_MODE_OPTIONS: { Dropdown.DropdownOption } = {
 	{ Value = "Toggle", Text = "Toggle sprint" },
 }
 
+-- 100%-style readout for the UI scale row -- a raw 1.1 means nothing to a player, "110%" means exactly
+-- the right thing (the same reasoning ControllerTab.lua's formatDeadzone gives for its own percentage).
+local UI_SCALE_STEP = 0.05
+local function formatUIScale(value: number): string
+	return string.format("%d%%", math.round(value * 100))
+end
+
+-- Copied from Settings/ControllerTab.lua rather than shared -- see that file's own comment on why a
+-- second tab needing the same eight lines is not yet the third caller that would earn a component.
+local function numberRow(
+	scope: Scope,
+	label: string,
+	hint: string,
+	value: UsedAs<number>,
+	min: number,
+	max: number,
+	step: number,
+	format: (number) -> string,
+	onChanged: (number) -> (),
+	layoutOrder: number
+): Frame
+	return scope:New "Frame" {
+		Name = `Row_{label}`,
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		LayoutOrder = layoutOrder,
+
+		[Children] = {
+			scope:New "UIListLayout" {
+				FillDirection = Enum.FillDirection.Vertical,
+				Padding = UDim.new(0, 2),
+				SortOrder = Enum.SortOrder.LayoutOrder,
+			},
+			scope:New "Frame" {
+				Name = "Control",
+				Size = UDim2.new(1, 0, 0, 32),
+				BackgroundTransparency = 1,
+				LayoutOrder = 1,
+
+				[Children] = {
+					Label(scope, {
+						Text = label,
+						Scale = "Body",
+						Color = Tokens.Color.TextPrimary,
+						AnchorPoint = Vector2.new(0, 0.5),
+						Position = UDim2.fromScale(0, 0.5),
+					}),
+					Stepper.Mount(scope, {
+						Value = value,
+						Min = min,
+						Max = max,
+						Step = step,
+						FormatValue = format,
+						OnChanged = onChanged,
+						AnchorPoint = Vector2.new(1, 0.5),
+						Position = UDim2.fromScale(1, 0.5),
+					}),
+				},
+			},
+			Label(scope, {
+				Text = hint,
+				Scale = "Detail",
+				Color = Tokens.Color.TextSecondary,
+				Size = UDim2.fromScale(1, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				TextWrapped = true,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				LayoutOrder = 2,
+			}),
+		},
+	} :: Frame
+end
+
 local function sectionLabel(scope: Scope, text: string, layoutOrder: number): Frame
 	return scope:New "Frame" {
 		Name = "SectionLabel",
@@ -146,6 +226,10 @@ local function GameplayTab(scope: Scope, props: GameplayTabProps): ScrollingFram
 
 	local sprintMode = scope:Computed(function(use)
 		return use(props.Parkour).SprintMode :: string
+	end)
+
+	local uiScale = scope:Computed(function(use)
+		return use(props.UI).Scale
 	end)
 
 	local rows: { Instance } = {
@@ -250,6 +334,23 @@ local function GameplayTab(scope: Scope, props: GameplayTabProps): ScrollingFram
 			})
 		)
 	end
+
+	table.insert(rows, sectionLabel(scope, "INTERFACE", 15))
+	table.insert(
+		rows,
+		numberRow(
+			scope,
+			"UI scale",
+			"Resizes the hotbar, menus and every other on-screen panel together.",
+			uiScale,
+			Constants.Settings.UI.Bounds.Scale.Min,
+			Constants.Settings.UI.Bounds.Scale.Max,
+			UI_SCALE_STEP,
+			formatUIScale,
+			props.OnUIScaleChanged,
+			16
+		)
+	)
 
 	return scope:New "ScrollingFrame" {
 		Name = "GameplayTab",

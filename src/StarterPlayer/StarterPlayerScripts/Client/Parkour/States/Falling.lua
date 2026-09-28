@@ -17,9 +17,13 @@
 	window, the camera dip, and the shake preset -- and three independent classifications of the same
 	fall is exactly how a landing ends up with a hard camera shake and a soft recovery.
 
-	This state is also where a roll can rescue a bad landing: Rolling pre-empts on its own priority
-	while the roll input is live, and ParkourConstants.Roll.LandingWindowSeconds is what makes a roll
-	pressed just before touchdown convert a hard landing into a full-momentum continuation.
+	This state is also where a roll rescues a bad landing, and the rescue is decided HERE, on the contact
+	frame, rather than by Rolling pre-empting on priority. A roll never starts in the air
+	(StateSupport.CanRoll demands ground contact), so the only honest moment to ask "did they press roll
+	in time" is the frame the ground arrives: a press within ParkourConstants.Roll.LandingWindowSeconds
+	before it returns "Rolling" instead of "Landing", so the landing -- its momentum cut, its camera dip,
+	its shake -- simply never happens. It used to be decided a frame EARLY instead, by letting Rolling
+	enter while merely NearGround, which is how a roll came to start airborne and float.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -67,6 +71,15 @@ local Falling: ParkourTypes.StateDefinition = {
 
 		if not context.Ground.Grounded then
 			return nil
+		end
+
+		-- Contact, with a roll pressed in time: roll out of the fall instead of landing it. A route-1
+		-- transition, so it asks the same predicate Rolling.CanEnter does -- cooldown and combat
+		-- commitment included -- under the roll's own landing window rather than the shared buffer. No
+		-- severity is computed or published, which is what keeps the dip and the shake from firing
+		-- (Rolling.Enter clears both again regardless).
+		if StateSupport.CanRoll(context, ParkourConstants.Roll.LandingWindowSeconds) then
+			return "Rolling"
 		end
 
 		-- Contact. Compute the drop from the apex, classify it, publish both, and hand off.

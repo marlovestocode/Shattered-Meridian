@@ -58,6 +58,16 @@ local logger = Logger.scope("WeaponRoster")
 
 local WeaponRoster = {}
 
+-- THE ONE ROSTER ENTRY WITH NO Workspace.Weapons MODEL. Every combatant owns this permanently --
+-- Server/Combat/Weapon/WeaponInventorySystem.lua seeds it into a fresh record's Owned/Order at
+-- creation, not via a pickup -- so "fight with no weapon in your inventory" is a real, always-
+-- reachable state rather than a bare-fisted fallback bolted onto the swing resolver. Exported as a
+-- constant rather than left as a string literal at each call site, the same reasoning every other
+-- cross-module id in this codebase gets one for: a typo in "Fists" at one of the two call sites (here
+-- and WeaponInventorySystem) would otherwise silently create two unrelated concepts that happen to
+-- look alike in a log line.
+WeaponRoster.FISTS_ID = "Fists" :: WeaponId
+
 -- The one fixed folder -- the same one WeaponModelRegistry reads, deliberately: a weapon is ONE model
 -- that answers both "what does it look like" and "what does it hit for".
 
@@ -131,7 +141,7 @@ local HITBOX_ATTRIBUTE_NAMES = {
 	-- Additive, not a replacement: WindupSeconds is the house timing for the swing ANIMATION, this is
 	-- the builder saying "this particular weapon connects later in its arc than the house sword does."
 	-- Applied at the very end of the chain (Server/Combat/AttackCatalog.Get) rather than baked into
-	-- WindupSeconds here, specifically so a clip's own AttackM<n> marker cannot silently discard it --
+	-- WindupSeconds here, specifically so a clip's own Hit/AttackM<n> marker cannot silently discard it --
 	-- see that function's own comment, and AttackWindows.lua's header for what the marker does.
 	SpawnDelay = "SpawnDelay",
 }
@@ -163,6 +173,12 @@ export type WeaponEntry = {
 	-- DefaultMoveRegistry reads Mode to pick the swing's anchor, and SpawnDelaySeconds is deliberately
 	-- NOT baked into any stage's WindupSeconds (see HITBOX_ATTRIBUTE_NAMES.SpawnDelay).
 	SwingHitbox: SwingHitboxConfig,
+	-- This weapon's resolved WeaponSpeed multiplier. Already divided into every Stages entry's timings
+	-- above -- carried as well because the swing CLIP has to play at the same speed, or a fast weapon's
+	-- hitbox opens before its animation reaches the strike. AttackCatalog.Get reads it (through
+	-- DefaultMoveRegistry) to turn a clip's length into this weapon's swing length, and the client plays
+	-- the clip at it.
+	Speed: number,
 }
 
 local started = false
@@ -485,7 +501,7 @@ local function buildStage(
 	applyReach(copy, hitbox, scale.Reach)
 	applySpeed(copy, scale.Speed)
 	-- SpawnDelaySeconds is deliberately NOT folded into copy.WindupSeconds here. See
-	-- HITBOX_ATTRIBUTE_NAMES.SpawnDelay: a clip's own AttackM<n> marker overwrites WindupSeconds
+	-- HITBOX_ATTRIBUTE_NAMES.SpawnDelay: a clip's own Hit/AttackM<n> marker overwrites WindupSeconds
 	-- wholesale in AttackCatalog.Get, so a delay baked in at this end would vanish the moment an
 	-- animator marked the clip -- silently, and only for the weapons whose clips happened to have one.
 	return copy
@@ -522,6 +538,7 @@ local function buildEntry(model: Instance): WeaponEntry
 			Finisher = buildStage(baseline.Finisher, hitbox, scale),
 		},
 		SwingHitbox = hitbox,
+		Speed = scale.Speed,
 	}
 end
 
@@ -545,23 +562,46 @@ function WeaponRoster.Start(): ()
 
 	local container = WeaponAssets.Container(logger)
 	if not container then
-		logger:warn("Workspace.Weapons folder not found; no weapons will be available")
-		return
+		logger:warn("Workspace.Weapons folder not found; no Studio-authored weapons will be available")
+	else
+		local models = container:GetChildren()
+		table.sort(models, function(a: Instance, b: Instance): boolean
+			return a.Name < b.Name
+		end)
+
+		for _, model in models do
+			local id = model.Name
+			if entriesById[id] then
+				logger:warn("Two Workspace.Weapons children share the same Name; keeping the first", { name = id })
+				continue
+			end
+			entriesById[id] = buildEntry(model)
+			table.insert(orderedIds, id)
+		end
 	end
 
-	local models = container:GetChildren()
-	table.sort(models, function(a: Instance, b: Instance): boolean
-		return a.Name < b.Name
-	end)
-
-	for _, model in models do
-		local id = model.Name
-		if entriesById[id] then
-			logger:warn("Two Workspace.Weapons children share the same Name; keeping the first", { name = id })
-			continue
-		end
-		entriesById[id] = buildEntry(model)
-		table.insert(orderedIds, id)
+	-- Fists, LAST and unconditionally -- not gated on the container existing above (this entry has no
+	-- model to find one in) and not sorted alongside the real weapons above, so a Studio-authored
+	-- "Fists" model can never collide with it: buildEntry below runs against a throwaway, never-
+	-- parented Instance that only exists for the length of this call, not a Workspace.Weapons child, so
+	-- the ordinary "two children share a Name" guard above does not apply and does not need to.
+	if entriesById[WeaponRoster.FISTS_ID] then
+		logger:warn("A Workspace.Weapons model is named Fists; the synthesized bare-hands entry wins", {
+			name = WeaponRoster.FISTS_ID,
+		})
+	else
+		local fistsModel = Instance.new("Model")
+		fistsModel.Name = WeaponRoster.FISTS_ID
+		local fists = CombatConstants.Weapons.Fists
+		-- Authored as the Basic hit it should deal (CombatConstants.Weapons.Fists' own header), turned
+		-- into the multiplier every other weapon carries against Baseline's first Basic stage.
+		local baselineBasicDamage = CombatConstants.Weapons.Baseline.Stages.Basic[1].Damage
+		fistsModel:SetAttribute(ATTRIBUTE_NAMES.Damage, fists.BasicHitDamage / baselineBasicDamage)
+		fistsModel:SetAttribute(ATTRIBUTE_NAMES.PostureDamage, fists.PostureDamage)
+		fistsModel:SetAttribute(ATTRIBUTE_NAMES.Reach, fists.Reach)
+		fistsModel:SetAttribute(ATTRIBUTE_NAMES.Speed, fists.Speed)
+		entriesById[WeaponRoster.FISTS_ID] = buildEntry(fistsModel)
+		table.insert(orderedIds, WeaponRoster.FISTS_ID)
 	end
 
 	logger:info("Weapon roster built", { count = #orderedIds, weapons = table.concat(orderedIds, ", ") })
@@ -596,6 +636,13 @@ function WeaponRoster.SwingHitbox(weaponId: WeaponId): SwingHitboxConfig
 		return entry.SwingHitbox
 	end
 	return CombatConstants.Weapons.SwingHitbox
+end
+
+-- This weapon's WeaponSpeed multiplier, or 1 for an id the roster doesn't know -- the same "fall back
+-- to the house sword, never nil" contract as SwingHitbox above, for the same reason.
+function WeaponRoster.Speed(weaponId: WeaponId): number
+	local entry = entriesById[weaponId]
+	return if entry then entry.Speed else 1
 end
 
 -- What a combatant with no other information starts holding: the first weapon in the roster, or nil

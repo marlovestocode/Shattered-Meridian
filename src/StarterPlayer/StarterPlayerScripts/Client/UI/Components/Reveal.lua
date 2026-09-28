@@ -111,9 +111,18 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
 
--- See the header: BlimpHelm's own tuning, adopted as the shared one. Critical, never under-damped.
+-- See the header: BlimpHelm's own tuning, adopted as the shared one for the ENTRANCE. Critical, never
+-- under-damped.
 local SPRING_SPEED = 22
 local SPRING_DAMPING = 1
+
+-- THE EXIT IS FASTER THAN THE ENTRANCE, and it used to be the same spring, which is what read as lag.
+-- A critically damped spring at 22 takes ~0.3s to get within 1% of zero, and at a 2% scale depth
+-- almost none of that motion is visible -- so a tile told to leave sat there, apparently ignoring the
+-- request, for a third of a second, and then popped. Leaving should be decisive (UI convention: exits
+-- faster than entrances); ~0.1s at this speed, with MOUNTED_EPSILON below, and a hotbar that recedes
+-- the moment a panel opens rather than after it.
+local EXIT_SPRING_SPEED = 48
 
 -- How far under 1 the content starts. A whisper, well under anything that reads as a "pop" -- the
 -- arrival is meant to be felt rather than watched, on a surface the player is glancing at during
@@ -121,9 +130,10 @@ local SPRING_DAMPING = 1
 local DEFAULT_DEPTH = 0.02
 
 -- When a leaving tile may stop being drawn. Not zero: a Fusion Spring approaches its goal
--- asymptotically and would keep a tile nominally mounted for a long tail of sub-pixel motion. One
--- percent of the reveal is well under a pixel of scale on the widest tile here.
-local MOUNTED_EPSILON = 0.01
+-- asymptotically and would keep a tile nominally mounted for a long tail of sub-pixel motion. Five
+-- percent of the reveal is 0.1-0.3% of scale at every depth in use -- invisible -- and cutting the tail
+-- there instead of at one percent is most of what makes the exit read as immediate.
+local MOUNTED_EPSILON = 0.05
 
 export type RevealProps = {
 	-- Whether the tile should be on screen. Its own screen's fact; this component never writes it.
@@ -153,7 +163,9 @@ local function Reveal(scope: Scope, props: RevealProps): RevealHandle
 		scope:Computed(function(use): number
 			return if use(props.Visible) then 1 else 0
 		end),
-		SPRING_SPEED,
+		scope:Computed(function(use): number
+			return if use(props.Visible) then SPRING_SPEED else EXIT_SPRING_SPEED
+		end),
 		SPRING_DAMPING
 	)
 

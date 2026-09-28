@@ -106,6 +106,10 @@ type Descriptor = {
 	-- AttachmentPart beside it, and for the same reason: it is a property of the WEAPON the stage
 	-- belongs to, not of the stage, so there is nowhere in the shared baseline table to put it.
 	SpawnDelaySeconds: number?,
+	-- This weapon's own WeaponSpeed, straight off WeaponRoster.Speed -- nil for the three standalone
+	-- attacks, which have no weapon. Resolved here beside SpawnDelaySeconds for the same reason: a
+	-- property of the WEAPON, not the stage. See MoveDefinition.WeaponSpeed for who reads it.
+	WeaponSpeed: number?,
 }
 
 local function weaponStageMoveId(weaponId: Types.WeaponId, category: WeaponStageCategory, stageIndex: number): string
@@ -203,6 +207,7 @@ local function enumerateDescriptors(): { Descriptor }
 				Definition = definition,
 				AttachmentPart = weaponSwingAttachment(weaponId),
 				SpawnDelaySeconds = WeaponRoster.SwingHitbox(weaponId).SpawnDelaySeconds,
+				WeaponSpeed = WeaponRoster.Speed(weaponId),
 			})
 		end
 		for index, definition in ipairs(weapon.Stages.Heavy) do
@@ -212,6 +217,7 @@ local function enumerateDescriptors(): { Descriptor }
 				Definition = definition,
 				AttachmentPart = weaponSwingAttachment(weaponId),
 				SpawnDelaySeconds = WeaponRoster.SwingHitbox(weaponId).SpawnDelaySeconds,
+				WeaponSpeed = WeaponRoster.Speed(weaponId),
 			})
 		end
 		-- Finisher is a single stage, not an array -- stageIndex 0 marks it, mirroring the sentinel
@@ -222,6 +228,7 @@ local function enumerateDescriptors(): { Descriptor }
 			Definition = weapon.Stages.Finisher,
 			AttachmentPart = weaponSwingAttachment(weaponId),
 			SpawnDelaySeconds = WeaponRoster.SwingHitbox(weaponId).SpawnDelaySeconds,
+			WeaponSpeed = WeaponRoster.Speed(weaponId),
 		})
 	end
 	for _, name in ipairs(STANDALONE_ATTACK_NAMES) do
@@ -379,6 +386,7 @@ local function toMoveDefinition(descriptor: Descriptor): MoveTypes.MoveDefinitio
 		-- Straight through from the weapon's own build; see MoveDefinition.SpawnDelaySeconds' own
 		-- header for why AttackCatalog rather than this projection is what finally adds it to a windup.
 		SpawnDelaySeconds = descriptor.SpawnDelaySeconds,
+		WeaponSpeed = descriptor.WeaponSpeed,
 		WindupSeconds = definition.WindupSeconds,
 		ActiveSeconds = definition.ActiveSeconds,
 		RecoverySeconds = definition.RecoverySeconds,

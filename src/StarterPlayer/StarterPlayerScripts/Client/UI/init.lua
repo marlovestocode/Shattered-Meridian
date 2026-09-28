@@ -73,6 +73,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
+local Constants = require(ReplicatedStorage.Shared.Constants)
 local Lazy = require(ReplicatedStorage.Shared.Lazy)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
@@ -164,6 +165,11 @@ export type UIHandles = {
 	-- computing a second one would open a second ViewportSize connection, which is the specific cost
 	-- Shell/Surface.lua's own header exists to prevent.
 	ViewportScale: Fusion.UsedAs<number>,
+	-- Multiplies ViewportScale above by the player's own UI-size preference
+	-- (Types.UISettings.Scale) -- called once by Client/Settings/SettingsClient.RestoreSettings after
+	-- it fetches the persisted value, and again on every live change from the Settings panel's own
+	-- Stepper. Not itself the scale a surface builds against; see ViewportScale's own field comment.
+	SetUIScale: (scale: number) -> (),
 	-- The player's own picked-up weapons, which one T will draw and whether it is out
 	-- (Screens/WeaponInventory/init.lua) -- always mounted, hidden until the first pickup, driven by
 	-- Client/Combat/WeaponInventoryClient.lua.
@@ -202,7 +208,22 @@ function UI.Mount(): UIHandles
 	-- The fix is not "call Compute everywhere"; that would be seventeen connections recomputing
 	-- seventeen Computeds on every window resize, which is the idle cost plan 11 rule 2 forbids.
 	-- One value, passed down.
-	local viewportScale = ViewportScale.Compute(scope)
+	local baseViewportScale = ViewportScale.Compute(scope)
+
+	-- THE USER'S OWN UI-SIZE PREFERENCE, composed into that ONE value rather than given a second
+	-- UIScale of its own -- every surface below already reads `viewportScale` alone, so multiplying
+	-- the user's own preference into it here is what makes "resize the hotbar/menus/everything" reach
+	-- every one of them for free, with no per-surface change. Defaults to 1 (today's only size) until
+	-- Client/Settings/SettingsClient.RestoreSettings calls the setter below with the player's real
+	-- persisted Types.UISettings.Scale -- that call happens after Mount() returns (Main.client.lua's
+	-- own boot order), so this Value exists and this setter is already valid the instant it does.
+	local uiScalePreference = scope:Value(Constants.Settings.UI.Defaults.Scale)
+	local viewportScale = scope:Computed(function(use)
+		return use(baseViewportScale) * use(uiScalePreference)
+	end)
+	local function setUIScalePreference(scale: number): ()
+		uiScalePreference:set(scale)
+	end
 
 	-- clientState is passed through so CharacterTab/EmotesTab can read the HUD-wide fields they don't
 	-- duplicate (see Menus/init.lua's header on that split). The handle is returned below --
@@ -260,7 +281,8 @@ function UI.Mount(): UIHandles
 	-- to go. BottomCentre has been reserved for it since Phase 1; Screens/HUD no longer owns a
 	-- ScreenGui, a ViewportScale.Compute or a hand-scaled bottom margin -- see that file's Mount
 	-- comment for what each of those three turned out to be a restatement of.
-	regions:Add("BottomCentre", 10, HUD.Mount(scope, clientState, armament))
+	-- chrome.DockVisible: the dock steps out while a panel is open (Shell/Chrome.lua).
+	regions:Add("BottomCentre", 10, HUD.Mount(scope, clientState, armament, chrome.DockVisible))
 	logger:debug("HUD mounted")
 
 	-- ITS OUTCOME BANNER IS A TopCentre TILE AT ORDER 5 -- ahead of the announcement (10) and the
@@ -411,6 +433,7 @@ function UI.Mount(): UIHandles
 	return {
 		ClientState = clientState,
 		ViewportScale = viewportScale,
+		SetUIScale = setUIScalePreference,
 		ShiftLockEngaged = shiftLockEngaged,
 		DeathFeed = deathFeed,
 		Chrome = chrome,

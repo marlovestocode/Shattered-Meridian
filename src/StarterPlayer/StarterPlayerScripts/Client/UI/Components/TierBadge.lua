@@ -66,6 +66,10 @@ export type TierBadgeProps = {
 	MeridianXP: UsedAs<number>,
 	-- 0 = resting, 1 = full promotion flare. One-shot drive owned by the consumer, eased here.
 	PromotionPulse: UsedAs<number>,
+	-- Meridian XP just granted, shown in place of the percent while non-nil -- the READABLE "+25" to
+	-- the meter's felt creep. Consumer-owned hold, exactly like PromotionPulse (HUD/init.lua). Optional:
+	-- a badge with no gain drive (the Storybook) simply never shows one.
+	Gain: UsedAs<number?>?,
 	LayoutOrder: number?,
 }
 
@@ -256,7 +260,21 @@ local function TierBadge(scope: Scope, props: TierBadgeProps): Frame
 		[Children] = plateChildren,
 	} :: Frame
 
+	local gain = props.Gain
+	local showingGain = scope:Computed(function(use): boolean
+		return gain ~= nil and use(gain) ~= nil
+	end)
+
 	local percentText = scope:Computed(function(use)
+		if gain ~= nil then
+			local amount = use(gain)
+			if amount ~= nil then
+				-- Replaces the percent rather than sitting beside it: the column is fixed-width (this
+				-- file's header), and for the two seconds it is up, "how much did that kill give me" is
+				-- the question the player is asking, not "how far into the tier am I".
+				return `+{math.floor(amount)}`
+			end
+		end
 		if use(props.TierNextXP) == nil then
 			-- Not "100%": the meter is full because there is no next tier, not because this one is
 			-- nearly done. Saying MAX is the only reading of that which is actually true.
@@ -315,7 +333,11 @@ local function TierBadge(scope: Scope, props: TierBadgeProps): Frame
 					Label(scope, {
 						Text = percentText,
 						Scale = "NumeralSmall",
-						Color = Tokens.Color.TextDisabled,
+						-- The meter's own bronze while a gain is up, so the number reads as belonging to
+						-- the bar that just moved; the change of TEXT is the cue, the colour reinforces it.
+						Color = scope:Computed(function(use)
+							return if use(showingGain) then Tokens.Color.AccentSecondary else Tokens.Color.TextDisabled
+						end),
 						Size = UDim2.fromOffset(PERCENT_WIDTH, METER_HEIGHT + 6),
 						TextXAlignment = Enum.TextXAlignment.Right,
 						LayoutOrder = 2,

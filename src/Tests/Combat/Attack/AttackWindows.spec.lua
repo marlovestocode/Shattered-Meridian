@@ -1,6 +1,7 @@
 --!strict
--- Covers Shared/Attack/AttackWindows.lua -- the optional marker-driven WindupSeconds override for a
--- Basic-string (M1) swing.
+-- Covers Shared/Attack/AttackWindows.lua -- a swing clip's real length (what every move with a clip
+-- is synced to) and the optional marker-driven WindupSeconds override: a generic Hit marker on any
+-- attack clip, or the older stage-specific AttackM<n> on an M1 clip.
 --
 -- Needs no published asset. KeyframeSequences are built in place with Instance.new and fed in through
 -- the injectable extractor, the same shape ParryWindows.spec.lua already established for the identical
@@ -19,8 +20,9 @@ local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
 local LiveTuningContract = require(ServerScriptService.Tests.TestHelpers.LiveTuningContract)
 
 -- Builds a sequence carrying `markers` as {name -> time}. One Keyframe per marker, the same shape
--- ParryWindows.spec.lua's makeSequence uses.
-local function makeSequence(markers: { [string]: number }): KeyframeSequence
+-- ParryWindows.spec.lua's makeSequence uses, plus a bare closing keyframe at `length` when given --
+-- which is what makes the clip that long, exactly as an exported clip's last keyframe does.
+local function makeSequence(markers: { [string]: number }, length: number?): KeyframeSequence
 	local sequence = Instance.new("KeyframeSequence")
 	for name, time in markers do
 		local keyframe = Instance.new("Keyframe")
@@ -30,14 +32,19 @@ local function makeSequence(markers: { [string]: number }): KeyframeSequence
 		marker.Parent = keyframe
 		keyframe.Parent = sequence
 	end
+	if length then
+		local closing = Instance.new("Keyframe")
+		closing.Time = length
+		closing.Parent = sequence
+	end
 	return sequence
 end
 
 -- Points the extractor at a fixed set of markers. Cases that care how many times it was called set
 -- their own counting extractor instead.
-local function serve(markers: { [string]: number }?): ()
+local function serve(markers: { [string]: number }?, length: number?): ()
 	AttackWindows.SetExtractor(function(): KeyframeSequence?
-		return if markers then makeSequence(markers) else nil
+		return if markers then makeSequence(markers, length) else nil
 	end)
 end
 
@@ -108,7 +115,7 @@ return function()
 
 		it("returns nil when the clip carries no usable marker", function()
 			serve({ SomeOtherMarker = 0.2 })
-			AttackWindows.Prefetch("rbxassetid://half", "AttackM1")
+			AttackWindows.Prefetch("rbxassetid://half")
 			expect(AttackWindows.WindupOverride("default:Primary:Basic:1", "rbxassetid://half")).to.equal(nil)
 		end)
 
@@ -116,9 +123,9 @@ return function()
 			expect(AttackWindows.WindupOverride("default:Primary:Basic:1", "")).to.equal(nil)
 		end)
 
-		it("returns nil for a move that is not a Basic stage even with a cached marker", function()
+		it("never lets a non-Basic move read an M1 stage marker", function()
 			serve({ AttackM1 = 0.31 })
-			AttackWindows.Prefetch("rbxassetid://shared", "AttackM1")
+			AttackWindows.Prefetch("rbxassetid://shared")
 			-- Same clip id, but Heavy never asks for an "AttackM1" marker at all -- MarkerNameFor
 			-- refuses before the cache is ever consulted.
 			expect(AttackWindows.WindupOverride("default:Primary:Heavy:1", "rbxassetid://shared")).to.equal(nil)
@@ -126,8 +133,7 @@ return function()
 
 		it("refuses a negative marker time rather than honouring it", function()
 			serve({ AttackM1 = -0.2 })
-			local hasMarker = AttackWindows.Prefetch("rbxassetid://negative", "AttackM1")
-			expect(hasMarker).to.equal(false)
+			AttackWindows.Prefetch("rbxassetid://negative")
 			expect(AttackWindows.WindupOverride("default:Primary:Basic:1", "rbxassetid://negative")).to.equal(nil)
 		end)
 	end)
@@ -135,14 +141,14 @@ return function()
 	describe("AttackWindows -- the override", function()
 		it("serves the cached marker time once prefetched", function()
 			serve({ AttackM1 = 0.22 })
-			AttackWindows.Prefetch("rbxassetid://basic1", "AttackM1")
+			AttackWindows.Prefetch("rbxassetid://basic1")
 			expect(AttackWindows.WindupOverride("default:Primary:Basic:1", "rbxassetid://basic1")).to.be.near(
 				0.22,
 				1e-6
 			)
 		end)
 
-		it("keys the cache by BOTH the animation id and the marker name", function()
+		it("serves each clip only its own markers", function()
 			-- Two different clips, each carrying only its own stage's marker -- Basic1's clip must
 			-- never answer for Basic2's marker name or vice versa.
 			AttackWindows.SetExtractor(function(animationId: string): KeyframeSequence?
@@ -151,8 +157,8 @@ return function()
 				end
 				return makeSequence({ AttackM2 = 0.31 })
 			end)
-			AttackWindows.Prefetch("rbxassetid://basic1", "AttackM1")
-			AttackWindows.Prefetch("rbxassetid://basic2", "AttackM2")
+			AttackWindows.Prefetch("rbxassetid://basic1")
+			AttackWindows.Prefetch("rbxassetid://basic2")
 			expect(AttackWindows.WindupOverride("default:Primary:Basic:1", "rbxassetid://basic1")).to.be.near(
 				0.31,
 				1e-6
@@ -167,7 +173,7 @@ return function()
 
 		it("respects AttackConstants.Windows.Enabled as the one kill switch", function()
 			serve({ AttackM1 = 0.22 })
-			AttackWindows.Prefetch("rbxassetid://basic1", "AttackM1")
+			AttackWindows.Prefetch("rbxassetid://basic1")
 			LiveTuningContract.withRestore(function()
 				AttackConstants.Windows.Enabled = false
 				expect(AttackWindows.WindupOverride("default:Primary:Basic:1", "rbxassetid://basic1")).to.equal(nil)
@@ -189,8 +195,8 @@ return function()
 				calls += 1
 				return makeSequence({ AttackM1 = 0.3 })
 			end)
-			AttackWindows.Prefetch("rbxassetid://cached", "AttackM1")
-			AttackWindows.Prefetch("rbxassetid://cached", "AttackM1")
+			AttackWindows.Prefetch("rbxassetid://cached")
+			AttackWindows.Prefetch("rbxassetid://cached")
 			AttackWindows.WindupOverride("default:Primary:Basic:1", "rbxassetid://cached")
 			expect(calls).to.equal(1)
 		end)
@@ -201,36 +207,191 @@ return function()
 				calls += 1
 				return nil
 			end)
-			AttackWindows.Prefetch("rbxassetid://missing", "AttackM1")
+			AttackWindows.Prefetch("rbxassetid://missing")
 			local afterFirst = calls
-			AttackWindows.Prefetch("rbxassetid://missing", "AttackM1")
+			AttackWindows.Prefetch("rbxassetid://missing")
 			-- The retries inside the first Prefetch are expected; a SECOND Prefetch must add none.
 			expect(calls).to.equal(afterFirst)
 			expect(afterFirst > 1).to.equal(true)
 		end)
 	end)
 
+	describe("AttackWindows -- the Hit marker", function()
+		it("times any attack, not only an M1", function()
+			serve({ Hit = 0.42 }, 1.2)
+			AttackWindows.Prefetch("rbxassetid://any")
+			for _, moveId in
+				{
+					"default:Primary:Heavy:1",
+					"default:Primary:Finisher",
+					"default:DashPunch",
+					"a-custom-move-slug",
+				}
+			do
+				expect(AttackWindows.WindupOverride(moveId, "rbxassetid://any")).to.be.near(0.42, 1e-6)
+			end
+		end)
+
+		it("times an M1 whose clip has no AttackM<n> marker", function()
+			serve({ Hit = 0.18 }, 0.7)
+			AttackWindows.Prefetch("rbxassetid://m1")
+			expect(AttackWindows.WindupOverride("default:Primary:Basic:2", "rbxassetid://m1")).to.be.near(0.18, 1e-6)
+		end)
+
+		it("loses to an M1 clip's own AttackM<n>, the more specific statement", function()
+			serve({ Hit = 0.18, AttackM1 = 0.25 }, 0.7)
+			AttackWindows.Prefetch("rbxassetid://both")
+			expect(AttackWindows.WindupOverride("default:Primary:Basic:1", "rbxassetid://both")).to.be.near(0.25, 1e-6)
+			-- A stage whose own name is absent still falls through to Hit on the same clip.
+			expect(AttackWindows.WindupOverride("default:Primary:Basic:2", "rbxassetid://both")).to.be.near(0.18, 1e-6)
+		end)
+
+		it("is switched off by AttackConstants.Windows.Enabled like every other marker", function()
+			serve({ Hit = 0.42 }, 1.2)
+			AttackWindows.Prefetch("rbxassetid://any")
+			LiveTuningContract.withRestore(function()
+				AttackConstants.Windows.Enabled = false
+				expect(AttackWindows.WindupOverride("default:Primary:Heavy:1", "rbxassetid://any")).to.equal(nil)
+			end, function()
+				AttackConstants.Windows.Enabled = true
+			end)
+		end)
+
+		it("reads the name from AttackConstants.Windows.HitMarkerName", function()
+			serve({ Impact = 0.3 }, 1.0)
+			AttackWindows.Prefetch("rbxassetid://renamed")
+			expect(AttackWindows.WindupOverride("default:Primary:Heavy:1", "rbxassetid://renamed")).to.equal(nil)
+			LiveTuningContract.withRestore(function()
+				AttackConstants.Windows.HitMarkerName = "Impact"
+				expect(AttackWindows.WindupOverride("default:Primary:Heavy:1", "rbxassetid://renamed")).to.be.near(
+					0.3,
+					1e-6
+				)
+			end, function()
+				AttackConstants.Windows.HitMarkerName = "Hit"
+			end)
+		end)
+
+		it("is reported by ValidateAll as the marker timing a Heavy", function()
+			serve({ Hit = 0.5 }, 1.4)
+			local records = AttackWindows.ValidateAll({
+				{ MoveId = "default:Primary:Heavy:1", AnimationId = "rbxassetid://heavy1" },
+			})
+			expect(records[1].MarkerName).to.equal("Hit")
+			expect(records[1].HasMarker).to.equal(true)
+		end)
+	end)
+
 	describe("AttackWindows.ValidateAll", function()
-		it("reports a marker-driven entry and skips non-Basic/blank entries", function()
-			serve({ AttackM1 = 0.31 })
+		it("reads every clip, reports the Basic marker, and skips blank entries", function()
+			serve({ AttackM1 = 0.31 }, 0.8)
 			local records = AttackWindows.ValidateAll({
 				{ MoveId = "default:Primary:Basic:1", AnimationId = "rbxassetid://basic1" },
 				{ MoveId = "default:Primary:Heavy:1", AnimationId = "rbxassetid://heavy1" },
 				{ MoveId = "default:Secondary:Basic:1", AnimationId = "" },
 			})
-			expect(#records).to.equal(1)
+			expect(#records).to.equal(2)
 			expect(records[1].MoveId).to.equal("default:Primary:Basic:1")
 			expect(records[1].MarkerName).to.equal("AttackM1")
 			expect(records[1].HasMarker).to.equal(true)
+			expect(records[1].ClipLength).to.be.near(0.8, 1e-6)
+			-- Heavy never gets a marker override, but its length is read all the same -- every move
+			-- with a clip is synced to it.
+			expect(records[2].MoveId).to.equal("default:Primary:Heavy:1")
+			expect(records[2].MarkerName).to.equal(nil)
+			expect(records[2].HasMarker).to.equal(false)
+			expect(records[2].ClipLength).to.be.near(0.8, 1e-6)
 		end)
 
-		it("reports HasMarker=false for a Basic clip with no usable marker, without erroring", function()
+		it("reports an unreadable clip as unread, without erroring", function()
 			serve(nil)
 			local records = AttackWindows.ValidateAll({
 				{ MoveId = "default:Primary:Basic:1", AnimationId = "rbxassetid://blank" },
 			})
 			expect(#records).to.equal(1)
+			expect(records[1].Read).to.equal(false)
 			expect(records[1].HasMarker).to.equal(false)
+			expect(records[1].ClipLength).to.equal(nil)
+		end)
+	end)
+
+	describe("AttackWindows -- clip length", function()
+		it("is the LAST keyframe's time, whatever order the keyframes are in", function()
+			local sequence = makeSequence({ AttackM1 = 0.31 }, 0.9)
+			local early = Instance.new("Keyframe")
+			early.Time = 0.4
+			early.Parent = sequence
+			expect(AttackWindows.ExtractClipLength(sequence)).to.be.near(0.9, 1e-6)
+		end)
+
+		it("is nil for a sequence with nothing past zero", function()
+			expect(AttackWindows.ExtractClipLength(Instance.new("KeyframeSequence"))).to.equal(nil)
+			expect(AttackWindows.ExtractClipLength(makeSequence({}, 0))).to.equal(nil)
+		end)
+
+		it("serves the cached length once prefetched, and nil before", function()
+			serve({}, 0.75)
+			expect(AttackWindows.ClipLength("rbxassetid://clip")).to.equal(nil)
+			AttackWindows.Prefetch("rbxassetid://clip")
+			expect(AttackWindows.ClipLength("rbxassetid://clip")).to.be.near(0.75, 1e-6)
+		end)
+
+		it("reads the length and the marker off ONE fetch", function()
+			local calls = 0
+			AttackWindows.SetExtractor(function(): KeyframeSequence?
+				calls += 1
+				return makeSequence({ AttackM1 = 0.2 }, 0.6)
+			end)
+			AttackWindows.Prefetch("rbxassetid://both")
+			expect(AttackWindows.ClipLength("rbxassetid://both")).to.be.near(0.6, 1e-6)
+			expect(AttackWindows.WindupOverride("default:Primary:Basic:1", "rbxassetid://both")).to.be.near(0.2, 1e-6)
+			expect(calls).to.equal(1)
+		end)
+
+		it("respects AttackConstants.Windows.SyncToClipLength as its own kill switch", function()
+			serve({}, 0.75)
+			AttackWindows.Prefetch("rbxassetid://clip")
+			LiveTuningContract.withRestore(function()
+				AttackConstants.Windows.SyncToClipLength = false
+				expect(AttackWindows.ClipLength("rbxassetid://clip")).to.equal(nil)
+			end, function()
+				AttackConstants.Windows.SyncToClipLength = true
+			end)
+			expect(AttackWindows.ClipLength("rbxassetid://clip")).to.be.near(0.75, 1e-6)
+		end)
+
+		it("returns nil for a blank id, never yielding or erroring", function()
+			expect(AttackWindows.ClipLength("")).to.equal(nil)
+		end)
+	end)
+
+	describe("AttackWindows.Request", function()
+		it("fetches in the background, once, however often it is asked", function()
+			local calls = 0
+			AttackWindows.SetExtractor(function(): KeyframeSequence?
+				calls += 1
+				task.wait()
+				return makeSequence({}, 0.5)
+			end)
+			AttackWindows.Request("rbxassetid://lazy")
+			AttackWindows.Request("rbxassetid://lazy")
+			-- Returned without waiting on the fetch.
+			expect(AttackWindows.ClipLength("rbxassetid://lazy")).to.equal(nil)
+			-- Prefetch joins the in-flight request rather than starting a second one.
+			AttackWindows.Prefetch("rbxassetid://lazy")
+			expect(AttackWindows.ClipLength("rbxassetid://lazy")).to.be.near(0.5, 1e-6)
+			AttackWindows.Request("rbxassetid://lazy")
+			expect(calls).to.equal(1)
+		end)
+
+		it("ignores a blank id", function()
+			local calls = 0
+			AttackWindows.SetExtractor(function(): KeyframeSequence?
+				calls += 1
+				return nil
+			end)
+			AttackWindows.Request("")
+			expect(calls).to.equal(0)
 		end)
 	end)
 end

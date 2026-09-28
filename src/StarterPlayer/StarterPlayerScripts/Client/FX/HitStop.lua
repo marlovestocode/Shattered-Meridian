@@ -2,32 +2,41 @@
 --[[
 	HitStop.lua
 
-	Owns: two independent, purely-cosmetic freeze effects that happen to share one throttled-freeze
-	factory and one Constants.FX.HitStop tuning table --
+	Owns: the purely-cosmetic freeze effects that share one throttled-freeze factory and one
+	Constants.FX.HitStop tuning table --
 
 	  * FreezeFlightLanding -- the dev-menu flight feature's landing-impact freeze.
 	    Client/Flight/FlightController.lua is the only caller. Delegates to
 	    Client/FX/FlightAnimator.FreezeActiveFlightTrack.
 
-	  * FreezeVictimMovement -- the combat hit-stop. Client/Combat/CombatFeedbackClient.lua is the only
-	    caller, on the DEFENDER's own client, off a resolved Clean/Backstab/GuardBroken contact (the
-	    same three outcomes DamageResolver grants DamageConstants.Hitstun to). Holds the local
-	    character's AssemblyLinearVelocity at zero for a beat via ParkourMotor.ApplyImpulse.
+	  * FreezeExchange -- the combat hit-stop's ANIMATION half: every playing ACTION track on BOTH the attacker
+	    and the defender stops dead for a beat, on every client that hears about the hit (both
+	    participants get Combat_Feedback). That shared pose-freeze is what a hit-stop actually is -- the
+	    impact landing, held for a few frames, on both bodies at once.
+
+	  * FreezeVictimMovement -- the combat hit-stop's MOVEMENT half, on the DEFENDER's own client, off a
+	    resolved Clean/Backstab/GuardBroken contact (the same three outcomes DamageResolver grants
+	    DamageConstants.Hitstun to). Stops the local body where it stands for the beat.
 
 	Both throttle rapid repeats on their own independent clock (see makeThrottledFreeze), so landings
 	or hits close in time can't stack into unintended slow motion.
 
-	WHY THE VICTIM FREEZE IS MOVEMENT, NOT ANIMATION, and this is a deliberate departure from what this
-	module used to do. It used to also own an attacker/victim/parry/posture-break freeze family that
-	delegated to a since-deleted CombatAnimator.FreezeActiveCombatTrack -- an ANIMATION-track freeze,
-	removed alongside the rest of the pre-rewrite combat system (CombatAnimator.lua no longer even
-	exposes that function). Rebuilding it as it was would freeze nothing visible for most swings today,
-	because no swing body-animation plays at all right now -- every Default move's AnimationId is ""
-	by design (see DamageTypes.AttackCatalogEntry's own comment on that). A freeze with nothing playing
-	to freeze is a silent no-op, the same failure mode DamageConstants.AttackerLunge's own header warns
-	about for a server-side movement write on a client-owned body -- except here the fix is the
-	opposite one: movement, not animation, is the thing guaranteed to be visibly happening on a hit,
-	so movement is what gets frozen.
+	WHY BOTH HALVES NOW, and what was wrong with movement alone (2026-09-28). This module used to freeze
+	only the victim's velocity, on the reasoning that no swing animation played -- which stopped being
+	true once weapons authored their own swing clips (Shared/Attack/AttackAnimations.lua). Two failures
+	followed, both reported from play: nothing about the ATTACKER ever stopped, so the hit had no weight
+	on the side that threw it; and the victim freeze did not hold a RUNNING player. It zeroed velocity on
+	Heartbeat, which runs AFTER physics, and a running Humanoid's walk controller simply re-accelerated
+	to full speed inside the very next step -- a runner felt, at most, a hitch. So:
+	  * the animation freeze (FreezeExchange) is back, on both bodies, through
+	    Client/FX/AnimationTrackUtil's generation-guarded FreezeGuard -- the same helper the flight freeze
+	    already uses, so overlapping freezes extend rather than resume early;
+	  * the movement freeze now takes the INPUT away rather than fighting its result: a RenderStep
+	    binding just after Roblox's own control script (Enum.RenderPriority.Input + 1) calls
+	    Humanoid:Move(Vector3.zero) for the beat, so the walk controller brakes instead of pushing. The
+	    horizontal velocity is still zeroed on Heartbeat for anything already in flight; the vertical is
+	    carried through, so a victim hit in the air is not hung in place.
+	It never writes WalkSpeed (RunSystem is that property's sole writer) and never anchors anything.
 
 	RUNS ON THE VICTIM'S OWN CLIENT, FOR THE SAME REASON Client/Combat/SwingLunge.lua's own forward
 	step does. A character is network-owned by its own client: that client simulates it and replicates
@@ -55,11 +64,14 @@
 	its own independent FX primitive). Purely local, purely presentation.
 ]]
 
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
+local AnimationTrackUtil = require(script.Parent.AnimationTrackUtil)
 local FlightAnimator = require(script.Parent.FlightAnimator)
 local ParkourMotor = require(script.Parent.Parent.Parkour.ParkourMotor)
 
@@ -95,45 +107,136 @@ function HitStop.FreezeFlightLanding(isHard: boolean): ()
 	freezeFlight(if isHard then CONFIG.FlightLandingHardSeconds else CONFIG.FlightLandingSoftSeconds)
 end
 
+-- Exchange (animation) freeze ----------------------------------------------------------------------
+
+-- One guard for every combat freeze, separate from the flight freeze's own -- see
+-- AnimationTrackUtil.NewFreezeGuard's header on why families must not share one.
+local exchangeGuard = AnimationTrackUtil.NewFreezeGuard()
+local lastExchangeClock = 0
+
+-- The priorities a hit-stop freezes: the swing, the guard, the parry -- the clips that ARE the
+-- exchange. Idle/Movement/Core (walking, running, the armed idle) are deliberately absent.
+--
+-- CHANGED 2026-09-28: this used to freeze EVERY playing track, locomotion included. In an M1 trade that
+-- is a full-body stop several times a second on both screens -- legs locking mid-stride on every hit --
+-- which playtest read as stutter rather than as weight. The impact reads from the arms stopping; the
+-- legs carrying on is what keeps a fight fluid.
+local FROZEN_PRIORITIES: { [Enum.AnimationPriority]: boolean } = {
+	[Enum.AnimationPriority.Action] = true,
+	[Enum.AnimationPriority.Action2] = true,
+	[Enum.AnimationPriority.Action3] = true,
+	[Enum.AnimationPriority.Action4] = true,
+}
+
+local function appendPlayingTracks(model: Model, into: { AnimationTrack }): ()
+	local humanoid = CharacterUtil.HumanoidOf(model)
+	local animator = if humanoid then humanoid:FindFirstChildOfClass("Animator") else nil
+	if animator == nil then
+		return
+	end
+	for _, track in animator:GetPlayingAnimationTracks() do
+		if FROZEN_PRIORITIES[track.Priority] then
+			table.insert(into, track)
+		end
+	end
+end
+
+-- Freezes every playing Action-priority track on both combatants for `seconds`. Runs on every client that hears the
+-- hit, and freezes the OTHER body locally too, so both participants see one shared stop rather than
+-- each only their own half. Throttled like the other freezes, so a fast multi-hit string reads as a
+-- series of stingers, not one long slow-motion hold.
+function HitStop.FreezeExchange(attacker: Model?, defender: Model?, seconds: number): ()
+	if seconds <= 0 then
+		return
+	end
+	local now = os.clock()
+	if now - lastExchangeClock < CONFIG.MinIntervalSeconds then
+		return
+	end
+	lastExchangeClock = now
+
+	local tracks: { AnimationTrack } = {}
+	if attacker then
+		appendPlayingTracks(attacker, tracks)
+	end
+	if defender and defender ~= attacker then
+		appendPlayingTracks(defender, tracks)
+	end
+	exchangeGuard:FreezeTracks(tracks, seconds)
+	logger:debug("Combat exchange hit-stop", { seconds = seconds, tracks = #tracks })
+end
+
 -- Victim movement freeze -----------------------------------------------------------------------------
 
 -- Absolute os.clock() deadline the current freeze holds until, or nil when none is running. One
--- shared deadline rather than a table keyed by anything: this module only ever freezes the LOCAL
--- player's own body (see this file's header on why it must run on the victim's own client), so there
--- is exactly one character it could ever apply to at a time.
+-- shared deadline rather than a table keyed by anything: this only ever freezes the LOCAL player's own
+-- body, so there is exactly one character it could ever apply to at a time.
 local victimFreezeUntil: number? = nil
 local victimFreezeConnection: RBXScriptConnection? = nil
+local inputHoldBound = false
 
--- Tears down the per-frame writer. Safe to call when nothing is running -- both call sites (expiry and
--- module Stop, if one is ever added) can reach this without checking first.
+-- After Roblox's own ControlModule, which calls Humanoid:Move on Enum.RenderPriority.Input -- so this
+-- frame's move vector is the one written here, not the player's.
+local INPUT_HOLD_BINDING = "CombatHitStopInputHold"
+local INPUT_HOLD_PRIORITY = Enum.RenderPriority.Input.Value + 1
+
+local function localRig(): (Humanoid?, BasePart?)
+	local character = Players.LocalPlayer.Character
+	if character == nil then
+		return nil, nil
+	end
+	return CharacterUtil.LiveHumanoidOf(character), CharacterUtil.RootOf(character)
+end
+
+-- Tears down both per-frame writers. Safe to call when nothing is running.
 local function stopVictimFreeze(): ()
 	if victimFreezeConnection then
 		victimFreezeConnection:Disconnect()
 		victimFreezeConnection = nil
 	end
+	if inputHoldBound then
+		RunService:UnbindFromRenderStep(INPUT_HOLD_BINDING)
+		inputHoldBound = false
+	end
 	victimFreezeUntil = nil
 end
 
--- One frame of the hold. Re-checks the deadline every call rather than trusting a frame-count, the
--- same "measured against the clock, not the frame" discipline SwingLunge's own heartbeat keeps, so a
--- hitch or a low frame rate shortens how many WRITES happen rather than how long the freeze LASTS.
---
--- ApplyImpulse already refuses on its own (a kinematic traversal owns the body, or the server holds
--- RootControlLocked) and returns false rather than throwing -- the return value is not checked here
--- because there is nothing useful to do differently either way: the freeze is cosmetic, so losing a
--- frame of it to a traversal that outranks it is the correct outcome, not a fault to recover from.
-local function onVictimFreezeHeartbeat(): ()
+local function freezeActive(): boolean
 	local until_ = victimFreezeUntil
 	if not until_ or os.clock() >= until_ then
 		stopVictimFreeze()
-		return
+		return false
 	end
-	ParkourMotor.ApplyImpulse(Vector3.zero)
+	return true
 end
 
--- Starts (or extends) the hold. A connection is opened lazily on first use and left running between
--- freezes rather than reconnected per call -- the idle cost is one nil check per Heartbeat, cheaper
--- than tearing down and rebuilding a connection on every combat exchange in a busy fight.
+-- The half that makes it hold a RUNNING player: take this frame's input away before physics sees it.
+local function onInputHold(): ()
+	if not freezeActive() then
+		return
+	end
+	local humanoid = localRig()
+	if humanoid then
+		humanoid:Move(Vector3.zero, false)
+	end
+end
+
+-- The half for what is already moving: horizontal velocity to zero, vertical carried through.
+-- ParkourMotor.ApplyExternalImpulse refuses during a kinematic traversal or a server-held root and
+-- returns false rather than throwing; losing a frame of a cosmetic freeze to either is the correct
+-- outcome. External rather than the plain ApplyImpulse because a hit that lands mid-roll (outside its
+-- evade frames) must END the roll: a velocity-driven state would otherwise overwrite the freeze every
+-- physics step and keep rolling straight through the hit that stopped it.
+local function onVictimFreezeHeartbeat(): ()
+	if not freezeActive() then
+		return
+	end
+	local _, root = localRig()
+	local vertical = if root then root.AssemblyLinearVelocity.Y else 0
+	ParkourMotor.ApplyExternalImpulse(Vector3.new(0, vertical, 0))
+end
+
+-- Starts (or extends) the hold.
 local function freezeVictimMovement(seconds: number): ()
 	if seconds <= 0 then
 		return
@@ -142,20 +245,18 @@ local function freezeVictimMovement(seconds: number): ()
 	if not victimFreezeConnection then
 		victimFreezeConnection = RunService.Heartbeat:Connect(onVictimFreezeHeartbeat)
 	end
+	if not inputHoldBound then
+		RunService:BindToRenderStep(INPUT_HOLD_BINDING, INPUT_HOLD_PRIORITY, onInputHold)
+		inputHoldBound = true
+	end
 end
 
 local freezeVictim = makeThrottledFreeze(freezeVictimMovement, "Combat victim hit-stop")
 
--- Freezes the LOCAL player's own body in place for `seconds` -- see this file's header for why this
--- is a movement freeze rather than an animation one, and why it has to be this specific client that
--- calls it. Throttled the same as the flight freeze, which is what stops a fast multi-hit combo from
--- chaining consecutive calls into one long freeze instead of a series of short stingers -- exactly
--- the failure mode Constants.FX.HitStop's own MinIntervalSeconds comment already names.
---
--- Caller supplies the duration rather than this function picking one from CONFIG itself, the same
--- "the tuning lives with the caller that knows which outcome this is" shape ShakePresets/HIT_FLASH_
--- COLORS already use in CombatFeedbackClient.lua -- this module owns HOW to freeze, not which outcome
--- deserves how long a freeze.
+-- Stops the LOCAL player's own body where it stands for `seconds` -- see this file's header for both
+-- halves and why the input half is what makes it work on a runner. Throttled the same as the flight
+-- freeze. Caller supplies the duration: this module owns HOW to freeze, not which outcome deserves how
+-- long.
 function HitStop.FreezeVictimMovement(seconds: number): ()
 	freezeVictim(seconds)
 end

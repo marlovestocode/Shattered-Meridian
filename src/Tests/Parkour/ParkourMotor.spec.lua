@@ -411,6 +411,144 @@ return function()
 		end)
 	end)
 
+	describe("ParkourMotor -- planar drive", function()
+		it("drives only the horizontal plane when asked, leaving the vertical to gravity", function()
+			-- A real engine assignment of every Plane-mode property, for the same reason this file exists:
+			-- a hallucinated name (PlaneVelocity, PrimaryTangentAxis, SecondaryTangentAxis) throws here.
+			local rig = makeRig()
+			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+
+			local command = ParkourMotor.BeginFrame()
+			command.Mode = "Velocity"
+			command.Velocity = Vector3.new(4, -8, 20)
+			command.PlanarOnly = true
+			expect(ParkourMotor.Apply()).to.equal(true)
+
+			local drive = rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME) :: LinearVelocity
+			expect(drive.VelocityConstraintMode).to.equal(Enum.VelocityConstraintMode.Plane)
+			expect(drive.PlaneVelocity.X).to.equal(4)
+			expect(drive.PlaneVelocity.Y).to.equal(20)
+			-- The plane's axes are world X and Z, so Y is the one axis the drive exerts no force along.
+			expect(drive.PrimaryTangentAxis:Dot(Vector3.yAxis)).to.equal(0)
+			expect(drive.SecondaryTangentAxis:Dot(Vector3.yAxis)).to.equal(0)
+
+			destroyRig(rig)
+		end)
+
+		it("returns to a full vector drive the frame planar is no longer asked for", function()
+			local rig = makeRig()
+			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+
+			local command = ParkourMotor.BeginFrame()
+			command.Mode = "Velocity"
+			command.Velocity = Vector3.new(0, 0, 20)
+			command.PlanarOnly = true
+			ParkourMotor.Apply()
+
+			command = ParkourMotor.BeginFrame()
+			command.Mode = "Velocity"
+			command.Velocity = Vector3.new(0, -8, 20)
+			ParkourMotor.Apply()
+
+			local drive = rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME) :: LinearVelocity
+			expect(drive.VelocityConstraintMode).to.equal(Enum.VelocityConstraintMode.Vector)
+			expect(drive.VectorVelocity.Y).to.equal(-8)
+
+			destroyRig(rig)
+		end)
+
+		it("resets PlanarOnly every frame, so a state that does not ask gets the vector drive", function()
+			local command = ParkourMotor.BeginFrame()
+			command.PlanarOnly = true
+			expect(ParkourMotor.BeginFrame().PlanarOnly).to.equal(false)
+		end)
+	end)
+
+	describe("ParkourMotor -- external impulses interrupt a velocity state", function()
+		it("records an interrupt for an external impulse while a Velocity state owns the body", function()
+			local rig = makeRig()
+			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local command = ParkourMotor.BeginFrame()
+			command.Mode = "Velocity"
+			command.Velocity = Vector3.new(0, 0, 30)
+			ParkourMotor.Apply()
+
+			local knock = Vector3.new(40, 25, 0)
+			expect(ParkourMotor.ApplyExternalImpulse(knock)).to.equal(true)
+			expect(ParkourMotor.ConsumeInterrupt()).to.equal(knock)
+			-- Cleared by the read.
+			expect(ParkourMotor.ConsumeInterrupt()).to.equal(nil)
+
+			destroyRig(rig)
+		end)
+
+		it("records nothing for a state's own impulse, or while the engine drives", function()
+			local rig = makeRig()
+			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			ParkourMotor.BeginFrame()
+			ParkourMotor.Apply()
+			expect(ParkourMotor.ApplyExternalImpulse(Vector3.new(10, 0, 0))).to.equal(true)
+			expect(ParkourMotor.ConsumeInterrupt()).to.equal(nil)
+
+			local command = ParkourMotor.BeginFrame()
+			command.Mode = "Velocity"
+			command.Velocity = Vector3.new(0, 0, 30)
+			ParkourMotor.Apply()
+			ParkourMotor.ApplyImpulse(Vector3.new(0, 50, 0))
+			expect(ParkourMotor.ConsumeInterrupt()).to.equal(nil)
+
+			destroyRig(rig)
+		end)
+
+		it("drops an unread interrupt when the body is handed back", function()
+			local rig = makeRig()
+			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local command = ParkourMotor.BeginFrame()
+			command.Mode = "Velocity"
+			command.Velocity = Vector3.new(0, 0, 30)
+			ParkourMotor.Apply()
+			ParkourMotor.ApplyExternalImpulse(Vector3.new(40, 0, 0))
+
+			ParkourMotor.BeginFrame()
+			ParkourMotor.Apply()
+			expect(ParkourMotor.ConsumeInterrupt()).to.equal(nil)
+
+			destroyRig(rig)
+		end)
+	end)
+
+	describe("ParkourMotor.IsFacingHeldElsewhere", function()
+		it("reads the AutoRotate the rest of the game left, not the one this module wrote", function()
+			local rig = makeRig()
+			rig.Humanoid.AutoRotate = true
+			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			expect(ParkourMotor.IsFacingHeldElsewhere()).to.equal(false)
+
+			-- Owning the body writes AutoRotate false itself; that must not read as shift lock.
+			local command = ParkourMotor.BeginFrame()
+			command.Mode = "Velocity"
+			ParkourMotor.Apply()
+			expect(rig.Humanoid.AutoRotate).to.equal(false)
+			expect(ParkourMotor.IsFacingHeldElsewhere()).to.equal(false)
+
+			destroyRig(rig)
+		end)
+
+		it("says yes when shift lock had AutoRotate off before the body was taken", function()
+			local rig = makeRig()
+			rig.Humanoid.AutoRotate = false
+			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			expect(ParkourMotor.IsFacingHeldElsewhere()).to.equal(true)
+
+			local command = ParkourMotor.BeginFrame()
+			command.Mode = "Velocity"
+			ParkourMotor.Apply()
+			expect(ParkourMotor.IsFacingHeldElsewhere()).to.equal(true)
+
+			destroyRig(rig)
+		end)
+	end)
+
 	describe("ParkourMotor.BeginFrame", function()
 		it("resets to a neutral Humanoid-driven frame, so a silent state hands the body back", function()
 			local command = ParkourMotor.BeginFrame()

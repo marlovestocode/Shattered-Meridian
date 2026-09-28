@@ -304,6 +304,13 @@ export type MoveDefinition = {
 	-- build in Workspace.Weapons (WeaponRoster.SwingHitboxConfig.SpawnDelaySeconds), which
 	-- DefaultMoveRegistry projects straight through.
 	SpawnDelaySeconds: number?,
+	-- The weapon's own WeaponSpeed multiplier -- nil (equivalent to 1) for a custom move and for the
+	-- standalone attacks. WindupSeconds/ActiveSeconds/RecoverySeconds/Cooldown below are ALREADY divided
+	-- by it (WeaponRoster.applySpeed); this is carried separately because the swing CLIP must play at
+	-- the same speed, and a clip's length or marker time is authored in clip time. AttackCatalog.Get
+	-- divides both by it, and hands it to the client as AttackStartedPayload.PlaybackSpeed. Not
+	-- editor-authored, same as SpawnDelaySeconds above: DefaultMoveRegistry projects it straight through.
+	WeaponSpeed: number?,
 
 	-- Timing (identical semantics to HitboxAttackDefinition).
 	WindupSeconds: number,

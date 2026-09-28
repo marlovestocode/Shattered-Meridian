@@ -9,8 +9,10 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local AttackCatalog = require(ServerScriptService.Server.Combat.AttackCatalog)
+local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
 local DefaultMoveRegistry = require(ServerScriptService.Server.Combat.DefaultMoveRegistry)
+local LiveTuningContract = require(ServerScriptService.Tests.TestHelpers.LiveTuningContract)
 local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
@@ -20,6 +22,40 @@ local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixtur
 -- moves the spec itself authored would never catch the bridge breaking against real authored data.
 local WEAPON = WeaponFixture.Install()[1]
 local DEFAULT_MOVE_ID = `default:{WEAPON}:Basic:1`
+local HEAVY_MOVE_ID = `default:{WEAPON}:Heavy:1`
+
+-- Serves every clip as a sequence `length` seconds long, carrying a marker named `markerName`
+-- (AttackM1 unless given) at `marker` when given -- the shape an exported clip has: marker keyframes
+-- wherever they were authored, and a last keyframe at the clip's end.
+local function serveClip(length: number, marker: number?, markerName: string?): ()
+	AttackWindows.SetExtractor(function(): KeyframeSequence?
+		local sequence = Instance.new("KeyframeSequence")
+		if marker then
+			local keyframe = Instance.new("Keyframe")
+			keyframe.Time = marker
+			local markerInstance = Instance.new("KeyframeMarker")
+			markerInstance.Name = markerName or "AttackM1"
+			markerInstance.Parent = keyframe
+			keyframe.Parent = sequence
+		end
+		local closing = Instance.new("Keyframe")
+		closing.Time = length
+		closing.Parent = sequence
+		return sequence
+	end)
+end
+
+local function clearClips(): ()
+	AttackWindows.Reset()
+	AttackWindows.SetExtractor(function()
+		return nil
+	end)
+end
+
+local function total(entry: any): number
+	local definition = entry.Definition
+	return definition.WindupSeconds + definition.ActiveSeconds + definition.RecoverySeconds
+end
 
 return function()
 	afterEach(function()
@@ -101,40 +137,158 @@ return function()
 		-- CombatConstants.Weapons.Baseline.Stages.Basic[1]: WindupSeconds 0.31, ActiveSeconds 0.22,
 		-- RecoverySeconds 0.14, Cooldown 0.44. Active+Recovery = 0.36, so the override survives only
 		-- when it is at least Cooldown - (Active+Recovery) = 0.08.
+		--
+		-- The bound only exists while the clip's LENGTH is unknown -- with it known, the swing is the
+		-- clip's length whatever the marker says (see the next describe). A read clip always has a
+		-- length, so these cases switch clip syncing off to reach the unknown-length path.
 		local ANIMATION_ID = "rbxassetid://104588315151150" -- AttackAnimations' baseline Basic:1 clip
 
-		local function serveMarker(time: number): ()
-			AttackWindows.SetExtractor(function(): KeyframeSequence?
-				local sequence = Instance.new("KeyframeSequence")
-				local keyframe = Instance.new("Keyframe")
-				keyframe.Time = time
-				local marker = Instance.new("KeyframeMarker")
-				marker.Name = "AttackM1"
-				marker.Parent = keyframe
-				keyframe.Parent = sequence
-				return sequence
+		local function withoutClipSync(body: () -> ()): ()
+			LiveTuningContract.withRestore(function()
+				AttackConstants.Windows.SyncToClipLength = false
+				body()
+			end, function()
+				AttackConstants.Windows.SyncToClipLength = true
 			end)
 		end
 
-		afterEach(function()
-			AttackWindows.Reset()
-			AttackWindows.SetExtractor(function()
-				return nil
+		afterEach(clearClips)
+
+		it("keeps the hardcoded WindupSeconds when the override would drop the swing below its own Cooldown", function()
+			serveClip(0.05, 0.05) -- 0.05 + 0.22 + 0.14 = 0.41, under the 0.44 Cooldown
+			AttackWindows.Prefetch(ANIMATION_ID)
+			withoutClipSync(function()
+				local entry = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
+				expect(entry.Definition.WindupSeconds).to.be.near(0.31, 1e-6)
 			end)
 		end)
 
-		it("keeps the hardcoded WindupSeconds when the override would drop the swing below its own Cooldown", function()
-			serveMarker(0.05) -- 0.05 + 0.22 + 0.14 = 0.41, under the 0.44 Cooldown
-			AttackWindows.Prefetch(ANIMATION_ID, "AttackM1")
+		it("applies the override once the swing still meets or exceeds its own Cooldown", function()
+			serveClip(0.10, 0.10) -- 0.10 + 0.22 + 0.14 = 0.46, at or over the 0.44 Cooldown
+			AttackWindows.Prefetch(ANIMATION_ID)
+			withoutClipSync(function()
+				local entry = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
+				expect(entry.Definition.WindupSeconds).to.be.near(0.10, 1e-6)
+			end)
+		end)
+	end)
+
+	describe("AttackCatalog.Get -- the swing ends when its clip does", function()
+		-- Basic[1]: Windup 0.31, Active 0.22, Recovery 0.14 (total 0.67), Cooldown 0.44.
+		-- Heavy[1]: Windup 0.600, Active 0.22, Recovery 0.55 (total 1.37), Cooldown 1.37.
+		local BASIC_CLIP = "rbxassetid://104588315151150"
+		local HEAVY_CLIP = "rbxassetid://83363364108102"
+
+		afterEach(clearClips)
+
+		it("keeps the authored timeline for a clip that has not been read", function()
 			local entry = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
 			expect(entry.Definition.WindupSeconds).to.be.near(0.31, 1e-6)
+			expect(entry.Definition.RecoverySeconds).to.be.near(0.14, 1e-6)
+			expect(entry.PlaybackSpeed).to.equal(1)
 		end)
 
-		it("applies the override once the swing still meets or exceeds its own Cooldown", function()
-			serveMarker(0.10) -- 0.10 + 0.22 + 0.14 = 0.46, at or over the 0.44 Cooldown
-			AttackWindows.Prefetch(ANIMATION_ID, "AttackM1")
+		it("stretches recovery so the swing lasts exactly as long as a longer clip", function()
+			serveClip(0.9)
+			AttackWindows.Prefetch(BASIC_CLIP)
 			local entry = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
-			expect(entry.Definition.WindupSeconds).to.be.near(0.10, 1e-6)
+			expect(total(entry)).to.be.near(0.9, 1e-6)
+			expect(entry.Definition.RecoverySeconds).to.be.near(0.37, 1e-6)
+		end)
+
+		it("opens the hitbox on the move's own delay, for its own window, whatever the clip's length", function()
+			serveClip(0.9)
+			AttackWindows.Prefetch(BASIC_CLIP)
+			local entry = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
+			expect(entry.Definition.WindupSeconds).to.be.near(0.31, 1e-6)
+			expect(entry.Definition.ActiveSeconds).to.be.near(0.22, 1e-6)
+		end)
+
+		it("syncs Heavy too, which no marker ever touches", function()
+			serveClip(1.6)
+			AttackWindows.Prefetch(HEAVY_CLIP)
+			local entry = AttackCatalog.Get(HEAVY_MOVE_ID) :: any
+			expect(entry.Definition.WindupSeconds).to.be.near(0.6, 1e-6)
+			expect(total(entry)).to.be.near(1.6, 1e-6)
+		end)
+
+		it("puts the hitbox on the clip's marker, and still ends on the clip's end", function()
+			-- 0.05 would have been refused by the Cooldown bound above; with the length known it is not
+			-- needed, because the swing is the clip's 0.9 either way.
+			serveClip(0.9, 0.05)
+			AttackWindows.Prefetch(BASIC_CLIP)
+			local entry = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
+			expect(entry.Definition.WindupSeconds).to.be.near(0.05, 1e-6)
+			expect(total(entry)).to.be.near(0.9, 1e-6)
+		end)
+
+		it("never cuts the hit window to fit a clip too short for it -- recovery just goes to zero", function()
+			serveClip(0.4) -- shorter than Windup + Active (0.53)
+			AttackWindows.Prefetch(BASIC_CLIP)
+			local entry = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
+			expect(entry.Definition.WindupSeconds).to.be.near(0.31, 1e-6)
+			expect(entry.Definition.ActiveSeconds).to.be.near(0.22, 1e-6)
+			expect(entry.Definition.RecoverySeconds).to.equal(0)
+		end)
+
+		it("opens a Heavy's hitbox on its clip's Hit marker", function()
+			serveClip(1.6, 0.45, "Hit")
+			AttackWindows.Prefetch(HEAVY_CLIP)
+			local entry = AttackCatalog.Get(HEAVY_MOVE_ID) :: any
+			expect(entry.Definition.WindupSeconds).to.be.near(0.45, 1e-6)
+			expect(entry.Definition.ActiveSeconds).to.be.near(0.22, 1e-6)
+			expect(total(entry)).to.be.near(1.6, 1e-6)
+		end)
+
+		it("pulls a swing-length Cooldown down with a shorter clip, so no dead time follows it", function()
+			serveClip(1.0) -- Heavy's authored Cooldown is its whole 1.37 timeline
+			AttackWindows.Prefetch(HEAVY_CLIP)
+			local entry = AttackCatalog.Get(HEAVY_MOVE_ID) :: any
+			expect(total(entry)).to.be.near(1.0, 1e-6)
+			expect(entry.Cooldown).to.be.near(1.0, 1e-6)
+		end)
+
+		it("leaves a Cooldown authored longer than its swing alone -- that one is a real gate", function()
+			local custom = MoveTypes.Clone(DefaultMoveRegistry.Get(DEFAULT_MOVE_ID) :: any)
+			custom.AnimationId = "rbxassetid://custom-clip"
+			custom.Cooldown = 5
+			MoveRegistryManager.Upsert(custom)
+			serveClip(0.9)
+			AttackWindows.Prefetch("rbxassetid://custom-clip")
+			local entry = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
+			expect(total(entry)).to.be.near(0.9, 1e-6)
+			expect(entry.Cooldown).to.equal(5)
+		end)
+
+		it("plays a fast weapon's clip fast, and times the swing against the clip at that speed", function()
+			local weapons = workspace:FindFirstChild("Weapons") :: Instance
+			local model = weapons:FindFirstChild(WEAPON) :: Instance
+			LiveTuningContract.withRestore(function()
+				model:SetAttribute("WeaponSpeed", 2)
+				WeaponFixture.Rebuild()
+				serveClip(0.9, 0.2)
+				AttackWindows.Prefetch(BASIC_CLIP)
+				local entry = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
+				expect(entry.PlaybackSpeed).to.equal(2)
+				-- The 0.2s marker, reached in half the time.
+				expect(entry.Definition.WindupSeconds).to.be.near(0.1, 1e-6)
+				-- The 0.9s clip, played at 2x.
+				expect(total(entry)).to.be.near(0.45, 1e-6)
+			end, function()
+				model:SetAttribute("WeaponSpeed", nil)
+				WeaponFixture.Rebuild()
+			end)
+		end)
+
+		it("respects AttackConstants.Windows.SyncToClipLength", function()
+			serveClip(0.9)
+			AttackWindows.Prefetch(BASIC_CLIP)
+			LiveTuningContract.withRestore(function()
+				AttackConstants.Windows.SyncToClipLength = false
+				expect((AttackCatalog.Get(DEFAULT_MOVE_ID) :: any).Definition.RecoverySeconds).to.be.near(0.14, 1e-6)
+			end, function()
+				AttackConstants.Windows.SyncToClipLength = true
+			end)
 		end)
 	end)
 

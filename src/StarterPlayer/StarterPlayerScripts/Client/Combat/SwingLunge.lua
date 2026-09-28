@@ -33,7 +33,7 @@
 
 	The number comes off the payload rather than out of this module because that is the value the
 	server really used, which since AttackConstants.Windows may have been read from the clip's own
-	AttackM<stage> marker instead of any hand-typed constant. A re-authored animation therefore moves
+	Hit/AttackM<stage> marker instead of any hand-typed constant. A re-authored animation therefore moves
 	the step with it. See Shared/Attack/AttackWindows.lua for the extraction, and note the failure mode
 	it implies: a clip whose marker is wrong now desynchronises the STEP as well as the hitbox, so
 	"the lunge fires at the wrong moment" is a reason to suspect the marker before suspecting this.

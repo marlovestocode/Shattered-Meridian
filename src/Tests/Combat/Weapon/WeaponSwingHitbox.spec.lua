@@ -14,8 +14,10 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local AttackCatalog = require(ServerScriptService.Server.Combat.AttackCatalog)
+local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
+local LiveTuningContract = require(ServerScriptService.Tests.TestHelpers.LiveTuningContract)
 local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
@@ -233,7 +235,7 @@ return function()
 			-- had touched the asset.
 			configure(WEAPON, { SpawnDelay = 0.2 })
 			serveMarker(0.10) -- clears the Cooldown bound: 0.10 + 0.22 + 0.14 = 0.46 >= 0.44
-			AttackWindows.Prefetch(ANIMATION_ID, "AttackM1")
+			AttackWindows.Prefetch(ANIMATION_ID)
 			expect((AttackCatalog.Get(BASIC_1) :: any).Definition.WindupSeconds).to.be.near(0.30, 1e-6)
 		end)
 
@@ -241,10 +243,18 @@ return function()
 			-- The bound guards the marker, and must judge it on the clip's own timing. Letting the delay
 			-- pad the sum would wave through a marker that genuinely does leave dead time after the
 			-- swing, on exactly the weapons that had a delay set.
+			--
+			-- The bound only applies while the clip's LENGTH is unknown (with it known, the swing is the
+			-- clip's length and the bound has nothing to guard), so clip syncing is switched off here.
 			configure(WEAPON, { SpawnDelay = 0.2 })
 			serveMarker(0.05) -- 0.05 + 0.22 + 0.14 = 0.41, under the 0.44 Cooldown: rejected
-			AttackWindows.Prefetch(ANIMATION_ID, "AttackM1")
-			expect((AttackCatalog.Get(BASIC_1) :: any).Definition.WindupSeconds).to.be.near(0.51, 1e-6)
+			AttackWindows.Prefetch(ANIMATION_ID)
+			LiveTuningContract.withRestore(function()
+				AttackConstants.Windows.SyncToClipLength = false
+				expect((AttackCatalog.Get(BASIC_1) :: any).Definition.WindupSeconds).to.be.near(0.51, 1e-6)
+			end, function()
+				AttackConstants.Windows.SyncToClipLength = true
+			end)
 		end)
 
 		it("applies to Heavy and Finisher too, which no marker ever touches", function()

@@ -110,6 +110,11 @@ end
 	  * PARRIED / TRADE -- nothing at all. DefenseSystem has already cancelled the attacker's swing and
 	    (for a parry) staggered them; the exchange has been settled. The result is still returned with
 	    its Kind intact so both clients get accurate feedback, but no resource moves.
+
+	  * EVADED -- nothing at all either, and unlike the two above the attacker's swing is NOT cancelled:
+	    it carries on and can still catch someone else. The defender was simply not there. Written as its
+	    own explicit branch below rather than left to fall through, so "an evade prices to zero" is a
+	    decision a reader can see and not an accident of the kind being unlisted.
 ]]
 function DamageResolver.Resolve(
 	kind: OutcomeKind,
@@ -148,6 +153,9 @@ function DamageResolver.Resolve(
 		if defenderStateAtContact == "Staggered" then
 			result.Damage = authoredDamage * comboScale * (1 - DefenseConstants.Stagger.MitigationMultiplier)
 		end
+	elseif kind == "Evaded" then
+		-- Deliberately empty: every field is already at its zero/nil default. See the header.
+		return result
 	end
 
 	return result

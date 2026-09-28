@@ -8,7 +8,7 @@
 
 	WHAT THIS LAYER IS FOR. The hitbox engine reports contacts and deliberately refuses to say what a
 	contact MEANS. This system is the first consumer of that signal: it decides what KIND of hit it
-	was -- clean, blocked, parried, traded, guard-broken, backstab -- and then stops. It emits a
+	was -- clean, blocked, parried, traded, guard-broken, backstab, evaded -- and then stops. It emits a
 	DefenseOutcome and applies no damage, no health, no knockback. The damage layer subscribes to
 	OnResolved exactly the way this subscribes to OnHit, and neither had to be rewritten to
 	accommodate the other.
@@ -101,6 +101,9 @@ type Registration = {
 	-- The DefenseState last actually written to the Humanoid Attribute, so publishState can skip the
 	-- write when Step re-asserts the same state it already published. See publishState's own header.
 	PublishedState: DefenseState?,
+	-- A guard press that arrived while the body was committed -- mid-swing or stunned -- and is being
+	-- held until it is free. See SetBlocking. Cleared by the release, or by Step raising the guard.
+	GuardDeferred: boolean,
 }
 
 local registrations: { [Model]: Registration } = {}
@@ -231,6 +234,7 @@ function DefenseSystem.RegisterCombatant(
 		ParryAnimationId = parryAnimationId or defaultParryAnimationId,
 		HoldsMovementLock = false,
 		PublishedState = nil,
+		GuardDeferred = false,
 	}
 	registration.Machine = DefenseStateMachine.New({
 		OnTransition = function(_from: DefenseState, to: DefenseState, _at: number)
@@ -303,6 +307,46 @@ end
 
 -- The block/parry input edge. Exposed as a function as well as being wired to the remote, so a bot
 -- can defend through exactly the same path a player does.
+-- Whether this body is committed to something a guard may not interrupt: its own swing (any phase the
+-- engine is still running -- windup, active or recovery) or a hitstun. Read from the engine directly
+-- (the layer below, already a dependency) and from the damage layer's HitstunUntil Attribute (the
+-- layer above, which this module may not require -- see that Attribute's own entry).
+--
+-- WHY THE GUARD WAITS FOR THE SWING, rather than cancelling it. Before this gate a guard could be
+-- raised mid-swing and both ran at once: the swing's hitbox stayed live while the body was blocking,
+-- and the client played the guard animation over the attack. Committing to a swing has to mean
+-- something, and the attack side already refuses the mirror image (a swing while guarding --
+-- DefenseStateMachine.CanAttack's "Guarding").
+--
+-- WHY THE GUARD WAITS FOR THE STUN. DamageConstants.Hitstun's own header promises a stunned combatant
+-- "reliably eats at least one more committed attack" -- a promise a guard raised inside the stun
+-- would break for every hit after the first, turning every combo into one hit and a block.
+local function bodyCommitted(registration: Registration, now: number): boolean
+	local combatantId = HitboxEngine.GetCombatantId(registration.Model)
+	if combatantId then
+		local attackState = HitboxEngine.GetAttackState(combatantId)
+		if attackState ~= nil and attackState ~= "Idle" then
+			return true
+		end
+	end
+	local stunnedUntil = registration.Humanoid:GetAttribute(Constants.Attributes.HitstunUntil)
+	return typeof(stunnedUntil) == "number" and now < stunnedUntil
+end
+
+-- The guard press itself, once every gate has passed -- shared by a press that arrives with the body
+-- free and by Step raising a press that was held (GuardDeferred).
+local function pressGuard(registration: Registration, now: number): ()
+	-- A weapon whose own parry clip carries no window falls back to the DEFAULT clip's window
+	-- rather than to no parry at all. That default is itself explicit (markers, or a
+	-- DefenseConstants.RegisteredParryWindows entry), and the boot validation already warned
+	-- about the unarmed clip -- so this is "the baseline timing until the animator marks this
+	-- clip", not a hidden constant. Without it, authoring a PARRY clip for a weapon silently
+	-- removed that weapon's parry.
+	local window = ParryWindows.Get(registration.ParryAnimationId)
+		or (if defaultParryAnimationId ~= "" then ParryWindows.Get(defaultParryAnimationId) else nil)
+	registration.Machine:Press(now, window, pingSecondsFor(registration.Model))
+end
+
 function DefenseSystem.SetBlocking(model: Model, blocking: boolean, now: number): ()
 	local registration = registrations[model]
 	if not registration then
@@ -321,11 +365,65 @@ function DefenseSystem.SetBlocking(model: Model, blocking: boolean, now: number)
 		if ParkourOwnership.OwnsBody(registration.Humanoid) then
 			return
 		end
-		local window = ParryWindows.Get(registration.ParryAnimationId)
-		registration.Machine:Press(now, window, pingSecondsFor(model))
+		-- HELD, NOT REFUSED. A player who presses guard a moment before their swing ends -- or while
+		-- still reeling -- gets the guard the instant they are free (Step), as long as the key is still
+		-- down. Refusing it outright would make the guard feel dropped at exactly the moment it matters.
+		if bodyCommitted(registration, now) then
+			registration.GuardDeferred = true
+			return
+		end
+		pressGuard(registration, now)
 	else
+		registration.GuardDeferred = false
 		registration.Machine:Release(now)
 	end
+end
+
+-- Opens this combatant's roll evade window (DefenseConstants.Evade), or refuses and says why. Public for
+-- the same reason SetBlocking is: a bot evades through exactly the path a player does. For a player it is
+-- reached from the composition root (Main.server.lua), which calls this when ParkourSystem accepts a Roll
+-- start -- so this system and ParkourSystem never require each other, and the trigger is the roll report
+-- the client already sends rather than a new remote.
+--
+-- BODY GATES HERE, POSTURE GATES ON THE MACHINE (DefenseStateMachine.BeginEvade), the same split as
+-- SetBlocking/Press:
+--   * Committed to a swing or reeling from a hit -- bodyCommitted, the rule the guard already waits on.
+--     No roll-cancelling out of your own swing, and no rolling out of a stun: DamageConstants.Hitstun's
+--     promise that a stunned combatant eats the next committed attack is exactly as broken by an evade
+--     as by a guard.
+--   * Grabbed, grabbing, or mounted. A held body is going where the grab sends it, a grabber's hands are
+--     full, and a body welded to a vessel station is not rolling anywhere.
+--
+-- A refusal changes nothing, and it does not refuse the ROLL -- the client's movement is its own. It
+-- refuses the evade frames, so a roll the server would not honour is a roll that gets hit. That is the
+-- correct failure for a client that skipped its own gates, and an honest client never reaches it: the
+-- same conditions are checked locally in StateSupport.CanRoll.
+function DefenseSystem.BeginEvade(model: Model, now: number): (boolean, string?)
+	local registration = registrations[model]
+	if not registration then
+		return false, "NotRegistered"
+	end
+	if bodyCommitted(registration, now) then
+		return false, "Committed"
+	end
+	local humanoid = registration.Humanoid
+	if
+		humanoid:GetAttribute(Constants.Attributes.Grabbed) == true
+		or humanoid:GetAttribute(Constants.Attributes.Grabbing) == true
+		or humanoid:GetAttribute(Constants.Attributes.Mounted) == true
+	then
+		return false, "Restrained"
+	end
+	local ok, reason = registration.Machine:BeginEvade(now, pingSecondsFor(model))
+	if ok then
+		-- A guard press held for later (SetBlocking's deferral) is dropped along with the raised guard the
+		-- machine just released: the player chose to roll instead, and raising the guard the moment the
+		-- roll ends would be a posture they never asked for on this press. Only on success -- a refused
+		-- evade leaves the body exactly as it was, deferred press included.
+		registration.GuardDeferred = false
+		debugLog("Evade opened", { model = model.Name })
+	end
+	return ok, reason
 end
 
 local function handleSetBlocking(player: Player, rawBlocking: unknown): ()
@@ -407,6 +505,7 @@ local function onHit(report: HitReport): ()
 		BlockHeld = machine:BlockHeldAt(at),
 		ParryLive = machine:IsParryLiveAt(at),
 		ParryConsumed = parryConsumedThisBatch[report.Target] == true,
+		Evading = machine:IsEvadingAt(at),
 	})
 
 	if result.ConsumesParry then
@@ -509,6 +608,18 @@ function DefenseSystem.Step(deltaTime: number, now: number): ()
 	-- arbitrated, or a whiff's recovery would be charged a frame late.
 	for _, registration in registrations do
 		local machine = registration.Machine
+		-- A guard held through a swing or a stun comes up the first frame the body is free -- and this
+		-- Step runs AFTER HitboxEngine.Step (Main.server.lua's boot order, asserted in Init), so a swing
+		-- that ended this frame is already Idle here. A traversal in the meantime keeps it waiting
+		-- rather than dropping it, the same "never strand the key" reasoning SetBlocking's release keeps.
+		if
+			registration.GuardDeferred
+			and not bodyCommitted(registration, now)
+			and not ParkourOwnership.OwnsBody(registration.Humanoid)
+		then
+			registration.GuardDeferred = false
+			pressGuard(registration, now)
+		end
 		machine:Update(now)
 		local state = machine:GetState()
 		-- Re-asserted every frame while the condition lasts -- see publishState's two-writer note.
@@ -542,12 +653,18 @@ end
 -- ATTACK GATING IS THIS LAYER'S JOB, not the engine's -- the engine stays ignorant of stagger, which
 -- is what keeps it standalone. The input layer consults this before HitboxEngine.RequestAttack.
 --
--- Nothing consumes it yet: the attack input layer went with Client/Combat/CombatClient.lua and has
--- not been rebuilt, so stagger's no-attack rule is correct here and unenforced in play until it is.
+-- Consumed by AttackRequestSystem.Throw (Server/Combat/Attack/AttackRequestSystem.lua) as the first
+-- of its three CanAttack-shaped gates -- stagger's no-attack rule is enforced in play.
 function DefenseSystem.CanAttack(model: Model): (boolean, string?)
 	local registration = registrations[model]
 	if not registration then
 		return true, nil
+	end
+	-- A guard key held through a swing or a stun is a guard, even before Step has raised it: the swing
+	-- that ends the commitment must not be followed by a fresh one ahead of the guard the player is
+	-- still holding the key for.
+	if registration.GuardDeferred then
+		return false, "Guarding"
 	end
 	return registration.Machine:CanAttack()
 end
@@ -709,6 +826,12 @@ function DefenseSystem.Init(): ()
 	-- Reads Workspace.Weapons at Init, which Main.server.lua has already populated by running
 	-- WeaponRoster.Start() before the combat stack boots. A weapon added to the folder after this
 	-- point is not swept -- the same boot-time-snapshot property WeaponRoster itself has.
+	-- Registered windows first, so the validation below reports them (and flags any that authored
+	-- markers have since shadowed). See DefenseConstants.RegisteredParryWindows for why this exists.
+	for animationId, window in DefenseConstants.RegisteredParryWindows do
+		ParryWindows.Register(animationId, window.Open, window.Close, window.RecoveryEnd)
+	end
+
 	local parryIds = WeaponDefenseAnimations.GetParryIds()
 	-- GetParryIds' own baseline is DefenseConstants.ParryAnimationId, which is what Main.server.lua
 	-- happens to pass to SetDefaultParryAnimation -- but this System's contract is that the default is

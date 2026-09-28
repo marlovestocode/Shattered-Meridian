@@ -155,6 +155,25 @@ local function applyGamepadSettings(): ()
 	Analog.SetSettings(gamepadSettings)
 end
 
+-- The live interface-preferences block. Same role as comfortSettings/gamepadSettings above.
+local uiSettings: Types.UISettings = {
+	Scale = Constants.Settings.UI.Defaults.Scale,
+}
+
+-- Unlike every other applier above, this one has no fixed consumer module to call into -- the thing it
+-- drives (the single ViewportScale multiplier UI/init.lua composes every surface's UIScale from) lives
+-- inside that module's own Fusion scope, not behind a public SetX function. UI.Mount() hands back a
+-- setter closing over that Value instead, and RestoreSettings below is handed THAT setter as its one
+-- parameter -- see this file's own RestoreSettings header for why every other applier needs no such
+-- thing (their consumers already exist before RestoreSettings runs; this one is created BY the same
+-- UI.Mount() call that RestoreSettings' caller already sequences after).
+local setUIScale: ((number) -> ())? = nil
+local function applyUISettings(): ()
+	if setUIScale then
+		setUIScale(uiSettings.Scale)
+	end
+end
+
 -- Autorun's own applier. A sibling to applyParkourSettings above rather than a line inside it, because
 -- Autorun lives on Types.PlayerSettings directly rather than in the nested Parkour block -- see that
 -- type's own note on why it is flat.
@@ -170,7 +189,12 @@ end
 -- blocked Main.client.lua well past the point CharacterCreationSystem's own onboarding flow already
 -- required a loaded profile), the server unconditionally has an answer ready -- see
 -- Constants.Settings.RemoteNames.GetSettings's own header for the full reasoning.
-function SettingsClient.RestoreSettings(): ()
+-- `setUIScaleParam`: the setter UI.Mount() returns for its own ViewportScale multiplier -- see
+-- uiSettings/applyUISettings' own header above for why this is a parameter rather than a module import
+-- like every other consumer here. Stored into the module-level setUIScale so Start(handle)'s own
+-- UIScaleChanged handler (a live drag on the panel, long after this call returns) can still reach it.
+function SettingsClient.RestoreSettings(setUIScaleParam: ((number) -> ())?): ()
+	setUIScale = setUIScaleParam
 	local getSettingsRemote = NetworkBridge.GetRemoteFunction(RemoteNames.GetSettings)
 	local ok, result = RemoteInvoker.Invoke(getSettingsRemote)
 
@@ -192,6 +216,7 @@ function SettingsClient.RestoreSettings(): ()
 			Parkour = parkourSettings,
 			Comfort = comfortSettings,
 			Gamepad = gamepadSettings,
+			UI = uiSettings,
 		}
 	end
 
@@ -302,10 +327,26 @@ function SettingsClient.RestoreSettings(): ()
 	end
 	applyGamepadSettings()
 
+	-- Same field-by-field decode and NaN-safe clamp as the Gamepad block directly above, simplified to
+	-- the one field this group has today. An older server that predates this block sends nothing, and
+	-- the fallback is this module's own default (today's ordinary size) rather than 0, which would
+	-- shrink the whole UI to nothing with no control left on screen to undo it.
+	local restoredUI = settings.UI
+	if typeof(restoredUI) == "table" then
+		local raw = restoredUI :: { [string]: any }
+		local bounds = Constants.Settings.UI.Bounds
+		local rawScale = raw.Scale
+		if typeof(rawScale) == "number" and rawScale == rawScale then
+			uiSettings = { Scale = math.clamp(rawScale, bounds.Scale.Min, bounds.Scale.Max) }
+		end
+	end
+	applyUISettings()
+
 	logger:info("Settings restored", {
 		autorun = autorunEnabled,
 		parkour = parkourSettings.Enabled,
 		cameraShake = comfortSettings.CameraShake,
+		uiScale = uiSettings.Scale,
 	})
 end
 
@@ -366,6 +407,7 @@ function SettingsClient.Start(handle: SettingsHandle, chrome: Chrome.ChromeHandl
 	-- the handle's), so this was purely a lying panel, which is the hardest version to notice.
 	handle.Comfort:set(table.clone(comfortSettings))
 	handle.Gamepad:set(table.clone(gamepadSettings))
+	handle.UI:set(table.clone(uiSettings))
 
 	local captureConnection: RBXScriptConnection? = nil
 	-- The capture's own entry on Shell/Chrome.lua's Escape stack, pushed ABOVE the panel's. Escape
@@ -588,6 +630,17 @@ function SettingsClient.Start(handle: SettingsHandle, chrome: Chrome.ChromeHandl
 
 		local updateParkourRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateParkour)
 		updateParkourRemote:FireServer("SprintMode", mode)
+	end)
+
+	-- Apply-then-persist, same order and same reasoning as GamepadNumberChanged above. The server
+	-- re-validates and clamps regardless of what is sent -- see SettingsSystem's UI_SETTING_FIELDS.
+	handle.UIScaleChanged:Connect(function(value: number)
+		uiSettings = { Scale = value }
+		handle.UI:set(table.clone(uiSettings))
+		applyUISettings()
+
+		local updateUIRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateUI)
+		updateUIRemote:FireServer("Scale", value)
 	end)
 
 	logger:debug("SettingsClient bindings connected")

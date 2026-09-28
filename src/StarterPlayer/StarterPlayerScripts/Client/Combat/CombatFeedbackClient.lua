@@ -54,9 +54,11 @@
 	with it stays inside the audio module, the same division of labour flashFor already keeps with
 	HitFlash.
 
-	AND NOW A FOURTH: HitStop.FreezeVictimMovement, the combat hit-stop. DEFENDER-ONLY, unlike the three
-	above -- there is no attacker-side freeze wired from here (see Constants.FX.HitStop's own comment on
-	why AttackerSeconds stays orphaned). Fired for exactly the three outcomes that grant
+	AND NOW A FOURTH: the combat hit-stop, in two halves. HitStop.FreezeExchange freezes the playing
+	animation of BOTH combatants on EVERY role's client (Clean/Backstab/GuardBroken, plus Parried as a
+	clash freeze, plus HeavyBonusSeconds for a Heavy move) -- the shared "the hit landed" stop.
+	HitStop.FreezeVictimMovement is DEFENDER-ONLY and stops the local body in place; it is fired for
+	exactly the three outcomes that grant
 	DamageConstants.Hitstun server-side (Clean, Backstab, GuardBroken): the freeze is a cosmetic stinger
 	riding alongside a lockout that is already real and already server-enforced (DamageSystem.CanAttack),
 	never a new source of truth about whether the victim is stunned. THIS is the module that has to fire
@@ -86,6 +88,8 @@ local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 
 local AttackInputClient = require(script.Parent.AttackInputClient)
+local LocalCombatState = require(script.Parent.LocalCombatState)
+local KnockbackClient = require(script.Parent.KnockbackClient)
 local CameraShake = require(script.Parent.Parent.FX.CameraShake)
 local CombatAudio = require(script.Parent.Parent.FX.CombatAudio)
 local CombatFeedbackModule = require(script.Parent.Parent.UI.Screens.CombatFeedback)
@@ -189,8 +193,9 @@ local HIT_FLASH_COLORS: { [string]: Color3 } = {
 }
 
 -- Victim-only, per HitFlash's own header -- fired on outcome.Defender's body regardless of which
--- participant's client is running this, since a Highlight reads the same for both. Unmapped for an
--- outcome with no entry above only in principle; every current OutcomeKind has one.
+-- participant's client is running this, since a Highlight reads the same for both. Evaded is the one
+-- OutcomeKind with no entry, deliberately: nothing touched the defender, and a hit-flash on a body the
+-- swing went through would say it had.
 local function flashFor(payload: CombatFeedback): ()
 	local color = HIT_FLASH_COLORS[payload.Kind]
 	if not color then
@@ -238,14 +243,71 @@ end
 -- instant this hit is one that put the LOCAL player into real, server-enforced hitstun -- see that
 -- function's own header for why nothing else in this codebase ever tells that client its swing was
 -- cut short otherwise.
+-- The shared pose-freeze of a hit-stop, on BOTH roles' clients (unlike the movement freeze above):
+-- the attacker's own body stopping on contact is half of what makes a hit feel heavy. Same outcome
+-- table as the victim freeze, plus a clash-freeze on a parry, plus the tuned heavy bonus for a Heavy
+-- move. See HitStop.FreezeExchange.
+local EXCHANGE_SECONDS_BY_KIND: { [string]: number } = {
+	Clean = Constants.FX.HitStop.VictimSeconds,
+	Backstab = Constants.FX.HitStop.PostureBreakSeconds,
+	GuardBroken = Constants.FX.HitStop.PostureBreakSeconds,
+	Parried = Constants.FX.HitStop.ParrySeconds,
+}
+
+local function freezeExchangeFor(payload: CombatFeedback): ()
+	local seconds = EXCHANGE_SECONDS_BY_KIND[payload.Kind]
+	if not seconds then
+		return
+	end
+	if typeof(payload.MoveId) == "string" and string.find(payload.MoveId, ":Heavy:", 1, true) then
+		seconds += Constants.FX.HitStop.HeavyBonusSeconds
+	end
+	HitStop.FreezeExchange(payload.Attacker, payload.Defender, seconds)
+end
+
+-- Victim-only, like the freeze above, and deliberately sequenced AFTER it: the launch the server put on
+-- this Defender copy starts once the freeze this same event just began has run out, because the freeze
+-- writes zero velocity every frame it holds and would erase a launch written any earlier. See
+-- KnockbackClient.lua's header for the shape of the launch itself.
+local function launchFor(payload: CombatFeedback): ()
+	if payload.Role ~= "Defender" or typeof(payload.Knockback) ~= "Vector3" then
+		return
+	end
+	KnockbackClient.Launch(payload.Knockback :: Vector3, FREEZE_SECONDS_BY_KIND[payload.Kind] or 0)
+end
+
+-- Outcomes that cancel the ATTACKER's own swing server-side: DefenseSystem.applyContact calls
+-- HitboxEngine.CancelAttack on a parried attacker ("Parried") and on both sides of a trade ("Traded").
+local ATTACKER_SWING_CANCELLED_BY_KIND: { [string]: boolean } = {
+	Parried = true,
+	Trade = true,
+}
+
+-- Keeps this client's own swing, and its record of being stunned, in step with what the server just
+-- did to this player -- the local mirror Client/Combat/LocalCombatState.lua holds for the swing
+-- prediction (AttackInputClient) and the held guard (DefenseClient).
 local function cancelSwingFor(payload: CombatFeedback): ()
-	if payload.Role ~= "Defender" then
-		return
+	if payload.Role == "Defender" then
+		if not FREEZE_SECONDS_BY_KIND[payload.Kind] then
+			return
+		end
+		-- The same three kinds DamageResolver grants DamageConstants.Hitstun for -- recorded so no swing
+		-- is predicted, and no guard animation started, while the server is refusing both.
+		LocalCombatState.NoteHitstun(os.clock() + DamageConstants.Hitstun.Seconds)
+		AttackInputClient.CancelSwing()
+	elseif ATTACKER_SWING_CANCELLED_BY_KIND[payload.Kind] then
+		-- Without this a parried swing kept playing to its end on the attacker's screen while the
+		-- server had already stopped it and staggered them.
+		AttackInputClient.CancelSwing()
 	end
-	if not FREEZE_SECONDS_BY_KIND[payload.Kind] then
-		return
+end
+
+-- The attacker's landed combo depth rides on every Combat_Feedback it receives, and the swing
+-- prediction needs it to know when the Basic string tips into the Finisher.
+local function noteComboFor(payload: CombatFeedback): ()
+	if payload.Role == "Attacker" and typeof(payload.ComboStage) == "number" then
+		AttackInputClient.NoteLandedCombo(payload.ComboStage)
 	end
-	AttackInputClient.CancelSwing()
 end
 
 -- Projects the world contact onto the screen. Returns nil when the contact is behind the camera or
@@ -324,8 +386,11 @@ local function onFeedback(raw: unknown): ()
 	-- header. It resolves the weapon itself; this module hands it the participant and nothing more.
 	CombatAudio.PlayImpact(payload.Kind, payload.Defender)
 	flashFor(payload)
+	freezeExchangeFor(payload)
 	freezeVictimFor(payload)
+	launchFor(payload)
 	cancelSwingFor(payload)
+	noteComboFor(payload)
 
 	local surfaces = handle
 	if surfaces then

@@ -170,8 +170,10 @@ export type ChromeHandle = {
 	Mode: Fusion.Computed<Mode>,
 	-- 0..1, a GOAL rather than an animated value -- see the tween note in this file's header.
 	Dim: Fusion.Computed<number>,
-	-- Whether the ambient corner tiles are on screen at all.
+	-- Whether the ambient corner tiles are on screen at all. Playing only.
 	AmbientVisible: Fusion.Computed<boolean>,
+	-- Whether the hotbar dock is on screen. Everything but Menu.
+	DockVisible: Fusion.Computed<boolean>,
 
 	-- Puts `close` on top of the Escape stack. `name` is for the log and for the specs; it is not a
 	-- key, and two entries may share one. Use BindEscape below unless the screen's open state is not
@@ -261,9 +263,21 @@ function Chrome.New(scope: Scope, props: ChromeProps): ChromeHandle
 		Dim = scope:Computed(function(use): number
 			return if use(mode) == "Menu" then 1 else 0
 		end),
-		-- The corner readouts describe the world around the player. A dead player is not in it.
+		-- The corner readouts describe the world around the player, and they are only worth screen
+		-- space while the player is IN it: a dead player is not, and a player reading a panel has taken
+		-- their eyes off it. So they leave in both -- out-of-focus UI disappears rather than sitting
+		-- dimmed behind the panel (the scrim still dims the WORLD behind a panel; there is just no HUD
+		-- left under it to dim).
 		AmbientVisible = scope:Computed(function(use): boolean
-			return use(mode) ~= "Dead"
+			return use(mode) == "Playing"
+		end),
+		-- The hotbar dock is the player's own controls, so it follows a different rule from the corners:
+		-- it survives Dead (an empty health bar is what a dead player is meant to be looking at -- see
+		-- Shell/Regions.lua's BottomCentre note) but leaves behind a panel, where it would only compete
+		-- with the thing the player opened. Read by Screens/HUD, which carries the exit on
+		-- Components/Reveal.lua rather than a bare Visible binding, so it recedes instead of blinking out.
+		DockVisible = scope:Computed(function(use): boolean
+			return use(mode) ~= "Menu"
 		end),
 
 		PushEscape = function(_self, name: string, close: () -> ()): EscapeHandle

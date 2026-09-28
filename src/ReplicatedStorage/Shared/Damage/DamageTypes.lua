@@ -57,6 +57,10 @@ export type AttackCatalogEntry = {
 	-- being split into two lookups. A second lookup at throw time could straddle a Move Editor edit
 	-- and pair one version's timing with another version's animation.
 	AnimationId: string,
+	-- The speed the clip must play at for Definition's timeline to line up with it -- the weapon's own
+	-- WeaponSpeed, 1 for anything without one. Same "carried for the layer above" reasoning again: it
+	-- was used to build Definition's timings, so it has to ship with them.
+	PlaybackSpeed: number,
 }
 
 -- How deep into an unbroken string an attacker is. Landing-based, and NOT the same counter as "which
@@ -96,6 +100,12 @@ export type DamageResult = {
 	-- GrabSystem.lua is the eventual consumer, subscribing to DamageSystem.OnApplied rather than this
 	-- layer reaching into it. Set in the same Clean/Backstab/GuardBroken branches Knockback is.
 	Grab: MoveTypes.MoveGrabConfig?,
+	-- The world-space launch this hit gives the defender, or nil. NOT set by DamageResolver, which has no
+	-- positions -- DamageSystem computes it from Knockback above and both combatants' roots
+	-- (Shared/Damage/Knockback.LaunchVelocity) and writes it here BEFORE OnApplied fires, so every
+	-- subscriber reads the one launch that was actually applied. Always nil when Grab is set: a grab is
+	-- what happens INSTEAD of ordinary knockback (GrabSystem.lua's header).
+	Launch: Vector3?,
 }
 
 -- Fired to both participants once per resolved contact. Everything each side needs to present the
@@ -118,6 +128,11 @@ export type CombatFeedback = {
 	-- reaction animation per move rather than per outcome kind.
 	MoveId: string,
 	ContactPosition: Vector3,
+	-- The launch to apply to the RECEIVING client's own body -- set on the Defender copy only, and only
+	-- when the defender is a player (a server-owned body is launched on the server). Carried on this
+	-- event rather than a remote of its own because the defender's client must start it AFTER the
+	-- hit-stop freeze this same event triggers, and two remotes have no ordering guarantee.
+	Knockback: Vector3?,
 }
 
 return DamageTypes

@@ -15,16 +15,13 @@
 	carries the id) with no stage (bloodlineStageProgress has no entry) -- see that field's own header
 	in Types.lua for the contract this upholds.
 
-	INTERIM DISPATCH NOTE, mirroring MeridianSystem.lua's own header verbatim in spirit:
-	software-architecture.md's documented flow is CombatSystem -> RewardSystem -> ProgressionSystem ->
-	BloodlineSystem -- both RewardSystem and ProgressionSystem are still empty Init()s. Init() below
-	subscribes directly to GameplayEvents.OnPlayerKilled for a first-pass awakening/advancement
-	trigger on every confirmed PvP kill, the same interim shortcut MeridianSystem/RivalrySystem/
-	BountySystem already took for the same reason (docs/architecture/2026-08-audit.md). This is a
-	known, documented gap, not a permanent design decision: once RewardSystem/ProgressionSystem exist,
-	THEY should own deciding fight-to-grow eligibility and call Awaken/AdvanceStage below -- this
-	System's direct subscription should be removed at that point, not left as a second, competing
-	trigger path.
+	INTERIM DISPATCH NOTE: Init() below subscribes directly to GameplayEvents.PlayerKilled for stage
+	advancement on every confirmed, attributed PvP kill. RewardSystem and ProgressionSystem ARE real now
+	(2026-09-28) and Meridian XP already flows through them; this System is the next component to move
+	onto that spine (a "BloodlineStage" reward kind routed to a public advance API here), and its direct
+	subscription must be removed in that same change, not left as a second, competing trigger path.
+	Deferred rather than done because it changes WHEN a stage-up is judged legitimate, which is a
+	product decision -- docs/architecture/2026-09-28-progression-spine-audit.md.
 
 	STAGE ADVANCEMENT REUSES THE SAME TRIGGER AS AWAKENING, deliberately, rather than inventing a
 	second progression currency: each bloodline's AwakeningCondition (Kind + Params) is the single

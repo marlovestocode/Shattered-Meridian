@@ -101,6 +101,7 @@ local Panel = require(script.Parent.Parent.Components.Panel)
 local Divider = require(script.Parent.Parent.Components.Divider)
 local Inset = require(script.Parent.Parent.Components.Inset)
 local Stack = require(script.Parent.Parent.Components.Stack)
+local Reveal = require(script.Parent.Parent.Components.Reveal)
 local ModuleWell = require(script.Parent.Parent.Components.ModuleWell)
 local VitalIcon = require(script.Parent.Parent.Components.VitalIcon)
 local AbilitySlot = require(script.Parent.Parent.Components.AbilitySlot)
@@ -141,6 +142,11 @@ local LEGEND_ACTIONS: { { Action: Types.KeybindAction, Text: string } } = {
 -- announces a permanent progression milestone that may have arrived seconds after the kill that
 -- earned it. It still self-clears rather than latching -- a tier-up is a moment, not a mode.
 local TIER_PROMOTION_HOLD_SECONDS = 2.5
+
+-- How long TierBadge's readout shows "+N" after a Meridian XP grant before returning to the percent.
+-- Long enough to read a number glanced at mid-fight; short enough that two kills a few seconds apart
+-- each get their own read (a second grant restarts it with the new amount).
+local XP_GAIN_HOLD_SECONDS = 2
 
 -- The seam between two modules. 60% of the dock's own content height, which is the tier plate's --
 -- a full-height rule reads as a wall between two panels rather than as a seam within one.
@@ -236,7 +242,18 @@ end
 --
 -- Optional: passing nothing gives the bare dock, byte-identical to what it was before the island
 -- existed, which is what Tests/UI/Hotbar.spec.lua's existing cases mount.
-function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsland.ArmamentState?): Frame
+--
+-- `visible` is Shell/Chrome.lua's DockVisible, passed in by UI/init.lua: whether the dock should be on
+-- screen at all (it steps out while a panel is open). Optional -- omitted, the dock is always up, which
+-- every spec that mounts it bare relies on. The exit and entrance are Components/Reveal.lua's, the one
+-- every ambient tile wears, for the same reason: BottomCentre's UIListLayout owns this tile's
+-- Position, so the motion has to be scale, never a slide.
+function HUD.Mount(
+	scope: Scope,
+	clientState: ClientState,
+	armament: ArmamentIsland.ArmamentState?,
+	visible: Fusion.UsedAs<boolean>?
+): Frame
 	local abilitySlots = {}
 	-- One reactive State Value per slot, seeded from whatever's already bound this session (an admin
 	-- who bound a move, then closed and reopened the Move Editor, shouldn't see every slot flash back
@@ -478,6 +495,27 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 		end)
 	end)
 
+	-- The one-shot drive behind TierBadge's "+N" readout, the same consumer-owned, generation-guarded
+	-- shape as the promotion flare above: ClientState only knows a grant ARRIVED, the badge only knows
+	-- how to render a number, and the hold between them lives here. A login sync never sets
+	-- MeridianXPGain, so this never claims a gain for a number the player merely learned.
+	local xpGainShown: Fusion.Value<number?> = scope:Value(nil :: number?)
+	local xpGainGeneration = 0
+	scope:Observer(clientState.MeridianXPGain):onChange(function()
+		local gain = Fusion.peek(clientState.MeridianXPGain)
+		if gain == nil then
+			return
+		end
+		xpGainGeneration += 1
+		local generation = xpGainGeneration
+		xpGainShown:set(gain.Amount)
+		task.delay(XP_GAIN_HOLD_SECONDS, function()
+			if xpGainGeneration == generation then
+				xpGainShown:set(nil)
+			end
+		end)
+	end)
+
 	local dock = Panel(scope, {
 		Name = "HotbarDock",
 		LayoutOrder = 4,
@@ -542,6 +580,7 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 						TierNextXP = clientState.TierNextXP,
 						MeridianXP = clientState.MeridianXP,
 						PromotionPulse = promotionPulse,
+						Gain = xpGainShown,
 					}),
 					separator(scope, 2),
 					moduleGroup(scope, "Vitals", 3, Tokens.Space.M, {
@@ -706,10 +745,18 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 	-- and not a style preference: BottomCentre's UIListLayout overwrites a child's Position on every
 	-- layout pass, so a tile that set one would have it silently discarded. The bottom margin that
 	-- used to live on this Position is BottomCentre's edge inset now.
+	-- Deeper than Reveal's default whisper: the dock is the one tile a player is always looking at, so
+	-- its exit should read as a deliberate drop-away when a panel opens, not a 2% flinch followed by a
+	-- pop. Still a scale, never a slide (see above).
+	local reveal = Reveal(scope, { Visible = if visible ~= nil then visible else true, Depth = 0.08 })
+
 	return Stack.New(scope, {
 		Name = "Hotbar",
 		Size = UDim2.fromOffset(0, 0),
 		AutomaticSize = Enum.AutomaticSize.XY,
+		-- Stays true through the exit so the scale has something on screen to carry out, then drops the
+		-- tile from BottomCentre entirely (a hidden tile takes no height -- Reveal's collapse contract).
+		Visible = reveal.Mounted,
 		AlignX = Enum.HorizontalAlignment.Center,
 		-- ZERO, and every band owns the gap BENEATH itself instead. A UIListLayout's Padding applies
 		-- between items regardless of either item's actual size, and BountyMarkedBadge collapses to
@@ -755,6 +802,9 @@ function HUD.Mount(scope: Scope, clientState: ClientState, armament: ArmamentIsl
 					KeyLegend(scope, { Entries = legendEntries }),
 				},
 			}),
+			-- Not a GuiObject, so the Stack's UIListLayout ignores it; it scales the whole dock as it
+			-- recedes and returns.
+			reveal.Scale,
 		},
 	}) :: Frame
 end

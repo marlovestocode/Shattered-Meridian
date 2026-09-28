@@ -164,6 +164,75 @@ DamageConstants.AttackerLunge = {
 	DurationSeconds = 0.08,
 }
 
+-- Kill credit ---------------------------------------------------------------------------------------
+
+-- Read by Server/Systems/PlayerDeathSystem.lua, which owns kill attribution -- NOT by this layer, which
+-- still attributes nothing (see DamageSystem.lua's header). It lives here rather than beside its reader
+-- because what it bounds is a property of damage: how long a blow this layer applied stays the
+-- explanation for a death that follows it.
+DamageConstants.KillCredit = {
+	-- How long after a player last removed health from another player that player still counts as the
+	-- killer. A death inside the window credits them; a death after it is unattributed.
+	--
+	-- LONGER THAN ZERO BECAUSE MOST PvP DEATHS ARE NOT THE BLOW ITSELF. A lethal hit dies on the frame it
+	-- lands and needs no window at all -- but a player knocked off a ledge, into the void, or who bleeds
+	-- out on a hazard mid-fight died OF that fight, and fight-to-grow owes the attacker for it.
+	--
+	-- SHORT BECAUSE AN ESCAPE MUST END THE DEBT. Someone who got away and fell off a cliff unrelated to
+	-- anything thirty seconds later did not lose a fight, and a window that long would sell progression
+	-- to whoever last chipped them. 10s covers a knock-off's fall and a short chase; it is a starting
+	-- point to tune against playtest deaths, not a derived number.
+	--
+	-- MUST STAY <= EngagementConstants.TagDurationSeconds (30): a credited death then always lands
+	-- inside a live combat tag, so "who killed me" can never name someone the HUD had already stopped
+	-- calling your opponent. Tests/Progression/PlayerDeathSystem.spec.lua asserts it.
+	WindowSeconds = 10,
+}
+
+-- Knockback -----------------------------------------------------------------------------------------
+
+-- How a move's authored knockback (MoveTypes.MoveKnockback, per move in the Move Editor) becomes a
+-- launch. The NUMBERS of a knock stay authored per move -- as with damage, a knock strength here would
+-- be a second authority competing with the editor. What lives here is what no single move can own:
+-- the safety bounds on any launch, how the defender's client holds it, and the anti-cheat budgets.
+DamageConstants.Knockback = {
+	-- Master switch. Off returns every hit to "resolved, applied by nothing".
+	Enabled = true,
+	-- Ceilings on any launch, whatever a move authored. A mis-typed 900 in the Move Editor should knock
+	-- someone across an arena, not out of the map. Roblox gravity is 196.2 studs/s^2, so 70 up is a
+	-- ~12.5 stud apex -- a real launch, well short of throwing anyone onto a roof.
+	MaxHorizontalVelocity = 90,
+	MaxUpVelocity = 70,
+	-- Seconds the defender's client keeps writing the HORIZONTAL part of the launch, decaying linearly
+	-- to nothing (Client/Combat/KnockbackClient.lua). Needed because a grounded Humanoid's own walk
+	-- controller drags horizontal velocity back toward its input within a couple of frames -- a single
+	-- write would read as a flinch, not a knock. The vertical part is written once and left to gravity.
+	HoldSeconds = 0.18,
+	-- How long after a launch a player's movement is allowed to look like it (Attributes.KnockbackUntil).
+	-- Longer than HoldSeconds plus a network round trip plus an apex's fall, so a parkour report that
+	-- spans an honest launch never counts toward the cheater flag.
+	MovementAllowanceSeconds = 2,
+	-- The anti-knockback audit (Server/Combat/Damage/KnockbackAudit.lua): after launching a PLAYER, the
+	-- server watches that body's replicated velocity; a client that honoured the launch shows speed
+	-- along its direction at some sample, one that ignored it does not.
+	Audit = {
+		Enabled = true,
+		-- Launches weaker than this horizontally are not audited: below it an honest knock and a player
+		-- simply running (RunConstants tops out near 48) cannot be told apart.
+		MinHorizontalVelocity = 30,
+		-- Seconds of samples after the launch. Covers the client's hit-stop freeze (<= 0.14s), the
+		-- round trip for the launch to arrive and its result to replicate back, with room to spare.
+		SampleSeconds = 1.25,
+		-- Pass when the best sample's speed along the launch direction reaches this fraction of the
+		-- launch's horizontal speed.
+		ComplianceFraction = 0.4,
+		-- Flag through ModerationSystem ("System" source, once per session) after this many failed
+		-- audits within WindowSeconds -- a pattern, never one lost packet.
+		FailuresBeforeFlag = 6,
+		WindowSeconds = 120,
+	},
+}
+
 -- Network -------------------------------------------------------------------------------------------
 
 DamageConstants.Network = {

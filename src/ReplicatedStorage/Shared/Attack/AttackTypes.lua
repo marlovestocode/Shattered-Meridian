@@ -94,6 +94,10 @@ export type AttackStartedPayload = {
 	-- DefaultMoveRegistry's header). Sent rather than looked up client-side because the Move Editor
 	-- can change it at runtime, and a client cache would serve the previous clip until rejoin.
 	AnimationId: string,
+	-- The speed to play AnimationId at. The server built Windup/Active/Recovery against the clip's real
+	-- length at THIS speed (AttackCatalog.Get), so playing it at any other speed puts the hit frame
+	-- somewhere the hitbox is not. The weapon's own WeaponSpeed; 1 for anything without one.
+	PlaybackSpeed: number,
 }
 
 -- Server -> owner, on every change to which weapon their strings come from. Its own event rather

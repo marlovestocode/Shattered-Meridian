@@ -62,6 +62,7 @@ export type OutcomeKind =
 	| "Backstab" -- blocking, but struck from the rear hemisphere
 	| "Parried" -- landed inside the defender's live parry window
 	| "Trade" -- both combatants parried each other in the same batch
+	| "Evaded" -- landed inside the defender's roll evade window (DefenseConstants.Evade)
 
 -- The two authored times that define a parry, plus the recovery a whiff costs.
 --
@@ -125,6 +126,10 @@ export type ResolveInput = {
 	-- True once something earlier in this same batch has already consumed the defender's parry.
 	-- Being surrounded is supposed to be dangerous: one window stops one attack.
 	ParryConsumed: boolean,
+	-- Whether the contact landed inside the defender's roll evade window
+	-- (DefenseStateMachine.IsEvadingAt). Optional so a caller that predates evasion -- every existing
+	-- resolver spec builds this table by hand -- reads as "not evading" rather than failing to typecheck.
+	Evading: boolean?,
 }
 
 -- What it returns. Kind plus the guard arithmetic, so the caller applies rather than recomputes.

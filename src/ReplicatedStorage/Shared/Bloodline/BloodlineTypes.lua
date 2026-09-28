@@ -11,8 +11,8 @@
 	sharing only KitAbilityDefinition (Shared/Kit/KitTypes.lua).
 
 	Does not own: awakening/stage-advancement triggering (BloodlineSystem's own interim on-kill
-	dispatch, mirroring MeridianSystem.lua's existing GameplayEvents.OnPlayerKilled pattern -- see
-	the Race Traits + Bloodline Abilities plan's section 4), persistence
+	dispatch off GameplayEvents.PlayerKilled -- not yet routed through RewardSystem/ProgressionSystem;
+	see the Race Traits + Bloodline Abilities plan's section 4), persistence
 	(Types.PlayerProfile.bloodlineIds already exists; this plan adds bloodlineStageProgress alongside
 	it), or the editor that authors these (Server/Systems/KitEditorSystem.lua).
 ]]
@@ -25,8 +25,9 @@ local BloodlineTypes = {}
 
 -- Open string Kind (not a closed union) because a bloodline's awakening/stage-advancement trigger is
 -- a per-content decision, not a fixed roster this file can enumerate ahead of time -- v1 ships
--- exactly one, "OnPlayerKilled", reusing GameplayEvents.OnPlayerKilled the same interim way
--- MeridianSystem.lua already does. Params carries whatever numbers that Kind needs to interpret --
+-- exactly one, "OnPlayerKilled", fed by BloodlineSystem's interim GameplayEvents.PlayerKilled
+-- subscription (MeridianSystem, which it used to mirror, now receives kills through the
+-- RewardSystem -> ProgressionSystem spine instead). Params carries whatever numbers that Kind needs to interpret --
 -- e.g. a kill-count threshold for a first awakening, additional-kills-since-this-stage for
 -- advancement, or a harder threshold for the Human-Ascension case world-bible.md's "contested
 -- authority" framing describes -- so a new Kind never needs a new top-level field on this struct.

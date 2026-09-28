@@ -191,6 +191,14 @@ local Sliding: ParkourTypes.StateDefinition = {
 			SLIDE.MaxSpeed,
 			context.DeltaTime
 		)
+		-- THE CEILING CRAWL -- see SLIDE.CrawlSpeed. Every ending exit below refuses while something is
+		-- overhead, so a slide friction had run down to zero under a dead-end ceiling used to sit there
+		-- for good: nothing moved the body, so the ceiling never cleared, so nothing ended the slide. With
+		-- a direction held it now keeps crawling at this floor (steering, below, aims it); with none, it
+		-- waits for the player rather than dragging them anywhere.
+		if not context.CeilingClear and StateSupport.HasMoveIntent(context) then
+			context.Momentum = math.max(context.Momentum, SLIDE.CrawlSpeed)
+		end
 
 		-- Limited steering: enough that a slide can be aimed, far short of enough that it stops
 		-- reading as committed.
@@ -235,17 +243,18 @@ local Sliding: ParkourTypes.StateDefinition = {
 			return "Jumping"
 		end
 
-		-- EXIT 2: roll out. Rolling's own CanEnter re-checks its cooldown and allowed-from list, so
-		-- this only has to notice the input.
+		-- EXIT 2: roll out. A route-1 transition, applied WITHOUT consulting Rolling.CanEnter
+		-- (StateMachine.Update -- the caller is asserting, not asking), so it asks the same predicate
+		-- Rolling.CanEnter does: StateSupport.CanRoll, cooldown and combat gates included.
 		--
-		-- The combat gate is the exception it cannot re-check: this is a route-1 transition, applied
-		-- without consulting Rolling.CanEnter at all (StateMachine.Update -- the caller is asserting,
-		-- not asking), so the gate has to be asked here or a slide would be a way to roll in combat
-		-- that a standing player does not have. The forced-slope entries INTO this state
-		-- (Idle/Walking/Sprinting.Update) are deliberately NOT gated the same way -- a slope too steep
-		-- to stand on takes the character whether they asked or not, and refusing it in combat would
-		-- leave them standing on a surface the framework has already decided is unstandable.
-		if InputBuffer.PeekRoll(context.Now) and not StateSupport.CombatBlocks(context, "Rolling") then
+		-- This comment used to claim Rolling's CanEnter "re-checks its cooldown and allowed-from list, so
+		-- this only has to notice the input". It never did -- route 1 skips CanEnter entirely -- and this
+		-- exit asked only the combat gate, so a slide was a way to roll that ignored the roll's cooldown.
+		-- The forced-slope entries INTO this state (Idle/Walking/Sprinting.Update) are deliberately NOT
+		-- gated the same way -- a slope too steep to stand on takes the character whether they asked or
+		-- not, and refusing it in combat would leave them standing on a surface the framework has already
+		-- decided is unstandable.
+		if StateSupport.CanRoll(context) then
 			context.Momentum *= SLIDE.RollOutRetainFraction
 			return "Rolling"
 		end
