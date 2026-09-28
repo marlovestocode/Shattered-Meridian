@@ -381,10 +381,7 @@ local DebugConstants = {
 			-- against the rebuilt HitboxEngine/DefenseSystem stack, not the deleted CombatSystem's own
 			-- training dummy. SpawnDummy is the same name that module's own SpawnDummy action used
 			-- (never renamed -- this is the direct successor to that action, not a new feature sharing
-			-- an old label), reused here rather than minted fresh. SpawnTrainingBot stays UNUSED and
-			-- orphaned -- an AI-controlled training bot is a materially bigger feature that nothing in
-			-- the rebuilt stack has rebuilt yet (its tunables were deleted with TrainingBotSystem.lua
-			-- since neither ever had a caller; re-author them if this gets rebuilt).
+			-- an old label), reused here rather than minted fresh.
 			SpawnDummy = "DevMenu_SpawnDummy",
 			-- Clears every active debug dummy at once -- the Spawn tab's companion to SpawnDummy, so a
 			-- tester can reset the training area without waiting out MaxActive eviction one dummy at a
@@ -398,7 +395,13 @@ local DebugConstants = {
 			-- "never let a joining admin's client guess a server-wide toggle's truth" reasoning
 			-- GetHitboxDebug already establishes for the swing-volume visualiser.
 			GetDebugDummyState = "DevMenu_GetDebugDummyState",
+			-- The AI sparring partner (Server/Combat/TrainingBot/TrainingBotSystem.lua), rebuilt
+			-- 2026-09-28 against the four-layer stack. SpawnTrainingBot is the old action's name, re-owned
+			-- rather than re-minted, now carrying (style, difficulty) -- see
+			-- Shared/TrainingBot/TrainingBotConstants.lua for both lists. DespawnTrainingBots clears every
+			-- active bot at once, the same companion role DespawnAllDebugDummies plays for the dummy.
 			SpawnTrainingBot = "DevMenu_SpawnTrainingBot",
+			DespawnTrainingBots = "DevMenu_DespawnTrainingBots",
 			-- Blimp Fuel System's dev/test convenience (Server/Systems/ResourceGatheringSystem.
 			-- SpawnDebugNode) -- spawns one tagged CoalDeposit/WaterSource Part near the requesting
 			-- admin, the same "spawn near me" shape SpawnDummy above already uses, so a tester can

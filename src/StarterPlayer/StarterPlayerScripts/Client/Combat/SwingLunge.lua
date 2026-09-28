@@ -38,14 +38,13 @@
 	it implies: a clip whose marker is wrong now desynchronises the STEP as well as the hitbox, so
 	"the lunge fires at the wrong moment" is a reason to suspect the marker before suspecting this.
 
-	NOTHING CANCELS A SCHEDULED STEP TODAY, and the delay is what makes that worth stating. A swing
-	interrupted during its windup -- the attacker taken into hitstun, DamageSystem calling
-	cancelSwingOf -- still steps when its timer comes up, because the attack layer publishes no
-	cancellation to the owning client at all (there is no Attack_Cancelled remote, and no hitstun
-	Attribute on Constants.Attributes for one to be read from). The visible cost is bounded: an
-	interrupted attacker slides their authored distance once, and the per-frame guards below still stop
-	it dead if they are killed or leave the ground. Closing it properly means the attack layer growing
-	an "this swing is over" signal, which is that layer's call and not something to fake from here.
+	A CANCELLED SWING CANCELS ITS STEP. AttackInputClient.OnSwingCancelled fires for every early end
+	of a swing this client started -- the server's Attack_Cancelled for a feint, the hitstun/parry cut
+	CombatFeedbackClient infers, and a prediction the server never confirmed -- and drops the pending
+	window, so a feinted heavy does not lurch forward on the beat its strike would have landed. A
+	step already moving when the cut arrives is dropped too: the per-frame guards below still stop it
+	dead if the body is killed or leaves the ground, but a swing that no longer exists has no reason to
+	finish its step.
 
 	NOT PREDICTION, and the distinction is the same one AttackInputClient draws for its FOV punch.
 	This claims no hit, moves no hitbox and reverses nothing. It walks the character a couple of studs
@@ -119,6 +118,7 @@ local window: Window? = nil
 local started = false
 local heartbeatConnection: RBXScriptConnection? = nil
 local startedDisconnect: (() -> ())? = nil
+local cancelledDisconnect: (() -> ())? = nil
 
 -- Speed at `elapsed` seconds into a step that covers `distanceStuds` in `durationSeconds`.
 --
@@ -282,6 +282,9 @@ function SwingLunge.Start(): ()
 	started = true
 
 	startedDisconnect = AttackInputClient.OnAttackStarted(onAttackStarted)
+	cancelledDisconnect = AttackInputClient.OnSwingCancelled(function()
+		window = nil
+	end)
 	-- One persistent connection, gated on `window` rather than connected per swing: a per-swing
 	-- connection is one respawn away from being leaked, and the idle cost of this one is a nil check.
 	heartbeatConnection = RunService.Heartbeat:Connect(onHeartbeat)
@@ -298,6 +301,10 @@ function SwingLunge.Stop(): ()
 	if startedDisconnect then
 		startedDisconnect()
 		startedDisconnect = nil
+	end
+	if cancelledDisconnect then
+		cancelledDisconnect()
+		cancelledDisconnect = nil
 	end
 	if heartbeatConnection then
 		heartbeatConnection:Disconnect()

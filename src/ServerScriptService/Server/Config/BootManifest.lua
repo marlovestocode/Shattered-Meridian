@@ -64,6 +64,7 @@ local DeathConstants = require(ReplicatedStorage.Shared.Death.DeathConstants)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
 local EngagementConstants = require(ReplicatedStorage.Shared.Engagement.EngagementConstants)
+local EnvironmentConstants = require(ReplicatedStorage.Shared.Combat.EnvironmentConstants)
 local GatheringConstants = require(ReplicatedStorage.Shared.Gathering.GatheringConstants)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -109,12 +110,12 @@ local function namesExcept(source: { [string]: string }, excluded: { string }): 
 	return names
 end
 
--- Removed with the old combat system, and never re-owned: the Dev Menu's three combat-target actions
--- plus its own Announcement RemoteEvent's odd sibling, and the Move Editor's two "test on a dummy"
+-- Removed with the old combat system, and never re-owned: the Dev Menu's two combat-target actions
+-- (a third, SpawnTrainingBot, was re-owned by the rebuilt Server/Combat/TrainingBot on 2026-09-28) plus its own Announcement RemoteEvent's odd sibling, and the Move Editor's two "test on a dummy"
 -- calls (see MoveEditorClient.lua's own header on that removal). Their names are still in the
 -- Constants tables, so without this list the boot check below would report four-plus phantom missing
 -- remotes on every healthy server.
-local DEV_MENU_RETIRED = { "ResetTargetCombatState", "SetTargetHealth", "SpawnTrainingBot" }
+local DEV_MENU_RETIRED = { "ResetTargetCombatState", "SetTargetHealth" }
 local MOVE_EDITOR_RETIRED = { "TestFireMove", "SpawnPreviewDummy" }
 
 -- Ordered to MIRROR Main.server.lua's boot sequence, purely so the two files read against each other.
@@ -241,6 +242,13 @@ local ENTRIES: { BootEntry } = {
 	-- The anti-knockback detector, a third OnApplied sibling. Owns no remote: the launch itself rides
 	-- DamageSystem's existing Combat_Feedback, and a flag goes through ModerationSystem.
 	{ Name = "KnockbackAudit", Path = { "Combat", "Damage", "KnockbackAudit" }, Remotes = {} },
+	-- The wall splat and the swing scuff, a sibling on OnApplied and OnSwingAccepted. Owns the one
+	-- server-to-nearby-clients remote both ride on.
+	{
+		Name = "EnvironmentReactionSystem",
+		Path = { "Combat", "Environment", "EnvironmentReactionSystem" },
+		Remotes = namesOf(EnvironmentConstants.Network.RemoteNames),
+	},
 	-- Owns no remote -- purely cosmetic, replicates for free as a Tool parented under the character
 	-- rather than through NetworkBridge. See its own header for why it is a sibling of the attack
 	-- layer, not a combat-legality gate.
@@ -287,6 +295,9 @@ local ENTRIES: { BootEntry } = {
 	},
 	{ Name = "AdminActionSystem", Path = { "Systems", "AdminActionSystem" }, Remotes = {} },
 	{ Name = "DebugDummySystem", Path = { "Systems", "DebugDummySystem" }, Remotes = {} },
+	-- The AI sparring partner. Owns no remotes of its own -- it is spawned through DevMenuSystem's
+	-- SpawnTrainingBot/DespawnTrainingBots, which is where those names are declared.
+	{ Name = "TrainingBotSystem", Path = { "Combat", "TrainingBot", "TrainingBotSystem" }, Remotes = {} },
 	{
 		Name = "DevMenuSystem",
 		Path = { "Systems", "DevMenuSystem" },
@@ -346,7 +357,6 @@ BootManifest.Planned = table.freeze({
 BootManifest.RetiredRemotes = {
 	Constants.Debug.DevMenu.RemoteNames.ResetTargetCombatState,
 	Constants.Debug.DevMenu.RemoteNames.SetTargetHealth,
-	Constants.Debug.DevMenu.RemoteNames.SpawnTrainingBot,
 	Constants.MoveEditor.RemoteNames.TestFireMove,
 	Constants.MoveEditor.RemoteNames.SpawnPreviewDummy,
 }

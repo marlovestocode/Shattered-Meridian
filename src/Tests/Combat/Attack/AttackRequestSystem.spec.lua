@@ -25,7 +25,9 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local AttackCatalog = require(ServerScriptService.Server.Combat.AttackCatalog)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackRequestSystem = require(ServerScriptService.Server.Combat.Attack.AttackRequestSystem)
+local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DefenseSystem = require(ServerScriptService.Server.Combat.Defense.DefenseSystem)
+local GuardMeter = require(ServerScriptService.Server.Combat.Defense.GuardMeter)
 local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.HitboxEngine)
 local SwingSequencer = require(ServerScriptService.Server.Combat.Attack.SwingSequencer)
 local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
@@ -346,6 +348,190 @@ return function()
 			-- is the one way the pause makes the game feel worse rather than better. Asserted here so
 			-- retuning either constant in isolation fails loudly.
 			expect(CHAIN_DELAY < BUFFER).to.equal(true)
+		end)
+	end)
+
+	describe("AttackRequestSystem -- feint", function()
+		local FEINT = AttackConstants.Feint
+
+		local function heavyWindup(): number
+			local entry = AttackCatalog.Get(`default:{FIRST_WEAPON}:Heavy:1`)
+			assert(entry ~= nil, "the first weapon's Heavy string must be catalogued")
+			return (entry :: any).Definition.WindupSeconds
+		end
+
+		it("cancels a Heavy early in its windup and frees the engine", function()
+			local attacker = makeDummy("Feinter", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			expect(AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)).to.equal(true)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Windup")
+
+			local accepted, reason = AttackRequestSystem.Feint(attacker.Model, base + 0.01)
+			expect(accepted).to.equal(true)
+			expect(reason).to.equal(nil)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Idle")
+		end)
+
+		it("refuses a move that is not feintable", function()
+			local attacker = makeDummy("Jabber", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			local accepted, reason = AttackRequestSystem.Feint(attacker.Model, base + 0.001)
+			expect(accepted).to.equal(false)
+			expect(reason).to.equal("NotFeintable")
+			expect(HitboxEngine.GetAttackState(attacker.Id)).never.to.equal("Idle")
+		end)
+
+		it("refuses with no swing in flight", function()
+			local attacker = makeDummy("Idle", Vector3.new(0, 5, 0))
+			local accepted, reason = AttackRequestSystem.Feint(attacker.Model, os.clock())
+			expect(accepted).to.equal(false)
+			expect(reason).to.equal("NotInWindup")
+		end)
+
+		it("refuses past the window fraction, so a feint cannot answer a visible parry", function()
+			local attacker = makeDummy("Late", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
+			-- Past the fraction but still inside the windup -- the engine is deliberately not stepped, so
+			-- it still reports Windup and the fraction is the only thing refusing.
+			local lateAt = base + heavyWindup() * (FEINT.WindowFraction + 0.1)
+			local accepted, reason = AttackRequestSystem.Feint(attacker.Model, lateAt)
+			expect(accepted).to.equal(false)
+			expect(reason).to.equal("TooLate")
+		end)
+
+		it("rewrites CombatBusyUntil BACKWARDS to the feint's own recovery", function()
+			local attacker = makeDummy("Busy", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
+			local swingBusy = attacker.Humanoid:GetAttribute("CombatBusyUntil") :: number
+
+			AttackRequestSystem.Feint(attacker.Model, base + 0.01)
+			local feintBusy = attacker.Humanoid:GetAttribute("CombatBusyUntil") :: number
+			expect(math.abs(feintBusy - (base + 0.01 + FEINT.RecoverySeconds)) < 1e-6).to.equal(true)
+			expect(feintBusy < swingBusy).to.equal(true)
+		end)
+
+		it("abandons the string and allows a fresh Heavy once the recovery ends", function()
+			local attacker = makeDummy("Reset", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
+			AttackRequestSystem.Feint(attacker.Model, base + 0.01)
+			expect(SwingSequencer.GetStageIndex(attacker.Model, "Heavy", base + 0.02)).to.equal(0)
+
+			-- Inside the recovery: held, and for a reason that buffers.
+			local early, earlyReason = AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base + 0.02)
+			expect(early).to.equal(false)
+			expect(AttackConstants.Input.TransientRefusals[earlyReason :: string]).to.equal(true)
+
+			-- After it: stage 1 again, with the swing-length cooldown shortened along with the swing.
+			local afterAt = base + 0.01 + FEINT.RecoverySeconds + 1e-3
+			local accepted, reason = AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, afterAt)
+			expect(reason).to.equal(nil)
+			expect(accepted).to.equal(true)
+			expect(SwingSequencer.GetStageIndex(attacker.Model, "Heavy", afterAt)).to.equal(1)
+		end)
+
+		it("will not feint again inside the feint cooldown", function()
+			local attacker = makeDummy("Twice", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
+			AttackRequestSystem.Feint(attacker.Model, base + 0.01)
+
+			local againAt = base + 0.01 + FEINT.RecoverySeconds + 1e-3
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, againAt)
+			local accepted, reason = AttackRequestSystem.Feint(attacker.Model, againAt + 0.001)
+			expect(accepted).to.equal(false)
+			expect(reason).to.equal("Cooldown")
+			expect(FEINT.CooldownSeconds > FEINT.RecoverySeconds).to.equal(true)
+		end)
+
+		it("drops a press buffered against the swing it cancelled", function()
+			local attacker = makeDummy("Buffered", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Heavy" }, false, base + 0.005)
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.005)).to.equal(true)
+
+			AttackRequestSystem.Feint(attacker.Model, base + 0.01)
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.01)).to.equal(false)
+		end)
+	end)
+
+	describe("AttackRequestSystem -- weight class", function()
+		it("throws a Heavy at twice a Basic's power level, so it drains twice the guard", function()
+			local basic = AttackCatalog.Get(`default:{FIRST_WEAPON}:Basic:1`)
+			local heavy = AttackCatalog.Get(`default:{FIRST_WEAPON}:Heavy:1`)
+			assert(basic ~= nil and heavy ~= nil, "both strings must be catalogued")
+			expect(basic.PowerLevel).to.equal(1)
+			expect(heavy.PowerLevel).to.equal(2)
+			expect(GuardMeter.DrainFor(heavy.PowerLevel, false)).to.equal(
+				2 * GuardMeter.DrainFor(basic.PowerLevel, false)
+			)
+		end)
+
+		it("hands the engine the move's own power level, not a flat 1", function()
+			local attacker = makeDummy("Heavyweight", Vector3.new(0, 5, 0))
+			local target = makeDummy("Anvil", Vector3.new(0, 5, -3))
+			local reports: { any } = {}
+			local disconnect = HitboxEngine.OnHit(function(report)
+				if report.Target == target.Model then
+					table.insert(reports, report)
+				end
+			end)
+
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
+			local entry = AttackCatalog.Get(`default:{FIRST_WEAPON}:Heavy:1`) :: any
+			local total = entry.Definition.WindupSeconds + entry.Definition.ActiveSeconds + FRAME
+			for frame = 0, math.ceil(total / FRAME) do
+				step(base + frame * FRAME)
+			end
+			disconnect()
+
+			expect(#reports > 0).to.equal(true)
+			expect(reports[1].PowerLevel).to.equal(2)
+		end)
+	end)
+
+	describe("AttackRequestSystem -- the string's tempo", function()
+		local function entryOf(moveId: string): any
+			local entry = AttackCatalog.Get(moveId)
+			assert(entry ~= nil, `{moveId} must be catalogued`)
+			return entry
+		end
+
+		it("plays an M1 at the Basic tempo relative to a Heavy on the same weapon", function()
+			local basic = entryOf(`default:{FIRST_WEAPON}:Basic:1`)
+			local heavy = entryOf(`default:{FIRST_WEAPON}:Heavy:1`)
+			local ratio = basic.PlaybackSpeed / heavy.PlaybackSpeed
+			local expected = AttackConstants.Tempo.ByStage.Basic / AttackConstants.Tempo.ByStage.Heavy
+			expect(ratio).to.be.near(expected, 1e-6)
+		end)
+
+		it("keeps every landed-hit gap in the string inside the combo window, Finisher included", function()
+			-- Worst case: contact on the first frame of one swing's active window, then the next swing's
+			-- own windup after this one's active + recovery and the chain beat. A gap past the window means
+			-- the Finisher is unreachable off a fully-landed string.
+			local chain: { any } = {}
+			for stage = 1, AttackConstants.Sequence.MaxStageProbe do
+				local entry = AttackCatalog.Get(`default:{FIRST_WEAPON}:Basic:{stage}`)
+				if not entry then
+					break
+				end
+				table.insert(chain, entry)
+			end
+			table.insert(chain, entryOf(`default:{FIRST_WEAPON}:Finisher`))
+			expect(#chain >= 2).to.equal(true)
+
+			local window = DamageConstants.Combo.WindowSeconds
+			for index = 1, #chain - 1 do
+				local current = chain[index].Definition
+				local following = chain[index + 1].Definition
+				local gap = current.ActiveSeconds + current.RecoverySeconds + CHAIN_DELAY + following.WindupSeconds
+				expect(gap < window).to.equal(true)
+			end
 		end)
 	end)
 

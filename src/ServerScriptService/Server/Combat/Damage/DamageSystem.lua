@@ -294,10 +294,7 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	end
 
 	if result.HitstunSeconds > 0 then
-		local stunnedUntil = math.max(hitstunUntil[outcome.Defender] or 0, at + result.HitstunSeconds)
-		hitstunUntil[outcome.Defender] = stunnedUntil
-		cancelSwingOf(outcome.Defender, at)
-		publishHitstunOf(outcome.Defender, stunnedUntil)
+		DamageSystem.ExtendHitstun(outcome.Defender, at + result.HitstunSeconds, at)
 	end
 
 	-- A landed M1 (Basic weapon-string) hit gives the ATTACKER a brief forced-forward nudge, driven
@@ -359,6 +356,13 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 		ComboStage = stage,
 		MoveId = entry.MoveId,
 		ContactPosition = outcome.Report.ContactPosition,
+		-- Read AFTER the drain above, so a block that just pushed the guard under the line already
+		-- throws the cracking sparks. Only meaningful on a Blocked contact; sent as nil otherwise so the
+		-- common case costs nothing on the wire.
+		GuardCracking = if outcome.Kind == "Blocked" and DefenseSystem.IsGuardCracking(outcome.Defender)
+			then true
+			else nil,
+		Perfect = if outcome.Perfect then true else nil,
 	}
 	sendFeedback(outcome.Attacker, feedback)
 	if outcome.Defender ~= outcome.Attacker then
@@ -429,6 +433,28 @@ function DamageSystem.Step(_deltaTime: number, now: number): ()
 			humanoid:Move(rootPart.CFrame.LookVector, false)
 		end
 	end
+end
+
+-- Hitstun ------------------------------------------------------------------------------------------
+
+-- Stuns `model` until `until_` (never shortening a stun already running), cancels its in-flight swing,
+-- and publishes the deadline on HitstunUntil/CombatBusyUntil. The one path by which anything enters
+-- hitstun: a resolved contact (applyOutcome above) and a wall splat
+-- (Server/Combat/Environment/EnvironmentReactionSystem.lua) both land here, so "stunned" means the same
+-- thing -- the same attack gate (CanAttack), the same guard hold (DefenseSystem.bodyCommitted), the same
+-- run lock (RunSystem) -- whatever caused it.
+--
+-- THE ONE SEAM the environment sibling reaches down for, and it is narrow on purpose: it takes a
+-- deadline, not a reason or an amount. Damage stays this module's to price; a splat only says "for
+-- this long, you are reeling".
+function DamageSystem.ExtendHitstun(model: Model, until_: number, at: number): ()
+	if typeof(until_) ~= "number" or until_ ~= until_ or until_ <= at then
+		return
+	end
+	local stunnedUntil = math.max(hitstunUntil[model] or 0, until_)
+	hitstunUntil[model] = stunnedUntil
+	cancelSwingOf(model, at)
+	publishHitstunOf(model, stunnedUntil)
 end
 
 -- Public queries -----------------------------------------------------------------------------------

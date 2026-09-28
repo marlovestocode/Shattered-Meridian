@@ -344,6 +344,53 @@ return function()
 		return MoveRegistryManager.Validate(candidate) :: MoveTypes.MoveDefinition
 	end
 
+	describe("MoveTypes weight class and feintability", function()
+		it("defaults a move that authors neither to class 1, not feintable", function()
+			local move = MoveRegistryManager.Validate(makeBoxCandidate()) :: MoveTypes.MoveDefinition
+			expect(move.PowerLevel).to.equal(nil)
+			expect(MoveTypes.PowerLevelOf(move)).to.equal(MoveTypes.DefaultPowerLevel)
+			expect(MoveTypes.IsFeintable(move)).to.equal(false)
+		end)
+
+		it("clamps and rounds an authored PowerLevel into the limits", function()
+			local high = MoveRegistryManager.Validate(makeBoxCandidate({ PowerLevel = 99 })) :: MoveTypes.MoveDefinition
+			expect(high.PowerLevel).to.equal(MoveTypes.PowerLevelLimits.Max)
+			local fractional =
+				MoveRegistryManager.Validate(makeBoxCandidate({ PowerLevel = 2.4 })) :: MoveTypes.MoveDefinition
+			expect(fractional.PowerLevel).to.equal(2)
+			local low = MoveRegistryManager.Validate(makeBoxCandidate({ PowerLevel = -3 })) :: MoveTypes.MoveDefinition
+			expect(low.PowerLevel).to.equal(MoveTypes.PowerLevelLimits.Min)
+		end)
+
+		it("keeps Feintable only when it is literally true", function()
+			local yes = MoveRegistryManager.Validate(makeBoxCandidate({ Feintable = true })) :: MoveTypes.MoveDefinition
+			expect(MoveTypes.IsFeintable(yes)).to.equal(true)
+			local junk =
+				MoveRegistryManager.Validate(makeBoxCandidate({ Feintable = "yes" })) :: MoveTypes.MoveDefinition
+			expect(junk.Feintable).to.equal(nil)
+		end)
+
+		it("is carried by Clone and seen by Fingerprint", function()
+			local move =
+				MoveRegistryManager.Validate(makeBoxCandidate({ PowerLevel = 2, Feintable = true })) :: MoveTypes.MoveDefinition
+			local copy = MoveTypes.Clone(move)
+			expect(copy.PowerLevel).to.equal(2)
+			expect(copy.Feintable).to.equal(true)
+			local before = MoveTypes.Fingerprint(move)
+			move.PowerLevel = 3
+			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
+		end)
+
+		it("weighs a weapon string by stage: Heavy and Finisher above Basic, only Heavy feintable", function()
+			expect(MoveTypes.PowerLevelByStage.Basic).to.equal(1)
+			expect(MoveTypes.PowerLevelByStage.Heavy).to.equal(2)
+			expect(MoveTypes.PowerLevelByStage.Finisher).to.equal(2)
+			expect(MoveTypes.FeintableByStage.Heavy).to.equal(true)
+			expect(MoveTypes.FeintableByStage.Basic).to.equal(false)
+			expect(MoveTypes.FeintableByStage.Finisher).to.equal(false)
+		end)
+	end)
+
 	describe("MoveTypes.DefaultCategory", function()
 		it("is the exact sentinel DefaultMoveRegistry stamps", function()
 			expect(MoveTypes.DefaultCategory).to.equal("Default")

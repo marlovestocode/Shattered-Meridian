@@ -28,6 +28,11 @@ return function()
 		trail.Transparency = TUNING.Transparency
 		trail.WidthScale = TUNING.WidthScale
 		trail.Lifetime = TUNING.LifetimeSeconds
+		trail.LightEmission = TUNING.LightEmission
+		trail.LightInfluence = TUNING.LightInfluence
+		trail.Brightness = TUNING.Brightness
+		trail.FaceCamera = TUNING.FaceCamera
+		trail.Color = TUNING.FeintColor
 		trail.Parent = part
 
 		expect(trail.Lifetime).to.be.near(TUNING.LifetimeSeconds, 1e-4)

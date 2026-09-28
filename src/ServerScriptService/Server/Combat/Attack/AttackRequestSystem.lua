@@ -140,17 +140,46 @@ type Buffered = {
 }
 local buffered: { [Model]: Buffered } = {}
 
+-- The swing each combatant most recently had ACCEPTED, for Feint to judge. Only what the feint gate
+-- needs, captured from the same catalogue entry the engine was handed, so "how far into the windup"
+-- is measured against the windup that is actually running. Stale once the swing ends -- Feint asks
+-- the engine whether it is still in Windup rather than trusting this table to know.
+type InFlight = {
+	MoveId: string,
+	Feintable: boolean,
+	StartedAt: number,
+	WindupSeconds: number,
+	-- Whether the move's Cooldown is a swing-length one (it stands for "until this swing is over"),
+	-- which a feint shortens along with the swing; a real, longer cooldown is left alone.
+	SwingLengthCooldown: boolean,
+	-- The swing's weight class, carried for GetInFlight's readers (a Heavy is PowerLevel 2+).
+	PowerLevel: number,
+}
+local inFlight: { [Model]: InFlight } = {}
+
+-- When each combatant may feint again (AttackConstants.Feint.CooldownSeconds).
+local feintReadyAt: { [Model]: number } = {}
+local inFlightReclaim = AmortizedReclaim.New()
+local feintReadyReclaim = AmortizedReclaim.New()
+
 local started = false
 local heartbeatTrove = Trove.New()
 local startedRemote: RemoteEvent? = nil
 local weaponChangedRemote: RemoteEvent? = nil
+local cancelledRemote: RemoteEvent? = nil
 local requestLimiter = RateLimiter.New(AttackConstants.Network.MaxCallsPerSecondPerPlayer)
 local swapLimiter = RateLimiter.New(AttackConstants.Network.MaxSwapsPerSecondPerPlayer)
+local feintLimiter = RateLimiter.New(AttackConstants.Network.MaxFeintsPerSecondPerPlayer)
 
 -- OnWeaponChanged's subscriber list -- see that function's own header. A plain array, not a
 -- RateLimiter/Trove-tracked resource: subscribers are Systems that live for the server's whole
 -- lifetime (WeaponVisualSystem today), never a per-player thing to clear on PlayerRemoving.
 local weaponChangedCallbacks: { (Model, Types.WeaponId) -> () } = {}
+
+-- OnSwingAccepted's subscriber list -- same lifetime and same reasoning as weaponChangedCallbacks above.
+-- Typed loosely here because InFlightView is declared further down; OnSwingAccepted's own signature
+-- carries the real type.
+local swingAcceptedCallbacks: { (Model, any) -> () } = {}
 
 -- Helpers ------------------------------------------------------------------------------------------
 
@@ -243,6 +272,17 @@ local function notifyWeaponChanged(character: Model, weaponId: Types.WeaponId?):
 		local ok, err = pcall(callback, character, weaponId)
 		if not ok then
 			logger:error("An AttackRequestSystem.OnWeaponChanged consumer errored", { errorMessage = tostring(err) })
+		end
+	end
+end
+
+-- Every OnSwingAccepted subscriber, pcall'd for the notifyWeaponChanged reason directly above: a
+-- cosmetic sibling erroring must never unwind into Throw and leave a swing half-committed.
+local function notifySwingAccepted(model: Model, view: any): ()
+	for _, callback in swingAcceptedCallbacks do
+		local ok, err = pcall(callback, model, view)
+		if not ok then
+			logger:error("An AttackRequestSystem.OnSwingAccepted consumer errored", { errorMessage = tostring(err) })
 		end
 	end
 end
@@ -438,9 +478,13 @@ function AttackRequestSystem.Throw(
 	-- this currently changes nothing -- it is passed honestly anyway, so the day the Move Editor grows
 	-- a scaling curve this needs no edit.
 	local comboStage = DamageSystem.GetComboStage(model, now)
-	-- PowerLevel is the old weight-class distinction between a jab and a heavy. Authored per move
-	-- nowhere yet, so a flat 1 is the honest value rather than an invented curve.
-	local accepted, engineReason = HitboxEngine.RequestAttack(combatantId, entry.Definition, comboStage, 1)
+	-- PowerLevel is the weight class -- what makes a blocked heavy drain twice the guard a blocked jab
+	-- does (GuardMeter.DrainFor). Resolved by the catalogue (MoveTypes.PowerLevelOf): by stage for a
+	-- weapon string's Default moves, authored for a custom one. It also scales hitbox volume, but only
+	-- through a Scaling.PowerMultiplierPerUnit no projected move sets, so today it changes guard drain
+	-- and nothing else.
+	local accepted, engineReason =
+		HitboxEngine.RequestAttack(combatantId, entry.Definition, comboStage, entry.PowerLevel)
 	if not accepted then
 		return false, engineReason or "Busy"
 	end
@@ -484,6 +528,23 @@ function AttackRequestSystem.Throw(
 		SwingSequencer.Advance(model, request.Kind, resolution, commitment, now)
 	end
 	setCooldown(model, resolution.MoveId, entry.Cooldown, now)
+	inFlight[model] = {
+		MoveId = resolution.MoveId,
+		Feintable = entry.Feintable,
+		StartedAt = now,
+		WindupSeconds = entry.Definition.WindupSeconds,
+		SwingLengthCooldown = entry.Cooldown <= commitment + 1e-6,
+		PowerLevel = entry.PowerLevel,
+	}
+	-- The same public view GetInFlight hands out, told to OnSwingAccepted subscribers the moment the swing
+	-- is committed. A fresh table, so a subscriber may keep it.
+	notifySwingAccepted(model, {
+		MoveId = resolution.MoveId,
+		StartedAt = now,
+		WindupSeconds = entry.Definition.WindupSeconds,
+		Feintable = entry.Feintable,
+		PowerLevel = entry.PowerLevel,
+	})
 
 	-- PUBLISHED FOR RunSystem, which reads it and forces the run down for the duration -- see
 	-- Constants.Attributes.CombatBusyUntil for the whole contract and for why it is a deadline rather
@@ -498,6 +559,11 @@ function AttackRequestSystem.Throw(
 	-- HitboxEngine today (it refuses a second swing as Busy), but a future move with an early-cancel
 	-- window would reach here mid-swing, and a gate that quietly gets weaker under a feature nobody has
 	-- built yet is the kind that fails silently when they do.
+	--
+	-- THE ONE DOCUMENTED EXCEPTION is AttackRequestSystem.Feint, which bare-writes this deadline
+	-- BACKWARDS to the end of the feint's own recovery. That is not the gate getting weaker: the swing
+	-- that owed the longer deadline no longer exists, and leaving it would force a feinting player to
+	-- walk through the swing they just cancelled.
 	local humanoidForBusy = CharacterUtil.HumanoidOf(model)
 	if humanoidForBusy then
 		local existingBusy = humanoidForBusy:GetAttribute(Constants.Attributes.CombatBusyUntil)
@@ -528,6 +594,91 @@ function AttackRequestSystem.Throw(
 		stageIndex = resolution.StageIndex,
 		comboStage = comboStage,
 	})
+	return true, nil
+end
+
+-- Feinting -----------------------------------------------------------------------------------------
+
+-- Cancels this combatant's own swing early in its windup, to bait a parry or a block. Returns
+-- (accepted, reason); a refusal is ordinary and never an error, the same contract as Throw.
+--
+-- THE GATE, in the order it is asked: a swing this layer threw is in flight, the engine still has it
+-- in Windup, the move is feintable (MoveTypes.IsFeintable -- Heavy stages by default), no more than
+-- AttackConstants.Feint.WindowFraction of that windup has elapsed, and the feint cooldown has passed.
+-- The window is what makes a feint a read rather than a reaction -- see that constant's own header.
+--
+-- WHAT A FEINT DOES: the engine interrupts the swing through its own CancelAttack (so nothing is left
+-- locked, and no hitbox ever opens), the string is abandoned back to stage 1, the attacker's lockout --
+-- the chain beat, a swing-length move cooldown, and CombatBusyUntil -- is rewritten to the feint's own
+-- short recovery, and the attacker is told on Attack_Cancelled so their clip stops. The stop reaches
+-- everyone else through the attacker's Animator, which replicates; no broadcast needed.
+--
+-- NOT REFUNDED: an art's Qi. A feintable art is authorable (a custom move may set Feintable) and
+-- feinting it still costs the cast -- the charge happened when the engine accepted the swing, and
+-- refunding it would make a Qi-costed feint free.
+--
+-- PUBLIC, for the same "one path for players and bots" reason Throw is.
+function AttackRequestSystem.Feint(model: Model, now: number): (boolean, string?)
+	if not isAlive(model) then
+		return false, "NoCharacter"
+	end
+	local combatantId = combatantIds[model] or HitboxEngine.GetCombatantId(model)
+	if not combatantId then
+		return false, "NotRegistered"
+	end
+	local swing = inFlight[model]
+	if not swing or HitboxEngine.GetAttackState(combatantId) ~= "Windup" then
+		return false, "NotInWindup"
+	end
+	if not swing.Feintable then
+		return false, "NotFeintable"
+	end
+	if now - swing.StartedAt > swing.WindupSeconds * AttackConstants.Feint.WindowFraction then
+		return false, "TooLate"
+	end
+	local readyAt = feintReadyAt[model]
+	if readyAt and now < readyAt then
+		return false, "Cooldown"
+	end
+
+	if not HitboxEngine.CancelAttack(combatantId, "Feint", now) then
+		return false, "NotInWindup"
+	end
+	inFlight[model] = nil
+	feintReadyAt[model] = now + AttackConstants.Feint.CooldownSeconds
+	-- A press buffered against the swing being cancelled was aimed at what came after THAT swing. The
+	-- player now decides afresh -- firing it on the recovery's last frame would turn every feint into a
+	-- guaranteed follow-up the player never chose.
+	buffered[model] = nil
+
+	local recoveredAt = now + AttackConstants.Feint.RecoverySeconds
+	SwingSequencer.CancelString(model, recoveredAt, now)
+	if swing.SwingLengthCooldown then
+		local perMove = cooldownUntil[model]
+		if perMove then
+			perMove[swing.MoveId] = recoveredAt
+		end
+	end
+	-- A bare write, deliberately -- the one exception the math.max note in Throw names.
+	local humanoid = CharacterUtil.HumanoidOf(model)
+	if humanoid then
+		humanoid:SetAttribute(Constants.Attributes.CombatBusyUntil, recoveredAt)
+	end
+
+	local remote = cancelledRemote
+	local player = Players:GetPlayerFromCharacter(model)
+	if remote and player then
+		remote:FireClient(
+			player,
+			{
+				MoveId = swing.MoveId,
+				Reason = "Feint",
+				RecoverySeconds = AttackConstants.Feint.RecoverySeconds,
+			} :: AttackTypes.AttackCancelledPayload
+		)
+	end
+
+	debugLog(AttackConstants.Debug.LogAccepted, "Swing feinted", { model = model.Name, moveId = swing.MoveId })
 	return true, nil
 end
 
@@ -672,6 +823,22 @@ local function handleRequest(player: Player, raw: unknown): ()
 	end
 end
 
+local function handleFeint(player: Player): ()
+	-- Throttled presses are dropped, and so is a refused one: a feint is a now-or-never decision, and
+	-- a buffered feint would fire into whatever the player did next.
+	if feintLimiter:IsLimited(player) then
+		return
+	end
+	local character = player.Character
+	if not character then
+		return
+	end
+	local accepted, reason = AttackRequestSystem.Feint(character, os.clock())
+	if not accepted then
+		debugLog(AttackConstants.Debug.LogRefused, "Feint refused", { player = player.Name, reason = reason })
+	end
+end
+
 local function handleSwap(player: Player): ()
 	if swapLimiter:IsLimited(player) then
 		return
@@ -725,10 +892,70 @@ local function unbindCharacter(character: Model): ()
 	-- rather than left to the Step sweep so a respawn is immediate rather than up-to-a-frame stale.
 	cooldownUntil[character] = nil
 	buffered[character] = nil
+	inFlight[character] = nil
+	feintReadyAt[character] = nil
 	SwingSequencer.Clear(character)
 end
 
 -- Public queries -----------------------------------------------------------------------------------
+
+-- What an OPPONENT can see of this combatant's current swing: which move started, when, how long its
+-- windup is, whether it may be feinted and how heavy it is -- or nil while nothing is swinging.
+--
+-- This is the information a practised player reads off the attacker's animation and their own
+-- knowledge of the move list, and nothing more: not a buffered press, not whether a feint is coming.
+-- Server/Combat/TrainingBot is its reader -- the bot decides when to parry from exactly this, plus its
+-- own reaction delay, so it can be baited by a feint the same way a person can.
+--
+-- nil once the engine says the swing is over (Idle) or cut (Interrupted), rather than trusting inFlight,
+-- which is deliberately left stale until the next accepted swing (see its own header). `now` is not
+-- needed to answer, so it is not asked for. A fresh table per call: the caller may keep it.
+export type InFlightView = {
+	MoveId: string,
+	StartedAt: number,
+	WindupSeconds: number,
+	Feintable: boolean,
+	PowerLevel: number,
+}
+
+function AttackRequestSystem.GetInFlight(model: Model): InFlightView?
+	local swing = inFlight[model]
+	if not swing then
+		return nil
+	end
+	local combatantId = combatantIds[model] or HitboxEngine.GetCombatantId(model)
+	if not combatantId then
+		return nil
+	end
+	local state = HitboxEngine.GetAttackState(combatantId)
+	if state == nil or state == "Idle" or state == "Interrupted" then
+		return nil
+	end
+	return {
+		MoveId = swing.MoveId,
+		StartedAt = swing.StartedAt,
+		WindupSeconds = swing.WindupSeconds,
+		Feintable = swing.Feintable,
+		PowerLevel = swing.PowerLevel,
+	}
+end
+
+-- Tells `callback` about every swing this layer COMMITS -- after every gate has passed and the engine
+-- has accepted it, with the same InFlightView GetInFlight answers. Returns a disconnect function, the
+-- OnWeaponChanged/DamageSystem.OnApplied shape. The extension point for a sibling that reacts to a swing
+-- starting rather than to a hit landing -- Server/Combat/Environment/EnvironmentReactionSystem.lua (the
+-- dust a swing scuffs off a wall) today. A subscriber that needs to know whether the swing survived to
+-- its strike asks GetInFlight again at that time: a feint, a parry or a stun can end it in between, and
+-- this signal deliberately says nothing about the future.
+function AttackRequestSystem.OnSwingAccepted(callback: (Model, InFlightView) -> ()): () -> ()
+	table.insert(swingAcceptedCallbacks, callback)
+	return function()
+		local index = table.find(swingAcceptedCallbacks, callback)
+		if index then
+			table.remove(swingAcceptedCallbacks, index)
+		end
+	end
+end
 
 -- Seconds until this combatant may throw this move again. For a HUD, a bot's own planning, or a spec.
 function AttackRequestSystem.GetCooldownRemaining(model: Model, moveId: string, now: number): number
@@ -807,6 +1034,9 @@ function AttackRequestSystem.Step(_deltaTime: number, now: number): ()
 	-- sweep every other per-model table in this stack keeps (DamageSystem.Step, SwingSequencer.Sweep)
 	-- in case that event ordering is ever missed.
 	combatantIdsReclaim:Step(combatantIds)
+	-- Same reclaim-only shape: both are read-on-demand and timestamp- or engine-checked, never walked.
+	inFlightReclaim:Step(inFlight)
+	feintReadyReclaim:Step(feintReadyAt)
 	SwingSequencer.Sweep()
 end
 
@@ -832,6 +1062,10 @@ function AttackRequestSystem.Init(): ()
 	swapRemote.OnServerEvent:Connect(handleSwap)
 	weaponChangedRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.WeaponChanged)
 
+	local feintRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.Feint)
+	feintRemote.OnServerEvent:Connect(handleFeint)
+	cancelledRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.Cancelled)
+
 	-- REGISTERS PLAYER CHARACTERS WITH THE ENGINE, inherited from the deleted TestAttackHarness -- see
 	-- this file's header. Bots and dummies are NOT auto-registered: they have no CharacterAdded to
 	-- hang off, and whoever spawns them already knows when they exist.
@@ -842,6 +1076,7 @@ function AttackRequestSystem.Init(): ()
 		OnPlayerRemoving = function(player: Player)
 			requestLimiter:Clear(player)
 			swapLimiter:Clear(player)
+			feintLimiter:Clear(player)
 			local character = player.Character
 			if character then
 				unbindCharacter(character)
@@ -888,7 +1123,12 @@ function AttackRequestSystem.Reset(): ()
 	combatantIdsReclaim:Reset()
 	cooldownReclaim:Reset()
 	table.clear(buffered)
+	table.clear(inFlight)
+	table.clear(feintReadyAt)
+	inFlightReclaim:Reset()
+	feintReadyReclaim:Reset()
 	table.clear(weaponChangedCallbacks)
+	table.clear(swingAcceptedCallbacks)
 	SwingSequencer.Reset()
 end
 

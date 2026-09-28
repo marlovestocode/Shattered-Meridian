@@ -38,8 +38,10 @@
 	SPAWNDUMMY IS BACK, pointed at the rebuilt stack. handleSpawnDebugDummy/handleDespawnAllDebugDummies/
 	handleSetDummyGuard/handleGetDebugDummyState below delegate to Server/Systems/DebugDummySystem.lua,
 	a from-scratch module (not a CombatSystem revival -- see that module's own header) that spawns a
-	real HitboxEngine/DefenseSystem-registered combatant. SpawnTrainingBot stays orphaned -- an
-	AI-controlled sparring partner is a materially bigger feature nothing has rebuilt yet.
+	real HitboxEngine/DefenseSystem-registered combatant. SpawnTrainingBot is back too (2026-09-28):
+	handleSpawnTrainingBot/handleDespawnTrainingBots delegate to Server/Combat/TrainingBot/
+	TrainingBotSystem.lua, an AI sparring partner that fights through the same public entry points a
+	player's remotes reach.
 
 	GetHitboxDebug/SetHitboxDebug are BACK, pointed at the rebuilt engine. They used to toggle the
 	deleted HitboxResolver.lua's visualisation through a small HitboxDebugState.lua holder; the state
@@ -64,6 +66,8 @@ local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 
 local AdminActionSystem = require(script.Parent.AdminActionSystem)
 local DebugDummySystem = require(script.Parent.DebugDummySystem)
+local TrainingBotSystem = require(script.Parent.Parent.Combat.TrainingBot.TrainingBotSystem)
+local TrainingBotConstants = require(ReplicatedStorage.Shared.TrainingBot.TrainingBotConstants)
 local ResourceGatheringSystem = require(script.Parent.ResourceGatheringSystem)
 local VersionWatchSystem = require(script.Parent.VersionWatchSystem)
 local FlightTuning = require(script.Parent.Parent.DevMenu.FlightTuning)
@@ -951,6 +955,64 @@ local function handleSpawnDebugDummy(player: Player): Types.DevMenuActionResult
 	return { Success = true }
 end
 
+-- Training bot ("Spawn" tab) ----------------------------------------------------------------------
+
+-- Spawns one AI sparring partner SpawnDistance studs in front of the requesting admin, facing them,
+-- that fights the admin first (TrainingBotSystem's targeting). Style and difficulty are CLIENT-SENT, so
+-- both are checked against TrainingBotConstants' closed lists here and a name outside them is refused
+-- outright rather than quietly defaulted -- the default is for a programming error server-side, not
+-- for whatever a client typed. Delegates everything else to Server/Combat/TrainingBot/
+-- TrainingBotSystem.lua; this handler owns authorization/validation and the position math only.
+local function handleSpawnTrainingBot(
+	player: Player,
+	rawStyle: unknown,
+	rawDifficulty: unknown
+): Types.DevMenuSpawnBotResult
+	logger:debug("SpawnTrainingBot received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "SpawnTrainingBot")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+	if not TrainingBotConstants.IsStyle(rawStyle) or not TrainingBotConstants.IsDifficulty(rawDifficulty) then
+		logger:debug("SpawnTrainingBot rejected: unknown preset", { player = player.Name })
+		return { Success = false, Reason = "InvalidPreset" }
+	end
+
+	local rootPart, rootPartFailureReason = getRootPart(player, "SpawnTrainingBot")
+	if not rootPart then
+		return { Success = false, Reason = rootPartFailureReason }
+	end
+
+	local spawnPosition = (rootPart.CFrame * CFrame.new(0, 0, -TrainingBotConstants.Config.SpawnDistance)).Position
+	local facing = Vector3.new(rootPart.Position.X, spawnPosition.Y, rootPart.Position.Z)
+	local model, spawnFailureReason = TrainingBotSystem.Spawn(
+		CFrame.lookAt(spawnPosition, facing),
+		rawStyle :: string,
+		rawDifficulty :: string,
+		player
+	)
+	if not model then
+		return { Success = false, Reason = spawnFailureReason or "SpawnFailed" }
+	end
+
+	logger:info("SpawnTrainingBot accepted", { player = player.Name, style = rawStyle, difficulty = rawDifficulty })
+	return { Success = true, ActiveCount = TrainingBotSystem.ActiveCount() }
+end
+
+local function handleDespawnTrainingBots(player: Player): Types.DevMenuSpawnBotResult
+	logger:debug("DespawnTrainingBots received", { player = player.Name, userId = player.UserId })
+
+	local allowed, reason = checkDevMenuPreconditions(player, "DespawnTrainingBots")
+	if not allowed then
+		return { Success = false, Reason = reason :: string }
+	end
+
+	local count = TrainingBotSystem.DespawnAll()
+	logger:info("DespawnTrainingBots accepted", { player = player.Name, count = count })
+	return { Success = true, ActiveCount = 0 }
+end
+
 -- Blimp Fuel System dev/test nodes ("Spawn" tab) -----------------------------------------------
 
 -- Studs in front of the requesting admin's own character to spawn a debug resource node -- its own
@@ -1444,6 +1506,8 @@ local REMOTE_HANDLERS: { RemoteHandlerSpec } = {
 	},
 	{ RemoteKey = "SetDummyGuard", Name = "SetDummyGuard", Handler = handleSetDummyGuard :: any },
 	{ RemoteKey = "GetDebugDummyState", Name = "GetDebugDummyState", Handler = handleGetDebugDummyState :: any },
+	{ RemoteKey = "SpawnTrainingBot", Name = "SpawnTrainingBot", Handler = handleSpawnTrainingBot :: any },
+	{ RemoteKey = "DespawnTrainingBots", Name = "DespawnTrainingBots", Handler = handleDespawnTrainingBots :: any },
 	{ RemoteKey = "GetServerVersionInfo", Name = "GetServerVersionInfo", Handler = handleGetServerVersionInfo :: any },
 	{ RemoteKey = "SpawnCoalDeposit", Name = "SpawnCoalDeposit", Handler = handleSpawnCoalDeposit :: any },
 	{ RemoteKey = "SpawnWaterSource", Name = "SpawnWaterSource", Handler = handleSpawnWaterSource :: any },

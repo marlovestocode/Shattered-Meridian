@@ -103,6 +103,7 @@ local Button = require(script.Parent.Parent.Parent.Parent.Components.Button)
 local Tab = require(script.Parent.Parent.Parent.Parent.Components.Tab)
 local TrackedLabel = require(script.Parent.Parent.Parent.Parent.Components.TrackedLabel)
 local NumericField = require(script.Parent.Parent.Parent.Parent.Components.NumericField)
+local Toggle = require(script.Parent.Parent.Parent.Parent.Components.Toggle)
 local ScrollArea = require(script.Parent.Parent.Parent.Parent.Components.ScrollArea)
 local MoveEditorTypes = require(script.Parent.Types)
 local Copy = require(script.Parent.Copy)
@@ -435,6 +436,16 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 	local maxTargets = fieldValue(props, scope, function(d)
 		return d.MaxTargets or 5
 	end, 5)
+	local powerLevel = fieldValue(props, scope, function(d)
+		return MoveTypes.PowerLevelOf(d)
+	end, MoveTypes.DefaultPowerLevel)
+	local feintable = fieldValue(props, scope, function(d)
+		return MoveTypes.IsFeintable(d)
+	end, false)
+	-- A Default move's weight class and feintability come from which stage of a string it is
+	-- (DefaultMoveRegistry's Descriptor.Stage), not from anything ApplyEdit writes back -- so an edit
+	-- here would read as saved and then silently revert. Both fields are therefore gated on
+	-- isCustomMove above: hidden rather than shown disabled.
 
 	local innerWidth = width - Tokens.Space.M * 2
 	-- Spelled out, and it MOVES when the toolbar does: this Panel's own vertical padding, the toolbar
@@ -767,6 +778,36 @@ function PropertyEditorModule.Mount(scope: Scope, width: number, height: number,
 					end)
 				end,
 			}),
+		}),
+		DraftBinding.Row(scope, 5, 2, {
+			NumericField.Mount(scope, {
+				Label = "Weight Class",
+				Unit = Copy.Field("Damage.PowerLevel").Unit,
+				Hint = Copy.Field("Damage.PowerLevel").Hint,
+				Value = powerLevel,
+				Min = MoveTypes.PowerLevelLimits.Min,
+				Max = MoveTypes.PowerLevelLimits.Max,
+				Steps = { 1 },
+				Decimals = 0,
+				Visible = isCustomMove,
+				OnChanged = function(v)
+					applyChange(props, function(d)
+						d.PowerLevel = math.floor(v + 0.5)
+					end)
+				end,
+			}),
+		}),
+		Toggle(scope, {
+			Label = "Feintable",
+			Hint = Copy.Field("Damage.Feintable").Hint,
+			Value = feintable,
+			LayoutOrder = 6,
+			Visible = isCustomMove,
+			OnChanged = function(enabled: boolean)
+				applyChange(props, function(d)
+					d.Feintable = if enabled then true else nil
+				end)
+			end,
 		}),
 	})
 

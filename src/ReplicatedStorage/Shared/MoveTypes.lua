@@ -78,6 +78,37 @@ local MoveTypes = {}
 -- failure this sentinel exists to prevent.
 MoveTypes.DefaultCategory = "Default"
 
+-- Weight class -- see MoveDefinition.PowerLevel. The per-stage table is what a weapon string's
+-- Default moves project with; a custom move authors its own (or leaves it nil, meaning
+-- DefaultPowerLevel). Bounds are MoveRegistryManager.Validate's clamp AND the Move Editor field's own
+-- range, from this one table.
+MoveTypes.DefaultPowerLevel = 1
+MoveTypes.PowerLevelLimits = { Min = 1, Max = 4 }
+MoveTypes.PowerLevelByStage = {
+	Basic = 1,
+	Heavy = 2,
+	Finisher = 2,
+}
+-- Only a Heavy may be feinted by default: a Basic is too fast for a cancel to bait anything, and a
+-- Finisher is the string's committed payoff -- see AttackRequestSystem.Feint.
+MoveTypes.FeintableByStage = {
+	Basic = false,
+	Heavy = true,
+	Finisher = false,
+}
+
+function MoveTypes.PowerLevelOf(move: { PowerLevel: number? }): number
+	local level = move.PowerLevel
+	if typeof(level) ~= "number" or level ~= level then
+		return MoveTypes.DefaultPowerLevel
+	end
+	return math.clamp(level, MoveTypes.PowerLevelLimits.Min, MoveTypes.PowerLevelLimits.Max)
+end
+
+function MoveTypes.IsFeintable(move: { Feintable: boolean? }): boolean
+	return move.Feintable == true
+end
+
 -- Re-exported so a consumer that only cares about moves (PropertyEditor, MoveEditorClient) can
 -- reference the shape/dimension/clip types through this one module rather than requiring three.
 export type MoveShape = HitboxShapes.ShapeId
@@ -311,6 +342,24 @@ export type MoveDefinition = {
 	-- divides both by it, and hands it to the client as AttackStartedPayload.PlaybackSpeed. Not
 	-- editor-authored, same as SpawnDelaySeconds above: DefaultMoveRegistry projects it straight through.
 	WeaponSpeed: number?,
+	-- The move's weight class -- what makes a heavy cost a guard more than a jab. Handed to
+	-- HitboxEngine.RequestAttack as the swing's PowerLevel, which the engine carries opaquely onto every
+	-- HitReport; GuardMeter.DrainFor multiplies guard drain by it, and the engine scales hitbox volume by
+	-- it only if the move's own Scaling.PowerMultiplierPerUnit is non-zero (0 for every projected move).
+	--
+	-- nil for a custom move means MoveTypes.DefaultPowerLevel. A Default move is never nil: its weight
+	-- is a property of which stage of a weapon string it is (MoveTypes.PowerLevelByStage), projected by
+	-- DefaultMoveRegistry rather than authored. Read through MoveTypes.PowerLevelOf, never directly.
+	PowerLevel: number?,
+	-- Playback tempo, applied on top of WeaponSpeed by AttackCatalog.Get (AttackConstants.Tempo's own
+	-- header): below 1 the clip plays slower and the windup/recovery stretch to match; the hit window
+	-- does not. nil (equivalent to 1) for every custom move -- only DefaultMoveRegistry stamps it, by
+	-- stage, and nothing in the editor authors it.
+	Tempo: number?,
+	-- Whether a swing of this move may be cancelled early in its windup (Attack_Feint --
+	-- AttackRequestSystem.Feint). nil means false for a custom move; a Default move takes it from its
+	-- stage (MoveTypes.FeintableByStage -- Heavy only). Read through MoveTypes.IsFeintable.
+	Feintable: boolean?,
 
 	-- Timing (identical semantics to HitboxAttackDefinition).
 	WindupSeconds: number,
@@ -448,6 +497,11 @@ function MoveTypes.Clone(move: MoveDefinition): MoveDefinition
 		OffsetRotation = move.OffsetRotation,
 		AttachmentPart = move.AttachmentPart,
 		SizeMultiplier = move.SizeMultiplier,
+		SpawnDelaySeconds = move.SpawnDelaySeconds,
+		WeaponSpeed = move.WeaponSpeed,
+		Tempo = move.Tempo,
+		PowerLevel = move.PowerLevel,
+		Feintable = move.Feintable,
 
 		WindupSeconds = move.WindupSeconds,
 		ActiveSeconds = move.ActiveSeconds,
@@ -600,6 +654,8 @@ function MoveTypes.Fingerprint(move: MoveDefinition): string
 		PostureDamage = move.PostureDamage,
 		ArcDegrees = move.ArcDegrees,
 		MaxTargets = move.MaxTargets,
+		PowerLevel = move.PowerLevel,
+		Feintable = move.Feintable,
 
 		AnimationId = move.AnimationId,
 		-- An ARRAY, so order matters and must not be sorted away -- digestValue sorts keys, and for a

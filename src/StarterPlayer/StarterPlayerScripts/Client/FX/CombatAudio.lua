@@ -136,6 +136,11 @@ end
 IMPACT_SOUND_NAMES.Backstab = IMPACT_SOUND_NAMES.Clean
 IMPACT_SOUND_NAMES.Trade = IMPACT_SOUND_NAMES.Clean
 
+local EVADED_ATTACKER_SOUND = "EvadedAttacker"
+SoundManager.Register(EVADED_ATTACKER_SOUND, SOUND_CONFIG.EvadedAttacker)
+local FEINT_SOUND = "Feint"
+SoundManager.Register(FEINT_SOUND, SOUND_CONFIG.Feint)
+
 -- Which outcomes a WEAPON can speak for, and with which of its own slots. Only two, and deliberately:
 -- Blocked and Parried are the outcomes where a weapon physically made the sound -- steel caught steel
 -- -- so the weapon that caught it is the right thing to hear. Clean/Backstab/Trade/GuardBroken are
@@ -218,12 +223,12 @@ end
 
 -- Plays `weaponId`'s own sound for `slot` if it has one, and reports whether it did -- the single
 -- "try the weapon first" step every play function below starts with.
-local function playWeaponSlot(weaponId: string?, slot: string): boolean
+local function playWeaponSlot(weaponId: string?, slot: string, pitchScale: number?): boolean
 	local name = ensureWeaponSound(weaponId, slot)
 	if not name then
 		return false
 	end
-	SoundManager.Play(name, jitteredSpeed())
+	SoundManager.Play(name, jitteredSpeed() * (pitchScale or 1))
 	return true
 end
 
@@ -285,16 +290,38 @@ end
 -- discoverable through a Tool attribute at all. Only consulted for the two outcomes a weapon can speak
 -- for (IMPACT_WEAPON_SLOTS); everything else goes straight to the shared stinger, and so does a defender
 -- who was blocking bare-handed.
-function CombatAudio.PlayImpact(outcomeKind: OutcomeKind, defender: Instance?): ()
+--
+-- `pitchScale` shifts the whole stinger (1 when omitted): a guard that is CRACKING blocks with a lower,
+-- strained clang and a PERFECT parry rings higher -- CombatFeedbackClient picks it from the payload. A
+-- pitch shift of the one authored sound rather than two more sound slots, so a weapon that authored its
+-- own SFX/Block keeps its own voice when it strains.
+function CombatAudio.PlayImpact(outcomeKind: OutcomeKind, defender: Instance?, pitchScale: number?): ()
 	local slot = IMPACT_WEAPON_SLOTS[outcomeKind]
-	if slot and playWeaponSlot(drawnWeaponIdOf(defender), slot) then
+	if slot and playWeaponSlot(drawnWeaponIdOf(defender), slot, pitchScale) then
 		return
 	end
 	local name = IMPACT_SOUND_NAMES[outcomeKind]
 	if not name then
 		return
 	end
+	SoundManager.Play(name, jitteredSpeed() * (pitchScale or 1))
+end
+
+-- An evade, split by who is listening -- the one outcome whose two participants should NOT hear the
+-- same sound. PlayImpact above is role-blind because every other outcome is a contact both sides
+-- felt; an evade is a contact that never happened, and what it sounds like depends on whose blade
+-- missed. The dodger gets the bright whiff (Impact.Evaded), the attacker the muted one.
+function CombatAudio.PlayEvaded(isDodger: boolean): ()
+	local name = if isDodger then IMPACT_SOUND_NAMES.Evaded else EVADED_ATTACKER_SOUND
+	if not name then
+		return
+	end
 	SoundManager.Play(name, jitteredSpeed())
+end
+
+-- The feint cue -- see CombatConstants.Sound.Feint.
+function CombatAudio.PlayFeint(): ()
+	SoundManager.Play(FEINT_SOUND, jitteredSpeed())
 end
 
 -- Draw and sheathe. NO SHARED FALLBACK, unlike the two above, and that asymmetry is the honest one: a
@@ -316,6 +343,13 @@ end
 
 local started = false
 local attackStartedDisconnect: (() -> ())? = nil
+local swingCancelledDisconnect: (() -> ())? = nil
+
+-- Bumped on every early end of a swing (AttackInputClient.OnSwingCancelled). A whoosh scheduled
+-- against a windup that never finished -- a feinted heavy, a swing cut by hitstun -- checks this when
+-- its delay fires and stays silent, so the cancelled swing does not whoosh on the beat its strike
+-- would have landed.
+local cancelEpoch = 0
 local inventoryConnection: RBXScriptConnection? = nil
 
 -- The last inventory state this client was told about, so a push can be read as a TRANSITION (a draw,
@@ -337,7 +371,8 @@ local lastSelected: string? = nil
 -- keep there because a step is continuous state a NEW swing must be able to replace outright (see its
 -- header). A sound is a discrete, one-shot event -- a second swing's windup finishing while the first
 -- swing's sound is still pending should still play BOTH, not silently drop the first one, so there is
--- nothing here for a newer swing to need to cancel.
+-- nothing here for a newer swing to need to cancel. A swing that ENDS EARLY is different -- see
+-- cancelEpoch above.
 --
 -- WeaponId is captured off the payload and carried into the delayed call rather than re-read when it
 -- fires: the weapon that threw this swing is a fact about the swing, and a player who swaps during the
@@ -350,9 +385,20 @@ local function onAttackStarted(payload: AttackTypes.AttackStartedPayload): ()
 		CombatAudio.PlaySwing(payload.Kind, weaponId)
 		return
 	end
+	local epoch = cancelEpoch
 	task.delay(delaySeconds, function()
+		if cancelEpoch ~= epoch then
+			return
+		end
 		CombatAudio.PlaySwing(payload.Kind, weaponId)
 	end)
+end
+
+local function onSwingCancelled(reason: string): ()
+	cancelEpoch += 1
+	if reason == "Feint" then
+		CombatAudio.PlayFeint()
+	end
 end
 
 -- Turns the server's whole-inventory push into the two edges that make a sound.
@@ -404,6 +450,7 @@ function CombatAudio.Start(): ()
 	end
 	started = true
 	attackStartedDisconnect = AttackInputClient.OnAttackStarted(onAttackStarted)
+	swingCancelledDisconnect = AttackInputClient.OnSwingCancelled(onSwingCancelled)
 
 	local inventoryRemote = NetworkBridge.GetRemoteEvent(WeaponConstants.Network.RemoteNames.InventoryChanged)
 	inventoryConnection = inventoryRemote.OnClientEvent:Connect(onInventoryChanged)
@@ -432,6 +479,10 @@ function CombatAudio.Stop(): ()
 	if attackStartedDisconnect then
 		attackStartedDisconnect()
 		attackStartedDisconnect = nil
+	end
+	if swingCancelledDisconnect then
+		swingCancelledDisconnect()
+		swingCancelledDisconnect = nil
 	end
 	if inventoryConnection then
 		inventoryConnection:Disconnect()

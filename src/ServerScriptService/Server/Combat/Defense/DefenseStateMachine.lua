@@ -346,8 +346,11 @@ end
 -- The parry punish, imposed by DefenseSystem when THIS combatant's attack is parried. Pre-empts
 -- whatever the defender was doing -- a stagger is not something the staggered player's own state
 -- machine gets an opinion about.
-function DefenseStateMachine.Stagger(self: Machine, now: number): ()
-	self._staggerUntil = now + DefenseConstants.Stagger.DurationSeconds
+--
+-- `seconds` overrides the ordinary length -- a PERFECT parry passes DefenseConstants.PerfectParry.
+-- StaggerSeconds. Omitted means Stagger.DurationSeconds, which is every other caller.
+function DefenseStateMachine.Stagger(self: Machine, now: number, seconds: number?): ()
+	self._staggerUntil = now + (seconds or DefenseConstants.Stagger.DurationSeconds)
 	-- Cannot parry for the duration, and the lockout is a timestamp rather than the state itself so
 	-- it survives the player pressing straight back into a block.
 	self._parryLockedUntil = math.max(self._parryLockedUntil, self._staggerUntil)
@@ -488,6 +491,19 @@ function DefenseStateMachine.IsParryLiveAt(self: Machine, at: number): boolean
 		return false
 	end
 	return at >= self._parryOpensAt and at <= self._parryEndsAt
+end
+
+-- Whether a contact at `at`, already known to land inside the live window, is a PERFECT parry: within
+-- DefenseConstants.PerfectParry.WindowSeconds of the window going live. Measured from _parryOpensAt,
+-- the same absolute the liveness test above uses, so the two can never disagree about when the window
+-- began -- see PerfectParry's own header on why no ping refund is applied here. Pure query: asks
+-- nothing about whether the window is live or spent, which the caller has already established.
+function DefenseStateMachine.IsPerfectParryAt(self: Machine, at: number): boolean
+	if self._parryEndsAt <= 0 then
+		return false
+	end
+	local elapsed = at - self._parryOpensAt
+	return elapsed >= 0 and elapsed <= DefenseConstants.PerfectParry.WindowSeconds
 end
 
 -- Whether a contact at `at` lands inside the roll's evade window. Unlike the parry it is never

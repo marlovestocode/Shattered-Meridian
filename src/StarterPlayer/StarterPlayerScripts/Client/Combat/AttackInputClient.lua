@@ -81,7 +81,6 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
-local UserInputService = game:GetService("UserInputService")
 
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
@@ -100,7 +99,7 @@ local HotbarBindings = require(script.Parent.HotbarBindings)
 local LocalCombatState = require(script.Parent.LocalCombatState)
 local CombatAnimator = require(script.Parent.Parent.FX.CombatAnimator)
 local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
-local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 
 type AttackStartedPayload = AttackTypes.AttackStartedPayload
 
@@ -122,6 +121,7 @@ local ACTION_SOURCE = "Attack"
 
 local started = false
 local requestRemote: RemoteEvent? = nil
+local feintRemote: RemoteEvent? = nil
 local toggleDrawRemote: RemoteEvent? = nil
 local selectNextRemote: RemoteEvent? = nil
 
@@ -261,64 +261,54 @@ end
 
 -- Input ---------------------------------------------------------------------------------------------
 
--- True while any modal UI panel is up (Components/ModalScreen.lua publishes the count as
--- Constants.Attributes.UiModalOpen -- see that constant's own comment). Roblox's own
--- gameProcessedEvent only covers clicks that LAND on the GUI, and a centred 760x620 panel leaves
--- most of the viewport uncovered, so a player reading their character sheet was still throwing a
--- punch every time they clicked anywhere else on screen.
-local function isModalUiOpen(): boolean
-	local player = Players.LocalPlayer
-	return player ~= nil and player:GetAttribute(Constants.Attributes.UiModalOpen) == true
-end
-
-local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
-	-- gameProcessed covers both halves of the obvious double-fire: a click that landed on a HUD
-	-- ability slot (that button fires its own OnActivated, which routes here through
-	-- AttackInputClient.PressHotbarSlot), and a number key typed into a TextBox.
-	if gameProcessed then
-		return
+-- Every attack-layer action goes through Client/Input/InputRouter.lua on its "Gameplay" layer, which
+-- is what drops a click that landed on the GUI (gameProcessed -- a HUD ability slot fires its own
+-- OnActivated, which routes here through AttackInputClient.PressHotbarSlot) and every press while a
+-- modal panel is open (Constants.Attributes.UiModalOpen). This module used to hand-roll both checks
+-- on its own raw InputBegan connection.
+--
+-- THE ROUTER IS ALSO THE ONLY THING THAT RESOLVES THE GAMEPAD CHORD LAYER, which is why the move was
+-- not optional once Feint existed: L2+R1 is Feint, and a raw connection matching BasicAttack on R1
+-- fired a Basic request alongside every chorded feint -- which the server then buffered and threw the
+-- moment the feint's own recovery ended. The same raw connection never fired the chord-only
+-- HotbarSlot1-5 on a pad at all.
+local function bindInputs(): ()
+	local function onBegan(action: Types.KeybindAction, handler: () -> ()): ()
+		InputRouter.Bind(action, {
+			Layer = "Gameplay",
+			Began = function()
+				handler()
+			end,
+		})
 	end
 
-	-- Gated here rather than inside each of the four branches below: while a panel is open NOTHING
-	-- in this module should fire -- not the swing, not a weapon swap, and not a hotbar number key,
-	-- which is otherwise just as reachable from a keyboard aimed at a menu.
-	--
-	-- AttackInputClient.PressHotbarSlot is deliberately NOT gated: that is the HUD ability slot's own
-	-- OnActivated, a click the player aimed at a button, and the HUD is not a modal.
-	if isModalUiOpen() then
-		return
-	end
-
-	if KeybindManager.Matches("BasicAttack", input) then
+	onBegan("BasicAttack", function()
 		requestWeaponAttack("Basic")
-		return
-	end
-	if KeybindManager.Matches("HeavyAttack", input) then
+	end)
+	onBegan("HeavyAttack", function()
 		requestWeaponAttack("Heavy")
-		return
-	end
-	if KeybindManager.Matches("ToggleWeapon", input) then
+	end)
+	onBegan("Feint", function()
+		AttackInputClient.PressFeint()
+	end)
+	onBegan("ToggleWeapon", function()
 		local remote = toggleDrawRemote
 		if remote then
 			-- No payload: the server owns which weapon is selected and whether it is currently out, so
 			-- there is nothing here for the client to name and nothing for the server to validate.
 			remote:FireServer()
 		end
-		return
-	end
-	if KeybindManager.Matches("SelectNextWeapon", input) then
+	end)
+	onBegan("SelectNextWeapon", function()
 		local remote = selectNextRemote
 		if remote then
 			remote:FireServer()
 		end
-		return
-	end
-
+	end)
 	for slot, action in HOTBAR_ACTIONS do
-		if KeybindManager.Matches(action, input) then
+		onBegan(action, function()
 			requestHotbar(slot)
-			return
-		end
+		end)
 	end
 end
 
@@ -406,11 +396,45 @@ end
 local pendingPrediction: { MoveId: string, Generation: number }? = nil
 local bufferedPress: { Kind: AttackTypes.AttackKind, Generation: number }? = nil
 
-function AttackInputClient.CancelSwing(): ()
+-- Why a swing this client was playing stopped early. "Feint" is the server's Attack_Cancelled;
+-- "Interrupted" is every other server-side cut this client infers (hitstun, parried, traded -- see
+-- CancelSwing's own header); "Unconfirmed" is a prediction the server never confirmed.
+export type SwingCancelReason = "Feint" | "Interrupted" | "Unconfirmed"
+
+local swingCancelledListeners: { (SwingCancelReason) -> () } = {}
+
+-- The MoveId of the swing most recently started on the attack layer, or nil once it is cut. What an
+-- Attack_Cancelled is matched against, so a cancel that raced a newer swing does not cut the newer
+-- one. NOT cleared when a swing ends on its own -- "is a swing playing" is always asked of
+-- LocalCombatState's deadline, never of this.
+local playingMoveId: string? = nil
+
+-- Tells every OnSwingCancelled listener. Pcall'd per listener for the reason onAttackStarted's own
+-- dispatch cannot afford to be: this runs from remote handlers and task.delay callbacks, and one FX
+-- module erroring must not stop the lunge being cancelled.
+local function notifySwingCancelled(reason: SwingCancelReason): ()
+	for _, listener in swingCancelledListeners do
+		local ok, err = pcall(listener, reason)
+		if not ok then
+			logger:error("An OnSwingCancelled listener errored", { errorMessage = tostring(err) })
+		end
+	end
+end
+
+local function cutSwing(reason: SwingCancelReason): ()
+	local wasPlaying = LocalCombatState.SwingEndsAt() > os.clock()
 	pendingPrediction = nil
-	bufferedPress = nil
+	playingMoveId = nil
 	manager:SetClaim(ATTACK_LAYER, SWING_SOURCE, nil)
 	LocalCombatState.ClearSwing()
+	if wasPlaying then
+		notifySwingCancelled(reason)
+	end
+end
+
+function AttackInputClient.CancelSwing(): ()
+	bufferedPress = nil
+	cutSwing("Interrupted")
 end
 
 -- Records the cooldown the server just imposed, and tells whoever is drawing it. Fires once on start
@@ -447,6 +471,7 @@ local attackStartedListeners: { (AttackStartedPayload) -> () } = {}
 -- (trail, lunge, swing audio) -- from a payload that is either the server's confirmation or the cached
 -- copy a prediction replays. One path for both, so a predicted swing looks exactly like a confirmed one.
 local function startSwing(payload: AttackStartedPayload, now: number): ()
+	playingMoveId = payload.MoveId
 	playSwing(payload)
 	LocalCombatState.SetSwing(now + swingSecondsOf(payload))
 	for _, listener in attackStartedListeners do
@@ -476,6 +501,10 @@ local landedComboAt = -math.huge
 
 local predictionGeneration = 0
 local bufferGeneration = 0
+
+-- When the server's feint recovery ends (AttackCancelledPayload.RecoverySeconds), mirrored so a press
+-- inside it is buffered-and-predicted rather than predicted into a refusal.
+local feintRecoveredAt = -math.huge
 
 -- The same count SwingSequencer probes the catalogue for. Every weapon is built from the one Baseline
 -- move set (WeaponRoster), so the baseline's length IS every weapon's.
@@ -519,7 +548,8 @@ end
 local function nextSwingAt(now: number): number
 	return math.max(
 		LocalCombatState.FreeAt(now),
-		LocalCombatState.SwingEndsAt() + AttackConstants.Sequence.ChainDelaySeconds
+		LocalCombatState.SwingEndsAt() + AttackConstants.Sequence.ChainDelaySeconds,
+		feintRecoveredAt
 	)
 end
 
@@ -543,9 +573,7 @@ local function bodyAllowsSwing(): boolean
 end
 
 local function cutUnconfirmedSwing(): ()
-	pendingPrediction = nil
-	manager:SetClaim(ATTACK_LAYER, SWING_SOURCE, nil)
-	LocalCombatState.ClearSwing()
+	cutSwing("Unconfirmed")
 end
 
 -- Plays the predicted move now, if every local gate agrees and the move has a confirmed copy to replay.
@@ -651,6 +679,30 @@ local function onAttackStarted(raw: unknown): ()
 	end
 end
 
+-- The server cut one of this player's swings short (Attack_Cancelled). Stops the clip -- the stop
+-- reaches every other client through this rig's Animator, which replicates -- and mirrors what the
+-- server just did to the string: back to stage 1, with the next swing held for the recovery.
+local function onAttackCancelled(raw: unknown): ()
+	if typeof(raw) ~= "table" then
+		return
+	end
+	local payload = raw :: AttackTypes.AttackCancelledPayload
+	if typeof(payload.MoveId) ~= "string" or payload.Reason ~= "Feint" then
+		return
+	end
+	local recovery = if typeof(payload.RecoverySeconds) == "number" then payload.RecoverySeconds else 0
+	local now = os.clock()
+	feintRecoveredAt = now + math.clamp(recovery, 0, 2)
+	stringKind = nil
+	stringStage = 0
+	-- Only the swing it is about. A cancel that crossed a newer swing on the wire is stale for the clip,
+	-- but its string reset and recovery above are still the server's truth.
+	if playingMoveId == payload.MoveId and LocalCombatState.SwingEndsAt() > now then
+		bufferedPress = nil
+		cutSwing("Feint")
+	end
+end
+
 local function onWeaponChanged(raw: unknown): ()
 	if typeof(raw) ~= "table" then
 		return
@@ -691,6 +743,8 @@ local function bindCharacter(character: Model, humanoid: Humanoid): ()
 	boundHumanoid = humanoid
 	pendingPrediction = nil
 	bufferedPress = nil
+	playingMoveId = nil
+	feintRecoveredAt = -math.huge
 	stringKind = nil
 	stringStage = 0
 	landedCombo = 0
@@ -718,6 +772,7 @@ function AttackInputClient.Start(): ()
 	started = true
 
 	requestRemote = NetworkBridge.GetRemoteEvent(AttackConstants.Network.RemoteNames.Request)
+	feintRemote = NetworkBridge.GetRemoteEvent(AttackConstants.Network.RemoteNames.Feint)
 	-- HIDES ROBLOX'S OWN BACKPACK HOTBAR. Weapons in this game are held through a Tool (see
 	-- Server/Combat/Weapon/WeaponVisualSystem.lua on why a real Tool rather than a hand-rolled
 	-- Motor6D), and the engine draws every Tool a character owns as a numbered slot along the bottom
@@ -743,7 +798,10 @@ function AttackInputClient.Start(): ()
 	local weaponChanged = NetworkBridge.GetRemoteEvent(AttackConstants.Network.RemoteNames.WeaponChanged)
 	weaponChanged.OnClientEvent:Connect(onWeaponChanged)
 
-	UserInputService.InputBegan:Connect(onInputBegan)
+	local cancelledRemote = NetworkBridge.GetRemoteEvent(AttackConstants.Network.RemoteNames.Cancelled)
+	cancelledRemote.OnClientEvent:Connect(onAttackCancelled)
+
+	bindInputs()
 
 	-- See Shared/PlayerLifecycle.lua. This module's own copy of the wait/spawn/re-check comment was one
 	-- of fifteen; the behaviour it described is now the shared binder's, so there is one place left to
@@ -758,6 +816,33 @@ function AttackInputClient.Start(): ()
 end
 
 -- Public ---------------------------------------------------------------------------------------------
+
+-- The feint press. Sent only while this client has a swing of its own playing -- the one local filter
+-- that is honest, since with no swing there is nothing to feint -- and never predicted: the server
+-- alone knows whether the swing is still inside AttackConstants.Feint.WindowFraction of its windup,
+-- and a clip cut on a guess would leave a swing the server kept landing with no animation at all.
+-- Attack_Cancelled is what stops the clip.
+function AttackInputClient.PressFeint(): ()
+	local remote = feintRemote
+	if not remote or LocalCombatState.SwingEndsAt() <= os.clock() then
+		return
+	end
+	remote:FireServer()
+end
+
+-- Subscribes to every early end of a swing this client started -- a feint, a server-side interrupt,
+-- or a prediction the server never confirmed. For presentation that was scheduled off
+-- OnAttackStarted and must not play for a swing that no longer exists (SwingLunge's step,
+-- AttackTrail's trail). Returns an unsubscribe function.
+function AttackInputClient.OnSwingCancelled(listener: (SwingCancelReason) -> ()): () -> ()
+	table.insert(swingCancelledListeners, listener)
+	return function()
+		local index = table.find(swingCancelledListeners, listener)
+		if index then
+			table.remove(swingCancelledListeners, index)
+		end
+	end
+end
 
 -- Fires the hotbar slot as if its key had been pressed. The HUD's ability slots are real buttons
 -- (AbilitySlot.lua's own header on why it is a TextButton), and "the button does the same thing as

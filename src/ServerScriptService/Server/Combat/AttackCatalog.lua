@@ -162,10 +162,35 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 	-- Taken before any of it is changed: step 3 needs the move's own authored total to tell a
 	-- swing-length Cooldown from a real one.
 	local authoredTotal = definition.WindupSeconds + definition.ActiveSeconds + definition.RecoverySeconds
-	local playbackSpeed = move.WeaponSpeed or 1
-	if playbackSpeed ~= playbackSpeed or playbackSpeed <= 0 then
-		playbackSpeed = 1
+
+	-- 0. THE STRING'S TEMPO (AttackConstants.Tempo), before anything reads a clip: it is a playback
+	-- multiplier on top of WeaponSpeed, so it has to be folded into playbackSpeed for every clip-derived
+	-- number below to come out in the same (slowed) time the client plays the clip in. The authored
+	-- windup and recovery stretch by it for a move with no clip data; the hit window never does -- see
+	-- that constant's own header.
+	local tempo = move.Tempo or 1
+	if tempo ~= tempo or tempo <= 0 then
+		tempo = 1
 	end
+	definition.WindupSeconds /= tempo
+	definition.RecoverySeconds /= tempo
+	-- A swing-length Cooldown stretches with the swing, capped at the stretched swing (the hit window
+	-- did not stretch, so Cooldown / tempo alone could outlast it and reintroduce dead time); a real,
+	-- longer cooldown is a gate, not a pace, and is left alone.
+	local authoredCooldown = move.Cooldown
+	if tempo ~= 1 and move.Cooldown <= authoredTotal + COOLDOWN_EPSILON then
+		authoredCooldown = math.min(
+			move.Cooldown / tempo,
+			definition.WindupSeconds + definition.ActiveSeconds + definition.RecoverySeconds
+		)
+	end
+	authoredTotal = definition.WindupSeconds + definition.ActiveSeconds + definition.RecoverySeconds
+
+	local weaponSpeed = move.WeaponSpeed or 1
+	if weaponSpeed ~= weaponSpeed or weaponSpeed <= 0 then
+		weaponSpeed = 1
+	end
+	local playbackSpeed = weaponSpeed * tempo
 	local clipLength = AttackWindows.ClipLength(animationId)
 	local clipSeconds = if clipLength then clipLength / playbackSpeed else nil
 	if clipSeconds and clipSeconds > HitboxEngineConstants.MaxSwingSeconds then
@@ -194,7 +219,10 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 	local windupOverride = AttackWindows.WindupOverride(moveId, animationId)
 	if windupOverride then
 		local overrideSeconds = windupOverride / playbackSpeed
-		if clipSeconds or overrideSeconds + definition.ActiveSeconds + definition.RecoverySeconds >= move.Cooldown then
+		if
+			clipSeconds
+			or overrideSeconds + definition.ActiveSeconds + definition.RecoverySeconds >= authoredCooldown
+		then
 			definition.WindupSeconds = overrideSeconds
 		end
 	end
@@ -225,7 +253,7 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 	-- whole swing, the attacker's commitment lock, the string's chain beat and CombatBusyUntil, all of
 	-- which AttackRequestSystem derives from those three -- is exactly the clip the player is watching.
 	-- Unknown length (no clip, not fetched yet, unreadable) keeps the authored timeline untouched.
-	local cooldown = move.Cooldown
+	local cooldown = authoredCooldown
 	if clipSeconds then
 		local struck = definition.WindupSeconds + definition.ActiveSeconds
 		if struck > clipSeconds then
@@ -251,8 +279,8 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 		-- clip is shorter than the authored timeline, that Cooldown would outlast the animation and
 		-- bring back exactly the dead time CombatConstants.Weapons' header forbids. A Cooldown authored
 		-- LONGER than its swing (DashPunch's 4s, an Art's) is a deliberate gate and is kept as-is.
-		if move.Cooldown <= authoredTotal + COOLDOWN_EPSILON then
-			cooldown = math.min(move.Cooldown, struck + definition.RecoverySeconds)
+		if authoredCooldown <= authoredTotal + COOLDOWN_EPSILON then
+			cooldown = math.min(authoredCooldown, struck + definition.RecoverySeconds)
 		end
 	end
 
@@ -263,6 +291,8 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 		Cooldown = cooldown,
 		AnimationId = animationId,
 		PlaybackSpeed = playbackSpeed,
+		PowerLevel = MoveTypes.PowerLevelOf(move),
+		Feintable = MoveTypes.IsFeintable(move),
 	}
 end
 

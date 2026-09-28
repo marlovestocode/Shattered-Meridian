@@ -274,6 +274,13 @@ export type ContentAreaHandle = {
 	DespawnAllDebugDummiesRequested: RBXScriptSignal,
 	SetDummyGuardRequested: RBXScriptSignal<boolean>,
 
+	-- Training bot (Spawn tab, Server/Combat/TrainingBot/TrainingBotSystem.lua) -- SpawnTrainingBotRequested
+	-- carries the picked (style, difficulty); both are re-validated server-side. Fire-and-forget like
+	-- SpawnDebugDummyRequested; ActiveTrainingBotCountDisplay is refreshed from each result's ActiveCount.
+	ActiveTrainingBotCountDisplay: Fusion.Value<number>,
+	SpawnTrainingBotRequested: RBXScriptSignal<string, string>,
+	DespawnTrainingBotsRequested: RBXScriptSignal,
+
 	-- Blimp Fuel System test nodes (Spawn tab, Server/Systems/ResourceGatheringSystem.
 	-- SpawnDebugNode) -- fire-and-forget, same shape as SpawnDebugDummyRequested above.
 	SpawnCoalDepositRequested: RBXScriptSignal,

@@ -78,6 +78,12 @@ subscribes to `DamageSystem.OnApplied` (that function's own documented extension
 with a new interaction kind should default to this sibling shape (subscribe to an existing extension
 point, get read through a narrow gate) before assuming it needs to become a fifth stacked layer.
 
+`TrainingBotSystem` (`Server/Combat/TrainingBot/`, the AI sparring partner) is the same sibling shape
+from the other direction: it only ever acts through the public player entry points
+(`AttackRequestSystem.Throw/Feint`, `DefenseSystem.SetBlocking/BeginEvade`) and reads through queries
+(`AttackRequestSystem.GetInFlight` is the one it added). If a bot or NPC seems to need a special case
+inside a combat layer, the player path is missing a public entry point — add that, not a bot branch.
+
 ## Deaths, kill credit and the progression spine
 
 `PlayerDeathSystem` is the **only** publisher of `GameplayEvents.PlayerKilled(victim, killer?, deathId)`

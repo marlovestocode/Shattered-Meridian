@@ -2,9 +2,11 @@
 --[[
 	MovementVFX.lua
 
-	Owns: ground dust kicked up under the local player's own feet -- a steady trickle while sprinting
-	(moving, grounded, not flying) and one bigger burst at Slide-start, colored by the standing
-	surface's Humanoid.FloorMaterial (Constants.FX.MovementDust.ColorByFloorMaterial). The visual idea
+	Owns: ground dust kicked up under a character's feet -- a steady trickle while the local player
+	sprints (moving, grounded, not flying), one bigger burst at Slide-start, and a puff at each end of
+	a roll (the local player's own, and -- through Client/FX/RemoteMovementFX.lua -- everyone else's),
+	colored by the standing surface's Humanoid.FloorMaterial (Constants.FX.MovementDust.ColorByFloorMaterial).
+	Also the local player's roll-start camera kick and afterimage hand-off, from the same state hook. The visual idea
 	is the one a downloaded reference Sprint asset already demonstrated (floor-material-colored dust
 	puffs), rebuilt from scratch through this codebase's own pooling conventions rather than copied --
 	that asset used raw Instance.new + Debris per puff, which has no place here.
@@ -33,10 +35,16 @@
 	(Constants.FX.MovementDust.FootOffsetStuds), not a raycast to the actual ground -- a first-pass
 	approximation, retune in Studio.
 
-	Does not own: deciding WHEN the local player is sprinting/sliding (CombatClient.lua calls
-	SetSprinting/PlaySlideBurst), the camera FOV/shake that accompanies Sprint/Slide (FOVOffset.lua,
-	CameraShake.lua), or the animation itself (CombatAnimator.lua). Purely local presentation;
-	nothing here crosses the network.
+	THE STATE HOOK. OnStateChanged is one more call in Client/Parkour/ParkourController.lua's
+	onTransition list, beside ParkourAudio's -- the same "no event source of its own" shape. Entering
+	Sliding plays the slide burst (which had no caller at all after CombatClient.lua was deleted);
+	entering Rolling plays the tuck puff, the Roll camera kick and RollAfterimage.PlayRoll; leaving it
+	plays the stand-up puff.
+
+	Does not own: deciding WHEN the local player is sprinting/sliding/rolling (the parkour state
+	machine decides; RunController calls SetSprinting), the ghosts themselves (RollAfterimage.lua), the
+	camera FOV that accompanies Sprint/Slide (FOVOffset.lua), or the animation (ParkourAnimator.lua).
+	Purely local presentation; nothing here crosses the network.
 ]]
 
 local Workspace = game:GetService("Workspace")
@@ -47,7 +55,9 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local CameraShake = require(script.Parent.CameraShake)
 local FXPool = require(script.Parent.FXPool)
+local RollAfterimage = require(script.Parent.RollAfterimage)
 
 local logger = Logger.scope("MovementVFX")
 
@@ -130,14 +140,16 @@ local function spawnPuff(position: Vector3, floorMaterial: Enum.Material, partic
 	end)
 end
 
+local currentCharacter: Model? = nil
 local currentHumanoid: Humanoid? = nil
 local currentRootPart: BasePart? = nil
 local sprintingIntent = false
 local lastTrickleClock = 0
 
--- Caches humanoid/root part for the trickle loop and PlaySlideBurst -- called from CombatClient.
--- lua's character-bind path alongside CombatAnimator.BindCharacter, same lifecycle.
+-- Caches the character for the trickle loop, the slide burst and the roll hook -- called from
+-- Main.client.lua's character-bind path alongside CombatAnimator.BindCharacter, same lifecycle.
 function MovementVFX.BindCharacter(character: Model): ()
+	currentCharacter = character
 	currentHumanoid = CharacterUtil.HumanoidOf(character)
 	currentRootPart = CharacterUtil.RootOf(character)
 end
@@ -149,8 +161,7 @@ function MovementVFX.SetSprinting(sprinting: boolean): ()
 	sprintingIntent = sprinting
 end
 
--- One-shot bigger burst at the current foot position -- called from CombatClient.lua's predicted
--- Slide press and its server-confirmed fallback.
+-- One-shot bigger burst at the current foot position -- on entering Sliding, through OnStateChanged.
 function MovementVFX.PlaySlideBurst(): ()
 	local rootPart = currentRootPart
 	if not rootPart then
@@ -159,6 +170,42 @@ function MovementVFX.PlaySlideBurst(): ()
 	local floorMaterial = if currentHumanoid then currentHumanoid.FloorMaterial else Enum.Material.Air
 	local position = rootPart.Position - Vector3.new(0, CONFIG.FootOffsetStuds, 0)
 	spawnPuff(position, floorMaterial, CONFIG.SlideBurstParticleCount)
+end
+
+-- One roll puff under ANY character -- the local player's through OnStateChanged, a remote player's
+-- through RemoteMovementFX. Radial rather than aimed: at half a second the roll is over before a
+-- directional spray would read as anything but noise.
+function MovementVFX.PlayRollBurst(character: Model): ()
+	local rootPart = CharacterUtil.RootOf(character)
+	if not rootPart then
+		return
+	end
+	local humanoid = CharacterUtil.HumanoidOf(character)
+	local floorMaterial = if humanoid then humanoid.FloorMaterial else Enum.Material.Air
+	if floorMaterial == Enum.Material.Air then
+		-- A roll carried off a ledge ends in the air; dust needs a floor to come off.
+		return
+	end
+	local position = rootPart.Position - Vector3.new(0, CONFIG.FootOffsetStuds, 0)
+	spawnPuff(position, floorMaterial, CONFIG.RollBurstParticleCount)
+end
+
+-- The local player's parkour transitions -- see this file's header, THE STATE HOOK.
+function MovementVFX.OnStateChanged(previous: string, next: string): ()
+	if next == "Sliding" and previous ~= "Sliding" then
+		MovementVFX.PlaySlideBurst()
+	end
+	local character = currentCharacter
+	if not character then
+		return
+	end
+	if next == "Rolling" and previous ~= "Rolling" then
+		MovementVFX.PlayRollBurst(character)
+		RollAfterimage.PlayRoll(character)
+		CameraShake.Shake(Constants.FX.CameraShake.Roll)
+	elseif previous == "Rolling" and next ~= "Rolling" then
+		MovementVFX.PlayRollBurst(character)
+	end
 end
 
 -- The persistent trickle evaluator -- see header for why this is one always-connected loop rather

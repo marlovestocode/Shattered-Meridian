@@ -326,6 +326,21 @@ function SwingSequencer.Advance(
 	record.ChainReadyAt = commitmentEndsAt + AttackConstants.Sequence.ChainDelaySeconds
 end
 
+-- Abandons the string in progress after a swing was cut short (a feint), KEEPING the weapon: the next
+-- press starts at stage 1, and the chain beat is rewritten to `readyAt` -- which may be EARLIER than
+-- the beat Advance set, since the swing that owed it never finished. The one place a string's
+-- deadline moves backwards, which is why it is its own function rather than a parameter on Advance.
+function SwingSequencer.CancelString(model: Model, readyAt: number, now: number): ()
+	local record = records[model]
+	if not record then
+		return
+	end
+	record.Category = nil
+	record.StageIndex = 0
+	record.LapsesAt = now
+	record.ChainReadyAt = readyAt
+end
+
 -- Seconds until the next stage of a string may be thrown, 0 when it may be thrown now.
 --
 -- THE BEAT BETWEEN LINKS, and it is this module's to own rather than the request system's for the same

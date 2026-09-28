@@ -136,6 +136,25 @@ return function()
 		end)
 	end)
 
+	-- PowerLevel/Feintable are flat and nil-able, which is exactly the shape Art and Grab had when they
+	-- were silently dropped from the record -- so they get the same round-trip coverage.
+	describe("MoveEditorSystem.EncodeMoveRecord -- PowerLevel and Feintable", function()
+		it("writes both into the record and reads both back", function()
+			local record = MoveEditorSystem.EncodeMoveRecord(baseMove({ PowerLevel = 3, Feintable = true }) :: any)
+			expect(record.PowerLevel).to.equal(3)
+			expect(record.Feintable).to.equal(true)
+			local candidate = MoveEditorSystem.CandidateFromStoredRecord(record) :: any
+			expect(candidate.PowerLevel).to.equal(3)
+			expect(candidate.Feintable).to.equal(true)
+		end)
+
+		it("omits both for a move that authors neither", function()
+			local record = MoveEditorSystem.EncodeMoveRecord(baseMove() :: any)
+			expect(record.PowerLevel).to.equal(nil)
+			expect(record.Feintable).to.equal(nil)
+		end)
+	end)
+
 	describe("MoveEditorSystem.CandidateFromStoredRecord -- structural guard", function()
 		it("returns nil for a non-table record", function()
 			expect(MoveEditorSystem.CandidateFromStoredRecord("not a table")).to.equal(nil)

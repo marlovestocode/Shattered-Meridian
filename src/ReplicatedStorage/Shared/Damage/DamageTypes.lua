@@ -61,6 +61,12 @@ export type AttackCatalogEntry = {
 	-- WeaponSpeed, 1 for anything without one. Same "carried for the layer above" reasoning again: it
 	-- was used to build Definition's timings, so it has to ship with them.
 	PlaybackSpeed: number,
+	-- The swing's weight class (MoveTypes.PowerLevelOf), handed to HitboxEngine.RequestAttack. Carried
+	-- here rather than on Definition because the engine takes PowerLevel as a per-swing argument, not a
+	-- property of the geometry -- see HitboxTypes' own header on why it stays an opaque number there.
+	PowerLevel: number,
+	-- Whether this move may be feinted (MoveTypes.IsFeintable). Read by AttackRequestSystem.Feint.
+	Feintable: boolean,
 }
 
 -- How deep into an unbroken string an attacker is. Landing-based, and NOT the same counter as "which
@@ -133,6 +139,13 @@ export type CombatFeedback = {
 	-- event rather than a remote of its own because the defender's client must start it AFTER the
 	-- hit-stop freeze this same event triggers, and two remotes have no ordering guarantee.
 	Knockback: Vector3?,
+	-- True on a Blocked contact that left the defender's guard CRACKING (DefenseConstants.GuardCrack) --
+	-- the cue for the heavier, hotter block sparks. Carried here rather than read off the
+	-- GuardCrack tag on arrival, for the same no-ordering-guarantee reason Knockback is: the
+	-- block that crosses the line would otherwise throw ordinary sparks half the time.
+	GuardCracking: boolean?,
+	-- True on a PERFECT parry (DefenseTypes.DefenseOutcome.Perfect) -- the cue for the heavier clash.
+	Perfect: boolean?,
 }
 
 return DamageTypes

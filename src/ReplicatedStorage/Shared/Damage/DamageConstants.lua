@@ -81,7 +81,14 @@ DamageConstants.Combo = {
 	-- So if Stagger.DurationSeconds is ever retuned down (its own comment flags 0.6-0.75 as the
 	-- previous design's derived bound), THIS number has to move with it or the parry silently stops
 	-- interrupting combos. The spec asserts the ordering rather than either number.
-	WindowSeconds = 0.9,
+	--
+	-- RAISED FROM 0.9 TO 1.15 with AttackConstants.Tempo (M1s at 0.75x). The slowed string lands its hits
+	-- further apart -- stage 2 into 3 came out at ~0.9s hit-to-hit on the authored numbers alone, i.e. AT
+	-- the old window -- and a string whose gaps outgrow this number can never reach its Finisher. Scaled
+	-- with the string rather than left at the edge, and kept under the two bounds either side of it:
+	-- Stagger.DurationSeconds (1.5) above, and AttackConstants.Sequence.ResetSeconds (1.2), which is
+	-- deliberately the longer of the two.
+	WindowSeconds = 1.15,
 
 	-- Ceiling on escalation. Past this, further landed hits keep the window alive but grant no more
 	-- growth -- an unbounded multiplier is one long string away from a one-combo kill, and bounding it

@@ -838,8 +838,8 @@ local CombatConstants = {
 		Fists = {
 			BasicHitDamage = 4,
 			PostureDamage = 0.65,
-			Reach = 0.5,
-			Speed = 1.5,
+			Reach = 0.3,
+			Speed = 1.2,
 		},
 
 		-- The one place a weapon swing's volume, reach and anchor are configured. Defined as SWING_HITBOX
@@ -1244,23 +1244,36 @@ local CombatConstants = {
 		-- natural length. Parried/GuardBroken are rarer, at-most-once-per-exchange events and need less
 		-- headroom.
 		Impact = {
-			Clean = { SoundId = "", Volume = 0.7, PoolSize = 3 } :: Constants.SoundDefinition,
+			Clean = { SoundId = "rbxassetid://78167398013554", Volume = 0.7, PoolSize = 3 } :: Constants.SoundDefinition,
 			-- Its own registration rather than a quieter Clean -- "distinct, duller" is the brief, and a
 			-- shared sample pitched down only approximates that; a real asset can be pointed here
 			-- without touching the ordinary hit sound at all.
-			Blocked = { SoundId = "", Volume = 0.55, PoolSize = 3 } :: Constants.SoundDefinition,
+			Blocked = { SoundId = "rbxassetid://136811265205147", Volume = 0.55, PoolSize = 3 } :: Constants.SoundDefinition,
 			-- THE STANDOUT CUE. A parry is the hardest defensive read in the system
 			-- (DefenseConstants.Parry's own MinUnguardedSeconds/lockout machinery exists because it is
 			-- the option worth gatekeeping) and the one outcome this codebase already treats as
 			-- deserving unmistakable feedback -- see CameraShake's own asymmetry, where Parried is the
 			-- one Attacker preset as loud as its Defender counterpart. Its own registration, own pool,
 			-- so landing one never competes with an ordinary hit for the same Sound instance.
-			Parried = { SoundId = "", Volume = 0.85, PoolSize = 2 } :: Constants.SoundDefinition,
+			Parried = { SoundId = "rbxassetid://131206760792389", Volume = 0.85, PoolSize = 2 } :: Constants.SoundDefinition,
 			-- Heavier than Blocked, not a louder Clean -- a guard break is a real opening
 			-- (DefenseStateMachine.BreakGuard), and DamageConstants.Guard's own header already treats it
 			-- as a distinct, consequential moment rather than a bigger version of an ordinary hit.
-			GuardBroken = { SoundId = "", Volume = 0.9, PoolSize = 2 } :: Constants.SoundDefinition,
+			GuardBroken = { SoundId = "rbxassetid://132492701741331", Volume = 0.9, PoolSize = 2 } :: Constants.SoundDefinition,
+			-- THE DODGER'S HALF of an evade: a bright whiff, the sound of a blade cutting air right where
+			-- you were. Played on the defender's client only -- see EvadedAttacker below for the other
+			-- half, and CombatAudio.PlayEvaded for the split.
+			Evaded = { SoundId = "rbxassetid://117848751549656", Volume = 0.75, PoolSize = 2 } :: Constants.SoundDefinition,
 		} :: { [string]: Constants.SoundDefinition },
+
+		-- The ATTACKER's half of an evade -- a muted whiff. Deliberately quieter and duller than the
+		-- dodger's: the dodge is the dodger's moment, and the attacker's cue only has to say "that went
+		-- through nothing" without rewarding the swing that missed.
+		EvadedAttacker = { SoundId = "rbxassetid://126172687057831", Volume = 0.8, PoolSize = 2 } :: Constants.SoundDefinition,
+
+		-- The feint cue, on the feinting player's own client when the server confirms the cancel
+		-- (Attack_Cancelled). Short and breathy -- a weight pulled back, not a strike.
+		Feint = { SoundId = "", Volume = 0.5 } :: Constants.SoundDefinition,
 
 		-- A few percent of per-play pitch variation, shared across every sound above -- the identical
 		-- "identical sample on a metronome" fix Client/FX/RunAudio.lua's own PitchJitter documents,

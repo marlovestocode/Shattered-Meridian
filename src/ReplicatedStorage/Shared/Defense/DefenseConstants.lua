@@ -90,6 +90,36 @@ DefenseConstants.Guard = {
 	TradeRestore = 0,
 }
 
+-- Guard cracking -----------------------------------------------------------------------------------
+
+-- THE BREAK YOU CAN SEE COMING. Below EnterFraction of Guard.Max the guard is "cracking": every block
+-- throws heavier, hotter sparks, and the blocker's guard pose strains and trembles. Both are the same fact
+-- read two ways -- the attacker learns one more hit may break it, the defender learns they are one read
+-- from an opening -- which is the tension the posture meter exists to create. Before this, the first
+-- visible sign a guard was low was the break itself.
+--
+-- PUBLISHED, NOT DERIVED BY CLIENTS. The pool is server-only (only the owning client is ever sent its
+-- number), so DefenseSystem publishes the crossing as the CollectionService tag below on the Humanoid,
+-- which replicates to every client -- the strain pose then reads the same for a spectator as for the two
+-- fighters -- and stamps it on each Combat_Feedback so the block's sparks never race the tag.
+--
+-- A TAG, NOT AN ATTRIBUTE, because the reader needs DISCOVERY: a cracking guard can be a player or a
+-- training bot (a Model under Workspace, with no Player to hang a character hook off), and the tag's
+-- added/removed signals hand Client/FX/GuardStrainPose.lua exactly the bodies to pose with no scan at
+-- all. It gates nothing -- no system reads it to decide anything -- so the "deadlines, not booleans"
+-- rule for cross-system GATES does not apply; DefenseSystem re-derives it from the pool every frame, and
+-- UnregisterCombatant removes it.
+--
+-- HYSTERESIS, so a guard regenerating across the line does not flicker the pose on and off: the flag
+-- sets below EnterFraction and clears only above ExitFraction. 0.3 is the brief; 0.3 of Guard.Max (100)
+-- is 30, which is under two ordinary blocked hits (DrainPerPowerLevel 18) -- the warning arrives with
+-- one real decision left, not three.
+DefenseConstants.GuardCrack = {
+	EnterFraction = 0.3,
+	ExitFraction = 0.36,
+	Tag = "GuardCracking",
+}
+
 -- Punish -------------------------------------------------------------------------------------------
 
 DefenseConstants.Stagger = {
@@ -172,6 +202,32 @@ DefenseConstants.Parry = {
 	-- min(ping, cap). Capped because ping is client-influenced and an uncapped refund is a permanent
 	-- parry for anyone willing to lie about it.
 	PingCompensationMaxSeconds = 0.12,
+}
+
+-- THE PERFECT PARRY. A contact landing within WindowSeconds of the parry window OPENING -- the defender
+-- held the press until the last possible moment -- is Perfect: the attacker is staggered for
+-- StaggerSeconds instead of Stagger.DurationSeconds, and both clients play a heavier clash (a longer
+-- freeze, a camera punch, a brighter burst -- FXConstants.PerfectParry). Skill you can feel, not just a
+-- number.
+--
+-- MEASURED ON THE SERVER'S OWN SUBSTEP CLOCK, the same one the parry itself is judged on: contact
+-- SampleTime minus the moment the window went live (DefenseStateMachine.ParryOpenedAt). NO PING REFUND,
+-- and that is deliberate, not an omission: the window opens when the press ARRIVES, one-way latency
+-- after the player pressed, so the measured interval is already SHORTER than the real press-to-impact
+-- interval by that latency. A refund here would subtract from a number that is already in the
+-- defender's favour. The refund that matters -- a late press still counting as a parry at all -- stays
+-- where it was, on the window's end (Parry.PingCompensationMaxSeconds).
+--
+-- 0.05 is the brief. The window itself is 0.2 (RegisteredParryWindows), so the perfect band is the first
+-- quarter of it: common enough to be a goal, rare enough to mean something.
+--
+-- StaggerSeconds is FLAGGED in the same spirit Stagger.DurationSeconds is: 1.5 already converts a parry
+-- into a full combo, and +0.3 adds roughly one more Basic swing (0.31s windup at WeaponSpeed 1) to it. It
+-- extends the punish; it does not create a new one. The whiff lockout it also extends
+-- (_parryLockedUntil follows the stagger) is the attacker's, and is correct to extend with it.
+DefenseConstants.PerfectParry = {
+	WindowSeconds = 0.05,
+	StaggerSeconds = DefenseConstants.Stagger.DurationSeconds + 0.3,
 }
 
 -- Evade ---------------------------------------------------------------------------------------------

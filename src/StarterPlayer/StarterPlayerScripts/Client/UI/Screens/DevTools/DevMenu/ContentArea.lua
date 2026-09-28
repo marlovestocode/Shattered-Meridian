@@ -28,6 +28,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
+local TrainingBotConstants = require(ReplicatedStorage.Shared.TrainingBot.TrainingBotConstants)
 local Tokens = require(script.Parent.Parent.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Parent.Parent.Parent.Components.Panel)
 local Section = require(script.Parent.Parent.Parent.Parent.Components.Section)
@@ -543,6 +544,14 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local dummyGuardActive = scope:Value(false)
 	local activeDummyCountDisplay = scope:Value(0)
 
+	-- Training bot (Spawn tab) -- which style/difficulty the NEXT spawn uses. Local picker state only:
+	-- nothing server-side is selected until Spawn is pressed, and the server re-validates both names
+	-- against the same TrainingBotConstants lists these cycle through. The count is advisory, refreshed
+	-- from each spawn/despawn result.
+	local trainingBotStyle = scope:Value(TrainingBotConstants.DefaultStyle :: string)
+	local trainingBotDifficulty = scope:Value(TrainingBotConstants.DefaultDifficulty :: string)
+	local activeTrainingBotCountDisplay = scope:Value(0)
+
 	-- Local-only raw input state for Teleport-To-Coordinates/Broadcast-Announcement -- neither is
 	-- exposed on the handle itself (same "screen owns its own raw input, fires already-validated
 	-- values" boundary the Reports tab's triage buttons and BugReport/init.lua's description field
@@ -586,6 +595,8 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local spawnDebugDummyRequestedEvent = Instance.new("BindableEvent")
 	local despawnAllDebugDummiesRequestedEvent = Instance.new("BindableEvent")
 	local setDummyGuardRequestedEvent = Instance.new("BindableEvent")
+	local spawnTrainingBotRequestedEvent = Instance.new("BindableEvent")
+	local despawnTrainingBotsRequestedEvent = Instance.new("BindableEvent")
 	local spawnCoalDepositRequestedEvent = Instance.new("BindableEvent")
 	local spawnWaterSourceRequestedEvent = Instance.new("BindableEvent")
 	local fillCarriedFuelRequestedEvent = Instance.new("BindableEvent")
@@ -620,6 +631,20 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	local activeDummyCountText = scope:Computed(function(use)
 		return `Active: {use(activeDummyCountDisplay)}`
 	end)
+	local trainingBotStyleText = scope:Computed(function(use)
+		return `Style: {use(trainingBotStyle)}`
+	end)
+	local trainingBotDifficultyText = scope:Computed(function(use)
+		return `Difficulty: {use(trainingBotDifficulty)}`
+	end)
+	local activeTrainingBotCountText = scope:Computed(function(use)
+		return `Active bots: {use(activeTrainingBotCountDisplay)}`
+	end)
+	-- Advances a picker to the next name in `order`, wrapping.
+	local function cycle(value: Fusion.Value<string>, order: { string }): ()
+		local index = table.find(order, peek(value)) or 0
+		value:set(order[index % #order + 1])
+	end
 	-- Empty string (renders nothing) rather than "Loading..." while versionBannerText is nil -- this
 	-- banner is advisory chrome, not a value the admin is waiting on the way the flight tuner's
 	-- fields below are, so silence is the right default for "not loaded yet" AND "no newer version."
@@ -852,12 +877,86 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 				},
 			},
 		}),
+		-- Training Bot -- the AI sparring partner (Server/Combat/TrainingBot/TrainingBotSystem.lua). It
+		-- fights through the same entry points a player's inputs reach -- swings, feints, guard, parry,
+		-- roll -- and narrates its reads on its nameplate. Style is WHAT it does (a pure drill like
+		-- ParryOnly, or a full opponent); difficulty is HOW WELL (reaction time, timing error, how fast
+		-- it learns your habits). See Shared/TrainingBot/TrainingBotConstants.lua for both lists.
+		Section(scope, "Training Bot", 4, {
+			scope:New "Frame" {
+				Name = "PresetRow",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				BackgroundTransparency = 1,
+				LayoutOrder = 1,
+
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						Padding = UDim.new(0, Tokens.Space.S),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					Button(scope, {
+						Text = trainingBotStyleText,
+						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 1,
+						OnActivated = function()
+							cycle(trainingBotStyle, TrainingBotConstants.StyleOrder :: { string })
+						end,
+					}),
+					Button(scope, {
+						Text = trainingBotDifficultyText,
+						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 2,
+						OnActivated = function()
+							cycle(trainingBotDifficulty, TrainingBotConstants.DifficultyOrder :: { string })
+						end,
+					}),
+				},
+			},
+			scope:New "Frame" {
+				Name = "SpawnBotRow",
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				BackgroundTransparency = 1,
+				LayoutOrder = 2,
+
+				[Children] = {
+					scope:New "UIListLayout" {
+						FillDirection = Enum.FillDirection.Horizontal,
+						Padding = UDim.new(0, Tokens.Space.S),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					},
+					Button(scope, {
+						Text = "Spawn Training Bot",
+						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 1,
+						OnActivated = function()
+							spawnTrainingBotRequestedEvent:Fire(peek(trainingBotStyle), peek(trainingBotDifficulty))
+						end,
+					}),
+					Button(scope, {
+						Text = "Despawn Bots",
+						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
+						LayoutOrder = 2,
+						OnActivated = function()
+							despawnTrainingBotsRequestedEvent:Fire()
+						end,
+					}),
+				},
+			},
+			Label(scope, {
+				Text = activeTrainingBotCountText,
+				Scale = "Body",
+				Color = Tokens.Color.TextSecondary,
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				LayoutOrder = 3,
+			}),
+		}),
 		-- Blimp Fuel System test nodes -- one tagged CoalDeposit/WaterSource Part spawned
 		-- RESOURCE_NODE_SPAWN_DISTANCE studs in front of the requesting admin (Server/Systems/
 		-- DevMenuSystem.handleSpawnCoalDeposit/handleSpawnWaterSource), so a tester can gather before a
 		-- builder has placed any real world nodes. See Server/Systems/ResourceGatheringSystem.
 		-- SpawnDebugNode's own header.
-		Section(scope, "Blimp Fuel Nodes", 4, {
+		Section(scope, "Blimp Fuel Nodes", 5, {
 			scope:New "Frame" {
 				Name = "SpawnResourceNodeRow",
 				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
@@ -1599,6 +1698,9 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 		SpawnDebugDummyRequested = spawnDebugDummyRequestedEvent.Event,
 		DespawnAllDebugDummiesRequested = despawnAllDebugDummiesRequestedEvent.Event,
 		SetDummyGuardRequested = setDummyGuardRequestedEvent.Event,
+		ActiveTrainingBotCountDisplay = activeTrainingBotCountDisplay,
+		SpawnTrainingBotRequested = spawnTrainingBotRequestedEvent.Event,
+		DespawnTrainingBotsRequested = despawnTrainingBotsRequestedEvent.Event,
 		SpawnCoalDepositRequested = spawnCoalDepositRequestedEvent.Event,
 		SpawnWaterSourceRequested = spawnWaterSourceRequestedEvent.Event,
 		FillCarriedFuelRequested = fillCarriedFuelRequestedEvent.Event,

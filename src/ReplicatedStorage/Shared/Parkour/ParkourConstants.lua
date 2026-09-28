@@ -1273,6 +1273,15 @@ ParkourConstants.Roll = {
 	-- outlived; the slide it hands to opens a fresh report.
 	CrawlSpeed = 8,
 	MaxCeilingHoldSeconds = 0.6,
+	-- The roll's one-shot, played by Client/FX/ParkourAudio.lua on entering Rolling. A cloth-and-scuff
+	-- tumble, one sound for every direction for the reason Dash.Sound gives. BLANK UNTIL AN ASSET IS
+	-- UPLOADED -- this codebase does not guess asset ids; SoundManager.Register warns once on a blank id
+	-- and Play no-ops on it, so the roll is silent rather than broken until one is pasted in.
+	Sound = {
+		SoundId = "",
+		Volume = 0.55,
+		PoolSize = 2,
+	},
 }
 
 -- THE DASH -- an AIR-ONLY, camera-aimed, steerable launch on its own key

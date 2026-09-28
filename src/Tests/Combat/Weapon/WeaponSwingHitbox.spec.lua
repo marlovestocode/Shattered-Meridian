@@ -40,8 +40,18 @@ local function configure(weaponId: string, attributes: { [string]: any }): ()
 	WeaponFixture.Rebuild()
 end
 
+-- Pinned to 1 here: SpawnDelay's arithmetic below is stated in the authored timeline's own seconds,
+-- and the M1 tempo (AttackConstants.Tempo, covered in AttackCatalog.spec) would divide every Basic
+-- number by it. SpawnDelay itself is never stretched -- it is the builder's delay in real seconds.
+local AUTHORED_BASIC_TEMPO = AttackConstants.Tempo.ByStage.Basic
+
 return function()
+	beforeEach(function()
+		AttackConstants.Tempo.ByStage.Basic = 1
+	end)
+
 	afterEach(function()
+		AttackConstants.Tempo.ByStage.Basic = AUTHORED_BASIC_TEMPO
 		for _, weaponId in ROSTER do
 			local values = WeaponFixture.HitboxValues(weaponId)
 			if values then

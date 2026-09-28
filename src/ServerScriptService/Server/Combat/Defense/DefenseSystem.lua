@@ -104,6 +104,9 @@ type Registration = {
 	-- A guard press that arrived while the body was committed -- mid-swing or stunned -- and is being
 	-- held until it is free. See SetBlocking. Cleared by the release, or by Step raising the guard.
 	GuardDeferred: boolean,
+	-- The GuardCrack tag state last written to the Humanoid -- deduped like PublishedState, and the
+	-- hysteresis memory publishGuardCrack needs (DefenseConstants.GuardCrack).
+	PublishedCracking: boolean,
 }
 
 local registrations: { [Model]: Registration } = {}
@@ -189,6 +192,42 @@ local function publishState(registration: Registration, state: DefenseState): ()
 	end
 end
 
+-- Whether a guard at `guard` of `max` reads as cracking, given whether it already did. The hysteresis
+-- rule of DefenseConstants.GuardCrack in one place, so the tag and the Combat_Feedback stamp
+-- (DefenseSystem.IsGuardCracking) can never disagree about the same pool.
+local function crackingFor(guard: number, max: number, wasCracking: boolean): boolean
+	if max <= 0 then
+		return false
+	end
+	local fraction = guard / max
+	if wasCracking then
+		return fraction < DefenseConstants.GuardCrack.ExitFraction
+	end
+	return fraction < DefenseConstants.GuardCrack.EnterFraction
+end
+
+-- Publishes the GuardCrack tag for every client to read (the strain pose -- see
+-- DefenseConstants.GuardCrack on why a tag). Deduped on PublishedCracking, since Step calls this every
+-- frame for every registration and an unchanged replicated write is pure cost -- publishState's own
+-- reasoning, applied to the second thing this system publishes.
+local function publishGuardCrack(registration: Registration): ()
+	local humanoid = registration.Humanoid
+	if humanoid.Parent == nil then
+		return
+	end
+	local cracking =
+		crackingFor(registration.Guard:Get(), registration.Guard:GetMax(), registration.PublishedCracking)
+	if cracking == registration.PublishedCracking then
+		return
+	end
+	registration.PublishedCracking = cracking
+	if cracking then
+		humanoid:AddTag(DefenseConstants.GuardCrack.Tag)
+	else
+		humanoid:RemoveTag(DefenseConstants.GuardCrack.Tag)
+	end
+end
+
 local function notifyClient(registration: Registration, state: DefenseState, attackerPosition: Vector3?): ()
 	local remote = stateChangedRemote
 	if not remote then
@@ -235,6 +274,7 @@ function DefenseSystem.RegisterCombatant(
 		HoldsMovementLock = false,
 		PublishedState = nil,
 		GuardDeferred = false,
+		PublishedCracking = false,
 	}
 	registration.Machine = DefenseStateMachine.New({
 		OnTransition = function(_from: DefenseState, to: DefenseState, _at: number)
@@ -263,6 +303,7 @@ function DefenseSystem.UnregisterCombatant(model: Model): ()
 	end
 	if registration.Humanoid.Parent ~= nil then
 		registration.Humanoid:SetAttribute(DefenseConstants.DefenseStateAttribute, nil)
+		registration.Humanoid:RemoveTag(DefenseConstants.GuardCrack.Tag)
 	end
 	registrations[model] = nil
 	parryConsumedThisBatch[model] = nil
@@ -522,6 +563,9 @@ local function onHit(report: HitReport): ()
 		DefenderStateAtContact = machine:StateAt(at),
 		Result = result,
 		SampleTime = at,
+		-- Judged here, at the contact's own SampleTime, against the same window the parry itself was just
+		-- judged against -- never re-derived in pass 2, where ConsumeParry has already closed it.
+		Perfect = result.Kind == "Parried" and machine:IsPerfectParryAt(at),
 	})
 end
 
@@ -578,7 +622,12 @@ local function applyContact(contact: PendingContact, now: number): ()
 		-- either would make a mutual success into a mutual failure.
 		local attackerRegistration = registrations[contact.Attacker]
 		if attackerRegistration then
-			attackerRegistration.Machine:Stagger(now)
+			-- A PERFECT parry staggers longer (DefenseConstants.PerfectParry) -- the one gameplay difference
+			-- it makes; the rest of its reward is presentation, keyed off Perfect on the outcome below.
+			attackerRegistration.Machine:Stagger(
+				now,
+				if contact.Perfect then DefenseConstants.PerfectParry.StaggerSeconds else nil
+			)
 		end
 		if defenderRegistration then
 			notifyClient(defenderRegistration, defenderRegistration.Machine:GetState(), contact.Report.ContactPosition)
@@ -595,8 +644,9 @@ local function applyContact(contact: PendingContact, now: number): ()
 		Guard = contact.Result.Guard,
 		GuardDelta = contact.Result.GuardDelta,
 		SampleTime = contact.SampleTime,
+		Perfect = contact.Perfect == true,
 	})
-	debugLog("Contact resolved", { kind = kind, defender = contact.Defender.Name })
+	debugLog("Contact resolved", { kind = kind, defender = contact.Defender.Name, perfect = contact.Perfect })
 end
 
 -- The loop -----------------------------------------------------------------------------------------
@@ -631,6 +681,7 @@ function DefenseSystem.Step(deltaTime: number, now: number): ()
 		-- making the punish hollow.
 		local regenerates = state ~= "Blocking" and state ~= "Staggered" and not machine:IsBlockHeld()
 		registration.Guard:Regenerate(deltaTime, now, regenerates)
+		publishGuardCrack(registration)
 	end
 
 	if #pending == 0 then
@@ -680,6 +731,18 @@ function DefenseSystem.GetGuard(model: Model): (number?, number?)
 		return nil, nil
 	end
 	return registration.Guard:Get(), registration.Guard:GetMax()
+end
+
+-- Whether this combatant's guard is cracking RIGHT NOW, by the same hysteresis rule the GuardCrack tag
+-- is published under. Read live off the pool rather than off that tag, because the
+-- damage layer asks straight after draining it -- inside the frame, before Step has re-published -- and
+-- stamps the answer on Combat_Feedback so a block's sparks never race the tag's replication.
+function DefenseSystem.IsGuardCracking(model: Model): boolean
+	local registration = registrations[model]
+	if not registration then
+		return false
+	end
+	return crackingFor(registration.Guard:Get(), registration.Guard:GetMax(), registration.PublishedCracking)
 end
 
 -- Drains guard from OUTSIDE a blocked contact, breaking it if the drain empties the pool. Returns

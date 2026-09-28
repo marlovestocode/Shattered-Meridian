@@ -58,6 +58,7 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
@@ -110,6 +111,10 @@ type Descriptor = {
 	-- attacks, which have no weapon. Resolved here beside SpawnDelaySeconds for the same reason: a
 	-- property of the WEAPON, not the stage. See MoveDefinition.WeaponSpeed for who reads it.
 	WeaponSpeed: number?,
+	-- Which stage of a weapon string this is, or nil for a standalone attack. Drives the projected
+	-- PowerLevel/Feintable (MoveTypes.PowerLevelByStage/FeintableByStage) -- a weight class is a property
+	-- of the stage, not of anything the Move Editor lets an admin retune on a Default move.
+	Stage: WeaponStageCategory?,
 }
 
 local function weaponStageMoveId(weaponId: Types.WeaponId, category: WeaponStageCategory, stageIndex: number): string
@@ -208,6 +213,7 @@ local function enumerateDescriptors(): { Descriptor }
 				AttachmentPart = weaponSwingAttachment(weaponId),
 				SpawnDelaySeconds = WeaponRoster.SwingHitbox(weaponId).SpawnDelaySeconds,
 				WeaponSpeed = WeaponRoster.Speed(weaponId),
+				Stage = "Basic",
 			})
 		end
 		for index, definition in ipairs(weapon.Stages.Heavy) do
@@ -218,6 +224,7 @@ local function enumerateDescriptors(): { Descriptor }
 				AttachmentPart = weaponSwingAttachment(weaponId),
 				SpawnDelaySeconds = WeaponRoster.SwingHitbox(weaponId).SpawnDelaySeconds,
 				WeaponSpeed = WeaponRoster.Speed(weaponId),
+				Stage = "Heavy",
 			})
 		end
 		-- Finisher is a single stage, not an array -- stageIndex 0 marks it, mirroring the sentinel
@@ -229,6 +236,7 @@ local function enumerateDescriptors(): { Descriptor }
 			AttachmentPart = weaponSwingAttachment(weaponId),
 			SpawnDelaySeconds = WeaponRoster.SwingHitbox(weaponId).SpawnDelaySeconds,
 			WeaponSpeed = WeaponRoster.Speed(weaponId),
+			Stage = "Finisher",
 		})
 	end
 	for _, name in ipairs(STANDALONE_ATTACK_NAMES) do
@@ -387,6 +395,13 @@ local function toMoveDefinition(descriptor: Descriptor): MoveTypes.MoveDefinitio
 		-- header for why AttackCatalog rather than this projection is what finally adds it to a windup.
 		SpawnDelaySeconds = descriptor.SpawnDelaySeconds,
 		WeaponSpeed = descriptor.WeaponSpeed,
+		-- By stage, never authored -- see Descriptor.Stage. A standalone attack (DashPunch/DashHit/
+		-- AirSlam) takes the Basic weight and is never feintable.
+		-- By stage too -- the string's pace knob (AttackConstants.Tempo). A standalone keeps 1: it is not
+		-- a link in a string, so a string's tempo has no business slowing it.
+		Tempo = if descriptor.Stage then AttackConstants.Tempo.ByStage[descriptor.Stage] else nil,
+		PowerLevel = MoveTypes.PowerLevelByStage[descriptor.Stage or "Basic"],
+		Feintable = MoveTypes.FeintableByStage[descriptor.Stage or "Basic"],
 		WindupSeconds = definition.WindupSeconds,
 		ActiveSeconds = definition.ActiveSeconds,
 		RecoverySeconds = definition.RecoverySeconds,

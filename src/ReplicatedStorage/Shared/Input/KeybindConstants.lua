@@ -79,9 +79,8 @@ local KeybindConstants = {
 		-- next to T and is unbound elsewhere in this table -- the two weapon actions stay adjacent.
 		SelectNextWeapon = { KeyCode = Enum.KeyCode.Y },
 		-- Right-click is otherwise unbound in this table (MouseButton1 is BasicAttack, Block/Parry
-		-- already lives on F) -- fires RequestFeint (CombatSystem.lua's handleFeintRequest), the
-		-- conventional "cancel/reposition" slot this genre leaves free next to the primary attack
-		-- button.
+		-- already lives on F) -- fires Attack_Feint (AttackRequestSystem.Feint), the conventional
+		-- "cancel/reposition" slot this genre leaves free next to the primary attack button.
 		Feint = { UserInputType = Enum.UserInputType.MouseButton2 },
 		-- Opens the player-facing bug report form (Client/BugReport/BugReportClient.lua). F8 reads
 		-- as a "system/meta" function-row key rather than a gameplay key -- unlike the letter/mouse

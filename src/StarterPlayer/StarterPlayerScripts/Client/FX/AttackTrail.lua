@@ -18,10 +18,11 @@
 	SCHEDULED AGAINST THE SWING'S OWN WINDUP AND ACTIVE SECONDS, on the identical Heartbeat-driven
 	`window` shape Client/Combat/SwingLunge.lua already uses for the same reason: a scheduled
 	task.delay thread is one a respawn or a cancelled swing has no way to reach and cancel, where a
-	polled window is cleared by just dropping the reference. Enabled turns on when the windup ends
-	(the arm is now actually moving through the strike) and off when ActiveSeconds does (the hitbox
-	just closed) -- not tied to the animation's own total length, which includes recovery the trail has
-	no reason to still be drawing through.
+	polled window is cleared by just dropping the reference. Enabled turns on just before the windup
+	ends and off just after ActiveSeconds does (SwingTrail.LeadSeconds/TailSeconds -- the arm's
+	acceleration into the strike and its follow-through; the window alone is a ~0.2s flicker) -- not
+	tied to the animation's own total length, which includes recovery the trail has no reason to still
+	be drawing through.
 
 	RESOLVES ITS OWN ATTACHMENT POINT PER SWING, from the AttackStartedPayload alone -- no
 	subscription to Weapon_InventoryChanged of its own, and no cached "current weapon" to go stale.
@@ -34,11 +35,20 @@
 	attack pressed in the same instant) simply gets no trail for that one swing rather than erroring --
 	cosmetic-only, exactly like WeaponVisualSystem's own equip-failure path.
 
-	TWO ATTACHMENTS BUILT FRESH PER SWING, not pooled per weapon. A swing is bounded by this game's own
-	combat cadence (SwapCooldownSeconds, per-move Cooldown) to at most a few a second, nowhere near the
-	frequency CLAUDE.md's performance guidance reserves pooling for, and a fresh Trail is what makes a
-	weapon swap or a respawn mid-swing incapable of leaving a trail parented to a part that no longer
-	exists.
+	ONE TRAIL AND ONE ATTACHMENT PAIR, BUILT ONCE AND REPARENTED PER SWING (combat performance audit
+	F4). This used to build all three fresh on every swing, on the theory that a swing is rare enough
+	not to matter -- but a mashed Basic string is several a second for the whole fight, and each one was
+	three Instance.new and three Destroy. Now a swing reparents the same three onto its anchor part,
+	after disabling the trail and clearing its drawn segments so nothing streaks across from the last
+	anchor. The one hazard reuse brings -- the anchor was a Tool that got sheathed, and Roblox destroyed
+	the pooled Instances with it -- is caught at the reparent (a destroyed Instance's Parent is locked,
+	so the assignment throws) and answered by building a fresh set, so a swap or a respawn still cannot
+	leave a trail on a part that no longer exists.
+
+	A CANCELLED SWING TAKES ITS TRAIL WITH IT (AttackInputClient.OnSwingCancelled): a swing cut in its
+	windup never reaches the strike, so its scheduled trail is dropped. A FEINT instead flares the trail
+	briefly in AttackConstants.Presentation.SwingTrail.FeintColor as the arm pulls back -- the feint
+	cue, readable in hindsight.
 
 	Does not own: WHEN a swing starts or how long it runs (AttackInputClient/AttackStartedPayload
 	decide that; this module only reacts), what the swing looks like otherwise (Client/FX/
@@ -80,24 +90,112 @@ local character: Model? = nil
 
 local started = false
 local startedDisconnect: (() -> ())? = nil
+local cancelledDisconnect: (() -> ())? = nil
 local heartbeatConnection: RBXScriptConnection? = nil
 
--- Destroys whatever this module built for the swing in progress, if any. Safe to call with nothing
--- live -- every field is nil-checked, and Destroy on an already-destroyed Instance is a no-op in
--- Luau. Called both mid-swing (the swing's own ActiveSeconds elapsed) and out from under a swing that
--- never got the chance to finish (BindCharacter, Stop).
-local function clearTrail(): ()
+-- Takes the pooled trail off whatever it was riding, without destroying it: disabled, its drawn
+-- segments cleared, and unparented so it holds no reference into a rig or Tool that may be about to
+-- go. Safe with nothing built, and on a set Roblox already destroyed along with its anchor (the pcall).
+local function releaseTrail(): ()
+	window = nil
+	local currentTrail = trail
+	if currentTrail then
+		pcall(function()
+			currentTrail.Enabled = false
+			currentTrail:Clear()
+			currentTrail.Parent = nil
+		end)
+	end
+	local near, far = attachment0, attachment1
+	if near then
+		pcall(function()
+			near.Parent = nil
+		end)
+	end
+	if far then
+		pcall(function()
+			far.Parent = nil
+		end)
+	end
+end
+
+local function destroyTrail(): ()
+	releaseTrail()
 	if trail then
 		trail:Destroy()
-		trail = nil
 	end
 	if attachment0 then
 		attachment0:Destroy()
-		attachment0 = nil
 	end
 	if attachment1 then
 		attachment1:Destroy()
-		attachment1 = nil
+	end
+	trail = nil
+	attachment0 = nil
+	attachment1 = nil
+end
+
+-- Parents `instance` under `parent`, reporting false when it cannot be -- which, for an Instance this
+-- module owns, means Roblox destroyed it with a previous anchor.
+local function tryParent(instance: Instance, parent: Instance): boolean
+	return (pcall(function()
+		instance.Parent = parent
+	end))
+end
+
+-- The pooled set, moved onto `part` at the given offsets -- or a fresh set when the pooled one was
+-- destroyed along with its last anchor (or never built). Left disabled, cleared and pale.
+local function acquire(part: BasePart, offsetNear: CFrame, offsetFar: CFrame): ()
+	releaseTrail()
+	local pooledTrail, pooled0, pooled1 = trail, attachment0, attachment1
+	local reused = pooledTrail ~= nil
+		and pooled0 ~= nil
+		and pooled1 ~= nil
+		and tryParent(pooled0, part)
+		and tryParent(pooled1, part)
+		and tryParent(pooledTrail, part)
+	if not reused then
+		-- The whole old set, not just the piece that failed: a reuse that got partway (one Attachment
+		-- reparented before another refused) would otherwise leave that one behind on the new anchor.
+		for _, stale in { pooledTrail, pooled0, pooled1 } :: { Instance? } do
+			if stale then
+				pcall(function()
+					stale:Destroy()
+				end)
+			end
+		end
+		local a0 = Instance.new("Attachment")
+		a0.Name = "AttackTrailNear"
+		a0.Parent = part
+		local a1 = Instance.new("Attachment")
+		a1.Name = "AttackTrailFar"
+		a1.Parent = part
+		local newTrail = Instance.new("Trail")
+		newTrail.Attachment0 = a0
+		newTrail.Attachment1 = a1
+		newTrail.Transparency = TUNING.Transparency
+		-- No Width: a Trail has none. Its thickness is the Attachment pair's separation -- see
+		-- AttackConstants.Presentation.SwingTrail.
+		newTrail.WidthScale = TUNING.WidthScale
+		newTrail.Lifetime = TUNING.LifetimeSeconds
+		newTrail.LightEmission = TUNING.LightEmission
+		newTrail.LightInfluence = TUNING.LightInfluence
+		newTrail.Brightness = TUNING.Brightness
+		newTrail.FaceCamera = TUNING.FaceCamera
+		newTrail.Enabled = false
+		newTrail.Parent = part
+		trail = newTrail
+		attachment0 = a0
+		attachment1 = a1
+	end
+	if attachment0 then
+		attachment0.CFrame = offsetNear
+	end
+	if attachment1 then
+		attachment1.CFrame = offsetFar
+	end
+	if trail then
+		trail.Color = TUNING.Color
 	end
 end
 
@@ -143,8 +241,7 @@ local function onAttackStarted(payload: AttackStartedPayload): ()
 	-- A new swing always retires whatever the previous one left running -- a fast combo string must
 	-- never show two overlapping trails, and one still fading out from a cancelled swing must not
 	-- outlive the throw that replaced it.
-	clearTrail()
-	window = nil
+	releaseTrail()
 
 	local currentCharacter = character
 	if not currentCharacter then
@@ -158,39 +255,31 @@ local function onAttackStarted(payload: AttackStartedPayload): ()
 		return
 	end
 
-	local a0 = Instance.new("Attachment")
-	a0.Name = "AttackTrailNear"
-	a0.CFrame = offsetNear
-	a0.Parent = part
+	-- Off until the windup ends -- see this file's header. Moved onto the anchor now (not at the enable
+	-- moment) so the pair has settled by the time it draws; Roblox trails an Attachment from wherever it
+	-- first renders, so moving it on the enable frame would draw a spurious segment from the old spot.
+	acquire(part, offsetNear, offsetFar)
 
-	local a1 = Instance.new("Attachment")
-	a1.Name = "AttackTrailFar"
-	a1.CFrame = offsetFar
-	a1.Parent = part
-
-	local newTrail = Instance.new("Trail")
-	newTrail.Attachment0 = a0
-	newTrail.Attachment1 = a1
-	newTrail.Color = TUNING.Color
-	newTrail.Transparency = TUNING.Transparency
-	-- No Width: a Trail has none. Its thickness is the Attachment pair's separation -- see
-	-- AttackConstants.Presentation.SwingTrail.
-	newTrail.WidthScale = TUNING.WidthScale
-	newTrail.Lifetime = TUNING.LifetimeSeconds
-	-- Off until the windup ends -- see this file's header. Built now (not deferred to the enable
-	-- moment) so Attachment0/Attachment1 are already parented and settled the instant it turns on;
-	-- Roblox trails a brand-new Attachment pair from wherever they first render, so building them a
-	-- beat early would otherwise draw a short, spurious segment from the part's origin.
-	newTrail.Enabled = false
-	newTrail.Parent = part
-
-	attachment0 = a0
-	attachment1 = a1
-	trail = newTrail
-
+	-- The hit window plus a lead into it and a tail after it (SwingTrail.LeadSeconds/TailSeconds) --
+	-- the trail traces the swing, the hitbox stays exactly the window.
 	window = {
-		startsAt = os.clock() + SwingLunge.DelayFor(payload.WindupSeconds, 0),
-		durationSeconds = payload.ActiveSeconds,
+		startsAt = os.clock() + SwingLunge.DelayFor(payload.WindupSeconds, -TUNING.LeadSeconds),
+		durationSeconds = payload.ActiveSeconds + TUNING.LeadSeconds + TUNING.TailSeconds,
+	}
+end
+
+-- A swing ended early. A feint flares the trail as the feint cue; anything else simply drops it.
+local function onSwingCancelled(reason: AttackInputClient.SwingCancelReason): ()
+	local currentTrail = trail
+	if reason ~= "Feint" or not TUNING.Enabled or not currentTrail or not currentTrail.Parent then
+		releaseTrail()
+		return
+	end
+	currentTrail.Color = TUNING.FeintColor
+	currentTrail.Enabled = true
+	window = {
+		startsAt = os.clock(),
+		durationSeconds = TUNING.FeintPulseSeconds,
 	}
 end
 
@@ -203,10 +292,7 @@ local function onHeartbeat(): ()
 	local currentTrail = trail
 	if not currentTrail or not currentTrail.Parent then
 		-- The part it was parented to (a Tool, most likely) is gone -- a sheathe or a swap mid-swing.
-		-- Destroying WOULD be redundant (Roblox already collected it with its parent) but the two
-		-- Attachments are separate Instances that may or may not have gone with it depending on which
-		-- one they were parented to; clearTrail's own nil-checks make this safe either way.
-		clearTrail()
+		-- The next acquire notices the destroyed set and builds a fresh one.
 		window = nil
 		return
 	end
@@ -216,9 +302,9 @@ local function onHeartbeat(): ()
 		return
 	end
 	if elapsed >= live.durationSeconds then
-		-- Disabled, not destroyed -- Trail.Lifetime still has to fade out whatever segment is already
-		-- drawn, which Destroy would cut off mid-fade. clearTrail's next call (the next swing, or a
-		-- character rebind) is what actually reclaims the Instances.
+		-- Disabled, not released -- Trail.Lifetime still has to fade out whatever segment is already
+		-- drawn, which Clear would cut off mid-fade. The next acquire (the next swing) or a character
+		-- rebind is what moves it on.
 		currentTrail.Enabled = false
 		window = nil
 		return
@@ -237,8 +323,7 @@ function AttackTrail.GetPreloadInstances(): { Instance }
 end
 
 function AttackTrail.BindCharacter(newCharacter: Model): ()
-	clearTrail()
-	window = nil
+	releaseTrail()
 	character = newCharacter
 end
 
@@ -249,6 +334,7 @@ function AttackTrail.Start(): ()
 	started = true
 
 	startedDisconnect = AttackInputClient.OnAttackStarted(onAttackStarted)
+	cancelledDisconnect = AttackInputClient.OnSwingCancelled(onSwingCancelled)
 	heartbeatConnection = RunService.Heartbeat:Connect(onHeartbeat)
 
 	logger:debug("AttackTrail started", { enabled = TUNING.Enabled })
@@ -264,12 +350,15 @@ function AttackTrail.Stop(): ()
 		startedDisconnect()
 		startedDisconnect = nil
 	end
+	if cancelledDisconnect then
+		cancelledDisconnect()
+		cancelledDisconnect = nil
+	end
 	if heartbeatConnection then
 		heartbeatConnection:Disconnect()
 		heartbeatConnection = nil
 	end
-	clearTrail()
-	window = nil
+	destroyTrail()
 	character = nil
 end
 

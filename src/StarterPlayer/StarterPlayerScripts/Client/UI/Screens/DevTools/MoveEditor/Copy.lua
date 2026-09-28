@@ -116,6 +116,16 @@ Copy.Fields = {
 		Hint = "Most targets one swing can hit. Doubles as pierce count when this move is a projectile -- 1 means it "
 			.. "stops on the first thing it touches. Default 5.",
 	} :: FieldCopy,
+	["Damage.PowerLevel"] = {
+		Unit = "class",
+		Hint = "How heavy this move is. A blocked hit drains guard in proportion to it, so a class-2 move breaks a "
+			.. "guard twice as fast as a class-1 jab. Weapon strings use 1 for basics and 2 for heavies and "
+			.. "finishers. Default 1.",
+	} :: FieldCopy,
+	["Damage.Feintable"] = {
+		Hint = "Lets the attacker cancel this move early in its windup to bait a parry. Only the first part of the "
+			.. "windup can be feinted, and a feint carries its own cooldown. Weapon strings allow it on heavies only.",
+	} :: FieldCopy,
 
 	-- Movement ---------------------------------------------------------------------------------
 	["Movement.LungeDistance"] = {

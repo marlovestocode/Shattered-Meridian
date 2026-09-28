@@ -108,6 +108,35 @@ AttackConstants.Sequence = {
 	MaxStageProbe = 16,
 }
 
+-- THE STRING'S TEMPO, per stage kind of a weapon string -- the one knob for "M1s are too fast".
+--
+-- A multiplier on the swing's PLAYBACK, not a pause between swings: below 1 the clip plays slower and
+-- the swing's windup and recovery stretch by the same factor, so the punch reads as heavier and the
+-- string's rhythm slows WITHOUT dead time between links (a gap between swings is what the old 0.20
+-- ChainDelaySeconds was, and it read as a hitch -- see that constant). Stacks with the weapon's own
+-- WeaponSpeed: the clip plays at WeaponSpeed x this.
+--
+-- ActiveSeconds -- the hit window -- is deliberately NOT stretched. It is a gameplay number (how long
+-- a swing can connect), not an animation one, and a slower swing silently growing a more forgiving
+-- hit window would be a balance change nobody asked for. Only where it opens moves.
+--
+-- Applied by Server/Combat/AttackCatalog.Get to a weapon string's Default moves (DefaultMoveRegistry
+-- stamps MoveDefinition.Tempo by stage); custom Move Editor moves and the standalones are 1. Every
+-- client-side reader (the predicted clip, the trail, the lunge, the whoosh) follows automatically
+-- because each is timed off the server's own AttackStartedPayload.
+--
+-- BOUNDED BY THE COMBO WINDOW: a slower string lands hits further apart, and the gap between two
+-- landed hits must stay under DamageConstants.Combo.WindowSeconds or the Finisher becomes
+-- unreachable. Tests/Combat/Attack/AttackRequestSystem.spec.lua checks the authored string against
+-- it; a clip much longer than its authored timeline is the case that check cannot see.
+AttackConstants.Tempo = {
+	ByStage = {
+		Basic = 0.75,
+		Heavy = 1,
+		Finisher = 1,
+	},
+}
+
 AttackConstants.Finisher = {
 	-- Landed-combo depth (ComboEscalation.GetStage) required before completing the Basic string tips
 	-- into the weapon's Finisher instead of wrapping back to stage 1.
@@ -235,6 +264,14 @@ AttackConstants.Network = {
 		SwapWeapon = "Attack_SwapWeapon",
 		-- Server -> owner, on every accepted swap.
 		WeaponChanged = "Attack_WeaponChanged",
+		-- Client -> server, the feint press (AttackRequestSystem.Feint). No payload at all: the server
+		-- knows which swing is in flight, so there is nothing for a client to name.
+		Feint = "Attack_Feint",
+		-- Server -> the attacker alone, when the server cuts one of their swings short. The one route by
+		-- which a client learns to stop a swing clip it started on Attack_Started -- see
+		-- AttackTypes.AttackCancelledPayload. Feint is its only sender today; a future hitstun or
+		-- parry cancel reuses it rather than adding a remote.
+		Cancelled = "Attack_Cancelled",
 	},
 
 	-- Sized against DefenseConstants.Network.MaxCallsPerSecondPerPlayer (12) as the established
@@ -250,6 +287,33 @@ AttackConstants.Network = {
 	-- rhythm, and a swap costs a registry lookup plus a string reset -- there is no legitimate reason
 	-- to send more than a couple a second.
 	MaxSwapsPerSecondPerPlayer = 4,
+
+	-- The feint key's own bucket. A legal feint needs a Heavy in its windup first, which is itself
+	-- gated by the request bucket above, so more than a few a second is never legitimate.
+	MaxFeintsPerSecondPerPlayer = 4,
+}
+
+-- Feint ---------------------------------------------------------------------------------------------
+
+-- Cancelling your own Heavy during the early part of its windup, to bait a parry or a block. See
+-- AttackRequestSystem.Feint for the gate and MoveTypes.FeintableByStage for which moves may be feinted.
+AttackConstants.Feint = {
+	-- How far into the windup a feint is still accepted, as a fraction of that swing's WindupSeconds.
+	--
+	-- THE FRACTION IS WHAT MAKES A FEINT A READ RATHER THAN A REACTION. A defender commits to a parry on
+	-- the attacker's windup; if the attacker could cancel right up to the strike, they could wait to SEE
+	-- the parry come out and cancel into a free punish -- an option-select, not a mind game. Cut off at
+	-- half, a feint has to be thrown before the defender's answer is visible.
+	WindowFraction = 0.5,
+
+	-- The attacker's own lockout after a feint -- how long before they may throw again, and what
+	-- CombatBusyUntil is rewritten to. Short, so a feint into a real swing is a live mix-up, but not
+	-- zero: a free cancel would make every Heavy press safe.
+	RecoverySeconds = 0.25,
+
+	-- Minimum gap between two feints, from the first one. Stops feint-feint-feint from locking a
+	-- defender into perpetual guessing -- the second bait costs a real commitment.
+	CooldownSeconds = 1.5,
 }
 
 -- Windows -----------------------------------------------------------------------------------------
@@ -454,14 +518,30 @@ AttackConstants.Presentation = {
 		-- the same choice for the same reason: a swing-in-progress is not yet a verdict, so it borrows
 		-- no faction/outcome colour the way a parry or a guard-break flash does.
 		Color = ColorSequence.new(Color3.fromRGB(235, 235, 245)),
+		-- Solid for the first half of a segment's life, then gone -- the old straight 0.15 -> 1 ramp spent
+		-- most of an already-short lifetime half-faded, which is most of why the M1 trail read as faint.
 		Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0.15),
+			NumberSequenceKeypoint.new(0, 0),
+			NumberSequenceKeypoint.new(0.5, 0.3),
 			NumberSequenceKeypoint.new(1, 1),
 		}),
 		-- Seconds a given point along the trail takes to fade out -- Roblox's own Trail.Lifetime, not a
-		-- duration this module schedules. Short on purpose: this is a swing's own arc, not a comet tail
-		-- that outlives it.
-		LifetimeSeconds = 0.18,
+		-- duration this module schedules. Still a swing's own arc, not a comet tail -- but 0.18 left an
+		-- M1's arc gone before the eye had found it; 0.3 holds it about one beat.
+		LifetimeSeconds = 0.3,
+		-- SELF-LIT and CAMERA-FACING. Unlit (LightInfluence 1, the Trail default) a pale trail in shade
+		-- reads as grey smoke; FaceCamera turns the ribbon toward the viewer, where a flat ribbon swept
+		-- by a punch is edge-on -- invisible -- for exactly the side view a fight is usually seen from.
+		LightEmission = 0.6,
+		LightInfluence = 0,
+		Brightness = 2,
+		FaceCamera = true,
+		-- The trail lights this long BEFORE the hit window opens and stays lit this long AFTER it closes.
+		-- The window alone is ~0.2s -- a flicker. The lead catches the arm's acceleration into the
+		-- strike and the tail its follow-through, so the trail traces the swing rather than a slice of
+		-- it. Presentation only: the hitbox is exactly the window, whatever this draws.
+		LeadSeconds = 0.06,
+		TailSeconds = 0.08,
 		-- Trail.WidthScale runs over each segment's LIFETIME, not along the limb: 0 is the segment just
 		-- laid down, 1 is the one about to vanish. Full width where the fist/blade is now, thinning to a
 		-- sliver as it fades, so the trail reads as a streak behind the strike rather than a flat ribbon.
@@ -479,7 +559,10 @@ AttackConstants.Presentation = {
 		--   * Fists: the R6 Right Arm is 2 studs long, so -1 is the fist. A 0.3-stud pair right at the
 		--     knuckles draws a thin line that follows the punch, not a sheet swept by the whole forearm.
 		--   * Weapons: along the Handle's own axis out to the blade, so the trail covers the edge that hit.
-		FistOffsetStuds = { Near = -0.75, Far = -1.05 },
+		-- Widened from a 0.3-stud pair (-0.75..-1.05) to 0.5: at 0.3 the camera-facing ribbon was a
+		-- hairline at fighting distance. Still only the forearm's last half-stud, not a sheet swept by the
+		-- whole arm -- Tests/FX/SwingTrail.spec holds it at or under 0.5.
+		FistOffsetStuds = { Near = -0.55, Far = -1.05 },
 		-- Which limb each stage of the bare-hands Basic string strikes with, in string order: jab with the
 		-- left, cross with the right, then a kick with the left foot. R6 limb part names. Anything not in
 		-- this list -- the Finisher (StageIndex 0), a Heavy, a stage past the end -- uses FistDefaultLimb.
@@ -487,6 +570,12 @@ AttackConstants.Presentation = {
 		FistLimbByStage = { "Left Arm", "Right Arm", "Left Leg" },
 		FistDefaultLimb = "Right Arm",
 		WeaponOffsetStuds = { Near = 0.5, Far = -3.2 },
+		-- THE FEINT CUE. When the server confirms a feint (Attack_Cancelled), the same trail flares for
+		-- this long in this colour as the arm pulls back -- a short, cold streak that reads in hindsight
+		-- as "that was a bait", distinct from the pale strike trail above. Local to the feinter, like the
+		-- trail itself; the defender's reward is the parry they wasted, not a banner.
+		FeintColor = ColorSequence.new(Color3.fromRGB(120, 200, 255)),
+		FeintPulseSeconds = 0.12,
 	},
 }
 

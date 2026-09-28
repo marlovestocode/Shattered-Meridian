@@ -71,6 +71,7 @@ local AttackRequestSystem = require(Combat.Attack.AttackRequestSystem)
 local GrabSystem = require(Combat.Grab.GrabSystem)
 local EngagementSystem = require(Combat.Engagement.EngagementSystem)
 local KnockbackAudit = require(Combat.Damage.KnockbackAudit)
+local EnvironmentReactionSystem = require(Combat.Environment.EnvironmentReactionSystem)
 local WeaponVisualSystem = require(Combat.Weapon.WeaponVisualSystem)
 local WeaponInventorySystem = require(Combat.Weapon.WeaponInventorySystem)
 local ParkourSystem = require(Systems.ParkourSystem)
@@ -89,6 +90,7 @@ local BountySystem = require(Systems.BountySystem)
 local BugReportSystem = require(Systems.BugReportSystem)
 local AdminActionSystem = require(Systems.AdminActionSystem)
 local DebugDummySystem = require(Systems.DebugDummySystem)
+local TrainingBotSystem = require(Combat.TrainingBot.TrainingBotSystem)
 local ModerationSystem = require(Systems.ModerationSystem)
 local DevMenuSystem = require(Systems.DevMenuSystem)
 local MoveEditorSystem = require(Systems.MoveEditorSystem)
@@ -376,6 +378,13 @@ boot("EngagementSystem", EngagementSystem)
 --     a Heartbeat of its own, so it has no place in the combat layers' connection-order requirement.
 boot("KnockbackAudit", KnockbackAudit)
 
+--     EnvironmentReactionSystem -- the wall splat and the swing scuff. A sibling on TWO extension points,
+--     DamageSystem.OnApplied (the resolved launch, like KnockbackAudit) and AttackRequestSystem.
+--     OnSwingAccepted (a committed swing), reaching down only through DamageSystem.ExtendHitstun. After
+--     both, so both subscriptions have something to attach to; its Heartbeat only watches its own rows,
+--     so it has no place in the combat layers' connection-order requirement.
+boot("EnvironmentReactionSystem", EnvironmentReactionSystem)
+
 --     WeaponVisualSystem is a further sibling, purely cosmetic -- it subscribes to
 --     AttackRequestSystem.OnWeaponChanged (the same public extension-point shape GrabSystem's own
 --     subscription to DamageSystem.OnApplied established) to keep a Tool matching the combatant's
@@ -507,11 +516,22 @@ boot("AdminActionSystem", AdminActionSystem)
 --      do.
 boot("DebugDummySystem", DebugDummySystem)
 
+-- 21c. TrainingBotSystem -- the AI sparring partner (Server/Combat/TrainingBot). A SIBLING of the attack
+--      layer that plays by its rules: it acts only through AttackRequestSystem.Throw/Feint and
+--      DefenseSystem.SetBlocking/BeginEvade, and learns through DamageSystem.OnApplied. Unlike
+--      DebugDummySystem it DOES own a Heartbeat, and ITS POSITION IS A CORRECTNESS REQUIREMENT: that
+--      Heartbeat reads attack/defence state all four combat layers wrote earlier in the same frame, so it
+--      must connect after every one of them (step 12's block) -- anywhere down here satisfies that, and
+--      its Init asserts the layers exist. Spawnable only through the whitelist-gated Spawn tab
+--      (DevMenuSystem, step 22), so a server nobody spawns one on pays one empty loop per frame.
+boot("TrainingBotSystem", TrainingBotSystem)
+
 -- 22. Whitelist-gated dev tooling boots last -- its
 --     ListBugReports/UpdateBugReportStatus handlers call BugReportSystem, its
 --     SetTargetGodmode/SetTargetFlight/SetTargetFlightCollide/etc. handlers call AdminActionSystem,
 --     its SpawnDebugDummy/DespawnAllDebugDummies/SetDummyGuard/GetDebugDummyState handlers call
---     DebugDummySystem (step 21b above), its KickPlayer/BanPlayer/MutePlayer handlers call
+--     DebugDummySystem (step 21b above), its SpawnTrainingBot/DespawnTrainingBots handlers call
+--     TrainingBotSystem (step 21c above), its KickPlayer/BanPlayer/MutePlayer handlers call
 --     ModerationSystem (already booted first, step 1), and its RollEmote handler calls
 --     EmoteUnlockService (already booted at step 12b) -- so it needs all of them already running, and
 --     nothing else in the boot sequence depends on DevMenuSystem existing first.

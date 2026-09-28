@@ -43,6 +43,26 @@ aggressor, turtle, custom) with per-parameter weights configurable by the reques
 validated/applied server-side — training bots must not become a backdoor for
 client-authoritative combat state.
 
+**As built (2026-09-28)** — `Server/Combat/TrainingBot/` (`TrainingBotBrain` decides,
+`TrainingBotSystem` perceives and acts), tunables in `Shared/TrainingBot/TrainingBotConstants.lua`,
+spawned from the Admin Menu's Spawn tab. It is the reference implementation of the decision model
+above, and anything new that fights (an enemy archetype, a boss) should start from it:
+
+- **Style × difficulty.** A style is the weight table (parry / block / evade / trade, aggression,
+  heavy and feint bias, string length, spacing); a difficulty is perception and execution (reaction
+  time, timing error, misread chance, learn rate, read influence, punish chance, turn rate). Shipped
+  styles: FullFight, Aggressor, Turtle, AttackOnly, BlockOnly, ParryOnly, DodgeOnly. Shipped
+  difficulties: Novice, Adept, Master. **Custom** (client-sent weights) is not built yet — the server
+  would need to validate and clamp every weight before it is.
+- **Same entry points as a player.** It acts only through `AttackRequestSystem.Throw/Feint` and
+  `DefenseSystem.SetBlocking/BeginEvade`, so every gate that refuses a player refuses it. It sees
+  only what a player sees: which move you started and when (`AttackRequestSystem.GetInFlight`),
+  after a sampled reaction delay — never your inputs.
+- **Reads, not reflexes.** It keeps a per-opponent habit model (how you answer its swings; how often
+  you feint) and reshapes its weights by it — heavies against blockers, feint baits against
+  parriers, short strings against rollers, and, from Adept up, waiting out the feint window once it
+  has seen you feint. Composure (hit → rattled → more defensive) gives it a visible mood.
+
 ## Dialogue and quests
 
 - `DialogueSystem` drives story NPC conversation trees; quest data flows through `QuestManager`

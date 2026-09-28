@@ -106,4 +106,18 @@ export type WeaponChangedPayload = {
 	WeaponId: Types.WeaponId,
 }
 
+-- Why the server cut a swing short. "Feint" is the only sender today -- see
+-- AttackConstants.Network.RemoteNames.Cancelled.
+export type AttackCancelReason = "Feint"
+
+-- Server -> the attacker alone, on Attack_Cancelled. Carries the MoveId so a client whose own
+-- prediction has already moved on to a different swing can ignore a cancel that is not about it.
+export type AttackCancelledPayload = {
+	MoveId: string,
+	Reason: AttackCancelReason,
+	-- How long the attacker is locked out after the cancel -- the client's LocalCombatState holds its
+	-- own swing prediction this long rather than guessing.
+	RecoverySeconds: number,
+}
+
 return AttackTypes

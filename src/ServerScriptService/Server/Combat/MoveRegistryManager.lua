@@ -684,6 +684,18 @@ function MoveRegistryManager.Validate(
 		maxTargets = math.floor(clamped)
 	end
 
+	-- Weight class and feintability -- both optional, both CLAMPED/COERCED rather than rejected, and
+	-- absent on every record persisted before they existed (see MoveDefinition.PowerLevel/Feintable).
+	-- Whole levels only: GuardMeter.DrainFor multiplies by it, and a fractional weight class is not a
+	-- thing an author means.
+	local powerLevel: number? = nil
+	if raw.PowerLevel ~= nil then
+		local clamped =
+			Sanitize.ClampNumber(raw.PowerLevel, MoveTypes.PowerLevelLimits.Min, MoveTypes.PowerLevelLimits.Max)
+		powerLevel = if clamped then math.floor(clamped + 0.5) else nil
+	end
+	local feintable: boolean? = if raw.Feintable == true then true else nil
+
 	if typeof(raw.AnimationId) ~= "string" then
 		return nil, "InvalidAnimationId"
 	end
@@ -749,6 +761,8 @@ function MoveRegistryManager.Validate(
 		PostureDamage = postureDamage,
 		ArcDegrees = arcDegrees,
 		MaxTargets = maxTargets,
+		PowerLevel = powerLevel,
+		Feintable = feintable,
 		AnimationId = animationId,
 		Animations = animations,
 		Movement = movement,

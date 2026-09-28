@@ -52,6 +52,7 @@ local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local ParkourAudio = require(script.Parent.Parent.FX.ParkourAudio)
+local MovementVFX = require(script.Parent.Parent.FX.MovementVFX)
 local EnvironmentProbe = require(script.Parent.EnvironmentProbe)
 local InputBuffer = require(script.Parent.InputBuffer)
 local ParkourAnimator = require(script.Parent.ParkourAnimator)
@@ -332,6 +333,8 @@ local function onTransition(previousId: MovementStateId, nextId: MovementStateId
 	ParkourAnimator.OnStateChanged(previousId, nextId, context.AnimationVariant)
 	ParkourCamera.OnStateChanged(previousId, nextId)
 	ParkourAudio.OnStateChanged(previousId, nextId)
+	-- Dust, the roll's camera kick and its afterimage -- the visual half of what ParkourAudio just did.
+	MovementVFX.OnStateChanged(previousId, nextId)
 	-- The run system, told the same thing on the same frame as the animator and the camera. This is
 	-- what stops the run loop and the footstep audio from continuing straight through a slide, a
 	-- wall-run, a vault or a fall -- before this, the run presentation asked only "is sprint held and

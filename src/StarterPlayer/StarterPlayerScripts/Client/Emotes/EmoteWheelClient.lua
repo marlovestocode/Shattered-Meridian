@@ -486,9 +486,11 @@ function EmoteWheelClient.Start(handle: EmoteWheelHandle, clientState: ClientSta
 		end
 
 		-- Cancel path -- closes WITHOUT confirming, distinct from the normal release-with-a-selection
-		-- path above (InputEnded matching the EmoteWheel keybind itself). See this file's header on
-		-- why MouseButton2 needing a guard against CombatClient.lua's own Feint bind is handled on
-		-- that module's side (EmoteWheelClient.IsOpen()), not here.
+		-- path above (InputEnded matching the EmoteWheel keybind itself). MouseButton2 is also Feint
+		-- (Client/Combat/AttackInputClient.PressFeint), which needs no guard against this: it sends
+		-- only while its owner has a swing of its own playing. The one overlap -- wheel opened inside
+		-- a Heavy's windup, right-click inside the feint window -- sends a feint the server judges on
+		-- its own gate, which is a legal feint the player also pressed for, not a misfire.
 		if input.UserInputType == Enum.UserInputType.MouseButton2 then
 			logger:debug("Emote wheel cancelled")
 			closeWheel(handle)

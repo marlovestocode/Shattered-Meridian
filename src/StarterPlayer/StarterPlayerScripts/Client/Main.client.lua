@@ -61,6 +61,9 @@ local FurnacePromptClient = require(script.Parent.Blimp.FurnacePromptClient)
 local SwingLunge = require(script.Parent.Combat.SwingLunge)
 local CombatAudio = require(script.Parent.FX.CombatAudio)
 local AttackTrail = require(script.Parent.FX.AttackTrail)
+local RollAfterimage = require(script.Parent.FX.RollAfterimage)
+local RemoteMovementFX = require(script.Parent.FX.RemoteMovementFX)
+local GuardStrainPose = require(script.Parent.FX.GuardStrainPose)
 local CombatFeedbackClient = require(script.Parent.Combat.CombatFeedbackClient)
 local DeathNoticeClient = require(script.Parent.Combat.DeathNoticeClient)
 local BugReportClient = require(script.Parent.BugReport.BugReportClient)
@@ -236,11 +239,11 @@ logger:debug("DefenseClient start")
 DefenseClient.Start()
 logger:debug("DefenseClient end")
 
--- Attack input -- the light/heavy strings, the five hotbar slots and the weapon swap. Unconditional
--- for every client, and deliberately AFTER SettingsClient.RestoreSettings above for exactly the same
--- reason DefenseClient is: it reads BasicAttack/HeavyAttack/HotbarSlot1-5/SwapWeapon through
--- KeybindManager, so a player who rebound any of them must have their override live before the first
--- press can reach this. Replaces the deleted TestAttackHarnessClient, whose own header always said a
+-- Attack input -- the light/heavy strings, the feint, the five hotbar slots and the weapon swap.
+-- Unconditional for every client, and deliberately AFTER SettingsClient.RestoreSettings above for
+-- exactly the same reason DefenseClient is: it binds BasicAttack/HeavyAttack/Feint/HotbarSlot1-5 and
+-- the weapon keys through InputRouter (which matches through KeybindManager), so a player who rebound
+-- any of them must have their override live before the first press can reach this. Replaces the deleted TestAttackHarnessClient, whose own header always said a
 -- real input layer would.
 --
 -- Also after UI.Mount() above, though not for a reason of its own: the HUD's ability slots subscribe
@@ -323,6 +326,25 @@ logger:debug("AttackTrail end")
 logger:debug("CombatAudio start")
 CombatAudio.Start()
 logger:debug("CombatAudio end")
+
+-- The roll's afterimage (the ghosts' fade loop), then the watcher that draws OTHER players' rolls off
+-- the replicated ParkourState Attribute. The local player's own roll reaches RollAfterimage through
+-- MovementVFX's state hook, which ParkourController (started above) drives. RollAfterimage first: a
+-- remote roll that replicates the instant the watcher binds must find the fade loop running.
+logger:debug("RollAfterimage start")
+RollAfterimage.Start()
+logger:debug("RollAfterimage end")
+logger:debug("RemoteMovementFX start")
+RemoteMovementFX.Start()
+logger:debug("RemoteMovementFX end")
+
+-- Every body whose guard is cracking strains its guard pose, on every client, off the GuardCrack tag
+-- DefenseSystem publishes (no remote). Then the environment's dust and chipped debris -- a swing scuffing
+-- a wall and a body splatted into one -- off Combat_EnvironmentFX, plus this player's own swing scuff,
+-- predicted locally off AttackInputClient.OnAttackStarted (started above). Neither depends on the other.
+logger:debug("GuardStrainPose start")
+GuardStrainPose.Start()
+logger:debug("GuardStrainPose end")
 
 -- Hit presentation -- damage numbers, the outcome banner and the camera shake, driven off the damage
 -- layer's Combat_Feedback event. AFTER UI.Mount(), and that IS load-bearing: it is handed the

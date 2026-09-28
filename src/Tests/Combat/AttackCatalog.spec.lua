@@ -57,10 +57,49 @@ local function total(entry: any): number
 	return definition.WindupSeconds + definition.ActiveSeconds + definition.RecoverySeconds
 end
 
+-- The string's tempo (AttackConstants.Tempo) is pinned to 1 for every case here but the one that is
+-- about it: the numbers below are the clip-sync and marker mechanics, stated in the authored timeline's
+-- own seconds, and a tempo would restate every one of them divided by it. DefaultMoveRegistry reads the
+-- constant per projection, so a live write reaches the next Get.
+local AUTHORED_BASIC_TEMPO = AttackConstants.Tempo.ByStage.Basic
+
 return function()
+	beforeEach(function()
+		AttackConstants.Tempo.ByStage.Basic = 1
+	end)
+
 	afterEach(function()
+		AttackConstants.Tempo.ByStage.Basic = AUTHORED_BASIC_TEMPO
 		AttackCatalog.Reset()
 		MoveRegistryManager.Init()
+	end)
+
+	describe("AttackCatalog.Get -- the string's tempo", function()
+		afterEach(clearClips)
+
+		it("plays an M1 clip slower and stretches its windup and recovery, but never its hit window", function()
+			AttackConstants.Tempo.ByStage.Basic = 0.75
+			local entry = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
+			expect(entry.PlaybackSpeed).to.be.near(0.75, 1e-6)
+			expect(entry.Definition.WindupSeconds).to.be.near(0.31 / 0.75, 1e-6)
+			expect(entry.Definition.RecoverySeconds).to.be.near(0.14 / 0.75, 1e-6)
+			expect(entry.Definition.ActiveSeconds).to.be.near(0.22, 1e-6)
+		end)
+
+		it("times a synced M1 against its clip played at the tempo", function()
+			AttackConstants.Tempo.ByStage.Basic = 0.75
+			serveClip(0.6, 0.3)
+			AttackWindows.Prefetch("rbxassetid://104588315151150")
+			local entry = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
+			expect(entry.Definition.WindupSeconds).to.be.near(0.3 / 0.75, 1e-6)
+			expect(total(entry)).to.be.near(0.6 / 0.75, 1e-6)
+		end)
+
+		it("leaves a Heavy at its own tempo", function()
+			AttackConstants.Tempo.ByStage.Basic = 0.75
+			local entry = AttackCatalog.Get(HEAVY_MOVE_ID) :: any
+			expect(entry.PlaybackSpeed).to.be.near(AttackConstants.Tempo.ByStage.Heavy, 1e-6)
+		end)
 	end)
 
 	describe("AttackCatalog.Get -- resolution", function()

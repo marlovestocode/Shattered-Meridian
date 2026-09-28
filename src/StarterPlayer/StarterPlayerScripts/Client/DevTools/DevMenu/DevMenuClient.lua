@@ -719,6 +719,41 @@ local function startDevMenu(handle: DevMenuHandle, chrome: Chrome.ChromeHandle):
 		end)
 	end)
 
+	-- Training bot (Spawn tab, Server/Combat/TrainingBot/TrainingBotSystem.lua) -- same fire-and-forget
+	-- "invokeAndReport, status text only" shape as SpawnDebugDummyRequested above, with the active count
+	-- taken from what the server reports rather than counted up locally (a spawn past MaxActive evicts).
+	content.SpawnTrainingBotRequested:Connect(function(style: string, difficulty: string)
+		logger:debug("SpawnTrainingBotRequested received", { style = style, difficulty = difficulty })
+		invokeAndReport(handle, function()
+			local spawnTrainingBotRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.SpawnTrainingBot)
+			return spawnTrainingBotRemote:InvokeServer(style, difficulty)
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuSpawnBotResult
+			logger:debug("SpawnTrainingBot result received", { success = result.Success, reason = result.Reason })
+			if result.Success and result.ActiveCount ~= nil then
+				content.ActiveTrainingBotCountDisplay:set(result.ActiveCount)
+			end
+			return describeActionResult(`Spawn {style} bot ({difficulty})`, result)
+		end)
+	end)
+
+	content.DespawnTrainingBotsRequested:Connect(function()
+		logger:debug("DespawnTrainingBotsRequested received")
+		invokeAndReport(handle, function()
+			local despawnTrainingBotsRemote =
+				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.DespawnTrainingBots)
+			return despawnTrainingBotsRemote:InvokeServer()
+		end, function(resultOrError)
+			local result = resultOrError :: Types.DevMenuSpawnBotResult
+			logger:debug("DespawnTrainingBots result received", { success = result.Success, reason = result.Reason })
+			if result.Success then
+				content.ActiveTrainingBotCountDisplay:set(0)
+			end
+			return describeActionResult("Despawn training bots", result)
+		end)
+	end)
+
 	-- Blimp Fuel System test nodes (Spawn tab, Server/Systems/ResourceGatheringSystem.SpawnDebugNode)
 	-- -- fire-and-forget, same "invokeAndReport, status text only" shape as SpawnDebugDummyRequested
 	-- above.

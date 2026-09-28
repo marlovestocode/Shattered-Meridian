@@ -646,23 +646,6 @@ export type ActionRejectedPayload = {
 	Reason: string,
 }
 
--- Sent to the acting player only, the moment CombatSystem accepts a Feint (RequestFeint,
--- CombatSystem.lua's handleFeintRequest) -- cancels the player's own Basic/Heavy/Finisher/AirSlam
--- swing while it's still telegraphing, before the hitbox can ever go active. Unlike Basic/Heavy/
--- Dash/BlockStart/Slide, Feint has no predict-then-rollback pair (no ActionRejectedPayload case):
--- the client's own local cancel of its currently-playing swing animation
--- (CombatAnimator.CancelActiveSwing) is fired unconditionally at press time and is always safe
--- regardless of whether the server ultimately accepts it (see CombatClient.lua's Feint input
--- branch), so a rejection needs no rollback -- there is nothing wrong to undo. RecoverySeconds is
--- the new (shorter) attackEndsAt commitment the feint replaced the swing's own remaining windup+
--- active+recovery with -- PredictionMirror.OnFeintPerformed assigns it the same way
--- OnMovementPerformed/OnSlidePerformed assign their own commitment durations, so a follow-up press
--- shortly after a feint still gets accurate prediction instead of staying conservatively locked out
--- for the ORIGINAL (longer) swing's commitment.
-export type FeintPerformedPayload = {
-	RecoverySeconds: number,
-}
-
 -- The knockback variant a clean (non-blocked, non-parried) hit applies, via
 -- HitResolution.ApplyFinisherPhysics/Server/Combat/RagdollController.lua. Two distinct sources
 -- produce these today:
@@ -743,8 +726,8 @@ export type CombatSnapshot = {
 	Attacking: boolean,
 	-- True while the player is holding Sprint (CombatState.sprinting) -- intent, not effect: a raised
 	-- WalkSpeed only actually applies when combat state permits it (see onHeartbeat). Always false for
-	-- a training bot's snapshot; bots have no sprint/dash movement state (BotState) yet, which is the
-	-- Reposition no-op TrainingBotWeights below still documents as awaiting movement AI.
+	-- a training bot's snapshot; bots have no sprint/dash movement state (BotState) yet, which was the
+	-- Reposition no-op the deleted TrainingBotSystem's weights documented as awaiting movement AI.
 	Sprinting: boolean,
 	-- General-purpose "still fighting" signal (CombatState.inCombatUntil) -- refreshed on throwing/
 	-- landing/receiving an attack, blocking, or an air-tech escape, independent of which specific
@@ -1085,9 +1068,9 @@ export type DevMenuSpawnDummyResult = {
 -- (CombatSystem.lua's handleSlideRequest) -- chained off Sprint, not a standalone press like Dash:
 -- the client only even fires it while its own Sprint key is currently held, and the server
 -- independently re-checks CombatState.sprinting regardless of what the client believes. "Feint"
--- fires RequestFeint (CombatSystem.lua's handleFeintRequest) -- cancels the player's own Basic/
--- Heavy/Finisher/AirSlam swing while it's still in its telegraph, before the hitbox goes active;
--- see FeintPerformedPayload's own header for the full mechanic.
+-- fires Attack_Feint (Server/Combat/Attack/AttackRequestSystem.lua's Feint) -- cancels the player's
+-- own feintable swing (a Heavy, by default) in the first part of its windup; the server answers with
+-- Attack_Cancelled (AttackTypes.AttackCancelledPayload) and the client stops the clip on that.
 export type KeybindAction =
 	"BasicAttack"
 	| "Block"
@@ -1356,37 +1339,19 @@ export type ParkourSettings = {
 
 export type SprintMode = "Hold" | "Toggle"
 
--- Training bots (Server/Systems/TrainingBotSystem.lua) -- AI-controlled practice opponents,
--- distinct from the static training dummy (which never acts). ai-design.md's "Training bots"
--- section is the canonical spec; ParryOnly doesn't map to a separate weighted action the way the
--- others do (CombatSystem.lua's handleBlockStart merged Block and Parry into one input for real
--- players), so it's a timing BEHAVIOR on the Block weight, not its own action -- see
--- TrainingBotSystem.lua's header for the full reasoning. This repo has no pathfinding/movement-AI
--- infrastructure yet (see Reposition below), which is also why bots have no dash/dodge AI at all.
-export type TrainingBotPresetName =
-	"AttackOnly"
-	| "BlockOnly"
-	| "ParryOnly"
-	| "FullFight"
-	| "Aggressor"
-	| "Turtle"
-	| "Custom"
+-- Training bots (Server/Combat/TrainingBot/TrainingBotSystem.lua) -- AI-controlled sparring partners,
+-- distinct from the static debug dummy (which never acts). Their style and difficulty names, and every
+-- tunable behind them, live in Shared/TrainingBot/TrainingBotConstants.lua (StyleName/DifficultyName)
+-- rather than here: that module is the one both the server and the Admin Menu's pickers read, and a
+-- second copy of the names in this file would drift the first time a style was added.
 
--- Relative weights (not probabilities -- don't need to sum to 1), consumed by
--- TrainingBotSystem.lua's decision loop. Reposition exists for forward compatibility with
--- ai-design.md's full action model but is a documented no-op until real movement AI exists.
-export type TrainingBotWeights = {
-	Attack: number,
-	Block: number,
-	Parry: number,
-	Reposition: number,
-}
-
--- Result of DevMenu_SpawnTrainingBot (a RemoteFunction -- same request/response reasoning as
--- DevMenuSpawnDummyResult above).
+-- Result of DevMenu_SpawnTrainingBot / DevMenu_DespawnTrainingBots (RemoteFunctions -- same
+-- request/response reasoning as DevMenuSpawnDummyResult above). ActiveCount is advisory only, the same
+-- way DevMenuDebugDummyStateResult's is: how many bots exist right after the action took effect.
 export type DevMenuSpawnBotResult = {
 	Success: boolean,
 	Reason: string?,
+	ActiveCount: number?,
 }
 
 -- Result of DevMenu_SetTargetHealth / DevMenu_SetTargetGodmode / DevMenu_SetTargetFlight

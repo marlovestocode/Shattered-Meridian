@@ -93,7 +93,10 @@ Constants.NetworkBudget = {
 	MaxAttackCallsPerSecondPerPlayer = 10,
 	-- Defensive/mobility actions get their own budget for exactly the reason the Attack split above
 	-- describes, which was applied to Attack and then never followed through to the other bucket.
-	-- CombatSystem.lua's defensiveRateLimiter gates FOUR distinct actions off one counter -- Feint,
+	-- HISTORICAL: neither number here has a reader since the deleted CombatSystem.lua; the live
+	-- buckets are per System (AttackConstants.Network, DefenseConstants.Network -- Feint has its own,
+	-- AttackConstants.Network.MaxFeintsPerSecondPerPlayer). The reasoning below still holds for them.
+	-- CombatSystem.lua's defensiveRateLimiter gated FOUR distinct actions off one counter -- Feint,
 	-- BlockStart (which is also the parry), Dash and Slide -- and four of those inside one second is
 	-- ordinary defensive play, not abuse: block-tap for a parry, dash out, block again, feint. At 4
 	-- the fifth input was rejected outright rather than buffered (checkCommonPreconditions runs the

@@ -32,6 +32,16 @@
 	question ("client owns feel"). A contact behind the camera projects to nothing and simply falls
 	back to a centred number rather than drawing off-screen.
 
+	TWO VARIANTS RIDE ON TOP OF THE OUTCOME KIND, both flagged by the server on the payload rather than
+	being kinds of their own (the server's vocabulary stays the seven OutcomeKinds):
+	  * Perfect (a Parried contact inside DefenseConstants.PerfectParry's first 50ms) -- a longer clash
+	    freeze, the PerfectParry shake, a harder camera punch, a denser burst, a brighter ring and its own
+	    banner. See VARIANTS below.
+	  * GuardCracking (a Blocked contact that left the guard under DefenseConstants.GuardCrack) -- hotter,
+	    heavier sparks, a lower strained clang, and a banner for BOTH sides: this is the one block the
+	    attacker most needs to be told about. The strained pose itself is not here -- it is on every
+	    client, off the replicated tag (Client/FX/GuardStrainPose.lua).
+
 	Does not own: the surfaces themselves (Client/UI/Screens/CombatFeedback), the shake compositor
 	(Client/FX/CameraShake.lua) or the FOV compositor (Client/FX/FOVOffset.lua), the press-side cue
 	(Client/Combat/AttackInputClient.lua), or the HUD's own vitals (Client/UI/State/ClientState.lua
@@ -95,6 +105,8 @@ local CombatAudio = require(script.Parent.Parent.FX.CombatAudio)
 local CombatFeedbackModule = require(script.Parent.Parent.UI.Screens.CombatFeedback)
 local HitFlash = require(script.Parent.Parent.FX.HitFlash)
 local HitStop = require(script.Parent.Parent.FX.HitStop)
+local ImpactSparks = require(script.Parent.Parent.FX.ImpactSparks)
+local RollAfterimage = require(script.Parent.Parent.FX.RollAfterimage)
 local Tokens = require(script.Parent.Parent.UI.Tokens)
 
 type CombatFeedback = DamageTypes.CombatFeedback
@@ -128,7 +140,7 @@ local BANNER_TEXT: { [string]: { Title: string, AttackerSubtitle: string, Defend
 		Parried = {
 			Title = "PARRIED",
 			AttackerSubtitle = "Your swing was turned aside",
-			DefenderSubtitle = "Perfect timing",
+			DefenderSubtitle = "Turned aside",
 			Color = Tokens.Color.AccentPrimaryBright,
 		},
 		GuardBroken = {
@@ -157,6 +169,43 @@ local BANNER_TEXT: { [string]: { Title: string, AttackerSubtitle: string, Defend
 		},
 	}
 
+-- The two payload-flagged variants' banners (see this file's header), keyed the way variantOf names
+-- them. Same shape as BANNER_TEXT so showBanner reads either without a branch.
+local VARIANT_BANNER_TEXT: { [string]: { Title: string, AttackerSubtitle: string, DefenderSubtitle: string, Color: Color3 } } =
+	{
+		ParriedPerfect = {
+			Title = "PERFECT PARRY",
+			AttackerSubtitle = "Read to the frame -- you're wide open",
+			DefenderSubtitle = "Flawless timing",
+			Color = Tokens.Color.AccentPrimaryBright,
+		},
+		BlockedCracking = {
+			Title = "GUARD CRACKING",
+			AttackerSubtitle = "Their guard is failing",
+			DefenderSubtitle = "One more hit breaks it",
+			Color = Tokens.Color.Warning,
+		},
+	}
+
+-- The variant a payload is, or nil for a plain outcome. Doubles as the ImpactSparks preset key and the
+-- VARIANT_BANNER_TEXT key, so "which variant is this" is answered once.
+local function variantOf(payload: CombatFeedback): string?
+	if payload.Kind == "Parried" and payload.Perfect == true then
+		return "ParriedPerfect"
+	end
+	if payload.Kind == "Blocked" and payload.GuardCracking == true then
+		return "BlockedCracking"
+	end
+	return nil
+end
+
+-- A variant's pitch on the impact stinger (CombatAudio.PlayImpact): a strained guard clangs lower, a
+-- perfect parry rings higher. Presentation only, so it lives with the rest of this file's mapping.
+local VARIANT_PITCH: { [string]: number } = {
+	ParriedPerfect = 1.12,
+	BlockedCracking = 0.82,
+}
+
 -- Which outcomes clear the damage-number stack when they land -- see the screen's own
 -- SuppressDamageNumbers. A defensive result and a chip-damage number arriving together read as
 -- contradictory feedback, and the banner owns that moment.
@@ -171,7 +220,9 @@ local function shakeFor(payload: CombatFeedback): ()
 	local table_ = if payload.Role == "Defender"
 		then AttackConstants.Presentation.ShakePresets.Defender
 		else AttackConstants.Presentation.ShakePresets.Attacker
-	local presetName = table_[payload.Kind] or AttackConstants.Presentation.DefaultShakePreset
+	local presetName = if variantOf(payload) == "ParriedPerfect"
+		then "PerfectParry"
+		else table_[payload.Kind] or AttackConstants.Presentation.DefaultShakePreset
 	-- Indexed rather than switched, so a preset renamed in Constants.FX is a nil (no shake) rather
 	-- than a runtime error -- Constants.FX's own "a missing preset degrades to no shake, never to a
 	-- wrong hit" rule, which CameraShake.Shake already tolerates on its own side too.
@@ -259,7 +310,11 @@ local function freezeExchangeFor(payload: CombatFeedback): ()
 	if not seconds then
 		return
 	end
-	if typeof(payload.MoveId) == "string" and string.find(payload.MoveId, ":Heavy:", 1, true) then
+	if variantOf(payload) == "ParriedPerfect" then
+		-- The perfect parry replaces the clash beat outright rather than adding to it: the whole exchange
+		-- stops for PerfectParrySeconds, on both bodies, on both clients.
+		seconds = Constants.FX.HitStop.PerfectParrySeconds
+	elseif typeof(payload.MoveId) == "string" and string.find(payload.MoveId, ":Heavy:", 1, true) then
 		seconds += Constants.FX.HitStop.HeavyBonusSeconds
 	end
 	HitStop.FreezeExchange(payload.Attacker, payload.Defender, seconds)
@@ -347,7 +402,8 @@ local function showBanner(payload: CombatFeedback): ()
 	if not surfaces then
 		return
 	end
-	local text = BANNER_TEXT[payload.Kind]
+	local variant = variantOf(payload)
+	local text = (if variant then VARIANT_BANNER_TEXT[variant] else nil) or BANNER_TEXT[payload.Kind]
 	if not text then
 		return
 	end
@@ -381,11 +437,29 @@ local function onFeedback(raw: unknown): ()
 	end
 
 	shakeFor(payload)
-	-- payload.Defender, not the local character: the block/parry sound belongs to the weapon that
-	-- CAUGHT the swing, and this same event reaches the attacker's machine too -- see CombatAudio's own
-	-- header. It resolves the weapon itself; this module hands it the participant and nothing more.
-	CombatAudio.PlayImpact(payload.Kind, payload.Defender)
+	if payload.Kind == "Evaded" then
+		-- A contact that never happened: no impact stinger, no hit-flash, no number (Damage is 0). The
+		-- dodger hears the bright whiff and the attacker the muted one (CombatAudio.PlayEvaded), and
+		-- BOTH see one bright ghost on the dodger's rig -- the swing went through where they were, and
+		-- the attacker is the one who most needs to read that it did.
+		CombatAudio.PlayEvaded(payload.Role == "Defender")
+		if typeof(payload.Defender) == "Instance" and payload.Defender:IsA("Model") then
+			RollAfterimage.FlashEvade(payload.Defender)
+		end
+	else
+		-- payload.Defender, not the local character: the block/parry sound belongs to the weapon that
+		-- CAUGHT the swing, and this same event reaches the attacker's machine too -- see CombatAudio's
+		-- own header. It resolves the weapon itself; this module hands it the participant and nothing
+		-- more.
+		local variant = variantOf(payload)
+		CombatAudio.PlayImpact(payload.Kind, payload.Defender, if variant then VARIANT_PITCH[variant] else nil)
+	end
 	flashFor(payload)
+	-- Sparks at the blades for the steel-on-steel outcomes (parry, block, trade, guard break), and the
+	-- parry's camera punch -- see ImpactSparks' own header. A body-only outcome has no preset and no-ops.
+	if typeof(payload.ContactPosition) == "Vector3" then
+		ImpactSparks.Play(variantOf(payload) or payload.Kind, payload.ContactPosition)
+	end
 	freezeExchangeFor(payload)
 	freezeVictimFor(payload)
 	launchFor(payload)

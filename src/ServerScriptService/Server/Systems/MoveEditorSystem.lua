@@ -292,6 +292,11 @@ local function encodeMoveRecord(move: MoveTypes.MoveDefinition): { [string]: any
 		PostureDamage = move.PostureDamage,
 		ArcDegrees = move.ArcDegrees,
 		MaxTargets = move.MaxTargets,
+		-- Both nil-able and flat, so candidateFromStoredRecord's table.clone carries them back through
+		-- with no decode step. Listed here or they are silently dropped from the record -- the exact way
+		-- Art and Grab once were.
+		PowerLevel = move.PowerLevel,
+		Feintable = move.Feintable,
 		AnimationId = move.AnimationId,
 		Animations = encodeAnimations(move.Animations),
 	}

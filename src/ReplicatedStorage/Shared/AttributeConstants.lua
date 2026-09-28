@@ -188,11 +188,13 @@ local AttributeConstants = {
 	-- are no hit-slow or stun tiers for it to sit below any more; the combat rewrite left none.
 	ParkourSpeedFloor = "ParkourSpeedFloor",
 	ParkourSpeedFloorExpiry = "ParkourSpeedFloorExpiry",
-	-- The movement state that player's client last reported (a Types.ParkourActionReport Kind, or the
-	-- empty string for ordinary locomotion). Purely informational: nothing gates on it. It exists
-	-- because Humanoid Attributes replicate to every client for free, so this gives other players'
-	-- clients -- and any future spectator/replay tooling -- a way to know what a remote character is
-	-- doing without this feature adding a broadcast remote of its own.
+	-- The movement action the server last ACCEPTED from that player's client (a Types.ParkourActionReport
+	-- Kind, or the empty string for ordinary locomotion) -- written by ParkourSystem.beginAction/its end
+	-- path only, so it never carries a report the server refused. Nothing server-side gates on it. It
+	-- exists because Humanoid Attributes replicate to every client for free, which lets other players'
+	-- clients know what a remote character is doing without a broadcast remote. Two client readers:
+	-- Client/FX/RemoteMovementFX.lua draws other players' rolls off "Roll" (dust and afterimage), and
+	-- Client/Defense/DefenseClient.lua drops a held guard the moment its own roll is accepted.
 	ParkourState = "ParkourState",
 	-- Run System (Server/Systems/RunSystem.lua, Client/Movement/RunController.lua). The sustained-run
 	-- STAGE this player's server-side state currently resolves to: 0 = not running (or running but

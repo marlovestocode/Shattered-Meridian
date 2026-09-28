@@ -104,6 +104,10 @@ export type DefenseOutcome = {
 	-- The engine's substep clock for the contact. Copied up from the report because ordering
 	-- outcomes is the single most common thing a consumer will want to do with a batch of them.
 	SampleTime: number,
+	-- Only ever true alongside Kind "Parried": the contact landed within
+	-- DefenseConstants.PerfectParry.WindowSeconds of the window going live. Optional so every outcome a
+	-- spec builds by hand still typechecks as "not perfect".
+	Perfect: boolean?,
 }
 
 -- What OutcomeResolver.Resolve is given. Primitives only -- no Instances, no clock, no services --
@@ -152,6 +156,9 @@ export type PendingContact = {
 	DefenderStateAtContact: DefenseState,
 	Result: ResolveResult,
 	SampleTime: number,
+	-- See DefenseOutcome.Perfect. Classified in pass 1 at the contact's own SampleTime, like everything
+	-- else about the contact, and carried unchanged to pass 2.
+	Perfect: boolean?,
 }
 
 return DefenseTypes

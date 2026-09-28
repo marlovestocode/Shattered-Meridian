@@ -38,11 +38,20 @@ local FXConstants = {
 		HitLight = { Amplitude = 0.012, Frequency = 28, DurationSeconds = 0.18 },
 		HitHeavy = { Amplitude = 0.025, Frequency = 24, DurationSeconds = 0.28 },
 		Parry = { Amplitude = 0.03, Frequency = 34, DurationSeconds = 0.22 },
+		-- A PERFECT parry (DefenseConstants.PerfectParry) -- sharper and longer than Parry, both roles.
+		PerfectParry = { Amplitude = 0.042, Frequency = 40, DurationSeconds = 0.32 },
+		-- A body slammed into a wall (EnvironmentReactionSystem's wall splat). Low and heavy, the victim's
+		-- read; the attacker gets the lighter HitHeavy.
+		WallSplat = { Amplitude = 0.05, Frequency = 16, DurationSeconds = 0.42 },
 		PostureBreak = { Amplitude = 0.045, Frequency = 20, DurationSeconds = 0.4 },
 		FinisherSlam = { Amplitude = 0.05, Frequency = 18, DurationSeconds = 0.45 },
 		-- One-shot kick at Slide-start (CombatClient.lua's predictSlide/Combat_SlidePerformed) --
 		-- lighter than any combat preset, a movement flourish rather than an impact.
 		SlideStart = { Amplitude = 0.02, Frequency = 22, DurationSeconds = 0.2 },
+		-- One-shot at roll start (Client/FX/MovementVFX.OnStateChanged), local player only. Lighter
+		-- still than SlideStart and slower-oscillating -- a body tucking and turning over, not an impact.
+		-- Gated by settings.Comfort.CameraShake like every preset here, through CameraShake.SetEnabled.
+		Roll = { Amplitude = 0.014, Frequency = 16, DurationSeconds = 0.22 },
 		-- Per-axis math.noise decorrelation offsets so pitch/yaw/roll wander independently instead of
 		-- in lockstep (which would read as a single diagonal jerk rather than a shake).
 		NoiseSeeds = { Pitch = 0, Yaw = 37.2, Roll = 91.7 },
@@ -76,6 +85,9 @@ local FXConstants = {
 		VictimSeconds = 0.09,
 		HeavyBonusSeconds = 0.03,
 		ParrySeconds = 0.12,
+		-- A PERFECT parry's clash freeze, both bodies (CombatFeedbackClient). Longer than any hit's on
+		-- purpose: the perfect parry is the one moment the whole exchange should visibly stop.
+		PerfectParrySeconds = 0.2,
 		PostureBreakSeconds = 0.14,
 		MinIntervalSeconds = 0.1,
 		-- Flight landing-impact freeze (HitStop.FreezeFlightLanding, Client/FX/FlightAnimator.
@@ -174,6 +186,9 @@ local FXConstants = {
 		TrickleIntervalSeconds = 0.15,
 		TrickleParticleCount = 5,
 		SlideBurstParticleCount = 20,
+		-- A roll's two puffs, at the tuck and at the stand-up (MovementVFX.PlayRollBurst). Smaller than a
+		-- slide's: a roll is over in half a second and kicks up two short scuffs, not a sustained scrape.
+		RollBurstParticleCount = 12,
 		-- Also schedules the pooled carrier Part's own Release() back to the pool.
 		ParticleLifetimeSeconds = 0.6,
 		-- Fraction of ParticleLifetimeSeconds used as the jittered LOW end of the emitter's own
@@ -224,6 +239,217 @@ local FXConstants = {
 			[Enum.Material.Plastic] = Color3.fromRGB(160, 150, 145),
 		} :: { [Enum.Material]: Color3 },
 		DefaultColor = Color3.fromRGB(150, 140, 130),
+	},
+
+	-- Contact sparks (Client/FX/ImpactSparks.lua) -- a pooled particle burst at the contact point of a
+	-- steel-on-steel outcome, fired off Combat_Feedback on both participants' clients. The TEXTURE IS
+	-- ROBLOX'S OWN DEFAULT on purpose: the 4-point sparkle MovementDust had to override to stop reading
+	-- as "stars" is exactly what a spark should look like, so there is no asset to guess or upload.
+	ImpactSparks = {
+		-- A burst is alive for its longest Lifetime; four simultaneous exchanges on screen is already a
+		-- brawl, and a burst past the cap is dropped rather than allocated.
+		PoolMaxSize = 8,
+		CarrierPartSize = Vector3.new(0.2, 0.2, 0.2),
+		-- Per outcome. Parried is the loudest by a distance -- the parry is the game's signature read and
+		-- the one moment this whole pass exists to make land. Blocked is a small, common spit of steel;
+		-- Trade a white clash; GuardBroken a slower, heavier shatter that falls under gravity.
+		Presets = {
+			Parried = {
+				Count = 30,
+				Color = ColorSequence.new(Color3.fromRGB(255, 235, 170), Color3.fromRGB(220, 160, 70)),
+				Speed = NumberRange.new(18, 34),
+				LifetimeSeconds = NumberRange.new(0.14, 0.3),
+				Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.35), NumberSequenceKeypoint.new(1, 0) }),
+				Drag = 7,
+				Acceleration = Vector3.new(0, -20, 0),
+				LightEmission = 1,
+			},
+			Blocked = {
+				Count = 8,
+				Color = ColorSequence.new(Color3.fromRGB(235, 235, 245)),
+				Speed = NumberRange.new(10, 18),
+				LifetimeSeconds = NumberRange.new(0.08, 0.18),
+				Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.2), NumberSequenceKeypoint.new(1, 0) }),
+				Drag = 8,
+				Acceleration = Vector3.new(0, -20, 0),
+				LightEmission = 0.8,
+			},
+			Trade = {
+				Count = 18,
+				Color = ColorSequence.new(Color3.fromRGB(255, 255, 255)),
+				Speed = NumberRange.new(14, 26),
+				LifetimeSeconds = NumberRange.new(0.1, 0.24),
+				Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.28), NumberSequenceKeypoint.new(1, 0) }),
+				Drag = 7,
+				Acceleration = Vector3.new(0, -20, 0),
+				LightEmission = 1,
+			},
+			-- A PERFECT parry: the Parried burst, hotter, denser and faster, with a white-hot core. Picked
+			-- by CombatFeedbackClient off Combat_Feedback.Perfect, never by an outcome kind of its own --
+			-- the server's vocabulary stays "Parried".
+			ParriedPerfect = {
+				Count = 55,
+				Color = ColorSequence.new({
+					ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 240)),
+					ColorSequenceKeypoint.new(0.35, Color3.fromRGB(255, 225, 140)),
+					ColorSequenceKeypoint.new(1, Color3.fromRGB(235, 150, 60)),
+				}),
+				Speed = NumberRange.new(26, 48),
+				LifetimeSeconds = NumberRange.new(0.18, 0.38),
+				Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.45), NumberSequenceKeypoint.new(1, 0) }),
+				Drag = 6,
+				Acceleration = Vector3.new(0, -20, 0),
+				LightEmission = 1,
+			},
+			-- A block while the guard is CRACKING (Combat_Feedback.GuardCracking, DefenseConstants.GuardCrack).
+			-- Sits between Blocked and GuardBroken on purpose: the GuardBroken palette (orange falling to red)
+			-- at a fraction of its count, so the sparks themselves say "this is what a break will look like".
+			BlockedCracking = {
+				Count = 18,
+				Color = ColorSequence.new(Color3.fromRGB(255, 205, 140), Color3.fromRGB(230, 100, 60)),
+				Speed = NumberRange.new(9, 20),
+				LifetimeSeconds = NumberRange.new(0.2, 0.45),
+				Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.32), NumberSequenceKeypoint.new(1, 0) }),
+				Drag = 4,
+				Acceleration = Vector3.new(0, -45, 0),
+				LightEmission = 0.75,
+			},
+			GuardBroken = {
+				Count = 36,
+				Color = ColorSequence.new(Color3.fromRGB(255, 190, 120), Color3.fromRGB(230, 90, 60)),
+				Speed = NumberRange.new(8, 20),
+				LifetimeSeconds = NumberRange.new(0.35, 0.7),
+				Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.5), NumberSequenceKeypoint.new(1, 0) }),
+				Drag = 3,
+				Acceleration = Vector3.new(0, -55, 0),
+				LightEmission = 0.6,
+			},
+		},
+		-- The camera punch a preset carries, if any -- a fast FOV tighten-and-release through FOVOffset (so
+		-- the settings.Comfort.FieldOfViewEffects toggle covers it), on both participants' clients. Keyed
+		-- by preset, not outcome, so the perfect parry's harder punch is data rather than a branch.
+		Punches = {
+			Parried = { FOVDelta = -4, OutSeconds = 0.04, BackSeconds = 0.2 },
+			ParriedPerfect = { FOVDelta = -8, OutSeconds = 0.035, BackSeconds = 0.32 },
+		} :: { [string]: { FOVDelta: number, OutSeconds: number, BackSeconds: number } },
+	},
+
+	-- The strained guard (Client/FX/GuardStrainPose.lua) -- a procedural brace-and-tremble layered over
+	-- whatever block pose is playing, on every client, for every body whose guard is cracking
+	-- (DefenseConstants.GuardCrack). Written to Motor6D.Transform after the animation step, so it rides
+	-- on top of the authored clip rather than replacing it -- the arms still hold the weapon's own guard,
+	-- they just shake under it. Angles in DEGREES (converted once at require), R6 joint names.
+	GuardStrain = {
+		-- The sag: the torso leans back off the incoming weight, the head dips behind the guard, and
+		-- both arms are driven down a touch, as if the guard is being pushed into the body.
+		TorsoLeanDegrees = 7,
+		HeadDipDegrees = 9,
+		ArmPressDegrees = 8,
+		-- The tremble: a small, fast, per-joint decorrelated noise. Fast enough to read as muscle
+		-- failing, not as a sway; small enough never to move the guard off the body.
+		TrembleDegrees = 2.2,
+		TrembleFrequency = 13,
+		-- How fast the whole layer fades in when the tag appears and out when it clears, so the pose
+		-- does not snap the moment the guard crosses the line.
+		BlendInSeconds = 0.18,
+		BlendOutSeconds = 0.25,
+		-- Only while the guard is actually up -- a cracking guard that has been lowered is just a
+		-- low number on a HUD, and a strained pose on a body not blocking would be a lie.
+		GuardStates = { Raising = true, ParryWindow = true, Blocking = true } :: { [string]: boolean },
+		-- Bodies further than this from the camera are not posed at all: a tremble of two degrees is
+		-- invisible at range, and every posed body is per-frame Transform writes.
+		MaxDistanceStuds = 150,
+	},
+
+	-- Environmental reactions (Client/FX/EnvironmentFX.lua) -- dust and chipped debris where a swing
+	-- scuffs a wall or a body is slammed into one (EnvironmentReactionSystem's Combat_EnvironmentFX, plus
+	-- the attacker's own locally-predicted swing scuff). Colored by the surface that was hit.
+	EnvironmentImpact = {
+		-- A burst's dust carrier lives for its dust's longest lifetime; chips are loose Parts.
+		DustPoolMaxSize = 10,
+		ChipPoolMaxSize = 40,
+		CarrierPartSize = Vector3.new(0.2, 0.2, 0.2),
+		-- Reuses MovementDust's authored puff sprite (the default emitter texture is a sparkle, which is
+		-- exactly wrong for dust -- see MovementDust.Texture's own header).
+		DustTexture = "rbxassetid://122434532",
+		-- Per kind of event. A swing scuff is a glancing strike (small); a wall splat is a whole body
+		-- hitting stone (large). Chips are real flying Parts in the surface's own color and material --
+		-- a sprite could not borrow the surface's look.
+		Presets = {
+			SwingScuff = {
+				DustCount = 10,
+				DustSpeed = NumberRange.new(3, 7),
+				DustSize = NumberSequence.new({
+					NumberSequenceKeypoint.new(0, 0.4),
+					NumberSequenceKeypoint.new(0.4, 1.1),
+					NumberSequenceKeypoint.new(1, 1.4),
+				}),
+				DustLifetimeSeconds = NumberRange.new(0.35, 0.7),
+				ChipCount = 4,
+				ChipSize = NumberRange.new(0.15, 0.32),
+				ChipSpeed = NumberRange.new(10, 18),
+				ChipLifetimeSeconds = 0.5,
+			},
+			WallSplat = {
+				DustCount = 26,
+				DustSpeed = NumberRange.new(4, 11),
+				DustSize = NumberSequence.new({
+					NumberSequenceKeypoint.new(0, 0.9),
+					NumberSequenceKeypoint.new(0.4, 2.2),
+					NumberSequenceKeypoint.new(1, 2.8),
+				}),
+				DustLifetimeSeconds = NumberRange.new(0.5, 1.0),
+				ChipCount = 10,
+				ChipSize = NumberRange.new(0.2, 0.5),
+				ChipSpeed = NumberRange.new(12, 24),
+				ChipLifetimeSeconds = 0.7,
+			},
+		},
+		-- Fraction of a chip's launch that is along the surface normal rather than scattered across it:
+		-- chips come OFF the wall, not along it.
+		ChipNormalBias = 0.65,
+		ChipUpwardSpeed = 6,
+		DustTransparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.35),
+			NumberSequenceKeypoint.new(1, 1),
+		}),
+		-- A surface that has no material color entry (MovementDust.ColorByFloorMaterial) and is not a
+		-- BasePart with its own Color falls back to this.
+		DefaultColor = Color3.fromRGB(150, 140, 130),
+	},
+
+	-- The roll's afterimage (Client/FX/RollAfterimage.lua) -- translucent copies of the rolling rig left
+	-- behind across the server's evade window, so "the evade frames are live right now" is something
+	-- every player can SEE rather than something the roller has to trust. Played on the roller's own
+	-- client at the predicted transition and on everyone else's off the replicated ParkourState
+	-- Attribute (Client/FX/RemoteMovementFX.lua).
+	RollAfterimage = {
+		-- Ghost SETS, not parts: one set is one limb-for-limb copy of an R6 rig (six parts). Sized for
+		-- a few rollers on screen at once with every stamp of every roll alive -- 3 stamps x 4 rolls --
+		-- and never more; a roll past the cap simply leaves fewer ghosts.
+		PoolMaxSize = 12,
+		-- Stamps per roll, the first at StartDelaySeconds and the rest every IntervalSeconds after.
+		-- StartDelay matches DefenseConstants.Evade's vulnerable startup (0.06s) and the three stamps
+		-- span its 0.25s active window, so the trail of ghosts IS the evade window, drawn.
+		StampCount = 3,
+		StartDelaySeconds = 0.06,
+		IntervalSeconds = 0.09,
+		-- How long one ghost takes to fade from StartTransparency to gone.
+		FadeSeconds = 0.3,
+		StartTransparency = 0.55,
+		-- Pale steel-blue, the same family as HitFlash.ParryWindowColor: an evade is a defensive
+		-- read, and steel is the colour this codebase already uses for "defence is live".
+		Color = Color3.fromRGB(150, 200, 255),
+		-- THE EVADED FLASH -- one brighter ghost on the dodger's rig when the server confirms a swing
+		-- went through them (Combat_Feedback Evaded). Brighter and a touch longer than a roll stamp, so
+		-- a successful dodge reads as its own event rather than as one more stamp.
+		EvadeFlashColor = Color3.fromRGB(210, 235, 255),
+		EvadeFlashStartTransparency = 0.25,
+		EvadeFlashFadeSeconds = 0.4,
+		-- Another player's roll is drawn only within this distance of the local camera
+		-- (Client/FX/RemoteMovementFX.lua). Past it the ghosts are a few pixels tall and the pool is
+		-- better spent on the fight in front of you.
+		RemoteMaxDistanceStuds = 160,
 	},
 
 	-- Combat/flight animation-track fade times and the shared cross-rig priority weight -- were THREE
