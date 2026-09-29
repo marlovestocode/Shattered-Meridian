@@ -39,13 +39,14 @@ local CameraConstants = {
 		-- own head/shoulder geometry. First person itself already locks the mouse and steers the
 		-- character natively, so shift lock has nothing to add there.
 		FirstPersonDistanceThreshold = 2,
-		-- When a swing's tracking (Client/Combat/SwingTracking.lua) or a parkour traversal hands the body's
-		-- rotation back, the body used to snap to the camera's yaw in one frame -- on every swing of a
-		-- string, since tracking turns the body toward the target and then lets go. For this long after a
-		-- hand-back the body instead eases to the camera's yaw at FacingReturnRate (an exponential rate,
-		-- per second: 20 is ~95% of the way in 0.15s), then tracks it exactly as before.
-		FacingReturnSeconds = 0.25,
-		FacingReturnRate = 20,
+		-- LOCKED, BUT LOOSE. The body turns to face where the camera looks on a critically damped spring
+		-- rather than being snapped onto it every frame, so the character swings round a beat behind the
+		-- view. Natural frequency in rad/s: at 20 a flick is ~63% turned in 0.11s and settled by ~0.25s --
+		-- loose enough to read, tight enough that a swing still goes where you are looking. Higher is
+		-- tighter; 0 restores the old rigid snap. Damping 1 is critical: it arrives without swinging past.
+		-- Also what brings the body round when swing tracking or a traversal hands it back.
+		BodyTurnFrequency = 20,
+		BodyTurnDamping = 1,
 	},
 
 	-- Flight camera feel (Client/Camera/FlightCamera.lua) -- FOV scaling and CameraOffset chase

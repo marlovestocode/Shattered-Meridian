@@ -74,9 +74,15 @@
 	turning the body moves the body and not the view. The engage/release ease moved with it: this module
 	now eases a 0..1 blend itself and hands the composer the finished vector.
 
-	The hand-back itself eases too: for CameraConstants.ShiftLock.FacingReturnSeconds after tracking or
-	parkour lets go of the body, the yaw write below eases the body onto the camera's yaw instead of
-	snapping it there in one frame.
+	Locked, but loose (2026-09-29). The body still ends up facing exactly where the camera looks -- that
+	is the lock, and it is what aims a swing -- but it TURNS into that facing on a critically damped
+	spring (CameraConstants.ShiftLock.BodyTurnFrequency) instead of being snapped onto it every frame.
+	A mouse flick swings the character round a beat behind the view rather than the whole body pivoting
+	on the same frame, the same "the character moves inside the camera, the camera does not move with the
+	character" feel Client/Camera/CameraFollow.lua gives position. It also covers the hand-back: when
+	swing tracking or parkour lets go of a body turned away from the camera, the spring (restarted from
+	rest while they owned it) brings it round smoothly instead of the one-frame snap it used to take on
+	every swing of a string.
 
 	Logging (Logger.scope("ShiftLockCamera"), Studio-only per Logger.lua): toggle and engage/
 	disengage transitions and character (re)binds only -- nothing logs at render-step frequency.
@@ -222,9 +228,13 @@ local combatFacingOwned = false
 local shoulderBlend = 0
 local lastCameraYaw = 0
 
--- os.clock() until which the yaw write eases the body back onto the camera's yaw rather than snapping it --
--- stamped when swing tracking or parkour hands the body's rotation back. See the header.
-local facingReturnUntil = 0
+-- The body's turn rate (radians/second) on its spring toward the camera's yaw -- see the header's "locked,
+-- but loose" note. Zeroed whenever this module is not the one turning the body (disengaged, suspended, or
+-- another owner holding the facing), so every hand-back starts the turn from rest.
+local bodyYawVelocity = 0
+
+-- Below both of these the body is facing the camera and not turning: nothing to write.
+local BODY_YAW_REST_VELOCITY = 0.01
 
 local function setEngaged(nowEngaged: boolean): ()
 	if nowEngaged == engaged then
@@ -321,6 +331,7 @@ local function onRenderStep(deltaTime: number): ()
 	setEngaged(enabled and hasLiveCharacter)
 
 	if not engaged then
+		bodyYawVelocity = 0
 		return
 	end
 
@@ -328,6 +339,7 @@ local function onRenderStep(deltaTime: number): ()
 	-- for exactly the window a suspending caller (Client/Emotes/EmoteWheelClient.lua) owns, without
 	-- otherwise touching `engaged` or the shoulder easing (updateShoulderOffset, its own render step).
 	if inputSuspended then
+		bodyYawVelocity = 0
 		return
 	end
 
@@ -350,6 +362,7 @@ local function onRenderStep(deltaTime: number): ()
 	-- rotating the body, so the camera keeps steering it exactly as it would without shift lock.
 	local lockOwnsFacing = rootControlLocked and not (punishLocked and not grabbed and not mounted)
 	if lockOwnsFacing or flying then
+		bodyYawVelocity = 0
 		return
 	end
 
@@ -360,6 +373,7 @@ local function onRenderStep(deltaTime: number): ()
 	-- MouseBehavior re-assert because a suspended YAW is not a suspended MODE: the player is still
 	-- shift-locked and still expects a locked cursor while a mantle plays out.
 	if parkourFacingOwned or combatFacingOwned then
+		bodyYawVelocity = 0
 		return
 	end
 
@@ -399,18 +413,34 @@ local function onRenderStep(deltaTime: number): ()
 	-- Its two siblings (FX/CameraOffsetComposer.lua, FX/FOVOffset.lua) already dedupe their own
 	-- per-frame writes and both cite Server/Systems/RunSystem.lua's "single most expensive thing"
 	-- comment for why; this one never got the same treatment.
+	--
+	-- With the turn now on a spring, "a real yaw change" means the body is off the camera's yaw OR still
+	-- turning: a spring settling onto its target keeps writing until it is at rest there.
 	local currentYaw = FlightMath.YawFromFlatDirection(root.CFrame.LookVector)
-	if currentYaw and math.abs(yaw - currentYaw) < YAW_WRITE_EPSILON_RADIANS then
-		return
-	end
-	-- Just after a hand-back, eased onto the camera's yaw rather than snapped -- see the header. The short
-	-- way round, so a body handed back facing the other way does not spin through 350 degrees.
-	if currentYaw and os.clock() < facingReturnUntil then
+	if currentYaw then
+		-- The short way round, so a body facing the other way never spins through 350 degrees.
 		local delta = (yaw - currentYaw) % (2 * math.pi)
 		if delta > math.pi then
 			delta -= 2 * math.pi
 		end
-		yaw = currentYaw + delta * FlightMath.EaseAlpha(Constants.Camera.ShiftLock.FacingReturnRate, deltaTime)
+		if math.abs(delta) < YAW_WRITE_EPSILON_RADIANS and math.abs(bodyYawVelocity) < BODY_YAW_REST_VELOCITY then
+			bodyYawVelocity = 0
+			return
+		end
+		-- Locked, but loose -- see the header. Read back off the root every frame rather than remembered,
+		-- so the spring always resumes from where the body really is. A frequency of 0 or less turns the
+		-- looseness off: the old rigid snap.
+		local shiftLock = Constants.Camera.ShiftLock
+		if shiftLock.BodyTurnFrequency > 0 then
+			yaw, bodyYawVelocity = FlightMath.SpringStep(
+				currentYaw,
+				bodyYawVelocity,
+				currentYaw + delta,
+				shiftLock.BodyTurnFrequency,
+				shiftLock.BodyTurnDamping,
+				deltaTime
+			)
+		end
 	end
 	root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
 end
@@ -484,9 +514,6 @@ local function onCharacterAdded(character: Model, humanoidInstance: Humanoid, li
 	parkourFacingOwned = humanoidInstance:GetAttribute(Constants.Attributes.ParkourFacingOwned) == true
 	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.ParkourFacingOwned), function()
 		local nowOwned = humanoidInstance:GetAttribute(Constants.Attributes.ParkourFacingOwned) == true
-		if parkourFacingOwned and not nowOwned then
-			facingReturnUntil = os.clock() + Constants.Camera.ShiftLock.FacingReturnSeconds
-		end
 		parkourFacingOwned = nowOwned
 		-- Parkour just handed rotation back. ParkourMotor.restoreRestorables writes Humanoid.AutoRotate
 		-- back to whatever it captured at the MOMENT parkour first took ownership -- but if this player
@@ -507,11 +534,7 @@ local function onCharacterAdded(character: Model, humanoidInstance: Humanoid, li
 
 	combatFacingOwned = humanoidInstance:GetAttribute(Constants.Attributes.CombatFacingOwned) == true
 	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.CombatFacingOwned), function()
-		local nowOwned = humanoidInstance:GetAttribute(Constants.Attributes.CombatFacingOwned) == true
-		if combatFacingOwned and not nowOwned then
-			facingReturnUntil = os.clock() + Constants.Camera.ShiftLock.FacingReturnSeconds
-		end
-		combatFacingOwned = nowOwned
+		combatFacingOwned = humanoidInstance:GetAttribute(Constants.Attributes.CombatFacingOwned) == true
 	end)
 
 	logger:debug("Character bound", { enabled = enabled, rootControlLocked = rootControlLocked })
