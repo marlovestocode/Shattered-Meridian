@@ -29,8 +29,8 @@
 	that module is the whole story; there is no exclusion to implement.
 
 	GRAB WORKS FOR FREE, BUT ONLY BECAUSE THE RIG IS UNANCHORED. Server/Combat/Grab/GrabSystem.lua
-	pins a held victim with a server-driven AlignPosition/AlignOrientation pair -- a constraint that
-	physically cannot move an Anchored part. A dummy's whole body (Humanoid, HumanoidRootPart, every
+	welds a held victim into the attacker's assembly, and refuses a grounded (anchored) body outright --
+	welding one would pin the attacker in place rather than lift the victim. A dummy's whole body (Humanoid, HumanoidRootPart, every
 	limb) is therefore left unanchored, standing under Roblox's own ordinary Humanoid stabilization the
 	same way a real character does; WalkSpeed/JumpPower are pinned to 0 instead so it never wanders
 	(nothing drives MoveDirection on it anyway -- there is no AI here, unlike TrainingBotSystem's

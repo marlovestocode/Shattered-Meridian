@@ -2,10 +2,10 @@
 --[[
 	GrabSystem.lua
 
-	Owns: the hold and the throw, end to end -- attaching a grabbed victim to the attacker's fist, the
-	hold's lifetime (an auto-release safety timer), the throw (destroying the hold's constraints and
-	handing the victim a real ballistic velocity), impact detection during flight, applying the throw's
-	own impact/self damage directly, and returning control on release/landing/disconnect.
+	Owns: the hold and the throw, end to end -- welding a grabbed victim into the attacker's grip, the
+	hold's lifetime (an auto-release safety timer), the throw (breaking the weld and handing the victim a
+	real ballistic velocity), impact detection during flight, applying the throw's own impact/self damage
+	directly, and returning control on release/landing/disconnect.
 
 	    HitboxEngine     where the volume is, who is inside it
 	    DefenseSystem    what kind of hit that was
@@ -28,19 +28,43 @@
 	prevents a grab from landing at the correct existing layer, for free, because DefenseSystem
 	decides the outcome kind before this module ever hears about the hit.
 
-	WHY A PLAYER'S BODY NEEDS PlatformStand + SetNetworkOwner AT ALL. A real player's character is
-	client-network-owned: the owning client simulates its own physics and replicates the result, so a
-	bare server CFrame/velocity write on it is silently overwritten by the owner's own next replicated
-	frame -- DamageSystem.lua's AttackerLunge paragraph and AdminActionSystem.ApplyFlying's header both
-	spell this out from two different angles. The fix this codebase already uses for exactly this
-	problem (AdminActionSystem.SetFlying, pcall-guarded the identical way here) is PlatformStand = true
-	(suspends the Humanoid's own ground-movement state so the root part behaves as a free physics body)
-	plus an explicit BasePart:SetNetworkOwner(nil) to hand the part to the SERVER -- only then does a
-	server-driven AlignPosition/AlignOrientation constraint, or a velocity write, actually stick. This
-	is new territory (nothing before this attached or launched a player's body), but the technique is
-	not; it is the deleted RagdollController.HoldAloft's own closest prior art, which now survives only
-	as prose (the CombatTypes.lua and Movement.lua that described it have themselves been deleted) -- the same server-side pin, the same "leave the
-	victim's own Humanoid/Motor6D control intact, this is not a ragdoll" posture.
+	THE HOLD IS A WELD INTO THE ATTACKER'S ASSEMBLY. It used to be an AlignPosition/AlignOrientation pair
+	pulling a server-owned victim toward the attacker's RightHand, and that is why a grab flung people for
+	a second before they "arrived": three separate faults, all of them the constraint's.
+	  * A spring with a destination four studs away travels there THROUGH the attacker's body -- a
+	    100000-force pull colliding with the attacker's own arm and torso, then overshooting.
+	  * Two network owners on one constraint. The victim was handed to the server (SetNetworkOwner(nil))
+	    while the hand it chased belonged to the ATTACKER'S client, so the server chased a hand position
+	    one ping stale, and the ownership hand-off itself raced the victim client's own last frames.
+	  * The target hung off the hand part, whose server-side pose is whatever the grab swing left it in,
+	    so the same offset put the victim somewhere different -- often inside the attacker -- each time.
+	A Weld (Part0 = attacker root, C0 = MoveGrabConfig.AttachOffset) fixes all three at once: it lands the
+	victim on its mark on the frame it is created, with no travel; it makes the victim part of the
+	ATTACKER'S assembly, so whoever simulates the attacker (their own client, or the server for a bot)
+	simulates the victim too, with no second owner to disagree and no SetNetworkOwner call at all; and the
+	root is upright and animation-free, so every grab looks the same. It is the technique Server/Vessel/
+	VesselMount.lua already uses to weld a player to a hull, and this module follows its release order.
+	Two things let the attacker carry the extra body without feeling it: every victim part goes Massless
+	(so the attacker's root stays the assembly root and their movement is not dragged) and into
+	GrabConstants.Hold.CollisionGroup, which collides with nothing. Both are recorded per part and
+	restored exactly on throw or release -- see captureBody/restoreBody.
+
+	PlatformStand IS STILL SET, for the same reason VesselMount sets it: it suspends the victim Humanoid's
+	own balance/walk controller, which would otherwise push against the assembly it is now part of.
+
+	THE THROW HANDS THE BODY TO THE SERVER. Destroying the weld makes the victim its own assembly again;
+	the server takes it (SetNetworkOwner(nil)) in the same frame, before writing the launch velocity,
+	because a velocity written onto a body some client owns is silently overwritten by that client's next
+	replicated frame (DamageSystem.lua's AttackerLunge paragraph). The flight is therefore server-
+	simulated, and control goes back on landing -- explicitly to the victim's own player, or to the server
+	for a bot/dummy (SetNetworkOwnershipAuto, which this used to call, would hand a training bot to
+	whichever player happened to be nearest; see TrainingBotSystem's header on why it pins its own bots).
+
+	THE RELEASE ORDER (restoreControl) IS VesselMount.Release's, and for its reason: settle the body's
+	velocity, then hand ownership back, THEN wake the Humanoid. A separated assembly inherits the velocity
+	the attacker's had (a turning attacker's spin included); clearing PlatformStand before zeroing that
+	re-arms the balance controller against a spin it did not cause, and the solver turns the argument into
+	linear speed -- the canonical Roblox fling, one more time.
 
 	MOVEMENT LOCK REUSES TWO EXISTING SEAMS, NEITHER OF WHICH THIS MODULE OWNS:
 	  * Constants.Attributes.RootControlLocked -- the exact Attribute ParkourController.
@@ -65,18 +89,21 @@
 	reviving the orphaned ObjectStunResolver.lua -- that module's whole design is proving a KNOCKBACK
 	caused an impact against a target that is still otherwise playing normally, with its own causation
 	gates (clearance, minimum travel, impact angle...). A grab throw is a simpler question -- did the
-	ballistic body this module is already the sole owner of just hit the ground or someone else -- asked
-	fresh every Step against the thrown victim's own current position, no causation gates needed because
-	there is no ambiguity about what launched them. Applies ThrowImpactDamage/ThrowSelfDamage directly
-	via Humanoid:TakeDamage -- a new kind of contact this module owns outright rather than forcing back
-	through the hitbox/defense pipeline, the same way DamageConstants.AttackerLunge is a self-contained
-	side effect DamageSystem applies directly rather than routing through HitboxEngine.
+	ballistic body this module is already the sole owner of just hit the ground, a wall or someone else
+	-- asked fresh every Step against the thrown victim's own current position, no causation gates needed
+	because there is no ambiguity about what launched them (stepFlight lists the probes). Applies
+	ThrowImpactDamage/ThrowSelfDamage directly via Humanoid:TakeDamage -- a new kind of contact this
+	module owns outright rather than forcing back through the hitbox/defense pipeline, the same way
+	DamageConstants.AttackerLunge is a self-contained side effect DamageSystem applies directly rather
+	than routing through HitboxEngine.
 
 	NO REGISTRY, same reasoning as DamageSystem's own header: everything this module needs about a
 	combatant (their Humanoid, their root, whether they are still alive) is derivable from the Model
 	DamageSystem.OnApplied hands it or the Model AttackRequestSystem/the remote hands it, and the only
 	state kept (holds, heldBy, flights) is reclaimed by Step's own model.Parent==nil sweep -- the same
 	convention every System in this stack uses rather than a CharacterRemoving listener per combatant.
+	A hold's weld going missing (BreakJointsOnDeath, a respawn tearing a rig down mid-hold) is caught by
+	the same sweep.
 
 	Does not own: whether a move is authored as a grab (the Move Creation System, via MoveTypes.
 	MoveGrabConfig), what a landed hit costs before the grab side effect begins (DamageResolver --
@@ -86,11 +113,13 @@
 ]]
 
 local CollectionService = game:GetService("CollectionService")
+local PhysicsService = game:GetService("PhysicsService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
@@ -116,6 +145,15 @@ local logger = Logger.scope("GrabSystem")
 
 local GrabSystem = {}
 
+-- What a hold changed on each of the victim's parts, index-aligned, so a throw or release puts back
+-- exactly what was there -- not a guess at what a character's parts "normally" are (an accessory is
+-- already Massless, a custom rig may have its own collision group).
+type BodySnapshot = {
+	Parts: { BasePart },
+	Massless: { boolean },
+	CollisionGroups: { string },
+}
+
 -- One hold per attacker -- the CanAttack gate below is what makes "already holding someone" refuse a
 -- second one before beginHold would ever see it, so this table structurally cannot hold two entries
 -- for the same attacker.
@@ -124,23 +162,27 @@ type Hold = {
 	VictimHumanoid: Humanoid,
 	VictimRoot: BasePart,
 	AttackerHumanoid: Humanoid,
+	AttackerRoot: BasePart,
 	Config: MoveGrabConfig,
 	ExpiresAt: number,
-	AttackerAttachment: Attachment,
-	VictimAttachment: Attachment,
-	AlignPosition: AlignPosition,
-	AlignOrientation: AlignOrientation,
+	Weld: Weld,
+	Body: BodySnapshot,
 }
 
--- One flight per thrown victim -- Attacker is carried for impact-damage attribution only; the flight
--- itself has no dependency on the attacker's character still existing (see Step's own sweep).
+-- One flight per thrown victim -- Attacker is carried for impact-damage attribution and to keep the
+-- thrower out of the flight's own probes; the flight itself has no dependency on the attacker's
+-- character still existing (see Step's own sweep).
 type Flight = {
 	Attacker: Model,
 	VictimHumanoid: Humanoid,
 	VictimRoot: BasePart,
 	Config: MoveGrabConfig,
+	-- No landing probe before this -- GrabConstants.Impact.MinFlightSeconds.
+	ChecksLandingAt: number,
 	ExpiresAt: number,
 	LastPosition: Vector3,
+	-- When the body first dropped under Impact.StallSpeed, or nil while it is still moving.
+	StalledSince: number?,
 }
 
 local holds: { [Model]: Hold } = {}
@@ -157,48 +199,75 @@ local throwRemote: RemoteEvent? = nil
 local holdChangedRemote: RemoteEvent? = nil
 local throwRateLimiter = RateLimiter.New(GrabConstants.Network.MaxThrowsPerSecondPerPlayer)
 
--- stepFlight's query state, hoisted to module scope and reused every frame -- mirrors
--- CandidateGatherer.lua's "one shared OverlapParams for the whole engine" discipline. stepFlight used
--- to allocate a fresh OverlapParams, a fresh RaycastParams, a fresh {victim, attacker} filter table
--- AND a fresh CollectionService:GetTagged() array on EVERY frame for EVERY in-flight throw. Reuse is
--- safe because GrabSystem.Step runs flights sequentially, never concurrently, so there is never more
--- than one stepFlight call touching this state at a time.
+-- Query state, hoisted to module scope and reused every frame -- mirrors CandidateGatherer.lua's "one
+-- shared OverlapParams for the whole engine" discipline. Reuse is safe because GrabSystem.Step runs
+-- flights sequentially, never concurrently, so there is never more than one probe touching this state
+-- at a time.
 local combatantOverlapParams = OverlapParams.new()
 combatantOverlapParams.FilterType = Enum.RaycastFilterType.Include
 combatantOverlapParams.RespectCanCollide = false
 
-local groundRayParams = RaycastParams.new()
-groundRayParams.FilterType = Enum.RaycastFilterType.Exclude
-groundRayParams.RespectCanCollide = true
--- Reused 2-element filter for the ground raycast -- overwritten (not reallocated) per flight.
-local groundRayFilter: { Instance } = { false :: any, false :: any }
+local worldRayParams = RaycastParams.new()
+worldRayParams.FilterType = Enum.RaycastFilterType.Exclude
+worldRayParams.RespectCanCollide = true
+-- Reused 2-element filter for every world ray -- overwritten (not reallocated) per use.
+local worldRayFilter: { Instance } = { false :: any, false :: any }
 
--- Tagged-combatant list backing combatantOverlapParams, kept in sync with HitboxEngine's own
--- Register/UnregisterCombatant tagging (see HitboxEngine.lua's CombatantTag usage) via the tag's
--- Added/Removed signals rather than re-querying CollectionService every frame -- registration churn
--- is a spawn or a death, not a frame event, the same reasoning CandidateGatherer.SetRegisteredModels'
--- own header gives for pushing updates rather than polling.
---
--- Wired at module load, not inside GrabSystem.Init(): HitboxEngine.RegisterCombatant tags a model the
--- moment it is called, independent of whether GrabSystem.Init() has ever run (GrabSystem.spec.lua, like
--- every combat spec, deliberately never calls Init -- see that file's own header). Subscribing here
--- instead keeps this list correct under both the real Main.server.lua boot order and a spec's own
--- synthetic Step-driven one.
-local taggedCombatants: { Instance } = CollectionService:GetTagged(HitboxEngineConstants.CombatantTag)
-combatantOverlapParams.FilterDescendantsInstances = taggedCombatants
-CollectionService:GetInstanceAddedSignal(HitboxEngineConstants.CombatantTag):Connect(function(instance: Instance)
-	table.insert(taggedCombatants, instance)
+-- The Include list for combatantOverlapParams is every model HitboxEngine has tagged as a combatant.
+-- ASSIGNING FilterDescendantsInstances COPIES THE ARRAY -- the params object never sees a later edit to
+-- the Lua table it was given. This used to keep a live table in sync with the tag's Added/Removed
+-- signals and assign it once, at module load, before any combatant existed: the copy the engine
+-- actually filtered by stayed empty for the life of the server, and a thrown body never struck anyone.
+-- A dirty flag instead, re-read on the next flight probe after registration churn (a spawn or a death,
+-- never a per-frame event). Wired at module load rather than in Init() because
+-- HitboxEngine.RegisterCombatant tags a model whether or not Init() has run -- GrabSystem.spec.lua, like
+-- every combat spec, never calls it.
+local combatantFilterDirty = true
+CollectionService:GetInstanceAddedSignal(HitboxEngineConstants.CombatantTag):Connect(function()
+	combatantFilterDirty = true
 end)
-CollectionService:GetInstanceRemovedSignal(HitboxEngineConstants.CombatantTag):Connect(function(instance: Instance)
-	local index = table.find(taggedCombatants, instance)
-	if index then
-		-- Swap-with-last removal -- order doesn't matter for a filter list, same reasoning
-		-- HitboxEngine's own engaged-swing removal uses.
-		local last = #taggedCombatants
-		taggedCombatants[index] = taggedCombatants[last]
-		taggedCombatants[last] = nil
+CollectionService:GetInstanceRemovedSignal(HitboxEngineConstants.CombatantTag):Connect(function()
+	combatantFilterDirty = true
+end)
+
+local function refreshCombatantFilter(): ()
+	if combatantFilterDirty then
+		combatantFilterDirty = false
+		combatantOverlapParams.FilterDescendantsInstances =
+			CollectionService:GetTagged(HitboxEngineConstants.CombatantTag)
 	end
-end)
+end
+
+-- nil until first asked, then whether GrabConstants.Hold.CollisionGroup is registered and usable.
+-- Resolved lazily (beginHold asks) as well as eagerly in Init, for the same spec-never-calls-Init reason.
+local collisionGroupReady: boolean? = nil
+
+-- Registers the hold's collision group and switches it off against every group that exists right now,
+-- itself included. A group registered LATER still collides with it (Roblox's default for a new pair);
+-- nothing in this codebase registers one at runtime today.
+local function ensureCollisionGroup(): boolean
+	if collisionGroupReady ~= nil then
+		return collisionGroupReady
+	end
+	local name = GrabConstants.Hold.CollisionGroup
+	local ok, err = pcall(function()
+		if not PhysicsService:IsCollisionGroupRegistered(name) then
+			PhysicsService:RegisterCollisionGroup(name)
+		end
+		for _, group in PhysicsService:GetRegisteredCollisionGroups() do
+			PhysicsService:CollisionGroupSetCollidable(name, group.name, false)
+		end
+	end)
+	if not ok then
+		-- Degrades rather than refuses: a hold without the group still works, it just lets the held
+		-- body touch things. Warned once, since the answer is cached.
+		logger:warn("Grab collision group unavailable -- held bodies keep their own collision", {
+			error = tostring(err),
+		})
+	end
+	collisionGroupReady = ok
+	return ok
+end
 
 -- Helpers ------------------------------------------------------------------------------------------
 
@@ -206,18 +275,6 @@ local function debugLog(flag: boolean, message: string, data: { [string]: any }?
 	if GrabConstants.Debug.Enabled and flag then
 		logger:debug(message, data)
 	end
-end
-
--- Which BasePart on `character` a hold pins a victim to, or attaches its own anchor onto for a would-
--- be attacker. See GrabConstants.HandPartNames' own header for the R15/R6/fallback order.
-local function resolveAttachPart(character: Model): BasePart?
-	for _, name in GrabConstants.HandPartNames do
-		local part = character:FindFirstChild(name)
-		if part and part:IsA("BasePart") then
-			return part
-		end
-	end
-	return character.PrimaryPart
 end
 
 -- Tells one participant the hold/flight just started or ended. Silently does nothing for a bot or a
@@ -235,37 +292,134 @@ local function sendHoldChanged(model: Model, role: GrabRole, active: boolean): (
 	remote:FireClient(player, { Role = role, Active = active } :: GrabTypes.GrabHoldChangedPayload)
 end
 
--- Hands PlatformStand/network ownership/the Attributes back to a victim who is regaining control --
--- shared by a dropped hold, a landed throw, and the disconnect sweep. Never called for a victim about
--- to fly instead (Throw destroys the hold rig but deliberately leaves PlatformStand/ownership/
--- Attributes in place -- see Throw's own comment).
-local function restoreControl(humanoid: Humanoid, rootPart: BasePart?): ()
+-- The registered combatant `part` belongs to, or nil. Walks up to the TAGGED model rather than taking
+-- the nearest Model ancestor, which for a weapon or any other nested Model welded into a rig is that
+-- nested Model rather than the character carrying it.
+local function combatantOf(part: BasePart): Model?
+	local node = part.Parent
+	while node ~= nil and node ~= Workspace do
+		if node:IsA("Model") and CollectionService:HasTag(node, HitboxEngineConstants.CombatantTag) then
+			return node
+		end
+		node = node.Parent
+	end
+	return nil
+end
+
+local function castWorld(origin: Vector3, direction: Vector3, victim: Model, attacker: Model): RaycastResult?
+	worldRayFilter[1] = victim
+	worldRayFilter[2] = attacker
+	worldRayParams.FilterDescendantsInstances = worldRayFilter
+	return Workspace:Raycast(origin, direction, worldRayParams)
+end
+
+-- Makes every part of `victim` massless (so the attacker's root stays its assembly's root and the
+-- attacker's movement does not carry the victim's weight) and, when `useGroup`, moves it into the hold's
+-- collision group. Returns what it overwrote, for restoreBody. Must run BEFORE the weld is created: the
+-- assembly root is chosen the moment the two assemblies join.
+local function captureBody(victim: Model, useGroup: boolean): BodySnapshot
+	local parts: { BasePart } = {}
+	local massless: { boolean } = {}
+	local groups: { string } = {}
+	local groupName = GrabConstants.Hold.CollisionGroup
+	for _, descendant in victim:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			table.insert(parts, descendant)
+			table.insert(massless, descendant.Massless)
+			table.insert(groups, descendant.CollisionGroup)
+			descendant.Massless = true
+			if useGroup then
+				descendant.CollisionGroup = groupName
+			end
+		end
+	end
+	return { Parts = parts, Massless = massless, CollisionGroups = groups }
+end
+
+local function restoreBody(body: BodySnapshot): ()
+	for index, part in body.Parts do
+		if part.Parent ~= nil then
+			part.Massless = body.Massless[index]
+			part.CollisionGroup = body.CollisionGroups[index]
+		end
+	end
+end
+
+-- Pulls a body that is about to get its collision back out of any wall standing between it and the
+-- attacker. See GrabConstants.Hold.WallClearanceStuds on why this is needed at all. The ray is
+-- extended past the victim's root by the same clearance, because a body whose root is still short of a
+-- wall can have its front half inside it.
+local function clearOfWalls(attacker: Model, attackerRoot: BasePart, victim: Model, victimRoot: BasePart): ()
+	if attackerRoot.Parent == nil or victimRoot.Parent == nil then
+		return
+	end
+	local origin = attackerRoot.Position
+	local offset = victimRoot.Position - origin
+	local distance = offset.Magnitude
+	if distance < 1e-3 then
+		return
+	end
+	local clearance = GrabConstants.Hold.WallClearanceStuds
+	local direction = offset / distance
+	local hit = castWorld(origin, direction * (distance + clearance), victim, attacker)
+	if not hit then
+		return
+	end
+	local safeDistance = math.max(hit.Distance - clearance, 0)
+	if safeDistance < distance then
+		victimRoot.CFrame += direction * (safeDistance - distance)
+	end
+end
+
+-- Hands a victim back their own body -- shared by a dropped hold, a landed throw, and the disconnect
+-- sweep. In VesselMount.Release's order, for its reason (this file's header, THE RELEASE ORDER):
+-- settle, then ownership, then the Humanoid.
+local function restoreControl(victim: Model, humanoid: Humanoid, root: BasePart): ()
+	if root.Parent ~= nil then
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		-- To the victim's own player explicitly, or to the server for a bot/dummy (nil) -- never Auto;
+		-- see this file's header, THE THROW. pcall-guarded because SetNetworkOwner throws on an anchored
+		-- or grounded part, which a body can have become mid-teardown.
+		local owner = Players:GetPlayerFromCharacter(victim)
+		pcall(function()
+			root:SetNetworkOwner(owner)
+		end)
+	end
 	if humanoid.Parent ~= nil then
 		humanoid.PlatformStand = false
 		humanoid:SetAttribute(Constants.Attributes.RootControlLocked, nil)
 		humanoid:SetAttribute(Constants.Attributes.Grabbed, nil)
 	end
-	if rootPart and rootPart.Parent ~= nil then
-		-- pcall-guarded the same way AdminActionSystem.SetFlying's own SetNetworkOwnershipAuto call is
-		-- -- an already-anchored or already-destroyed part can throw here.
-		pcall(function()
-			rootPart:SetNetworkOwnershipAuto()
-		end)
-	end
 end
 
--- Destroys a hold's constraints/attachments only -- never touches PlatformStand, network ownership or
--- Attributes, because the two callers disagree about what should happen to those afterwards
--- (releaseHold hands control back immediately; Throw hands the body a velocity and keeps it server-
--- pinned through the flight instead).
-local function destroyHoldRig(hold: Hold): ()
-	hold.AlignPosition:Destroy()
-	hold.AlignOrientation:Destroy()
-	hold.VictimAttachment:Destroy()
-	hold.AttackerAttachment:Destroy()
+-- Undoes the hold's rig and hands the body back to physics as its own assembly -- the half a throw and
+-- a release share. Neither the ownership nor the Humanoid is touched here: the two callers disagree
+-- about what happens to those next.
+local function detachHold(attacker: Model, hold: Hold): ()
+	holds[attacker] = nil
+	heldBy[hold.Victim] = nil
+	hold.Weld:Destroy()
+	restoreBody(hold.Body)
+	clearOfWalls(attacker, hold.AttackerRoot, hold.Victim, hold.VictimRoot)
+	if hold.AttackerHumanoid.Parent ~= nil then
+		hold.AttackerHumanoid:SetAttribute(Constants.Attributes.Grabbing, nil)
+	end
+	sendHoldChanged(attacker, "Attacker", false)
 end
 
 -- Begin / release ------------------------------------------------------------------------------------
+
+-- Drops the victim where they are held and hands control back to both sides -- the auto-release
+-- safety timer, and the disconnect/death backstop Step's own sweep calls this for. Never applies any
+-- damage: a dropped hold is not a throw, it is the hold simply not happening any more.
+local function releaseHold(attacker: Model, hold: Hold): ()
+	detachHold(attacker, hold)
+	restoreControl(hold.Victim, hold.VictimHumanoid, hold.VictimRoot)
+	sendHoldChanged(hold.Victim, "Victim", false)
+
+	debugLog(GrabConstants.Debug.LogHoldReleased, "Grab hold released", { attacker = attacker.Name })
+end
 
 -- Starts a hold. Called only from the DamageSystem.OnApplied subscription below, and silently
 -- declines rather than erroring for every precondition that isn't met -- a grab that can't begin is
@@ -279,8 +433,8 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 	-- Already holding someone -- see GrabSystem.CanAttack's own header on why this should be
 	-- structurally unreachable via the attack layer (a holding attacker cannot throw another attack),
 	-- but a hotbar move or a bot's own direct HitboxEngine.RequestAttack call bypasses that gate, so
-	-- this is the backstop.
-	if holds[attacker] then
+	-- this is the backstop. An attacker who is themselves held or mid-flight is refused the same way.
+	if holds[attacker] or heldBy[attacker] or flights[attacker] then
 		return
 	end
 	-- The victim is already somebody else's hold or already in flight.
@@ -294,56 +448,52 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 		return
 	end
 	-- A body welded to a blimp station (Server/Systems/BlimpSystem.lua) cannot be held. This is not a
-	-- balance call, it is a physical one: a mount is a rigid Weld into the hull's assembly and a hold is
-	-- an AlignPosition dragging the same root toward a fist, so honouring both would have the two fight
-	-- every physics step -- and whichever won, the mount's own release path would be operating on a body
-	-- it no longer describes. Refused at the START rather than by yanking the victim off the blimp,
-	-- because the attacker landing a hit on a passenger has no business dismounting them.
+	-- balance call, it is a physical one: a mount is a rigid Weld into the hull's assembly, and so is a
+	-- hold now -- honouring both would weld the attacker to the hull through the victim, and whichever
+	-- released first would be operating on a body it no longer describes. Refused at the START rather
+	-- than by yanking the victim off the blimp, because the attacker landing a hit on a passenger has no
+	-- business dismounting them.
 	--
 	-- Read as an Attribute, not through a BlimpSystem require, the same seam AttackRequestSystem's and
 	-- DefenseSystem's own Mounted gates use.
 	if victimHumanoid:GetAttribute(Constants.Attributes.Mounted) == true then
 		return
 	end
-	local attackerAttachPart = resolveAttachPart(attacker)
+	-- Either side of a live air combo: AirComboSystem is already driving that body server-side, and a
+	-- weld on top of its spring is two owners on one body -- the exact fault this module's own header
+	-- describes. AirComboSystem refuses Grabbed/Grabbing bodies from its side for the same reason.
+	if AirComboAttributes.IsParticipant(victimHumanoid) or AirComboAttributes.IsParticipant(attackerHumanoid) then
+		return
+	end
+	local attackerRoot = attacker.PrimaryPart
 	local victimRoot = victim.PrimaryPart
-	if not attackerAttachPart or not victimRoot then
+	if not attackerRoot or not victimRoot then
+		return
+	end
+	-- Anchored, or jointed to something anchored (an admin freeze, a cutscene rig): welding that into
+	-- the attacker's assembly would anchor the ATTACKER in place instead of lifting the victim.
+	if victimRoot:IsGrounded() then
 		return
 	end
 
+	-- A victim who was holding someone themselves drops them first -- a chain of welded bodies is not
+	-- a hold anybody authored.
+	local victimsOwnHold = holds[victim]
+	if victimsOwnHold then
+		releaseHold(victim, victimsOwnHold)
+	end
+
 	victimHumanoid.PlatformStand = true
-	-- pcall-guarded the same way AdminActionSystem.SetFlying's own SetNetworkOwner call is --
-	-- SetNetworkOwner throws on an anchored or otherwise ungrounded part.
-	pcall(function()
-		victimRoot:SetNetworkOwner(nil)
-	end)
+	local body = captureBody(victim, ensureCollisionGroup())
 
-	local attackerAttachment = Instance.new("Attachment")
-	attackerAttachment.Name = "GrabAnchor"
-	attackerAttachment.CFrame = config.AttachOffset
-	attackerAttachment.Parent = attackerAttachPart
-
-	local victimAttachment = Instance.new("Attachment")
-	victimAttachment.Name = "GrabTarget"
-	victimAttachment.Parent = victimRoot
-
-	local alignPosition = Instance.new("AlignPosition")
-	alignPosition.Name = "GrabAlignPosition"
-	alignPosition.Attachment0 = victimAttachment
-	alignPosition.Attachment1 = attackerAttachment
-	alignPosition.MaxForce = GrabConstants.Hold.MaxForce
-	alignPosition.Responsiveness = GrabConstants.Hold.PositionResponsiveness
-	alignPosition.RigidityEnabled = false
-	alignPosition.Parent = victimRoot
-
-	local alignOrientation = Instance.new("AlignOrientation")
-	alignOrientation.Name = "GrabAlignOrientation"
-	alignOrientation.Attachment0 = victimAttachment
-	alignOrientation.Attachment1 = attackerAttachment
-	alignOrientation.MaxTorque = GrabConstants.Hold.MaxTorque
-	alignOrientation.Responsiveness = GrabConstants.Hold.OrientationResponsiveness
-	alignOrientation.RigidityEnabled = false
-	alignOrientation.Parent = victimRoot
+	-- C0 carries the whole placement, so the body is on its mark the frame the weld exists -- no
+	-- travel, no pre-positioning CFrame write racing an ownership change. See this file's header.
+	local weld = Instance.new("Weld")
+	weld.Name = "GrabWeld"
+	weld.Part0 = attackerRoot
+	weld.Part1 = victimRoot
+	weld.C0 = config.AttachOffset
+	weld.Parent = victimRoot
 
 	attackerHumanoid:SetAttribute(Constants.Attributes.Grabbing, true)
 	victimHumanoid:SetAttribute(Constants.Attributes.Grabbed, true)
@@ -354,12 +504,11 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 		VictimHumanoid = victimHumanoid,
 		VictimRoot = victimRoot,
 		AttackerHumanoid = attackerHumanoid,
+		AttackerRoot = attackerRoot,
 		Config = config,
 		ExpiresAt = now + config.HoldSeconds,
-		AttackerAttachment = attackerAttachment,
-		VictimAttachment = victimAttachment,
-		AlignPosition = alignPosition,
-		AlignOrientation = alignOrientation,
+		Weld = weld,
+		Body = body,
 	}
 	heldBy[victim] = attacker
 
@@ -371,26 +520,6 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 		"Grab hold started",
 		{ attacker = attacker.Name, victim = victim.Name }
 	)
-end
-
--- Drops the victim where they stand and hands control back to both sides -- the auto-release safety
--- timer, and the disconnect/death backstop Step's own sweep calls this for. Never applies any damage:
--- a dropped hold is not a throw, it is the hold simply not happening any more.
-local function releaseHold(attacker: Model, hold: Hold): ()
-	holds[attacker] = nil
-	heldBy[hold.Victim] = nil
-
-	destroyHoldRig(hold)
-
-	if hold.AttackerHumanoid.Parent ~= nil then
-		hold.AttackerHumanoid:SetAttribute(Constants.Attributes.Grabbing, nil)
-	end
-	restoreControl(hold.VictimHumanoid, hold.VictimRoot)
-
-	sendHoldChanged(attacker, "Attacker", false)
-	sendHoldChanged(hold.Victim, "Victim", false)
-
-	debugLog(GrabConstants.Debug.LogHoldReleased, "Grab hold released", { attacker = attacker.Name })
 end
 
 -- Throw ----------------------------------------------------------------------------------------------
@@ -409,39 +538,41 @@ function GrabSystem.Throw(attackerModel: Model, now: number): (boolean, string?)
 		return false, "NoCharacter"
 	end
 
-	-- The attacker's own root CFrame, not the hand attachment's -- consistent with every other
-	-- facing-relative effect in this combat stack (DamageConstants.AttackerLunge, every authored
-	-- move's own root-relative Offset), and immune to whatever orientation an in-progress animation
-	-- happens to have left the hand part in.
-	local attackerRoot = attackerModel.PrimaryPart
-	local lookVector = if attackerRoot then attackerRoot.CFrame.LookVector else Vector3.new(0, 0, -1)
-
+	-- Flattened, so an attacker pitched by a slope or an animation throws along the ground rather than
+	-- into it -- the vertical part of the launch is ThrowUpVelocity's alone. The root, not a hand,
+	-- consistent with every other facing-relative effect in this stack (DamageConstants.AttackerLunge,
+	-- every authored move's own root-relative Offset).
+	local look = hold.AttackerRoot.CFrame.LookVector
+	local flat = Vector3.new(look.X, 0, look.Z)
+	local forward = if flat.Magnitude > 1e-3 then flat.Unit else Vector3.new(0, 0, -1)
 	local config = hold.Config
-	holds[attackerModel] = nil
-	heldBy[hold.Victim] = nil
-	destroyHoldRig(hold)
+	local victimRoot = hold.VictimRoot
 
-	if hold.AttackerHumanoid.Parent ~= nil then
-		hold.AttackerHumanoid:SetAttribute(Constants.Attributes.Grabbing, nil)
-	end
-	sendHoldChanged(attackerModel, "Attacker", false)
+	detachHold(attackerModel, hold)
+	-- The server takes the now-separate body BEFORE writing its velocity -- see this file's header, THE
+	-- THROW. PlatformStand and the Grabbed/RootControlLocked Attributes deliberately stay set: the
+	-- flight still owns this body until it lands.
+	pcall(function()
+		victimRoot:SetNetworkOwner(nil)
+	end)
+	-- The separated assembly inherited the attacker's velocity, turning included; none of that is part
+	-- of the throw.
+	victimRoot.AssemblyAngularVelocity = Vector3.zero
+	victimRoot.AssemblyLinearVelocity = forward * config.ThrowHorizontalVelocity
+		+ Vector3.new(0, config.ThrowUpVelocity, 0)
 	-- Deliberately NO sendHoldChanged for the victim here: Constants.Attributes.Grabbed spans the whole
 	-- hold-then-flight lifetime (see this file's header), and so does the "GRABBED" client cue it
 	-- drives -- the victim's own Active=false fires once, on landing, not twice.
 
-	-- The victim's body stays PlatformStand + server-network-owned (both already set by beginHold) --
-	-- only the constraints that were pinning it to the attacker's fist are gone. Real Roblox gravity
-	-- now carries the arc; this module only has to watch for where it ends.
-	local velocity = lookVector * config.ThrowHorizontalVelocity + Vector3.new(0, config.ThrowUpVelocity, 0)
-	hold.VictimRoot.AssemblyLinearVelocity = velocity
-
 	flights[hold.Victim] = {
 		Attacker = attackerModel,
 		VictimHumanoid = hold.VictimHumanoid,
-		VictimRoot = hold.VictimRoot,
+		VictimRoot = victimRoot,
 		Config = config,
+		ChecksLandingAt = now + GrabConstants.Impact.MinFlightSeconds,
 		ExpiresAt = now + GrabConstants.Impact.MaxFlightSeconds,
-		LastPosition = hold.VictimRoot.Position,
+		LastPosition = victimRoot.Position,
+		StalledSince = nil,
 	}
 
 	debugLog(
@@ -474,13 +605,9 @@ local function landFlight(victim: Model, flight: Flight, impactTarget: Model?): 
 		end
 	end
 
-	if flight.VictimRoot.Parent ~= nil then
-		-- Stops the body dead rather than letting it keep sliding under whatever velocity remained --
-		-- a thrown body that skids through the landing reads as still being thrown, not as having
-		-- landed.
-		flight.VictimRoot.AssemblyLinearVelocity = Vector3.zero
-	end
-	restoreControl(flight.VictimHumanoid, flight.VictimRoot)
+	-- restoreControl zeroes the velocity first -- a thrown body that skids through the landing reads as
+	-- still being thrown, not as having landed.
+	restoreControl(victim, flight.VictimHumanoid, flight.VictimRoot)
 	sendHoldChanged(victim, "Victim", false)
 
 	debugLog(GrabConstants.Debug.LogThrowLanded, "Grab throw landed", {
@@ -489,15 +616,19 @@ local function landFlight(victim: Model, flight: Flight, impactTarget: Model?): 
 	})
 end
 
--- One flight's own small swept check, run every Step -- see this file's header on why this is written
--- fresh rather than reviving ObjectStunResolver.lua. Two independent tests, either one ends the
--- flight:
---   * a nearby registered combatant (a player-collision impact), and
---   * a ray swept from last frame's position to this one (a ground/geometry impact) -- swept rather
---     than a single point sample so a fast throw cannot tunnel an entire floor between two Heartbeats,
---     the identical reasoning HitboxEngineConstants' own substep system exists for.
+-- One flight's own small check, run every Step -- see this file's header on why this is written fresh
+-- rather than reviving ObjectStunResolver.lua. Any one of these ends the flight:
+--   * another live combatant within Impact.CollisionRadiusStuds (the only one that deals impact damage),
+--   * a ray swept from last frame's position to this one hitting something (a wall, a floor arrived at
+--     steeply) -- swept rather than a point sample so a fast throw cannot tunnel a floor between two
+--     Heartbeats, the identical reasoning HitboxEngineConstants' own substep system exists for,
+--   * a descending body with a floor within Impact.FootProbeStuds under it (a low, flat throw that
+--     skims in with nothing AHEAD of it for the swept ray to find),
+--   * a body that has stalled (Impact.StallSpeed for Impact.StallSeconds) wherever it came to rest.
+-- The three geometry checks wait out Impact.MinFlightSeconds first; the combatant check does not.
 local function stepFlight(victim: Model, flight: Flight, now: number): ()
-	if victim.Parent == nil or flight.VictimRoot.Parent == nil or flight.VictimHumanoid.Parent == nil then
+	local root = flight.VictimRoot
+	if victim.Parent == nil or root.Parent == nil or flight.VictimHumanoid.Parent == nil then
 		flights[victim] = nil
 		return
 	end
@@ -512,42 +643,63 @@ local function stepFlight(victim: Model, flight: Flight, now: number): ()
 		return
 	end
 
-	local currentPosition = flight.VictimRoot.Position
+	local currentPosition = root.Position
 
+	refreshCombatantFilter()
 	local nearbyParts = Workspace:GetPartBoundsInRadius(
 		currentPosition,
 		GrabConstants.Impact.CollisionRadiusStuds,
 		combatantOverlapParams
 	)
-	for _, part in ipairs(nearbyParts) do
-		local model = part:FindFirstAncestorOfClass("Model")
-		if model and model ~= victim and model ~= flight.Attacker then
-			local candidateHumanoid = CharacterUtil.LiveHumanoidOf(model)
-			if candidateHumanoid then
+	-- Consecutive parts almost always belong to the same rig; remembering the last one rejected skips
+	-- re-walking its ancestry for each of its other fifteen parts.
+	local rejected: Model? = nil
+	for _, part in nearbyParts do
+		local model = combatantOf(part)
+		if model and model ~= rejected then
+			if model ~= victim and model ~= flight.Attacker and CharacterUtil.LiveHumanoidOf(model) then
 				landFlight(victim, flight, model)
 				return
 			end
+			rejected = model
 		end
 	end
 
 	local lastPosition = flight.LastPosition
+	flight.LastPosition = currentPosition
+	if now < flight.ChecksLandingAt then
+		return
+	end
+
 	local delta = currentPosition - lastPosition
 	local travelled = delta.Magnitude
-	local alreadyGrounded = flight.VictimHumanoid.FloorMaterial ~= Enum.Material.Air
-	if travelled > 1e-3 or alreadyGrounded then
-		groundRayFilter[1] = victim
-		groundRayFilter[2] = flight.Attacker
-		groundRayParams.FilterDescendantsInstances = groundRayFilter
-		local direction = if travelled > 1e-3 then delta.Unit else Vector3.new(0, -1, 0)
-		local castDistance = travelled + GrabConstants.Impact.GroundProbeExtraStuds
-		local result = Workspace:Raycast(lastPosition, direction * castDistance, groundRayParams)
-		if result or alreadyGrounded then
+	if travelled > 1e-3 then
+		local reach = delta.Unit * (travelled + GrabConstants.Impact.GroundProbeExtraStuds)
+		if castWorld(lastPosition, reach, victim, flight.Attacker) then
 			landFlight(victim, flight, nil)
 			return
 		end
 	end
 
-	flight.LastPosition = currentPosition
+	local velocity = root.AssemblyLinearVelocity
+	if velocity.Y <= 0 then
+		local down = Vector3.new(0, -GrabConstants.Impact.FootProbeStuds, 0)
+		if castWorld(currentPosition, down, victim, flight.Attacker) then
+			landFlight(victim, flight, nil)
+			return
+		end
+	end
+
+	if velocity.Magnitude < GrabConstants.Impact.StallSpeed then
+		local stalledSince = flight.StalledSince
+		if stalledSince == nil then
+			flight.StalledSince = now
+		elseif now - stalledSince >= GrabConstants.Impact.StallSeconds then
+			landFlight(victim, flight, nil)
+		end
+	else
+		flight.StalledSince = nil
+	end
 end
 
 -- The loop -----------------------------------------------------------------------------------------
@@ -556,19 +708,27 @@ end
 -- DELIBERATELY FULL WALKS, both of them -- the one place in this stack that did NOT get an amortised
 -- reclaim cursor when AttackRequestSystem/SwingSequencer/DamageSystem did. Neither loop below is a
 -- reclaim: the first RELEASES a hold when its expiry passes (skipping an entry would leave a victim
--- pinned past the window), and the second advances flight physics on every entry (skipping one is a
--- dropped frame of motion). Both tables are also bounded by "grabs actually in progress right now",
--- which on any real server is a handful, so the full walk was never the cost. See
+-- pinned past the window), and the second advances flight probes on every entry (skipping one is a
+-- dropped frame of landing detection). Both tables are also bounded by "grabs actually in progress
+-- right now", which on any real server is a handful, so the full walk was never the cost. See
 -- Shared/AmortizedReclaim.lua's header on why a sweep that does per-entry work must not be amortised.
+--
+-- A hold costs nothing per frame beyond the checks below -- the weld does the carrying, on whichever
+-- machine simulates the attacker, with no server-side constraint solve at all.
 function GrabSystem.Step(_deltaTime: number, now: number): ()
 	for attacker, hold in holds do
 		local attackerGone = attacker.Parent == nil
+			or hold.AttackerRoot.Parent == nil
 			or hold.AttackerHumanoid.Parent == nil
 			or hold.AttackerHumanoid.Health <= 0
 		local victimGone = hold.Victim.Parent == nil
+			or hold.VictimRoot.Parent == nil
 			or hold.VictimHumanoid.Parent == nil
 			or hold.VictimHumanoid.Health <= 0
-		if attackerGone or victimGone or now >= hold.ExpiresAt then
+		-- The weld itself going (BreakJointsOnDeath, a rig torn down under it) ends the hold even if
+		-- both Humanoids somehow still read alive -- there is nothing holding the body any more.
+		local weldGone = hold.Weld.Parent == nil
+		if attackerGone or victimGone or weldGone or now >= hold.ExpiresAt then
 			releaseHold(attacker, hold)
 		end
 	end
@@ -644,6 +804,10 @@ function GrabSystem.Init(): ()
 	-- rather than a wrong outcome. Asserted anyway for the same "a comment cannot fail a boot" reason.
 	assert(DamageSystem.OnApplied ~= nil, "GrabSystem.Init() requires DamageSystem to be available")
 	started = true
+
+	-- Eagerly, so the group exists (and is paired off against every group the place registers at edit
+	-- time) before the first grab rather than on it.
+	ensureCollisionGroup()
 
 	throwRemote = NetworkBridge.CreateRemoteEvent(GrabConstants.Network.RemoteNames.Throw)
 	throwRemote.OnServerEvent:Connect(function(player: Player)

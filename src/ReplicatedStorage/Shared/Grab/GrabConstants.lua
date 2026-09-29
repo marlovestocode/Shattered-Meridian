@@ -10,10 +10,10 @@
 	THERE IS NO PER-MOVE NUMBER IN THIS FILE, same as its siblings. HoldSeconds/ThrowUpVelocity/
 	ThrowHorizontalVelocity/ThrowImpactDamage/ThrowSelfDamage are all authored PER MOVE in the Move
 	Creation System (MoveTypes.MoveGrabConfig) and reach GrabSystem through DamageResult.Grab. What IS
-	here is everything no single move could sensibly author: which physical part a victim attaches to,
-	how hard the constraints that pin them there pull, how the impact sweep is tuned, and the one
-	authoring default (AttachOffset) that is deliberately NOT exposed to an author at all -- see
-	Defaults.AttachOffset's own comment.
+	here is everything no single move could sensibly author: where on the attacker a held victim sits,
+	how the held body is kept out of the physics solver's way, how the flight's landing/impact checks
+	are tuned, and the one authoring default (AttachOffset) that is deliberately NOT exposed to an
+	author at all -- see Defaults.AttachOffset's own comment.
 
 	Does not own: per-move hold/throw numbers (the Move Editor, via MoveTypes.MoveGrabConfig), the
 	hold/flight state machine itself (Server/Combat/Grab/GrabSystem.lua), or clamping a saved move
@@ -22,28 +22,25 @@
 
 local GrabConstants = {}
 
--- Attachment -------------------------------------------------------------------------------------
-
--- Which BasePart on the attacker's rig a hold pins the victim to, tried in order. "RightHand" is the
--- R15 name; "Right Arm" is R6's. Neither existing is not an error -- resolveAttachPart falls back to
--- the attacker's own PrimaryPart (the same root every registration path in this combat stack already
--- requires), which still reads as "grabbed by the attacker" even without a literal fist to point at,
--- and covers a rig this list has never seen (a bot, a custom NPC skeleton).
-GrabConstants.HandPartNames = { "RightHand", "Right Arm" }
-
 -- Authoring defaults -------------------------------------------------------------------------------
 
 GrabConstants.Defaults = {
-	-- Root/hand-relative -- see MoveGrabConfig.AttachOffset's own header on why this is the ONE field
-	-- of the sub-table an author never edits: MoveRegistryManager.Validate always writes this exact
-	-- value onto a saved move regardless of what a client submits, the same "the server decides what
-	-- the numbers mean" posture the move's own top-level Offset already takes, just total rather than
-	-- partial here since there is no legitimate reason for two different Grab moves to pin a victim to
-	-- two different points on the attacker's fist.
+	-- Where the victim's root sits, in the ATTACKER'S ROOT space -- the weld's C0 (GrabSystem.beginHold).
+	-- See MoveGrabConfig.AttachOffset's own header on why this is the ONE field of the sub-table an
+	-- author never edits: MoveRegistryManager.Validate always writes this exact value onto a saved move
+	-- regardless of what a client submits (and ToWire never sends one), so changing it here re-places
+	-- every grab move at once, persisted ones included.
 	--
-	-- Slightly down and to the side of the resolved hand part, and a little in front of it -- a fist
-	-- holding a collar, not a point floating in space.
-	AttachOffset = CFrame.new(0, -0.5, -1),
+	-- Root-relative, NOT hand-relative, on purpose. It used to hang off the RightHand part, and that is
+	-- half of why a grab flung people: the hand's pose on the server is whatever the grab SWING left it
+	-- in, so the same offset put the victim somewhere different on every grab -- usually with their
+	-- torso inside the attacker's arm. The root is the one frame on a rig that is upright, animation-
+	-- free and identical on every client, so the victim lands in the same place every time.
+	--
+	-- Out in front at the right hand's reach and lifted half a stud (feet off the floor -- held up by the
+	-- collar, not standing), turned to FACE the attacker. Three studs forward leaves a clear two-stud gap
+	-- between the two torsos, so nothing overlaps even before the collision group below takes effect.
+	AttachOffset = CFrame.new(0.5, 0.5, -3) * CFrame.Angles(0, math.pi, 0),
 	HoldSeconds = 3,
 	ThrowUpVelocity = 20,
 	ThrowHorizontalVelocity = 55,
@@ -63,15 +60,22 @@ GrabConstants.Limits = {
 
 -- Hold physics -------------------------------------------------------------------------------------
 
--- AlignPosition/AlignOrientation tuning for the hold's own pin. Rigid enough that the victim reads as
--- genuinely CARRIED (not dragged on a spring) while still being a physics constraint rather than a
--- teleport -- a direct CFrame write would fight the victim's own (server-owned, see GrabSystem's own
--- header on SetNetworkOwner) physics simulation every frame instead of cooperating with it.
+-- A HOLD IS A WELD, NOT A CONSTRAINT PAIR. See GrabSystem.lua's header, THE HOLD, for the full account
+-- of why the old AlignPosition/AlignOrientation spring flung people. What is here is the two things a
+-- weld needs so the held body is carried rather than fought over.
 GrabConstants.Hold = {
-	MaxForce = 100000,
-	PositionResponsiveness = 60,
-	MaxTorque = 100000,
-	OrientationResponsiveness = 60,
+	-- Every BasePart of a held victim is moved into this group for the hold, and the group collides
+	-- with NOTHING (GrabSystem registers it and turns off every pairing it can see at that moment). A
+	-- held body is part of the attacker's assembly, so any contact it makes -- an attacker's own arm, a
+	-- wall they walk the victim into, a bystander -- is a contact the attacker's Humanoid feels as a
+	-- shove. Restored part by part to whatever group each part had before, on throw or release.
+	CollisionGroup = "GrabHeld",
+	-- Studs kept between a released/thrown body and any wall found between the attacker and it. A held
+	-- body collides with nothing, so an attacker who backs the victim into a wall has it partly INSIDE
+	-- that wall at the moment of release; switching collision back on there resolves as an
+	-- intersection, which is a fling. GrabSystem pulls the body back toward the attacker by the wall's
+	-- distance minus this first.
+	WallClearanceStuds = 1.5,
 }
 
 -- Flight / impact ------------------------------------------------------------------------------------
@@ -92,6 +96,22 @@ GrabConstants.Impact = {
 	-- frame's, so a landing registers on the frame it happens rather than one frame after the physics
 	-- solver has already arrested the body and erased the evidence.
 	GroundProbeExtraStuds = 2,
+	-- How far below the thrown body's root a DESCENDING body looks for a floor. A standing R6 or R15
+	-- root sits three studs above its feet, so this is "the feet are about to touch": the swept ray
+	-- above only ever sees what is AHEAD of the body, and a throw that skims in low and flat along the
+	-- ground has nothing ahead of it -- it used to fall back on Humanoid.FloorMaterial, which a
+	-- PlatformStanding body does not keep current.
+	FootProbeStuds = 3.25,
+	-- No landing check at all for this long after the throw, so a throw from a low hold cannot "land"
+	-- on the floor it was thrown off before it has left it. Short enough to be invisible: the default
+	-- ThrowUpVelocity is still rising when it ends.
+	MinFlightSeconds = 0.1,
+	-- A body moving slower than this for StallSeconds straight has come to rest somewhere neither probe
+	-- recognises as a floor (wedged on a ledge, caught on a railing) -- land it there rather than leave
+	-- the victim locked out of their own character until MaxFlightSeconds. Held for a window, not a
+	-- single frame, because a straight-up throw passes through zero speed at its apex.
+	StallSpeed = 2,
+	StallSeconds = 0.25,
 }
 
 -- Network ---------------------------------------------------------------------------------------

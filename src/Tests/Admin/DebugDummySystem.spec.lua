@@ -131,11 +131,11 @@ return function()
 			expect(math.abs(actual.Position.Z - spawnCFrame.Position.Z) < 1e-2).to.equal(true)
 		end)
 
-		it("registers a Humanoid unanchored, so a Grab hold's AlignPosition can actually move it", function()
+		it("registers a Humanoid unanchored, so a Grab hold can actually carry it", function()
 			-- The whole reason Grab "just works" against a debug dummy (see this module's own header)
-			-- is that nothing here anchors the rig -- an AlignPosition constraint cannot move an
-			-- Anchored part at all, so this is the one property that would silently break Grab without
-			-- ever failing loudly anywhere.
+			-- is that nothing here anchors the rig -- GrabSystem refuses to weld a grounded body into an
+			-- attacker's assembly (it would pin the attacker instead), so this is the one property that
+			-- would silently break Grab without ever failing loudly anywhere.
 			local model = DebugDummySystem.Spawn(CFrame.new(0, 5, 0)) :: Model
 			local rootPart = model:FindFirstChild("HumanoidRootPart") :: BasePart
 			expect(rootPart.Anchored).to.equal(false)

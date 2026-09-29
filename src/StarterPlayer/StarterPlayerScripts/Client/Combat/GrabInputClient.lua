@@ -59,6 +59,8 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 
+local Glyph = require(script.Parent.Parent.Input.Glyph)
+local InputDevice = require(script.Parent.Parent.Input.InputDevice)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local Layers = require(script.Parent.Parent.UI.Shell.Layers)
 
@@ -120,6 +122,19 @@ local function setCue(text: string?): ()
 	end
 end
 
+-- What to call the throw key in the attacker's cue, resolved when the cue shows rather than written
+-- into it: the cue used to say "[G]" unconditionally, which was wrong for anyone who had rebound
+-- GrabThrow and for every gamepad player (theirs is a chord -- see Glyph.Resolve). Glyph answers with
+-- an image id for a plain gamepad button, which a one-line TextLabel cannot draw, so that case falls
+-- back to the binding's text name.
+local function throwKeyLabel(): string
+	local glyph = Glyph.Resolve("GrabThrow", InputDevice.Current())
+	if glyph.Kind == "Text" then
+		return glyph.Value
+	end
+	return KeybindManager.Describe(KeybindManager.GetGamepad("GrabThrow"))
+end
+
 -- Sending -------------------------------------------------------------------------------------------
 
 local function requestThrow(): ()
@@ -178,7 +193,7 @@ local function onHoldChanged(raw: unknown): ()
 	end
 
 	if payload.Role == "Attacker" then
-		setCue("HOLDING -- [G] TO THROW")
+		setCue(`HOLDING -- [{string.upper(throwKeyLabel())}] TO THROW`)
 	else
 		setCue("GRABBED")
 	end

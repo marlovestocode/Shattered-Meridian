@@ -43,8 +43,9 @@
 	client the physics and every Humanoid:Move and CFrame write here is silently discarded (the
 	mirror-image of Server Humanoid:Move being inert on a PLAYER). Knockback therefore lands through
 	DamageSystem.applyLaunch's own server-owned branch ("a bot, or a dummy that is not anchored"),
-	and GrabSystem's AlignPosition can hold it -- so everything a player can do to a player, they can do
-	to it. While Grabbed, this module writes nothing to the body at all.
+	and GrabSystem's hold weld can carry it (handing it back to the server, not to Auto, on release) --
+	so everything a player can do to a player, they can do to it. While Grabbed, this module writes
+	nothing to the body at all.
 
 	R6, ON PURPOSE. The game is R6-locked and every authored clip is R6; a bot built R15 (as
 	DebugDummySystem's static dummy is) would be refused every clip here without an error.

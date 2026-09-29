@@ -21,6 +21,7 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local DamageSystem = require(ServerScriptService.Server.Combat.Damage.DamageSystem)
 local DefaultMoveRegistry = require(ServerScriptService.Server.Combat.DefaultMoveRegistry)
 local DefenseSystem = require(ServerScriptService.Server.Combat.Defense.DefenseSystem)
+local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
 local GrabSystem = require(ServerScriptService.Server.Combat.Grab.GrabSystem)
 local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.HitboxEngine)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
@@ -65,14 +66,17 @@ type Dummy = {
 
 local spawned: { Model } = {}
 
-local function makeDummy(name: string, position: Vector3, lookAt: Vector3?): Dummy
+-- Anchored by default so a rig with no floor under it stays put. A would-be grab VICTIM must be built
+-- unanchored (`anchored = false`): GrabSystem refuses to weld a grounded body into an attacker's
+-- assembly, since that would pin the attacker rather than lift the victim.
+local function makeDummy(name: string, position: Vector3, lookAt: Vector3?, anchored: boolean?): Dummy
 	local model = Instance.new("Model")
 	model.Name = name
 
 	local root = Instance.new("Part")
 	root.Name = "HumanoidRootPart"
 	root.Size = Vector3.new(2, 2, 1)
-	root.Anchored = true
+	root.Anchored = anchored ~= false
 	root.CanCollide = false
 	root.CFrame = if lookAt then CFrame.lookAt(position, lookAt) else CFrame.new(position)
 	root.Parent = model
@@ -130,10 +134,14 @@ end
 local function throwGrabHit(base: number): (Dummy, Dummy)
 	overrideMoveWithGrab()
 	local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-	local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+	local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
 	HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
 	step(FRAME, base + FRAME)
 	return attacker, defender
+end
+
+local function holdWeldOf(defender: Dummy): Weld?
+	return defender.Root:FindFirstChild("GrabWeld") :: Weld?
 end
 
 return function()
@@ -192,7 +200,7 @@ return function()
 		it("does not begin a second hold for an attacker who is already holding someone", function()
 			local base = os.clock()
 			local attacker, firstVictim = throwGrabHit(base)
-			local secondVictim = makeDummy("SecondDefender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local secondVictim = makeDummy("SecondDefender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
 
 			-- The same attacker lands a second Grab-carrying hit while still holding the first victim.
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -200,6 +208,57 @@ return function()
 
 			expect(GrabSystem.IsHeld(firstVictim.Model)).to.equal(true)
 			expect(GrabSystem.IsHeld(secondVictim.Model)).to.equal(false)
+		end)
+	end)
+
+	describe("GrabSystem -- the hold itself", function()
+		it("welds the victim's root to the attacker's root at the authored offset", function()
+			local base = os.clock()
+			local attacker, defender = throwGrabHit(base)
+
+			local weld = holdWeldOf(defender)
+			expect(weld).to.be.ok()
+			local found = weld :: Weld
+			expect(found.Part0).to.equal(attacker.Root)
+			expect(found.Part1).to.equal(defender.Root)
+			expect(found.C0).to.equal(GRAB_CONFIG.AttachOffset)
+		end)
+
+		it("makes the held body massless and moves it into the hold's collision group", function()
+			local base = os.clock()
+			local _attacker, defender = throwGrabHit(base)
+
+			expect(defender.Root.Massless).to.equal(true)
+			expect(defender.Root.CollisionGroup).to.equal(GrabConstants.Hold.CollisionGroup)
+		end)
+
+		it("never grabs a victim that is anchored", function()
+			overrideMoveWithGrab()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(GrabSystem.IsHeld(defender.Model)).to.equal(false)
+			expect(defender.Humanoid.PlatformStand).to.equal(false)
+		end)
+
+		it("releases the hold, and restores the body, the frame its weld goes missing", function()
+			local base = os.clock()
+			local attacker, defender = throwGrabHit(base)
+			local originalGroup = "Default"
+
+			local weld = holdWeldOf(defender) :: Weld
+			weld:Destroy()
+			step(FRAME, base + 2 * FRAME)
+
+			expect(GrabSystem.IsHolding(attacker.Model)).to.equal(false)
+			expect(GrabSystem.IsHeld(defender.Model)).to.equal(false)
+			expect(defender.Root.Massless).to.equal(false)
+			expect(defender.Root.CollisionGroup).to.equal(originalGroup)
+			expect(defender.Humanoid.PlatformStand).to.equal(false)
 		end)
 	end)
 
@@ -244,6 +303,8 @@ return function()
 			expect(defender.Humanoid:GetAttribute(Constants.Attributes.Grabbed)).to.equal(nil)
 			expect(attacker.Humanoid:GetAttribute(Constants.Attributes.Grabbing)).to.equal(nil)
 			expect(defender.Humanoid.PlatformStand).to.equal(false)
+			expect(holdWeldOf(defender)).to.equal(nil)
+			expect(defender.Root.Massless).to.equal(false)
 		end)
 
 		it("lets both sides attack again once the hold has auto-released", function()
@@ -270,6 +331,40 @@ return function()
 			expect(GrabSystem.IsHolding(attacker.Model)).to.equal(false)
 			expect(GrabSystem.IsHeld(defender.Model)).to.equal(false)
 			expect(GrabSystem.IsInFlight(defender.Model)).to.equal(true)
+		end)
+
+		it("breaks the weld and gives the body its own mass and collision back for the flight", function()
+			local base = os.clock()
+			local attacker, defender = throwGrabHit(base)
+
+			GrabSystem.Throw(attacker.Model, base + 2 * FRAME)
+
+			expect(holdWeldOf(defender)).to.equal(nil)
+			expect(defender.Root.Massless).to.equal(false)
+			expect(defender.Root.CollisionGroup).to.equal("Default")
+			-- Still the flight's until it lands.
+			expect(defender.Humanoid.PlatformStand).to.equal(true)
+		end)
+
+		it("lands on, and damages, a bystander the thrown body reaches", function()
+			-- Registered AFTER GrabSystem was required, which is the case the combatant filter used to
+			-- miss: it copied the tagged list once at module load and never saw anyone registered later.
+			local base = os.clock()
+			local attacker, defender = throwGrabHit(base)
+			-- Within Impact.CollisionRadiusStuds of the victim wherever the weld left it -- this spec
+			-- does not simulate physics, so it may still be at its own spawn or already on its mark --
+			-- and a clear stud outside makeDefinition's still-active 4-wide box, so the attacker's own
+			-- swing cannot land on it first.
+			local bystander = makeDummy("Bystander", Vector3.new(4, 5, -2), Vector3.new(0, 5, -2))
+			local healthBefore = bystander.Humanoid.Health
+
+			GrabSystem.Throw(attacker.Model, base + 2 * FRAME)
+			step(FRAME, base + 3 * FRAME)
+
+			expect(GrabSystem.IsInFlight(defender.Model)).to.equal(false)
+			expect(bystander.Humanoid.Health).to.equal(healthBefore - GRAB_CONFIG.ThrowImpactDamage)
+			expect(defender.Humanoid:GetAttribute(Constants.Attributes.Grabbed)).to.equal(nil)
+			expect(defender.Humanoid.PlatformStand).to.equal(false)
 		end)
 
 		it("clears the attacker's Grabbing Attribute but keeps the victim's Grabbed one through flight", function()

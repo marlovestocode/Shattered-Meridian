@@ -174,8 +174,9 @@ local mounted = false
 -- shift lock could still turn freely through the same stagger. See the yaw guard in onRenderStep.
 local punishLocked = false
 
--- Mirrors this character's own Humanoid "Grabbed" Attribute. A grab victim is held by the server's
--- GrabAlignOrientation, so it must keep the yaw write suspended even if it is also staggered.
+-- Mirrors this character's own Humanoid "Grabbed" Attribute. A grab victim's root is welded into the
+-- attacker's assembly (GrabSystem's hold), which this client does not own, so it must keep the yaw
+-- write suspended even if it is also staggered.
 local grabbed = false
 
 -- CombatFeedback's ShiftLockEngaged Value (see that file's handle type), bound in Start() --
