@@ -58,8 +58,8 @@ export type LiveConsoleHandle = {
 	ServerEntries: Fusion.Value<{ Logger.LogEntry }>,
 	ClientEntries: Fusion.Value<{ Logger.LogEntry }>,
 	-- Fired by the header's own close button instead of that button writing IsOpen directly -- same
-	-- "the client module is the ONE place IsOpen is ever written" precedent Client/DevTools/MoveEditor/
-	-- MoveEditorClient.lua's own setOpen establishes, needed here because LiveConsoleClient.lua must
+	-- "the client module is the ONE place IsOpen is ever written" precedent every dev tool's driver
+	-- keeps (Client/DevTools/MoveEditor/MoveEditorClient.lua's setOpen), needed here because LiveConsoleClient.lua must
 	-- call Unsubscribe on every close, not just the keybind-driven one.
 	CloseRequested: BindableEvent,
 }

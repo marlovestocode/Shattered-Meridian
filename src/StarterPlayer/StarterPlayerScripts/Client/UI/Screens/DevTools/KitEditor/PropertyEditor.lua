@@ -4,9 +4,9 @@
 
 	Owns: the Kit Editor's content pane -- the full authoring form for whichever draft is currently
 	open (props.Draft), branching on KitDraft.Kind since a Race Trait and a Bloodline share almost
-	nothing structurally beyond the Ability shape (see AbilityEditor.lua's own header). Mirrors
-	MoveEditor/PropertyEditor.lua's own "clone the current draft, mutate the one field that changed,
-	hand the result to props.OnFieldChanged" convention -- that closure (owned by init.lua) sets
+	nothing structurally beyond the Ability shape (see AbilityEditor.lua's own header). The Move
+	Editor's convention (MoveEditor/Fields.lua): clone the current draft, mutate the one field that
+	changed, hand the result to props.OnFieldChanged -- that closure (owned by init.lua) sets
 	props.Draft immediately (optimistic) and fires the outer DraftFieldChanged signal, which
 	KitEditorClient.lua debounces into the actual UpdateDraft network call.
 

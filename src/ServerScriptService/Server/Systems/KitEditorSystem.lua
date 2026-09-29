@@ -19,11 +19,11 @@
 	BloodlineEditorSystem, which would duplicate every one of the ten request handlers below for
 	nothing. addToIndex/removeFromIndex ARE genuinely shared (both content types' index records are
 	the identical `{ Ids: {string} }` shape, just under different keys) -- the ten request handlers
-	themselves stay separate, unabstracted functions, matching how MoveEditorSystem itself keeps
-	handleListMoves/handleListDefaultMoves as two plain functions rather than one generic over two
-	Result payload shapes Luau's type system would fight to express cleanly.
+	themselves stay separate, unabstracted functions rather than one generic over two Result payload
+	shapes Luau's type system would fight to express cleanly.
 
-	NO CANDIDATE-TO-ROBLOX-TYPE RECONSTRUCTION, unlike MoveEditorSystem's own candidateFromStoredRecord
+	NO CANDIDATE-TO-ROBLOX-TYPE RECONSTRUCTION, unlike the Move Editor's record codec
+	(Systems/Support/MoveRecordCodec.lua)
 	-- every field on a RaceTraitDefinition/BloodlineDefinition (and everything KitAbilityDefinition/
 	ActiveModifierSpec carry) is already a DataStore-safe primitive (string/number/boolean, nested in
 	plain tables, no Vector3/CFrame/Color3 anywhere in either schema), so a stored record can be handed

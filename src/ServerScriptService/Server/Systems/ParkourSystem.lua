@@ -39,6 +39,8 @@
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
+
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -335,8 +337,15 @@ local function handleReport(player: Player, rawPayload: unknown): ()
 	-- wall-run while the server has it ragdolled or air-combo-held is either desynced or lying; either
 	-- way granting velocity ownership would put the parkour framework and RagdollController's
 	-- AlignPosition pin on the same body at once. The client's own controller independently parks in
-	-- its AerialCombat state for the same signal, so an honest client never reaches this branch.
+	-- its CombatHeld state for the same signal, so an honest client never reaches this branch.
 	if humanoid and humanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true then
+		notifyRejected(player, report.Kind, report.Phase, "CombatRestricted")
+		return
+	end
+	-- Either side of a live air combo, for the same reason: the victim's body is the server's, and the
+	-- attacker's is committed to the follow. Both clients park for the same Attributes (ParkourController's
+	-- resolveCombatOwned), so this is the server not trusting that (docs/design/air-combat-and-evade.md B5).
+	if humanoid and AirComboAttributes.IsParticipant(humanoid) then
 		notifyRejected(player, report.Kind, report.Phase, "CombatRestricted")
 		return
 	end
@@ -422,14 +431,14 @@ end
 -- Returns a disconnect function, matching DefenseSystem.OnResolved's own contract.
 --
 -- THIS SYSTEM'S FIRST PUBLIC SURFACE, and it is a signal rather than a query on purpose. Its one
--- subscriber today is the composition root, which turns an accepted Roll into
--- DefenseSystem.BeginEvade -- the roll's evade frames. The subscription lives in Main.server.lua and not
+-- subscriber today is the composition root, which turns an accepted Evade into
+-- DefenseSystem.BeginEvade -- the evade's frames. The subscription lives in Main.server.lua and not
 -- in either System, so this module never learns combat exists and DefenseSystem never learns parkour
 -- does: the same "the boot script knows both, each layer knows one" shape SetParryAnimation is wired
 -- through.
 --
 -- Accepted, not claimed, is the whole value: the evade is keyed off the SAME plausibility gate that
--- decides whether the roll's velocity ownership is granted, so a report the server refused as
+-- decides whether the evade's velocity ownership is granted, so a report the server refused as
 -- implausible can never open a window.
 function ParkourSystem.OnActionStarted(callback: (player: Player, kind: ActionKind, now: number) -> ()): () -> ()
 	table.insert(actionStartedCallbacks, callback)

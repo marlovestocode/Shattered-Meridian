@@ -30,7 +30,15 @@
 
 local TrainingBotConstants = {}
 
-export type StyleName = "FullFight" | "Aggressor" | "Turtle" | "AttackOnly" | "BlockOnly" | "ParryOnly" | "DodgeOnly"
+export type StyleName =
+	"FullFight"
+	| "Aggressor"
+	| "Turtle"
+	| "AttackOnly"
+	| "BlockOnly"
+	| "ParryOnly"
+	| "DodgeOnly"
+	| "ParryTrade"
 
 export type DifficultyName = "Novice" | "Adept" | "Master"
 
@@ -60,10 +68,26 @@ export type Style = {
 	SpacingStuds: number,
 	-- Holds guard in neutral whenever the target is close, rather than only in response to a swing.
 	HoldGuardInNeutral: boolean,
-	-- 0..1: chance, per neutral-game decision with you in reach, that it raises its guard for a beat
-	-- before you have swung at all -- the "respect" a player shows someone in their face. Doubles as
-	-- it gets rattled. Blocks, never parries (a held guard cannot arm one).
+	-- 0..1: chance PER SECOND with you in reach that it raises its guard for a beat before you have
+	-- swung at all -- the "respect" a player shows someone in their face. Doubles as it gets rattled.
+	-- Blocks, never parries (a held guard cannot arm one), which is why this is kept low on anything
+	-- meant to parry: at the old per-think rate a FullFight bot spent most of close range turtled.
 	GuardInRange: number,
+	-- PARRY-TRADE DRILL SWITCHES (DefenseConstants.Rally). Both optional; absent means off, which is
+	-- every style but ParryTrade.
+	--
+	-- Every swing it answers is a PERFECT parry: seen the instant it starts, pressed on the last server
+	-- frame before the window would open too late, never misread, never held. This deliberately steps
+	-- outside the difficulty's human numbers -- the drill is you against a wall that always answers.
+	PerfectParry: boolean?,
+	-- Its only offence is one Basic thrown at you while you are Staggered -- i.e. right after it parried
+	-- you -- so you get to parry it back. Never opens from neutral, never punishes a whiff, never strings.
+	CounterAfterParry: boolean?,
+	-- Chance a planned string of 3+ Basics (from neutral, a punish or a pressure follow-up) ends in the
+	-- LAUNCHER as its 4th hit (Space + M1 after B3 -- docs/design/air-combat-and-evade.md B2). It is only
+	-- ever PRESSED if all three Basics actually landed (the same thing the combat stack requires), so this
+	-- is "how often it goes for the air combo when it has earned one". nil/0 = never launches.
+	LaunchChance: number?,
 }
 
 -- HOW WELL IT DOES IT.
@@ -111,12 +135,16 @@ TrainingBotConstants.StyleOrder = table.freeze({
 	"BlockOnly",
 	"ParryOnly",
 	"DodgeOnly",
+	"ParryTrade",
 }) :: { StyleName }
 
 TrainingBotConstants.DifficultyOrder = table.freeze({ "Novice", "Adept", "Master" }) :: { DifficultyName }
 
 TrainingBotConstants.DefaultStyle = "FullFight" :: StyleName
 TrainingBotConstants.DefaultDifficulty = "Adept" :: DifficultyName
+-- The Admin Menu weapon picker's first entry: "whatever the roster hands a combatant by default"
+-- (WeaponRoster.Default()). Every other entry is a WeaponRoster id, which the server re-checks.
+TrainingBotConstants.DefaultWeaponChoice = "Default"
 
 TrainingBotConstants.Styles = table.freeze({
 	-- A well-rounded duelist: the default sparring partner.
@@ -134,6 +162,7 @@ TrainingBotConstants.Styles = table.freeze({
 		SpacingStuds = 1.5,
 		HoldGuardInNeutral = false,
 		GuardInRange = 0.3,
+		LaunchChance = 0.85,
 	}),
 	-- Walks you down. Trades freely, strings long, parries less.
 	Aggressor = table.freeze({
@@ -150,6 +179,7 @@ TrainingBotConstants.Styles = table.freeze({
 		SpacingStuds = 0,
 		HoldGuardInNeutral = false,
 		GuardInRange = 0.08,
+		LaunchChance = 0.95,
 	}),
 	-- Sits behind its guard and punishes. The thing you practise guard-breaking and feint-baiting on.
 	Turtle = table.freeze({
@@ -166,6 +196,7 @@ TrainingBotConstants.Styles = table.freeze({
 		SpacingStuds = 0.5,
 		HoldGuardInNeutral = true,
 		GuardInRange = 0,
+		LaunchChance = 0.6,
 	}),
 	-- Never defends. Practise your own parry/roll timing against a steady stream of real swings.
 	AttackOnly = table.freeze({
@@ -182,6 +213,7 @@ TrainingBotConstants.Styles = table.freeze({
 		SpacingStuds = 0,
 		HoldGuardInNeutral = false,
 		GuardInRange = 0,
+		LaunchChance = 0.9,
 	}),
 	-- Pure defensive drills: each one only ever answers your swings one way.
 	BlockOnly = table.freeze({
@@ -228,6 +260,27 @@ TrainingBotConstants.Styles = table.freeze({
 		SpacingStuds = 1,
 		HoldGuardInNeutral = false,
 		GuardInRange = 0,
+	}),
+	-- Parry-trade drill: you swing, it perfect-parries, it counters with one swing for you to parry back,
+	-- and round it goes, the window shrinking every exchange (DefenseConstants.Rally). It never starts
+	-- anything, so the rally always begins when you swing.
+	ParryTrade = table.freeze({
+		Parry = 1,
+		Block = 0,
+		Evade = 0,
+		Trade = 0,
+		Aggression = 0,
+		CanAttack = true,
+		HeavyBias = 0,
+		FeintChance = 0,
+		StringMin = 1,
+		StringMax = 1,
+		-- Inside its own reach, so the counter needs no walk-in and your answer is always in range.
+		SpacingStuds = -1,
+		HoldGuardInNeutral = false,
+		GuardInRange = 0,
+		PerfectParry = true,
+		CounterAfterParry = true,
 	}),
 }) :: { [StyleName]: Style }
 
@@ -302,8 +355,9 @@ TrainingBotConstants.Config = table.freeze({
 	WalkSpeed = 10,
 	SprintSpeed = 18,
 	GuardWalkSpeed = 7,
-	-- Sprint when further than this outside its preferred range.
-	SprintBeyondStuds = 10,
+	-- Sprint when further than this outside its preferred range. A player closing on someone sprints;
+	-- at 10 the bot walked most gaps at WalkSpeed and could be kited indefinitely.
+	SprintBeyondStuds = 5,
 	-- Estimated weapon reach when the roster's hitbox config cannot answer (studs, root to target root).
 	FallbackReach = 6,
 	-- Extra studs on the target's reach when judging whether an incoming swing can reach the bot --
@@ -313,7 +367,9 @@ TrainingBotConstants.Config = table.freeze({
 	BillboardRefreshSeconds = 0.2,
 	BillboardColor = Color3.fromRGB(214, 120, 70),
 	-- Give up on a planned press the combat stack keeps refusing (chain delay, cooldown) after this long.
-	AttackIntentSeconds = 0.6,
+	-- Must exceed AttackConstants.Sequence.EndOfStringCooldownSeconds (0.5): a pressure string planned the
+	-- moment the last one ends is refused for exactly that long with the body otherwise free.
+	AttackIntentSeconds = 0.8,
 }) :: {
 	MaxHealth: number,
 	RespawnDelay: number,
@@ -331,6 +387,54 @@ TrainingBotConstants.Config = table.freeze({
 	BillboardColor: Color3,
 	AttackIntentSeconds: number,
 }
+
+-- HOW IT PLAYS OFFENCE AND READS YOUR STRINGS (TrainingBotBrain). Style-independent: these are how a
+-- competent player uses whatever aggression their style gives them, not how much of it they have.
+TrainingBotConstants.Offence = table.freeze({
+	-- You standing inside its reach, not swinging and not guarding, is its turn: its per-second
+	-- Aggression is multiplied by this there (capped at 0.95). Without it the bot spaced itself just
+	-- outside its own reach and let you walk in unanswered.
+	InReachAggressionScale = 2.5,
+	-- Extra Heavy chance against a guard that is being HELD (Blocking) -- a held guard cannot parry, and
+	-- a Heavy drains it double -- scaled by 0.5 + 0.5 * ReadInfluence. A feint is wasted on a held guard,
+	-- so the feint chance is multiplied by HeldGuardFeintScale at the same time.
+	HeldGuardHeavyBonus = 0.35,
+	HeldGuardFeintScale = 0.3,
+	-- An M1 feint (every Basic is feintable -- MoveTypes.FeintableByStage): a from-neutral string opens
+	-- with a feinted M1 at this fraction of the Heavy feint chance, then swings for real.
+	BasicFeintShare = 0.4,
+	-- ANTI-METRONOME. After each accepted press of a string with presses left, the next one is held back
+	-- by up to StringDelayMaxSeconds, at StringDelayChance * (0.5 + ReadInfluence) plus half the
+	-- read-weighted parry habit -- so a parrier gets its timing broken. ONLY WHEN ITS LAST HIT DID NOT LAND:
+	-- the M1 impact gap sits 0.06s inside DamageConstants.Combo.WindowSeconds (see AttackConstants.
+	-- Sequence.ChainDelaySeconds), so any hold on a landing string drops the combo and the launcher -- and a
+	-- stunned target has no parry timing to break anyway.
+	StringDelayChance = 0.2,
+	StringDelayMaxSeconds = 0.25,
+	-- After a string of its own whose last contact LANDED, it keeps the pressure on (a new exchange the
+	-- moment its lockout ends) at Aggression * PunishChance, rather than stepping out as it does after a
+	-- blocked or parried one.
+	PressureWindowSeconds = 0.9,
+	-- How many Basics a player's string has before it ends in AttackConstants' end-of-string lockout (the
+	-- launcher is the only 4th hit, and it is never earned on a guard). A block on the swing that ends a
+	-- string -- or on any Heavy -- is dropped the moment that swing goes into recovery so the recovery can
+	-- be punished; mid-string it is held, as a player holds block through a string.
+	StringLength = 3,
+})
+
+-- THE BOT'S AIR GAME, once its launcher has you up (TrainingBotBrain's air beats). It runs the same air
+-- string a player does, through the same presses, and the one thing that makes it a sparring partner rather
+-- than a metronome is the DELAY: each beat is pressed on-beat or held back by up to MaxBeatDelaySeconds, at
+-- DelayChance, scaled by the difficulty's ReadInfluence -- so a Master baits your parry the way a person
+-- would. MaxBeatDelaySeconds stays inside AirComboConstants' legal delay space (ContinueSeconds minus an air
+-- hit's windup and recovery), or the bot would drop its own combos.
+TrainingBotConstants.Air = table.freeze({
+	MaxBeatDelaySeconds = 0.35,
+	DelayChance = 0.5,
+	-- It cashes out with the Spike when a wall is within this many studs behind you (the splat is the
+	-- Spike's whole point), with the Slam otherwise.
+	SpikeWallStuds = 14,
+})
 
 function TrainingBotConstants.IsStyle(value: unknown): boolean
 	return typeof(value) == "string" and TrainingBotConstants.Styles[value :: any] ~= nil

@@ -12,7 +12,7 @@ local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
 -- Progression spec documents: a real unlock needs PlayerDataSystem's DataStore-backed load flow for
 -- a live Player.
 --
--- What IS fully exercised is the Move-Creation-System-to-art seam, which is where the actual risk
+-- What IS fully exercised is the move-to-art seam, which is where the actual risk
 -- lives: MoveRegistryManager.Validate accepting/rejecting/clamping an authored Art binding, and
 -- ArtTreeManager indexing the registry into trees. Both run against a real registry populated
 -- through the real Upsert path, no mocking.
@@ -26,11 +26,10 @@ local function baseMove(moveId: string, art: any?): any
 		CreatedAt = 0,
 		UpdatedAt = 0,
 		Shape = "Box",
-		Dimensions = { SizeX = 5, SizeY = 5, SizeZ = 5 },
+		Dimensions = { Width = 5, Height = 5, Length = 5 },
 		OffsetX = 0,
 		OffsetY = 0,
 		OffsetZ = 0,
-		OffsetRotation = { X = 0, Y = 0, Z = 0 },
 		WindupSeconds = 0.2,
 		ActiveSeconds = 0.2,
 		RecoverySeconds = 0.2,
@@ -38,7 +37,6 @@ local function baseMove(moveId: string, art: any?): any
 		Damage = 10,
 		PostureDamage = 10,
 		AnimationId = "",
-		Animations = {},
 		Art = art,
 	}
 end

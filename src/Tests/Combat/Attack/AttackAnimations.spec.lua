@@ -59,6 +59,16 @@ return function()
 			expect(AttackAnimations.Get("default:DashPunch")).to.equal("")
 		end)
 
+		-- The air combo's moves borrow a ground clip until their own is authored, and SAY they borrowed it:
+		-- AttackCatalog retimes a borrowed clip to the air move's own windup instead of trusting its marker.
+		it("lends an unauthored air move the ground clip it stands in on, and names the lender", function()
+			local id, lender = AttackAnimations.Resolve("default:NoSuchWeapon:Air:1")
+			expect(id).to.equal(AttackAnimations.Get("default:NoSuchWeapon:Basic:1"))
+			expect(lender).to.equal("default:NoSuchWeapon:Basic:1")
+			local _, groundLender = AttackAnimations.Resolve("default:NoSuchWeapon:Basic:1")
+			expect(groundLender).to.equal(nil)
+		end)
+
 		it('returns "" for an unknown or malformed id, never nil or an error', function()
 			expect(AttackAnimations.Get("no-such-move")).to.equal("")
 			expect(AttackAnimations.Get("")).to.equal("")

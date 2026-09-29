@@ -75,8 +75,8 @@ export type ActionIconProps = {
 	Text: string,
 	Size: UsedAs<UDim2>?,
 	-- Omit for the common case of a LayoutOrder-flowed tile (every DevMenu/Sidebar.lua roster-row
-	-- caller). A caller placing this tile by absolute anchor instead (MoveEditor/MoveList.lua's
-	-- delete icon, pinned to a row's right edge) MUST pass both of these -- there used to be no way
+	-- caller). A caller placing this tile by absolute anchor instead (pinned to a row's right edge,
+	-- say) MUST pass both of these -- there used to be no way
 	-- to do that at all (neither field existed, so a caller passing them anyway had both silently
 	-- dropped, leaving the tile pinned to its parent's default top-left corner regardless of what it
 	-- computed).

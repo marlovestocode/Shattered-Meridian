@@ -22,8 +22,8 @@
 	nesting depth (see that module's processChild).
 
 	`description` (optional, additive): a wrapped, TextSecondary subtitle rendered directly under the
-	title at LayoutOrder 2 -- the docs-site "explain what this group of controls does" convention the
-	Move Editor's redesigned PropertyEditor.lua wants for every one of its 11 sections. `nil` (the
+	title at LayoutOrder 2 -- the docs-site "explain what this group of controls does" convention.
+	`nil` (the
 	default for every pre-existing call site) renders nothing at that LayoutOrder, so no existing
 	caller's output changes. A caller that DOES pass a description must start its own `children`'s
 	LayoutOrder at 3, not 2, to avoid colliding with this slot. No longer capped at one line: it uses
@@ -55,7 +55,7 @@
 	docs/ui-ux-philosophy.md's own Borders rule ("higher importance: brighter edge highlight, more
 	contrast"). Opt-in rather than a global default change so existing DevMenu callers -- a lower-
 	stakes admin tool, not a "detailed menu" screen per that doc's own Menu Design section -- are
-	unaffected; the Move Editor's own PropertyEditor.lua passes this for all 9 of its sections.
+	unaffected.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -71,8 +71,7 @@ local Children = Fusion.Children
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
 
--- Clears SectionIcon.lua's own 16px glyph box with room to spare for TrackedLabel's 11px Action
--- step. Only needed on the `summary` path, where the title row stops being an auto-height list and
+-- Room for TrackedLabel's 11px Action step with a few pixels to spare. Only needed on the `summary` path, where the title row stops being an auto-height list and
 -- becomes a fixed band with something anchored to each end.
 local TITLE_ROW_HEIGHT = 20
 
@@ -94,9 +93,8 @@ local function Section(
 
 	local titleRow: Instance
 	if summary ~= nil then
-		-- A fixed-height band with the icon+title group anchored left and the readout anchored right
-		-- -- the same construction MoveList.lua's own "Moves" header and MoveEditor/init.lua's screen
-		-- header already use, rather than a new idiom. It cannot be the auto-height horizontal
+		-- A fixed-height band with the icon+title group anchored left and the readout anchored right.
+		-- It cannot be the auto-height horizontal
 		-- UIListLayout the icon-only branch below uses, because a UIListLayout has no way to push one
 		-- child to the far end of the row.
 		local titleGroup: { Instance } = {

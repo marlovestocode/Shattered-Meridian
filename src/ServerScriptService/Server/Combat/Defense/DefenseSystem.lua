@@ -57,6 +57,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
+local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
+local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboConstants)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
@@ -107,6 +109,21 @@ type Registration = {
 	-- The GuardCrack tag state last written to the Humanoid -- deduped like PublishedState, and the
 	-- hysteresis memory publishGuardCrack needs (DefenseConstants.GuardCrack).
 	PublishedCracking: boolean,
+	-- The quantised guard fraction last written to the GuardFraction Attribute (publishGuardFraction),
+	-- or nil before the first write. Deduped like PublishedCracking.
+	PublishedGuardStep: number?,
+	-- The parry trade this combatant is in (DefenseConstants.Rally): who with, how many parries have
+	-- been traded so far, and when it lapses. RallyCount 0 / RallyPartner nil is "not rallying".
+	RallyPartner: Model?,
+	RallyCount: number,
+	RallyLapsesAt: number,
+	-- The owning player, resolved once at registration -- nil for a bot or a dummy, which has no client
+	-- to tell and so is skipped by syncGuard without a Players lookup every frame.
+	Player: Player?,
+	-- The guard pool as the owning client was last told it, and when -- see syncGuard.
+	SentGuard: number?,
+	SentGuardMax: number?,
+	GuardSentAt: number,
 }
 
 local registrations: { [Model]: Registration } = {}
@@ -116,6 +133,20 @@ local pending: { PendingContact } = {}
 -- is supposed to be dangerous: one window stops one attack. Kept here rather than by consuming the
 -- machine's own flag in pass 1, so pass 1 genuinely applies nothing.
 local parryConsumedThisBatch: { [Model]: boolean } = {}
+
+-- THE AIR PARRY'S REWIND HOLD (docs/design/air-combat-and-evade.md B5). A Clean contact on an AIR-HELD
+-- defender with a real round trip is not applied at the end of its frame: it waits here for up to
+-- min(round trip, AirComboConstants.Parry.RewindMaxSeconds), so a parry pressed in time on the victim's own
+-- screen -- whose press is still in flight to the server -- is not eaten by lag. A press arriving in the hold
+-- is judged at its rewound time (DefenseStateMachine.RewoundParryCovers); otherwise the contact applies as
+-- the Clean it was when the hold runs out. Only ever air-held defenders: on the ground a defender has other
+-- options, and a deferred hit would stall every exchange.
+type HeldContact = {
+	Contact: PendingContact,
+	ReleaseAt: number,
+	RewindSeconds: number,
+}
+local heldContacts: { HeldContact } = {}
 
 local outcomeCallbacks: { (DefenseOutcome) -> () } = {}
 
@@ -152,6 +183,12 @@ local function pingSecondsFor(model: Model): number
 	return ping
 end
 
+-- Whether this body is held in an air combo, or lying in a slam's intangible knockdown -- the Attributes
+-- AirComboSystem publishes, read through Shared/AirCombo/AirComboAttributes (which owns their clock). Never
+-- through a require of that System: the air combo is a sibling ABOVE this layer.
+local isAirHeld = AirComboAttributes.IsHeld
+local isAirComboIntangible = AirComboAttributes.IsIntangible
+
 -- Publishes the live state so the HUD and any future spectator tooling can read it off the Humanoid
 -- for free, and takes or releases the movement lock for the two states that genuinely remove control.
 --
@@ -178,7 +215,9 @@ local function publishState(registration: Registration, state: DefenseState): ()
 		humanoid:SetAttribute(DefenseConstants.DefenseStateAttribute, state)
 	end
 
-	local wantsLock = state == "Staggered" or state == "GuardBroken"
+	-- IsStaggerHeld covers a parry armed out of a stagger (DefenseConstants.Rally): the state is
+	-- Raising/ParryWindow, but the punish is still running, so the body stays parked.
+	local wantsLock = state == "Staggered" or state == "GuardBroken" or registration.Machine:IsStaggerHeld()
 	if wantsLock == registration.HoldsMovementLock then
 		return
 	end
@@ -215,8 +254,7 @@ local function publishGuardCrack(registration: Registration): ()
 	if humanoid.Parent == nil then
 		return
 	end
-	local cracking =
-		crackingFor(registration.Guard:Get(), registration.Guard:GetMax(), registration.PublishedCracking)
+	local cracking = crackingFor(registration.Guard:Get(), registration.Guard:GetMax(), registration.PublishedCracking)
 	if cracking == registration.PublishedCracking then
 		return
 	end
@@ -228,25 +266,81 @@ local function publishGuardCrack(registration: Registration): ()
 	end
 end
 
+-- Publishes this combatant's guard, as a fraction of its max, on the GuardFraction Humanoid Attribute so
+-- EVERY client can read an opponent's guard. The lock-on marker (Client/Combat/LockOnController.lua) is
+-- the reader. The owner still gets exact numbers through syncGuard; this is for everyone else.
+--
+-- QUANTISED to DefenseConstants.GuardFraction.Steps and deduped, because Step calls this every frame and
+-- a regenerating guard would otherwise replicate a fresh float to every client every frame. At 20 steps a
+-- full regen is at most 20 writes.
+local function publishGuardFraction(registration: Registration): ()
+	local humanoid = registration.Humanoid
+	if humanoid.Parent == nil then
+		return
+	end
+	local max = registration.Guard:GetMax()
+	local steps = DefenseConstants.GuardFraction.Steps
+	local fraction = if max > 0 then math.clamp(registration.Guard:Get() / max, 0, 1) else 0
+	local step = math.floor(fraction * steps + 0.5)
+	if step == registration.PublishedGuardStep then
+		return
+	end
+	registration.PublishedGuardStep = step
+	humanoid:SetAttribute(DefenseConstants.GuardFraction.Attribute, step / steps)
+end
+
 local function notifyClient(registration: Registration, state: DefenseState, attackerPosition: Vector3?): ()
 	local remote = stateChangedRemote
 	if not remote then
 		return
 	end
-	local player = Players:GetPlayerFromCharacter(registration.Model)
+	local player = registration.Player
 	if not player then
 		return
 	end
+	local guard = registration.Guard:Get()
+	local guardMax = registration.Guard:GetMax()
+	-- Every push carries the pool, so every push counts as the latest sync (see syncGuard).
+	registration.SentGuard = guard
+	registration.SentGuardMax = guardMax
+	registration.GuardSentAt = os.clock()
 	remote:FireClient(player, {
 		State = state,
-		Guard = registration.Guard:Get(),
-		GuardMax = registration.Guard:GetMax(),
+		Guard = guard,
+		GuardMax = guardMax,
 		-- Sent only on a parry, so the client can snap the defender to face their attacker. The snap
 		-- is done client-side rather than by writing CFrame from here: the client owns its own
 		-- character's physics, so a server rotation write would be fought and then overwritten. Feel
 		-- belongs on the client; the decision that a parry happened stays here.
 		FaceTowards = attackerPosition,
 	})
+end
+
+-- Keeps the owning client's guard readout true -- see DefenseConstants.Guard.SyncIntervalSeconds. The
+-- pool moves where no state transition happens (regeneration every frame, a blocked hit while already
+-- Blocking), and those changes used to reach the HUD only when some later transition happened to carry
+-- the number. Pushes any meaningful change, rate-limited, and the empty/full end states at once.
+local function syncGuard(registration: Registration, now: number): ()
+	if not registration.Player then
+		return
+	end
+	local guard = registration.Guard:Get()
+	local guardMax = registration.Guard:GetMax()
+	local sent = registration.SentGuard
+	if sent == guard and registration.SentGuardMax == guardMax then
+		return
+	end
+	local atEnd = guard <= 0 or guard >= guardMax
+	if not atEnd then
+		local GUARD = DefenseConstants.Guard
+		if sent ~= nil and math.abs(guard - sent) < GUARD.SyncMinDelta then
+			return
+		end
+		if now - registration.GuardSentAt < GUARD.SyncIntervalSeconds then
+			return
+		end
+	end
+	notifyClient(registration, registration.Machine:GetState(), nil)
 end
 
 -- Registry -----------------------------------------------------------------------------------------
@@ -275,6 +369,14 @@ function DefenseSystem.RegisterCombatant(
 		PublishedState = nil,
 		GuardDeferred = false,
 		PublishedCracking = false,
+		PublishedGuardStep = nil,
+		RallyPartner = nil,
+		RallyCount = 0,
+		RallyLapsesAt = 0,
+		Player = Players:GetPlayerFromCharacter(model),
+		SentGuard = nil,
+		SentGuardMax = nil,
+		GuardSentAt = -math.huge,
 	}
 	registration.Machine = DefenseStateMachine.New({
 		OnTransition = function(_from: DefenseState, to: DefenseState, _at: number)
@@ -376,16 +478,87 @@ end
 
 -- The guard press itself, once every gate has passed -- shared by a press that arrives with the body
 -- free and by Step raising a press that was held (GuardDeferred).
-local function pressGuard(registration: Registration, now: number): ()
+-- Rally ---------------------------------------------------------------------------------------------
+
+-- The window multiplier for this combatant's next parry press -- see DefenseConstants.Rally. 1 outside
+-- a live rally.
+local function rallyScale(registration: Registration, now: number): number
+	local RALLY = DefenseConstants.Rally
+	if registration.RallyCount <= 0 or now >= registration.RallyLapsesAt then
+		return 1
+	end
+	return math.max(RALLY.MinWindowScale, RALLY.WindowScalePerParry ^ registration.RallyCount)
+end
+
+local function clearRally(registration: Registration): ()
+	registration.RallyPartner = nil
+	registration.RallyCount = 0
+	registration.RallyLapsesAt = 0
+end
+
+-- Ends the rally `model` is in, on both sides. For a clean hit, a backstab or a guard break -- the
+-- exchange was lost outright, so the next one starts from the full window.
+local function endRally(model: Model): ()
+	local registration = registrations[model]
+	if not registration then
+		return
+	end
+	local partner = registration.RallyPartner
+	clearRally(registration)
+	local partnerRegistration = if partner then registrations[partner] else nil
+	if partnerRegistration and partnerRegistration.RallyPartner == model then
+		clearRally(partnerRegistration)
+	end
+end
+
+-- One more parry traded between `parrier` and `parried`. Continues their rally when it is still live
+-- between exactly these two; anything else starts a fresh one at 1.
+local function noteRallyParry(parrier: Model, parried: Model, now: number): ()
+	local a = registrations[parrier]
+	local b = registrations[parried]
+	if not a or not b then
+		return
+	end
+	local continuing = a.RallyPartner == parried and b.RallyPartner == parrier and now < a.RallyLapsesAt
+	local count = if continuing then a.RallyCount + 1 else 1
+	local lapsesAt = now + DefenseConstants.Rally.LapseSeconds
+	-- Either side may have been rallying with someone else a moment ago; that one is over now.
+	if not continuing then
+		endRally(parrier)
+		endRally(parried)
+	end
+	a.RallyPartner, a.RallyCount, a.RallyLapsesAt = parried, count, lapsesAt
+	b.RallyPartner, b.RallyCount, b.RallyLapsesAt = parrier, count, lapsesAt
+	debugLog("Rally parry", { parrier = parrier.Name, parried = parried.Name, count = count })
+end
+
+-- The parry window this combatant's press arms, or nil when none is armed for them.
+local function parryWindowFor(registration: Registration): DefenseTypes.ParryWindow?
 	-- A weapon whose own parry clip carries no window falls back to the DEFAULT clip's window
 	-- rather than to no parry at all. That default is itself explicit (markers, or a
 	-- DefenseConstants.RegisteredParryWindows entry), and the boot validation already warned
 	-- about the unarmed clip -- so this is "the baseline timing until the animator marks this
 	-- clip", not a hidden constant. Without it, authoring a PARRY clip for a weapon silently
 	-- removed that weapon's parry.
-	local window = ParryWindows.Get(registration.ParryAnimationId)
+	return ParryWindows.Get(registration.ParryAnimationId)
 		or (if defaultParryAnimationId ~= "" then ParryWindows.Get(defaultParryAnimationId) else nil)
-	registration.Machine:Press(now, window, pingSecondsFor(registration.Model))
+end
+
+-- Converts the held contact an arriving press covers into the parry it would have been, and applies it.
+-- Declared here, defined in pass 2 below (it needs applyContact).
+local resolveHeldContactsFor: (registration: Registration, now: number, window: DefenseTypes.ParryWindow?, scale: number) -> ()
+
+-- `blockOnly` raises a plain guard with no parry window. It is for a press HELD through a committed
+-- body (GuardDeferred, raised by Step): see Step's own note on why that press may block but not parry.
+local function pressGuard(registration: Registration, now: number, blockOnly: boolean?): ()
+	local window = if blockOnly then nil else parryWindowFor(registration)
+	local scale = rallyScale(registration, now)
+	local armed = registration.Machine:Press(now, window, pingSecondsFor(registration.Model), scale)
+	-- An air-held defender's press may be the parry for a contact still in its rewind hold -- judged at the
+	-- press's REWOUND time, not now. Only an armed press can be: a press into a held guard mints no window.
+	if armed and #heldContacts > 0 then
+		resolveHeldContactsFor(registration, now, window, scale)
+	end
 end
 
 function DefenseSystem.SetBlocking(model: Model, blocking: boolean, now: number): ()
@@ -409,7 +582,12 @@ function DefenseSystem.SetBlocking(model: Model, blocking: boolean, now: number)
 		-- HELD, NOT REFUSED. A player who presses guard a moment before their swing ends -- or while
 		-- still reeling -- gets the guard the instant they are free (Step), as long as the key is still
 		-- down. Refusing it outright would make the guard feel dropped at exactly the moment it matters.
-		if bodyCommitted(registration, now) then
+		--
+		-- EXCEPT WHILE AIR-HELD. Every air hit stuns, so deferring the press past the stun would hold an
+		-- air-held victim's parry until the combo was already over -- and the parry is their one way out
+		-- (docs/design/air-combat-and-evade.md B4). The stun still means what it means everywhere else:
+		-- the held guard does nothing (pass 1's AirHeld rule), and only a timed parry counts.
+		if bodyCommitted(registration, now) and not isAirHeld(registration.Humanoid) then
 			registration.GuardDeferred = true
 			return
 		end
@@ -420,25 +598,25 @@ function DefenseSystem.SetBlocking(model: Model, blocking: boolean, now: number)
 	end
 end
 
--- Opens this combatant's roll evade window (DefenseConstants.Evade), or refuses and says why. Public for
+-- Opens this combatant's evade window (DefenseConstants.Evade), or refuses and says why. Public for
 -- the same reason SetBlocking is: a bot evades through exactly the path a player does. For a player it is
--- reached from the composition root (Main.server.lua), which calls this when ParkourSystem accepts a Roll
--- start -- so this system and ParkourSystem never require each other, and the trigger is the roll report
+-- reached from the composition root (Main.server.lua), which calls this when ParkourSystem accepts an Evade
+-- start -- so this system and ParkourSystem never require each other, and the trigger is the evade report
 -- the client already sends rather than a new remote.
 --
 -- BODY GATES HERE, POSTURE GATES ON THE MACHINE (DefenseStateMachine.BeginEvade), the same split as
 -- SetBlocking/Press:
 --   * Committed to a swing or reeling from a hit -- bodyCommitted, the rule the guard already waits on.
---     No roll-cancelling out of your own swing, and no rolling out of a stun: DamageConstants.Hitstun's
+--     No evade-cancelling out of your own swing, and no evading out of a stun: DamageConstants.Hitstun's
 --     promise that a stunned combatant eats the next committed attack is exactly as broken by an evade
 --     as by a guard.
 --   * Grabbed, grabbing, or mounted. A held body is going where the grab sends it, a grabber's hands are
---     full, and a body welded to a vessel station is not rolling anywhere.
+--     full, and a body welded to a vessel station is not evading anywhere.
 --
--- A refusal changes nothing, and it does not refuse the ROLL -- the client's movement is its own. It
--- refuses the evade frames, so a roll the server would not honour is a roll that gets hit. That is the
+-- A refusal changes nothing, and it does not refuse the GLIDE -- the client's movement is its own. It
+-- refuses the evade frames, so an evade the server would not honour is a glide that gets hit. That is the
 -- correct failure for a client that skipped its own gates, and an honest client never reaches it: the
--- same conditions are checked locally in StateSupport.CanRoll.
+-- same conditions are checked locally in States/Evading.CanEnter.
 function DefenseSystem.BeginEvade(model: Model, now: number): (boolean, string?)
 	local registration = registrations[model]
 	if not registration then
@@ -454,6 +632,10 @@ function DefenseSystem.BeginEvade(model: Model, now: number): (boolean, string?)
 		or humanoid:GetAttribute(Constants.Attributes.Mounted) == true
 	then
 		return false, "Restrained"
+	end
+	-- Held in an air combo: the parry is the one way out, never an evade.
+	if isAirHeld(humanoid) then
+		return false, "AirHeld"
 	end
 	local ok, reason = registration.Machine:BeginEvade(now, pingSecondsFor(model))
 	if ok then
@@ -529,6 +711,17 @@ local function onHit(report: HitReport): ()
 
 	local machine = registration.Machine
 	local at = report.SampleTime
+
+	-- THE AIR COMBO'S TWO RULES, both read off the defender's own Attributes (see isAirHeld):
+	--   * a slam's hard knockdown is intangible -- the contact resolves Evaded, which prices to nothing and
+	--     leaves the attacker's swing running, exactly "the defender was not there";
+	--   * an AIR-HELD defender's guard does nothing -- a contact that would have been Blocked (or a
+	--     Backstab/GuardBroken, both of which exist only because a guard was up) resolves Clean. A timed
+	--     parry is the one defence that still counts, and ParryLive below is untouched for it.
+	local humanoid = registration.Humanoid
+	local intangible = isAirComboIntangible(humanoid)
+	local airHeld = not intangible and isAirHeld(humanoid)
+
 	-- ADVANCED TO THE CONTACT'S OWN TIME BEFORE IT IS QUERIED. Pass 1 runs inside the engine's Step,
 	-- which is the frame BEFORE this system's own Step advances anything -- so without this the
 	-- machine's live segment still describes whatever it was at the end of the LAST frame, and
@@ -546,8 +739,16 @@ local function onHit(report: HitReport): ()
 		BlockHeld = machine:BlockHeldAt(at),
 		ParryLive = machine:IsParryLiveAt(at),
 		ParryConsumed = parryConsumedThisBatch[report.Target] == true,
-		Evading = machine:IsEvadingAt(at),
+		Evading = intangible or machine:IsEvadingAt(at),
 	})
+	if airHeld and (result.Kind == "Blocked" or result.Kind == "Backstab" or result.Kind == "GuardBroken") then
+		result = {
+			Kind = "Clean",
+			Guard = registration.Guard:Get(),
+			GuardDelta = 0,
+			ConsumesParry = false,
+		}
+	end
 
 	if result.ConsumesParry then
 		-- Marked in the batch, not on the machine: pass 1 applies nothing, and the machine's own flag
@@ -580,6 +781,13 @@ local function emit(outcome: DefenseOutcome): ()
 			logger:error("A DefenseSystem.OnResolved consumer errored", { errorMessage = tostring(err) })
 		end
 	end
+end
+
+-- How long a parry staggers the attacker -- longer for a PERFECT parry (DefenseConstants.PerfectParry).
+-- The one definition: applyContact staggers with it, and DefenseSystem.ParryStaggerSeconds hands it to the
+-- attack layer, which holds a parried attacker's string until exactly this much later.
+local function parryStaggerSeconds(perfect: boolean): number
+	return if perfect then DefenseConstants.PerfectParry.StaggerSeconds else DefenseConstants.Stagger.DurationSeconds
 end
 
 local function applyContact(contact: PendingContact, now: number): ()
@@ -624,14 +832,15 @@ local function applyContact(contact: PendingContact, now: number): ()
 		if attackerRegistration then
 			-- A PERFECT parry staggers longer (DefenseConstants.PerfectParry) -- the one gameplay difference
 			-- it makes; the rest of its reward is presentation, keyed off Perfect on the outcome below.
-			attackerRegistration.Machine:Stagger(
-				now,
-				if contact.Perfect then DefenseConstants.PerfectParry.StaggerSeconds else nil
-			)
+			attackerRegistration.Machine:Stagger(now, parryStaggerSeconds(contact.Perfect == true))
 		end
 		if defenderRegistration then
 			notifyClient(defenderRegistration, defenderRegistration.Machine:GetState(), contact.Report.ContactPosition)
 		end
+		noteRallyParry(contact.Defender, contact.Attacker, now)
+	elseif kind == "Clean" or kind == "Backstab" or kind == "GuardBroken" then
+		-- A hit that actually got through ends the trade for both sides.
+		endRally(contact.Defender)
 	end
 
 	emit({
@@ -647,6 +856,70 @@ local function applyContact(contact: PendingContact, now: number): ()
 		Perfect = contact.Perfect == true,
 	})
 	debugLog("Contact resolved", { kind = kind, defender = contact.Defender.Name, perfect = contact.Perfect })
+end
+
+-- How long a resolved contact waits in the rewind hold before it applies, or 0 to apply it now. Only a
+-- CLEAN contact on an AIR-HELD, player-backed defender is held -- a parry, a trade and an evade are already
+-- decided, and a bot or a dummy has no round trip to rewind.
+local function rewindHoldFor(contact: PendingContact): number
+	if contact.Result.Kind ~= "Clean" then
+		return 0
+	end
+	local registration = registrations[contact.Defender]
+	if not registration or not isAirHeld(registration.Humanoid) then
+		return 0
+	end
+	return math.min(pingSecondsFor(contact.Defender), AirComboConstants.Parry.RewindMaxSeconds)
+end
+
+resolveHeldContactsFor = function(
+	registration: Registration,
+	now: number,
+	window: DefenseTypes.ParryWindow?,
+	scale: number
+): ()
+	-- EARLIEST FIRST, and only one: a parry window stops one attack, exactly as on the ground.
+	local chosen: number? = nil
+	for index, held in heldContacts do
+		if held.Contact.Defender == registration.Model then
+			if chosen == nil or held.Contact.SampleTime < heldContacts[chosen].Contact.SampleTime then
+				chosen = index
+			end
+		end
+	end
+	if chosen == nil then
+		return
+	end
+	local held = heldContacts[chosen]
+	local contact = held.Contact
+	local covers, perfect =
+		registration.Machine:RewoundParryCovers(now - held.RewindSeconds, contact.SampleTime, window, scale)
+	if not covers then
+		return
+	end
+	-- Re-classified as the parry it would have been, through the same resolver pass 1 uses, so the guard
+	-- restore and the unparryable-weight rules are the ordinary ones. A resolver that still says otherwise
+	-- (a move no parry can stop) leaves the contact held as the Clean it was.
+	local result = OutcomeResolver.Resolve({
+		DefenderState = "ParryWindow",
+		BearingDegrees = contact.BearingDegrees,
+		PowerLevel = contact.Report.PowerLevel,
+		Guard = registration.Guard:Get(),
+		GuardMax = registration.Guard:GetMax(),
+		BlockHeld = true,
+		ParryLive = true,
+		ParryConsumed = false,
+		Evading = false,
+	})
+	if result.Kind ~= "Parried" then
+		return
+	end
+	table.remove(heldContacts, chosen)
+	contact.Result = result
+	contact.Perfect = perfect
+	contact.DefenderStateAtContact = "ParryWindow"
+	applyContact(contact, now)
+	debugLog("Air parry judged on the rewind", { defender = registration.Model.Name, perfect = perfect })
 end
 
 -- The loop -----------------------------------------------------------------------------------------
@@ -668,7 +941,12 @@ function DefenseSystem.Step(deltaTime: number, now: number): ()
 			and not ParkourOwnership.OwnsBody(registration.Humanoid)
 		then
 			registration.GuardDeferred = false
-			pressGuard(registration, now)
+			-- A HELD PRESS COMES UP AS A BLOCK, NEVER A PARRY (2026-09-29). This press was made while the body
+			-- was committed (a swing, a stun), and it rises the instant the body is free. If it armed a
+			-- parry, holding the key through hitstun would parry the next hit of any tight string with no
+			-- timing at all. The parry is a read made on a free body, so it takes a fresh press, and the
+			-- ordinary MinUnguardedSeconds rule applies to that press like any other.
+			pressGuard(registration, now, true)
 		end
 		machine:Update(now)
 		local state = machine:GetState()
@@ -682,6 +960,20 @@ function DefenseSystem.Step(deltaTime: number, now: number): ()
 		local regenerates = state ~= "Blocking" and state ~= "Staggered" and not machine:IsBlockHeld()
 		registration.Guard:Regenerate(deltaTime, now, regenerates)
 		publishGuardCrack(registration)
+		publishGuardFraction(registration)
+		syncGuard(registration, now)
+	end
+
+	-- The rewind holds that have run out apply as the Clean they were. First, so a held contact from an
+	-- earlier frame never lands after a newer one.
+	if #heldContacts > 0 then
+		for index = #heldContacts, 1, -1 do
+			local held = heldContacts[index]
+			if now >= held.ReleaseAt then
+				table.remove(heldContacts, index)
+				applyContact(held.Contact, now)
+			end
+		end
 	end
 
 	if #pending == 0 then
@@ -690,7 +982,12 @@ function DefenseSystem.Step(deltaTime: number, now: number): ()
 
 	OutcomeResolver.ArbitrateTrades(pending)
 	for _, contact in pending do
-		applyContact(contact, now)
+		local hold = rewindHoldFor(contact)
+		if hold > 0 then
+			table.insert(heldContacts, { Contact = contact, ReleaseAt = now + hold, RewindSeconds = hold })
+		else
+			applyContact(contact, now)
+		end
 	end
 
 	table.clear(pending)
@@ -720,9 +1017,26 @@ function DefenseSystem.CanAttack(model: Model): (boolean, string?)
 	return registration.Machine:CanAttack()
 end
 
+-- How long a Parried outcome staggers its attacker, from the outcome's own Perfect flag. A pure query on
+-- the rule applyContact staggers with, so the attack layer never restates the two stagger lengths. A
+-- rally parry out of a stagger can END a stagger early; this is the length it was stamped with.
+function DefenseSystem.ParryStaggerSeconds(perfect: boolean): number
+	return parryStaggerSeconds(perfect)
+end
+
 function DefenseSystem.GetState(model: Model): DefenseState?
 	local registration = registrations[model]
 	return if registration then registration.Machine:GetState() else nil
+end
+
+-- How many parries this combatant has traded in their current rally, and with whom -- 0/nil when not
+-- rallying or the rally has lapsed. For the debug readout and the spec; see DefenseConstants.Rally.
+function DefenseSystem.GetRally(model: Model, now: number): (number, Model?)
+	local registration = registrations[model]
+	if not registration or registration.RallyCount <= 0 or now >= registration.RallyLapsesAt then
+		return 0, nil
+	end
+	return registration.RallyCount, registration.RallyPartner
 end
 
 function DefenseSystem.GetGuard(model: Model): (number?, number?)
@@ -937,6 +1251,7 @@ function DefenseSystem.Reset(): ()
 	end
 	table.clear(registrations)
 	table.clear(pending)
+	table.clear(heldContacts)
 	table.clear(parryConsumedThisBatch)
 	table.clear(outcomeCallbacks)
 	defaultParryAnimationId = ""

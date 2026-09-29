@@ -3,7 +3,7 @@
 	States/Sliding.lua
 
 	Owns: the momentum slide -- entry off real speed, physics-driven decay, slope response, the crouch
-	that lets it pass under things, and the four ways out (jump, roll, stand, obstacle).
+	that lets it pass under things, and the ways out (jump, stand, obstacle -- and an evade, which pre-empts it).
 
 	THE DESIGN CONSTRAINT THIS FILE EXISTS TO SATISFY, quoted because it is what every decision below
 	is measured against: "Make the slide feel like an actual continuation of movement instead of a
@@ -16,7 +16,7 @@
 	    than the sum of its parts (JumpOutRetainFraction is above 1) because chaining is the skill this
 	    system is built to reward.
 	  * There is no minimum commitment beyond the anti-flicker MinDurationSeconds, and jumping,
-	    rolling or vaulting out bypasses even that.
+	    evading or vaulting out bypasses even that.
 
 	The crouch (HipHeightDelta) is what physically lets a slide pass under geometry, and the ceiling
 	probe is what stops it ending while still underneath -- standing up inside a low tunnel would eject
@@ -243,23 +243,11 @@ local Sliding: ParkourTypes.StateDefinition = {
 			return "Jumping"
 		end
 
-		-- EXIT 2: roll out. A route-1 transition, applied WITHOUT consulting Rolling.CanEnter
-		-- (StateMachine.Update -- the caller is asserting, not asking), so it asks the same predicate
-		-- Rolling.CanEnter does: StateSupport.CanRoll, cooldown and combat gates included.
-		--
-		-- This comment used to claim Rolling's CanEnter "re-checks its cooldown and allowed-from list, so
-		-- this only has to notice the input". It never did -- route 1 skips CanEnter entirely -- and this
-		-- exit asked only the combat gate, so a slide was a way to roll that ignored the roll's cooldown.
-		-- The forced-slope entries INTO this state (Idle/Walking/Sprinting.Update) are deliberately NOT
-		-- gated the same way -- a slope too steep to stand on takes the character whether they asked or
-		-- not, and refusing it in combat would leave them standing on a surface the framework has already
-		-- decided is unstandable.
-		if StateSupport.CanRoll(context) then
-			context.Momentum *= SLIDE.RollOutRetainFraction
-			return "Rolling"
-		end
+		-- No roll-out exit any more: the evade that replaced the roll is entered by ordinary pre-emption
+		-- (Evading, 140, outranks this state, and EvadeConstants.AllowedFromStates names Sliding), so its
+		-- own CanEnter -- cooldown and combat gates included -- is always the one asked.
 
-		-- EXIT 3: something to traverse. A slide into a vaultable obstacle becomes the vault, carrying
+		-- EXIT 2: something to traverse. A slide into a vaultable obstacle becomes the vault, carrying
 		-- the slide's speed -- one of the chains the design calls out by name.
 		if StateSupport.WithinTraversalRange(context) then
 			local classification = StateSupport.ClassifyObstacle(context)
@@ -268,7 +256,7 @@ local Sliding: ParkourTypes.StateDefinition = {
 			end
 		end
 
-		-- EXIT 4: the slide is over on its own terms. Four conditions, any of which ends it -- but
+		-- EXIT 3: the slide is over on its own terms. Four conditions, any of which ends it -- but
 		-- none of them may fire while there is something overhead, or the character stands up inside
 		-- it, and none may fire mid-grace either: every one of them hands off to a GROUNDED state
 		-- (ResolveGroundedState), and resolving to Walking while the feet are off the floor would put the
@@ -339,9 +327,9 @@ local Sliding: ParkourTypes.StateDefinition = {
 		-- of leaving it commanded.
 		-- ...AND SO DO THE TRAVERSAL EXITS, for exactly the same reason. They used to sit in an
 		-- early-return list justified as "Vaulting and Mantling are kinematic and write their own
-		-- TargetCFrame in Enter, and Rolling writes its own velocity command -- so each overwrites this
+		-- TargetCFrame in Enter, and the roll wrote its own velocity command -- so each overwrites this
 		-- frame's command before it is committed." That is not true of any of the three: none of
-		-- Vaulting.Enter, Mantling.Enter or Rolling.Enter touches context.Motor at all. All three write
+		-- Vaulting.Enter, Mantling.Enter or Evading.Enter touches context.Motor at all. All three write
 		-- the motor from their UPDATE, and StateMachine.Update applies at most one transition and
 		-- returns -- so the incoming state's Update does not run until the NEXT frame, and this frame
 		-- commits whatever the outgoing state last asked for.
@@ -356,7 +344,7 @@ local Sliding: ParkourTypes.StateDefinition = {
 		-- rewrites the value the assembly already has (a no-op) and, crucially, tears the velocity drive
 		-- down instead of leaving it commanded. The traversal then takes a clean, unowned body on its
 		-- first Update, which is what all three of them assume they are getting.
-		if nextState == "Jumping" or nextState == "Vaulting" or nextState == "Mantling" or nextState == "Rolling" then
+		if nextState == "Jumping" or nextState == "Vaulting" or nextState == "Mantling" or nextState == "Evading" then
 			StateSupport.HandOff(context, context.RootPart.AssemblyLinearVelocity)
 			return
 		end

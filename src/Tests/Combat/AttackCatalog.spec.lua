@@ -100,6 +100,18 @@ return function()
 			local entry = AttackCatalog.Get(HEAVY_MOVE_ID) :: any
 			expect(entry.PlaybackSpeed).to.be.near(AttackConstants.Tempo.ByStage.Heavy, 1e-6)
 		end)
+
+		it("lets a weapon override one stage's tempo without touching its other stages", function()
+			local previous = AttackConstants.Tempo.ByWeapon[WEAPON]
+			AttackConstants.Tempo.ByStage.Basic = 0.75
+			AttackConstants.Tempo.ByWeapon[WEAPON] = { Basic = 0.9 }
+			local basic = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
+			local heavy = AttackCatalog.Get(HEAVY_MOVE_ID) :: any
+			AttackConstants.Tempo.ByWeapon[WEAPON] = previous
+			expect(basic.PlaybackSpeed).to.be.near(0.9, 1e-6)
+			expect(basic.Definition.WindupSeconds).to.be.near(0.31 / 0.9, 1e-6)
+			expect(heavy.PlaybackSpeed).to.be.near(AttackConstants.Tempo.ByStage.Heavy, 1e-6)
+		end)
 	end)
 
 	describe("AttackCatalog.Get -- resolution", function()
@@ -132,8 +144,8 @@ return function()
 
 	describe("AttackCatalog.Get -- precedence", function()
 		it("prefers a custom move over a Default one sharing its id", function()
-			-- Mirrors the Move Editor's own List/ListDefaultMoves split: a custom move sharing an id is
-			-- the more recent authored intent.
+			-- A custom move sharing an id with a Default one is the more specific intent (AttackCatalog's
+			-- resolveMove).
 			local default = DefaultMoveRegistry.Get(DEFAULT_MOVE_ID)
 			expect(default).to.be.ok()
 

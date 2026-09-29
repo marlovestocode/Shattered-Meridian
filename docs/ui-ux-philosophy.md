@@ -283,7 +283,7 @@ UI/
   State/
     ClientState.lua       -- Fusion Values reflecting server-validated state
   Components/             -- reusable primitives, one file each
-  Screens/                -- one folder per Surface (HUD, Menus, DevMenu, MoveEditor, Onboarding,
+  Screens/                -- one folder per Surface (HUD, Menus, DevTools, Onboarding,
                            -- DeathFeed, CombatFeedback, BugReport, Announcement, ...)
 ```
 
@@ -349,12 +349,14 @@ Rules:
   `Sidebar` (stats header + player roster) beside a tabbed `ContentArea` (Spawn/Admin/Tuning/
   Reports). Roster rows use `ActionIcon` (Kick/Ban/Mute/Flag), with a distinct `Armed` state for
   Ban's two-press confirm.
-- **Move Editor** (`Screens/MoveEditor/*`) — the admin-only authoring tool for combat moves, and
-  the largest screen in the codebase: header, `Sidebar` (move list + section nav),
-  `PropertyEditor` (toolbar + per-section forms), a live `PreviewViewport` hitbox gizmo. Has its
-  own screen-scoped palette (`EditorTokens.lua`) that is deliberately **not** promoted to
-  `Tokens.lua` — read that file's header before moving anything up. `ShortcutsOverlay.lua` (F1)
-  documents every non-obvious input binding this screen has accumulated.
+- **Move Editor** (`Screens/DevTools/MoveEditor/*`, rebuilt 2026-09-29) — the admin-only authoring
+  tool for combat moves, and the reference for how a dense TOOL wears this frame: `ScreenFrame` tabs
+  (`Hitbox`/`Timing`/`Impact`/`Identity`) between two pinned rails — a grouped move browser on the
+  left, and a readout on the right holding the RESULTS of the inputs (hitbox plots, the effective
+  timeline, notes, actions). No cards: groups are bronze `SectionHeading`s and spacing. Built only from
+  shared components and `Tokens` — no screen-scoped palette. Its hitbox plots rasterise the engine's
+  own `ContainsPoint` rather than drawing a shape, so the preview cannot disagree with the hit. See
+  `docs/design/move-editor-guide.md`.
 - **Onboarding** (`Screens/Onboarding/*`) — a skippable intro cinematic followed by a mandatory
   4-screen character creator, gated purely on `profile.raceId == nil`. Runs its own temporary
   Fusion scope, cleaned up before `UI.Mount()` is called.

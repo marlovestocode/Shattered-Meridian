@@ -71,6 +71,14 @@
 	vertical one is carried through untouched, the same decomposition Shared/Parkour/ParkourMath's
 	solved arcs learned to make.
 
+	TARGET-AWARE STEP-IN (2026-09-29, LockOnConstants.StepIn). A Basic now steps too, but ONLY toward a
+	target (the lock-on target, or the swing assist's pick -- SwingTracking.PickTarget) and only to close the
+	gap to StandoffStuds. A target already in range gets no step, a target out of reach gets none either,
+	and with no target nothing moves. That is the difference from the flat 4-stud Basic step that was
+	removed for reading as "the punch closes the distance for you". A Heavy keeps its authored step but
+	takes the smaller of it and the gap, so it never runs through a target standing close. The distance is
+	resolved on the step's first frame, from where the target is THEN, not where it was at the press.
+
 	Does not own: whether the swing happens (Server/Combat/Attack/AttackRequestSystem.lua), the swing
 	animation or the FOV punch (Client/Combat/AttackInputClient.lua), what a landed hit costs
 	(DamageSystem), or any movement outside this window (the parkour framework, RunController).
@@ -79,13 +87,17 @@
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local AirComboMoves = require(ReplicatedStorage.Shared.AirCombo.AirComboMoves)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
+local LockOnConstants = require(ReplicatedStorage.Shared.Combat.LockOnConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 
 local AttackInputClient = require(script.Parent.AttackInputClient)
+local CombatTargets = require(script.Parent.CombatTargets)
+local SwingTracking = require(script.Parent.SwingTracking)
 local ParkourMotor = require(script.Parent.Parent.Parkour.ParkourMotor)
 
 type AttackStartedPayload = AttackTypes.AttackStartedPayload
@@ -109,8 +121,13 @@ type Window = {
 	startsAt: number,
 	durationSeconds: number,
 	-- Peak speed, in studs/second, at the instant the window opens. Precomputed once per swing
-	-- because it is a pure function of the authored pair and nothing about it changes mid-window.
+	-- because it is a pure function of the authored pair and nothing about it changes mid-window --
+	-- except for a target-aware step, which fills it in on its first frame (see `resolved`).
 	peakSpeed: number,
+	-- The kind's own authored distance, or nil for a kind that only steps toward a target.
+	authoredDistance: number?,
+	-- Whether the distance still has to be resolved against the target (LockOnConstants.StepIn).
+	resolved: boolean,
 }
 
 local window: Window? = nil
@@ -155,6 +172,42 @@ function SwingLunge.DelayFor(windupSeconds: number, delaySeconds: number): numbe
 	return math.max(0, windupSeconds + delaySeconds)
 end
 
+-- How far a target-aware step carries, given the flat gap to the target (nil for no target) and the
+-- kind's own authored distance (nil for a kind with none). Pure, so a spec can check it without a rig.
+-- See this file's header, TARGET-AWARE STEP-IN.
+function SwingLunge.StepInDistance(gapStuds: number?, authoredDistance: number?): number
+	if gapStuds == nil then
+		return authoredDistance or 0
+	end
+	local tuning = LockOnConstants.StepIn
+	local wanted = gapStuds - tuning.StandoffStuds
+	if wanted < tuning.MinStepStuds then
+		return 0
+	end
+	if authoredDistance then
+		return math.min(authoredDistance, wanted)
+	end
+	-- No authored step: never chase a target that is out of reach.
+	if wanted > tuning.MaxStepStuds then
+		return 0
+	end
+	return wanted
+end
+
+-- The flat gap from `root` to the target a swing thrown now would track, or nil for none.
+local function gapToTarget(root: BasePart): number?
+	local targetModel = SwingTracking.PickTarget(root)
+	if targetModel == nil then
+		return nil
+	end
+	local targetRoot = CombatTargets.LiveRoot(targetModel, root.Parent :: Model?)
+	if targetRoot == nil then
+		return nil
+	end
+	local offset = targetRoot.Position - root.Position
+	return Vector3.new(offset.X, 0, offset.Z).Magnitude
+end
+
 -- Whether the body is in a state where a forward step is meaningful. ParkourMotor.ApplyImpulse makes
 -- the ownership refusals (see this file's header); this makes the two this module owns.
 local function bodyAcceptsStep(currentHumanoid: Humanoid, currentRoot: BasePart): boolean
@@ -174,7 +227,12 @@ local function onAttackStarted(payload: AttackStartedPayload): ()
 	end
 
 	local perKind = tuning.ByKind[payload.Kind]
-	if not perKind then
+	local stepIn = LockOnConstants.StepIn
+	-- Never for an air move: the air combo's follow owns the attacker's body.
+	local targetAware = stepIn.Enabled
+		and stepIn.ByKind[payload.Kind] == true
+		and not (typeof(payload.MoveId) == "string" and AirComboMoves.RoleOf(payload.MoveId) ~= nil)
+	if not perKind and not targetAware then
 		-- Hotbar, or a kind added to AttackTypes.AttackKind without a step authored for it. Silent by
 		-- design: "this move does not step" is an ordinary authoring answer, not a fault.
 		return
@@ -200,10 +258,14 @@ local function onAttackStarted(payload: AttackStartedPayload): ()
 	-- the previous swing's step is a faster string, not a double-speed character -- and one landing
 	-- inside the previous swing's WAIT correctly cancels that wait, because the swing it was scheduled
 	-- for has been superseded.
+	local delaySeconds = if perKind then perKind.DelaySeconds else -stepIn.LeadSeconds
+	local durationSeconds = if perKind then perKind.DurationSeconds else stepIn.DurationSeconds
 	window = {
-		startsAt = os.clock() + SwingLunge.DelayFor(windupSeconds, perKind.DelaySeconds),
-		durationSeconds = perKind.DurationSeconds,
-		peakSpeed = SwingLunge.SpeedAt(perKind.DistanceStuds, perKind.DurationSeconds, 0),
+		startsAt = os.clock() + SwingLunge.DelayFor(windupSeconds, delaySeconds),
+		durationSeconds = durationSeconds,
+		peakSpeed = if perKind then SwingLunge.SpeedAt(perKind.DistanceStuds, durationSeconds, 0) else 0,
+		authoredDistance = if perKind then perKind.DistanceStuds else nil,
+		resolved = not targetAware,
 	}
 end
 
@@ -236,6 +298,16 @@ local function onHeartbeat(): ()
 	if not bodyAcceptsStep(currentHumanoid, currentRoot) then
 		window = nil
 		return
+	end
+
+	if not live.resolved then
+		live.resolved = true
+		local distance = SwingLunge.StepInDistance(gapToTarget(currentRoot), live.authoredDistance)
+		if distance <= 0 then
+			window = nil
+			return
+		end
+		live.peakSpeed = SwingLunge.SpeedAt(distance, live.durationSeconds, 0)
 	end
 
 	local speed = live.peakSpeed * (1 - elapsed / live.durationSeconds)

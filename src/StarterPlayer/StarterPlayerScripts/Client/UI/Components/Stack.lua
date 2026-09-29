@@ -134,11 +134,10 @@ end
 -- not. A computed size is a claim about how tall five other things are; this is a request to the
 -- thing that already knows.
 --
--- WORKS ON ANY CHILD OF ANY UIListLayout, not only on a Stack's. Four call sites rely on that:
--- Components/Panel.lua owns a list layout of its own (Screens/DevTools/MoveEditor/Sidebar.lua and
--- PreviewViewport.lua both fill inside one), Components/ModalScreen.lua does too (Components/
--- ScreenFrame.lua's body band fills inside THAT), and Screens/Onboarding/CreatorFrame.lua's panel is
--- a third. The flex item is a property of the child and the layout above it, so a container this
+-- WORKS ON ANY CHILD OF ANY UIListLayout, not only on a Stack's. Call sites rely on that:
+-- Components/Panel.lua owns a list layout of its own, Components/ModalScreen.lua does too
+-- (Components/ScreenFrame.lua's body band fills inside THAT), and Screens/Onboarding/CreatorFrame.lua's
+-- panel is a third. The flex item is a property of the child and the layout above it, so a container this
 -- module did not build is no different to the engine -- and marking one is still strictly better than
 -- the subtraction it replaces, whoever owns the layout.
 --

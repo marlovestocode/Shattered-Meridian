@@ -39,7 +39,14 @@
 	baits, one that sees you roll shortens its strings to catch the roll's recovery. The billboard
 	narrates the read so a tester can see why it just did what it did.
 
-	COMPOSURE. A 0..1 mood that drops when it is hit or guard-broken and recovers over time and on its
+	PLAYING ITS TURN (2026-09-28, "they are actually lobotomized"). What a player does that the first build
+did not, all tuned in TrainingBotConstants.Offence: you stepping into its reach while idle is its turn to
+swing, not a cue to back away; a held guard gets a Heavy rather than a feint; a block on the swing that
+ENDS your string is dropped into your recovery and punished rather than held until you are safe again;
+its own strings are not a metronome -- it holds a beat back, more so the more you parry; and a string
+that lands is followed up rather than walked away from.
+
+COMPOSURE. A 0..1 mood that drops when it is hit or guard-broken and recovers over time and on its
 	own successes. Low composure makes it parry less, roll and block more, and back off -- a rattled
 	bot looks rattled, which is most of what makes a sparring partner feel alive rather than scripted.
 
@@ -101,9 +108,22 @@ export type Perception = {
 	-- guard last came down, or math.huge while it is still up (a held guard is not a fresh press). A
 	-- press before this only blocks.
 	ParryArmableAt: number,
-	SelfRolling: boolean,
+	SelfEvading: boolean,
 	EvadeReady: boolean,
 	HomeDistance: number,
+
+	-- THE AIR COMBO (docs/design/air-combat-and-evade.md). All optional, so a perception built before air
+	-- combat existed (every spec's) reads as "on the ground, in nobody's combo".
+	-- Held in the air by your combo: the ONLY answer left is a timed parry -- a guard does nothing, an evade
+	-- is refused, and it cannot swing. Its rhythm read applies to your air beats like any other swing.
+	SelfAirHeld: boolean?,
+	-- The attacker of a live combo -- its launcher landed on you.
+	SelfAirAttacker: boolean?,
+	-- How many of its air beats have landed, and when its first air press may be thrown.
+	SelfAirHitsLanded: number?,
+	AirPressReadyAt: number?,
+	-- A wall close behind you, along the line it would Spike you: the finisher it picks.
+	WallBehindTarget: boolean?,
 
 	-- The combat stack's own numbers, handed in rather than required so this module stays pure.
 	FeintWindowFraction: number,
@@ -116,6 +136,9 @@ export type Perception = {
 export type MoveKind = "Hold" | "Approach" | "Retreat" | "Strafe" | "Home"
 export type EvadeDirection = "Back" | "Left" | "Right"
 export type AttackKind = "Basic" | "Heavy"
+-- One press a plan makes. "Launcher" is a Basic thrown with the Up modifier (Space + M1) -- the air combo's
+-- branch off the string, earned by the Basics before it.
+export type PlanPress = AttackKind | "Launcher"
 
 export type Intent = {
 	Move: MoveKind,
@@ -123,6 +146,8 @@ export type Intent = {
 	Sprint: boolean,
 	Guard: boolean,
 	Attack: AttackKind?,
+	-- "Up" presses the attack with the jump key held: the launcher on a Basic, the Spike on an air Heavy.
+	Modifier: "Up"?,
 	Feint: boolean,
 	Evade: EvadeDirection?,
 }
@@ -174,18 +199,31 @@ type Threat = {
 type Plan = {
 	Label: string,
 	-- Presses still to make, in order.
-	Queue: { AttackKind },
+	Queue: { PlanPress },
 	-- Throw the head of Queue as a Heavy and feint it at this fraction of its feint window.
 	FeintFraction: number?,
 	-- Set once the planned feint's swing is accepted: feint when Now passes this.
 	FeintAt: number?,
 	-- When the current head press was first wanted -- a press refused for this long is abandoned.
 	WantedSince: number?,
+	-- A deliberate hold before the next press (TrainingBotConstants.Offence's anti-metronome): rolled
+	-- when a press is accepted, started once the body is free, and pressed at PressAt.
+	PendingDelay: number?,
+	PressAt: number?,
 	ExpiresAt: number,
 	Punish: boolean,
 }
 
+-- Its air string, once its launcher has you up: how many beats it means to land before cashing out, and
+-- when it will press the next one (on-beat, or held back to bait your parry).
+type AirPlan = {
+	Length: number,
+	NextAt: number,
+	SeenHits: number,
+}
+
 export type Brain = {
+	Air: AirPlan?,
 	Style: Style,
 	Difficulty: Difficulty,
 	StyleName: string,
@@ -201,6 +239,15 @@ export type Brain = {
 	-- start/windup of the last one, so a follow-up that arrives on the beat is read early.
 	Cadence: number?,
 	LastSwingStart: number?,
+	-- Which swing of your current string the last one was (1..Offence.StringLength) -- what tells it
+	-- that a blocked swing ended your string and its recovery is there to punish.
+	StringCount: number,
+	-- When a contact of its own last landed clean (or broke your guard), and until when a string that
+	-- ended on it may be followed straight up (Offence.PressureWindowSeconds).
+	LastLandedAt: number,
+	PressureUntil: number,
+	-- Clean contacts its CURRENT plan has landed -- what decides whether a planned Launcher was earned.
+	PlanLanded: number,
 	-- Guard held up in neutral, as a player holds block when you are in their face, until this time.
 	StanceUntil: number,
 	NextStanceThinkAt: number,
@@ -220,6 +267,13 @@ export type Brain = {
 	PunishJudgedState: string?,
 	WhiffJudgedFor: number?,
 	LastNow: number,
+	-- Recent server frame length (EMA). A press is only ever applied on a frame, so a PerfectParry style
+	-- aims one frame ahead of its ideal moment to land on the last frame that still makes it.
+	FrameSeconds: number,
+	-- Style.CounterAfterParry: the one counter swing its last parry earned, owed until this time. Set by
+	-- OnOutcome when it parries you, spent when the swing is planned -- so a missed parry-back (which
+	-- drops you straight back into the same stagger) does not earn it a second free swing.
+	CounterOwedUntil: number,
 }
 
 -- Maths -------------------------------------------------------------------------------------------
@@ -271,6 +325,7 @@ function TrainingBotBrain.new(styleName: string, difficultyName: string, rng: Ra
 	local difficulty = TrainingBotConstants.Difficulties[difficultyName :: any]
 		or TrainingBotConstants.Difficulties[TrainingBotConstants.DefaultDifficulty]
 	return {
+		Air = nil,
 		Style = style,
 		Difficulty = difficulty,
 		StyleName = styleName,
@@ -284,6 +339,10 @@ function TrainingBotBrain.new(styleName: string, difficultyName: string, rng: Ra
 		Stats = { Seen = 0, Parry = 0, Block = 0, Evade = 0, Trade = 0, Late = 0, Busy = 0, Range = 0, None = 0 },
 		Cadence = nil,
 		LastSwingStart = nil,
+		StringCount = 0,
+		LastLandedAt = -math.huge,
+		PressureUntil = -math.huge,
+		PlanLanded = 0,
 		StanceUntil = 0,
 		NextStanceThinkAt = 0,
 		Threat = nil,
@@ -297,15 +356,17 @@ function TrainingBotBrain.new(styleName: string, difficultyName: string, rng: Ra
 		PunishJudgedState = nil,
 		WhiffJudgedFor = nil,
 		LastNow = 0,
+		FrameSeconds = 1 / 60,
+		CounterOwedUntil = -math.huge,
 	}
 end
 
 -- Reads -------------------------------------------------------------------------------------------
 
--- "blk 45% | pry 20% | roll 10% | feint 30%" -- what the bot currently believes about you.
+-- "blk 45% | pry 20% | evade 10% | feint 30%" -- what the bot currently believes about you.
 function TrainingBotBrain.DescribeRead(brain: Brain): string
 	local habits = brain.Habits
-	return `blk {percent(habits.Block)} | pry {percent(habits.Parry)} | roll {percent(habits.Evade)} | feint {percent(
+	return `blk {percent(habits.Block)} | pry {percent(habits.Parry)} | evade {percent(habits.Evade)} | feint {percent(
 		habits.Feint
 	)}`
 end
@@ -324,7 +385,9 @@ end
 
 -- Beyond this gap between two swing starts, the second one is a new exchange, not the next beat of a
 -- string, and teaches the cadence nothing.
-local STRING_GAP_SECONDS = 1.1
+-- Sized off the M1 string's own start-to-start beat (~1.03-1.06s since AttackConstants' 2026-09-28
+-- slowdown) with room for a late press; the end-of-string lockout pushes a fresh string past it.
+local STRING_GAP_SECONDS = 1.35
 -- How close to the expected beat a swing has to start to count as "on rhythm".
 local RHYTHM_TOLERANCE_SECONDS = 0.15
 -- A swing that arrives exactly when it was expected is not reacted to -- it was already being watched
@@ -338,14 +401,20 @@ local function beginThreat(brain: Brain, swing: SwingView): ()
 		gaussian(rng, difficulty.ReactionSeconds, difficulty.ReactionJitterSeconds),
 		difficulty.ReactionMinSeconds
 	)
+	-- The parry-trade drill (Style.PerfectParry) is not a person: it sees the swing the moment it starts.
+	if brain.Style.PerfectParry then
+		reaction = 0
+	end
 
 	-- READING THE STRING. A player does not react to the second and third swings of a string -- they
 	-- have the rhythm from the first. Every swing that starts inside a string updates the cadence; one
 	-- that lands on the expected beat is seen almost at once, as often as this difficulty reads rhythm.
 	local last = brain.LastSwingStart
+	local continuesString = false
 	if last then
 		local gap = swing.StartedAt - last
-		if gap > 0 and gap <= STRING_GAP_SECONDS then
+		continuesString = gap > 0 and gap <= STRING_GAP_SECONDS
+		if continuesString then
 			local cadence = brain.Cadence
 			if
 				cadence
@@ -358,6 +427,10 @@ local function beginThreat(brain: Brain, swing: SwingView): ()
 		end
 	end
 	brain.LastSwingStart = swing.StartedAt
+	-- A string past its last Basic is a fresh one (the end-of-string lockout sits between them).
+	brain.StringCount = if continuesString and brain.StringCount < TrainingBotConstants.Offence.StringLength
+		then brain.StringCount + 1
+		else 1
 
 	brain.Threat = {
 		StartedAt = swing.StartedAt,
@@ -438,7 +511,10 @@ local function decideResponse(brain: Brain, threat: Threat, p: Perception): ()
 	-- player mashing block out of a stun gets. So being busy DELAYS the guard rather than forbidding it;
 	-- it only forbids it when the body is still committed as the hit lands. A roll is refused outright
 	-- while committed, so it needs the body free before its own startup.
-	local freeAt = math.max(now, p.SelfBusyUntil)
+	-- AIR-HELD, the press is never deferred: DefenseSystem.SetBlocking lets an air-held victim's press through
+	-- the stun, because the parry is their one way out. So the body is "free" to press right now.
+	local airHeld = p.SelfAirHeld == true
+	local freeAt = if airHeld then now else math.max(now, p.SelfBusyUntil)
 	local canGuard = not p.SelfLocked and freeAt <= threat.ImpactAt - 0.02
 	local canRoll = canGuard and p.EvadeReady and freeAt <= threat.ImpactAt - p.EvadeStartup - 0.02
 
@@ -488,6 +564,15 @@ local function decideResponse(brain: Brain, threat: Threat, p: Perception): ()
 		weights.Block += weights.Parry
 		weights.Parry = 0
 	end
+	-- Held in your air combo: a guard does nothing, an evade is refused and it cannot swing -- the timed
+	-- parry is the one way out, read off your air beats exactly like any other swing (baited by your delays
+	-- at the difficulty's own rate). A guard still up from the last beat simply comes down, so the next
+	-- press can arm.
+	if airHeld then
+		weights.Block = 0
+		weights.Evade = 0
+		weights.Trade = 0
+	end
 
 	local picked = pickWeighted(rng, weights, RESPONSE_ORDER)
 	if picked == nil then
@@ -511,8 +596,17 @@ local function decideResponse(brain: Brain, threat: Threat, p: Perception): ()
 	end
 
 	if choice == "Parry" then
-		local ideal = threat.ImpactAt - (p.ParryOpen + p.ParryClose) * 0.5
-		local actAt = math.max(ideal + timingError, freeAt)
+		local actAt
+		if style.PerfectParry then
+			-- A PERFECT parry is a contact within DefenseConstants.PerfectParry of the window OPENING, so aim
+			-- at the opening, not the middle, and with no human error. A press only happens on a frame: aimed
+			-- one frame ahead, it lands on the last frame whose window still opens before the hit, and the hit
+			-- then arrives less than a frame after the window went live.
+			actAt = math.max(threat.ImpactAt - p.ParryOpen - brain.FrameSeconds, freeAt)
+		else
+			local ideal = threat.ImpactAt - (p.ParryOpen + p.ParryClose) * 0.5
+			actAt = math.max(ideal + timingError, freeAt)
+		end
 		-- Too soon after its guard came down, a press only blocks. Wait for it to arm if the window
 		-- would still catch the hit from there.
 		if actAt < p.ParryArmableAt then
@@ -525,8 +619,15 @@ local function decideResponse(brain: Brain, threat: Threat, p: Perception): ()
 			choice = if weights.Block > 0 or style.Block > 0 then "Block" else "None"
 		else
 			threat.ActAt = actAt
-			local holds = rng:NextNumber() < difficulty.HoldAfterParryChance
-			threat.ReleaseAt = if holds then math.huge else actAt + p.ParryClose + 0.02
+			if style.PerfectParry then
+				-- Always a tap: a held guard could not arm the NEXT parry of the trade (a fresh press has to
+				-- follow DefenseConstants.Parry.MinUnguardedSeconds of guard down), and the window runs to its
+				-- close whether the key is held or not.
+				threat.ReleaseAt = actAt + 0.05
+			else
+				local holds = rng:NextNumber() < difficulty.HoldAfterParryChance
+				threat.ReleaseAt = if holds then math.huge else actAt + p.ParryClose + 0.02
+			end
 		end
 	end
 	if choice == "Evade" then
@@ -555,7 +656,7 @@ local function decideResponse(brain: Brain, threat: Threat, p: Perception): ()
 		narrate(brain, if freeAt > now then `Block {what} (out of the stun)` else `Block {what}`)
 	elseif choice == "Evade" then
 		stats.Evade += 1
-		narrate(brain, `Roll {string.lower(threat.EvadeDirection)} from {what}`)
+		narrate(brain, `Evade {string.lower(threat.EvadeDirection)} from {what}`)
 	elseif choice == "Trade" then
 		stats.Trade += 1
 		narrate(brain, "Swing through it -- mine lands first")
@@ -569,7 +670,9 @@ local function updateThreat(brain: Brain, p: Perception): ()
 	local swing = p.TargetSwing
 	local threat = brain.Threat
 
-	if swing and (threat == nil or threat.StartedAt ~= swing.StartedAt) then
+	-- LastSwingStart, not just the live threat: a threat retired while its swing is still recovering
+	-- (below) must not be re-noticed as a brand-new swing on the next frame.
+	if swing and swing.StartedAt ~= brain.LastSwingStart and (threat == nil or threat.StartedAt ~= swing.StartedAt) then
 		if threat and not threat.Over then
 			endThreat(brain, threat, p)
 		end
@@ -601,6 +704,16 @@ local function updateThreat(brain: Brain, p: Perception): ()
 		end
 		if swing == nil or swing.StartedAt ~= threat.StartedAt then
 			endThreat(brain, threat, p)
+		elseif p.TargetAttackState == "Recovery" then
+			-- The danger is past once the swing is recovering. A guard held on it comes down now -- so the
+			-- recovery can be punished -- if that swing ended your string (or was a Heavy); mid-string it
+			-- stays up for the next beat, as a player's does. Anything else is simply over.
+			local guardHeld = (threat.Response == "Block" or threat.Response == "Parry")
+				and threat.ReleaseAt == math.huge
+			local stringOver = threat.Swing.Heavy or brain.StringCount >= TrainingBotConstants.Offence.StringLength
+			if stringOver or not guardHeld then
+				endThreat(brain, threat, p)
+			end
 		end
 	end
 
@@ -634,8 +747,8 @@ local function randomInt(rng: Random, low: number, high: number): number
 	return rng:NextInteger(low, high)
 end
 
-local function basicString(count: number): { AttackKind }
-	local queue: { AttackKind } = {}
+local function basicString(count: number): { PlanPress }
+	local queue: { PlanPress } = {}
 	for _ = 1, count do
 		table.insert(queue, "Basic")
 	end
@@ -644,8 +757,30 @@ end
 
 local function startPlan(brain: Brain, plan: Plan): ()
 	brain.Plan = plan
+	brain.PlanLanded = 0
 	narrate(brain, plan.Label)
 end
+
+-- THE LAUNCHER, planned the way a player plans it: a string of 3+ Basics may end in Space + M1 as its
+-- 4th hit, at the style's LaunchChance -- and whether it is PRESSED is decided at the moment it is due,
+-- off whether all three Basics landed (PlanLanded), exactly the condition the combat stack checks. A
+-- string that was blocked just ends there instead of wasting the press on a fresh B1.
+local LAUNCH_STRING = 3
+local function maybeLaunch(brain: Brain, queue: { PlanPress }): { PlanPress }
+	local chance = brain.Style.LaunchChance or 0
+	if chance <= 0 or #queue < LAUNCH_STRING or brain.Rng:NextNumber() >= chance then
+		return queue
+	end
+	for _, press in queue do
+		if press ~= "Basic" then
+			return queue
+		end
+	end
+	return { "Basic", "Basic", "Basic", "Launcher" }
+end
+
+-- The DefenseStates in which your guard is up (raised, parrying or held).
+local GUARDING: { [string]: boolean } = { Raising = true, ParryWindow = true, Blocking = true }
 
 -- The punishable DefenseStates, and what the bot calls each.
 local PUNISHABLE: { [string]: string } = {
@@ -673,10 +808,11 @@ local function punishOnOffer(brain: Brain, p: Perception): string?
 		and brain.WhiffJudgedFor ~= swing.StartedAt
 		and p.SelfDefenseState ~= "Blocking"
 	then
-		-- Recovery after a swing that never touched the bot is a whiff. (A landed one leaves the bot
-		-- stunned, and a disabled bot never gets this far.)
+		-- Recovery after a swing that whiffed or was blocked (a landed one leaves the bot stunned, and a
+		-- disabled bot never gets this far). A blocked one reaches here once updateThreat drops the guard
+		-- at the end of your string.
 		brain.WhiffJudgedFor = swing.StartedAt
-		return "Whiff punish"
+		return "Punish your recovery"
 	end
 	return nil
 end
@@ -689,11 +825,32 @@ local function considerOffence(brain: Brain, p: Perception): ()
 		return
 	end
 
+	-- The parry-trade drill's only offence: the one swing each of its parries earns (CounterOwedUntil),
+	-- thrown at you while that parry still has you staggered, so you can parry it back. Always taken.
+	if style.CounterAfterParry then
+		if p.Now < brain.CounterOwedUntil and p.TargetDefenseState == "Staggered" then
+			brain.CounterOwedUntil = -math.huge
+			startPlan(brain, {
+				Label = "Your turn -- parry it back",
+				Queue = { "Basic" },
+				FeintFraction = nil,
+				FeintAt = nil,
+				WantedSince = nil,
+				ExpiresAt = p.Now + 1.5,
+				Punish = true,
+			})
+		end
+		return
+	end
+
 	local punish = punishOnOffer(brain, p)
 	if punish and p.Distance <= p.Reach + 6 and rng:NextNumber() < difficulty.PunishChance then
 		startPlan(brain, {
 			Label = punish,
-			Queue = basicString(randomInt(rng, math.max(style.StringMin, 2), math.max(style.StringMax, 3))),
+			Queue = maybeLaunch(
+				brain,
+				basicString(randomInt(rng, math.max(style.StringMin, 2), math.max(style.StringMax, 3)))
+			),
 			FeintFraction = nil,
 			FeintAt = nil,
 			WantedSince = nil,
@@ -701,6 +858,28 @@ local function considerOffence(brain: Brain, p: Perception): ()
 			Punish = true,
 		})
 		return
+	end
+
+	local offence = TrainingBotConstants.Offence
+
+	-- PRESSURE. Its last string landed: a player keeps the initiative rather than stepping out, so it goes
+	-- again the moment its end-of-string lockout lets it (the plan waits that out). One roll per string.
+	if p.Now < brain.PressureUntil and p.Distance <= p.Reach + 2 then
+		brain.PressureUntil = -math.huge
+		if rng:NextNumber() < style.Aggression * difficulty.PunishChance then
+			local count = randomInt(rng, style.StringMin, style.StringMax)
+			local heavy = style.HeavyBias > 0 and p.TargetGuardFraction < 0.4
+			startPlan(brain, {
+				Label = if heavy then "Keep the pressure -- Heavy" else "Keep the pressure",
+				Queue = if heavy then { "Heavy" } else maybeLaunch(brain, basicString(count)),
+				FeintFraction = nil,
+				FeintAt = nil,
+				WantedSince = nil,
+				ExpiresAt = p.Now + 1.5 + (count + 1) * 1.1,
+				Punish = false,
+			})
+			return
+		end
 	end
 
 	if p.Now < brain.NextThinkAt then
@@ -731,6 +910,12 @@ local function considerOffence(brain: Brain, p: Perception): ()
 	if p.SelfHealthFraction < 0.3 and style.Aggression >= 0.8 then
 		aggression = math.min(aggression + 0.2, 1)
 	end
+	-- You, standing in its reach doing nothing: its turn. A player does not wait a second and a half to
+	-- swing at someone who just walked into range.
+	local targetGuarding = GUARDING[p.TargetDefenseState] == true
+	if p.Distance <= p.Reach and p.TargetAttackState == "Idle" and not targetGuarding then
+		aggression = math.min(aggression * offence.InReachAggressionScale, 0.95)
+	end
 	-- Aggression is a chance per SECOND in reach, converted to this think's slice -- as a per-think chance
 	-- it made the bot swing every few hundred milliseconds and spend most of the fight mid-swing, which
 	-- is exactly when it cannot defend.
@@ -744,8 +929,14 @@ local function considerOffence(brain: Brain, p: Perception): ()
 	if p.TargetGuardFraction < 0.4 then
 		heavyChance += 0.3
 	end
+	-- A HELD guard cannot parry and pays double for a Heavy; a feint (which baits a parry) is wasted on it.
+	local feintScale = 1
+	if p.TargetDefenseState == "Blocking" and style.HeavyBias > 0 then
+		heavyChance += offence.HeldGuardHeavyBonus * (0.5 + 0.5 * influence)
+		feintScale = offence.HeldGuardFeintScale
+	end
 	heavyChance = math.clamp(heavyChance, 0, 0.85)
-	local feintChance = math.clamp(style.FeintChance + influence * 0.6 * habits.Parry, 0, 0.8)
+	local feintChance = math.clamp((style.FeintChance + influence * 0.6 * habits.Parry) * feintScale, 0, 0.8)
 	-- A roller gets short strings: one swing to draw the roll, then wait out its recovery.
 	local stringMax = style.StringMax
 	if influence * habits.Evade > 0.35 then
@@ -767,6 +958,7 @@ local function considerOffence(brain: Brain, p: Perception): ()
 		else
 			local reason = if p.TargetGuardFraction < 0.4
 				then "your guard is low"
+				elseif targetGuarding then "you're holding guard"
 				elseif habits.Block > 0.4 then "you keep blocking"
 				else "change of pace"
 			startPlan(brain, {
@@ -783,13 +975,29 @@ local function considerOffence(brain: Brain, p: Perception): ()
 	end
 
 	local count = randomInt(rng, style.StringMin, stringMax)
+	-- AN M1 FEINT: the string's first Basic cancelled inside its feint window, then the real string --
+	-- the cheap bait on someone who parries on sight.
+	if rng:NextNumber() < feintChance * offence.BasicFeintShare then
+		startPlan(brain, {
+			Label = if habits.Parry > 0.3 then "Feint the M1 (you like to parry)" else "Feint the M1",
+			Queue = { "Basic", "Basic", "Basic" },
+			FeintFraction = 0.3 + rng:NextNumber() * 0.5,
+			FeintAt = nil,
+			WantedSince = nil,
+			ExpiresAt = p.Now + 1 + 3 * 1.1,
+			Punish = false,
+		})
+		return
+	end
+	local queue = maybeLaunch(brain, basicString(count))
+	local launching = queue[#queue] == "Launcher"
 	startPlan(brain, {
-		Label = if count == 1 then "Poke" else `{count}-hit string`,
-		Queue = basicString(count),
+		Label = if launching then "Full string -- launcher" elseif count == 1 then "Poke" else `{count}-hit string`,
+		Queue = queue,
 		FeintFraction = nil,
 		FeintAt = nil,
 		WantedSince = nil,
-		ExpiresAt = p.Now + 1 + count * 0.7,
+		ExpiresAt = p.Now + 1 + #queue * 1.1,
 		Punish = false,
 	})
 end
@@ -800,7 +1008,9 @@ local function neutralMovement(brain: Brain, p: Perception, intent: Intent): ()
 	local style = brain.Style
 	local config = TrainingBotConstants.Config
 	local rng = brain.Rng
-	local desired = p.Reach + style.SpacingStuds + (1 - brain.Composure) * 3
+	-- A rattled bot backs off -- except the parry-trade drill, which has to stay in the exchange.
+	local rattled = if style.CounterAfterParry then 0 else (1 - brain.Composure) * 3
+	local desired = p.Reach + style.SpacingStuds + rattled
 
 	if p.Now < brain.RetreatUntil then
 		intent.Move = "Retreat"
@@ -817,10 +1027,13 @@ local function neutralMovement(brain: Brain, p: Perception, intent: Intent): ()
 	if p.Distance > desired + 1.5 then
 		intent.Move = "Approach"
 		intent.Sprint = p.Distance > desired + config.SprintBeyondStuds
-	elseif p.Distance < desired - 1.5 then
+	elseif p.Distance < desired - 1.5 and (brain.Composure < 0.6 or p.SelfGuardFraction < 0.35) then
+		-- Only a rattled bot, or one on a failing guard, gives ground. A calm one that is walked into holds
+		-- it -- that is its turn to swing (considerOffence) -- rather than backpedalling at the speed you
+		-- advance, which read as running away from the fight.
 		intent.Move = "Retreat"
 	else
-		-- Footsies: mostly circling, sometimes planting to let you commit.
+		-- Footsies (and a calm bot walked into): mostly circling, sometimes planting to let you commit.
 		intent.Move = if brain.Planted then "Hold" else "Strafe"
 	end
 end
@@ -834,6 +1047,7 @@ local function idleIntent(): Intent
 		Sprint = false,
 		Guard = false,
 		Attack = nil,
+		Modifier = nil,
 		Feint = false,
 		Evade = nil,
 	}
@@ -844,6 +1058,10 @@ function TrainingBotBrain.Think(brain: Brain, p: Perception): Intent
 	local now = p.Now
 	local dt = math.clamp(now - brain.LastNow, 0, 0.5)
 	brain.LastNow = now
+	-- Frames longer than a tenth of a second are hitches (or the first call), not the server's pace.
+	if dt > 0 and dt < 0.1 then
+		brain.FrameSeconds = ema(brain.FrameSeconds, dt, 0.2)
+	end
 
 	-- Composure drifts back toward calm.
 	brain.Composure = math.min(brain.Composure + dt * 0.08, 1)
@@ -856,9 +1074,52 @@ function TrainingBotBrain.Think(brain: Brain, p: Perception): Intent
 		return intent
 	end
 
+	-- ITS AIR STRING. Its launcher landed: nothing else it could decide matters until the combo is over, and
+	-- the victim cannot swing at it. Each beat is pressed the moment its body is free -- on-beat -- or held
+	-- back to bait your parry, at a rate its difficulty's read sets; after the beats it meant to land, it
+	-- cashes out: the Spike with a wall behind you, the Slam otherwise.
+	if p.SelfAirAttacker then
+		brain.Plan = nil
+		brain.Threat = nil
+		local rng = brain.Rng
+		local air = brain.Air
+		if air == nil then
+			air = {
+				Length = randomInt(rng, 0, 3),
+				NextAt = p.AirPressReadyAt or now,
+				SeenHits = 0,
+			}
+			brain.Air = air
+			narrate(brain, "Launched -- read me")
+		end
+		local plan = air :: AirPlan
+		local hits = p.SelfAirHitsLanded or 0
+		if hits > plan.SeenHits then
+			plan.SeenHits = hits
+			local AIR = TrainingBotConstants.Air
+			local delayChance = AIR.DelayChance * (0.5 + brain.Difficulty.ReadInfluence)
+			local delay = if rng:NextNumber() < delayChance then rng:NextNumber() * AIR.MaxBeatDelaySeconds else 0
+			plan.NextAt = now + delay
+			if delay > 0.1 then
+				narrate(brain, "Delayed beat")
+			end
+		end
+		local free = p.SelfAttackState == "Idle" and p.SelfBusyUntil <= now
+		if free and now >= plan.NextAt then
+			if hits >= plan.Length then
+				intent.Attack = "Heavy"
+				intent.Modifier = if p.WallBehindTarget then "Up" else nil
+			else
+				intent.Attack = "Basic"
+			end
+		end
+		return intent
+	end
+	brain.Air = nil
+
 	updateThreat(brain, p)
 
-	if p.SelfDisabled or p.SelfRolling then
+	if p.SelfDisabled or p.SelfEvading then
 		-- Nothing it decides can happen; a plan that was mid-string is over (it got hit, it is rolling).
 		if p.SelfDisabled then
 			brain.Plan = nil
@@ -912,8 +1173,12 @@ function TrainingBotBrain.Think(brain: Brain, p: Perception): Intent
 	end
 
 	if plan and (now > plan.ExpiresAt or #plan.Queue == 0) then
-		if #plan.Queue == 0 and not plan.Punish then
-			-- Hit and run: step out after a string rather than standing in front of the answer.
+		if #plan.Queue == 0 and now - brain.LastLandedAt < 1 then
+			-- It landed: keep the initiative (considerOffence's pressure roll) instead of stepping out.
+			brain.PressureUntil = now + TrainingBotConstants.Offence.PressureWindowSeconds
+			brain.NextThinkAt = now
+		elseif #plan.Queue == 0 and not plan.Punish then
+			-- Blocked or dodged: step out rather than standing in front of the answer.
 			brain.RetreatUntil = now + 0.3 + brain.Rng:NextNumber() * 0.4
 		end
 		brain.Plan = nil
@@ -926,12 +1191,37 @@ function TrainingBotBrain.Think(brain: Brain, p: Perception): Intent
 			intent.Sprint = p.Distance > p.Reach + 6
 		else
 			intent.Move = "Hold"
-			intent.Attack = plan.Queue[1]
-			-- The give-up clock only runs while the body is FREE: waiting out its own previous swing is
-			-- the string working, not the press being refused. What it catches is a press refused with
-			-- nothing in the way -- a cooldown, a gate that did not open.
 			local free = p.SelfAttackState == "Idle" and p.SelfBusyUntil <= now
-			if not free then
+			-- The anti-metronome hold starts once the body is free, so it is a real gap in the string -- and
+			-- never after a hit that landed: that gap would drop the combo (see Offence.StringDelayChance).
+			if free and plan.PendingDelay then
+				if now - brain.LastLandedAt < 0.8 then
+					plan.PendingDelay = nil
+				else
+					plan.PressAt = now + plan.PendingDelay
+					plan.PendingDelay = nil
+				end
+			end
+			local holding = plan.PendingDelay ~= nil or (plan.PressAt ~= nil and now < plan.PressAt)
+			local press = plan.Queue[1]
+			if press == "Launcher" and free and brain.PlanLanded < LAUNCH_STRING then
+				-- Not earned: the string was blocked, dodged or broken up. Stop rather than throw a fresh B1.
+				brain.Plan = nil
+				narrate(brain, "String didn't land -- no launch")
+				return intent
+			end
+			if holding then
+				intent.Attack = nil
+			elseif press == "Launcher" then
+				intent.Attack = "Basic"
+				intent.Modifier = "Up"
+			else
+				intent.Attack = press :: AttackKind
+			end
+			-- The give-up clock only runs while the body is FREE and not deliberately holding: waiting out
+			-- its own previous swing is the string working, not the press being refused. What it catches
+			-- is a press refused with nothing in the way -- a cooldown, a gate that did not open.
+			if not free or holding then
 				plan.WantedSince = nil
 			elseif plan.WantedSince == nil then
 				plan.WantedSince = now
@@ -947,7 +1237,9 @@ function TrainingBotBrain.Think(brain: Brain, p: Perception): Intent
 		-- for a beat and let you commit. Rolled on its own think clock, more often when rattled.
 		if now >= brain.NextStanceThinkAt then
 			brain.NextStanceThinkAt = now + brain.Difficulty.ThinkSeconds
-			local chance = brain.Style.GuardInRange * (1 + (1 - brain.Composure))
+			-- GuardInRange is per SECOND (as Aggression is), converted to this think's slice.
+			local perSecond = math.clamp(brain.Style.GuardInRange * (1 + (1 - brain.Composure)), 0, 0.999)
+			local chance = 1 - (1 - perSecond) ^ brain.Difficulty.ThinkSeconds
 			if inYourReach and brain.Rng:NextNumber() < chance then
 				brain.StanceUntil = now + 0.4 + brain.Rng:NextNumber() * 0.7
 			end
@@ -971,12 +1263,25 @@ function TrainingBotBrain.OnOwnSwingAccepted(
 	feintWindowFraction: number
 ): ()
 	local plan = brain.Plan
-	if not plan or plan.Queue[1] ~= kind then
+	local press = plan and plan.Queue[1]
+	local pressKind = if press == "Launcher" then "Basic" else press
+	if not plan or pressKind ~= kind then
 		return
 	end
 	table.remove(plan.Queue, 1)
 	plan.WantedSince = nil
-	if plan.FeintFraction and kind == "Heavy" and swing.Feintable then
+	plan.PressAt = nil
+	-- ANTI-METRONOME: maybe hold the next press back a beat -- more often the more you parry. Never on a
+	-- punish (that is a race) or ahead of a planned feint's follow-up (the feint is the mix-up).
+	if #plan.Queue > 0 and plan.Queue[1] ~= "Launcher" and not plan.Punish and plan.FeintFraction == nil then
+		local offence = TrainingBotConstants.Offence
+		local influence = brain.Difficulty.ReadInfluence
+		local chance = offence.StringDelayChance * (0.5 + influence) + 0.5 * influence * brain.Habits.Parry
+		if brain.Rng:NextNumber() < math.clamp(chance, 0, 0.8) then
+			plan.PendingDelay = 0.08 + brain.Rng:NextNumber() * (offence.StringDelayMaxSeconds - 0.08)
+		end
+	end
+	if plan.FeintFraction and swing.Feintable then
 		plan.FeintAt = swing.StartedAt + swing.WindupSeconds * feintWindowFraction * plan.FeintFraction
 		plan.FeintFraction = nil
 	end
@@ -1000,8 +1305,14 @@ function TrainingBotBrain.OnOutcome(brain: Brain, role: "Attacker" | "Defender",
 		if kind == "Clean" or kind == "Backstab" or kind == "GuardBroken" then
 			brain.Composure = math.min(brain.Composure + 0.08, 1)
 			brain.ConsecutiveBlocked = 0
+			brain.LastLandedAt = now
+			if kind ~= "GuardBroken" then
+				brain.PlanLanded += 1
+			end
 		elseif kind == "Blocked" then
 			brain.ConsecutiveBlocked += 1
+			brain.LastLandedAt = -math.huge
+			brain.PressureUntil = -math.huge
 			-- Two blocked in a row: stop feeding the guard Basics. Leave the string, or swap its tail for a
 			-- Heavy if the guard is worth breaking.
 			local plan = brain.Plan
@@ -1022,21 +1333,31 @@ function TrainingBotBrain.OnOutcome(brain: Brain, role: "Attacker" | "Defender",
 		elseif kind == "Parried" or kind == "Trade" then
 			brain.Plan = nil
 			brain.ConsecutiveBlocked = 0
+			brain.LastLandedAt = -math.huge
+			brain.PressureUntil = -math.huge
 			brain.Composure = math.max(brain.Composure - 0.15, 0)
 			narrate(brain, if kind == "Parried" then "Parried -- ouch" else "Traded")
 		elseif kind == "Evaded" then
 			brain.ConsecutiveBlocked = 0
+			brain.LastLandedAt = -math.huge
+			brain.PressureUntil = -math.huge
 			narrate(brain, "You rolled it")
 		end
 	else
 		if kind == "Clean" or kind == "Backstab" then
 			brain.Composure = math.max(brain.Composure - 0.15, 0)
+			-- Hit back first: whatever initiative its last string earned is gone.
+			brain.PressureUntil = -math.huge
 		elseif kind == "GuardBroken" then
 			brain.Composure = math.max(brain.Composure - 0.3, 0)
 			narrate(brain, "Guard broken!")
 		elseif kind == "Parried" then
 			brain.Composure = math.min(brain.Composure + 0.12, 1)
 			narrate(brain, "Parried you")
+			if brain.Style.CounterAfterParry then
+				-- Good for as long as the stagger it caused could last; past that there is nothing to trade.
+				brain.CounterOwedUntil = now + 2
+			end
 		elseif kind == "Blocked" or kind == "Evaded" then
 			brain.Composure = math.min(brain.Composure + 0.04, 1)
 		end

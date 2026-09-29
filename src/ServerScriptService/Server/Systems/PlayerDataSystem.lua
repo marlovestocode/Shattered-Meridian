@@ -379,12 +379,28 @@ local function encodeKeybindOverrides(overrides: { [Types.KeybindAction]: Types.
 	return encoded
 end
 
+-- KeybindActions renamed since a record may have saved a binding under the old name, old -> new. The
+-- rename has to happen HERE, not on the client: isRebindableKeybindAction drops any action no longer in
+-- Defaults, so a binding saved under a retired name never reaches the client to be migrated there. A
+-- binding under the old name is applied to the new one -- unless the record ALSO holds one under the new
+-- name, which can only have been saved later and so wins. The next save re-encodes it under the new name.
+-- Roll became Evade when the roll was replaced by the combat evade (docs/design/air-combat-and-evade.md).
+local RENAMED_KEYBIND_ACTIONS: { [string]: string } = {
+	Roll = "Evade",
+}
+
 local function decodeKeybindOverrides(raw: unknown): { [Types.KeybindAction]: Types.Keybind }
 	local overrides: { [Types.KeybindAction]: Types.Keybind } = {}
 	if typeof(raw) ~= "table" then
 		return overrides
 	end
-	for action, rawKeybind in raw :: { [string]: any } do
+	local rawTable = raw :: { [string]: any }
+	for storedAction, rawKeybind in rawTable do
+		local action = storedAction
+		local renamed = if typeof(storedAction) == "string" then RENAMED_KEYBIND_ACTIONS[storedAction] else nil
+		if renamed ~= nil then
+			action = if rawTable[renamed] == nil then renamed else nil
+		end
 		if typeof(action) == "string" and isRebindableKeybindAction(action) then
 			local keybind = decodeKeybind(rawKeybind)
 			if keybind then

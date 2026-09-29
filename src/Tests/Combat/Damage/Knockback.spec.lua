@@ -35,7 +35,7 @@ local FRAME = 1 / 60
 local PARRY_ANIMATION = "rbxassetid://spec-knockback-parry"
 
 local function knock(horizontal: number, up: number): MoveTypes.MoveKnockback
-	return { HorizontalVelocity = horizontal, UpVelocity = up, RagdollSeconds = 0 }
+	return { HorizontalVelocity = horizontal, UpVelocity = up }
 end
 
 return function()

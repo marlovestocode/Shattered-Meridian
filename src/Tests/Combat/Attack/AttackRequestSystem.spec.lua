@@ -18,6 +18,7 @@
 -- and create remotes with nobody to fire them at. Every case drives Throw/Press/Step directly, which
 -- is exactly the surface Init() wires the remote to.
 
+local CollectionService = game:GetService("CollectionService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -372,14 +373,18 @@ return function()
 			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Idle")
 		end)
 
-		it("refuses a move that is not feintable", function()
-			local attacker = makeDummy("Jabber", Vector3.new(0, 5, 0))
-			local base = os.clock()
-			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
-			local accepted, reason = AttackRequestSystem.Feint(attacker.Model, base + 0.001)
-			expect(accepted).to.equal(false)
-			expect(reason).to.equal("NotFeintable")
-			expect(HitboxEngine.GetAttackState(attacker.Id)).never.to.equal("Idle")
+		-- Right-click during an M1 has to feint on every weapon, not only during a Heavy.
+		it("feints a Basic too, on every weapon in the roster", function()
+			for index, weaponId in ROSTER do
+				local attacker = makeDummy(`Jabber{index}`, Vector3.new(index * 20, 5, 0))
+				local base = os.clock()
+				AttackRequestSystem.SetWeapon(attacker.Model, weaponId, base)
+				expect(AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)).to.equal(true)
+				local accepted, reason = AttackRequestSystem.Feint(attacker.Model, base + 0.001)
+				expect(reason).to.equal(nil)
+				expect(accepted).to.equal(true)
+				expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Idle")
+			end
 		end)
 
 		it("refuses with no swing in flight", function()
@@ -510,10 +515,10 @@ return function()
 			expect(ratio).to.be.near(expected, 1e-6)
 		end)
 
-		it("keeps every landed-hit gap in the string inside the combo window, Finisher included", function()
+		it("keeps every landed-hit gap in the string inside the combo window, the launcher included", function()
 			-- Worst case: contact on the first frame of one swing's active window, then the next swing's
 			-- own windup after this one's active + recovery and the chain beat. A gap past the window means
-			-- the Finisher is unreachable off a fully-landed string.
+			-- the launcher -- the string's 4th hit, which needs all three before it LANDED -- is unreachable.
 			local chain: { any } = {}
 			for stage = 1, AttackConstants.Sequence.MaxStageProbe do
 				local entry = AttackCatalog.Get(`default:{FIRST_WEAPON}:Basic:{stage}`)
@@ -522,7 +527,7 @@ return function()
 				end
 				table.insert(chain, entry)
 			end
-			table.insert(chain, entryOf(`default:{FIRST_WEAPON}:Finisher`))
+			table.insert(chain, entryOf(`default:{FIRST_WEAPON}:Launcher`))
 			expect(#chain >= 2).to.equal(true)
 
 			local window = DamageConstants.Combo.WindowSeconds
@@ -542,6 +547,124 @@ return function()
 			expect(AttackRequestSystem.GetWeapon(attacker.Model)).to.equal(FIRST_WEAPON)
 			SwingSequencer.SwapWeapon(attacker.Model, os.clock())
 			expect(AttackRequestSystem.GetWeapon(attacker.Model)).to.equal(SECOND_WEAPON)
+		end)
+	end)
+	describe("AttackRequestSystem -- the hit-confirm cancel", function()
+		-- When the first Basic stage's recovery may be cut once it lands, from a throw at `base`.
+		local function basicCutAt(base: number): number
+			local entry = AttackCatalog.Get(`default:{FIRST_WEAPON}:Basic:1`) :: any
+			local definition = entry.Definition
+			return AttackConstants.HitConfirmCancelAt(
+				base,
+				definition.WindupSeconds,
+				definition.ActiveSeconds,
+				definition.RecoverySeconds
+			)
+		end
+
+		it("cuts a LANDED Basic's recovery into a Heavy at the cut point", function()
+			local attacker = makeDummy("Confirmed", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			expect((AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base))).to.equal(true)
+			AttackRequestSystem.NoteHitConfirmed(attacker.Model, `default:{FIRST_WEAPON}:Basic:1`)
+
+			local cutAt = basicCutAt(base) + 1e-3
+			step(cutAt)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Recovery")
+			local accepted = AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, cutAt)
+			expect(accepted).to.equal(true)
+		end)
+
+		it("does not cut a swing that did not land", function()
+			local attacker = makeDummy("Whiffed", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+
+			local cutAt = basicCutAt(base) + 1e-3
+			step(cutAt)
+			local accepted, reason = AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, cutAt)
+			expect(accepted).to.equal(false)
+			expect(reason).to.equal("Busy")
+		end)
+
+		it("does not cut before the cut point", function()
+			local attacker = makeDummy("TooSoon", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			AttackRequestSystem.NoteHitConfirmed(attacker.Model, `default:{FIRST_WEAPON}:Basic:1`)
+
+			local early = basicCutAt(base) - 0.02
+			step(early)
+			local accepted = AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, early)
+			expect(accepted).to.equal(false)
+		end)
+
+		it("keeps M1 into M1 at its full rhythm -- Basic does not take the cut", function()
+			expect(AttackConstants.HitConfirm.CancelInto.Basic).to.equal(false)
+			local attacker = makeDummy("Rhythm", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			AttackRequestSystem.NoteHitConfirmed(attacker.Model, `default:{FIRST_WEAPON}:Basic:1`)
+
+			local cutAt = basicCutAt(base) + 1e-3
+			step(cutAt)
+			local accepted = AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, cutAt)
+			expect(accepted).to.equal(false)
+		end)
+
+		it("cuts a landed recovery for an accepted evade, and only then", function()
+			local attacker = makeDummy("EvadeOut", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+
+			local cutAt = basicCutAt(base) + 1e-3
+			step(cutAt)
+			expect(AttackRequestSystem.CancelRecoveryForEvade(attacker.Model, cutAt)).to.equal(false)
+
+			AttackRequestSystem.NoteHitConfirmed(attacker.Model, `default:{FIRST_WEAPON}:Basic:1`)
+			expect(AttackRequestSystem.CancelRecoveryForEvade(attacker.Model, cutAt)).to.equal(true)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Idle")
+		end)
+
+		it("ignores a landing reported for a swing that is not the one in flight", function()
+			local attacker = makeDummy("Stale", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			AttackRequestSystem.NoteHitConfirmed(attacker.Model, `default:{FIRST_WEAPON}:Basic:2`)
+
+			local cutAt = basicCutAt(base) + 1e-3
+			step(cutAt)
+			expect((AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, cutAt))).to.equal(false)
+		end)
+	end)
+
+	describe("AttackRequestSystem -- the heavy tell", function()
+		local TELL = AttackConstants.Tell
+
+		it("tags a Heavy's thrower for its windup, with the windup's end stamped", function()
+			local attacker = makeDummy("Telegraph", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			expect((AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base))).to.equal(true)
+			expect(CollectionService:HasTag(attacker.Model, TELL.Tag)).to.equal(true)
+			expect(typeof(attacker.Model:GetAttribute(TELL.UntilAttribute))).to.equal("number")
+
+			local entry = AttackCatalog.Get(`default:{FIRST_WEAPON}:Heavy:1`) :: any
+			step(base + entry.Definition.WindupSeconds + 0.01)
+			expect(CollectionService:HasTag(attacker.Model, TELL.Tag)).to.equal(false)
+		end)
+
+		it("does not tag a Basic", function()
+			local attacker = makeDummy("Quiet", Vector3.new(0, 5, 0))
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, os.clock())
+			expect(CollectionService:HasTag(attacker.Model, TELL.Tag)).to.equal(false)
+		end)
+
+		it("drops the tell the moment the Heavy is feinted", function()
+			local attacker = makeDummy("Bluff", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
+			expect((AttackRequestSystem.Feint(attacker.Model, base + 0.01))).to.equal(true)
+			expect(CollectionService:HasTag(attacker.Model, TELL.Tag)).to.equal(false)
 		end)
 	end)
 end

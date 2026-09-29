@@ -4,15 +4,12 @@
 
 	Owns: the Kit Editor's left column -- two groups, "Race Traits" and "Bloodlines", each with its
 	own "+ New" action and a scrollable list of every known entry in that group. Two content types,
-	one column -- the same "merge two nav axes into one column" decision MoveEditor/Sidebar.lua's own
-	header describes for its Moves-list-plus-Section-nav merge, applied here to Race Traits and
-	Bloodlines instead: they share one editor screen (the Race Traits + Bloodline Abilities plan's own
-	design), so a second sidebar for the second content type would just be two columns arguing over
-	the same space Move Editor's own redesign already spent effort avoiding.
+	one column: they share one editor screen (the Race Traits + Bloodline Abilities plan's own design),
+	so a second sidebar for the second content type would just be two columns arguing over the same
+	space.
 
-	Deliberately simpler than MoveEditor/MoveList.lua's own row (no hover-reveal action strip, no
-	inline rename, no duplicate) -- a trait/bloodline row has exactly one destructive action (Delete)
-	and identity is edited in PropertyEditor.lua's own Identity section, not from the list.
+	A trait/bloodline row has exactly one destructive action (Delete); identity is edited in
+	PropertyEditor.lua's own Identity section, not from the list.
 
 	Does not own: the actual Save/Delete network round trips -- OnSelectRaceTrait/OnDeleteRaceTrait/
 	OnSelectBloodline/OnDeleteBloodline etc. are plain closures wired by init.lua, which is what
@@ -56,7 +53,7 @@ export type SidebarProps = {
 local ROW_HEIGHT = 36
 local ROW_ACCENT_WIDTH = 4
 -- How long a Delete press stays Armed before disarming itself if not confirmed -- same idea and
--- magnitude as MoveEditor/MoveList.lua's own DELETE_ARM_SECONDS.
+-- magnitude as Constants.MoveEditor.ConfirmWindowSeconds.
 local DELETE_ARM_SECONDS = 3
 
 local function row(

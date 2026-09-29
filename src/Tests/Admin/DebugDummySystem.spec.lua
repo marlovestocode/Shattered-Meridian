@@ -10,8 +10,7 @@
 -- DebugDummySystem.Spawn is exercised directly (not via a hand-built Instance.new rig) for every case
 -- below -- it is the exact function DevMenuSystem.handleSpawnDebugDummy calls in production, and
 -- Players:CreateHumanoidModelFromDescription with an empty HumanoidDescription needs no asset upload
--- or network round trip (see that function's own header), so it is safe to call from a headless spec
--- the same way PreviewViewport.lua already calls it client-side.
+-- or network round trip (see that function's own header), so it is safe to call from a headless spec.
 
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")

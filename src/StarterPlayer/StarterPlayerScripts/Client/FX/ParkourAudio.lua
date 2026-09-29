@@ -35,6 +35,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local EvadeConstants = require(ReplicatedStorage.Shared.Combat.EvadeConstants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
 
@@ -53,7 +54,7 @@ local ParkourAudio = {}
 local ONE_SHOTS: { [string]: { Name: string, Definition: SoundManager.SoundDefinition } } = {
 	Dashing = { Name = "DashLaunch", Definition = ParkourConstants.Dash.Sound },
 	Mantling = { Name = "Mantle", Definition = ParkourConstants.Obstacle.MantleSound },
-	Rolling = { Name = "Roll", Definition = ParkourConstants.Roll.Sound },
+	Evading = { Name = "Evade", Definition = EvadeConstants.Sound },
 }
 
 -- Started on entering the state and stopped on leaving it. The config tables here carry

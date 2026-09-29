@@ -280,6 +280,29 @@ return function()
 			expect(DefenseSystem.GetState(fighter.Model)).never.to.equal("Neutral")
 		end)
 
+		it("raises a guard HELD through a stun as a block, never a parry window", function()
+			-- A free press arms a parry (see "arms the spawn-time clip's window" below). The same press
+			-- held through hitstun must not: otherwise holding the key parried the next hit of any tight
+			-- string with no timing at all.
+			local base = os.clock()
+			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+			fighter.Humanoid:SetAttribute("HitstunUntil", base + 0.5)
+
+			DefenseSystem.SetBlocking(fighter.Model, true, base)
+			step(FRAME, base + 0.6)
+			expect(DefenseSystem.GetState(fighter.Model)).to.equal("Blocking")
+		end)
+
+		it("raises a guard HELD through a swing as a block, never a parry window", function()
+			local base = os.clock()
+			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(fighter.Id, makeDefinition({ ActiveSeconds = 0.2 }), 1, 1)
+			DefenseSystem.SetBlocking(fighter.Model, true, base)
+			step(FRAME, base + 0.5)
+			expect(DefenseSystem.GetState(fighter.Model)).to.equal("Blocking")
+		end)
+
 		it("raises the guard at once for a body nothing commits", function()
 			local base = os.clock()
 			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))

@@ -20,9 +20,8 @@
 	DamageConstants.Knockback.MaxHorizontalVelocity/MaxUpVelocity is the only thing this adds. Negative
 	authored values are treated as zero: a "pull" is a different mechanic (GrabSystem's), not a sign flip.
 
-	Not handled, deliberately: MoveKnockback.RagdollSeconds (there is no ragdoll system since the combat
-	rewrite deleted RagdollController) and StartsAirCombo (AirCombo was deleted with it). Both fields stay
-	authored and persisted; a knock with them set is an ordinary knock today.
+	Not handled here: MoveKnockback.StartsAirCombo, which is not a velocity -- AirComboSystem reads it to
+	decide whether the hit opens an air string (AirComboMoves.IsLauncher).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")

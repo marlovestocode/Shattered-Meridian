@@ -45,8 +45,8 @@ KitConstants.RequestMaxCallsPerSecond = 4
 -- Per-field authoring bounds for KitAbilityDefinition/ActiveModifierSpec (Shared/Kit/KitTypes.lua,
 -- Types.lua) -- ONE table read by both RaceManager.Validate/BloodlineManager.Validate and, once it
 -- exists, KitEditorSystem's own client field bounds, the same "one place the editor's own bounds
--- and the server's own clamp agree on a range" reasoning Constants.MoveEditor.ObjectStun.Limits'
--- own header already establishes for that feature. First-pass ranges, wide enough to cover any
+-- and the server's own clamp agree on a range" reasoning Constants.MoveEditor.Limits' own header
+-- establishes for moves. First-pass ranges, wide enough to cover any
 -- real authored ability -- not a balance opinion, same as MoveRegistryManager's own clamp
 -- constants, just a floor against a value that would read as broken.
 KitConstants.Limits = {

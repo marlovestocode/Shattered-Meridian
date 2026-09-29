@@ -134,7 +134,7 @@ HitboxEngineConstants.CombatantTag = "Combatant"
 --
 -- This is the ENTIRE integration contract between this engine and the movement framework.
 -- Client/Parkour/ParkourController.lua's resolveCombatOwned already polls this exact Attribute and
--- hands the body to the AerialCombat state (priority 1000, pre-empts everything) while it is set, so
+-- hands the body to the CombatHeld state (priority 1000, pre-empts everything) while it is set, so
 -- a locking swing parks parkour with zero parkour-side changes. Renaming it here silently unparks the
 -- movement system mid-swing. Aliased onto Constants.Attributes.RootControlLocked rather than a second
 -- literal -- GrabSystem.lua reads the same Attribute through that table directly, and two independently

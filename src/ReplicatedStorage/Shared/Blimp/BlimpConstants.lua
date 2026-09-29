@@ -948,7 +948,7 @@ BlimpConstants.Audio = {
 -- what keeps it that way. Every input below has a global meaning that is either physically inert
 -- while mounted (the left stick -- BlimpSystem.mount sets PlatformStand, and RunSystem pins WalkSpeed
 -- to 0 off Constants.Attributes.Mounted) or already gated on that same Attribute by its own consumer
--- (Client/Parkour/ParkourInput.lua for Slide/Roll/Dash/Leap, Client/Emotes/EmoteWheelClient.lua for
+-- (Client/Parkour/ParkourInput.lua for Slide/Evade/Dash/Leap, Client/Emotes/EmoteWheelClient.lua for
 -- the wheel, Client/Camera/ShiftLockCamera.lua for shift lock). That is why this layer needs no
 -- ContextActionService sink and no suppression switch of its own: nothing it takes was answering.
 --
@@ -995,7 +995,7 @@ BlimpConstants.Controls = {
 	-- stop it. That rule is about the GLOBAL map, and its premise is that the player can jump. At a
 	-- helm they cannot: BlimpSystem.mount sets Humanoid.PlatformStand (which suspends the Humanoid's
 	-- own jump handling outright) and welds the root to the station, and ParkourInput's IsJumpKeyDown
-	-- poll is mount-gated (fixed 2026-08-30 -- pollJump was the one Jump/Slide/Roll/Dash/Leap reader
+	-- poll is mount-gated (fixed 2026-08-30 -- pollJump was the one Jump/Slide/Evade/Dash/Leap reader
 	-- that had been missing the isMounted() check the other four already had). The button is genuinely
 	-- idle here in a way it never is anywhere else, which is exactly why the contextual map may spend
 	-- it and the global map may not. Tests/Blimp/BlimpHelmControls.spec.lua pins both halves of that.

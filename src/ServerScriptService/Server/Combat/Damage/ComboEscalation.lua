@@ -96,6 +96,23 @@ function ComboEscalation.Advance(attacker: Model, now: number): number
 	return state.Stage
 end
 
+-- Keeps a LIVE string from lapsing before `until_`. Advances nothing, and never shortens a window. A
+-- string that has already lapsed at `now` stays lapsed. A hold keeps a string alive, it does not make one.
+--
+-- NOT A LANDING, and the landing-based rule above still holds. A hold only stops the clock while
+-- something the attacker could not act through is happening: their own art winding up, or the stagger
+-- from a parry. Whether the NEXT hit lands inside the window is still the whole test. The caller decides
+-- how far to hold (AttackRequestSystem, through DamageSystem.HoldCombo).
+function ComboEscalation.Hold(attacker: Model, until_: number, now: number): ()
+	local state = states[attacker]
+	if not state or now >= state.WindowExpiresAt then
+		return
+	end
+	if until_ > state.WindowExpiresAt then
+		state.WindowExpiresAt = until_
+	end
+end
+
 -- There is no Clear(attacker). There used to be, for "teardown -- a character being removed, a spec
 -- clearing between cases", and nothing ever called it: ReclaimStale below already drops every record
 -- whose attacker has left the world, which is the same teardown arriving on its own schedule. Keeping

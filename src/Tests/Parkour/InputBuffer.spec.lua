@@ -14,6 +14,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterPlayer = game:GetService("StarterPlayer")
 
 local InputBuffer = require(StarterPlayer.StarterPlayerScripts.Client.Parkour.InputBuffer)
+local EvadeConstants = require(ReplicatedStorage.Shared.Combat.EvadeConstants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 
 local ALL_ASSISTS_ON = {
@@ -203,17 +204,25 @@ return function()
 		end)
 	end)
 
-	describe("InputBuffer -- roll", function()
+	describe("InputBuffer -- evade", function()
 		it("buffers and consumes a press", function()
-			InputBuffer.PressRoll(100)
-			expect(InputBuffer.PeekRoll(100)).to.equal(true)
-			expect(InputBuffer.ConsumeRoll(100)).to.equal(true)
-			expect(InputBuffer.PeekRoll(100)).to.equal(false)
+			InputBuffer.PressEvade(100)
+			expect(InputBuffer.PeekEvade(100)).to.equal(true)
+			expect(InputBuffer.ConsumeEvade(100)).to.equal(true)
+			expect(InputBuffer.PeekEvade(100)).to.equal(false)
 		end)
 
-		it("expires past the shared action window", function()
-			InputBuffer.PressRoll(100)
-			expect(InputBuffer.PeekRoll(100 + ACTION_WINDOW + 0.01)).to.equal(false)
+		it("outlives parkour's shared window -- it is buffered like an attack press", function()
+			InputBuffer.PressEvade(100)
+			expect(InputBuffer.PeekEvade(100 + ACTION_WINDOW + 0.01)).to.equal(
+				ACTION_WINDOW + 0.01 < EvadeConstants.BufferSeconds
+			)
+			expect(InputBuffer.PeekEvade(100 + EvadeConstants.BufferSeconds - 0.01)).to.equal(true)
+		end)
+
+		it("expires past its own buffer window", function()
+			InputBuffer.PressEvade(100)
+			expect(InputBuffer.PeekEvade(100 + EvadeConstants.BufferSeconds + 0.01)).to.equal(false)
 		end)
 	end)
 
@@ -247,21 +256,21 @@ return function()
 		it("consuming a jump leaves slide, roll, leap and dash alone", function()
 			InputBuffer.PressJump(100)
 			InputBuffer.PressSlide(100)
-			InputBuffer.PressRoll(100)
+			InputBuffer.PressEvade(100)
 			InputBuffer.PressLeap(100)
 			InputBuffer.PressDash(100)
 			InputBuffer.ConsumeJump(100)
 			expect(InputBuffer.PeekSlide(100)).to.equal(true)
-			expect(InputBuffer.PeekRoll(100)).to.equal(true)
+			expect(InputBuffer.PeekEvade(100)).to.equal(true)
 			expect(InputBuffer.PeekLeap(100)).to.equal(true)
 			expect(InputBuffer.PeekDash(100)).to.equal(true)
 		end)
 
 		it("consuming a dash leaves the roll alone -- they are separate keys and separate moves", function()
-			InputBuffer.PressRoll(100)
+			InputBuffer.PressEvade(100)
 			InputBuffer.PressDash(100)
 			InputBuffer.ConsumeDash(100)
-			expect(InputBuffer.PeekRoll(100)).to.equal(true)
+			expect(InputBuffer.PeekEvade(100)).to.equal(true)
 		end)
 	end)
 
@@ -290,14 +299,14 @@ return function()
 			-- respawns.
 			InputBuffer.PressJump(100)
 			InputBuffer.PressSlide(100)
-			InputBuffer.PressRoll(100)
+			InputBuffer.PressEvade(100)
 			InputBuffer.PressLeap(100)
 			InputBuffer.PressDash(100)
 			InputBuffer.Clear()
 
 			expect(InputBuffer.PeekJump(100)).to.equal(false)
 			expect(InputBuffer.PeekSlide(100)).to.equal(false)
-			expect(InputBuffer.PeekRoll(100)).to.equal(false)
+			expect(InputBuffer.PeekEvade(100)).to.equal(false)
 			expect(InputBuffer.PeekLeap(100)).to.equal(false)
 			expect(InputBuffer.PeekDash(100)).to.equal(false)
 			expect(InputBuffer.IsSlideHeld()).to.equal(false)
@@ -307,7 +316,7 @@ return function()
 	describe("InputBuffer -- leap", function()
 		-- Leap used to be detected as a double tap of jump, with its own two-timestamp gesture-detection
 		-- machinery here. It is now a dedicated key with a dedicated buffered press -- see
-		-- States/Leaping.lua's own header for the change -- so it is tested exactly like Roll above
+		-- States/Leaping.lua's own header for the change -- so it is tested exactly like Evade above
 		-- rather than needing a describe block of its own shape.
 		it("buffers and consumes a press", function()
 			InputBuffer.PressLeap(100)

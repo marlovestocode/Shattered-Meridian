@@ -93,7 +93,18 @@ AttackConstants.Sequence = {
 	-- any stage's Windup/RecoverySeconds, past the point where 0.48 + ChainDelaySeconds clears 0.9, the
 	-- Finisher silently stops being reachable off a fully-landed string -- redo this check by hand, the
 	-- same way this comment just did, rather than trusting the old margin.
-	ChainDelaySeconds = 0.05,
+	--
+	-- RAISED TO 0.12 (2026-09-28, with Tempo.ByStage.Basic 0.75 -> 0.65): "there is not nearly enough
+	-- time between each M1 for a defender to even try to parry." Impact to impact was ~0.87s against a
+	-- 0.65s hitstun, so a hit defender had ~0.2s before the next impact -- a frame-perfect read, not a
+	-- parry. Now it is ~1.03-1.09s (worst pair B3 -> Launcher: 0.24 + 0.20/0.65 + 0.12 + 0.42 = 1.09),
+	-- under DamageConstants.Combo.WindowSeconds (1.15) by 0.06 -- the tightest this margin has been, so
+	-- recheck that pair before moving either number again. BufferSeconds (0.35) still leaves 0.23s of
+	-- early-press forgiveness. Most of the extra time is the slower windup (a READ), not dead air, which is
+	-- what keeps this from being the 0.20 beat that read as a hitch.
+	ChainDelaySeconds = 0.12,
+
+	EndOfStringCooldownSeconds = 0.5,
 
 	-- Switching between the Basic and Heavy strings restarts whichever you switched away from.
 	-- Without this a player could alternate presses and hold both strings at their last stage
@@ -131,22 +142,124 @@ AttackConstants.Sequence = {
 -- it; a clip much longer than its authored timeline is the case that check cannot see.
 AttackConstants.Tempo = {
 	ByStage = {
-		Basic = 0.75,
+		-- 0.65 (was 0.75): a defender needs to be able to SEE the next M1 coming and parry it -- see
+		-- Sequence.ChainDelaySeconds for the impact-to-impact arithmetic this and it share.
+		Basic = 0.65,
 		Heavy = 1,
 		Finisher = 1,
+		-- The air combo's moves play at their authored pace: their windups are the parry read
+		-- (CombatConstants.Weapons.Baseline.Stages' own header on them), and a tempo here would silently
+		-- move every one of them.
+		Launcher = 1,
+		Air = 1,
+		AirFinisher = 1,
 	},
+	-- PER-WEAPON OVERRIDES of ByStage, keyed by roster id then stage kind. A stage a weapon does not name
+	-- here plays at ByStage's tempo. Replaces the ByStage value outright; it does not multiply it.
+	--
+	-- Fists Basic 0.72 (2026-09-29): "the parry window in between punches on hands may be a little too
+	-- long". Fists already play at WeaponSpeed 1.5, so at the shared 0.65 the gap between one punch's
+	-- hitstun ending and the next punch landing was the easiest parry read in the roster. 0.72 plays the
+	-- windup and recovery about 10% faster and shortens each punch-to-punch gap by roughly 0.04s. The hit
+	-- window is untouched, the same as for every tempo. A faster string can only WIDEN the combo-window
+	-- margin that Sequence.ChainDelaySeconds' header tracks, so that check still holds.
+	ByWeapon = {
+		Fists = {
+			Basic = 0.72,
+		},
+	} :: { [string]: { [string]: number } },
 }
 
-AttackConstants.Finisher = {
-	-- Landed-combo depth (ComboEscalation.GetStage) required before completing the Basic string tips
-	-- into the weapon's Finisher instead of wrapping back to stage 1.
-	--
-	-- LANDED, not thrown, and that is the whole design of it: the finisher is the payoff for a string
-	-- that actually connected, so whiffing three times in the air can never earn one. Three is the
-	-- length of the Primary Basic string, so "land a full string, get the finisher" is the rule a
-	-- player learns without being told it.
-	MinComboStage = 3,
+-- The tempo one stage of one weapon's string plays at: that weapon's ByWeapon override when it names the
+-- stage, else the shared ByStage value, else 1. Read LIVE on every call (not cached) so a spec or a Studio
+-- session that edits either table sees its edit.
+function AttackConstants.TempoFor(weaponId: string?, stage: string): number
+	local override = if weaponId then AttackConstants.Tempo.ByWeapon[weaponId] else nil
+	local tempo = (override and override[stage]) or (AttackConstants.Tempo.ByStage :: { [string]: number })[stage]
+	return tempo or 1
+end
+
+-- THE HIT-CONFIRM CANCEL (2026-09-29). A swing that LANDED may be cut partway through its recovery into
+-- the next action. A whiff sits through the whole recovery, so landing feels snappy and whiffing stays
+-- punishable.
+--
+--   * ConfirmKinds -- which outcomes count as landing. A block does not: blocking has to stay a safe
+--     answer, and a faster heavy off a blocked jab would turn it into a guard-break engine.
+--   * RecoveryKeepFraction -- how much of the landed swing's recovery still plays before it can be cut.
+--     0.4 keeps the first 40%, so the cut arrives 60% of the recovery early.
+--   * CancelInto -- which follow-ups may take the cut. Evade is the Evade key (the server cuts on the
+--     accepted evade report, Main.server.lua; the client checks it in States/Evading via
+--     ParkourContext.CombatCommitted).
+--
+-- BASIC IS OFF, ON PURPOSE. M1 into M1 keeps its full rhythm: the gap between M1s is the parry read
+-- the string was slowed for (Tempo.ByStage.Basic 0.65, 2026-09-28), and cutting recovery there would take
+-- that read straight back out. The launcher IS on. It is the string's payoff, its windup is still the
+-- read, and an earlier launcher widens the thin B3 -> launcher combo-window margin that
+-- Sequence.ChainDelaySeconds' header tracks. Air moves never cancel or take a cancel: the air string has
+-- its own grammar.
+AttackConstants.HitConfirm = {
+	Enabled = true,
+	RecoveryKeepFraction = 0.4,
+	ConfirmKinds = {
+		Clean = true,
+		Backstab = true,
+		GuardBroken = true,
+	} :: { [string]: boolean },
+	CancelInto = {
+		Basic = false,
+		Heavy = true,
+		Hotbar = true,
+		Launcher = true,
+		Evade = true,
+	} :: { [string]: boolean },
+	-- The evade has no server-side input buffer (an attack press does), and the client times its cut
+	-- from a swing it started a little earlier than the server did. So the server accepts an evade cut
+	-- this much before its own cut point rather than refusing the evade frames over clock skew.
+	EvadeLatencyToleranceSeconds = 0.08,
 }
+
+-- THE HEAVY TELL (2026-09-29). A swing at or above MinPowerLevel -- every Heavy stage, the launcher, the
+-- air finishers, and any authored art given that weight -- flashes on its thrower for its windup, for
+-- every OTHER client. Heavy weight is what a block pays for (GuardMeter drains by PowerLevel), so this is
+-- the "parry or evade this one, don't block it" read made visible.
+--
+-- Published by the server (AttackRequestSystem) as a CollectionService Tag on the thrower's model plus a
+-- server-time deadline Attribute, so any combatant can carry it (bots and dummies included) and each
+-- client decides how to draw it (Client/FX/SwingTellFX.lua). The tag comes off at the windup's end, or
+-- early when the swing is feinted or cut.
+AttackConstants.Tell = {
+	Enabled = true,
+	MinPowerLevel = 2,
+	Tag = "SwingTell",
+	-- workspace:GetServerTimeNow() at which the telegraphed windup ends.
+	UntilAttribute = "SwingTellUntil",
+	-- How the client draws it: a Highlight that INTENSIFIES toward the strike, from StartFillTransparency
+	-- at the windup's start to PeakFillTransparency as the hit window opens, so the flash reads as "the
+	-- blow is coming" and its brightest frame is the moment to answer it. Danger red, the palette's
+	-- threat colour (UI Tokens.Color.DangerBright).
+	Color = Color3.fromRGB(216, 98, 112),
+	StartFillTransparency = 0.85,
+	PeakFillTransparency = 0.45,
+	OutlineTransparency = 0.15,
+}
+
+-- When a landed swing's recovery may be cut (HitConfirm), from the timeline it was thrown with. One
+-- definition for the server gate and the client's prediction of it.
+function AttackConstants.HitConfirmCancelAt(
+	startedAt: number,
+	windupSeconds: number,
+	activeSeconds: number,
+	recoverySeconds: number
+): number
+	return startedAt
+		+ windupSeconds
+		+ activeSeconds
+		+ recoverySeconds * math.clamp(AttackConstants.HitConfirm.RecoveryKeepFraction, 0, 1)
+end
+
+-- AttackConstants.Finisher (the landed-combo depth that tipped a completed Basic string into the weapon's
+-- Finisher) is retired: the only 4th hit of an M1 string is now the air combo's launcher, Space + M1 after
+-- B3, with its own thresholds in AirComboConstants.Launcher. See SwingSequencer's header.
 
 -- Weapons ---------------------------------------------------------------------------------------
 
@@ -235,6 +348,9 @@ AttackConstants.Input = {
 		-- Hitstun/Staggered already buffer on.
 		Grabbing = true,
 		Grabbed = true,
+		-- The air combo's first beat, pressed while the victim is still rising (AirComboMachine.CanPress).
+		-- Buffered, so an eager first press fires the moment it may -- the on-beat press, not a dropped one.
+		AirRising = true,
 	} :: { [string]: boolean },
 }
 
@@ -269,8 +385,8 @@ AttackConstants.Network = {
 		Feint = "Attack_Feint",
 		-- Server -> the attacker alone, when the server cuts one of their swings short. The one route by
 		-- which a client learns to stop a swing clip it started on Attack_Started -- see
-		-- AttackTypes.AttackCancelledPayload. Feint is its only sender today; a future hitstun or
-		-- parry cancel reuses it rather than adding a remote.
+		-- AttackTypes.AttackCancelledPayload. Senders: a feint, and a parry (which only restores the
+		-- client's string mirror -- see AttackRequestSystem.KeepChainThroughParry).
 		Cancelled = "Attack_Cancelled",
 	},
 
@@ -288,14 +404,15 @@ AttackConstants.Network = {
 	-- to send more than a couple a second.
 	MaxSwapsPerSecondPerPlayer = 4,
 
-	-- The feint key's own bucket. A legal feint needs a Heavy in its windup first, which is itself
+	-- The feint key's own bucket. A legal feint needs a swing in its windup first, which is itself
 	-- gated by the request bucket above, so more than a few a second is never legitimate.
 	MaxFeintsPerSecondPerPlayer = 4,
 }
 
 -- Feint ---------------------------------------------------------------------------------------------
 
--- Cancelling your own Heavy during the early part of its windup, to bait a parry or a block. See
+-- Cancelling your own swing (an M1 or a Heavy) during the early part of its windup, to bait a parry or a
+-- block. See
 -- AttackRequestSystem.Feint for the gate and MoveTypes.FeintableByStage for which moves may be feinted.
 AttackConstants.Feint = {
 	-- How far into the windup a feint is still accepted, as a fraction of that swing's WindupSeconds.
@@ -342,6 +459,13 @@ AttackConstants.Windows = {
 	-- at its native length, and the two never checked each other -- the swing unlocked mid-animation,
 	-- or the body stood frozen after the clip had finished.
 	SyncToClipLength = true,
+	-- A BORROWED clip (an air move standing in on a ground swing's clip until its own is authored --
+	-- Shared/Attack/AttackAnimations.lua's BORROWED_FROM) plays at whatever speed lands its strike marker on
+	-- the air move's own windup (AttackCatalog.Get, step 0). Bounded so a wildly mismatched lender can
+	-- neither freeze nor blur: past these the clip is simply off by the remainder, which is cosmetic --
+	-- the timing is the move's authored numbers either way.
+	BorrowedClipMinSpeed = 0.5,
+	BorrowedClipMaxSpeed = 2.5,
 }
 
 -- Presentation ----------------------------------------------------------------------------------
@@ -502,7 +626,7 @@ AttackConstants.Presentation = {
 		} :: { [string]: { DistanceStuds: number, DurationSeconds: number, DelaySeconds: number } },
 		-- Skipped entirely while airborne (Humanoid.FloorMaterial == Air). A step is a thing feet do; the
 		-- same write with no ground under it is an air-dash on every M1, which is a movement mechanic
-		-- nobody designed. States/AerialCombat.lua already owns what the body does mid-air in combat.
+		-- nobody designed. States/CombatHeld.lua already owns what the body does mid-air in combat.
 		GroundedOnly = true,
 	},
 

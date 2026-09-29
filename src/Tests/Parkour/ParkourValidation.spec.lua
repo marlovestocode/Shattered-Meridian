@@ -77,7 +77,7 @@ return function()
 		end)
 
 		it("accepts a payload with no duration -- that field is optional by contract", function()
-			local parsed = ParkourValidation.Parse({ Kind = "Roll", Phase = "End", Speed = 10, Position = ORIGIN })
+			local parsed = ParkourValidation.Parse({ Kind = "Evade", Phase = "End", Speed = 10, Position = ORIGIN })
 			expect(parsed).to.be.ok()
 		end)
 

@@ -29,13 +29,9 @@ local modulesToLoad = {
 	-- SettingsSystem.lua has no dedicated spec either -- same reasoning as EmoteSystem above; its own
 	-- pure logic lives entirely in PlayerDataSystem's EncodeSettings/DecodeSettings, already covered.
 	ServerScriptService.Server.Systems.SettingsSystem,
-	-- MoveEditorSystem.lua has no dedicated spec (its pure logic lives in MoveRegistryManager.Validate
-	-- and DefaultMoveRegistry, both already covered) and was not even MOUNTED in test.project.json
-	-- until now -- so nothing anywhere caught a broken require path in the one module that owns the
-	-- Move Editor's auth gate, DataStore encode/decode and every one of its twelve remotes. Adding it
-	-- here is the same cheap insurance EmoteSystem/SettingsSystem above already take. A real spec for
-	-- its encode/decode round trip still wants writing; that needs its file-local helpers exported
-	-- first, the way BugReportSystem.ValidateCategory already is.
+	-- MoveEditorSystem.lua's pure pieces are specced directly (Tests/MoveEditor/MoveEditorSystem.spec.lua
+	-- for its entry notes, MoveRecordCodec.spec.lua for its records); its remotes are admin-gated and
+	-- DataStore-backed, so this entry stays as the same cheap require insurance EmoteSystem's is.
 	ServerScriptService.Server.Systems.MoveEditorSystem,
 	-- ParkourSystem.lua's pure logic lives in Shared/Parkour/ParkourValidation.lua (specced directly),
 	-- so this entry exists for the same reason SettingsSystem's does: nothing else in the suite would

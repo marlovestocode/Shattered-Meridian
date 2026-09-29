@@ -222,7 +222,7 @@ return function()
 		it("refuses unconditionally while grounded, regardless of cooldown, input, or air charge", function()
 			-- Pressing Q while standing on solid ground used to still fire a dash (with the
 			-- SurfaceStickSpeed bias in Update dragging the body along the floor) -- Dash is the
-			-- framework's AIRBORNE chaining move, Rolling already owns the grounded dodge, and a burst
+			-- framework's AIRBORNE chaining move, Evading already owns the grounded dodge, and a burst
 			-- that fights the surface the whole way reads as a bug, not a mechanic. This must hold even
 			-- with every other gate wide open.
 			local now = nextNow()
@@ -237,8 +237,8 @@ return function()
 		end)
 
 		it("still accepts while in combat -- the dash is deliberately not combat-gated", function()
-			-- ParkourConstants.CombatGate.BlockedStates lists Rolling but NOT Dashing, on purpose:
-			-- blocking both would leave a fighting player with no evasive movement at all. This test
+			-- ParkourConstants.CombatGate.BlockedStates does NOT list Dashing, on purpose (nor Evading):
+			-- blocking either would take evasive movement away from a fighting player. This test
 			-- is the record of that being a decision rather than an omission -- if Dashing is ever
 			-- added to that roster, this is the test that should be rewritten to say so.
 			local now = nextNow()

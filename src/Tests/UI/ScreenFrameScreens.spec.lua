@@ -37,10 +37,9 @@ return function()
 	-- checked coordinates would be re-asserting the arithmetic this replaced. Searched recursively:
 	-- how deeply ModalScreen nests its Panel is that component's business, not this one's.
 	--
-	-- BY NAME, not FindFirstChildOfClass: the Move Editor mounts TWO ScreenGuis into the same parent
-	-- (its ShortcutsOverlay is a deliberate sibling panel, not a child of the editor's root -- see
-	-- that module's header), and it mounts the overlay FIRST. A class lookup finds the overlay and
-	-- then reports the editor as missing its bands.
+	-- BY NAME, not FindFirstChildOfClass: a screen may mount more than one ScreenGui into the same
+	-- parent (a sibling overlay), and a class lookup would find whichever came first and report the
+	-- screen as missing its bands.
 	local function expectFrameBands(parent: Instance, screenName: string): ()
 		local screenGui = parent:FindFirstChild(screenName)
 		expect(screenGui).to.be.ok()

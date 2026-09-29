@@ -55,7 +55,7 @@ local VALID_KINDS: { [string]: boolean } = {
 	WallRun = true,
 	LedgeClimb = true,
 	Leap = true,
-	Roll = true,
+	Evade = true,
 	Dash = true,
 }
 

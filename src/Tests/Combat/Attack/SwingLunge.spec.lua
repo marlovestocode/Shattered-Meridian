@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local SwingLunge = require(StarterPlayer.StarterPlayerScripts.Client.Combat.SwingLunge) :: any
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
+local LockOnConstants = require(ReplicatedStorage.Shared.Combat.LockOnConstants)
 
 -- Integrates the speed curve numerically, the same way the physics engine will: sum speed * dt over
 -- the window. Asserting on the INTEGRAL rather than on the peak is the point -- the authored number
@@ -127,6 +128,34 @@ return function()
 		it("are both false before any swing has been confirmed", function()
 			expect(SwingLunge.IsStepping()).to.equal(false)
 			expect(SwingLunge.IsPending()).to.equal(false)
+		end)
+	end)
+	describe("SwingLunge.StepInDistance -- the target-aware step", function()
+		local STEP = LockOnConstants.StepIn
+
+		it("never steps without a target unless the kind authors its own step", function()
+			expect(SwingLunge.StepInDistance(nil, nil)).to.equal(0)
+			expect(SwingLunge.StepInDistance(nil, 5)).to.equal(5)
+		end)
+
+		it("closes the gap to the standoff and no further", function()
+			local gap = STEP.StandoffStuds + 1.5
+			expect(SwingLunge.StepInDistance(gap, nil)).to.be.near(1.5, 1e-6)
+		end)
+
+		it("does not step toward a target already in range", function()
+			expect(SwingLunge.StepInDistance(STEP.StandoffStuds + STEP.MinStepStuds * 0.5, nil)).to.equal(0)
+			expect(SwingLunge.StepInDistance(STEP.StandoffStuds - 1, nil)).to.equal(0)
+		end)
+
+		it("does not chase a target out of reach -- it is not a gap-closer", function()
+			expect(SwingLunge.StepInDistance(STEP.StandoffStuds + STEP.MaxStepStuds + 1, nil)).to.equal(0)
+		end)
+
+		it("keeps an authored step, but never past a close target", function()
+			expect(SwingLunge.StepInDistance(STEP.StandoffStuds + 20, 5)).to.equal(5)
+			expect(SwingLunge.StepInDistance(STEP.StandoffStuds + 1, 5)).to.be.near(1, 1e-6)
+			expect(SwingLunge.StepInDistance(STEP.StandoffStuds, 5)).to.equal(0)
 		end)
 	end)
 end

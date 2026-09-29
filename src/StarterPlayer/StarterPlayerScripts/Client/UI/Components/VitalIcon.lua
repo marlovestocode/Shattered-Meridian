@@ -31,23 +31,14 @@
 	non-hotbar meter (ability/cooldown, Meridian XP) per that file's own header. This owns the
 	icon-tile form factor the hotbar introduced.
 
-	"Bars should not simply fill. They should feel alive" (docs/ui-ux-philosophy.md's Player Status
-	Display section, which asks specifically for "a subtle pulse on damage, an energy-flow glow on Qi
-	gain"). Both are here, and NEITHER runs a timer, holds a flag, or needs the caller to say a hit
-	landed -- they fall out of the spring this gauge already had:
-
-	    impact = (smoothed - real)   -- positive only while the value is FALLING
-	    surge  = (real - smoothed)   -- positive only while the value is RISING
-
-	The smoothed fill trails the real one for exactly as long as it takes to absorb a change, and the
-	size of the gap is the size of the change. So a hit flares the tile in proportion to how hard it
-	hit, a gain blooms the wash in proportion to how much came in, and both decay to nothing on their
-	own the instant the spring catches up. No `task.delay`, no generation guard, no second Value --
-	and, unlike a timer-driven flash, neither can outlive its event or fire twice for one hit. Both
-	are exactly 0 at rest, which is what makes them free: nothing downstream recomputes while nothing
-	is happening. (Contrast TierBadge.lua's promotion flare, where the CONSUMER owns the one-shot
-	drive: a promotion is a fact only ClientState knows, where "this number just dropped" is one this
-	component can already see in its own props.)
+	NO PER-FRAME DECORATIVE CUES ANY MORE -- a performance decision, taken on a measured frame-rate drop
+	every time the player was hit. This gauge used to derive a damage flare, a border colour blend, a
+	border transparency pulse and a gain bloom from the spring's lag (impact = smoothed - real, surge =
+	real - smoothed). All of those rewrote their properties on EVERY frame the spring was moving -- seven
+	or eight writes per gauge per frame, on a surface built from chamfered image layers, a UIStroke and a
+	UIGradient -- and health and guard both move on every hit. Now the only thing that animates is the
+	fill itself (the wash height and the track width, two writes a frame while it settles); the border
+	and the wash only change when the critical state flips.
 
 	Per that doc's Implementation Notes on the HUD sync rule, only the *decorative* interpolation uses
 	the smoothed value; CriticalBelow/fillColor read the real, un-smoothed fraction so the
@@ -58,7 +49,7 @@
 	shift -- and each vital's glyph shape is distinct, so all of them are tellable apart with no color
 	information at all.
 
-	Tile shape: the tile background, its border, the wash gauge and the impact flare all render via
+	Tile shape: the tile background, its border and the wash gauge all render via
 	Client/UI/ChamferedSurface.lua's true cut-corner silhouette when available, falling back to the
 	sharp-rect UICorner+UIStroke treatment automatically when it isn't (ChamferedSurface.IsAvailable()).
 	The wash reuses the exact same Fill mask as the tile background rather than a plain rectangle:
@@ -121,14 +112,7 @@ local MUTED_WASH_TRANSPARENCY = 0.9
 local FILL_SPRING_SPEED = Tokens.Motion.FillSpring.Speed
 local FILL_SPRING_DAMPING = Tokens.Motion.FillSpring.Damping
 
--- Converts the spring's own lag (see this file's header) into a 0-1 cue intensity. 6 means a change
--- of about a sixth of the bar saturates the cue -- tuned so a light hit is visible and a heavy one is
--- unmistakable, rather than every scratch flashing at full.
-local LAG_GAIN = 6
--- How bright each cue gets at full intensity, expressed as the transparency it reaches.
-local IMPACT_PEAK_TRANSPARENCY = 0.45
-local SURGE_PEAK_TRANSPARENCY = 0.35
--- The tile border's resting transparency. A hit drives it to 0 (see strokeTransparency below).
+-- The tile border's resting transparency.
 local STROKE_RESTING_TRANSPARENCY = 0.35
 local MUTED_STROKE_TRANSPARENCY = 0.4
 
@@ -252,44 +236,24 @@ function VitalIcon.new(scope: Scope, props: VitalIconProps): Frame
 		return use(meter.FillColor)
 	end)
 
-	-- Decorative only -- smooths how the gauge catches up to `fraction`, and (see this file's header)
-	-- is also the sole source of the damage/gain cues below. Every gameplay-relevant read (critical
+	-- Decorative only -- smooths how the gauge catches up to `fraction`, and is now the ONLY thing on
+	-- this gauge that changes per frame (see this file's header). Every gameplay-relevant read (critical
 	-- threshold, fill color) stays on the real, un-smoothed `fraction` so the accessibility cue never
 	-- desyncs from actual state.
 	local animatedFraction = scope:Spring(fraction, FILL_SPRING_SPEED, FILL_SPRING_DAMPING)
 
-	-- The spring's lag, split by sign -- falling is a hit, rising is a gain.
-	local impact = scope:Computed(function(use)
-		if muted then
-			return 0
-		end
-		return math.clamp((use(animatedFraction) - use(fraction)) * LAG_GAIN, 0, 1)
-	end)
-	local surge = scope:Computed(function(use)
-		if muted then
-			return 0
-		end
-		return math.clamp((use(fraction) - use(animatedFraction)) * LAG_GAIN, 0, 1)
-	end)
-
 	-- A flat neutral border is nearly invisible against this dock's dark surface tones, so a vital's
 	-- resting border is the same metallic violet the frame and corner accents already use -- it reads
-	-- as a deliberate forged edge rather than disappearing. Critical escalates to Danger red on top of
-	-- that, and a hit pulls it toward the vital's own hue for as long as the flare lasts.
+	-- as a deliberate forged edge rather than disappearing. Critical escalates to Danger red. Reads
+	-- only isCritical, so it recomputes on the critical edge and never per frame.
 	local strokeColor = scope:Computed(function(use)
 		if muted then
 			return Tokens.Color.TextDisabled
 		end
-		local base = if use(isCritical) then Tokens.Color.Danger else Tokens.Color.AccentPrimary
-		return base:Lerp(use(fillColor), use(impact))
+		return if use(isCritical) then Tokens.Color.Danger else Tokens.Color.AccentPrimary
 	end)
 
-	local strokeTransparency = scope:Computed(function(use)
-		if muted then
-			return MUTED_STROKE_TRANSPARENCY
-		end
-		return STROKE_RESTING_TRANSPARENCY * (1 - use(impact))
-	end)
+	local strokeTransparency = if muted then MUTED_STROKE_TRANSPARENCY else STROKE_RESTING_TRANSPARENCY
 
 	local strokeThickness = scope:Computed(function(use)
 		return if use(isCritical) then 2 else 1
@@ -344,18 +308,9 @@ function VitalIcon.new(scope: Scope, props: VitalIconProps): Frame
 		Rotation = 90,
 	}
 
-	-- The wash brightens with `surge` -- the doc's "energy-flow glow on Qi gain", and the same
-	-- mechanism for every other vital. One float property, no instance churn.
-	local washTransparency = scope:Computed(function(use)
-		local resting = if muted then MUTED_WASH_TRANSPARENCY else WASH_TRANSPARENCY
-		return resting - (resting - SURGE_PEAK_TRANSPARENCY) * use(surge)
-	end)
+	local washTransparency = if muted then MUTED_WASH_TRANSPARENCY else WASH_TRANSPARENCY
 	local washSize = scope:Computed(function(use)
 		return UDim2.fromScale(1, use(animatedFraction))
-	end)
-	-- The damage flare: a full-tile plate in the vital's own hue, fully invisible at rest.
-	local flareTransparency = scope:Computed(function(use)
-		return 1 - (1 - IMPACT_PEAK_TRANSPARENCY) * use(impact)
 	end)
 
 	local tileChildren: { Instance } = {}
@@ -376,18 +331,13 @@ function VitalIcon.new(scope: Scope, props: VitalIconProps): Frame
 			Size = washSize,
 			ZIndex = 1,
 		})
-		local flare = ChamferedSurface.Fill(scope, {
-			FillColor = fillColor,
-			FillTransparency = flareTransparency,
-			ZIndex = 4,
-		})
 		local stroke = ChamferedSurface.Stroke(scope, {
 			Color = strokeColor,
 			Transparency = strokeTransparency,
 			Weight = strokeWeight,
 			ZIndex = 5,
 		})
-		local layers = ChamferedSurface.AllLayers({ tileFill, wash, flare, stroke })
+		local layers = ChamferedSurface.AllLayers({ tileFill, wash, stroke })
 		if layers then
 			tileChildren = layers
 		else
@@ -422,17 +372,6 @@ function VitalIcon.new(scope: Scope, props: VitalIconProps): Frame
 				BackgroundTransparency = washTransparency,
 				BorderSizePixel = 0,
 				ZIndex = 1,
-			} :: Frame
-		)
-		table.insert(
-			tileChildren,
-			scope:New "Frame" {
-				Name = "Flare",
-				Size = UDim2.fromScale(1, 1),
-				BackgroundColor3 = fillColor,
-				BackgroundTransparency = flareTransparency,
-				BorderSizePixel = 0,
-				ZIndex = 4,
 			} :: Frame
 		)
 	end

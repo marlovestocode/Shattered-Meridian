@@ -78,9 +78,9 @@ local function bindParkourActions(): ()
 	-- step off.
 	--
 	-- IT WAS LATENT UNTIL THE HELM GOT A GAMEPAD MAP AND IS NOT LATENT NOW. On a keyboard the helm's
-	-- contextual keys (W/S/X/G) happen to miss Slide (C), Roll (LeftAlt) and Dash (Q), so only Leap --
+	-- contextual keys (W/S/X/G) happen to miss Slide (C), Evade (Z) and Dash (Q), so only Leap --
 	-- which genuinely shares E with Interact -- ever collided. BlimpConstants.Controls' gamepad column
-	-- overlaps all three by construction: its four face buttons are ButtonY (Roll), ButtonA, ButtonB
+	-- overlaps all three by construction: its four face buttons are ButtonY (Evade), ButtonA, ButtonB
 	-- (Dash) and ButtonX (Slide), chosen BECAUSE those global meanings are inert at a helm. This gate
 	-- is the half of "inert" that was only true of the action and not yet true of its buffer.
 	--
@@ -98,11 +98,11 @@ local function bindParkourActions(): ()
 		end,
 	})
 
-	InputRouter.Bind("Roll", {
+	InputRouter.Bind("Evade", {
 		Layer = "Gameplay",
 		Began = function()
 			if not isMounted() then
-				InputBuffer.PressRoll(os.clock())
+				InputBuffer.PressEvade(os.clock())
 			end
 		end,
 	})
@@ -153,7 +153,7 @@ end
 
 -- Binds the input handlers. Called from ParkourController.Start. Idempotent.
 --
--- BEHAVIOUR NOTE FROM THE InputRouter MIGRATION: Slide/Roll/Leap/Dash previously checked only
+-- BEHAVIOUR NOTE FROM THE InputRouter MIGRATION: Slide/Evade/Leap/Dash previously checked only
 -- gameProcessed, never Constants.Attributes.UiModalOpen -- unlike Client/Combat/AttackInputClient.lua
 -- and Client/Combat/GrabInputClient.lua, which both already gate on it. InputRouter's "Gameplay"
 -- layer applies that gate uniformly (see InputRouter.lua's own header), so these four actions now

@@ -222,11 +222,11 @@ local function onInputHold(): ()
 end
 
 -- The half for what is already moving: horizontal velocity to zero, vertical carried through.
--- ParkourMotor.ApplyExternalImpulse refuses during a kinematic traversal or a server-held root and
--- returns false rather than throwing; losing a frame of a cosmetic freeze to either is the correct
--- outcome. External rather than the plain ApplyImpulse because a hit that lands mid-roll (outside its
--- evade frames) must END the roll: a velocity-driven state would otherwise overwrite the freeze every
--- physics step and keep rolling straight through the hit that stopped it.
+-- ParkourMotor.ApplyExternalImpulse refuses only while the server holds the root, returning false rather
+-- than throwing; losing a frame of a cosmetic freeze to that is the correct outcome. External rather than
+-- the plain ApplyImpulse because a hit that lands mid-evade (outside its frames), mid-slide or mid-vault
+-- must END that state (ParkourController's interrupt rule): a state that owns the body would otherwise
+-- overwrite the freeze every physics step and carry the player straight through the hit that stopped it.
 local function onVictimFreezeHeartbeat(): ()
 	if not freezeActive() then
 		return

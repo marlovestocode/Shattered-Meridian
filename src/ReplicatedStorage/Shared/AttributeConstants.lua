@@ -178,6 +178,12 @@ local AttributeConstants = {
 	-- GetAttributeChangedSignal shape ShiftLockCamera already uses for Flying/RootControlLocked, so it
 	-- costs that module a cached boolean and no new dependency in either direction.
 	ParkourFacingOwned = "ParkourFacingOwned",
+	-- CLIENT-WRITTEN, like ParkourFacingOwned directly above and for the same reason: true while
+	-- Client/Combat/SwingTracking.lua is turning the local body toward its target during a swing's windup.
+	-- Client/Camera/ShiftLockCamera.lua skips its per-frame yaw write while it is set, exactly as it does
+	-- for ParkourFacingOwned. An Attribute rather than a require, so the camera never depends on the combat
+	-- client. Never replicates, never an authority: the server's hitbox reads the real replicated facing.
+	CombatFacingOwned = "CombatFacingOwned",
 	-- The momentum a just-finished parkour action handed back, as an absolute WalkSpeed floor, plus the
 	-- timestamp it decays to nothing at. Together these are how a slide's or a vault's earned speed
 	-- survives into ordinary running instead of being erased the instant the action ends -- see
@@ -193,8 +199,8 @@ local AttributeConstants = {
 	-- path only, so it never carries a report the server refused. Nothing server-side gates on it. It
 	-- exists because Humanoid Attributes replicate to every client for free, which lets other players'
 	-- clients know what a remote character is doing without a broadcast remote. Two client readers:
-	-- Client/FX/RemoteMovementFX.lua draws other players' rolls off "Roll" (dust and afterimage), and
-	-- Client/Defense/DefenseClient.lua drops a held guard the moment its own roll is accepted.
+	-- Client/FX/RemoteMovementFX.lua draws other players' evades off "Evade" (dust and afterimage), and
+	-- Client/Defense/DefenseClient.lua drops a held guard the moment its own evade is accepted.
 	ParkourState = "ParkourState",
 	-- Run System (Server/Systems/RunSystem.lua, Client/Movement/RunController.lua). The sustained-run
 	-- STAGE this player's server-side state currently resolves to: 0 = not running (or running but
@@ -249,6 +255,29 @@ local AttributeConstants = {
 	-- CombatBusyUntil reason above: nothing has to remember to clear it. Server-only in meaning -- the
 	-- client's os.clock() is a different clock, so no client reads this.
 	KnockbackUntil = "KnockbackUntil",
+	-- Air combat (Server/Combat/AirCombo/AirComboSystem.lua, docs/design/air-combat-and-evade.md). The
+	-- five below are the whole cross-system channel for an air combo; no System requires AirComboSystem
+	-- to learn any of it. EVERY DEADLINE HERE IS IN workspace:GetServerTimeNow() TIME, NOT os.clock(),
+	-- unlike HitstunUntil/CombatBusyUntil/KnockbackUntil above: clients read these (the parkour park, the
+	-- attacker's follow, the spectator FX), and GetServerTimeNow is the one clock both sides share.
+	--
+	-- On the VICTIM: held in the air until this time. Refuses their attack, evade and parkour, turns a
+	-- held guard into nothing (DefenseSystem pass 1), and leaves the parry press itself live.
+	AirHeldUntil = "AirHeldUntil",
+	-- On the ATTACKER: committed to an air combo until this time. Their Basic/Heavy resolve to air moves,
+	-- their parkour is parked, and their own client drives the follow (Client/Combat/AirComboClient.lua).
+	AirComboAttackerUntil = "AirComboAttackerUntil",
+	-- On BOTH: the hover point (Vector3). The attacker's client computes its follow slot from it.
+	AirComboAnchor = "AirComboAnchor",
+	-- On BOTH: which phase the combo is in (AirComboTypes.Phase), for every client's readability FX.
+	-- Lingers briefly after the combo ends so the end state (Parried/Dropped/Slammed/Spiked) is visible,
+	-- then clears to nil.
+	AirComboPhase = "AirComboPhase",
+	-- On the VICTIM: cannot be launched again until this time -- after ANY combo ends, whatever ended it.
+	LaunchImmuneUntil = "LaunchImmuneUntil",
+	-- On the VICTIM of a Slam: every contact until this time resolves Evaded (DefenseSystem pass 1). The
+	-- hard knockdown is intangible so a slam can never be followed by a free hit on a body lying down.
+	AirComboIntangibleUntil = "AirComboIntangibleUntil",
 }
 
 return AttributeConstants

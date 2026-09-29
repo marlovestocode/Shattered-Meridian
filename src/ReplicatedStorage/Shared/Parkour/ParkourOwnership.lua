@@ -33,10 +33,10 @@
 	currently allows, and closing it means ParkourTypes.ActionKind growing a reportable hang, which is
 	the parkour layer's call and not something to fake from a combat gate.
 
-	AerialCombat IS DELIBERATELY NOT AN ACTION HERE. That state is where the parkour framework parks
-	while COMBAT already owns the body (States/AerialCombat.lua: "doing nothing, correctly"). Counting
+	CombatHeld IS DELIBERATELY NOT AN ACTION HERE. That state is where the parkour framework parks
+	while COMBAT already owns the body (States/CombatHeld.lua: "doing nothing, correctly"). Counting
 	it would mean a combat action refusing itself: the first swing hands the body to combat, parkour
-	parks in AerialCombat, and every following swing is refused for being "in a parkour action" --
+	parks in CombatHeld, and every following swing is refused for being "in a parkour action" --
 	which would take aerial combat out of the game entirely.
 ]]
 
@@ -54,7 +54,7 @@ local ParkourOwnership = {}
 -- standing or walking, and Sprinting is handled by forcing the run down rather than by refusing) and
 -- so is ordinary air time (Jumping/Falling/Landing -- a jump is not a traversal, and refusing an
 -- attack for being briefly airborne would delete jump-cancelling and every aerial exchange).
--- AerialCombat is absent for the reason this file's header gives at length.
+-- CombatHeld is absent for the reason this file's header gives at length.
 --
 -- Listed exhaustively rather than derived from a DriveMode or a priority number: this is a GAMEPLAY
 -- rule about which traversals commit you, and tying it to an implementation detail of how a state
@@ -66,7 +66,7 @@ local ACTION_STATES: { [string]: boolean } = {
 	WallRunning = true,
 	LedgeHanging = true,
 	LedgeClimbing = true,
-	Rolling = true,
+	Evading = true,
 	Dashing = true,
 	Leaping = true,
 	LedgeLeaping = true,

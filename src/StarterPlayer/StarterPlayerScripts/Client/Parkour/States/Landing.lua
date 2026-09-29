@@ -11,8 +11,7 @@
 	              state was entered at all.
 	  * Medium -- a small momentum cost and the same brief hold. A visible beat, no loss of control.
 	  * Hard   -- a real recovery window (HardLandingRecoverySeconds) and most of the momentum gone.
-	              This is the only landing that takes anything from the player, and it is the one a
-	              correctly-timed roll cancels entirely.
+	              This is the only landing that takes anything from the player.
 
 	CanEnter always refuses. This state is reachable ONLY by States/Falling.lua explicitly handing off
 	to it (route 1 in StateMachine.lua, which does not consult CanEnter), because "should I be
@@ -25,7 +24,7 @@
 	Combat interaction: the hard-landing hold does NOT lock out attacks. It costs momentum and plays a
 	recovery beat, but CombatSystem's own action gates are untouched by this framework -- a player who
 	lands hard can still swing, block or parry immediately. The design asked for landing to "interact
-	with combat so attacks, rolls, slides, or other actions can potentially be performed immediately
+	with combat so attacks, evades, slides, or other actions can potentially be performed immediately
 	after landing," and taking the character's actions away would have been the opposite of that.
 ]]
 
@@ -52,12 +51,6 @@ local Landing: ParkourTypes.StateDefinition = {
 	end,
 
 	Enter = function(context: ParkourContext): ()
-		-- Recorded BEFORE the cut, for the late landing roll: a roll pressed within
-		-- Roll.LandingWindowSeconds of this contact refunds what the line below takes (States/
-		-- Rolling.Enter). Not cleared in Exit -- Exit runs before the roll's Enter on that very
-		-- transition, and the roll is the one reader, so it clears them itself.
-		context.PreLandingMomentum = context.Momentum
-		context.LandedAt = context.Now
 		local severity = context.LandingSeverity or "Soft"
 		local retain = if severity == "Hard"
 			then FALL.HardLandingRetainFraction

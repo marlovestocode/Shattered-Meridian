@@ -17,13 +17,9 @@
 	window, the camera dip, and the shake preset -- and three independent classifications of the same
 	fall is exactly how a landing ends up with a hard camera shake and a soft recovery.
 
-	This state is also where a roll rescues a bad landing, and the rescue is decided HERE, on the contact
-	frame, rather than by Rolling pre-empting on priority. A roll never starts in the air
-	(StateSupport.CanRoll demands ground contact), so the only honest moment to ask "did they press roll
-	in time" is the frame the ground arrives: a press within ParkourConstants.Roll.LandingWindowSeconds
-	before it returns "Rolling" instead of "Landing", so the landing -- its momentum cut, its camera dip,
-	its shake -- simply never happens. It used to be decided a frame EARLY instead, by letting Rolling
-	enter while merely NearGround, which is how a roll came to start airborne and float.
+	No landing rescue lives here any more. The landing roll -- a roll pressed just before touchdown that
+	skipped Landing entirely -- was cut with the roll (docs/design/air-combat-and-evade.md, A2); the evade
+	that replaced it is a ground move and is simply refused in the air.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -73,15 +69,6 @@ local Falling: ParkourTypes.StateDefinition = {
 			return nil
 		end
 
-		-- Contact, with a roll pressed in time: roll out of the fall instead of landing it. A route-1
-		-- transition, so it asks the same predicate Rolling.CanEnter does -- cooldown and combat
-		-- commitment included -- under the roll's own landing window rather than the shared buffer. No
-		-- severity is computed or published, which is what keeps the dip and the shake from firing
-		-- (Rolling.Enter clears both again regardless).
-		if StateSupport.CanRoll(context, ParkourConstants.Roll.LandingWindowSeconds) then
-			return "Rolling"
-		end
-
 		-- Contact. Compute the drop from the apex, classify it, publish both, and hand off.
 		local fallHeight = math.max(context.ApexHeight - currentHeight, 0)
 		context.FallHeight = fallHeight
@@ -93,7 +80,7 @@ local Falling: ParkourTypes.StateDefinition = {
 	Exit = function(context: ParkourContext): ()
 		-- Reset the apex on the way out so the next airborne stretch starts fresh. Done in Exit rather
 		-- than in the next state's Enter because every exit from Falling -- landing, ledge grab,
-		-- wall-run, roll -- needs it, and putting it in one place is the only way it cannot be
+		-- wall-run -- needs it, and putting it in one place is the only way it cannot be
 		-- forgotten by whichever exit is added next.
 		context.ApexHeight = context.RootPart.Position.Y
 	end,

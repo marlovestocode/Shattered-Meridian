@@ -31,7 +31,7 @@ local EngagementConstants = {}
 --
 -- 30 AS OF 2026-08-26, up from the 5 inherited from the deleted CombatSystem. THIS NUMBER IS READ BY
 -- MORE THAN THE HUD, and the reach is worth stating where the value lives rather than leaving it to
--- be rediscovered: ParkourConstants.CombatGate.BlockedStates refuses Dash, Slide, Roll, Leap and
+-- be rediscovered: ParkourConstants.CombatGate.BlockedStates refuses Slide, Leap and
 -- WallRun for the whole of it, and EmoteSystem refuses every CombatAllowed = false emote. Raising it
 -- six-fold therefore lengthens a movement lockout six-fold, not just a label.
 --
@@ -78,6 +78,12 @@ EngagementConstants.Network = {
 		-- Types.EngagementPayload's own header for why an absolute deadline could not be sent.
 		Changed = "Engagement_Changed",
 	},
+	-- COALESCED, NOT PER HIT (combat performance audit N1/F5). Entering or leaving combat and a change of
+	-- opponent still push the instant they happen; anything else -- the running damage totals, the last
+	-- outcome, a refreshed countdown -- is pushed at most this often per player. It used to fire on every
+	-- landed hit to both fighters, and every push rebuilt the HUD's engagement panel on arrival. The HUD
+	-- decays the countdown locally between pushes, so nothing visible is lost.
+	MinPushIntervalSeconds = 0.5,
 }
 
 -- Debug ---------------------------------------------------------------------------------------------

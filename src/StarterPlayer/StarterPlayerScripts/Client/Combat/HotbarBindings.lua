@@ -4,8 +4,8 @@
 
 	Owns: a READ-ONLY local mirror of the server's slot(1-5) -> ArtId map (Types.PlayerProfile.
 	equippedArts, via ArtConstants.RemoteNames.ArtStateUpdated) for the HUD hotbar
-	(Client/UI/Screens/HUD/init.lua's five AbilitySlots) and the Move Editor toolbar's "which
-	slot(s) is this move already on" row (PropertyEditor.lua) to read.
+	(Client/UI/Screens/HUD/init.lua's five AbilitySlots) and the Move Editor readout's "which slot is
+	this art on" row (Screens/DevTools/MoveEditor/Readout.lua) to read.
 
 	IT MIRRORS THE ART'S NAME AND COST TOO, as of 2026-08-25 -- GetInfo below. An ArtId is a move-
 	registry key and the registry is server-side, so a client holding only the id has an identifier it

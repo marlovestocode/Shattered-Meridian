@@ -297,6 +297,30 @@ return function()
 		-- The Gamepad block, which ships with NO migration of its own (see DecodeSettings' own note):
 		-- every pre-Gamepad record on disk has no such key, so this fallback is not an edge case, it is
 		-- what every existing player hits on their next login.
+		-- A renamed KeybindAction. The client cannot migrate this itself: the decode below drops any action
+		-- no longer in Keybinds.Defaults, so a binding saved as "Roll" would be silently reset to Z.
+		it("carries a binding saved under the retired Roll action over to Evade", function()
+			local decoded = PlayerDataSystem.DecodeSettings({
+				Keybinds = { Roll = { KeyCode = "X" } },
+				GamepadKeybinds = { Roll = { KeyCode = "ButtonX" } },
+				Autorun = false,
+			})
+
+			expect((decoded.Keybinds :: any).Evade.KeyCode).to.equal(Enum.KeyCode.X)
+			expect((decoded.Keybinds :: any).Roll).to.equal(nil)
+			expect((decoded.GamepadKeybinds :: any).Evade.KeyCode).to.equal(Enum.KeyCode.ButtonX)
+		end)
+
+		it("prefers a binding saved under Evade over a stale Roll one in the same record", function()
+			local decoded = PlayerDataSystem.DecodeSettings({
+				Keybinds = { Roll = { KeyCode = "X" }, Evade = { KeyCode = "V" } },
+				GamepadKeybinds = {},
+				Autorun = false,
+			})
+
+			expect((decoded.Keybinds :: any).Evade.KeyCode).to.equal(Enum.KeyCode.V)
+		end)
+
 		it("falls back to the shipped stick defaults for a missing Gamepad block", function()
 			local decoded = PlayerDataSystem.DecodeSettings({
 				Keybinds = {},

@@ -225,7 +225,7 @@ return function()
 			local trace: Trace = {}
 			local machine = StateMachine.New("Vaulting")
 			machine:Register(makeState("Vaulting", 150, trace, { Committed = true }))
-			machine:Register(makeState("AerialCombat", 1000, trace))
+			machine:Register(makeState("CombatHeld", 1000, trace))
 
 			expect(machine:Update(makeContext())).to.equal("Vaulting")
 		end)
@@ -243,10 +243,10 @@ return function()
 			local trace: Trace = {}
 			local machine = StateMachine.New("Vaulting")
 			machine:Register(makeState("Vaulting", 150, trace, { Committed = true }))
-			machine:Register(makeState("AerialCombat", 1000, trace))
+			machine:Register(makeState("CombatHeld", 1000, trace))
 
-			expect(machine:ForceTransition("AerialCombat", makeContext())).to.equal(true)
-			expect(machine:GetCurrentId()).to.equal("AerialCombat")
+			expect(machine:ForceTransition("CombatHeld", makeContext())).to.equal(true)
+			expect(machine:GetCurrentId()).to.equal("CombatHeld")
 		end)
 	end)
 
@@ -381,9 +381,9 @@ return function()
 			local trace: Trace = {}
 			local machine = StateMachine.New("Idle")
 			machine:Register(makeState("Idle", 10, trace))
-			machine:Register(makeState("AerialCombat", 1000, trace))
+			machine:Register(makeState("CombatHeld", 1000, trace))
 
-			machine:ForceTransition("AerialCombat", makeContext())
+			machine:ForceTransition("CombatHeld", makeContext())
 			expect(machine:GetHistory()[1].Route).to.equal("Forced")
 		end)
 

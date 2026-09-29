@@ -36,7 +36,7 @@ local PRESS_CONTROLS = { "SailUp", "SailDown", "Furl", "Adrift", "Release" }
 local GATED_WHILE_MOUNTED: { [string]: string } = {
 	-- Client/Parkour/ParkourInput.lua -- every Began is behind its isMounted() check.
 	Slide = "ParkourInput",
-	Roll = "ParkourInput",
+	Evade = "ParkourInput",
 	Dash = "ParkourInput",
 	Leap = "ParkourInput",
 	-- Client/Emotes/EmoteWheelClient.lua -- refuses to open the wheel while mounted.

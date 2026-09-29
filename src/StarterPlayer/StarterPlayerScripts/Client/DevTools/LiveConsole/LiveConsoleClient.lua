@@ -13,7 +13,7 @@
 	setOpen (below) is the ONE place IsOpen is ever written client-side -- the keybind toggle and
 	the screen's own "X" button (which fires handle.CloseRequested instead of writing IsOpen
 	directly) both route through it -- same precedent Client/DevTools/MoveEditor/MoveEditorClient.lua's own
-	setOpen establishes, needed here because Subscribe/Unsubscribe must stay in lockstep with EVERY
+	setOpen keeps, needed here because Subscribe/Unsubscribe must stay in lockstep with EVERY
 	open/close transition, not just the keybind-driven one.
 
 	Unlike DevMenuClient.lua/MoveEditorClient.lua, this module does NOT gate whether to bind its

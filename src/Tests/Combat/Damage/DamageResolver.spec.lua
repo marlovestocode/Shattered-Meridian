@@ -83,7 +83,7 @@ return function()
 		end)
 
 		it("carries knockback through without applying it", function()
-			local knockback = { UpVelocity = 40, HorizontalVelocity = 20, RagdollSeconds = 0.5 }
+			local knockback = { UpVelocity = 40, HorizontalVelocity = 20 }
 			local result = DamageResolver.Resolve("Clean", "Neutral", profile({ Knockback = knockback }), 1)
 			expect(result.Knockback).to.equal(knockback)
 		end)
@@ -161,7 +161,7 @@ return function()
 		it("prices to nothing and earns the attacker no escalation", function()
 			-- The defender was not there. A move with knockback and a grab authored on it must carry
 			-- neither through, or an evaded swing would still launch or hold the body it missed.
-			local knockback = { UpVelocity = 40, HorizontalVelocity = 20, RagdollSeconds = 0.5 }
+			local knockback = { UpVelocity = 40, HorizontalVelocity = 20 }
 			local result = DamageResolver.Resolve("Evaded", "Neutral", profile({ Knockback = knockback }), 4)
 			expect(result.Kind).to.equal("Evaded")
 			expect(result.Damage).to.equal(0)

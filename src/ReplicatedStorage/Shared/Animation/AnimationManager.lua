@@ -984,12 +984,12 @@ function AnimationManager.Bind(self: AnimationManagerInstance, character: Model)
 	-- Every handler re-checks the generation it was created under: a connection can outlive the bind
 	-- that made it by a frame (Disconnect is not retroactive for a signal already in flight), and
 	-- acting on the previous life's death would tear down the new one's animations.
-	local function guarded(handler: () -> ()): () -> ()
-		return function()
+	local function guarded(handler: (...any) -> ()): (...any) -> ()
+		return function(...)
 			if self.generation ~= generation then
 				return
 			end
-			handler()
+			handler(...)
 		end
 	end
 

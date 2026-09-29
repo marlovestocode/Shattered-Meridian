@@ -79,15 +79,29 @@
 	(AttackCatalog and the Move Creation System behind it), how a move's timeline is built from its
 	clip (Shared/Attack/AttackWindows.lua and AttackCatalog.Get's own concern), or any
 	presentation whatsoever -- every FX decision belongs to the client that receives Attack_Started.
+
+	KEEPING THE CHAIN (2026-09-29). Two things must not cost a player their place in a string, and this
+	module is where both are decided, because it is the one layer that sees the string AND the combo:
+	  * an Art woven in mid-string (Throw's hotbar branch: SwingSequencer.Weave holds the string's place,
+	    DamageSystem.HoldCombo keeps the landed combo alive until the art's hit window closes), and
+	  * a swing that got PARRIED (onDamageApplied: SwingSequencer.RestoreParried hands the stage back and
+	    holds it through the stagger, and DamageSystem.HoldCombo holds the landed combo the same way).
+	Either way B1, B2, then an Art or a parry still leaves B3 and the launcher within reach.
 ]]
 
+local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
+local AirComboMoves = require(ReplicatedStorage.Shared.AirCombo.AirComboMoves)
+local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
+local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
+local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local AmortizedReclaim = require(ReplicatedStorage.Shared.AmortizedReclaim)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
@@ -106,6 +120,7 @@ local MoveRegistryManager = require(script.Parent.Parent.MoveRegistryManager)
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
 local DefenseSystem = require(script.Parent.Parent.Defense.DefenseSystem)
 local GrabSystem = require(script.Parent.Parent.Grab.GrabSystem)
+local AirComboSystem = require(script.Parent.Parent.AirCombo.AirComboSystem)
 local HitboxEngine = require(script.Parent.Parent.HitboxEngine.HitboxEngine)
 local AdminConfig = require(script.Parent.Parent.Parent.Config.AdminConfig)
 local ArtSystem = require(script.Parent.Parent.Parent.Systems.ArtSystem)
@@ -154,11 +169,21 @@ type InFlight = {
 	SwingLengthCooldown: boolean,
 	-- The swing's weight class, carried for GetInFlight's readers (a Heavy is PowerLevel 2+).
 	PowerLevel: number,
+	-- The rest of the timeline, for the hit-confirm cancel point (AttackConstants.HitConfirmCancelAt).
+	ActiveSeconds: number,
+	RecoverySeconds: number,
+	-- Set once this swing LANDS (onDamageApplied): when its recovery may be cut into a follow-up. nil for a
+	-- swing that has not landed, and for an air move, which never cancels.
+	ConfirmCancelAt: number?,
 }
 local inFlight: { [Model]: InFlight } = {}
 
 -- When each combatant may feint again (AttackConstants.Feint.CooldownSeconds).
 local feintReadyAt: { [Model]: number } = {}
+
+-- Models currently carrying the heavy tell (AttackConstants.Tell), and when (os.clock) it comes off. Only
+-- ever holds the few swings winding up right now, so Step walks it in full.
+local tellEndsAt: { [Model]: number } = {}
 local inFlightReclaim = AmortizedReclaim.New()
 local feintReadyReclaim = AmortizedReclaim.New()
 
@@ -167,6 +192,8 @@ local heartbeatTrove = Trove.New()
 local startedRemote: RemoteEvent? = nil
 local weaponChangedRemote: RemoteEvent? = nil
 local cancelledRemote: RemoteEvent? = nil
+-- The DamageSystem.OnApplied subscription (onDamageApplied), connected in Init.
+local appliedDisconnect: (() -> ())? = nil
 local requestLimiter = RateLimiter.New(AttackConstants.Network.MaxCallsPerSecondPerPlayer)
 local swapLimiter = RateLimiter.New(AttackConstants.Network.MaxSwapsPerSecondPerPlayer)
 local feintLimiter = RateLimiter.New(AttackConstants.Network.MaxFeintsPerSecondPerPlayer)
@@ -307,9 +334,78 @@ local function resolveFromEquippedArt(model: Model, player: Player, slot: number
 		MoveId = artId,
 		WeaponId = SwingSequencer.GetWeapon(model),
 		StageIndex = 0,
-		IsFinisher = false,
-	},
-		nil
+	}, nil
+end
+
+-- The heavy tell --------------------------------------------------------------------------------------
+
+local function clearTell(model: Model): ()
+	if tellEndsAt[model] == nil then
+		return
+	end
+	tellEndsAt[model] = nil
+	if model.Parent ~= nil then
+		CollectionService:RemoveTag(model, AttackConstants.Tell.Tag)
+	end
+end
+
+-- Raises the tell on `model` for `windupSeconds`. Removed first so a re-raise always fires the client's
+-- tag-added signal, even if an earlier tell somehow had not come off yet.
+local function raiseTell(model: Model, windupSeconds: number, now: number): ()
+	clearTell(model)
+	local seconds = math.max(windupSeconds, 0)
+	model:SetAttribute(AttackConstants.Tell.UntilAttribute, Workspace:GetServerTimeNow() + seconds)
+	CollectionService:AddTag(model, AttackConstants.Tell.Tag)
+	tellEndsAt[model] = now + seconds
+end
+
+-- Hit-confirm cancel -----------------------------------------------------------------------------------
+
+-- Which AttackConstants.HitConfirm.CancelInto entry a resolved press is, or nil for one that can never
+-- take the cut (an air move).
+local function cancelTargetFor(request: AttackRequest, resolution: SwingSequencer.Resolution): string?
+	if resolution.AirRole ~= nil then
+		return nil
+	end
+	if resolution.IsLauncher == true then
+		return "Launcher"
+	end
+	return request.Kind
+end
+
+-- Whether this combatant's current swing landed and has reached its cut point, and whether `target` may
+-- take the cut. Asks the engine for the phase rather than trusting inFlight, which goes stale once a
+-- swing ends.
+local function confirmCancelReady(model: Model, combatantId: number, target: string?, now: number): boolean
+	local tuning = AttackConstants.HitConfirm
+	if not tuning.Enabled or target == nil or tuning.CancelInto[target] ~= true then
+		return false
+	end
+	local swing = inFlight[model]
+	local cancelAt = swing and swing.ConfirmCancelAt
+	if cancelAt == nil or now < cancelAt then
+		return false
+	end
+	return HitboxEngine.GetAttackState(combatantId) == "Recovery"
+end
+
+-- Marks the swing that just landed as cancelable. Only the in-flight swing it is actually about, and
+-- never an air-combo move (the air string has its own deadline grammar, AirComboMachine). Production
+-- reaches it from onDamageApplied; PUBLIC so a spec can land a swing without a whole contact pipeline.
+function AttackRequestSystem.NoteHitConfirmed(model: Model, moveId: string): ()
+	local swing = inFlight[model]
+	if swing == nil or swing.MoveId ~= moveId or swing.ConfirmCancelAt ~= nil then
+		return
+	end
+	if AirComboMoves.RoleOf(moveId) ~= nil then
+		return
+	end
+	swing.ConfirmCancelAt = AttackConstants.HitConfirmCancelAt(
+		swing.StartedAt,
+		swing.WindupSeconds,
+		swing.ActiveSeconds,
+		swing.RecoverySeconds
+	)
 end
 
 -- Resolves which move a request means. Split from Throw below so the answer is available before any
@@ -333,6 +429,11 @@ local function resolveRequest(model: Model, request: AttackRequest, now: number)
 		if not player then
 			return nil, "NotAuthorized"
 		end
+		-- An air combo's attacker is committed to its string: the air grammar has no hotbar branch, and an
+		-- Art cast from a hover would be a free, unscaled hit on a victim who can only parry.
+		if AirComboSystem.IsAttacker(model) then
+			return nil, "AirCombo"
+		end
 		local slot = request.Slot
 		if typeof(slot) ~= "number" then
 			return nil, "InvalidSlot"
@@ -344,7 +445,22 @@ local function resolveRequest(model: Model, request: AttackRequest, now: number)
 		return nil, refusal or "NoArtEquipped"
 	end
 
-	local resolution = SwingSequencer.Resolve(model, request.Kind, DamageSystem.GetComboStage(model, now), now)
+	-- THE AIR GRAMMAR (docs/design/air-combat-and-evade.md B2). Inside a live combo AirComboSystem decides what
+	-- the press means -- the next beat, or a finisher -- and may say "not yet" (the victim is still rising,
+	-- transient, so the press buffers). Outside one it returns nothing and the ground string resolves as it
+	-- always has, with the modifier offered for the launcher branch.
+	local modifierUp = request.Modifier == "Up"
+	local airRole, airRefusal = AirComboSystem.ResolvePress(model, request.Kind, modifierUp, now)
+	if airRefusal then
+		return nil, airRefusal
+	end
+	local resolution = SwingSequencer.Resolve(
+		model,
+		request.Kind,
+		DamageSystem.GetComboStage(model, now),
+		now,
+		{ ModifierUp = modifierUp, AirRole = airRole }
+	)
 	if not resolution then
 		return nil, "UnknownMove"
 	end
@@ -352,22 +468,17 @@ local function resolveRequest(model: Model, request: AttackRequest, now: number)
 end
 
 -- Runs every gate and, if they all pass, actually throws. Returns (accepted, reason) -- a refusal is
--- normal and never an error, matching HitboxEngine.RequestAttack's own contract.
+-- normal and never an error, matching HitboxEngine.RequestAttack's own contract. Throw and ThrowMove
+-- below are its two public faces.
 --
--- PUBLIC, so a bot's decision-making can throw through exactly the same path a player's press does,
--- with no special casing anywhere in this file -- the same reason DefenseSystem.SetBlocking is
--- exposed alongside its own remote handler.
---
--- `_authorized` is unused inside this function itself (resolveRequest no longer branches on it, and
--- the Hotbar Qi charge below no longer exempts it either -- see this function's own note there) but
--- stays in the signature: Press below still needs to accept, remember, and replay it for a buffered
--- press's later re-validation (rememberRefused's own Authorized field), and every existing caller --
--- production and this module's own spec -- already calls Throw positionally with it.
-function AttackRequestSystem.Throw(
+-- `forced` is ThrowMove's pre-resolved move (see that function): when present it replaces resolveRequest
+-- and nothing else -- every gate, the cooldown, the engine call and every commit below run exactly as
+-- for a press.
+local function throw(
 	model: Model,
 	request: AttackRequest,
-	_authorized: boolean,
-	now: number
+	now: number,
+	forced: SwingSequencer.Resolution?
 ): (boolean, string?)
 	if not isAlive(model) then
 		return false, "NoCharacter"
@@ -398,6 +509,13 @@ function AttackRequestSystem.Throw(
 	local grabAllows, grabReason = GrabSystem.CanAttack(model, now)
 	if not grabAllows then
 		return false, grabReason or "Grabbed"
+	end
+
+	-- Fourth gate of the same shape (Server/Combat/AirCombo/AirComboSystem.lua): an air-held victim cannot
+	-- swing -- the parry is their one way out, and it is a DefenseSystem press, not an attack.
+	local airAllows, airReason = AirComboSystem.CanAttack(model, now)
+	if not airAllows then
+		return false, airReason or "AirHeld"
 	end
 
 	-- A COMMITTED TRAVERSAL REFUSES THE SWING OUTRIGHT. Mid-vault, mid-slide, mid-wall-run, the body
@@ -433,7 +551,12 @@ function AttackRequestSystem.Throw(
 		return false, "Mounted"
 	end
 
-	local resolution, resolveReason = resolveRequest(model, request, now)
+	local resolution, resolveReason
+	if forced then
+		resolution = forced
+	else
+		resolution, resolveReason = resolveRequest(model, request, now)
+	end
 	if not resolution then
 		return false, resolveReason or "UnknownMove"
 	end
@@ -467,7 +590,14 @@ function AttackRequestSystem.Throw(
 	-- all -- which would quietly cost the debug log its most basic distinction between "you are still
 	-- swinging" and "you are waiting out the pause". Both are transient and both buffer identically, so
 	-- this changes nothing about behaviour and everything about whether the log can be read.
-	if request.Kind ~= "Hotbar" and SwingSequencer.ChainDelayRemaining(model, now) > 0 then
+	-- A LANDED swing's recovery may be cut into this press (AttackConstants.HitConfirm). The cut replaces
+	-- the chain beat and any end-of-string lockout, so both gates are skipped for it.
+	local confirmCancel = confirmCancelReady(model, combatantId, cancelTargetFor(request, resolution), now)
+	if
+		request.Kind ~= "Hotbar"
+		and not confirmCancel
+		and SwingSequencer.ChainDelayRemaining(model, now, resolution) > 0
+	then
 		local engineState = HitboxEngine.GetAttackState(combatantId)
 		return false, if engineState ~= nil and engineState ~= "Idle" then "Busy" else "ChainDelay"
 	end
@@ -483,6 +613,9 @@ function AttackRequestSystem.Throw(
 	-- weapon string's Default moves, authored for a custom one. It also scales hitbox volume, but only
 	-- through a Scaling.PowerMultiplierPerUnit no projected move sets, so today it changes guard drain
 	-- and nothing else.
+	if confirmCancel then
+		HitboxEngine.CancelRecovery(combatantId, now)
+	end
 	local accepted, engineReason =
 		HitboxEngine.RequestAttack(combatantId, entry.Definition, comboStage, entry.PowerLevel)
 	if not accepted then
@@ -502,7 +635,9 @@ function AttackRequestSystem.Throw(
 	-- an admin's Hotbar press to a real, persisted Art the same as anyone else's (see ArtSystem.lua's
 	-- own header) -- there's no separate "dev-tested" MoveId to distinguish it by, so there's no honest
 	-- way to charge everyone else and not the admin. See ArtSystem.DevGrantAndEquip's own header.
-	if request.Kind == "Hotbar" then
+	-- A forced throw (the Move Editor's Test) is not an art cast: the move may not be an art at all, and
+	-- testing one must not drain the admin's Qi or grant mastery for a swing they never earned.
+	if request.Kind == "Hotbar" and forced == nil then
 		local player = Players:GetPlayerFromCharacter(model)
 		if player then
 			local refusal = ArtSystem.UseArt(player, resolution.MoveId)
@@ -526,6 +661,12 @@ function AttackRequestSystem.Throw(
 		+ entry.Definition.RecoverySeconds
 	if request.Kind ~= "Hotbar" then
 		SwingSequencer.Advance(model, request.Kind, resolution, commitment, now)
+	else
+		-- AN ART IS A LINK, NOT A RESET (see this file's header, KEEPING THE CHAIN). The string keeps its
+		-- place through the art, and the landed combo cannot lapse before the art's own hit window closes:
+		-- a landed art advances it as any hit does, and a whiffed one lets it lapse from there.
+		SwingSequencer.Weave(model, resolution.MoveId, commitment, now)
+		DamageSystem.HoldCombo(model, now + entry.Definition.WindupSeconds + entry.Definition.ActiveSeconds, now)
 	end
 	setCooldown(model, resolution.MoveId, entry.Cooldown, now)
 	inFlight[model] = {
@@ -535,7 +676,31 @@ function AttackRequestSystem.Throw(
 		WindupSeconds = entry.Definition.WindupSeconds,
 		SwingLengthCooldown = entry.Cooldown <= commitment + 1e-6,
 		PowerLevel = entry.PowerLevel,
+		ActiveSeconds = entry.Definition.ActiveSeconds,
+		RecoverySeconds = entry.Definition.RecoverySeconds,
+		ConfirmCancelAt = nil,
 	}
+	-- The air combo judges an air swing against its shared deadline the moment the swing is committed --
+	-- against its REWOUND start, so a press that was in time on the attacker's own screen is honoured
+	-- (AirComboMachine.NoteSwingAccepted). A no-op for anything that is not an air move.
+	if resolution.AirRole then
+		AirComboSystem.NoteSwingAccepted(
+			model,
+			resolution.AirRole,
+			now,
+			entry.Definition.WindupSeconds,
+			entry.Definition.ActiveSeconds
+		)
+	end
+	-- The heavy tell (AttackConstants.Tell): every other client sees this swing flash for its windup.
+	-- Anything lighter drops a tell a previous heavy might still have up.
+	local tell = AttackConstants.Tell
+	if tell.Enabled and entry.PowerLevel >= tell.MinPowerLevel then
+		raiseTell(model, entry.Definition.WindupSeconds, now)
+	else
+		clearTell(model)
+	end
+
 	-- The same public view GetInFlight hands out, told to OnSwingAccepted subscribers the moment the swing
 	-- is committed. A fresh table, so a subscriber may keep it.
 	notifySwingAccepted(model, {
@@ -597,6 +762,50 @@ function AttackRequestSystem.Throw(
 	return true, nil
 end
 
+-- PUBLIC, so a bot's decision-making can throw through exactly the same path a player's press does,
+-- with no special casing anywhere in this file -- the same reason DefenseSystem.SetBlocking is
+-- exposed alongside its own remote handler.
+--
+-- `_authorized` is unused (resolveRequest no longer branches on it, and the Hotbar Qi charge no longer
+-- exempts it either) but stays in the signature: Press below still needs to accept, remember, and
+-- replay it for a buffered press's later re-validation (rememberRefused's own Authorized field), and
+-- every existing caller -- production and this module's own spec -- already calls Throw positionally
+-- with it.
+function AttackRequestSystem.Throw(
+	model: Model,
+	request: AttackRequest,
+	_authorized: boolean,
+	now: number
+): (boolean, string?)
+	return throw(model, request, now, nil)
+end
+
+-- Throws one specific move by id, through every gate Throw applies -- the Move Editor's Test button
+-- (Server/Systems/MoveEditorSystem.lua), and the reason the editor never needs a combat path of its own.
+--
+-- It is a one-off cast, exactly like a hotbar art: its own authored Cooldown, no chain beat, and the
+-- string keeps its place (Kind "Hotbar", with no Slot, so no client slot lights up). What it skips is
+-- only the art machinery -- resolving a slot and charging Qi -- because the move under test need not be
+-- an art, and an admin tuning one must not pay for, or level up from, their own test swings.
+--
+-- NO AUTHORIZATION HERE, deliberately, the same way HitboxEngine.SetDebugVolumesEnabled has none: this
+-- layer has no notion of who may do what, and throwing an arbitrary MoveId is only safe behind the
+-- caller's own admin gate. The one caller is MoveEditorSystem's TestFire handler, behind AdminGate.
+function AttackRequestSystem.ThrowMove(model: Model, moveId: string, now: number): (boolean, string?)
+	if not AttackCatalog.Has(moveId) then
+		return false, "UnknownMove"
+	end
+	-- The same refusal a hotbar press gets mid air string: the air grammar has no one-off branch.
+	if AirComboSystem.IsAttacker(model) then
+		return false, "AirCombo"
+	end
+	return throw(model, { Kind = "Hotbar" }, now, {
+		MoveId = moveId,
+		WeaponId = SwingSequencer.GetWeapon(model),
+		StageIndex = 0,
+	})
+end
+
 -- Feinting -----------------------------------------------------------------------------------------
 
 -- Cancels this combatant's own swing early in its windup, to bait a parry or a block. Returns
@@ -645,6 +854,7 @@ function AttackRequestSystem.Feint(model: Model, now: number): (boolean, string?
 		return false, "NotInWindup"
 	end
 	inFlight[model] = nil
+	clearTell(model)
 	feintReadyAt[model] = now + AttackConstants.Feint.CooldownSeconds
 	-- A press buffered against the swing being cancelled was aimed at what came after THAT swing. The
 	-- player now decides afresh -- firing it on the recovery's last frame would turn every feint into a
@@ -680,6 +890,98 @@ function AttackRequestSystem.Feint(model: Model, now: number): (boolean, string?
 
 	debugLog(AttackConstants.Debug.LogAccepted, "Swing feinted", { model = model.Name, moveId = swing.MoveId })
 	return true, nil
+end
+
+-- Parried --------------------------------------------------------------------------------------------
+
+-- A parried swing keeps the attacker's chain: the string goes back to where it was before that swing, and
+-- the string and the landed combo are both held until the stagger ends, so the next press continues rather
+-- than restarting. Returns whether a chain was kept. `moveId` is the parried swing's, and `perfect` and `at`
+-- are the outcome's own Perfect flag and SampleTime.
+--
+-- "WHENEVER WE GET PARRIED ON A CHAIN OUR M1 CHAIN NEEDS TO STAY WHERE IT WAS, SO WE CAN DO AN UPPERCUT IF
+-- WE WERE CLOSE" (user, 2026-09-29). B1 and B2 land, B3 is parried: after the stagger, M1 is B3 and Space +
+-- M1 after it launches. A parried launcher leaves the string at B3 with the landed depth held, so Space +
+-- M1 tries the launcher again. The PUNISH IS UNCHANGED. The attacker is staggered exactly as long as
+-- before and the parrier's free combo is the same. What the attacker keeps is only the progress the
+-- parried swing never spent.
+--
+-- The combo is held a full DamageConstants.Combo.WindowSeconds past the stagger. The attacker cannot land
+-- anything while staggered, and the parried swing's own contact was usually most of a window after the
+-- hit before it, so a hold that only reached the stagger's end would lapse the moment they could swing.
+--
+-- AIR MOVES KEEP NOTHING. A parried air hit is the victim's one way out and ends the combo
+-- (docs/design/air-combat-and-evade.md B4); SwingSequencer keeps no undo for one, so this returns false.
+--
+-- PUBLIC for the spec, and so a scripted caller can drive it; production reaches it only through
+-- onDamageApplied below.
+function AttackRequestSystem.KeepChainThroughParry(model: Model, moveId: string, perfect: boolean, at: number): boolean
+	local resumeAt = at + DefenseSystem.ParryStaggerSeconds(perfect)
+	if not SwingSequencer.RestoreParried(model, moveId, resumeAt) then
+		return false
+	end
+	DamageSystem.HoldCombo(model, resumeAt + DamageConstants.Combo.WindowSeconds, at)
+
+	-- The client mirrors the string to predict the next swing's clip (AttackInputClient). Tell it where the
+	-- string went back to, or its next prediction plays the stage AFTER the one the server will throw.
+	local remote = cancelledRemote
+	local player = Players:GetPlayerFromCharacter(model)
+	if remote and player then
+		local kind, stage = SwingSequencer.GetString(model, at)
+		remote:FireClient(
+			player,
+			{
+				MoveId = moveId,
+				Reason = "Parried",
+				RecoverySeconds = resumeAt - at,
+				StringKind = kind,
+				StringStage = stage,
+			} :: AttackTypes.AttackCancelledPayload
+		)
+	end
+
+	debugLog(AttackConstants.Debug.LogAccepted, "Parried -- chain kept", { model = model.Name, moveId = moveId })
+	return true
+end
+
+local function onDamageApplied(outcome: DefenseTypes.DefenseOutcome, _result: DamageTypes.DamageResult): ()
+	if AttackConstants.HitConfirm.ConfirmKinds[outcome.Kind] then
+		AttackRequestSystem.NoteHitConfirmed(outcome.Attacker, outcome.Report.DebugName)
+		-- The hit cut the DEFENDER's own swing (DamageSystem's hitstun cancel), so their tell is over.
+		clearTell(outcome.Defender)
+		return
+	end
+	if outcome.Kind ~= "Parried" then
+		return
+	end
+	clearTell(outcome.Attacker)
+	AttackRequestSystem.KeepChainThroughParry(
+		outcome.Attacker,
+		outcome.Report.DebugName,
+		outcome.Perfect == true,
+		outcome.SampleTime
+	)
+end
+
+-- Cuts a LANDED swing's recovery so the evade that was just accepted can take effect (AttackConstants.
+-- HitConfirm.CancelInto.Evade). Returns whether it cut anything. Reached from the composition root
+-- (Main.server.lua), which calls this before DefenseSystem.BeginEvade on an accepted Evade report: that
+-- System refuses evade frames to a body still in a swing, and a confirmed recovery is exactly the swing
+-- this is allowed to end. Refused (false, nothing cut) before the cut point, for a swing that did not
+-- land, and when Evade is not in CancelInto. That is the same answer the client's own gate gives.
+function AttackRequestSystem.CancelRecoveryForEvade(model: Model, now: number): boolean
+	local combatantId = combatantIds[model] or HitboxEngine.GetCombatantId(model)
+	-- Judged a little ahead (EvadeLatencyToleranceSeconds): the evade report has no buffer to wait in.
+	local judgedAt = now + AttackConstants.HitConfirm.EvadeLatencyToleranceSeconds
+	if not combatantId or not confirmCancelReady(model, combatantId, "Evade", judgedAt) then
+		return false
+	end
+	if not HitboxEngine.CancelRecovery(combatantId, now) then
+		return false
+	end
+	-- A press buffered against the swing just cut was aimed at what came after it, not at an evade.
+	buffered[model] = nil
+	return true
 end
 
 -- Buffering ----------------------------------------------------------------------------------------
@@ -773,7 +1075,11 @@ local function sanitizeRequest(raw: unknown): AttackRequest?
 	if kind ~= "Hotbar" then
 		-- Slot and MoveId are meaningless outside a hotbar press and are dropped rather than carried,
 		-- so a client cannot smuggle a MoveId in on a Basic press and have some later reader honour it.
-		return { Kind = kind :: AttackTypes.AttackKind }
+		-- The modifier is the one extra a weapon press may carry, and only its one legal value survives.
+		return {
+			Kind = kind :: AttackTypes.AttackKind,
+			Modifier = if candidate.Modifier == "Up" then "Up" else nil,
+		}
 	end
 
 	local rawSlot = candidate.Slot
@@ -894,6 +1200,7 @@ local function unbindCharacter(character: Model): ()
 	buffered[character] = nil
 	inFlight[character] = nil
 	feintReadyAt[character] = nil
+	clearTell(character)
 	SwingSequencer.Clear(character)
 end
 
@@ -1038,6 +1345,14 @@ function AttackRequestSystem.Step(_deltaTime: number, now: number): ()
 	inFlightReclaim:Step(inFlight)
 	feintReadyReclaim:Step(feintReadyAt)
 	SwingSequencer.Sweep()
+
+	-- A full walk, unlike the reclaims above: every entry is a live tell with a deadline to act on, and
+	-- there are only ever as many as there are heavies winding up right now.
+	for model, endsAt in tellEndsAt do
+		if now >= endsAt or model.Parent == nil then
+			clearTell(model)
+		end
+	end
 end
 
 -- Lifecycle ----------------------------------------------------------------------------------------
@@ -1052,6 +1367,7 @@ function AttackRequestSystem.Init(): ()
 	assert(DefenseSystem.CanAttack ~= nil, "AttackRequestSystem.Init() requires DefenseSystem to be available")
 	assert(DamageSystem.CanAttack ~= nil, "AttackRequestSystem.Init() requires DamageSystem to be available")
 	assert(GrabSystem.CanAttack ~= nil, "AttackRequestSystem.Init() requires GrabSystem to be available")
+	assert(AirComboSystem.CanAttack ~= nil, "AttackRequestSystem.Init() requires AirComboSystem to be available")
 	started = true
 
 	local requestRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.Request)
@@ -1065,6 +1381,10 @@ function AttackRequestSystem.Init(): ()
 	local feintRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.Feint)
 	feintRemote.OnServerEvent:Connect(handleFeint)
 	cancelledRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.Cancelled)
+
+	-- A parried swing keeps its chain -- see KeepChainThroughParry. DamageSystem.OnApplied is that layer's
+	-- documented extension point and fires for Parried too (GrabSystem subscribes the same way).
+	appliedDisconnect = DamageSystem.OnApplied(onDamageApplied)
 
 	-- REGISTERS PLAYER CHARACTERS WITH THE ENGINE, inherited from the deleted TestAttackHarness -- see
 	-- this file's header. Bots and dummies are NOT auto-registered: they have no CharacterAdded to
@@ -1109,6 +1429,11 @@ end
 
 function AttackRequestSystem.Shutdown(): ()
 	heartbeatTrove:Clean()
+	local disconnect = appliedDisconnect
+	appliedDisconnect = nil
+	if disconnect then
+		disconnect()
+	end
 	started = false
 end
 
@@ -1125,6 +1450,9 @@ function AttackRequestSystem.Reset(): ()
 	table.clear(buffered)
 	table.clear(inFlight)
 	table.clear(feintReadyAt)
+	for model in tellEndsAt do
+		clearTell(model)
+	end
 	inFlightReclaim:Reset()
 	feintReadyReclaim:Reset()
 	table.clear(weaponChangedCallbacks)

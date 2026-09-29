@@ -5,20 +5,12 @@
 	Owns: resolving a MoveId into the pair the rebuilt combat stack runs on -- the geometry
 	HitboxEngine needs, and the damage numbers the layer above it applies.
 
-	WHY THIS EXISTS AT ALL, and why it is a bridge rather than a table. The Move Creation System is a
-	fully-built authoring pipeline: MoveRegistryManager, DefaultMoveRegistry, a DataStore, a live
-	editor UI, a balance-graphing tool (Shared/MoveStats.lua), and the ArtSystem binding that makes an
-	Art literally a MoveDefinition with an Art block on it (MoveTypes.MoveArtBinding's own header calls
-	itself "the entire Move-Creation-System-to-ArtSystem seam"). All of it survived the combat teardown
-	intact, and all of it was left with no combat consumer -- MoveTypes.ToHitboxAttackDefinition
-	projects onto the DELETED system's schema, which the rebuilt engine does not understand.
-
-	The alternative was a fresh hand-authored table mapping MoveId to engine-shaped attacks. It would
-	have been smaller. It would also have duplicated a schema, a validation pass, and a persistence
-	story that already exist and are already exercised by a real UI -- and, because an Art IS a move, it
-	would have left the progression layer's entire ability system with no path to ever deal damage. So
-	this module bridges instead, and the whole bridge is one projection function
-	(MoveTypes.ToEngineAttackDefinition) plus the lookup order below.
+	WHY A CATALOGUE OVER THE MOVE REGISTRIES rather than a table of attacks: every move -- a weapon
+	stage (DefaultMoveRegistry), an admin-authored move and every Art (MoveRegistryManager; an Art IS a
+	move with an Art block) -- already has one schema, one validation gate and one persistence story in
+	the Move Editor. The whole bridge from that to the combat stack is one lossless projection
+	(MoveTypes.ToEngineAttackDefinition -- the schema is the engine's own vocabulary since the
+	2026-09-29 rebuild) plus the lookup order and the clip sync below.
 
 	WHERE IT SITS. A sibling of HitboxEngine/ and Damage/, nested in neither, because neither owns it:
 	the attack layer will read it to find out what to throw, and the damage layer reads it to find out
@@ -47,6 +39,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AttackAnimations = require(ReplicatedStorage.Shared.Attack.AttackAnimations)
+local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
@@ -63,39 +56,33 @@ local logger = Logger.scope("AttackCatalog")
 
 local AttackCatalog = {}
 
--- Which projection warnings have already been reported. Keyed by move id AND the notes themselves, so
--- a move edited in the Move Editor into a DIFFERENT set of problems reports again while an unchanged
--- one stays quiet.
+-- Which clip warnings have already been reported, keyed by a signature naming the move, the problem and
+-- the clip -- so a move edited into a DIFFERENT problem reports again while an unchanged one stays quiet.
 --
--- The dedupe is not an optimisation, it is a correctness property of the log: Get sits on the damage
--- layer's per-contact path, and several of the notes it can raise (an authored ArcDegrees, which every
--- hand-authored Default move carries) are true of perfectly ordinary moves. Without this, one warning
--- per landed hit would bury the log in a busy fight -- exactly the per-contact volume
--- DefenseConstants.Debug.Enabled exists to keep out by default. Once per distinct problem is what a
--- misauthored move actually warrants.
-local reportedProjectionNotes: { [string]: boolean } = {}
+-- The dedupe is a correctness property of the log, not an optimisation: Get sits on the damage layer's
+-- per-contact path, and one warning per landed hit would bury the log in a busy fight. Once per distinct
+-- problem is what a misauthored move warrants.
+local reportedWarnings: { [string]: boolean } = {}
 
 -- Float slack for comparing an authored Cooldown against the authored timeline it was typed to match
 -- (0.31 + 0.22 + 0.14 is not exactly 0.67 in binary).
 local COOLDOWN_EPSILON = 1e-6
 
--- A warning raised at most once per distinct signature -- the same dedupe, and the same table, the
--- projection notes below use, for the same reason: Get sits on the per-contact path.
+-- A warning raised at most once per distinct signature -- see reportedWarnings.
 local function warnOnce(signature: string, message: string, data: { [string]: any }): ()
-	if reportedProjectionNotes[signature] then
+	if reportedWarnings[signature] then
 		return
 	end
-	reportedProjectionNotes[signature] = true
+	reportedWarnings[signature] = true
 	logger:warn(message, data)
 end
 
 -- Resolves a MoveId to an authored move, custom moves taking precedence over Default ones.
 --
--- THE ORDER MATTERS AND MIRRORS THE EDITOR'S OWN. MoveEditorSystem keeps List and ListDefaultMoves
--- separate, and a Default move is a live projection of a hand-authored Constants.Combat attack that an
--- admin may have retuned in place. A custom move sharing an id with a Default one is the admin's more
--- recent intent, so it wins -- and because DefaultMoveRegistry.Get rebuilds its projection fresh on
--- every call, a retuned Default is never stale here either.
+-- A custom move sharing an id with a Default one is the more specific intent, so it wins. (The editor
+-- never creates one -- a generated id can never carry the "default:" prefix -- but a spec does, to
+-- stand a custom move in for a weapon stage.) DefaultMoveRegistry.Get composes its override fresh on
+-- every call, so a retuned Default is never stale here either.
 local function resolveMove(moveId: string): MoveTypes.MoveDefinition?
 	local custom = MoveRegistryManager.Get(moveId)
 	if custom then
@@ -123,32 +110,25 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 		return nil
 	end
 
-	local definition, profile, notes = MoveTypes.ToEngineAttackDefinition(move)
-
-	-- Surfaced rather than swallowed: every note means an authored field did not survive the projection
-	-- intact (a shape with no engine equivalent, a projectile with no path to be one). That is exactly
-	-- the class of thing that otherwise reads as "this move has been subtly wrong for a month," which
-	-- the parry plan's fail-closed rule exists to prevent. Deduped rather than gated on Debug.Enabled,
-	-- so a real authoring mistake is loud even in production while a busy fight stays quiet -- see
-	-- reportedProjectionNotes above.
-	if #notes > 0 then
-		local joined = table.concat(notes, "; ")
-		local signature = `{moveId}|{joined}`
-		if not reportedProjectionNotes[signature] then
-			reportedProjectionNotes[signature] = true
-			logger:warn("Move projected with corrections", { moveId = moveId, notes = joined })
-		end
-	end
+	local definition, profile = MoveTypes.ToEngineAttackDefinition(move)
 
 	-- AUTHORED FIRST, CONFIGURED SECOND. A custom move authored in the Move Editor carries its own
-	-- AnimationId and keeps it. A "Default" move structurally cannot -- DefaultMoveRegistry builds its
-	-- projection fresh on every read with AnimationId hardcoded to "", and the editor hides the
-	-- Animation section for that category entirely -- so the whole live move set falls through to
+	-- AnimationId and keeps it. A Default move structurally cannot -- DefaultMoveRegistry projects it
+	-- with AnimationId "" and the editor does not offer it one -- so the whole weapon move set falls
+	-- through to
 	-- Shared/Attack/AttackAnimations.lua, which exists to be the shelf those clips have nowhere else
 	-- to sit on. Resolved here (rather than inline in the returned table below) because AttackWindows
 	-- needs it too -- this is already the one place a MoveId becomes everything the combat stack knows
 	-- about a move.
-	local animationId = if move.AnimationId ~= "" then move.AnimationId else AttackAnimations.Get(move.MoveId)
+	-- `borrowedFrom` is set when an air move is standing in on a ground swing's clip until its own is
+	-- authored (AttackAnimations' BORROWED_FROM) -- see step 1a below for what that changes.
+	local animationId: string
+	local borrowedFrom: string? = nil
+	if move.AnimationId ~= "" then
+		animationId = move.AnimationId
+	else
+		animationId, borrowedFrom = AttackAnimations.Resolve(move.MoveId)
+	end
 
 	-- THE TIMELINE, built in three steps, in this order on purpose: WHEN THE HITBOX OPENS (the delay),
 	-- HOW LONG IT STAYS OPEN (ActiveSeconds, authored, untouched), and WHEN THE SWING ENDS (the clip).
@@ -191,6 +171,22 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 		weaponSpeed = 1
 	end
 	local playbackSpeed = weaponSpeed * tempo
+	-- 0. A BORROWED CLIP IS RETIMED TO THE MOVE, not the move to the clip. The lender's strike marker says
+	-- where ITS swing connects; this move's own authored windup is where THIS one must (an air hit's 0.22s
+	-- windup is the parry read -- AttackAnimations' BORROWED_FROM header). So the clip plays at whatever
+	-- speed lands that strike on the authored windup, and step 1a below never lets the marker override it.
+	-- Unknown marker (not fetched yet, none authored): the authored timeline stands and the clip plays at
+	-- the weapon's speed, which is only ever cosmetically off.
+	if borrowedFrom then
+		local strike = AttackWindows.WindupOverride(borrowedFrom, animationId)
+		if strike and strike > 0 and definition.WindupSeconds > 0 then
+			playbackSpeed = math.clamp(
+				strike / definition.WindupSeconds,
+				AttackConstants.Windows.BorrowedClipMinSpeed,
+				AttackConstants.Windows.BorrowedClipMaxSpeed
+			)
+		end
+	end
 	local clipLength = AttackWindows.ClipLength(animationId)
 	local clipSeconds = if clipLength then clipLength / playbackSpeed else nil
 	if clipSeconds and clipSeconds > HitboxEngineConstants.MaxSwingSeconds then
@@ -216,7 +212,7 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 	-- could push the total below the untouched Cooldown, silently reintroducing dead time after the
 	-- animation finishes where the move still can't be re-thrown. With the length KNOWN the bound is
 	-- unnecessary: the total is the clip's, whatever the marker says, and step 3 clamps Cooldown to it.
-	local windupOverride = AttackWindows.WindupOverride(moveId, animationId)
+	local windupOverride = if borrowedFrom then nil else AttackWindows.WindupOverride(moveId, animationId)
 	if windupOverride then
 		local overrideSeconds = windupOverride / playbackSpeed
 		if
@@ -233,9 +229,8 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 	-- when the CLIP connects, and SpawnDelay is the builder saying this weapon's arc lands later than
 	-- the house sword's. Applied before the override, a marked clip would silently discard the
 	-- builder's value and an unmarked one would keep it -- the same move behaving two ways depending on
-	-- whether an animator had touched the asset, which is precisely the "subtly wrong for a month"
-	-- class this file's projection-notes warning exists to prevent. Applied after, "delay" means the
-	-- same thing either way.
+	-- whether an animator had touched the asset -- the "subtly wrong for a month" class of bug. Applied
+	-- after, "delay" means the same thing either way.
 	--
 	-- ADDITIVE, never a replacement: zero is the default and changes nothing. It lengthens only the
 	-- windup: with the clip's length known, step 3 takes it back out of recovery (the clip does not get
@@ -293,6 +288,7 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 		PlaybackSpeed = playbackSpeed,
 		PowerLevel = MoveTypes.PowerLevelOf(move),
 		Feintable = MoveTypes.IsFeintable(move),
+		BorrowedFrom = borrowedFrom,
 	}
 end
 
@@ -307,7 +303,7 @@ end
 
 -- Spec-only, so one case cannot serve another its suppressed warnings.
 function AttackCatalog.Reset(): ()
-	table.clear(reportedProjectionNotes)
+	table.clear(reportedWarnings)
 end
 
 return AttackCatalog

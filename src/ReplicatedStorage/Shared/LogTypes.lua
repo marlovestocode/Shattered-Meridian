@@ -3,9 +3,8 @@
 	LogTypes.lua
 
 	Owns: the shape of one captured log entry -- LogEntry, LogLevel, LogSource, LogFields -- as a
-	genuinely leaf module with NO requires of its own, the same "leaf module" contract
-	Shared/AnimationTimeline.lua already established (see Types.lua's own header comment on why that
-	property is what makes pulling a type into Types.lua safe).
+	genuinely leaf module with NO requires of its own -- the property that makes pulling a type into
+	Types.lua safe (see Types.lua's own header comment).
 
 	Exists because Types.lua needs LogEntry for LiveConsoleSubscribeResult.Snapshot -- a genuine
 	network-boundary type, squarely inside Types.lua's own charter -- but Shared/Logger.lua cannot be

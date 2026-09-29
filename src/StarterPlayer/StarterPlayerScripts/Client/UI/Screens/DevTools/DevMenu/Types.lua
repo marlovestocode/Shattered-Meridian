@@ -278,7 +278,8 @@ export type ContentAreaHandle = {
 	-- carries the picked (style, difficulty); both are re-validated server-side. Fire-and-forget like
 	-- SpawnDebugDummyRequested; ActiveTrainingBotCountDisplay is refreshed from each result's ActiveCount.
 	ActiveTrainingBotCountDisplay: Fusion.Value<number>,
-	SpawnTrainingBotRequested: RBXScriptSignal<string, string>,
+	-- (style, difficulty, weapon) -- weapon is TrainingBotConstants.DefaultWeaponChoice or a weapon id.
+	SpawnTrainingBotRequested: RBXScriptSignal<string, string, string>,
 	DespawnTrainingBotsRequested: RBXScriptSignal,
 
 	-- Blimp Fuel System test nodes (Spawn tab, Server/Systems/ResourceGatheringSystem.

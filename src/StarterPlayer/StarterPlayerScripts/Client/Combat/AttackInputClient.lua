@@ -82,12 +82,14 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
 
+local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
+local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboConstants)
+local AirComboMoves = require(ReplicatedStorage.Shared.AirCombo.AirComboMoves)
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
-local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
@@ -100,6 +102,7 @@ local LocalCombatState = require(script.Parent.LocalCombatState)
 local CombatAnimator = require(script.Parent.Parent.FX.CombatAnimator)
 local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
 local InputRouter = require(script.Parent.Parent.Input.InputRouter)
+local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 
 type AttackStartedPayload = AttackTypes.AttackStartedPayload
 
@@ -160,6 +163,8 @@ local manager = AnimationManager.new({ Name = "AttackInputClient" })
 
 -- Assigned in the Prediction section below; declared here because the input handlers above it call it.
 local predictPress: (kind: AttackTypes.AttackKind) -> ()
+-- Assigned beside the jump suppression below, for the same reason.
+local notePressForJump: (kind: AttackTypes.AttackKind, now: number) -> ()
 
 -- Sending -------------------------------------------------------------------------------------------
 
@@ -235,13 +240,30 @@ local function slotCooldownRemaining(slot: number, now: number): number
 	return math.max(readyAt - now, 0)
 end
 
+-- Whether this press should skip the local swing prediction: an air-combo press (the attacker's Basic is an
+-- air beat, not the ground string the prediction mirrors) or a press with the launcher modifier held (the
+-- server may resolve it to the Launcher). Predicting either would play the wrong clip until the real one
+-- arrived. The server's Attack_Started still plays the right one a round trip later.
+local function skipsPrediction(modifierUp: boolean): boolean
+	local humanoid = boundHumanoid
+	return modifierUp or (humanoid ~= nil and AirComboAttributes.IsAttacker(humanoid))
+end
+
 local function requestWeaponAttack(kind: AttackTypes.AttackKind): ()
 	-- ALWAYS SENT, never pre-filtered. The server is the authority on whether this press throws, and
 	-- it forgives an early press by buffering it, which a local drop would throw away. The local swing
 	-- prediction below is presentation layered on top, never a reason not to send.
+	--
+	-- THE AIR COMBO'S MODIFIER: the jump key held at the press (docs/design/air-combat-and-evade.md B2) --
+	-- Space + M1 mid-string is the launcher branch, Space + Heavy in the air is the Spike. Sent as a request,
+	-- never trusted: the server decides whether the string has earned what it asks for.
+	local modifierUp = KeybindManager.IsJumpKeyDown()
+	notePressForJump(kind, os.clock())
 	playPressCue(kind)
-	sendRequest({ Kind = kind })
-	predictPress(kind)
+	sendRequest({ Kind = kind, Modifier = if modifierUp then "Up" else nil })
+	if not skipsPrediction(modifierUp) then
+		predictPress(kind)
+	end
 end
 
 local function requestHotbar(slot: number): ()
@@ -408,6 +430,9 @@ local swingCancelledListeners: { (SwingCancelReason) -> () } = {}
 -- one. NOT cleared when a swing ends on its own -- "is a swing playing" is always asked of
 -- LocalCombatState's deadline, never of this.
 local playingMoveId: string? = nil
+-- The payload and start time of that same swing, for the hit-confirm cut point (NoteHitConfirmed).
+local playingPayload: AttackStartedPayload? = nil
+local playingStartedAt = 0
 
 -- Tells every OnSwingCancelled listener. Pcall'd per listener for the reason onAttackStarted's own
 -- dispatch cannot afford to be: this runs from remote handlers and task.delay callbacks, and one FX
@@ -425,6 +450,7 @@ local function cutSwing(reason: SwingCancelReason): ()
 	local wasPlaying = LocalCombatState.SwingEndsAt() > os.clock()
 	pendingPrediction = nil
 	playingMoveId = nil
+	playingPayload = nil
 	manager:SetClaim(ATTACK_LAYER, SWING_SOURCE, nil)
 	LocalCombatState.ClearSwing()
 	if wasPlaying then
@@ -472,6 +498,8 @@ local attackStartedListeners: { (AttackStartedPayload) -> () } = {}
 -- copy a prediction replays. One path for both, so a predicted swing looks exactly like a confirmed one.
 local function startSwing(payload: AttackStartedPayload, now: number): ()
 	playingMoveId = payload.MoveId
+	playingPayload = payload
+	playingStartedAt = now
 	playSwing(payload)
 	LocalCombatState.SetSwing(now + swingSecondsOf(payload))
 	for _, listener in attackStartedListeners do
@@ -494,11 +522,6 @@ local stringKind: AttackTypes.AttackKind? = nil
 local stringStage = 0
 local stringLapsesAt = -math.huge
 
--- This player's landed combo depth (ComboEscalation), as the last Combat_Feedback reported it -- the
--- one input the server's Finisher rule takes that nothing else tells this client.
-local landedCombo = 0
-local landedComboAt = -math.huge
-
 local predictionGeneration = 0
 local bufferGeneration = 0
 
@@ -514,8 +537,8 @@ local function stageCount(kind: AttackTypes.AttackKind): number
 end
 
 -- SwingSequencer.Resolve, restated against the mirror. Same rules in the same order: a live string of
--- the same kind continues, running past the end wraps -- or, for Basic with a deep enough landed combo,
--- tips into the Finisher.
+-- the same kind continues, and running past the end wraps. (A press that may be the launcher -- the one
+-- 4th hit, Space + M1 -- is never predicted: see skipsPrediction.)
 local function predictMoveId(kind: AttackTypes.AttackKind, now: number): string?
 	local weapon = currentWeapon
 	if not weapon then
@@ -530,13 +553,6 @@ local function predictMoveId(kind: AttackTypes.AttackKind, now: number): string?
 		and (stringKind == kind or not AttackConstants.Sequence.ResetOnCategorySwitch)
 	local nextStage = (if live then stringStage else 0) + 1
 	if nextStage > count then
-		if
-			kind == "Basic"
-			and landedCombo >= AttackConstants.Finisher.MinComboStage
-			and now - landedComboAt < DamageConstants.Combo.WindowSeconds
-		then
-			return `default:{weapon}:Finisher`
-		end
 		nextStage = 1
 	end
 	return `default:{weapon}:{kind}:{nextStage}`
@@ -545,12 +561,21 @@ end
 -- When this body can next start a swing by this client's own measure: its swing and the chain beat
 -- after it over, and any hitstun spent. The server gates the same two things (HitboxEngine "Busy",
 -- SwingSequencer "ChainDelay", DamageSystem "Hitstun").
-local function nextSwingAt(now: number): number
-	return math.max(
-		LocalCombatState.FreeAt(now),
-		LocalCombatState.SwingEndsAt() + AttackConstants.Sequence.ChainDelaySeconds,
-		feintRecoveredAt
-	)
+--
+-- `kind` is the press being judged. A kind that may take a landed swing's cut (AttackConstants.HitConfirm.
+-- CancelInto) is free at the cut point, with no chain beat after it, exactly as the server's
+-- confirmCancelReady treats it.
+local function nextSwingAt(now: number, kind: AttackTypes.AttackKind?): number
+	local tuning = AttackConstants.HitConfirm
+	local cancelable = kind ~= nil and tuning.Enabled and tuning.CancelInto[kind] == true
+	local swingEnd = LocalCombatState.SwingEndsAt()
+	local cancelAt = LocalCombatState.CancelAt()
+	local swingGate = if cancelable
+			and cancelAt > 0
+			and cancelAt < swingEnd
+		then cancelAt
+		else swingEnd + AttackConstants.Sequence.ChainDelaySeconds
+	return math.max(LocalCombatState.FreeAt(now, cancelable), swingGate, feintRecoveredAt)
 end
 
 -- Every other server gate this client can see the answer to: the guard (DefenseSystem "Guarding"), the
@@ -583,7 +608,7 @@ local function predictSwing(kind: AttackTypes.AttackKind): boolean
 		return false
 	end
 	local now = os.clock()
-	if nextSwingAt(now) > now or not bodyAllowsSwing() then
+	if nextSwingAt(now, kind) > now or not bodyAllowsSwing() then
 		return false
 	end
 	local moveId = predictMoveId(kind, now)
@@ -627,7 +652,7 @@ predictPress = function(kind: AttackTypes.AttackKind): ()
 	-- AttackConstants.Input.BufferSeconds. Mirrored exactly, so a mashed string is predicted swing after
 	-- swing instead of only its first press.
 	local now = os.clock()
-	local freeAt = nextSwingAt(now)
+	local freeAt = nextSwingAt(now, kind)
 	if freeAt <= now or freeAt - now > AttackConstants.Input.BufferSeconds then
 		return
 	end
@@ -641,6 +666,84 @@ predictPress = function(kind: AttackTypes.AttackKind): ()
 			predictSwing(current.Kind)
 		end
 	end)
+end
+
+-- SPACE DOES NOT JUMP WHILE THE LAUNCHER IS EARNABLE (docs/design/air-combat-and-evade.md B2, approved): once
+-- this player's Basic string is live at the launcher's stage, Space is the launcher MODIFIER, and a press of
+-- it must not also hop the body off the ground. The same precedent the old finisher jump-suppression set.
+-- Outside that window Space jumps exactly as always.
+--
+-- Done by standing the Humanoid's own Jumping state down until the string lapses: that one switch covers the
+-- engine's default jump and every parkour path that goes through Humanoid:ChangeState, with no second
+-- input interception to keep in step with the first.
+local jumpSuppressGeneration = 0
+
+-- THE CLICK, NOT THE CONFIRMATION, STARTS IT. The 3rd M1 is usually clicked while B2 is still swinging, and
+-- the server holds that press in its buffer until B2 is over -- so B3's Attack_Started can arrive well after
+-- the click. Suppressing only from that confirmation left Space jumping in exactly the window a player
+-- reaches for it ("I can still jump at the 3rd M1"). So this client counts its own Basic presses into the
+-- string, reconciled with the server's mirror whenever that is ahead, and suppresses from the press that
+-- will be B3. The server's confirmation then extends the window to the string's real lapse.
+local localBasicPresses = 0
+local localStringLapsesAt = -math.huge
+
+local function setJumpSuppressed(suppressed: boolean): ()
+	local humanoid = boundHumanoid
+	if humanoid and humanoid.Parent ~= nil then
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, not suppressed)
+	end
+end
+
+local function suppressJumpUntil(deadline: number, now: number): ()
+	jumpSuppressGeneration += 1
+	local generation = jumpSuppressGeneration
+	setJumpSuppressed(true)
+	task.delay(math.max(deadline - now, 0), function()
+		if jumpSuppressGeneration == generation then
+			setJumpSuppressed(false)
+		end
+	end)
+end
+
+local function releaseJumpSuppression(): ()
+	jumpSuppressGeneration += 1
+	localBasicPresses = 0
+	localStringLapsesAt = -math.huge
+	setJumpSuppressed(false)
+end
+
+notePressForJump = function(kind: AttackTypes.AttackKind, now: number): ()
+	if not AirComboConstants.Enabled then
+		return
+	end
+	if kind ~= "Basic" then
+		releaseJumpSuppression()
+		return
+	end
+	if now > localStringLapsesAt then
+		localBasicPresses = 0
+	end
+	-- The server's mirror is authoritative where it knows more (a press this client counted may have been
+	-- refused); the local count only ever runs ahead of it, never behind. And a string the mirror shows
+	-- COMPLETE is over: the press after B3 is a fresh string's B1 (or the launcher), so the count restarts
+	-- rather than running on to a "4th" and suppressing Space through the next string.
+	if stringKind == "Basic" and now <= stringLapsesAt then
+		if stringStage >= stageCount("Basic") then
+			localBasicPresses = 0
+		else
+			localBasicPresses = math.max(localBasicPresses, stringStage)
+		end
+	end
+	localBasicPresses += 1
+	-- Long enough to cover the press waiting in the server's buffer, the swing itself, and the string's
+	-- reset window after it; B3's confirmation replaces it with the exact lapse.
+	localStringLapsesAt = now
+		+ AttackConstants.Input.BufferSeconds
+		+ AirComboConstants.Launcher.JumpSuppressSwingAllowanceSeconds
+		+ AttackConstants.Sequence.ResetSeconds
+	if localBasicPresses >= AirComboConstants.Launcher.MinStringStage then
+		suppressJumpUntil(localStringLapsesAt, now)
+	end
 end
 
 local function onAttackStarted(raw: unknown): ()
@@ -658,6 +761,38 @@ local function onAttackStarted(raw: unknown): ()
 		stringKind = payload.Kind
 		stringStage = payload.StageIndex
 		stringLapsesAt = now + swingSecondsOf(payload) + AttackConstants.Sequence.ResetSeconds
+		local minStage = AirComboConstants.Launcher.MinStringStage
+		-- An EARLIER stage's confirmation (B2's, arriving after the B3 click) must not cancel the suppression
+		-- that click started -- which is still true only while the local count is at B3 or past it.
+		local clickedAhead = payload.Kind == "Basic"
+			and payload.StageIndex > 0
+			and localBasicPresses >= minStage
+			and now <= localStringLapsesAt
+		if AirComboConstants.Enabled and payload.Kind == "Basic" and payload.StageIndex >= minStage then
+			suppressJumpUntil(math.max(stringLapsesAt, localStringLapsesAt), now)
+		elseif AirComboConstants.Enabled and AirComboMoves.IsLauncher(payload.MoveId) then
+			-- THE LAUNCHER ITSELF: Space is still held from the Space + M1 that threw it, so Space must not
+			-- jump through its windup either. Held for the swing; a launch that lands hands the body to the
+			-- follow (platform-standing, where a jump means nothing), and a whiff gives Space back at its end.
+			suppressJumpUntil(now + swingSecondsOf(payload), now)
+		elseif not clickedAhead then
+			-- A Heavy, a fresh string's B1, or an air move: Space is Space again.
+			releaseJumpSuppression()
+		end
+	elseif stringKind ~= nil and now <= stringLapsesAt then
+		-- AN ART WOVEN INTO A LIVE STRING holds its place (SwingSequencer.Weave): the server keeps the string
+		-- alive until the art ends plus the ordinary grace, so the mirror does too. Otherwise the next M1
+		-- is predicted as a fresh B1 and corrected a round trip later. If Space is currently the launcher
+		-- modifier, it stays one through the art.
+		stringLapsesAt = math.max(stringLapsesAt, now + swingSecondsOf(payload) + AttackConstants.Sequence.ResetSeconds)
+		if
+			AirComboConstants.Enabled
+			and stringKind == "Basic"
+			and stringStage >= AirComboConstants.Launcher.MinStringStage
+		then
+			localStringLapsesAt = math.max(localStringLapsesAt, stringLapsesAt)
+			suppressJumpUntil(localStringLapsesAt, now)
+		end
 	end
 
 	local prediction = pendingPrediction
@@ -687,14 +822,47 @@ local function onAttackCancelled(raw: unknown): ()
 		return
 	end
 	local payload = raw :: AttackTypes.AttackCancelledPayload
-	if typeof(payload.MoveId) ~= "string" or payload.Reason ~= "Feint" then
+	if typeof(payload.MoveId) ~= "string" then
 		return
 	end
 	local recovery = if typeof(payload.RecoverySeconds) == "number" then payload.RecoverySeconds else 0
 	local now = os.clock()
+
+	-- PARRIED: the server kept this player's chain (AttackRequestSystem.KeepChainThroughParry) and held it
+	-- through the stagger. Only the mirror moves. The clip was already cut by Combat_Feedback
+	-- (CancelSwing), and the stagger gates prediction through the published defence state.
+	if payload.Reason == "Parried" then
+		local kind = payload.StringKind
+		local stage = payload.StringStage
+		if (kind == "Basic" or kind == "Heavy") and typeof(stage) == "number" and stage > 0 then
+			stringKind = kind
+			stringStage = stage
+			stringLapsesAt = now + math.clamp(recovery, 0, 3) + AttackConstants.Sequence.ResetSeconds
+		else
+			stringKind = nil
+			stringStage = 0
+		end
+		releaseJumpSuppression()
+		-- Space stays the launcher modifier while the kept string is at the launcher's stage.
+		if
+			AirComboConstants.Enabled
+			and stringKind == "Basic"
+			and stringStage >= AirComboConstants.Launcher.MinStringStage
+		then
+			localBasicPresses = stringStage
+			localStringLapsesAt = stringLapsesAt
+			suppressJumpUntil(stringLapsesAt, now)
+		end
+		return
+	end
+
+	if payload.Reason ~= "Feint" then
+		return
+	end
 	feintRecoveredAt = now + math.clamp(recovery, 0, 2)
 	stringKind = nil
 	stringStage = 0
+	releaseJumpSuppression()
 	-- Only the swing it is about. A cancel that crossed a newer swing on the wire is stale for the clip,
 	-- but its string reset and recovery above are still the server's truth.
 	if playingMoveId == payload.MoveId and LocalCombatState.SwingEndsAt() > now then
@@ -719,6 +887,7 @@ local function onWeaponChanged(raw: unknown): ()
 	-- A swap resets the server's string (SwingSequencer.SetWeapon/SwapWeapon), so the mirror follows.
 	stringKind = nil
 	stringStage = 0
+	releaseJumpSuppression()
 	logger:debug("Weapon changed", { weaponId = currentWeapon })
 end
 
@@ -747,7 +916,8 @@ local function bindCharacter(character: Model, humanoid: Humanoid): ()
 	feintRecoveredAt = -math.huge
 	stringKind = nil
 	stringStage = 0
-	landedCombo = 0
+	-- A fresh Humanoid jumps; a suppression scheduled against the last life must not reach this one.
+	jumpSuppressGeneration += 1
 	LocalCombatState.ResetForNewLife()
 
 	-- Bind() runs Unbind() first thing internally, so the previous life's claims and tracks are
@@ -782,11 +952,18 @@ function AttackInputClient.Start(): ()
 	--
 	-- pcall'd because SetCoreGuiEnabled throws if the CoreGui is not ready yet on a very early boot,
 	-- and a cosmetic strip failing to hide must not take the whole attack input layer down with it.
+	--
+	-- AND ROBLOX'S OWN HEALTH DISPLAY, for the same "the game already presents this" reason plus a
+	-- performance one. The HUD's vital pills draw health; the built-in CoreGui drew a second health bar
+	-- in the corner AND, whenever health was down, a full-screen red damage overlay -- a translucent
+	-- layer over every pixel for as long as the player was hurt, which in a fight is most of it. That
+	-- overlay is pure GPU fill cost the game never asked for, and it read as the game's own hit effect.
 	local ok, err = pcall(function()
 		StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
+		StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Health, false)
 	end)
 	if not ok then
-		logger:warn("Could not hide the Backpack CoreGui", { errorMessage = tostring(err) })
+		logger:warn("Could not hide the Backpack/Health CoreGui", { errorMessage = tostring(err) })
 	end
 
 	toggleDrawRemote = NetworkBridge.GetRemoteEvent(WeaponConstants.Network.RemoteNames.ToggleDraw)
@@ -800,6 +977,13 @@ function AttackInputClient.Start(): ()
 
 	local cancelledRemote = NetworkBridge.GetRemoteEvent(AttackConstants.Network.RemoteNames.Cancelled)
 	cancelledRemote.OnClientEvent:Connect(onAttackCancelled)
+
+	-- The parkour framework asks for the swing to stop when an evade takes a landed swing's cut
+	-- (LocalCombatState.RequestSwingCut -- a leaf signal, because Client/Parkour may not require this).
+	LocalCombatState.OnSwingCutRequested(function()
+		bufferedPress = nil
+		cutSwing("Interrupted")
+	end)
 
 	bindInputs()
 
@@ -816,6 +1000,29 @@ function AttackInputClient.Start(): ()
 end
 
 -- Public ---------------------------------------------------------------------------------------------
+
+-- The local player's swing `moveId` LANDED (Combat_Feedback, attacker role, a HitConfirm.ConfirmKinds
+-- outcome -- CombatFeedbackClient is the caller). Marks its recovery as cancelable from the same cut point
+-- the server computes (AttackConstants.HitConfirmCancelAt), so a follow-up press is predicted, and the
+-- evade allowed, at the moment the server will take it. Ignored for any swing but the one playing, and
+-- for an air move, which never cancels.
+function AttackInputClient.NoteHitConfirmed(moveId: string): ()
+	local payload = playingPayload
+	if not AttackConstants.HitConfirm.Enabled or payload == nil or payload.MoveId ~= moveId then
+		return
+	end
+	if AirComboMoves.RoleOf(moveId) ~= nil then
+		return
+	end
+	LocalCombatState.SetCancelAt(
+		AttackConstants.HitConfirmCancelAt(
+			playingStartedAt,
+			payload.WindupSeconds,
+			payload.ActiveSeconds,
+			payload.RecoverySeconds
+		)
+	)
+end
 
 -- The feint press. Sent only while this client has a swing of its own playing -- the one local filter
 -- that is honest, since with no swing there is nothing to feint -- and never predicted: the server
@@ -886,16 +1093,6 @@ function AttackInputClient.OnAttackStarted(listener: (AttackStartedPayload) -> (
 			table.remove(attackStartedListeners, index)
 		end
 	end
-end
-
--- This player's landed combo depth, from a Combat_Feedback in which they were the Attacker --
--- CombatFeedbackClient's to call. Feeds only the Finisher half of the swing prediction.
-function AttackInputClient.NoteLandedCombo(comboStage: number): ()
-	if typeof(comboStage) ~= "number" then
-		return
-	end
-	landedCombo = comboStage
-	landedComboAt = os.clock()
 end
 
 -- The weapon the server last said this player is holding. Presentation only.

@@ -19,6 +19,7 @@ local StarterPlayer = game:GetService("StarterPlayer")
 
 local States = require(StarterPlayer.StarterPlayerScripts.Client.Parkour.States)
 local StateMachine = require(StarterPlayer.StarterPlayerScripts.Client.Parkour.StateMachine)
+local EvadeConstants = require(ReplicatedStorage.Shared.Combat.EvadeConstants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 
 -- Every MovementStateId in ParkourTypes. Written out rather than derived, deliberately: a state
@@ -38,11 +39,11 @@ local EXPECTED_IDS = {
 	"WallRunning",
 	"LedgeHanging",
 	"LedgeClimbing",
-	"Rolling",
+	"Evading",
 	"Dashing",
 	"Leaping",
 	"LedgeLeaping",
-	"AerialCombat",
+	"CombatHeld",
 }
 
 local VALID_DRIVES = { Humanoid = true, Velocity = true, Kinematic = true }
@@ -63,7 +64,7 @@ local MUST_REPORT = {
 	Mantling = "Mantle",
 	WallRunning = "WallRun",
 	LedgeClimbing = "LedgeClimb",
-	Rolling = "Roll",
+	Evading = "Evade",
 	Dashing = "Dash",
 	Leaping = "Leap",
 	LedgeLeaping = "Leap",
@@ -138,11 +139,11 @@ return function()
 			end
 		end)
 
-		it("puts AerialCombat above everything -- combat ownership may never be pre-empted", function()
+		it("puts CombatHeld above everything -- combat ownership may never be pre-empted", function()
 			local map = byId()
 			for _, definition in States do
-				if definition.Id ~= "AerialCombat" then
-					expect(definition.Priority < map.AerialCombat.Priority).to.equal(true)
+				if definition.Id ~= "CombatHeld" then
+					expect(definition.Priority < map.CombatHeld.Priority).to.equal(true)
 				end
 			end
 		end)
@@ -155,7 +156,7 @@ return function()
 
 		it("puts every traversal above ordinary ground locomotion", function()
 			local map = byId()
-			for _, id in { "Sliding", "Vaulting", "Mantling", "WallRunning", "Rolling" } do
+			for _, id in { "Sliding", "Vaulting", "Mantling", "WallRunning", "Evading" } do
 				expect(map[id].Priority > map.Sprinting.Priority).to.equal(true)
 			end
 		end)
@@ -194,7 +195,7 @@ return function()
 			-- been hand-edited for months with nothing checking them.
 			local map = byId()
 			for owner, allowed in
-				{ Dashing = ParkourConstants.Dash.AllowedFromStates, Rolling = ParkourConstants.Roll.AllowedFromStates }
+				{ Dashing = ParkourConstants.Dash.AllowedFromStates, Evading = EvadeConstants.AllowedFromStates }
 			do
 				for id in allowed :: { [string]: boolean } do
 					expect(map[id]).never.to.equal(nil, `{owner}.AllowedFromStates names unregistered state {id}`)
@@ -215,7 +216,7 @@ return function()
 		it("declares NO report for ordinary locomotion -- those must not be network events", function()
 			local map = byId()
 			for _, id in
-				{ "Idle", "Walking", "Sprinting", "Jumping", "WallLaunching", "Falling", "Landing", "AerialCombat" }
+				{ "Idle", "Walking", "Sprinting", "Jumping", "WallLaunching", "Falling", "Landing", "CombatHeld" }
 			do
 				expect(map[id].Reports).to.equal(nil)
 			end
@@ -253,19 +254,19 @@ return function()
 			expect(map.Falling.Probes.Ledge).to.equal(true)
 		end)
 
-		it("has the crouching states request the ceiling probe", function()
-			-- Standing up inside geometry is the failure this probe exists to prevent, so both states
-			-- that lower the character have to be asking for it.
+		it("has the crouching state request the ceiling probe", function()
+			-- Standing up inside geometry is the failure this probe exists to prevent, so the state that
+			-- lowers the character has to be asking for it.
 			local map = byId()
 			expect(map.Sliding.Probes.Ceiling).to.equal(true)
-			expect(map.Rolling.Probes.Ceiling).to.equal(true)
 		end)
 
-		it("does not have the roll pay for an obstacle probe it can never act on", function()
-			-- Rolling is Committed, so nothing can pre-empt it on an obstacle it sees, and its own Update
-			-- has no traversal exit -- the probe was a cast every frame for nothing.
+		it("does not have the evade pay for probes it can never act on", function()
+			-- Evading is Committed, so nothing can pre-empt it on an obstacle it sees, and it never crouches,
+			-- so there is no ceiling to stand up into -- either probe would be a cast every frame for nothing.
 			local map = byId()
-			expect(map.Rolling.Probes.Obstacle).to.equal(nil)
+			expect(map.Evading.Probes.Obstacle).to.equal(nil)
+			expect(map.Evading.Probes.Ceiling).to.equal(nil)
 		end)
 
 		it("has the obstacle-traversal states request obstacle probes", function()
@@ -313,14 +314,14 @@ return function()
 			expect(map.LedgeHanging.Committed).to.equal(true)
 		end)
 
-		it("leaves the dash interruptible, unlike the roll", function()
+		it("leaves the dash interruptible, unlike the evade", function()
 			-- The one structural difference between the two burst states, and the whole reason both
-			-- exist. Roll is Committed because a dodge that can be stolen is not a dodge. The dash
+			-- exist. Evade is Committed because a dodge that can be stolen is not a dodge. The dash
 			-- takes the opposite trade on purpose: being pre-empted by a vault, a wall or a ledge IS
 			-- the mechanic. Flipping this would silently delete all four chains.
 			local map = byId()
 			expect(map.Dashing.Committed).never.to.equal(true)
-			expect(map.Rolling.Committed).to.equal(true)
+			expect(map.Evading.Committed).to.equal(true)
 		end)
 
 		it("leaves ordinary locomotion interruptible", function()
@@ -354,10 +355,7 @@ return function()
 			expect(ParkourConstants.WallRun.MaxDurationSeconds < ceiling).to.equal(true)
 			expect(ParkourConstants.Obstacle.MantleDurationSeconds < ceiling).to.equal(true)
 			expect(ParkourConstants.Ledge.ClimbDurationSeconds < ceiling).to.equal(true)
-			-- The roll's window includes its ceiling hold (see ParkourController's ACTION_DURATIONS), so the
-			-- whole of it has to fit, not just the roll proper.
-			local roll = ParkourConstants.Roll
-			expect(roll.DurationSeconds + roll.MaxCeilingHoldSeconds + 0.5 < ceiling).to.equal(true)
+			expect(EvadeConstants.ReportOwnershipSeconds < ceiling).to.equal(true)
 			expect(ParkourConstants.Dash.MaxDurationSeconds < ceiling).to.equal(true)
 		end)
 

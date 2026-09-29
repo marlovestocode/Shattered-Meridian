@@ -3,8 +3,13 @@
 	CombatFeedbackClient.lua
 
 	Owns: turning DamageSystem's Combat_Feedback event into something the local player can actually
-	see and feel -- a camera shake scaled to the outcome, a floating damage number at the contact, and
-	a banner for the outcomes a player must not miss (PARRIED, GUARD BROKEN, BACKSTAB).
+	see and feel -- a camera shake scaled to the outcome, a floating damage number at the contact, the
+	impact sound, sparks and freeze.
+
+	NO OUTCOME BANNER ANY MORE (PARRIED / BLOCKED / GUARD BROKEN text). It was the single most expensive
+	step of handling a hit -- 1.6-2.7ms of script per resolved contact, measured by the per-hit breakdown
+	below, several times the rest combined -- and it said what the sound, the sparks and the shake
+	already say.
 
 	THE ONE THING THAT MAKES THE COMBAT STACK LEGIBLE. Everything below it works today with no visible
 	trace: HitboxEngine finds a contact, DefenseSystem classifies it, DamageSystem applies it, and
@@ -25,7 +30,7 @@
 
 	DAMAGE NUMBERS ARE ATTACKER-SIDE ONLY. A number floating off the thing you hit is information; the
 	same number floating off yourself while your own health bar is already dropping is the same fact
-	twice. The defender's feedback is the health bar, the shake and the banner.
+	twice. The defender's feedback is the health bar, the shake and the impact sound.
 
 	CONTACT POSITION IS PROJECTED HERE, per frame of the hit, not carried as a screen position: a
 	world position is what the server can honestly know, and turning it into a UDim2 is a camera
@@ -35,11 +40,10 @@
 	TWO VARIANTS RIDE ON TOP OF THE OUTCOME KIND, both flagged by the server on the payload rather than
 	being kinds of their own (the server's vocabulary stays the seven OutcomeKinds):
 	  * Perfect (a Parried contact inside DefenseConstants.PerfectParry's first 50ms) -- a longer clash
-	    freeze, the PerfectParry shake, a harder camera punch, a denser burst, a brighter ring and its own
-	    banner. See VARIANTS below.
+	    freeze, the PerfectParry shake, a harder camera punch, a denser burst and a brighter ring. See
+	    VARIANTS below.
 	  * GuardCracking (a Blocked contact that left the guard under DefenseConstants.GuardCrack) -- hotter,
-	    heavier sparks, a lower strained clang, and a banner for BOTH sides: this is the one block the
-	    attacker most needs to be told about. The strained pose itself is not here -- it is on every
+	    heavier sparks and a lower strained clang. The strained pose itself is not here -- it is on every
 	    client, off the replicated tag (Client/FX/GuardStrainPose.lua).
 
 	Does not own: the surfaces themselves (Client/UI/Screens/CombatFeedback), the shake compositor
@@ -94,12 +98,12 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 
 local AttackInputClient = require(script.Parent.AttackInputClient)
 local LocalCombatState = require(script.Parent.LocalCombatState)
 local KnockbackClient = require(script.Parent.KnockbackClient)
+local AirComboFX = require(script.Parent.Parent.FX.AirComboFX)
 local CameraShake = require(script.Parent.Parent.FX.CameraShake)
 local CombatAudio = require(script.Parent.Parent.FX.CombatAudio)
 local CombatFeedbackModule = require(script.Parent.Parent.UI.Screens.CombatFeedback)
@@ -107,7 +111,6 @@ local HitFlash = require(script.Parent.Parent.FX.HitFlash)
 local HitStop = require(script.Parent.Parent.FX.HitStop)
 local ImpactSparks = require(script.Parent.Parent.FX.ImpactSparks)
 local RollAfterimage = require(script.Parent.Parent.FX.RollAfterimage)
-local Tokens = require(script.Parent.Parent.UI.Tokens)
 
 type CombatFeedback = DamageTypes.CombatFeedback
 type Handle = CombatFeedbackModule.CombatFeedbackHandle
@@ -119,76 +122,13 @@ local CombatFeedbackClient = {}
 local started = false
 local handle: Handle? = nil
 
--- Bumped on every banner so a stale clear timer cannot cut a fresher banner short -- the same
--- generation guard HUD's own tier-promotion pulse uses, for the same reason.
-local outcomeGeneration = 0
-
 -- Combo depth at which a damage number switches to the heavier visual weight. Derived from the
 -- escalation ceiling rather than authored separately, so retuning DamageConstants.Combo.MaxStage
 -- moves this with it instead of leaving a threshold that outlives its own scale.
 local HEAVY_COMBO_STAGE = math.max(math.ceil(DamageConstants.Combo.MaxStage / 2), 2)
 
--- The outcomes that get a banner, and what it says. Deliberately NOT every outcome: a Clean hit is
--- already fully described by the damage number and the shake, and banner-ing the common case would
--- train players to ignore the banner exactly when an uncommon one needs reading.
---
--- Blocked appears for the DEFENDER only (see bannerFor below) -- "your block worked" is worth saying
--- to the person who pressed the button, while "they blocked" is already obvious to an attacker whose
--- damage number never appeared.
-local BANNER_TEXT: { [string]: { Title: string, AttackerSubtitle: string, DefenderSubtitle: string, Color: Color3 } } =
-	{
-		Parried = {
-			Title = "PARRIED",
-			AttackerSubtitle = "Your swing was turned aside",
-			DefenderSubtitle = "Turned aside",
-			Color = Tokens.Color.AccentPrimaryBright,
-		},
-		GuardBroken = {
-			Title = "GUARD BROKEN",
-			AttackerSubtitle = "Their guard is gone",
-			DefenderSubtitle = "Your guard is gone",
-			Color = Tokens.Color.Danger,
-		},
-		Backstab = {
-			Title = "BACKSTAB",
-			AttackerSubtitle = "Caught them from behind",
-			DefenderSubtitle = "Caught from behind",
-			Color = Tokens.Color.Danger,
-		},
-		Trade = {
-			Title = "TRADE",
-			AttackerSubtitle = "Both swings landed",
-			DefenderSubtitle = "Both swings landed",
-			Color = Tokens.Color.Warning,
-		},
-		Blocked = {
-			Title = "BLOCKED",
-			AttackerSubtitle = "",
-			DefenderSubtitle = "Guard held",
-			Color = Tokens.VitalColor.Posture,
-		},
-	}
-
--- The two payload-flagged variants' banners (see this file's header), keyed the way variantOf names
--- them. Same shape as BANNER_TEXT so showBanner reads either without a branch.
-local VARIANT_BANNER_TEXT: { [string]: { Title: string, AttackerSubtitle: string, DefenderSubtitle: string, Color: Color3 } } =
-	{
-		ParriedPerfect = {
-			Title = "PERFECT PARRY",
-			AttackerSubtitle = "Read to the frame -- you're wide open",
-			DefenderSubtitle = "Flawless timing",
-			Color = Tokens.Color.AccentPrimaryBright,
-		},
-		BlockedCracking = {
-			Title = "GUARD CRACKING",
-			AttackerSubtitle = "Their guard is failing",
-			DefenderSubtitle = "One more hit breaks it",
-			Color = Tokens.Color.Warning,
-		},
-	}
-
--- The variant a payload is, or nil for a plain outcome. Doubles as the ImpactSparks preset key and the
--- VARIANT_BANNER_TEXT key, so "which variant is this" is answered once.
+-- The variant a payload is, or nil for a plain outcome. Doubles as the ImpactSparks preset key, so
+-- "which variant is this" is answered once.
 local function variantOf(payload: CombatFeedback): string?
 	if payload.Kind == "Parried" and payload.Perfect == true then
 		return "ParriedPerfect"
@@ -208,7 +148,7 @@ local VARIANT_PITCH: { [string]: number } = {
 
 -- Which outcomes clear the damage-number stack when they land -- see the screen's own
 -- SuppressDamageNumbers. A defensive result and a chip-damage number arriving together read as
--- contradictory feedback, and the banner owns that moment.
+-- contradictory feedback, and the parry sound and sparks own that moment.
 local SUPPRESSES_DAMAGE_NUMBERS: { [string]: boolean } = {
 	Parried = true,
 	Trade = true,
@@ -232,7 +172,7 @@ end
 -- Which of Constants.FX.HitFlash's three named colors a resolution pops on the defender -- the same
 -- "white = a plain hit, gold = a parry deflection, red-gold = a posture break" family that config's own
 -- header describes. Fewer buckets than DefenseTypes.OutcomeKind has entries, deliberately: Backstab and
--- Trade already get their own answer through the shake presets and the banner above, so they read here
+-- Trade already get their own answer through the shake presets and the impact sounds, so they read here
 -- as "a plain hit" rather than earning a fourth/fifth color with nothing else to distinguish it by.
 local HIT_FLASH_COLORS: { [string]: Color3 } = {
 	Clean = Constants.FX.HitFlash.HitColor,
@@ -331,6 +271,19 @@ local function launchFor(payload: CombatFeedback): ()
 	KnockbackClient.Launch(payload.Knockback :: Vector3, FREEZE_SECONDS_BY_KIND[payload.Kind] or 0)
 end
 
+-- The spacing push (DamageConstants.Spacing), on EITHER role: the defender sliding back, the attacker
+-- following a hit or rebounding off a block. Started after this client's freeze for the same reason as
+-- the launch above -- the victim's movement freeze, or the exchange's pose freeze for the attacker.
+local function pushFor(payload: CombatFeedback): ()
+	if typeof(payload.Push) ~= "Vector3" or typeof(payload.Knockback) == "Vector3" then
+		return
+	end
+	local delay = if payload.Role == "Defender"
+		then FREEZE_SECONDS_BY_KIND[payload.Kind] or 0
+		else EXCHANGE_SECONDS_BY_KIND[payload.Kind] or 0
+	KnockbackClient.Push(payload.Push :: Vector3, delay)
+end
+
 -- Outcomes that cancel the ATTACKER's own swing server-side: DefenseSystem.applyContact calls
 -- HitboxEngine.CancelAttack on a parried attacker ("Parried") and on both sides of a trade ("Traded").
 local ATTACKER_SWING_CANCELLED_BY_KIND: { [string]: boolean } = {
@@ -354,14 +307,9 @@ local function cancelSwingFor(payload: CombatFeedback): ()
 		-- Without this a parried swing kept playing to its end on the attacker's screen while the
 		-- server had already stopped it and staggered them.
 		AttackInputClient.CancelSwing()
-	end
-end
-
--- The attacker's landed combo depth rides on every Combat_Feedback it receives, and the swing
--- prediction needs it to know when the Basic string tips into the Finisher.
-local function noteComboFor(payload: CombatFeedback): ()
-	if payload.Role == "Attacker" and typeof(payload.ComboStage) == "number" then
-		AttackInputClient.NoteLandedCombo(payload.ComboStage)
+	elseif AttackConstants.HitConfirm.ConfirmKinds[payload.Kind] and typeof(payload.MoveId) == "string" then
+		-- The swing LANDED: its recovery may now be cut into a follow-up (AttackConstants.HitConfirm).
+		AttackInputClient.NoteHitConfirmed(payload.MoveId)
 	end
 end
 
@@ -397,34 +345,42 @@ local function damageKindFor(payload: CombatFeedback): "Normal" | "Heavy" | "Cri
 	return "Normal"
 end
 
-local function showBanner(payload: CombatFeedback): ()
-	local surfaces = handle
-	if not surfaces then
-		return
-	end
-	local variant = variantOf(payload)
-	local text = (if variant then VARIANT_BANNER_TEXT[variant] else nil) or BANNER_TEXT[payload.Kind]
-	if not text then
-		return
-	end
+-- PER-HIT COST BREAKDOWN (Constants.Debug.FpsCounter.HitCostLogMs). Every step of onFeedback runs
+-- inside a MicroProfiler label and is timed; a hit whose script work passes the threshold logs what each
+-- step cost, so "my frame rate drops when I get hit" points at a module rather than at a guess.
+-- Script time only: a render cost (a Highlight, particles) lands in FpsCounter's frame spike log.
+local HIT_COST_LOG_MS = Constants.Debug.FpsCounter.HitCostLogMs
+local stepLabels: { string } = {}
+local stepSeconds: { number } = {}
 
-	local subtitle = if payload.Role == "Defender" then text.DefenderSubtitle else text.AttackerSubtitle
-	if subtitle == "" then
-		-- The attacker's half of Blocked -- see BANNER_TEXT's own header. An empty subtitle is the
-		-- authored way of saying "this side gets no banner", not a missing string.
-		return
+local function timed(label: string, fn: () -> ()): ()
+	debug.profilebegin(label)
+	local stepStartedAt = os.clock()
+	fn()
+	table.insert(stepLabels, label)
+	table.insert(stepSeconds, os.clock() - stepStartedAt)
+	debug.profileend()
+end
+
+local function reportHitCost(payload: CombatFeedback): ()
+	local total = 0
+	for _, seconds in stepSeconds do
+		total += seconds
 	end
-
-	surfaces.Outcome:set({ Title = text.Title, Subtitle = subtitle, Color = text.Color })
-
-	-- Cleared on its own timer rather than latching -- an outcome is a moment, not a mode.
-	outcomeGeneration += 1
-	local generation = outcomeGeneration
-	task.delay(AttackConstants.Presentation.OutcomeTextSeconds, function()
-		if outcomeGeneration == generation then
-			surfaces.Outcome:set(nil)
+	if total * 1000 >= HIT_COST_LOG_MS then
+		local parts = table.create(#stepLabels)
+		for index, label in stepLabels do
+			table.insert(parts, `{label} {string.format("%.2f", stepSeconds[index] * 1000)}`)
 		end
-	end)
+		logger:info("Hit feedback cost", {
+			totalMs = string.format("%.2f", total * 1000),
+			role = payload.Role,
+			kind = payload.Kind,
+			steps = table.concat(parts, " | "),
+		})
+	end
+	table.clear(stepLabels)
+	table.clear(stepSeconds)
 end
 
 local function onFeedback(raw: unknown): ()
@@ -436,50 +392,77 @@ local function onFeedback(raw: unknown): ()
 		return
 	end
 
-	shakeFor(payload)
-	if payload.Kind == "Evaded" then
-		-- A contact that never happened: no impact stinger, no hit-flash, no number (Damage is 0). The
-		-- dodger hears the bright whiff and the attacker the muted one (CombatAudio.PlayEvaded), and
-		-- BOTH see one bright ghost on the dodger's rig -- the swing went through where they were, and
-		-- the attacker is the one who most needs to read that it did.
-		CombatAudio.PlayEvaded(payload.Role == "Defender")
-		if typeof(payload.Defender) == "Instance" and payload.Defender:IsA("Model") then
-			RollAfterimage.FlashEvade(payload.Defender)
-		end
-	else
-		-- payload.Defender, not the local character: the block/parry sound belongs to the weapon that
-		-- CAUGHT the swing, and this same event reaches the attacker's machine too -- see CombatAudio's
-		-- own header. It resolves the weapon itself; this module hands it the participant and nothing
-		-- more.
-		local variant = variantOf(payload)
-		CombatAudio.PlayImpact(payload.Kind, payload.Defender, if variant then VARIANT_PITCH[variant] else nil)
+	debug.profilebegin("CombatFeedback")
+	timed("Hit.Shake", function()
+		shakeFor(payload)
+	end)
+	-- The air combo's weight on top of the ordinary hit presentation: a camera punch per air hit, the
+	-- finisher hardest, and the air parry's own clash (docs/design/air-combat-and-evade.md B4).
+	if payload.AirCombo ~= nil then
+		timed("Hit.AirCombo", function()
+			AirComboFX.OnFeedback(payload)
+		end)
 	end
-	flashFor(payload)
+	timed("Hit.Audio", function()
+		if payload.Kind == "Evaded" then
+			-- A contact that never happened: no impact stinger, no hit-flash, no number (Damage is 0). The
+			-- dodger hears the bright whiff and the attacker the muted one (CombatAudio.PlayEvaded), and
+			-- BOTH see one bright ghost on the dodger's rig -- the swing went through where they were, and
+			-- the attacker is the one who most needs to read that it did.
+			CombatAudio.PlayEvaded(payload.Role == "Defender")
+			if typeof(payload.Defender) == "Instance" and payload.Defender:IsA("Model") then
+				RollAfterimage.FlashEvade(payload.Defender)
+			end
+		else
+			-- payload.Defender, not the local character: the block/parry sound belongs to the weapon that
+			-- CAUGHT the swing, and this same event reaches the attacker's machine too -- see CombatAudio's
+			-- own header. It resolves the weapon itself; this module hands it the participant and nothing
+			-- more.
+			local variant = variantOf(payload)
+			CombatAudio.PlayImpact(payload.Kind, payload.Defender, if variant then VARIANT_PITCH[variant] else nil)
+		end
+	end)
+	timed("Hit.Flash", function()
+		flashFor(payload)
+	end)
 	-- Sparks at the blades for the steel-on-steel outcomes (parry, block, trade, guard break), and the
 	-- parry's camera punch -- see ImpactSparks' own header. A body-only outcome has no preset and no-ops.
-	if typeof(payload.ContactPosition) == "Vector3" then
-		ImpactSparks.Play(variantOf(payload) or payload.Kind, payload.ContactPosition)
-	end
-	freezeExchangeFor(payload)
-	freezeVictimFor(payload)
-	launchFor(payload)
-	cancelSwingFor(payload)
-	noteComboFor(payload)
-
-	local surfaces = handle
-	if surfaces then
-		if SUPPRESSES_DAMAGE_NUMBERS[payload.Kind] then
-			surfaces.SuppressDamageNumbers(AttackConstants.Presentation.OutcomeTextSeconds)
-		elseif payload.Role == "Attacker" and payload.Damage > 0 then
-			surfaces.AddDamageHit({
-				Amount = payload.Damage,
-				Kind = damageKindFor(payload),
-				Position = screenPositionOf(payload.ContactPosition),
-			})
+	timed("Hit.Sparks", function()
+		if typeof(payload.ContactPosition) == "Vector3" then
+			ImpactSparks.Play(variantOf(payload) or payload.Kind, payload.ContactPosition)
 		end
-	end
+	end)
+	timed("Hit.FreezeExchange", function()
+		freezeExchangeFor(payload)
+	end)
+	timed("Hit.FreezeVictim", function()
+		freezeVictimFor(payload)
+	end)
+	timed("Hit.Knockback", function()
+		launchFor(payload)
+		pushFor(payload)
+	end)
+	timed("Hit.CancelSwing", function()
+		cancelSwingFor(payload)
+	end)
 
-	showBanner(payload)
+	timed("Hit.DamageNumbers", function()
+		local surfaces = handle
+		if surfaces then
+			if SUPPRESSES_DAMAGE_NUMBERS[payload.Kind] then
+				surfaces.SuppressDamageNumbers(AttackConstants.Presentation.OutcomeTextSeconds)
+			elseif payload.Role == "Attacker" and payload.Damage > 0 then
+				surfaces.AddDamageHit({
+					Amount = payload.Damage,
+					Kind = damageKindFor(payload),
+					Position = screenPositionOf(payload.ContactPosition),
+				})
+			end
+		end
+	end)
+
+	debug.profileend()
+	reportHitCost(payload)
 end
 
 -- Lifecycle -----------------------------------------------------------------------------------------
@@ -497,20 +480,6 @@ function CombatFeedbackClient.Start(feedbackHandle: Handle): ()
 
 	local remote = NetworkBridge.GetRemoteEvent(DamageConstants.Network.RemoteNames.Feedback)
 	remote.OnClientEvent:Connect(onFeedback)
-
-	-- A new life must not inherit the previous one's banner. The screen is mounted once for the
-	-- session (ResetOnSpawn = false), so nothing else would clear it.
-	--
-	-- Routed through Shared/PlayerLifecycle.lua rather than a bare CharacterAdded connect, for one
-	-- shape rather than sixteen. The Humanoid wait it adds is not needed here (a banner does not care
-	-- about a Humanoid) and costs nothing -- a life whose Humanoid never arrives is a life the player
-	-- has bigger problems with than a stale outcome banner.
-	PlayerLifecycle.BindLocalCharacter({
-		Scope = "CombatFeedbackClient",
-		OnCharacter = function()
-			feedbackHandle.Outcome:set(nil)
-		end,
-	})
 
 	logger:info("CombatFeedbackClient started")
 end

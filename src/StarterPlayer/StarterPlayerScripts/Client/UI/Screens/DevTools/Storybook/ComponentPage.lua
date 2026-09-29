@@ -17,7 +17,7 @@
 	what cannot be verified from source.
 
 	NOT EVERY COMPONENT IS HERE YET. The ones missing are the ones that need real domain data to say
-	anything (AbilitySlot, ActionIcon, VitalIcon, Graph, DamageNumberLabel) -- each needs a fixture
+	anything (AbilitySlot, ActionIcon, VitalIcon, DamageNumberLabel) -- each needs a fixture
 	that is a small design decision of its own rather than a line in this file. Adding one once its
 	fixture exists is a single Specimen call.
 ]]
@@ -510,7 +510,7 @@ local function ComponentPage(scope: Scope, layoutOrder: number, visible: Fusion.
 		}),
 
 		Label(scope, {
-			Text = "AbilitySlot, ActionIcon, VitalIcon, Graph and DamageNumberLabel are not here yet -- each needs a data fixture. See this file's header.",
+			Text = "AbilitySlot, ActionIcon, VitalIcon and DamageNumberLabel are not here yet -- each needs a data fixture. See this file's header.",
 			Scale = "Detail",
 			Color = Tokens.Color.TextDisabled,
 			AutoHeight = true,

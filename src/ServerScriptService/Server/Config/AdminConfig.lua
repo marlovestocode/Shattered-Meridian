@@ -30,12 +30,10 @@ local AdminConfig = {}
 -- closed (nobody authorized until explicitly populated). Add your own UserId (and any testers')
 -- here, e.g. [123456789] = true. Never guess or invent a UserId.
 AdminConfig.AuthorizedUserIds = {
-	[3888090557] = true,
-	[10258838914] = true,
-	[4689336404] = true,
-	[1785892535] = true,
-	[88478367] = true,
+	[3888090557] = true, -- marquis
+	[2620785150] = true, -- domingo
 	[5123402196] = true, -- miraj
+	[846436815] = true, -- dink
 } :: { [number]: boolean }
 
 return AdminConfig

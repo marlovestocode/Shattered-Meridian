@@ -8,11 +8,11 @@ local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 return function()
 	describe("IsActionState", function()
 		it("calls every committed traversal an action", function()
-			-- Dashing is here for the same reason Rolling is: it owns velocity, it declares a Reports
+			-- Dashing is here for the same reason Evading is: it owns velocity, it declares a Reports
 			-- kind, and swinging out of the middle of one would be the combat layer overwriting a
 			-- movement the server has already stood its WalkSpeed resolver down for.
 			for _, stateId in
-				{ "Sliding", "Vaulting", "Mantling", "WallRunning", "LedgeClimbing", "Rolling", "Dashing" }
+				{ "Sliding", "Vaulting", "Mantling", "WallRunning", "LedgeClimbing", "Evading", "Dashing" }
 			do
 				expect(ParkourOwnership.IsActionState(stateId :: any)).to.equal(true, stateId)
 			end
@@ -40,11 +40,11 @@ return function()
 			end
 		end)
 
-		it("does not count AerialCombat, which would make combat refuse itself", function()
+		it("does not count CombatHeld, which would make combat refuse itself", function()
 			-- That state is where parkour parks WHILE combat owns the body. Counting it would mean the
 			-- first swing hands the body over, parkour parks, and every following swing is refused for
 			-- being "in a parkour action" -- aerial combat gone entirely.
-			expect(ParkourOwnership.IsActionState("AerialCombat")).to.equal(false)
+			expect(ParkourOwnership.IsActionState("CombatHeld")).to.equal(false)
 		end)
 
 		it("treats no state at all as not an action", function()

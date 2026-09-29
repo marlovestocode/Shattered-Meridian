@@ -2,10 +2,9 @@
 --[[
 	Toggle.lua
 
-	Owns: a real on/off switch -- this codebase's first. Built to replace the Move Editor's
-	PropertyEditor.lua enable/disable pattern (a full-width Button whose Text swaps between
-	"+ Add X"/"- Remove X"), which reads like a legacy HTML form control rather than a modern
-	settings toggle.
+	Owns: a real on/off switch -- this codebase's first. Built to replace an enable/disable pattern
+	the old Move Editor used (a full-width Button whose Text swaps between "+ Add X"/"- Remove X"),
+	which reads like a legacy HTML form control rather than a modern settings toggle.
 
 	A rectangular track + rectangular sliding knob, not a rounded pill -- Tokens.Radius.Sharp is the
 	only radius this codebase's chrome uses (docs/ui-ux-philosophy.md's "avoid perfect rounded
@@ -45,8 +44,7 @@ export type ToggleProps = {
 	-- Defaults to true. For a toggle that only applies under some other condition (Knockback's own
 	-- "Starts Aerial Combo", which is meaningless until Knockback itself is on). Before this existed
 	-- every such caller wrapped this component in a bare Frame purely to have something to bind a
-	-- Visible to -- PropertyEditor.lua's "StartsAirComboRow" was exactly that wrapper, and it is
-	-- deleted now that this prop exists.
+	-- Visible to.
 	Visible: UsedAs<boolean>?,
 	-- One or two sentences under the switch saying what turning it ON actually does -- the same
 	-- field-level explanation NumericField.lua's own Hint provides, for the control where it matters

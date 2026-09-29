@@ -30,11 +30,11 @@
 	    and Main.server.lua's OnWeaponChanged hookup gives it the same per-weapon parry clip (and window)
 	    a player holding that weapon gets.
 
-	WHY THE SERVER PLAYS ITS CLIPS. A player's swing/guard/roll clips are played by that player's own
+	WHY THE SERVER PLAYS ITS CLIPS. A player's swing/guard/evade clips are played by that player's own
 	client on their own Animator and replicate from there (AttackInputClient, DefenseClient,
 	ParkourAnimator). The bot has no client, and Attack_Started is only ever sent to a Player. So this
 	module plays the same clips -- resolved through the same AttackCatalog entry, WeaponDefenseAnimations
-	and ParkourConstants.AnimationIds -- on the bot's server-owned Animator through Shared/Animation/
+	and EvadeConstants.AnimationIds -- on the bot's server-owned Animator through Shared/Animation/
 	AnimationManager (which was written to own "a bot, an NPC" rig as well as the local player's), and
 	they replicate to everyone. That is what makes the bot READABLE: you parry its swing off its windup
 	exactly as you would a person's.
@@ -77,7 +77,10 @@ local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
+local EvadeConstants = require(ReplicatedStorage.Shared.Combat.EvadeConstants)
+local EvadeMotion = require(ReplicatedStorage.Shared.Combat.EvadeMotion)
+local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
+local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboConstants)
 local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
 local TrainingBotConstants = require(ReplicatedStorage.Shared.TrainingBot.TrainingBotConstants)
 local Trove = require(ReplicatedStorage.Shared.Trove)
@@ -88,6 +91,7 @@ local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
 local AttackCatalog = require(script.Parent.Parent.AttackCatalog)
 local AttackRequestSystem = require(script.Parent.Parent.Attack.AttackRequestSystem)
+local AirComboSystem = require(script.Parent.Parent.AirCombo.AirComboSystem)
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
 local DefenseSystem = require(script.Parent.Parent.Defense.DefenseSystem)
 local HitboxEngine = require(script.Parent.Parent.HitboxEngine.HitboxEngine)
@@ -122,6 +126,14 @@ local GUARD_UP: { [string]: boolean } = { Raising = true, ParryWindow = true, Bl
 -- The DefenseStates in which the bot cannot act at all.
 local DISABLED_STATES: { [string]: boolean } = { Staggered = true, GuardBroken = true }
 
+-- The bot's evade directions, to the directional clips a player's evade plays for the same direction
+-- (EvadeConstants.AnimationIds). Blank means "not authored": no clip -- the same glide a player's is.
+local EVADE_CLIPS: { [string]: string } = {
+	Back = EvadeConstants.AnimationIds.Back,
+	Left = EvadeConstants.AnimationIds.Left,
+	Right = EvadeConstants.AnimationIds.Right,
+}
+
 local THROW_RETRY_SECONDS = 0.05
 local RETARGET_SECONDS = 0.4
 local MOVING_SPEED = 1.5
@@ -151,8 +163,10 @@ type Bot = {
 	NextThrowAt: number,
 	NextBillboardAt: number,
 	LastEvadeAt: number,
-	RollingUntil: number,
-	RollDirection: Vector3,
+	-- When the current evade glide started, and which way it goes. EvadeStartedAt = -math.huge is "not
+	-- evading"; the glide is over once EvadeMotion.SpeedAt says so.
+	EvadeStartedAt: number,
+	EvadeDirection: Vector3,
 	-- When the swing currently presented on the attack layer is scheduled to finish, or nil.
 	SwingEndsAt: number?,
 	GuardShown: boolean,
@@ -325,7 +339,7 @@ local function refreshBillboard(bot: Bot): ()
 	local guard, guardMax = DefenseSystem.GetGuard(bot.Model)
 	local brain = bot.Brain
 	bot.Label.Text = table.concat({
-		`TRAINING BOT | {bot.StyleName} | {bot.DifficultyName}`,
+		`TRAINING BOT | {bot.StyleName} | {bot.DifficultyName} | {bot.WeaponId or "Unarmed"}`,
 		string.format(
 			"HP %d/%d | Guard %d/%d | Nerve %d%%",
 			math.max(math.floor(humanoid.Health), 0),
@@ -477,6 +491,27 @@ end
 
 -- Perception ---------------------------------------------------------------------------------------
 
+-- Whether a wall stands close behind `victim` along the line from `attacker` -- where a Spike would send
+-- them, and so whether the Spike's wall splat is on offer.
+local wallRayParams = RaycastParams.new()
+wallRayParams.FilterType = Enum.RaycastFilterType.Exclude
+wallRayParams.RespectCanCollide = true
+local function wallBehind(attacker: Model, victim: Model): boolean
+	local attackerRoot = CharacterUtil.RootOf(attacker)
+	local victimRoot = CharacterUtil.RootOf(victim)
+	if not attackerRoot or not victimRoot then
+		return false
+	end
+	local direction = flat(victimRoot.Position - attackerRoot.Position)
+	if direction.Magnitude < 1e-3 then
+		return false
+	end
+	wallRayParams.FilterDescendantsInstances = { attacker, victim }
+	local hit =
+		Workspace:Raycast(victimRoot.Position, direction.Unit * TrainingBotConstants.Air.SpikeWallStuds, wallRayParams)
+	return hit ~= nil and math.abs(hit.Normal.Y) <= AirComboConstants.Spike.WallMaxNormalY
+end
+
 local function perceive(bot: Bot, now: number): Perception
 	local root = bot.Root
 	local humanoid = bot.Humanoid
@@ -499,20 +534,29 @@ local function perceive(bot: Bot, now: number): Perception
 		TargetStunned = false,
 		SelfSwing = swingViewOf(model),
 		SelfAttackState = attackStateOf(model),
-		SelfBusyUntil = numberAttribute(humanoid, Constants.Attributes.CombatBusyUntil),
+		-- CombatBusyUntil is the later of the swing's end and any hitstun, and nothing rewrites it when a
+		-- swing is cut short by a parry or a trade -- so once the engine says the swing is over, only the
+		-- hitstun half still holds the body. Read raw, a parried bot believed itself committed through the
+		-- whole cancelled swing and let the counter land rather than parrying it back.
+		SelfBusyUntil = if attackStateOf(model) == "Idle"
+			then numberAttribute(humanoid, Constants.Attributes.HitstunUntil)
+			else numberAttribute(humanoid, Constants.Attributes.CombatBusyUntil),
 		SelfDefenseState = selfState,
 		SelfGuardFraction = guardFractionOf(model),
 		SelfHealthFraction = if humanoid.MaxHealth > 0 then humanoid.Health / humanoid.MaxHealth else 0,
 		SelfDisabled = numberAttribute(humanoid, Constants.Attributes.HitstunUntil) > now or humanoid:GetAttribute(
 			Constants.Attributes.Grabbed
 		) == true or humanoid:GetAttribute(Constants.Attributes.Grabbing) == true or DISABLED_STATES[selfState] == true,
-		SelfLocked = humanoid:GetAttribute(Constants.Attributes.Grabbed) == true or humanoid:GetAttribute(
-			Constants.Attributes.Grabbing
-		) == true or DISABLED_STATES[selfState] == true,
+		-- A stagger no longer stops a guard from mattering when parry trading is on (DefenseConstants.Rally):
+		-- a staggered combatant may parry back, and so may the bot.
+		SelfLocked = humanoid:GetAttribute(Constants.Attributes.Grabbed) == true
+			or humanoid:GetAttribute(Constants.Attributes.Grabbing) == true
+			or selfState == "GuardBroken"
+			or (selfState == "Staggered" and not DefenseConstants.Rally.ParryFromStagger),
 		ParryArmableAt = if bot.GuardHeld
 			then math.huge
 			else bot.GuardReleasedAt + DefenseConstants.Parry.MinUnguardedSeconds,
-		SelfRolling = now < bot.RollingUntil,
+		SelfEvading = now - bot.EvadeStartedAt < EvadeConstants.DurationSeconds,
 		EvadeReady = now - bot.LastEvadeAt >= DefenseConstants.Evade.CooldownSeconds,
 		HomeDistance = flat(bot.SpawnCFrame.Position - root.Position).Magnitude,
 		FeintWindowFraction = AttackConstants.Feint.WindowFraction,
@@ -537,6 +581,17 @@ local function perceive(bot: Bot, now: number): Perception
 		perception.TargetDefenseState = DefenseSystem.GetState(target) or "Neutral"
 		perception.TargetGuardFraction = guardFractionOf(target)
 		perception.TargetStunned = numberAttribute(targetHumanoid, Constants.Attributes.HitstunUntil) > now
+	end
+
+	-- The air combo, from its own queries -- the same "read through the public surface" shape every other
+	-- field here keeps (AirComboSystem.GetCombo is a read-only view).
+	perception.SelfAirHeld = AirComboAttributes.IsHeld(humanoid)
+	local combo = AirComboSystem.GetCombo(model)
+	if combo and combo.Attacker == model then
+		perception.SelfAirAttacker = true
+		perception.SelfAirHitsLanded = combo.AirHitsLanded
+		perception.AirPressReadyAt = combo.LaunchedAt + AirComboConstants.Timing.FirstPressSeconds
+		perception.WallBehindTarget = wallBehind(model, combo.Victim)
 	end
 	return perception
 end
@@ -589,21 +644,26 @@ local function applyIntent(bot: Bot, intent: Intent, perception: Perception, now
 		DefenseSystem.SetBlocking(model, intent.Guard, now)
 	end
 
-	-- Rolling out of a held guard is legal (BeginEvade drops the guard itself), exactly as for a player.
+	-- Evading out of a held guard is legal (BeginEvade drops the guard itself), exactly as for a player.
 	if intent.Evade then
 		local ok = DefenseSystem.BeginEvade(model, now)
 		if ok then
 			bot.LastEvadeAt = now
-			bot.RollingUntil = now + ParkourConstants.Roll.DurationSeconds
-			bot.RollDirection = evadeDirection(bot, toTarget, intent.Evade)
-			bot.Animations:SetClaim(LAYER_TRAVERSAL, SOURCE, {
-				Clip = ParkourConstants.AnimationIds.Roll,
-				Looped = false,
-				Priority = Enum.AnimationPriority.Action,
-				FadeIn = 0.05,
-				FadeOut = 0.1,
-				MaxSeconds = ParkourConstants.Roll.DurationSeconds,
-			})
+			-- The same glide a player's evade is (EvadeMotion.SpeedAt, driven in the body section below), and
+			-- the same clip rule: the directional clip when one is authored, otherwise no clip at all.
+			bot.EvadeStartedAt = now
+			bot.EvadeDirection = evadeDirection(bot, toTarget, intent.Evade)
+			local evadeClip = EVADE_CLIPS[intent.Evade]
+			if evadeClip ~= nil and evadeClip ~= "" then
+				bot.Animations:SetClaim(LAYER_TRAVERSAL, SOURCE, {
+					Clip = evadeClip,
+					Looped = false,
+					Priority = Enum.AnimationPriority.Action,
+					FadeIn = 0.05,
+					FadeOut = 0.1,
+					MaxSeconds = EvadeConstants.DurationSeconds,
+				})
+			end
 		end
 	end
 
@@ -617,7 +677,7 @@ local function applyIntent(bot: Bot, intent: Intent, perception: Perception, now
 	-- Only asked while its own swing is over -- the engine refuses a second concurrent swing as Busy, and
 	-- asking every retry tick mid-swing would cost a catalogue resolve per tick for a guaranteed no.
 	if intent.Attack and now >= bot.NextThrowAt and perception.SelfAttackState == "Idle" then
-		local request: AttackTypes.AttackRequest = { Kind = intent.Attack }
+		local request: AttackTypes.AttackRequest = { Kind = intent.Attack, Modifier = intent.Modifier }
 		local accepted = AttackRequestSystem.Throw(model, request, false, now)
 		if accepted then
 			local view = AttackRequestSystem.GetInFlight(model)
@@ -644,16 +704,25 @@ local function applyIntent(bot: Bot, intent: Intent, perception: Perception, now
 
 	presentGuard(bot, GUARD_UP[perception.SelfDefenseState] == true)
 
-	-- The body. Nothing is written while held: GrabSystem's constraints own it.
-	if humanoid:GetAttribute(Constants.Attributes.Grabbed) == true then
+	-- The body. Nothing is written while someone else's constraints own it: a grab's, or an air combo's
+	-- (held as the victim, or driven to its follow slot as the attacker -- AirComboSystem), or a finisher's
+	-- flight (platform-standing under the server's velocity). Turning the root here would fight all of them.
+	if
+		humanoid:GetAttribute(Constants.Attributes.Grabbed) == true
+		or AirComboAttributes.IsParticipant(humanoid)
+		or humanoid.PlatformStand
+	then
 		humanoid:Move(Vector3.zero, false)
 		return
 	end
 
-	if now < bot.RollingUntil then
+	if now - bot.EvadeStartedAt < EvadeConstants.DurationSeconds then
+		-- The same glide curve a player's evade drives (Shared/Combat/EvadeMotion.lua), so the two are one
+		-- move rather than two copies of the same numbers.
 		humanoid:Move(Vector3.zero, false)
 		local velocity = root.AssemblyLinearVelocity
-		root.AssemblyLinearVelocity = bot.RollDirection * ParkourConstants.Roll.Speed + Vector3.new(0, velocity.Y, 0)
+		root.AssemblyLinearVelocity = bot.EvadeDirection * EvadeMotion.SpeedAt(now - bot.EvadeStartedAt)
+			+ Vector3.new(0, velocity.Y, 0)
 	else
 		local locked = humanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true
 			or perception.SelfDisabled
@@ -697,7 +766,8 @@ local spawnInto: (
 	styleName: TrainingBotConstants.StyleName,
 	difficultyName: TrainingBotConstants.DifficultyName,
 	owner: Player?,
-	brain: Brain?
+	brain: Brain?,
+	weaponId: Types.WeaponId?
 ) -> Bot?
 
 local function unregisterCombat(bot: Bot): ()
@@ -748,7 +818,7 @@ local function onDied(bot: Bot): ()
 		end
 		local brain = bot.Brain
 		destroyBot(bot)
-		spawnInto(bot.SpawnCFrame, bot.StyleName, bot.DifficultyName, bot.Owner, brain)
+		spawnInto(bot.SpawnCFrame, bot.StyleName, bot.DifficultyName, bot.Owner, brain, bot.WeaponId)
 	end)
 end
 
@@ -757,7 +827,8 @@ spawnInto = function(
 	styleName: TrainingBotConstants.StyleName,
 	difficultyName: TrainingBotConstants.DifficultyName,
 	owner: Player?,
-	brain: Brain?
+	brain: Brain?,
+	requestedWeapon: Types.WeaponId?
 ): Bot?
 	local ok, modelOrError = pcall(buildRig)
 	if not ok then
@@ -792,7 +863,11 @@ spawnInto = function(
 	nextId += 1
 	local id = nextId
 	local now = os.clock()
-	local weaponId = WeaponRoster.Default()
+	-- The weapon it was spawned with (the Admin Menu's picker), kept across respawns; else the roster's
+	-- default. A requested id the roster no longer knows falls back rather than spawning it unarmed.
+	local weaponId = if requestedWeapon and WeaponRoster.Has(requestedWeapon)
+		then requestedWeapon
+		else WeaponRoster.Default()
 
 	local combatantId = HitboxEngine.RegisterCombatant(model, root, humanoid)
 	DefenseSystem.RegisterCombatant(model, root, humanoid, WeaponDefenseAnimations.GetParry(weaponId))
@@ -836,8 +911,8 @@ spawnInto = function(
 		NextThrowAt = 0,
 		NextBillboardAt = 0,
 		LastEvadeAt = -math.huge,
-		RollingUntil = 0,
-		RollDirection = Vector3.zero,
+		EvadeStartedAt = -math.huge,
+		EvadeDirection = Vector3.zero,
 		SwingEndsAt = nil,
 		GuardShown = false,
 		GuardHeld = false,
@@ -917,12 +992,14 @@ end
 
 -- Spawns one bot at `spawnCFrame`, evicting the oldest past Config.MaxActive. Unknown style/difficulty
 -- names fall back to the defaults rather than failing -- the caller (DevMenuSystem) validates first, so
--- reaching here with one is a programming error worth a warning, not a refusal.
+-- reaching here with one is a programming error worth a warning, not a refusal. `weaponId` is what it
+-- fights with (nil, or an id the roster does not know, means WeaponRoster.Default()).
 function TrainingBotSystem.Spawn(
 	spawnCFrame: CFrame,
 	styleName: string?,
 	difficultyName: string?,
-	owner: Player?
+	owner: Player?,
+	weaponId: Types.WeaponId?
 ): (Model?, string?)
 	local style = if TrainingBotConstants.IsStyle(styleName)
 		then styleName :: TrainingBotConstants.StyleName
@@ -941,7 +1018,7 @@ function TrainingBotSystem.Spawn(
 		destroyBot(active[1])
 	end
 
-	local bot = spawnInto(spawnCFrame, style, difficulty, owner, nil)
+	local bot = spawnInto(spawnCFrame, style, difficulty, owner, nil, weaponId)
 	if not bot then
 		return nil, "SpawnFailed"
 	end

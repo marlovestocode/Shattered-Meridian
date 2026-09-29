@@ -45,8 +45,8 @@
 	Because that field is only reachable for a CUSTOM move. A "Default" move -- every hand-authored
 	attack in Constants.Combat.Weapons, which is the entire live move set -- is a fresh projection built
 	by DefaultMoveRegistry on every read, and that projection hardcodes AnimationId = "" and never
-	stores one (see its own header: the Move Editor deliberately hides the Animation section for
-	Category == "Default"). So a Default move has nowhere to put a clip id, and before this file the
+	stores one (the Move Editor does not offer a Default move a clip field). So a Default move has
+	nowhere to put a clip id, and before this file the
 	whole live move set was structurally unable to have an animation. This is that missing shelf.
 
 	THE PRECEDENCE IS: an authored MoveDefinition.AnimationId wins, and this table is the fallback --
@@ -71,11 +71,10 @@
 	that mismatch is worth a helper rather than a rule an author has to remember: a bare id resolves to
 	nothing, silently, in a file that looks correctly filled in.
 
-	ONE CLIP PER MOVE, not a timeline. The Move Creation System's richer MoveDefinition.Animations list
-	(AnimationTimeline.Clip, with per-clip start/stop/speed/fade/blend control) is not reached from here
-	-- it is a custom-move authoring feature, and its runtime playback path went with the combat
-	teardown. A single clip per attack is what the rebuilt client actually plays today; when timeline
-	playback comes back, this file is the fallback it falls back TO, not something it replaces.
+	ONE CLIP PER MOVE, not a timeline. A move authored in the Move Editor carries its own single
+	AnimationId (MoveTypes.MoveDefinition); a Default move carries none and resolves its clip here. The
+	old multi-clip timeline was never played by the rebuilt client and was deleted with the 2026-09-29
+	Move Editor rebuild.
 
 	Does not own: playing anything (Client/Combat/AttackInputClient.lua claims the clip through
 	Shared/Animation/AnimationManager.lua), which move a press throws (SwingSequencer), or the timing
@@ -108,6 +107,34 @@ local WEAPON_STAGE_FOLDERS: { [string]: string } = {
 	["Basic:3"] = "M3",
 	["Heavy:1"] = "HEAVY",
 	["Finisher"] = "FINISHER",
+	-- The air combo (Shared/AirCombo/AirComboMoves.lua names these ids).
+	["Launcher"] = "LAUNCHER",
+	["Air:1"] = "AIR1",
+	["Air:2"] = "AIR2",
+	["Air:3"] = "AIR3",
+	["AirFinisher:Slam"] = "SLAM",
+	["AirFinisher:Spike"] = "SPIKE",
+}
+
+-- THE AIR MOVES BORROW A GROUND CLIP UNTIL THEIR OWN IS AUTHORED. Stage -> the stage whose clip stands in.
+-- An air string that plays no animation at all reads as the combo not working, and this repo does not guess
+-- asset ids, so until a LAUNCHER/AIR1../SLAM/SPIKE clip exists (in IDS below or a weapon's own folder) each
+-- air move plays the ground swing closest to it: the three air beats the three M1s, the launcher and the
+-- spike the finisher's swing, the slam the heavy's overhead.
+--
+-- A BORROWED CLIP IS RETIMED, NEVER TRUSTED FOR TIMING. The borrowed swing's strike is not where the air
+-- move's is (an M1 strikes at ~0.31s; an air hit must at 0.22s, because that windup IS the parry read --
+-- docs/design/air-combat-and-evade.md B4). So Server/Combat/AttackCatalog.Get plays a borrowed clip at
+-- whatever speed puts its Hit marker on the move's OWN authored windup, and ignores the marker as a windup
+-- override. See Resolve below, which is what tells it the clip is borrowed. An air move's own authored clip
+-- is not borrowed and follows the ordinary marker rules.
+local BORROWED_FROM: { [string]: string } = {
+	["Launcher"] = "Finisher",
+	["Air:1"] = "Basic:1",
+	["Air:2"] = "Basic:2",
+	["Air:3"] = "Basic:3",
+	["AirFinisher:Slam"] = "Heavy:1",
+	["AirFinisher:Spike"] = "Finisher",
 }
 
 -- MoveId -> animation asset id. Keys are DefaultMoveRegistry's own synthetic ids, which is the same
@@ -127,9 +154,17 @@ local IDS: { [string]: string } = {
 	-- telegraph, which is the whole point of a heavy in this game's defence model: the windup IS the
 	-- tell a defender parries off.
 	["Heavy:1"] = "83363364108102",
-	-- Thrown only when a full Basic string LANDED (AttackConstants.Finisher.MinComboStage) -- the
-	-- payoff swing, and the one most worth a distinctive clip.
+	-- The weapon's Finisher move. No M1 throws it any more (the string's 4th hit is the air combo's
+	-- launcher), but its clip is what the launcher and the Spike borrow until their own are authored.
 	["Finisher"] = "138196103225171",
+
+	-- The air combo. BLANK UNTIL AUTHORED -- each borrows a ground clip meanwhile (BORROWED_FROM above).
+	["Launcher"] = "",
+	["Air:1"] = "",
+	["Air:2"] = "",
+	["Air:3"] = "",
+	["AirFinisher:Slam"] = "",
+	["AirFinisher:Spike"] = "",
 
 	-- Standalone attacks --------------------------------------------------------------------------
 	-- Catalogued and throwable through the hotbar, but not part of either string. Listed so they are
@@ -137,7 +172,6 @@ local IDS: { [string]: string } = {
 	-- Keyed by their full MoveId because they have no weapon in them to strip.
 	["default:DashPunch"] = "",
 	["default:DashHit"] = "",
-	["default:AirSlam"] = "",
 }
 
 -- Splits a weapon-stage MoveId into the weapon that threw it and the stage key IDS/
@@ -203,11 +237,7 @@ AttackAnimations.Ids = IDS
 -- one level up (an authored MoveDefinition.AnimationId beats this whole file). A weapon that hasn't
 -- set its own Attribute for this stage falls straight through to IDS, so an unattributed weapon keeps
 -- animating exactly as it always has.
-function AttackAnimations.Get(moveId: string): string
-	if typeof(moveId) ~= "string" then
-		return ""
-	end
-	local weaponId, stage = splitWeaponStage(moveId)
+local function ownClip(weaponId: string?, stage: string): string
 	if weaponId then
 		local override = weaponOverride(weaponId, stage)
 		if override then
@@ -215,6 +245,35 @@ function AttackAnimations.Get(moveId: string): string
 		end
 	end
 	return WeaponAssets.NormalizeAssetId(IDS[stage] or "")
+end
+
+-- The clip for `moveId`, and -- when it is BORROWED (an air move standing in on a ground swing's clip, see
+-- BORROWED_FROM) -- the MoveId it was borrowed from, which is what the clip's own markers are named for (an
+-- M1 clip's AttackM<n>). nil for a move's own clip. A borrowed clip resolves through the same
+-- weapon-override-then-shared precedence as the stage it borrows from, so a weapon with its own M1 clip
+-- lends that one to its air beats.
+function AttackAnimations.Resolve(moveId: string): (string, string?)
+	if typeof(moveId) ~= "string" then
+		return "", nil
+	end
+	local weaponId, stage = splitWeaponStage(moveId)
+	local own = ownClip(weaponId, stage)
+	if own ~= "" then
+		return own, nil
+	end
+	local lender = BORROWED_FROM[stage]
+	if weaponId and lender then
+		local borrowed = ownClip(weaponId, lender)
+		if borrowed ~= "" then
+			return borrowed, `default:{weaponId}:{lender}`
+		end
+	end
+	return "", nil
+end
+
+function AttackAnimations.Get(moveId: string): string
+	local id = AttackAnimations.Resolve(moveId)
+	return id
 end
 
 -- Every weapon's non-blank override, as (weaponId, stage, rawId) triples -- the one walk every weapon

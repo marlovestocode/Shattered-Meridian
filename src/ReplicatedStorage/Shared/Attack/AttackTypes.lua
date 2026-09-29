@@ -63,6 +63,11 @@ export type AttackRequest = {
 	-- Deviation gating anyone else does, not a free pass just because their account also carries
 	-- dev-tool trust. A slot with nothing equipped simply refuses -- MoveId was never read at all.
 	MoveId: string?,
+	-- "Up" when the jump key (Space / gamepad A) was held at the press -- the air combo's modifier: Space + M1
+	-- is the launcher branch, Space + Heavy in the air is the Spike (docs/design/air-combat-and-evade.md B2).
+	-- Basic/Heavy only. The SERVER decides whether it means anything (SwingSequencer.Resolve, AirComboSystem),
+	-- so a forged modifier can only ask for a launcher the string already earned.
+	Modifier: "Up"?,
 }
 
 -- What the server tells the ATTACKER the instant it accepts a throw. Nobody else is told: this is a
@@ -106,9 +111,11 @@ export type WeaponChangedPayload = {
 	WeaponId: Types.WeaponId,
 }
 
--- Why the server cut a swing short. "Feint" is the only sender today -- see
--- AttackConstants.Network.RemoteNames.Cancelled.
-export type AttackCancelReason = "Feint"
+-- Why the server cut a swing short -- see AttackConstants.Network.RemoteNames.Cancelled. "Feint" is the
+-- attacker's own cancel (the string resets). "Parried" is sent after a parry, and only to say where the
+-- string went BACK to (AttackRequestSystem.KeepChainThroughParry). The swing itself was already cut through
+-- Combat_Feedback.
+export type AttackCancelReason = "Feint" | "Parried"
 
 -- Server -> the attacker alone, on Attack_Cancelled. Carries the MoveId so a client whose own
 -- prediction has already moved on to a different swing can ignore a cancel that is not about it.
@@ -116,8 +123,12 @@ export type AttackCancelledPayload = {
 	MoveId: string,
 	Reason: AttackCancelReason,
 	-- How long the attacker is locked out after the cancel -- the client's LocalCombatState holds its
-	-- own swing prediction this long rather than guessing.
+	-- own swing prediction this long rather than guessing. For "Parried" this is the stagger.
 	RecoverySeconds: number,
+	-- "Parried" only: the string the server restored, so the client's prediction mirror continues it.
+	-- StringKind nil means no string is live (the parried swing was a fresh string's first hit).
+	StringKind: AttackKind?,
+	StringStage: number?,
 }
 
 return AttackTypes

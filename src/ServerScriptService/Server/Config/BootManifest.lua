@@ -110,13 +110,12 @@ local function namesExcept(source: { [string]: string }, excluded: { string }): 
 	return names
 end
 
--- Removed with the old combat system, and never re-owned: the Dev Menu's two combat-target actions
--- (a third, SpawnTrainingBot, was re-owned by the rebuilt Server/Combat/TrainingBot on 2026-09-28) plus its own Announcement RemoteEvent's odd sibling, and the Move Editor's two "test on a dummy"
--- calls (see MoveEditorClient.lua's own header on that removal). Their names are still in the
--- Constants tables, so without this list the boot check below would report four-plus phantom missing
--- remotes on every healthy server.
+-- Removed with the old combat system, and never re-owned: the Dev Menu's two combat-target actions (a
+-- third, SpawnTrainingBot, was re-owned by the rebuilt Server/Combat/TrainingBot on 2026-09-28). Their
+-- names are still in the Constants table, so without this list the boot check below would report
+-- phantom missing remotes on every healthy server. (The Move Editor's two retired names went with its
+-- 2026-09-29 rebuild, which deleted them from its table outright.)
 local DEV_MENU_RETIRED = { "ResetTargetCombatState", "SetTargetHealth" }
-local MOVE_EDITOR_RETIRED = { "TestFireMove", "SpawnPreviewDummy" }
 
 -- Ordered to MIRROR Main.server.lua's boot sequence, purely so the two files read against each other.
 -- The order here is documentation and nothing enforces it -- see this file's header on why boot order
@@ -230,6 +229,11 @@ local ENTRIES: { BootEntry } = {
 		Path = { "Combat", "Grab", "GrabSystem" },
 		Remotes = namesOf(GrabConstants.Network.RemoteNames),
 	},
+	-- Air combos (docs/design/air-combat-and-evade.md, Part B). The same sibling shape as GrabSystem: it
+	-- subscribes to DamageSystem.OnApplied and is read by AttackRequestSystem.Throw as a fourth
+	-- CanAttack-shaped gate. NO REMOTE of its own -- the launcher modifier rides Attack_Request, state rides
+	-- Humanoid Attributes, and hit/clash feedback rides Combat_Feedback's optional AirCombo field.
+	{ Name = "AirComboSystem", Path = { "Combat", "AirCombo", "AirComboSystem" }, Remotes = {} },
 	-- The combat tag. A sibling of the attack layer like GrabSystem above, subscribing to the same
 	-- DamageSystem.OnApplied extension point -- see its own header. Boots after GrabSystem for no
 	-- ordering reason beyond reading in dependency order; its Step reclaims only its own rows, so an
@@ -306,7 +310,7 @@ local ENTRIES: { BootEntry } = {
 	{
 		Name = "MoveEditorSystem",
 		Path = { "Systems", "MoveEditorSystem" },
-		Remotes = namesExcept(Constants.MoveEditor.RemoteNames, MOVE_EDITOR_RETIRED),
+		Remotes = namesOf(Constants.MoveEditor.RemoteNames),
 	},
 	{
 		Name = "KitEditorSystem",
@@ -357,8 +361,6 @@ BootManifest.Planned = table.freeze({
 BootManifest.RetiredRemotes = {
 	Constants.Debug.DevMenu.RemoteNames.ResetTargetCombatState,
 	Constants.Debug.DevMenu.RemoteNames.SetTargetHealth,
-	Constants.MoveEditor.RemoteNames.TestFireMove,
-	Constants.MoveEditor.RemoteNames.SpawnPreviewDummy,
 }
 
 -- Which Systems have reported Init this VM. A set, not a count: the useful question at the end of boot

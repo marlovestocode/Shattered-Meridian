@@ -464,7 +464,7 @@ return function()
 		end)
 	end)
 
-	describe("ParkourMotor -- external impulses interrupt a velocity state", function()
+	describe("ParkourMotor -- external impulses interrupt a body-owning state", function()
 		it("records an interrupt for an external impulse while a Velocity state owns the body", function()
 			local rig = makeRig()
 			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
@@ -511,6 +511,39 @@ return function()
 
 			ParkourMotor.BeginFrame()
 			ParkourMotor.Apply()
+			expect(ParkourMotor.ConsumeInterrupt()).to.equal(nil)
+
+			destroyRig(rig)
+		end)
+
+		it("records an interrupt under a Kinematic owner instead of refusing the knock", function()
+			-- A knock mid-vault used to be refused outright and lost. The rigid position drive would erase a
+			-- direct write before a physics step, so the write is skipped and the interrupt carries it to
+			-- ParkourController, which ends the traversal and hands the body off with it.
+			local rig = makeRig()
+			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local command = ParkourMotor.BeginFrame()
+			command.Mode = "Kinematic"
+			command.TargetCFrame = CFrame.new(0, 52, 0)
+			ParkourMotor.Apply()
+
+			local knock = Vector3.new(0, 30, 40)
+			expect(ParkourMotor.ApplyExternalImpulse(knock)).to.equal(true)
+			expect(ParkourMotor.ConsumeInterrupt()).to.equal(knock)
+
+			destroyRig(rig)
+		end)
+
+		it("still refuses an external impulse while the server holds the body", function()
+			local rig = makeRig()
+			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local command = ParkourMotor.BeginFrame()
+			command.Mode = "Velocity"
+			command.Velocity = Vector3.new(0, 0, 30)
+			ParkourMotor.Apply()
+			rig.Humanoid:SetAttribute(Constants.Attributes.RootControlLocked, true)
+
+			expect(ParkourMotor.ApplyExternalImpulse(Vector3.new(40, 0, 0))).to.equal(false)
 			expect(ParkourMotor.ConsumeInterrupt()).to.equal(nil)
 
 			destroyRig(rig)

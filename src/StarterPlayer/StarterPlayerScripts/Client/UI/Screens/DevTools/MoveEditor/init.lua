@@ -2,318 +2,367 @@
 --[[
 	MoveEditor/init.lua
 
-	Owns: the mounted, admin-gated Move Creation System editor's root -- ScreenGui > Root Panel >
-	Header + a three-column Body row (Sidebar | PropertyEditor | PreviewViewport). A new sibling
-	top-level screen to DevMenu (mounted from UI/init.lua alongside it), not a 5th DevMenu tab --
-	DevMenu's own root has a fixed 744x600 budget sized for its existing 4-tab strip, too small for
-	a move list + a full property form + a live 3D viewport side by side.
+	Owns: the Move Editor screen -- the admin tool that authors every combat move as data -- and the
+	Values and signals on its handle (Types.lua). Rebuilt from nothing on 2026-09-29 alongside the schema,
+	the registries and the server System; see docs/design/move-editor-guide.md for how it is used.
 
-	Sidebar.lua (not a bare MoveList.Mount call, as before the website-style redesign) now owns BOTH
-	the Moves list and the section nav PropertyEditor.lua's content pane is split by -- see that
-	file's own header for why those two navigation axes live in one merged column instead of two.
+	THE FRAME IS Components/ScreenFrame, like every modal here: a tab strip, a body, a footer carrying the
+	answer to the last action. The body is a row of three, and the reason for each column is what it is
+	FOR while an author works:
 
-	Owns the actual state every panel below reads/writes: IsOpen, StatusText, MovesDisplay, Draft,
-	LastTestResultText, plus the BindableEvents that make up MoveEditorHandle (Types.lua). This
-	root constructs Sidebar/PropertyEditor/PreviewViewport directly and wires them with plain
-	closures (OnNew/OnSelect/OnDelete/OnFieldChanged/OnSave/OnReset) -- unlike DevMenu's own
-	Sidebar/ContentArea split, those three panels get no BindableEvent handle of their own, since
-	this root constructs all three itself and is never called before they exist. Only THIS screen's
-	own outer Mount crosses the "not created yet" boundary Client/DevTools/MoveEditor/MoveEditorClient.lua
-	needs signals for -- see Types.lua's header. Sidebar.Mount's own return value (which owns
-	SelectedSection, the one piece of state PropertyEditor.lua needs from it) isn't part of that
-	boundary either, for the same "constructed here, never called before it exists" reason.
+	    Browser (rail)   every move, grouped, with its save state -- where you go to pick
+	    Form (tabs)      Hitbox / Timing / Impact / Identity -- the inputs, one concern per tab
+	    Readout (rail)   plots, the effective timeline, notes, actions -- the RESULTS of those inputs
 
-	A field edit updates Draft immediately (optimistic -- both PropertyEditor and PreviewViewport
-	read the same Draft, so both feel instant) and ALSO fires DraftFieldChanged, which
-	MoveEditorClient.lua debounces into the actual UpdateDraft network call and reconciles back into
-	Draft once the server responds (see Constants.MoveEditor.DraftDebounceSeconds' own header).
+	Both rails are pinned, so a result is never a tab switch away from the input that caused it (the
+	character menu's IdentityRail argument). The form takes whatever the rails leave (Stack.Fill), not a
+	width computed from theirs.
 
-	Does not own: authorization (MoveEditorSystem.lua re-checks server-side regardless of whether
-	this screen is even visible) or the actual RemoteFunction calls (MoveEditorClient.lua).
+	NO CARDS. Groups inside a column are separated by a bronze SectionHeading and spacing, never by a
+	bordered box inside the panel's own border -- ScreenFrame's header, and the reason the old editor's
+	Section-card stack was the first thing this rebuild removed.
 
-	Also owns hotbarBindings/bindHotbarSlotRequestedEvent (2026-08-10, the Move Creation System
-	hotbar pass) -- PropertyEditor.lua's toolbar reads the former to show which slot(s) the
-	currently-selected move already occupies and fires the latter (via its own OnBindHotbarSlot
-	closure above, which resolves the signal's MoveId argument from `draft`) when an admin clicks a
-	slot button. MoveEditorClient.lua's handler for this one DOES touch a RemoteFunction
-	(EquipArtSlot, ArtSystem.DevGrantAndEquip server-side) -- binding to a slot is an equip, not
-	client-side bookkeeping, since an art IS a move; see Client/Combat/HotbarBindings.lua's own
-	header.
+	EDITS ARE OPTIMISTIC AND FLOW ONE WAY. A field edit clones the draft, mutates the clone, sets Draft
+	(so every field, both plots and the dirty chip update the same frame) and fires DraftEdited; the
+	driver debounces that into a Preview and writes the server's answer back. Nothing in this screen
+	calls a remote.
+
+	UNDO LIVES HERE, not in the driver: it is a property of the edits this screen makes, and an undo is
+	just one more edit -- it sets Draft and fires DraftEdited like any field, so the driver previews it
+	with no special case. Every edit records the draft it replaced (Shared/Authoring/DraftHistory.lua,
+	one stack per move, a burst of edits coalesced into one step). The server's own answers written back
+	into Draft are not edits and are never recorded.
+
+	Does not own: any network call, authorization, or what an action does -- Client/DevTools/MoveEditor/
+	MoveEditorClient.lua drives this screen from outside.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
+local Constants = require(ReplicatedStorage.Shared.Constants)
+local DraftHistory = require(ReplicatedStorage.Shared.Authoring.DraftHistory)
+local MoveEditorTypes = require(ReplicatedStorage.Shared.Authoring.MoveEditorTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
-local MoveStats = require(ReplicatedStorage.Shared.MoveStats)
+local TrainingBotConstants = require(ReplicatedStorage.Shared.TrainingBot.TrainingBotConstants)
 
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
+local Inset = require(script.Parent.Parent.Parent.Components.Inset)
+local Label = require(script.Parent.Parent.Parent.Components.Label)
 local ScreenFrame = require(script.Parent.Parent.Parent.Components.ScreenFrame)
 local Stack = require(script.Parent.Parent.Parent.Components.Stack)
-local Inset = require(script.Parent.Parent.Parent.Components.Inset)
-local ShortcutsOverlay = require(script.ShortcutsOverlay)
-local Label = require(script.Parent.Parent.Parent.Components.Label)
 
-local MoveEditorTypes = require(script.Types)
-local EditorTokens = require(script.EditorTokens)
-local Sidebar = require(script.Sidebar)
-local PropertyEditor = require(script.PropertyEditor)
-local PreviewViewport = require(script.PreviewViewport)
+local Browser = require(script.Browser)
+local Fields = require(script.Fields)
+local HitboxTab = require(script.HitboxTab)
+local IdentityTab = require(script.IdentityTab)
+local ImpactTab = require(script.ImpactTab)
+local MoveEditorScreenTypes = require(script.Types)
+local Readout = require(script.Readout)
+local TimingTab = require(script.TimingTab)
 
-local Children = Fusion.Children
 local peek = Fusion.peek
 
 type Scope = Fusion.Scope<typeof(Fusion)>
+type MoveEntry = MoveEditorTypes.MoveEntry
 
-export type MoveEditorHandle = MoveEditorTypes.MoveEditorHandle
+export type MoveEditorHandle = MoveEditorScreenTypes.MoveEditorHandle
 
 local MoveEditor = {}
 
-local SIDEBAR_WIDTH = 260
-local CONTENT_WIDTH = 600
-local PREVIEW_WIDTH = 420
-local ROOT_WIDTH = SIDEBAR_WIDTH + Tokens.Space.M * 2 + CONTENT_WIDTH + PREVIEW_WIDTH + Tokens.Space.L * 2
-local ROOT_HEIGHT = 760
+local ROOT_WIDTH = 1240
+local ROOT_HEIGHT = 780
+local BROWSER_WIDTH = 272
+local READOUT_WIDTH = 344
 
--- The band heights are Components/ScreenFrame.lua's; this is what the three columns share once the
--- body's own inset comes off. Same pair Screens/DevTools/DevMenu/init.lua and Screens/DevTools/KitEditor/init.lua take.
-local _, BODY_BAND_HEIGHT = ScreenFrame.BodySize(ROOT_WIDTH, ROOT_HEIGHT)
-local BODY_HEIGHT = BODY_BAND_HEIGHT - Tokens.Space.M - Tokens.Space.L
--- The inventory readout's own row height, in the tab strip band.
-local READOUT_HEIGHT = 20
+local TAB_NAMES: { string } = { "Hitbox", "Timing", "Impact", "Identity" }
 
-function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorTypes.MoveEditorHandle
+function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 	local isOpen = scope:Value(false)
 	local statusText = scope:Value("")
-	local movesDisplay: Fusion.Value<{ MoveTypes.MoveDefinition }> = scope:Value({} :: { MoveTypes.MoveDefinition })
-	local draft: Fusion.Value<MoveTypes.MoveDefinition?> = scope:Value(nil :: MoveTypes.MoveDefinition?)
-	local lastTestResultText = scope:Value("")
-	-- Owned here (not by StatsPanel) for the same reason `draft` is: MoveEditorClient.lua appends to
-	-- it from outside this screen entirely, so it has to live on the handle -- see Types.lua's own
-	-- MoveEditorHandle.TestSamples.
-	local testSamples: Fusion.Value<{ MoveStats.TestSample }> = scope:Value({} :: { MoveStats.TestSample })
-	local hotbarBindings: Fusion.Value<{ [number]: string? }> = scope:Value({} :: { [number]: string? })
+	local entries = scope:Value({} :: { MoveEntry })
+	local hotbarBindings = scope:Value({} :: { [number]: string? })
+	local volumesVisible = scope:Value(false)
+	local dummyGuard = scope:Value(false)
+	local botStyle = scope:Value(TrainingBotConstants.DefaultStyle :: string)
+	local botDifficulty = scope:Value(TrainingBotConstants.DefaultDifficulty :: string)
+	local hitLog = scope:Value({} :: { MoveEditorScreenTypes.HitLogEntry })
+	local selectedId = scope:Value(nil :: string?)
+	local draft = scope:Value(nil :: MoveTypes.MoveDefinition?)
+	local tabs = ScreenFrame.NewTabState(scope, TAB_NAMES)
 
-	-- The fingerprint of whatever the server last handed back as AUTHORITATIVE -- written by
-	-- MoveEditorClient.lua on a successful New/Select/Save/Reset/Duplicate, and deliberately NOT on a
-	-- debounced UpdateDraft reconcile. UpdateDraft only mutates the server's in-memory registry; the
-	-- DataStore is untouched until Save, and "there is work the DataStore doesn't have" is precisely
-	-- what isDirty below reports.
-	local savedFingerprint = scope:Value("")
-	-- Both written only by MoveEditorClient.lua -- see their own headers in Types.lua.
-	local unsavedCount = scope:Value(0)
-	local lastSavedMoveId = scope:Value("")
+	local selectedEntry = scope:Computed(function(use): MoveEntry?
+		local id = use(selectedId)
+		if not id then
+			return nil
+		end
+		for _, entry in ipairs(use(entries)) do
+			if entry.Move.MoveId == id then
+				return entry
+			end
+		end
+		return nil
+	end)
 	local isDirty = scope:Computed(function(use)
 		local current = use(draft)
 		if not current then
 			return false
 		end
-		return MoveTypes.Fingerprint(current) ~= use(savedFingerprint)
+		local entry = use(selectedEntry)
+		-- No entry yet is a brand-new move the server has not answered for: unsaved by definition.
+		return entry == nil or entry.SavedFingerprint ~= MoveTypes.Fingerprint(current)
+	end)
+	local isDefault = scope:Computed(function(use)
+		local entry = use(selectedEntry)
+		return entry ~= nil and entry.Source == "Default"
+	end)
+	local hasDraft = scope:Computed(function(use)
+		return use(draft) ~= nil
 	end)
 
-	local closeRequestedEvent = Instance.new("BindableEvent")
-	local newMoveRequestedEvent = Instance.new("BindableEvent")
-	local selectMoveRequestedEvent = Instance.new("BindableEvent")
-	local deleteMoveRequestedEvent = Instance.new("BindableEvent")
-	local draftFieldChangedEvent = Instance.new("BindableEvent")
-	local saveRequestedEvent = Instance.new("BindableEvent")
-	local resetRequestedEvent = Instance.new("BindableEvent")
-	local bindHotbarSlotRequestedEvent = Instance.new("BindableEvent")
-	local duplicateMoveRequestedEvent = Instance.new("BindableEvent")
-	local renameMoveRequestedEvent = Instance.new("BindableEvent")
-	local toggleTestDummyRequestedEvent = Instance.new("BindableEvent")
-	-- This client's own best-effort guess, per HasTestDummy's own header -- MoveEditorClient.lua is
-	-- the only writer (on a successful Spawn/Despawn response).
-	local hasTestDummy = scope:Value(false)
+	-- Raw BindableEvents need registering with the scope to be cleaned up with it (Studio hot reload
+	-- re-runs Mount) -- see Screens/Menus/init.lua.
+	local function signal(): BindableEvent
+		local event = Instance.new("BindableEvent")
+		table.insert(scope, event)
+		return event
+	end
+	local closeRequested = signal()
+	local selectRequested = signal()
+	local newRequested = signal()
+	local duplicateRequested = signal()
+	local draftEdited = signal()
+	local saveRequested = signal()
+	local revertRequested = signal()
+	local deleteRequested = signal()
+	local resetDefaultRequested = signal()
+	local testRequested = signal()
+	local bindSlotRequested = signal()
+	local spawnDummyRequested = signal()
+	local volumesToggled = signal()
+	local dummyGuardToggled = signal()
+	local spawnBotRequested = signal()
+	local clearBenchRequested = signal()
+	local clearHitLogRequested = signal()
 
-	local selectedMoveId = scope:Computed(function(use)
-		local currentDraft = use(draft)
-		return if currentDraft then currentDraft.MoveId else nil
-	end)
+	local history = DraftHistory.new(Constants.MoveEditor.UndoDepth, Constants.MoveEditor.UndoCoalesceSeconds)
+	-- DraftHistory is plain data; this bumps whenever it changes so CanUndo/CanRedo recompute.
+	local historyVersion = scope:Value(0)
+	local function historyChanged(): ()
+		historyVersion:set(peek(historyVersion) + 1)
+	end
+	local function canStep(ask: (DraftHistory.History, string) -> boolean)
+		return scope:Computed(function(use)
+			use(historyVersion)
+			local current = use(draft)
+			return current ~= nil and current.MoveId ~= "" and ask(history, current.MoveId)
+		end)
+	end
+	local canUndo = canStep(DraftHistory.CanUndo)
+	local canRedo = canStep(DraftHistory.CanRedo)
 
-	local sidebar = Sidebar.Mount(scope, SIDEBAR_WIDTH, BODY_HEIGHT, {
-		MovesDisplay = movesDisplay,
-		SelectedMoveId = selectedMoveId,
+	-- Replaces the draft with one the history handed back, exactly as an edit would.
+	local function step(take: (DraftHistory.History, string, MoveTypes.MoveDefinition) -> MoveTypes.MoveDefinition?)
+		local current = peek(draft)
+		if not current or current.MoveId == "" then
+			return
+		end
+		local target = take(history, current.MoveId, current)
+		if not target then
+			return
+		end
+		historyChanged()
+		draft:set(target)
+		draftEdited:Fire(target)
+	end
+	local function undo(): ()
+		step(DraftHistory.Undo)
+	end
+	local function redo(): ()
+		step(DraftHistory.Redo)
+	end
+
+	local context: Fields.FormContext = {
 		Draft = draft,
-		OnNew = function()
-			newMoveRequestedEvent:Fire()
-		end,
-		OnSelect = function(moveId: string)
-			selectMoveRequestedEvent:Fire(moveId)
-		end,
-		LastSavedMoveId = lastSavedMoveId,
-		OnDelete = function(moveId: string)
-			deleteMoveRequestedEvent:Fire(moveId)
-		end,
-		OnRename = function(moveId: string, newName: string)
-			renameMoveRequestedEvent:Fire(moveId, newName)
-		end,
-		OnDuplicate = function(moveId: string)
-			duplicateMoveRequestedEvent:Fire(moveId)
-		end,
-	})
-
-	local propertyEditorRoot = PropertyEditor.Mount(scope, CONTENT_WIDTH, BODY_HEIGHT, {
-		Draft = draft,
-		LastTestResultText = lastTestResultText,
-		SelectedSection = sidebar.SelectedSection,
-		HotbarBindings = hotbarBindings,
-		TestSamples = testSamples,
-		IsDirty = isDirty,
-		OnNew = function()
-			newMoveRequestedEvent:Fire()
-		end,
-		OnDuplicate = function()
-			-- "" means "whatever is open" -- the toolbar button has no move in hand the way a list row
-			-- does, and resolving the draft here would duplicate a lookup MoveEditorClient must do
-			-- anyway (it needs the freshest record, including edits this screen has not sent yet).
-			duplicateMoveRequestedEvent:Fire("")
-		end,
-		OnFieldChanged = function(newDraft: MoveTypes.MoveDefinition)
-			-- Optimistic: both this panel and PreviewViewport read `draft` directly, so setting it
-			-- here (before the network round trip even starts) is what makes an edit feel instant.
-			draft:set(newDraft)
-			draftFieldChangedEvent:Fire(newDraft)
-		end,
-		OnSave = function()
-			saveRequestedEvent:Fire()
-		end,
-		OnReset = function()
-			resetRequestedEvent:Fire()
-		end,
-		HasTestDummy = hasTestDummy,
-		OnToggleTestDummy = function()
-			toggleTestDummyRequestedEvent:Fire()
-		end,
-		OnBindHotbarSlot = function(slot: number)
-			-- Resolved here (not passed down as a prop) since init.lua already owns `draft` -- the
-			-- same "screen exposes state/signals, client module drives from outside" boundary this
-			-- whole file's header documents. Silently does nothing with no move selected -- the
-			-- toolbar that hosts these buttons is only ever Visible while hasDraft is true anyway
-			-- (PropertyEditor.lua's own toolbar Visible prop), so this is defensive, not reachable
-			-- from the UI in practice.
-			local currentDraft = peek(draft)
-			if currentDraft and currentDraft.MoveId ~= "" then
-				bindHotbarSlotRequestedEvent:Fire(slot, currentDraft.MoveId)
+		IsDefault = isDefault,
+		Entry = selectedEntry,
+		Edit = function(mutate)
+			local current = peek(draft)
+			if not current then
+				return
 			end
+			local nextDraft = MoveTypes.Clone(current)
+			mutate(nextDraft)
+			-- A move the server has not named yet has nowhere to file its history.
+			if current.MoveId ~= "" then
+				history:Record(current.MoveId, current, os.clock())
+				historyChanged()
+			end
+			draft:set(nextDraft)
+			draftEdited:Fire(nextDraft)
 		end,
-	})
+	}
 
-	-- A sibling ModalScreen, not a child of the editor's root -- see ShortcutsOverlay.lua's header.
-	-- Mounted unconditionally and Visible-gated on its own value, like every other surface here.
-	local shortcutsOpen = scope:Value(false)
-	ShortcutsOverlay.Mount(scope, playerGui, { IsOpen = shortcutsOpen })
+	local function pageVisible(name: string)
+		return scope:Computed(function(use)
+			return use(tabs.Selected[name]) and use(hasDraft)
+		end)
+	end
 
-	local previewRoot = PreviewViewport.Mount(scope, PREVIEW_WIDTH, BODY_HEIGHT, {
-		Draft = draft,
-		IsOpen = isOpen,
+	local form = Stack.New(scope, {
+		Name = "Form",
+		LayoutOrder = 2,
+		ClipsDescendants = true,
+		Children = {
+			Inset(scope, { Top = Tokens.Space.M, X = Tokens.Space.L }),
+			-- Exactly one page is visible at a time, so the Stack places it at the origin; a page is a
+			-- full-height ScrollArea.
+			HitboxTab(scope, context, pageVisible("Hitbox")),
+			TimingTab(scope, context, pageVisible("Timing")),
+			ImpactTab(scope, context, pageVisible("Impact")),
+			IdentityTab(scope, context, pageVisible("Identity")),
+			Label(scope, {
+				Text = "Pick a move on the left, or make a new one.",
+				Scale = "Body",
+				Color = Tokens.Color.TextDisabled,
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				Visible = scope:Computed(function(use)
+					return not use(hasDraft)
+				end),
+			}),
+		},
 	})
 
 	ScreenFrame.Mount(scope, playerGui, {
 		Name = "MoveEditor",
 		Size = UDim2.fromOffset(ROOT_WIDTH, ROOT_HEIGHT),
 		IsOpen = isOpen,
-		-- No frame-level tabs: this editor's sections live in the Sidebar and scroll the middle column,
-		-- with the move list and the preview persisting across every one of them.
-		Title = "Move Creation System",
-		-- The inventory readout, pinned to the strip's right clear of the close control. It used to sit
-		-- beside the title and the status line used to sit out here; they have swapped, because "12
-		-- moves, 2 unsaved" is a standing fact about the panel and "Saved." is a transient answer to the
-		-- last thing you did -- and the footer band is where this frame puts transient answers.
-		HeaderAccessory = Stack.Row(scope, {
-			Name = "InventoryReadout",
-			Size = UDim2.fromOffset(0, READOUT_HEIGHT),
-			AutomaticSize = Enum.AutomaticSize.X,
-			Gap = Tokens.Space.S,
-			AlignY = Enum.VerticalAlignment.Center,
-			AnchorPoint = Vector2.new(1, 0.5),
-			Position = UDim2.new(1, -(Tokens.Control.CloseButtonClearance + ScreenFrame.BandPaddingX), 0.5, 0),
-			Children = {
-				-- The dot is the SECOND signal for the same fact the text beside it already states, per
-				-- Tokens.Color's rule that hue is never the only carrier: someone who cannot distinguish
-				-- the amber still reads "2 unsaved".
-				scope:New "Frame" {
-					Name = "UnsavedDot",
-					Size = UDim2.fromOffset(6, 6),
-					BackgroundColor3 = EditorTokens.Dirty,
-					BorderSizePixel = 0,
-					LayoutOrder = 1,
-					Visible = scope:Computed(function(use)
-						return use(unsavedCount) > 0
-					end),
-
-					[Children] = scope:New "UICorner" { CornerRadius = UDim.new(0.5, 0) },
-				},
-				Label(scope, {
-					-- Counts the whole known inventory, Default moves included -- an admin asking "how
-					-- much is in here" means everything the editor can open, not just the section they
-					-- happen to be looking at.
-					Text = scope:Computed(function(use)
-						local total = #use(movesDisplay)
-						local pending = use(unsavedCount)
-						if pending == 0 then
-							return `{total} moves`
-						end
-						return `{total} moves · {pending} unsaved`
-					end),
-					Scale = "Detail",
-					Color = scope:Computed(function(use)
-						return if use(unsavedCount) > 0 then EditorTokens.Dirty else Tokens.Color.TextSecondary
-					end),
-					Size = UDim2.fromOffset(160, READOUT_HEIGHT),
-					TextXAlignment = Enum.TextXAlignment.Right,
-					LayoutOrder = 2,
-				}),
-			},
-		}),
+		-- No HeaderAccessory: the tab run spans the whole strip, so anything pinned there sits on top of
+		-- the last tab. The move count and unsaved count live in the browser rail's own header instead.
+		Tabs = tabs,
 		Wordmark = "MOVE EDITOR",
 		StatusText = statusText,
-		-- Fires the signal rather than writing IsOpen -- MoveEditorClient's setOpen is the one place
-		-- this screen's open state is written.
+		-- A signal, not a write: the driver arms the unsaved-work confirmation before anything closes.
 		OnClose = function()
-			closeRequestedEvent:Fire()
+			closeRequested:Fire()
 		end,
-
 		Body = Stack.Row(scope, {
 			Name = "Body",
-			Gap = Tokens.Space.M,
 			Children = {
-				Inset(scope, { Top = Tokens.Space.M, Bottom = Tokens.Space.L, X = Tokens.Space.L }),
-				sidebar.Root,
-				propertyEditorRoot,
-				previewRoot,
+				Browser(scope, {
+					Width = BROWSER_WIDTH,
+					LayoutOrder = 1,
+					Entries = entries,
+					SelectedId = selectedId,
+					IsDirty = isDirty,
+					OnSelect = function(moveId: string)
+						selectRequested:Fire(moveId)
+					end,
+					OnNew = function()
+						newRequested:Fire()
+					end,
+				}),
+				Stack.Fill(scope, form),
+				Readout(scope, {
+					Width = READOUT_WIDTH,
+					LayoutOrder = 3,
+					Entry = selectedEntry,
+					Draft = draft,
+					IsDirty = isDirty,
+					HotbarBindings = hotbarBindings,
+					VolumesVisible = volumesVisible,
+					CanUndo = canUndo,
+					CanRedo = canRedo,
+					OnUndo = undo,
+					OnRedo = redo,
+					OnSave = function()
+						saveRequested:Fire()
+					end,
+					OnTest = function()
+						testRequested:Fire()
+					end,
+					OnRevert = function()
+						revertRequested:Fire()
+					end,
+					OnDuplicate = function()
+						duplicateRequested:Fire()
+					end,
+					OnDelete = function()
+						deleteRequested:Fire()
+					end,
+					OnResetDefault = function()
+						resetDefaultRequested:Fire()
+					end,
+					OnBindSlot = function(slot: number)
+						bindSlotRequested:Fire(slot)
+					end,
+					OnSpawnDummy = function()
+						spawnDummyRequested:Fire()
+					end,
+					OnToggleVolumes = function(visible: boolean)
+						volumesToggled:Fire(visible)
+					end,
+					DummyGuard = dummyGuard,
+					BotStyle = botStyle,
+					BotDifficulty = botDifficulty,
+					OnDummyGuard = function(enabled: boolean)
+						dummyGuardToggled:Fire(enabled)
+					end,
+					OnSpawnBot = function()
+						spawnBotRequested:Fire()
+					end,
+					OnClearBench = function()
+						clearBenchRequested:Fire()
+					end,
+					HitLog = hitLog,
+					OnClearHitLog = function()
+						clearHitLogRequested:Fire()
+					end,
+				}),
 			},
 		}),
 	})
 
 	return {
 		IsOpen = isOpen,
-		CloseRequested = closeRequestedEvent.Event,
 		StatusText = statusText,
-		-- Sidebar's own value, handed straight out rather than mirrored -- PropertyEditor already reads
-		-- this exact Fusion.Value, so a second copy could only drift from it.
-		SelectedSection = sidebar.SelectedSection,
-		ShortcutsOpen = shortcutsOpen,
-		MovesDisplay = movesDisplay,
-		Draft = draft,
-		LastTestResultText = lastTestResultText,
-		TestSamples = testSamples,
-		NewMoveRequested = newMoveRequestedEvent.Event,
-		SelectMoveRequested = selectMoveRequestedEvent.Event,
-		DeleteMoveRequested = deleteMoveRequestedEvent.Event,
-		DraftFieldChanged = draftFieldChangedEvent.Event,
-		SaveRequested = saveRequestedEvent.Event,
-		ResetRequested = resetRequestedEvent.Event,
+		Entries = entries,
 		HotbarBindings = hotbarBindings,
-		BindHotbarSlotRequested = bindHotbarSlotRequestedEvent.Event,
-		SavedFingerprint = savedFingerprint,
+		VolumesVisible = volumesVisible,
+		SelectedId = selectedId,
+		Draft = draft,
+		SelectedEntry = selectedEntry,
 		IsDirty = isDirty,
-		UnsavedCount = unsavedCount,
-		LastSavedMoveId = lastSavedMoveId,
-		DuplicateMoveRequested = duplicateMoveRequestedEvent.Event,
-		RenameMoveRequested = renameMoveRequestedEvent.Event,
-		ToggleTestDummyRequested = toggleTestDummyRequestedEvent.Event,
-		HasTestDummy = hasTestDummy,
-	}
+		CurrentTab = tabs.Current,
+		CanUndo = canUndo,
+		CanRedo = canRedo,
+		Undo = undo,
+		Redo = redo,
+		ClearHistory = function(moveId: string)
+			history:Clear(moveId)
+			historyChanged()
+		end,
+		CloseRequested = closeRequested.Event,
+		SelectRequested = selectRequested.Event,
+		NewRequested = newRequested.Event,
+		DuplicateRequested = duplicateRequested.Event,
+		DraftEdited = draftEdited.Event,
+		SaveRequested = saveRequested.Event,
+		RevertRequested = revertRequested.Event,
+		DeleteRequested = deleteRequested.Event,
+		ResetDefaultRequested = resetDefaultRequested.Event,
+		TestRequested = testRequested.Event,
+		BindSlotRequested = bindSlotRequested.Event,
+		SpawnDummyRequested = spawnDummyRequested.Event,
+		VolumesToggled = volumesToggled.Event,
+		DummyGuard = dummyGuard,
+		BotStyle = botStyle,
+		BotDifficulty = botDifficulty,
+		DummyGuardToggled = dummyGuardToggled.Event,
+		SpawnBotRequested = spawnBotRequested.Event,
+		ClearBenchRequested = clearBenchRequested.Event,
+		HitLog = hitLog,
+		ClearHitLogRequested = clearHitLogRequested.Event,
+	} :: any
 end
 
 return MoveEditor

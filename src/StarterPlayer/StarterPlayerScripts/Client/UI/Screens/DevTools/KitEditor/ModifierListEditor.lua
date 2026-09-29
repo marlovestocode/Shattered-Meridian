@@ -18,10 +18,10 @@
 	last typed rather than silently discarding them.
 
 	Reactivity: scope:ForPairs keyed by array INDEX (an ActiveModifierSpec has no id of its own to key
-	by) -- see MoveEditor/MoveList.lua's own header for why ForPairs, not ForValues, is this
-	codebase's dynamic-list primitive. Every edit replaces the WHOLE array via props.OnChanged (add,
-	remove, or patch one entry) -- there is no in-place mutation, matching PropertyEditor.lua's own
-	"clone the current draft, mutate the one field that changed" convention one level up.
+	by) -- see Screens/DevTools/MoveEditor/Browser.lua's own header for why ForPairs, not ForValues,
+	is this codebase's dynamic-list primitive. Every edit replaces the WHOLE array via props.OnChanged
+	(add, remove, or patch one entry) -- there is no in-place mutation, matching PropertyEditor.lua's
+	own "clone the current draft, mutate the one field that changed" convention one level up.
 
 	Does not own: which draft (Race Trait Ability, Bloodline stage PassiveEffects/GrantedAbility.
 	Effects) this list belongs to -- the caller supplies the array and receives the replacement.

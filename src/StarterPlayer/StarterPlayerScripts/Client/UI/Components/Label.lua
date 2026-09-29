@@ -18,8 +18,8 @@
 	AutoHeight (2026-08-12) closes this component's one long-standing hole: it had no fixed-WIDTH,
 	automatic-HEIGHT mode. Passing a Size switched AutomaticSize off entirely, so every caller with
 	genuinely wrapped prose had to hand-count a pixel height and accept that a third line clipped --
-	a tradeoff Section.lua's, PropertyEditor.lua's and HitboxEditor.lua's own headers each separately
-	documented as accepted, across eight call sites at 30 or 32px. It is no longer accepted; those
+	a tradeoff three separate screen headers each documented as accepted, across eight call sites at
+	30 or 32px. It is no longer accepted; those
 	call sites now pass AutoHeight and let the text decide its own height.
 
 	Both new props are strictly additive, and the proof matters because ~25 screens render through

@@ -42,7 +42,10 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
+local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
+local EvadeConstants = require(ReplicatedStorage.Shared.Combat.EvadeConstants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnership)
@@ -63,6 +66,7 @@ local ParkourMotor = require(script.Parent.ParkourMotor)
 local ParkourNetwork = require(script.Parent.ParkourNetwork)
 local StateMachine = require(script.Parent.StateMachine)
 local States = require(script.Parent.States)
+local StateSupport = require(script.Parent.States.StateSupport)
 -- The run system's presentation owner (Client/Movement/RunController.lua). Required in THIS direction
 -- -- the framework pushing outward -- for the same reason ParkourAnimator/ParkourCamera are: this
 -- module is the one that knows every other layer exists, and a run system that pulled the state id
@@ -100,10 +104,8 @@ local ACTION_DURATIONS: { [string]: number } = {
 	-- assisted) stays comfortably inside the existing +0.5s slack.
 	WallRun = ParkourConstants.WallRun.MaxDurationSeconds + 0.5,
 	LedgeClimb = ParkourConstants.Ledge.ClimbDurationSeconds + 0.5,
-	-- Includes the ceiling hold: a roll that finishes under something too low to stand in keeps running
-	-- (crawling) for up to MaxCeilingHoldSeconds before it hands off to a slide -- see States/Rolling.lua.
-	-- A window sized for DurationSeconds alone would under-declare that roll by the whole hold.
-	Roll = ParkourConstants.Roll.DurationSeconds + ParkourConstants.Roll.MaxCeilingHoldSeconds + 0.5,
+	-- The glide plus the usual slack -- see EvadeConstants.ReportOwnershipSeconds.
+	Evade = EvadeConstants.ReportOwnershipSeconds,
 	-- Derived from the LONGEST direction rather than from any one of the four, so retuning a single
 	-- direction longer can never under-declare the window and have the server force-expire a dash
 	-- mid-burst. States/Dashing.lua's own spec asserts every direction stays at or under it.
@@ -199,8 +201,6 @@ local function buildInitialContext(boundCharacter: Model, boundHumanoid: Humanoi
 		CombatOwned = false,
 		InCombat = false,
 		CombatCommitted = false,
-		PreLandingMomentum = nil,
-		LandedAt = nil,
 		Assists = InputBuffer.GetAssists(),
 		Motor = ParkourMotor.BeginFrame(),
 		AnimationVariant = nil,
@@ -230,6 +230,10 @@ local function resolveCombatOwned(boundHumanoid: Humanoid): boolean
 		or boundHumanoid:GetAttribute(Constants.Attributes.Flying) == true
 		or boundHumanoid:GetAttribute(Constants.Attributes.Frozen) == true
 		or boundHumanoid:GetAttribute(Constants.Attributes.EmoteMovementLocked) == true
+		-- Either side of a live air combo (docs/design/air-combat-and-evade.md B6): the victim's body is the
+		-- server's, the attacker's is Client/Combat/AirComboClient's follow. Read off the deadlines rather
+		-- than trusting RootControlLocked alone, which has other writers that clear it on their own schedule.
+		or AirComboAttributes.IsParticipant(boundHumanoid)
 		or boundHumanoid.Health <= 0
 end
 
@@ -328,6 +332,11 @@ local function setActionOwned(owned: boolean): ()
 end
 
 local function onTransition(previousId: MovementStateId, nextId: MovementStateId): ()
+	-- An evade that took a landed swing's cut (see CombatCommitted above) ends that swing locally too. The
+	-- server cuts its own copy on the accepted report; this stops the clip and the step on this screen.
+	if nextId == "Evading" and LocalCombatState.SwingEndsAt() > os.clock() then
+		LocalCombatState.RequestSwingCut()
+	end
 	reportTransition(previousId, nextId)
 	setActionOwned(ParkourOwnership.IsActionState(nextId))
 	ParkourAnimator.OnStateChanged(previousId, nextId, context.AnimationVariant)
@@ -345,6 +354,29 @@ local function onTransition(previousId: MovementStateId, nextId: MovementStateId
 		ParkourAudio.PlayLanding(context.LandingSeverity)
 	end
 	logger:trace("Parkour state changed", { from = previousId, to = nextId })
+end
+
+-- Ends the body-owning state an external impulse interrupted, and hands the body to the engine carrying
+-- that impulse. Airborne or launched upward: Falling. Otherwise whichever ground state fits.
+--
+-- The impulse is written by the hand-off AFTER the outgoing state's Exit has run, because Exit fills the
+-- motor command with the state's own hand-off velocity (StateSupport.HandOff) -- which is precisely the
+-- velocity that must NOT survive a hit. Same frame, same Apply, so no physics step sits between the two.
+local function interruptOwner(interrupt: Vector3): ()
+	local target: MovementStateId = if interrupt.Y > 1e-3 or not context.Ground.Grounded
+		then "Falling"
+		else StateSupport.ResolveGroundedState(context)
+	local previousId = machine:GetCurrentId()
+	machine:ForceTransition(target, context)
+	StateSupport.HandOff(context, interrupt)
+	context.Momentum = ParkourMath.PlanarSpeed(interrupt)
+	ParkourMotor.Apply()
+	onTransition(previousId, machine:GetCurrentId())
+	lastAnimationVariant = context.AnimationVariant
+	local currentHumanoid = humanoid
+	if currentHumanoid then
+		releaseStrandedOwnership(currentHumanoid, machine:GetCurrentDefinition())
+	end
 end
 
 local function step(deltaTime: number): ()
@@ -388,7 +420,12 @@ local function step(deltaTime: number): ()
 	-- LocalCombatState is the one place this client already records its own swing and its own stun, and
 	-- a second copy kept here would be a third answer to a question the server has already answered.
 	-- See ParkourContext.CombatCommitted for who reads it.
-	context.CombatCommitted = LocalCombatState.FreeAt(now) > now
+	--
+	-- Its one reader is the evade, so the swing counts as over at a LANDED swing's cut point when the evade
+	-- may take that cut (AttackConstants.HitConfirm.CancelInto.Evade) -- the same gate the server applies
+	-- in AttackRequestSystem.CancelRecoveryForEvade before opening the evade frames.
+	local hitConfirm = AttackConstants.HitConfirm
+	context.CombatCommitted = LocalCombatState.FreeAt(now, hitConfirm.Enabled and hitConfirm.CancelInto.Evade) > now
 
 	local velocity = currentRoot.AssemblyLinearVelocity
 	context.Velocity = velocity
@@ -440,6 +477,21 @@ local function step(deltaTime: number): ()
 			context.LeftGroundAt = now
 		end
 		wasGrounded = grounded
+	end
+
+	-- KNOCKBACK WINS, FOR EVERY STATE THAT DRIVES THE BODY. An external mover (a knockback launch, a
+	-- hit-stop freeze) that landed while a Velocity or Kinematic state owned the body is recorded by
+	-- ParkourMotor.ApplyExternalImpulse as an interrupt. It is consumed HERE, before the owning state gets
+	-- another Update, and ends that state carrying the impulse -- rather than per state, which is how only
+	-- the roll ever honoured it and a knock landed mid-slide, mid-dash, mid-leap, mid-wall-run or mid-vault
+	-- was erased by the state's own drive on the next physics step (or, for a vault, refused outright).
+	local interrupt = ParkourMotor.ConsumeInterrupt()
+	if interrupt then
+		local owner = machine:GetCurrentDefinition()
+		if owner and owner.Drive ~= "Humanoid" then
+			interruptOwner(interrupt)
+			return
+		end
 	end
 
 	local previousId = machine:GetCurrentId()
@@ -510,19 +562,19 @@ local function onHeartbeat(deltaTime: number): ()
 	if not currentHumanoid then
 		return
 	end
-	-- Combat ownership is checked BEFORE the frame runs as well as inside it: the AerialCombat state
+	-- Combat ownership is checked BEFORE the frame runs as well as inside it: the CombatHeld state
 	-- exists to park the machine correctly while combat holds the body, but the body must be released
 	-- on the very frame ownership changes, not on the frame after the machine notices.
-	if resolveCombatOwned(currentHumanoid) and machine:GetCurrentId() ~= "AerialCombat" then
+	if resolveCombatOwned(currentHumanoid) and machine:GetCurrentId() ~= "CombatHeld" then
 		context.Now = os.clock()
 		context.DeltaTime = deltaTime
 		context.CombatOwned = true
 		context.Motor = ParkourMotor.BeginFrame()
 		local previousId = machine:GetCurrentId()
-		machine:ForceTransition("AerialCombat", context)
+		machine:ForceTransition("CombatHeld", context)
 		ParkourMotor.Release()
 		InputBuffer.Clear()
-		onTransition(previousId, "AerialCombat")
+		onTransition(previousId, "CombatHeld")
 		return
 	end
 

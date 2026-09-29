@@ -722,12 +722,12 @@ local function startDevMenu(handle: DevMenuHandle, chrome: Chrome.ChromeHandle):
 	-- Training bot (Spawn tab, Server/Combat/TrainingBot/TrainingBotSystem.lua) -- same fire-and-forget
 	-- "invokeAndReport, status text only" shape as SpawnDebugDummyRequested above, with the active count
 	-- taken from what the server reports rather than counted up locally (a spawn past MaxActive evicts).
-	content.SpawnTrainingBotRequested:Connect(function(style: string, difficulty: string)
-		logger:debug("SpawnTrainingBotRequested received", { style = style, difficulty = difficulty })
+	content.SpawnTrainingBotRequested:Connect(function(style: string, difficulty: string, weapon: string)
+		logger:debug("SpawnTrainingBotRequested received", { style = style, difficulty = difficulty, weapon = weapon })
 		invokeAndReport(handle, function()
 			local spawnTrainingBotRemote =
 				NetworkBridge.GetRemoteFunction(Constants.Debug.DevMenu.RemoteNames.SpawnTrainingBot)
-			return spawnTrainingBotRemote:InvokeServer(style, difficulty)
+			return spawnTrainingBotRemote:InvokeServer(style, difficulty, weapon)
 		end, function(resultOrError)
 			local result = resultOrError :: Types.DevMenuSpawnBotResult
 			logger:debug("SpawnTrainingBot result received", { success = result.Success, reason = result.Reason })
@@ -1242,9 +1242,8 @@ local function startDevMenu(handle: DevMenuHandle, chrome: Chrome.ChromeHandle):
 	-- Flight-feel tuner: fetch every tunable field ONCE and wire the cycle/adjust/reset signals.
 	-- task.spawn since InvokeServer yields and Start() shouldn't stall the rest of the client boot
 	-- sequence behind it (Main.client.lua's own convention for yielding work, e.g. bindLocalCharacter
-	-- in CombatClient.lua). The only DevMenu tuning tool left of this shape -- Hitbox Timing/
-	-- Standalone Attacks moved to the Move Editor's "Default" moves section, see
-	-- Client/DevTools/MoveEditor/MoveEditorClient.lua. Adjust fires a FRACTIONAL delta straight through (no
+	-- in CombatClient.lua). The only DevMenu tuning tool left of this shape -- hand-authored attacks
+	-- are tuned as the Move Editor's Default moves now. Adjust fires a FRACTIONAL delta straight through (no
 	-- per-field name needed -- there's only ever one number being adjusted for whichever field is
 	-- currently selected).
 	task.spawn(function()

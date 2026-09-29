@@ -336,8 +336,8 @@ end
 
 -- One rack bead. FIXED SET OF MAX_BEADS INSTANCES, each reactive, rather than a Fusion For over the
 -- live rack: the count is bounded by construction, so a For here would buy dynamic sizing this strip
--- can never need while adding an Instance-lifetime problem (see MoveEditor/MoveList.lua on why a
--- plain Computed returning Instances leaks). Every bead's visibility, size and weight is one
+-- can never need while adding an Instance-lifetime problem (see Screens/DevTools/MoveEditor/
+-- Browser.lua on why a plain Computed returning Instances leaks). Every bead's visibility, size and weight is one
 -- Computed off the same two facts.
 local function rackBead(scope: Scope, index: number, shown: UsedAs<number>, selectedSlot: UsedAs<number>): Frame
 	local isSelected = scope:Computed(function(use)

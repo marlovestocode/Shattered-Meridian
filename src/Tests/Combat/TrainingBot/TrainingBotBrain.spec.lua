@@ -48,7 +48,7 @@ local function perception(overrides: { [string]: any }?): Perception
 		SelfDisabled = false,
 		SelfLocked = false,
 		ParryArmableAt = 0,
-		SelfRolling = false,
+		SelfEvading = false,
 		EvadeReady = true,
 		HomeDistance = 0,
 		FeintWindowFraction = 0.5,
@@ -452,6 +452,351 @@ return function()
 				TrainingBotBrain.Think(brain, perception({ Now = 0.1, HasTarget = false, HomeDistance = 30 }))
 			expect(intent.Move).to.equal("Home")
 			expect(brain.Threat).to.equal(nil)
+		end)
+	end)
+
+	describe("TrainingBotBrain -- playing its turn", function()
+		it("a calm bot you walk into holds its ground rather than backing away", function()
+			for seed = 1, 20 do
+				local brain = TrainingBotBrain.new("FullFight", "Adept", Random.new(seed))
+				local intent = TrainingBotBrain.Think(brain, perception({ Now = 0, Distance = 3 }))
+				expect(intent.Move ~= "Retreat").to.equal(true)
+			end
+		end)
+
+		-- Three Basics on a 0.6s beat, each Windup 0.3 / Active 0.1 / Recovery 0.15 -- except the last, whose
+		-- recovery runs into the end-of-string lockout. A blocker holds its guard through the string and
+		-- drops it into that final recovery to punish; mid-string it keeps it up.
+		it("holds its block through your string, then punishes the recovery that ends it", function()
+			local starts = { 0, 0.6, 1.2 }
+			local function swingAt(t: number): (SwingView?, string)
+				for index, start in starts do
+					local recoveryEnds = if index == #starts then start + 1 else start + 0.55
+					if t >= start and t < recoveryEnds then
+						local state = if t < start + 0.3
+							then "Windup"
+							elseif t < start + 0.4 then "Active"
+							else "Recovery"
+						return { StartedAt = start, WindupSeconds = 0.3, Feintable = false, Heavy = false }, state
+					end
+				end
+				return nil, "Idle"
+			end
+
+			local punished = 0
+			for seed = 1, 20 do
+				local brain = TrainingBotBrain.new("FullFight", "Master", Random.new(seed))
+				local style = table.clone(brain.Style) :: any
+				style.Parry = 0
+				style.Evade = 0
+				style.Trade = 0
+				style.Block = 1
+				style.Aggression = 0
+				style.GuardInRange = 0
+				brain.Style = style
+
+				local droppedMidString = false
+				local attacked = false
+				local t = 0
+				while t < 2.2 do
+					local swing, state = swingAt(t)
+					local intent = TrainingBotBrain.Think(
+						brain,
+						perception({ Now = t, TargetSwing = swing, TargetAttackState = state })
+					)
+					-- The first swing's recovery: still mid-string, the guard stays up.
+					if t >= 0.42 and t < 0.55 and not intent.Guard then
+						droppedMidString = true
+					end
+					if t >= 1.6 and intent.Attack == "Basic" then
+						attacked = true
+					end
+					t += FRAME
+				end
+				expect(droppedMidString).to.equal(false)
+				if attacked then
+					punished += 1
+				end
+			end
+			expect(punished >= 15).to.equal(true)
+		end)
+
+		it("breaks its string's rhythm against someone who parries", function()
+			local delayed = 0
+			for seed = 1, 30 do
+				local brain = TrainingBotBrain.new("FullFight", "Master", Random.new(seed))
+				brain.Habits.Parry = 1
+				local plan: any = { Label = "test", Queue = { "Basic", "Basic" }, ExpiresAt = 10, Punish = false }
+				brain.Plan = plan
+				TrainingBotBrain.OnOwnSwingAccepted(
+					brain,
+					"Basic",
+					{ StartedAt = 0, WindupSeconds = 0.3, Feintable = false, Heavy = false },
+					0.5
+				)
+				if plan.PendingDelay then
+					delayed += 1
+					-- Body free: the hold starts now, so there is no press on this frame...
+					local now = TrainingBotBrain.Think(brain, perception({ Now = 1, Distance = 3 }))
+					expect(now.Attack).to.equal(nil)
+					-- ...and there is one once it has run out.
+					local later = TrainingBotBrain.Think(brain, perception({ Now = 1.3, Distance = 3 }))
+					expect(later.Attack).to.equal("Basic")
+				end
+			end
+			expect(delayed >= 15).to.equal(true)
+		end)
+
+		it("never holds a beat after a hit that landed -- the combo window has no room for it", function()
+			local brain = TrainingBotBrain.new("FullFight", "Master", Random.new(1))
+			local plan: any =
+				{ Label = "test", Queue = { "Basic" }, ExpiresAt = 10, Punish = false, PendingDelay = 0.2 }
+			brain.Plan = plan
+			brain.LastLandedAt = 0.7
+			local intent = TrainingBotBrain.Think(brain, perception({ Now = 1, Distance = 3 }))
+			expect(intent.Attack).to.equal("Basic")
+		end)
+
+		it("goes for the launcher only when its three Basics all landed", function()
+			local function atLauncher(landed: number): TrainingBotBrain.Intent
+				local brain = TrainingBotBrain.new("FullFight", "Master", Random.new(1))
+				brain.Plan = {
+					Label = "test",
+					Queue = { "Launcher" },
+					FeintFraction = nil,
+					FeintAt = nil,
+					WantedSince = nil,
+					ExpiresAt = 10,
+					Punish = true,
+				} :: any
+				brain.PlanLanded = landed
+				return TrainingBotBrain.Think(brain, perception({ Now = 1, Distance = 3 }))
+			end
+			local earned = atLauncher(3)
+			expect(earned.Attack).to.equal("Basic")
+			expect(earned.Modifier).to.equal("Up")
+			local blocked = atLauncher(2)
+			expect(blocked.Attack).to.equal(nil)
+		end)
+
+		it("plans a launcher onto its full strings, punishes included", function()
+			local launching = 0
+			for seed = 1, 30 do
+				local brain = TrainingBotBrain.new("Aggressor", "Master", Random.new(seed))
+				TrainingBotBrain.Think(brain, perception({ Now = 0, TargetDefenseState = "Staggered" }))
+				local plan = brain.Plan :: any
+				if plan and plan.Queue[#plan.Queue] == "Launcher" then
+					launching += 1
+				end
+			end
+			expect(launching >= 10).to.equal(true)
+		end)
+
+		it("arms a feint on its own M1 too", function()
+			local brain = TrainingBotBrain.new("FullFight", "Master", Random.new(2))
+			brain.Plan = {
+				Label = "Feint the M1",
+				Queue = { "Basic", "Basic", "Basic" },
+				FeintFraction = 0.5,
+				FeintAt = nil,
+				WantedSince = nil,
+				ExpiresAt = 10,
+				Punish = false,
+			} :: any
+			TrainingBotBrain.OnOwnSwingAccepted(
+				brain,
+				"Basic",
+				{ StartedAt = 0, WindupSeconds = 0.48, Feintable = true, Heavy = false },
+				0.5
+			)
+			expect((brain.Plan :: any).FeintAt).to.be.ok()
+		end)
+
+		it("never delays a punish", function()
+			for seed = 1, 20 do
+				local brain = TrainingBotBrain.new("FullFight", "Master", Random.new(seed))
+				brain.Habits.Parry = 1
+				local plan: any = { Label = "test", Queue = { "Basic", "Basic" }, ExpiresAt = 10, Punish = true }
+				brain.Plan = plan
+				TrainingBotBrain.OnOwnSwingAccepted(
+					brain,
+					"Basic",
+					{ StartedAt = 0, WindupSeconds = 0.3, Feintable = false, Heavy = false },
+					0.5
+				)
+				expect(plan.PendingDelay).to.equal(nil)
+			end
+		end)
+	end)
+
+	describe("TrainingBotBrain -- the ParryTrade drill", function()
+		local PERFECT_BAND = 0.05
+
+		it("opens its window less than a frame before the hit, on every seed and difficulty", function()
+			for _, difficulty in { "Novice", "Adept", "Master" } do
+				for seed = 1, 20 do
+					local brain = TrainingBotBrain.new("ParryTrade", difficulty, Random.new(seed))
+					-- Off the frame grid on purpose, so the hit never lands exactly on a Think.
+					local swing = heavySwing(0.004)
+					local impact = swing.StartedAt + swing.WindupSeconds
+					local pressed = playSwing(brain, swing, 0, 1, 1)
+					expect(pressed).to.be.ok()
+					local sinceOpen = impact - ((pressed :: number) + PARRY_OPEN)
+					expect(sinceOpen >= 0).to.equal(true)
+					expect(sinceOpen <= FRAME + 1e-6).to.equal(true)
+					expect(sinceOpen <= PERFECT_BAND).to.equal(true)
+				end
+			end
+		end)
+
+		it("answers even a swing faster than any human reaction", function()
+			local brain = TrainingBotBrain.new("ParryTrade", "Novice", Random.new(2))
+			local swing: SwingView = { StartedAt = 0, WindupSeconds = 0.12, Feintable = false, Heavy = false }
+			local pressed = playSwing(brain, swing, 0, 0.5, 0.5)
+			expect(covers(pressed, 0.12)).to.equal(true)
+		end)
+
+		it("parries back out of its own stagger", function()
+			local brain = TrainingBotBrain.new("ParryTrade", "Adept", Random.new(3))
+			local pressed = playSwing(brain, heavySwing(0), 0, 1, 1, {
+				SelfDefenseState = "Staggered",
+				SelfDisabled = true,
+				SelfLocked = false,
+			})
+			expect(covers(pressed, WINDUP)).to.equal(true)
+		end)
+
+		it("taps rather than holds, so the next parry of the trade can arm", function()
+			local brain = TrainingBotBrain.new("ParryTrade", "Master", Random.new(4))
+			playSwing(brain, heavySwing(0), 0, 1, 1)
+			local intent = TrainingBotBrain.Think(brain, perception({ Now = 1.2 }))
+			expect(intent.Guard).to.equal(false)
+		end)
+
+		it("never starts anything from neutral", function()
+			local brain = TrainingBotBrain.new("ParryTrade", "Master", Random.new(5))
+			local t = 0
+			while t < 5 do
+				local intent = TrainingBotBrain.Think(brain, perception({ Now = t, Distance = REACH - 1 }))
+				expect(intent.Attack).to.equal(nil)
+				expect(intent.Guard).to.equal(false)
+				t += FRAME
+			end
+		end)
+
+		it("throws exactly one counter per parry it lands, and nothing else into your stagger", function()
+			local brain = TrainingBotBrain.new("ParryTrade", "Master", Random.new(6))
+			local t = 0
+			-- A stagger it did NOT cause earns nothing.
+			while t < 0.5 do
+				local intent = TrainingBotBrain.Think(
+					brain,
+					perception({ Now = t, Distance = REACH - 1, TargetDefenseState = "Staggered" })
+				)
+				expect(intent.Attack).to.equal(nil)
+				t += FRAME
+			end
+
+			TrainingBotBrain.OnOutcome(brain, "Defender", "Parried", t)
+			local counters = 0
+			while t < 3 do
+				local intent = TrainingBotBrain.Think(
+					brain,
+					perception({ Now = t, Distance = REACH - 1, TargetDefenseState = "Staggered" })
+				)
+				if intent.Attack then
+					expect(intent.Attack).to.equal("Basic")
+					counters += 1
+					-- The combat stack accepts it on the spot; any press after this would be a second swing.
+					TrainingBotBrain.OnOwnSwingAccepted(
+						brain,
+						"Basic",
+						{ StartedAt = t, WindupSeconds = 0.3, Feintable = false, Heavy = false },
+						0.5
+					)
+				end
+				t += FRAME
+			end
+			expect(counters).to.equal(1)
+		end)
+	end)
+
+	describe("TrainingBotBrain -- the air combo", function()
+		-- Held in your air combo: stunned by every beat, yet the parry press is never deferred for an air-held
+		-- defender (DefenseSystem.SetBlocking), so the bot answers the beat with a timed parry -- and only
+		-- with one: a guard does nothing in the air and an evade is refused.
+		local AIR_HELD = { SelfAirHeld = true, SelfDisabled = true, SelfBusyUntil = math.huge }
+
+		it("parries out of an air combo despite the stun every beat leaves", function()
+			local brain = TrainingBotBrain.new("ParryOnly", "Master", Random.new(11))
+			local pressed = playSwing(brain, heavySwing(0), 0, 1, 1, AIR_HELD)
+			expect(covers(pressed, WINDUP)).to.equal(true)
+		end)
+
+		it("never blocks or evades while held -- the parry is the one way out", function()
+			for seed = 1, 10 do
+				local brain = TrainingBotBrain.new("BlockOnly", "Master", Random.new(seed))
+				local pressed = playSwing(brain, heavySwing(0), 0, 1, 1, AIR_HELD)
+				expect(pressed).to.equal(nil)
+			end
+		end)
+
+		it("runs its own air string once its launcher lands, then cashes out", function()
+			local brain = TrainingBotBrain.new("FullFight", "Adept", Random.new(3))
+			local attacks: { string } = {}
+			local hits = 0
+			local t = 0
+			while t < 3 do
+				local intent = TrainingBotBrain.Think(
+					brain,
+					perception({
+						Now = t,
+						SelfAirAttacker = true,
+						SelfAirHitsLanded = hits,
+						AirPressReadyAt = 0.18,
+					})
+				)
+				if intent.Attack then
+					table.insert(attacks, intent.Attack)
+					if intent.Attack == "Heavy" then
+						break
+					end
+					-- The press is accepted and lands; the next beat waits on the new hit count.
+					hits += 1
+				end
+				t += FRAME
+			end
+			expect(#attacks > 0).to.equal(true)
+			expect(attacks[#attacks]).to.equal("Heavy")
+			for index = 1, #attacks - 1 do
+				expect(attacks[index]).to.equal("Basic")
+			end
+		end)
+
+		it("picks the Spike when a wall stands behind you", function()
+			local brain = TrainingBotBrain.new("FullFight", "Adept", Random.new(5))
+			local intent: TrainingBotBrain.Intent? = nil
+			local t = 0
+			while t < 2 do
+				local candidate = TrainingBotBrain.Think(
+					brain,
+					perception({
+						Now = t,
+						SelfAirAttacker = true,
+						SelfAirHitsLanded = 3,
+						AirPressReadyAt = 0,
+						WallBehindTarget = true,
+					})
+				)
+				if candidate.Attack then
+					intent = candidate
+					break
+				end
+				t += FRAME
+			end
+			expect(intent).to.be.ok()
+			expect((intent :: any).Attack).to.equal("Heavy")
+			expect((intent :: any).Modifier).to.equal("Up")
 		end)
 	end)
 end

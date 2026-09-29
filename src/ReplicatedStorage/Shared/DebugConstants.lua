@@ -43,6 +43,8 @@ local DebugConstants = {
 		-- name here (matching the string passed to Logger.scope(...) at each module's call site)
 		-- to see its logs; remove/flip false to silence it without touching that module's code.
 		Scopes = {
+			-- The frame-rate overlay's spike and "frame rate dropped" lines (Client/Diagnostics/FpsCounter).
+			FpsCounter = true,
 			CombatClient = true,
 			CombatSystem = true,
 			NetworkBridge = true,
@@ -178,14 +180,13 @@ local DebugConstants = {
 			ServerHopSystem = true,
 			VersionWatchSystem = true,
 			AdminActionSystem = true,
-			ObjectStunResolver = true,
 			-- Emotes.
 			EmoteSystem = true,
 			EmoteUnlockService = true,
 			EmoteController = true,
 			EmoteWheelClient = true,
 			EmoteAnimator = true,
-			-- Move Creation System.
+			-- Move Editor.
 			MoveEditorSystem = true,
 			MoveEditorClient = true,
 			-- Live Admin Console (F5). These two entries only gate their own Init/lifecycle lines
@@ -300,6 +301,46 @@ local DebugConstants = {
 		-- OpenDevConsole, F6 is ParkourConstants.Debug.ToggleKeyCode, F8 is OpenBugReport, and F7 --
 		-- this -- was free in both. A future dev key must check all three places.
 		ToggleKeyCode = Enum.KeyCode.F7,
+	},
+
+	-- The frame-rate overlay (Client/Diagnostics/FpsCounter.lua): a corner readout of FPS and the
+	-- worst single frame in the last window, plus a log line for every frame that spikes. The WORST
+	-- FRAME is the number that matters for "it hitches when I get hit": a 100ms stall inside an
+	-- otherwise-60fps second barely moves an average, and is exactly what a player feels.
+	--
+	-- Not Studio-gated and not whitelist-gated: it reads nothing but the local frame clock, so it is
+	-- harmless on any client, and frame rate is most worth checking on a real device in a real server.
+	FpsCounter = {
+		Enabled = true,
+		-- Shown on join; the key toggles it. Set false to have it start hidden.
+		VisibleByDefault = true,
+		-- A RAW key, same call Storybook's F7 makes (see its comment for the collision check): F3 is
+		-- free in Constants.Keybinds and in every raw dev key (F5 console, F6 parkour, F7 storybook,
+		-- F8 bug report).
+		ToggleKeyCode = Enum.KeyCode.F3,
+		-- How often the readout repaints, and the window its FPS and worst frame cover.
+		WindowSeconds = 0.5,
+		-- A frame longer than this is logged (throttled to one line per SpikeLogCooldownSeconds), so a
+		-- hitch can be matched against whatever the Output shows happening at the same moment.
+		SpikeLogMs = 50,
+		SpikeLogCooldownSeconds = 1,
+		-- A window whose FPS falls below this fraction of the recent best logs "Frame rate dropped" with
+		-- the gpu/render/scripts/physics breakdown -- the sustained-drop counterpart to the spike log.
+		-- Also show the SERVER's frame numbers (Server/Diagnostics/ServerFrameStats.lua publishes them as
+		-- ReplicatedStorage Attributes). In Studio's Play mode the server shares the client's process, so
+		-- its work costs the player frames without showing in any client-side number.
+		ServerStats = true,
+		SlowWindowFraction = 0.7,
+		SlowWindowLogCooldownSeconds = 2,
+		-- The per-hit breakdown (Client/Combat/CombatFeedbackClient.lua): when handling one Combat_Feedback
+		-- costs this client more than this much SCRIPT time, the cost of each step (shake, sound, flash,
+		-- freeze, knockback, UI...) is logged. Script time only -- a render cost like a Highlight shows
+		-- up in the frame spike log instead, not here. Every step is also a MicroProfiler label
+		-- ("Hit.Flash" etc., Ctrl+F6) either way.
+		HitCostLogMs = 1,
+		-- Colour bands on the FPS number.
+		GoodFps = 55,
+		OkFps = 30,
 	},
 
 	DevMenu = {
@@ -436,11 +477,9 @@ local DebugConstants = {
 			ListFlightTuning = "DevMenu_ListFlightTuning",
 			AdjustFlightTuning = "DevMenu_AdjustFlightTuning",
 			ResetFlightTuning = "DevMenu_ResetFlightTuning",
-			-- Live hitbox timing/full-field tuning for hand-authored (Basic/Heavy/Finisher weapon
-			-- stages, DashPunch/DashHit/AirSlam) attacks moved out of DevMenu entirely -- it's now the
-			-- Move Editor's "Default" moves section (Server/Combat/DefaultMoveRegistry.lua,
-			-- Constants.MoveEditor.RemoteNames.ListDefaultMoves/UpdateDefaultMoveDraft/
-			-- ResetDefaultMove below).
+			-- Live tuning of hand-authored attacks (weapon stages, DashPunch/DashHit) moved out of the
+			-- DevMenu entirely -- they are the Move Editor's Default moves now (Server/Combat/
+			-- DefaultMoveRegistry.lua's override layer, Constants.MoveEditor.RemoteNames).
 			-- Bug report triage (DevMenu/init.lua's "Reports" tab) -- handlers live in
 			-- DevMenuSystem.lua but call straight into BugReportSystem.ListReports/UpdateStatus, the
 			-- same "gate here, compute there" split as every other admin action above. The PUBLIC

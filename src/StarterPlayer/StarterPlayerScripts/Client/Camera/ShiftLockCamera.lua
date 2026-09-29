@@ -165,6 +165,19 @@ local flying = false
 -- snap to centre and back. Mounting is the narrower fact, so it gets the narrower read.
 local mounted = false
 
+-- Mirrors whether this character's Humanoid "DefenseState" Attribute is one of the two punish states
+-- (Staggered, GuardBroken), or a guard state a stagger can be running underneath (see readPunishLocked
+-- in onCharacterAdded). DefenseSystem takes RootControlLocked for these, but only to park the
+-- parkour framework (no roll or dash out of a punish) -- nothing physically drives the body's rotation
+-- then, unlike a ragdoll, a grab or a mount. Suspending the yaw write for it froze a shift-locked
+-- player at whatever angle the stagger caught them (1.8s on a perfect parry), while a player without
+-- shift lock could still turn freely through the same stagger. See the yaw guard in onRenderStep.
+local punishLocked = false
+
+-- Mirrors this character's own Humanoid "Grabbed" Attribute. A grab victim is held by the server's
+-- GrabAlignOrientation, so it must keep the yaw write suspended even if it is also staggered.
+local grabbed = false
+
 -- CombatFeedback's ShiftLockEngaged Value (see that file's handle type), bound in Start() --
 -- drives the game-styled crosshair (UI/Components/ShiftLockCrosshair.lua) that replaces the
 -- engine's stock mouse-locked cursor while the default cursor is hidden below.
@@ -183,6 +196,11 @@ local inputSuspended = false
 -- wrong for a traversal, since a player mid-mantle is still shift-locked and still expects a locked
 -- cursor.
 local parkourFacingOwned = false
+
+-- Mirrors the client-written "CombatFacingOwned" Attribute: Client/Combat/SwingTracking.lua is turning (or
+-- holding) the body toward a target for a swing's windup and hit window. Exactly the ParkourFacingOwned
+-- carve-out above, for a second owner -- see Constants.Attributes.CombatFacingOwned.
+local combatFacingOwned = false
 
 local function setEngaged(nowEngaged: boolean): ()
 	if nowEngaged == engaged then
@@ -282,7 +300,11 @@ local function onRenderStep(_deltaTime: number): ()
 	-- competes with the server's AlignOrientation/ragdoll physics for the same frame, and the server
 	-- always wins on the NEXT replication tick regardless -- fighting it for even one frame is what
 	-- produced the visible jitter this lock exists to prevent.
-	if rootControlLocked or flying then
+	--
+	-- A punish-only lock (see `punishLocked`) is the exception: RootControlLocked is set, but nothing is
+	-- rotating the body, so the camera keeps steering it exactly as it would without shift lock.
+	local lockOwnsFacing = rootControlLocked and not (punishLocked and not grabbed and not mounted)
+	if lockOwnsFacing or flying then
 		return
 	end
 
@@ -292,7 +314,7 @@ local function onRenderStep(_deltaTime: number): ()
 	-- folded into it because it is a different owner with a different lifetime, and kept AFTER the
 	-- MouseBehavior re-assert because a suspended YAW is not a suspended MODE: the player is still
 	-- shift-locked and still expects a locked cursor while a mantle plays out.
-	if parkourFacingOwned then
+	if parkourFacingOwned or combatFacingOwned then
 		return
 	end
 
@@ -379,6 +401,28 @@ local function onCharacterAdded(character: Model, humanoidInstance: Humanoid, li
 		mounted = humanoidInstance:GetAttribute(Constants.Attributes.Mounted) == true
 	end)
 
+	-- Same shape again for the two reads behind `punishLocked`'s carve-out -- see those locals.
+	-- The guard states are included for a parry armed OUT OF a stagger (DefenseConstants.Rally): the
+	-- stagger's lock stays on through it, and a guarding body cannot be holding any other lock -- a guard
+	-- press mid-swing is deferred until the swing ends, and a grab or a mount is excluded by name below.
+	local function readPunishLocked(): boolean
+		local state = humanoidInstance:GetAttribute(Constants.Attributes.DefenseState)
+		return state == "Staggered"
+			or state == "GuardBroken"
+			or state == "Raising"
+			or state == "ParryWindow"
+			or state == "ParryRecovery"
+	end
+	punishLocked = readPunishLocked()
+	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.DefenseState), function()
+		punishLocked = readPunishLocked()
+	end)
+
+	grabbed = humanoidInstance:GetAttribute(Constants.Attributes.Grabbed) == true
+	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.Grabbed), function()
+		grabbed = humanoidInstance:GetAttribute(Constants.Attributes.Grabbed) == true
+	end)
+
 	-- Same shape again, one owner further out: this one is written by another CLIENT module
 	-- (Client/Parkour/ParkourMotor.lua) rather than by the server, which changes nothing about how it
 	-- is read. Seeded rather than assumed false for the same reason as the two above -- a rapid respawn
@@ -402,6 +446,11 @@ local function onCharacterAdded(character: Model, humanoidInstance: Humanoid, li
 		if not nowOwned and not rootControlLocked and not flying then
 			humanoidInstance.AutoRotate = not engaged
 		end
+	end)
+
+	combatFacingOwned = humanoidInstance:GetAttribute(Constants.Attributes.CombatFacingOwned) == true
+	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.CombatFacingOwned), function()
+		combatFacingOwned = humanoidInstance:GetAttribute(Constants.Attributes.CombatFacingOwned) == true
 	end)
 
 	logger:debug("Character bound", { enabled = enabled, rootControlLocked = rootControlLocked })

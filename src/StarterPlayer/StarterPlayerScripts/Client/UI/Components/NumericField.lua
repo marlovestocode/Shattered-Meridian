@@ -131,15 +131,15 @@ export type NumericFieldProps = {
 	-- its hints in Screens/DevTools/MoveEditor/Copy.lua rather than inline, so the prose is editable in one
 	-- place -- see that module's own header.
 	--
-	-- LAYOUT RULE: within a single horizontal row of these (PropertyEditor.lua's `numericRow`),
-	-- either every field carries a Hint or none does. The row's cells are AutomaticSize.Y and
+	-- LAYOUT RULE: within a single horizontal row of these (the Move Editor's Fields.Pair), either
+	-- every field carries a Hint or none does. The row's cells are AutomaticSize.Y and
 	-- top-aligned, so one hinted field beside an unhinted one leaves the short cell's control
 	-- floating against a taller neighbour.
 	Hint: string?,
 }
 
 -- Narrower than this file's original 44 -- a full NumericField (up to 4 step buttons + a value
--- readout) needs to fit inside a 2-column numericRow cell in PropertyEditor.lua's content pane, and
+-- readout) needs to fit inside a half-width cell of a form pane (the Move Editor's Fields.Pair), and
 -- 44 left only a ~6px margin there (confirmed too tight in Studio -- buttons overlapped the next
 -- field). 40 gives a ~32px margin instead while still fitting every step label this file renders
 -- ("-0.01" being the longest).
@@ -560,8 +560,7 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 			BackgroundTransparency = Tokens.Wash.TrackBase.Transparency,
 			BorderSizePixel = 0,
 			LayoutOrder = 3,
-			-- Without this the click falls through to whatever is behind the panel -- the same reason
-			-- Screens/DevTools/MoveEditor/PreviewViewport.lua's own ViewportFrame sets it.
+			-- Without this the click falls through to whatever is behind the panel.
 			Active = true,
 
 			[OnEvent "InputBegan"] = function(input: InputObject)

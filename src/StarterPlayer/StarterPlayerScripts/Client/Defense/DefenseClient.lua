@@ -387,16 +387,16 @@ end
 
 -- Lifecycle -----------------------------------------------------------------------------------------
 
--- ROLL-FROM-GUARD. The server drops a raised guard the moment it accepts a roll (DefenseSystem.BeginEvade
+-- EVADE-FROM-GUARD. The server drops a raised guard the moment it accepts an evade (DefenseSystem.BeginEvade
 -- -> DefenseStateMachine.BeginEvade's Release), but nothing tells THIS client: the key is still
 -- physically down, so blockHeld stays true and the guard pose keeps playing over a guard that no longer
--- exists. The server's own ParkourState Attribute turning "Roll" is exactly the "your roll was accepted"
+-- exists. The server's own ParkourState Attribute turning "Evade" is exactly the "your evade was accepted"
 -- signal, already replicated, so this mirrors the server's release off it rather than adding a remote
 -- or reaching into the parkour framework. The release it sends is redundant (the server has already
 -- released) and harmless -- Release on a machine whose guard is down is a no-op. Re-pressing the key
--- after the roll raises the guard as normal.
+-- after the evade raises the guard as normal.
 local function onParkourStateChanged(humanoid: Humanoid): ()
-	if blockHeld and humanoid:GetAttribute(Constants.Attributes.ParkourState) == "Roll" then
+	if blockHeld and humanoid:GetAttribute(Constants.Attributes.ParkourState) == "Evade" then
 		setBlockHeld(false)
 	end
 end

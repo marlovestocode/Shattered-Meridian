@@ -167,6 +167,11 @@ export type WeaponEntry = {
 		Basic: { HitboxAttackDefinition },
 		Heavy: { HitboxAttackDefinition },
 		Finisher: HitboxAttackDefinition,
+		-- The air combo's moves (CombatConstants.Weapons.Baseline.Stages' own header on them). Built from the
+		-- same baseline by the same buildStage, so a fast weapon's air string is fast too.
+		Launcher: HitboxAttackDefinition,
+		Air: { HitboxAttackDefinition },
+		AirFinisher: { Slam: HitboxAttackDefinition, Spike: HitboxAttackDefinition },
 	},
 	-- This weapon's resolved swing geometry. Already baked into every Stages entry above (Size/Offset)
 	-- -- carried here as well because two consumers need the config itself rather than its effect:
@@ -239,15 +244,10 @@ local function applyReach(definition: HitboxAttackDefinition, hitbox: SwingHitbo
 	if hitbox.Mode ~= "Blade" and not hitbox.ScaleWithWeaponReach then
 		return
 	end
-	if definition.Size then
-		local size = definition.Size :: Vector3
-		-- X and Z only: Y is how tall the swing arc is, which is a property of the human throwing it
-		-- rather than of the blade, and scaling it would let a long weapon hit over a wall.
-		definition.Size = Vector3.new(size.X * reach, size.Y, size.Z * reach)
-	end
-	if definition.Radius then
-		definition.Radius = (definition.Radius :: number) * reach
-	end
+	-- X and Z only: Y is how tall the swing arc is, which is a property of the human throwing it rather
+	-- than of the blade, and scaling it would let a long weapon hit over a wall.
+	local size = definition.Size
+	definition.Size = Vector3.new(size.X * reach, size.Y, size.Z * reach)
 	local offset = definition.Offset
 	definition.Offset = offset - offset.Position + (offset.Position * reach)
 end
@@ -475,10 +475,7 @@ local function buildStage(
 ): HitboxAttackDefinition
 	local copy: HitboxAttackDefinition = {
 		DebugName = source.DebugName,
-		Shape = source.Shape,
 		Size = source.Size,
-		Radius = source.Radius,
-		Dimensions = source.Dimensions,
 		Offset = source.Offset,
 		WindupSeconds = source.WindupSeconds,
 		ActiveSeconds = source.ActiveSeconds,
@@ -486,7 +483,6 @@ local function buildStage(
 		Cooldown = source.Cooldown,
 		Damage = source.Damage * scale.Damage,
 		PostureDamage = source.PostureDamage * scale.PostureDamage,
-		ArcDegrees = source.ArcDegrees,
 		MaxTargets = source.MaxTargets,
 		SizeMultiplier = source.SizeMultiplier,
 	}
@@ -528,6 +524,10 @@ local function buildEntry(model: Instance): WeaponEntry
 	for _, stage in baseline.Heavy do
 		table.insert(heavy, buildStage(stage, hitbox, scale))
 	end
+	local air: { HitboxAttackDefinition } = {}
+	for _, stage in baseline.Air do
+		table.insert(air, buildStage(stage, hitbox, scale))
+	end
 
 	return {
 		Id = model.Name,
@@ -536,6 +536,12 @@ local function buildEntry(model: Instance): WeaponEntry
 			Basic = basic,
 			Heavy = heavy,
 			Finisher = buildStage(baseline.Finisher, hitbox, scale),
+			Launcher = buildStage(baseline.Launcher, hitbox, scale),
+			Air = air,
+			AirFinisher = {
+				Slam = buildStage(baseline.AirFinisher.Slam, hitbox, scale),
+				Spike = buildStage(baseline.AirFinisher.Spike, hitbox, scale),
+			},
 		},
 		SwingHitbox = hitbox,
 		Speed = scale.Speed,

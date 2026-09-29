@@ -151,14 +151,20 @@ local KeybindConstants = {
 		-- Unclaimed elsewhere here, and far enough from the WASD/mouse combat cluster that an
 		-- accidental mid-fight press is unlikely.
 		CharacterMenuToggle = { KeyCode = Enum.KeyCode.M },
-		-- Parkour dodge/roll (Client/Parkour/States/Rolling.lua). LeftAlt is unclaimed elsewhere in
-		-- this table, sits under the same hand already on WASD (a roll has to be reachable without
-		-- leaving the movement keys, unlike the panel toggles above), and -- unlike every letter key
-		-- left -- carries no risk of colliding with Roblox's own chat-focus behavior on a stray press.
-		Roll = { KeyCode = Enum.KeyCode.LeftAlt },
+		-- The combat evade (Client/Parkour/States/Evading.lua) -- renamed from Roll when the roll was
+		-- replaced; SettingsClient migrates a binding saved under the old name. Z: unclaimed elsewhere in
+		-- this table (the Move Editor's Ctrl+Z is a dev-tool chord, not a gameplay bind) and under the same
+		-- hand already on WASD, which a dodge needs to be reachable without leaving the movement keys.
+		--
+		-- NOT LeftAlt, which it used to be. A bare Alt press is not the game's to own on Windows: Studio
+		-- takes it for the ribbon's key tips, and the OS can hand focus to the window's menu. Either way
+		-- the game loses input for a moment -- the locked mouse is released (the cursor flashes on
+		-- screen), held WASD stops registering (the evade comes out with no direction and the body stands
+		-- still), and the camera stops following the mouse -- then focus comes back and it all resumes.
+		Evade = { KeyCode = Enum.KeyCode.Z },
 		-- Parkour committed leap (Client/Parkour/States/Leaping.lua). Used to fire on a double-tap of
 		-- jump; E is unclaimed elsewhere in this table, sits under the same hand already on WASD (same
-		-- reachability requirement as Roll's own comment above), and is the conventional "interact/use"
+		-- reachability requirement as Evade's own comment above), and is the conventional "interact/use"
 		-- key this genre trains players to reach for on a deliberate single press.
 		Leap = { KeyCode = Enum.KeyCode.E },
 		-- Board/leave a blimp station (Client/Blimp/BlimpController.lua, and the KeyboardKeyCode that
@@ -179,7 +185,7 @@ local KeybindConstants = {
 		-- Grab layer's follow-up throw input (Client/Combat/GrabInputClient.lua). G is unbound
 		-- elsewhere in this table and sits under the same hand already on WASD -- a throw has to be
 		-- reachable the instant a hold lands, the same "no leaving the movement keys" requirement
-		-- Roll/Leap's own comments give.
+		-- Evade/Leap's own comments give.
 		GrabThrow = { KeyCode = Enum.KeyCode.G },
 	} :: { [Types.KeybindAction]: Types.Keybind },
 
@@ -214,7 +220,7 @@ local KeybindConstants = {
 		-- DPadLeft. A face button would be nicer, but ShiftLock is the one action here that can afford
 		-- NOT to have one: it is a MODE TOGGLE, pressed once and then lived in for minutes, so the cost
 		-- of taking a thumb off the left stick to reach it is paid at a moment the player chose. It sat
-		-- on ButtonY until Roll took that button below -- read Roll's comment for why that trade is not
+		-- on ButtonY until Evade took that button below -- read Evade's comment for why that trade is not
 		-- symmetric.
 		ShiftLock = { KeyCode = Enum.KeyCode.DPadLeft },
 		-- D-pad item/weapon-swap is a standard convention in this genre.
@@ -238,24 +244,12 @@ local KeybindConstants = {
 		-- HotbarSlot1-5 below, Settings is NOT admin-only, so it earns a real gamepad default rather
 		-- than staying keyboard-only.
 		SettingsToggle = { KeyCode = Enum.KeyCode.DPadUp },
-		-- Y (Triangle). THE ROLL GOT ITS FACE BUTTON, and this is the one binding in this table that
-		-- was a genuine BUG rather than a compromise.
-		--
-		-- It sat on DPadLeft, under a comment that said "not ideal -- a roll deserves a face button"
-		-- and treated that as taste. It was not taste. States/Rolling.lua's whole reason to exist is
-		-- the LANDING ROLL: a roll pressed within ParkourConstants.Roll.LandingWindowSeconds (0.2s) of
-		-- ground contact converts a hard landing into a full-speed continuation. That is a reflex input
-		-- on a two-tenths-of-a-second window, and it is pressed while the player is IN THE AIR STEERING
-		-- -- which on a gamepad means the left thumb is on Thumbstick1 and cannot also be on the D-pad.
-		-- The binding did not make the landing roll hard on a controller, it made it unreachable, and
-		-- with it the timing skill the parkour system is built around.
-		--
-		-- WHAT PAID FOR IT was ShiftLock, which moved to DPadLeft above. That trade is not symmetric
-		-- and that is the point: a mode toggle can afford a thumb-off-stick reach because the player
-		-- picks the moment, and a 0.2s landing window cannot afford one at all. Dash (ButtonB) stays
-		-- put -- doubling roll onto it would make two distinct mechanics indistinguishable, which is
-		-- what the old comment here was right to refuse.
-		Roll = { KeyCode = Enum.KeyCode.ButtonY },
+		-- Y (Triangle). THE DODGE GETS A FACE BUTTON. It sat on DPadLeft once, which is a thumb-off-the-
+		-- stick reach -- and an evade is pressed WHILE steering, which on a gamepad means the left thumb is on
+		-- Thumbstick1 and cannot also be on the D-pad. ShiftLock paid for it by moving to DPadLeft: a mode
+		-- toggle can afford the reach because the player picks the moment, and a dodge cannot. Dash (ButtonB)
+		-- stays put -- doubling the evade onto it would make two distinct mechanics indistinguishable.
+		Evade = { KeyCode = Enum.KeyCode.ButtonY },
 		-- Leap, Interact, GrabThrow and HotbarSlot1-5 have no entry in THIS table and are not
 		-- unbound: they live one table down, in GamepadChords, reached by holding GamepadModifier.
 		-- This comment used to say there was "genuinely nowhere left to put" Leap without doubling up
@@ -294,7 +288,7 @@ local KeybindConstants = {
 	-- collapsing them would force every consumer to branch on device and on modifier state.
 	--
 	-- THIS EXISTS BECAUSE THE BUTTON BUDGET IS GENUINELY FULL, not because chords are nice. Read
-	-- GamepadDefaults above: Roll's comment and Leap's comment independently hit the same wall --
+	-- GamepadDefaults above: Evade's comment and Leap's comment independently hit the same wall --
 	-- every face, shoulder, stick-click and D-pad direction in this genre's convention family is
 	-- already spoken for -- and Leap, Interact and GrabThrow are live gameplay actions, not admin
 	-- tooling. The choice was doubling two distinct mechanics onto one button (which makes them
@@ -306,7 +300,7 @@ local KeybindConstants = {
 	-- this map while the modifier is held, so it is discoverable rather than secret.
 	--
 	-- FLAGGED FOR A REAL CONTROLLER PLAYTEST, the same standing OpenBugReport's ButtonSelect note and
-	-- Roll's DPadLeft note already take in the map above. These are reasoned, not measured.
+	-- Evade's DPadLeft note already take in the map above. These are reasoned, not measured.
 	GamepadChords = {
 		-- R1 is BasicAttack; a feint is the cancel of exactly that, so it reads as a modified attack.
 		Feint = { KeyCode = Enum.KeyCode.ButtonR1 },
@@ -314,11 +308,11 @@ local KeybindConstants = {
 		Leap = { KeyCode = Enum.KeyCode.ButtonB },
 		-- X is Slide; both are "engage with the ground/world in front of you".
 		Interact = { KeyCode = Enum.KeyCode.ButtonX },
-		-- Y. Its plain binding is Roll, which is a TAP with a 0.2s window; this is a modified tap, so
+		-- Y. Its plain binding is Evade, which is a TAP; this is a modified tap, so
 		-- the two never compete for a press (the same hold-versus-tap argument HotbarSlot5 makes about
 		-- sharing L1 with Block). This comment used to justify the button by saying Y was ShiftLock,
 		-- "the least combat-critical face button" -- that is stale, ShiftLock moved to DPadLeft when
-		-- Roll took this button, and the reasoning is now the modifier rather than what it displaces.
+		-- the dodge took this button, and the reasoning is now the modifier rather than what it displaces.
 		GrabThrow = { KeyCode = Enum.KeyCode.ButtonY },
 		-- The D-pad is already this game's quick-select semantic (ToggleWeapon/EmoteWheel/Settings
 		-- all live there unmodified), so the modified D-pad is the natural home for the slot picker.

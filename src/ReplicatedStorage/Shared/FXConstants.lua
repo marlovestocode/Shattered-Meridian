@@ -106,6 +106,11 @@ local FXConstants = {
 		-- Pool hard cap -- well under Roblox's 31-Highlight render limit (see HitFlash.lua), since
 		-- this melee system only ever flashes the handful of characters in one player's view at once.
 		PoolMaxSize = 6,
+		-- Skip the flash on the LOCAL player's own body. It is the most expensive one on this client --
+		-- an always-on-top outline and fill over the largest model on screen -- and it tells the player
+		-- nothing the shake, the impact sound and the health bar have not already said. Everyone else
+		-- still sees it on them, on their own clients. Set false to flash yourself too.
+		SkipLocalCharacter = true,
 		HitColor = Color3.fromRGB(255, 255, 255),
 		ParryColor = Color3.fromRGB(220, 180, 90),
 		PostureBreakColor = Color3.fromRGB(230, 120, 70),
@@ -429,11 +434,13 @@ local FXConstants = {
 		-- and never more; a roll past the cap simply leaves fewer ghosts.
 		PoolMaxSize = 12,
 		-- Stamps per roll, the first at StartDelaySeconds and the rest every IntervalSeconds after.
-		-- StartDelay matches DefenseConstants.Evade's vulnerable startup (0.06s) and the three stamps
-		-- span its 0.25s active window, so the trail of ghosts IS the evade window, drawn.
+		-- StartDelay matches DefenseConstants.Evade's startup (now 0 -- the evade is live on the press) and
+		-- the three stamps span the front of the evade glide (EvadeConstants.DurationSeconds, 0.24s -- most
+		-- of its distance is covered in the first 0.15s) inside the evade's 0.30s window, so the trail of
+		-- ghosts IS the dodge, drawn.
 		StampCount = 3,
-		StartDelaySeconds = 0.06,
-		IntervalSeconds = 0.09,
+		StartDelaySeconds = 0,
+		IntervalSeconds = 0.07,
 		-- How long one ghost takes to fade from StartTransparency to gone.
 		FadeSeconds = 0.3,
 		StartTransparency = 0.55,

@@ -18,16 +18,16 @@
 	     penalties -- so three of the five directions were deliberately weak. There is one power
 	     budget now, and the extra reach comes from Dash.CruiseSeconds rather than a bigger speed.
 
-	WHY THIS IS NOT A SECOND ROLL. States/Rolling.lua already exists and is already a committed
+	WHY THIS IS NOT A SECOND EVADE. States/Evading.lua already exists and is already a committed
 	grounded burst, so the split of labour has to be real or one of the two is dead weight:
-	  * ROLL is the DODGE. Committed = true, so nothing can steal it -- that reliability is most of its
-	    defensive value -- and it owns the landing-roll conversion.
+	  * EVADE is the DODGE. Committed = true, so nothing can steal it -- that reliability is most of its
+	    defensive value -- and it is ground-only.
 	  * DASH is the CHAIN. It works in the air, it is deliberately NOT committed, and being pre-empted
 	    is the mechanic rather than a failure of one.
 	Read those two sentences together and every decision below follows from them.
 
 	PRIORITY 130, AND WHY THE NUMBER IS LOAD-BEARING. It sits in the gap between Sliding (120) and
-	Rolling (140), and both bounds are chosen rather than convenient:
+	Evading (140), and both bounds are chosen rather than convenient:
 	  * LOWER BOUND -- route-2 pre-emption requires the incoming state to STRICTLY outrank the active
 	    one, so 130 has to clear the highest id in Dash.AllowedFromStates: Jumping (70), the highest of
 	    the airborne states Dash may be entered from now that it is AIR-ONLY (grounded states were
@@ -38,8 +38,8 @@
 	    dash the instant their own CanEnter agrees. That is how "dash into a vault", "dash off a ledge
 	    into a wall-run" and "air-dash onto a lip" work here -- through the machine's own arbitration,
 	    with every one of those states' gates (cooldowns, assists, chain limits, and critically their
-	    FACING checks) fully consulted. Rolling (140) is inert because Roll.AllowedFromStates has no
-	    Dashing entry; LedgeLeaping (176) refuses unconditionally; AerialCombat (1000) must win.
+	    FACING checks) fully consulted. Evading (140) is inert because EvadeConstants.AllowedFromStates has no
+	    Dashing entry; LedgeLeaping (176) refuses unconditionally; CombatHeld (1000) must win.
 
 	    Those facing checks are why LIVE facing (below) is a strict improvement for this list rather
 	    than a cosmetic change: the body now points wherever the dash is actually going, so a dash
@@ -54,8 +54,8 @@
 
 	The one route-1 chain that IS here -- dash into a slide -- is genuinely route-1, because it is
 	triggered by a key still being HELD at the dash's end rather than by geometry appearing. Its two
-	skipped gates (grounded, and the combat gate) are re-asked inline, the same obligation
-	States/Sliding.lua's own hand-off into Rolling meets by asking StateSupport.CanRoll.
+	skipped gates (grounded, and the combat gate) are re-asked inline -- the obligation every route-1
+	hand-off has, since route 1 never consults the target's CanEnter.
 
 	THE WEIGHTED FEEL, in three parts:
 	  1. A SPRING, not a curve. Commanded speed is driven toward Dash.LaunchSpeed by
@@ -105,7 +105,7 @@ type ParkourContext = ParkourTypes.ParkourContext
 
 local DASH = ParkourConstants.Dash
 
--- Per-dash scratch. Module-level rather than context fields for the same reason Rolling's and
+-- Per-dash scratch. Module-level rather than context fields for the same reason Evading's and
 -- Sliding's are: nothing outside this file has any business reading them, and there is exactly one
 -- local player.
 --
@@ -157,15 +157,15 @@ local Dashing: ParkourTypes.StateDefinition = {
 	-- dash does not crouch (HipHeightDelta stays 0), so there is no stand-up-into-geometry case.
 	Probes = { Ground = true, Obstacle = true, Walls = true, Ledge = true },
 	Reports = "Dash",
-	-- NOT Committed, unlike Rolling -- the one structural difference between the two states, and the
+	-- NOT Committed, unlike Evading -- the one structural difference between the two states, and the
 	-- thing that makes the chains in the header possible at all. See that discussion; the residual
 	-- risk (being stolen on frame one) is only reachable when the geometry was already in traversal
 	-- range at the moment of the press, where converting to the traversal is the correct outcome.
 
 	CanEnter = function(context: ParkourContext): (boolean, string?)
 		-- Asked first, the house rule States/WallRunning.CanEnter documents. "Dashing" is deliberately
-		-- NOT in ParkourConstants.CombatGate.BlockedStates today, and neither is Rolling any more: the
-		-- roll is the grounded dodge (priced by the server's evade frames and its own cooldown) and the
+		-- NOT in ParkourConstants.CombatGate.BlockedStates today, and neither is Evading: the
+		-- evade is the grounded dodge (priced by the server's evade frames and its own cooldown) and the
 		-- dash is the airborne one. The question is asked anyway so that roster stays a pure data change.
 		if StateSupport.CombatBlocks(context, "Dashing") then
 			return false, "InCombat"
@@ -187,10 +187,10 @@ local Dashing: ParkourTypes.StateDefinition = {
 			return false, "NotAllowedFromThisState"
 		end
 		-- AIR-ONLY. A grounded player has a floor under them; a burst that shoves them along it fights
-		-- the surface the whole way (the SurfaceStickSpeed bias in Update exists for a dash that LANDS
-		-- mid-flight, not for one that starts already standing on something) and reads as being dragged
-		-- rather than dashed. Dash is the framework's AIRBORNE chaining move -- Rolling already owns the
-		-- grounded dodge/reposition job (see the file header) -- so this refuses unconditionally rather
+		-- the surface the whole way (Update's grounded branch exists for a dash that LANDS mid-flight,
+		-- not for one that starts already standing on something) and reads as being dragged
+		-- rather than dashed. Dash is the framework's AIRBORNE chaining move -- Evading already owns the
+		-- grounded dodge job (see the file header) -- so this refuses unconditionally rather
 		-- than trying to make the grounded case feel good.
 		if context.Ground.Grounded then
 			return false, "MustBeAirborne"
@@ -262,7 +262,7 @@ local Dashing: ParkourTypes.StateDefinition = {
 		-- Resolved once, off the LAUNCH angle, before any frame can reach ParkourAnimator's resolver.
 		-- Steering does not re-publish it: one clip per dash, not a cut mid-flight.
 		context.AnimationVariant = pitchBand(travelDirection)
-		-- Same landing rescue States/Rolling.lua performs on entry, for the same reason: a dash taken
+		-- Same landing rescue States/Evading.lua performs on entry, for the same reason: a dash taken
 		-- at the moment of contact should not also pay the fall's momentum cost, and clearing
 		-- FallHeight alongside it keeps the camera dip from firing for a landing that was cancelled.
 		context.LandingSeverity = nil
@@ -314,18 +314,18 @@ local Dashing: ParkourTypes.StateDefinition = {
 		if context.Ground.Grounded and travelDirection.Y <= 0 then
 			-- Every dash STARTS airborne (CanEnter's gate), but one aimed level or downward can easily
 			-- LAND before its own duration elapses -- this is that case, not the grounded-entry one.
-			-- Projected onto the surface so the tail of the dash follows terrain rather than launching
-			-- off the crest of a ramp -- the same line, and the same reason, as Rolling's and Sliding's.
+			-- HORIZONTAL PLANE ONLY on the ground, leaving standing height to the Humanoid. It used to be
+			-- projected onto the surface with a -SurfaceStickSpeed bias on Y, and at the drive's 90000
+			-- MaxForce that beats the Humanoid's hip support: the R6 root was pushed down until the torso
+			-- met the floor, so a dash that landed slid the rest of its length half-buried. Same fix, same
+			-- reason, as States/Evading.lua's drive().
 			--
 			-- The Y test is what generalizes the old `quadrant ~= "Up"` guard to a continuous aim. A
 			-- RISING dash keeps the 3D integration below for its whole duration even on a frame the
-			-- ground probe still reports contact, because projecting a mostly-vertical travel vector
-			-- onto the ground plane would flatten it to nearly nothing and kill the launch outright.
-			local travel = ParkourMath.SafeUnit(
-				ParkourMath.ProjectOnPlane(travelDirection, context.Ground.Normal),
-				travelDirection
-			)
-			motor.Velocity = travel * context.Momentum - Vector3.new(0, DASH.SurfaceStickSpeed, 0)
+			-- ground probe still reports contact, because flattening a mostly-vertical travel vector
+			-- would reduce it to nearly nothing and kill the launch outright.
+			motor.Velocity = ParkourMath.Flatten(travelDirection) * context.Momentum
+			motor.PlanarOnly = true
 			motor.CancelGravity = false
 		else
 			if context.Now < hangUntil then

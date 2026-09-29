@@ -29,6 +29,9 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
 local TrainingBotConstants = require(ReplicatedStorage.Shared.TrainingBot.TrainingBotConstants)
+local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
+local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
+local Logger = require(ReplicatedStorage.Shared.Logger)
 local Tokens = require(script.Parent.Parent.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Parent.Parent.Parent.Components.Panel)
 local Section = require(script.Parent.Parent.Parent.Parent.Components.Section)
@@ -53,6 +56,28 @@ type ContentAreaHandle = DevMenuTypes.ContentAreaHandle
 type AbilitySlotState = AbilitySlot.AbilitySlotState
 
 local ContentArea = {}
+
+local logger = Logger.scope("DevMenuContentArea")
+
+-- The training bot weapon picker's choices: "Default", every Workspace.Weapons model by name, then Fists
+-- -- the same ids, in the same order, WeaponRoster.Start builds on the server (which never runs on a
+-- client, so the roster itself cannot be asked here). Read on every press rather than once, so weapons
+-- that replicate after the menu mounts still show up. The server re-validates whatever is picked.
+local function trainingBotWeaponChoices(): { string }
+	local names: { string } = {}
+	local container = WeaponAssets.Container(logger)
+	if container then
+		for _, child in container:GetChildren() do
+			if child.Name ~= WeaponRoster.FISTS_ID and not table.find(names, child.Name) then
+				table.insert(names, child.Name)
+			end
+		end
+	end
+	table.sort(names)
+	table.insert(names, 1, TrainingBotConstants.DefaultWeaponChoice)
+	table.insert(names, WeaponRoster.FISTS_ID)
+	return names
+end
 
 -- One "0.080s [-0.1][-0.01][+0.01][+0.1]" row -- originally shared by the Hitbox Timing/Standalone
 -- Attacks tuners' Windup/Active/Recovery fields too (both since moved out of DevMenu entirely, into
@@ -550,6 +575,7 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	-- from each spawn/despawn result.
 	local trainingBotStyle = scope:Value(TrainingBotConstants.DefaultStyle :: string)
 	local trainingBotDifficulty = scope:Value(TrainingBotConstants.DefaultDifficulty :: string)
+	local trainingBotWeapon = scope:Value(TrainingBotConstants.DefaultWeaponChoice :: string)
 	local activeTrainingBotCountDisplay = scope:Value(0)
 
 	-- Local-only raw input state for Teleport-To-Coordinates/Broadcast-Announcement -- neither is
@@ -636,6 +662,9 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 	end)
 	local trainingBotDifficultyText = scope:Computed(function(use)
 		return `Difficulty: {use(trainingBotDifficulty)}`
+	end)
+	local trainingBotWeaponText = scope:Computed(function(use)
+		return `Weapon: {use(trainingBotWeapon)}`
 	end)
 	local activeTrainingBotCountText = scope:Computed(function(use)
 		return `Active bots: {use(activeTrainingBotCountDisplay)}`
@@ -913,11 +942,19 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 					}),
 				},
 			},
+			Button(scope, {
+				Text = trainingBotWeaponText,
+				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+				LayoutOrder = 2,
+				OnActivated = function()
+					cycle(trainingBotWeapon, trainingBotWeaponChoices())
+				end,
+			}),
 			scope:New "Frame" {
 				Name = "SpawnBotRow",
 				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
 				BackgroundTransparency = 1,
-				LayoutOrder = 2,
+				LayoutOrder = 3,
 
 				[Children] = {
 					scope:New "UIListLayout" {
@@ -930,7 +967,11 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 						Size = UDim2.new(0.5, -Tokens.Space.XS, 0, Tokens.Control.RowHeight),
 						LayoutOrder = 1,
 						OnActivated = function()
-							spawnTrainingBotRequestedEvent:Fire(peek(trainingBotStyle), peek(trainingBotDifficulty))
+							spawnTrainingBotRequestedEvent:Fire(
+								peek(trainingBotStyle),
+								peek(trainingBotDifficulty),
+								peek(trainingBotWeapon)
+							)
 						end,
 					}),
 					Button(scope, {
@@ -948,7 +989,7 @@ function ContentArea.Mount(scope: Scope, width: number, bodyHeight: number): Con
 				Scale = "Body",
 				Color = Tokens.Color.TextSecondary,
 				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
-				LayoutOrder = 3,
+				LayoutOrder = 4,
 			}),
 		}),
 		-- Blimp Fuel System test nodes -- one tagged CoalDeposit/WaterSource Part spawned

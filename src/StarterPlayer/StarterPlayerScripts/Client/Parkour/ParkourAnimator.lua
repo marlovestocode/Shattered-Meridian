@@ -59,6 +59,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
+local EvadeConstants = require(ReplicatedStorage.Shared.Combat.EvadeConstants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
@@ -67,6 +68,14 @@ type MovementStateId = ParkourTypes.MovementStateId
 
 local ANIMATION = ParkourConstants.Animation
 local IDS = ParkourConstants.AnimationIds
+-- The evade's optional directional clips live with the rest of the evade's tunables (EvadeConstants), not
+-- in the parkour id table, and are registered under their own keys beside it.
+local EVADE_IDS: { [string]: string } = {
+	EvadeForward = EvadeConstants.AnimationIds.Forward,
+	EvadeBack = EvadeConstants.AnimationIds.Back,
+	EvadeLeft = EvadeConstants.AnimationIds.Left,
+	EvadeRight = EvadeConstants.AnimationIds.Right,
+}
 
 local ParkourAnimator = {}
 
@@ -76,6 +85,7 @@ local ParkourAnimator = {}
 -- directly with no second name mapping to keep in sync.
 local manager = AnimationManager.new({ Name = "ParkourAnimator" })
 manager:RegisterMany(IDS)
+manager:RegisterMany(EVADE_IDS)
 
 -- This module's own exclusive slot on the body and its one claim source. A dedicated layer rather
 -- than sharing one with anything else -- see this file's header on why "Locomotion" does not exist
@@ -140,13 +150,6 @@ local STATE_CLIPS: { [string]: ClipEntry } = {
 		ScalesWithSpeed = true,
 		FadeIn = PROFILES.Settle.FadeIn,
 		FadeOut = PROFILES.Settle.FadeOut,
-	},
-	Rolling = {
-		Key = "Roll",
-		Looped = false,
-		ScalesWithSpeed = false,
-		FadeIn = PROFILES.Snap.FadeIn,
-		FadeOut = PROFILES.Snap.FadeOut,
 	},
 	Mantling = {
 		Key = "Mantle",
@@ -229,6 +232,10 @@ type VariantClipOverride = {
 	ScalesWithSpeed: boolean?,
 	FadeIn: number?,
 	FadeOut: number?,
+	-- While this variant's own asset is blank, play NOTHING rather than falling through to the state's
+	-- shared clip. For a variant that is a different motion altogether, where the shared clip would be
+	-- wrong rather than merely generic -- the evade glide, which must play no clip rather than a wrong one.
+	NoFallback: boolean?,
 }
 
 local VARIANT_CLIPS: {
@@ -307,19 +314,22 @@ local VARIANT_CLIPS: {
 				},
 			},
 		},
-		-- Also present in STATE_CLIPS above (as "Roll", the fallback every variant lands on while its own
-		-- id is blank -- see hasAsset). States/Rolling.Enter publishes the variant once: "Forward" for a
-		-- roll the body turns into, or the side of the body the roll went toward for one that KEEPS its
-		-- facing (in combat, or under shift lock). Four clips because a dodge to the side and a dodge
-		-- backwards are different motions, and the forward clip played for either reads as the character
-		-- rolling one way while travelling another. Snap profile and one-shot for the same reasons as the
-		-- STATE_CLIPS entry.
-		Rolling = {
+		-- THE EVADE. No STATE_CLIPS entry and every variant NoFallback, on purpose: until a directional clip
+		-- is authored (EvadeConstants.AnimationIds) the body keeps its current pose, which with the
+		-- afterimage ghosts reads as a flash-step -- the training bot's look. States/Evading.Enter publishes
+		-- the variant once, from the angle between travel and the held facing. Snap profile and one-shot:
+		-- the informative frame of a dodge is its first.
+		Evading = {
 			Looped = false,
 			ScalesWithSpeed = false,
 			FadeIn = PROFILES.Snap.FadeIn,
 			FadeOut = PROFILES.Snap.FadeOut,
-			Clips = { Forward = "RollForward", Back = "RollBack", Left = "RollLeft", Right = "RollRight" },
+			Clips = {
+				Forward = { Key = "EvadeForward", NoFallback = true },
+				Back = { Key = "EvadeBack", NoFallback = true },
+				Left = { Key = "EvadeLeft", NoFallback = true },
+				Right = { Key = "EvadeRight", NoFallback = true },
+			},
 		},
 		-- Also present in STATE_CLIPS (as the no-variant fallback); both agree on one-shot, non-scaling.
 		Landing = {
@@ -406,7 +416,7 @@ local currentScalesWithSpeed = false
 -- directional wall-jump pair safe to ship half-authored -- a missing WallJumpLeft plays the shared
 -- WallJump, not nothing.
 local function hasAsset(key: string): boolean
-	local assetId = IDS[key]
+	local assetId = IDS[key] or EVADE_IDS[key]
 	return assetId ~= nil and assetId ~= ""
 end
 
@@ -425,6 +435,9 @@ local function resolveKey(stateId: MovementStateId, variant: string?): (string?,
 					if clip.ScalesWithSpeed ~= nil then clip.ScalesWithSpeed else variantEntry.ScalesWithSpeed,
 					clip.FadeIn or variantEntry.FadeIn or ANIMATION.FadeInSeconds,
 					clip.FadeOut or variantEntry.FadeOut or ANIMATION.FadeOutSeconds
+			end
+			if clip.NoFallback then
+				return nil, false, false, ANIMATION.FadeInSeconds, ANIMATION.FadeOutSeconds
 			end
 		end
 	end

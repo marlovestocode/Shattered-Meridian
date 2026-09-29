@@ -38,10 +38,9 @@
 	THE STATE HOOK. OnStateChanged is one more call in Client/Parkour/ParkourController.lua's
 	onTransition list, beside ParkourAudio's -- the same "no event source of its own" shape. Entering
 	Sliding plays the slide burst (which had no caller at all after CombatClient.lua was deleted);
-	entering Rolling plays the tuck puff, the Roll camera kick and RollAfterimage.PlayRoll; leaving it
-	plays the stand-up puff.
+	entering Evading plays the dust kick, the Roll camera kick and RollAfterimage.PlayRoll.
 
-	Does not own: deciding WHEN the local player is sprinting/sliding/rolling (the parkour state
+	Does not own: deciding WHEN the local player is sprinting/sliding/evading (the parkour state
 	machine decides; RunController calls SetSprinting), the ghosts themselves (RollAfterimage.lua), the
 	camera FOV that accompanies Sprint/Slide (FOVOffset.lua), or the animation (ParkourAnimator.lua).
 	Purely local presentation; nothing here crosses the network.
@@ -199,12 +198,12 @@ function MovementVFX.OnStateChanged(previous: string, next: string): ()
 	if not character then
 		return
 	end
-	if next == "Rolling" and previous ~= "Rolling" then
+	-- The evade: a dust kick where the glide leaves, the afterimage ghosts along it, and a small camera
+	-- kick. No burst on the way out -- the glide eases to rest rather than landing from a tumble.
+	if next == "Evading" and previous ~= "Evading" then
 		MovementVFX.PlayRollBurst(character)
 		RollAfterimage.PlayRoll(character)
 		CameraShake.Shake(Constants.FX.CameraShake.Roll)
-	elseif previous == "Rolling" and next ~= "Rolling" then
-		MovementVFX.PlayRollBurst(character)
 	end
 end
 

@@ -6,11 +6,11 @@
 	(AttackDefinition), what it answers with (HitReport), and the sanitisers that guarantee neither
 	ever carries a number the geometry math can't survive.
 
-	A FRESH SCHEMA, not Types.HitboxAttackDefinition. That type belongs to the Move Creation System's
-	authoring pipeline -- it carries damage, posture, stun configs, animation ids and editor metadata,
-	because a "move" in that system is the whole gameplay package. This engine resolves geometry and
-	reports contacts; it has no opinion on any of that, and reusing a type that carries it would make
-	the engine look like it did. What is here is the complete set of things you need to know to answer
+	A FRESH SCHEMA, not an authored move (MoveTypes.MoveDefinition) or a CombatConstants stage
+	(Types.HitboxAttackDefinition). Those carry damage, posture, knockback, clips and editor metadata,
+	because a "move" is the whole gameplay package. This engine resolves geometry and reports contacts;
+	it has no opinion on any of that, and reusing a type that carries it would make the engine look
+	like it did. What is here is the complete set of things you need to know to answer
 	"who is inside this volume right now," and nothing else.
 
 	THE DOMAIN-AGNOSTIC LAYERING, which is the reason ComboStage and PowerLevel are plain numbers:
@@ -20,8 +20,8 @@
 	is what lets a bot, a dummy and a player go through one code path -- and what lets the progression
 	layer change what "power" means without touching a line of geometry.
 
-	LOCAL SPACE CONVENTION, matching Shared/HitboxShapes.lua's so an author who knows one knows both:
-	origin is (0,0,0), FORWARD is -Z, up is +Y, right is +X.
+	LOCAL SPACE CONVENTION -- the one the Move Editor authors in too, since its schema IS this module's
+	vocabulary (MoveTypes): origin is (0,0,0), FORWARD is -Z, up is +Y, right is +X.
 	  * REACH shapes (Cone, Beam) grow forward FROM the origin -- the origin is their apex/base and
 	    Length is literally how far in front of the attach point they extend.
 	  * CENTRED shapes (Box, Sphere, Cylinder, Capsule, Arc) straddle the origin, so Offset alone
@@ -40,20 +40,19 @@ local Sanitize = require(ReplicatedStorage.Shared.Sanitize)
 
 local HitboxTypes = {}
 
--- The shape vocabulary. Seven, not the twelve HitboxShapes.lua offers, and deliberately so: each one
--- here has an exact analytic containment test and a meaningfully different silhouette in play. The
--- editor-only shapes (Disc, Wedge, Pyramid, Blade, Slice) existed to give the Move Editor's shape
--- picker variety; with no editor in this engine's scope, carrying them would mean carrying five more
--- branches through every geometry function for no attack that needs them.
+-- The shape vocabulary. Seven, and deliberately so: each has an exact analytic containment test and a
+-- meaningfully different silhouette in play. The old Move Editor offered twelve; the five editor-only
+-- ones (Disc, Wedge, Pyramid, Blade, Slice) were projected onto these at swing time, and since the
+-- 2026-09-29 rebuild the editor authors in exactly this list (MoveTypes.Shapes).
 export type ShapeKind = "Box" | "Sphere" | "Capsule" | "Cone" | "Cylinder" | "Arc" | "Beam"
 
 -- Where on the attacker the hitbox's local space is anchored. Resolved against the LIVE part every
 -- sample, never baked at swing start -- see AttackDefinition.Offset.
 export type AttachmentPoint = "Root" | "RightHand" | "LeftHand" | "Weapon"
 
--- One flat measurement bag shared by every shape, rather than a per-shape variant. Same reasoning as
--- HitboxShapes.Dimensions: it keeps the sanitiser, the scaler and the geometry dispatcher each one
--- fixed-shape table instead of seven, and a field a shape doesn't use is simply never read by it.
+-- One flat measurement bag shared by every shape, rather than a per-shape variant: it keeps the
+-- sanitiser, the scaler and the geometry dispatcher each one fixed-shape table instead of seven, and a
+-- field a shape doesn't use is simply never read by it.
 export type Dimensions = {
 	Width: number,
 	Height: number,
@@ -205,12 +204,9 @@ end
 -- a NaN that reaches the geometry does not error, it makes every containment test silently return
 -- false, producing an attack that swings and never hits anything.
 
--- The per-field bounds this module actually clamps against, exposed read-only.
---
--- Exported so a spec can cross-check them against Shared/HitboxShapes.FIELD_SPECS -- the caps the
--- Move Editor lets an author TYPE. Those two disagree today for Radius/InnerRadius, and where the
--- authoring cap is the looser one a move is stored larger than it will ever be resolved. See
--- Tests/Combat/HitboxShapes.spec.lua, which pins the discrepancy and states both one-line fixes.
+-- The per-field bounds this module actually clamps against, exposed read-only. The Move Editor's own
+-- authoring caps (Constants.MoveEditor.Limits.Dimensions) sit inside these, so nothing an author can
+-- type is ever clamped a second time here.
 function HitboxTypes.FieldBounds(): { [string]: { Min: number, Max: number, Default: number } }
 	return FIELD_BOUNDS
 end

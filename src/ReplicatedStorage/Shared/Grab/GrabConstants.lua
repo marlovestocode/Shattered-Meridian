@@ -15,11 +15,9 @@
 	authoring default (AttachOffset) that is deliberately NOT exposed to an author at all -- see
 	Defaults.AttachOffset's own comment.
 
-	Does not own: per-move hold/throw numbers (the Move Creation System, via MoveTypes.MoveGrabConfig),
-	the hold/flight state machine itself (Server/Combat/Grab/GrabSystem.lua), or the clamp bounds
-	MoveRegistryManager.Validate enforces on a saved move (Limits below is what THAT function reads,
-	but the clamping itself stays MoveRegistryManager's own job -- the same split
-	Constants.MoveEditor.ObjectStun.Limits already keeps with validateObjectStun).
+	Does not own: per-move hold/throw numbers (the Move Editor, via MoveTypes.MoveGrabConfig), the
+	hold/flight state machine itself (Server/Combat/Grab/GrabSystem.lua), or clamping a saved move
+	(Limits below is what MoveRegistryManager.Validate reads, but the clamping itself stays its job).
 ]]
 
 local GrabConstants = {}
@@ -53,9 +51,8 @@ GrabConstants.Defaults = {
 	ThrowSelfDamage = 10,
 }
 
--- Clamp bounds for MoveRegistryManager's validateGrab, the same {Min, Max} shape
--- Constants.MoveEditor.ObjectStun.Limits already uses for its own sub-table -- one place PropertyEditor
--- .lua's NumericField rows and the server's own clamp agree on a range.
+-- Clamp bounds for MoveRegistryManager's validateGrab, in Constants.MoveEditor.Limits' {Min, Max}
+-- shape -- one place the Move Editor's Grab fields (ImpactTab) and the server's clamp agree on a range.
 GrabConstants.Limits = {
 	HoldSeconds = { Min = 0.5, Max = 15 },
 	ThrowUpVelocity = { Min = 0, Max = 150 },
@@ -93,8 +90,7 @@ GrabConstants.Impact = {
 	CollisionRadiusStuds = 4,
 	-- Extra probe distance added to the ray this sweep casts between last frame's position and this
 	-- frame's, so a landing registers on the frame it happens rather than one frame after the physics
-	-- solver has already arrested the body and erased the evidence -- same reasoning
-	-- Types.ObjectStunConfig.ProbeDistanceStuds gives for its own probe.
+	-- solver has already arrested the body and erased the evidence.
 	GroundProbeExtraStuds = 2,
 }
 

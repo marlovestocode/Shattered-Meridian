@@ -24,10 +24,11 @@
 	  * a newer launch REPLACES an older one mid-hold -- the body goes where the latest hit sends it.
 
 	Writes only through ParkourMotor.ApplyExternalImpulse, the single seam for "something outside the
-	parkour state machine needs this body to move" -- which already refuses during a kinematic traversal
-	and while the server holds root control (a grab, a mount), both correctly "not now" for a knock too,
-	and which ENDS a velocity-driven parkour state (a roll, a slide) instead of letting its drive erase
-	the launch on the next physics step. See that function's own header.
+	parkour state machine needs this body to move" -- which refuses only while the server holds root
+	control (a grab, a mount), correctly "not now" for a knock too, and which ENDS any parkour state that
+	owns the body (an evade, a slide, a dash, a wall-run, a vault) instead of letting its drive erase the
+	launch on the next physics step (ParkourController's generic interrupt rule). See that function's
+	own header.
 
 	Does not own: the launch (DamageSystem), the freeze (Client/FX/HitStop.lua), or deciding which hits
 	launch (CombatFeedbackClient hands over whatever the server put on the payload).
@@ -50,6 +51,9 @@ type Active = {
 	StartsAt: number,
 	-- Whether the first (full, vertical-including) write has happened yet.
 	Launched: boolean,
+	-- A spacing push (Push) rather than a launch: horizontal only, so even its first frame carries the
+	-- body's own vertical velocity instead of writing the launch's.
+	CarryY: boolean,
 }
 
 local active: Active? = nil
@@ -112,12 +116,18 @@ local function onHeartbeat(): ()
 		stop()
 		return
 	end
-	local desired = KnockbackClient.VelocityAt(current.Launch, hold, elapsed, isFirst, root.AssemblyLinearVelocity)
+	local desired = KnockbackClient.VelocityAt(
+		current.Launch,
+		hold,
+		elapsed,
+		isFirst and not current.CarryY,
+		root.AssemblyLinearVelocity
+	)
 	if ParkourMotor.ApplyExternalImpulse(desired) then
 		current.Launched = true
 	elseif isFirst then
-		-- Refused on the first frame (a vault owns the body, or the server does): this launch is not
-		-- going to happen, and holding its horizontal part afterwards would be a knock with no lift.
+		-- Refused on the first frame (the server holds root control): this launch is not going to
+		-- happen, and holding its horizontal part afterwards would be a knock with no lift.
 		stop()
 	end
 end
@@ -131,6 +141,29 @@ function KnockbackClient.Launch(launch: Vector3, delaySeconds: number): ()
 		Launch = launch,
 		StartsAt = os.clock() + math.max(0, delaySeconds),
 		Launched = false,
+		CarryY = false,
+	}
+	if heartbeat == nil then
+		heartbeat = RunService.Heartbeat:Connect(onHeartbeat)
+	end
+end
+
+-- Slides the local body by the horizontal `push` (DamageConstants.Spacing), starting `delaySeconds` from
+-- now. The same decaying hold as a launch, but it never writes Y, so a push landing mid-jump keeps the
+-- jump. Never replaces a launch that is still running: a knockback outranks a spacing nudge.
+function KnockbackClient.Push(push: Vector3, delaySeconds: number): ()
+	if typeof(push) ~= "Vector3" or push ~= push then
+		return
+	end
+	local current = active
+	if current ~= nil and not current.CarryY then
+		return
+	end
+	active = {
+		Launch = Vector3.new(push.X, 0, push.Z),
+		StartsAt = os.clock() + math.max(0, delaySeconds),
+		Launched = false,
+		CarryY = true,
 	}
 	if heartbeat == nil then
 		heartbeat = RunService.Heartbeat:Connect(onHeartbeat)

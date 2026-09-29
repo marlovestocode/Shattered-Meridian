@@ -69,6 +69,7 @@ local DefenseSystem = require(Combat.Defense.DefenseSystem)
 local DamageSystem = require(Combat.Damage.DamageSystem)
 local AttackRequestSystem = require(Combat.Attack.AttackRequestSystem)
 local GrabSystem = require(Combat.Grab.GrabSystem)
+local AirComboSystem = require(Combat.AirCombo.AirComboSystem)
 local EngagementSystem = require(Combat.Engagement.EngagementSystem)
 local KnockbackAudit = require(Combat.Damage.KnockbackAudit)
 local EnvironmentReactionSystem = require(Combat.Environment.EnvironmentReactionSystem)
@@ -356,6 +357,13 @@ end)
 --     that module's own Init() for the one assertion it does make (DamageSystem must be available).
 boot("GrabSystem", GrabSystem)
 
+--     AirComboSystem is the next sibling of the same shape (docs/design/air-combat-and-evade.md, Part B):
+--     it subscribes to DamageSystem.OnApplied, holds DamageSystem's one air-combo hook slot for the air
+--     string's damage scaling, and is READ by AttackRequestSystem.Throw as a fourth CanAttack-shaped gate
+--     (and ResolvePress, for what an air attacker's press means). Boots after GrabSystem; its Init asserts
+--     the two layers below it are available.
+boot("AirComboSystem", AirComboSystem)
+
 --     EngagementSystem is another sibling of the same shape -- it subscribes to DamageSystem.OnApplied
 --     exactly as GrabSystem does, and is read by nobody through a require at all: it publishes the
 --     Constants.Attributes.InCombat seam and its own Engagement_Changed remote, and every consumer
@@ -412,20 +420,28 @@ boot("WeaponInventorySystem", WeaponInventorySystem)
 --      suspected-cheater flag.
 boot("ParkourSystem", ParkourSystem)
 
---      THE ROLL'S EVADE FRAMES ARE WIRED HERE, for the reason the per-weapon parry clips above are: the
+--      THE EVADE'S FRAMES ARE WIRED HERE, for the reason the per-weapon parry clips above are: the
 --      boot script is the one place that legitimately knows both sides. ParkourSystem publishes an
 --      ACCEPTED action (its OnActionStarted runs after the plausibility gate), DefenseSystem owns what a
 --      contact means, and neither requires the other -- DefenseSystem is the second layer of the combat
 --      stack and has no business knowing parkour exists, and ParkourSystem has none knowing combat
---      does. The accepted Roll report IS the trigger, so evasion costs no new remote (the N1 remote
+--      does. The accepted Evade report IS the trigger, so evasion costs no new remote (the N1 remote
 --      budget in docs/architecture). BeginEvade applies its own body gates and may refuse; a refused
---      evade leaves the roll a roll that simply gets hit.
+--      evade leaves the glide a glide that simply gets hit.
 ParkourSystem.OnActionStarted(function(player: Player, kind: ParkourTypes.ActionKind, now: number)
-	if kind ~= "Roll" then
+	if kind ~= "Evade" then
+		return
+	end
+	-- Combat only: an evade reported outside an engagement opens no frames (States/Evading.CanEnter's
+	-- own rule, re-checked against the server's tag rather than trusted from the client).
+	if not EngagementSystem.IsInCombat(player) then
 		return
 	end
 	local character = player.Character
 	if character then
+		-- A LANDED swing's recovery may be cut into the evade (AttackConstants.HitConfirm). Cut first, so
+		-- BeginEvade's own "not mid-swing" gate sees a free body. A no-op for anything else.
+		AttackRequestSystem.CancelRecoveryForEvade(character, now)
 		DefenseSystem.BeginEvade(character, now)
 	end
 end)
@@ -525,6 +541,10 @@ boot("DebugDummySystem", DebugDummySystem)
 --      its Init asserts the layers exist. Spawnable only through the whitelist-gated Spawn tab
 --      (DevMenuSystem, step 22), so a server nobody spawns one on pays one empty loop per frame.
 boot("TrainingBotSystem", TrainingBotSystem)
+
+-- The server's own frame numbers for the client's F3 overlay (Constants.Debug.FpsCounter.ServerStats).
+-- Not a System and not in BootManifest: no remote, no gameplay state, nothing reads it but that overlay.
+require(script.Parent.Diagnostics.ServerFrameStats).Start()
 
 -- 22. Whitelist-gated dev tooling boots last -- its
 --     ListBugReports/UpdateBugReportStatus handlers call BugReportSystem, its

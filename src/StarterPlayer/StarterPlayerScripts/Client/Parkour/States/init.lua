@@ -21,7 +21,7 @@
 	fifteen files to reconstruct it.
 
 	PRIORITY LADDER (highest wins a contested pre-emption):
-	   1000  AerialCombat   -- combat owns the body; nothing may pre-empt it
+	   1000  CombatHeld   -- combat owns the body; nothing may pre-empt it
 	    220  LedgeClimbing  -- only reachable from LedgeHanging
 	    210  LedgeHanging   -- catching an edge beats continuing to fall
 	    176  LedgeLeaping   -- route-1 only (CanEnter always refuses); reachable exclusively from
@@ -39,7 +39,7 @@
 	                       -- WallJumping state, now a phase of this one -- see its own header)
 	    150  Vaulting       -- clearing an obstacle beats running into it
 	    145  Mantling       -- just under Vaulting: when both are viable the faster option wins
-	    140  Rolling        -- a dodge beats whatever it is dodging out of
+	    140  Evading        -- the combat evade: a dodge beats whatever it is dodging out of
 	    130  Dashing        -- above Sliding so a dash may cancel one (route-2 entry needs a STRICTLY
 	                       -- higher priority), and BELOW every traversal above it on purpose: Mantling,
 	                       -- Vaulting, WallRunning and LedgeHanging are all meant to pre-empt a running
@@ -65,7 +65,7 @@
 local ParkourTypes = require(game:GetService("ReplicatedStorage").Shared.Parkour.ParkourTypes)
 
 local States: { ParkourTypes.StateDefinition } = {
-	require(script.AerialCombat),
+	require(script.CombatHeld),
 	require(script.LedgeClimbing),
 	require(script.LedgeHanging),
 	require(script.LedgeLeaping),
@@ -73,7 +73,7 @@ local States: { ParkourTypes.StateDefinition } = {
 	require(script.WallRunning),
 	require(script.Vaulting),
 	require(script.Mantling),
-	require(script.Rolling),
+	require(script.Evading),
 	require(script.Dashing),
 	require(script.Sliding),
 	require(script.Landing),

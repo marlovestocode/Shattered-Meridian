@@ -8,12 +8,8 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
--- AnimationTimeline is a leaf module (no requires of its own -- see its own header), so pulling its
--- Clip type in here for AttackStartedPayload.Animations below cannot create a require cycle the way
--- pulling in a module that itself requires Types.lua would.
-local AnimationTimeline = require(ReplicatedStorage.Shared.AnimationTimeline)
--- Same "leaf module, no require cycle" reasoning as AnimationTimeline above -- LogTypes.lua has no
--- requires of its own. NOT Shared/Logger.lua directly: Logger requires Constants, and Constants
+-- LogTypes.lua is a leaf module (no requires of its own), so pulling its types in here cannot create a
+-- require cycle. NOT Shared/Logger.lua directly: Logger requires Constants, and Constants
 -- requires this very file, so requiring Logger here would close a three-module cycle
 -- (Types -> Logger -> Constants -> Types) -- see LogTypes.lua's own header.
 local LogTypes = require(ReplicatedStorage.Shared.LogTypes)
@@ -202,42 +198,7 @@ export type SystemModule = {
 -- reaction machinery (damage number, hit-flash, hit-stop, PredictionMirror) a SECOND time for the
 -- same landed swing -- see CombatFeedbackPayload.FinisherVariant's own header for what it exists to
 -- carry and why the ordinary "Hit" event for that same swing can't carry it itself.
--- "ObjectStun" is sent to BOTH the attacker and the victim the moment a move's Object Stun
--- resolves (Server/Combat/ObjectStunResolver.lua reported an impact and CombatSystem applied it) --
--- the only Kind whose payload carries a whole sub-table of its own (ObjectStunFeedback below),
--- because a wall slam has presentation state nothing else here does: which surface class was hit,
--- where and which way it faced, and the two authored clips to play.
-export type CombatFeedbackKind =
-	"Hit"
-	| "Blocked"
-	| "Parried"
-	| "PostureBreak"
-	| "Death"
-	| "Disarmed"
-	| "GroundSlam"
-	| "ObjectStun"
-
--- The presentation half of a resolved Object Stun -- everything a client needs to play the impact
--- and nothing it doesn't. Deliberately NOT the whole ObjectStunConfig: the detection gates, the
--- cooldowns and the follow-up's entire definition are server concerns the client has no business
--- receiving, and shipping them would put an authored move's full data on the wire on every slam.
-export type ObjectStunFeedback = {
-	-- "Wall" / "Floor" / "Ceiling" / "Prop" -- mirrors ObjectStunResolver.SurfaceKind, kept as a
-	-- plain string here for the same leaf-module reason HitboxShapeId is a separate copy: this file
-	-- requires nothing, and a server-only resolver has no business being a network-type dependency.
-	Surface: string,
-	-- Plays on the victim / the attacker respectively; "" means the author didn't set one.
-	VictimAnimationId: string,
-	AttackerAnimationId: string,
-	SoundId: string,
-	EffectColor: Color3,
-	CameraShakeScale: number,
-	ImpactPosition: Vector3,
-	-- Points out of the struck surface -- lets a client aim impact particles away from the wall
-	-- rather than into it.
-	ImpactNormal: Vector3,
-	StunSeconds: number,
-}
+export type CombatFeedbackKind = "Hit" | "Blocked" | "Parried" | "PostureBreak" | "Death" | "Disarmed" | "GroundSlam"
 
 export type CombatVitalsPayload = {
 	Health: number,
@@ -488,10 +449,6 @@ export type CombatFeedbackPayload = {
 	-- guess at something it may structurally be unable to observe. False (or nil) means a genuine,
 	-- observable fall -- the existing poll-based detection, which already works reliably for that case.
 	ImmediateGroundImpact: boolean?,
-	-- Set only for Kind == "ObjectStun" -- see ObjectStunFeedback above. Not consumed for any
-	-- gameplay/hit decision (the server already applied the stun, damage and pin before sending
-	-- this); purely presentation, like FinisherVariant and AirComboPriorityShift.
-	ObjectStun: ObjectStunFeedback?,
 }
 
 -- Which weapon a player currently fights with -- ONE at a time, always. The id is the Name of a
@@ -542,24 +499,6 @@ export type AttackStartedPayload = {
 	-- rather than reloading it every throw.
 	AnimationId: string?,
 	AnimationTrackName: string?,
-	-- Additive, nil for every weapon-stage/standalone/follow-up throw. Non-nil -- EVEN WHEN THE ARRAY
-	-- ITSELF IS EMPTY -- if and only if this swing came from CombatSystem.ThrowCustomMove: a Move
-	-- Creation System move's full authored AnimationTimeline.Clip list (MoveDefinition.Animations),
-	-- or -- for a move that only ever set the original single-clip AnimationId -- that id projected
-	-- onto a one-clip list by the same AnimationTimeline.FromLegacyAnimationId helper
-	-- MoveRegistryManager.Validate and PreviewViewport's own preview already use, so the editor's
-	-- preview and the real throw can never schedule two different sequences from the same authored
-	-- data. Resolved client-side by CombatAnimator.PlayCustomMoveTimeline via AnimationTimeline.
-	-- Resolve, against THIS payload's own WindupSeconds/ActiveSeconds/RecoverySeconds -- one shared
-	-- pure scheduler, never a second copy of the resolution logic.
-	--
-	-- Non-nil is deliberately the ONLY signal CombatClient.lua's attack-started handler needs to know
-	-- "this throw is a CustomMove, never fall back to ConfirmSwing's DebugName-trailing-digit
-	-- inference." A custom move's DebugName is always its MoveId (MoveTypes.ToHitboxAttackDefinition),
-	-- an admin-authored slug+suffix with no relationship whatsoever to the M1 combo stage numbering
-	-- that inference exists to read -- gating on "AnimationId happened to be non-empty" instead (the
-	-- bug this field replaces) let a MoveId ending in "3" silently play the M1 combo's third swing.
-	Animations: { AnimationTimeline.Clip }?,
 }
 
 -- Sent to the acting player only, the moment CombatSystem accepts a Dash (after every validation
@@ -746,297 +685,36 @@ export type CombatSnapshot = {
 	HeldAloft: boolean,
 }
 
--- The twelve hitbox shapes an authored move may use. Structurally identical BY CONSTRUCTION to
--- Shared/HitboxShapes.lua's own ShapeId union -- the same deliberate two-copies arrangement
--- MoveEditor/Types.lua's SectionId and Components/SectionIcon.lua's SectionIconGlyphKind already
--- use, and for the same reason: this file is a leaf that requires nothing (see its own header), and
--- HitboxShapes.lua is a leaf geometry module with no business depending on the network-boundary
--- type file. HitboxShapes.SHAPE_SPECS is the RUNTIME authority (a shape with no spec there simply
--- does not exist); this union is the compile-time mirror of its keys.
-export type HitboxShapeId =
-	"Box"
-	| "Sphere"
-	| "Cone"
-	| "Cylinder"
-	| "Capsule"
-	| "Disc"
-	| "Wedge"
-	| "Pyramid"
-	| "Arc"
-	| "Beam"
-	| "Blade"
-	| "Slice"
-
--- Every measurement any shape reads, always fully populated. Mirrors HitboxShapes.Dimensions for
--- the same reason HitboxShapeId mirrors ShapeId above. Which of these a given shape actually
--- consumes is HitboxShapes.FieldsFor(shape) -- nothing here implies a shape reads all eight.
-export type HitboxDimensions = {
-	Width: number,
-	Height: number,
-	Depth: number,
-	Length: number,
-	Thickness: number,
-	Radius: number,
-	InnerRadius: number,
-	AngleDegrees: number,
-}
-
--- Which classes of world geometry an Object Stun may trigger against. Four independent booleans
--- rather than one enum because they are genuinely independent choices -- a wall-slam move wants
--- Walls only, a ground-spike wants Floors only, a "smash them through the scenery" move wants Props
--- regardless of orientation. Walls/Floors/Ceilings are decided from the impact surface's own
--- NORMAL; Props is decided from the hit PART instead (unanchored, or carrying the config's
--- RequirePartTag) and takes priority over the orientation classes, so a crate reads as a prop
--- whichever face of it was struck. See Server/Combat/ObjectStunResolver.lua's classifySurface.
-export type ObjectStunSurfaces = {
-	Walls: boolean,
-	Floors: boolean,
-	Ceilings: boolean,
-	Props: boolean,
-}
-
--- The optional second attack an Object Stun chains into once the target is pinned. This is what
--- makes "hit them, knock them into a wall, wall-stun them, then immediately follow up" authorable
--- as ONE move instead of bespoke code per move.
+-- One stage of a hand-authored swing -- the shape CombatConstants' weapon stages (Weapons.Baseline
+-- .Stages.*) and standalone attacks (DashPunch/DashHit) are written in, and what Shared/Combat/
+-- WeaponRoster.lua builds each weapon's own copy of. Read by exactly one thing at runtime:
+-- Server/Combat/DefaultMoveRegistry.lua, which projects it into a MoveTypes.MoveDefinition (a Box of this
+-- Size) for AttackCatalog. It is authoring data, never mutated after the roster builds it -- the Move
+-- Editor tunes a Default move through DefaultMoveRegistry's override layer, not by writing here.
 --
--- Deliberately carries its OWN full hitbox/timing/damage block rather than inheriting the parent
--- move's: a follow-up is a different attack (a close-range punish into a pinned target, typically
--- far tighter and faster than the launcher that set it up), and inheriting the parent's geometry
--- would make the common case -- a big sweeping launcher into a small precise punish -- inexpressible.
-export type ObjectStunFollowUp = {
-	Enabled: boolean,
-	-- Seconds after the object impact before the follow-up is thrown. 0 is legal (immediate).
-	DelaySeconds: number,
-	-- Plays on the ATTACKER when the follow-up throws. "" = none, the same wired-but-unauthored
-	-- convention Constants.Combat.AnimationIds already uses.
-	AnimationId: string,
-
-	WindupSeconds: number,
-	ActiveSeconds: number,
-	RecoverySeconds: number,
-	Damage: number,
-	PostureDamage: number,
-	MaxTargets: number,
-
-	Shape: HitboxShapeId,
-	Dimensions: HitboxDimensions,
-	-- Relative to the ATTACKER's root at the moment the follow-up throws, exactly like the parent
-	-- move's own Offset -- not relative to the pinned victim. Combined with TeleportAttacker below
-	-- (which first puts the attacker at a known distance from the victim), that is what makes a
-	-- follow-up land reliably rather than depending on where the attacker happened to drift.
-	Offset: CFrame,
-	OffsetRotation: Vector3,
-
-	-- Closes the gap before throwing: repositions the attacker TeleportDistanceStuds from the pinned
-	-- victim, facing them. Off by default -- a teleport is a strong, very visible effect an author
-	-- should opt into rather than discover.
-	TeleportAttacker: boolean,
-	TeleportDistanceStuds: number,
-
-	-- The follow-up's own knockback, independent of the parent move's -- typically what peels the
-	-- victim back off the surface. Same shape as HitboxAttackDefinition.Knockback below.
-	Knockback: {
-		UpVelocity: number,
-		HorizontalVelocity: number,
-		RagdollSeconds: number,
-		StartsAirCombo: boolean?,
-	}?,
-}
-
--- A move-authored reaction to KNOCKING A TARGET INTO something -- not to a target merely being near
--- something. See MoveTypes.lua's own header for where this sits in the authored-move schema and
--- Server/Combat/ObjectStunResolver.lua for the runtime.
---
--- The causation problem is the entire design. A naive "is there a wall behind them" check fires
--- constantly for anyone fighting with their back to a building, which makes the mechanic feel random
--- rather than earned. Four independent, separately-authorable gates together answer "did THIS move
--- put them there":
---
---   * RequiredClearanceStuds -- at the moment the hit lands there must be NO qualifying surface
---     closer than this along the direction the target is about to be thrown. A target already
---     against the wall cannot be "knocked into" it; the watch is refused outright.
---   * MinTravelStuds -- the target must actually be carried at least this far from where they stood
---     when hit, before any impact counts.
---   * MinImpactSpeed -- how fast they must still be moving on contact, ruling out drifting gently
---     into a surface at the tail of a spent knockback.
---   * MaxImpactAngleDegrees -- how head-on the contact must be (between travel direction and the
---     surface's inward normal), ruling out scraping ALONG a wall.
---
--- MaxTravelSeconds bounds how long the resolver keeps watching after the hit; past it the watch is
--- dropped untriggered, so a target knocked back, recovering, and walking into a wall five seconds
--- later never sets it off.
-export type ObjectStunConfig = {
-	Enabled: boolean,
-
-	-- Detection ---------------------------------------------------------------------------------
-	Surfaces: ObjectStunSurfaces,
-	-- Only trigger on anchored geometry. On by default: unanchored debris absorbs an impact rather
-	-- than stopping the target, so slamming someone into a loose crate reads wrong. Turn it off
-	-- (with Surfaces.Props on) for a move that is specifically about smashing through scenery.
-	RequireAnchored: boolean,
-	-- CollectionService tag the hit part, or an ancestor of it, must carry. "" = no requirement (the
-	-- default). The escape hatch for a level designer to mark exactly which scenery is slam-worthy
-	-- without the combat code knowing anything about the map.
-	RequirePartTag: string,
-	-- Rejects impacts against parts smaller than this on their smallest axis -- a lamp post or a
-	-- railing should not stop a launched body the way a wall does.
-	MinSurfaceExtentStuds: number,
-	-- How far ahead of the target the resolver probes each tick, on top of the distance they will
-	-- cover this frame. Roughly a body's own half-depth: enough that contact registers on the frame
-	-- it happens rather than after the physics solver has stopped them dead and erased the evidence.
-	ProbeDistanceStuds: number,
-	RequiredClearanceStuds: number,
-	MinTravelStuds: number,
-	MinImpactSpeed: number,
-	MaxImpactAngleDegrees: number,
-	MaxTravelSeconds: number,
-
-	-- Outcome -----------------------------------------------------------------------------------
-	StunSeconds: number,
-	-- How long the target stays DOWN, measured from the moment the drop that ends a pin actually
-	-- lands -- NOT the total. The full physical sequence is PinSeconds + this, and CombatSystem's own
-	-- onObjectStunImpact is what adds them together for the ragdoll and the action lockout alike.
-	RagdollSeconds: number,
-	BonusDamage: number,
-	BonusPostureDamage: number,
-	-- Bounces the target back off the surface at this speed. 0 = they stay where they hit, which is
-	-- the right answer whenever PinSeconds is doing the work instead.
-	ReboundVelocity: number,
-	-- Holds the target against the surface this long -- the "stuck in the wall" beat a follow-up
-	-- needs in order to land at all. 0 = no pin.
-	--
-	-- The pin is the FIRST of two beats: when it expires the body is peeled off the surface and
-	-- slammed into the floor (CombatSystem.dropFromSurface / RagdollController.SlamToGround),
-	-- which is what gives the reaction its ground-impact payoff instead of ending with the target
-	-- sliding quietly down the wall. Set it to 0 for a move that should leave them where they hit,
-	-- with no drop at all.
-	PinSeconds: number,
-	-- Plays on the TARGET at impact ("" = none) -- the wall-stun reaction clip.
-	VictimAnimationId: string,
-	-- Plays on the ATTACKER at impact ("" = none) -- the "they landed it" beat, separate from the
-	-- follow-up's own animation, which plays later.
-	AttackerAnimationId: string,
-	SoundId: string,
-	EffectColor: Color3,
-	-- Multiplies the impact's client-side camera reaction. 0 disables it.
-	CameraShakeScale: number,
-
-	-- Limits ------------------------------------------------------------------------------------
-	-- Per attacker, per move: how long before this move may trigger another object stun at all.
-	-- Stops a fast multi-hit move chain-stunning one target against the same wall.
-	CooldownSeconds: number,
-	-- Per throw: how many distinct targets one swing may object-stun. 1 for almost everything.
-	MaxTriggersPerMove: number,
-
-	FollowUp: ObjectStunFollowUp?,
-}
-
--- One stage of a melee swing's hitbox (Constants.Combat.Weapons[weaponId].Stages.Basic/Heavy
--- entries), consumed by
--- both CombatSystem.lua (attack-request validation, per-hit resolution) and
--- Server/Combat/HitboxResolver.lua (the oriented-box sampling/sweep itself). Defined here rather
--- than locally in either module because it's genuinely the static-data shape Constants.lua's
--- tables are authored in AND the runtime shape both consumers pass around -- a real shared
--- boundary, not a single module's own API surface (contrast HitboxResolver.SwingConfig, which
--- stays local to that module since it's only that module's own call shape).
+-- Deliberately narrow (2026-09-29): the twelve-shape Dimensions bag, Knockback/Slam/Projectile/
+-- ObjectStun and ArcDegrees that used to hang off this type were never set by any stage and had no
+-- runtime reading them; they went with the Move Editor rebuild.
 export type HitboxAttackDefinition = {
 	DebugName: string,
-	-- Seconds after the request is accepted before the hitbox can register a hit (telegraph).
 	WindupSeconds: number,
-	-- Seconds the hitbox is live and sampled for overlaps, starting right after WindupSeconds.
 	ActiveSeconds: number,
-	-- Seconds of post-active endlag with no hitbox sampling. Tuning expectation (not enforced by
-	-- code): Cooldown should be >= WindupSeconds + ActiveSeconds + RecoverySeconds, otherwise a new
-	-- swing can start while the previous one's recovery hasn't finished.
 	RecoverySeconds: number,
-	-- Oriented box dimensions, in studs, passed directly to Workspace:GetPartBoundsInBox.
+	-- The box, in studs (Width, Height, Length). In the shipped BodyBox mode this IS the swing; in Blade
+	-- mode the engine sizes the swing off the weapon's own Blade part and this is only what the Move
+	-- Editor shows (see CombatConstants.Weapons.SwingHitbox).
 	Size: Vector3,
-	-- Relative to the attacker's HumanoidRootPart CFrame, recomputed fresh every sample so the box
-	-- follows the attacker's current position/facing during the active window (e.g. CFrame.new(0,
-	-- 0, -3) sits 3 studs in front of the attacker).
+	-- Root-relative (or weapon-relative, in Blade mode) translation of the box's centre. Forward is -Z.
 	Offset: CFrame,
 	Damage: number,
 	PostureDamage: number,
-	-- Minimum seconds between the start of this attack category's swings (see RecoverySeconds).
+	-- Minimum seconds between two throws of this stage. Authored at or under the stage's own
+	-- Windup + Active + Recovery so the swing's end, not the cooldown, is the gate a player feels.
 	Cooldown: number,
-	-- Optional second validation layer beyond the box itself -- nil skips the arc check entirely
-	-- (the box's own Size/Offset already constrains reach directionally).
-	ArcDegrees: number?,
-	-- Optional cap on distinct targets a single swing can land a hit on. nil = unlimited (every
-	-- valid target the box overlaps gets hit, still capped at one hit each).
+	-- nil = every target the box contains, once each.
 	MaxTargets: number?,
-	-- Additive, all three nil for every hand-authored Constants.lua definition (Box is the implicit
-	-- default, matching every attack that predates the Move Creation System). Set only by
-	-- MoveRegistryManager.ToHitboxAttackDefinition (MoveTypes.lua) for an authored custom move.
-	--
-	-- Box and Sphere remain SPECIAL: for those two, Size/Radius are populated and
-	-- HitboxResolver.performSample runs the original exact GetPartBoundsInBox/GetPartBoundsInRadius
-	-- query with no narrow-phase filtering at all, byte-identical to what it always did. Every OTHER
-	-- shape leaves both nil and is resolved entirely through Dimensions -- a broadphase oriented-box
-	-- query (HitboxShapes.BoundingBox) whose results are then filtered by HitboxShapes.ContainsPoint.
-	-- That split is why widening this union could not regress a single existing attack.
-	Shape: HitboxShapeId?,
-	Radius: number?,
-	-- Present for every Move Creation System move (all twelve shapes read their measurements from
-	-- it), nil for every hand-authored definition. See HitboxDimensions above.
-	Dimensions: HitboxDimensions?,
-	-- Additive, nil for every hand-authored Constants.lua definition (today's finishers apply
-	-- knockback through the separate FinisherVariant/RagdollController path, not this field).
-	-- Set only by MoveRegistryManager.ToHitboxAttackDefinition for a custom move that authors
-	-- simple knockback -- see onSwingHitCandidate's hit-confirmed branch in CombatSystem.lua.
-	Knockback: {
-		UpVelocity: number,
-		HorizontalVelocity: number,
-		RagdollSeconds: number,
-		-- Additive, nil/false for every existing knockback-authoring caller. When true, the hit
-		-- unlocks aerial-combo continuation via AirCombo.Apply -- see MoveTypes.MoveKnockback.
-		-- StartsAirCombo's own header for the full reasoning; this field only exists so
-		-- MoveTypes.ToHitboxAttackDefinition's Knockback passthrough stays a straight field-for-field
-		-- copy instead of needing a rebuild.
-		StartsAirCombo: boolean?,
-	}?,
-	-- Additive, nil for every hand-authored Constants.lua definition except AirSlam -- see
-	-- MoveTypes.MoveSlamConfig's own header for the authoring-side shape this mirrors by hand (the same
-	-- "duplicated inline rather than shared" convention Knockback above already keeps, since Types.lua
-	-- does not depend on MoveTypes.lua to stay a leaf module). DefaultMoveRegistry.toMoveDefinition
-	-- reads this straight off the live Constants table and projects it onto MoveDefinition.Slam
-	-- unmodified -- there is no admin-editable snapshot for it (DefaultMoveRegistry.MutableSnapshot has
-	-- no Slam field), so retuning it means editing Constants.lua directly. Consumed by
-	-- Server/Combat/Slam/SlamSystem.lua, a DamageSystem.OnApplied subscriber exactly like GrabSystem.
-	Slam: {
-		DownVelocity: number,
-		KnockdownSeconds: number,
-		FaceDownSpin: number,
-		ImpactDamage: number?,
-	}?,
-	-- Additive, nil for every hand-authored Constants.lua definition and every existing standalone
-	-- attack (DashPunch/DashHit/AirSlam) -- those all stay body-relative swings. Set only by
-	-- MoveRegistryManager.ToHitboxAttackDefinition for a Move Creation System move authored as a
-	-- projectile: when present, CombatSystem.ThrowCustomMove routes through
-	-- HitboxResolver.StartProjectile instead of the ordinary StartSwing -- see that function's own
-	-- header for how Speed/MaxRange interact with WindupSeconds/ActiveSeconds/MaxTargets.
-	Projectile: {
-		Speed: number, -- studs per second
-		MaxRange: number, -- studs -- travel stops at this distance even if ActiveSeconds hasn't elapsed
-	}?,
-	-- Additive, nil for every hand-authored definition and for any custom move that doesn't author
-	-- one. Set only by MoveRegistryManager.ToHitboxAttackDefinition. Rides on this struct (rather
-	-- than being looked up from MoveRegistryManager at hit time) for exactly the reason Knockback
-	-- does: CombatSystem's per-hit path is generic over HitboxAttackDefinition and never sees a
-	-- MoveDefinition, so anything a landed hit must react to has to travel with the definition.
-	-- Consumed by CombatSystem's applyCustomMoveKnockback, which hands it to
-	-- Server/Combat/ObjectStunResolver.Watch. Always nil on an Object Stun's own follow-up
-	-- definition -- see MoveTypes.FollowUpToHitboxAttackDefinition for why chaining stops at one
-	-- level.
-	ObjectStun: ObjectStunConfig?,
-	-- Additive. nil (equivalent to 1) for every definition that predates it. The one live use is
-	-- Shared/Combat/WeaponRoster.lua's own applyReach: a weapon's WeaponReach Attribute used to scale
-	-- Size/Offset directly, which was the whole hitbox for a Root-anchored swing. Now that every weapon
-	-- stage is AttachmentPart == "Weapon" and SizeFromAttachmentPart-sized off the equipped weapon's own
-	-- Blade part (see HitboxTypes.AttackDefinition.SizeMultiplier's own header), Size/Offset on THIS
-	-- struct are vestigial preview-only numbers, so WeaponReach's effect is carried through this field
-	-- instead -- MoveTypes.ToEngineAttackDefinition copies it straight onto the engine definition of the
-	-- same name.
+	-- nil (1) unless WeaponRoster's WeaponReach scaled it. Carried onto the engine definition, where it
+	-- scales a blade-sized swing (HitboxTypes.AttackDefinition.SizeMultiplier).
 	SizeMultiplier: number?,
 }
 
@@ -1148,19 +826,19 @@ export type KeybindAction =
 	-- to M, which is why it alone among the panels couldn't be rebound; it routes through
 	-- KeybindManager like every other action now.
 	| "CharacterMenuToggle"
-	-- The Parkour System's dodge/roll (Client/Parkour/States/Rolling.lua via Client/Parkour/
+	-- The combat evade (Client/Parkour/States/Evading.lua via Client/Parkour/
 	-- ParkourInput.lua). Fires no combat remote of its own -- the parkour framework reports the action
-	-- to Server/Systems/ParkourSystem.lua through its own remote once the roll actually starts, the
+	-- to Server/Systems/ParkourSystem.lua through its own remote once the evade actually starts, the
 	-- same "the input records an intent, the state machine decides whether it becomes an action" split
 	-- Client/Parkour/InputBuffer.lua's own header describes. Sprint, Slide and jump are deliberately
 	-- NOT new actions here: sprint and slide already have entries above (the parkour framework reads
 	-- the same bindings), and jump has never been a rebindable action at all -- see KeybindManager.lua's
 	-- IsJumpKeyDown carve-out.
-	| "Roll"
+	| "Evade"
 	-- The Parkour System's committed long jump (Client/Parkour/States/Leaping.lua via Client/Parkour/
 	-- ParkourInput.lua). Used to be a double-tap of jump rather than a KeybindAction of its own -- see
 	-- InputBuffer.lua's own header on why that meant it could never be independently rebound. A
-	-- dedicated key the same way Roll is, for the same reason: reachable without leaving the movement
+	-- dedicated key the same way Evade is, for the same reason: reachable without leaving the movement
 	-- keys, and no risk of a stray double-jump accidentally firing it.
 	| "Leap"
 	-- The Grab layer's follow-up throw (Client/Combat/GrabInputClient.lua via
@@ -1864,9 +1542,8 @@ export type ActiveModifierLifetime = "Instant" | "Timed" | "Bound"
 --     which is never the intent of a one-shot grant.
 export type ActiveModifierKind = "AttributeDelta" | "Tag" | "QiRestore"
 
--- Mirrors AttributeBlock's own six field names exactly, by construction -- the same deliberate
--- two-copies arrangement HitboxShapeId already keeps against HitboxShapes.ShapeId, for the identical
--- reason: this file is a leaf (see its own header) and has no business depending on a module that
+-- Mirrors AttributeBlock's own six field names exactly, by construction -- a deliberate two-copies
+-- arrangement, because this file is a leaf (see its own header) and has no business depending on a module that
 -- isn't. AttributeBlock is the RUNTIME authority; this union is its compile-time mirror.
 export type ActiveModifierAttributeKey = "Vitality" | "Fortitude" | "MeridianFlow" | "Might" | "Pressure" | "Fleetness"
 

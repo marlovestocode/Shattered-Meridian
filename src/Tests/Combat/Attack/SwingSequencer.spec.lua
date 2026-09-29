@@ -18,6 +18,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboConstants)
 local AttackCatalog = require(ServerScriptService.Server.Combat.AttackCatalog)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local SwingSequencer = require(ServerScriptService.Server.Combat.Attack.SwingSequencer)
@@ -34,7 +35,9 @@ local SECOND_WEAPON = ROSTER[2]
 local T = 1000
 local RESET = AttackConstants.Sequence.ResetSeconds
 local CHAIN_DELAY = AttackConstants.Sequence.ChainDelaySeconds
-local FINISHER_STAGE = AttackConstants.Finisher.MinComboStage
+-- A landed combo deep enough for anything the string could offer: the launcher's own threshold.
+local FULL_COMBO = AirComboConstants.Launcher.MinComboStage
+local END_OF_STRING = AttackConstants.Sequence.EndOfStringCooldownSeconds
 
 local spawned: { Model } = {}
 
@@ -207,15 +210,13 @@ return function()
 			end
 		end)
 
-		it("wraps back to stage 1 past the end of the string when the combo is too shallow", function()
-			-- comboStage 1 is below Finisher.MinComboStage, so completing the string wraps rather than
-			-- tipping into the finisher. This is the whiffing player's experience: the string cycles.
+		it("wraps back to stage 1 past the end of the string", function()
+			-- The whiffing player's experience: the string cycles.
 			local attacker = makeAttacker("Wrapping")
 			local count = firstWeaponBasicCount()
 			throwBasic(attacker, count, 1)
 			local wrapped = SwingSequencer.Resolve(attacker, "Basic", 1, T + count * 0.2)
 			expect((wrapped :: SwingSequencer.Resolution).StageIndex).to.equal(1)
-			expect((wrapped :: SwingSequencer.Resolution).IsFinisher).to.equal(false)
 		end)
 
 		it("advances on a throw regardless of whether anything landed", function()
@@ -309,54 +310,38 @@ return function()
 		end)
 	end)
 
-	describe("SwingSequencer -- the finisher", function()
-		it("tips a completed Basic string into the Finisher once the landed combo is deep enough", function()
-			local attacker = makeAttacker("Finishing")
+	describe("SwingSequencer -- the 4th M1", function()
+		-- The only 4th hit of an M1 string is the air combo's launcher (Space + M1 after B3). A plain M1
+		-- after a fully LANDED string used to tip into the weapon's Finisher; it now starts a fresh string.
+		it("never throws the Finisher off a fully landed string", function()
+			local attacker = makeAttacker("NoFinisher")
 			local count = firstWeaponBasicCount()
-			throwBasic(attacker, count, FINISHER_STAGE)
-			local finisher = SwingSequencer.Resolve(attacker, "Basic", FINISHER_STAGE, T + count * 0.2)
-			expect((finisher :: SwingSequencer.Resolution).IsFinisher).to.equal(true)
-			expect((finisher :: SwingSequencer.Resolution).MoveId).to.equal(`default:{FIRST_WEAPON}:Finisher`)
-			expect((finisher :: SwingSequencer.Resolution).StageIndex).to.equal(0)
+			throwBasic(attacker, count, FULL_COMBO)
+			local fourth = SwingSequencer.Resolve(attacker, "Basic", FULL_COMBO, T + count * 0.2)
+			expect((fourth :: SwingSequencer.Resolution).MoveId).to.equal(`default:{FIRST_WEAPON}:Basic:1`)
+			expect((fourth :: SwingSequencer.Resolution).IsLauncher).never.to.equal(true)
 		end)
 
-		it("does not unlock the Finisher one stage below the threshold", function()
-			local attacker = makeAttacker("NearlyFinishing")
+		it("makes a plain press after a completed string wait out the end-of-string lockout", function()
+			local attacker = makeAttacker("LockedOut")
 			local count = firstWeaponBasicCount()
-			throwBasic(attacker, count, FINISHER_STAGE - 1)
-			local wrapped = SwingSequencer.Resolve(attacker, "Basic", FINISHER_STAGE - 1, T + count * 0.2)
-			expect((wrapped :: SwingSequencer.Resolution).IsFinisher).to.equal(false)
+			throwBasic(attacker, count, FULL_COMBO)
+			local lastAt = T + (count - 1) * 0.2
+			local plain = SwingSequencer.Resolve(attacker, "Basic", FULL_COMBO, lastAt + CHAIN_DELAY + 0.01)
+			expect(SwingSequencer.ChainDelayRemaining(attacker, lastAt + CHAIN_DELAY + 0.01, plain) > 0).to.equal(true)
+			expect(SwingSequencer.ChainDelayRemaining(attacker, lastAt + END_OF_STRING + 0.01, plain)).to.equal(0)
 		end)
 
-		it("never offers a Finisher on the Heavy string", function()
-			-- The finisher is the Basic string's payoff. Heavy wraps like any other string.
-			local attacker = makeAttacker("HeavyFinisher")
-			local stage = 0
-			for index = 1, AttackConstants.Sequence.MaxStageProbe do
-				local at = T + (index - 1) * 0.2
-				local resolution = SwingSequencer.Resolve(attacker, "Heavy", FINISHER_STAGE + 5, at)
-				if not resolution then
-					break
-				end
-				expect(resolution.IsFinisher).to.equal(false)
-				SwingSequencer.Advance(attacker, "Heavy", resolution, NO_COMMITMENT, at)
-				stage = index
-			end
-			expect(stage > 0).to.equal(true)
-		end)
-
-		it("starts the next string at stage 1 after a Finisher", function()
-			-- Falls out of Advance recording StageIndex 0 -- no special-cased reset path.
-			local attacker = makeAttacker("PostFinisher")
+		it("lets the launcher follow a completed string on the ordinary beat, not the lockout", function()
+			-- The launcher IS the string's 4th link. A 0.5s lockout before it would outrun the combo window
+			-- whose landed hits it needs.
+			local attacker = makeAttacker("LaunchOnBeat")
 			local count = firstWeaponBasicCount()
-			throwBasic(attacker, count, FINISHER_STAGE)
-			local at = T + count * 0.2
-			local finisher = SwingSequencer.Resolve(attacker, "Basic", FINISHER_STAGE, at)
-			SwingSequencer.Advance(attacker, "Basic", finisher :: SwingSequencer.Resolution, NO_COMMITMENT, at)
-
-			local next_ = SwingSequencer.Resolve(attacker, "Basic", FINISHER_STAGE, at + 0.2)
-			expect((next_ :: SwingSequencer.Resolution).StageIndex).to.equal(1)
-			expect((next_ :: SwingSequencer.Resolution).IsFinisher).to.equal(false)
+			throwBasic(attacker, count, FULL_COMBO)
+			local at = T + (count - 1) * 0.2 + CHAIN_DELAY + 0.01
+			local launcher = SwingSequencer.Resolve(attacker, "Basic", FULL_COMBO, at, { ModifierUp = true })
+			expect((launcher :: SwingSequencer.Resolution).IsLauncher).to.equal(true)
+			expect(SwingSequencer.ChainDelayRemaining(attacker, at, launcher)).to.equal(0)
 		end)
 	end)
 
@@ -422,6 +407,208 @@ return function()
 			throwBasic(attacker, 2, 1)
 			SwingSequencer.Clear(attacker)
 			expect(SwingSequencer.GetStageIndex(attacker, "Basic", T + 0.3)).to.equal(0)
+		end)
+	end)
+
+	describe("SwingSequencer -- the air combo's launcher branch", function()
+		local LAUNCHER = AirComboConstants.Launcher
+		local UP = { ModifierUp = true }
+
+		it("throws the Launcher for Space + M1 once the string and the landed combo have earned it", function()
+			local attacker = makeAttacker("Launcher")
+			throwBasic(attacker, LAUNCHER.MinStringStage, 1)
+			local at = T + LAUNCHER.MinStringStage * 0.2
+			local resolution = SwingSequencer.Resolve(attacker, "Basic", LAUNCHER.MinComboStage, at, UP)
+			expect(resolution).to.be.ok()
+			expect((resolution :: any).MoveId).to.equal(`default:{FIRST_WEAPON}:Launcher`)
+			expect((resolution :: any).IsLauncher).to.equal(true)
+		end)
+
+		it("is just the next Basic when the string has not thrown enough stages -- never a dead input", function()
+			local attacker = makeAttacker("TooEarly")
+			throwBasic(attacker, LAUNCHER.MinStringStage - 1, 1)
+			local at = T + LAUNCHER.MinStringStage * 0.2
+			local resolution = SwingSequencer.Resolve(attacker, "Basic", LAUNCHER.MinComboStage, at, UP)
+			expect((resolution :: any).MoveId).to.equal(`default:{FIRST_WEAPON}:Basic:{LAUNCHER.MinStringStage}`)
+		end)
+
+		it("ignores a forged modifier when the landed combo has not earned it", function()
+			local attacker = makeAttacker("Forged")
+			throwBasic(attacker, LAUNCHER.MinStringStage, 1)
+			local at = T + LAUNCHER.MinStringStage * 0.2
+			local resolution = SwingSequencer.Resolve(attacker, "Basic", LAUNCHER.MinComboStage - 1, at, UP)
+			expect((resolution :: any).IsLauncher).never.to.equal(true)
+		end)
+
+		it("needs the modifier: the same earned press without Space continues the string", function()
+			local attacker = makeAttacker("NoModifier")
+			throwBasic(attacker, LAUNCHER.MinStringStage, 1)
+			local at = T + LAUNCHER.MinStringStage * 0.2
+			local resolution = SwingSequencer.Resolve(attacker, "Basic", LAUNCHER.MinComboStage, at)
+			expect((resolution :: any).IsLauncher).never.to.equal(true)
+		end)
+
+		it("ends the ground string: the next ground press after a launcher starts at stage 1", function()
+			local attacker = makeAttacker("AfterLaunch")
+			throwBasic(attacker, LAUNCHER.MinStringStage, 1)
+			local at = T + LAUNCHER.MinStringStage * 0.2
+			local launcher = SwingSequencer.Resolve(attacker, "Basic", LAUNCHER.MinComboStage, at, UP)
+			SwingSequencer.Advance(attacker, "Basic", launcher :: any, NO_COMMITMENT, at)
+			local nextPress = SwingSequencer.Resolve(attacker, "Basic", 1, at + CHAIN_DELAY + 0.01)
+			expect((nextPress :: any).MoveId).to.equal(`default:{FIRST_WEAPON}:Basic:1`)
+		end)
+	end)
+
+	describe("SwingSequencer -- air moves inside a combo", function()
+		it("turns the air combo's role into the weapon's own air move", function()
+			local attacker = makeAttacker("AirBeat")
+			local beat = SwingSequencer.Resolve(attacker, "Basic", 1, T, { AirRole = { Role = "Air", Beat = 2 } })
+			expect((beat :: any).MoveId).to.equal(`default:{FIRST_WEAPON}:Air:2`)
+			local spike =
+				SwingSequencer.Resolve(attacker, "Heavy", 1, T, { AirRole = { Role = "Finisher", Finisher = "Spike" } })
+			expect((spike :: any).MoveId).to.equal(`default:{FIRST_WEAPON}:AirFinisher:Spike`)
+		end)
+
+		it("throws nothing for an air beat the weapon has not authored", function()
+			local attacker = makeAttacker("NoSuchBeat")
+			local resolution =
+				SwingSequencer.Resolve(attacker, "Basic", 1, T, { AirRole = { Role = "Air", Beat = 99 } })
+			expect(resolution).to.equal(nil)
+		end)
+	end)
+	describe("SwingSequencer.Weave -- an Art holds the string's place", function()
+		it("does not spend a stage: B1, B2, an Art, then M1 is B3", function()
+			local attacker = makeAttacker("WeaveStage")
+			throwBasic(attacker, 2, 1)
+			local artAt = T + 0.3
+			SwingSequencer.Weave(attacker, "art:test", 0.5, artAt)
+			local nextPress = SwingSequencer.Resolve(attacker, "Basic", 1, artAt + 0.5 + CHAIN_DELAY)
+			expect((nextPress :: any).StageIndex).to.equal(3)
+		end)
+
+		it("holds the string live through a long art, with the full grace after it", function()
+			local attacker = makeAttacker("WeaveLong")
+			throwBasic(attacker, 2, 1)
+			local artAt = T + 0.3
+			local artLength = RESET + 1
+			SwingSequencer.Weave(attacker, "art:long", artLength, artAt)
+			-- Past the grace the last M1 left, but inside the art's own end plus grace.
+			expect(SwingSequencer.GetStageIndex(attacker, "Basic", artAt + artLength + RESET - 0.01)).to.equal(2)
+			expect(SwingSequencer.GetStageIndex(attacker, "Basic", artAt + artLength + RESET + 0.01)).to.equal(0)
+		end)
+
+		it("makes the next link owe the ordinary beat after the art", function()
+			local attacker = makeAttacker("WeaveBeat")
+			throwBasic(attacker, 1, 1)
+			local artAt = T + 0.3
+			SwingSequencer.Weave(attacker, "art:beat", 0.5, artAt)
+			expect(SwingSequencer.ChainDelayRemaining(attacker, artAt + 0.5)).to.be.near(CHAIN_DELAY, 1e-6)
+			expect(SwingSequencer.ChainDelayRemaining(attacker, artAt + 0.5 + CHAIN_DELAY)).to.equal(0)
+		end)
+
+		it("does not make a string where none was live", function()
+			local attacker = makeAttacker("WeaveNoString")
+			SwingSequencer.Weave(attacker, "art:alone", 0.5, T)
+			expect(SwingSequencer.GetStageIndex(attacker, "Basic", T + 0.6)).to.equal(0)
+		end)
+
+		it("still reaches the launcher after B1, B2, B3 and an Art", function()
+			local minStage = AirComboConstants.Launcher.MinStringStage
+			local attacker = makeAttacker("WeaveLaunch")
+			throwBasic(attacker, minStage, 1)
+			local artAt = T + minStage * 0.2
+			SwingSequencer.Weave(attacker, "art:into-launch", 0.6, artAt)
+			local at = artAt + 0.6 + CHAIN_DELAY
+			local resolution = SwingSequencer.Resolve(attacker, "Basic", FULL_COMBO, at, { ModifierUp = true })
+			expect((resolution :: any).IsLauncher).to.equal(true)
+		end)
+	end)
+
+	describe("SwingSequencer.RestoreParried -- a parried swing keeps the chain", function()
+		local STAGGER = 1.5
+
+		it("hands the parried stage back: B1, B2, B3 parried, then M1 is B3 again", function()
+			local attacker = makeAttacker("ParriedB3")
+			local b3 = throwBasic(attacker, 3, 1)
+			local resumeAt = T + 0.5 + STAGGER
+			expect(SwingSequencer.RestoreParried(attacker, b3.MoveId, resumeAt)).to.equal(true)
+			local nextPress = SwingSequencer.Resolve(attacker, "Basic", 1, resumeAt)
+			expect((nextPress :: any).StageIndex).to.equal(3)
+		end)
+
+		it("holds the string through the stagger, with the full grace after it", function()
+			local attacker = makeAttacker("ParriedHold")
+			local b2 = throwBasic(attacker, 2, 1)
+			local resumeAt = T + 0.3 + STAGGER
+			SwingSequencer.RestoreParried(attacker, b2.MoveId, resumeAt)
+			expect(SwingSequencer.GetStageIndex(attacker, "Basic", resumeAt + RESET - 0.01)).to.equal(1)
+			expect(SwingSequencer.GetStageIndex(attacker, "Basic", resumeAt + RESET + 0.01)).to.equal(0)
+		end)
+
+		it("drops the end-of-string lockout a parried B3 had started", function()
+			local attacker = makeAttacker("ParriedLockout")
+			local b3 = throwBasic(attacker, 3, 1)
+			local resumeAt = T + 0.5 + STAGGER
+			SwingSequencer.RestoreParried(attacker, b3.MoveId, resumeAt)
+			expect(SwingSequencer.ChainDelayRemaining(attacker, resumeAt)).to.equal(0)
+		end)
+
+		it("leaves a parried launcher's string at B3, so Space + M1 launches again", function()
+			local minStage = AirComboConstants.Launcher.MinStringStage
+			local attacker = makeAttacker("ParriedLauncher")
+			throwBasic(attacker, minStage, 1)
+			local at = T + minStage * 0.2
+			local launcher = SwingSequencer.Resolve(attacker, "Basic", FULL_COMBO, at, { ModifierUp = true })
+			SwingSequencer.Advance(attacker, "Basic", launcher :: any, NO_COMMITMENT, at)
+			local resumeAt = at + STAGGER
+			expect(SwingSequencer.RestoreParried(attacker, (launcher :: any).MoveId, resumeAt)).to.equal(true)
+			local again = SwingSequencer.Resolve(attacker, "Basic", FULL_COMBO, resumeAt, { ModifierUp = true })
+			expect((again :: any).IsLauncher).to.equal(true)
+		end)
+
+		it("restores a fresh string's parried B1 to no string at all", function()
+			local attacker = makeAttacker("ParriedB1")
+			local b1 = throwBasic(attacker, 1, 1)
+			SwingSequencer.RestoreParried(attacker, b1.MoveId, T + STAGGER)
+			local nextPress = SwingSequencer.Resolve(attacker, "Basic", 1, T + STAGGER)
+			expect((nextPress :: any).StageIndex).to.equal(1)
+		end)
+
+		it("ignores a parry of an older swing, and restores at most once", function()
+			local attacker = makeAttacker("ParriedStale")
+			local b1 = throwBasic(attacker, 1, 1)
+			local b2 = SwingSequencer.Resolve(attacker, "Basic", 1, T + 0.2)
+			SwingSequencer.Advance(attacker, "Basic", b2 :: any, NO_COMMITMENT, T + 0.2)
+			expect(SwingSequencer.RestoreParried(attacker, b1.MoveId, T + STAGGER)).to.equal(false)
+			local _, stage = SwingSequencer.GetString(attacker, T + 0.3)
+			expect(stage).to.equal(2)
+
+			expect(SwingSequencer.RestoreParried(attacker, (b2 :: any).MoveId, T + STAGGER)).to.equal(true)
+			expect(SwingSequencer.RestoreParried(attacker, (b2 :: any).MoveId, T + STAGGER)).to.equal(false)
+		end)
+
+		it("restores nothing for a parried air hit -- that parry ends the combo", function()
+			local attacker = makeAttacker("ParriedAir")
+			local beat = SwingSequencer.Resolve(attacker, "Basic", 1, T, { AirRole = { Role = "Air", Beat = 1 } })
+			SwingSequencer.Advance(attacker, "Basic", beat :: any, NO_COMMITMENT, T)
+			expect(SwingSequencer.RestoreParried(attacker, (beat :: any).MoveId, T + STAGGER)).to.equal(false)
+		end)
+
+		it("does not restore across a feint", function()
+			local attacker = makeAttacker("ParriedAfterFeint")
+			local b2 = throwBasic(attacker, 2, 1)
+			SwingSequencer.CancelString(attacker, T + 0.5, T + 0.3)
+			expect(SwingSequencer.RestoreParried(attacker, b2.MoveId, T + STAGGER)).to.equal(false)
+		end)
+
+		it("hands back the string around a parried Art unchanged", function()
+			local attacker = makeAttacker("ParriedArt")
+			throwBasic(attacker, 2, 1)
+			SwingSequencer.Weave(attacker, "art:parried", 0.6, T + 0.3)
+			local resumeAt = T + 0.5 + STAGGER
+			expect(SwingSequencer.RestoreParried(attacker, "art:parried", resumeAt)).to.equal(true)
+			local nextPress = SwingSequencer.Resolve(attacker, "Basic", 1, resumeAt)
+			expect((nextPress :: any).StageIndex).to.equal(3)
 		end)
 	end)
 end

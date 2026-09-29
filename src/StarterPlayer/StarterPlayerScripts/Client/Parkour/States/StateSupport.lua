@@ -185,7 +185,7 @@ end
 
 -- Which of the three ordinary ground states the character belongs in right now. Centralized because
 -- all three of them, plus every state that ends by handing back to the ground (Landing, Sliding,
--- Rolling, Mantling, Vaulting), need the same answer -- and three states independently deciding
+-- Evading, Mantling, Vaulting), need the same answer -- and three states independently deciding
 -- "am I walking or sprinting" is exactly how a character ends up flickering between two of them.
 function StateSupport.ResolveGroundedState(context: ParkourContext): MovementStateId
 	if not StateSupport.HasMoveIntent(context) and context.PlanarSpeed < LOCOMOTION.IdleSpeedThreshold then
@@ -387,65 +387,6 @@ function StateSupport.LedgeGrabAvailable(context: ParkourContext, verticalSpeed:
 	-- refuses a class of situations, this refuses exactly one edge for a fraction of a second.
 	if context.Now < regrabSameUntil and isBlockedLedge(context.Ledge) then
 		return false, "SameLedgeLockout"
-	end
-	return true, nil
-end
-
--- THE ONE ANSWER TO "MAY A ROLL START RIGHT NOW", and the cooldown bookkeeping behind it -- the same
--- shape, and the same reason, as LedgeGrabAvailable above.
---
--- A roll can be entered by three routes, and two of them are route 1: Rolling.CanEnter (route 2, the
--- machine asking), Sliding's roll-out exit and Falling's contact-frame landing roll (both asserting,
--- which StateMachine.Update applies without consulting the target's CanEnter). The roll's cooldown used
--- to be a file-local inside States/Rolling.lua where neither route-1 site could see it, and Sliding's
--- exit re-checked only the combat gate -- so slide -> roll skipped the cooldown outright, and a
--- slide-roll-slide-roll chain rolled as often as the slide's own cooldown allowed. One predicate, asked
--- by all three, and the cooldown living beside it, is what keeps the asserting sites honest against the
--- asking one.
---
--- `inputWindow` overrides the buffered-press window for the one caller with its own:
--- Falling's contact frame, which asks with ParkourConstants.Roll.LandingWindowSeconds (see that field
--- and InputBuffer.PeekRoll). Every other caller passes nil.
---
--- GROUNDED ONLY. A roll never starts in the air -- the landing roll is not an airborne roll that
--- happens to touch down, it is decided on the frame the ground is touched (Falling.Update), so a roll
--- "in open air" is not a state this framework has, and asking for ground contact here rather than
--- NearGround is what makes that true for every route at once.
---
--- The refusal reasons are the strings the F6 overlay shows, so a route-1 caller that forwards the
--- first return value gets the same diagnosis Rolling.CanEnter would have given.
-local rollCooldownUntil = 0
-
-function StateSupport.NoteRollStarted(now: number): ()
-	rollCooldownUntil = now + ParkourConstants.Roll.CooldownSeconds
-end
-
-function StateSupport.CanRoll(context: ParkourContext, inputWindow: number?): (boolean, string?)
-	-- Asked first -- see States/WallRunning.CanEnter's own note on why the combat refusal leads. Rolling
-	-- is not in CombatGate.BlockedStates today (see that table's own comment), so this passes; it stays
-	-- asked so re-listing it is a data change that bites every route at once.
-	if StateSupport.CombatBlocks(context, "Rolling") then
-		return false, "InCombat"
-	end
-	-- No rolling out of your own swing or out of a stun. The server refuses the evade frames for the same
-	-- two conditions (DefenseSystem.BeginEvade's bodyCommitted), so a client that skipped this check
-	-- would roll and still be hit; this is the client declining to send a roll the server will not honour,
-	-- and keeping the swing's own animation from being cut off by a roll the player could not have had.
-	if context.CombatCommitted == true then
-		return false, "CombatCommitted"
-	end
-	if context.Now < rollCooldownUntil then
-		return false, "RollCooldown"
-	end
-	if not InputBuffer.PeekRoll(context.Now, inputWindow) then
-		return false, "NoRollInput"
-	end
-	local allowed = (ParkourConstants.Roll.AllowedFromStates :: { [string]: boolean })[context.CurrentStateId]
-	if not allowed then
-		return false, "NotAllowedFromThisState"
-	end
-	if not context.Ground.Grounded then
-		return false, "NotGrounded"
 	end
 	return true, nil
 end

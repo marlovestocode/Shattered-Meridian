@@ -64,6 +64,9 @@
 					},
 					"Boat": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Boat"
+					},
+					"Diagnostics": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Diagnostics"
 					}
 				}
 			}
@@ -103,6 +106,9 @@
 				},
 				"Boat": {
 					"$path": "src/ServerScriptService/Server/Boat"
+				},
+				"Diagnostics": {
+					"$path": "src/ServerScriptService/Server/Diagnostics"
 				}
 			},
 			"Tests": {

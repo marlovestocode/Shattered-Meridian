@@ -870,6 +870,29 @@ function HitboxEngine.CancelAttack(combatantId: number, reason: string, now: num
 	return combatant.Machine:Interrupt(reason, now or os.clock())
 end
 
+-- Ends a swing EARLY, but only from its Recovery -- the one phase where nothing is left to hit with. For
+-- the attack layer's hit-confirm cancel (AttackConstants.HitConfirm): a swing that landed may be cut
+-- partway through its recovery into the next action. Returns whether it cut anything.
+--
+-- Its own entry point rather than CancelAttack with a reason, because the phase check IS the contract. A
+-- caller that wants to end recovery must not be able to end a windup or an active window by mistake,
+-- and this engine is the only place that knows which phase a swing is in right now. Goes through the
+-- ordinary Interrupt path, so the movement lock and the hit set clean up exactly as for any other end.
+function HitboxEngine.CancelRecovery(combatantId: number, now: number?): boolean
+	local combatant = combatantById[combatantId]
+	if combatant == nil then
+		return false
+	end
+	local at = now or os.clock()
+	local machine = combatant.Machine
+	-- Brought up to `at` first, so a recovery that already ran out this frame is reported as over
+	-- rather than cut.
+	if machine:Update(at) ~= "Recovery" then
+		return false
+	end
+	return machine:Interrupt("RecoveryCancel", at)
+end
+
 -- Debug visualisation ---------------------------------------------------------------------------------
 
 -- Turns the swing-volume visualiser on or off for the WHOLE SERVER, live, in Studio or a published

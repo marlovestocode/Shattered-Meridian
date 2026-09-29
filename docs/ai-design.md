@@ -58,6 +58,13 @@ above, and anything new that fights (an enemy archetype, a boss) should start fr
   `DefenseSystem.SetBlocking/BeginEvade`, so every gate that refuses a player refuses it. It sees
   only what a player sees: which move you started and when (`AttackRequestSystem.GetInFlight`),
   after a sampled reaction delay — never your inputs.
+- **Any weapon.** The Spawn tab's Weapon picker (Default, each `Workspace.Weapons` model, Fists)
+  arms it through `AttackRequestSystem.SetWeapon`; the server re-checks the id against
+  `WeaponRoster`, and the bot keeps it across respawns.
+- **Plays its turn.** `TrainingBotConstants.Offence`: swings at you when you stand idle in its
+  reach instead of backing away, Heavies a held guard, drops its block into the recovery that ends
+  your string and punishes it, varies its own string timing (more against parriers), and follows
+  up a string that landed.
 - **Reads, not reflexes.** It keeps a per-opponent habit model (how you answer its swings; how often
   you feint) and reshapes its weights by it — heavies against blockers, feint baits against
   parriers, short strings against rollers, and, from Adept up, waiting out the feint window once it

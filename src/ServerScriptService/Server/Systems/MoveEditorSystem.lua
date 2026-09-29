@@ -2,92 +2,83 @@
 --[[
 	MoveEditorSystem.lua
 
-	Owns: authorization + rate-limiting, every Constants.MoveEditor.RemoteNames RemoteFunction, and
-	DataStore persistence for the Move Creation System -- the "System" half of the Manager/System
-	pairing whose "Manager" half is Server/Combat/MoveRegistryManager.lua (the live in-memory
-	registry itself). checkMoveEditorPreconditions is a thin wrapper over
-	Server/Network/AdminGate.Check (auth + rate limit), with its own dedicated `rateLimiter` bucket
-	passed in -- see AdminGate.lua's own header for why it never constructs or defaults one itself.
-	wrapHandler is Shared/RemoteHandler.Scoped, bound once to this module's logger and error result.
-	It used to be a local copy on the grounds that "generalizing that one too was ruled out during the
-	Network-module design pass" -- the difference it claimed to have (a fixed error result) turned out
-	to be a parameter WrapInvoke already took.
+	Owns: the Move Editor's server half -- every Constants.MoveEditor.RemoteNames remote, admin gating,
+	DataStore persistence of custom moves and Default-move overrides, and building the MoveEditorTypes
+	entries the editor reads. The "System" half of the pairing whose registries are Server/Combat/
+	MoveRegistryManager.lua (custom moves) and Server/Combat/DefaultMoveRegistry.lua (weapon stages).
 
-	Persistence shape: one DataStore key per move ("Move_<MoveId>") plus a small fixed-key index
-	record ("MoveIndex" -> { MoveIds: {string} }, maintained via UpdateAsync for atomicity) since
-	DataStore has no native "list all keys" and the authored-move count is small (tens, not
-	thousands admins would ever hand-author). Every persisted record is schema-versioned
-	(Constants.MoveEditor.SchemaVersion) mirroring PlayerDataSystem's own {SchemaVersion, ...}
-	wrapper convention, even though no migration exists yet -- a real v2 schema change (e.g. v2's
-	multi-hitbox array) has a documented, already-proven upgrade path to follow.
+	REBUILT 2026-09-29, together with the whole editor. Three things the old System did not do and this one
+	is built around:
 
-	"Save is explicit only" -- UpdateDraft mutates MoveRegistryManager's live in-memory table (so an
-	edit takes effect immediately for TestFireMove, exactly HitboxTuning.lua's own live-mutation
-	precedent) with NO DataStore write; only SaveMove persists. There is no autosave-on-keystroke --
-	an unreviewed mid-edit value reaching disk, where another admin could load it, is worse than an
-	admin losing an unsaved draft on crash (the tradeoff PlayerDataSystem's own autosave accepts for
-	a fundamentally different case: protecting a single player's own progression, not a shared,
-	admin-managed content registry).
+	  * IT KNOWS WHAT IS SAVED. The persisted state of every move is held here (savedMoves), loaded at boot
+	    and replaced on every Save. So "is this unsaved?" is a fact the server states in each entry
+	    (SavedFingerprint), not something the client reconstructs from what it happens to remember -- it
+	    survives closing and reopening the editor, and two admins see the same answer. It is also what
+	    makes Revert possible at all: undoing unsaved work needs the saved version to go back to.
 
-	MoveId/Author/CreatedAt/UpdatedAt are ALWAYS stamped here from trusted server context
-	(stampTrustedMetadata) before a client-submitted candidate ever reaches
-	MoveRegistryManager.Validate -- a client can propose every other field, but never its own
-	identity or authorship, the same "server owns truth" boundary DevMenuSystem enforces for every
-	other admin action.
+	  * IT SAYS WHAT THE MOVE WILL ACTUALLY DO. Each entry carries AttackCatalog's resolved timeline -- the
+	    windup a strike marker set, the recovery the clip's length left -- plus plain-language notes (a Box
+	    whose size the blade replaces, a custom move no player can reach). The old editor showed only the
+	    numbers typed into it, which is how a move could look right in the editor and play differently.
 
-	Also owns the four ListDefaultMoves/UpdateDefaultMoveDraft/SaveDefaultMove/ResetDefaultMove
-	RemoteFunctions -- the "Default" (formerly DevMenu Tuning-tab) half of the Move Editor, backed by
-	Server/Combat/DefaultMoveRegistry.lua instead of MoveRegistryManager. Same authorization/
-	rate-limit gate (checkMoveEditorPreconditions) and pcall-safety (wrapHandler) as every remote
-	below. UpdateDraft/UpdateDefaultMoveDraft both stay in-memory-only (an edit takes effect
-	immediately for TestFireMove/live combat with no DataStore round trip); UpdateDefaultMoveDraft
-	ALSO skips stampTrustedMetadata entirely -- a Default move is never created and its identity is
-	its fixed synthetic MoveId, never something a client request could legitimately propose changing
-	-- but IS savable: SaveDefaultMove persists the move's CURRENT live values (read straight off
-	DefaultMoveRegistry.Get, not a client-submitted candidate) to a small DataStore override record
-	("DefaultOverride_<MoveId>", same mainStore as custom moves' "Move_<MoveId>" records, no separate
-	index needed since a Default move's MoveId set is fixed/enumerable via DefaultMoveRegistry.List
-	rather than open-ended like a custom move's), which loadDefaultMoveOverrides re-applies on every
-	boot after DefaultMoveRegistry has captured its own pristine file defaults (see that module's own
-	header for why the ordering matters for Reset). ResetDefaultMove both live-reverts AND clears
-	that move's override record, so a Reset actually undoes a previous Save, not just the current
-	session's live edits. A Default move is still never created/deleted -- see DefaultMoveRegistry.
-	lua's own header for why (its MoveId set is fixed by Constants.Combat.Weapons/DashPunch/DashHit/
-	AirSlam, not admin-authored).
+	  * TEST IS A REAL SWING. TestFire throws the move from the admin's own character through
+	    AttackRequestSystem.ThrowMove -- every gate, the engine, the damage layer -- not through a
+	    Move-Editor-owned combat path that could drift from the real one.
 
-	Does not own: the live in-memory registry itself, the MoveDefinition schema, or the Validate
-	allow-list (MoveRegistryManager.lua), the admin whitelist (Server/Config/AdminConfig.lua), or
-	Default-move field mutation/reset itself (DefaultMoveRegistry.lua).
+	Save is explicit. Preview makes a draft LIVE (the next swing uses it) with no DataStore write; only
+	Save persists. An unreviewed mid-edit value reaching disk, where another admin could load it, is worse
+	than an admin losing an unsaved draft to a crash.
 
-	No longer owns (combat system removed): TestFireMove/SpawnPreviewDummy, the two admin actions that
-	used to throw a move at (or spawn) a training dummy via CombatSystem.ThrowCustomMove/
-	SpawnTrainingDummy. Move creation/editing/saving/validation/listing -- this module's actual core
-	responsibility, per the header above -- is untouched by that removal.
+	IDENTITY IS STAMPED HERE, never taken from the client: MoveId (generated for a new move), Author and
+	CreatedAt (kept from the existing move) and UpdatedAt (now) are set before Validate ever sees the
+	candidate. A Default move's identity is fixed by its place in the roster and DefaultMoveRegistry
+	.ApplyEdit ignores whatever the payload claims.
+
+	Persistence shape: one key per custom move ("Move_<MoveId>") plus an index record ("MoveIndex" ->
+	{ MoveIds }, maintained atomically through Support/AuthoredContentStore) because DataStore cannot list
+	keys; one key per overridden Default move ("DefaultOverride_<MoveId>"), no index needed since the
+	Default id set is enumerable. Every record is Support/MoveRecordCodec's -- which also upgrades records
+	written before the rebuild.
+
+	MUST NOT BE OMITTED FROM ANY BUILD. Init is the only thing that hydrates MoveRegistryManager and the
+	Default overrides from DataStore; a server without it boots with no custom moves, no arts and every
+	weapon at its built values, with no error anywhere. See CLAUDE.md's two-build-configs section.
+
+	Does not own: validation (MoveRegistryManager.Validate), the override layer (DefaultMoveRegistry), the
+	record format (MoveRecordCodec), resolving a move for combat (AttackCatalog), throwing it
+	(AttackRequestSystem), or what an art unlocks (ArtSystem).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local DataStoreService = game:GetService("DataStoreService")
 
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
 local Constants = require(ReplicatedStorage.Shared.Constants)
-local Types = require(ReplicatedStorage.Shared.Types)
-local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
-local Logger = require(ReplicatedStorage.Shared.Logger)
-local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
+local Logger = require(ReplicatedStorage.Shared.Logger)
+local MoveEditorTypes = require(ReplicatedStorage.Shared.Authoring.MoveEditorTypes)
+local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
+local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
+
 local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
 local AdminGate = require(script.Parent.Parent.Network.AdminGate)
-
-local MoveRegistryManager = require(script.Parent.Parent.Combat.MoveRegistryManager)
+local AttackCatalog = require(script.Parent.Parent.Combat.AttackCatalog)
+local AttackRequestSystem = require(script.Parent.Parent.Combat.Attack.AttackRequestSystem)
 local DefaultMoveRegistry = require(script.Parent.Parent.Combat.DefaultMoveRegistry)
+local MoveRegistryManager = require(script.Parent.Parent.Combat.MoveRegistryManager)
+local ArtTreeManager = require(script.Parent.Parent.Managers.ArtTreeManager)
 local AdminActionSystem = require(script.Parent.AdminActionSystem)
 local ArtSystem = require(script.Parent.ArtSystem)
--- For one post-load call: an art is a move, so the moves this System loads ARE the art roster,
--- and this is the only point in the boot where that roster is known to be complete.
-local ArtTreeManager = require(script.Parent.Parent.Managers.ArtTreeManager)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local AuthoredContentStore = require(script.Parent.Support.AuthoredContentStore)
+local MoveBalance = require(script.Parent.Support.MoveBalance)
+local MoveRecordCodec = require(script.Parent.Support.MoveRecordCodec)
+
+type MoveDefinition = MoveTypes.MoveDefinition
+type MoveEntry = MoveEditorTypes.MoveEntry
+type MoveSource = MoveEditorTypes.MoveSource
 
 local MoveEditorSystem = {}
 
@@ -95,422 +86,215 @@ local logger = Logger.scope("MoveEditorSystem")
 
 local Config = Constants.MoveEditor
 
--- Own bucket, separate from DevMenuSystem's/CombatSystem's -- see DevMenuSystem.lua's identical
--- rateLimiter comment for why every dev-tool domain gets its own budget.
-local rateLimiter = RateLimiter.New(Constants.NetworkBudget.MaxRemoteCallsPerSecondPerPlayer)
+local rateLimiter = RateLimiter.New(Config.MaxCallsPerSecond)
+
+local wrapHandler = RemoteHandler.Scoped(logger, { Success = false, Reason = "InternalError" })
+local withRetry = DataStoreRetry.Scoped(logger, Constants.Storage.RetryPolicy)
+
+-- Obtained in Init, never at require time, so requiring this module has no side effects.
+local mainStore: DataStore? = nil
 
 local INDEX_KEY = "MoveIndex"
+-- The persisted field name inside the index document. KitEditorSystem's is "Ids"; the two are not
+-- interchangeable, which is why AuthoredContentStore takes it explicitly.
+local INDEX_FIELD = "MoveIds"
+
 local function recordKey(moveId: string): string
 	return "Move_" .. moveId
 end
 
--- No index needed for Default overrides (unlike recordKey/INDEX_KEY above) -- a Default move's
--- MoveId set is fixed and fully enumerable via DefaultMoveRegistry.List() at boot, so
--- loadDefaultMoveOverrides just probes one key per known move instead of maintaining a second
--- MoveIds-style index record.
-local function defaultOverrideKey(moveId: string): string
+local function overrideKey(moveId: string): string
 	return "DefaultOverride_" .. moveId
 end
 
--- Shared auth + rate-limit precondition -- Server/Network/AdminGate.lua's own Check, the module
--- this used to hand-duplicate (see that module's header).
-local function checkMoveEditorPreconditions(player: Player, actionName: string): (boolean, string?)
-	return AdminGate.Check(player, actionName, rateLimiter)
-end
+-- The persisted state of every move that has one: a custom move's stored record, a Default move's stored
+-- override (resolved). Absent for a custom move that was only ever previewed, and for a Default move with
+-- no stored override -- whose saved state is simply its built self.
+local savedMoves: { [string]: MoveDefinition } = {}
 
--- The pcall boundary every RemoteFunction handler below goes through, bound once to this module's own
--- logger and error result -- see Shared/RemoteHandler.Scoped. This used to be a ten-line local that
--- WAS that binding written out longhand, kept on the grounds that "generalizing that one too was
--- ruled out"; the only difference it actually had from WrapInvoke was baking in the two things
--- WrapInvoke already takes as parameters. Every call site below is unchanged.
-local wrapHandler = RemoteHandler.Scoped(logger, { Success = false, Reason = "InternalError" })
+-- Classification ---------------------------------------------------------------------------------------
 
--- Obtained lazily inside Init(), never at module load time -- keeps require()-ing this module
--- side-effect-free, same reasoning as BugReportSystem.lua's own mainStore.
-local mainStore: DataStore? = nil
-
--- The retry/backoff wrapper every DataStore call below goes through, bound once to this module's own
--- logger and to the ONE policy (Constants.Storage.RetryPolicy). Five Systems each held this same
--- three-line local, differing only in which Constants table they read the same two numbers out of;
--- see Shared/DataStoreRetry.Scoped's own header. Call sites are unchanged -- still
--- withRetry(operationName, attempt).
-local withRetry = DataStoreRetry.Scoped(logger, Constants.Storage.RetryPolicy)
-
--- DataStore/JSON carries no Roblox value types, so the three that appear on a live MoveDefinition
--- are decomposed here and rebuilt in candidateFromStoredRecord below:
---   * Vector3 Size          -> a plain {X,Y,Z} sub-table (nil for every non-Box shape).
---   * CFrame Offset         -> flat OffsetX/Y/Z plus OffsetRotationX/Y/Z DEGREES. Never the CFrame
---                              itself: MoveRegistryManager.Validate is the only thing allowed to
---                              decide what an author's six numbers mean (see buildOffset), and
---                              storing the composed matrix would let a hand-edited record smuggle
---                              in a rotation the degrees don't describe.
---   * Color3 EffectColor    -> flat R/G/B 0-255 integers.
--- Dimensions and each Animations clip are already flat tables of numbers/strings/booleans, so they
--- round-trip as-is; they're still written field-by-field rather than by table.clone so a future
--- field added to either type has to be considered here rather than silently riding along.
-local function encodeDimensions(dimensions: MoveTypes.MoveDimensions): { [string]: any }
-	return {
-		Width = dimensions.Width,
-		Height = dimensions.Height,
-		Depth = dimensions.Depth,
-		Length = dimensions.Length,
-		Thickness = dimensions.Thickness,
-		Radius = dimensions.Radius,
-		InnerRadius = dimensions.InnerRadius,
-		AngleDegrees = dimensions.AngleDegrees,
-	}
-end
-
-local function encodeAnimations(clips: { MoveTypes.MoveAnimationClip }): { { [string]: any } }
-	local encoded: { { [string]: any } } = {}
-	for _, clip in ipairs(clips) do
-		table.insert(encoded, {
-			ClipId = clip.ClipId,
-			Name = clip.Name,
-			AnimationId = clip.AnimationId,
-			Enabled = clip.Enabled,
-			Order = clip.Order,
-			StartMode = clip.StartMode,
-			StartTime = clip.StartTime,
-			StartPhase = clip.StartPhase,
-			StartDelay = clip.StartDelay,
-			StopMode = clip.StopMode,
-			DurationSeconds = clip.DurationSeconds,
-			Speed = clip.Speed,
-			Weight = clip.Weight,
-			FadeInSeconds = clip.FadeInSeconds,
-			FadeOutSeconds = clip.FadeOutSeconds,
-			Looped = clip.Looped,
-			Priority = clip.Priority,
-			Blend = clip.Blend,
-			OnInterrupt = clip.OnInterrupt,
-		})
+-- A move is Default when the Default registry knows the id and no custom move has taken it over -- the
+-- same precedence AttackCatalog resolves with, so the editor edits the move combat would actually throw.
+local function sourceOf(moveId: string): MoveSource?
+	if MoveRegistryManager.Get(moveId) then
+		return "Custom"
 	end
-	return encoded
+	if DefaultMoveRegistry.Get(moveId) then
+		return "Default"
+	end
+	return nil
 end
 
-local function encodeKnockback(knockback: MoveTypes.MoveKnockback): { [string]: any }
-	return {
-		UpVelocity = knockback.UpVelocity,
-		HorizontalVelocity = knockback.HorizontalVelocity,
-		RagdollSeconds = knockback.RagdollSeconds,
-		StartsAirCombo = knockback.StartsAirCombo == true,
-	}
+local function liveMove(moveId: string, source: MoveSource): MoveDefinition?
+	if source == "Custom" then
+		return MoveRegistryManager.Get(moveId)
+	end
+	return DefaultMoveRegistry.Get(moveId)
 end
 
-local function encodeObjectStun(objectStun: Types.ObjectStunConfig): { [string]: any }
-	local encoded: { [string]: any } = {
-		Enabled = objectStun.Enabled,
-		Surfaces = {
-			Walls = objectStun.Surfaces.Walls,
-			Floors = objectStun.Surfaces.Floors,
-			Ceilings = objectStun.Surfaces.Ceilings,
-			Props = objectStun.Surfaces.Props,
-		},
-		RequireAnchored = objectStun.RequireAnchored,
-		RequirePartTag = objectStun.RequirePartTag,
-		MinSurfaceExtentStuds = objectStun.MinSurfaceExtentStuds,
-		ProbeDistanceStuds = objectStun.ProbeDistanceStuds,
-		RequiredClearanceStuds = objectStun.RequiredClearanceStuds,
-		MinTravelStuds = objectStun.MinTravelStuds,
-		MinImpactSpeed = objectStun.MinImpactSpeed,
-		MaxImpactAngleDegrees = objectStun.MaxImpactAngleDegrees,
-		MaxTravelSeconds = objectStun.MaxTravelSeconds,
-		StunSeconds = objectStun.StunSeconds,
-		RagdollSeconds = objectStun.RagdollSeconds,
-		BonusDamage = objectStun.BonusDamage,
-		BonusPostureDamage = objectStun.BonusPostureDamage,
-		ReboundVelocity = objectStun.ReboundVelocity,
-		PinSeconds = objectStun.PinSeconds,
-		VictimAnimationId = objectStun.VictimAnimationId,
-		AttackerAnimationId = objectStun.AttackerAnimationId,
-		SoundId = objectStun.SoundId,
-		EffectColorR = math.floor(objectStun.EffectColor.R * 255 + 0.5),
-		EffectColorG = math.floor(objectStun.EffectColor.G * 255 + 0.5),
-		EffectColorB = math.floor(objectStun.EffectColor.B * 255 + 0.5),
-		CameraShakeScale = objectStun.CameraShakeScale,
-		CooldownSeconds = objectStun.CooldownSeconds,
-		MaxTriggersPerMove = objectStun.MaxTriggersPerMove,
-	}
+-- What the move would be after a restart.
+local function savedMove(moveId: string, source: MoveSource): MoveDefinition?
+	local saved = savedMoves[moveId]
+	if saved then
+		return saved
+	end
+	if source == "Default" then
+		return DefaultMoveRegistry.GetBuilt(moveId)
+	end
+	return nil
+end
 
-	local followUp = objectStun.FollowUp
-	if followUp then
-		local encodedFollowUp: { [string]: any } = {
-			Enabled = followUp.Enabled,
-			DelaySeconds = followUp.DelaySeconds,
-			AnimationId = followUp.AnimationId,
-			WindupSeconds = followUp.WindupSeconds,
-			ActiveSeconds = followUp.ActiveSeconds,
-			RecoverySeconds = followUp.RecoverySeconds,
-			Damage = followUp.Damage,
-			PostureDamage = followUp.PostureDamage,
-			MaxTargets = followUp.MaxTargets,
-			Shape = followUp.Shape,
-			Dimensions = encodeDimensions(followUp.Dimensions),
-			OffsetX = followUp.Offset.X,
-			OffsetY = followUp.Offset.Y,
-			OffsetZ = followUp.Offset.Z,
-			OffsetRotationX = followUp.OffsetRotation.X,
-			OffsetRotationY = followUp.OffsetRotation.Y,
-			OffsetRotationZ = followUp.OffsetRotation.Z,
-			TeleportAttacker = followUp.TeleportAttacker,
-			TeleportDistanceStuds = followUp.TeleportDistanceStuds,
-		}
-		if followUp.Knockback then
-			encodedFollowUp.Knockback = encodeKnockback(followUp.Knockback)
+-- Entries -----------------------------------------------------------------------------------------------
+
+local function artExists(artId: string): boolean
+	local art = MoveRegistryManager.Get(artId)
+	return art ~= nil and art.Art ~= nil
+end
+
+-- AttackCatalog's resolved timeline for the move, plus what its clip says about the authored numbers:
+-- where the strike marker lands, and the authored windup/recovery that would match the clip
+-- (MoveBalance.MatchClip). The clip facts ride along because they come from the same resolution -- a
+-- second catalogue lookup could straddle an edit.
+local function effectiveTiming(move: MoveDefinition): (MoveEditorTypes.EffectiveTiming?, MoveEditorTypes.ClipMatch?)
+	local entry = AttackCatalog.Get(move.MoveId)
+	if not entry then
+		return nil, nil
+	end
+	local clipLength = AttackWindows.ClipLength(entry.AnimationId)
+	-- A borrowed clip carries the LENDER's marker (AttackCatalog step 0), and is retimed to this move, so
+	-- it has a strike to draw but nothing to match the move to.
+	local marker = AttackWindows.WindupOverride(entry.BorrowedFrom or move.MoveId, entry.AnimationId)
+	local effective: MoveEditorTypes.EffectiveTiming = {
+		WindupSeconds = entry.Definition.WindupSeconds,
+		ActiveSeconds = entry.Definition.ActiveSeconds,
+		RecoverySeconds = entry.Definition.RecoverySeconds,
+		Cooldown = entry.Cooldown,
+		PlaybackSpeed = entry.PlaybackSpeed,
+		AnimationId = entry.AnimationId,
+		ClipSeconds = if clipLength and entry.PlaybackSpeed > 0 then clipLength / entry.PlaybackSpeed else nil,
+		StrikeSeconds = if marker then MoveBalance.StrikeSeconds(move, marker, entry.PlaybackSpeed) else nil,
+	}
+	local clipMatch = if entry.BorrowedFrom then nil else MoveBalance.MatchClip(move, marker, clipLength)
+	return effective, clipMatch
+end
+
+-- The plain-language facts an author should know before trusting what they see. PURE -- exported for the
+-- spec -- and phrased for the person reading the editor, not for a log.
+function MoveEditorSystem.DescribeMove(
+	move: MoveDefinition,
+	source: MoveSource,
+	effective: MoveEditorTypes.EffectiveTiming?,
+	isArt: (string) -> boolean
+): { string }
+	local notes: { string } = {}
+
+	if effective == nil then
+		table.insert(notes, "The combat catalogue cannot resolve this move, so nothing can throw it.")
+	end
+
+	if source == "Custom" and move.Art == nil then
+		table.insert(
+			notes,
+			"Not an art, so no player can reach it: only an art can sit in a hotbar slot. Test still throws it."
+		)
+	end
+
+	if move.AttachmentPart == "Weapon" and move.Shape == "Box" then
+		table.insert(
+			notes,
+			"Anchored to the weapon: a Box takes the equipped blade's own size, so Width, Height and Length are ignored."
+		)
+	elseif move.AttachmentPart ~= "Root" then
+		table.insert(
+			notes,
+			`Anchored to {move.AttachmentPart}: the offset is measured from that part, which moves with the animation.`
+		)
+	end
+
+	if effective then
+		if effective.AnimationId == "" then
+			table.insert(notes, "No clip: the swing plays no animation and keeps its authored timing.")
+		elseif effective.ClipSeconds == nil then
+			table.insert(
+				notes,
+				"The clip has not been read yet, so the timeline shows authored timing. Test once to sync it."
+			)
+		elseif effective.WindupSeconds + effective.ActiveSeconds > effective.ClipSeconds + 1e-3 then
+			table.insert(
+				notes,
+				string.format(
+					"The hitbox is still open when the clip ends (%.2fs): shorten the windup or active window, or use a longer clip.",
+					effective.ClipSeconds
+				)
+			)
 		end
-		encoded.FollowUp = encodedFollowUp
 	end
 
-	return encoded
+	if move.Grab and move.Knockback then
+		table.insert(
+			notes,
+			"Grab and Knockback are both set: on a clean hit the grab's hold takes over from the knockback."
+		)
+	end
+
+	if move.Art and move.Art.Prerequisite and not isArt(move.Art.Prerequisite) then
+		table.insert(notes, `Prerequisite "{move.Art.Prerequisite}" is not an art, so this art can never be unlocked.`)
+	end
+
+	return notes
 end
 
-local function encodeMoveRecord(move: MoveTypes.MoveDefinition): { [string]: any }
-	local encoded: { [string]: any } = {
-		SchemaVersion = Config.SchemaVersion,
-		MoveId = move.MoveId,
-		DisplayName = move.DisplayName,
-		Description = move.Description,
-		Category = move.Category,
-		Author = move.Author,
-		CreatedAt = move.CreatedAt,
-		UpdatedAt = move.UpdatedAt,
-		Shape = move.Shape,
-		Dimensions = encodeDimensions(move.Dimensions),
-		Radius = move.Radius,
-		OffsetX = move.Offset.X,
-		OffsetY = move.Offset.Y,
-		OffsetZ = move.Offset.Z,
-		OffsetRotationX = move.OffsetRotation.X,
-		OffsetRotationY = move.OffsetRotation.Y,
-		OffsetRotationZ = move.OffsetRotation.Z,
-		WindupSeconds = move.WindupSeconds,
-		ActiveSeconds = move.ActiveSeconds,
-		RecoverySeconds = move.RecoverySeconds,
-		Cooldown = move.Cooldown,
-		Damage = move.Damage,
-		PostureDamage = move.PostureDamage,
-		ArcDegrees = move.ArcDegrees,
-		MaxTargets = move.MaxTargets,
-		-- Both nil-able and flat, so candidateFromStoredRecord's table.clone carries them back through
-		-- with no decode step. Listed here or they are silently dropped from the record -- the exact way
-		-- Art and Grab once were.
-		PowerLevel = move.PowerLevel,
-		Feintable = move.Feintable,
-		AnimationId = move.AnimationId,
-		Animations = encodeAnimations(move.Animations),
-	}
-	if move.Size then
-		encoded.Size = { X = move.Size.X, Y = move.Size.Y, Z = move.Size.Z }
-	end
-	if move.Movement then
-		encoded.Movement = {
-			LungeDistanceStuds = move.Movement.LungeDistanceStuds,
-			LungeDurationSeconds = move.Movement.LungeDurationSeconds,
-		}
-	end
-	if move.Knockback then
-		encoded.Knockback = encodeKnockback(move.Knockback)
-	end
-	if move.Projectile then
-		-- Already a flat table of numbers -- no Vector3/CFrame-style conversion needed, unlike Size.
-		encoded.Projectile = { Speed = move.Projectile.Speed, MaxRange = move.Projectile.MaxRange }
-	end
-	if move.Grab then
-		-- AttachOffset deliberately excluded -- validateGrab (MoveRegistryManager.lua) never reads it
-		-- from a candidate; it always re-derives from GrabConstants.Defaults.AttachOffset, the same
-		-- "author never edits this field" contract MoveGrabConfig's own header documents. Every other
-		-- field is already a flat number, no Vector3/CFrame-style conversion needed.
-		encoded.Grab = {
-			HoldSeconds = move.Grab.HoldSeconds,
-			ThrowUpVelocity = move.Grab.ThrowUpVelocity,
-			ThrowHorizontalVelocity = move.Grab.ThrowHorizontalVelocity,
-			ThrowImpactDamage = move.Grab.ThrowImpactDamage,
-			ThrowSelfDamage = move.Grab.ThrowSelfDamage,
-		}
-	end
-	if move.ObjectStun then
-		encoded.ObjectStun = encodeObjectStun(move.ObjectStun)
+local function groupOf(move: MoveDefinition, source: MoveSource): string
+	if source == "Default" then
+		return DefaultMoveRegistry.GroupOf(move.MoveId) or DefaultMoveRegistry.StandaloneGroup
 	end
 	if move.Art then
-		-- Every field is already a flat string/number -- no Vector3/CFrame/Color3-style conversion
-		-- needed, unlike Size/Offset/ObjectStun's EffectColor above.
-		encoded.Art = {
-			TreeId = move.Art.TreeId,
-			Node = move.Art.Node,
-			QiCost = move.Art.QiCost,
-			RequiredTier = move.Art.RequiredTier,
-			Prerequisite = move.Art.Prerequisite,
-		}
+		return "Arts"
 	end
-	return encoded
+	return if move.Category ~= "" then move.Category else "Custom"
 end
 
--- Rebuilds the Roblox value types encodeMoveRecord decomposed, then hands the result to
--- MoveRegistryManager.Validate -- the SAME strict allow-list gate a client-submitted candidate
--- passes through, so a DataStore read is trusted no more than network input (PlayerDataSystem.
--- DecodeProfile's own reasoning). Returns nil for anything not even table-shaped; Validate itself
--- handles every other structural failure, including a record from the v1 schema (no Dimensions, no
--- Animations, no ObjectStun), which it reconstructs from the v1 fields this decoder still passes
--- through untouched -- see MoveRegistryManager's own dimensionsFromCandidate. Grab/Art need no
--- explicit handling here (unlike Size/ObjectStun above): every one of their fields is already a
--- flat string/number, so the table.clone below already carries them through correctly -- validateGrab/
--- validateArt read candidate.Grab/candidate.Art directly with no Roblox-type reconstruction needed.
-local function candidateFromStoredRecord(raw: unknown): { [string]: unknown }?
-	if typeof(raw) ~= "table" then
-		return nil
-	end
-	local record = raw :: { [string]: any }
-	local candidate: { [string]: unknown } = table.clone(record)
-	if typeof(record.Size) == "table" then
-		candidate.Size = Vector3.new(record.Size.X, record.Size.Y, record.Size.Z)
-	end
-	if typeof(record.ObjectStun) == "table" then
-		local objectStun: { [string]: any } = table.clone(record.ObjectStun)
-		if
-			typeof(objectStun.EffectColorR) == "number"
-			and typeof(objectStun.EffectColorG) == "number"
-			and typeof(objectStun.EffectColorB) == "number"
-		then
-			objectStun.EffectColor =
-				Color3.fromRGB(objectStun.EffectColorR, objectStun.EffectColorG, objectStun.EffectColorB)
-		end
-		candidate.ObjectStun = objectStun
-	end
-	return candidate
-end
-
--- A Default override record only ever needs the MUTABLE fields DefaultMoveRegistry.ApplyEdit
--- actually writes -- see that module's own header for the full list. Deliberately narrower than
--- encodeMoveRecord above: identity fields (MoveId/DisplayName/Category/Author/CreatedAt/UpdatedAt/
--- AnimationId) are never overridden for a Default move (BasicInfo/Animation render read-only in
--- PropertyEditor.lua for exactly this reason), so persisting them here would be dead weight.
-local function encodeDefaultOverride(move: MoveTypes.MoveDefinition): { [string]: any }
-	local encoded: { [string]: any } = {
-		SchemaVersion = Config.SchemaVersion,
-		Shape = move.Shape,
-		Dimensions = encodeDimensions(move.Dimensions),
-		Radius = move.Radius,
-		OffsetX = move.Offset.X,
-		OffsetY = move.Offset.Y,
-		OffsetZ = move.Offset.Z,
-		OffsetRotationX = move.OffsetRotation.X,
-		OffsetRotationY = move.OffsetRotation.Y,
-		OffsetRotationZ = move.OffsetRotation.Z,
-		WindupSeconds = move.WindupSeconds,
-		ActiveSeconds = move.ActiveSeconds,
-		RecoverySeconds = move.RecoverySeconds,
-		Cooldown = move.Cooldown,
-		Damage = move.Damage,
-		PostureDamage = move.PostureDamage,
-		ArcDegrees = move.ArcDegrees,
-		MaxTargets = move.MaxTargets,
+local function buildEntry(move: MoveDefinition, source: MoveSource): MoveEntry
+	local effective, clipMatch = effectiveTiming(move)
+	local saved = savedMove(move.MoveId, source)
+	return {
+		Move = move,
+		Source = source,
+		Group = groupOf(move, source),
+		SavedFingerprint = if saved then MoveTypes.Fingerprint(saved) else nil,
+		Overridden = source == "Default" and DefaultMoveRegistry.IsOverridden(move.MoveId),
+		Effective = effective,
+		Balance = if effective then MoveBalance.Compute(effective, move) else nil,
+		ClipMatch = clipMatch,
+		Notes = MoveEditorSystem.DescribeMove(move, source, effective, artExists),
 	}
-	if move.Size then
-		encoded.Size = { X = move.Size.X, Y = move.Size.Y, Z = move.Size.Z }
-	end
-	return encoded
 end
 
--- Overlays a persisted Default override record onto `current` (DefaultMoveRegistry.Get's own
--- projection, already carrying the correct MoveId/DisplayName/Category/Author/CreatedAt/UpdatedAt/
--- AnimationId -- see encodeDefaultOverride above for why those are never part of `raw`) to build the
--- full wire-shaped candidate DefaultMoveRegistry.ApplyEdit (and, underneath it,
--- MoveRegistryManager.Validate) expects. Returns nil for anything not even table-shaped; Validate
--- itself handles every other structural failure the same "DataStore read trusted no more than
--- network input" way candidateFromStoredRecord above does for a custom move.
-local function candidateFromStoredDefaultOverride(
-	current: MoveTypes.MoveDefinition,
-	raw: unknown
-): { [string]: unknown }?
-	if typeof(raw) ~= "table" then
+local function entryFor(moveId: string): MoveEntry?
+	local source = sourceOf(moveId)
+	if not source then
 		return nil
 	end
-	local record = raw :: { [string]: any }
-
-	local candidate: { [string]: unknown } = table.clone(current :: any)
-	candidate.Offset = nil
-	candidate.OffsetX = current.Offset.X
-	candidate.OffsetY = current.Offset.Y
-	candidate.OffsetZ = current.Offset.Z
-	-- Same decompose-then-overlay treatment Offset already gets: the live value supplies the
-	-- baseline so an override recorded before rotation existed still produces a coherent candidate,
-	-- and the record overwrites only what it actually carries.
-	candidate.OffsetRotation = nil
-	candidate.OffsetRotationX = current.OffsetRotation.X
-	candidate.OffsetRotationY = current.OffsetRotation.Y
-	candidate.OffsetRotationZ = current.OffsetRotation.Z
-
-	if record.Shape ~= nil then
-		candidate.Shape = record.Shape
-	end
-	if typeof(record.Dimensions) == "table" then
-		candidate.Dimensions = record.Dimensions
-	end
-	if typeof(record.Size) == "table" then
-		candidate.Size = Vector3.new(record.Size.X, record.Size.Y, record.Size.Z)
-	end
-	if record.Radius ~= nil then
-		candidate.Radius = record.Radius
-	end
-	if record.OffsetX ~= nil then
-		candidate.OffsetX = record.OffsetX
-	end
-	if record.OffsetY ~= nil then
-		candidate.OffsetY = record.OffsetY
-	end
-	if record.OffsetZ ~= nil then
-		candidate.OffsetZ = record.OffsetZ
-	end
-	if record.OffsetRotationX ~= nil then
-		candidate.OffsetRotationX = record.OffsetRotationX
-	end
-	if record.OffsetRotationY ~= nil then
-		candidate.OffsetRotationY = record.OffsetRotationY
-	end
-	if record.OffsetRotationZ ~= nil then
-		candidate.OffsetRotationZ = record.OffsetRotationZ
-	end
-	if record.WindupSeconds ~= nil then
-		candidate.WindupSeconds = record.WindupSeconds
-	end
-	if record.ActiveSeconds ~= nil then
-		candidate.ActiveSeconds = record.ActiveSeconds
-	end
-	if record.RecoverySeconds ~= nil then
-		candidate.RecoverySeconds = record.RecoverySeconds
-	end
-	if record.Cooldown ~= nil then
-		candidate.Cooldown = record.Cooldown
-	end
-	if record.Damage ~= nil then
-		candidate.Damage = record.Damage
-	end
-	if record.PostureDamage ~= nil then
-		candidate.PostureDamage = record.PostureDamage
-	end
-	if record.ArcDegrees ~= nil then
-		candidate.ArcDegrees = record.ArcDegrees
-	end
-	if record.MaxTargets ~= nil then
-		candidate.MaxTargets = record.MaxTargets
-	end
-
-	return candidate
+	local move = liveMove(moveId, source)
+	return if move then buildEntry(move, source) else nil
 end
 
--- Stamps MoveId/Author/CreatedAt (existing values for an already-known move, freshly-generated/
--- trusted-server-context values for a brand-new one) and always-fresh UpdatedAt onto a client-
--- submitted candidate -- a client may propose every OTHER field, but never its own identity or
--- authorship. This is what lets UpdateDraft/SaveMove double as "create," matching the plan's "+ New
--- Move" flow: a client sends a candidate with no MoveId (or an empty one) and gets a real,
--- server-assigned MoveId back in the response to adopt into its own local draft state.
-local function stampTrustedMetadata(player: Player, raw: { [string]: unknown }): { [string]: unknown }
+-- A clip the boot warm pass never saw (a custom move just given one) starts reading now, so the next
+-- entry built for it can show its synced timeline. Request yields, hence the spawn.
+local function warmClip(move: MoveDefinition): ()
+	if move.AnimationId ~= "" then
+		task.spawn(AttackWindows.Request, move.AnimationId)
+	end
+end
+
+-- Applying a draft ------------------------------------------------------------------------------------
+
+-- Stamps trusted identity onto a client draft -- see this file's header. A draft with no MoveId, or one
+-- naming a move that does not exist, is a NEW move.
+local function stampCustom(player: Player, raw: { [string]: unknown }): { [string]: unknown }
 	local stamped = table.clone(raw)
-	local rawMoveId = raw.MoveId
-	local existing = if typeof(rawMoveId) == "string" and rawMoveId ~= ""
-		then MoveRegistryManager.Get(rawMoveId)
-		else nil
+	local existing = if typeof(raw.MoveId) == "string" then MoveRegistryManager.Get(raw.MoveId :: string) else nil
 	if existing then
 		stamped.MoveId = existing.MoveId
 		stamped.Author = existing.Author
@@ -525,265 +309,249 @@ local function stampTrustedMetadata(player: Player, raw: { [string]: unknown }):
 	return stamped
 end
 
--- Atomic (UpdateAsync, not a separate Get-then-Set) so two admins saving/deleting different moves
--- at nearly the same moment can never clobber each other's index entry. Both halves live in
--- Systems/Support/AuthoredContentStore.lua now -- KitEditorSystem held the same twenty lines twice
--- over, differing only in the field name and the log prefix.
---
--- "MoveIds" IS THE PERSISTED FIELD NAME and must stay exactly that: it is the key
--- loadPersistedMoves below reads back out of the index document
--- (`(indexRaw :: { [string]: any }).MoveIds`). KitEditorSystem's is "Ids". The two are not
--- interchangeable, which is why the shared helper takes the field explicitly rather than assuming.
-local INDEX_FIELD = "MoveIds"
-
-local function addToIndex(moveId: string): boolean
-	if not mainStore then
-		return false
+-- Validates a draft and makes it live, for either source. Returns the live move and its source, or
+-- (nil, nil, reason).
+local function applyDraft(player: Player, rawDraft: unknown): (MoveDefinition?, MoveSource?, string?)
+	if typeof(rawDraft) ~= "table" then
+		return nil, nil, "InvalidShape"
 	end
-	return AuthoredContentStore.AddToIndex(
-		withRetry,
-		"MoveEditor",
-		mainStore :: DataStore,
-		INDEX_KEY,
-		INDEX_FIELD,
-		moveId
-	)
+	local raw = rawDraft :: { [string]: unknown }
+	local moveId = raw.MoveId
+	if typeof(moveId) == "string" and sourceOf(moveId) == "Default" then
+		local updated, reason = DefaultMoveRegistry.ApplyEdit(moveId, raw)
+		if not updated then
+			return nil, nil, reason
+		end
+		return updated, "Default", nil
+	end
+
+	local validated, reason = MoveRegistryManager.Validate(stampCustom(player, raw))
+	if not validated then
+		return nil, nil, reason
+	end
+	MoveRegistryManager.Upsert(validated)
+	warmClip(validated)
+	return validated, "Custom", nil
 end
 
-local function removeFromIndex(moveId: string): boolean
-	if not mainStore then
-		return false
-	end
-	return AuthoredContentStore.RemoveFromIndex(
-		withRetry,
-		"MoveEditor",
-		mainStore :: DataStore,
-		INDEX_KEY,
-		INDEX_FIELD,
-		moveId
-	)
+-- Persistence --------------------------------------------------------------------------------------------
+
+local function store(): DataStore?
+	return mainStore
 end
 
-local function handleListMoves(player: Player): MoveTypes.MoveEditorListResult
-	logger:debug("ListMoves received", { player = player.Name, userId = player.UserId })
-	local allowed, reason = checkMoveEditorPreconditions(player, "ListMoves")
+local function writeRecord(key: string, record: { [string]: any }, operation: string): boolean
+	local dataStore = store()
+	if not dataStore then
+		return false
+	end
+	return withRetry(operation, function()
+		(dataStore :: DataStore):SetAsync(key, record)
+	end)
+end
+
+local function removeRecord(key: string, operation: string): boolean
+	local dataStore = store()
+	if not dataStore then
+		return false
+	end
+	return withRetry(operation, function()
+		(dataStore :: DataStore):RemoveAsync(key)
+	end)
+end
+
+-- Handlers -----------------------------------------------------------------------------------------------
+
+local function gate(player: Player, actionName: string): (boolean, string?)
+	return AdminGate.Check(player, actionName, rateLimiter)
+end
+
+local function handleOpen(player: Player): MoveEditorTypes.OpenResult
+	local allowed, reason = gate(player, "Open")
 	if not allowed then
 		return { Success = false, Reason = reason }
 	end
-	return { Success = true, Moves = MoveRegistryManager.List() }
+	local entries: { MoveEntry } = {}
+	for _, move in DefaultMoveRegistry.List() do
+		-- A Default id a custom move has taken over is that custom move's, listed below instead.
+		if MoveRegistryManager.Get(move.MoveId) == nil then
+			table.insert(entries, buildEntry(move, "Default"))
+		end
+	end
+	for _, move in MoveRegistryManager.List() do
+		table.insert(entries, buildEntry(move, "Custom"))
+	end
+	return { Success = true, Entries = entries }
 end
 
-local function handleGetMove(player: Player, rawMoveId: unknown): MoveTypes.MoveEditorMoveResult
-	local allowed, reason = checkMoveEditorPreconditions(player, "GetMove")
+local function handlePreview(player: Player, rawDraft: unknown): MoveEditorTypes.EntryResult
+	local allowed, reason = gate(player, "Preview")
+	if not allowed then
+		return { Success = false, Reason = reason }
+	end
+	local move, source, applyReason = applyDraft(player, rawDraft)
+	if not move or not source then
+		return { Success = false, Reason = applyReason }
+	end
+	return { Success = true, Entry = buildEntry(move, source) }
+end
+
+local function handleSave(player: Player, rawDraft: unknown): MoveEditorTypes.EntryResult
+	local allowed, reason = gate(player, "Save")
+	if not allowed then
+		return { Success = false, Reason = reason }
+	end
+	local move, source, applyReason = applyDraft(player, rawDraft)
+	if not move or not source then
+		return { Success = false, Reason = applyReason }
+	end
+	local moveId = move.MoveId
+
+	if source == "Default" then
+		-- An override identical to the built move is no override at all: storing it would pin today's
+		-- built values over whatever the weapon is rebuilt to tomorrow. So it is cleared instead.
+		local built = DefaultMoveRegistry.GetBuilt(moveId) :: MoveDefinition
+		if MoveTypes.Fingerprint(built) == MoveTypes.Fingerprint(move) then
+			DefaultMoveRegistry.Reset(moveId)
+			if not removeRecord(overrideKey(moveId), "MoveEditor Save clear override") then
+				return { Success = false, Reason = "StorageError" }
+			end
+			savedMoves[moveId] = nil
+		else
+			if
+				not writeRecord(overrideKey(moveId), MoveRecordCodec.EncodeOverride(move), "MoveEditor Save override")
+			then
+				return { Success = false, Reason = "StorageError" }
+			end
+			savedMoves[moveId] = MoveTypes.Clone(move)
+		end
+	else
+		if not writeRecord(recordKey(moveId), MoveRecordCodec.Encode(move), "MoveEditor Save record") then
+			return { Success = false, Reason = "StorageError" }
+		end
+		local dataStore = store() :: DataStore
+		if not AuthoredContentStore.AddToIndex(withRetry, "MoveEditor", dataStore, INDEX_KEY, INDEX_FIELD, moveId) then
+			logger:error("Save: index update failed -- the move is saved but may not load after a restart", {
+				moveId = moveId,
+			})
+		end
+		savedMoves[moveId] = MoveTypes.Clone(move)
+	end
+
+	logger:info("Move saved", { admin = player.Name, moveId = moveId, source = source })
+	return { Success = true, Entry = entryFor(moveId) }
+end
+
+-- Puts the live move back to its persisted state. A custom move that was never saved has no persisted
+-- state and stops existing -- the Entry comes back nil, which is the client's cue to drop it.
+local function handleRevert(player: Player, rawMoveId: unknown): MoveEditorTypes.EntryResult
+	local allowed, reason = gate(player, "Revert")
 	if not allowed then
 		return { Success = false, Reason = reason }
 	end
 	if typeof(rawMoveId) ~= "string" then
 		return { Success = false, Reason = "InvalidMoveId" }
 	end
-	local move = MoveRegistryManager.Get(rawMoveId)
-	if not move then
+	local moveId = rawMoveId :: string
+	local source = sourceOf(moveId)
+	if not source then
 		return { Success = false, Reason = "MoveNotFound" }
 	end
-	return { Success = true, Move = move }
+
+	local saved = savedMoves[moveId]
+	if source == "Default" then
+		if saved then
+			DefaultMoveRegistry.ApplyEdit(moveId, MoveTypes.ToWire(saved))
+		else
+			DefaultMoveRegistry.Reset(moveId)
+		end
+	elseif saved then
+		MoveRegistryManager.Upsert(saved)
+	else
+		MoveRegistryManager.Delete(moveId)
+	end
+	return { Success = true, Entry = entryFor(moveId) }
 end
 
--- In-memory only -- no DataStore write, see this file's header for why this is what makes an edit
--- take effect immediately in MoveRegistryManager's live registry.
-local function handleUpdateDraft(player: Player, rawMove: unknown): MoveTypes.MoveEditorMoveResult
-	logger:debug("UpdateDraft received", { player = player.Name, userId = player.UserId })
-	local allowed, reason = checkMoveEditorPreconditions(player, "UpdateDraft")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
-	if typeof(rawMove) ~= "table" then
-		return { Success = false, Reason = "InvalidShape" }
-	end
-	local stamped = stampTrustedMetadata(player, rawMove :: { [string]: unknown })
-	local validated, validateReason = MoveRegistryManager.Validate(stamped)
-	if not validated then
-		return { Success = false, Reason = validateReason }
-	end
-	MoveRegistryManager.Upsert(validated)
-	return { Success = true, Move = validated }
-end
-
-local function handleSaveMove(player: Player, rawMove: unknown): MoveTypes.MoveEditorMoveResult
-	logger:debug("SaveMove received", { player = player.Name, userId = player.UserId })
-	local allowed, reason = checkMoveEditorPreconditions(player, "SaveMove")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
-	if typeof(rawMove) ~= "table" then
-		return { Success = false, Reason = "InvalidShape" }
-	end
-	local stamped = stampTrustedMetadata(player, rawMove :: { [string]: unknown })
-	local validated, validateReason = MoveRegistryManager.Validate(stamped)
-	if not validated then
-		return { Success = false, Reason = validateReason }
-	end
-	MoveRegistryManager.Upsert(validated)
-
-	if not mainStore then
-		return { Success = false, Reason = "StorageError" }
-	end
-	local setOk = withRetry("MoveEditor SaveMove SetAsync", function()
-		(mainStore :: DataStore):SetAsync(recordKey(validated.MoveId), encodeMoveRecord(validated))
-	end)
-	if not setOk then
-		return { Success = false, Reason = "StorageError" }
-	end
-
-	if not addToIndex(validated.MoveId) then
-		logger:error(
-			"SaveMove: index update failed, move saved but may not list after a restart",
-			{ moveId = validated.MoveId }
-		)
-	end
-
-	logger:info("SaveMove accepted", { admin = player.Name, moveId = validated.MoveId })
-	return { Success = true, Move = validated }
-end
-
-local function handleDeleteMove(player: Player, rawMoveId: unknown): MoveTypes.MoveEditorActionResult
-	logger:debug("DeleteMove received", { player = player.Name, userId = player.UserId })
-	local allowed, reason = checkMoveEditorPreconditions(player, "DeleteMove")
+local function handleDelete(player: Player, rawMoveId: unknown): MoveEditorTypes.ActionResult
+	local allowed, reason = gate(player, "Delete")
 	if not allowed then
 		return { Success = false, Reason = reason }
 	end
 	if typeof(rawMoveId) ~= "string" then
 		return { Success = false, Reason = "InvalidMoveId" }
 	end
+	local moveId = rawMoveId :: string
+	if sourceOf(moveId) ~= "Custom" then
+		return { Success = false, Reason = "NotCustomMove" }
+	end
 
-	MoveRegistryManager.Delete(rawMoveId)
-
-	if mainStore then
-		withRetry("MoveEditor DeleteMove RemoveAsync", function()
-			(mainStore :: DataStore):RemoveAsync(recordKey(rawMoveId))
-		end)
-		if not removeFromIndex(rawMoveId) then
-			logger:error("DeleteMove: index update failed, record removed but may reappear after a restart", {
-				moveId = rawMoveId,
+	MoveRegistryManager.Delete(moveId)
+	savedMoves[moveId] = nil
+	local dataStore = store()
+	if dataStore then
+		removeRecord(recordKey(moveId), "MoveEditor Delete record")
+		if
+			not AuthoredContentStore.RemoveFromIndex(withRetry, "MoveEditor", dataStore, INDEX_KEY, INDEX_FIELD, moveId)
+		then
+			logger:error("Delete: index update failed -- the record is gone but its id may linger in the index", {
+				moveId = moveId,
 			})
 		end
 	end
-
-	logger:info("DeleteMove accepted", { admin = player.Name, moveId = rawMoveId })
+	logger:info("Move deleted", { admin = player.Name, moveId = moveId })
 	return { Success = true }
 end
 
--- Default-move handlers -- backed by DefaultMoveRegistry.lua instead of MoveRegistryManager, see
--- this file's own header for why these three skip stampTrustedMetadata/DataStore entirely.
-local function handleListDefaultMoves(player: Player): MoveTypes.MoveEditorListResult
-	logger:debug("ListDefaultMoves received", { player = player.Name, userId = player.UserId })
-	local allowed, reason = checkMoveEditorPreconditions(player, "ListDefaultMoves")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
-	return { Success = true, Moves = DefaultMoveRegistry.List() }
-end
-
--- Takes an explicit `moveId` (unlike UpdateDraft, which derives identity from the candidate via
--- stampTrustedMetadata) -- a Default move's identity is its fixed synthetic MoveId, never something a
--- client request legitimately proposes; DefaultMoveRegistry.ApplyEdit treats `moveId` as the sole
--- authority for which live Constants table gets mutated, ignoring whatever MoveId the candidate itself
--- carries.
-local function handleUpdateDefaultMoveDraft(
-	player: Player,
-	rawMoveId: unknown,
-	rawCandidate: unknown
-): MoveTypes.MoveEditorMoveResult
-	logger:debug("UpdateDefaultMoveDraft received", { player = player.Name, userId = player.UserId })
-	local allowed, reason = checkMoveEditorPreconditions(player, "UpdateDefaultMoveDraft")
+local function handleResetDefault(player: Player, rawMoveId: unknown): MoveEditorTypes.EntryResult
+	local allowed, reason = gate(player, "ResetDefault")
 	if not allowed then
 		return { Success = false, Reason = reason }
 	end
 	if typeof(rawMoveId) ~= "string" then
 		return { Success = false, Reason = "InvalidMoveId" }
 	end
-	local updated, editReason = DefaultMoveRegistry.ApplyEdit(rawMoveId, rawCandidate)
-	if not updated then
-		return { Success = false, Reason = editReason }
+	local moveId = rawMoveId :: string
+	if sourceOf(moveId) ~= "Default" then
+		return { Success = false, Reason = "NotDefaultMove" }
 	end
-	return { Success = true, Move = updated }
+
+	DefaultMoveRegistry.Reset(moveId)
+	savedMoves[moveId] = nil
+	-- Best effort, and loud when it fails: the live revert already happened, but a stored override that
+	-- survives would quietly come back at the next boot.
+	if not removeRecord(overrideKey(moveId), "MoveEditor ResetDefault") then
+		logger:error("ResetDefault: the stored override could not be removed and will return after a restart", {
+			moveId = moveId,
+		})
+	end
+	logger:info("Default move reset", { admin = player.Name, moveId = moveId })
+	return { Success = true, Entry = entryFor(moveId) }
 end
 
--- Persists a Default move's CURRENT live values -- unlike SaveMove above, this reads straight off
--- DefaultMoveRegistry.Get rather than trusting a client-submitted candidate, since a Default move's
--- identity fields are never client-editable to begin with (see this file's own header) and its live
--- values are already the single source of truth (UpdateDefaultMoveDraft mutated them in place).
-local function handleSaveDefaultMove(player: Player, rawMoveId: unknown): MoveTypes.MoveEditorMoveResult
-	logger:debug("SaveDefaultMove received", { player = player.Name, userId = player.UserId })
-	local allowed, reason = checkMoveEditorPreconditions(player, "SaveDefaultMove")
+local function handleTestFire(player: Player, rawMoveId: unknown): MoveEditorTypes.ActionResult
+	local allowed, reason = gate(player, "TestFire")
 	if not allowed then
 		return { Success = false, Reason = reason }
 	end
 	if typeof(rawMoveId) ~= "string" then
 		return { Success = false, Reason = "InvalidMoveId" }
 	end
-	local current = DefaultMoveRegistry.Get(rawMoveId)
-	if not current then
-		return { Success = false, Reason = "MoveNotFound" }
+	local character = player.Character
+	if not character then
+		return { Success = false, Reason = "NoCharacter" }
 	end
-
-	if not mainStore then
-		return { Success = false, Reason = "StorageError" }
+	local accepted, refusal = AttackRequestSystem.ThrowMove(character, rawMoveId :: string, os.clock())
+	if not accepted then
+		return { Success = false, Reason = refusal }
 	end
-	local setOk = withRetry("MoveEditor SaveDefaultMove SetAsync", function()
-		(mainStore :: DataStore):SetAsync(defaultOverrideKey(rawMoveId), encodeDefaultOverride(current))
-	end)
-	if not setOk then
-		return { Success = false, Reason = "StorageError" }
-	end
-
-	logger:info("SaveDefaultMove accepted", { admin = player.Name, moveId = rawMoveId })
-	return { Success = true, Move = current }
+	return { Success = true }
 end
 
--- Both live-reverts (DefaultMoveRegistry.Reset, exactly as before) AND clears any persisted
--- override for this move -- without the RemoveAsync below, a Reset would only look permanent for
--- the rest of THIS server's lifetime; the next boot's loadDefaultMoveOverrides would silently
--- re-apply the old saved value, since nothing else ever deletes an override record. Best-effort on
--- the RemoveAsync (logged, never fails the response) -- same "the in-memory revert already
--- succeeded, don't make the admin re-click over a storage hiccup" tradeoff DeleteMove's own
--- removeFromIndex failure accepts.
-local function handleResetDefaultMove(player: Player, rawMoveId: unknown): MoveTypes.MoveEditorMoveResult
-	logger:debug("ResetDefaultMove received", { player = player.Name, userId = player.UserId })
-	local allowed, reason = checkMoveEditorPreconditions(player, "ResetDefaultMove")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
-	if typeof(rawMoveId) ~= "string" then
-		return { Success = false, Reason = "InvalidMoveId" }
-	end
-	local reset = DefaultMoveRegistry.Reset(rawMoveId)
-	if not reset then
-		return { Success = false, Reason = "InvalidMoveId" }
-	end
-
-	if mainStore then
-		local removeOk = withRetry("MoveEditor ResetDefaultMove RemoveAsync", function()
-			(mainStore :: DataStore):RemoveAsync(defaultOverrideKey(rawMoveId))
-		end)
-		if not removeOk then
-			logger:error("ResetDefaultMove: override RemoveAsync failed, may reappear after a restart", {
-				moveId = rawMoveId,
-			})
-		end
-	end
-
-	logger:info("ResetDefaultMove accepted", { admin = player.Name, moveId = rawMoveId })
-	return { Success = true, Move = reset }
-end
-
--- The Move Editor toolbar's "bind to slot N" control. Thin: every real decision (is this actually
--- an art, has the admin earned it, which slot) lives in ArtSystem.DevGrantAndEquip -- this handler
--- only gates + shape-checks, the same split every other handler in this file already uses. A
--- hotbar slot has exactly one owner, ArtSystem's persisted equippedArts (see that module's own
--- header on why HotbarBindings.lua stopped being a second one), so binding here IS equipping.
-local function handleEquipArtSlot(player: Player, rawSlot: unknown, rawArtId: unknown): MoveTypes.MoveEditorActionResult
-	logger:debug("EquipArtSlot received", { player = player.Name, userId = player.UserId })
-	local allowed, reason = checkMoveEditorPreconditions(player, "EquipArtSlot")
+-- Binding a slot IS equipping an art (ArtSystem owns every slot); DevGrantAndEquip is the one unlock
+-- bypass, so an admin can put a form they authored ten seconds ago under a key.
+local function handleEquipArtSlot(player: Player, rawSlot: unknown, rawArtId: unknown): MoveEditorTypes.ActionResult
+	local allowed, reason = gate(player, "EquipArtSlot")
 	if not allowed then
 		return { Success = false, Reason = reason }
 	end
@@ -793,221 +561,154 @@ local function handleEquipArtSlot(player: Player, rawSlot: unknown, rawArtId: un
 	if rawArtId ~= nil and typeof(rawArtId) ~= "string" then
 		return { Success = false, Reason = "InvalidArtId" }
 	end
-	local equipReason = ArtSystem.DevGrantAndEquip(player, rawSlot :: number, rawArtId :: string?)
-	if equipReason then
-		return { Success = false, Reason = equipReason }
+	local refusal = ArtSystem.DevGrantAndEquip(player, rawSlot :: number, rawArtId :: string?)
+	if refusal then
+		return { Success = false, Reason = refusal }
 	end
 	return { Success = true }
 end
 
--- Freezes/unfreezes the admin's own character while their editor screen is open/closed -- reuses
--- AdminActionSystem.SetFrozen (the exact mechanism/Humanoid Attribute an admin's own "Frozen"
--- DevMenu toggle already drives, checked at TOP priority by Server/Systems/RunSystem.lua's resolver)
--- rather than writing the Attribute directly, so this stays in sync with AdminActionSystem's own
--- overrideStates bookkeeping instead of fighting it. Fire-and-forget (RemoteEvent) -- the editor
--- screen doesn't need or wait for a response.
---
--- Deliberately does NOT route through checkMoveEditorPreconditions' shared rateLimiter:IsLimited
--- check the way every other Move Editor remote does -- only for the CLOSE (rawIsOpen == false) case.
--- This used to be symmetric with every other handler here, and that was the bug: rateLimiter's
--- budget (Constants.NetworkBudget.MaxRemoteCallsPerSecondPerPlayer) is shared across every Move
--- Editor remote, including the debounced-but-still-frequent UpdateDraft calls a busy editing session
--- fires, so an admin who had been actively tuning a move (or mashing Test on Dummy, which itself
--- toggles this exact remote) could get their CLOSE silently dropped. Nothing else ever clears
--- Constants.Attributes.Frozen once that happens -- the client had already flipped its own IsOpen to
--- false and shows the panel closed, so there is no error, no retry, and no visible reason to press
--- anything again -- reported as "randomly freezing myself." A dropped OPEN is harmless by comparison
--- (the admin's character just doesn't freeze that press, and pressing the keybind again retries it
--- for free), so only the unfreeze path is exempted: unfreezing your own character must never be
--- something a shared network budget can leave stuck.
+-- Freezes the admin while the editor is open, through AdminActionSystem.SetFrozen so its own bookkeeping
+-- stays authoritative. The CLOSE is exempt from the rate limit: a throttled close would leave the admin
+-- frozen with the panel already gone and nothing on screen to press again.
 local function handleSetEditorOpen(player: Player, rawIsOpen: unknown): ()
-	if not AdminGate.IsAuthorized(player) then
-		logger:warn("SetEditorOpen rejected: not authorized", { player = player.Name, userId = player.UserId })
-		return
-	end
-	if typeof(rawIsOpen) ~= "boolean" then
+	if not AdminGate.IsAuthorized(player) or typeof(rawIsOpen) ~= "boolean" then
 		return
 	end
 	if rawIsOpen and rateLimiter:IsLimited(player) then
-		logger:debug("SetEditorOpen rejected: rate limited", { player = player.Name, userId = player.UserId })
 		return
 	end
-	AdminActionSystem.SetFrozen(player, rawIsOpen)
+	AdminActionSystem.SetFrozen(player, rawIsOpen :: boolean)
 end
 
--- Loads every persisted move into MoveRegistryManager's live in-memory table -- backgrounded
--- (task.spawn from Init(), see BugReportSystem.lua's seedOpenReportCount for the identical
--- reasoning) so a slow full-index page-through never blocks Main.server.lua's synchronous boot
--- chain. A move that fails to decode/validate is skipped and logged, never crashes the load --
--- corrupt or hand-edited DataStore content degrades safely, same as PlayerDataSystem's own
--- DecodeProfile contract.
-local function loadPersistedMoves(): ()
-	if not mainStore then
-		return
-	end
+-- Boot load ---------------------------------------------------------------------------------------------
 
-	local indexOk, indexRaw = withRetry("MoveEditor loadPersistedMoves index GetAsync", function()
-		return (mainStore :: DataStore):GetAsync(INDEX_KEY)
+local function logDropped(moveId: string, dropped: { string }): ()
+	if #dropped > 0 then
+		logger:warn("Stored move carried fields with no runtime; they were dropped on load", {
+			moveId = moveId,
+			dropped = table.concat(dropped, ", "),
+		})
+	end
+end
+
+-- Every stored custom move into the registry. A record that fails to fetch, decode or validate is skipped
+-- and logged, never fatal -- corrupt content degrades one move, not the boot.
+local function loadPersistedMoves(dataStore: DataStore): ()
+	local indexOk, indexRaw = withRetry("MoveEditor load index", function()
+		return dataStore:GetAsync(INDEX_KEY)
 	end)
 	if not indexOk then
-		logger:error("loadPersistedMoves: index GetAsync failed, starting with an empty registry")
+		logger:error("Load: the move index could not be read; starting with no custom moves")
 		return
 	end
-	if typeof(indexRaw) ~= "table" then
-		logger:info("loadPersistedMoves: no existing move index, starting empty")
-		return
-	end
-
-	local moveIds = (indexRaw :: { [string]: any }).MoveIds
+	local moveIds = if typeof(indexRaw) == "table" then (indexRaw :: any)[INDEX_FIELD] else nil
 	if typeof(moveIds) ~= "table" then
+		logger:info("Load: no move index yet")
 		return
 	end
 
-	local loadedCount = 0
+	local loaded = 0
 	for _, rawMoveId in ipairs(moveIds :: { unknown }) do
-		if typeof(rawMoveId) == "string" then
-			local getOk, raw = withRetry("MoveEditor loadPersistedMoves record GetAsync", function()
-				return (mainStore :: DataStore):GetAsync(recordKey(rawMoveId))
-			end)
-			if getOk and raw ~= nil then
-				local candidate = candidateFromStoredRecord(raw)
-				if candidate then
-					-- COERCED, never rejected. A record written before Validate gained its
-					-- reserved-category gate could legitimately be carrying the sentinel, and letting
-					-- that record fail validation here would make a real, admin-authored move vanish
-					-- from the registry on the next boot with no signal anywhere -- strictly worse than
-					-- showing it uncategorised. The warn is what keeps the coercion visible rather than
-					-- silent. (Note this runs BEFORE Validate, so the gate below never sees the
-					-- sentinel and this call correctly leaves allowReservedCategory false.)
-					if candidate.Category == MoveTypes.DefaultCategory then
-						logger:warn(
-							"loadPersistedMoves: stored move claims the reserved 'Default' category -- loading it as uncategorised",
-							{ moveId = rawMoveId }
-						)
-						candidate.Category = ""
-					end
-					local validated, reason = MoveRegistryManager.Validate(candidate)
-					if validated then
-						MoveRegistryManager.Upsert(validated)
-						loadedCount += 1
-					else
-						logger:warn(
-							"loadPersistedMoves: skipped invalid record",
-							{ moveId = rawMoveId, reason = reason }
-						)
-					end
-				else
-					logger:warn("loadPersistedMoves: skipped record with an invalid shape", { moveId = rawMoveId })
-				end
-			else
-				logger:warn("loadPersistedMoves: skipped record that failed to fetch", { moveId = rawMoveId })
-			end
+		if typeof(rawMoveId) ~= "string" then
+			continue
 		end
+		local moveId = rawMoveId :: string
+		local getOk, raw = withRetry("MoveEditor load record", function()
+			return dataStore:GetAsync(recordKey(moveId))
+		end)
+		if not getOk or raw == nil then
+			logger:warn("Load: skipped a move whose record could not be fetched", { moveId = moveId })
+			continue
+		end
+		local candidate, dropped = MoveRecordCodec.Decode(raw)
+		if not candidate then
+			logger:warn("Load: skipped a record that is not a move", { moveId = moveId })
+			continue
+		end
+		local validated, reason = MoveRegistryManager.Validate(candidate)
+		if not validated then
+			logger:warn("Load: skipped an invalid move", { moveId = moveId, reason = reason })
+			continue
+		end
+		logDropped(moveId, dropped)
+		MoveRegistryManager.Upsert(validated)
+		savedMoves[moveId] = validated
+		loaded += 1
 	end
-	logger:info("loadPersistedMoves complete", { loadedCount = loadedCount })
+	logger:info("Custom moves loaded", { count = loaded })
 
-	-- Audited HERE rather than in ArtTreeManager.Init, which is the only point where the art roster
-	-- is complete -- see that function's own note. An art is a move, so "every move is loaded" and
-	-- "every art exists" are the same moment. Never fatal: a broken prerequisite should cost that art
-	-- its unlock path and show up in a log, not stop the server.
+	-- The art roster is complete only now (an art is a move), so this is the one moment a prerequisite
+	-- audit is meaningful. Never fatal.
 	for _, problem in ipairs(ArtTreeManager.AuditPrerequisites()) do
 		logger:warn("Art prerequisite problem", { problem = problem })
 	end
 end
 
--- Sibling to loadPersistedMoves above, for Default moves -- no index to page through (see
--- defaultOverrideKey's own header for why), just one GetAsync per move DefaultMoveRegistry.List()
--- already knows about. Calling List() first is what makes DefaultMoveRegistry.lua's own
--- ensureDefaultsCaptured run BEFORE any override is applied here -- see that module's header for why
--- this ordering is what keeps Reset reverting to the true Constants.lua file value, never a
--- previously-applied override. A move whose override record fails to decode/validate is skipped and
--- logged, never crashes the load -- same degrade-safely contract loadPersistedMoves already applies
--- to a corrupt custom-move record.
-local function loadDefaultMoveOverrides(): ()
-	if not mainStore then
-		return
-	end
-
-	local moves = DefaultMoveRegistry.List()
-	local loadedCount = 0
-	for _, move in ipairs(moves) do
-		local getOk, raw = withRetry("MoveEditor loadDefaultMoveOverrides GetAsync", function()
-			return (mainStore :: DataStore):GetAsync(defaultOverrideKey(move.MoveId))
+local function loadDefaultMoveOverrides(dataStore: DataStore): ()
+	local loaded = 0
+	for _, built in DefaultMoveRegistry.List() do
+		local moveId = built.MoveId
+		local getOk, raw = withRetry("MoveEditor load override", function()
+			return dataStore:GetAsync(overrideKey(moveId))
 		end)
-		if getOk and raw ~= nil then
-			local candidate = candidateFromStoredDefaultOverride(move, raw)
-			if candidate then
-				local updated, reason = DefaultMoveRegistry.ApplyEdit(move.MoveId, candidate)
-				if updated then
-					loadedCount += 1
-				else
-					logger:warn(
-						"loadDefaultMoveOverrides: skipped invalid override",
-						{ moveId = move.MoveId, reason = reason }
-					)
-				end
-			else
-				logger:warn(
-					"loadDefaultMoveOverrides: skipped override with an invalid shape",
-					{ moveId = move.MoveId }
-				)
-			end
-		elseif not getOk then
-			logger:warn("loadDefaultMoveOverrides: skipped override that failed to fetch", { moveId = move.MoveId })
+		if not getOk then
+			logger:warn("Load: skipped an override that could not be fetched", { moveId = moveId })
+			continue
 		end
+		if raw == nil then
+			continue
+		end
+		local candidate, dropped =
+			MoveRecordCodec.DecodeOverride(DefaultMoveRegistry.GetBuilt(moveId) :: MoveDefinition, raw)
+		if not candidate then
+			logger:warn("Load: skipped an override that is not a move", { moveId = moveId })
+			continue
+		end
+		local applied, reason = DefaultMoveRegistry.ApplyEdit(moveId, candidate)
+		if not applied then
+			logger:warn("Load: skipped an invalid override", { moveId = moveId, reason = reason })
+			continue
+		end
+		logDropped(moveId, dropped)
+		savedMoves[moveId] = applied
+		loaded += 1
 	end
-	logger:info("loadDefaultMoveOverrides complete", { loadedCount = loadedCount })
+	logger:info("Default-move overrides loaded", { count = loaded })
 end
 
--- Assumes MoveRegistryManager.Init() has already run (Main.server.lua calls it before this System's
--- own Init() -- see that file's boot-order comments) -- this function only POPULATES the
--- already-initialized registry.
+-- Init --------------------------------------------------------------------------------------------------
+
+-- Assumes MoveRegistryManager.Init and WeaponRoster.Start have run (Main.server's boot order).
 function MoveEditorSystem.Init(): ()
 	mainStore = DataStoreService:GetDataStore(StorageConfig.CustomMoveDataStoreName)
+	local dataStore = mainStore :: DataStore
+	-- Backgrounded so a slow page-through never blocks the synchronous boot chain.
+	task.spawn(loadPersistedMoves, dataStore)
+	task.spawn(loadDefaultMoveOverrides, dataStore)
 
-	task.spawn(loadPersistedMoves)
-	task.spawn(loadDefaultMoveOverrides)
+	local names = Config.RemoteNames
+	NetworkBridge.CreateRemoteFunction(names.Open).OnServerInvoke = wrapHandler("Open", handleOpen)
+	NetworkBridge.CreateRemoteFunction(names.Preview).OnServerInvoke = wrapHandler("Preview", handlePreview)
+	NetworkBridge.CreateRemoteFunction(names.Save).OnServerInvoke = wrapHandler("Save", handleSave)
+	NetworkBridge.CreateRemoteFunction(names.Revert).OnServerInvoke = wrapHandler("Revert", handleRevert)
+	NetworkBridge.CreateRemoteFunction(names.Delete).OnServerInvoke = wrapHandler("Delete", handleDelete)
+	NetworkBridge.CreateRemoteFunction(names.ResetDefault).OnServerInvoke =
+		wrapHandler("ResetDefault", handleResetDefault)
+	NetworkBridge.CreateRemoteFunction(names.TestFire).OnServerInvoke = wrapHandler("TestFire", handleTestFire)
+	NetworkBridge.CreateRemoteFunction(names.EquipArtSlot).OnServerInvoke =
+		wrapHandler("EquipArtSlot", handleEquipArtSlot)
 
-	local listRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.ListMoves)
-	listRemote.OnServerInvoke = wrapHandler("ListMoves", handleListMoves)
-
-	local getRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.GetMove)
-	getRemote.OnServerInvoke = wrapHandler("GetMove", handleGetMove)
-
-	local updateDraftRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.UpdateDraft)
-	updateDraftRemote.OnServerInvoke = wrapHandler("UpdateDraft", handleUpdateDraft)
-
-	local saveRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.SaveMove)
-	saveRemote.OnServerInvoke = wrapHandler("SaveMove", handleSaveMove)
-
-	local deleteRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.DeleteMove)
-	deleteRemote.OnServerInvoke = wrapHandler("DeleteMove", handleDeleteMove)
-
-	local listDefaultMovesRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.ListDefaultMoves)
-	listDefaultMovesRemote.OnServerInvoke = wrapHandler("ListDefaultMoves", handleListDefaultMoves)
-
-	local updateDefaultMoveDraftRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.UpdateDefaultMoveDraft)
-	updateDefaultMoveDraftRemote.OnServerInvoke = wrapHandler("UpdateDefaultMoveDraft", handleUpdateDefaultMoveDraft)
-
-	local saveDefaultMoveRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.SaveDefaultMove)
-	saveDefaultMoveRemote.OnServerInvoke = wrapHandler("SaveDefaultMove", handleSaveDefaultMove)
-
-	local resetDefaultMoveRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.ResetDefaultMove)
-	resetDefaultMoveRemote.OnServerInvoke = wrapHandler("ResetDefaultMove", handleResetDefaultMove)
-
-	local equipArtSlotRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.EquipArtSlot)
-	equipArtSlotRemote.OnServerInvoke = wrapHandler("EquipArtSlot", handleEquipArtSlot)
-
-	local setEditorOpenRemote = NetworkBridge.CreateRemoteEvent(Config.RemoteNames.SetEditorOpen)
-	setEditorOpenRemote.OnServerEvent:Connect(function(player: Player, rawIsOpen: unknown)
-		local ok, errorMessage = pcall(handleSetEditorOpen, player, rawIsOpen)
-		if not ok then
-			logger:error(
-				"SetEditorOpen handler errored",
-				{ player = player.Name, errorMessage = tostring(errorMessage) }
-			)
-		end
-	end)
+	NetworkBridge.CreateRemoteEvent(names.SetEditorOpen).OnServerEvent
+		:Connect(function(player: Player, rawIsOpen: unknown)
+			local ok, errorMessage = pcall(handleSetEditorOpen, player, rawIsOpen)
+			if not ok then
+				logger:error(
+					"SetEditorOpen handler errored",
+					{ player = player.Name, errorMessage = tostring(errorMessage) }
+				)
+			end
+		end)
 
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "MoveEditorSystem",
@@ -1019,15 +720,9 @@ function MoveEditorSystem.Init(): ()
 	logger:info("MoveEditorSystem.Init() complete")
 end
 
--- Exported specifically so this System's regression tests can exercise the DataStore encode/decode
--- round-trip headlessly -- no live remote, no DataStore, just a MoveDefinition in and the record (or
--- the record back out) -- the same "pure logic gets its own export" precedent every other System in
--- this codebase already follows. This pairing is exactly what let Art/Grab silently stop persisting
--- despite validating and working live: encodeMoveRecord forgot to write them, and nothing caught it
--- until an admin restarted their server and found their edits gone. A round-trip test on this pair is
--- what a new optional MoveDefinition field (the next one being Slam -- see MoveRegistryManager.lua's
--- own note that it isn't validated/persisted yet) should be checked against before shipping.
-MoveEditorSystem.EncodeMoveRecord = encodeMoveRecord
-MoveEditorSystem.CandidateFromStoredRecord = candidateFromStoredRecord
+-- Spec-only: forgets every saved state, so one case's saves cannot leak into the next.
+function MoveEditorSystem.Reset(): ()
+	table.clear(savedMoves)
+end
 
 return MoveEditorSystem

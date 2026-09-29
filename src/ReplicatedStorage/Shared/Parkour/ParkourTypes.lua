@@ -26,9 +26,9 @@ local ParkourTypes = {}
 -- behind the design's "modular so additional movement mechanics can be added later without
 -- rewriting the entire movement system."
 --
--- "AerialCombat" is the combat-owned carve-out: while a player is being juggled, is mid-air-combo
+-- "CombatHeld" is the combat-owned carve-out: while a player is being juggled, is mid-air-combo
 -- chase, or is ragdolled, the parkour system parks in this state and drives NOTHING -- see
--- States/AerialCombat.lua for why yielding entirely (rather than trying to force the character back
+-- States/CombatHeld.lua for why yielding entirely (rather than trying to force the character back
 -- onto ground movement) is the only correct behavior when CombatSystem/RagdollController already
 -- own the body.
 export type MovementStateId =
@@ -45,11 +45,11 @@ export type MovementStateId =
 	| "WallRunning"
 	| "LedgeHanging"
 	| "LedgeClimbing"
-	| "Rolling"
+	| "Evading"
 	| "Dashing"
 	| "Leaping"
 	| "LedgeLeaping"
-	| "AerialCombat"
+	| "CombatHeld"
 
 -- How the motor is driving the character this frame. Each state declares one; ParkourMotor.lua is
 -- the only module that reads it, and the only module in the whole codebase that writes the
@@ -85,7 +85,7 @@ export type DriveMode = "Humanoid" | "Velocity" | "Kinematic"
 -- second Start inside the first one's ownership. A dash opens its own window from ordinary locomotion,
 -- owns velocity for its whole duration, and hands momentum back on its own terms; there is no other
 -- window for it to be a continuation of. See States/Dashing.lua.
-export type ActionKind = "Slide" | "Vault" | "Mantle" | "WallRun" | "LedgeClimb" | "Roll" | "Leap" | "Dash"
+export type ActionKind = "Slide" | "Vault" | "Mantle" | "WallRun" | "LedgeClimb" | "Evade" | "Leap" | "Dash"
 
 -- What a report is saying about that action.
 export type ActionPhase = "Start" | "End"
@@ -314,7 +314,7 @@ export type ParkourContext = {
 	-- Which state is running right now, and which one ran immediately before it. Set by
 	-- StateMachine.lua before any state callback fires, so a CanEnter predicate can legally depend on
 	-- where the character is coming from -- LedgeClimbing may only be entered from LedgeHanging,
-	-- Rolling only from the states in ParkourConstants.Roll.AllowedFromStates, and both express that
+	-- Evading only from the states in EvadeConstants.AllowedFromStates, and both express that
 	-- by reading CurrentStateId rather than by the machine hardcoding a transition table (which is
 	-- what would make adding a state a multi-file edit again).
 	CurrentStateId: MovementStateId,
@@ -430,19 +430,10 @@ export type ParkourContext = {
 	--
 	-- Narrower than InCombat and orthogonal to CombatOwned: a player can be InCombat for thirty seconds
 	-- and committed for none of it, and a committed body is still the player's own to drive -- it just
-	-- may not roll out of the commitment. Read through StateSupport.CanRoll. Compared against `true`
+	-- may not evade out of the commitment. Read by States/Evading.CanEnter. Compared against `true`
 	-- rather than read for truthiness, so a hand-built spec context that predates the field reads as
 	-- "not committed".
 	CombatCommitted: boolean?,
-
-	-- The momentum the character had at the instant of ground contact, BEFORE States/Landing.lua charged
-	-- the fall's cost against it, and the time of that contact. Written by Landing.Enter and read by
-	-- exactly one thing: States/Rolling.Enter, which refunds the landing cut for a roll pressed within
-	-- ParkourConstants.Roll.LandingWindowSeconds AFTER touchdown (the late half of the landing roll --
-	-- the early half is decided on the contact frame itself, in States/Falling.Update, and never enters
-	-- Landing at all). nil until the first landing of a life.
-	PreLandingMomentum: number?,
-	LandedAt: number?,
 
 	-- Player-configurable assist flags, resolved once per settings change rather than per frame.
 	Assists: AssistSettings,
@@ -595,7 +586,7 @@ export type MotorCommand = {
 	Velocity: Vector3,
 	-- Velocity mode only: drive the HORIZONTAL plane and leave the vertical axis entirely to physics.
 	-- Velocity.Y is ignored when set. For a velocity-owning state that has left the ground and must fall
-	-- like a body rather than hold whatever vertical speed it last commanded -- a roll carried off a
+	-- like a body rather than hold whatever vertical speed it last commanded -- an evade carried off a
 	-- ledge is the case it exists for. See ParkourMotor's own Velocity branch for the constraint mode it
 	-- selects.
 	PlanarOnly: boolean,

@@ -178,7 +178,7 @@ ParkourConstants.Jump = {
 	--
 	-- Leaping.CanEnter is NOT on that list: the leap reads its own dedicated key (InputBuffer.PeekLeap)
 	-- rather than jump input at all now -- see States/Leaping.lua's own header -- so this assist has no
-	-- opinion on it either way. InputBuffer.PeekSlide/PeekRoll/PeekLeap never had PeekJump's bug in the
+	-- opinion on it either way. InputBuffer.PeekSlide/PeekEvade/PeekLeap never had PeekJump's bug in the
 	-- first place; they always passed BufferLive's `enabled` as an unconditional true. Sized to cover
 	-- one step at a bad framerate (20fps): a press is stamped by ParkourInput's InputBegan handler and
 	-- read on the next controller step, so a window of zero would drop presses to a race rather than to
@@ -462,16 +462,13 @@ ParkourConstants.Slide = {
 	-- ending exit refuses while the ceiling is blocked (standing up would eject the character through
 	-- it), and at zero speed nothing moves the body out from under it. This lets the player crawl out
 	-- in the direction they are steering; with no input held it does nothing, so a slide is never
-	-- dragged anywhere the player did not ask to go. Matches Roll.CrawlSpeed, which hands its own
-	-- dead-end ceiling hold to this state.
+	-- dragged anywhere the player did not ask to go.
 	CrawlSpeed = 8,
 
 	-- Fraction of live slide momentum carried into a jump taken out of the slide. Above 1 on purpose
 	-- -- the slide-jump is the intended skill-expression chain of this whole system, and it should
 	-- pay slightly more than the sum of its parts.
 	JumpOutRetainFraction = 1.08,
-	-- Fraction carried into a roll taken out of a slide.
-	RollOutRetainFraction = 0.95,
 
 	-- The continuous slide loop, played for exactly the duration Sliding is the active state
 	-- (Client/FX/SlideAudio.lua's own OnStateChanged, started/stopped the same way
@@ -1175,20 +1172,17 @@ ParkourConstants.WallJump = {
 -- combat with no error and no obvious cause.
 --
 -- Base locomotion is not listed and must never be: Idle/Walking/Sprinting/Falling/Landing/
--- AerialCombat are not "parkour actions," they are how a character exists, and blocking any of them
+-- CombatHeld are not "parkour actions," they are how a character exists, and blocking any of them
 -- would strand the machine with nowhere legal to be.
 --
--- ROLLING IS NOT LISTED, AND THAT IS THE DECISION THIS COMMENT USED TO FLAG AS PENDING. It sat here
--- as "the judgment call" beside Sliding, on the grounds that the design's exhaustive allow-list
--- (hang/climb/mantle/vault) did not name it. It came out because it is not a repositioning tool in the
--- sense this gate exists to remove: it is the grounded DODGE, and with it blocked a grounded fighter had
--- no evasive move at all for the InCombat tag's full thirty seconds after any exchange (Dash is
--- air-only). What a roll is worth in a fight is now priced where combat prices things -- the server's
--- evade frames (DefenseConstants.Evade, opened by DefenseSystem.BeginEvade off the accepted roll report)
--- and the roll's own cooldown -- and what it must NOT be is gated by StateSupport.CanRoll's combat-
--- commitment check (no rolling out of your own swing or out of hitstun) rather than by this table.
--- Adding "Rolling = true" back here is still a one-line change, and StateSupport.CanRoll still asks
--- this table first, so it would still bite everywhere a roll can start.
+-- EVADING IS NOT LISTED, deliberately, and must not be. It is the grounded DODGE (Shared/Combat/
+-- EvadeConstants.lua), not a repositioning tool in the sense this gate exists to remove, and with it
+-- blocked a grounded fighter would have no evasive move at all while tagged InCombat (Dash is air-only).
+-- What an evade is worth in a fight is priced where combat prices things -- the server's evade frames
+-- (EvadeConstants.Frames, opened by DefenseSystem.BeginEvade off the accepted Evade report) and its own
+-- cooldown -- and what it must NOT be is gated by States/Evading.CanEnter's combat-commitment check (no
+-- evading out of your own swing or out of hitstun), not by this table. The evade does not ask this
+-- table at all -- it gates the OTHER way: States/Evading.CanEnter refuses it unless InCombat is set.
 --
 -- SLIDING REMAINS THE OPEN JUDGMENT CALL. Listed because the allow-list does not name it; reads as a
 -- combat move as much as a traversal one. If combat starts feeling stiff it is the next entry to
@@ -1211,79 +1205,6 @@ ParkourConstants.CombatGate = {
 	} :: { [string]: boolean },
 }
 
-ParkourConstants.Roll = {
-	Speed = 30,
-	DurationSeconds = 0.5,
-	-- THE ROLL'S ONLY COST. Stamina was removed on purpose, so the cooldown is what stops a roll from
-	-- being spammed as locomotion or as a permanent evade. The server derives its own evade cooldown from
-	-- this (DefenseConstants.Evade.CooldownSeconds), so retuning it here retunes both halves.
-	CooldownSeconds = 0.9,
-	-- Fraction of the momentum the roll was ENTERED with that it hands back on exit -- not of the roll's
-	-- own Speed. This used to retain the roll's live speed (always at least Speed, 30), which meant a
-	-- roll from a standstill handed 30 studs/s into Idle: faster than walking, so rolling on cooldown
-	-- beat walking as a way to travel. Keyed off entry momentum, a roll returns what you brought into
-	-- it -- a sprinting roll exits sprinting, a standing one exits standing -- and the burst in between is
-	-- the dodge, not a speed boost. Floored at walking pace while movement is held (Rolling.Exit), so a
-	-- roll from rest with a direction held does not stop dead.
-	ExitRetainFraction = 1,
-	-- THE LANDING ROLL. A roll pressed within this window of ground contact converts what would have been
-	-- a hard landing into a full-momentum continuation. Two halves, both reading this one number:
-	--   * EARLY -- pressed up to this long BEFORE contact. Decided on the contact frame itself
-	--     (States/Falling.Update asks StateSupport.CanRoll with this as the input window), so Landing
-	--     is never entered: no momentum cut, no camera dip, no landing shake.
-	--   * LATE -- pressed up to this long AFTER contact, from inside Landing. The dip has already played
-	--     (it fired on the contact frame and cannot be un-fired), but States/Rolling.Enter refunds the
-	--     momentum Landing took (ParkourContext.PreLandingMomentum), so the continuation is still full
-	--     speed. Accepted and documented rather than delaying the dip on every landing just in case.
-	LandingWindowSeconds = 0.2,
-	-- A roll may be started from these states only -- everything else must transition first. Kept
-	-- here (not hardcoded in States/Rolling.lua) so a design pass can widen it without touching code.
-	-- Falling is listed for the EARLY landing roll above -- StateSupport.CanRoll still demands ground
-	-- contact, so this never means a roll in open air; it means "the fall that is touching down this
-	-- frame".
-	AllowedFromStates = {
-		Idle = true,
-		Walking = true,
-		Sprinting = true,
-		Sliding = true,
-		Landing = true,
-		Falling = true,
-	},
-	-- The crouch while rolling (a HipHeight delta, restored on exit). The roll's own number rather than
-	-- a read of Slide.HipHeightDelta, but CONSTRAINED by it: a roll that reaches its ceiling hold cap
-	-- hands off to Sliding (MaxCeilingHoldSeconds below), and a slide that stood taller than the roll it
-	-- inherited would stand up into the very geometry the roll was ducking. So this must never exceed
-	-- Slide.HipHeightDelta -- asserted in Tests/Parkour/RollingState.spec, because it is invisible here.
-	HipHeightDelta = 1.6,
-	-- Downward bias on the commanded velocity while grounded, holding the body against the surface across
-	-- small bumps. Same job as Slide.SurfaceStickSpeed, owned separately so the two can be tuned apart.
-	-- Replaced a hardcoded 8 that was also applied in the air -- which is what pinned a roll carried off
-	-- a ledge to an 8 studs/s descent. Airborne, the roll now drives only the horizontal plane
-	-- (MotorCommand.PlanarOnly) and gravity owns the fall.
-	SurfaceStickSpeed = 8,
-	-- THE CEILING HOLD. A roll that finishes under something too low to stand in cannot stand up, and
-	-- used to wait for the ceiling to clear -- at its full roll speed if the tunnel continued, and at
-	-- ZERO forever if it was a dead end, because nothing moved the body and the ceiling therefore never
-	-- cleared. Past DurationSeconds with the ceiling blocked, the roll now crawls in the direction of held
-	-- input at this speed (zero with no input -- the player is not dragged, but is never stuck either),
-	-- for at most MaxCeilingHoldSeconds, then hands off to Sliding, which owns the same low-clearance
-	-- posture with no cap of its own and a crawl rule of its own (Slide.CrawlSpeed). The cap exists
-	-- because the roll is a server-reported action whose ownership window is declared up front
-	-- (ParkourController's ACTION_DURATIONS, which adds this hold to the roll's own) and must not be
-	-- outlived; the slide it hands to opens a fresh report.
-	CrawlSpeed = 8,
-	MaxCeilingHoldSeconds = 0.6,
-	-- The roll's one-shot, played by Client/FX/ParkourAudio.lua on entering Rolling. A cloth-and-scuff
-	-- tumble, one sound for every direction for the reason Dash.Sound gives. BLANK UNTIL AN ASSET IS
-	-- UPLOADED -- this codebase does not guess asset ids; SoundManager.Register warns once on a blank id
-	-- and Play no-ops on it, so the roll is silent rather than broken until one is pasted in.
-	Sound = {
-		SoundId = "",
-		Volume = 0.55,
-		PoolSize = 2,
-	},
-}
-
 -- THE DASH -- an AIR-ONLY, camera-aimed, steerable launch on its own key
 -- (Constants.Keybinds.Defaults.Dash, Q / gamepad B). ONE rule: it sends you exactly where you are
 -- looking, at full power, and you fly it with the mouse for as long as it lasts.
@@ -1298,9 +1219,10 @@ ParkourConstants.Roll = {
 --      penalties, so three of them were deliberately weak. There is one power budget now.
 --   3. Direction was frozen at entry and commanded unchanged for the whole burst, so there was no
 --      input path into a running dash at all. TurnDegreesPerSecond below is that path.
--- Sits beside Roll (above) rather than replacing it, and the split of labour is what lets both exist:
---   * ROLL is the grounded DODGE. Committed, so nothing can steal it, which is most of its defensive
---     value, and it owns the landing-roll conversion.
+-- Sits beside the evade (Shared/Combat/EvadeConstants.lua) rather than replacing it, and the split of
+-- labour is what lets both exist:
+--   * EVADE is the grounded DODGE. Committed, so nothing can steal it, which is most of its defensive
+--     value.
 --   * DASH is the AIRBORNE CHAINING move. Deliberately NOT committed, so a vault, a mantle, a
 --     wall-run or a ledge grab may pre-empt it mid-flight -- which is how "dash into a vault" and
 --     "air-dash onto a ledge" happen through the state machine's own arbitration, with each target's
@@ -1431,11 +1353,9 @@ ParkourConstants.Dash = {
 	-- direction -- a fast fall lurches back down, and a rising jump turns the dash into a float
 	-- extender. Kept as a constant rather than inlined so the trade is reversible in one edit.
 	AirVerticalResetsFall = true,
-	-- Constant downward bias applied once a dash's own flight LANDS mid-burst (every dash starts
-	-- airborne -- see CanEnter -- but one aimed downward, or simply a long one, can easily touch down
-	-- before its duration elapses), keeping the body in contact across small bumps instead of
-	-- skipping off them. Same value and same job as Slide.SurfaceStickSpeed.
-	SurfaceStickSpeed = 8,
+	-- NO SurfaceStickSpeed any more: a dash that lands mid-burst drives the horizontal plane only (see
+	-- States/Dashing.lua's Update), because a downward stick at the drive's force sinks a standing R6 body
+	-- into the floor.
 
 	-- The pitch, in degrees off level, that sorts a launch into the Up / Level / Down animation
 	-- bands. ANIMATION ONLY -- it has no effect on where the dash goes, which is the aim and nothing
@@ -1444,7 +1364,7 @@ ParkourConstants.Dash = {
 	AnimationPitchDegrees = 30,
 
 	-- A dash may be started from these states only. Data rather than a condition in States/Dashing.lua,
-	-- for the same reason Roll.AllowedFromStates is. Every entry here is already an AIRBORNE state --
+	-- for the same reason EvadeConstants.AllowedFromStates is. Every entry here is already an AIRBORNE state --
 	-- Dash's own CanEnter refuses unconditionally while context.Ground.Grounded (see its own comment),
 	-- so listing a grounded state (Idle, Walking, Sprinting, Landing, Sliding) would only ever be a dead
 	-- entry that could never actually pass. Jumping, Falling and WallLaunching are the three states a
@@ -1457,7 +1377,7 @@ ParkourConstants.Dash = {
 	-- above 130 could never actually be pre-empted into a dash. src/Tests/Parkour/StateRegistry.spec.lua
 	-- asserts both that relationship and that every key names a real registered state.
 	--
-	-- Deliberately absent: WallRunning, LedgeHanging, Vaulting, Mantling, Rolling, Leaping. The last
+	-- Deliberately absent: WallRunning, LedgeHanging, Vaulting, Mantling, Evading, Leaping. The last
 	-- five are Committed and therefore unreachable by route 2 regardless of what this table says;
 	-- WallRunning is not committed, but dashing out of a wall-run is that state's own call to make from
 	-- its Update, not this table's to grant behind its back.
@@ -1490,7 +1410,6 @@ ParkourConstants.Fall = {
 	-- Between SoftLandingHeight and this, a brief landing beat plays but control is never taken.
 	MediumLandingHeight = 22,
 	-- Above MediumLandingHeight, a real hard landing: a short recovery during which momentum is cut.
-	-- A correctly-timed roll (Roll.LandingWindowSeconds) skips this entirely.
 	HardLandingRecoverySeconds = 0.42,
 	-- Momentum retained through each landing severity.
 	SoftLandingRetainFraction = 1,
@@ -1619,7 +1538,7 @@ ParkourConstants.Assists = {
 	-- Smoothing of sub-StepMaxHeight geometry so small clutter never interrupts a sprint.
 	StepAssist = true,
 	-- How long an action input stays buffered waiting for its state to become available. Shared by
-	-- slide/vault/roll/wall-jump -- jump has its own, tighter Jump.BufferSeconds.
+	-- slide/vault/evade/wall-jump -- jump has its own, tighter Jump.BufferSeconds.
 	ActionBufferSeconds = 0.18,
 }
 
@@ -1643,7 +1562,7 @@ ParkourConstants.Camera = {
 	-- Camera dips slightly during a slide so the low stance reads.
 	SlideCameraDropStuds = 1.1,
 
-	-- Roll/wall-run camera tilt, in degrees, applied as camera roll. Small -- a big roll angle is
+	-- Wall-run camera tilt, in degrees, applied as camera roll. Small -- a big roll angle is
 	-- disorienting and, mid-fight, actively harmful.
 	WallRunTiltDegrees = 9,
 	WallRunTiltEaseSpeed = 7,
@@ -1757,16 +1676,6 @@ ParkourConstants.AnimationIds = {
 	WallJump = "rbxassetid://88023924827467",
 	WallJumpLeft = "rbxassetid://88023924827467",
 	WallJumpRight = "rbxassetid://75811078175435",
-	Roll = "rbxassetid://125167812303491",
-	-- Directional rolls, for a roll that KEEPS its facing -- in combat, or under shift lock (States/
-	-- Rolling publishes Forward/Back/Left/Right from the angle between travel and facing). All blank:
-	-- "authored later" (user action -- see this table's own header). A blank one falls through
-	-- ParkourAnimator's hasAsset check to Roll above, so an unauthored side plays the forward clip rather
-	-- than nothing, and each is a one-line id edit here when it exists.
-	RollForward = "",
-	RollBack = "",
-	RollLeft = "",
-	RollRight = "",
 	-- The dash, one clip per PITCH BAND of the launch aim -- States/Dashing.lua sorts the angle it
 	-- launched at into Up / Level / Down (Dash.AnimationPitchDegrees) and publishes that as its
 	-- AnimationVariant, once at Enter. Three bands rather than the five body-relative quadrants this
@@ -1818,7 +1727,7 @@ ParkourConstants.Animation = {
 
 	-- Per-clip overrides, named rather than written inline in the animator so blend feel stays tunable
 	-- from this file like every other movement number. The rule behind the three bands:
-	--   * SNAP -- an action whose FIRST FRAME is the readable moment. A wall-jump kick, a roll, a vault:
+	--   * SNAP -- an action whose FIRST FRAME is the readable moment. A wall-jump kick, an evade, a vault:
 	--     the pose that communicates what happened is at the start, and blending into it slowly means
 	--     the character is still half-standing when the informative frame goes past.
 	--   * SETTLE -- a loop the character SETTLES into and holds. A fall, a wall-run, a slide: nothing

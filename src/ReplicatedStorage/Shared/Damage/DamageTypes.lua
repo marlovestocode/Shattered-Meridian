@@ -67,6 +67,11 @@ export type AttackCatalogEntry = {
 	PowerLevel: number,
 	-- Whether this move may be feinted (MoveTypes.IsFeintable). Read by AttackRequestSystem.Feint.
 	Feintable: boolean,
+	-- The move whose clip this one borrows (Shared/Attack/AttackAnimations' BORROWED_FROM), or nil when it
+	-- plays its own. A borrowed clip is retimed to the move rather than the move to the clip, so anything
+	-- reading the clip's marker for THIS move must read it under the lender's id -- the Move Editor's
+	-- readout is the one reader today. Nothing in combat reads it after Get.
+	BorrowedFrom: string?,
 }
 
 -- How deep into an unbroken string an attacker is. Landing-based, and NOT the same counter as "which
@@ -139,6 +144,10 @@ export type CombatFeedback = {
 	-- event rather than a remote of its own because the defender's client must start it AFTER the
 	-- hit-stop freeze this same event triggers, and two remotes have no ordering guarantee.
 	Knockback: Vector3?,
+	-- The spacing push for the RECEIVING client's own body (DamageConstants.Spacing), on either role's copy:
+	-- the defender slid back, or the attacker following a hit / rebounding off a block. Horizontal only,
+	-- and only when that side is a player. Carried here for Knockback's ordering reason.
+	Push: Vector3?,
 	-- True on a Blocked contact that left the defender's guard CRACKING (DefenseConstants.GuardCrack) --
 	-- the cue for the heavier, hotter block sparks. Carried here rather than read off the
 	-- GuardCrack tag on arrival, for the same no-ordering-guarantee reason Knockback is: the
@@ -146,6 +155,10 @@ export type CombatFeedback = {
 	GuardCracking: boolean?,
 	-- True on a PERFECT parry (DefenseTypes.DefenseOutcome.Perfect) -- the cue for the heavier clash.
 	Perfect: boolean?,
+	-- The contact's part in an air combo, for the heavier presentation (Client/FX/AirComboFX.lua): "Launch",
+	-- "Hit" (an air beat), "Finisher", or "Clash" (an air parry -- its own effect, distinct from a ground
+	-- parry). Set by the air combo's damage hook (DamageSystem.SetAirComboHook); nil for every other contact.
+	AirCombo: string?,
 }
 
 return DamageTypes

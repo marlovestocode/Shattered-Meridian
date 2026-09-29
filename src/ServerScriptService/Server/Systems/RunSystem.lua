@@ -456,7 +456,7 @@ local function stepPlayer(player: Player, state: PlayerRunState, deltaTime: numb
 	-- EITHER a parkour action owns velocity OR the character is simply airborne. Those are not the
 	-- same condition: Reports-bearing states (vault, wall-run, wall-jump, ledge-climb, roll, leap)
 	-- claim ParkourVelocityOwned and were already covered, but States/LedgeHanging.lua, LedgeLeaping,
-	-- Jumping, Falling and AerialCombat never do -- so a ledge hang or a jump arc taken with Sprint
+	-- Jumping, Falling and CombatHeld never do -- so a ledge hang or a jump arc taken with Sprint
 	-- and a direction held used to charge (or drain) the ladder exactly as if the character were
 	-- still flat-out sprinting on the ground. Grounded closes that: any state that leaves the ground,
 	-- reported or not, is "not a stop" in the same sense a vault already was, and must not cost or

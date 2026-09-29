@@ -6,7 +6,7 @@
 	(Constants.Keybinds.GamepadModifier, ButtonL2 by default) is down, per
 	Constants.Keybinds.GamepadChords.
 
-	WHY A LAYER AT ALL. Read Constants.Keybinds.GamepadDefaults: Roll's comment and Leap's comment
+	WHY A LAYER AT ALL. Read Constants.Keybinds.GamepadDefaults: Evade's comment and Leap's comment
 	independently reached the same wall -- every face button, shoulder, stick click and D-pad
 	direction in this genre's convention family is already bound -- and Leap, Interact and GrabThrow
 	are live gameplay actions with no gamepad binding as a result. The two ways out were doubling two

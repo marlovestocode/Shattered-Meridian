@@ -2,7 +2,7 @@
 --[[
 	InputBuffer.lua
 
-	Owns: the local player's buffered parkour intents -- when jump, slide, roll, leap and dash were
+	Owns: the local player's buffered parkour intents -- when jump, slide, evade, leap and dash were
 	last pressed, whether slide is currently held, whether each buffered press is still live, and the
 	one intent that survives an arbitrarily long gap: a slide key held through a fall, re-armed as a
 	fresh press at the moment of touchdown (ArmHeldSlideOnLanding).
@@ -36,6 +36,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local EvadeConstants = require(ReplicatedStorage.Shared.Combat.EvadeConstants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
@@ -49,15 +50,15 @@ local InputBuffer = {}
 -- under --!strict, and so no caller can invent an intent by passing an arbitrary string.
 local jumpPressedAt = 0
 local slidePressedAt = 0
-local rollPressedAt = 0
+local evadePressedAt = 0
 -- The committed leap's own dedicated press -- see PressLeap/PeekLeap/ConsumeLeap below, which mirror
--- Roll's shape exactly. Leap used to be detected as a double-tap of jump instead of having a key of its
+-- Evade's shape exactly. Leap used to be detected as a double-tap of jump instead of having a key of its
 -- own -- that mechanism (a raw press-history timestamp plus a detected-gesture buffer, and a line inside
 -- ConsumeJump spending the gesture alongside an ordinary jump so the two inputs could not fire twice off
 -- one press) is gone along with it: a dedicated key needs none of that cross-consumption, because there
 -- is only ever one input to spend.
 local leapPressedAt = 0
--- The four-way dash's press (States/Dashing.lua). Mirrors Roll's shape exactly, and deliberately has
+-- The four-way dash's press (States/Dashing.lua). Mirrors Evade's shape exactly, and deliberately has
 -- no held counterpart the way slide does: a dash is a one-shot burst with an authored duration, so
 -- there is nothing for holding the key to extend.
 local dashPressedAt = 0
@@ -100,8 +101,8 @@ function InputBuffer.ReleaseSlide(): ()
 	slideHeld = false
 end
 
-function InputBuffer.PressRoll(now: number): ()
-	rollPressedAt = now
+function InputBuffer.PressEvade(now: number): ()
+	evadePressedAt = now
 end
 
 function InputBuffer.PressLeap(now: number): ()
@@ -163,7 +164,7 @@ end
 -- version is that this function is the "was jump pressed" test for wall-jumps, leaps, slide-jumps and
 -- ledge climb-ups, not just for buffered jumps.
 --
--- `enabled` is now unconditionally true here, exactly as PeekSlide/PeekRoll/PeekLeap already pass it --
+-- `enabled` is now unconditionally true here, exactly as PeekSlide/PeekEvade/PeekLeap already pass it --
 -- the preference is expressed entirely in which window it gets.
 function InputBuffer.PeekJump(now: number): boolean
 	local window = if assists.JumpBuffer
@@ -204,24 +205,17 @@ function InputBuffer.ConsumeSlide(now: number): boolean
 	return true
 end
 
--- `window` overrides the shared ActionBufferSeconds for ONE caller: the landing roll, which asks with
--- ParkourConstants.Roll.LandingWindowSeconds on the frame of ground contact (States/Falling.Update,
--- through StateSupport.CanRoll). That window is the roll's own tuning -- how early before touchdown a
--- press still counts as rolling out of the fall -- and borrowing the shared buffer for it would tie a
--- landing-skill number to the generic "I pressed a frame early" forgiveness every other intent uses.
--- Every ordinary roll leaves it nil.
-function InputBuffer.PeekRoll(now: number, window: number?): boolean
-	return ParkourMath.BufferLive(now, rollPressedAt, window or ParkourConstants.Assists.ActionBufferSeconds, true)
+-- The evade's press (States/Evading.lua), live for EvadeConstants.BufferSeconds -- a combat input's
+-- buffer, matching the attack press, rather than parkour's shorter shared window. See that constant.
+function InputBuffer.PeekEvade(now: number): boolean
+	return ParkourMath.BufferLive(now, evadePressedAt, EvadeConstants.BufferSeconds, true)
 end
 
--- Takes the same optional window as PeekRoll, so a press admitted under the landing window is also
--- SPENT under it. Consuming with the shorter default would find a 0.19s-old press already expired, leave
--- it unconsumed, and hand it to the next caller that asks with the wider window.
-function InputBuffer.ConsumeRoll(now: number, window: number?): boolean
-	if not InputBuffer.PeekRoll(now, window) then
+function InputBuffer.ConsumeEvade(now: number): boolean
+	if not InputBuffer.PeekEvade(now) then
 		return false
 	end
-	rollPressedAt = 0
+	evadePressedAt = 0
 	return true
 end
 
@@ -252,7 +246,7 @@ end
 function InputBuffer.Clear(): ()
 	jumpPressedAt = 0
 	slidePressedAt = 0
-	rollPressedAt = 0
+	evadePressedAt = 0
 	leapPressedAt = 0
 	dashPressedAt = 0
 	slideHeld = false

@@ -27,9 +27,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 -- onto Constants.Attributes.DefenseState, not a second definition of the string -- see that field's
 -- own header.
 local Constants = require(ReplicatedStorage.Shared.Constants)
--- For Evade.CooldownSeconds only, which is derived from the roll's own cooldown -- see that field.
--- ParkourConstants has no requires of its own, so this cannot form a cycle.
-local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
+-- For the Evade table, which derives every number from the glide it covers -- see that table.
+-- EvadeConstants has no requires of its own, so this cannot form a cycle.
+local EvadeConstants = require(ReplicatedStorage.Shared.Combat.EvadeConstants)
 
 local DefenseConstants = {}
 
@@ -88,6 +88,16 @@ DefenseConstants.Guard = {
 	-- here as a named zero rather than an implicit one so the intent is greppable: two players with
 	-- depleted guards must not be able to parry each other on purpose to refill.
 	TradeRestore = 0,
+
+	-- HOW THE OWNING CLIENT'S GUARD READOUT STAYS TRUE (DefenseSystem's syncGuard). The pool changes in
+	-- places that are not state transitions -- it REGENERATES every frame, and a blocked hit drains it
+	-- while the state stays Blocking -- and those used to reach the HUD only when some unrelated
+	-- transition happened to resend the number, so the guard gauge sat wrong for seconds at a time.
+	-- Now any change is pushed, at most once per SyncIntervalSeconds, and at once when the pool reaches
+	-- empty or full so the end states are never late. The HUD's own spring smooths between pushes.
+	SyncIntervalSeconds = 0.2,
+	-- Changes smaller than this are not worth a push on their own (they still ride the next one).
+	SyncMinDelta = 1,
 }
 
 -- Guard cracking -----------------------------------------------------------------------------------
@@ -118,6 +128,15 @@ DefenseConstants.GuardCrack = {
 	EnterFraction = 0.3,
 	ExitFraction = 0.36,
 	Tag = "GuardCracking",
+}
+
+-- Every combatant's guard as a fraction of its max, published on this Humanoid Attribute for EVERY client
+-- (DefenseSystem's publishGuardFraction). The owner still gets exact numbers on its own remote; this is how
+-- an opponent's guard reaches the lock-on marker. Steps is how finely it is quantised before replicating:
+-- 20 is a 5% bar step, invisible at the marker's width and at most 20 writes per full regen.
+DefenseConstants.GuardFraction = {
+	Attribute = "GuardFraction",
+	Steps = 20,
 }
 
 -- Punish -------------------------------------------------------------------------------------------
@@ -230,43 +249,61 @@ DefenseConstants.PerfectParry = {
 	StaggerSeconds = DefenseConstants.Stagger.DurationSeconds + 0.3,
 }
 
+-- Rally --------------------------------------------------------------------------------------------
+
+-- PARRY TRADING. A parried attacker may parry back: the stagger still forbids attacking and still
+-- parks their movement, but it no longer forbids arming a parry, so the parrier's counter can itself
+-- be parried and the exchange can go back and forth. Landing a parry out of a stagger ends that
+-- stagger on the spot -- you won the exchange -- and staggers the other side in turn. A whiff out of
+-- a stagger pays the ordinary whiff lockout and drops straight back into the stagger it came from.
+--
+-- EACH PARRY IN AN UNBROKEN RALLY SHRINKS THE NEXT WINDOW. Same clip, same opening moment -- only the
+-- DURATION (Close - Open) is multiplied by WindowScalePerParry for every parry already traded between
+-- the two, down to MinWindowScale. The perfect-parry band shrinks with it, so it stays the same
+-- fraction of the window. The ping refund (Parry.PingCompensationMaxSeconds) is NOT scaled: it pays
+-- back latency, which does not shrink because the exchange got longer.
+--
+-- Against the shipped 0.2s window: 0.2 -> 0.16 -> 0.128 -> 0.102 -> 0.082 -> 0.07 (floor).
+--
+-- A rally is between TWO combatants and lapses after LapseSeconds with no parry between them, or the
+-- moment either one takes a clean hit, a backstab or a guard break. Longer than the longest stagger
+-- (PerfectParry.StaggerSeconds, 1.8), so a counter thrown at the very end of a punish still counts as
+-- the same rally.
+DefenseConstants.Rally = {
+	ParryFromStagger = true,
+	WindowScalePerParry = 0.8,
+	MinWindowScale = 0.35,
+	LapseSeconds = 2.5,
+}
+
 -- Evade ---------------------------------------------------------------------------------------------
 
--- THE ROLL'S EVADE FRAMES. A contact landing inside the window resolves to OutcomeKind "Evaded" --
--- no damage, no guard change, no stun -- regardless of bearing. Opened by DefenseSystem.BeginEvade,
--- which the composition root calls when ParkourSystem accepts a Roll start (Main.server.lua), so the
--- trigger is the roll report the client already sends and no remote was added for it.
+-- THE EVADE'S FRAMES. A contact landing inside the window resolves to OutcomeKind "Evaded" -- no damage,
+-- no guard change, no stun -- regardless of bearing. Opened by DefenseSystem.BeginEvade, which the
+-- composition root calls when ParkourSystem accepts an Evade start (Main.server.lua), so the trigger is
+-- the evade report the client already sends and no remote was added for it.
 --
 -- A FIXED SHAPE, NOT A CLIP'S MARKERS, and that is consistent with this file's own rule rather than an
--- exception to it: the parry window lives on an asset because the parry IS its animation. The roll's
--- clip is a shared placeholder today and the directional clips are not authored yet, so there is no
--- asset whose keyframes could be the authority. If that changes, this is the table that moves.
+-- exception to it: the parry window lives on an asset because the parry IS its animation. The evade is a
+-- glide with no required clip at all (EvadeConstants.AnimationIds are optional), so there is no asset
+-- whose keyframes could be the authority.
 --
--- Three phases, counted from the moment the server ACCEPTS the roll:
---   startup   -- vulnerable. The commitment tax: a roll pressed on the frame the swing lands does
---                not escape it, which is what keeps evading a read rather than a reflex mash.
---   active    -- evading.
---   recovery  -- vulnerable again for the rest of the roll. Nothing to author: it is simply the roll
---                continuing after the window closes, and ParkourOwnership already refuses attacks
---                and guards for its whole length.
+-- DERIVED, NOT RESTATED: every number comes from Shared/Combat/EvadeConstants.lua, which owns the glide
+-- these frames cover. Retuning the glide retunes the frames with it; two independently-authored copies
+-- would drift the first time one was tuned.
+--   startup   -- vulnerable (0 today: a press anywhere in an opponent's windup covers the hit).
+--   active    -- evading. Outlasts the glide, so the whole move is covered.
+--   recovery  -- vulnerable again. Nothing to author: the glide is over by then, and ParkourOwnership
+--                refuses attacks and guards for as long as the evade report is open.
 DefenseConstants.Evade = {
-	StartupSeconds = 0.06,
-	ActiveSeconds = 0.25,
-
-	-- The server opens the window when the roll report ARRIVES, one-way latency after the player
-	-- pressed -- the same double charge the parry refunds, refunded the same way and under the same
-	-- cap (Parry.PingCompensationMaxSeconds), because a client-influenced number is exactly as
-	-- untrustworthy here as there. Extends the END only; a refund that also opened the window early
-	-- would let a high-ping player's roll start evading before it began.
-	PingCompensationMaxSeconds = 0.12,
-
-	-- Minimum gap between two accepted evades. The ROLL'S cooldown, minus a tolerance for the jitter
-	-- between two reports that left the client exactly one cooldown apart. Derived rather than
-	-- restated so retuning the roll moves the evade with it: the whole design is "the cooldown is the
-	-- cost", and two independently-authored numbers for one cost would drift the first time one was
-	-- tuned. The client's own cooldown (States/Rolling) is the real gate for an honest client; this is
-	-- the server refusing a client that skips it.
-	CooldownSeconds = math.max(ParkourConstants.Roll.CooldownSeconds - 0.15, 0),
+	StartupSeconds = EvadeConstants.Frames.StartupSeconds,
+	ActiveSeconds = EvadeConstants.Frames.ActiveSeconds,
+	-- The server opens the window when the report ARRIVES, one-way latency after the player pressed -- the
+	-- same double charge the parry refunds, refunded the same way and under the same cap. Extends the END
+	-- only; a refund that also opened the window early would let a high-ping evade start before it began.
+	PingCompensationMaxSeconds = EvadeConstants.Frames.PingCompensationMaxSeconds,
+	-- Minimum gap between two accepted evades: the client's cooldown minus a jitter tolerance.
+	CooldownSeconds = math.max(EvadeConstants.CooldownSeconds - EvadeConstants.ServerCooldownToleranceSeconds, 0),
 }
 
 -- Animation ------------------------------------------------------------------------------------------

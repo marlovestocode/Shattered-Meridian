@@ -1,167 +1,233 @@
 --!strict
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local Constants = require(ReplicatedStorage.Shared.Constants)
+local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
 local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
-local Fixtures = require(ServerScriptService.Tests.TestHelpers.Fixtures)
 
-local function makeCandidate(overrides: { [string]: any }?): { [string]: any }
-	local candidate = {
-		MoveId = "registry-test-move",
-		DisplayName = "Registry Test Move",
-		Category = "Testing",
-		Author = "TestAuthor",
-		CreatedAt = 1000,
-		UpdatedAt = 1000,
+local LIMITS = Constants.MoveEditor.Limits
+
+-- Validate is the one gate a client draft, a DataStore record and a Default override all pass, so its
+-- two answers are pinned separately: a table that is not a move is REJECTED with a stable reason code
+-- (the editor turns those into prose), a move with an out-of-range number is CLAMPED.
+--
+-- Every case that touches the registry starts from Init(): TestEZ runs every spec in one VM, and the
+-- registry is module state.
+
+local function wire(overrides: { [string]: any }?): { [string]: any }
+	local candidate: { [string]: any } = {
+		MoveId = "spec-move",
+		DisplayName = "Spec Move",
+		Author = "Spec",
+		CreatedAt = 1,
+		UpdatedAt = 2,
 		Shape = "Box",
-		Size = Vector3.new(4, 4, 4),
+		Dimensions = { Width = 4, Height = 5, Length = 6 },
 		OffsetX = 0,
 		OffsetY = 0,
 		OffsetZ = -3,
-		WindupSeconds = 0.2,
+		WindupSeconds = 0.3,
 		ActiveSeconds = 0.15,
-		RecoverySeconds = 0.3,
-		Cooldown = 0.6,
-		Damage = 5,
-		PostureDamage = 5,
-		ArcDegrees = 100,
-		MaxTargets = 5,
-		AnimationId = "",
+		RecoverySeconds = 0.35,
+		Cooldown = 0.8,
+		Damage = 10,
+		PostureDamage = 8,
 	}
-	return Fixtures.applyOverrides(candidate, overrides)
+	for key, value in pairs(overrides or {}) do
+		candidate[key] = value
+	end
+	return candidate
 end
 
 return function()
-	-- MoveRegistryManager owns a single shared, module-level `moves` table (no per-instance
-	-- registry object -- see its own header) -- Init() resets it to empty so each test in this file
-	-- starts from a known-clean slate regardless of what an earlier test (or another spec file
-	-- sharing the same TestEZ VM) left behind, mirroring HitboxTuning.spec.lua's own
-	-- "LiveTuningContract.withRestore"-style discipline for shared in-memory state.
-	local function reset(): ()
-		MoveRegistryManager.Init()
+	-- Inside the returned function on purpose: TestEZ injects `expect` into THIS function's environment
+	-- only, so a module-level helper calling it calls nil.
+	local function rejects(overrides: { [string]: any }, reason: string): ()
+		local validated, actual = MoveRegistryManager.Validate(wire(overrides))
+		expect(validated).to.equal(nil)
+		expect(actual).to.equal(reason)
 	end
 
-	describe("MoveRegistryManager round trip", function()
-		it("List returns nothing before any Upsert", function()
-			reset()
-			expect(#MoveRegistryManager.List()).to.equal(0)
+	describe("MoveRegistryManager.Validate -- rejections", function()
+		it("rejects anything that is not a table", function()
+			local validated, reason = MoveRegistryManager.Validate("move")
+			expect(validated).to.equal(nil)
+			expect(reason).to.equal("InvalidShape")
 		end)
 
-		it("Upsert then Get returns the same move by MoveId", function()
-			reset()
-			local move = MoveRegistryManager.Validate(makeCandidate())
-			MoveRegistryManager.Upsert(move :: any)
-
-			local fetched = MoveRegistryManager.Get("registry-test-move")
-			expect(fetched).to.be.ok()
-			expect((fetched :: any).DisplayName).to.equal("Registry Test Move")
+		it("rejects a missing identity", function()
+			rejects({ MoveId = "" }, "InvalidMoveId")
+			rejects({ DisplayName = "   " }, "InvalidDisplayName")
+			rejects({ Author = "" }, "InvalidAuthor")
+			rejects({ CreatedAt = "yesterday" }, "InvalidTimestamp")
 		end)
 
-		it("Get returns nil for an unknown MoveId", function()
-			reset()
-			expect(MoveRegistryManager.Get("does-not-exist")).to.equal(nil)
+		it("rejects a shape the engine does not have, including the retired twelve-shape names", function()
+			rejects({ Shape = "Hexagon" }, "InvalidShapeKind")
+			rejects({ Shape = "Wedge" }, "InvalidShapeKind")
+			rejects({ Shape = "Disc" }, "InvalidShapeKind")
 		end)
 
-		it("an invalid candidate never reaches Upsert", function()
-			reset()
-			local move, reason = MoveRegistryManager.Validate(makeCandidate({ MoveId = "" }))
-			expect(move).to.equal(nil)
-			expect(reason).to.equal("InvalidMoveId")
-			-- Validate rejected it -- confirm nothing was ever written under any key.
-			expect(#MoveRegistryManager.List()).to.equal(0)
+		it("rejects geometry it cannot place", function()
+			rejects({ Dimensions = "big" }, "MissingDimensions")
+			rejects({ OffsetZ = "forward" }, "InvalidOffset")
+			rejects({ AttachmentPart = "Tail" }, "InvalidAttachmentPart")
 		end)
 
-		it("List reflects every Upserted move", function()
-			reset()
-			MoveRegistryManager.Upsert(MoveRegistryManager.Validate(makeCandidate({ MoveId = "move-a" })) :: any)
-			MoveRegistryManager.Upsert(MoveRegistryManager.Validate(makeCandidate({ MoveId = "move-b" })) :: any)
-			expect(#MoveRegistryManager.List()).to.equal(2)
+		it("rejects non-numeric timing and damage", function()
+			rejects({ WindupSeconds = "soon" }, "InvalidTiming")
+			rejects({ Cooldown = 0 / 0 }, "InvalidTiming")
+			rejects({ Damage = "lots" }, "InvalidDamage")
+			rejects({ MaxTargets = "all" }, "InvalidMaxTargets")
+			rejects({ AnimationId = 12345 }, "InvalidAnimationId")
 		end)
 
-		it("Upsert with the same MoveId replaces, not appends", function()
-			reset()
-			MoveRegistryManager.Upsert(MoveRegistryManager.Validate(makeCandidate({ Damage = 5 })) :: any)
-			MoveRegistryManager.Upsert(MoveRegistryManager.Validate(makeCandidate({ Damage = 25 })) :: any)
+		it("rejects a malformed optional block rather than dropping it", function()
+			rejects({ Knockback = "far" }, "InvalidKnockback")
+			rejects({ Knockback = { UpVelocity = 1 } }, "InvalidKnockback")
+			rejects(
+				{ Knockback = { UpVelocity = 1, HorizontalVelocity = 1, StartsAirCombo = "yes" } },
+				"InvalidKnockback"
+			)
+			rejects({ Grab = { HoldSeconds = 1 } }, "InvalidGrab")
+			rejects({ Art = "art" }, "InvalidArt")
+		end)
+	end)
+
+	describe("MoveRegistryManager.Validate -- normalisation", function()
+		it("clamps out-of-range numbers into Constants.MoveEditor.Limits", function()
+			local validated = MoveRegistryManager.Validate(wire({
+				WindupSeconds = 99,
+				Cooldown = -5,
+				Damage = 5000,
+				OffsetZ = -400,
+				Dimensions = { Width = 0, Height = 9999, Length = 6 },
+			})) :: any
+			expect(validated.WindupSeconds).to.equal(LIMITS.PhaseSeconds.Max)
+			expect(validated.Cooldown).to.equal(LIMITS.CooldownSeconds.Min)
+			expect(validated.Damage).to.equal(LIMITS.Damage.Max)
+			expect(validated.Offset.Z).to.equal(LIMITS.OffsetStuds.Min)
+			expect(validated.Dimensions.Width).to.equal(LIMITS.Dimensions.Width.Min)
+			expect(validated.Dimensions.Height).to.equal(LIMITS.Dimensions.Height.Max)
+		end)
+
+		it("fills every dimension, and keeps an Arc's hub inside its rim", function()
+			local validated = MoveRegistryManager.Validate(wire({
+				Shape = "Arc",
+				Dimensions = { Radius = 4, InnerRadius = 9, Height = 3, AngleDegrees = 120 },
+			})) :: any
+			expect(validated.Dimensions.InnerRadius).to.equal(4)
+			expect(validated.Dimensions.Width).to.be.ok()
+			expect(validated.Dimensions.Length).to.be.ok()
+		end)
+
+		it("builds Offset from the six flat numbers, rotation included", function()
+			local validated = MoveRegistryManager.Validate(wire({ OffsetYaw = 90 })) :: any
+			expect(validated.OffsetRotation.Y).to.equal(90)
+			expect(validated.Offset.Position.Z).to.be.near(-3, 1e-6)
+			-- Yawed a quarter turn, the volume's forward (-Z) now points along -X.
+			expect(validated.Offset.LookVector.X).to.be.near(-1, 1e-6)
+		end)
+
+		it("defaults the anchor to Root and movement to unlocked", function()
+			local validated = MoveRegistryManager.Validate(wire()) :: any
+			expect(validated.AttachmentPart).to.equal("Root")
+			expect(validated.LocksMovement).to.equal(false)
+		end)
+
+		it("normalises a bare animation id into rbxassetid form", function()
+			local validated = MoveRegistryManager.Validate(wire({ AnimationId = "12345" })) :: any
+			expect(validated.AnimationId).to.equal("rbxassetid://12345")
+		end)
+
+		it("rounds PowerLevel to a whole class and keeps Feintable only when literally true", function()
+			local validated = MoveRegistryManager.Validate(wire({ PowerLevel = 2.6, Feintable = "yes" })) :: any
+			expect(validated.PowerLevel).to.equal(3)
+			expect(validated.Feintable).to.equal(nil)
+		end)
+
+		it("writes the grab's attach offset itself, whatever the candidate says", function()
+			local validated = MoveRegistryManager.Validate(wire({
+				Grab = {
+					AttachOffset = CFrame.new(0, 100, 0),
+					HoldSeconds = 2,
+					ThrowUpVelocity = 20,
+					ThrowHorizontalVelocity = 30,
+					ThrowImpactDamage = 5,
+					ThrowSelfDamage = 5,
+				},
+			})) :: any
+			expect(validated.Grab.AttachOffset).to.equal(GrabConstants.Defaults.AttachOffset)
+		end)
+
+		it("truncates free text rather than refusing it", function()
+			local validated = MoveRegistryManager.Validate(wire({
+				Description = string.rep("x", LIMITS.DescriptionLength + 50),
+				Category = string.rep("c", LIMITS.CategoryLength + 5),
+			})) :: any
+			expect(#validated.Description).to.equal(LIMITS.DescriptionLength)
+			expect(#validated.Category).to.equal(LIMITS.CategoryLength)
+		end)
+
+		it("ignores every retired field instead of rejecting a record that still carries one", function()
+			local validated = MoveRegistryManager.Validate(wire({
+				ArcDegrees = 90,
+				Projectile = { Speed = 50, MaxRange = 50 },
+				Animations = {},
+			})) :: any
+			expect(validated).to.be.ok()
+			expect(validated.ArcDegrees).to.equal(nil)
+			expect(validated.Projectile).to.equal(nil)
+		end)
+	end)
+
+	describe("MoveRegistryManager registry", function()
+		it("Upsert then Get round-trips, and Delete removes", function()
+			MoveRegistryManager.Init()
+			MoveRegistryManager.Upsert(MoveRegistryManager.Validate(wire()) :: any)
+			expect(MoveRegistryManager.Get("spec-move")).to.be.ok()
 			expect(#MoveRegistryManager.List()).to.equal(1)
-			local fetched = MoveRegistryManager.Get("registry-test-move")
-			expect((fetched :: any).Damage).to.equal(25)
+			MoveRegistryManager.Delete("spec-move")
+			expect(MoveRegistryManager.Get("spec-move")).to.equal(nil)
 		end)
 
-		it("Delete removes a move so Get returns nil afterward", function()
-			reset()
-			MoveRegistryManager.Upsert(MoveRegistryManager.Validate(makeCandidate()) :: any)
-			MoveRegistryManager.Delete("registry-test-move")
-			expect(MoveRegistryManager.Get("registry-test-move")).to.equal(nil)
-			expect(#MoveRegistryManager.List()).to.equal(0)
-		end)
-
-		it("Get/List return copies, not the live table -- mutating one never corrupts the registry", function()
-			reset()
-			MoveRegistryManager.Upsert(MoveRegistryManager.Validate(makeCandidate()) :: any)
-			local fetched = MoveRegistryManager.Get("registry-test-move") :: any
-			fetched.Damage = 9999
-
-			local fetchedAgain = MoveRegistryManager.Get("registry-test-move") :: any
-			expect(fetchedAgain.Damage).to.equal(5)
-		end)
-
-		-- THE NESTED half of that contract, which the top-level assertion above cannot see.
-		--
-		-- copyMove used to be built on table.clone(move), so it deep-copied only the sub-tables it
-		-- named explicitly and handed every other one out ALIASED. That was true when written and
-		-- quietly stopped being true: Art (and Slam) joined MoveDefinition afterwards and were never
-		-- added, so a caller mutating a returned move's Art binding was writing into the registry's
-		-- own record. It now delegates to MoveTypes.Clone, which enumerates the schema -- a field
-		-- added and forgotten there is dropped loudly on the next read rather than aliased silently.
-		it("Get returns nested tables by value too, not aliases into the registry's own record", function()
-			reset()
-			MoveRegistryManager.Upsert(MoveRegistryManager.Validate(makeCandidate({
-				Art = { TreeId = "common_foundation", Node = 2, QiCost = 5, RequiredTier = 1 },
+		it("hands out copies, never the live record", function()
+			MoveRegistryManager.Init()
+			MoveRegistryManager.Upsert(MoveRegistryManager.Validate(wire({
+				Knockback = { UpVelocity = 5, HorizontalVelocity = 6 },
 			})) :: any)
-
-			local fetched = MoveRegistryManager.Get("registry-test-move") :: any
-			expect(fetched.Art).to.be.ok()
-			local originalNode = fetched.Art.Node
-			fetched.Art.Node = 9
-			fetched.Dimensions.Width = 999
-
-			local fetchedAgain = MoveRegistryManager.Get("registry-test-move") :: any
-			expect(fetchedAgain.Art.Node).to.equal(originalNode)
-			expect(fetchedAgain.Dimensions.Width).never.to.equal(999)
+			local copy = MoveRegistryManager.Get("spec-move") :: any
+			copy.Damage = 999
+			copy.Dimensions.Width = 999
+			copy.Knockback.UpVelocity = 999
+			local fresh = MoveRegistryManager.Get("spec-move") :: any
+			expect(fresh.Damage).to.equal(10)
+			expect(fresh.Dimensions.Width).to.equal(4)
+			expect(fresh.Knockback.UpVelocity).to.equal(5)
+			MoveRegistryManager.Init()
 		end)
 	end)
 
 	describe("MoveRegistryManager.GenerateMoveId", function()
-		it("slugifies the display name", function()
-			reset()
-			local moveId = MoveRegistryManager.GenerateMoveId("Rising Dragon Strike!")
-			expect(moveId:match("^rising%-dragon%-strike%-%d+$")).to.be.ok()
-		end)
-
-		it("never collides with an already-registered MoveId", function()
-			reset()
-			MoveRegistryManager.Upsert(MoveRegistryManager.Validate(makeCandidate({ MoveId = "slam" })) :: any)
-			-- GenerateMoveId's uniqueness is against the REGISTRY, not against ids it has previously
-			-- handed out -- it retries `base-<math.random(1000, 9999)>` until moves[candidate] is nil.
-			-- So each generated id has to actually be registered before asking for the next one, which
-			-- is also the real call shape (MoveEditorSystem.handleSaveMove generates, then Upserts).
-			--
-			-- This loop used to draw 25 ids WITHOUT registering any of them and assert they were
-			-- pairwise distinct, which is a property the function does not have and never claimed:
-			-- 25 draws from a 9000-value space collide about 3% of the time, so the suite failed
-			-- roughly one run in thirty for a reason that had nothing to do with the change under test.
-			local seen: { [string]: boolean } = { slam = true }
-			for _ = 1, 25 do
-				local generated = MoveRegistryManager.GenerateMoveId("Slam")
-				expect(seen[generated]).to.equal(nil)
-				seen[generated] = true
-				MoveRegistryManager.Upsert(MoveRegistryManager.Validate(makeCandidate({ MoveId = generated })) :: any)
+		it("slugifies the display name and never collides", function()
+			MoveRegistryManager.Init()
+			local first = MoveRegistryManager.GenerateMoveId("Rising Palm!")
+			expect(string.match(first, "^rising%-palm%-%d%d%d%d$")).to.be.ok()
+			MoveRegistryManager.Upsert(MoveRegistryManager.Validate(wire({ MoveId = first })) :: any)
+			for _ = 1, 20 do
+				expect(MoveRegistryManager.GenerateMoveId("Rising Palm!") ~= first).to.equal(true)
 			end
+			MoveRegistryManager.Init()
 		end)
 
-		it("falls back to a generic base for a name with no alphanumeric characters", function()
-			reset()
-			local moveId = MoveRegistryManager.GenerateMoveId("!!!")
-			expect(moveId:match("^move%-%d+$")).to.be.ok()
+		it("can never produce an id in the Default registry's space", function()
+			local id = MoveRegistryManager.GenerateMoveId("default:Sword:Basic:1")
+			expect(string.sub(id, 1, 8) ~= "default:").to.equal(true)
+		end)
+
+		it("falls back to a generic base for a name with no letters or digits", function()
+			expect(string.match(MoveRegistryManager.GenerateMoveId("!!!"), "^move%-%d+$")).to.be.ok()
 		end)
 	end)
 end

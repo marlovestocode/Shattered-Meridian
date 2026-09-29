@@ -4,26 +4,23 @@
 
 	Owns: the hand-authored combat content and physics-feel numbers every weapon/finisher/dash/air
 	attack in the game is built from -- MaxHealth/MaxPosture and block mitigation, the Basic/Heavy/
-	Finisher move catalog per weapon (Weapons), the three standalone attacks (DashPunch/DashHit/
-	AirSlam), the air-combo juggle window (AirCombo), finisher/ragdoll launch physics (Finisher/
+	Finisher move catalog per weapon (Weapons) -- the air combo's Launcher/Air/AirFinisher moves among
+	them -- the two standalone attacks (DashPunch/DashHit), finisher/ragdoll launch physics (Finisher/
 	Ragdoll), and the wired-but-unauthored animation/sound registrations (AnimationIds/Sound) that go
 	with all of it. Extracted from Shared/Constants.lua (formerly Constants.Combat) for two reasons,
 	not one:
 
-	  * IT IS THE MOVE CREATION SYSTEM'S OWN LIVE DATA, not settled canon. Server/Combat/
-	    DefaultMoveRegistry.lua's ApplyEdit/Reset mutate Weapons[...].Stages/DashPunch/DashHit/AirSlam
-	    directly, BY REFERENCE, from the Move Editor's live admin remotes -- so this table is read and
-	    rewritten by a real system at runtime, in a live server, not just hand-edited between deploys.
-	    A module named "Constants" holding something a running server rewrites is exactly the surprise
-	    docs/architecture/2026-08-audit.md section 5's "Constants facade/replication split" finding
-	    (3.4) called out.
+	  * IT IS THE MOVE EDITOR'S DEFAULT CONTENT, not settled canon. Every stage here is a "Default"
+	    move an admin can retune live (Server/Combat/DefaultMoveRegistry.lua). Since the 2026-09-29
+	    rebuild that retune is an OVERRIDE LAYERED ON TOP of these tables rather than a write into
+	    them -- nothing at runtime mutates this module any more -- but it is still content a live
+	    server re-shapes, which is why it lives apart from the game's central constants.
 	  * IT MATCHES THE PRECEDENT THE REST OF COMBAT ALREADY SET. AttackConstants.lua/DamageConstants.lua/
 	    DefenseConstants.lua/HitboxEngineConstants.lua each already left Shared/Constants.lua as their
 	    own standalone module, specifically so each layer "is a module, and a module that can be added
 	    or removed without editing the game's central constants table is the concrete form of that
 	    claim" (AttackConstants.lua's own header). This was the one remaining piece of the pre-rewrite
-	    CombatSystem.lua's own config that hadn't followed suit -- not overlooked, just not forced until
-	    DefaultMoveRegistry.lua's live-tuning need made the runtime-mutation problem concrete.
+	    CombatSystem.lua's own config that hadn't followed suit.
 
 	Does not own: the Attack layer's cross-move relationship tunables (AttackConstants.lua), hitstun/
 	combo-window length (DamageConstants.lua), stagger/parry (DefenseConstants.lua), or contact
@@ -92,7 +89,7 @@ local SWING_HITBOX = {
 	--             Offset below verbatim.
 	-- "Blade"   -- the previous behaviour: anchor to the equipped weapon's Blade part and take the
 	--             swing's dimensions from that part's own live Size. The per-stage Size/Offset lines
-	--             below go vestigial in that mode, read only by the Move Editor's preview.
+	--             below go vestigial in that mode, read only by the Move Editor's readout.
 	-- Read by Server/Combat/DefaultMoveRegistry.lua (which anchor it hands the engine) and by
 	-- Shared/Combat/WeaponRoster.lua (whether WeaponReach still scales the box).
 	Mode = "BodyBox" :: "BodyBox" | "Blade",
@@ -146,9 +143,8 @@ local SWING_HITBOX = {
 -- front of the hand (-0.25, matching the Weapons hitboxes' own front-loaded convention below). Paired
 -- with each definition's Size.Z shrinking from 7 to 4.25 (half-reach 2.125) to match -- the box is
 -- now front-loaded instead of hand-centered. A tuning number per combat-philosophy.md's Tuning
--- process -- adjust freely after a playtest (MoveRegistryManager's own CLAMP_MIN/MAX_OFFSET_STUDS,
--- reused by Server/Combat/DefaultMoveRegistry.lua's Validate-backed ApplyEdit, already cover a much
--- wider range than this for the Move Editor's live Default-move tuner).
+-- process -- adjust freely after a playtest (Constants.MoveEditor.Limits.OffsetStuds, which the Move
+-- Editor's Default-move overrides are clamped to, already covers a much wider range than this).
 local HandTrackedOffset = CFrame.new(0, 0, -2.375)
 
 -- CombatSystem's first-pass technical tunables (software-architecture.md's CombatSystem
@@ -534,7 +530,6 @@ local CombatConstants = {
 		Damage = 8,
 		PostureDamage = 10,
 		Cooldown = 4,
-		ArcDegrees = 100,
 		-- 1, NOT the 3 every other multi-target hitbox uses -- DashPunch is a LAUNCHER, and both
 		-- weapons' own Finishers already establish the rule this now follows ("a launcher commits to
 		-- one foe, not a crowd-clear", see each Finisher's MaxTargets = 1). At 3 this was the single
@@ -556,7 +551,7 @@ local CombatConstants = {
 	-- combo; DashHit is what an ordinary forward dash "always has strapped to the end of it" --
 	-- weaker damage/posture, one fewer max target, and no air-combo hook at all (its DebugName never
 	-- matches applyAirCombo's "DashPunch" launch condition -- see that function's own header). Same
-	-- Size/Offset/ArcDegrees as DashPunch (a punch's physical reach doesn't need to differ by how it
+	-- Size/Offset as DashPunch (a punch's physical reach doesn't need to differ by how it
 	-- was triggered -- both also hand-tracked, see HandTrackedOffset's own header and
 	-- CombatSystem.lua's resolveAttackHandPart); Damage/PostureDamage/MaxTargets scaled down to
 	-- reflect that this is the free, always-available version, not the cooldown-gated,
@@ -577,182 +572,16 @@ local CombatConstants = {
 		Damage = 5,
 		PostureDamage = 6,
 		Cooldown = 0.8,
-		ArcDegrees = 100,
 		MaxTargets = 2,
 	},
 
-	-- AirSlam's own HitboxAttackDefinition -- pressing Basic Attack (M1) while airborne, at ANY time
-	-- (no M1 combo prerequisite), throws this standalone move instead of continuing the grounded
-	-- Basic string -- see CombatSystem.lua's handleAirSlamRequest/throwAirSlam, modeled directly on
-	-- DashPunch/DashHit just above (a real move thrown via onSwingHitCandidate directly, never
-	-- startAttackSwing, so it can never touch basicComboLanded/basicAttackReadyAt -- landing or
-	-- whiffing an air slam has zero effect on the grounded M1 string, and vice versa). A clean
-	-- (non-blocked, non-parried) hit always resolves with FinisherVariant = "Downslam"
-	-- (HitResolution.ApplyFinisherPhysics), reusing Finisher.Downslam's own SlamToGround knockback
-	-- and letting CombatAnimator's existing finisherTrackName("Downslam") resolution pick the
-	-- animation -- no separate physics/animation plumbing needed for this move.
-	--
-	-- Own real cooldown (CombatState.airSlamReadyAt), same "a move that hits hard AND launches needs
-	-- a real gate, not a free spam option" reasoning as DashPunch.Cooldown's own header -- jumping is
-	-- free (no Stamina), so without this a player could throw one on every hop. Damage/PostureDamage
-	-- sit between a Basic3 and a Heavy1 (a committed, telegraphed hit, not a routine combo stage);
-	-- hand-tracked Offset (see HandTrackedOffset's own header) and a taller Size than a ground swing
-	-- since the attacker is airborne and the target is typically at or near ground level.
-	-- First-pass technical values, free to tune per combat-philosophy.md's Tuning process.
-	AirSlam = {
-		DebugName = "AirSlam",
-		WindupSeconds = 0.35,
-		ActiveSeconds = 0.22,
-		RecoverySeconds = 0.3,
-		-- Scaled with every other melee hitbox's "slightly bigger than the player" pass -- kept
-		-- taller than a level swing's own 6.5 (it's an overhead slam, needs more vertical reach
-		-- toward a target typically below the attacker). Z shrunk from 7 to 4.25, same
-		-- HandTrackedOffset fix as DashPunch/DashHit (see that local's own header) -- AirSlam shared
-		-- the identical "bleeds behind the attacker" bug since it shares the same tracked-hand Offset.
-		Size = Vector3.new(6, 7, 4.25),
-		Offset = HandTrackedOffset,
-		Damage = 14,
-		PostureDamage = 16,
-		Cooldown = 3,
-		ArcDegrees = 100,
-		MaxTargets = 1,
-	},
-
-	-- Air combo: a DashPunch that connects (unmitigated -- Block stops it, same rule as every
-	-- finisher) holds BOTH the target AND the attacker in the air together (AirCombo.Apply). While
-	-- CombatState.airComboExpiry hasn't lapsed, the attacker's own subsequent Basic (M1) hits landing
-	-- on that SAME target continue the juggle -- refreshing the hold below -- up to MaxHits total, at
-	-- which point the final hit slams them into the ground for bonus damage instead of holding them
-	-- up again. A real player target stays LIVE the whole sequence (full Motor6D/Humanoid control,
-	-- Block/Parry-capable -- see AirCombo.lua's own header); a training-dummy target stays fully
-	-- ragdolled, no defend concept to preserve. Bot targets never reach this at all -- bots can't be
-	-- juggled (CombatState.airComboTarget is typed Player?, never a bot).
-	AirCombo = {
-		-- Dummy-target only, as of this pass -- a real player target stays live-held from impact (no
-		-- launch velocity/tumble at all, see AirCombo.Apply's own header for why); a training dummy
-		-- still gets this pop + backward spin to sell the hit landing before RagdollController.
-		-- HoldAloft's own AlignPosition takes over.
-		LaunchHorizontalVelocity = 4,
-		LaunchBackwardSpin = 4,
-		-- How long both combatants stay locked into the sequence per launch or hold-refresh --
-		-- reused for EVERYTHING that needs to agree on "how long until this sequence naturally ends
-		-- without another landed hit": the target's ragdoll recovery window, RagdollController.
-		-- HoldAloft's own hold duration, AND (as of this value) CombatState.airComboExpiry's own
-		-- continuation deadline (applyAirCombo's `now + cfg.AirborneSeconds`) -- those three used to
-		-- be governed by two DIFFERENT constants (this one plus a separate, SHORTER WindowSeconds),
-		-- which meant a hit that landed physically in time (target still visibly held) could still
-		-- get silently rejected as "too late" for combo-continuation purposes -- read as "we fall
-		-- before I finish the combo" even on a hit that looked like it connected. One constant means
-		-- that gap can't reopen. Bumped from 1.4 -- real swing windup + human reaction time to a
-		-- landed hit ate more of the old, tighter budget than intended; the target is fully ragdolled/
-		-- held the whole time regardless; a bit more slack costs the defender nothing extra.
-		AirborneSeconds = 1.8,
-		-- Guaranteed EXTRA hold time (on top of AirborneSeconds, not a replacement for it) a
-		-- priority-switch parry grants -- see AirCombo.SwitchPriority's own header (Server/Combat/
-		-- AirCombo.lua). A continuation-hit Parry against an already-tracked air-combo target flips
-		-- who's attacking instead of just ending the sequence; this is the reward for pulling off that
-		-- harder, correctly-timed defensive read, on top of the punish/disarm resolveHitAgainstTarget's
-		-- Parry branch already applies to the (now-victim) attacker. Deliberately does not apply to
-		-- parrying the OPENING DashPunch itself -- that stays a plain punish with no launch, see
-		-- SwitchPriority's own call site (CombatSystem.lua's resolveHitAgainstTarget) for the exact
-		-- isTrackedContinuation gate. A rally of back-and-forth priority-switch parries can chain
-		-- indefinitely, each one re-adding this same bonus on top of the base window.
-		ParryHoldExtensionSeconds = 2,
-		-- How high above their hit-time position the TARGET rises and then STOPS -- a fixed world
-		-- position (RagdollController.HoldAloft pins them there via AlignPosition), not a launch
-		-- velocity + gravity estimate. This replaced a velocity/FloatGravityFraction-based float
-		-- (v0 = 75 studs/sec, 45% net gravity) that was tuned assuming a ~14-stud peak but actually
-		-- settles far higher (v0^2 / (2 * netGravity) works out closer to 30+ studs at those numbers)
-		-- -- getting float kinematics exactly right is inherently fiddly, and re-launching on every
-		-- continuation hit compounded the error hit-over-hit (each relaunch reset velocity from an
-		-- ALREADY-elevated position, so a fast combo ratcheted the target higher and higher instead of
-		-- settling at one height) -- read as "it just keeps going up and never comes back down, I
-		-- can't hit him." Pinning to an exact position sidesteps both failure modes by construction:
-		-- one rise, one height, held there for follow-ups, full stop, regardless of tuning or how many
-		-- continuation hits land. See HoldAloft's own header.
-		HoverHeight = 12,
-		-- AlignPosition.MaxVelocity (studs/sec) for the target's rise to HoverHeight. Paced to a
-		-- readable FLIGHT, not a snap: at ~12 studs of rise this is ~0.4s up. Deliberately close to the
-		-- attacker's ChaseSpeed below so the two ascend TOGETHER (the whole point of the air combo is
-		-- launching both up in formation) -- if these two drift far apart the faster body leaves the
-		-- slower one out of swing range mid-rise and early continuation hits whiff. Was 60 (a fast zip
-		-- that read as a snap up rather than a launch you fly alongside).
-		HoverRiseSpeed = 30,
-		-- AlignPosition.Responsiveness for the target's rise -- see ChaseResponsiveness below for what
-		-- this knob actually does; left at a snappy value here since the target's rise already reads
-		-- as a launch via LaunchAndRagdoll's own tumble/spin (LaunchBackwardSpin above), unlike the
-		-- attacker's own motion which had nothing else selling "flight" until ChaseResponsiveness.
-		HoverResponsiveness = 25,
-		-- Total hits in the sequence including the DashPunch launcher itself -- e.g. 4 means launcher
-		-- + 2 continuations + 1 slam. Capped deliberately small: combat-philosophy.md's "no true
-		-- unblockable/unparryable without a telegraphed cost" -- the sequence itself stays short
-		-- rather than open-ended, the same reasoning that already caps the M1 string at
-		-- BasicComboLength before forcing a Finisher. (This previously also pointed at a
-		-- TechWindowSeconds field "below" for the target's escape option; no such field exists
-		-- anywhere in the codebase and no air-tech is implemented, so the short sequence length is
-		-- currently the ONLY thing bounding a victim's helplessness here.)
-		MaxHits = 4,
-		-- The attacker's OWN positioning -- see RagdollController.HoldAloft's header for why a fixed-
-		-- point AlignPosition pin (not a one-time launch velocity, and -- as of this value -- not a
-		-- live per-Heartbeat re-target either) is what actually closes the gap and holds it: the
-		-- attacker keeps full Humanoid control to keep swinging, and Roblox's own Humanoid movement
-		-- handling fights/cancels an externally-set velocity almost immediately once ownership is back
-		-- with the client -- a single impulse never actually closed the distance, which is why "we
-		-- weren't floating next to each other." Studs/sec cap on how fast the hold can move them.
-		-- Paced to a readable FLIGHT up to the target, matched to HoverRiseSpeed above so attacker and
-		-- target ascend together in formation (see that field). Was 55 -- once the hold stopped sagging
-		-- (gravity is now cancelled, see ChaseResponsiveness/ensureGravityCancel), that high a cap ran
-		-- the attacker up the ~8-10 stud rise in ~0.15s, which read as a SNAP, not "flying to them." At
-		-- ~22 studs/sec the same rise is ~0.4s -- a visible flight that arrives about when the target
-		-- settles. Lower this further for a floatier ascent, raise it back toward 55 for a snappier one.
-		ChaseSpeed = 22,
-		-- AlignPosition.Responsiveness for the attacker's chase -- how aggressively it converts
-		-- position error into target velocity. The original 25 (same value AlignPosition's own
-		-- default-ish "snappy" range) made a short gap basically resolve in one physics step once
-		-- MaxForce = math.huge could supply whatever force that demanded -- read as "teleporting up,"
-		-- not flying. 10 makes the velocity ramp up over several frames instead of jumping straight to
-		-- ChaseSpeed, which is what actually reads as a rise/flight rather than a snap -- ChaseSpeed
-		-- above still caps how fast that ramp tops out, so it stays quick overall.
-		-- IMPORTANT: this soft value only holds the attacker at the right spot because the attacker's
-		-- hold now CANCELS GRAVITY (RagdollController.ensureGravityCancel, triggered by passing
-		-- liveBodyFacePoint to the attacker's HoldAloft calls). Without that, a soft Responsiveness
-		-- against a LIVE body's own gravity settles well BELOW the target Position -- the "float down,
-		-- never reach them" bug -- so if the gravity-cancel is ever removed, this must go back up
-		-- (~25) or the sag returns.
-		ChaseResponsiveness = 10,
-		-- How far back (studs, horizontal) the chase parks the attacker from the target, instead of
-		-- pulling all the way to the target's exact point -- converging to zero distance put the
-		-- target directly overhead (both are solid, colliding bodies, and the target is the higher of
-		-- the two), read as "he's on my head, not in front of me." 3.5 sits inside a Basic swing's own
-		-- forward reach (Weapons.Primary.Stages.Basic's Offset = -3, Size.Z = 6, i.e. 0-6 studs in
-		-- front of the attacker) so a continuation hit's hitbox reliably contains the target once the
-		-- chase settles, instead of guessing a distance unrelated to the hitbox that's supposed to
-		-- land on it.
-		ChaseStandoffDistance = 3.5,
-		-- Below this horizontal magnitude, the away-from-target standoff direction falls back to a
-		-- fixed world direction instead of normalizing a near-zero vector (DashPunch's own Offset/Size
-		-- means the real degenerate case essentially never happens in practice).
-		MinStandoffDirectionMagnitude = 0.5,
-		-- How far below the target's hover height the chase parks the attacker's root -- a small gap
-		-- (not zero, not level) so the target visually reads as "up and ahead" rather than exactly
-		-- level, while staying well inside a Basic swing's own vertical reach (Size.Y = 5 centered on
-		-- the attacker's own root, i.e. +/-2.5 studs) so it doesn't undershoot the hitbox at the other
-		-- extreme.
-		ChaseBelowTargetOffset = 1.5,
-		-- The finisher slam (the hit that reaches MaxHits) -- reuses Downslam-style physics
-		-- (RagdollController.SlamToGround) rather than a new mechanic. Bonus damage is on top of
-		-- that hit's own normal Basic-stage damage, not a replacement for it -- "a little extra
-		-- damage for smacking the ground."
-		SlamDownVelocity = 85,
-		SlamKnockdownSeconds = 1.25,
-		SlamBonusDamage = 6,
-		-- Same face-down tumble bias as Finisher.Downslam.FaceDownSpin (see that field's own header for
-		-- the mechanism) -- kept as its own independently-tunable number rather than a shared reference
-		-- since this slam's own SlamDownVelocity (85) already differs from Finisher.Downslam's (140),
-		-- the same "each context keeps its own copy even where values happen to start equal" reasoning
-		-- Constants.Debug.DevMenu's confirm-window constants already document.
-		FaceDownSpin = 9,
-	},
+	-- AirSlam (the standalone jump + M1 slam) and AirCombo (the deleted AirCombo.lua's juggle window) used to
+	-- live here. Both are retired: the air combo is Server/Combat/AirCombo/AirComboSystem.lua now, with its own
+	-- constants (Shared/AirCombo/AirComboConstants.lua) and its own moves (Weapons.Baseline.Stages.Launcher/Air/
+	-- AirFinisher below). What the old tables got right was kept there -- the 3.5-stud standoff, the 1.5-stud
+	-- below-offset, a hover pinned to a point rather than a launch estimate, and ONE shared deadline for hold
+	-- and continuation -- and what they got wrong was left behind: the parry-hold extension, the priority
+	-- switch, and a 12-stud hover too high to follow. AirSlam's authored numbers seed the Slam finisher.
 
 	-- Locomotion animation ids -- read generically by Client/FX/CombatAnimator.lua's BindCharacter
 	-- loop (whatever's in this table gets a template built and loaded, nothing hardcodes the name
@@ -781,9 +610,7 @@ local CombatConstants = {
 
 	-- DebugHitboxes/Hitboxes (swept melee hitbox geometry/scheduling and its Studio debug-Part
 	-- cosmetics) were removed alongside the rest of the combat system -- their one reader,
-	-- Server/Combat/HitboxResolver.lua, is gone. HitboxShapes.lua's own FIELD_SPECS comments still
-	-- cross-reference Hitboxes.MaxCandidateRadius by name for historical context (why its Max=500 was
-	-- chosen), but never actually read the constant.
+	-- Server/Combat/HitboxResolver.lua, is gone.
 
 	-- ONE WEAPON IN HAND AT A TIME, drawn from an open roster (combat-philosophy.md's "Established
 	-- systems" list names "weapon switching with swap cooldown" alongside Lock-on/Block/Parry/Posture
@@ -839,7 +666,7 @@ local CombatConstants = {
 			BasicHitDamage = 4,
 			PostureDamage = 0.65,
 			Reach = 0.3,
-			Speed = 1.2,
+			Speed = 1.5,
 		},
 
 		-- The one place a weapon swing's volume, reach and anchor are configured. Defined as SWING_HITBOX
@@ -859,9 +686,10 @@ local CombatConstants = {
 		-- WeaponPostureDamage ~1.0, which is exactly the tuning relationship its own comment described
 		-- in prose. Deleting that second hand-authored copy is what makes a THIRD weapon free.
 		--
-		-- Still the live table the Move Editor tunes: WeaponRoster hands each weapon's copies to
-		-- DefaultMoveRegistry by reference, so an admin retunes one weapon without touching another,
-		-- and retuning this baseline changes only what the NEXT boot builds from.
+		-- What the Move Editor's Default moves are built from: WeaponRoster builds each weapon's own copy,
+		-- DefaultMoveRegistry projects those copies (never writing them) and layers an admin's overrides
+		-- on top, so an admin retunes one weapon without touching another, and retuning this baseline
+		-- changes only what the NEXT boot builds from.
 		Baseline = {
 			DisplayName = "Sword",
 			-- EVERY Size/Offset BELOW NOW COMES FROM SWING_HITBOX, and which SPACE that Offset is in depends
@@ -870,20 +698,21 @@ local CombatConstants = {
 			-- In the shipped "BodyBox" mode both are root-local and literal: the box is SWING_HITBOX.Size,
 			-- centred on SWING_HITBOX.Offset in the attacker's own root space, opened once the stage's
 			-- WindupSeconds elapses. Everything in the paragraph below describes "Blade" mode instead, which
-			-- is what these stages did before and what flipping Mode restores: Server/Combat/DefaultMoveRegistry.lua marks every stage here AttachmentPart == "Weapon"
-			-- (see its own enumerateDescriptors), which HitboxEngine.resolveAttachmentPart resolves to the
+			-- is what these stages did before and what flipping Mode restores: Server/Combat/
+			-- DefaultMoveRegistry.lua anchors every stage here AttachmentPart == "Weapon" (its own
+			-- weaponAnchor), which HitboxEngine.resolveAttachmentPart resolves to the
 			-- equipped weapon's own "Blade" part when the model has one (falling back to Handle, then to
 			-- RightHand, then to the root for a weapon authored without one -- see that function's own
 			-- header). MoveTypes.ToEngineAttackDefinition also sets SizeFromAttachmentPart for every stage
 			-- projected from here, so Size below is VESTIGIAL for a weapon with a real Blade part -- it is
-			-- read only by the Move Editor's own preview reconstruction (DefaultMoveRegistry.toMoveDefinition)
+			-- read only by the Move Editor's readout (DefaultMoveRegistry's projection)
 			-- and by the fallback case where resolution missed the Blade entirely, never by a normal swing.
 			-- Offset is still live either way: it composes against the resolved part's OWN local space now,
 			-- so CFrame.new() (identity) means "centred exactly on the Blade" rather than "N studs in front
 			-- of the root" the way it used to. Left at identity throughout rather than re-guessed per stage,
 			-- since this baseline has no one Blade model to calibrate a nudge against -- an admin tuning a
 			-- specific weapon that reads as offset (its mesh's own pivot sitting at the hilt rather than the
-			-- centre, say) can still nudge THIS shared Offset from the Move Editor, exactly as before.
+			-- centre, say) can still nudge that weapon's Offset from the Move Editor, as an override.
 			Stages = {
 				Basic = {
 					{
@@ -923,7 +752,6 @@ local CombatConstants = {
 						Damage = 6.5,
 						PostureDamage = 10,
 						Cooldown = 0.44,
-						ArcDegrees = 100,
 						MaxTargets = 3,
 					},
 					{
@@ -937,7 +765,6 @@ local CombatConstants = {
 						Damage = 6.5,
 						PostureDamage = 10,
 						Cooldown = 0.47,
-						ArcDegrees = 100,
 						MaxTargets = 3,
 					},
 					{
@@ -951,7 +778,6 @@ local CombatConstants = {
 						Damage = 6.5,
 						PostureDamage = 12,
 						Cooldown = 0.54,
-						ArcDegrees = 110,
 						MaxTargets = 3,
 					},
 				},
@@ -983,7 +809,6 @@ local CombatConstants = {
 						-- ~1.63s AFTER the swing had visibly ended, with nothing on screen explaining why --
 						-- reads as unresponsive input, not a deliberate pause.
 						Cooldown = 1.37,
-						ArcDegrees = 120,
 						MaxTargets = 4,
 					},
 				},
@@ -1008,8 +833,100 @@ local CombatConstants = {
 					Damage = 20,
 					PostureDamage = 35,
 					Cooldown = 0.9,
-					ArcDegrees = 110,
 					MaxTargets = 1,
+				},
+
+				-- THE AIR COMBO'S MOVES (docs/design/air-combat-and-evade.md, B3), built per weapon exactly like
+				-- the stages above and tunable from the Move Editor like them. The windups ARE the design:
+				-- the parry read an air string lives on is "0.02-0.22s after the windup becomes visible", so a
+				-- windup changed here changes whether an air hit is read or reacted to. The scaling RULES
+				-- (air-hit falloff, finisher per-hit bonus) are not here -- AirComboConstants.Damage.
+				--
+				-- The LAUNCHER: Space + M1 while the Basic string is live at stage >= 2 with a landed combo >=
+				-- 2 (AirComboConstants.Launcher). A readable 0.42s windup -- reaction-parryable, balanced by
+				-- its mix-up against Basic 3 and Heavy -- and a 0.35s recovery, so a blocked or whiffed
+				-- launcher is punishable. Blockable, parryable and evadeable like any move.
+				Launcher = {
+					DebugName = "Launcher",
+					WindupSeconds = 0.42,
+					ActiveSeconds = 0.2,
+					RecoverySeconds = 0.35,
+					Size = SWING_HITBOX.Size,
+					Offset = SWING_HITBOX.Offset,
+					Damage = 7,
+					PostureDamage = 10,
+					Cooldown = 0.97,
+					MaxTargets = 1,
+				},
+				-- The three air beats. 0.22s windups: a read, not a reaction. 0.16s recovery, so the next
+				-- beat is ready ~0.2s after a hit lands (AirComboConstants.Timing's on-beat press).
+				Air = {
+					{
+						DebugName = "Air1",
+						WindupSeconds = 0.22,
+						ActiveSeconds = 0.18,
+						RecoverySeconds = 0.16,
+						Size = SWING_HITBOX.Size,
+						Offset = SWING_HITBOX.Offset,
+						Damage = 4,
+						PostureDamage = 6,
+						Cooldown = 0.56,
+						MaxTargets = 1,
+					},
+					{
+						DebugName = "Air2",
+						WindupSeconds = 0.22,
+						ActiveSeconds = 0.18,
+						RecoverySeconds = 0.16,
+						Size = SWING_HITBOX.Size,
+						Offset = SWING_HITBOX.Offset,
+						Damage = 4,
+						PostureDamage = 6,
+						Cooldown = 0.56,
+						MaxTargets = 1,
+					},
+					{
+						DebugName = "Air3",
+						WindupSeconds = 0.22,
+						ActiveSeconds = 0.18,
+						RecoverySeconds = 0.16,
+						Size = SWING_HITBOX.Size,
+						Offset = SWING_HITBOX.Offset,
+						Damage = 4,
+						PostureDamage = 6,
+						Cooldown = 0.56,
+						MaxTargets = 1,
+					},
+				},
+				-- The two cash-outs. Slower than an air beat on purpose (0.40 / 0.34) and therefore
+				-- REACTABLE: cashing out raw into a waiting victim gets parried, so a finisher has to be set
+				-- up by conditioning -- the route-choice tension. What each one DOES is AirComboConstants.Slam
+				-- / .Spike; the damage below is the base their per-hit bonus grows from.
+				AirFinisher = {
+					Slam = {
+						DebugName = "AirSlamFinisher",
+						WindupSeconds = 0.40,
+						ActiveSeconds = 0.2,
+						RecoverySeconds = 0.3,
+						Size = SWING_HITBOX.Size,
+						Offset = SWING_HITBOX.Offset,
+						Damage = 8,
+						PostureDamage = 12,
+						Cooldown = 0.9,
+						MaxTargets = 1,
+					},
+					Spike = {
+						DebugName = "AirSpikeFinisher",
+						WindupSeconds = 0.34,
+						ActiveSeconds = 0.2,
+						RecoverySeconds = 0.3,
+						Size = SWING_HITBOX.Size,
+						Offset = SWING_HITBOX.Offset,
+						Damage = 6,
+						PostureDamage = 10,
+						Cooldown = 0.84,
+						MaxTargets = 1,
+					},
 				},
 			},
 		},
@@ -1045,9 +962,8 @@ local CombatConstants = {
 		RagdollElasticityWeight = 100,
 		-- Hard ceiling (studs/s) on any linear velocity RagdollController writes onto a body. Nothing
 		-- authored today comes close (the biggest is Finisher.Downslam's 140), so this never bites on a
-		-- tuned move -- it exists so an authored Move Creation System knockback (Types.
-		-- HitboxAttackDefinition.Knockback is designer-editable at runtime via the Move Editor) can't
-		-- fat-finger a body clean off the map. A ragdoll that leaves the play space can't be recovered
+		-- tuned move -- it exists so a knockback authored in the Move Editor (MoveTypes.MoveKnockback)
+		-- can't fat-finger a body clean off the map. A ragdoll that leaves the play space can't be recovered
 		-- into anything meaningful, so this is a containment guard, not a feel knob.
 		MaxLaunchSpeed = 250,
 		-- Smooth recovery ("blend") -- how long the body spends physically folding back to its rest pose

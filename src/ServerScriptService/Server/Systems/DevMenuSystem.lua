@@ -68,6 +68,7 @@ local AdminActionSystem = require(script.Parent.AdminActionSystem)
 local DebugDummySystem = require(script.Parent.DebugDummySystem)
 local TrainingBotSystem = require(script.Parent.Parent.Combat.TrainingBot.TrainingBotSystem)
 local TrainingBotConstants = require(ReplicatedStorage.Shared.TrainingBot.TrainingBotConstants)
+local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 local ResourceGatheringSystem = require(script.Parent.ResourceGatheringSystem)
 local VersionWatchSystem = require(script.Parent.VersionWatchSystem)
 local FlightTuning = require(script.Parent.Parent.DevMenu.FlightTuning)
@@ -961,12 +962,14 @@ end
 -- that fights the admin first (TrainingBotSystem's targeting). Style and difficulty are CLIENT-SENT, so
 -- both are checked against TrainingBotConstants' closed lists here and a name outside them is refused
 -- outright rather than quietly defaulted -- the default is for a programming error server-side, not
--- for whatever a client typed. Delegates everything else to Server/Combat/TrainingBot/
+-- for whatever a client typed. The weapon is client-sent too: nil or TrainingBotConstants.
+-- DefaultWeaponChoice means the roster's default, and anything else must be a WeaponRoster id. Delegates everything else to Server/Combat/TrainingBot/
 -- TrainingBotSystem.lua; this handler owns authorization/validation and the position math only.
 local function handleSpawnTrainingBot(
 	player: Player,
 	rawStyle: unknown,
-	rawDifficulty: unknown
+	rawDifficulty: unknown,
+	rawWeapon: unknown
 ): Types.DevMenuSpawnBotResult
 	logger:debug("SpawnTrainingBot received", { player = player.Name, userId = player.UserId })
 
@@ -977,6 +980,14 @@ local function handleSpawnTrainingBot(
 	if not TrainingBotConstants.IsStyle(rawStyle) or not TrainingBotConstants.IsDifficulty(rawDifficulty) then
 		logger:debug("SpawnTrainingBot rejected: unknown preset", { player = player.Name })
 		return { Success = false, Reason = "InvalidPreset" }
+	end
+	local weaponId: string? = nil
+	if rawWeapon ~= nil and rawWeapon ~= TrainingBotConstants.DefaultWeaponChoice then
+		if typeof(rawWeapon) ~= "string" or not WeaponRoster.Has(rawWeapon) then
+			logger:debug("SpawnTrainingBot rejected: unknown weapon", { player = player.Name })
+			return { Success = false, Reason = "InvalidWeapon" }
+		end
+		weaponId = rawWeapon
 	end
 
 	local rootPart, rootPartFailureReason = getRootPart(player, "SpawnTrainingBot")
@@ -990,13 +1001,17 @@ local function handleSpawnTrainingBot(
 		CFrame.lookAt(spawnPosition, facing),
 		rawStyle :: string,
 		rawDifficulty :: string,
-		player
+		player,
+		weaponId
 	)
 	if not model then
 		return { Success = false, Reason = spawnFailureReason or "SpawnFailed" }
 	end
 
-	logger:info("SpawnTrainingBot accepted", { player = player.Name, style = rawStyle, difficulty = rawDifficulty })
+	logger:info(
+		"SpawnTrainingBot accepted",
+		{ player = player.Name, style = rawStyle, difficulty = rawDifficulty, weapon = weaponId }
+	)
 	return { Success = true, ActiveCount = TrainingBotSystem.ActiveCount() }
 end
 

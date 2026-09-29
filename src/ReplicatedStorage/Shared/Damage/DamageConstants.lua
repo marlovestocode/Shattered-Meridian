@@ -240,6 +240,28 @@ DamageConstants.Knockback = {
 	},
 }
 
+-- Spacing -------------------------------------------------------------------------------------------
+
+-- THE PUSH EVERY CONTACT GIVES, for moves that author no knockback of their own (every Default M1 and
+-- Heavy today). Before this a landed or blocked string moved nobody. Blocked strings left both fighters
+-- glued together, and a landed string's spacing depended on whoever happened to be walking.
+--   * Hit (Clean, Backstab, GuardBroken): the defender slides back DefenderStuds, and the ATTACKER follows
+--     by AttackerFollowStuds. Equal distances keep the gap the same from B1 to B3 and into the launcher,
+--     so the string stays in range without a gap-closing lunge (the thing SwingLunge's Basic entry was
+--     removed for).
+--   * Blocked: both are pushed APART. The defender slides back further than on a hit, and the attacker
+--     rebounds a little, so a blocked string separates and has to be walked back into.
+-- Distances in studs. The client holds a linear decay over DamageConstants.Knockback.HoldSeconds, so the
+-- speed is 2 * studs / HoldSeconds (about 13 studs/s for 1.2). That is well under Knockback.Audit's
+-- MinHorizontalVelocity, so a push is never audited as a knockback.
+-- Never applied to an air-combo move or an air-held body (the air combo owns both), to a grab, or to a
+-- move whose own authored knockback already launched the defender.
+DamageConstants.Spacing = {
+	Enabled = true,
+	Hit = { DefenderStuds = 1.2, AttackerFollowStuds = 1.2 },
+	Blocked = { DefenderStuds = 1.8, AttackerStuds = 0.7 },
+}
+
 -- Network -------------------------------------------------------------------------------------------
 
 DamageConstants.Network = {

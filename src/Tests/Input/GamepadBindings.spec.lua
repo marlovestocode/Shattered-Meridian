@@ -28,14 +28,12 @@ return function()
 
 	-- Actions a player performs WHILE MOVING, on a reflex, where the input either lands in a narrow
 	-- window or is wasted. These are the ones that cannot live on the D-pad.
-	local REFLEX_ACTIONS = { "Roll", "Slide", "Dash" }
+	local REFLEX_ACTIONS = { "Evade", "Slide", "Dash" }
 
 	describe("the movement-critical actions", function()
-		-- The regression this file exists for. Roll sat on DPadLeft, and States/Rolling.lua's whole
-		-- reason to exist is the LANDING ROLL -- a roll pressed within
-		-- ParkourConstants.Roll.LandingWindowSeconds of touching down turns a hard landing into a
-		-- full-speed continuation. That is a two-tenths-of-a-second window pressed while airborne and
-		-- steering, so on a pad the binding did not make it hard, it made it impossible.
+		-- The regression this file exists for. The dodge once sat on DPadLeft, and it is pressed WHILE
+		-- steering -- the left thumb on Thumbstick1 cannot also be on the D-pad -- so on a pad the binding
+		-- did not make it hard, it made it impossible.
 		it("keeps every reflex action off the D-pad, so it can be pressed while steering", function()
 			for _, action in REFLEX_ACTIONS do
 				local keybind = gamepadDefaults[action]
@@ -44,9 +42,9 @@ return function()
 			end
 		end)
 
-		it("binds the landing roll to a button the right thumb can reach", function()
-			expect(gamepadDefaults.Roll).to.be.ok()
-			expect(gamepadDefaults.Roll.KeyCode).to.equal(Enum.KeyCode.ButtonY)
+		it("binds the evade to a button the right thumb can reach", function()
+			expect(gamepadDefaults.Evade).to.be.ok()
+			expect(gamepadDefaults.Evade.KeyCode).to.equal(Enum.KeyCode.ButtonY)
 		end)
 	end)
 

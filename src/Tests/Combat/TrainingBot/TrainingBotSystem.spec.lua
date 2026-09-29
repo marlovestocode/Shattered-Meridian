@@ -156,6 +156,16 @@ return function()
 			expect(TrainingBotSystem.ActiveCount()).to.equal(0)
 		end)
 
+		it("fights with the weapon it was spawned with, and falls back for one the roster does not know", function()
+			local picked = WeaponRoster.FISTS_ID
+			local armed = TrainingBotSystem.Spawn(CFrame.new(ORIGIN), "FullFight", "Adept", nil, picked) :: Model
+			expect(AttackRequestSystem.GetWeapon(armed)).to.equal(picked)
+
+			local fallback =
+				TrainingBotSystem.Spawn(CFrame.new(ORIGIN), "FullFight", "Adept", nil, "NotAWeapon") :: Model
+			expect(AttackRequestSystem.GetWeapon(fallback)).to.equal(WeaponRoster.Default())
+		end)
+
 		it("falls back to the default preset for an unknown name rather than failing", function()
 			local model = TrainingBotSystem.Spawn(CFrame.new(ORIGIN), "NotAStyle", "NotADifficulty", nil)
 			expect(model).to.be.ok()

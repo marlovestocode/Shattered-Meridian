@@ -97,10 +97,9 @@
 	module with no Fusion scope to make one from. Its beginCapture/cancelCapture are already an
 	exactly-matched pair, which is the bar for reaching past BindEscape.
 
-	TEN ENTRIES, NINE PANELS. The extra two are layers rather than screens: the move editor's F1
-	shortcut overlay pushes above the editor, and Settings' capture above Settings. Both used to be
-	branches of an if-chain inside one screen's own Escape handler, and both are the same shape as
-	the panel-over-panel case -- which is the argument for a stack rather than a registry.
+	LAYERS AS WELL AS PANELS. Settings' key capture pushes above Settings itself; it used to be a
+	branch of an if-chain inside that screen's own Escape handler, and it is the same shape as the
+	panel-over-panel case -- which is the argument for a stack rather than a registry.
 
 	POP IS IDEMPOTENT AND ORDER-INDEPENDENT. A screen closed by its own toggle while a second panel
 	sits above it pops out of the middle of the stack, and popping twice is a no-op rather than an

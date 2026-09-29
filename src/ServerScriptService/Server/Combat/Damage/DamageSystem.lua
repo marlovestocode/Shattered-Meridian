@@ -66,15 +66,16 @@
 
 	Does not own: contact detection (HitboxEngine), what kind of hit something was (DefenseSystem), the
 	guard pool itself (DefenseSystem.DrainGuard -- this decides how much, that owns the meter), per-move
-	damage or knockback numbers (the Move Creation System, via AttackCatalog), ragdoll or air-combo
-	treatment (deleted with RagdollController/AirCombo; MoveKnockback.RagdollSeconds/StartsAirCombo are
-	authored but inert), or deciding when anyone throws an attack (the attack layer).
+	damage or knockback numbers (the Move Editor's moves, via AttackCatalog), air-combo treatment
+	(AirComboSystem), or deciding when anyone throws an attack (the attack layer).
 ]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
+local AirComboMoves = require(ReplicatedStorage.Shared.AirCombo.AirComboMoves)
 local AmortizedReclaim = require(ReplicatedStorage.Shared.AmortizedReclaim)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
@@ -114,6 +115,18 @@ local hitstunReclaim = AmortizedReclaim.New()
 local lungeUntil: { [Model]: number } = {}
 
 local appliedCallbacks: { (DefenseOutcome, DamageResult) -> () } = {}
+
+-- THE AIR COMBO'S ONE SEAM INTO THIS LAYER (Server/Combat/AirCombo/AirComboSystem.lua, which sits ABOVE this
+-- one as a sibling of the attack layer and so is never required from here). One slot, set by that System's
+-- Attach: handed each contact's resolved damage before anything reads it, it returns the damage to apply
+-- (air hits scale down, finishers scale up -- AirComboConstants.Damage) and an optional presentation tag
+-- for the feedback payload. Nil means no air combo is booted, and every contact prices exactly as before.
+--
+-- A SLOT RATHER THAN AN OnApplied SUBSCRIBER REWRITING result.Damage, deliberately: OnApplied's consumers
+-- (kill credit among them) must all read the one damage that is actually dealt, and a subscriber that
+-- mutated it would make that depend on subscription order.
+export type AirComboHook = (outcome: DefenseOutcome, moveId: string, damage: number) -> (number, string?)
+local airComboHook: AirComboHook? = nil
 
 local started = false
 local heartbeatTrove = Trove.New()
@@ -182,6 +195,12 @@ end
 local function launchFor(outcome: DefenseOutcome, result: DamageResult): Vector3?
 	local authored = result.Knockback
 	if not DamageConstants.Knockback.Enabled or authored == nil or result.Grab ~= nil then
+		return nil
+	end
+	-- A launcher's launch is the AIR COMBO's (AirComboSystem takes the body server-side and springs it to a
+	-- hover), not a knockback -- the same "instead of ordinary knockback" rule a grab gets above. Handing
+	-- the victim's client a launch as well would put two owners on one body for the first frames of the rise.
+	if authored.StartsAirCombo == true then
 		return nil
 	end
 	if outcome.Defender == outcome.Attacker then
@@ -253,6 +272,69 @@ local function publishHitstunOf(defender: Model, until_: number): ()
 	extendDeadline(humanoid, AttributeConstants.HitstunUntil, until_)
 end
 
+-- The spacing pushes for one contact (DamageConstants.Spacing): what the defender and the attacker are each
+-- pushed by, either of which may be nil. `launch` is the authored knockback already resolved for this hit;
+-- a hit that launched gets no hit push on top.
+local function spacingFor(
+	outcome: DefenseOutcome,
+	moveId: string,
+	result: DamageResult,
+	launch: Vector3?
+): (Vector3?, Vector3?)
+	local spacing = DamageConstants.Spacing
+	if not spacing.Enabled or outcome.Defender == outcome.Attacker or result.Grab ~= nil then
+		return nil, nil
+	end
+	if AirComboMoves.RoleOf(moveId) ~= nil then
+		return nil, nil
+	end
+	local defenderHumanoid = CharacterUtil.HumanoidOf(outcome.Defender)
+	local attackerHumanoid = CharacterUtil.HumanoidOf(outcome.Attacker)
+	if defenderHumanoid == nil or attackerHumanoid == nil then
+		return nil, nil
+	end
+	if AirComboAttributes.IsParticipant(defenderHumanoid) or AirComboAttributes.IsParticipant(attackerHumanoid) then
+		return nil, nil
+	end
+	local attackerRoot = outcome.Attacker.PrimaryPart
+	local defenderRoot = outcome.Defender.PrimaryPart
+	if attackerRoot == nil or defenderRoot == nil then
+		return nil, nil
+	end
+	local between = defenderRoot.Position - attackerRoot.Position
+	local flat = Vector3.new(between.X, 0, between.Z)
+	if flat.Magnitude <= 1e-3 then
+		local look = attackerRoot.CFrame.LookVector
+		flat = Vector3.new(look.X, 0, look.Z)
+	end
+	if flat.Magnitude <= 1e-3 then
+		return nil, nil
+	end
+	local direction = flat.Unit
+	-- Studs covered by a linear decay over the client's hold: speed = 2 * distance / hold.
+	local hold = DamageConstants.Knockback.HoldSeconds
+	local function speedFor(studs: number): number
+		return if hold > 0 then 2 * math.max(studs, 0) / hold else 0
+	end
+
+	local kind = outcome.Kind
+	if kind == "Clean" or kind == "Backstab" or kind == "GuardBroken" then
+		if launch ~= nil then
+			return nil, nil
+		end
+		local defenderPush = direction * speedFor(spacing.Hit.DefenderStuds)
+		-- A SERVER-OWNED attacker already steps in on a landed M1 (DamageConstants.AttackerLunge), so the
+		-- follow is only for a player, whose own client moves them.
+		local attackerPush = if Players:GetPlayerFromCharacter(outcome.Attacker) ~= nil
+			then direction * speedFor(spacing.Hit.AttackerFollowStuds)
+			else nil
+		return defenderPush, attackerPush
+	elseif kind == "Blocked" then
+		return direction * speedFor(spacing.Blocked.DefenderStuds), -direction * speedFor(spacing.Blocked.AttackerStuds)
+	end
+	return nil, nil
+end
+
 local function applyOutcome(outcome: DefenseOutcome): ()
 	local entry = AttackCatalog.Get(outcome.Report.DebugName)
 	if not entry then
@@ -286,8 +368,25 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	-- Finisher-eligibility/UI all need the true number), so only the value fed into the resolver is pinned;
 	-- pin to 1 rather than skip Resolve entirely so Basic keeps the exact same Clean/Blocked/Backstab/
 	-- GuardBroken pricing rules as everything else, just at ComboMultiplier(1) == 1.
-	local pricingStage = if isBasicMoveId(entry.MoveId) then 1 else stage
+	-- Every air hit and finisher is flat-priced the same way (AirComboMoves.IsFlatPriced): the air combo
+	-- scales them itself, and ComboEscalation's multiplier on top would make the two scalings stack.
+	local pricingStage = if isBasicMoveId(entry.MoveId) or AirComboMoves.IsFlatPriced(entry.MoveId) then 1 else stage
 	local result = DamageResolver.Resolve(outcome.Kind, outcome.DefenderStateAtContact, entry.Profile, pricingStage)
+
+	-- The air combo's scaling and presentation tag, before any reader sees the result (see airComboHook).
+	local airComboTag: string? = nil
+	local hook = airComboHook
+	if hook then
+		local ok, scaled, tag = pcall(hook, outcome, entry.MoveId, result.Damage)
+		if ok then
+			if typeof(scaled) == "number" and scaled == scaled and scaled >= 0 then
+				result.Damage = scaled
+			end
+			airComboTag = if typeof(tag) == "string" then tag else nil
+		else
+			logger:error("The air combo damage hook errored", { errorMessage = tostring(scaled) })
+		end
+	end
 
 	if result.GuardDrain > 0 then
 		DefenseSystem.DrainGuard(outcome.Defender, result.GuardDrain, at)
@@ -346,6 +445,18 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	local launch = result.Launch
 	local launchedPlayer: Player? = if launch then applyLaunch(outcome.Defender, launch, os.clock()) else nil
 
+	-- The spacing pushes (DamageConstants.Spacing). Applied through applyLaunch, the same owner split an
+	-- authored knockback uses, and handed to each player's own client on their feedback as Push. Kept OFF
+	-- result.Launch on purpose: Launch is what the knockback audit and the environment reactions read, and
+	-- a spacing nudge is neither of those.
+	local defenderPush, attackerPush = spacingFor(outcome, entry.MoveId, result, launch)
+	local pushedDefender: Player? = if defenderPush
+		then applyLaunch(outcome.Defender, defenderPush, os.clock())
+		else nil
+	local pushedAttacker: Player? = if attackerPush
+		then applyLaunch(outcome.Attacker, attackerPush, os.clock())
+		else nil
+
 	local feedback: CombatFeedback = {
 		Kind = outcome.Kind,
 		Role = "Attacker",
@@ -363,6 +474,8 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 			then true
 			else nil,
 		Perfect = if outcome.Perfect then true else nil,
+		AirCombo = airComboTag,
+		Push = if pushedAttacker then attackerPush else nil,
 	}
 	sendFeedback(outcome.Attacker, feedback)
 	if outcome.Defender ~= outcome.Attacker then
@@ -370,6 +483,7 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 		defenderFeedback.Role = "Defender"
 		-- Only a player's own client applies a launch; a server-owned body already has it.
 		defenderFeedback.Knockback = if launchedPlayer then launch else nil
+		defenderFeedback.Push = if pushedDefender then defenderPush else nil
 		sendFeedback(outcome.Defender, defenderFeedback)
 	end
 
@@ -490,6 +604,23 @@ function DamageSystem.GetComboStage(model: Model, now: number): number
 	return ComboEscalation.GetStage(model, now)
 end
 
+-- Keeps this attacker's live landed combo from lapsing before `until_` (ComboEscalation.Hold). Adds no
+-- depth, and does nothing for a combo that already lapsed at `at`.
+--
+-- AttackRequestSystem's ONE seam into this layer for chain-keeping (2026-09-29). It holds the combo
+-- through an Art woven into a string, and through the stagger of a parried swing, so the combo depth the
+-- launcher needs survives both. The string position half lives in SwingSequencer. This layer still owns
+-- what a landing IS. It is only told when the clock must not run.
+function DamageSystem.HoldCombo(model: Model, until_: number, at: number): ()
+	ComboEscalation.Hold(model, until_, at)
+end
+
+-- Installs (or, with nil, removes) the air combo's damage hook -- see airComboHook. One slot: a second
+-- installer replaces the first, which is correct for a hook with exactly one legitimate owner.
+function DamageSystem.SetAirComboHook(hook: AirComboHook?): ()
+	airComboHook = hook
+end
+
 -- This system's output signal, for anything downstream that wants to react to real damage --
 -- PlayerDeathSystem's kill credit, GrabSystem, EngagementSystem and KnockbackAudit today. The
 -- DamageResult carries Launch already resolved. Returns a disconnect function
@@ -569,6 +700,7 @@ function DamageSystem.Reset(): ()
 	table.clear(lungeUntil)
 	hitstunReclaim:Reset()
 	table.clear(appliedCallbacks)
+	airComboHook = nil
 	ComboEscalation.Reset()
 	AttackCatalog.Reset()
 end

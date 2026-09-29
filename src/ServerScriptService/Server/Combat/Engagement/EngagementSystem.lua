@@ -63,7 +63,7 @@
 	THREE CONSEQUENCES, ONE OF WHICH IS LOUD:
 	  * Constants.Attributes.InCombat is written on each true/false edge, through a Shared/
 	    ChangeNotifier (the module built for exactly this, and named in that Attribute's own comment).
-	    ParkourConstants.CombatGate.BlockedStates refuses Dash, Slide, Roll, Leap and WallRun while it
+	    ParkourConstants.CombatGate.BlockedStates refuses Slide, Leap and WallRun while it
 	    is true -- five movement states that have NEVER been gated in the current build, because
 	    nothing has set this Attribute since the teardown. Tuning TagDurationSeconds therefore reaches
 	    a great deal further than the HUD line it visibly drives.
@@ -183,6 +183,13 @@ export type Combatant = {
 local inCombatNotifier = ChangeNotifier.New() :: ChangeNotifier.ChangeNotifierInstance<boolean>
 
 local changedRemote: RemoteEvent? = nil
+
+-- Remote coalescing (EngagementConstants.Network.MinPushIntervalSeconds): when each player was last
+-- sent a payload, who it named, and whether a newer one is waiting for the interval to pass.
+local lastPushAt: { [Player]: number } = {}
+local lastPushedInCombat: { [Player]: boolean } = {}
+local lastPushedOpponent: { [Player]: string? } = {}
+local pushPending: { [Player]: boolean } = {}
 local appliedDisconnect: (() -> ())? = nil
 local heartbeatTrove = Trove.New()
 local lifecycleTrove = Trove.New()
@@ -260,8 +267,25 @@ local function publish(player: Player, now: number): ()
 		end
 	end
 
-	if changedRemote then
-		changedRemote:FireClient(player, buildPayload(player, now))
+	local remote = changedRemote
+	if not remote then
+		return
+	end
+	-- An edge or a new opponent goes out now; anything else waits out the interval and is flushed by
+	-- Step. See EngagementConstants.Network.MinPushIntervalSeconds.
+	local engagement = engagements[player]
+	local opponent = if engagement then engagement.opponentName else nil
+	local urgent = lastPushAt[player] == nil
+		or inCombat ~= lastPushedInCombat[player]
+		or opponent ~= lastPushedOpponent[player]
+	if urgent or now - lastPushAt[player] >= EngagementConstants.Network.MinPushIntervalSeconds then
+		lastPushAt[player] = now
+		lastPushedInCombat[player] = inCombat
+		lastPushedOpponent[player] = opponent
+		pushPending[player] = nil
+		remote:FireClient(player, buildPayload(player, now))
+	else
+		pushPending[player] = true
 	end
 end
 
@@ -423,6 +447,25 @@ end
 -- publishes, publishing runs consumer code that can reach this table, and mutating a table mid-
 -- iteration is undefined in Luau.
 function EngagementSystem.Step(_deltaTime: number, now: number): ()
+	-- Coalesced pushes whose interval has passed. Collected first for the same mutation-during-walk
+	-- reason as the expiry sweep below.
+	local due: { Player }? = nil
+	for player in pushPending do
+		local pushedAt = lastPushAt[player]
+		if pushedAt == nil or now - pushedAt >= EngagementConstants.Network.MinPushIntervalSeconds then
+			due = due or {}
+			table.insert(due :: { Player }, player)
+		end
+	end
+	if due then
+		for _, player in due :: { Player } do
+			pushPending[player] = nil
+			if engagements[player] ~= nil then
+				publish(player, now)
+			end
+		end
+	end
+
 	local expired: { Player }? = nil
 	for player, engagement in engagements do
 		if now >= engagement.inCombatUntil then
@@ -559,6 +602,10 @@ function EngagementSystem.ReleasePlayer(player: Player): ()
 	-- a departed player is at best wasted and at worst an error.
 	engagements[player] = nil
 	ChangeNotifier.Clear(inCombatNotifier, player)
+	lastPushAt[player] = nil
+	lastPushedInCombat[player] = nil
+	lastPushedOpponent[player] = nil
+	pushPending[player] = nil
 
 	for _, other in engagements do
 		other.recentOpponents[player] = nil

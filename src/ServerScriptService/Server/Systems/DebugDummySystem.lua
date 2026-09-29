@@ -172,11 +172,9 @@ end
 -- Building the rig -----------------------------------------------------------------------------------
 
 -- An empty HumanoidDescription (default body parts, no asset upload/reference, no network round trip)
--- is enough for a generic, fully-rigged R15 body -- the exact same client-safe API
--- PreviewViewport.lua's own buildDummyRig already uses for the Move Editor's static preview gizmo (see
--- that file's header, which names this module's server-side use of the identical technique as its own
--- prior art). Colored to match Config.LabelColor so the body itself reads as "practice dummy" at a
--- glance, not just the nameplate above it.
+-- is enough for a generic, fully-rigged body, with no asset round trip. Colored to match
+-- Config.LabelColor so the body itself reads as "practice dummy" at a glance, not just the nameplate
+-- above it.
 local function buildRig(): Model
 	local description = Instance.new("HumanoidDescription")
 	description.HeadColor = Config.LabelColor

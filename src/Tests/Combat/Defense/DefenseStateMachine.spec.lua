@@ -199,7 +199,9 @@ return function()
 			local machine = DefenseStateMachine.New()
 			machine:Stagger(T)
 			expect(machine:BlockHeldAt(T)).to.equal(false)
-			machine:Press(T + 0.1, WINDOW, 0)
+			-- No window, so this is a plain block: with parry trading on, a windowed press would arm a
+			-- parry out of the stagger instead (see "parry trading" below).
+			machine:Press(T + 0.1, nil, 0)
 			-- Staggered is still the state, but the guard is genuinely up -- "Staggered" alone does not
 			-- say whether a contact was covered.
 			expect(machine:StateAt(T + 0.2)).to.equal("Staggered")
@@ -209,7 +211,7 @@ return function()
 	end)
 
 	describe("DefenseStateMachine -- the stagger punish", function()
-		it("cannot attack, cannot parry, CAN block", function()
+		it("cannot attack, CAN parry back, CAN block", function()
 			local machine = DefenseStateMachine.New()
 			machine:Stagger(T)
 			expect(machine:GetState()).to.equal("Staggered")
@@ -218,10 +220,11 @@ return function()
 			expect(canAttack).to.equal(false)
 			expect(attackReason).to.equal("Staggered")
 
-			-- The brief is explicit about both halves: no parry, but the block stays available.
-			expect(machine:Press(T + 0.1, WINDOW, 0)).to.equal(false)
+			-- Parry trading (DefenseConstants.Rally): the stagger no longer forbids arming a parry.
+			expect(DefenseConstants.Rally.ParryFromStagger).to.equal(true)
+			expect(machine:Press(T + 0.1, WINDOW, 0)).to.equal(true)
 			expect(machine:IsBlockHeld()).to.equal(true)
-			expect(machine:IsParryLiveAt(T + 0.2)).to.equal(false)
+			expect(machine:IsParryLiveAt(T + 0.2)).to.equal(true)
 		end)
 
 		it("lasts exactly the configured duration and then hands back to the held guard", function()
@@ -236,12 +239,86 @@ return function()
 			expect(machine:GetState()).to.equal("Blocking")
 		end)
 
-		it("keeps the parry locked for the whole punish", function()
+		it("leaves the parry armable for the whole punish", function()
 			local machine = DefenseStateMachine.New()
 			machine:Stagger(T)
-			local canArm, reason = machine:CanArmParryAt(T + DefenseConstants.Stagger.DurationSeconds - 0.01)
+			expect(machine:CanArmParryAt(T + DefenseConstants.Stagger.DurationSeconds - 0.01)).to.equal(true)
+		end)
+	end)
+
+	describe("DefenseStateMachine -- parry trading", function()
+		it("drops a whiffed parry straight back into the stagger it interrupted", function()
+			local machine = DefenseStateMachine.New()
+			machine:Stagger(T)
+			machine:Press(T + 0.1, WINDOW, 0)
+			machine:Release(T + 0.12)
+			-- The window closes at T + 0.35 with nothing caught.
+			machine:Update(T + 0.4)
+			expect(machine:GetState()).to.equal("Staggered")
+			expect(machine:CanAttack()).to.equal(false)
+			-- And the whiff still paid its lockout: recovery ends 0.35s past the close.
+			local canArm, reason = machine:CanArmParryAt(T + 0.5)
 			expect(canArm).to.equal(false)
-			expect(reason).to.equal("Staggered")
+			expect(reason).to.equal("Locked")
+			-- The punish runs to its own end, not the window's.
+			machine:Update(T + DefenseConstants.Stagger.DurationSeconds)
+			expect(machine:GetState()).to.equal("Neutral")
+		end)
+
+		it("ends the stagger the moment a parry out of it lands", function()
+			local machine = DefenseStateMachine.New()
+			machine:Stagger(T)
+			machine:Press(T + 0.1, WINDOW, 0)
+			machine:Release(T + 0.12)
+			machine:Update(T + 0.15)
+			machine:ConsumeParry(T + 0.2)
+			machine:Update(T + 0.2)
+			expect(machine:GetState()).to.equal("Neutral")
+			expect(machine:CanAttack()).to.equal(true)
+		end)
+
+		it("keeps the stagger's gates on while the parry out of it is still pending", function()
+			local machine = DefenseStateMachine.New()
+			machine:Stagger(T)
+			machine:Press(T + 0.1, WINDOW, 0)
+			machine:Update(T + 0.2)
+			expect(machine:GetState()).to.equal("ParryWindow")
+			expect(machine:IsStaggerHeld()).to.equal(true)
+			local canAttack, attackReason = machine:CanAttack()
+			expect(canAttack).to.equal(false)
+			expect(attackReason).to.equal("Staggered")
+			local ok, evadeReason = machine:BeginEvade(T + 0.2, 0)
+			expect(ok).to.equal(false)
+			expect(evadeReason).to.equal("Staggered")
+		end)
+
+		it("charges the anti-turtle rule when a staggered guard is released", function()
+			local machine = DefenseStateMachine.New()
+			machine:Stagger(T)
+			-- A plain block during the stagger (the machine only arms when the lockout allows, so force
+			-- the no-window path), then a release and an instant re-press.
+			machine:Press(T + 0.1, nil, 0)
+			machine:Release(T + 0.5)
+			expect(machine:Press(T + 0.55, WINDOW, 0)).to.equal(false)
+		end)
+
+		it("shortens the window by the rally scale, keeping its opening moment", function()
+			local machine = DefenseStateMachine.New()
+			machine:Press(T, WINDOW, 0, 0.5)
+			-- Opens at T + 0.05 as authored; lasts 0.1s instead of 0.2s.
+			expect(machine:IsParryLiveAt(T + 0.05)).to.equal(true)
+			expect(machine:IsParryLiveAt(T + 0.14)).to.equal(true)
+			expect(machine:IsParryLiveAt(T + 0.16)).to.equal(false)
+			-- The perfect band shrinks with it.
+			local perfect = DefenseConstants.PerfectParry.WindowSeconds
+			expect(machine:IsPerfectParryAt(T + 0.05 + perfect * 0.5 - 0.001)).to.equal(true)
+			expect(machine:IsPerfectParryAt(T + 0.05 + perfect * 0.5 + 0.001)).to.equal(false)
+		end)
+
+		it("ignores a rally scale outside (0, 1)", function()
+			local machine = DefenseStateMachine.New()
+			machine:Press(T, WINDOW, 0, 1.5)
+			expect(machine:IsParryLiveAt(T + 0.24)).to.equal(true)
 		end)
 	end)
 
@@ -270,11 +347,13 @@ return function()
 	describe("DefenseStateMachine -- the roll's evade window", function()
 		local EVADE = DefenseConstants.Evade
 
-		it("is vulnerable through the startup, evading through the active phase, and vulnerable after", function()
+		it("is vulnerable through any startup, evading through the active phase, and vulnerable after", function()
 			local machine = DefenseStateMachine.New()
 			expect(machine:BeginEvade(T, 0)).to.equal(true)
-			expect(machine:IsEvadingAt(T)).to.equal(false)
-			expect(machine:IsEvadingAt(T + EVADE.StartupSeconds * 0.5)).to.equal(false)
+			expect(machine:IsEvadingAt(T - 0.01)).to.equal(false)
+			if EVADE.StartupSeconds > 0 then
+				expect(machine:IsEvadingAt(T + EVADE.StartupSeconds * 0.5)).to.equal(false)
+			end
 			expect(machine:IsEvadingAt(T + EVADE.StartupSeconds)).to.equal(true)
 			expect(machine:IsEvadingAt(T + EVADE.StartupSeconds + EVADE.ActiveSeconds)).to.equal(true)
 			expect(machine:IsEvadingAt(T + EVADE.StartupSeconds + EVADE.ActiveSeconds + 0.01)).to.equal(false)
@@ -291,7 +370,10 @@ return function()
 			machine:BeginEvade(T, 10) -- an absurd ping
 			local activeEnd = T + EVADE.StartupSeconds + EVADE.ActiveSeconds
 			-- The start is not pulled earlier by any ping.
-			expect(machine:IsEvadingAt(T + EVADE.StartupSeconds * 0.5)).to.equal(false)
+			expect(machine:IsEvadingAt(T - 0.01)).to.equal(false)
+			if EVADE.StartupSeconds > 0 then
+				expect(machine:IsEvadingAt(T + EVADE.StartupSeconds * 0.5)).to.equal(false)
+			end
 			expect(machine:IsEvadingAt(activeEnd + EVADE.PingCompensationMaxSeconds)).to.equal(true)
 			expect(machine:IsEvadingAt(activeEnd + EVADE.PingCompensationMaxSeconds + 0.01)).to.equal(false)
 		end)
@@ -305,9 +387,15 @@ return function()
 			expect((machine:BeginEvade(T + EVADE.CooldownSeconds, 0))).to.equal(true)
 		end)
 
-		it("derives its cooldown from the roll's, a little under it", function()
-			local rollCooldown = require(ReplicatedStorage.Shared.Parkour.ParkourConstants).Roll.CooldownSeconds
-			expect(EVADE.CooldownSeconds < rollCooldown).to.equal(true)
+		it("opens on the press and outlasts the glide it covers", function()
+			local evadeConstants = require(ReplicatedStorage.Shared.Combat.EvadeConstants)
+			expect(EVADE.StartupSeconds).to.equal(0)
+			expect(EVADE.StartupSeconds + EVADE.ActiveSeconds > evadeConstants.DurationSeconds).to.equal(true)
+		end)
+
+		it("derives its cooldown from the evade's, a little under it", function()
+			local evadeCooldown = require(ReplicatedStorage.Shared.Combat.EvadeConstants).CooldownSeconds
+			expect(EVADE.CooldownSeconds < evadeCooldown).to.equal(true)
 			expect(EVADE.CooldownSeconds > 0).to.equal(true)
 		end)
 
@@ -356,6 +444,59 @@ return function()
 			expect(machine:IsBlockHeld()).to.equal(false)
 			expect(machine:CanAttack()).to.equal(true)
 			expect(machine:CanArmParryAt(T + 1)).to.equal(true)
+		end)
+	end)
+
+	describe("DefenseStateMachine -- the air parry's rewind", function()
+		-- RewoundParryCovers answers "would a press made at pressAt have caught a contact at contactAt",
+		-- judged exactly as a live press is -- but at the rewound time, with no end refund.
+		local OPEN = WINDOW.Open
+
+		it("covers a contact inside the window a press at the rewound time would have armed", function()
+			local machine = DefenseStateMachine.New()
+			local covers = machine:RewoundParryCovers(T, T + OPEN + 0.1, WINDOW, 1)
+			expect(covers).to.equal(true)
+		end)
+
+		it("misses a contact outside that window, early or late, with no end refund", function()
+			local machine = DefenseStateMachine.New()
+			expect((machine:RewoundParryCovers(T, T + OPEN - 0.01, WINDOW, 1))).to.equal(false)
+			expect((machine:RewoundParryCovers(T, T + WINDOW.Close + 0.01, WINDOW, 1))).to.equal(false)
+		end)
+
+		it("judges the perfect band from the rewound opening", function()
+			local machine = DefenseStateMachine.New()
+			local perfectBand = DefenseConstants.PerfectParry.WindowSeconds
+			local _, perfect = machine:RewoundParryCovers(T, T + OPEN + perfectBand * 0.5, WINDOW, 1)
+			expect(perfect).to.equal(true)
+			local _, late = machine:RewoundParryCovers(T, T + OPEN + perfectBand + 0.02, WINDOW, 1)
+			expect(late).to.equal(false)
+		end)
+
+		it("applies MinUnguardedSeconds at the rewound time", function()
+			local machine = DefenseStateMachine.New()
+			machine:Press(T, nil, 0)
+			machine:Release(T + 0.1)
+			local pressAt = T + 0.1 + DefenseConstants.Parry.MinUnguardedSeconds * 0.5
+			expect((machine:RewoundParryCovers(pressAt, pressAt + OPEN + 0.05, WINDOW, 1))).to.equal(false)
+		end)
+
+		it("mints nothing for a guard already held at the rewound time", function()
+			local machine = DefenseStateMachine.New()
+			machine:Press(T, nil, 0)
+			expect((machine:RewoundParryCovers(T + 0.5, T + 0.5 + OPEN + 0.05, WINDOW, 1))).to.equal(false)
+		end)
+
+		it("shortens with the rally scale, keeping its opening", function()
+			local machine = DefenseStateMachine.New()
+			local length = WINDOW.Close - OPEN
+			expect((machine:RewoundParryCovers(T, T + OPEN + length * 0.4, WINDOW, 0.5))).to.equal(true)
+			expect((machine:RewoundParryCovers(T, T + OPEN + length * 0.6, WINDOW, 0.5))).to.equal(false)
+		end)
+
+		it("refuses without a window", function()
+			local machine = DefenseStateMachine.New()
+			expect((machine:RewoundParryCovers(T, T + OPEN + 0.05, nil, 1))).to.equal(false)
 		end)
 	end)
 end

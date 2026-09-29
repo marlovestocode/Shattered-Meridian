@@ -15,8 +15,8 @@
 	shapes growing forward from the origin and "centred" shapes straddling it. Read that file's header
 	before changing anything here.
 
-	WHY SweptContainsPoint EXISTS, since it is the one function here with no equivalent in the old
-	Shared/HitboxShapes.lua:
+	WHY SweptContainsPoint EXISTS, since it is the one function here the pre-rebuild shape module (the
+	deleted Shared/HitboxShapes.lua) had no equivalent of:
 
 	ContainsPoint answers "is this point inside the volume AT THIS INSTANT." Sampled discretely, that
 	question has a blind spot exactly as wide as the distance the volume travelled since the last
@@ -63,8 +63,8 @@ local EPSILON = 1e-4
 local SCRATCH_DIMENSIONS: Dimensions = HitboxTypes.DefaultDimensions()
 
 -- Shared by ContainsPoint and BoundingBox so the two can never disagree about how wide a cone is.
--- AngleDegrees is the FULL apex angle (what an author means by "a 45 degree cone"), matching
--- HitboxShapes.ConeBaseRadius, so the half-angle is what drives the taper. Clamped to 1..179 because
+-- AngleDegrees is the FULL apex angle (what an author means by "a 45 degree cone"), so the half-angle
+-- is what drives the taper. Clamped to 1..179 because
 -- tan is undefined at 90 degrees of half-angle and meaningless past it.
 local function coneBaseRadius(dimensions: Dimensions): number
 	local halfAngle = math.rad(math.clamp(dimensions.AngleDegrees, 1, 179) / 2)

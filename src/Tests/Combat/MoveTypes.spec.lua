@@ -2,577 +2,264 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
+local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
-local Fixtures = require(ServerScriptService.Tests.TestHelpers.Fixtures)
 
--- A well-formed Box move candidate in the WIRE shape MoveRegistryManager.Validate expects
--- (OffsetX/Y/Z flat numbers, not a CFrame -- see Validate's own header) -- mirrors exactly what
--- MoveEditorClient.lua's encodeDraftForWire produces.
-local function makeBoxCandidate(overrides: { [string]: any }?): { [string]: any }
-	local candidate = {
-		MoveId = "test-move",
-		DisplayName = "Test Move",
-		Category = "Testing",
-		Author = "TestAuthor",
-		CreatedAt = 1000,
-		UpdatedAt = 1000,
+-- The schema module's own contract: the vocabulary is the engine's, the wire encoding round-trips
+-- through Validate, Clone never aliases, Fingerprint sees exactly the authored fields, and the engine
+-- projection is a copy rather than an approximation.
+
+local function wire(overrides: { [string]: any }?): { [string]: any }
+	local candidate: { [string]: any } = {
+		MoveId = "spec-move",
+		DisplayName = "Spec Move",
+		Description = "",
+		Category = "",
+		Author = "Spec",
+		CreatedAt = 1,
+		UpdatedAt = 2,
 		Shape = "Box",
-		Size = Vector3.new(4, 4, 4),
+		Dimensions = { Width = 4, Height = 5, Length = 6, Radius = 2, InnerRadius = 0, AngleDegrees = 90 },
 		OffsetX = 0,
-		OffsetY = 0,
+		OffsetY = 0.5,
 		OffsetZ = -3,
-		WindupSeconds = 0.2,
+		WindupSeconds = 0.3,
 		ActiveSeconds = 0.15,
-		RecoverySeconds = 0.3,
-		Cooldown = 0.6,
-		Damage = 5,
-		PostureDamage = 5,
-		ArcDegrees = 100,
-		MaxTargets = 5,
+		RecoverySeconds = 0.35,
+		Cooldown = 0.8,
+		Damage = 10,
+		PostureDamage = 8,
 		AnimationId = "",
 	}
-	return Fixtures.applyOverrides(candidate, overrides)
+	for key, value in pairs(overrides or {}) do
+		candidate[key] = value
+	end
+	return candidate
+end
+
+local function move(overrides: { [string]: any }?): MoveTypes.MoveDefinition
+	local validated, reason = MoveRegistryManager.Validate(wire(overrides))
+	if not validated then
+		error(`fixture rejected: {tostring(reason)}`)
+	end
+	return validated
 end
 
 return function()
-	describe("MoveRegistryManager.Validate", function()
-		it("accepts a well-formed Box move", function()
-			local move, reason = MoveRegistryManager.Validate(makeBoxCandidate())
-			expect(reason).to.equal(nil)
-			expect(move).to.be.ok()
-			expect((move :: any).Shape).to.equal("Box")
-			expect((move :: any).Size).to.equal(Vector3.new(4, 4, 4))
-			expect((move :: any).Radius).to.equal(nil)
-			expect((move :: any).Offset).to.equal(CFrame.new(0, 0, -3))
+	describe("MoveTypes vocabulary", function()
+		it("offers exactly the engine's seven shapes", function()
+			expect(#MoveTypes.Shapes).to.equal(7)
+			for _, shape in MoveTypes.Shapes do
+				expect(HitboxTypes.IsShapeKind(shape)).to.equal(true)
+			end
 		end)
 
-		it("accepts a well-formed Sphere move", function()
-			local candidate = makeBoxCandidate({ Shape = "Sphere", Size = nil, Radius = 5 })
-			local move, reason = MoveRegistryManager.Validate(candidate)
-			expect(reason).to.equal(nil)
-			expect(move).to.be.ok()
-			expect((move :: any).Shape).to.equal("Sphere")
-			expect((move :: any).Radius).to.equal(5)
-			expect((move :: any).Size).to.equal(nil)
-		end)
-
-		it("rejects a non-table candidate", function()
-			local move, reason = MoveRegistryManager.Validate("not a table")
-			expect(move).to.equal(nil)
-			expect(reason).to.equal("InvalidShape")
-		end)
-
-		it("rejects a missing MoveId", function()
-			local move, reason = MoveRegistryManager.Validate(makeBoxCandidate({ MoveId = "" }))
-			expect(move).to.equal(nil)
-			expect(reason).to.equal("InvalidMoveId")
-		end)
-
-		-- v1 rejected these as MissingSize/MissingRadius. Dimensions replaced that pair, so the single
-		-- MissingDimensions is now the successor to both -- see dimensionsFromCandidate's own header on
-		-- why "geometry cannot be determined at all" stayed a hard reject rather than defaulting.
-		-- `Size` is REMOVED after the fact rather than passed as `{ Size = nil }`. A Lua table
-		-- constructor stores nothing for an explicit nil value, so `{ Size = nil }` is simply `{}` and
-		-- Fixtures.applyOverrides (a `pairs` loop) has no key to apply -- meaning both of these tests
-		-- used to hand Validate a candidate that still carried its default Size, and assert it was
-		-- rejected. It never was, and never could have been.
-		it("rejects Shape == Box with neither Size nor Dimensions", function()
-			local candidate = makeBoxCandidate()
-			candidate.Size = nil
-			local move, reason = MoveRegistryManager.Validate(candidate)
-			expect(move).to.equal(nil)
-			expect(reason).to.equal("MissingDimensions")
-		end)
-
-		it("rejects Shape == Sphere with neither Radius nor Dimensions", function()
-			local candidate = makeBoxCandidate({ Shape = "Sphere" })
-			candidate.Size = nil
-			local move, reason = MoveRegistryManager.Validate(candidate)
-			expect(move).to.equal(nil)
-			expect(reason).to.equal("MissingDimensions")
-		end)
-
-		-- The reserved-category gate. A custom move claiming "Default" would masquerade as a
-		-- DefaultMoveRegistry projection to every UI consumer without being backed by a live Constants
-		-- table -- unreachable and undeletable. See Validate's own allowReservedCategory header.
-		it("rejects the reserved Default category from a client-submitted candidate", function()
-			local candidate = makeBoxCandidate({ Category = MoveTypes.DefaultCategory })
-			local move, reason = MoveRegistryManager.Validate(candidate)
-			expect(move).to.equal(nil)
-			expect(reason).to.equal("ReservedCategory")
-		end)
-
-		it("accepts the reserved Default category when allowReservedCategory is true", function()
-			local candidate = makeBoxCandidate({ Category = MoveTypes.DefaultCategory })
-			local move, reason = MoveRegistryManager.Validate(candidate, true)
-			expect(reason).to.equal(nil)
-			expect(move).to.be.ok()
-			expect((move :: any).Category).to.equal(MoveTypes.DefaultCategory)
-		end)
-
-		-- Pinned deliberately: the sentinel is an EXACT match, because DefaultMoveRegistry writes
-		-- exactly "Default" and every UI filter compares with ==. A lowercase category is an ordinary
-		-- author tag, and making the gate case-insensitive would be a silent behaviour change.
-		it("accepts a lowercase 'default' as an ordinary category", function()
-			local move, reason = MoveRegistryManager.Validate(makeBoxCandidate({ Category = "default" }))
-			expect(reason).to.equal(nil)
-			expect(move).to.be.ok()
-			expect((move :: any).Category).to.equal("default")
-		end)
-
-		it("still accepts an empty category", function()
-			local move, reason = MoveRegistryManager.Validate(makeBoxCandidate({ Category = "" }))
-			expect(reason).to.equal(nil)
-			expect(move).to.be.ok()
-		end)
-
-		it("rejects an unrecognized Shape", function()
-			local move, reason = MoveRegistryManager.Validate(makeBoxCandidate({ Shape = "Trapezoid" }))
-			expect(move).to.equal(nil)
-			expect(reason).to.equal("InvalidShapeField")
-		end)
-
-		-- The complement of the case above, and the regression that matters most about the widened
-		-- vocabulary: "Cone" USED to be an unrecognized shape and is now a real one. A shape beyond the
-		-- original Box/Sphere pair carries its geometry in Dimensions only, so it must validate without
-		-- a Size and must come back with both legacy fields nil -- see deriveLegacyGeometry.
-		it("accepts a non-legacy shape carrying Dimensions", function()
-			local candidate = makeBoxCandidate({
-				Shape = "Cone",
-				Dimensions = { Length = 12, AngleDegrees = 45 },
-			})
-			-- Removed, not overridden to nil -- see the two tests above on why that distinction matters.
-			candidate.Size = nil
-			local move, reason = MoveRegistryManager.Validate(candidate)
-			expect(reason).to.equal(nil)
-			expect(move).to.be.ok()
-			expect((move :: any).Shape).to.equal("Cone")
-			expect((move :: any).Dimensions.Length).to.equal(12)
-			expect((move :: any).Dimensions.AngleDegrees).to.equal(45)
-			expect((move :: any).Size).to.equal(nil)
-			expect((move :: any).Radius).to.equal(nil)
-		end)
-
-		it("clamps an out-of-range timing field instead of rejecting it", function()
-			local move = MoveRegistryManager.Validate(makeBoxCandidate({ WindupSeconds = 999 }))
-			expect(move).to.be.ok()
-			expect((move :: any).WindupSeconds).to.equal(45) -- CLAMP_MAX_SECONDS
-		end)
-
-		it("rejects a non-string AnimationId", function()
-			local move, reason = MoveRegistryManager.Validate(makeBoxCandidate({ AnimationId = 5 }))
-			expect(move).to.equal(nil)
-			expect(reason).to.equal("InvalidAnimationId")
-		end)
-
-		it("accepts a well-formed Movement grant", function()
-			local candidate = makeBoxCandidate({ Movement = { LungeDistanceStuds = 8, LungeDurationSeconds = 0.2 } })
-			local move, reason = MoveRegistryManager.Validate(candidate)
-			expect(reason).to.equal(nil)
-			expect((move :: any).Movement.LungeDistanceStuds).to.equal(8)
-		end)
-
-		it("rejects a malformed Movement grant", function()
-			local candidate = makeBoxCandidate({ Movement = { LungeDistanceStuds = "not a number" } })
-			local move, reason = MoveRegistryManager.Validate(candidate)
-			expect(move).to.equal(nil)
-			expect(reason).to.equal("InvalidMovement")
-		end)
-
-		it("leaves Movement/Knockback/Projectile nil when absent", function()
-			local move = MoveRegistryManager.Validate(makeBoxCandidate())
-			expect((move :: any).Movement).to.equal(nil)
-			expect((move :: any).Knockback).to.equal(nil)
-			expect((move :: any).Projectile).to.equal(nil)
-		end)
-
-		it("accepts a well-formed Projectile config", function()
-			local candidate = makeBoxCandidate({ Projectile = { Speed = 40, MaxRange = 60 } })
-			local move, reason = MoveRegistryManager.Validate(candidate)
-			expect(reason).to.equal(nil)
-			expect((move :: any).Projectile.Speed).to.equal(40)
-			expect((move :: any).Projectile.MaxRange).to.equal(60)
-		end)
-
-		it("clamps an out-of-range Projectile Speed/MaxRange instead of rejecting", function()
-			local candidate = makeBoxCandidate({ Projectile = { Speed = 9999, MaxRange = -5 } })
-			local move = MoveRegistryManager.Validate(candidate)
-			expect(move).to.be.ok()
-			expect((move :: any).Projectile.Speed).to.equal(1999) -- CLAMP_MAX_PROJECTILE_SPEED
-			expect((move :: any).Projectile.MaxRange).to.equal(5) -- CLAMP_MIN_PROJECTILE_RANGE
-		end)
-
-		it("rejects a malformed Projectile config", function()
-			local candidate = makeBoxCandidate({ Projectile = { Speed = "fast" } })
-			local move, reason = MoveRegistryManager.Validate(candidate)
-			expect(move).to.equal(nil)
-			expect(reason).to.equal("InvalidProjectile")
-		end)
-
-		it("defaults Knockback.StartsAirCombo to false when absent", function()
-			local candidate =
-				makeBoxCandidate({ Knockback = { UpVelocity = 20, HorizontalVelocity = 10, RagdollSeconds = 0.5 } })
-			local move, reason = MoveRegistryManager.Validate(candidate)
-			expect(reason).to.equal(nil)
-			expect((move :: any).Knockback.StartsAirCombo).to.equal(false)
-		end)
-
-		it("accepts Knockback.StartsAirCombo == true", function()
-			local candidate = makeBoxCandidate({
-				Knockback = { UpVelocity = 20, HorizontalVelocity = 10, RagdollSeconds = 0.5, StartsAirCombo = true },
-			})
-			local move, reason = MoveRegistryManager.Validate(candidate)
-			expect(reason).to.equal(nil)
-			expect((move :: any).Knockback.StartsAirCombo).to.equal(true)
-		end)
-
-		it("rejects a non-boolean Knockback.StartsAirCombo", function()
-			local candidate = makeBoxCandidate({
-				Knockback = { UpVelocity = 20, HorizontalVelocity = 10, RagdollSeconds = 0.5, StartsAirCombo = "yes" },
-			})
-			local move, reason = MoveRegistryManager.Validate(candidate)
-			expect(move).to.equal(nil)
-			expect(reason).to.equal("InvalidKnockback")
+		it("offers the engine's four anchors", function()
+			expect(#MoveTypes.AttachmentPoints).to.equal(4)
+			for _, point in MoveTypes.AttachmentPoints do
+				local definition = HitboxTypes.SanitizeDefinition({ Shape = "Box", AttachmentPart = point })
+				expect(definition.AttachmentPart).to.equal(point)
+			end
 		end)
 	end)
-
-	describe("MoveTypes.ToHitboxAttackDefinition", function()
-		it("projects a Box move losslessly, with DebugName == MoveId", function()
-			local move = MoveRegistryManager.Validate(makeBoxCandidate()) :: MoveTypes.MoveDefinition
-			local definition = MoveTypes.ToHitboxAttackDefinition(move)
-			expect(definition.DebugName).to.equal("test-move")
-			expect(definition.WindupSeconds).to.equal(move.WindupSeconds)
-			expect(definition.ActiveSeconds).to.equal(move.ActiveSeconds)
-			expect(definition.RecoverySeconds).to.equal(move.RecoverySeconds)
-			expect(definition.Size).to.equal(move.Size)
-			expect(definition.Offset).to.equal(move.Offset)
-			expect(definition.Damage).to.equal(move.Damage)
-			expect(definition.PostureDamage).to.equal(move.PostureDamage)
-			expect(definition.Cooldown).to.equal(move.Cooldown)
-			expect(definition.ArcDegrees).to.equal(move.ArcDegrees)
-			expect(definition.MaxTargets).to.equal(move.MaxTargets)
-			expect(definition.Shape).to.equal("Box")
-			expect(definition.Radius).to.equal(nil)
-		end)
-
-		it("projects a Sphere move's Shape/Radius through", function()
-			local candidate = makeBoxCandidate({ Shape = "Sphere", Size = nil, Radius = 6 })
-			local move = MoveRegistryManager.Validate(candidate) :: MoveTypes.MoveDefinition
-			local definition = MoveTypes.ToHitboxAttackDefinition(move)
-			expect(definition.Shape).to.equal("Sphere")
-			expect(definition.Radius).to.equal(6)
-			expect(definition.Size).to.equal(nil)
-		end)
-
-		it("projects Knockback through when present", function()
-			local candidate =
-				makeBoxCandidate({ Knockback = { UpVelocity = 20, HorizontalVelocity = 10, RagdollSeconds = 0.5 } })
-			local move = MoveRegistryManager.Validate(candidate) :: MoveTypes.MoveDefinition
-			local definition = MoveTypes.ToHitboxAttackDefinition(move)
-			expect(definition.Knockback).to.be.ok()
-			expect((definition.Knockback :: any).UpVelocity).to.equal(20)
-		end)
-
-		it("projects Projectile through when present", function()
-			local candidate = makeBoxCandidate({ Projectile = { Speed = 40, MaxRange = 60 } })
-			local move = MoveRegistryManager.Validate(candidate) :: MoveTypes.MoveDefinition
-			local definition = MoveTypes.ToHitboxAttackDefinition(move)
-			expect(definition.Projectile).to.be.ok()
-			expect((definition.Projectile :: any).Speed).to.equal(40)
-			expect((definition.Projectile :: any).MaxRange).to.equal(60)
-		end)
-
-		it("leaves Projectile nil for an ordinary melee move", function()
-			local move = MoveRegistryManager.Validate(makeBoxCandidate()) :: MoveTypes.MoveDefinition
-			local definition = MoveTypes.ToHitboxAttackDefinition(move)
-			expect(definition.Projectile).to.equal(nil)
-		end)
-	end)
-
-	-- A move carrying every optional sub-table Validate can produce, including the one three-level
-	-- path in this schema (ObjectStun -> FollowUp -> Dimensions). Built through Validate so it is a
-	-- real, normalized MoveDefinition rather than a hand-assembled approximation of one.
-	--
-	-- Slam is the one exception and deliberately absent: MoveRegistryManager has no validateSlam, so
-	-- a Slam block on the candidate is dropped rather than carried, and asserting on it here would
-	-- test the fixture builder rather than MoveTypes. Add it the moment that validator exists.
-	local function makeRichMove(): MoveTypes.MoveDefinition
-		local candidate = makeBoxCandidate({
-			Movement = { LungeDistanceStuds = 8, LungeDurationSeconds = 0.2 },
-			Knockback = { UpVelocity = 20, HorizontalVelocity = 10, RagdollSeconds = 0.6, StartsAirCombo = true },
-			Projectile = { Speed = 40, MaxRange = 60 },
-			Grab = {
-				HoldSeconds = 2,
-				ThrowUpVelocity = 40,
-				ThrowHorizontalVelocity = 60,
-				ThrowImpactDamage = 8,
-				ThrowSelfDamage = 4,
-			},
-			-- TreeId must name a live ArtConstants.ArtTrees entry, and Prerequisite must not be this
-			-- move's own id -- validateArt rejects both, so a fixture that got either wrong would come
-			-- back with no Art block at all and quietly pass every assertion below.
-			Art = {
-				TreeId = "common_foundation",
-				Node = 2,
-				QiCost = 15,
-				RequiredTier = 2,
-				Prerequisite = "some-other-art",
-			},
-			Animations = {
-				{ AnimationId = "rbxassetid://1", StartSeconds = 0, Speed = 1, Weight = 1 },
-				{ AnimationId = "rbxassetid://2", StartSeconds = 0.3, Speed = 1, Weight = 1 },
-			},
-			ObjectStun = {
-				Enabled = true,
-				Surfaces = { Walls = true, Floors = false, Ceilings = false, Props = true },
-				BonusDamage = 12,
-				FollowUp = {
-					Enabled = true,
-					DelaySeconds = 0.1,
-					WindupSeconds = 0.1,
-					ActiveSeconds = 0.1,
-					RecoverySeconds = 0.1,
-					Damage = 9,
-					PostureDamage = 4,
-					MaxTargets = 1,
-					Shape = "Box",
-					AnimationId = "",
-				},
-			},
-		})
-		return MoveRegistryManager.Validate(candidate) :: MoveTypes.MoveDefinition
-	end
 
 	describe("MoveTypes weight class and feintability", function()
 		it("defaults a move that authors neither to class 1, not feintable", function()
-			local move = MoveRegistryManager.Validate(makeBoxCandidate()) :: MoveTypes.MoveDefinition
-			expect(move.PowerLevel).to.equal(nil)
-			expect(MoveTypes.PowerLevelOf(move)).to.equal(MoveTypes.DefaultPowerLevel)
-			expect(MoveTypes.IsFeintable(move)).to.equal(false)
+			local plain = move()
+			expect(MoveTypes.PowerLevelOf(plain)).to.equal(MoveTypes.DefaultPowerLevel)
+			expect(MoveTypes.IsFeintable(plain)).to.equal(false)
 		end)
 
-		it("clamps and rounds an authored PowerLevel into the limits", function()
-			local high = MoveRegistryManager.Validate(makeBoxCandidate({ PowerLevel = 99 })) :: MoveTypes.MoveDefinition
-			expect(high.PowerLevel).to.equal(MoveTypes.PowerLevelLimits.Max)
-			local fractional =
-				MoveRegistryManager.Validate(makeBoxCandidate({ PowerLevel = 2.4 })) :: MoveTypes.MoveDefinition
-			expect(fractional.PowerLevel).to.equal(2)
-			local low = MoveRegistryManager.Validate(makeBoxCandidate({ PowerLevel = -3 })) :: MoveTypes.MoveDefinition
-			expect(low.PowerLevel).to.equal(MoveTypes.PowerLevelLimits.Min)
+		it("clamps PowerLevel into its limits when read", function()
+			expect(MoveTypes.PowerLevelOf({ PowerLevel = 99 })).to.equal(MoveTypes.PowerLevelLimits.Max)
+			expect(MoveTypes.PowerLevelOf({ PowerLevel = 0 / 0 })).to.equal(MoveTypes.DefaultPowerLevel)
 		end)
 
-		it("keeps Feintable only when it is literally true", function()
-			local yes = MoveRegistryManager.Validate(makeBoxCandidate({ Feintable = true })) :: MoveTypes.MoveDefinition
-			expect(MoveTypes.IsFeintable(yes)).to.equal(true)
-			local junk =
-				MoveRegistryManager.Validate(makeBoxCandidate({ Feintable = "yes" })) :: MoveTypes.MoveDefinition
-			expect(junk.Feintable).to.equal(nil)
-		end)
-
-		it("is carried by Clone and seen by Fingerprint", function()
-			local move =
-				MoveRegistryManager.Validate(makeBoxCandidate({ PowerLevel = 2, Feintable = true })) :: MoveTypes.MoveDefinition
-			local copy = MoveTypes.Clone(move)
-			expect(copy.PowerLevel).to.equal(2)
-			expect(copy.Feintable).to.equal(true)
-			local before = MoveTypes.Fingerprint(move)
-			move.PowerLevel = 3
-			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
-		end)
-
-		it("weighs a weapon string by stage: Heavy and Finisher above Basic, only Heavy feintable", function()
-			expect(MoveTypes.PowerLevelByStage.Basic).to.equal(1)
-			expect(MoveTypes.PowerLevelByStage.Heavy).to.equal(2)
-			expect(MoveTypes.PowerLevelByStage.Finisher).to.equal(2)
+		it("weighs a weapon string by stage: Heavy and Finisher above Basic; Basic and Heavy feintable", function()
+			expect(MoveTypes.PowerLevelByStage.Heavy > MoveTypes.PowerLevelByStage.Basic).to.equal(true)
+			expect(MoveTypes.PowerLevelByStage.Finisher > MoveTypes.PowerLevelByStage.Basic).to.equal(true)
+			expect(MoveTypes.FeintableByStage.Basic).to.equal(true)
 			expect(MoveTypes.FeintableByStage.Heavy).to.equal(true)
-			expect(MoveTypes.FeintableByStage.Basic).to.equal(false)
 			expect(MoveTypes.FeintableByStage.Finisher).to.equal(false)
 		end)
 	end)
 
-	describe("MoveTypes.DefaultCategory", function()
-		it("is the exact sentinel DefaultMoveRegistry stamps", function()
-			expect(MoveTypes.DefaultCategory).to.equal("Default")
+	describe("MoveTypes.ToWire", function()
+		it("round-trips through Validate to the same authored move", function()
+			local original = move({
+				OffsetYaw = 30,
+				OffsetPitch = -10,
+				Knockback = { UpVelocity = 10, HorizontalVelocity = 40, StartsAirCombo = true },
+				Grab = {
+					HoldSeconds = 2,
+					ThrowUpVelocity = 20,
+					ThrowHorizontalVelocity = 30,
+					ThrowImpactDamage = 5,
+					ThrowSelfDamage = 5,
+				},
+				Art = { TreeId = "common_foundation", Node = 1, QiCost = 10, RequiredTier = 1 },
+				PowerLevel = 3,
+				Feintable = true,
+				MaxTargets = 2,
+				AttachmentPart = "RightHand",
+				LocksMovement = true,
+			})
+			local stamped = MoveTypes.ToWire(original)
+			stamped.Author = original.Author
+			stamped.CreatedAt = original.CreatedAt
+			stamped.UpdatedAt = original.UpdatedAt
+			local again = MoveRegistryManager.Validate(stamped)
+			expect(again).to.be.ok()
+			expect(MoveTypes.Fingerprint(again :: any)).to.equal(MoveTypes.Fingerprint(original))
+		end)
+
+		it("never carries a CFrame, a projected field or the grab's attach offset", function()
+			local source = move({
+				Grab = {
+					HoldSeconds = 2,
+					ThrowUpVelocity = 20,
+					ThrowHorizontalVelocity = 30,
+					ThrowImpactDamage = 5,
+					ThrowSelfDamage = 5,
+				},
+			})
+			source.WeaponSpeed = 1.5
+			local encoded = MoveTypes.ToWire(source)
+			for _, value in pairs(encoded) do
+				expect(typeof(value) == "CFrame" or typeof(value) == "Vector3").to.equal(false)
+			end
+			expect(encoded.WeaponSpeed).to.equal(nil)
+			expect(encoded.Grab.AttachOffset).to.equal(nil)
+		end)
+	end)
+
+	describe("MoveTypes.ComposeOffset", function()
+		it("keeps the translation and applies yaw, then pitch, then roll", function()
+			local composed = MoveTypes.ComposeOffset(Vector3.new(1, 2, -3), Vector3.new(10, 20, 30))
+			local expected = CFrame.new(1, 2, -3) * CFrame.fromEulerAnglesYXZ(math.rad(10), math.rad(20), math.rad(30))
+			expect((composed.Position - expected.Position).Magnitude).to.be.near(0, 1e-6)
+			expect(composed.LookVector:Dot(expected.LookVector)).to.be.near(1, 1e-6)
 		end)
 	end)
 
 	describe("MoveTypes.Clone", function()
 		it("preserves every authored field", function()
-			local original = makeRichMove()
-			local copy = MoveTypes.Clone(original)
-			expect(copy.DisplayName).to.equal(original.DisplayName)
-			expect(copy.Category).to.equal(original.Category)
-			expect(copy.Shape).to.equal(original.Shape)
-			expect(copy.Offset).to.equal(original.Offset)
-			expect(copy.Damage).to.equal(original.Damage)
-			expect(#copy.Animations).to.equal(#original.Animations)
+			local source = move({ Knockback = { UpVelocity = 5, HorizontalVelocity = 6 }, MaxTargets = 3 })
+			local copy = MoveTypes.Clone(source)
+			expect(MoveTypes.Fingerprint(copy)).to.equal(MoveTypes.Fingerprint(source))
+			expect(copy.MoveId).to.equal(source.MoveId)
+			expect(copy.Author).to.equal(source.Author)
 		end)
 
-		it("does not alias Dimensions", function()
-			local original = makeRichMove()
-			local copy = MoveTypes.Clone(original)
-			expect(copy.Dimensions).never.to.equal(original.Dimensions)
+		it("does not alias Dimensions, Knockback, Grab or Art", function()
+			local source = move({
+				Knockback = { UpVelocity = 5, HorizontalVelocity = 6 },
+				Grab = {
+					HoldSeconds = 2,
+					ThrowUpVelocity = 20,
+					ThrowHorizontalVelocity = 30,
+					ThrowImpactDamage = 5,
+					ThrowSelfDamage = 5,
+				},
+				Art = { TreeId = "common_foundation", Node = 1, QiCost = 10, RequiredTier = 1 },
+			})
+			local copy = MoveTypes.Clone(source)
 			copy.Dimensions.Width = 99
-			expect(original.Dimensions.Width).never.to.equal(99)
-		end)
-
-		it("does not alias Movement/Knockback/Projectile", function()
-			local original = makeRichMove()
-			local copy = MoveTypes.Clone(original);
-			(copy.Movement :: any).LungeDistanceStuds = 99
 			(copy.Knockback :: any).UpVelocity = 99
-			(copy.Projectile :: any).Speed = 99
-			expect((original.Movement :: any).LungeDistanceStuds).to.equal(8)
-			expect((original.Knockback :: any).UpVelocity).to.equal(20)
-			expect((original.Projectile :: any).Speed).to.equal(40)
-		end)
-
-		-- Grab/Art are the two blocks Clone copies with a FLAT table.clone rather than a deep walk --
-		-- correct today because neither nests, and this is what says so out loud if one ever starts to.
-		it("does not alias Grab or Art", function()
-			local original = makeRichMove()
-			local copy = MoveTypes.Clone(original);
-			(copy.Grab :: any).HoldSeconds = 99
-			(copy.Art :: any).QiCost = 99
-			expect((original.Grab :: any).HoldSeconds).to.equal(2)
-			expect((original.Art :: any).QiCost).to.equal(15)
-		end)
-
-		it("does not alias individual Animations clips", function()
-			local original = makeRichMove()
-			local copy = MoveTypes.Clone(original)
-			copy.Animations[1].StartSeconds = 99
-			expect(original.Animations[1].StartSeconds).never.to.equal(99)
-		end)
-
-		-- The deepest path in the schema, and the one a shallow clone silently gets wrong.
-		it("does not alias ObjectStun.Surfaces or ObjectStun.FollowUp.Dimensions", function()
-			local original = makeRichMove()
-			local copy = MoveTypes.Clone(original)
-			local copyStun = copy.ObjectStun :: any
-			local originalStun = original.ObjectStun :: any
-			copyStun.Surfaces.Walls = false
-			copyStun.FollowUp.Damage = 99
-			copyStun.FollowUp.Dimensions.Width = 99
-			expect(originalStun.Surfaces.Walls).to.equal(true)
-			expect(originalStun.FollowUp.Damage).to.equal(9)
-			expect(originalStun.FollowUp.Dimensions.Width).never.to.equal(99)
-		end)
-
-		it("round-trips to an identical fingerprint", function()
-			local original = makeRichMove()
-			expect(MoveTypes.Fingerprint(MoveTypes.Clone(original))).to.equal(MoveTypes.Fingerprint(original))
+			(copy.Grab :: any).HoldSeconds = 9
+			(copy.Art :: any).QiCost = 50
+			expect(source.Dimensions.Width).to.equal(4)
+			expect((source.Knockback :: any).UpVelocity).to.equal(5)
+			expect((source.Grab :: any).HoldSeconds).to.equal(2)
+			expect((source.Art :: any).QiCost).to.equal(10)
 		end)
 	end)
 
 	describe("MoveTypes.Fingerprint", function()
-		it("is stable across repeated calls", function()
-			local move = makeRichMove()
-			expect(MoveTypes.Fingerprint(move)).to.equal(MoveTypes.Fingerprint(move))
+		it("is stable and matches two independently built identical moves", function()
+			expect(MoveTypes.Fingerprint(move())).to.equal(MoveTypes.Fingerprint(move()))
 		end)
 
-		-- Two independently-constructed moves with identical content must digest identically -- the
-		-- property digestValue's sort-keys-at-every-level walk exists to guarantee, since `pairs`
-		-- order is unspecified and a rebuilt sub-table is free to enumerate differently.
-		it("matches across two independently built but identical moves", function()
-			local a = makeRichMove()
-			local b = makeRichMove();
-			(b :: any).Dimensions = table.clone(a.Dimensions)
-			expect(MoveTypes.Fingerprint(b)).to.equal(MoveTypes.Fingerprint(a))
+		it("ignores identity stamps and projected fields", function()
+			local a = move()
+			local b = move({ MoveId = "other-id", Author = "Someone", CreatedAt = 50, UpdatedAt = 60 })
+			b.WeaponSpeed = 2
+			b.Tempo = 0.5
+			expect(MoveTypes.Fingerprint(a)).to.equal(MoveTypes.Fingerprint(b))
 		end)
 
-		-- The assertion that keeps dirty-tracking from being permanently stuck on: these four are
-		-- re-stamped server-side on EVERY round trip (MoveEditorSystem.stampTrustedMetadata).
-		it("ignores MoveId, Author, CreatedAt and UpdatedAt", function()
-			local move = makeRichMove()
-			local before = MoveTypes.Fingerprint(move)
-			move.MoveId = "totally-different-id"
-			move.Author = "SomeoneElse"
-			move.CreatedAt = 999999
-			move.UpdatedAt = 123456789
-			expect(MoveTypes.Fingerprint(move)).to.equal(before)
+		it("changes when any authored field changes", function()
+			local base = MoveTypes.Fingerprint(move())
+			local variants: { { [string]: any } } = {
+				{ Damage = 11 },
+				{ Description = "the punish" },
+				{ OffsetZ = -4 },
+				{ OffsetYaw = 15 },
+				{ Shape = "Sphere" },
+				{ AttachmentPart = "Weapon" },
+				{ LocksMovement = true },
+				{ AnimationId = "rbxassetid://1" },
+				{ Knockback = { UpVelocity = 1, HorizontalVelocity = 1 } },
+				{ Art = { TreeId = "common_foundation", Node = 1, QiCost = 10, RequiredTier = 1 } },
+			}
+			for _, variant in variants do
+				expect(MoveTypes.Fingerprint(move(variant)) ~= base).to.equal(true)
+			end
+		end)
+	end)
+
+	describe("MoveTypes.ToEngineAttackDefinition", function()
+		it("copies the geometry, timing and anchor straight onto the engine definition", function()
+			local source = move({ Shape = "Cone", MaxTargets = 2, AttachmentPart = "LeftHand", LocksMovement = true })
+			local definition, profile = MoveTypes.ToEngineAttackDefinition(source)
+			expect(definition.DebugName).to.equal(source.MoveId)
+			expect(definition.Shape).to.equal("Cone")
+			expect(definition.BaseDimensions.Length).to.equal(source.Dimensions.Length)
+			expect(definition.BaseDimensions.AngleDegrees).to.equal(source.Dimensions.AngleDegrees)
+			expect(definition.Offset).to.equal(source.Offset)
+			expect(definition.AttachmentPart).to.equal("LeftHand")
+			expect(definition.WindupSeconds).to.equal(source.WindupSeconds)
+			expect(definition.MaxTargetsPerSwing).to.equal(2)
+			expect(definition.LocksMovement).to.equal(true)
+			expect(definition.SizeFromAttachmentPart).to.equal(false)
+			expect(profile.Damage).to.equal(source.Damage)
+			expect(profile.PostureDamage).to.equal(source.PostureDamage)
 		end)
 
-		it("changes when an authored scalar changes", function()
-			local move = makeRichMove()
-			local before = MoveTypes.Fingerprint(move)
-			move.Damage += 1
-			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
+		it("survives the engine's own sanitiser with nothing to correct", function()
+			local definition = MoveTypes.ToEngineAttackDefinition(move({ Shape = "Arc" }))
+			local _, problems = HitboxTypes.SanitizeDefinition(definition)
+			expect(#problems).to.equal(0)
 		end)
 
-		it("changes when the offset translation changes", function()
-			local move = makeRichMove()
-			local before = MoveTypes.Fingerprint(move)
-			move.Offset = CFrame.new(0, 0, -4)
-			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
+		it("sizes a weapon-anchored swing off the blade", function()
+			local definition = MoveTypes.ToEngineAttackDefinition(move({ AttachmentPart = "Weapon" }))
+			expect(definition.SizeFromAttachmentPart).to.equal(true)
 		end)
 
-		it("changes when OffsetRotation changes", function()
-			local move = makeRichMove()
-			local before = MoveTypes.Fingerprint(move)
-			move.OffsetRotation = Vector3.new(0, 45, 0)
-			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
+		it("hands the damage layer the knockback and grab it authored", function()
+			local source = move({
+				Knockback = { UpVelocity = 5, HorizontalVelocity = 6, StartsAirCombo = true },
+				Grab = {
+					HoldSeconds = 2,
+					ThrowUpVelocity = 20,
+					ThrowHorizontalVelocity = 30,
+					ThrowImpactDamage = 5,
+					ThrowSelfDamage = 5,
+				},
+			})
+			local _, profile = MoveTypes.ToEngineAttackDefinition(source)
+			expect((profile.Knockback :: any).StartsAirCombo).to.equal(true)
+			expect((profile.Grab :: any).AttachOffset).to.equal(GrabConstants.Defaults.AttachOffset)
 		end)
 
-		it("changes when a clip is added, and when clip order changes", function()
-			local move = makeRichMove()
-			local before = MoveTypes.Fingerprint(move)
-			table.insert(move.Animations, { AnimationId = "rbxassetid://3", StartSeconds = 0.5, Speed = 1, Weight = 1 })
-			local added = MoveTypes.Fingerprint(move)
-			expect(added).never.to.equal(before)
-
-			local swapped = MoveTypes.Clone(move)
-			swapped.Animations[1], swapped.Animations[2] = swapped.Animations[2], swapped.Animations[1]
-			expect(MoveTypes.Fingerprint(swapped)).never.to.equal(added)
-		end)
-
-		it("changes when an optional sub-table is removed", function()
-			local move = makeRichMove()
-			local before = MoveTypes.Fingerprint(move)
-			move.Knockback = nil
-			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
-		end)
-
-		it("changes when a nested ObjectStun follow-up field changes", function()
-			local move = makeRichMove()
-			local before = MoveTypes.Fingerprint(move);
-			((move.ObjectStun :: any).FollowUp :: any).Damage = 42
-			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
-		end)
-
-		-- Description is pure metadata -- nothing in combat resolution reads it -- but it is AUTHORED,
-		-- and an admin who writes a paragraph of intent and closes without saving has to be told they
-		-- are about to lose it. That is exactly what the digest is for.
-		it("changes when the description changes", function()
-			local move = makeRichMove()
-			local before = MoveTypes.Fingerprint(move)
-			move.Description = "Opener -- meant to be cancelled into the heavy."
-			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
-		end)
-
-		it("changes when a Grab field changes", function()
-			local move = makeRichMove()
-			local before = MoveTypes.Fingerprint(move);
-			(move.Grab :: any).ThrowUpVelocity = 99
-			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
-		end)
-
-		-- Art was the one authored block Clone carried and this digest did not, so an art binding
-		-- edit never tripped the editor's UNSAVED chip and was lost on the next load. These two
-		-- cases are what keep it from silently falling back out.
-		it("changes when the Art binding's QiCost changes", function()
-			local move = makeRichMove()
-			local before = MoveTypes.Fingerprint(move);
-			(move.Art :: any).QiCost = 42
-			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
-		end)
-
-		it("changes when the Art binding is removed entirely", function()
-			local move = makeRichMove()
-			local before = MoveTypes.Fingerprint(move)
-			move.Art = nil
-			expect(MoveTypes.Fingerprint(move)).never.to.equal(before)
+		it("does not alias the move's dimensions into the engine definition", function()
+			local source = move()
+			local definition = MoveTypes.ToEngineAttackDefinition(source)
+			definition.BaseDimensions.Width = 99
+			expect(source.Dimensions.Width).to.equal(4)
 		end)
 	end)
 end

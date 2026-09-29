@@ -91,6 +91,7 @@ local BlimpFuelModule = require(script.Screens.BlimpFuel)
 local BlimpHelmModule = require(script.Screens.BlimpHelm)
 local CarriedResourcesModule = require(script.Screens.CarriedResources)
 local FurnacePromptModule = require(script.Screens.FurnacePrompt)
+local LockOnMarkerModule = require(script.Screens.LockOnMarker)
 local WeaponInventoryModule = require(script.Screens.WeaponInventory)
 local ShiftLockCrosshair = require(script.Components.ShiftLockCrosshair)
 local ViewportScale = require(script.ViewportScale)
@@ -160,6 +161,9 @@ export type UIHandles = {
 	-- The furnace's custom interaction prompt (Screens/FurnacePrompt/init.lua) -- driven by
 	-- Client/Blimp/FurnacePromptClient.lua, which owns the ProximityPromptService wiring behind it.
 	FurnacePrompt: FurnacePromptModule.FurnacePromptHandle,
+	-- The lock-on target's marker and guard bar (Screens/LockOnMarker/init.lua) -- driven by
+	-- Client/Combat/LockOnController.lua, which owns the target and projects it every frame.
+	LockOnMarker: LockOnMarkerModule.LockOnMarkerHandle,
 	-- The one viewport multiplier, exposed because FurnacePromptClient projects a world point into a
 	-- scaled surface's own space and has to divide by exactly the scale that surface was built with --
 	-- computing a second one would open a second ViewportSize connection, which is the specific cost
@@ -428,6 +432,10 @@ function UI.Mount(): UIHandles
 	-- band. Screens/FurnacePrompt's own Mount header has the argument; Shell/Regions is not involved
 	-- and deliberately does not know it exists.
 	local furnacePrompt = FurnacePromptModule.Mount(scope, playerGui, viewportScale)
+
+	-- Same shape as the furnace prompt just above: it tracks a point in the world, so it owns a World-band
+	-- surface rather than a region tile.
+	local lockOnMarker = LockOnMarkerModule.Mount(scope, playerGui, viewportScale)
 	logger:debug("FurnacePrompt mounted")
 
 	return {
@@ -449,6 +457,7 @@ function UI.Mount(): UIHandles
 		BlimpHelm = blimpHelm,
 		CarriedResources = carriedResources,
 		FurnacePrompt = furnacePrompt,
+		LockOnMarker = lockOnMarker,
 		WeaponInventory = weaponInventory,
 		Scope = scope,
 	}

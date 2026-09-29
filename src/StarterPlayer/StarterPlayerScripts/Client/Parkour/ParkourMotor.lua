@@ -183,9 +183,9 @@ local GUARDED_HUMANOID_STATES = {
 }
 local capturedStateEnabled: { [Enum.HumanoidStateType]: boolean }? = nil
 
--- THE LAST EXTERNAL IMPULSE THAT LANDED WHILE A VELOCITY STATE OWNED THE BODY, or nil. See
--- ApplyExternalImpulse. Held until the owning state consumes it (ConsumeInterrupt) or the body is handed
--- back, whichever comes first -- an interrupt describes THIS period of ownership and must never survive
+-- THE LAST EXTERNAL IMPULSE THAT LANDED WHILE A PARKOUR STATE OWNED THE BODY (Velocity or Kinematic), or
+-- nil. See ApplyExternalImpulse. Held until ParkourController consumes it (ConsumeInterrupt) or the body
+-- is handed back, whichever comes first -- an interrupt describes THIS period of ownership and must never survive
 -- into the next one.
 local pendingInterrupt: Vector3? = nil
 
@@ -717,30 +717,41 @@ end
 -- freeze -- as opposed to an impulse a parkour state fires as part of its own move (a jump, a slide-jump,
 -- a wall launch), which stays on ApplyImpulse above.
 --
--- The difference is what happens while a Velocity-drive state owns the body. ApplyImpulse's write
--- lands on the assembly and is then overwritten on the very next physics step by the state's
--- LinearVelocity, at 90000 MaxForce -- which is correct for the state's own impulses (every one of them
--- is fired on the frame the state hands off) and wrong for a hit: a player knocked back mid-roll simply
--- kept rolling, the launch erased before it moved them a stud (audit L-28, the roll case).
+-- The difference is what happens while a state owns the body. ApplyImpulse's write lands on the assembly
+-- and is then overwritten on the very next physics step by a Velocity state's LinearVelocity (90000
+-- MaxForce), or refused outright under a Kinematic state's rigid AlignPosition -- correct for a state's
+-- own impulses, and wrong for a hit: a player knocked back mid-slide kept sliding, and one knocked back
+-- mid-vault was never knocked at all (audit L-28).
 --
--- So this does the same write and, when a Velocity state is the owner, also records it as an
--- INTERRUPT. The state reads that through ConsumeInterrupt on its next Update and hands off carrying the
--- impulse rather than re-commanding its own velocity -- the knock wins, the state ends. A state that
--- never consumes it loses nothing either: the record is dropped the moment the body is handed back.
+-- So while ANY state owns the body (Velocity or Kinematic), this also records the impulse as an
+-- INTERRUPT. ParkourController reads it through ConsumeInterrupt before the owning state's next Update,
+-- ends that state, and hands the body to the engine carrying the impulse -- the knock wins, whatever the
+-- state was. Under a Kinematic owner the write itself is skipped (the rigid drive would erase it before
+-- a physics step); the hand-off writes it instead, one controller frame later.
 --
--- Same refusals as ApplyImpulse (a kinematic traversal, a server-held root), and an impulse that was
--- refused raises nothing, because nothing happened to the body.
+-- Still refused while the server holds root control -- the server's own pin or hold is the owner then,
+-- and an impulse that was refused raises nothing, because nothing happened to the body.
 function ParkourMotor.ApplyExternalImpulse(velocity: Vector3): boolean
-	if not ParkourMotor.ApplyImpulse(velocity) then
+	local part = rootPart
+	local currentHumanoid = humanoid
+	if not part or not currentHumanoid or not part.Parent then
 		return false
 	end
+	if currentHumanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true then
+		return false
+	end
+	if activeMode == "Kinematic" then
+		pendingInterrupt = velocity
+		return true
+	end
+	part.AssemblyLinearVelocity = velocity
 	if activeMode == "Velocity" then
 		pendingInterrupt = velocity
 	end
 	return true
 end
 
--- The impulse an external mover wrote while a Velocity state owned the body, cleared by the read. nil
+-- The impulse an external mover landed while a state owned the body, cleared by the read. nil
 -- when there was none. See ApplyExternalImpulse.
 function ParkourMotor.ConsumeInterrupt(): Vector3?
 	local interrupt = pendingInterrupt

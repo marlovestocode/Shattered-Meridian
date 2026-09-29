@@ -34,10 +34,10 @@
 	    than the transition to Blocking, because ping compensation refunds latency without delaying
 	    the guard coming up -- see ParryWindows.ParryEndFor. One marker, two derived times, so the
 	    membership test cannot be "is the state ParryWindow".
-	  * EVADE LIVENESS (_evadeOpensAt/_evadeEndsAt). The roll's evade frames, same shape as the parry's
+	  * EVADE LIVENESS (_evadeOpensAt/_evadeEndsAt). The evade's frames, same shape as the parry's
 	    for the same reason: a ping-refunded window that a contact is tested against at its own
-	    SampleTime. Not a state because a roll changes nothing else about the defender's posture --
-	    rolling out of a guard releases it through the ordinary Release path, and a roll in any other
+	    SampleTime. Not a state because an evade changes nothing else about the defender's posture --
+	    evading out of a guard releases it through the ordinary Release path, and an evade in any other
 	    posture leaves that posture exactly as it was.
 
 	Does not own: the guard pool (GuardMeter.lua), what a contact resolves to (OutcomeResolver.lua),
@@ -88,13 +88,16 @@ export type Machine = typeof(setmetatable(
 		_parryOpensAt: number,
 		_parryEndsAt: number,
 		_parryConsumed: boolean,
+		-- The rally multiplier the CURRENT press armed with (DefenseConstants.Rally), 1 outside a rally.
+		-- Kept so the perfect-parry band shrinks with the window it belongs to.
+		_windowScale: number,
 		-- Wall-clock until which no new parry may be armed. Survives leaving ParryRecovery.
 		_parryLockedUntil: number,
 		-- When the defender last stopped holding guard, for the anti-turtle arming rule.
 		_guardDownSince: number,
 		_staggerUntil: number,
 		_guardBrokenUntil: number,
-		-- The roll's evade window, absolute. _evadeEndsAt carries the ping refund. Zero when no evade has
+		-- The evade window, absolute. _evadeEndsAt carries the ping refund. Zero when no evade has
 		-- ever been opened, which no real contact time can fall inside.
 		_evadeOpensAt: number,
 		_evadeEndsAt: number,
@@ -147,6 +150,7 @@ function DefenseStateMachine.New(hooks: Hooks?): Machine
 		_parryOpensAt = 0,
 		_parryEndsAt = 0,
 		_parryConsumed = false,
+		_windowScale = 1,
 		_parryLockedUntil = 0,
 		_guardDownSince = 0,
 		_staggerUntil = 0,
@@ -199,12 +203,21 @@ local function phaseEnd(self: Machine): number?
 		-- wall-clock and nowhere for the two to disagree.
 		return if window then self._parryOpensAt else nil
 	elseif state == "ParryWindow" then
+		-- A parry that LANDED ends the window on the spot. ConsumeParry already pulled _parryEndsAt back
+		-- to the contact, so the parrier drops straight to Blocking (key held) or Neutral instead of
+		-- sitting in ParryWindow until its authored Close -- where CanAttack refuses "Guarding", a
+		-- refusal the input buffer drops, eating the very counter-hit the parry just earned.
+		if self._parryConsumed then
+			return self._parryEndsAt
+		end
 		-- Closes at the authored Close, NOT at the ping-compensated _parryEndsAt. The refund extends
 		-- how long a contact still counts as a parry; it must not delay the guard coming up, or a
 		-- high-ping player is charged for the latency this is meant to refund.
 		return if window then self._parryOpensAt + (window.Close - window.Open) else nil
 	elseif state == "ParryRecovery" then
-		return self._parryLockedUntil
+		-- Never earlier than the state was entered: a consumed window has stamped no lockout, and a stale
+		-- one would otherwise date the transition out of here to some moment in the past.
+		return math.max(self._parryLockedUntil, self._enteredAt)
 	elseif state == "Staggered" then
 		return self._staggerUntil
 	elseif state == "GuardBroken" then
@@ -213,14 +226,24 @@ local function phaseEnd(self: Machine): number?
 	return nil
 end
 
-local function nextAfter(self: Machine, state: DefenseState): DefenseState?
+local function nextAfter(self: Machine, state: DefenseState, at: number): DefenseState?
 	if state == "Raising" then
 		return "ParryWindow"
 	elseif state == "ParryWindow" then
+		-- A parry armed OUT OF A STAGGER (DefenseConstants.Rally) that caught nothing drops straight back
+		-- into the stagger it interrupted: the punish is still running, and a whiff must not end it.
+		-- Held or released makes no difference here -- a staggered guard is represented as Staggered with
+		-- the block held, exactly as a plain press during a stagger already is.
+		if at < self._staggerUntil then
+			return "Staggered"
+		end
 		-- The whole branch. Held guard becomes a block; a released tap that caught nothing becomes a
 		-- whiff and pays the recovery.
 		return if self._blockHeld then "Blocking" else "ParryRecovery"
 	elseif state == "ParryRecovery" then
+		if at < self._staggerUntil then
+			return "Staggered"
+		end
 		return if self._blockHeld then "Blocking" else "Neutral"
 	elseif state == "Staggered" then
 		return if self._blockHeld then "Blocking" else "Neutral"
@@ -250,7 +273,7 @@ function DefenseStateMachine.Update(self: Machine, now: number): DefenseState
 			self._parryLockedUntil = math.max(self._parryLockedUntil, dueAt + recovery)
 		end
 
-		local target = nextAfter(self, state)
+		local target = nextAfter(self, state, dueAt)
 		if target == nil then
 			break
 		end
@@ -272,7 +295,16 @@ end
 -- FAIL-SOFT ON EVERY REFUSAL. A press that cannot arm a parry -- no window, still inside a lockout,
 -- guard dropped too recently, mid-stagger -- still raises the guard. The player never loses their
 -- block for pressing at a bad moment; they only lose the parry, which is the thing being priced.
-function DefenseStateMachine.Press(self: Machine, now: number, window: ParryWindow?, pingSeconds: number): boolean
+--
+-- `windowScale` is the rally multiplier (DefenseConstants.Rally) -- the caller owns who is rallying with
+-- whom; this only shortens the window it was handed. Omitted, or anything outside (0, 1), means 1.
+function DefenseStateMachine.Press(
+	self: Machine,
+	now: number,
+	window: ParryWindow?,
+	pingSeconds: number,
+	windowScale: number?
+): boolean
 	self._blockHeld = true
 
 	-- A guard break is an opening, and the whole point of an opening is that the guard is not
@@ -293,8 +325,9 @@ function DefenseStateMachine.Press(self: Machine, now: number, window: ParryWind
 	local canArm = window ~= nil
 		and now >= self._parryLockedUntil
 		and (now - self._guardDownSince) >= DefenseConstants.Parry.MinUnguardedSeconds
-		-- A staggered attacker can block but not parry. The brief is explicit about both halves.
-		and self._state ~= "Staggered"
+		-- A staggered attacker may parry back only while parry trading is on (DefenseConstants.Rally).
+		-- Otherwise they can block but not parry -- the original brief's two halves.
+		and (self._state ~= "Staggered" or DefenseConstants.Rally.ParryFromStagger)
 
 	if not canArm then
 		if self._state == "Staggered" then
@@ -307,7 +340,20 @@ function DefenseStateMachine.Press(self: Machine, now: number, window: ParryWind
 		return false
 	end
 
+	local scale = if windowScale and windowScale > 0 and windowScale < 1 then windowScale else 1
 	local armed = window :: ParryWindow
+	if scale < 1 then
+		-- Same opening moment, shorter duration. The whiff recovery after the close keeps its own length:
+		-- a rally makes the read harder, not the miss cheaper.
+		local close = armed.Open + (armed.Close - armed.Open) * scale
+		armed = {
+			Open = armed.Open,
+			Close = close,
+			RecoveryEnd = close + (armed.RecoveryEnd - armed.Close),
+			Source = armed.Source,
+		}
+	end
+	self._windowScale = scale
 	self._window = armed
 	-- ParryWindows deals in clip-relative offsets; everything on this machine past this point is
 	-- wall-clock. This pair is the single conversion between the two.
@@ -334,6 +380,12 @@ function DefenseStateMachine.Release(self: Machine, now: number): ()
 		applyTransition(self, "Neutral", now)
 		return
 	end
+	-- A staggered guard coming down is a guard coming down, for the anti-turtle rule. applyTransition
+	-- only stamps this on the way out of Blocking, and a staggered block never is Blocking -- so without
+	-- this, holding guard through a stagger and re-tapping would re-arm a parry trade for free.
+	if state == "Staggered" then
+		self._guardDownSince = now
+	end
 	-- Released mid-window. The window is NOT cancelled -- it runs to its close regardless, and the
 	-- release only decides where that close leads (ParryRecovery rather than Blocking). A parry is a
 	-- committed read; the alternative is a free arm-and-disarm, where a tap buys a live window while
@@ -351,9 +403,12 @@ end
 -- StaggerSeconds. Omitted means Stagger.DurationSeconds, which is every other caller.
 function DefenseStateMachine.Stagger(self: Machine, now: number, seconds: number?): ()
 	self._staggerUntil = now + (seconds or DefenseConstants.Stagger.DurationSeconds)
-	-- Cannot parry for the duration, and the lockout is a timestamp rather than the state itself so
-	-- it survives the player pressing straight back into a block.
-	self._parryLockedUntil = math.max(self._parryLockedUntil, self._staggerUntil)
+	-- Without parry trading, cannot parry for the duration -- and the lockout is a timestamp rather
+	-- than the state itself so it survives the player pressing straight back into a block. With it
+	-- (DefenseConstants.Rally), parrying back is the whole point, so no lockout is stamped here.
+	if not DefenseConstants.Rally.ParryFromStagger then
+		self._parryLockedUntil = math.max(self._parryLockedUntil, self._staggerUntil)
+	end
 	self._window = nil
 	self._parryOpensAt = 0
 	self._parryEndsAt = 0
@@ -396,23 +451,28 @@ end
 function DefenseStateMachine.ConsumeParry(self: Machine, at: number): ()
 	self._parryConsumed = true
 	self._parryEndsAt = math.min(self._parryEndsAt, at)
+	-- A parry landed OUT OF A STAGGER wins the exchange (DefenseConstants.Rally): the punish ends here,
+	-- and the window's own early close (phaseEnd) then hands the body straight back.
+	if self._staggerUntil > at then
+		self._staggerUntil = at
+	end
 end
 
--- Opens the roll's evade window, or refuses and says why. The POSTURE gates live here; the BODY gates
+-- Opens the evade window, or refuses and says why. The POSTURE gates live here; the BODY gates
 -- (mid-swing, hitstun, grabbed, mounted) are DefenseSystem.BeginEvade's, because they read things this
 -- machine has no view of -- the same split SetBlocking/Press already make.
 --
--- Staggered and GuardBroken refuse because both are punishes, and a roll out of either would be the
+-- Staggered and GuardBroken refuse because both are punishes, and an evade out of either would be the
 -- cheapest possible way to make a punish end early. The parkour client never gets this far in either
 -- (both take RootControlLocked, which parks the framework) -- this is the server not trusting that.
 --
--- A RAISED GUARD IS DROPPED, not refused. Roll-from-guard is a legitimate read, and it goes through the
+-- A RAISED GUARD IS DROPPED, not refused. Evade-from-guard is a legitimate read, and it goes through the
 -- ordinary Release so the anti-turtle clock and the segment trail record it exactly as a key release
 -- would. A parry window already armed is NOT cancelled -- it runs to its close, per Release's own rule --
 -- but a contact inside both resolves Evaded first (OutcomeResolver rule 0) and never spends it.
 function DefenseStateMachine.BeginEvade(self: Machine, now: number, pingSeconds: number): (boolean, string?)
 	local state = self._state
-	if state == "Staggered" then
+	if state == "Staggered" or DefenseStateMachine.IsStaggerHeld(self) then
 		return false, "Staggered"
 	end
 	if state == "GuardBroken" then
@@ -503,11 +563,11 @@ function DefenseStateMachine.IsPerfectParryAt(self: Machine, at: number): boolea
 		return false
 	end
 	local elapsed = at - self._parryOpensAt
-	return elapsed >= 0 and elapsed <= DefenseConstants.PerfectParry.WindowSeconds
+	return elapsed >= 0 and elapsed <= DefenseConstants.PerfectParry.WindowSeconds * self._windowScale
 end
 
--- Whether a contact at `at` lands inside the roll's evade window. Unlike the parry it is never
--- consumed: a roll through two swings evades both, because the dodge is about where the body IS, not
+-- Whether a contact at `at` lands inside the evade window. Unlike the parry it is never
+-- consumed: an evade through two swings evades both, because the dodge is about where the body IS, not
 -- about spending a read on one attack.
 function DefenseStateMachine.IsEvadingAt(self: Machine, at: number): boolean
 	if self._evadeEndsAt <= 0 then
@@ -522,7 +582,7 @@ end
 -- stamps _parryLockedUntil to its own end -- so a caller asking mid-punish would otherwise be told
 -- "Locked", which is true but useless. "Staggered" is the reason a player could act on.
 function DefenseStateMachine.CanArmParryAt(self: Machine, at: number): (boolean, string?)
-	if self._state == "Staggered" then
+	if self._state == "Staggered" and not DefenseConstants.Rally.ParryFromStagger then
 		return false, "Staggered"
 	end
 	if self._state == "GuardBroken" then
@@ -537,11 +597,71 @@ function DefenseStateMachine.CanArmParryAt(self: Machine, at: number): (boolean,
 	return true, nil
 end
 
+-- THE AIR PARRY'S REWIND (docs/design/air-combat-and-evade.md B5): would a press made at `pressAt` -- in the
+-- past, the arrival of a press minus the defender's round trip -- have caught a contact at `contactAt`?
+-- Judged exactly as Press judges a live press, but at `pressAt`: the whiff lockout and MinUnguardedSeconds
+-- evaluated then, the guard not already held then (a held guard mints no window), and the window's own
+-- opening and (rally-scaled) length from then. NO END REFUND: the rewind replaces the ping refund, it does
+-- not stack with it. Returns whether it covers, and whether it would have been PERFECT.
+--
+-- A pure query. DefenseSystem only ever asks it for an AIR-HELD defender's held Clean contact, and applies
+-- the answer itself (the window the arriving press armed is spent through the ordinary ConsumeParry).
+function DefenseStateMachine.RewoundParryCovers(
+	self: Machine,
+	pressAt: number,
+	contactAt: number,
+	window: ParryWindow?,
+	windowScale: number?
+): (boolean, boolean)
+	if window == nil then
+		return false, false
+	end
+	if pressAt < self._parryLockedUntil then
+		return false, false
+	end
+	if (pressAt - self._guardDownSince) < DefenseConstants.Parry.MinUnguardedSeconds then
+		return false, false
+	end
+	local stateThen = DefenseStateMachine.StateAt(self, pressAt)
+	if stateThen == "GuardBroken" or (stateThen == "Staggered" and not DefenseConstants.Rally.ParryFromStagger) then
+		return false, false
+	end
+	if DefenseStateMachine.BlockHeldAt(self, pressAt) then
+		return false, false
+	end
+	local scale = if windowScale and windowScale > 0 and windowScale < 1 then windowScale else 1
+	local opensAt = pressAt + window.Open
+	local closesAt = opensAt + (window.Close - window.Open) * scale
+	if contactAt < opensAt or contactAt > closesAt then
+		return false, false
+	end
+	return true, (contactAt - opensAt) <= DefenseConstants.PerfectParry.WindowSeconds * scale
+end
+
+-- Whether a stagger is still running underneath the current state -- true in Staggered itself, and in a
+-- parry window armed out of one (DefenseConstants.Rally) that has not landed yet. DefenseSystem keeps
+-- the movement lock on through it, and the evade and attack gates treat it as the stagger it is:
+-- arming a parry mid-punish must not become a way to evade or swing out of that punish.
+--
+-- Read off the time the current state was ENTERED rather than a clock, so it needs none: a state
+-- entered before the stagger's end began inside the punish. A landed parry pulls _staggerUntil back
+-- to the contact, and the window closes on that same instant, so the next state starts clear.
+function DefenseStateMachine.IsStaggerHeld(self: Machine): boolean
+	local state = self._state
+	if state == "Staggered" then
+		return true
+	end
+	if state == "Raising" or state == "ParryWindow" or state == "ParryRecovery" then
+		return self._enteredAt < self._staggerUntil
+	end
+	return false
+end
+
 -- Whether this combatant may start an attack. The defence layer's job, not the engine's -- see
 -- DefenseSystem's own header.
 function DefenseStateMachine.CanAttack(self: Machine): (boolean, string?)
 	local state = self._state
-	if state == "Staggered" then
+	if state == "Staggered" or DefenseStateMachine.IsStaggerHeld(self) then
 		return false, "Staggered"
 	end
 	if state == "GuardBroken" then
@@ -561,6 +681,7 @@ function DefenseStateMachine.Reset(self: Machine, now: number): ()
 	self._parryOpensAt = 0
 	self._parryEndsAt = 0
 	self._parryConsumed = false
+	self._windowScale = 1
 	self._parryLockedUntil = 0
 	self._guardDownSince = 0
 	self._staggerUntil = 0

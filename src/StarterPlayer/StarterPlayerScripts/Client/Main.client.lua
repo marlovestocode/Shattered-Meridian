@@ -55,13 +55,19 @@ local DefenseClient = require(script.Parent.Defense.DefenseClient)
 local AttackInputClient = require(script.Parent.Combat.AttackInputClient)
 local WeaponInventoryClient = require(script.Parent.Combat.WeaponInventoryClient)
 local GrabInputClient = require(script.Parent.Combat.GrabInputClient)
+local AirComboClient = require(script.Parent.Combat.AirComboClient)
+local AirComboFX = require(script.Parent.FX.AirComboFX)
 local BlimpController = require(script.Parent.Blimp.BlimpController)
 local BoatController = require(script.Parent.Boat.BoatController)
 local FurnacePromptClient = require(script.Parent.Blimp.FurnacePromptClient)
 local SwingLunge = require(script.Parent.Combat.SwingLunge)
+local LockOnController = require(script.Parent.Combat.LockOnController)
+local SwingTracking = require(script.Parent.Combat.SwingTracking)
+local SwingTellFX = require(script.Parent.FX.SwingTellFX)
 local CombatAudio = require(script.Parent.FX.CombatAudio)
 local AttackTrail = require(script.Parent.FX.AttackTrail)
 local RollAfterimage = require(script.Parent.FX.RollAfterimage)
+local FpsCounter = require(script.Parent.Diagnostics.FpsCounter)
 local RemoteMovementFX = require(script.Parent.FX.RemoteMovementFX)
 local GuardStrainPose = require(script.Parent.FX.GuardStrainPose)
 local CombatFeedbackClient = require(script.Parent.Combat.CombatFeedbackClient)
@@ -267,6 +273,14 @@ logger:debug("GrabInputClient start")
 GrabInputClient.Start()
 logger:debug("GrabInputClient end")
 
+-- The air combo (docs/design/air-combat-and-evade.md, Part B): the local attacker's follow, and every
+-- combatant's phase readability. Both read only replicated Attributes, so neither depends on the other or on
+-- anything started above beyond the parkour controller, which parks itself off the same Attributes.
+logger:debug("AirComboClient start")
+AirComboClient.Start()
+AirComboFX.Start()
+logger:debug("AirComboClient end")
+
 -- Blimp mount input, the mounted-body pose and the pilot's helm. AFTER SettingsClient.RestoreSettings
 -- for the same reason the two input modules above are -- it reads the Interact bind both to match the
 -- release press AND to re-key every blimp ProximityPrompt, so a rebound key that was not live yet would
@@ -310,6 +324,16 @@ logger:debug("BoatController end")
 -- motor refuses the impulse rather than erroring, and rebinds on the next life).
 logger:debug("SwingLunge start")
 SwingLunge.Start()
+
+-- Lock-on (CapsLock / R3): the target, the soft camera pull and the marker with its guard bar -- see
+-- Client/Combat/LockOnController.lua. Then swing tracking, which turns the body toward that target (or the
+-- soft assist's pick) during a windup. Both after AttackInputClient.Start above, whose swing signals
+-- SwingTracking listens to.
+LockOnController.Start(uiHandles.LockOnMarker, uiHandles.ViewportScale)
+SwingTracking.Start()
+
+-- The heavy tell on other combatants (AttackConstants.Tell) -- a server-published tag, drawn here.
+SwingTellFX.Start()
 logger:debug("SwingLunge end")
 
 -- Same one real dependency as SwingLunge directly above -- AttackInputClient.OnAttackStarted -- and
@@ -359,6 +383,11 @@ logger:debug("CombatFeedbackClient end")
 logger:debug("DeathNoticeClient start")
 DeathNoticeClient.Start(uiHandles.DeathFeed)
 logger:debug("DeathNoticeClient end")
+
+-- The frame-rate overlay (F3). Needs nothing from UI.Mount() -- it builds its own plain ScreenGui so it
+-- keeps working if the UI layer is what is misbehaving -- and is not dev-gated: see
+-- Constants.Debug.FpsCounter.
+FpsCounter.Start()
 
 -- THE ONE DEV-TOOLING CALL. Dev Menu, Move Editor, Kit Editor, Live Console and the Storybook are
 -- started together by Client/DevTools/init.lua, and this file reaches that module by FindFirstChild
