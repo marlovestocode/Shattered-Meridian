@@ -46,11 +46,24 @@ LockOnConstants.Targeting = {
 -- Camera -----------------------------------------------------------------------------------------------
 
 LockOnConstants.Camera = {
-	-- How hard the camera is pulled toward the target, as an exponential ease rate (per second). High
-	-- enough to hold the target on screen through a strafe, low enough that the player's own input still
-	-- visibly moves the camera on top of it.
-	YawRate = 9,
-	PitchRate = 5,
+	-- How hard the camera is pulled toward the target: the natural frequency (rad/s) of a spring on the
+	-- camera's yaw and pitch, and its damping ratio (1 = critical, no overshoot). High enough to hold the
+	-- target on screen through a strafe, low enough that the player's own input still visibly moves the
+	-- camera on top of it.
+	--
+	-- A SPRING, NOT AN EASE (2026-09-29). This was an exponential ease (rates 9 and 5), which turns at full
+	-- speed the instant the target's bearing jumps -- and in a fight it jumps constantly: every step-in,
+	-- every lunge, every sidestep at arm's length. The camera snapped at the start of each of those. A
+	-- spring carries its own angular velocity, so it accelerates into a turn and eases out of it.
+	YawFrequency = 14,
+	PitchFrequency = 9,
+	Damping = 1,
+	-- CLOSE RANGE, THE PULL SOFTENS. At arm's length a half-stud sidestep swings the bearing by 10 degrees
+	-- or more, so a full-strength pull there whips the camera on every exchange. Inside CloseRangeStuds the
+	-- frequencies are scaled down linearly, to CloseRangeScale at MinDistanceStuds, so a brawl reads as
+	-- steady and the camera still tracks a target that is really moving away.
+	CloseRangeStuds = 8,
+	CloseRangeScale = 0.4,
 	-- The camera looks slightly DOWN on the target rather than straight at it, so the ground between you
 	-- stays in view. Radians added to the pitch that would aim exactly at the target point.
 	PitchBias = math.rad(-8),

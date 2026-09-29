@@ -47,6 +47,7 @@ local FlightCamera = require(script.Parent.Camera.FlightCamera)
 local CameraShake = require(script.Parent.FX.CameraShake)
 local FOVOffset = require(script.Parent.FX.FOVOffset)
 local CameraOffsetComposer = require(script.Parent.FX.CameraOffsetComposer)
+local CameraFollow = require(script.Parent.Camera.CameraFollow)
 local ParkourController = require(script.Parent.Parkour.ParkourController)
 local RunController = require(script.Parent.Movement.RunController)
 local CharacterMenuClient = require(script.Parent.CharacterMenu.CharacterMenuClient)
@@ -193,6 +194,12 @@ logger:debug("FOVOffset end")
 logger:debug("CameraOffsetComposer start")
 CameraOffsetComposer.Start()
 logger:debug("CameraOffsetComposer end")
+
+-- After CameraOffsetComposer: the smoothed follow writes its trail as one of that composer's slots. See
+-- Client/Camera/CameraFollow.lua.
+logger:debug("CameraFollow start")
+CameraFollow.Start()
+logger:debug("CameraFollow end")
 
 logger:debug("ShiftLockCamera start")
 ShiftLockCamera.Start(uiHandles.ShiftLockEngaged)

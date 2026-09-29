@@ -16,10 +16,18 @@
 	POST-MULTIPLYING a small CFrame.Angles onto Workspace.CurrentCamera each frame at
 	RenderPriority.Camera + 2 -- deliberately AFTER the default camera scripts (Camera) AND
 	ShiftLockCamera's Camera + 1 character-yaw write, so the shake layers on the frame's FINAL camera
-	pose instead of being overwritten by, or fighting, either. The default camera rewrites the base
-	CFrame fresh every frame, which is exactly what lets a decaying offset here read as a shake that
-	settles rather than a permanent nudge. Never touches Humanoid.CameraOffset -- that property is
-	ShiftLockCamera's alone (see its header); this only ever composes onto the camera CFrame.
+	pose instead of being overwritten by, or fighting, either. Never touches Humanoid.CameraOffset --
+	that property is ShiftLockCamera's alone (see its header); this only ever composes onto the camera
+	CFrame.
+
+	EACH FRAME'S SHAKE IS TAKEN BACK OFF BEFORE THE NEXT CAMERA UPDATE (2026-09-29). The default camera
+	rewrites the camera's POSITION fresh every frame, but not its orientation: it reads its look
+	direction back off Camera.CFrame (Client/Combat/LockOnController.lua's soft lock depends on exactly
+	that). So a rotation left on the camera after the update is where the next frame starts, and the
+	shake used to accumulate -- every frame's noise baked into the player's aim, several degrees over one
+	heavy hit, never coming back, and more of it at a higher frame rate. That is what made the camera jerk
+	on every landed punch. undoLastShake, bound just before the camera scripts, removes the rotation this
+	module added, so the shake reads as a shake and the player's aim ends exactly where they left it.
 
 	Does not own: deciding WHEN to shake or how hard (CombatClient picks the preset per resolution),
 	the FOV punch (SwingEffect) or colour dip (StunEffect), or any camera framing/lock behavior
@@ -35,6 +43,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local logger = Logger.scope("CameraShake")
 
 local RENDER_STEP_NAME = "CombatCameraShake"
+local UNDO_STEP_NAME = "CombatCameraShakeUndo"
 
 local NOISE_SEEDS = Constants.FX.CameraShake.NoiseSeeds
 
@@ -58,6 +67,11 @@ local started = false
 -- the default experience, never to a degraded one" posture Shake() below already takes for a nil
 -- preset.
 local shakeEnabled = true
+
+-- The rotation this module put on the camera last frame, and which camera it went on -- taken back off
+-- by undoLastShake before the default camera reads the look direction. See the header.
+local appliedRotation: CFrame? = nil
+local appliedCamera: Camera? = nil
 
 -- Pushed from Client/Settings/SettingsClient.lua's applyComfortSettings, never read from a profile
 -- here -- this module has no business knowing that persistence exists, the same routing-only split
@@ -124,7 +138,26 @@ local function onRenderStep(): ()
 	local yaw = amplitude * math.noise(t, shake.Seed + NOISE_SEEDS.Yaw)
 	local roll = amplitude * math.noise(t, shake.Seed + NOISE_SEEDS.Roll)
 
-	camera.CFrame = camera.CFrame * CFrame.Angles(pitch, yaw, roll)
+	local rotation = CFrame.Angles(pitch, yaw, roll)
+	camera.CFrame = camera.CFrame * rotation
+	appliedRotation = rotation
+	appliedCamera = camera
+end
+
+-- Removes last frame's shake before the camera scripts run, so it never becomes the starting point of the
+-- next frame's look. Only on the camera it was applied to: a camera swapped out in between never carried
+-- it. Before LockOnController (Camera - 1), so the lock eases from the player's real aim too.
+local function undoLastShake(): ()
+	local rotation = appliedRotation
+	if rotation == nil then
+		return
+	end
+	appliedRotation = nil
+	local camera = appliedCamera
+	appliedCamera = nil
+	if camera ~= nil and camera == Workspace.CurrentCamera then
+		camera.CFrame = camera.CFrame * rotation:Inverse()
+	end
 end
 
 -- Binds the render-step compositor. Called once from Main.client.lua's boot sequence, after
@@ -136,6 +169,7 @@ function CameraShake.Start(): ()
 		return
 	end
 	started = true
+	RunService:BindToRenderStep(UNDO_STEP_NAME, Enum.RenderPriority.Camera.Value - 2, undoLastShake)
 	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value + 2, onRenderStep)
 	logger:info("CameraShake started")
 end

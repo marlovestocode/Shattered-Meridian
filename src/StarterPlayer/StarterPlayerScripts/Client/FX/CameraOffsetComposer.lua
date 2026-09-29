@@ -154,10 +154,17 @@ local function onRenderStep(deltaTime: number): ()
 end
 
 -- Binds the render-step compositor and the local player's own character watch. Called once from
--- Main.client.lua's boot sequence. Idempotent. Binds at the same Enum.RenderPriority.Camera.Value + 1
--- slot ShiftLockCamera/FlightCamera already use for their own (now-removed) direct CameraOffset
--- writes -- a different property write than FOVOffset's FieldOfView, so there's no ordering hazard
--- sharing the same priority tier as that module.
+-- Main.client.lua's boot sequence. Idempotent.
+--
+-- BOUND JUST BEFORE THE CAMERA SCRIPTS (RenderPriority.Camera - 1), so what it writes is what the default
+-- camera reads in the SAME frame. It used to bind at Camera + 1 -- after the camera had already read the
+-- property -- so every offset reached the screen a frame after it was composed. For the callers that set
+-- their slots at Camera + 1 or later (ShiftLockCamera, FlightCamera, BlimpCamera, ParkourCamera) nothing
+-- changes: a value they set this frame is written at the start of the next one and read by that frame's
+-- camera update, exactly as before. The one caller that needs the same-frame write is
+-- Client/Camera/CameraFollow.lua, which sets its trail at Camera - 3 from this frame's root position; a
+-- frame-late trail would be one frame of the body's own motion out of date, which is the very jerk it
+-- exists to remove.
 function CameraOffsetComposer.Start(): ()
 	if started then
 		return
@@ -177,7 +184,7 @@ function CameraOffsetComposer.Start(): ()
 		end,
 	})
 
-	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value + 1, onRenderStep)
+	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value - 1, onRenderStep)
 	logger:info("CameraOffsetComposer started")
 end
 

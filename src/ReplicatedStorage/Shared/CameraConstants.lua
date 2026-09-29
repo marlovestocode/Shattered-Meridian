@@ -39,6 +39,13 @@ local CameraConstants = {
 		-- own head/shoulder geometry. First person itself already locks the mouse and steers the
 		-- character natively, so shift lock has nothing to add there.
 		FirstPersonDistanceThreshold = 2,
+		-- When a swing's tracking (Client/Combat/SwingTracking.lua) or a parkour traversal hands the body's
+		-- rotation back, the body used to snap to the camera's yaw in one frame -- on every swing of a
+		-- string, since tracking turns the body toward the target and then lets go. For this long after a
+		-- hand-back the body instead eases to the camera's yaw at FacingReturnRate (an exponential rate,
+		-- per second: 20 is ~95% of the way in 0.15s), then tracks it exactly as before.
+		FacingReturnSeconds = 0.25,
+		FacingReturnRate = 20,
 	},
 
 	-- Flight camera feel (Client/Camera/FlightCamera.lua) -- FOV scaling and CameraOffset chase
@@ -97,6 +104,32 @@ local CameraConstants = {
 		HeavyFOVDelta = -1.2,
 		PunchOutSeconds = 0.09,
 		PunchBackSeconds = 0.22,
+	},
+
+	-- The smoothed follow (Client/Camera/CameraFollow.lua, arithmetic in Shared/CameraFollowMath.lua): the
+	-- camera's focus trails the body on a critically damped spring instead of being welded to it, so a
+	-- lunge, a step-in, a landing or a traversal pop moves the view with weight rather than in one frame.
+	-- Small on purpose -- the trail is capped at about a stud, which is enough to take the jerk out of a
+	-- 2-4 stud punch step without the camera ever visibly lagging a running body.
+	Follow = {
+		Enabled = true,
+		-- Natural frequency (rad/s). At 14 the camera reaches the body ~0.25s after it stops. Vertical is
+		-- a touch stiffer so a jump's rise and fall do not read as floaty.
+		HorizontalFrequency = 14,
+		VerticalFrequency = 16,
+		-- Critical: settles as fast as possible without swinging past the body.
+		Damping = 1,
+		MaxHorizontalLagStuds = 1.1,
+		MaxVerticalLagStuds = 0.8,
+		-- One-frame jumps bigger than this are teleports/respawns: re-seat instead of animating.
+		TeleportStuds = 8,
+		-- Below this camera-to-focus distance the camera is effectively first person, where an offset
+		-- focus would push the view out of the head. The follow stands down there, like the shoulder
+		-- offset does (ShiftLock.FirstPersonDistanceThreshold).
+		FirstPersonDistanceThreshold = 2,
+		-- How fast the trail is released when the follow stands down (flight, a vessel, first person),
+		-- so handing off never snaps the view by the last trail's worth.
+		ReleaseEaseSpeed = 12,
 	},
 }
 
