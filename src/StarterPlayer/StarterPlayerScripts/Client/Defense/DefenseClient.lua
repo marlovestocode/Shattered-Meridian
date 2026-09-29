@@ -20,11 +20,16 @@
 	meant to; markers and manual track bookkeeping are deliberately NOT reached for here -- the
 	manager owns the AnimationTrack and nothing outside it is supposed to touch one directly.
 
-	A PRESS PLAYS TWO CLIPS IN SEQUENCE, not one: the parry swing-up (whose markers separately arm the
-	server's parry window -- entirely unaffected by this client-side sequencing) plays once, then
-	AnimationManager's OnFinished hands the layer to the block-hold clip on a loop for as long as the
-	key stays down. See setBlockHeld's own comment for the two-phase claim and the guards around the
-	handoff.
+	A PRESS THAT WILL PARRY PLAYS TWO CLIPS IN SEQUENCE; A PRESS THAT WILL ONLY BLOCK PLAYS ONE. The
+	parry swing-up (whose markers separately arm the server's parry window -- entirely unaffected by this
+	client-side sequencing) plays once and hands the layer to the block-hold loop when the parry window
+	closes -- not when the clip happens to end, which left the guard pose arriving well after the guard
+	itself was up. A press that will not arm a parry (guard dropped too recently, a whiffed tap's lockout,
+	a press held through a swing or a stun, no window at all) skips the swing-up and raises the held guard
+	directly. Which one a press is gets predicted on the key edge by Client/Defense/ParryPrediction.lua and
+	corrected by the server's verdict on that press (DefenseTypes.PressVerdict). Before, every press played
+	the swing-up, so a press the server had turned into a plain block LOOKED like a parry -- which is how a
+	block reads as "it should have parried". See claimGuardPress for the claims and the handoff.
 
 	BOTH CLIPS ARE PER-WEAPON. Which pair a press plays is resolved by
 	Shared/Defense/WeaponDefenseAnimations.lua off the drawn weapon's own Animations/PARRY and
@@ -60,10 +65,13 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 local WeaponDefenseAnimations = require(ReplicatedStorage.Shared.Defense.WeaponDefenseAnimations)
+local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
+local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 
 local LocalCombatState = require(script.Parent.Parent.Combat.LocalCombatState)
 local CombatAnimator = require(script.Parent.Parent.FX.CombatAnimator)
 local InputRouter = require(script.Parent.Parent.Input.InputRouter)
+local ParryPrediction = require(script.Parent.ParryPrediction)
 
 local logger = Logger.scope("DefenseClient")
 
@@ -92,6 +100,10 @@ local boundHumanoid: Humanoid? = nil
 -- AnimationManager's own header on the four modules it is meant to eventually replace), not one this
 -- module can close by itself.
 local manager = AnimationManager.new({ Name = "DefenseClient" })
+
+-- Whether the next press arms a parry, predicted from this client's own key edges and corrected by the
+-- server -- see ParryPrediction's header. One for the player's whole session, Reset per life.
+local predictor = ParryPrediction.New()
 
 -- Registered once, at module load, under manager-local keys rather than the raw asset ids -- lets
 -- ParryAnimationId/BlockHoldAnimationId change (or land blank, pre-asset) with nothing here needing
@@ -206,28 +218,31 @@ end
 
 -- Input --------------------------------------------------------------------------------------------
 
-local function sendBlocking(blocking: boolean): ()
+-- `pressId` rides a press only, so the server's verdict on it can be matched to the press it answers.
+local function sendBlocking(blocking: boolean, pressId: number?): ()
 	local remote = setBlockingRemote
 	if not remote then
 		return
 	end
-	remote:FireServer(blocking)
+	remote:FireServer(blocking, pressId)
 end
 
 -- Claims the held-guard loop -- the second half of the press sequence below, and also what a
 -- released-then-instantly-repressed block re-enters through if the parry clip's OnFinished fires
 -- after a fresh press already re-claimed BLOCK_CLIP (the `blockHeld` guard at the call site is what
 -- actually prevents that race; this function only ever runs when it's still wanted).
-local function claimBlockHold(): ()
-	local fadeSeconds = DefenseConstants.Presentation.BlockAnimationFadeSeconds
+--
+-- Also the WHOLE of a press predicted to only block -- see claimGuardPress. `fadeIn` is the press fade for
+-- that case and the (longer) handoff fade when it follows the parry swing-up.
+local function claimBlockHold(fadeIn: number): ()
 	manager:SetClaim(DEFENSE_LAYER, BLOCK_SOURCE, {
 		-- Read at claim time, not captured when the press started: a weapon swapped DURING a held
 		-- guard should hand off into the weapon the player is actually holding now.
 		Clip = blockClipKey,
 		Looped = true,
 		Priority = Enum.AnimationPriority.Action,
-		FadeIn = fadeSeconds,
-		FadeOut = fadeSeconds,
+		FadeIn = fadeIn,
+		FadeOut = DefenseConstants.Presentation.BlockAnimationFadeSeconds,
 		-- See ACTION_SOURCE's own header -- this is the second of the two-phase claim's clips, so it
 		-- needs the same stand-down-CombatAnimator's-armed-idle wiring the first phase gets below.
 		OnFinished = function(_clip: string, _reason: AnimationManager.FinishReason)
@@ -237,33 +252,72 @@ local function claimBlockHold(): ()
 	CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, manager:GetActiveClip(DEFENSE_LAYER) ~= nil)
 end
 
--- Plays the guard press: the parry swing-up, chaining into the held loop. Only ever called while the
--- key is down and the body is free -- see raiseGuardWhenFree.
+-- Bumped by every new press claim and every release, so a scheduled parry-to-hold handoff that belongs to
+-- an earlier press finds itself stale and does nothing.
+local handoffGeneration = 0
+
+-- Hands the parry swing-up over to the held-guard loop at the moment the parry window closes -- the moment
+-- the server's guard stops being a parry and becomes a block. The swing-up is usually longer than the
+-- window, and waiting for it to finish (the old handoff) left the held-guard pose arriving a good while
+-- after the guard it depicts. A clip SHORTER than the window still hands off early through its own
+-- OnFinished (claimGuardPress), whichever comes first.
+local function scheduleHandoff(press: ParryPrediction.Press, parryClip: string): ()
+	local window = press.Window
+	if window == nil then
+		return
+	end
+	handoffGeneration += 1
+	local generation = handoffGeneration
+	local delaySeconds = math.max(press.At + window.Close - os.clock(), 0)
+	task.delay(delaySeconds, function()
+		if generation ~= handoffGeneration or not blockHeld then
+			return
+		end
+		-- Only if the swing-up is still what is playing: a correction or a Completed chain may already
+		-- have moved the layer on.
+		if manager:GetActiveClip(DEFENSE_LAYER) == parryClip then
+			claimBlockHold(DefenseConstants.Presentation.BlockAnimationFadeSeconds)
+		end
+	end)
+end
+
+-- Plays the guard press. Only ever called while the key is down and the body is free -- see
+-- raiseGuardWhenFree.
+--
+-- A PRESS PREDICTED TO ONLY BLOCK goes straight to the held-guard loop: no swing-up, because the swing-up
+-- is the parry and this press is not one. A PRESS PREDICTED TO PARRY plays the swing-up once and hands off
+-- to the loop at the window's close (scheduleHandoff) or at the clip's own end, whichever is first. Either
+-- way the first clip fades in over Presentation.PressFadeInSeconds, the short press fade -- the pose on the
+-- key edge is the latency the player feels.
 local function claimGuardPress(): ()
+	local press = predictor:GetHeldPress()
+	-- Any handoff scheduled by an earlier claim is for a swing-up this call is about to replace.
+	handoffGeneration += 1
+	local pressFade = DefenseConstants.Presentation.PressFadeInSeconds
+	if press == nil or not press.Armed then
+		claimBlockHold(pressFade)
+		return
+	end
+
 	-- Claimed off the LOCAL press/release, not the server's StateChanged echo -- the same "client
 	-- predicts its own press for feel" split this file's header describes for the parry facing snap.
-	-- A press that never arms a parry still raises the guard (DefenseStateMachine.Press's own
-	-- fail-soft rule), so claiming here is correct for a plain block too, not just an armed parry.
 	-- SetClaim(layer, source, nil) clears -- AnimationManager.Register already made BLOCK_CLIP resolve
 	-- to nothing if ParryAnimationId is blank, so a claim with no asset yet is a safe, silent no-op
 	-- rather than something this module needs to guard against separately.
 	--
-	-- TWO-PHASE ON PRESS: BLOCK_CLIP plays ONCE (Looped = false) -- the parry swing-up, whose own
-	-- markers are still what arms the server's parry window, completely unaffected by how this client
-	-- sequences its OWN presentation on top of it. OnFinished only chains into the held-guard loop
-	-- when the reason is "Completed" (the clip actually played out) AND the key is still down --
-	-- either guard alone is not enough: a release mid-swing retires the entry with "Cleared"/
-	-- "Superseded", never "Completed", but a same-frame release-then-repress could otherwise still
-	-- land a stale hold claim after the key had already gone back down, which the blockHeld check
-	-- closes. On release there is nothing to chain: setBlockHeld's SetClaim(nil) clears whichever of the two
-	-- clips is currently active.
-	local fadeSeconds = DefenseConstants.Presentation.BlockAnimationFadeSeconds
+	-- OnFinished only chains into the held-guard loop when the reason is "Completed" (the clip actually
+	-- played out) AND the key is still down -- either guard alone is not enough: a release mid-swing
+	-- retires the entry with "Cleared"/"Superseded", never "Completed", but a same-frame
+	-- release-then-repress could otherwise still land a stale hold claim after the key had already gone
+	-- back down, which the blockHeld check closes. On release there is nothing to chain: setBlockHeld's
+	-- SetClaim(nil) clears whichever of the two clips is currently active.
+	local parryClip = parryClipKey
 	manager:SetClaim(DEFENSE_LAYER, BLOCK_SOURCE, {
-		Clip = parryClipKey,
+		Clip = parryClip,
 		Looped = false,
 		Priority = Enum.AnimationPriority.Action,
-		FadeIn = fadeSeconds,
-		FadeOut = fadeSeconds,
+		FadeIn = pressFade,
+		FadeOut = DefenseConstants.Presentation.BlockAnimationFadeSeconds,
 		OnFinished = function(_clip: string, reason: AnimationManager.FinishReason)
 			-- Cleared unconditionally, for every reason -- see ACTION_SOURCE's own header. If
 			-- this chains into claimBlockHold below, that call re-asserts true for the second
@@ -271,7 +325,11 @@ local function claimGuardPress(): ()
 			-- layer any more and the armed-idle loop is correctly free to resume.
 			CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, false)
 			if reason == "Completed" and blockHeld then
-				claimBlockHold()
+				claimBlockHold(DefenseConstants.Presentation.BlockAnimationFadeSeconds)
+			elseif reason == "Failed" and blockHeld then
+				-- No swing-up to show (no asset yet, or it failed to load): the guard still goes up.
+				-- Fires synchronously inside the SetClaim above, so this is the press fade, not a handoff.
+				claimBlockHold(pressFade)
 			end
 		end,
 	})
@@ -279,6 +337,21 @@ local function claimGuardPress(): ()
 	-- why a claim whose track failed to load (retiring synchronously inside SetClaim above, before
 	-- this line runs) must not be re-asserted active.
 	CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, manager:GetActiveClip(DEFENSE_LAYER) ~= nil)
+	scheduleHandoff(press, parryClip)
+end
+
+-- Whether the local body is held in an air combo right now. Read off the same replicated Attribute the
+-- server reads (Shared/AirCombo/AirComboAttributes), because an air-held press is the one press the server
+-- never defers: the parry is an air-held body's one way out, and it arms through the stun.
+local function isAirHeld(): boolean
+	local humanoid = boundHumanoid
+	return humanoid ~= nil and AirComboAttributes.IsHeld(humanoid)
+end
+
+-- Whether a press made at `now` reaches the server on a free body -- the same rule as its bodyCommitted
+-- gate, read off this client's own mirror of the swing and the stun.
+local function bodyIsFree(now: number): boolean
+	return LocalCombatState.FreeAt(now) <= now or isAirHeld()
 end
 
 -- A guard animation waiting for the body to be free: pressed mid-swing or while stunned. See
@@ -299,7 +372,7 @@ local function raiseGuardWhenFree(): ()
 	end
 	local now = os.clock()
 	local freeAt = LocalCombatState.FreeAt(now)
-	if freeAt > now then
+	if freeAt > now and not isAirHeld() then
 		guardGeneration += 1
 		local generation = guardGeneration
 		task.delay(freeAt - now, function()
@@ -310,6 +383,7 @@ local function raiseGuardWhenFree(): ()
 		return
 	end
 	guardAnimationDeferred = false
+	predictor:NoteGuardRaised()
 	claimGuardPress()
 end
 
@@ -319,16 +393,22 @@ local function setBlockHeld(held: boolean): ()
 	end
 	blockHeld = held
 	LocalCombatState.SetGuardHeld(held)
+	local now = os.clock()
+
 	-- Sent on the edge, whatever the body is doing: the server holds a press it cannot honour yet and
 	-- raises the guard itself the moment the body is free, so waiting here would only add a round trip.
-	sendBlocking(held)
-
 	if held then
+		-- Predicted BEFORE the claim below reads it: the prediction is what picks the clip.
+		local pressId = predictor:Press(now, bodyIsFree(now))
+		sendBlocking(true, pressId)
 		guardAnimationDeferred = true
 		raiseGuardWhenFree()
 	else
+		predictor:Release(now)
+		sendBlocking(false)
 		guardAnimationDeferred = false
 		guardGeneration += 1
+		handoffGeneration += 1
 		-- SetClaim(layer, source, nil) clears whichever of the two clips is currently active -- and is a
 		-- no-op for a guard that never got as far as animating.
 		manager:SetClaim(DEFENSE_LAYER, BLOCK_SOURCE, nil)
@@ -368,20 +448,66 @@ local function faceTowards(position: Vector3): ()
 	root.CFrame = CFrame.lookAt(origin, origin + flattened.Unit)
 end
 
-type StatePayload = {
-	State: string,
-	Guard: number,
-	GuardMax: number,
-	FaceTowards: Vector3?,
-}
+-- The server's verdict disagreed with the press's prediction. Puts the right clip on the layer -- but only
+-- while the guard animation is actually up: a press still waiting on a committed body reads the corrected
+-- prediction when it rises (claimGuardPress), so there is nothing to swap yet.
+local function correctPressPresentation(): ()
+	local press = predictor:GetHeldPress()
+	if press == nil or not blockHeld or guardAnimationDeferred then
+		return
+	end
+	if press.Armed then
+		-- Late news that this press IS a parry. Worth showing only while the window it armed could still
+		-- be open; past that, the swing-up would be a parry animation for a window already spent.
+		local window = press.Window
+		if window and os.clock() < press.At + window.Close then
+			claimGuardPress()
+		end
+	elseif manager:GetActiveClip(DEFENSE_LAYER) ~= blockClipKey then
+		-- Predicted a parry the server turned into a plain block: drop the swing-up for the guard it is.
+		handoffGeneration += 1
+		claimBlockHold(DefenseConstants.Presentation.BlockAnimationFadeSeconds)
+	end
+end
+
+-- The Window field, checked rather than trusted: three finite numbers or it is treated as absent.
+local function readWindow(raw: unknown): DefenseTypes.WindowShape?
+	if typeof(raw) ~= "table" then
+		return nil
+	end
+	local window = raw :: { [string]: unknown }
+	local open, close, recoveryEnd = window.Open, window.Close, window.RecoveryEnd
+	if typeof(open) ~= "number" or typeof(close) ~= "number" or typeof(recoveryEnd) ~= "number" then
+		return nil
+	end
+	return { Open = open, Close = close, RecoveryEnd = recoveryEnd }
+end
 
 local function onStateChanged(rawPayload: unknown): ()
 	if typeof(rawPayload) ~= "table" then
 		return
 	end
-	local payload = rawPayload :: StatePayload
+	local payload = rawPayload :: { [string]: unknown }
+
+	-- Every push carries the window the next press would arm (absent when none would) and the state.
+	predictor:SetWindow(readWindow(payload.Window))
+	if typeof(payload.State) == "string" then
+		predictor:NoteServerState(payload.State :: string)
+	end
+
+	-- Sent only on a parry: the snap, and the prediction learning its press landed.
 	if typeof(payload.FaceTowards) == "Vector3" then
 		faceTowards(payload.FaceTowards :: Vector3)
+		predictor:NoteParryLanded()
+	end
+
+	local verdict = payload.Press
+	if typeof(verdict) == "table" then
+		local id = (verdict :: { [string]: unknown }).Id
+		local armed = (verdict :: { [string]: unknown }).Armed
+		if typeof(id) == "number" and typeof(armed) == "boolean" and predictor:Confirm(id, armed) then
+			correctPressPresentation()
+		end
 	end
 end
 
@@ -418,6 +544,8 @@ local function bindCharacter(nextCharacter: Model, humanoid: Humanoid, life: Tro
 		blockHeld = false
 		sendBlocking(false)
 	end
+	-- The server's fresh machine has no lockout and no recent guard; neither does the prediction.
+	predictor:Reset()
 
 	-- AnimationManager.Bind() drops the previous life's claims/tracks itself (Unbind() runs first
 	-- thing inside Bind()) -- nothing here needs to clear DEFENSE_LAYER separately.

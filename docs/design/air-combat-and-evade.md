@@ -408,14 +408,20 @@ first beat's longer budget (`FirstContinueSeconds`) absorbs the one-RTT late sta
      when the hold expires.
    - The judgement stays on DefenseSystem's own substep clock, so it is the same parry, judged on the
      victim's timeline.
-   - **Why only when air-held:** on the ground the defender has other options and a deferred hit
-     would stall every exchange. In the air the parry is the only option, so a generous, capped rewind
-     cannot be abused for anything else.
+   - **Extended to the ground (2026-09-29), tighter and narrower.** The same lag made ground parries
+     feel late and ground blocks feel dropped, so every player-backed defender now gets a rewind, capped
+     at `DefenseConstants.Parry.RewindMaxSeconds = 0.12` (the air hold keeps its 0.20: the parry is the
+     only way out there, which is worth a longer confirmation delay). The original objection -- "a
+     deferred hit would stall every exchange" -- is answered by holding only contacts a later press
+     could actually change (inside the block arc, key not already down, body not committed to a swing
+     or stun). On the ground a rewound press can also turn a held hit into a **block**, not just a
+     parry; in the air a held block still does nothing. See DefenseSystem's `rewindHoldFor` and
+     `resolveHeldContactsFor`.
    - **The cost, stated honestly:** against a laggy victim, the attacker's hit confirmation (and its
      hit-stop) can arrive up to 0.20s later on air hits. The attacker's own swing animation is
      unaffected.
-   - **Cheating:** `GetNetworkPing` is server-measured, the cap bounds any gain, and the rewind never
-     applies outside an air hold.
+   - **Cheating:** `GetNetworkPing` is server-measured, the cap bounds any gain (0.20 air, 0.12
+     ground), and a rewound press is never judged earlier than the release before it.
 
 ### Server audits
 

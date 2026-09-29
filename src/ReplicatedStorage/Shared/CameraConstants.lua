@@ -39,6 +39,14 @@ local CameraConstants = {
 		-- own head/shoulder geometry. First person itself already locks the mouse and steers the
 		-- character natively, so shift lock has nothing to add there.
 		FirstPersonDistanceThreshold = 2,
+		-- LOCKED, BUT LOOSE. The body turns to face where the camera looks on a critically damped spring
+		-- rather than being snapped onto it every frame, so the character swings round a beat behind the
+		-- view. Natural frequency in rad/s: at 20 a flick is ~63% turned in 0.11s and settled by ~0.25s --
+		-- loose enough to read, tight enough that a swing still goes where you are looking. Higher is
+		-- tighter; 0 restores the old rigid snap. Damping 1 is critical: it arrives without swinging past.
+		-- Also what brings the body round when swing tracking or a traversal hands it back.
+		BodyTurnFrequency = 20,
+		BodyTurnDamping = 1,
 	},
 
 	-- Flight camera feel (Client/Camera/FlightCamera.lua) -- FOV scaling and CameraOffset chase
@@ -97,6 +105,32 @@ local CameraConstants = {
 		HeavyFOVDelta = -1.2,
 		PunchOutSeconds = 0.09,
 		PunchBackSeconds = 0.22,
+	},
+
+	-- The smoothed follow (Client/Camera/CameraFollow.lua, arithmetic in Shared/CameraFollowMath.lua): the
+	-- camera's focus trails the body on a critically damped spring instead of being welded to it, so a
+	-- lunge, a step-in, a landing or a traversal pop moves the view with weight rather than in one frame.
+	-- Small on purpose -- the trail is capped at about a stud, which is enough to take the jerk out of a
+	-- 2-4 stud punch step without the camera ever visibly lagging a running body.
+	Follow = {
+		Enabled = true,
+		-- Natural frequency (rad/s). At 14 the camera reaches the body ~0.25s after it stops. Vertical is
+		-- a touch stiffer so a jump's rise and fall do not read as floaty.
+		HorizontalFrequency = 14,
+		VerticalFrequency = 16,
+		-- Critical: settles as fast as possible without swinging past the body.
+		Damping = 1,
+		MaxHorizontalLagStuds = 1.1,
+		MaxVerticalLagStuds = 0.8,
+		-- One-frame jumps bigger than this are teleports/respawns: re-seat instead of animating.
+		TeleportStuds = 8,
+		-- Below this camera-to-focus distance the camera is effectively first person, where an offset
+		-- focus would push the view out of the head. The follow stands down there, like the shoulder
+		-- offset does (ShiftLock.FirstPersonDistanceThreshold).
+		FirstPersonDistanceThreshold = 2,
+		-- How fast the trail is released when the follow stands down (flight, a vessel, first person),
+		-- so handing off never snaps the view by the last trail's worth.
+		ReleaseEaseSpeed = 12,
 	},
 }
 

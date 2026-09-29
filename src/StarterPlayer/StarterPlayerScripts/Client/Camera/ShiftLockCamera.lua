@@ -25,7 +25,7 @@
 	feel, not the trust model.
 
 	The CameraOffset write goes through Client/FX/CameraOffsetComposer.lua (a named "ShiftLock"
-	continuous slot, eased by that module itself via its own easeSpeed) rather than a direct
+	continuous slot, eased here and handed over finished -- see the camera-space note below) rather than a direct
 	Humanoid.CameraOffset write -- see that module's header for why: it's what replaced the old direct
 	write and the manual "skip while Flying" mutual-exclusion this file used to need to hand-roll
 	against FlightCamera.lua's own direct write.
@@ -63,6 +63,26 @@
 	Humanoid pattern as "Flying" (Client/Flight/FlightController.lua) / "BonusWalkSpeed"
 	(Server/Systems/RunSystem.lua) -- server truth, read reactively by a client presentation module,
 	never a NetworkBridge remote for this.
+
+	Shoulder framing is held in CAMERA space (2026-09-29). Humanoid.CameraOffset is applied in the root's
+	own object space, so a shoulder offset written there swings round with the body. That never showed
+	while this module pinned the body to the camera's yaw -- but swing tracking (Client/Combat/
+	SwingTracking.lua) and parkour both turn the body away from the camera for a while, and every time
+	they did the camera slid sideways with the shoulder, then slid back when the body was handed back.
+	On every swing of a string. The offset is now built in the camera's yaw frame and converted into the
+	root's frame just before the composer writes it (updateShoulderOffset, RenderPriority.Camera - 2), so
+	turning the body moves the body and not the view. The engage/release ease moved with it: this module
+	now eases a 0..1 blend itself and hands the composer the finished vector.
+
+	Locked, but loose (2026-09-29). The body still ends up facing exactly where the camera looks -- that
+	is the lock, and it is what aims a swing -- but it TURNS into that facing on a critically damped
+	spring (CameraConstants.ShiftLock.BodyTurnFrequency) instead of being snapped onto it every frame.
+	A mouse flick swings the character round a beat behind the view rather than the whole body pivoting
+	on the same frame, the same "the character moves inside the camera, the camera does not move with the
+	character" feel Client/Camera/CameraFollow.lua gives position. It also covers the hand-back: when
+	swing tracking or parkour lets go of a body turned away from the camera, the spring (restarted from
+	rest while they owned it) brings it round smoothly instead of the one-frame snap it used to take on
+	every swing of a string.
 
 	Logging (Logger.scope("ShiftLockCamera"), Studio-only per Logger.lua): toggle and engage/
 	disengage transitions and character (re)binds only -- nothing logs at render-step frequency.
@@ -119,6 +139,7 @@ local CameraOffsetComposer = require(script.Parent.Parent.FX.CameraOffsetCompose
 local logger = Logger.scope("ShiftLockCamera")
 
 local RENDER_STEP_NAME = "ShiftLockCameraUpdate"
+local OFFSET_STEP_NAME = "ShiftLockCameraOffset"
 
 local ShiftLockCamera = {}
 
@@ -203,6 +224,19 @@ local parkourFacingOwned = false
 -- carve-out above, for a second owner -- see Constants.Attributes.CombatFacingOwned.
 local combatFacingOwned = false
 
+-- The shoulder framing's 0..1 engage blend, eased here (see the header's camera-space note). And the last
+-- usable camera yaw, for the frame a camera pitched straight down has none.
+local shoulderBlend = 0
+local lastCameraYaw = 0
+
+-- The body's turn rate (radians/second) on its spring toward the camera's yaw -- see the header's "locked,
+-- but loose" note. Zeroed whenever this module is not the one turning the body (disengaged, suspended, or
+-- another owner holding the facing), so every hand-back starts the turn from rest.
+local bodyYawVelocity = 0
+
+-- Below both of these the body is facing the camera and not turning: nothing to write.
+local BODY_YAW_REST_VELOCITY = 0.01
+
 local function setEngaged(nowEngaged: boolean): ()
 	if nowEngaged == engaged then
 		return
@@ -235,10 +269,56 @@ local function setEngaged(nowEngaged: boolean): ()
 	end
 end
 
--- deltaTime is unused now that the CameraOffset ease itself moved into CameraOffsetComposer (this
--- function only computes a target and hands it over, same "_"-prefixed convention FlightCamera.lua
--- already uses for an accepted-but-unused parameter).
-local function onRenderStep(_deltaTime: number): ()
+-- The shoulder framing, every frame, just before CameraOffsetComposer writes (Camera - 1) -- so it is
+-- converted into the root's frame with THIS frame's root rotation, not last frame's. See the header's
+-- camera-space note.
+--
+-- Eases every frame regardless of engagement so releasing the mode (or dying mid-fight) glides the camera
+-- back to centre instead of snapping it. Skipped entirely while Flying or Mounted -- see those locals'
+-- own headers.
+local function updateShoulderOffset(deltaTime: number): ()
+	local currentHumanoid = humanoid
+	if currentHumanoid == nil then
+		return
+	end
+	if flying or mounted then
+		-- Hand CameraOffset over to whichever module owns it -- FlightCamera's own "Flight" slot while
+		-- flying, BlimpCamera's "Blimp" slot while mounted. Cleared rather than left at its last
+		-- (possibly non-zero, shoulder-offset) value, which would otherwise keep summing into the
+		-- composer's total on top of that module's own offset for as long as the state lasted. The blend
+		-- restarts from zero, so the shoulder eases back in afterwards exactly as it did before.
+		shoulderBlend = 0
+		CameraOffsetComposer.ClearContinuous("ShiftLock")
+		return
+	end
+
+	local shiftLock = Constants.Camera.ShiftLock
+	local camera = Workspace.CurrentCamera
+	local root = rootPart
+	local blendTarget = 0
+	if engaged and camera and root then
+		local cameraDistance = (camera.CFrame.Position - root.Position).Magnitude
+		if cameraDistance >= shiftLock.FirstPersonDistanceThreshold then
+			blendTarget = 1
+		end
+	end
+	shoulderBlend += (blendTarget - shoulderBlend) * FlightMath.EaseAlpha(shiftLock.OffsetLerpSpeed, deltaTime)
+
+	local offset = Vector3.zero
+	if shoulderBlend > 1e-4 and camera and root then
+		local cameraYaw = FlightMath.YawFromFlatDirection(camera.CFrame.LookVector)
+		if cameraYaw then
+			lastCameraYaw = cameraYaw
+		end
+		local worldOffset = CFrame.Angles(0, lastCameraYaw, 0)
+			:VectorToWorldSpace(shiftLock.ShoulderOffset * shoulderBlend)
+		offset = root.CFrame:VectorToObjectSpace(worldOffset)
+	end
+	-- Already eased above, so the composer is told not to ease it again (its nil-easeSpeed contract).
+	CameraOffsetComposer.SetContinuous("ShiftLock", offset, nil)
+end
+
+local function onRenderStep(deltaTime: number): ()
 	local camera = Workspace.CurrentCamera
 	local currentHumanoid = humanoid
 	local currentRootPart = rootPart
@@ -251,39 +331,16 @@ local function onRenderStep(_deltaTime: number): ()
 
 	setEngaged(enabled and hasLiveCharacter)
 
-	local shiftLock = Constants.Camera.ShiftLock
-
-	-- CameraOffset eases every frame regardless of engagement so releasing the mode (or dying
-	-- mid-fight) glides the camera back to center instead of snapping it. Skipped entirely while
-	-- Flying -- see the `flying` local's own header. Registered through CameraOffsetComposer (a
-	-- named "ShiftLock" continuous slot, eased by that module itself via OffsetLerpSpeed) rather than
-	-- writing Humanoid.CameraOffset directly -- see this file's header.
-	if currentHumanoid and not flying and not mounted then
-		local targetOffset = Vector3.zero
-		if engaged and camera and currentRootPart then
-			local cameraDistance = (camera.CFrame.Position - currentRootPart.Position).Magnitude
-			if cameraDistance >= shiftLock.FirstPersonDistanceThreshold then
-				targetOffset = shiftLock.ShoulderOffset
-			end
-		end
-
-		CameraOffsetComposer.SetContinuous("ShiftLock", targetOffset, shiftLock.OffsetLerpSpeed)
-	elseif flying or mounted then
-		-- Hand CameraOffset over to whichever module owns it -- FlightCamera's own "Flight" slot while
-		-- flying, BlimpCamera's "Blimp" slot while mounted. Cleared rather than left at its last
-		-- (possibly non-zero, shoulder-offset) value, which would otherwise keep summing into the
-		-- composer's total on top of that module's own offset for as long as the state lasted.
-		CameraOffsetComposer.ClearContinuous("ShiftLock")
-	end
-
 	if not engaged then
+		bodyYawVelocity = 0
 		return
 	end
 
 	-- See this file's header, "Input suspension" section -- skips the MouseBehavior/yaw writes below
 	-- for exactly the window a suspending caller (Client/Emotes/EmoteWheelClient.lua) owns, without
-	-- otherwise touching `engaged` or the CameraOffset easing above.
+	-- otherwise touching `engaged` or the shoulder easing (updateShoulderOffset, its own render step).
 	if inputSuspended then
+		bodyYawVelocity = 0
 		return
 	end
 
@@ -306,6 +363,7 @@ local function onRenderStep(_deltaTime: number): ()
 	-- rotating the body, so the camera keeps steering it exactly as it would without shift lock.
 	local lockOwnsFacing = rootControlLocked and not (punishLocked and not grabbed and not mounted)
 	if lockOwnsFacing or flying then
+		bodyYawVelocity = 0
 		return
 	end
 
@@ -316,6 +374,7 @@ local function onRenderStep(_deltaTime: number): ()
 	-- MouseBehavior re-assert because a suspended YAW is not a suspended MODE: the player is still
 	-- shift-locked and still expects a locked cursor while a mantle plays out.
 	if parkourFacingOwned or combatFacingOwned then
+		bodyYawVelocity = 0
 		return
 	end
 
@@ -355,9 +414,34 @@ local function onRenderStep(_deltaTime: number): ()
 	-- Its two siblings (FX/CameraOffsetComposer.lua, FX/FOVOffset.lua) already dedupe their own
 	-- per-frame writes and both cite Server/Systems/RunSystem.lua's "single most expensive thing"
 	-- comment for why; this one never got the same treatment.
+	--
+	-- With the turn now on a spring, "a real yaw change" means the body is off the camera's yaw OR still
+	-- turning: a spring settling onto its target keeps writing until it is at rest there.
 	local currentYaw = FlightMath.YawFromFlatDirection(root.CFrame.LookVector)
-	if currentYaw and math.abs(yaw - currentYaw) < YAW_WRITE_EPSILON_RADIANS then
-		return
+	if currentYaw then
+		-- The short way round, so a body facing the other way never spins through 350 degrees.
+		local delta = (yaw - currentYaw) % (2 * math.pi)
+		if delta > math.pi then
+			delta -= 2 * math.pi
+		end
+		if math.abs(delta) < YAW_WRITE_EPSILON_RADIANS and math.abs(bodyYawVelocity) < BODY_YAW_REST_VELOCITY then
+			bodyYawVelocity = 0
+			return
+		end
+		-- Locked, but loose -- see the header. Read back off the root every frame rather than remembered,
+		-- so the spring always resumes from where the body really is. A frequency of 0 or less turns the
+		-- looseness off: the old rigid snap.
+		local shiftLock = Constants.Camera.ShiftLock
+		if shiftLock.BodyTurnFrequency > 0 then
+			yaw, bodyYawVelocity = FlightMath.SpringStep(
+				currentYaw,
+				bodyYawVelocity,
+				currentYaw + delta,
+				shiftLock.BodyTurnFrequency,
+				shiftLock.BodyTurnDamping,
+				deltaTime
+			)
+		end
 	end
 	root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
 end
@@ -496,6 +580,8 @@ function ShiftLockCamera.Start(shiftLockEngaged: Fusion.Value<boolean>): ()
 	-- Camera.Value + 1: after the default camera scripts have produced the frame's final camera
 	-- pose, so the yaw the character copies is this frame's, not last frame's.
 	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value + 1, onRenderStep)
+	-- Before CameraOffsetComposer (Camera - 1), so the shoulder is converted with this frame's root.
+	RunService:BindToRenderStep(OFFSET_STEP_NAME, Enum.RenderPriority.Camera.Value - 2, updateShoulderOffset)
 
 	logger:info("ShiftLockCamera started")
 end

@@ -221,6 +221,30 @@ DefenseConstants.Parry = {
 	-- min(ping, cap). Capped because ping is client-influenced and an uncapped refund is a permanent
 	-- parry for anyone willing to lie about it.
 	PingCompensationMaxSeconds = 0.12,
+
+	-- THE GROUND PARRY'S LAG REWIND -- the air combo's rewind (AirComboConstants.Parry), extended to every
+	-- player-backed defender. The window above opens when the press ARRIVES, but the defender pressed
+	-- against a swing they saw late: the server started it, it reached their screen a one-way trip (plus
+	-- interpolation) later, and their press took another one-way trip back. So a parry timed to the hit
+	-- ON THEIR SCREEN arrives after the hit has already landed on the server's clock -- the "I pressed it
+	-- in time and it didn't parry" feel. The end refund above cannot fix that: it extends the window's
+	-- far side, which forgives an EARLY press, never a late-looking one.
+	--
+	-- So a Clean contact on a defender with a real round trip waits up to min(round trip, this) before it
+	-- applies (DefenseSystem's rewind hold). A press arriving inside that hold is judged at its REWOUND
+	-- time -- arrival minus the same amount, never earlier than the release before it -- as the parry, or
+	-- on the ground the block, it would have been had it reached the server when it was pressed.
+	--
+	-- THE COST, stated rather than hidden: against a laggy defender the attacker's hit confirmation
+	-- (damage, hitstun, hit feedback) lands up to this much later. Their own swing animation is untouched.
+	-- Only contacts a later press could actually change are held (in the block arc, key not already down,
+	-- body not committed to a swing or stun), so the delay is never spent where it could not matter.
+	--
+	-- Tighter than the air combo's 0.2 on purpose: an air-held victim's parry is their ONE way out, so it
+	-- is worth a longer confirmation delay there. On the ground every exchange pays this, and 0.12 --
+	-- the same ceiling the end refund already trusts ping up to -- covers a typical round trip without
+	-- letting a padded ping stall every hit an attacker lands.
+	RewindMaxSeconds = 0.12,
 }
 
 -- THE PERFECT PARRY. A contact landing within WindowSeconds of the parry window OPENING -- the defender
@@ -348,11 +372,11 @@ DefenseConstants.RegisteredParryWindows = {
 -- CLIENT-SIDE PRESENTATION ONLY, unlike ParryAnimationId above: the server never reads this id or
 -- cares how long it plays, since nothing about parry timing lives in it (no ParryStart/ParryClose/
 -- ParryRecoveryEnd markers expected or checked here). DefenseClient.lua plays ParryAnimationId ONCE,
--- non-looped, on press -- that clip's own markers are still what arms the server's parry window --
--- and chains into this one, looped, the instant the parry clip finishes (AnimationManager's
--- OnFinished "Completed" reason), for as long as the block key stays held. So a block press always
--- shows the parry swing-up first and settles into a held guard pose, whether or not anything was
--- actually parried; the OUTCOME was already decided server-side by the time this plays at all.
+-- non-looped, on a press predicted to ARM a parry -- that clip's own markers are still what arms the
+-- server's parry window -- and hands off to this one, looped, when the parry window closes (or the clip
+-- ends, if sooner), for as long as the block key stays held. A press predicted to only BLOCK plays this
+-- one straight away, with no swing-up: the swing-up is the "this press is a parry" tell, so it plays
+-- only when that is true (Client/Defense/ParryPrediction.lua, corrected by the server's verdict).
 DefenseConstants.BlockHoldAnimationId = "rbxassetid://103128038437125"
 
 -- Client-side presentation only (DefenseClient.lua) -- how long the block/parry pose crossfades in
@@ -360,7 +384,14 @@ DefenseConstants.BlockHoldAnimationId = "rbxassetid://103128038437125"
 -- the server's timing authority is ParryAnimationId's own markers, never how long any LOCAL blend
 -- takes.
 DefenseConstants.Presentation = {
+	-- The parry-to-hold handoff and the fade out on release.
 	BlockAnimationFadeSeconds = 0.15,
+	-- The fade IN on the key edge -- the first clip of a press, the parry swing-up or the plain guard.
+	-- Separate from the handoff fade, and much shorter, because it is the latency the player feels: at
+	-- 0.15 a guard spent most of a 0.2s parry window still blending up from the idle, so the pose read as
+	-- late even when the server had the guard up on arrival. Short enough to read as instant, long enough
+	-- not to pop.
+	PressFadeInSeconds = 0.05,
 }
 
 -- Budgets ------------------------------------------------------------------------------------------

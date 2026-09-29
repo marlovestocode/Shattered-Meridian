@@ -14,7 +14,8 @@
 	mounts a vessel or starts flying.
 
 	A SOFT CAMERA LOCK. Every frame, BEFORE the default camera scripts run (RenderPriority.Camera - 1), the
-	camera's look is eased toward the target. The default camera reads its look direction back off
+	camera's look is pulled toward the target on a critically damped spring (LockOnConstants.Camera's own
+	note on why a spring rather than an ease), softened at close range. The default camera reads its look direction back off
 	Camera.CFrame, so it then applies the player's own mouse/stick input, zoom and occlusion on top of the
 	eased look: the player can still glance around and is pulled back. Running before rather than after
 	the camera scripts is what keeps occlusion correct, and it means ShiftLockCamera (Camera + 1) turns
@@ -37,6 +38,7 @@ local Workspace = game:GetService("Workspace")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local LockOnConstants = require(ReplicatedStorage.Shared.Combat.LockOnConstants)
@@ -58,6 +60,10 @@ local LockOnController = {}
 local target: Model? = nil
 -- When the target was last in line of sight (os.clock), for OcclusionGraceSeconds.
 local lastVisibleAt = 0
+-- The camera pull's angular velocities (radians/second), carried frame to frame by the spring. Zeroed on
+-- every target change, so a new lock starts from rest rather than inheriting the last one's swing.
+local yawVelocity = 0
+local pitchVelocity = 0
 
 local character: Model? = nil
 local humanoid: Humanoid? = nil
@@ -81,6 +87,8 @@ local function setTarget(newTarget: Model?): ()
 	end
 	target = newTarget
 	lastVisibleAt = os.clock()
+	yawVelocity = 0
+	pitchVelocity = 0
 	local handle = marker
 	if handle then
 		handle.SetVisible(false)
@@ -158,14 +166,21 @@ local function hasLineOfSight(origin: Vector3, aim: Vector3, targetModel: Model)
 	return Workspace:Raycast(origin, aim - origin, sightParams) == nil
 end
 
--- Eases the camera's look toward `aim` by `deltaTime`. See this file's header on why this runs before the
+-- Pulls the camera's look toward `aim` by `deltaTime`. See this file's header on why this runs before the
 -- default camera scripts and writes only the look, never the position they are about to recompute.
+--
+-- The spring's VALUE is re-read off the camera every frame rather than kept here, so the player's own
+-- mouse or stick input (applied by the camera scripts between two calls) is simply where the spring
+-- resumes from; only the velocity is this module's memory.
 local function pullCamera(camera: Camera, aim: Vector3, deltaTime: number): ()
 	local tuning = LockOnConstants.Camera
 	local focus = camera.Focus.Position
 	local direction = aim - focus
 	local flat = Vector3.new(direction.X, 0, direction.Z)
 	if flat.Magnitude < tuning.MinDistanceStuds then
+		-- Stood down, so the next frame back in range starts the pull from rest.
+		yawVelocity = 0
+		pitchVelocity = 0
 		return
 	end
 	local look = camera.CFrame.LookVector
@@ -178,10 +193,34 @@ local function pullCamera(camera: Camera, aim: Vector3, deltaTime: number): ()
 	local desiredPitch =
 		math.clamp(math.atan2(direction.Y, flat.Magnitude) + tuning.PitchBias, tuning.MinPitch, tuning.MaxPitch)
 
-	local yawAlpha = 1 - math.exp(-tuning.YawRate * deltaTime)
-	local pitchAlpha = 1 - math.exp(-tuning.PitchRate * deltaTime)
-	local yaw = currentYaw + CombatTargets.AngleDelta(currentYaw, desiredYaw) * yawAlpha
-	local pitch = currentPitch + (desiredPitch - currentPitch) * pitchAlpha
+	-- Softer at arm's length, where small movements are big angles. 1 at CloseRangeStuds and beyond, down to
+	-- CloseRangeScale at MinDistanceStuds.
+	local closeness = math.clamp(
+		(flat.Magnitude - tuning.MinDistanceStuds) / math.max(tuning.CloseRangeStuds - tuning.MinDistanceStuds, 1e-3),
+		0,
+		1
+	)
+	local scale = tuning.CloseRangeScale + (1 - tuning.CloseRangeScale) * closeness
+
+	-- The yaw target is unwrapped next to the current yaw, so the spring always turns the short way round.
+	local yaw, nextYawVelocity = FlightMath.SpringStep(
+		currentYaw,
+		yawVelocity,
+		currentYaw + CombatTargets.AngleDelta(currentYaw, desiredYaw),
+		tuning.YawFrequency * scale,
+		tuning.Damping,
+		deltaTime
+	)
+	local pitch, nextPitchVelocity = FlightMath.SpringStep(
+		currentPitch,
+		pitchVelocity,
+		desiredPitch,
+		tuning.PitchFrequency * scale,
+		tuning.Damping,
+		deltaTime
+	)
+	yawVelocity = nextYawVelocity
+	pitchVelocity = nextPitchVelocity
 	camera.CFrame = CFrame.new(camera.CFrame.Position) * CFrame.fromOrientation(pitch, yaw, 0)
 end
 

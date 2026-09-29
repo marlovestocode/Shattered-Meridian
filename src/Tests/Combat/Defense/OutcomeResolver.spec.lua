@@ -118,6 +118,15 @@ return function()
 			-- stops a player blocking instantly out of a whiffed attack.
 			expect(OutcomeResolver.Mitigates("Raising", true)).to.equal(false)
 			expect(OutcomeResolver.Mitigates("ParryWindow", true)).to.equal(false)
+			expect(OutcomeResolver.Mitigates("ParryWindow", true, false)).to.equal(false)
+		end)
+
+		it("mitigates a window that has already parried while the key is held", function()
+			-- A landed parry drops a held guard straight into Blocking; this is that, for a second
+			-- contact in the same batch, before pass 2 has applied the transition.
+			expect(OutcomeResolver.Mitigates("ParryWindow", true, true)).to.equal(true)
+			expect(OutcomeResolver.Mitigates("ParryWindow", false, true)).to.equal(false)
+			expect(OutcomeResolver.Mitigates("Raising", true, true)).to.equal(false)
 		end)
 
 		it("mitigates a staggered block, because the brief allows one", function()
@@ -276,16 +285,31 @@ return function()
 			expect(result.GuardDelta).to.equal(5)
 		end)
 
-		it("stops exactly one attack -- a second contact in the same batch lands clean", function()
+		it("stops exactly one attack -- a second contact on a released tap lands clean", function()
 			-- The window consumes on the first contact, which is what makes being surrounded
-			-- genuinely dangerous rather than merely inconvenient. And ParryWindow does not
-			-- mitigate, so the second hit is Clean rather than Blocked.
+			-- genuinely dangerous rather than merely inconvenient. With the key already let go there
+			-- is no guard behind the spent parry, so the second hit is Clean.
 			local result = OutcomeResolver.Resolve(makeInput({
 				DefenderState = "ParryWindow",
 				ParryLive = true,
 				ParryConsumed = true,
 			}))
 			expect(result.Kind).to.equal("Clean")
+		end)
+
+		it("blocks a second contact in the same batch when the key is still held", function()
+			-- One window parries one attack; the guard behind it still blocks the rest, exactly as it
+			-- would a frame later once pass 2 has dropped the defender into Blocking.
+			local result = OutcomeResolver.Resolve(makeInput({
+				DefenderState = "ParryWindow",
+				ParryLive = true,
+				ParryConsumed = true,
+				BlockHeld = true,
+				Guard = 60,
+			}))
+			expect(result.Kind).to.equal("Blocked")
+			expect(result.GuardDelta).to.equal(-DefenseConstants.Guard.DrainPerPowerLevel)
+			expect(result.ConsumesParry).to.equal(false)
 		end)
 	end)
 

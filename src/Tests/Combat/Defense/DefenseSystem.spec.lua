@@ -221,6 +221,214 @@ return function()
 		end)
 	end)
 
+	describe("DefenseSystem -- a second hit behind a landed parry", function()
+		it("blocks it when the key is still held, and counts the parry's restore before the drain", function()
+			-- Two swings land in ONE batch. The first is parried; the second used to land Clean because
+			-- ParryWindow does not mitigate -- while the identical hit a frame later was Blocked, once pass 2
+			-- had dropped the defender into Blocking. Whether it got through depended on a frame boundary.
+			local base = os.clock()
+			local first = makeDummy("First", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local second = makeDummy("Second", Vector3.new(1, 5, 0), Vector3.new(1, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			DefenseSystem.DrainGuard(defender.Model, 50, base)
+
+			local outcomes, disconnect = captureOutcomes()
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			HitboxEngine.RequestAttack(first.Id, makeDefinition(), 1, 1)
+			HitboxEngine.RequestAttack(second.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(2)
+			local kinds: { [string]: number } = {}
+			for _, outcome in outcomes do
+				kinds[outcome.Kind] = (kinds[outcome.Kind] or 0) + 1
+			end
+			-- One window, one parry -- the other swing is blocked, not parried and not clean.
+			expect(kinds.Parried).to.equal(1)
+			expect(kinds.Blocked).to.equal(1)
+			-- 50 + the parry's restore - one blocked hit. Both contacts are classified before either
+			-- applies, so the block must be charged against the restored pool, not the pre-batch one.
+			local guard = DefenseSystem.GetGuard(defender.Model)
+			local GUARD = DefenseConstants.Guard
+			expect(guard).to.be.near(50 + GUARD.ParryRestore - GUARD.DrainPerPowerLevel, 1e-3)
+		end)
+
+		it("drains a guard once per blocked hit when two land in the same batch", function()
+			local base = os.clock()
+			local first = makeDummy("First", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local second = makeDummy("Second", Vector3.new(1, 5, 0), Vector3.new(1, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			step(FRAME, base + WINDOW_CLOSE + FRAME)
+			HitboxEngine.RequestAttack(first.Id, makeDefinition(), 1, 1)
+			HitboxEngine.RequestAttack(second.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + WINDOW_CLOSE + 2 * FRAME)
+
+			local guard = DefenseSystem.GetGuard(defender.Model)
+			local GUARD = DefenseConstants.Guard
+			expect(guard).to.be.near(GUARD.Max - 2 * GUARD.DrainPerPowerLevel, 1e-3)
+		end)
+	end)
+
+	describe("DefenseSystem -- the lag rewind on the ground", function()
+		-- The defender's press is judged at its arrival minus min(round trip, Parry.RewindMaxSeconds), so a
+		-- parry or block pressed in time on their own screen is not eaten by the trip to the server. A dummy
+		-- has no Player, so the round trip comes from the spec seam.
+		local PING = 0.1
+
+		beforeEach(function()
+			DefenseSystem.SetPingResolver(function(): number
+				return PING
+			end)
+		end)
+
+		it("holds a Clean hit on a defender with a round trip, then applies it when no press comes", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			expect(#outcomes).to.equal(0)
+			step(FRAME, base + FRAME + PING * 0.5)
+			expect(#outcomes).to.equal(0)
+			step(FRAME, base + FRAME + PING + FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Clean")
+		end)
+
+		it("parries a hit that landed while the press was still in flight", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			-- Arrives after the contact, but its rewound time (arrival - PING) is before it.
+			DefenseSystem.SetBlocking(defender.Model, true, base + FRAME + PING * 0.5)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Parried")
+			expect(DefenseSystem.GetState(attacker.Model)).to.equal("Staggered")
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Idle")
+		end)
+
+		it("does not parry twice -- the rewound parry spends the window the press armed", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local other = makeDummy("Other", Vector3.new(1, 5, 0), Vector3.new(1, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			local pressAt = base + FRAME + PING * 0.5
+			DefenseSystem.SetBlocking(defender.Model, true, pressAt)
+			HitboxEngine.RequestAttack(other.Id, makeDefinition(), 1, 1)
+			step(FRAME, pressAt + FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(2)
+			expect(outcomes[1].Kind).to.equal("Parried")
+			-- The key is still down behind the spent window, so the second swing is blocked.
+			expect(outcomes[2].Kind).to.equal("Blocked")
+		end)
+
+		it("blocks a hit that landed while a plain block press was in flight", function()
+			local base = os.clock()
+			-- No window anywhere: every press is a plain block.
+			ParryWindows.Reset()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			DefenseSystem.SetBlocking(defender.Model, true, base + FRAME + PING * 0.5)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Blocked")
+			local guard = DefenseSystem.GetGuard(defender.Model)
+			expect(guard).to.be.near(DefenseConstants.Guard.Max - DefenseConstants.Guard.DrainPerPowerLevel, 1e-3)
+		end)
+
+		it("leaves a hit Clean when the press arrives later than the rewind reaches", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			-- Still inside the hold (the frame that releases it has not run), but rewound only to just
+			-- after the contact -- the press really was late.
+			DefenseSystem.SetBlocking(defender.Model, true, base + FRAME + PING + 0.5 * FRAME)
+			step(FRAME, base + FRAME + PING + FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Clean")
+		end)
+
+		it("caps the rewind at Parry.RewindMaxSeconds however bad the round trip", function()
+			DefenseSystem.SetPingResolver(function(): number
+				return 1
+			end)
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			expect(#outcomes).to.equal(0)
+			step(FRAME, base + FRAME + DefenseConstants.Parry.RewindMaxSeconds + FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Clean")
+		end)
+
+		it("does not hold a hit from the flank -- no press could have turned it", function()
+			local base = os.clock()
+			-- Off the defender's shoulder, past the block arc but short of the rear hemisphere.
+			local attacker = makeDummy("Attacker", Vector3.new(4, 5, -3), Vector3.new(0, 5, -4))
+			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Clean")
+		end)
+
+		it("does not hold a hit on a defender committed to their own swing", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			local outcomes, disconnect = captureOutcomes()
+			-- The defender's own swing sits far behind them, so it hits nothing -- it only commits the body.
+			HitboxEngine.RequestAttack(defender.Id, makeDefinition({ Offset = CFrame.new(0, 0, 30) }), 1, 1)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Clean")
+		end)
+	end)
+
 	describe("DefenseSystem -- a guard waits for a committed body", function()
 		-- Before this, a guard could be raised mid-swing and both ran at once: the swing's hitbox stayed
 		-- live while its thrower blocked. The press is HELD, not refused -- the guard comes up the frame
