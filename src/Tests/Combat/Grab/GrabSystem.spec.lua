@@ -13,6 +13,7 @@
 -- is exactly why Attach() exists separately -- see DamageSystem.spec.lua's own header for the same
 -- reasoning applied one layer down.
 
+local CollectionService = game:GetService("CollectionService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -230,6 +231,29 @@ return function()
 
 			expect(defender.Root.Massless).to.equal(true)
 			expect(defender.Root.CollisionGroup).to.equal(GrabConstants.Hold.CollisionGroup)
+		end)
+
+		it("tags both bodies and publishes the grip point for the hold pose", function()
+			local base = os.clock()
+			local attacker, defender = throwGrabHit(base)
+
+			expect(CollectionService:HasTag(attacker.Model, GrabConstants.Hold.HolderTag)).to.equal(true)
+			expect(CollectionService:HasTag(defender.Model, GrabConstants.Hold.HeldTag)).to.equal(true)
+			-- In the attacker's root space: the weld's C0 applied to the victim-space grip.
+			expect(attacker.Model:GetAttribute(GrabConstants.Hold.GripAttribute)).to.equal(
+				GRAB_CONFIG.AttachOffset * GrabConstants.Hold.GripOffset
+			)
+		end)
+
+		it("clears the tags and the grip the moment the hold ends", function()
+			local base = os.clock()
+			local attacker, defender = throwGrabHit(base)
+
+			GrabSystem.Throw(attacker.Model, base + 2 * FRAME)
+
+			expect(CollectionService:HasTag(attacker.Model, GrabConstants.Hold.HolderTag)).to.equal(false)
+			expect(CollectionService:HasTag(defender.Model, GrabConstants.Hold.HeldTag)).to.equal(false)
+			expect(attacker.Model:GetAttribute(GrabConstants.Hold.GripAttribute)).to.equal(nil)
 		end)
 
 		it("never grabs a victim that is anchored", function()

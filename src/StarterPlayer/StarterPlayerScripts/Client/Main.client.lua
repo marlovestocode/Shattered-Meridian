@@ -70,6 +70,7 @@ local AttackTrail = require(script.Parent.FX.AttackTrail)
 local RollAfterimage = require(script.Parent.FX.RollAfterimage)
 local FpsCounter = require(script.Parent.Diagnostics.FpsCounter)
 local RemoteMovementFX = require(script.Parent.FX.RemoteMovementFX)
+local GrabHoldPose = require(script.Parent.FX.GrabHoldPose)
 local GuardStrainPose = require(script.Parent.FX.GuardStrainPose)
 local CombatFeedbackClient = require(script.Parent.Combat.CombatFeedbackClient)
 local DeathNoticeClient = require(script.Parent.Combat.DeathNoticeClient)
@@ -376,6 +377,13 @@ logger:debug("RemoteMovementFX end")
 logger:debug("GuardStrainPose start")
 GuardStrainPose.Start()
 logger:debug("GuardStrainPose end")
+
+-- Every grab being held puts the holder's right hand on the victim's collar (and the victim's hands on
+-- that arm), on every client, off the tags GrabSystem publishes (no remote) -- same shape as the guard
+-- strain above, bound one render priority after it.
+logger:debug("GrabHoldPose start")
+GrabHoldPose.Start()
+logger:debug("GrabHoldPose end")
 
 -- Hit presentation -- damage numbers, the outcome banner and the camera shake, driven off the damage
 -- layer's Combat_Feedback event. AFTER UI.Mount(), and that IS load-bearing: it is handed the

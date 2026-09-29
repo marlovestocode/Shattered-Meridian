@@ -63,14 +63,15 @@ export type Config = {
 	MaxReachFraction: number,
 }
 
+-- Which limb we are solving. Every rig lookup below is this string spliced into a name, which is what
+-- keeps the R15 branch a single code path instead of two mirrored ones.
+export type Side = "Left" | "Right"
+
 export type Poser = {
 	ResolveGrips: (station: BasePart) -> (CFrame, CFrame),
 	Apply: (character: Model, station: BasePart) -> boolean,
+	ApplyHand: (character: Model, side: Side, target: Vector3) -> boolean,
 }
-
--- Which limb we are solving. Every rig lookup below is this string spliced into a name, which is what
--- keeps the R15 branch a single code path instead of two mirrored ones.
-type Side = "Left" | "Right"
 
 -- Guard for the degenerate cases the law of cosines cannot answer: a target sitting exactly on the
 -- shoulder, or an arm/target arrangement that has collapsed to a point. Small enough to be invisible,
@@ -264,8 +265,9 @@ function VesselArmPose.New(config: Config): Poser
 			return false
 		end
 
+		local arm = shoulder.Part1
 		local reach = target - shoulderRest.Position
-		if reach.Magnitude < EPSILON then
+		if not arm or reach.Magnitude < EPSILON then
 			return false
 		end
 		local direction = reach.Unit
@@ -273,7 +275,18 @@ function VesselArmPose.New(config: Config): Poser
 
 		-- One bone: point it at the grip. No elbow to solve, so no law of cosines -- see this file's
 		-- header on why the other rig gets a reduced pose rather than no pose.
-		shoulder.Transform = shoulderRest:Inverse() * limbFrame(shoulderRest.Position, direction, bendAxis)
+		--
+		-- Pointing the JOINT'S axis at the grip is not pointing the HAND at it. An R6 shoulder sits at
+		-- the arm's inner top corner (C1 = (-0.5, 0.5, 0), then a quarter turn), so the end of the arm is
+		-- 1.5 studs down that axis and half a stud off it -- about 18 degrees, which landed every R6 hand
+		-- half a stud below whatever it was reaching for. The tip's offset is a fixed fact of the joint,
+		-- read here from C1 and the arm's own size rather than authored, and it always lies in the plane
+		-- the arm swings in, so rotating the aim by that angle about the same bend axis puts the tip on
+		-- the line to the grip exactly (closed form -- no iteration to converge or diverge).
+		local tip = shoulder.C1:Inverse() * Vector3.new(0, -arm.Size.Y * 0.5, 0)
+		local tipAngle = math.atan2(tip.Z, -tip.Y)
+		local aim = CFrame.fromAxisAngle(bendAxis, tipAngle):VectorToWorldSpace(direction)
+		shoulder.Transform = shoulderRest:Inverse() * limbFrame(shoulderRest.Position, aim, bendAxis)
 		return true
 	end
 
@@ -314,16 +327,20 @@ function VesselArmPose.New(config: Config): Poser
 	-- and nil is a `return false`, not an error.
 	function poser.Apply(character: Model, station: BasePart): boolean
 		local leftGrip, rightGrip = poser.ResolveGrips(station)
-
-		if character:FindFirstChild("RightUpperArm") then
-			local posedRight = poseR15Arm(character, "Right", rightGrip.Position)
-			local posedLeft = poseR15Arm(character, "Left", leftGrip.Position)
-			return posedRight or posedLeft
-		end
-
-		local posedRight = poseR6Arm(character, "Right", rightGrip.Position)
-		local posedLeft = poseR6Arm(character, "Left", leftGrip.Position)
+		local posedRight = poser.ApplyHand(character, "Right", rightGrip.Position)
+		local posedLeft = poser.ApplyHand(character, "Left", leftGrip.Position)
 		return posedRight or posedLeft
+	end
+
+	-- One hand onto one world point, for this frame -- the half of Apply that knows nothing about a
+	-- station. Public because a grip is not always a pair of Attachments on a part: GrabHoldPose
+	-- (Client/FX) puts an attacker's right hand on a held victim's collar with exactly this solve. Same
+	-- return contract and same timing requirement as Apply.
+	function poser.ApplyHand(character: Model, side: Side, target: Vector3): boolean
+		if character:FindFirstChild("RightUpperArm") then
+			return poseR15Arm(character, side, target)
+		end
+		return poseR6Arm(character, side, target)
 	end
 
 	return poser

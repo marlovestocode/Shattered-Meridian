@@ -105,11 +105,18 @@
 	A hold's weld going missing (BreakJointsOnDeath, a respawn tearing a rig down mid-hold) is caught by
 	the same sweep.
 
+	THE HAND IS POSED TO THE BODY, NOT THE BODY TO THE HAND. The weld is on the attacker's root, so the
+	victim is always in the same place; Client/FX/GrabHoldPose.lua then raises the attacker's right arm
+	onto the victim's collar every frame on every client (and the victim's hands onto that arm), reading
+	only the two tags and the grip Attribute this module publishes (GrabConstants.Hold). The other way
+	round -- welding to the hand -- is what the old hold did, and it inherits whatever the arm's
+	animation is doing, on a server that does not run the same animation as the clients.
+
 	Does not own: whether a move is authored as a grab (the Move Creation System, via MoveTypes.
 	MoveGrabConfig), what a landed hit costs before the grab side effect begins (DamageResolver --
 	Damage/GuardDrain/HitstunSeconds are entirely unaffected by Grab being present), contact detection
 	or outcome classification (HitboxEngine/DefenseSystem), or presentation
-	(Client/Combat/GrabInputClient.lua).
+	(Client/Combat/GrabInputClient.lua for the cue, Client/FX/GrabHoldPose.lua for the arms).
 ]]
 
 local CollectionService = game:GetService("CollectionService")
@@ -399,6 +406,9 @@ end
 local function detachHold(attacker: Model, hold: Hold): ()
 	holds[attacker] = nil
 	heldBy[hold.Victim] = nil
+	CollectionService:RemoveTag(attacker, GrabConstants.Hold.HolderTag)
+	CollectionService:RemoveTag(hold.Victim, GrabConstants.Hold.HeldTag)
+	attacker:SetAttribute(GrabConstants.Hold.GripAttribute, nil)
 	hold.Weld:Destroy()
 	restoreBody(hold.Body)
 	clearOfWalls(attacker, hold.AttackerRoot, hold.Victim, hold.VictimRoot)
@@ -498,6 +508,14 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 	attackerHumanoid:SetAttribute(Constants.Attributes.Grabbing, true)
 	victimHumanoid:SetAttribute(Constants.Attributes.Grabbed, true)
 	victimHumanoid:SetAttribute(Constants.Attributes.RootControlLocked, true)
+
+	-- What every client's Client/FX/GrabHoldPose.lua needs to put the attacker's hand ON the victim: the
+	-- grip point in the attacker's root space (the same space the weld's C0 is in, so it is exact on
+	-- every client whatever either body is doing), and a tag on each Model. Attribute before tag, so a
+	-- client never sees a tagged holder without its grip.
+	attacker:SetAttribute(GrabConstants.Hold.GripAttribute, config.AttachOffset * GrabConstants.Hold.GripOffset)
+	CollectionService:AddTag(attacker, GrabConstants.Hold.HolderTag)
+	CollectionService:AddTag(victim, GrabConstants.Hold.HeldTag)
 
 	holds[attacker] = {
 		Victim = victim,

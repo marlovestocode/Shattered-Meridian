@@ -37,10 +37,16 @@ GrabConstants.Defaults = {
 	-- torso inside the attacker's arm. The root is the one frame on a rig that is upright, animation-
 	-- free and identical on every client, so the victim lands in the same place every time.
 	--
-	-- Out in front at the right hand's reach and lifted half a stud (feet off the floor -- held up by the
-	-- collar, not standing), turned to FACE the attacker. Three studs forward leaves a clear two-stud gap
-	-- between the two torsos, so nothing overlaps even before the collision group below takes effect.
-	AttachOffset = CFrame.new(0.5, 0.5, -3) * CFrame.Angles(0, math.pi, 0),
+	-- Centred on the attacker's RIGHT shoulder line (x = 1.5, where an R6 right arm hangs), at arm's
+	-- length in front of it, lifted 0.6 studs (feet off the floor -- held up by the collar, not
+	-- standing), and turned to FACE the attacker. Chosen so Hold.GripOffset below -- the front of the
+	-- victim's collar -- sits ~1.7 studs up-and-forward of the attacker's right shoulder joint, which is
+	-- where an R6 arm raised about 45 degrees puts its hand: Client/FX/GrabHoldPose.lua raises the arm
+	-- onto that point, and this placement is what makes it land ON the collar rather than short of it or
+	-- through the victim's chest. Leaves ~0.7 studs between the two torsos. Move this and the arm follows
+	-- (the pose solves for wherever the grip is), but past ~1.8 studs from the shoulder the hand visibly
+	-- stops short.
+	AttachOffset = CFrame.new(1.5, 0.6, -1.7) * CFrame.Angles(0, math.pi, 0),
 	HoldSeconds = 3,
 	ThrowUpVelocity = 20,
 	ThrowHorizontalVelocity = 55,
@@ -76,6 +82,34 @@ GrabConstants.Hold = {
 	-- intersection, which is a fling. GrabSystem pulls the body back toward the attacker by the wall's
 	-- distance minus this first.
 	WallClearanceStuds = 1.5,
+	-- Where the attacker's hand closes, in the VICTIM'S root space: the front of the collar, at the base
+	-- of the neck (an R6 torso's top face is y = +1, its front face z = -0.5). GrabSystem publishes it to
+	-- clients in the ATTACKER'S root space (GripAttribute) so the pose never has to find the victim.
+	GripOffset = Vector3.new(0, 1, -0.5),
+	-- CollectionService tags GrabSystem puts on the two Models for exactly the length of a hold (not
+	-- the flight), and a Vector3 Attribute on the attacker's Model: the grip point in the attacker's
+	-- root space. Tags and Attributes replicate for free, which is all Client/FX/GrabHoldPose.lua needs
+	-- to pose every hold on every client with no remote -- the same seam GuardStrainPose reads
+	-- DefenseConstants.GuardCrack.Tag through.
+	HolderTag = "GrabHolding",
+	HeldTag = "GrabHeldBody",
+	GripAttribute = "GrabGrip",
+}
+
+-- Hold pose (Client/FX/GrabHoldPose.lua) --------------------------------------------------------------
+
+GrabConstants.Pose = {
+	-- Fraction of full arm extension the IK will reach on an R15 rig before it stops reaching and
+	-- points (Shared/Vessel/VesselArmPose.lua's MaxReachFraction). R6 has no elbow and always points.
+	MaxReachFraction = 0.97,
+	-- Which way an R15 elbow breaks -- 1 is behind the arm plane, the natural reach-forward pose.
+	ElbowPoleSign = 1,
+	-- Where the VICTIM'S two hands go, in the victim's own root space: on the attacker's forearm, just
+	-- short of the hand at their collar -- clawing at the grip. With the default AttachOffset the
+	-- attacker's arm runs from about (0.5, -0.1, -1.7) to Hold.GripOffset in this space, and both points
+	-- sit along it.
+	VictimLeftHand = Vector3.new(-0.2, 0.9, -0.9),
+	VictimRightHand = Vector3.new(0.3, 0.75, -1.0),
 }
 
 -- Flight / impact ------------------------------------------------------------------------------------
