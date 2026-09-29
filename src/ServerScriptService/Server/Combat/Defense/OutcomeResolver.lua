@@ -97,12 +97,21 @@ end
 --
 -- Raising and ParryWindow deliberately DO NOT mitigate. The guard is not live until the window
 -- closes -- that is the raise time, and it is what stops a player blocking instantly out of a
--- whiffed attack. It also means a contact inside the window that is NOT parried (because something
--- earlier in the batch already spent it) lands clean, which is precisely what makes being surrounded
--- dangerous rather than merely inconvenient.
-function OutcomeResolver.Mitigates(state: DefenseState, blockHeld: boolean): boolean
+-- whiffed attack.
+--
+-- THE ONE EXCEPTION IS A WINDOW THAT HAS ALREADY PARRIED (`parrySpent`) WITH THE KEY STILL HELD. A
+-- landed parry ends the window on the spot (DefenseStateMachine's phaseEnd) and a held key drops the
+-- defender straight into Blocking -- but that transition is applied in pass 2, so a second contact in
+-- the SAME batch used to see "ParryWindow, parry spent" and land clean, while the identical contact one
+-- frame later was blocked. Whether a hit got through depended on where a frame boundary fell. Being
+-- surrounded is still dangerous in the way that matters: one window parries one attack, and the rest
+-- are blocked (and drain guard) rather than parried. A released tap is still unguarded after its parry.
+function OutcomeResolver.Mitigates(state: DefenseState, blockHeld: boolean, parrySpent: boolean?): boolean
 	if state == "Blocking" then
 		return true
+	end
+	if state == "ParryWindow" then
+		return blockHeld and parrySpent == true
 	end
 	if state == "Staggered" or state == "ParryRecovery" then
 		-- A staggered defender may block -- the brief is explicit -- and it costs them (GuardMeter
@@ -133,7 +142,7 @@ function OutcomeResolver.Resolve(input: ResolveInput): ResolveResult
 		}
 	end
 
-	local mitigates = OutcomeResolver.Mitigates(input.DefenderState, input.BlockHeld)
+	local mitigates = OutcomeResolver.Mitigates(input.DefenderState, input.BlockHeld, input.ParryConsumed)
 	local parryAvailable = input.ParryLive and not input.ParryConsumed
 	local covering = mitigates or parryAvailable
 
@@ -175,7 +184,7 @@ function OutcomeResolver.Resolve(input: ResolveInput): ResolveResult
 		}
 	end
 
-	-- 4. Everything else -- the flanks, an unguarded defender, a spent window.
+	-- 4. Everything else -- the flanks, an unguarded defender, a spent window whose key was let go.
 	return {
 		Kind = "Clean" :: DefenseTypes.OutcomeKind,
 		Guard = guard,

@@ -161,4 +161,36 @@ export type PendingContact = {
 	Perfect: boolean?,
 }
 
+-- The Defense_StateChanged payload, server -> the defending client. One shape for both ends, so the
+-- server's writer (DefenseSystem.notifyClient) and its readers (Client/Defense/DefenseClient.lua, and
+-- Client/UI/State/ClientState.lua for Guard/GuardMax) cannot drift apart.
+--
+--   State/Guard/GuardMax -- the posture, and the guard pool the HUD's posture tile renders.
+--   FaceTowards          -- sent only on a parry: the attacker's position, for the client's facing snap.
+--   Window               -- the parry window a press would arm RIGHT NOW (clip-relative seconds, before
+--                           any rally shrink), or absent when none would. On every push, so the client's
+--                           arming prediction always runs on the timing the server will judge with --
+--                           including a per-weapon clip's authored markers, which the client never reads.
+--   Press                -- the server's verdict on one press: the id the client sent with it, and
+--                           whether it armed a parry. Only on the push answering that press.
+export type PressVerdict = {
+	Id: number,
+	Armed: boolean,
+}
+
+export type WindowShape = {
+	Open: number,
+	Close: number,
+	RecoveryEnd: number,
+}
+
+export type StatePayload = {
+	State: DefenseState,
+	Guard: number,
+	GuardMax: number,
+	FaceTowards: Vector3?,
+	Window: WindowShape?,
+	Press: PressVerdict?,
+}
+
 return DefenseTypes

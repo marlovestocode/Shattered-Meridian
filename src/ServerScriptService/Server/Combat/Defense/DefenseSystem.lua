@@ -106,6 +106,9 @@ type Registration = {
 	-- A guard press that arrived while the body was committed -- mid-swing or stunned -- and is being
 	-- held until it is free. See SetBlocking. Cleared by the release, or by Step raising the guard.
 	GuardDeferred: boolean,
+	-- When the last guard release (key up, or an evade dropping the guard) reached this system. The rewind
+	-- never judges a press as having happened before it -- see rewoundPressAt.
+	ReleasedAt: number,
 	-- The GuardCrack tag state last written to the Humanoid -- deduped like PublishedState, and the
 	-- hysteresis memory publishGuardCrack needs (DefenseConstants.GuardCrack).
 	PublishedCracking: boolean,
@@ -133,18 +136,26 @@ local pending: { PendingContact } = {}
 -- is supposed to be dangerous: one window stops one attack. Kept here rather than by consuming the
 -- machine's own flag in pass 1, so pass 1 genuinely applies nothing.
 local parryConsumedThisBatch: { [Model]: boolean } = {}
+-- Each defender's guard as the contacts classified so far in THIS batch leave it. Pass 1 resolves every
+-- contact before pass 2 applies any, so reading the pool fresh per contact classified each one against
+-- the pool as it stood before the batch: two blocked hits drained it once, and a parry's restore was
+-- invisible to a block behind it in the same batch. Cleared with the batch.
+local batchGuard: { [Model]: number } = {}
 
--- THE AIR PARRY'S REWIND HOLD (docs/design/air-combat-and-evade.md B5). A Clean contact on an AIR-HELD
--- defender with a real round trip is not applied at the end of its frame: it waits here for up to
--- min(round trip, AirComboConstants.Parry.RewindMaxSeconds), so a parry pressed in time on the victim's own
--- screen -- whose press is still in flight to the server -- is not eaten by lag. A press arriving in the hold
--- is judged at its rewound time (DefenseStateMachine.RewoundParryCovers); otherwise the contact applies as
--- the Clean it was when the hold runs out. Only ever air-held defenders: on the ground a defender has other
--- options, and a deferred hit would stall every exchange.
+-- THE REWIND HOLD. A Clean contact on a player-backed defender with a real round trip is not applied at the
+-- end of its frame: it waits here for up to min(round trip, cap), so a parry or block pressed in time on the
+-- defender's own screen -- whose press is still in flight to the server -- is not eaten by lag. A press
+-- arriving in the hold is judged at its rewound time (see rewoundPressAt and resolveHeldContactsFor);
+-- otherwise the contact applies as the Clean it was when the hold runs out.
+--
+-- Born as the air parry's rewind (docs/design/air-combat-and-evade.md B5, cap AirComboConstants.Parry.
+-- RewindMaxSeconds) and extended to the ground (2026-09-29, cap DefenseConstants.Parry.RewindMaxSeconds),
+-- because the same lag made ground parries feel late and ground blocks feel dropped. Only contacts a later
+-- press could actually change are held (rewindHoldFor), so an exchange never stalls on a hit no input could
+-- have answered. Air-held defenders keep their one rule: only the parry is rewound, never the guard.
 type HeldContact = {
 	Contact: PendingContact,
 	ReleaseAt: number,
-	RewindSeconds: number,
 }
 local heldContacts: { HeldContact } = {}
 
@@ -167,9 +178,17 @@ local function debugLog(message: string, data: { [string]: any }?): ()
 	end
 end
 
--- One-way latency for a player-backed combatant, in seconds. Zero for anything else -- a bot or a
--- training dummy has no connection to refund.
+-- Spec-only replacement for the ping lookup below (SetPingResolver). A dummy has no Player and so no ping,
+-- which would leave every latency rule in this system untestable without a live client.
+local pingResolver: ((model: Model) -> number)? = nil
+
+-- Network latency for a player-backed combatant, in seconds, as Player:GetNetworkPing reports it. Zero for
+-- anything else -- a bot or a training dummy has no connection to refund.
 local function pingSecondsFor(model: Model): number
+	local resolver = pingResolver
+	if resolver then
+		return resolver(model)
+	end
 	local player = Players:GetPlayerFromCharacter(model)
 	if not player then
 		return 0
@@ -289,7 +308,25 @@ local function publishGuardFraction(registration: Registration): ()
 	humanoid:SetAttribute(DefenseConstants.GuardFraction.Attribute, step / steps)
 end
 
-local function notifyClient(registration: Registration, state: DefenseState, attackerPosition: Vector3?): ()
+-- The parry window this combatant's press arms, or nil when none is armed for them.
+local function parryWindowFor(registration: Registration): DefenseTypes.ParryWindow?
+	-- A weapon whose own parry clip carries no window falls back to the DEFAULT clip's window
+	-- rather than to no parry at all. That default is itself explicit (markers, or a
+	-- DefenseConstants.RegisteredParryWindows entry), and the boot validation already warned
+	-- about the unarmed clip -- so this is "the baseline timing until the animator marks this
+	-- clip", not a hidden constant. Without it, authoring a PARRY clip for a weapon silently
+	-- removed that weapon's parry.
+	return ParryWindows.Get(registration.ParryAnimationId)
+		or (if defaultParryAnimationId ~= "" then ParryWindows.Get(defaultParryAnimationId) else nil)
+end
+
+-- `verdict` answers one press (see handleSetBlocking); every other push omits it.
+local function notifyClient(
+	registration: Registration,
+	state: DefenseState,
+	attackerPosition: Vector3?,
+	verdict: DefenseTypes.PressVerdict?
+): ()
 	local remote = stateChangedRemote
 	if not remote then
 		return
@@ -304,7 +341,8 @@ local function notifyClient(registration: Registration, state: DefenseState, att
 	registration.SentGuard = guard
 	registration.SentGuardMax = guardMax
 	registration.GuardSentAt = os.clock()
-	remote:FireClient(player, {
+	local window = parryWindowFor(registration)
+	local payload: DefenseTypes.StatePayload = {
 		State = state,
 		Guard = guard,
 		GuardMax = guardMax,
@@ -313,7 +351,14 @@ local function notifyClient(registration: Registration, state: DefenseState, att
 		-- character's physics, so a server rotation write would be fought and then overwritten. Feel
 		-- belongs on the client; the decision that a parry happened stays here.
 		FaceTowards = attackerPosition,
-	})
+		-- The client predicts whether its next press arms a parry, so it can play the parry swing-up or
+		-- go straight to the guard on the key edge (Client/Defense/DefenseClient.lua). That prediction
+		-- needs the window this press would be judged with, and only the server has it: a per-weapon
+		-- clip's markers are read here, never on the client. Three numbers on a push that already goes.
+		Window = if window then { Open = window.Open, Close = window.Close, RecoveryEnd = window.RecoveryEnd } else nil,
+		Press = verdict,
+	}
+	remote:FireClient(player, payload)
 end
 
 -- Keeps the owning client's guard readout true -- see DefenseConstants.Guard.SyncIntervalSeconds. The
@@ -368,6 +413,7 @@ function DefenseSystem.RegisterCombatant(
 		HoldsMovementLock = false,
 		PublishedState = nil,
 		GuardDeferred = false,
+		ReleasedAt = -math.huge,
 		PublishedCracking = false,
 		PublishedGuardStep = nil,
 		RallyPartner = nil,
@@ -390,6 +436,9 @@ function DefenseSystem.RegisterCombatant(
 
 	registrations[model] = registration
 	publishState(registration, "Neutral")
+	-- The owning client's first push of this life: its guard readout, and the parry window its first press
+	-- will be judged with (ParryPrediction), rather than both waiting for the first state change.
+	notifyClient(registration, "Neutral", nil)
 end
 
 function DefenseSystem.UnregisterCombatant(model: Model): ()
@@ -409,6 +458,7 @@ function DefenseSystem.UnregisterCombatant(model: Model): ()
 	end
 	registrations[model] = nil
 	parryConsumedThisBatch[model] = nil
+	batchGuard[model] = nil
 end
 
 function DefenseSystem.IsRegistered(model: Model): boolean
@@ -444,6 +494,9 @@ function DefenseSystem.SetParryAnimation(model: Model, animationId: string): ()
 		return
 	end
 	registration.ParryAnimationId = animationId
+	-- A new clip is a new window: re-sent now, so the client's next press is predicted on this weapon's
+	-- timing rather than the last one's.
+	notifyClient(registration, registration.Machine:GetState(), nil)
 end
 
 -- Input --------------------------------------------------------------------------------------------
@@ -532,39 +585,39 @@ local function noteRallyParry(parrier: Model, parried: Model, now: number): ()
 	debugLog("Rally parry", { parrier = parrier.Name, parried = parried.Name, count = count })
 end
 
--- The parry window this combatant's press arms, or nil when none is armed for them.
-local function parryWindowFor(registration: Registration): DefenseTypes.ParryWindow?
-	-- A weapon whose own parry clip carries no window falls back to the DEFAULT clip's window
-	-- rather than to no parry at all. That default is itself explicit (markers, or a
-	-- DefenseConstants.RegisteredParryWindows entry), and the boot validation already warned
-	-- about the unarmed clip -- so this is "the baseline timing until the animator marks this
-	-- clip", not a hidden constant. Without it, authoring a PARRY clip for a weapon silently
-	-- removed that weapon's parry.
-	return ParryWindows.Get(registration.ParryAnimationId)
-		or (if defaultParryAnimationId ~= "" then ParryWindows.Get(defaultParryAnimationId) else nil)
-end
-
 -- Converts the held contact an arriving press covers into the parry it would have been, and applies it.
 -- Declared here, defined in pass 2 below (it needs applyContact).
-local resolveHeldContactsFor: (registration: Registration, now: number, window: DefenseTypes.ParryWindow?, scale: number) -> ()
+local resolveHeldContactsFor: (
+	registration: Registration,
+	now: number,
+	window: DefenseTypes.ParryWindow?,
+	scale: number,
+	armed: boolean
+) -> ()
 
 -- `blockOnly` raises a plain guard with no parry window. It is for a press HELD through a committed
 -- body (GuardDeferred, raised by Step): see Step's own note on why that press may block but not parry.
-local function pressGuard(registration: Registration, now: number, blockOnly: boolean?): ()
+local function pressGuard(registration: Registration, now: number, blockOnly: boolean?): boolean
 	local window = if blockOnly then nil else parryWindowFor(registration)
 	local scale = rallyScale(registration, now)
 	local armed = registration.Machine:Press(now, window, pingSecondsFor(registration.Model), scale)
-	-- An air-held defender's press may be the parry for a contact still in its rewind hold -- judged at the
-	-- press's REWOUND time, not now. Only an armed press can be: a press into a held guard mints no window.
-	if armed and #heldContacts > 0 then
-		resolveHeldContactsFor(registration, now, window, scale)
+	-- The press may be the parry -- or, on the ground, the block -- for a contact still in its rewind hold,
+	-- judged at the press's REWOUND time rather than now. See resolveHeldContactsFor. Never for a press
+	-- Step is raising out of a deferral (`blockOnly`): that press arrived while the body was committed, so
+	-- rewinding it from now would judge it as if it had reached a free body.
+	if not blockOnly and #heldContacts > 0 then
+		resolveHeldContactsFor(registration, now, window, scale, armed)
 	end
+	return armed
 end
 
-function DefenseSystem.SetBlocking(model: Model, blocking: boolean, now: number): ()
+-- Returns whether a press armed a parry window -- false for a release, a refused press, a press held for a
+-- committed body, and a press that only raised a plain block. handleSetBlocking reports it back to the
+-- pressing client; a bot's caller ignores it.
+function DefenseSystem.SetBlocking(model: Model, blocking: boolean, now: number): boolean
 	local registration = registrations[model]
 	if not registration then
-		return
+		return false
 	end
 	if blocking then
 		-- A committed traversal refuses the guard, on the same rule and through the same predicate
@@ -577,7 +630,7 @@ function DefenseSystem.SetBlocking(model: Model, blocking: boolean, now: number)
 		-- Press/Release pairing is what keeps the state honest, and a gate that can break the pair is a
 		-- worse bug than the one it is closing.
 		if ParkourOwnership.OwnsBody(registration.Humanoid) then
-			return
+			return false
 		end
 		-- HELD, NOT REFUSED. A player who presses guard a moment before their swing ends -- or while
 		-- still reeling -- gets the guard the instant they are free (Step), as long as the key is still
@@ -589,13 +642,14 @@ function DefenseSystem.SetBlocking(model: Model, blocking: boolean, now: number)
 		-- the held guard does nothing (pass 1's AirHeld rule), and only a timed parry counts.
 		if bodyCommitted(registration, now) and not isAirHeld(registration.Humanoid) then
 			registration.GuardDeferred = true
-			return
+			return false
 		end
-		pressGuard(registration, now)
-	else
-		registration.GuardDeferred = false
-		registration.Machine:Release(now)
+		return pressGuard(registration, now)
 	end
+	registration.GuardDeferred = false
+	registration.ReleasedAt = now
+	registration.Machine:Release(now)
+	return false
 end
 
 -- Opens this combatant's evade window (DefenseConstants.Evade), or refuses and says why. Public for
@@ -644,17 +698,34 @@ function DefenseSystem.BeginEvade(model: Model, now: number): (boolean, string?)
 		-- roll ends would be a posture they never asked for on this press. Only on success -- a refused
 		-- evade leaves the body exactly as it was, deferred press included.
 		registration.GuardDeferred = false
+		registration.ReleasedAt = now
 		debugLog("Evade opened", { model = model.Name })
 	end
 	return ok, reason
 end
 
-local function handleSetBlocking(player: Player, rawBlocking: unknown): ()
+-- The largest press id accepted. The client counts up from 1 per session; anything outside this is not an
+-- id the client could have sent, and a verdict echoing it back would be answering nothing.
+local MAX_PRESS_ID = 2 ^ 31
+
+local function handleSetBlocking(player: Player, rawBlocking: unknown, rawPressId: unknown): ()
 	if rateLimiter:IsLimited(player) then
 		return
 	end
 	if typeof(rawBlocking) ~= "boolean" then
 		return
+	end
+	-- Optional, and only meaningful on a press: the id the client will match the verdict against. A
+	-- malformed one drops the verdict, never the press -- the guard does not depend on it.
+	local pressId: number? = nil
+	if
+		rawBlocking
+		and typeof(rawPressId) == "number"
+		and rawPressId == math.floor(rawPressId)
+		and rawPressId >= 1
+		and rawPressId <= MAX_PRESS_ID
+	then
+		pressId = rawPressId
 	end
 	local character = player.Character
 	if not character then
@@ -667,7 +738,15 @@ local function handleSetBlocking(player: Player, rawBlocking: unknown): ()
 	if humanoid and humanoid:GetAttribute(Constants.Attributes.Mounted) == true then
 		return
 	end
-	DefenseSystem.SetBlocking(character, rawBlocking, os.clock())
+	local armed = DefenseSystem.SetBlocking(character, rawBlocking, os.clock())
+	-- THE VERDICT. The client plays the parry swing-up or the plain guard on the key edge from its own
+	-- prediction; this is the correction, for the cases the prediction cannot see (a stun it had not heard
+	-- about yet, a lockout timed on the server's clock). Sent even when it agrees, so the client never has
+	-- to guess whether silence means "confirmed" or "lost".
+	local registration = registrations[character]
+	if pressId and registration then
+		notifyClient(registration, registration.Machine:GetState(), nil, { Id = pressId, Armed = armed })
+	end
 end
 
 -- Pass 1 -------------------------------------------------------------------------------------------
@@ -734,7 +813,7 @@ local function onHit(report: HitReport): ()
 		DefenderState = machine:StateAt(at),
 		BearingDegrees = bearing,
 		PowerLevel = report.PowerLevel,
-		Guard = registration.Guard:Get(),
+		Guard = batchGuard[report.Target] or registration.Guard:Get(),
 		GuardMax = registration.Guard:GetMax(),
 		BlockHeld = machine:BlockHeldAt(at),
 		ParryLive = machine:IsParryLiveAt(at),
@@ -744,11 +823,12 @@ local function onHit(report: HitReport): ()
 	if airHeld and (result.Kind == "Blocked" or result.Kind == "Backstab" or result.Kind == "GuardBroken") then
 		result = {
 			Kind = "Clean",
-			Guard = registration.Guard:Get(),
+			Guard = batchGuard[report.Target] or registration.Guard:Get(),
 			GuardDelta = 0,
 			ConsumesParry = false,
 		}
 	end
+	batchGuard[report.Target] = result.Guard
 
 	if result.ConsumesParry then
 		-- Marked in the batch, not on the machine: pass 1 applies nothing, and the machine's own flag
@@ -805,8 +885,18 @@ local function applyContact(contact: PendingContact, now: number): ()
 		-- A block is the only thing that suppresses regeneration, and only because it is the only
 		-- thing that spends the pool. A parry's restore must not also start a regen delay, or the
 		-- reward would partly cancel itself.
+		--
+		-- APPLIED AS THE DELTA, NOT THE ABSOLUTE pass 1 worked out. The absolute was the pool at
+		-- classification time, which is stale by the time a contact out of the rewind hold applies (up
+		-- to Parry.RewindMaxSeconds later): writing it back undid any drain or regeneration in between,
+		-- so a held Clean hit silently refunded the posture drain of the hit before it. A trade's
+		-- rollback (ArbitrateTrades) zeroes its delta, so it composes here too. A break is pinned to
+		-- empty whatever regenerated since classification -- it was judged to empty the pool.
 		local spendsGuard = kind == "Blocked" or kind == "GuardBroken"
-		guard:Set(contact.Result.Guard, now, spendsGuard)
+		local applied = if kind == "GuardBroken" then 0 else guard:Get() + contact.Result.GuardDelta
+		guard:Set(applied, now, spendsGuard)
+		-- The emitted outcome carries the pool as it actually is now, not as pass 1 predicted it.
+		contact.Result.Guard = guard:Get()
 
 		if kind == "GuardBroken" then
 			machine:BreakGuard(now)
@@ -858,68 +948,179 @@ local function applyContact(contact: PendingContact, now: number): ()
 	debugLog("Contact resolved", { kind = kind, defender = contact.Defender.Name, perfect = contact.Perfect })
 end
 
--- How long a resolved contact waits in the rewind hold before it applies, or 0 to apply it now. Only a
--- CLEAN contact on an AIR-HELD, player-backed defender is held -- a parry, a trade and an evade are already
--- decided, and a bot or a dummy has no round trip to rewind.
-local function rewindHoldFor(contact: PendingContact): number
+-- How far back an arriving press from this defender is judged: min(round trip, cap), with the air combo's
+-- longer cap while air-held (see DefenseConstants.Parry.RewindMaxSeconds on why the two differ). Zero for a
+-- bot or a dummy, which has no round trip to rewind.
+local function rewindSecondsFor(registration: Registration): number
+	local cap = if isAirHeld(registration.Humanoid)
+		then AirComboConstants.Parry.RewindMaxSeconds
+		else DefenseConstants.Parry.RewindMaxSeconds
+	return math.min(pingSecondsFor(registration.Model), cap)
+end
+
+-- The moment a press arriving `now` is judged as having been made: its arrival less the rewind, but never
+-- before the release that preceded it. The two travelled the same wire in order, so a press rewound past its
+-- own release would be claiming the key went down before it came up -- and a guard already up at that moment
+-- cannot mint a fresh window anyway (DefenseStateMachine.RewoundParryCovers refuses it).
+local function rewoundPressAt(registration: Registration, now: number): number
+	return math.max(now - rewindSecondsFor(registration), registration.ReleasedAt)
+end
+
+-- How long a resolved contact waits in the rewind hold before it applies, or 0 to apply it now. Only a CLEAN
+-- contact that a later press could still turn into a parry or a block is held -- a parry, a trade and an
+-- evade are already decided, and holding anything else would only delay a hit no input could have answered:
+--   * outside the block arc: a parry or a block from that side does nothing either way;
+--   * the key already down at contact: a held guard mints no window, and there is no press left to arrive;
+--   * on the ground, a body committed to its own swing or a stun: a press arriving now is deferred and
+--     comes up as a plain block later (SetBlocking), never judged against this contact.
+-- Also 0 for a bot or a dummy (rewindSecondsFor), which has no round trip.
+local function rewindHoldFor(contact: PendingContact, now: number): number
 	if contact.Result.Kind ~= "Clean" then
 		return 0
 	end
 	local registration = registrations[contact.Defender]
-	if not registration or not isAirHeld(registration.Humanoid) then
+	if not registration then
 		return 0
 	end
-	return math.min(pingSecondsFor(contact.Defender), AirComboConstants.Parry.RewindMaxSeconds)
+	if not OutcomeResolver.IsWithinBlockArc(contact.BearingDegrees) then
+		return 0
+	end
+	if registration.Machine:BlockHeldAt(contact.SampleTime) then
+		return 0
+	end
+	if not isAirHeld(registration.Humanoid) and bodyCommitted(registration, now) then
+		return 0
+	end
+	return rewindSecondsFor(registration)
 end
 
+-- Takes one held contact out of the hold, re-classified, and applies it now.
+local function releaseHeld(held: HeldContact, result: DefenseTypes.ResolveResult, stateThen: DefenseState): ()
+	local index = table.find(heldContacts, held)
+	if index then
+		table.remove(heldContacts, index)
+	end
+	local contact = held.Contact
+	contact.Result = result
+	contact.DefenderStateAtContact = stateThen
+end
+
+-- Judges this defender's held contacts against a press that has just arrived, as if it had arrived at its
+-- rewound time (rewoundPressAt). Runs after the live Press, so the arriving press has already done its
+-- ordinary work; this only corrects the contacts that landed while it was in flight.
+--
+--   1. THE PARRY. An armed press parries the EARLIEST held contact its rewound window covers
+--      (DefenseStateMachine.RewoundParryCovers -- the same arming checks, evaluated then). Only one: a parry
+--      window stops one attack. The parry applies through applyContact, whose ConsumeParry also spends the
+--      live window this press just armed, so one press can never parry twice.
+--   2. THE GUARD, ground only. Every other held contact that landed at or after the rewound press is judged
+--      against the guard that press would have put up: from the press itself for a plain block, from the
+--      rewound window's close for an armed press (the raise time is still the raise time), and -- the
+--      OutcomeResolver.Mitigates rule -- straight after the parry for a held key. A contact inside an armed
+--      window that nothing parried stays the Clean it was: that is a window which caught the wrong hit, not
+--      a guard. Air-held defenders skip this step: their guard does nothing (pass 1's AirHeld rule).
+--
+-- Both go through the same resolver pass 1 uses, so the guard arithmetic and the arc rules are the ordinary
+-- ones, and a resolver that disagrees leaves the contact held as the Clean it was.
 resolveHeldContactsFor = function(
 	registration: Registration,
 	now: number,
 	window: DefenseTypes.ParryWindow?,
-	scale: number
+	scale: number,
+	armed: boolean
 ): ()
-	-- EARLIEST FIRST, and only one: a parry window stops one attack, exactly as on the ground.
-	local chosen: number? = nil
-	for index, held in heldContacts do
+	local candidates: { HeldContact } = {}
+	for _, held in heldContacts do
 		if held.Contact.Defender == registration.Model then
-			if chosen == nil or held.Contact.SampleTime < heldContacts[chosen].Contact.SampleTime then
-				chosen = index
+			table.insert(candidates, held)
+		end
+	end
+	if #candidates == 0 then
+		return
+	end
+	table.sort(candidates, function(a: HeldContact, b: HeldContact): boolean
+		return a.Contact.SampleTime < b.Contact.SampleTime
+	end)
+
+	local machine = registration.Machine
+	local pressAt = rewoundPressAt(registration, now)
+	local function resolveAs(held: HeldContact, stateThen: DefenseState, parryLive: boolean, parrySpent: boolean)
+		return OutcomeResolver.Resolve({
+			DefenderState = stateThen,
+			BearingDegrees = held.Contact.BearingDegrees,
+			PowerLevel = held.Contact.Report.PowerLevel,
+			Guard = registration.Guard:Get(),
+			GuardMax = registration.Guard:GetMax(),
+			BlockHeld = true,
+			ParryLive = parryLive,
+			ParryConsumed = parrySpent,
+			Evading = false,
+		})
+	end
+
+	-- 1. The parry.
+	local parriedAt: number? = nil
+	if armed then
+		for _, held in candidates do
+			local covers, perfect = machine:RewoundParryCovers(pressAt, held.Contact.SampleTime, window, scale)
+			if covers then
+				local result = resolveAs(held, "ParryWindow", true, false)
+				if result.Kind == "Parried" then
+					releaseHeld(held, result, "ParryWindow")
+					held.Contact.Perfect = perfect
+					parriedAt = held.Contact.SampleTime
+					applyContact(held.Contact, now)
+					debugLog("Parry judged on the rewind", { defender = registration.Model.Name, perfect = perfect })
+				end
+				break
 			end
 		end
 	end
-	if chosen == nil then
+
+	-- 2. The guard.
+	if isAirHeld(registration.Humanoid) then
 		return
 	end
-	local held = heldContacts[chosen]
-	local contact = held.Contact
-	local covers, perfect =
-		registration.Machine:RewoundParryCovers(now - held.RewindSeconds, contact.SampleTime, window, scale)
-	if not covers then
+	-- The posture the guard settles into once it is up. A press into a guard break raised nothing.
+	local liveState = machine:GetState()
+	if liveState == "GuardBroken" then
 		return
 	end
-	-- Re-classified as the parry it would have been, through the same resolver pass 1 uses, so the guard
-	-- restore and the unparryable-weight rules are the ordinary ones. A resolver that still says otherwise
-	-- (a move no parry can stop) leaves the contact held as the Clean it was.
-	local result = OutcomeResolver.Resolve({
-		DefenderState = "ParryWindow",
-		BearingDegrees = contact.BearingDegrees,
-		PowerLevel = contact.Report.PowerLevel,
-		Guard = registration.Guard:Get(),
-		GuardMax = registration.Guard:GetMax(),
-		BlockHeld = true,
-		ParryLive = true,
-		ParryConsumed = false,
-		Evading = false,
-	})
-	if result.Kind ~= "Parried" then
-		return
+	local guardState: DefenseState = if liveState == "Staggered" then "Staggered" else "Blocking"
+	-- When the rewound press's guard came up: at the rewound window's close if that press would have armed
+	-- one, at the press itself if it would only have blocked. Asked at `pressAt`, not taken from the live
+	-- press: a press that arms NOW (MinUnguarded or a lockout just ran out) may not have armed THEN, and a
+	-- press that did not arm then was a plain block from that moment.
+	local guardUpAt = pressAt
+	if armed and window and machine:CanArmParryAt(pressAt) then
+		guardUpAt = pressAt + window.Open + (window.Close - window.Open) * scale
 	end
-	table.remove(heldContacts, chosen)
-	contact.Result = result
-	contact.Perfect = perfect
-	contact.DefenderStateAtContact = "ParryWindow"
-	applyContact(contact, now)
-	debugLog("Air parry judged on the rewind", { defender = registration.Model.Name, perfect = perfect })
+	for _, held in candidates do
+		if table.find(heldContacts, held) == nil then
+			continue
+		end
+		local at = held.Contact.SampleTime
+		if at < pressAt then
+			continue
+		end
+		local result: DefenseTypes.ResolveResult
+		local stateThen: DefenseState
+		if at >= guardUpAt then
+			stateThen = guardState
+			result = resolveAs(held, stateThen, false, false)
+		elseif parriedAt ~= nil and at >= parriedAt then
+			stateThen = "ParryWindow"
+			result = resolveAs(held, stateThen, false, true)
+		else
+			continue
+		end
+		if result.Kind == "Clean" then
+			continue
+		end
+		releaseHeld(held, result, stateThen)
+		applyContact(held.Contact, now)
+		debugLog("Guard judged on the rewind", { defender = registration.Model.Name, kind = result.Kind })
+	end
 end
 
 -- The loop -----------------------------------------------------------------------------------------
@@ -982,9 +1183,9 @@ function DefenseSystem.Step(deltaTime: number, now: number): ()
 
 	OutcomeResolver.ArbitrateTrades(pending)
 	for _, contact in pending do
-		local hold = rewindHoldFor(contact)
+		local hold = rewindHoldFor(contact, now)
 		if hold > 0 then
-			table.insert(heldContacts, { Contact = contact, ReleaseAt = now + hold, RewindSeconds = hold })
+			table.insert(heldContacts, { Contact = contact, ReleaseAt = now + hold })
 		else
 			applyContact(contact, now)
 		end
@@ -992,6 +1193,7 @@ function DefenseSystem.Step(deltaTime: number, now: number): ()
 
 	table.clear(pending)
 	table.clear(parryConsumedThisBatch)
+	table.clear(batchGuard)
 end
 
 -- Public queries -----------------------------------------------------------------------------------
@@ -1253,8 +1455,17 @@ function DefenseSystem.Reset(): ()
 	table.clear(pending)
 	table.clear(heldContacts)
 	table.clear(parryConsumedThisBatch)
+	table.clear(batchGuard)
 	table.clear(outcomeCallbacks)
 	defaultParryAnimationId = ""
+	pingResolver = nil
+end
+
+-- Replaces the ping lookup, or restores the real one when passed nil. Spec-only, the same role
+-- ParryWindows.SetExtractor plays: a dummy has no Player, so without it the rewind hold and the ping
+-- refunds could never be exercised. Reset restores the real lookup.
+function DefenseSystem.SetPingResolver(resolver: ((model: Model) -> number)?): ()
+	pingResolver = resolver
 end
 
 return DefenseSystem :: Types.SystemModule & typeof(DefenseSystem)
