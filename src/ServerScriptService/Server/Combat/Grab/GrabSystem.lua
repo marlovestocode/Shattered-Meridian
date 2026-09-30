@@ -127,6 +127,7 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
+local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
@@ -147,6 +148,8 @@ type DefenseOutcome = DefenseTypes.DefenseOutcome
 type DamageResult = DamageTypes.DamageResult
 type MoveGrabConfig = MoveTypes.MoveGrabConfig
 type GrabRole = GrabTypes.GrabRole
+type ModeSpec = GrabConstants.ModeSpec
+type AnimationManagerInstance = AnimationManager.AnimationManagerInstance
 
 local logger = Logger.scope("GrabSystem")
 
@@ -171,9 +174,13 @@ type Hold = {
 	AttackerHumanoid: Humanoid,
 	AttackerRoot: BasePart,
 	Config: MoveGrabConfig,
+	Mode: ModeSpec,
 	ExpiresAt: number,
 	Weld: Weld,
 	Body: BodySnapshot,
+	-- One per body with an authored hold clip, nil otherwise -- see playHoldClip.
+	VictimAnimator: AnimationManagerInstance?,
+	AttackerAnimator: AnimationManagerInstance?,
 }
 
 -- One flight per thrown victim -- Attacker is carried for impact-damage attribution and to keep the
@@ -400,6 +407,46 @@ local function restoreControl(victim: Model, humanoid: Humanoid, root: BasePart)
 	end
 end
 
+-- Loops an authored hold clip (MoveGrabConfig.VictimAnimation/AttackerAnimation) on `model` for the
+-- length of the hold, or does nothing for "" / nil. Through AnimationManager, like every other track in
+-- this codebase, on a manager of its own: the hold clip is one claim on one layer for a few seconds, and
+-- borrowing a longer-lived manager would mean reaching into a module that owns a different rig's
+-- lifetime. PLAYED BY THE SERVER, which is the one machine that can play a clip on a player, a bot and
+-- a debug dummy alike -- a server-loaded track replicates to every client, the held player's own
+-- included. GrabConstants.Animation on why Action4 and why looped.
+local function playHoldClip(model: Model, clip: string?, role: GrabRole): AnimationManagerInstance?
+	if clip == nil or clip == "" then
+		return nil
+	end
+	local manager = AnimationManager.new({ Name = `GrabSystem:{role}:{model.Name}` })
+	if not manager:Bind(model) then
+		manager:Destroy()
+		return nil
+	end
+	local animation = GrabConstants.Animation
+	manager:Claim(animation.Layer, "GrabSystem", {
+		Clip = clip,
+		Looped = true,
+		Priority = animation.Priority,
+		FadeIn = animation.FadeInSeconds,
+		FadeOut = animation.FadeOutSeconds,
+	})
+	return manager
+end
+
+-- Fades the clip out rather than cutting it (AnimationManager.Unbind destroys its tracks outright), and
+-- only then releases the manager. The delay holds nothing but the manager itself: Destroy on a rig that
+-- has since gone away is a no-op.
+local function stopHoldClip(manager: AnimationManagerInstance?): ()
+	if not manager then
+		return
+	end
+	manager:Clear(GrabConstants.Animation.Layer, "GrabSystem")
+	task.delay(GrabConstants.Animation.FadeOutSeconds, function()
+		manager:Destroy()
+	end)
+end
+
 -- Undoes the hold's rig and hands the body back to physics as its own assembly -- the half a throw and
 -- a release share. Neither the ownership nor the Humanoid is touched here: the two callers disagree
 -- about what happens to those next.
@@ -409,6 +456,10 @@ local function detachHold(attacker: Model, hold: Hold): ()
 	CollectionService:RemoveTag(attacker, GrabConstants.Hold.HolderTag)
 	CollectionService:RemoveTag(hold.Victim, GrabConstants.Hold.HeldTag)
 	attacker:SetAttribute(GrabConstants.Hold.GripAttribute, nil)
+	hold.Victim:SetAttribute(GrabConstants.Hold.ModeAttribute, nil)
+	hold.Victim:SetAttribute(GrabConstants.Hold.VictimAnimatedAttribute, nil)
+	stopHoldClip(hold.VictimAnimator)
+	stopHoldClip(hold.AttackerAnimator)
 	hold.Weld:Destroy()
 	restoreBody(hold.Body)
 	clearOfWalls(attacker, hold.AttackerRoot, hold.Victim, hold.VictimRoot)
@@ -509,11 +560,19 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 	victimHumanoid:SetAttribute(Constants.Attributes.Grabbed, true)
 	victimHumanoid:SetAttribute(Constants.Attributes.RootControlLocked, true)
 
-	-- What every client's Client/FX/GrabHoldPose.lua needs to put the attacker's hand ON the victim: the
-	-- grip point in the attacker's root space (the same space the weld's C0 is in, so it is exact on
-	-- every client whatever either body is doing), and a tag on each Model. Attribute before tag, so a
-	-- client never sees a tagged holder without its grip.
-	attacker:SetAttribute(GrabConstants.Hold.GripAttribute, config.AttachOffset * GrabConstants.Hold.GripOffset)
+	-- What every client's Client/FX/GrabHoldPose.lua needs to pose the hold: the grip point in the
+	-- attacker's root space (the same space the weld's C0 is in, so it is exact on every client whatever
+	-- either body is doing), the victim's mode (for where their own hands go) and whether an authored
+	-- clip owns the victim's arms instead, and a tag on each Model. Attributes before tags, so a client
+	-- never sees a tagged body without what it needs to pose it.
+	local mode = GrabConstants.ModeOf(config.Mode)
+	local victimClip = config.VictimAnimation
+	attacker:SetAttribute(GrabConstants.Hold.GripAttribute, config.AttachOffset * mode.Grip)
+	victim:SetAttribute(GrabConstants.Hold.ModeAttribute, config.Mode or GrabConstants.DefaultMode)
+	victim:SetAttribute(
+		GrabConstants.Hold.VictimAnimatedAttribute,
+		if victimClip ~= nil and victimClip ~= "" then true else nil
+	)
 	CollectionService:AddTag(attacker, GrabConstants.Hold.HolderTag)
 	CollectionService:AddTag(victim, GrabConstants.Hold.HeldTag)
 
@@ -524,9 +583,12 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 		AttackerHumanoid = attackerHumanoid,
 		AttackerRoot = attackerRoot,
 		Config = config,
+		Mode = mode,
 		ExpiresAt = now + config.HoldSeconds,
 		Weld = weld,
 		Body = body,
+		VictimAnimator = playHoldClip(victim, victimClip, "Victim"),
+		AttackerAnimator = playHoldClip(attacker, config.AttackerAnimation, "Attacker"),
 	}
 	heldBy[victim] = attacker
 
@@ -559,9 +621,13 @@ function GrabSystem.Throw(attackerModel: Model, now: number): (boolean, string?)
 	-- Flattened, so an attacker pitched by a slope or an animation throws along the ground rather than
 	-- into it -- the vertical part of the launch is ThrowUpVelocity's alone. The root, not a hand,
 	-- consistent with every other facing-relative effect in this stack (DamageConstants.AttackerLunge,
-	-- every authored move's own root-relative Offset).
-	local look = hold.AttackerRoot.CFrame.LookVector
-	local flat = Vector3.new(look.X, 0, look.Z)
+	-- every authored move's own root-relative Offset). A mode that holds the body BEHIND the attacker
+	-- (a drag -- GrabConstants.Modes' ThrowAway) throws along attacker-to-victim instead, which is
+	-- "onward, the way it was already being hauled" rather than straight back through the thrower.
+	local along = if hold.Mode.ThrowAway
+		then hold.VictimRoot.Position - hold.AttackerRoot.Position
+		else hold.AttackerRoot.CFrame.LookVector
+	local flat = Vector3.new(along.X, 0, along.Z)
 	local forward = if flat.Magnitude > 1e-3 then flat.Unit else Vector3.new(0, 0, -1)
 	local config = hold.Config
 	local victimRoot = hold.VictimRoot

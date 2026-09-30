@@ -125,15 +125,15 @@ end
 
 -- Publishes a custom move over the Default id carrying GRAB_CONFIG, the same "clone the Default
 -- projection, overwrite one field, Upsert it live" pattern DamageSystem.spec's own overrideMove uses.
-local function overrideMoveWithGrab(): ()
+local function overrideMoveWithGrab(config: MoveTypes.MoveGrabConfig?): ()
 	local move = MoveTypes.Clone(DefaultMoveRegistry.Get(MOVE_ID) :: any)
-	move.Grab = GRAB_CONFIG
+	move.Grab = config or GRAB_CONFIG
 	MoveRegistryManager.Upsert(move)
 end
 
 -- A Clean hit against two dummies facing each other, with the Grab-carrying move already live.
-local function throwGrabHit(base: number): (Dummy, Dummy)
-	overrideMoveWithGrab()
+local function throwGrabHit(base: number, config: MoveTypes.MoveGrabConfig?): (Dummy, Dummy)
+	overrideMoveWithGrab(config)
 	local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
 	local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
 	HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -241,8 +241,30 @@ return function()
 			expect(CollectionService:HasTag(defender.Model, GrabConstants.Hold.HeldTag)).to.equal(true)
 			-- In the attacker's root space: the weld's C0 applied to the victim-space grip.
 			expect(attacker.Model:GetAttribute(GrabConstants.Hold.GripAttribute)).to.equal(
-				GRAB_CONFIG.AttachOffset * GrabConstants.Hold.GripOffset
+				GRAB_CONFIG.AttachOffset * GrabConstants.ModeOf(GRAB_CONFIG.Mode).Grip
 			)
+		end)
+
+		it("tells clients the victim's hold mode, defaulting a config that names none to Collar", function()
+			local base = os.clock()
+			local _attacker, defender = throwGrabHit(base)
+
+			expect(defender.Model:GetAttribute(GrabConstants.Hold.ModeAttribute)).to.equal(GrabConstants.DefaultMode)
+			-- No VictimAnimation authored, so the client pose owns the victim's hands.
+			expect(defender.Model:GetAttribute(GrabConstants.Hold.VictimAnimatedAttribute)).to.equal(nil)
+		end)
+
+		it("resolves the grip from the config's own mode", function()
+			local dragConfig = table.clone(GRAB_CONFIG)
+			dragConfig.Mode = "Drag"
+			dragConfig.AttachOffset = GrabConstants.Modes.Drag.Placement
+			local base = os.clock()
+			local attacker, defender = throwGrabHit(base, dragConfig)
+
+			expect(defender.Model:GetAttribute(GrabConstants.Hold.ModeAttribute)).to.equal("Drag")
+			-- Placement * Grip IS the mode's Hand -- that identity is what puts the holder's hand on the grip.
+			local grip = attacker.Model:GetAttribute(GrabConstants.Hold.GripAttribute) :: Vector3
+			expect((grip - GrabConstants.Modes.Drag.Hand).Magnitude < 1e-4).to.equal(true)
 		end)
 
 		it("clears the tags and the grip the moment the hold ends", function()
@@ -254,6 +276,7 @@ return function()
 			expect(CollectionService:HasTag(attacker.Model, GrabConstants.Hold.HolderTag)).to.equal(false)
 			expect(CollectionService:HasTag(defender.Model, GrabConstants.Hold.HeldTag)).to.equal(false)
 			expect(attacker.Model:GetAttribute(GrabConstants.Hold.GripAttribute)).to.equal(nil)
+			expect(defender.Model:GetAttribute(GrabConstants.Hold.ModeAttribute)).to.equal(nil)
 		end)
 
 		it("never grabs a victim that is anchored", function()

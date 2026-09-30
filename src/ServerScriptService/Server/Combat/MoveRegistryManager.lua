@@ -110,8 +110,22 @@ local function validateKnockback(raw: unknown): (MoveTypes.MoveKnockback?, strin
 		nil
 end
 
+-- An authored grab animation: optional, a string or nothing, normalised the same way the move's own
+-- AnimationId is. Returns false for a value that is not a string at all.
+local function grabAnimation(value: unknown): (string?, boolean)
+	if value == nil then
+		return "", true
+	end
+	if typeof(value) ~= "string" then
+		return nil, false
+	end
+	return WeaponAssets.NormalizeAssetId(Sanitize.BoundedString(value, LIMITS.AnimationIdLength)), true
+end
+
 -- AttachOffset is never read from the candidate: it is not authorable, so there is nothing to trust or
--- clamp -- the server writes GrabConstants' own default every time.
+-- clamp -- the server writes the chosen mode's own Placement every time. Mode is strict on identity (a
+-- name GrabConstants.Modes does not know is refused rather than silently held some other way); an
+-- absent one is the default mode, which is what every grab saved before modes existed means.
 local function validateGrab(raw: unknown): (MoveTypes.MoveGrabConfig?, string?)
 	if raw == nil then
 		return nil, nil
@@ -129,8 +143,20 @@ local function validateGrab(raw: unknown): (MoveTypes.MoveGrabConfig?, string?)
 	if hold == nil or up == nil or horizontal == nil or impact == nil or selfDamage == nil then
 		return nil, "InvalidGrab"
 	end
+	local modeName = if candidate.Mode == nil then GrabConstants.DefaultMode else candidate.Mode
+	if typeof(modeName) ~= "string" or GrabConstants.Modes[modeName] == nil then
+		return nil, "InvalidGrab"
+	end
+	local victimAnimation, victimOk = grabAnimation(candidate.VictimAnimation)
+	local attackerAnimation, attackerOk = grabAnimation(candidate.AttackerAnimation)
+	if not victimOk or not attackerOk then
+		return nil, "InvalidGrab"
+	end
 	return {
-		AttachOffset = GrabConstants.Defaults.AttachOffset,
+		AttachOffset = GrabConstants.Modes[modeName].Placement,
+		Mode = modeName :: any,
+		VictimAnimation = victimAnimation,
+		AttackerAnimation = attackerAnimation,
 		HoldSeconds = hold,
 		ThrowUpVelocity = up,
 		ThrowHorizontalVelocity = horizontal,

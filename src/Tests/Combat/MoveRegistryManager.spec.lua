@@ -161,6 +161,60 @@ return function()
 			expect(validated.Grab.AttachOffset).to.equal(GrabConstants.Defaults.AttachOffset)
 		end)
 
+		it("places a grab by its mode, defaulting a record saved before modes existed", function()
+			local function grabWith(fields: { [string]: any }): any
+				local grab: { [string]: any } = {
+					HoldSeconds = 2,
+					ThrowUpVelocity = 20,
+					ThrowHorizontalVelocity = 30,
+					ThrowImpactDamage = 5,
+					ThrowSelfDamage = 5,
+				}
+				for key, value in fields do
+					grab[key] = value
+				end
+				return MoveRegistryManager.Validate(wire({ Grab = grab }))
+			end
+
+			local legacy = grabWith({})
+			expect(legacy.Grab.Mode).to.equal(GrabConstants.DefaultMode)
+			expect(legacy.Grab.AttachOffset).to.equal(GrabConstants.Modes[GrabConstants.DefaultMode].Placement)
+
+			local drag = grabWith({ Mode = "Drag" })
+			expect(drag.Grab.Mode).to.equal("Drag")
+			expect(drag.Grab.AttachOffset).to.equal(GrabConstants.Modes.Drag.Placement)
+		end)
+
+		it("refuses a grab mode that does not exist rather than holding some other way", function()
+			local validated, reason = MoveRegistryManager.Validate(wire({
+				Grab = {
+					Mode = "Suplex",
+					HoldSeconds = 2,
+					ThrowUpVelocity = 20,
+					ThrowHorizontalVelocity = 30,
+					ThrowImpactDamage = 5,
+					ThrowSelfDamage = 5,
+				},
+			}))
+			expect(validated).to.equal(nil)
+			expect(reason).to.equal("InvalidGrab")
+		end)
+
+		it("normalises grab animation ids and treats an absent one as none", function()
+			local validated = MoveRegistryManager.Validate(wire({
+				Grab = {
+					VictimAnimation = "12345",
+					HoldSeconds = 2,
+					ThrowUpVelocity = 20,
+					ThrowHorizontalVelocity = 30,
+					ThrowImpactDamage = 5,
+					ThrowSelfDamage = 5,
+				},
+			})) :: any
+			expect(validated.Grab.VictimAnimation).to.equal("rbxassetid://12345")
+			expect(validated.Grab.AttackerAnimation).to.equal("")
+		end)
+
 		it("truncates free text rather than refusing it", function()
 			local validated = MoveRegistryManager.Validate(wire({
 				Description = string.rep("x", LIMITS.DescriptionLength + 50),

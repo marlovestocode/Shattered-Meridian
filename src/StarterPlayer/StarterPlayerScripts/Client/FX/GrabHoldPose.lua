@@ -5,6 +5,11 @@
 	Owns: what a grab LOOKS like while it is held -- the attacker's right hand on the victim's collar, and
 	the victim's two hands up on that arm -- for every hold in view, on every client.
 
+	MODES. Where the hand goes and where the victim's hands go are per hold mode (collar, head, drag...),
+	all of it data in GrabConstants.Modes; the holder's grip arrives already resolved to their own root
+	space, and the victim's mode arrives by name. A move that authors a VictimAnimation gets the clip
+	instead of the victim-hand pose (GrabSystem plays it; this module simply stands down on that body).
+
 	WHY THE HAND GOES TO THE BODY. Server/Combat/Grab/GrabSystem.lua welds the victim to the attacker's
 	ROOT at GrabConstants.Defaults.AttachOffset, so the victim is always in the same place and never
 	jitters with an animation. Without this module the attacker's arm simply keeps playing its idle clip at
@@ -109,14 +114,22 @@ local function poseHolder(model: Model): boolean
 	return poser.ApplyHand(model, "Right", root.CFrame * grip)
 end
 
+-- The victim's hands go where their mode says (GrabConstants.Modes[...].VictimHands) -- unless the
+-- move authored a VictimAnimation, which is the author's say over those arms. That case answers true
+-- WITHOUT posing, so the entry stays tracked (the Attribute is read live) and the clip plays untouched.
 local function poseHeld(model: Model): boolean
 	local root = rootOf(model)
 	if not root then
 		return false
 	end
+	if model:GetAttribute(HOLD.VictimAnimatedAttribute) == true then
+		return true
+	end
+	local modeName = model:GetAttribute(HOLD.ModeAttribute)
+	local hands = GrabConstants.ModeOf(if typeof(modeName) == "string" then modeName else nil).VictimHands
 	local rootCFrame = root.CFrame
-	local posedLeft = poser.ApplyHand(model, "Left", rootCFrame * POSE.VictimLeftHand)
-	local posedRight = poser.ApplyHand(model, "Right", rootCFrame * POSE.VictimRightHand)
+	local posedLeft = poser.ApplyHand(model, "Left", rootCFrame * hands.Left)
+	local posedRight = poser.ApplyHand(model, "Right", rootCFrame * hands.Right)
 	return posedLeft or posedRight
 end
 
@@ -159,7 +172,8 @@ local function untrack(set: { [Model]: true }, instance: Instance, role: Role): 
 	set[instance] = nil
 	if role == "Holder" then
 		releaseArm(instance, "Right")
-	else
+	elseif instance:GetAttribute(HOLD.VictimAnimatedAttribute) ~= true then
+		-- A victim whose arms a clip was driving was never posed here -- leave the clip's fade alone.
 		releaseArm(instance, "Left")
 		releaseArm(instance, "Right")
 	end

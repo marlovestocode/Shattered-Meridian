@@ -38,6 +38,7 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local GrabTypes = require(ReplicatedStorage.Shared.Grab.GrabTypes)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 
 local MoveTypes = {}
@@ -106,10 +107,18 @@ export type MoveKnockback = {
 }
 
 -- "Hold, then throw" instead of an ordinary knockback -- see Server/Combat/Grab/GrabSystem.lua. The
--- attach offset is NOT authored: Validate always writes GrabConstants.Defaults.AttachOffset, and ToWire
--- never sends one, so there is no client-supplied CFrame to trust.
+-- attach offset is NOT authored: Validate always writes the chosen Mode's own placement
+-- (GrabConstants.Modes[Mode].Placement), and ToWire never sends one, so there is no client-supplied
+-- CFrame to trust. Mode and the two animations are optional so a config written before they existed
+-- still reads: nil Mode is "Collar", a nil or "" animation is none.
 export type MoveGrabConfig = {
 	AttachOffset: CFrame,
+	Mode: GrabTypes.GrabMode?,
+	-- Looped on the held body / the holder for the length of the hold (never the flight), by the server
+	-- so it plays on a bot or a dummy too. A victim clip also stands the victim's hand pose down, since
+	-- the clip is the author's say over what those arms do.
+	VictimAnimation: string?,
+	AttackerAnimation: string?,
 	HoldSeconds: number,
 	ThrowUpVelocity: number,
 	ThrowHorizontalVelocity: number,
@@ -309,6 +318,9 @@ function MoveTypes.ToWire(move: MoveDefinition): MoveWire
 	end
 	if move.Grab then
 		wire.Grab = {
+			Mode = move.Grab.Mode,
+			VictimAnimation = move.Grab.VictimAnimation,
+			AttackerAnimation = move.Grab.AttackerAnimation,
 			HoldSeconds = move.Grab.HoldSeconds,
 			ThrowUpVelocity = move.Grab.ThrowUpVelocity,
 			ThrowHorizontalVelocity = move.Grab.ThrowHorizontalVelocity,

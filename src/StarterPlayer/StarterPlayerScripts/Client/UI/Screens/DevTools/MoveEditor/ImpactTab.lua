@@ -45,6 +45,13 @@ local GRAB_FIELDS = {
 	{ Field = "ThrowSelfDamage", Label = "Landing damage", Unit = "to the thrown", Steps = { 1, 10 } },
 }
 
+-- The hold-mode dropdown, in GrabConstants.ModeOrder with each mode's own Label -- adding a mode there
+-- adds it here.
+local GRAB_MODE_OPTIONS = {}
+for _, modeName in GrabConstants.ModeOrder do
+	table.insert(GRAB_MODE_OPTIONS, { Value = modeName, Text = GrabConstants.Modes[modeName].Label })
+end
+
 local function ImpactTab(scope: Scope, context: Fields.FormContext, visible: UsedAs<boolean>): ScrollingFrame
 	local isCustom = scope:Computed(function(use)
 		return not use(context.IsDefault)
@@ -168,6 +175,9 @@ local function ImpactTab(scope: Scope, context: Fields.FormContext, visible: Use
 				local defaults = GrabConstants.Defaults
 				move.Grab = {
 					AttachOffset = defaults.AttachOffset,
+					Mode = defaults.Mode :: any,
+					VictimAnimation = "",
+					AttackerAnimation = "",
 					HoldSeconds = defaults.HoldSeconds,
 					ThrowUpVelocity = defaults.ThrowUpVelocity,
 					ThrowHorizontalVelocity = defaults.ThrowHorizontalVelocity,
@@ -177,10 +187,58 @@ local function ImpactTab(scope: Scope, context: Fields.FormContext, visible: Use
 			end,
 		}),
 
+		Fields.Choice(scope, context, {
+			Label = "Hold",
+			Options = GRAB_MODE_OPTIONS,
+			LayoutOrder = 22,
+			Visible = hasGrab,
+			Get = function(move)
+				return if move.Grab then move.Grab.Mode or GrabConstants.DefaultMode else GrabConstants.DefaultMode
+			end,
+			Set = function(move, value)
+				if move.Grab then
+					move.Grab.Mode = value :: any
+				end
+			end,
+		}),
+		Fields.Prose(scope, Copy.Hints.GrabMode, 23, hasGrab),
+		Fields.Text(scope, context, {
+			Label = "Held target's animation id",
+			Placeholder = "rbxassetid://... or a bare id",
+			MaxLength = LIMITS.AnimationIdLength,
+			Hint = Copy.Hints.GrabVictimAnimation,
+			LayoutOrder = 29,
+			Visible = hasGrab,
+			Get = function(move)
+				return if move.Grab then move.Grab.VictimAnimation or "" else ""
+			end,
+			Set = function(move, value)
+				if move.Grab then
+					move.Grab.VictimAnimation = value
+				end
+			end,
+		}),
+		Fields.Text(scope, context, {
+			Label = "Your hold animation id",
+			Placeholder = "rbxassetid://... or a bare id",
+			MaxLength = LIMITS.AnimationIdLength,
+			Hint = Copy.Hints.GrabAttackerAnimation,
+			LayoutOrder = 30,
+			Visible = hasGrab,
+			Get = function(move)
+				return if move.Grab then move.Grab.AttackerAnimation or "" else ""
+			end,
+			Set = function(move, value)
+				if move.Grab then
+					move.Grab.AttackerAnimation = value
+				end
+			end,
+		}),
+
 		Fields.Prose(
 			scope,
 			"A weapon stage has no knockback or grab of its own: the string's launch and finish belong to the air combo.",
-			30,
+			40,
 			context.IsDefault
 		),
 	}
@@ -194,7 +252,7 @@ local function ImpactTab(scope: Scope, context: Fields.FormContext, visible: Use
 				Range = (GrabConstants.Limits :: any)[grabField.Field],
 				Steps = grabField.Steps,
 				Decimals = if grabField.Field == "HoldSeconds" then 2 else 0,
-				LayoutOrder = 21 + index,
+				LayoutOrder = 23 + index,
 				Visible = hasGrab,
 				Get = function(move: Move)
 					return if move.Grab then (move.Grab :: any)[grabField.Field] else 0
