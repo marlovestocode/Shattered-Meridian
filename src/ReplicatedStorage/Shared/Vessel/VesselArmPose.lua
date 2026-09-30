@@ -128,10 +128,9 @@ local function restJointWorld(motor: Motor6D): CFrame?
 	return part0.CFrame * motor.C0
 end
 
--- A limb's joint frame, built so its NEGATIVE Y axis runs down the limb -- the orientation every Roblox
--- rig's arm joints already have at rest (arms hang down; the joint's C1 rotation, identity on R15 and a
--- Y-rotation on R6, preserves the part's Y axis either way). Writing the frame rather than an angle is
--- what makes the same two lines correct for both rigs.
+-- A limb's joint frame, built so its NEGATIVE Y axis runs down the limb -- the orientation an R15 arm
+-- joint has at rest (its C1 carries no rotation). R15 ONLY: an R6 shoulder's C1 is a quarter turn, and a
+-- frame built this way rolls an R6 arm ninety degrees about its length -- the R6 path uses SwingToward.
 --
 -- `bendAxis` is the axis the whole arm plane pivots about; passing it in rather than deriving it here is
 -- what guarantees the upper and lower segments share one plane, which is what an elbow is.
@@ -153,6 +152,41 @@ local function resolveBendAxis(torsoCFrame: CFrame, reachDirection: Vector3): Ve
 		return Vector3.new(1, 0, 0)
 	end
 	return axis.Unit
+end
+
+-- The joint frame that points a one-bone limb's TIP along `direction` (world space), by swinging the
+-- joint's REST frame about the joint -- the smallest rotation that takes the rest tip direction onto
+-- `direction`. `restJoint` is the joint's world frame with Transform = identity; `tipInJoint` is the
+-- limb's far end in that frame (C1:Inverse() applied to the tip point in the limb part's own space).
+--
+-- WHY A SWING AND NOT limbFrame. limbFrame builds the joint frame from scratch with -Y down the limb,
+-- which is right for R15 (C1 carries no rotation, the limb hangs straight off its joint). An R6
+-- shoulder's C1 is a QUARTER TURN about Y with the joint at the arm's inner top corner, so a frame
+-- built that way rolls the whole arm ninety degrees about its own length: the hand still lands where
+-- it was aimed, but the arm's box swings out of line with the shoulder -- "my arm is offset from my
+-- shoulder at an unhuman angle". Swinging the rest frame keeps the arm's roll as its rig authored it,
+-- keeps the pivot in the socket, and puts the tip -- not the joint's axis, which on R6 is 18 degrees
+-- off it -- exactly on the line, in closed form.
+function VesselArmPose.SwingToward(restJoint: CFrame, tipInJoint: Vector3, direction: Vector3): CFrame
+	local pivot = restJoint.Position
+	local restOffset = restJoint:VectorToWorldSpace(tipInJoint)
+	if restOffset.Magnitude < EPSILON or direction.Magnitude < EPSILON then
+		return restJoint
+	end
+	local from = restOffset.Unit
+	local to = direction.Unit
+	local axis = from:Cross(to)
+	local swing: CFrame
+	if axis.Magnitude < EPSILON then
+		if from:Dot(to) > 0 then
+			return restJoint
+		end
+		-- Exactly opposite: any axis perpendicular to the limb does; the joint's own X is one.
+		swing = CFrame.fromAxisAngle(restJoint.XVector, math.pi)
+	else
+		swing = CFrame.fromAxisAngle(axis.Unit, math.acos(math.clamp(from:Dot(to), -1, 1)))
+	end
+	return CFrame.new(pivot) * swing * restJoint.Rotation
 end
 
 -- One vehicle layer's bound solver. See this file's header; the config is bound once here so the
@@ -270,23 +304,12 @@ function VesselArmPose.New(config: Config): Poser
 		if not arm or reach.Magnitude < EPSILON then
 			return false
 		end
-		local direction = reach.Unit
-		local bendAxis = resolveBendAxis(torso.CFrame, direction)
 
-		-- One bone: point it at the grip. No elbow to solve, so no law of cosines -- see this file's
-		-- header on why the other rig gets a reduced pose rather than no pose.
-		--
-		-- Pointing the JOINT'S axis at the grip is not pointing the HAND at it. An R6 shoulder sits at
-		-- the arm's inner top corner (C1 = (-0.5, 0.5, 0), then a quarter turn), so the end of the arm is
-		-- 1.5 studs down that axis and half a stud off it -- about 18 degrees, which landed every R6 hand
-		-- half a stud below whatever it was reaching for. The tip's offset is a fixed fact of the joint,
-		-- read here from C1 and the arm's own size rather than authored, and it always lies in the plane
-		-- the arm swings in, so rotating the aim by that angle about the same bend axis puts the tip on
-		-- the line to the grip exactly (closed form -- no iteration to converge or diverge).
+		-- One bone: swing it at the grip. No elbow to solve, so no law of cosines -- see this file's
+		-- header on why the other rig gets a reduced pose rather than no pose. See SwingToward on why
+		-- this is a swing of the rest pose and not a frame built with limbFrame.
 		local tip = shoulder.C1:Inverse() * Vector3.new(0, -arm.Size.Y * 0.5, 0)
-		local tipAngle = math.atan2(tip.Z, -tip.Y)
-		local aim = CFrame.fromAxisAngle(bendAxis, tipAngle):VectorToWorldSpace(direction)
-		shoulder.Transform = shoulderRest:Inverse() * limbFrame(shoulderRest.Position, aim, bendAxis)
+		shoulder.Transform = shoulderRest:Inverse() * VesselArmPose.SwingToward(shoulderRest, tip, reach.Unit)
 		return true
 	end
 

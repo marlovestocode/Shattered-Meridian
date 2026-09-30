@@ -47,8 +47,9 @@
 	so everything a player can do to a player, they can do to it. While Grabbed, this module writes
 	nothing to the body at all.
 
-	R6, ON PURPOSE. The game is R6-locked and every authored clip is R6; a bot built R15 (as
-	DebugDummySystem's static dummy is) would be refused every clip here without an error.
+	R6, ON PURPOSE. The game is R6-locked and every authored clip is R6; a bot built R15 would be refused
+	every clip here without an error (DebugDummySystem's dummy was, until it moved to R6 for exactly
+	this).
 
 	IT REMEMBERS YOU ACROSS DEATHS. A defeated bot is rebuilt at its spawn point after RespawnDelay (the
 	same honest destroy-and-recreate DebugDummySystem does, for the same reason: Dead is terminal), but

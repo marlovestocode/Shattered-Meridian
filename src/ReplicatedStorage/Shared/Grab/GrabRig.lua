@@ -22,15 +22,17 @@
 	idle clip; this one must not, which is why Client/FX/GrabHoldPose.lua pins the same arm's Transform to
 	identity every frame on top of it. GrabSystem restores the original C0 when the hold ends.
 
-	THE TIP CORRECTION is VesselArmPose's: an R6 hand is half a stud off its shoulder joint's axis, so the
-	aim is rotated by that fixed angle to land the tip, not the joint's axis, along Arm. Both are read from
-	the rig (C1 and the hand part's size), never authored.
+	THE ARM IS SWUNG, NOT REBUILT (VesselArmPose.SwingToward): the shoulder's rest frame is rotated about
+	its own pivot until the hand TIP points along Arm. That keeps the arm in its socket with its authored
+	roll, and lands the tip rather than the joint's axis (on R6 those are 18 degrees apart). Everything is
+	read from the rig (C0, C1, the hand part's size), never authored.
 
 	Pure: no state, no services, no authority. Server/Combat/Grab/GrabSystem.lua applies what Solve
 	returns; the client pose calls ArmChain to know which joints to pin.
 ]]
 
 local GrabConstants = require(script.Parent.GrabConstants)
+local VesselArmPose = require(script.Parent.Parent.Vessel.VesselArmPose)
 
 local GrabRig = {}
 
@@ -55,8 +57,6 @@ export type Solution = {
 	ShoulderC0: CFrame?,
 	OriginalShoulderC0: CFrame?,
 }
-
-local EPSILON = 1e-3
 
 local function motorIn(parent: Instance?, name: string): Motor6D?
 	local child = if parent then parent:FindFirstChild(name) else nil
@@ -182,7 +182,9 @@ local function handTipLocal(hand: BasePart): Vector3
 end
 
 -- The shoulder C0 that points `chain`'s hand tip along `direction` (a unit vector in root space) with
--- every joint otherwise at rest. See this file's header on the tip correction.
+-- every joint otherwise at rest: VesselArmPose.SwingToward on the shoulder's rest frame, which swings
+-- the arm about its socket without rolling it (see that function on why a frame built from scratch put
+-- R6 arms visibly out of line with the shoulder).
 local function shoulderC0Toward(chain: ArmChain, rest: { [BasePart]: CFrame }, direction: Vector3): CFrame?
 	local shoulder = chain.Shoulder
 	local torso = shoulder.Part0
@@ -191,25 +193,9 @@ local function shoulderC0Toward(chain: ArmChain, rest: { [BasePart]: CFrame }, d
 	if not torsoRest or not handRest then
 		return nil
 	end
-
 	local jointFrame = torsoRest * shoulder.C0
-	local tip = jointFrame:PointToObjectSpace(handRest * handTipLocal(chain.Hand))
-	-- The tip's angle off the joint's -Y axis, within the plane the arm swings in.
-	local tipAngle = math.atan2(tip.Z, -tip.Y)
-
-	local bend = direction:Cross(torsoRest.UpVector)
-	if bend.Magnitude < EPSILON then
-		bend = direction:Cross(torsoRest.LookVector)
-	end
-	if bend.Magnitude < EPSILON then
-		return nil
-	end
-	bend = bend.Unit
-
-	local aim = CFrame.fromAxisAngle(bend, tipAngle):VectorToWorldSpace(direction)
-	-- The joint frame whose -Y runs down the (tip-corrected) arm -- VesselArmPose's limbFrame.
-	local limb = CFrame.fromMatrix(jointFrame.Position, bend, -aim)
-	return torsoRest:Inverse() * limb
+	local tipInJoint = jointFrame:PointToObjectSpace(handRest * handTipLocal(chain.Hand))
+	return torsoRest:Inverse() * VesselArmPose.SwingToward(jointFrame, tipInJoint, direction)
 end
 
 -- The part of a victim that is gripped, or nil for a rig without one.

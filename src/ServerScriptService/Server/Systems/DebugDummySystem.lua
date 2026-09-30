@@ -184,7 +184,11 @@ local function buildRig(): Model
 	description.LeftLegColor = Config.LabelColor
 	description.RightLegColor = Config.LabelColor
 
-	local model = Players:CreateHumanoidModelFromDescription(description, Enum.HumanoidRigType.R15)
+	-- R6, like every character in this game. It was R15, and an R6 clip -- which every animation authored
+	-- here is -- silently does nothing on an R15 rig: a grab's VictimAnimation never played on the dummy,
+	-- and the dummy was the one victim a solo tester has (TrainingBotSystem's header already named this
+	-- trap for bots).
+	local model = Players:CreateHumanoidModelFromDescription(description, Enum.HumanoidRigType.R6)
 	model.Name = "DebugDummy"
 	-- DELIBERATELY UNTAGGED, so hitting a dummy PUTS YOU IN COMBAT like hitting anything else does.
 	--
@@ -209,7 +213,7 @@ end
 
 -- One TextLabel filling the whole BillboardGui rather than a status line plus a separate scrolling
 -- log -- simplest thing that reads correctly at a glance, and refreshBillboardText below only ever has
--- one Text property to write. Adornee prefers Head (present on every R15 rig this module builds) and
+-- one Text property to write. Adornee prefers Head (present on every rig this module builds) and
 -- falls back to the root part defensively, in case a future rig source ever lacks one.
 local function attachBillboard(model: Model): TextLabel
 	local adornee = model:FindFirstChild("Head") or model:FindFirstChild("HumanoidRootPart")
@@ -365,7 +369,7 @@ local function spawnAt(spawnCFrame: CFrame): Model?
 
 	local humanoid = CharacterUtil.HumanoidOf(model)
 	local rootPart = CharacterUtil.RootOf(model)
-	-- Defensive rather than expected to ever trip -- every R15 rig CreateHumanoidModelFromDescription
+	-- Defensive rather than expected to ever trip -- every rig CreateHumanoidModelFromDescription
 	-- produces has both, but a malformed rig must not reach RegisterCombatant with a nil dressed as a
 	-- real Instance (the same failure mode DamageSystem.humanoidOf's own typeof guard exists to avoid
 	-- one layer up).

@@ -84,14 +84,17 @@ GrabConstants.Modes = {
 		Body = FACING_HOLDER,
 		ThrowAway = false,
 	},
-	-- Dragged along the floor behind and to the right by the collar: on their back, head toward the
-	-- holder, the arm swung down, out and back, the upper body raised 25 degrees by the grip.
+	-- Dragged along the floor behind by the collar: on their back, head toward the holder, the arm hanging
+	-- 45 degrees down and back, only 30 degrees out from the side -- a pull, not an arm held out -- with
+	-- the upper body raised 19 degrees by the grip. (The first solve had the arm 47 degrees out to the
+	-- side; it cleared the holder's leg by overlap-testing the R6 Head's 2-stud collision box, which is far
+	-- wider than the head anyone sees. Solved again against the visible head, the arm comes in close.)
 	Drag = {
 		Label = "Drag by the collar",
-		Arm = Vector3.new(0.639, -0.5, 0.585).Unit,
+		Arm = Vector3.new(0.354, -0.707, 0.612).Unit,
 		GripPart = "Torso",
 		GripAt = "Collar",
-		Body = onBackRaised(25),
+		Body = onBackRaised(19),
 		ThrowAway = true,
 	},
 	-- Dragged straight behind by the top of the head, arm hanging down and back, body raised 16 degrees.
