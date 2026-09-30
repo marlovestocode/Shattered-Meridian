@@ -106,13 +106,13 @@ export type MoveKnockback = {
 	StartsAirCombo: boolean?,
 }
 
--- "Hold, then throw" instead of an ordinary knockback -- see Server/Combat/Grab/GrabSystem.lua. The
--- attach offset is NOT authored: Validate always writes the chosen Mode's own placement
--- (GrabConstants.Modes[Mode].Placement), and ToWire never sends one, so there is no client-supplied
--- CFrame to trust. Mode and the two animations are optional so a config written before they existed
--- still reads: nil Mode is "Collar", a nil or "" animation is none.
+-- "Hold, then throw" instead of an ordinary knockback -- see Server/Combat/Grab/GrabSystem.lua. WHERE
+-- the victim is held is not a number on the move at all: Mode names an entry of GrabConstants.Modes
+-- (an arm direction and a gripped body part), and Shared/Grab/GrabRig.lua welds that part to the
+-- holder's hand against the two real rigs. (There used to be an AttachOffset CFrame here; it assumed R6
+-- proportions and was dropped.) Mode and the two animations are optional so a config written before
+-- they existed still reads: nil Mode is "Collar", a nil or "" animation is none.
 export type MoveGrabConfig = {
-	AttachOffset: CFrame,
 	Mode: GrabTypes.GrabMode?,
 	-- Looped on the held body / the holder for the length of the hold (never the flight), by the server
 	-- so it plays on a bot or a dummy too. A victim clip also stands the victim's hand pose down, since
@@ -218,7 +218,7 @@ export type DamageProfile = {
 -- the next read) rather than aliased (silently, forever) -- the failure an earlier table.clone-based copy
 -- in MoveRegistryManager actually had.
 --
--- Offset/OffsetRotation/AttachOffset are immutable Roblox value types and are assigned, not copied.
+-- Offset/OffsetRotation are immutable Roblox value types and are assigned, not copied.
 function MoveTypes.Clone(move: MoveDefinition): MoveDefinition
 	return {
 		MoveId = move.MoveId,

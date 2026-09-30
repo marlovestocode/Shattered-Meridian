@@ -38,11 +38,12 @@
 	    one ping stale, and the ownership hand-off itself raced the victim client's own last frames.
 	  * The target hung off the hand part, whose server-side pose is whatever the grab swing left it in,
 	    so the same offset put the victim somewhere different -- often inside the attacker -- each time.
-	A Weld (Part0 = attacker root, C0 = MoveGrabConfig.AttachOffset) fixes all three at once: it lands the
-	victim on its mark on the frame it is created, with no travel; it makes the victim part of the
-	ATTACKER'S assembly, so whoever simulates the attacker (their own client, or the server for a bot)
-	simulates the victim too, with no second owner to disagree and no SetNetworkOwner call at all; and the
-	root is upright and animation-free, so every grab looks the same. It is the technique Server/Vessel/
+	A Weld (the victim's torso or head to the holder's hand part -- Shared/Grab/GrabRig.lua solves it) fixes
+	all three at once: it lands the victim on its mark on the frame it is created, with no travel; it
+	makes the victim part of the ATTACKER'S assembly, so whoever simulates the attacker (their own client,
+	or the server for a bot) simulates the victim too, with no second owner to disagree and no
+	SetNetworkOwner call at all; and the holder's arm is posed through its shoulder C0 (replicated, and
+	pinned against animation on every client), so every grab looks the same on every machine. It is the technique Server/Vessel/
 	VesselMount.lua already uses to weld a player to a hull, and this module follows its release order.
 	Two things let the attacker carry the extra body without feeling it: every victim part goes Massless
 	(so the attacker's root stays the assembly root and their movement is not dragged) and into
@@ -105,12 +106,10 @@
 	A hold's weld going missing (BreakJointsOnDeath, a respawn tearing a rig down mid-hold) is caught by
 	the same sweep.
 
-	THE HAND IS POSED TO THE BODY, NOT THE BODY TO THE HAND. The weld is on the attacker's root, so the
-	victim is always in the same place; Client/FX/GrabHoldPose.lua then raises the attacker's right arm
-	onto the victim's collar every frame on every client (and the victim's hands onto that arm), reading
-	only the two tags and the grip Attribute this module publishes (GrabConstants.Hold). The other way
-	round -- welding to the hand -- is what the old hold did, and it inherits whatever the arm's
-	animation is doing, on a server that does not run the same animation as the clients.
+	THE BODY IS WELDED TO THE HAND. An earlier version welded the victim to the holder's root and posed
+	the arm toward them; that only lined up while both rigs were R6-proportioned, and put an R15 dummy
+	across the holder's shoulder. How a mode holds someone is data (GrabConstants.Modes: an arm direction,
+	a gripped body part, a body orientation); GrabRig turns it into the weld against the real rigs.
 
 	Does not own: whether a move is authored as a grab (the Move Creation System, via MoveTypes.
 	MoveGrabConfig), what a landed hit costs before the grab side effect begins (DamageResolver --
@@ -133,6 +132,7 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
+local GrabRig = require(ReplicatedStorage.Shared.Grab.GrabRig)
 local GrabTypes = require(ReplicatedStorage.Shared.Grab.GrabTypes)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -178,6 +178,10 @@ type Hold = {
 	ExpiresAt: number,
 	Weld: Weld,
 	Body: BodySnapshot,
+	-- The holder's posed shoulder and the C0 it had before, to put back on release (nil when the rig
+	-- had no arm GrabRig could pose and the weld fell back to root-to-root).
+	Shoulder: Motor6D?,
+	OriginalShoulderC0: CFrame?,
 	-- One per body with an authored hold clip, nil otherwise -- see playHoldClip.
 	VictimAnimator: AnimationManagerInstance?,
 	AttackerAnimator: AnimationManagerInstance?,
@@ -455,7 +459,11 @@ local function detachHold(attacker: Model, hold: Hold): ()
 	heldBy[hold.Victim] = nil
 	CollectionService:RemoveTag(attacker, GrabConstants.Hold.HolderTag)
 	CollectionService:RemoveTag(hold.Victim, GrabConstants.Hold.HeldTag)
-	attacker:SetAttribute(GrabConstants.Hold.GripAttribute, nil)
+	attacker:SetAttribute(GrabConstants.Hold.ArmAttribute, nil)
+	local shoulder, originalC0 = hold.Shoulder, hold.OriginalShoulderC0
+	if shoulder and originalC0 and shoulder.Parent ~= nil then
+		shoulder.C0 = originalC0
+	end
 	hold.Victim:SetAttribute(GrabConstants.Hold.ModeAttribute, nil)
 	hold.Victim:SetAttribute(GrabConstants.Hold.VictimAnimatedAttribute, nil)
 	stopHoldClip(hold.VictimAnimator)
@@ -547,27 +555,35 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 	victimHumanoid.PlatformStand = true
 	local body = captureBody(victim, ensureCollisionGroup())
 
-	-- C0 carries the whole placement, so the body is on its mark the frame the weld exists -- no
-	-- travel, no pre-positioning CFrame write racing an ownership change. See this file's header.
+	-- The victim's torso (or head) welded to the holder's HAND part, with the holder's arm posed through
+	-- its shoulder C0 -- see Shared/Grab/GrabRig.lua's header on why this, and not a placement relative
+	-- to the root, is what "attached to the hand" has to mean. The weld's C0/C1 carry the whole
+	-- placement, so the body is on its mark the frame the weld exists: no travel, no pre-positioning
+	-- CFrame write racing an ownership change.
+	local mode = GrabConstants.ModeOf(config.Mode)
+	local solution = GrabRig.Solve(attacker, attackerRoot, victim, victimRoot, mode)
+	if solution.Shoulder and solution.ShoulderC0 then
+		solution.Shoulder.C0 = solution.ShoulderC0
+	end
 	local weld = Instance.new("Weld")
-	weld.Name = "GrabWeld"
-	weld.Part0 = attackerRoot
-	weld.Part1 = victimRoot
-	weld.C0 = config.AttachOffset
-	weld.Parent = victimRoot
+	weld.Name = GrabConstants.Hold.WeldName
+	weld.Part0 = solution.Part0
+	weld.Part1 = solution.Part1
+	weld.C0 = solution.C0
+	weld.C1 = solution.C1
+	weld.Parent = solution.Part1
 
 	attackerHumanoid:SetAttribute(Constants.Attributes.Grabbing, true)
 	victimHumanoid:SetAttribute(Constants.Attributes.Grabbed, true)
 	victimHumanoid:SetAttribute(Constants.Attributes.RootControlLocked, true)
 
-	-- What every client's Client/FX/GrabHoldPose.lua needs to pose the hold: the grip point in the
-	-- attacker's root space (the same space the weld's C0 is in, so it is exact on every client whatever
-	-- either body is doing), the victim's mode (for where their own hands go) and whether an authored
-	-- clip owns the victim's arms instead, and a tag on each Model. Attributes before tags, so a client
-	-- never sees a tagged body without what it needs to pose it.
-	local mode = GrabConstants.ModeOf(config.Mode)
+	-- What every client's Client/FX/GrabHoldPose.lua needs: which of the holder's arms to pin (so no
+	-- animation swings the hand the victim is welded to), the victim's mode, whether an authored clip
+	-- owns the victim's arms, and a tag on each Model. Attributes before tags, so a client never sees a
+	-- tagged body without what it needs to pose it. Only set when an arm was actually posed -- a
+	-- root-to-root fallback has no arm to pin.
 	local victimClip = config.VictimAnimation
-	attacker:SetAttribute(GrabConstants.Hold.GripAttribute, config.AttachOffset * mode.Grip)
+	attacker:SetAttribute(GrabConstants.Hold.ArmAttribute, if solution.Shoulder then "Right" else nil)
 	victim:SetAttribute(GrabConstants.Hold.ModeAttribute, config.Mode or GrabConstants.DefaultMode)
 	victim:SetAttribute(
 		GrabConstants.Hold.VictimAnimatedAttribute,
@@ -587,6 +603,8 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 		ExpiresAt = now + config.HoldSeconds,
 		Weld = weld,
 		Body = body,
+		Shoulder = solution.Shoulder,
+		OriginalShoulderC0 = solution.OriginalShoulderC0,
 		VictimAnimator = playHoldClip(victim, victimClip, "Victim"),
 		AttackerAnimator = playHoldClip(attacker, config.AttackerAnimation, "Attacker"),
 	}

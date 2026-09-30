@@ -122,10 +122,9 @@ local function grabAnimation(value: unknown): (string?, boolean)
 	return WeaponAssets.NormalizeAssetId(Sanitize.BoundedString(value, LIMITS.AnimationIdLength)), true
 end
 
--- AttachOffset is never read from the candidate: it is not authorable, so there is nothing to trust or
--- clamp -- the server writes the chosen mode's own Placement every time. Mode is strict on identity (a
--- name GrabConstants.Modes does not know is refused rather than silently held some other way); an
--- absent one is the default mode, which is what every grab saved before modes existed means.
+-- Mode is strict on identity (a name GrabConstants.Modes does not know is refused rather than silently
+-- held some other way); an absent one is the default mode, which is what every grab saved before modes
+-- existed means. Anything else on the candidate (an old record's AttachOffset included) is ignored.
 local function validateGrab(raw: unknown): (MoveTypes.MoveGrabConfig?, string?)
 	if raw == nil then
 		return nil, nil
@@ -153,7 +152,6 @@ local function validateGrab(raw: unknown): (MoveTypes.MoveGrabConfig?, string?)
 		return nil, "InvalidGrab"
 	end
 	return {
-		AttachOffset = GrabConstants.Modes[modeName].Placement,
 		Mode = modeName :: any,
 		VictimAnimation = victimAnimation,
 		AttackerAnimation = attackerAnimation,

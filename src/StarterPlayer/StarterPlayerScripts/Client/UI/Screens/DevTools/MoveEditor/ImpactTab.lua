@@ -174,7 +174,6 @@ local function ImpactTab(scope: Scope, context: Fields.FormContext, visible: Use
 				end
 				local defaults = GrabConstants.Defaults
 				move.Grab = {
-					AttachOffset = defaults.AttachOffset,
 					Mode = defaults.Mode :: any,
 					VictimAnimation = "",
 					AttackerAnimation = "",

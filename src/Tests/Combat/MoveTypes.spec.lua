@@ -2,7 +2,6 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
-local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
@@ -252,7 +251,7 @@ return function()
 			})
 			local _, profile = MoveTypes.ToEngineAttackDefinition(source)
 			expect((profile.Knockback :: any).StartsAirCombo).to.equal(true)
-			expect((profile.Grab :: any).AttachOffset).to.equal(GrabConstants.Defaults.AttachOffset)
+			expect((profile.Grab :: any).HoldSeconds).to.equal(2)
 		end)
 
 		it("does not alias the move's dimensions into the engine definition", function()

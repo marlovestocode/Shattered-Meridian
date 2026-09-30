@@ -2,33 +2,32 @@
 --[[
 	GrabHoldPose.lua
 
-	Owns: what a grab LOOKS like while it is held -- the attacker's right hand on the victim's collar, and
-	the victim's two hands up on that arm -- for every hold in view, on every client.
+	Owns: the two per-client halves of what a held grab LOOKS like, for every hold in view --
+	  * the HOLDER'S gripping arm kept exactly where the server posed it, and
+	  * the VICTIM'S two hands up on the holder's wrist, clawing at the grip.
 
-	MODES. Where the hand goes and where the victim's hands go are per hold mode (collar, head, drag...),
-	all of it data in GrabConstants.Modes; the holder's grip arrives already resolved to their own root
-	space, and the victim's mode arrives by name. A move that authors a VictimAnimation gets the clip
-	instead of the victim-hand pose (GrabSystem plays it; this module simply stands down on that body).
+	THE VICTIM IS WELDED TO THE HOLDER'S HAND (Shared/Grab/GrabRig.lua), and the server poses that arm
+	through its shoulder C0. What C0 cannot do is stop an animation: every AnimationTrack writes
+	Motor6D.Transform on top of C0, so the idle clip, a walk cycle or an authored AttackerAnimation would
+	swing the arm -- and the victim welded to its hand -- around with it. So this module writes that arm's
+	Transforms back to identity every frame, AFTER the animation step (RENDER_PRIORITY), on every client:
+	Transform does not replicate, which is Shared/Vessel/VesselArmPose.lua's header's whole argument for
+	why a per-client pose runs on every client rather than once.
 
-	WHY THE HAND GOES TO THE BODY. Server/Combat/Grab/GrabSystem.lua welds the victim to the attacker's
-	ROOT at GrabConstants.Defaults.AttachOffset, so the victim is always in the same place and never
-	jitters with an animation. Without this module the attacker's arm simply keeps playing its idle clip at
-	their side while a body floats in front of them. This solves the arm onto the body instead, every frame,
-	with Shared/Vessel/VesselArmPose.lua's IK (ApplyHand) -- the solver that already puts a pilot's hands on
-	a wheel, and every word of its header applies here: Motor6D.Transform is the only channel that beats a
-	playing clip, it does not replicate, so every client poses every hold it can see, and it must run
-	AFTER the animation step (see RENDER_PRIORITY).
+	The victim's hands are the other half: IK (VesselArmPose.ApplyHand) onto either side of the holder's
+	hand part, which this module finds through the hold's own Weld (its Part0 is that hand). Relative to
+	the real hand, so it is right in every hold mode and on any rig. A move that authors a VictimAnimation
+	gets the clip instead (GrabSystem plays it; this module stands down on that body).
 
 	NO REMOTE. GrabSystem tags the two Models for exactly the length of a hold (GrabConstants.Hold.
-	HolderTag/HeldTag) and puts the grip point on the attacker's Model as a Vector3 Attribute in the
-	attacker's root space (Hold.GripAttribute). Tags and Attributes replicate for free, so this module
-	learns about every hold on the server -- a bot's included -- the same way GuardStrainPose learns about
-	a cracking guard. Nothing here decides anything about a hold; a tag coming off is the whole release.
+	HolderTag/HeldTag) and says which arm is holding in an Attribute. Tags and Attributes replicate for
+	free, so this learns about every hold on the server -- a bot's included -- the way GuardStrainPose
+	learns about a cracking guard. A tag coming off is the whole release; the server puts the C0 back.
 
 	ZERO IDLE COST, GuardStrainPose's rule: the RenderStep binding exists only while something is tagged.
 
-	Does not own: the hold itself or where the victim is (GrabSystem), the grip placement numbers
-	(GrabConstants), or the IK solve (VesselArmPose).
+	Does not own: the hold, the weld or the arm's pose (GrabSystem / GrabRig, on the server), or the IK
+	solve (VesselArmPose).
 ]]
 
 local CollectionService = game:GetService("CollectionService")
@@ -36,6 +35,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
+local GrabRig = require(ReplicatedStorage.Shared.Grab.GrabRig)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local VesselArmPose = require(ReplicatedStorage.Shared.Vessel.VesselArmPose)
@@ -48,11 +48,8 @@ local HOLD = GrabConstants.Hold
 local POSE = GrabConstants.Pose
 local RENDER_STEP_NAME = "GrabHoldPose"
 -- Above Character (the animation step) for VesselArmPose's reason, and above GuardStrainPose's +2: a
--- holding attacker whose guard is also cracking keeps their hand on the victim, since a hold is the
--- bigger commitment of the two and the strain composes onto whatever it finds anyway.
+-- holding attacker whose guard is also cracking keeps the arm the victim hangs from where it is.
 local RENDER_PRIORITY = Enum.RenderPriority.Character.Value + 3
-
-type Role = "Holder" | "Held"
 
 -- Only ApplyHand is used, so the station-grip half of the config is inert -- there is no station.
 local poser = VesselArmPose.New({
@@ -64,83 +61,92 @@ local poser = VesselArmPose.New({
 	MaxReachFraction = POSE.MaxReachFraction,
 })
 
--- A Model can in principle be both (a victim who was holding someone is released first, server-side,
--- so not in practice) -- keyed per role so one tag coming off never drops the other's pose.
-local holders: { [Model]: true } = {}
-local held: { [Model]: true } = {}
+-- Per tagged body, the lookups resolved once rather than every frame. nil = not resolved yet (the
+-- Attribute or the weld may replicate a frame after the tag).
+type HolderEntry = { Joints: { Motor6D }? }
+type HeldEntry = { Weld: Weld? }
+
+local holders: { [Model]: HolderEntry } = {}
+local held: { [Model]: HeldEntry } = {}
 
 local started = false
 local bound = false
 local trove = Trove.New()
 
--- Hands an arm back to its animation. A clip that drives the joint rewrites Transform next frame anyway;
--- this is for a rig nothing animates (a dummy with no Animate script), whose arm would otherwise stay
--- raised forever at the last pose written.
-local function releaseArm(model: Model, side: VesselArmPose.Side): ()
-	local torso = model:FindFirstChild("Torso")
-	local r6Shoulder = if torso then torso:FindFirstChild(side .. " Shoulder") else nil
-	if r6Shoulder and r6Shoulder:IsA("Motor6D") then
-		r6Shoulder.Transform = CFrame.identity
-		return
-	end
-	for _, name in { side .. "UpperArm", side .. "LowerArm", side .. "Hand" } do
-		local part = model:FindFirstChild(name)
-		if part then
-			for _, child in part:GetChildren() do
-				if child:IsA("Motor6D") then
-					child.Transform = CFrame.identity
-				end
-			end
+-- Holder: pin the posed arm. False drops the entry (no such arm on this rig -- the server fell back to
+-- root-to-root and set no ArmAttribute, or the rig is going away).
+local function poseHolder(model: Model, entry: HolderEntry): boolean
+	local joints = entry.Joints
+	if not joints then
+		local side = model:GetAttribute(HOLD.ArmAttribute)
+		if side ~= "Right" and side ~= "Left" then
+			-- Not replicated yet, or a fallback hold: keep the entry, try again next frame.
+			return model.Parent ~= nil
 		end
+		local chain = GrabRig.ArmChain(model, if side == "Left" then "Left" else "Right")
+		if not chain then
+			return false
+		end
+		joints = chain.Joints
+		entry.Joints = joints
 	end
+	for _, joint in joints :: { Motor6D } do
+		if joint.Parent == nil then
+			return false
+		end
+		joint.Transform = CFrame.identity
+	end
+	return true
 end
 
-local function rootOf(model: Model): BasePart?
-	local root = model.PrimaryPart
-	if root and root.Parent ~= nil then
-		return root
+local function findWeld(model: Model): Weld?
+	for _, descendant in model:GetDescendants() do
+		if descendant.Name == HOLD.WeldName and descendant:IsA("Weld") then
+			return descendant
+		end
 	end
 	return nil
 end
 
--- One holder for this frame. False when there is nothing to pose (no grip yet, no root, a rig
--- VesselArmPose cannot solve), which drops the entry rather than retrying the lookups every frame.
-local function poseHolder(model: Model): boolean
-	local grip = model:GetAttribute(HOLD.GripAttribute)
-	local root = rootOf(model)
-	if typeof(grip) ~= "Vector3" or not root then
-		return false
-	end
-	return poser.ApplyHand(model, "Right", root.CFrame * grip)
-end
-
--- The victim's hands go where their mode says (GrabConstants.Modes[...].VictimHands) -- unless the
--- move authored a VictimAnimation, which is the author's say over those arms. That case answers true
--- WITHOUT posing, so the entry stays tracked (the Attribute is read live) and the clip plays untouched.
-local function poseHeld(model: Model): boolean
-	local root = rootOf(model)
-	if not root then
+-- Victim: both hands onto either side of the holder's hand part, a little way up from its grip end.
+local function poseHeld(model: Model, entry: HeldEntry): boolean
+	if model.Parent == nil then
 		return false
 	end
 	if model:GetAttribute(HOLD.VictimAnimatedAttribute) == true then
+		-- The authored clip owns these arms. Kept tracked (the Attribute is read live), never posed.
 		return true
 	end
-	local modeName = model:GetAttribute(HOLD.ModeAttribute)
-	local hands = GrabConstants.ModeOf(if typeof(modeName) == "string" then modeName else nil).VictimHands
-	local rootCFrame = root.CFrame
-	local posedLeft = poser.ApplyHand(model, "Left", rootCFrame * hands.Left)
-	local posedRight = poser.ApplyHand(model, "Right", rootCFrame * hands.Right)
+	local weld = entry.Weld
+	if not weld or weld.Parent == nil then
+		weld = findWeld(model)
+		entry.Weld = weld
+	end
+	if not weld then
+		-- Not replicated yet: keep the entry, look again next frame.
+		return true
+	end
+	local hand = weld.Part0
+	if not hand or hand.Parent == nil then
+		return true
+	end
+	local half = hand.Size * 0.5
+	local up = -half.Y + hand.Size.Y * POSE.VictimHandAlongArm
+	local out = half.X + POSE.VictimHandClearance
+	local handCFrame = hand.CFrame
+	local posedLeft = poser.ApplyHand(model, "Left", handCFrame * Vector3.new(-out, up, 0))
+	local posedRight = poser.ApplyHand(model, "Right", handCFrame * Vector3.new(out, up, 0))
 	return posedLeft or posedRight
 end
 
 local function step(_deltaTime: number): ()
-	for model in holders do
-		if not poseHolder(model) then
+	for model, entry in holders do
+		if not poseHolder(model, entry) then
 			holders[model] = nil
 		end
 	end
-	for model in held do
-		if not poseHeld(model) then
+	for model, entry in held do
+		if not poseHeld(model, entry) then
 			held[model] = nil
 		end
 	end
@@ -158,24 +164,49 @@ local function bindIfNeeded(): ()
 	bound = true
 end
 
-local function track(set: { [Model]: true }, instance: Instance): ()
+-- Hands a victim's arms back to their animation. A clip that drives the joint rewrites Transform next
+-- frame anyway; this is for a rig nothing animates (a debug dummy), whose arms would otherwise stay up.
+-- The holder's arm needs no such thing: the server restores its C0, and the Transform we pinned is
+-- identity, which is exactly an unanimated joint's own.
+local function releaseArm(model: Model, side: GrabRig.Side): ()
+	local chain = GrabRig.ArmChain(model, side)
+	if chain then
+		for _, joint in chain.Joints do
+			joint.Transform = CFrame.identity
+		end
+	end
+end
+
+local function releaseVictimArms(model: Model): ()
+	releaseArm(model, "Left")
+	releaseArm(model, "Right")
+end
+
+local function onHolderTagged(instance: Instance): ()
 	if instance:IsA("Model") then
-		set[instance] = true
+		holders[instance] = { Joints = nil }
 		bindIfNeeded()
 	end
 end
 
-local function untrack(set: { [Model]: true }, instance: Instance, role: Role): ()
-	if not instance:IsA("Model") or set[instance] == nil then
+local function onHeldTagged(instance: Instance): ()
+	if instance:IsA("Model") then
+		held[instance] = { Weld = nil }
+		bindIfNeeded()
+	end
+end
+
+local function onHolderUntagged(instance: Instance): ()
+	holders[instance :: any] = nil
+end
+
+local function onHeldUntagged(instance: Instance): ()
+	if not instance:IsA("Model") or held[instance] == nil then
 		return
 	end
-	set[instance] = nil
-	if role == "Holder" then
-		releaseArm(instance, "Right")
-	elseif instance:GetAttribute(HOLD.VictimAnimatedAttribute) ~= true then
-		-- A victim whose arms a clip was driving was never posed here -- leave the clip's fade alone.
-		releaseArm(instance, "Left")
-		releaseArm(instance, "Right")
+	held[instance] = nil
+	if instance:GetAttribute(HOLD.VictimAnimatedAttribute) ~= true then
+		releaseVictimArms(instance)
 	end
 end
 
@@ -186,23 +217,15 @@ function GrabHoldPose.Start(): ()
 		return
 	end
 	started = true
-	trove:Connect(CollectionService:GetInstanceAddedSignal(HOLD.HolderTag), function(instance: Instance)
-		track(holders, instance)
-	end)
-	trove:Connect(CollectionService:GetInstanceRemovedSignal(HOLD.HolderTag), function(instance: Instance)
-		untrack(holders, instance, "Holder")
-	end)
-	trove:Connect(CollectionService:GetInstanceAddedSignal(HOLD.HeldTag), function(instance: Instance)
-		track(held, instance)
-	end)
-	trove:Connect(CollectionService:GetInstanceRemovedSignal(HOLD.HeldTag), function(instance: Instance)
-		untrack(held, instance, "Held")
-	end)
+	trove:Connect(CollectionService:GetInstanceAddedSignal(HOLD.HolderTag), onHolderTagged)
+	trove:Connect(CollectionService:GetInstanceRemovedSignal(HOLD.HolderTag), onHolderUntagged)
+	trove:Connect(CollectionService:GetInstanceAddedSignal(HOLD.HeldTag), onHeldTagged)
+	trove:Connect(CollectionService:GetInstanceRemovedSignal(HOLD.HeldTag), onHeldUntagged)
 	for _, instance in CollectionService:GetTagged(HOLD.HolderTag) do
-		track(holders, instance)
+		onHolderTagged(instance)
 	end
 	for _, instance in CollectionService:GetTagged(HOLD.HeldTag) do
-		track(held, instance)
+		onHeldTagged(instance)
 	end
 	logger:info("GrabHoldPose started")
 end

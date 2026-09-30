@@ -10,10 +10,9 @@
 	THERE IS NO PER-MOVE NUMBER IN THIS FILE, same as its siblings. HoldSeconds/ThrowUpVelocity/
 	ThrowHorizontalVelocity/ThrowImpactDamage/ThrowSelfDamage are all authored PER MOVE in the Move
 	Creation System (MoveTypes.MoveGrabConfig) and reach GrabSystem through DamageResult.Grab. What IS
-	here is everything no single move could sensibly author: where on the attacker a held victim sits,
-	how the held body is kept out of the physics solver's way, how the flight's landing/impact checks
-	are tuned, and the one authoring default (AttachOffset) that is deliberately NOT exposed to an
-	author at all -- see Defaults.AttachOffset's own comment.
+	here is everything no single move could sensibly author: what each hold MODE means (a move picks a
+	mode by name; the arm direction and gripped body part behind it live here), how the held body is kept
+	out of the physics solver's way, and how the flight's landing/impact checks are tuned.
 
 	Does not own: per-move hold/throw numbers (the Move Editor, via MoveTypes.MoveGrabConfig), the
 	hold/flight state machine itself (Server/Combat/Grab/GrabSystem.lua), or clamping a saved move
@@ -25,34 +24,37 @@ local GrabConstants = {}
 -- Hold modes -------------------------------------------------------------------------------------
 
 -- How a held body is carried. One entry per GrabTypes.GrabMode; a move picks one in the Move Editor
--- (MoveGrabConfig.Mode) and EVERYTHING the mode means is here, so a new way of holding someone is a new
--- entry, not new code:
+-- (MoveGrabConfig.Mode) and everything the mode means is here, so a new way of holding someone is a new
+-- entry, not new code.
 --
---   Hand         Where the holder's right hand closes, in the HOLDER'S root space. Client/FX/
---                GrabHoldPose.lua solves the arm onto it; an R6 arm reaches ~1.58 studs from its shoulder
---                joint at (1, 0.5, 0), so a Hand much past ~1.75 from there visibly stops short.
---   Grip         The point of the VICTIM it closes on, in the victim's root space (an R6 torso's top face
---                is y = +1 and its front face z = -0.5; the head's centre is y = +1.5).
---   Body         How the victim's body is turned, in the holder's root space.
---   Placement    Derived, never authored: the weld's C0 that puts Grip exactly on Hand with Body's turn.
---                This, not a hand-tuned offset, is what MoveRegistryManager.Validate writes as a saved
---                move's AttachOffset, so re-tuning a mode here re-places every move that uses it.
---   VictimHands  Where the victim's own hands go (victim root space) when no VictimAnimation is
---                authored: a little way up the holder's forearm, clawing at the grip.
---   ThrowAway    Throw along the line from holder to victim instead of the holder's facing. A dragged
---                body is BEHIND the holder, and throwing it "forward" would launch it through them.
+-- A MODE NAMES BODY PARTS, NOT COORDINATES. The victim's GripPart (their torso or head) is welded
+-- straight to the holder's right HAND part (Shared/Grab/GrabRig.lua), at a point found from that part's
+-- own size, and the holder's arm is posed to point along Arm. Nothing here assumes a rig's proportions:
+-- the first version of modes placed the body with R6 offsets from the root, and an R15 debug dummy (whose
+-- root sits at the hips, not mid-torso) ended up wedged against the holder's shoulder.
 --
--- Every number below was solved against R6 part sizes rather than eyeballed (hand within reach, zero
--- overlap between the two bodies' parts, a dragged body's lowest point ~0.1 studs above the floor).
--- Re-check those three if you move one; the held body collides with nothing, so a bad number clips
--- rather than flings, and it is only visible in play.
+--   Arm         Which way the holder's right arm points, in the HOLDER'S root space (normalised below).
+--               The hand is wherever that puts it -- the victim is attached to the hand, so the two
+--               cannot disagree.
+--   GripPart    "Torso" (R6 Torso / R15 UpperTorso) or "Head" -- the victim part welded to the hand.
+--   GripAt      Where on that part the hand closes: "Collar" (top of its front face), "Face" (centre of
+--               its front face), "Crown" (centre of its top face).
+--   Body        How the victim's body is turned, in the holder's root space.
+--   ThrowAway   Throw along the line from holder to victim instead of the holder's facing. A dragged
+--               body is BEHIND the holder, and throwing it "forward" would launch it through them.
+--
+-- The Arm/Body pairs were solved against R6 part sizes (hand at the R6 arm's true 1.58-stud reach, zero
+-- overlap between the two bodies, a dragged body's lowest point ~0.1 studs above the floor), not
+-- eyeballed. The held body collides with nothing, so a bad number clips rather than flings -- it is
+-- only visible in play.
+export type GripPart = "Torso" | "Head"
+export type GripAt = "Collar" | "Face" | "Crown"
 export type ModeSpec = {
 	Label: string,
-	Hand: Vector3,
-	Grip: Vector3,
+	Arm: Vector3,
+	GripPart: GripPart,
+	GripAt: GripAt,
 	Body: CFrame,
-	Placement: CFrame,
-	VictimHands: { Left: Vector3, Right: Vector3 },
 	ThrowAway: boolean,
 }
 
@@ -63,65 +65,44 @@ local function onBackRaised(degrees: number): CFrame
 	return CFrame.Angles(math.rad(degrees - 90), 0, 0) * FACING_HOLDER
 end
 
-local function mode(spec: {
-	Label: string,
-	Hand: Vector3,
-	Grip: Vector3,
-	Body: CFrame,
-	VictimHands: { Left: Vector3, Right: Vector3 },
-	ThrowAway: boolean,
-}): ModeSpec
-	return {
-		Label = spec.Label,
-		Hand = spec.Hand,
-		Grip = spec.Grip,
-		Body = spec.Body,
-		Placement = CFrame.new(spec.Hand) * spec.Body * CFrame.new(-spec.Grip),
-		VictimHands = spec.VictimHands,
-		ThrowAway = spec.ThrowAway,
-	}
-end
-
 GrabConstants.Modes = {
-	-- Lifted off the floor by the collar, facing the holder, level with their right shoulder. Feet 0.6
-	-- studs up, ~0.7 studs between the two chests.
-	Collar = mode({
+	-- Lifted off the floor by the collar, facing the holder, arm raised forward and up. R6 feet ~0.5 up.
+	Collar = {
 		Label = "Lift by the collar",
-		Hand = Vector3.new(1.5, 1.6, -1.2),
-		Grip = Vector3.new(0, 1, -0.5),
+		Arm = Vector3.new(0.294, 0.646, -0.705).Unit,
+		GripPart = "Torso",
+		GripAt = "Collar",
 		Body = FACING_HOLDER,
-		VictimHands = { Left = Vector3.new(-0.15, 0.78, -0.74), Right = Vector3.new(0.45, 0.56, -0.98) },
 		ThrowAway = false,
-	}),
-	-- Hoisted by the face, the arm raised higher; the victim hangs with their toes 0.4 studs up.
-	Head = mode({
+	},
+	-- Hoisted by the face, the arm raised higher; the victim hangs with their toes just off the floor.
+	Head = {
 		Label = "Lift by the head",
-		Hand = Vector3.new(1.4, 1.9, -0.9),
-		Grip = Vector3.new(0, 1.5, -0.5),
+		Arm = Vector3.new(0.234, 0.818, -0.526).Unit,
+		GripPart = "Head",
+		GripAt = "Face",
 		Body = FACING_HOLDER,
-		VictimHands = { Left = Vector3.new(-0.17, 1.22, -0.68), Right = Vector3.new(0.41, 0.94, -0.86) },
 		ThrowAway = false,
-	}),
+	},
 	-- Dragged along the floor behind and to the right by the collar: on their back, head toward the
-	-- holder, the arm swung low and back. The body is raised 21 degrees from the floor at the grip.
-	Drag = mode({
+	-- holder, the arm swung down, out and back, the upper body raised 25 degrees by the grip.
+	Drag = {
 		Label = "Drag by the collar",
-		Hand = Vector3.new(2.03, -0.62, 0.86),
-		Grip = Vector3.new(0, 1, -0.4),
-		Body = onBackRaised(21),
-		VictimHands = { Left = Vector3.new(-0.04, 1.24, -0.55), Right = Vector3.new(0.66, 1.48, -0.69) },
+		Arm = Vector3.new(0.639, -0.5, 0.585).Unit,
+		GripPart = "Torso",
+		GripAt = "Collar",
+		Body = onBackRaised(25),
 		ThrowAway = true,
-	}),
-	-- Dragged straight behind by the top of the head, arm hanging down and back; the body trails
-	-- further out than a collar drag (the head is between hand and shoulders) at 16 degrees.
-	HeadDrag = mode({
+	},
+	-- Dragged straight behind by the top of the head, arm hanging down and back, body raised 16 degrees.
+	HeadDrag = {
 		Label = "Drag by the head",
-		Hand = Vector3.new(1.0, -1.04, 0.72),
-		Grip = Vector3.new(0, 2, 0),
+		Arm = Vector3.new(0, -0.906, 0.424).Unit,
+		GripPart = "Head",
+		GripAt = "Crown",
 		Body = onBackRaised(16),
-		VictimHands = { Left = Vector3.new(-0.25, 2.11, -0.13), Right = Vector3.new(0.25, 2.25, -0.26) },
 		ThrowAway = true,
-	}),
+	},
 } :: { [string]: ModeSpec }
 
 -- Dropdown order in the Move Editor, and the answer for a config that names no mode.
@@ -138,18 +119,6 @@ end
 -- Authoring defaults -------------------------------------------------------------------------------
 
 GrabConstants.Defaults = {
-	-- Where the victim's root sits, in the ATTACKER'S ROOT space -- the weld's C0 (GrabSystem.beginHold).
-	-- Always the default mode's Placement: see MoveGrabConfig.AttachOffset's own header on why this is
-	-- never authored. MoveRegistryManager.Validate writes the CHOSEN mode's Placement, not this; this is
-	-- the value for a config that has no mode to choose by.
-	--
-	-- Root-relative, NOT hand-relative, on purpose. It used to hang off the RightHand part, and that is
-	-- half of why a grab flung people: the hand's pose on the server is whatever the grab SWING left it
-	-- in, so the same offset put the victim somewhere different on every grab -- usually with their
-	-- torso inside the attacker's arm. The root is the one frame on a rig that is upright, animation-
-	-- free and identical on every client, so the victim lands in the same place every time, and
-	-- Client/FX/GrabHoldPose.lua then brings the HAND to the body instead.
-	AttachOffset = GrabConstants.Modes.Collar.Placement,
 	Mode = "Collar",
 	HoldSeconds = 3,
 	ThrowUpVelocity = 20,
@@ -187,16 +156,28 @@ GrabConstants.Hold = {
 	-- distance minus this first.
 	WallClearanceStuds = 1.5,
 	-- CollectionService tags GrabSystem puts on the two Models for exactly the length of a hold (not
-	-- the flight), plus three Attributes: on the holder, the grip point in the holder's root space
-	-- (Vector3); on the victim, the mode's name, and whether an authored VictimAnimation owns their arms.
-	-- Tags and Attributes replicate for free, which is all Client/FX/GrabHoldPose.lua needs to pose every
-	-- hold on every client with no remote -- the same seam GuardStrainPose reads
-	-- DefenseConstants.GuardCrack.Tag through.
+	-- the flight), plus three Attributes: on the holder, which arm is holding (Client/FX/GrabHoldPose.lua
+	-- pins that arm's joints so no animation swings the victim around); on the victim, the mode's name,
+	-- and whether an authored VictimAnimation owns their arms. Tags and Attributes replicate for free, so
+	-- the pose needs no remote -- the same seam GuardStrainPose reads DefenseConstants.GuardCrack.Tag
+	-- through.
 	HolderTag = "GrabHolding",
 	HeldTag = "GrabHeldBody",
-	GripAttribute = "GrabGrip",
+	ArmAttribute = "GrabArm",
 	ModeAttribute = "GrabMode",
 	VictimAnimatedAttribute = "GrabVictimAnimated",
+	-- The name of the hold's Weld, parented to the victim's gripped part. The pose finds the holder's
+	-- hand through it (Weld.Part0) to put the victim's own hands on it.
+	WeldName = "GrabWeld",
+	-- For a rig with no arm or no torso/head this module recognises (a bare test rig, an odd NPC): the
+	-- weld falls back to root-to-root, placing the grip where an R6 hand and R6 part would put it.
+	FallbackShoulder = Vector3.new(1, 0.5, 0),
+	FallbackReach = 1.58,
+	FallbackGrips = {
+		Collar = Vector3.new(0, 1, -0.5),
+		Face = Vector3.new(0, 1.5, -0.5),
+		Crown = Vector3.new(0, 2, 0),
+	} :: { [string]: Vector3 },
 }
 
 -- Hold animations (MoveGrabConfig.VictimAnimation / AttackerAnimation) ---------------------------------
@@ -221,7 +202,11 @@ GrabConstants.Pose = {
 	MaxReachFraction = 0.97,
 	-- Which way an R15 elbow breaks -- 1 is behind the arm plane, the natural reach-forward pose.
 	ElbowPoleSign = 1,
-	-- (Where the victim's hands go is per mode -- Modes[...].VictimHands.)
+	-- Where the victim's own hands go when no VictimAnimation is authored: on either side of the holder's
+	-- hand part, this fraction of its length up from the grip end, and this far off its surface --
+	-- clawing at the wrist that has them. Relative to the holder's hand, so it is right in every mode.
+	VictimHandAlongArm = 0.3,
+	VictimHandClearance = 0.15,
 }
 
 -- Flight / impact ------------------------------------------------------------------------------------

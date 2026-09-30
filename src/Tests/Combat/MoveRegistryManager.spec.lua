@@ -147,7 +147,7 @@ return function()
 			expect(validated.Feintable).to.equal(nil)
 		end)
 
-		it("writes the grab's attach offset itself, whatever the candidate says", function()
+		it("ignores an attach offset an old record still carries -- placement is the mode's, not a number", function()
 			local validated = MoveRegistryManager.Validate(wire({
 				Grab = {
 					AttachOffset = CFrame.new(0, 100, 0),
@@ -158,10 +158,11 @@ return function()
 					ThrowSelfDamage = 5,
 				},
 			})) :: any
-			expect(validated.Grab.AttachOffset).to.equal(GrabConstants.Defaults.AttachOffset)
+			expect(validated.Grab.AttachOffset).to.equal(nil)
+			expect(validated.Grab.Mode).to.equal(GrabConstants.DefaultMode)
 		end)
 
-		it("places a grab by its mode, defaulting a record saved before modes existed", function()
+		it("keeps a grab's mode, defaulting a record saved before modes existed", function()
 			local function grabWith(fields: { [string]: any }): any
 				local grab: { [string]: any } = {
 					HoldSeconds = 2,
@@ -178,11 +179,9 @@ return function()
 
 			local legacy = grabWith({})
 			expect(legacy.Grab.Mode).to.equal(GrabConstants.DefaultMode)
-			expect(legacy.Grab.AttachOffset).to.equal(GrabConstants.Modes[GrabConstants.DefaultMode].Placement)
 
 			local drag = grabWith({ Mode = "Drag" })
 			expect(drag.Grab.Mode).to.equal("Drag")
-			expect(drag.Grab.AttachOffset).to.equal(GrabConstants.Modes.Drag.Placement)
 		end)
 
 		it("refuses a grab mode that does not exist rather than holding some other way", function()

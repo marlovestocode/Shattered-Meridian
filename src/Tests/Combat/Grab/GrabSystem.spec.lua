@@ -14,6 +14,7 @@
 -- reasoning applied one layer down.
 
 local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -23,6 +24,7 @@ local DamageSystem = require(ServerScriptService.Server.Combat.Damage.DamageSyst
 local DefaultMoveRegistry = require(ServerScriptService.Server.Combat.DefaultMoveRegistry)
 local DefenseSystem = require(ServerScriptService.Server.Combat.Defense.DefenseSystem)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
+local GrabRig = require(ReplicatedStorage.Shared.Grab.GrabRig)
 local GrabSystem = require(ServerScriptService.Server.Combat.Grab.GrabSystem)
 local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.HitboxEngine)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
@@ -50,7 +52,6 @@ local MOVE_ID = `default:{WEAPON}:Basic:1`
 -- time skip, and throw velocities small enough that a spec asserting on state (never on real physics
 -- settling) doesn't need to care what they resolve to.
 local GRAB_CONFIG: MoveTypes.MoveGrabConfig = {
-	AttachOffset = CFrame.new(),
 	HoldSeconds = 0.2,
 	ThrowUpVelocity = 10,
 	ThrowHorizontalVelocity = 10,
@@ -142,7 +143,25 @@ local function throwGrabHit(base: number, config: MoveTypes.MoveGrabConfig?): (D
 end
 
 local function holdWeldOf(defender: Dummy): Weld?
-	return defender.Root:FindFirstChild("GrabWeld") :: Weld?
+	return defender.Model:FindFirstChild(GrabConstants.Hold.WeldName, true) :: Weld?
+end
+
+-- A real R6 body (Torso, arms, head, Motor6Ds) for the cases that are about the rig rather than the
+-- state machine -- the bare root-only dummies above deliberately exercise GrabRig's fallback instead.
+-- Anchored root for the holder only, so neither falls while a case runs; the victim must be unanchored.
+local function makeR6(name: string, position: Vector3, lookAt: Vector3, anchored: boolean): Dummy
+	local model =
+		Players:CreateHumanoidModelFromDescription(Instance.new("HumanoidDescription"), Enum.HumanoidRigType.R6)
+	model.Name = name
+	model:PivotTo(CFrame.lookAt(position, lookAt))
+	local root = model.PrimaryPart :: BasePart
+	root.Anchored = anchored
+	local humanoid = model:FindFirstChildOfClass("Humanoid") :: Humanoid
+	model.Parent = Workspace
+	table.insert(spawned, model)
+	local id = HitboxEngine.RegisterCombatant(model, root, humanoid)
+	DefenseSystem.RegisterCombatant(model, root, humanoid, PARRY_ANIMATION)
+	return { Model = model, Root = root, Humanoid = humanoid, Id = id }
 end
 
 return function()
@@ -213,16 +232,61 @@ return function()
 	end)
 
 	describe("GrabSystem -- the hold itself", function()
-		it("welds the victim's root to the attacker's root at the authored offset", function()
+		it("falls back to root-to-root, at R6 numbers, for a rig with no arm, torso or head", function()
 			local base = os.clock()
 			local attacker, defender = throwGrabHit(base)
 
 			local weld = holdWeldOf(defender)
 			expect(weld).to.be.ok()
 			local found = weld :: Weld
+			local mode = GrabConstants.ModeOf(nil)
+			local hold = GrabConstants.Hold
 			expect(found.Part0).to.equal(attacker.Root)
 			expect(found.Part1).to.equal(defender.Root)
-			expect(found.C0).to.equal(GRAB_CONFIG.AttachOffset)
+			expect(found.C0).to.equal(CFrame.new(hold.FallbackShoulder + mode.Arm * hold.FallbackReach) * mode.Body)
+			expect(found.C1).to.equal(CFrame.new(hold.FallbackGrips[mode.GripAt]))
+			-- No arm was posed, so there is none for the client to pin.
+			expect(attacker.Model:GetAttribute(hold.ArmAttribute)).to.equal(nil)
+		end)
+
+		it("welds a real rig's torso to the holder's HAND, with the hand pointed along the mode's arm", function()
+			overrideMoveWithGrab()
+			local base = os.clock()
+			local attacker = makeR6("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
+			local defender = makeR6("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
+			local shoulder = (attacker.Model:FindFirstChild("Torso") :: BasePart):FindFirstChild(
+					"Right Shoulder"
+				) :: Motor6D
+			local restC0 = shoulder.C0
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			local weld = holdWeldOf(defender) :: Weld
+			expect(weld).to.be.ok()
+			expect(weld.Part0).to.equal(attacker.Model:FindFirstChild("Right Arm"))
+			expect(weld.Part1).to.equal(defender.Model:FindFirstChild("Torso"))
+			expect(attacker.Model:GetAttribute(GrabConstants.Hold.ArmAttribute)).to.equal("Right")
+
+			-- The posed arm, read back through the rig's own joints: its hand tip lies along the mode's Arm
+			-- from the shoulder joint -- the tip correction working on a real R6 arm, not in theory.
+			local rest = GrabRig.RestInRoot(attacker.Model, attacker.Root)
+			local torso = shoulder.Part0 :: BasePart
+			local jointPosition = (rest[torso] * restC0).Position
+			local arm = shoulder.Part1 :: BasePart
+			local tip = rest[arm] * Vector3.new(0, -arm.Size.Y * 0.5, 0)
+			local direction = (tip - jointPosition).Unit
+			expect(direction:Dot(GrabConstants.ModeOf(nil).Arm) > 0.999).to.equal(true)
+
+			-- And the grip point on the victim's torso is ON that tip, through the weld.
+			local torsoOfVictim = defender.Model:FindFirstChild("Torso") :: BasePart
+			local gripInHand = weld.C0 * weld.C1:Inverse() * GrabRig.GripLocal(torsoOfVictim, "Collar")
+			local gripInRoot = rest[arm] * gripInHand
+			expect((gripInRoot - tip).Magnitude < 1e-3).to.equal(true)
+
+			-- Released: the shoulder is exactly as it was.
+			GrabSystem.Throw(attacker.Model, base + 2 * FRAME)
+			expect(shoulder.C0).to.equal(restC0)
 		end)
 
 		it("makes the held body massless and moves it into the hold's collision group", function()
@@ -233,16 +297,12 @@ return function()
 			expect(defender.Root.CollisionGroup).to.equal(GrabConstants.Hold.CollisionGroup)
 		end)
 
-		it("tags both bodies and publishes the grip point for the hold pose", function()
+		it("tags both bodies for the hold pose", function()
 			local base = os.clock()
 			local attacker, defender = throwGrabHit(base)
 
 			expect(CollectionService:HasTag(attacker.Model, GrabConstants.Hold.HolderTag)).to.equal(true)
 			expect(CollectionService:HasTag(defender.Model, GrabConstants.Hold.HeldTag)).to.equal(true)
-			-- In the attacker's root space: the weld's C0 applied to the victim-space grip.
-			expect(attacker.Model:GetAttribute(GrabConstants.Hold.GripAttribute)).to.equal(
-				GRAB_CONFIG.AttachOffset * GrabConstants.ModeOf(GRAB_CONFIG.Mode).Grip
-			)
 		end)
 
 		it("tells clients the victim's hold mode, defaulting a config that names none to Collar", function()
@@ -254,17 +314,18 @@ return function()
 			expect(defender.Model:GetAttribute(GrabConstants.Hold.VictimAnimatedAttribute)).to.equal(nil)
 		end)
 
-		it("resolves the grip from the config's own mode", function()
+		it("holds by the config's own mode", function()
 			local dragConfig = table.clone(GRAB_CONFIG)
 			dragConfig.Mode = "Drag"
-			dragConfig.AttachOffset = GrabConstants.Modes.Drag.Placement
 			local base = os.clock()
-			local attacker, defender = throwGrabHit(base, dragConfig)
+			local _attacker, defender = throwGrabHit(base, dragConfig)
 
 			expect(defender.Model:GetAttribute(GrabConstants.Hold.ModeAttribute)).to.equal("Drag")
-			-- Placement * Grip IS the mode's Hand -- that identity is what puts the holder's hand on the grip.
-			local grip = attacker.Model:GetAttribute(GrabConstants.Hold.GripAttribute) :: Vector3
-			expect((grip - GrabConstants.Modes.Drag.Hand).Magnitude < 1e-4).to.equal(true)
+			local drag = GrabConstants.Modes.Drag
+			local hold = GrabConstants.Hold
+			expect((holdWeldOf(defender) :: Weld).C0).to.equal(
+				CFrame.new(hold.FallbackShoulder + drag.Arm * hold.FallbackReach) * drag.Body
+			)
 		end)
 
 		it("clears the tags and the grip the moment the hold ends", function()
@@ -275,7 +336,7 @@ return function()
 
 			expect(CollectionService:HasTag(attacker.Model, GrabConstants.Hold.HolderTag)).to.equal(false)
 			expect(CollectionService:HasTag(defender.Model, GrabConstants.Hold.HeldTag)).to.equal(false)
-			expect(attacker.Model:GetAttribute(GrabConstants.Hold.GripAttribute)).to.equal(nil)
+			expect(attacker.Model:GetAttribute(GrabConstants.Hold.ArmAttribute)).to.equal(nil)
 			expect(defender.Model:GetAttribute(GrabConstants.Hold.ModeAttribute)).to.equal(nil)
 		end)
 
