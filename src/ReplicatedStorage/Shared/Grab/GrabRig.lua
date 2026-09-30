@@ -97,6 +97,49 @@ function GrabRig.ArmChain(model: Model, side: Side): ArmChain?
 	return { Shoulder = shoulder, Joints = joints, Hand = hand }
 end
 
+-- Every joint that decides where `side`'s hand is relative to `root`: the arm (ArmChain.Joints) AND the
+-- torso chain it hangs from (R6 RootJoint; R15 Waist then Root). Pinning only the arm is not enough --
+-- every run and walk cycle animates the torso (bob, lean, twist), and a pinned arm on a moving torso
+-- still carries the hand, and the body welded to it, through the whole stride. Pin all of these to
+-- identity and the hand is exactly where GrabRig.Solve put it, relative to the root, whatever the legs
+-- are doing. nil for a rig with no arm this module reads.
+function GrabRig.HoldJoints(model: Model, root: BasePart, side: Side): { Motor6D }?
+	local chain = GrabRig.ArmChain(model, side)
+	if not chain then
+		return nil
+	end
+	local joints = table.clone(chain.Joints)
+
+	local motors: { Motor6D } = {}
+	for _, descendant in model:GetDescendants() do
+		if descendant:IsA("Motor6D") then
+			table.insert(motors, descendant)
+		end
+	end
+
+	-- Walk from the part the shoulder hangs off back to the root, one parent joint at a time. Bounded,
+	-- because a malformed rig with a joint cycle must cost a few iterations, not a hang.
+	local current = chain.Shoulder.Part0
+	for _ = 1, 8 do
+		if current == nil or current == root then
+			break
+		end
+		local parentJoint: Motor6D? = nil
+		for _, motor in motors do
+			if motor.Part1 == current then
+				parentJoint = motor
+				break
+			end
+		end
+		if not parentJoint then
+			break
+		end
+		table.insert(joints, parentJoint)
+		current = parentJoint.Part0
+	end
+	return joints
+end
+
 -- Every part's CFrame in `root`'s space with every joint at rest (Transform ignored), found by walking
 -- the rig's own joints out from the root: Part1 = Part0 * C0 * C1:Inverse(). Only joints whose two parts
 -- are both in `model` count -- a hold's own GrabWeld reaches into another rig and must not be followed.

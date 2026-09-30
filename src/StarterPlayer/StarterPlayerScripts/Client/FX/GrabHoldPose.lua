@@ -8,11 +8,14 @@
 
 	THE VICTIM IS WELDED TO THE HOLDER'S HAND (Shared/Grab/GrabRig.lua), and the server poses that arm
 	through its shoulder C0. What C0 cannot do is stop an animation: every AnimationTrack writes
-	Motor6D.Transform on top of C0, so the idle clip, a walk cycle or an authored AttackerAnimation would
-	swing the arm -- and the victim welded to its hand -- around with it. So this module writes that arm's
-	Transforms back to identity every frame, AFTER the animation step (RENDER_PRIORITY), on every client:
-	Transform does not replicate, which is Shared/Vessel/VesselArmPose.lua's header's whole argument for
-	why a per-client pose runs on every client rather than once.
+	Motor6D.Transform on top of C0, so the idle clip, a walk or run cycle, or an authored AttackerAnimation
+	would swing the arm -- and the victim welded to its hand -- around with it. So this module writes the
+	whole chain from the holder's root to that hand (GrabRig.HoldJoints: the torso joints as well as the
+	arm's, since a stride moves the torso the arm hangs from) back to identity, twice a frame -- see
+	unbind's comment -- on every client. The legs keep animating; the hand does not move relative to the
+	root. Transform does not replicate, which is Shared/Vessel/VesselArmPose.lua's header's whole argument
+	for why a per-client pose runs on every client rather than once. GrabSystem pins the same chain on
+	the server.
 
 	The victim's hands are the other half: IK (VesselArmPose.ApplyHand) onto either side of the holder's
 	hand part, which this module finds through the hold's own Weld (its Part0 is that hand). Relative to
@@ -71,10 +74,12 @@ local held: { [Model]: HeldEntry } = {}
 
 local started = false
 local bound = false
+local preSimulation: RBXScriptConnection? = nil
 local trove = Trove.New()
 
--- Holder: pin the posed arm. False drops the entry (no such arm on this rig -- the server fell back to
--- root-to-root and set no ArmAttribute, or the rig is going away).
+-- Holder: pin the posed arm AND the torso chain it hangs from (GrabRig.HoldJoints -- the run and walk
+-- cycles move the torso too, and the hand rides it). False drops the entry (no such arm on this rig --
+-- the server fell back to root-to-root and set no ArmAttribute, or the rig is going away).
 local function poseHolder(model: Model, entry: HolderEntry): boolean
 	local joints = entry.Joints
 	if not joints then
@@ -83,11 +88,14 @@ local function poseHolder(model: Model, entry: HolderEntry): boolean
 			-- Not replicated yet, or a fallback hold: keep the entry, try again next frame.
 			return model.Parent ~= nil
 		end
-		local chain = GrabRig.ArmChain(model, if side == "Left" then "Left" else "Right")
-		if not chain then
+		local root = model.PrimaryPart
+		local holdJoints = if root
+			then GrabRig.HoldJoints(model, root, if side == "Left" then "Left" else "Right")
+			else nil
+		if not holdJoints then
 			return false
 		end
-		joints = chain.Joints
+		joints = holdJoints
 		entry.Joints = joints
 	end
 	for _, joint in joints :: { Motor6D } do
@@ -139,20 +147,40 @@ local function poseHeld(model: Model, entry: HeldEntry): boolean
 	return posedLeft or posedRight
 end
 
-local function step(_deltaTime: number): ()
+-- TWO PINS PER FRAME. The render-step pin (RENDER_PRIORITY, after the character step) decides what is
+-- DRAWN. The PreSimulation pin fires after the frame's animation update and before the physics step:
+-- the holder's own client simulates the held body (it is part of the holder's assembly), and without
+-- this second pin it stepped that body off the arm and torso the run cycle had just swung, even though
+-- the arm it drew was still.
+local function unbind(): ()
+	if bound then
+		RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
+		bound = false
+	end
+	local connection = preSimulation
+	if connection then
+		connection:Disconnect()
+		preSimulation = nil
+	end
+end
+
+local function pinHolders(): ()
 	for model, entry in holders do
 		if not poseHolder(model, entry) then
 			holders[model] = nil
 		end
 	end
+end
+
+local function step(_deltaTime: number): ()
+	pinHolders()
 	for model, entry in held do
 		if not poseHeld(model, entry) then
 			held[model] = nil
 		end
 	end
 	if bound and next(holders) == nil and next(held) == nil then
-		RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
-		bound = false
+		unbind()
 	end
 end
 
@@ -161,6 +189,7 @@ local function bindIfNeeded(): ()
 		return
 	end
 	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, step)
+	preSimulation = RunService.PreSimulation:Connect(pinHolders)
 	bound = true
 end
 
@@ -234,10 +263,7 @@ function GrabHoldPose.Stop(): ()
 	trove:Clean()
 	table.clear(holders)
 	table.clear(held)
-	if bound then
-		RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
-		bound = false
-	end
+	unbind()
 	started = false
 end
 

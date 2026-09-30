@@ -284,6 +284,14 @@ return function()
 			local gripInRoot = rest[arm] * gripInHand
 			expect((gripInRoot - tip).Magnitude < 1e-3).to.equal(true)
 
+			-- What gets pinned against the run/walk cycle is the torso joint as well as the arm: a pinned arm
+			-- on an animated torso still swings the hand.
+			local pinned = GrabRig.HoldJoints(attacker.Model, attacker.Root, "Right") :: { Motor6D }
+			local rootJoint = attacker.Root:FindFirstChild("RootJoint")
+			expect(table.find(pinned, shoulder)).to.be.ok()
+			expect(table.find(pinned, rootJoint :: any)).to.be.ok()
+			expect(#pinned).to.equal(2)
+
 			-- Released: the shoulder is exactly as it was.
 			GrabSystem.Throw(attacker.Model, base + 2 * FRAME)
 			expect(shoulder.C0).to.equal(restC0)

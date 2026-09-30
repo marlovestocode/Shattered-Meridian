@@ -182,6 +182,9 @@ type Hold = {
 	-- had no arm GrabRig could pose and the weld fell back to root-to-root).
 	Shoulder: Motor6D?,
 	OriginalShoulderC0: CFrame?,
+	-- The torso-and-arm chain from the holder's root to the hand (GrabRig.HoldJoints), pinned to its rest
+	-- pose every PreSimulation -- see pinHolds. Empty for a root-to-root fallback hold.
+	PinnedJoints: { Motor6D },
 	-- One per body with an authored hold clip, nil otherwise -- see playHoldClip.
 	VictimAnimator: AnimationManagerInstance?,
 	AttackerAnimator: AnimationManagerInstance?,
@@ -605,6 +608,7 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 		Body = body,
 		Shoulder = solution.Shoulder,
 		OriginalShoulderC0 = solution.OriginalShoulderC0,
+		PinnedJoints = if solution.Shoulder then GrabRig.HoldJoints(attacker, attackerRoot, "Right") or {} else {},
 		VictimAnimator = playHoldClip(victim, victimClip, "Victim"),
 		AttackerAnimator = playHoldClip(attacker, config.AttackerAnimation, "Attacker"),
 	}
@@ -840,6 +844,19 @@ function GrabSystem.Step(_deltaTime: number, now: number): ()
 	end
 end
 
+-- Keeps every holder's hand where the hold put it, on the server's own copy of the rig. The server
+-- plays replicated animations too, so a running holder's torso and arm swing here as well -- and the
+-- server's copy of the held body is the one hit detection and the throw's launch point read. Pinned to
+-- the rest pose GrabRig.Solve measured the hand against, after the animation update and before physics:
+-- the client does the same (Client/FX/GrabHoldPose.lua), so every machine agrees the hand is still.
+local function pinHolds(): ()
+	for _, hold in holds do
+		for _, joint in hold.PinnedJoints do
+			joint.Transform = CFrame.identity
+		end
+	end
+end
+
 -- Public queries -----------------------------------------------------------------------------------
 
 -- Whether this combatant may start an ordinary attack, and why not when they may not.
@@ -936,6 +953,7 @@ function GrabSystem.Init(): ()
 	heartbeatTrove:Connect(RunService.Heartbeat, function(deltaTime: number)
 		GrabSystem.Step(deltaTime, os.clock())
 	end)
+	heartbeatTrove:Connect(RunService.PreSimulation, pinHolds)
 
 	-- A holding/held/thrown player disconnecting mid-hold must not leave the OTHER side stuck
 	-- PlatformStand-locked forever -- Step's own sweep already covers this every frame (attacker/victim
