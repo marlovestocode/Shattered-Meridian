@@ -7,8 +7,8 @@
 	wired-but-unauthored AnimationIds/Sound registrations that go with them. Extracted from
 	Shared/Constants.lua (formerly Constants.Flight) for the same reason Constants.Combat was split
 	out to Shared/Combat/CombatConstants.lua alongside this file: Server/DevMenu/FlightTuning.lua's
-	AdjustField/ResetField mutate this table's fields directly, BY REFERENCE, from a live admin remote
-	(DevMenu_AdjustFlightTuning) -- FlightTuning.lua's own header has always said "Constants.Flight is
+	SetField/ResetField mutate this table's fields directly, BY REFERENCE, from a live admin remote
+	(DevMenu_SetFlightTuning) -- FlightTuning.lua's own header has always said "Constants.Flight is
 	read BY REFERENCE every frame... mutating a field here takes effect on the very next Heartbeat."
 	A module literally named "Constants" being rewritten by a running server is exactly the surprise
 	docs/architecture/2026-08-audit.md section 5's "Constants facade/replication split" finding (3.4)

@@ -55,6 +55,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local AirComboMachine = require(script.Parent.AirComboMachine)
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
 local DefenseSystem = require(script.Parent.Parent.Defense.DefenseSystem)
+local NetworkLatency = require(script.Parent.Parent.NetworkLatency)
 
 type Combo = AirComboTypes.Combo
 type EndReason = AirComboTypes.EndReason
@@ -166,17 +167,7 @@ end
 
 -- A player-backed model's network latency (Player:GetNetworkPing), or 0 for a bot or a dummy.
 local function pingOf(model: Model): number
-	local player = Players:GetPlayerFromCharacter(model)
-	if not player then
-		return 0
-	end
-	local ok, ping = pcall(function()
-		return player:GetNetworkPing()
-	end)
-	if not ok or typeof(ping) ~= "number" or ping ~= ping or ping < 0 then
-		return 0
-	end
-	return ping
+	return NetworkLatency.PingSeconds(model)
 end
 
 local function setAttribute(humanoid: Humanoid, name: string, value: any): ()

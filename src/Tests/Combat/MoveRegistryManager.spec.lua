@@ -4,7 +4,10 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
+local DomainTypes = require(ReplicatedStorage.Shared.Domain.DomainTypes)
 local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
+local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
 
 local LIMITS = Constants.MoveEditor.Limits
 
@@ -92,6 +95,82 @@ return function()
 			)
 			rejects({ Grab = { HoldSeconds = 1 } }, "InvalidGrab")
 			rejects({ Art = "art" }, "InvalidArt")
+			rejects({ Projectile = "fast" }, "InvalidProjectile")
+			rejects({ Projectile = { SpreadPattern = "Spiral" } }, "InvalidProjectile")
+			rejects({ Projectile = { Piercing = "yes" } }, "InvalidProjectile")
+		end)
+
+		it("refuses a projectile move that grabs", function()
+			rejects({
+				Projectile = {},
+				Grab = {
+					HoldSeconds = 2,
+					ThrowUpVelocity = 20,
+					ThrowHorizontalVelocity = 30,
+					ThrowImpactDamage = 5,
+					ThrowSelfDamage = 5,
+				},
+			}, "ProjectileCannotGrab")
+		end)
+	end)
+
+	describe("MoveRegistryManager.Validate -- the projectile block", function()
+		it("accepts an empty block as every default, and clamps its numbers", function()
+			local validated = MoveRegistryManager.Validate(wire({ Projectile = { Speed = 99999 } })) :: any
+			expect(validated).to.be.ok()
+			expect(validated.Projectile.Speed).to.equal(ProjectileTypes.Limits.Speed.Max)
+			expect(validated.Projectile.SpreadPattern).to.equal("Single")
+			expect(validated.Projectile.ParryBehavior).to.equal("ParryOne")
+		end)
+
+		it("leaves a move without the block melee", function()
+			local validated = MoveRegistryManager.Validate(wire()) :: any
+			expect(validated.Projectile).to.equal(nil)
+		end)
+	end)
+
+	describe("MoveRegistryManager.Validate -- the realm block", function()
+		it("accepts an empty block as every default, and survives the wire round trip unchanged", function()
+			local validated = MoveRegistryManager.Validate(wire({ Domain = {} })) :: any
+			expect(validated).to.be.ok()
+			expect(MoveTypes.IsDomain(validated)).to.equal(true)
+			expect(validated.Domain.Shape).to.equal("Sphere")
+
+			local domain = validated.Domain :: DomainTypes.DomainSpec
+			local effect = DomainTypes.DefaultEffect()
+			effect.MoveId = "spec-strike"
+			domain.Effects = { effect }
+			domain.Rules = { DomainTypes.DefaultRule() }
+			local wired = MoveTypes.ToWire(validated)
+			wired.Author = "Spec"
+			wired.CreatedAt = 1
+			wired.UpdatedAt = 2
+			local again = MoveRegistryManager.Validate(wired) :: any
+			expect(again).to.be.ok()
+			expect(MoveTypes.Fingerprint(again)).to.equal(MoveTypes.Fingerprint(validated))
+			expect(again.Domain.Effects[1].MoveId).to.equal("spec-strike")
+		end)
+
+		it("refuses a malformed block, a self-referencing effect, and a realm that grabs", function()
+			rejects({ Domain = "vast" }, "InvalidDomain")
+			rejects({ Domain = { Shape = "Torus" } }, "InvalidDomain")
+			rejects({ Domain = { Effects = { { Kind = "Strike", MoveId = "spec-move" } } } }, "DomainSelfReference")
+			rejects({
+				Domain = {},
+				Grab = {
+					HoldSeconds = 2,
+					ThrowUpVelocity = 20,
+					ThrowHorizontalVelocity = 30,
+					ThrowImpactDamage = 5,
+					ThrowSelfDamage = 5,
+				},
+			}, "DomainCannotGrab")
+		end)
+
+		it("leaves the block out of the engine projection", function()
+			local validated = MoveRegistryManager.Validate(wire({ Domain = {} })) :: any
+			local definition = MoveTypes.ToEngineAttackDefinition(validated)
+			expect((definition :: any).Domain).to.equal(nil)
 		end)
 	end)
 
@@ -203,6 +282,8 @@ return function()
 			local validated = MoveRegistryManager.Validate(wire({
 				Grab = {
 					VictimAnimation = "12345",
+					ThrowAnimation = "67890",
+					VictimThrowAnimation = "24680",
 					HoldSeconds = 2,
 					ThrowUpVelocity = 20,
 					ThrowHorizontalVelocity = 30,
@@ -211,7 +292,28 @@ return function()
 				},
 			})) :: any
 			expect(validated.Grab.VictimAnimation).to.equal("rbxassetid://12345")
+			expect(validated.Grab.ThrowAnimation).to.equal("rbxassetid://67890")
+			expect(validated.Grab.VictimThrowAnimation).to.equal("rbxassetid://24680")
 			expect(validated.Grab.AttackerAnimation).to.equal("")
+		end)
+
+		it("clamps a throw release point into the clip and leaves an absent one absent", function()
+			local function grabWith(releaseAt: number?): any
+				return (MoveRegistryManager.Validate(wire({
+					Grab = {
+						ThrowReleaseAt = releaseAt,
+						HoldSeconds = 2,
+						ThrowUpVelocity = 20,
+						ThrowHorizontalVelocity = 30,
+						ThrowImpactDamage = 5,
+						ThrowSelfDamage = 5,
+					},
+				})) :: any).Grab
+			end
+			expect(grabWith(0.4).ThrowReleaseAt).to.equal(0.4)
+			expect(grabWith(1.5).ThrowReleaseAt).to.equal(1)
+			expect(grabWith(-1).ThrowReleaseAt).to.equal(0)
+			expect(grabWith(nil).ThrowReleaseAt).to.equal(nil)
 		end)
 
 		it("truncates free text rather than refusing it", function()

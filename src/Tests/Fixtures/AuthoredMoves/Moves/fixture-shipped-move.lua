@@ -1,0 +1,36 @@
+--!strict
+-- FIXTURE for Tests/MoveEditor/AuthoredMoveLibrary.spec.lua: a shipped custom move, in exactly the shape
+-- Support/MoveSourceWriter.ToLua writes.
+return {
+	ActiveSeconds = 0.15,
+	AnimationId = "",
+	Author = "Fixture",
+	Category = "",
+	Cooldown = 0.8,
+	CreatedAt = 1,
+	Damage = 11,
+	Description = "",
+	Dimensions = {
+		AngleDegrees = 90,
+		Height = 5,
+		InnerRadius = 0,
+		Length = 5,
+		Radius = 2,
+		Width = 4,
+	},
+	DisplayName = "Fixture Shipped Move",
+	LocksMovement = false,
+	MoveId = "fixture-shipped-move",
+	OffsetPitch = 0,
+	OffsetRoll = 0,
+	OffsetX = 0,
+	OffsetY = 0,
+	OffsetYaw = 0,
+	OffsetZ = -3,
+	PostureDamage = 8,
+	RecoverySeconds = 0.35,
+	SchemaVersion = 3,
+	Shape = "Box",
+	UpdatedAt = 2,
+	WindupSeconds = 0.3,
+}

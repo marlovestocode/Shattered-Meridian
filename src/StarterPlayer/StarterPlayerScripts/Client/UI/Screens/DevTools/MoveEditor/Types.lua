@@ -92,9 +92,40 @@ export type MoveEditorHandle = {
 	SpawnBotRequested: RBXScriptSignal<>,
 	ClearBenchRequested: RBXScriptSignal<>,
 
+	-- The hitbox drawn on the admin's own character (Client/DevTools/MoveEditor/HitboxWorldPreview.lua),
+	-- and Place mode: the modal steps aside and the volume is dragged in the world with handles.
+	ShowOnCharacter: Fusion.Value<boolean>,
+	PlacementMode: Fusion.Value<boolean>,
+	-- "Move" | "Rotate" | "Resize"
+	PlacementTool: Fusion.Value<string>,
+	-- Studs per snap step; 0 is free. Any non-zero step also snaps rotation (PlacementMath).
+	PlacementSnap: Fusion.Value<number>,
+	-- The screen's own edit path, for an editor outside the form (the Place mode gizmo): clones the
+	-- draft, applies `mutate`, records undo, sets Draft and fires DraftEdited -- exactly a field edit.
+	EditDraft: (mutate: (MoveTypes.MoveDefinition) -> ()) -> (),
+
 	-- Contacts from Test swings of the open move, newest first (HitLog.lua). Written by the driver.
 	HitLog: Fusion.Value<{ HitLogEntry }>,
 	ClearHitLogRequested: RBXScriptSignal<>,
+
+	-- (request) -- the Tools tab's bulk apply; the driver invokes MoveEditor_BulkScale with it.
+	BulkScaleRequested: RBXScriptSignal<MoveEditorTypes.BulkScaleRequest>,
+
+	-- The open move's saved versions (Tools tab), newest first; nil until loaded for this selection.
+	HistoryVersions: Fusion.Value<{ MoveEditorTypes.HistoryVersion }?>,
+	LoadHistoryRequested: RBXScriptSignal<>,
+	-- (version)
+	RestoreVersionRequested: RBXScriptSignal<number>,
+
+	-- Studio-only source tools (Tools tab > SOURCE). ExportText is the generated module, once exported.
+	ExportText: Fusion.Value<string?>,
+	WriteToSourceRequested: RBXScriptSignal<>,
+	RemoveFromSourceRequested: RBXScriptSignal<>,
+	ExportSourceRequested: RBXScriptSignal<>,
+
+	-- (moment) -- the Presentation tab's per-moment Preview: play the DRAFT's cue for that moment on this
+	-- client, through the runtime's own path (Client/DevTools/MoveEditor/PresentationPreview.lua).
+	PreviewCueRequested: RBXScriptSignal<string>,
 }
 
 return {}

@@ -102,7 +102,13 @@ AttackConstants.Sequence = {
 	-- recheck that pair before moving either number again. BufferSeconds (0.35) still leaves 0.23s of
 	-- early-press forgiveness. Most of the extra time is the slower windup (a READ), not dead air, which is
 	-- what keeps this from being the 0.20 beat that read as a hitch.
-	ChainDelaySeconds = 0.12,
+	--
+	-- DROPPED BACK TO 0.05 (2026-09-30, "combat in general feels pretty unresponsive"). This beat is dead time
+	-- the player feels as input lag -- the next swing waits on it after the clip has visibly ended -- and the
+	-- parry read it bought is now bought by a shorter M1 stun instead (DamageConstants.Hitstun.ByStage, whose
+	-- header has the arithmetic). B3 -> Launcher on a blade is now 0.22 + 0.12 + 0.05 + 0.42 = 0.81 against the
+	-- 1.15 combo window: the thin 0.06 margin above is gone.
+	ChainDelaySeconds = 0.05,
 
 	EndOfStringCooldownSeconds = 0.5,
 
@@ -144,7 +150,10 @@ AttackConstants.Tempo = {
 	ByStage = {
 		-- 0.65 (was 0.75): a defender needs to be able to SEE the next M1 coming and parry it -- see
 		-- Sequence.ChainDelaySeconds for the impact-to-impact arithmetic this and it share.
-		Basic = 0.65,
+		-- 0.8 (2026-09-30): the blade M1 took 0.48s to land and 1.02s to cycle, which read as unresponsive. The
+		-- defender's read is now kept by a shorter M1 stun (DamageConstants.Hitstun.ByStage) rather than by a
+		-- slower attacker. Windup 0.39, impact to impact 0.78.
+		Basic = 0.8,
 		Heavy = 1,
 		Finisher = 1,
 		-- The air combo's moves play at their authored pace: their windups are the parry read
@@ -163,9 +172,14 @@ AttackConstants.Tempo = {
 	-- windup and recovery about 10% faster and shortens each punch-to-punch gap by roughly 0.04s. The hit
 	-- window is untouched, the same as for every tempo. A faster string can only WIDEN the combo-window
 	-- margin that Sequence.ChainDelaySeconds' header tracks, so that check still holds.
+	--
+	-- Fists Basic 0.65 (2026-09-30), now SLOWER than the shared 0.8 rather than faster: at WeaponSpeed 1.5 the
+	-- shared tempo would cycle a punch every 0.54s, too fast to read even with the short Fists stun. At 0.65
+	-- (playback 0.975) a punch lands 0.32s after the press and every 0.65s, still well ahead of a blade's 0.78
+	-- -- see DamageConstants.Hitstun.ByStage for the read it leaves.
 	ByWeapon = {
 		Fists = {
-			Basic = 0.72,
+			Basic = 0.65,
 		},
 	} :: { [string]: { [string]: number } },
 }
@@ -216,6 +230,60 @@ AttackConstants.HitConfirm = {
 	-- from a swing it started a little earlier than the server did. So the server accepts an evade cut
 	-- this much before its own cut point rather than refusing the evade frames over clock skew.
 	EvadeLatencyToleranceSeconds = 0.08,
+}
+
+-- THE GUARD CUT (2026-09-30). A guard pressed during your own swing's RECOVERY comes up partway through
+-- it instead of at the very end. Before this the guard waited for the whole clip, so a block pressed right
+-- after a whiffed M1 arrived ~0.12s later than the player asked for it -- read as "I pressed block and
+-- nothing happened".
+--
+--   * RecoveryKeepFraction -- how much of the recovery still plays before the guard may cut it. 0.3 keeps
+--     the first 30%: committing to a swing still costs something, a whiff is still punishable by a fast
+--     enough answer, but the tail of the follow-through no longer holds a guard hostage.
+--
+-- Windup and active are NEVER cut: a swing you threw is a swing you threw. The guard it raises is a
+-- BLOCK, never a parry (DefenseSystem raises a deferred press block-only), so a whiff cannot be turned
+-- into a free parry. Air moves never take it (the air string's own grammar). Served by
+-- AttackRequestSystem.Step (server) and LocalCombatState.GuardFreeAt (the client's guard animation).
+AttackConstants.GuardCut = {
+	Enabled = true,
+	RecoveryKeepFraction = 0.3,
+}
+
+-- When a swing's recovery may be cut by a guard (GuardCut), from the timeline it was thrown with. One
+-- definition for the server and the client's mirror of it.
+function AttackConstants.GuardCutAt(
+	startedAt: number,
+	windupSeconds: number,
+	activeSeconds: number,
+	recoverySeconds: number
+): number
+	return startedAt
+		+ windupSeconds
+		+ activeSeconds
+		+ recoverySeconds * math.clamp(AttackConstants.GuardCut.RecoveryKeepFraction, 0, 1)
+end
+
+-- THE ATTACKER'S LATENCY REFUND (2026-09-30). The swing animation is predicted: it starts on the
+-- attacker's screen the instant they press. The server used to start the swing's clock when the press
+-- ARRIVED, so its hitbox always ran one network trip behind the animation the attacker was watching --
+-- and in an exchange, the lower-ping player's swing always came out first. The defence layer has refunded
+-- the DEFENDER's latency on a parry press for a long time (DefenseConstants.Parry.RewindMaxSeconds); this
+-- is the same refund on the other side.
+--
+-- A player's swing is judged to have started min(ping / 2, MaxLeadSeconds) before the press arrived --
+-- half the round trip, because the press only made the one trip (the parry rewind uses the whole round
+-- trip because the defender was reacting to a swing that had to reach them first). The lead is never
+-- allowed to reach back past the moment the body became free to swing -- its last swing, a stun, a
+-- stagger, the chain beat, a cooldown -- so it refunds the wire and nothing else
+-- (AttackRequestSystem.throw). Only the WINDUP ever shortens: HitboxEngine.RequestAttack refuses to
+-- backdate a swing so far that its Active window would already have been due.
+--
+-- Air moves take none (the air combo judges its own deadline against a rewound start already --
+-- AirComboMachine.NoteSwingAccepted), and neither does a bot or a dummy, which has no connection.
+AttackConstants.Latency = {
+	Enabled = true,
+	MaxLeadSeconds = 0.1,
 }
 
 -- THE HEAVY TELL (2026-09-29). A swing at or above MinPowerLevel -- every Heavy stage, the launcher, the
@@ -388,6 +456,10 @@ AttackConstants.Network = {
 		-- AttackTypes.AttackCancelledPayload. Senders: a feint, and a parry (which only restores the
 		-- client's string mirror -- see AttackRequestSystem.KeepChainThroughParry).
 		Cancelled = "Attack_Cancelled",
+		-- Server -> each client the shots concern (ProjectileRelevanceStuds below), at most once per
+		-- engine frame while shots are flying: the batch of launches, bounces, retargets and ends
+		-- (AttackTypes.ProjectileBatchPayload), which Client/FX/ProjectileFX.lua draws. Presentation only.
+		Projectile = "Attack_Projectile",
 	},
 
 	-- Sized against DefenseConstants.Network.MaxCallsPerSecondPerPlayer (12) as the established
@@ -397,7 +469,14 @@ AttackConstants.Network = {
 	--
 	-- A throttled request is dropped, NOT buffered: the buffer exists to forgive a mistimed press,
 	-- not to hand a mashing client a queue.
-	MaxCallsPerSecondPerPlayer = 10,
+	--
+	-- RAISED TO 30 (2026-09-30), "M1 chains sometimes just stop in the middle". The bucket is a FIXED one-
+	-- second window, and a player mashing M1 -- the normal way to play a string -- clicks 10-15 times a
+	-- second. So the 11th click of any second was dropped: if that click was the one the buffer needed for
+	-- the next stage, the string simply ended, and the client, which had already predicted the swing,
+	-- played it and then cut it as unconfirmed. Every press past the gate costs one table write (the
+	-- one-slot buffer), so 30 still bounds a spammer at trivial cost while no human mash reaches it.
+	MaxCallsPerSecondPerPlayer = 30,
 
 	-- The swap key gets its own, much tighter bucket. Swapping is a deliberate act, not a combat
 	-- rhythm, and a swap costs a registry lookup plus a string reset -- there is no legitimate reason
@@ -407,6 +486,14 @@ AttackConstants.Network = {
 	-- The feint key's own bucket. A legal feint needs a swing in its windup first, which is itself
 	-- gated by the request bucket above, so more than a few a second is never legitimate.
 	MaxFeintsPerSecondPerPlayer = 4,
+
+	-- Attack_Projectile's RELEVANCE RADIUS (Server/Combat/Attack/ProjectileRelevance.lua). A client is sent
+	-- a shot only if its path passes within this many studs of that player's character (or the player
+	-- threw it, or is its homing target, or has no character to measure from). A shot's draw ball is a
+	-- few studs across, so past this it is a handful of pixels at most -- and before this existed, every
+	-- shot anywhere in the server was sent to and drawn by every client, which is how one realm's
+	-- strikes dropped frames for players nowhere near it.
+	ProjectileRelevanceStuds = 350,
 }
 
 -- Feint ---------------------------------------------------------------------------------------------
@@ -466,6 +553,15 @@ AttackConstants.Windows = {
 	-- the timing is the move's authored numbers either way.
 	BorrowedClipMinSpeed = 0.5,
 	BorrowedClipMaxSpeed = 2.5,
+	-- A CLIP THE AUTHORED TIMELINE CANNOT FIT (2026-09-30). With no Hit marker, a move whose windup + active
+	-- runs past the end of its own clip opened its hitbox after the animation had already finished --
+	-- every weapon's Heavy and Launcher did (boot log: "Hitbox closes after its clip ends"), so the blow
+	-- landed on screen and THEN hit. For exactly that case AttackCatalog (step 1c) moves the hitbox onto the
+	-- clip's estimated strike (AttackWindows.EstimateStrikeTime) and slows the clip toward the authored
+	-- windup so the move keeps its weight: never faster than the weapon plays it, never slower than
+	-- RetimeMinFactor of that. false restores the old behaviour. A Hit marker on the clip replaces all of it.
+	RetimeUnfitClips = true,
+	RetimeMinFactor = 0.75,
 }
 
 -- Presentation ----------------------------------------------------------------------------------
@@ -551,6 +647,29 @@ AttackConstants.Presentation = {
 		-- server evidently refused the press, and the predicted swing is cut rather than left playing a
 		-- move that never happened.
 		ConfirmGraceSeconds = 0.1,
+	},
+
+	-- THE PREDICTED HIT (2026-09-30). Client/Combat/HitPrediction.lua plays the attacker's impact -- the
+	-- thud, the flash, the exchange freeze, the target's flinch -- the frame their own swing's volume
+	-- overlaps a target on their own screen, instead of a full round trip (plus up to
+	-- DefenseConstants.Parry.RewindMaxSeconds of lag-rewind hold) later. Invisible in Studio, where the
+	-- round trip is zero; on a real server it is the difference between a punch that lands and a punch
+	-- that lands and then, a beat later, hits.
+	--
+	-- COSMETIC, AND IT CAN BE WRONG: the server may still rule the hit blocked, parried or evaded. Two
+	-- things keep that rare and readable. A target visibly guarding or evading is never predicted (that
+	-- is where nearly every reversal comes from). And the server's verdict always plays in full when it
+	-- disagrees -- a predicted thud followed by a parry clang reads as "they parried it", which is true.
+	-- A matching Clean verdict skips only what was already played; damage numbers always wait for it.
+	HitPrediction = {
+		Enabled = true,
+		-- A target's ROOT is tested against the box, so the box is grown by roughly a body's half-extent --
+		-- the engine tests every part of the body, not just its centre.
+		PadStuds = 1,
+		PadHeightStuds = 2.5,
+		-- How long a predicted hit waits to be matched by the server's verdict for the same target and
+		-- move before it is forgotten (a prediction the server never confirmed: a miss it called a hit).
+		MatchSeconds = 0.8,
 	},
 
 	-- The forward step a confirmed swing carries the LOCAL player's own body through

@@ -38,6 +38,8 @@ EditorConstants.MoveEditor = {
 	-- LocksMovement -- and every block with no runtime (Projectile, Movement, ObjectStun, Slam,
 	-- ArcDegrees, the clip timeline, Knockback.RagdollSeconds) was deleted. v1/v2 records are upgraded
 	-- on load by Server/Systems/Support/MoveRecordCodec.lua; nothing rewrites them until their next save.
+	-- Still 3 after 2026-09-30's Projectile block (a real, flown move type this time): it is an optional
+	-- block a v3 record either carries or does not, so it needed no version -- see MoveRecordCodec's header.
 	SchemaVersion = 3,
 
 	-- Between a field edit and the Preview round trip it triggers: long enough that dragging a stepper
@@ -59,6 +61,21 @@ EditorConstants.MoveEditor = {
 	-- window slides, so it bounds the gap between two edits, not the length of the burst.
 	UndoDepth = 50,
 	UndoCoalesceSeconds = 0.4,
+
+	-- Bulk edit (MoveEditor_BulkScale): the multiplier range one call may apply per field (the UI's
+	-- -75%..+300%), and how many moves one call may touch -- a bound on the per-call work and DataStore
+	-- writes, since the rate limit counts the call once however many moves it scales.
+	BulkScaleLimits = { Min = 0.25, Max = 4 },
+	BulkScaleMaxMoves = 64,
+
+	-- Saved versions kept per move ("MoveHistory_<id>" in the move DataStore), oldest dropped first.
+	HistoryDepth = 10,
+
+	-- Studio-only "Write to source": where scripts/move-writer.py listens. Localhost only -- the helper
+	-- binds 127.0.0.1, and Phase 0a (2026-09-29) confirmed a Studio play-mode server can reach it.
+	SourceWriter = {
+		Url = "http://localhost:34880",
+	},
 
 	-- How long an irreversible action (Delete, Revert, closing with unsaved work) stays armed after its
 	-- first press. The second press inside the window commits; anything else disarms.
@@ -140,6 +157,19 @@ EditorConstants.MoveEditor = {
 		-- Fire-and-forget: the editor opened or closed, so the server freezes/unfreezes the admin through
 		-- AdminActionSystem.SetFrozen.
 		SetEditorOpen = "MoveEditor_SetEditorOpen",
+		-- Multiplies chosen timing/impact fields of every move in one browser group (optionally one stage
+		-- of a weapon's string), live or live-and-saved. Scales CURRENT live values, so it is cumulative.
+		BulkScale = "MoveEditor_BulkScale",
+		-- A move's saved versions, newest first, each with a server-written summary of what it changed.
+		History = "MoveEditor_History",
+		-- Makes one saved version LIVE again (a Preview, not a Save) so the admin can review it and Save.
+		RestoreVersion = "MoveEditor_RestoreVersion",
+		-- STUDIO ONLY (created in every build; outside Studio each refuses NotStudio). Write the live move
+		-- into src/ as a ModuleScript through scripts/move-writer.py and drop its DataStore copy; remove that
+		-- file again; or just return the text it would write.
+		WriteToSource = "MoveEditor_WriteToSource",
+		RemoveFromSource = "MoveEditor_RemoveFromSource",
+		ExportSource = "MoveEditor_ExportSource",
 	},
 }
 

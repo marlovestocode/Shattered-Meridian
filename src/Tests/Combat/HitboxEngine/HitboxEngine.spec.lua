@@ -411,6 +411,108 @@ return function()
 			expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(nil)
 		end)
 
+		it("holds the body, not just the parkour hand-over: SwingRooted rides the lock both ways", function()
+			-- RootControlLocked parks parkour and the camera; it never zeroed anyone's speed. SwingRooted is what
+			-- RunSystem pins WalkSpeed to 0 off, so a move's "Locks movement" actually stops the attacker.
+			local ROOTED = HitboxEngineConstants.SwingRootedAttribute
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			expect(attacker.Humanoid:GetAttribute(ROOTED)).to.equal(nil)
+
+			HitboxEngine.RequestAttack(
+				attacker.Id,
+				makeDefinition({ LocksMovement = true, ActiveSeconds = 0.1, RecoverySeconds = 0.05 }),
+				1,
+				0
+			)
+			local base = os.clock()
+			HitboxEngine.Step(FRAME, base + 0.01)
+			expect(attacker.Humanoid:GetAttribute(ROOTED)).to.equal(true)
+			expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(true)
+
+			HitboxEngine.Step(FRAME, base + 0.5)
+			expect(attacker.Humanoid:GetAttribute(ROOTED)).to.equal(nil)
+		end)
+
+		it("never roots a body for a non-locking swing", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ LocksMovement = false }), 1, 0)
+			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+			expect(attacker.Humanoid:GetAttribute(HitboxEngineConstants.SwingRootedAttribute)).to.equal(nil)
+		end)
+
+		it("locks the WINDUP: held from the swing's first instant, released as the Active window opens", function()
+			local ROOTED = HitboxEngineConstants.SwingRootedAttribute
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			HitboxEngine.RequestAttack(
+				attacker.Id,
+				makeDefinition({ LocksWindup = true, WindupSeconds = 0.3, ActiveSeconds = 0.2, RecoverySeconds = 0.5 }),
+				1,
+				0
+			)
+			local base = os.clock()
+			-- Before the engine has even stepped: the body is already held.
+			expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(true)
+			expect(attacker.Humanoid:GetAttribute(ROOTED)).to.equal(true)
+
+			HitboxEngine.Step(FRAME, base + 0.1)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Windup")
+			expect(attacker.Humanoid:GetAttribute(ROOTED)).to.equal(true)
+
+			-- Active opens: a windup-only lock lets go.
+			HitboxEngine.Step(FRAME, base + 0.35)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Active")
+			expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(nil)
+			expect(attacker.Humanoid:GetAttribute(ROOTED)).to.equal(nil)
+		end)
+
+		it(
+			"carries one unbroken lock through the whole swing when it locks the windup AND the active window",
+			function()
+				local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+				HitboxEngine.RequestAttack(
+					attacker.Id,
+					makeDefinition({
+						LocksWindup = true,
+						LocksMovement = true,
+						WindupSeconds = 0.3,
+						ActiveSeconds = 0.2,
+						RecoverySeconds = 0.5,
+					}),
+					1,
+					0
+				)
+				local base = os.clock()
+				expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(true)
+				HitboxEngine.Step(FRAME, base + 0.35)
+				expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Active")
+				expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(true)
+				HitboxEngine.Step(FRAME, base + 0.7)
+				expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Recovery")
+				expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(true)
+				HitboxEngine.Step(FRAME, base + 1.5)
+				expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(nil)
+			end
+		)
+
+		it("releases a windup lock when the swing is cut in the windup", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			HitboxEngine.RequestAttack(
+				attacker.Id,
+				makeDefinition({ LocksWindup = true, WindupSeconds = 0.5, ActiveSeconds = 0.2 }),
+				1,
+				0
+			)
+			expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(true)
+			HitboxEngine.CancelAttack(attacker.Id, "Parried")
+			expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(nil)
+		end)
+
+		it("never holds the body in a windup that does not ask for it", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ WindupSeconds = 0.3 }), 1, 0)
+			expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(nil)
+		end)
+
 		it("holds the lock through recovery, so a heavy attack cannot be cancelled by moving", function()
 			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
 			HitboxEngine.RequestAttack(
@@ -689,6 +791,102 @@ return function()
 			expect(report.Dimensions.Width).to.equal(4)
 			expect(report.Dimensions.Height).to.equal(6)
 			expect(report.Dimensions.Length).to.equal(6)
+		end)
+	end)
+
+	-- AttackConstants.Latency: a player's swing is started a little before its press arrived. The engine owns
+	-- the two limits that are about the swing itself.
+	describe("HitboxEngine.RequestAttack -- a backdated start", function()
+		it("starts the swing at the requested moment and says so", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local requested = os.clock() - 0.05
+			local accepted, _, begunAt =
+				HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ WindupSeconds = 0.4 }), 1, 0, requested)
+			expect(accepted).to.equal(true)
+			expect(begunAt).to.be.near(requested, 1e-6)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Windup")
+		end)
+
+		it("never backdates so far that the Active window would already be due", function()
+			-- Only the windup shortens: a backdated swing can never hit on the frame it arrives.
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local before = os.clock()
+			local _, _, begunAt =
+				HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ WindupSeconds = 0.1 }), 1, 0, before - 5)
+			assert(begunAt, "an accepted swing reports its start")
+			expect(begunAt > before - 0.1).to.equal(true)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Windup")
+		end)
+
+		it("never backdates into the combatant's previous swing", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local _, _, firstBegun =
+				HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ ActiveSeconds = 0.05 }), 1, 0)
+			assert(firstBegun, "an accepted swing reports its start")
+			HitboxEngine.Step(FRAME, firstBegun + 0.2)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Idle")
+
+			local _, _, secondBegun =
+				HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ WindupSeconds = 10 }), 1, 0, firstBegun - 5)
+			assert(secondBegun, "an accepted swing reports its start")
+			expect(secondBegun >= firstBegun + 0.05 - 1e-6).to.equal(true)
+		end)
+
+		it("ignores a start in the future and starts now", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local before = os.clock()
+			local _, _, begunAt = HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0, before + 10)
+			assert(begunAt, "an accepted swing reports its start")
+			expect(begunAt >= before).to.equal(true)
+			expect(begunAt <= os.clock()).to.equal(true)
+		end)
+	end)
+
+	-- HitboxEngineConstants.TargetTrail: a moving target is also tested where the attacker most likely saw it.
+	describe("HitboxEngine -- the moving-target allowance", function()
+		-- The spec box spans z -1 to -7 in front of the attacker (plus the narrow-phase margin). A target
+		-- centred at -8.5 is a stud and a half past its far edge.
+		local EDGE_Z = -8.5
+
+		it("still misses a target standing just past the edge", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			makeDummy("Target", Vector3.new(0, 5, EDGE_Z))
+			local hits, disconnect = captureHits()
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
+			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+			disconnect()
+
+			expect(#hits).to.equal(0)
+		end)
+
+		it("catches a target backing away just past the edge", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = makeDummy("Target", Vector3.new(0, 5, EDGE_Z))
+			-- Walking away at 18 studs/s: the attacker was looking at it ~1.8 studs closer.
+			target.Root.AssemblyLinearVelocity = Vector3.new(0, 0, -18)
+			local hits, disconnect = captureHits()
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
+			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+			disconnect()
+
+			expect(#hits).to.equal(1)
+		end)
+
+		it("does not reach AHEAD of a target that is closing in", function()
+			-- The trail is only ever behind a body, along its own motion: one walking toward the attacker was
+			-- further away a moment ago, not closer.
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = makeDummy("Target", Vector3.new(0, 5, EDGE_Z))
+			target.Root.AssemblyLinearVelocity = Vector3.new(0, 0, 18)
+			local hits, disconnect = captureHits()
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
+			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+			disconnect()
+
+			expect(#hits).to.equal(0)
 		end)
 	end)
 end

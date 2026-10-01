@@ -512,4 +512,122 @@ return function()
 			expect(reason).to.equal("NotHolding")
 		end)
 	end)
+
+	-- Real R6 rigs, because the throw clip plays through AnimationManager on the holder's own Animator.
+	-- The id never resolves to a real asset here, so its Length stays 0 and nothing but the clock
+	-- this spec drives (GrabSystem's own deadline) can end the clip within a case: the launch-on-finish
+	-- path itself is AnimationManager's, and is covered by its own spec.
+	describe("GrabSystem.Throw -- with a ThrowAnimation", function()
+		local THROW_CONFIG: MoveTypes.MoveGrabConfig = table.clone(GRAB_CONFIG)
+		THROW_CONFIG.ThrowAnimation = "rbxassetid://1"
+
+		local function throwGrabHitR6(base: number): (Dummy, Dummy)
+			overrideMoveWithGrab(THROW_CONFIG)
+			local attacker = makeR6("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
+			local defender = makeR6("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			return attacker, defender
+		end
+
+		it("keeps the victim welded in the hand while the clip plays", function()
+			local base = os.clock()
+			local attacker, defender = throwGrabHitR6(base)
+
+			local accepted = GrabSystem.Throw(attacker.Model, base + 2 * FRAME)
+
+			expect(accepted).to.equal(true)
+			expect(GrabSystem.IsThrowing(attacker.Model)).to.equal(true)
+			expect(GrabSystem.IsHeld(defender.Model)).to.equal(true)
+			expect(GrabSystem.IsInFlight(defender.Model)).to.equal(false)
+			expect(holdWeldOf(defender)).to.be.ok()
+		end)
+
+		it("refuses a second press while the first throw's clip is still playing", function()
+			local base = os.clock()
+			local attacker = throwGrabHitR6(base)
+
+			GrabSystem.Throw(attacker.Model, base + 2 * FRAME)
+			local accepted, reason = GrabSystem.Throw(attacker.Model, base + 3 * FRAME)
+
+			expect(accepted).to.equal(false)
+			expect(reason).to.equal("AlreadyThrowing")
+		end)
+
+		it("hands the holder's arm to the clip but keeps the victim's hold pose", function()
+			overrideMoveWithGrab(THROW_CONFIG)
+			local base = os.clock()
+			local attacker = makeR6("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
+			local defender = makeR6("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
+			local shoulder = (attacker.Model:FindFirstChild("Torso") :: BasePart):FindFirstChild(
+					"Right Shoulder"
+				) :: Motor6D
+			local restC0 = shoulder.C0
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			expect(shoulder.C0 == restC0).to.equal(false)
+
+			GrabSystem.Throw(attacker.Model, base + 2 * FRAME)
+
+			expect(shoulder.C0).to.equal(restC0)
+			expect(CollectionService:HasTag(attacker.Model, GrabConstants.Hold.HolderTag)).to.equal(false)
+			expect(attacker.Model:GetAttribute(GrabConstants.Hold.ArmAttribute)).to.equal(nil)
+			expect(CollectionService:HasTag(defender.Model, GrabConstants.Hold.HeldTag)).to.equal(true)
+		end)
+
+		it("is not released by HoldSeconds once the throw is committed", function()
+			local base = os.clock()
+			local attacker, defender = throwGrabHitR6(base)
+
+			GrabSystem.Throw(attacker.Model, base + 2 * FRAME)
+			step(FRAME, base + 2 * FRAME + GRAB_CONFIG.HoldSeconds + FRAME)
+
+			expect(GrabSystem.IsHolding(attacker.Model)).to.equal(true)
+			expect(GrabSystem.IsHeld(defender.Model)).to.equal(true)
+			expect(GrabSystem.IsInFlight(defender.Model)).to.equal(false)
+		end)
+
+		it("launches the victim itself if the clip's finish never arrives", function()
+			local base = os.clock()
+			local attacker, defender = throwGrabHitR6(base)
+			local throwing = GrabConstants.Throw
+
+			GrabSystem.Throw(attacker.Model, base + 2 * FRAME)
+			step(FRAME, base + 2 * FRAME + throwing.MaxClipSeconds + throwing.DeadlineGraceSeconds + FRAME)
+
+			expect(GrabSystem.IsHolding(attacker.Model)).to.equal(false)
+			expect(GrabSystem.IsInFlight(defender.Model)).to.equal(true)
+			expect(holdWeldOf(defender)).to.equal(nil)
+		end)
+
+		it("hands the victim's arms to their thrown clip from the press, while still held", function()
+			local config: MoveTypes.MoveGrabConfig = table.clone(THROW_CONFIG)
+			config.VictimThrowAnimation = "rbxassetid://2"
+			overrideMoveWithGrab(config)
+			local base = os.clock()
+			local attacker = makeR6("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
+			local defender = makeR6("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			-- No held clip authored, so the client pose owns the victim's hands during the hold.
+			expect(defender.Model:GetAttribute(GrabConstants.Hold.VictimAnimatedAttribute)).to.equal(nil)
+
+			GrabSystem.Throw(attacker.Model, base + 2 * FRAME)
+
+			expect(GrabSystem.IsHeld(defender.Model)).to.equal(true)
+			expect(defender.Model:GetAttribute(GrabConstants.Hold.VictimAnimatedAttribute)).to.equal(true)
+		end)
+
+		it("releases rather than throws when the victim dies mid-clip", function()
+			local base = os.clock()
+			local attacker, defender = throwGrabHitR6(base)
+
+			GrabSystem.Throw(attacker.Model, base + 2 * FRAME)
+			defender.Humanoid.Health = 0
+			step(FRAME, base + 3 * FRAME)
+
+			expect(GrabSystem.IsHolding(attacker.Model)).to.equal(false)
+			expect(GrabSystem.IsInFlight(defender.Model)).to.equal(false)
+		end)
+	end)
 end

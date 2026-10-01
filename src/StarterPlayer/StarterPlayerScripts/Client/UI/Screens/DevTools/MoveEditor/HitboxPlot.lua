@@ -22,6 +22,13 @@
 	instead, which moves with the animation -- the readout's notes say so; this view cannot know where the
 	part will be mid-swing.
 
+	A PROJECTILE MOVE IS DRAWN AS ITS VOLLEY: every shot's path for its first PROJECTILE_REACH studs, each
+	piece a Capsule of the shot's radius -- the swept volume the server tests a step against -- laid along
+	the points Shared/HitboxEngine/ProjectileMotion flies (Volley for the spread, Path for gravity and
+	acceleration). So a 5-shot 30-degree fan shows five evenly spaced lanes because the server fires five
+	evenly spaced lanes. Drawn as fired "Facing" from the root with no homing: an anchor-aimed or
+	target-aimed volley, and a homing shot's turn, depend on a pose and a target this view does not have.
+
 	Cells are built once and only recoloured on an edit: a few hundred Frames toggling a transparency is
 	cheap, a few hundred being rebuilt on every keystroke is not.
 ]]
@@ -29,7 +36,9 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local HitboxGeometry = require(ReplicatedStorage.Shared.HitboxEngine.HitboxGeometry)
+local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local ProjectileMotion = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileMotion)
 
 local Tokens = require(script.Parent.Parent.Parent.Parent.Tokens)
 local Label = require(script.Parent.Parent.Parent.Parent.Components.Label)
@@ -65,20 +74,100 @@ local BODY_HALF_DEPTH = 0.5
 local BODY_BOTTOM = -3
 local BODY_TOP = 2.5
 
--- The volume's corners in root space, from the engine's own broadphase box.
-local function worldCorners(move: MoveTypes.MoveDefinition): { Vector3 }
-	local size, centre = HitboxGeometry.BoundingBox(move.Shape, move.Dimensions)
-	local frame = move.Offset * centre
+-- How much of a projectile's flight the plot draws, in studs -- enough to read a spread, short enough
+-- that the body stays visible beside it.
+local PROJECTILE_REACH = 24
+-- Pieces per shot path when something bends it (gravity, acceleration); a straight shot is one.
+local CURVED_PATH_SEGMENTS = 4
+-- Past this many volumes a cell takes fewer depth samples, so a wide volley still redraws at drag speed.
+local MANY_VOLUMES = 8
+local FEW_DEPTH_SAMPLES = 3
+
+-- One volume to rasterise: a shape at a root-space pose, plus that pose's inverse and the root-space
+-- box around it (a cell outside the box skips the exact test).
+type Volume = {
+	Shape: MoveTypes.MoveShape,
+	Dimensions: MoveTypes.MoveDimensions,
+	Inverse: CFrame,
+	Min: Vector3,
+	Max: Vector3,
+}
+
+local function newVolume(shape: MoveTypes.MoveShape, dimensions: MoveTypes.MoveDimensions, pose: CFrame): Volume
+	local size, centre = HitboxGeometry.BoundingBox(shape, dimensions)
+	local frame = pose * centre
 	local half = size / 2
-	local corners: { Vector3 } = {}
+	local low, high = Vector3.one * math.huge, -Vector3.one * math.huge
 	for _, sx in { -1, 1 } do
 		for _, sy in { -1, 1 } do
 			for _, sz in { -1, 1 } do
-				table.insert(corners, frame:PointToWorldSpace(Vector3.new(half.X * sx, half.Y * sy, half.Z * sz)))
+				local corner = frame:PointToWorldSpace(Vector3.new(half.X * sx, half.Y * sy, half.Z * sz))
+				low, high = low:Min(corner), high:Max(corner)
 			end
 		end
 	end
+	return { Shape = shape, Dimensions = dimensions, Inverse = pose:Inverse(), Min = low, Max = high }
+end
+
+-- A projectile's volley as Capsules along each shot's path (see this file's header).
+local function volleyVolumes(move: MoveTypes.MoveDefinition, spec: MoveTypes.MoveProjectileConfig): { Volume }
+	local volumes: { Volume } = {}
+	local aim = CFrame.new(move.Offset.Position) * move.Offset.Rotation
+	local curved = spec.Gravity ~= 0 or spec.Acceleration ~= 0
+	local segments = if curved then CURVED_PATH_SEGMENTS else 1
+	for _, shot in ProjectileMotion.Volley(spec, aim) do
+		local points = ProjectileMotion.Path(spec, shot, PROJECTILE_REACH, segments)
+		for index = 1, #points - 1 do
+			local a, b = points[index], points[index + 1]
+			local delta = b - a
+			local length = delta.Magnitude
+			local dimensions = HitboxTypes.DefaultDimensions()
+			dimensions.Radius = spec.Size
+			dimensions.Length = length
+			local pose = if length > 1e-4
+				then CFrame.lookAt(
+					(a + b) / 2,
+					b,
+					if math.abs(delta.Unit.Y) > 0.999 then Vector3.xAxis else Vector3.yAxis
+				)
+				else CFrame.new(a)
+			table.insert(volumes, newVolume("Capsule", dimensions, pose))
+		end
+		if #points == 1 then
+			local dimensions = HitboxTypes.DefaultDimensions()
+			dimensions.Radius = spec.Size
+			table.insert(volumes, newVolume("Sphere", dimensions, CFrame.new(points[1])))
+		end
+	end
+	return volumes
+end
+
+-- Everything the plot draws for a move, in root space.
+local function volumesOf(move: MoveTypes.MoveDefinition): { Volume }
+	local spec = move.Projectile
+	if spec then
+		return volleyVolumes(move, spec)
+	end
+	return { newVolume(move.Shape, move.Dimensions, move.Offset) }
+end
+
+-- The volumes' corners in root space, from the engine's own broadphase boxes.
+local function worldCorners(volumes: { Volume }): { Vector3 }
+	local corners: { Vector3 } = {}
+	for _, volume in volumes do
+		table.insert(corners, volume.Min)
+		table.insert(corners, volume.Max)
+	end
 	return corners
+end
+
+local function insideBox(volume: Volume, point: Vector3): boolean
+	return point.X >= volume.Min.X
+		and point.X <= volume.Max.X
+		and point.Y >= volume.Min.Y
+		and point.Y <= volume.Max.Y
+		and point.Z >= volume.Min.Z
+		and point.Z <= volume.Max.Z
 end
 
 type Fit = {
@@ -226,17 +315,26 @@ local function HitboxPlot(scope: Scope, props: HitboxPlotProps): Frame
 			return
 		end
 
-		local fit = fitView(props.View, worldCorners(move))
-		local inverse = move.Offset:Inverse()
-		local depthStep = if DEPTH_SAMPLES > 1 then (fit.DepthMax - fit.DepthMin) / (DEPTH_SAMPLES - 1) else 0
+		local volumes = volumesOf(move)
+		local fit = fitView(props.View, worldCorners(volumes))
+		local depthSamples = if #volumes > MANY_VOLUMES then FEW_DEPTH_SAMPLES else DEPTH_SAMPLES
+		local depthStep = if depthSamples > 1 then (fit.DepthMax - fit.DepthMin) / (depthSamples - 1) else 0
 		for row = 0, GRID - 1 do
 			for column = 0, GRID - 1 do
 				local lit = false
-				for sample = 0, DEPTH_SAMPLES - 1 do
+				for sample = 0, depthSamples - 1 do
 					local depth = fit.DepthMin + depthStep * sample
 					local point = cellPoint(props.View, column, row, fit.HalfExtent, depth)
-					if HitboxGeometry.ContainsPoint(move.Shape, move.Dimensions, inverse * point, 0) then
-						lit = true
+					for _, volume in volumes do
+						if
+							insideBox(volume, point)
+							and HitboxGeometry.ContainsPoint(volume.Shape, volume.Dimensions, volume.Inverse * point, 0)
+						then
+							lit = true
+							break
+						end
+					end
+					if lit then
 						break
 					end
 				end

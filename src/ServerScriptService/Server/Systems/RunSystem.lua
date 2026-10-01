@@ -38,7 +38,8 @@
 	                            hold-then-flight lifetime -- pinned by the same fist (or, mid-air, by
 	                            nothing but the thrown velocity itself) that already owns their
 	                            RootControlLocked Attribute, so WalkSpeed has nothing legitimate to
-	                            drive either way.
+	                            drive either way. GrabThrowing, the holder's side of the same grab, shares
+                            the tier: rooted for the length of their throw clip.
 	  5. ParkourVelocityOwned-- ParkourSystem. The client's movement framework is driving velocity
 	                            directly for an accepted action; WalkSpeed must stand down entirely or
 	                            the two fight for the same body.
@@ -79,6 +80,7 @@
 
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
@@ -87,6 +89,7 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
+local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local RunConstants = require(ReplicatedStorage.Shared.Run.RunConstants)
 local RunLadder = require(ReplicatedStorage.Shared.Run.RunLadder)
 local Types = require(ReplicatedStorage.Shared.Types)
@@ -128,7 +131,9 @@ type LiveAttributes = {
 	Flying: boolean,
 	EmoteMovementLocked: boolean,
 	Grabbed: boolean,
+	GrabThrowing: boolean,
 	Mounted: boolean,
+	SwingRooted: boolean,
 	-- A parkour action currently owns velocity, so this System writes nothing.
 	ParkourVelocityOwned: boolean,
 	-- Deadlines and states compared against `now` each tick -- the COMPARISON stays per-frame, only
@@ -141,6 +146,12 @@ type LiveAttributes = {
 	-- input Attribute changes. effectiveBaseSpeed used to do this arithmetic, and both reads behind
 	-- it, on every tick for every player.
 	BaseSpeed: number,
+	-- A realm's movement rules (Shared/Domain/DomainRules.lua): its MoveSpeed scale and its Rooted flag, and
+	-- the lease both are read through (server time). The lease is compared every tick -- a realm's rules
+	-- lapse at DomainUntil even if nothing rewrites the Attributes.
+	DomainMoveSpeed: number,
+	DomainRooted: boolean,
+	DomainUntil: number,
 }
 
 -- The Attribute names bindCharacter's one connection actually reacts to. Anything else on the
@@ -151,7 +162,9 @@ local MIRRORED_ATTRIBUTES: { [string]: true } = {
 	[ATTRIBUTES.Flying] = true,
 	[ATTRIBUTES.EmoteMovementLocked] = true,
 	[ATTRIBUTES.Grabbed] = true,
+	[ATTRIBUTES.GrabThrowing] = true,
 	[ATTRIBUTES.Mounted] = true,
+	[ATTRIBUTES.SwingRooted] = true,
 	[ATTRIBUTES.ParkourVelocityOwned] = true,
 	[ATTRIBUTES.CombatBusyUntil] = true,
 	[DefenseConstants.DefenseStateAttribute] = true,
@@ -159,6 +172,9 @@ local MIRRORED_ATTRIBUTES: { [string]: true } = {
 	[ATTRIBUTES.ParkourSpeedFloorExpiry] = true,
 	[ATTRIBUTES.BonusWalkSpeed] = true,
 	[ATTRIBUTES.SpeedMultiplier] = true,
+	[ATTRIBUTES.DomainUntil] = true,
+	[ATTRIBUTES.DomainFlags] = true,
+	[ATTRIBUTES.DomainMoveSpeed] = true,
 }
 
 type PlayerRunState = {
@@ -231,13 +247,18 @@ local function getState(player: Player): PlayerRunState
 			Flying = false,
 			EmoteMovementLocked = false,
 			Grabbed = false,
+			GrabThrowing = false,
 			Mounted = false,
+			SwingRooted = false,
 			ParkourVelocityOwned = false,
 			CombatBusyUntil = 0,
 			DefenseState = "",
 			ParkourSpeedFloor = 0,
 			ParkourSpeedFloorExpiry = 0,
 			BaseSpeed = (CombatConstants.BaseWalkSpeed + CombatConstants.DefaultBonusWalkSpeed),
+			DomainMoveSpeed = 1,
+			DomainRooted = false,
+			DomainUntil = 0,
 		},
 	}
 	playerStates[player] = created
@@ -269,7 +290,9 @@ local function readLiveAttributes(live: LiveAttributes, humanoid: Humanoid): ()
 	live.Flying = humanoid:GetAttribute(ATTRIBUTES.Flying) == true
 	live.EmoteMovementLocked = humanoid:GetAttribute(ATTRIBUTES.EmoteMovementLocked) == true
 	live.Grabbed = humanoid:GetAttribute(ATTRIBUTES.Grabbed) == true
+	live.GrabThrowing = humanoid:GetAttribute(ATTRIBUTES.GrabThrowing) == true
 	live.Mounted = humanoid:GetAttribute(ATTRIBUTES.Mounted) == true
+	live.SwingRooted = humanoid:GetAttribute(ATTRIBUTES.SwingRooted) == true
 	live.ParkourVelocityOwned = humanoid:GetAttribute(ATTRIBUTES.ParkourVelocityOwned) == true
 	live.CombatBusyUntil = numberAttribute(humanoid, ATTRIBUTES.CombatBusyUntil, 0)
 	local defenceState = humanoid:GetAttribute(DefenseConstants.DefenseStateAttribute)
@@ -294,6 +317,18 @@ local function readLiveAttributes(live: LiveAttributes, humanoid: Humanoid): ()
 	local bonus = numberAttribute(humanoid, ATTRIBUTES.BonusWalkSpeed, CombatConstants.DefaultBonusWalkSpeed)
 	local multiplier = numberAttribute(humanoid, ATTRIBUTES.SpeedMultiplier, 1)
 	live.BaseSpeed = (CombatConstants.BaseWalkSpeed + bonus) * multiplier
+
+	-- A realm's two movement rules -- read raw here (the mirror is event-rate) and gated on the lease per
+	-- tick in stepPlayer (realmSpeedScale / realmRooted), which is the DomainRules contract.
+	live.DomainUntil = numberAttribute(humanoid, ATTRIBUTES.DomainUntil, 0)
+	live.DomainMoveSpeed = math.max(numberAttribute(humanoid, ATTRIBUTES.DomainMoveSpeed, 1), 0)
+	local flags = math.floor(numberAttribute(humanoid, ATTRIBUTES.DomainFlags, 0))
+	live.DomainRooted = bit32.band(flags, DomainRules.FlagBits.Rooted) ~= 0
+end
+
+-- Whether a realm's rules still govern this body -- the lease, on the shared server clock.
+local function realmGoverns(live: LiveAttributes): boolean
+	return live.DomainUntil > 0 and live.DomainUntil > Workspace:GetServerTimeNow()
 end
 
 -- Whether some other System has taken this character outright. Tiers 1-4 of the resolver, asked as one
@@ -307,9 +342,17 @@ local function isMovementLocked(live: LiveAttributes): boolean
 		-- resolver" shape as the three above; see Constants.Attributes.Grabbed's own header for why
 		-- this is a separate Attribute from RootControlLocked rather than a widened meaning for it.
 		or live.Grabbed
+		-- The other end of a grab: a holder rooted for their throw clip. See Constants.Attributes.GrabThrowing.
+		or live.GrabThrowing
 		-- Blimp layer (Server/Systems/BlimpSystem.lua) -- true for as long as this player is welded to a
 		-- station. Same shape as Grabbed immediately above; see Constants.Attributes.Mounted's own header.
 		or live.Mounted
+		-- A move that Locks movement holds its attacker from the start of its Active window through its
+		-- recovery (HitboxEngine.setMovementLock). See Constants.Attributes.SwingRooted.
+		or live.SwingRooted
+		-- A realm's Rooted rule (Shared/Domain/DomainRules.lua) -- the same "an external system holds this
+		-- body where it is" tier, gated on the realm's lease.
+		or (live.DomainRooted and realmGoverns(live))
 end
 
 -- The decaying WalkSpeed floor a just-finished parkour action leaves behind (Constants.Attributes.
@@ -504,6 +547,11 @@ local function stepPlayer(player: Player, state: PlayerRunState, deltaTime: numb
 		desired = 0
 	else
 		desired = live.BaseSpeed * RunLadder.SpeedMultiplier(nextStage)
+		-- A realm's MoveSpeed rule scales the gear, and -- like every tier above the floor -- sits under the
+		-- parkour carry below, which can preserve a speed a player earned but never grant one.
+		if live.DomainMoveSpeed ~= 1 and realmGoverns(live) then
+			desired *= live.DomainMoveSpeed
+		end
 		-- A floor rather than a tier, and applied ONLY here -- never to the zeros above. That placement
 		-- is the whole safety argument for this feature's one client-influenced number: a slide's earned
 		-- speed survives into ordinary running, but it cannot peek through an admin freeze, a flight, an

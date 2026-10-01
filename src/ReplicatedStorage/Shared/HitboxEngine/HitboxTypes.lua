@@ -31,11 +31,15 @@
 
 	Does not own: the geometry itself (HitboxGeometry.lua), when a hitbox is live
 	(Server/Combat/HitboxEngine/AttackStateMachine.lua), or what a contact MEANS -- there is
-	deliberately no damage, knockback, blocking or status field anywhere in this file.
+	deliberately no damage, knockback, blocking or status field anywhere in this file. The projectile
+	block's contact record (ProjectileTypes.ProjectileContact) carries a shot's authored parry answers
+	and reflected damage scale as OPAQUE PASSTHROUGH, the way ComboStage and PowerLevel are: the engine
+	stamps them on the report and never reads them; the defence and damage layers do.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
 local Sanitize = require(ReplicatedStorage.Shared.Sanitize)
 
 local HitboxTypes = {}
@@ -107,6 +111,11 @@ export type AttackDefinition = {
 	-- HitboxEngineConstants.RootControlLockedAttribute -- that Attribute is the whole contract with
 	-- the parkour framework.
 	LocksMovement: boolean,
+	-- When true the attacker is held through the WINDUP too: the movement lock is taken as the swing begins
+	-- rather than when the Active window opens. On its own it is released as Active begins (a committed
+	-- wind-up that then lets the strike carry); with LocksMovement as well the one lock simply runs the whole
+	-- swing. Optional: absent is false.
+	LocksWindup: boolean?,
 	-- When true AND Shape == "Box", the engine reads Width/Height/Length for this swing off the
 	-- resolved AttachmentPart's own live Size every time the Active window opens, instead of off
 	-- BaseDimensions -- BaseDimensions.Radius/InnerRadius/AngleDegrees (unused by Box) still flow
@@ -126,6 +135,11 @@ export type AttackDefinition = {
 	-- Types.HitboxAttackDefinition.SizeMultiplier's own header for the full chain. Ignored whenever
 	-- SizeFromAttachmentPart is false, same as BaseDimensions already scales by hand in that case.
 	SizeMultiplier: number?,
+	-- Present = this attack is DELIVERED BY PROJECTILE (ProjectileTypes' header). The swing's lifecycle is
+	-- unchanged -- windup, active, recovery, movement lock -- but when the Active window opens the engine
+	-- launches the volley instead of sampling Shape/BaseDimensions on the body, and those two are unread.
+	-- Offset and AttachmentPart still say where it starts: the spawn point is anchor.CFrame * Offset.
+	Projectile: ProjectileTypes.ProjectileSpec?,
 }
 
 -- What the engine answers with. Everything a consumer needs to decide what a contact MEANS, and
@@ -157,6 +171,10 @@ export type HitReport = {
 	-- nothing else on this record is a stable per-move key. The engine still never learns what a
 	-- "move" is; it just stops discarding a string it was already carrying.
 	DebugName: string,
+	-- Present exactly when a projectile made this contact rather than a volume on the attacker's body
+	-- (ProjectileTypes.ProjectileContact). Absent on every swing's report, so every consumer that predates
+	-- projectiles reads a report exactly as it always did.
+	Projectile: ProjectileTypes.ProjectileContact?,
 }
 
 -- Per-field bounds. Upper bounds are generous -- this is a "no NaN, no negative, nothing absurd"
@@ -328,6 +346,20 @@ function HitboxTypes.SanitizeDefinition(raw: unknown): (AttackDefinition, { stri
 		maxTargets = Sanitize.ClampNumberOr(source.MaxTargetsPerSwing, 1, 128, 1)
 	end
 
+	-- Through the same gate an authored move's block passed (MoveRegistryManager.Validate), so a caller
+	-- that skipped it still cannot hand the flight a NaN. A block that fails it is not dropped -- that
+	-- would turn a projectile into an invisible melee swing -- but replaced with the defaults and noted.
+	local projectile: ProjectileTypes.ProjectileSpec? = nil
+	if source.Projectile ~= nil then
+		local spec, reason = ProjectileTypes.Validate(source.Projectile)
+		if spec then
+			projectile = spec
+		else
+			projectile = ProjectileTypes.Defaults()
+			table.insert(problems, `Projectile block rejected ({reason}); flying the defaults`)
+		end
+	end
+
 	return {
 		DebugName = if typeof(source.DebugName) == "string" then source.DebugName :: string else "UnnamedAttack",
 		Shape = shape,
@@ -340,12 +372,14 @@ function HitboxTypes.SanitizeDefinition(raw: unknown): (AttackDefinition, { stri
 		RecoverySeconds = Sanitize.ClampNumberOr(source.RecoverySeconds, 0, 30, 0),
 		MaxTargetsPerSwing = maxTargets,
 		LocksMovement = source.LocksMovement == true,
+		LocksWindup = source.LocksWindup == true,
 		SizeFromAttachmentPart = source.SizeFromAttachmentPart == true,
 		-- Same floor as HitboxEngineConstants.MinScaleMultiplier and the same reasoning: a zero or
 		-- negative multiplier would collapse or invert the box, so a mis-authored value is clamped to
 		-- merely small rather than broken. 16 is generous the same way FIELD_BOUNDS' own uppers are --
 		-- a "no NaN, no negative, nothing absurd" guard, not a balance pass.
 		SizeMultiplier = Sanitize.ClampNumberOr(source.SizeMultiplier, 0.05, 16, 1),
+		Projectile = projectile,
 	},
 		problems
 end

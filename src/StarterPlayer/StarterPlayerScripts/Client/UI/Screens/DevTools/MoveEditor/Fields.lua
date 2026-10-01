@@ -23,13 +23,16 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local MoveEditorTypes = require(ReplicatedStorage.Shared.Authoring.MoveEditorTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local Constants = require(ReplicatedStorage.Shared.Constants)
 
 local Tokens = require(script.Parent.Parent.Parent.Parent.Tokens)
+local ArmedButton = require(script.Parent.Parent.Parent.Parent.Components.ArmedButton)
 local DropdownModule = require(script.Parent.Parent.Parent.Parent.Components.Dropdown)
 local Label = require(script.Parent.Parent.Parent.Parent.Components.Label)
 local NumericFieldModule = require(script.Parent.Parent.Parent.Parent.Components.NumericField)
 local ScrollArea = require(script.Parent.Parent.Parent.Parent.Components.ScrollArea)
 local SectionHeading = require(script.Parent.Parent.Parent.Parent.Components.SectionHeading)
+local Selection = require(script.Parent.Parent.Parent.Parent.Components.Selection)
 local Stack = require(script.Parent.Parent.Parent.Parent.Components.Stack)
 local StatRow = require(script.Parent.Parent.Parent.Parent.Components.StatRow)
 local TextField = require(script.Parent.Parent.Parent.Parent.Components.TextField)
@@ -57,6 +60,8 @@ export type FormContext = {
 local Fields = {}
 
 local STAT_ROW_HEIGHT = 24
+-- SectionHeading's own height, so a fold heading sits exactly where a plain one would.
+local FOLD_HEIGHT = 24
 
 type Range = { Min: number, Max: number }
 
@@ -265,6 +270,61 @@ function Fields.Heading(scope: Scope, text: string, layoutOrder: number, visible
 	})
 end
 
+-- A group heading that FOLDS: the same bronze SectionHeading, pressable, with Hide/Show opposite it.
+-- Returns the heading and a Computed that is true while the group is both visible and open -- every field
+-- in the group takes that as (part of) its Visible, so a folded group costs its fields nothing but
+-- their hidden frames. Open on first mount; the state is per screen session, not saved.
+--
+-- For the long, optional groups a mode adds (the projectile groups): an author tuning one of them does
+-- not have to scroll past four others to reach it, and a group they are done with gets out of the way.
+-- A group that is always relevant stays a plain Fields.Heading.
+--
+-- `startClosed` is for a page made of many such groups (the Presentation tab's sixteen moments), where an
+-- author opens the one they came for rather than scrolling past the fifteen they did not.
+function Fields.Fold(
+	scope: Scope,
+	text: string,
+	layoutOrder: number,
+	visible: UsedAs<boolean>?,
+	startClosed: boolean?
+): (Frame, Fusion.Computed<boolean>)
+	local open = scope:Value(not startClosed)
+	local engagement = Selection.New(scope)
+	local shown = scope:Computed(function(use): boolean
+		local isVisible = if visible == nil then true else use(visible)
+		return isVisible and use(open)
+	end)
+	local heading = scope:New "TextButton" {
+		Name = `Fold_{text}`,
+		Size = UDim2.new(1, 0, 0, FOLD_HEIGHT),
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		Text = "",
+		LayoutOrder = layoutOrder,
+		Visible = visible,
+
+		[Fusion.OnEvent "SelectionGained"] = engagement.OnSelectionGained,
+		[Fusion.OnEvent "SelectionLost"] = engagement.OnSelectionLost,
+		[Fusion.OnEvent "MouseEnter"] = engagement.OnPointerEnter,
+		[Fusion.OnEvent "MouseLeave"] = engagement.OnPointerLeave,
+		[Fusion.OnEvent "Activated"] = function()
+			open:set(not peek(open))
+		end,
+
+		[Fusion.Children] = SectionHeading(scope, {
+			Text = text,
+			Note = scope:Computed(function(use)
+				return if use(open) then "Hide" else "Show"
+			end),
+			NoteColor = scope:Computed(function(use)
+				return if use(engagement.Active) then Tokens.Color.TextPrimary else Tokens.Color.TextSecondary
+			end),
+			Size = UDim2.fromScale(1, 1),
+		}),
+	} :: TextButton
+	return heading :: any, shown
+end
+
 -- One wrapped sentence of context under a heading.
 function Fields.Prose(scope: Scope, text: UsedAs<string>, layoutOrder: number, visible: UsedAs<boolean>?): Frame
 	return Label(scope, {
@@ -303,6 +363,34 @@ function Fields.Page(scope: Scope, name: string, visible: UsedAs<boolean>, child
 		Size = UDim2.fromScale(1, 1),
 		Visible = visible,
 		Children = content,
+	})
+end
+
+export type ArmedButtonSpec = {
+	Idle: string,
+	-- What the button says while armed ("Delete? Again").
+	Armed: string,
+	LayoutOrder: number,
+	Size: UDim2?,
+	Disabled: UsedAs<boolean>?,
+	Visible: UsedAs<boolean>?,
+	OnConfirm: () -> (),
+}
+
+-- A button for an irreversible action: the first press ARMS it (its text says so), a second press inside
+-- Constants.MoveEditor.ConfirmWindowSeconds commits, and the window lapsing disarms it. The mechanism is
+-- Components/ArmedButton (promoted out of here when the admin panel became its second caller); this
+-- only fixes the window and the half-width default every Move Editor call site wants.
+function Fields.ArmedButton(scope: Scope, spec: ArmedButtonSpec): Frame
+	return ArmedButton(scope, {
+		Idle = spec.Idle,
+		Armed = spec.Armed,
+		WindowSeconds = Constants.MoveEditor.ConfirmWindowSeconds,
+		Size = spec.Size or UDim2.new(0.5, -Tokens.Space.S / 2, 0, Tokens.Control.StepButtonSize),
+		LayoutOrder = spec.LayoutOrder,
+		Disabled = spec.Disabled,
+		Visible = spec.Visible,
+		OnConfirm = spec.OnConfirm,
 	})
 end
 

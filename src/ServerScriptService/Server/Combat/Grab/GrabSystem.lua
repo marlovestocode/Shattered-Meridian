@@ -61,6 +61,14 @@
 	for a bot/dummy (SetNetworkOwnershipAuto, which this used to call, would hand a training bot to
 	whichever player happened to be nearest; see TrainingBotSystem's header on why it pins its own bots).
 
+	A THROW CAN WAIT FOR A CLIP. A move that authors MoveGrabConfig.ThrowAnimation turns the press into a
+	commitment: the clip plays once on the holder with the victim still welded to their hand, and the
+	launch above happens at its authored release point, ThrowReleaseAt (beginThrowClip); the rest of the
+	clip plays on as the follow-through. The VICTIM has two clips of their own the same way: a held loop
+	(VictimAnimation) and a thrown one-shot (VictimThrowAnimation) that replaces it on the press and rides
+	the flight until landing (playVictimThrowClip, dropFlight). Until then it is still a hold in every respect
+	CanAttack/IsHolding/IsHeld can see; only HoldSeconds stops applying.
+
 	THE RELEASE ORDER (restoreControl) IS VesselMount.Release's, and for its reason: settle the body's
 	velocity, then hand ownership back, THEN wake the Humanoid. A separated assembly inherits the velocity
 	the attacker's had (a turning attacker's spin included); clearing PlatformStand before zeroing that
@@ -185,9 +193,17 @@ type Hold = {
 	-- The torso-and-arm chain from the holder's root to the hand (GrabRig.HoldJoints), pinned to its rest
 	-- pose every PreSimulation -- see pinHolds. Empty for a root-to-root fallback hold.
 	PinnedJoints: { Motor6D },
-	-- One per body with an authored hold clip, nil otherwise -- see playHoldClip.
+	-- One per body with an authored hold clip, nil otherwise -- see playHoldClip. The attacker's also
+	-- plays the throw clip (beginThrowClip), and is created for it when there was no hold clip.
 	VictimAnimator: AnimationManagerInstance?,
 	AttackerAnimator: AnimationManagerInstance?,
+	-- Set when Throw is pressed on a move with an authored ThrowAnimation: the hold stays welded while the
+	-- clip plays, the hold's own ExpiresAt no longer applies, and Step launches the victim itself at
+	-- this time if the clip's finish never arrives. nil for an ordinary hold.
+	ThrowDeadline: number?,
+	-- True once the victim's thrown clip has replaced their held loop on VictimAnimator (playVictimThrowClip),
+	-- which is what tells launch to hand that manager on to the flight rather than stop it.
+	VictimThrown: boolean?,
 }
 
 -- One flight per thrown victim -- Attacker is carried for impact-damage attribution and to keep the
@@ -204,6 +220,9 @@ type Flight = {
 	LastPosition: Vector3,
 	-- When the body first dropped under Impact.StallSpeed, or nil while it is still moving.
 	StalledSince: number?,
+	-- The victim's thrown clip, carried over from the hold, faded out whenever the flight ends -- see
+	-- dropFlight. nil when the move authors no VictimThrowAnimation.
+	VictimAnimator: AnimationManagerInstance?,
 }
 
 local holds: { [Model]: Hold } = {}
@@ -421,13 +440,21 @@ end
 -- lifetime. PLAYED BY THE SERVER, which is the one machine that can play a clip on a player, a bot and
 -- a debug dummy alike -- a server-loaded track replicates to every client, the held player's own
 -- included. GrabConstants.Animation on why Action4 and why looped.
+local function newGrabAnimator(model: Model, role: GrabRole): AnimationManagerInstance?
+	local manager = AnimationManager.new({ Name = `GrabSystem:{role}:{model.Name}` })
+	if not manager:Bind(model) then
+		manager:Destroy()
+		return nil
+	end
+	return manager
+end
+
 local function playHoldClip(model: Model, clip: string?, role: GrabRole): AnimationManagerInstance?
 	if clip == nil or clip == "" then
 		return nil
 	end
-	local manager = AnimationManager.new({ Name = `GrabSystem:{role}:{model.Name}` })
-	if not manager:Bind(model) then
-		manager:Destroy()
+	local manager = newGrabAnimator(model, role)
+	if not manager then
 		return nil
 	end
 	local animation = GrabConstants.Animation
@@ -626,20 +653,40 @@ end
 
 -- Throw ----------------------------------------------------------------------------------------------
 
--- Ends the hold and launches the victim. PUBLIC, so a bot's decision-making (or a scripted boss beat)
--- can throw through exactly the same path a player's press does -- the same "public function the
--- remote calls, so nothing needs a special case" convention DefenseSystem.SetBlocking/
--- AttackRequestSystem.Press are exposed alongside their own remote handlers for.
-function GrabSystem.Throw(attackerModel: Model, now: number): (boolean, string?)
-	local hold = holds[attackerModel]
-	if not hold then
-		return false, "NotHolding"
+-- Swaps the victim's held loop for their thrown clip (MoveGrabConfig.VictimThrowAnimation), played once
+-- from the throw press on: through the holder's ThrowAnimation, if there is one, and on through the
+-- flight, which fades it out on landing if it is still playing. On the SAME manager and claim as the
+-- held loop, so it replaces that loop rather than layering over it; a victim with no held loop gets a
+-- manager for it now. VictimAnimatedAttribute goes true with it, standing the client's hand pose down
+-- (Client/FX/GrabHoldPose.lua): the victim is still held through the wind-up, and the clip owns the arms.
+local function playVictimThrowClip(hold: Hold): ()
+	local clip = hold.Config.VictimThrowAnimation
+	if clip == nil or clip == "" then
+		return
 	end
-	if hold.VictimRoot.Parent == nil or hold.VictimHumanoid.Parent == nil then
-		releaseHold(attackerModel, hold)
-		return false, "NoCharacter"
+	local manager = hold.VictimAnimator or newGrabAnimator(hold.Victim, "Victim")
+	if not manager then
+		return
 	end
+	hold.VictimAnimator = manager
+	hold.VictimThrown = true
+	hold.Victim:SetAttribute(GrabConstants.Hold.VictimAnimatedAttribute, true)
+	local animation = GrabConstants.Animation
+	manager:Claim(animation.Layer, "GrabSystem", {
+		Clip = clip,
+		Looped = false,
+		ReplicatedOneShot = true,
+		Priority = animation.Priority,
+		FadeIn = GrabConstants.Throw.FadeInSeconds,
+		FadeOut = animation.FadeOutSeconds,
+		-- Only read while the clip's Length is unresolved: the longest the throw can still be running.
+		MaxSeconds = GrabConstants.Throw.MaxClipSeconds + GrabConstants.Impact.MaxFlightSeconds,
+	})
+end
 
+-- Ends the hold and launches the victim -- the throw itself, run on the press when the move authors no
+-- ThrowAnimation, or at that clip's release point (beginThrowClip).
+local function launch(attackerModel: Model, hold: Hold, now: number): ()
 	-- Flattened, so an attacker pitched by a slope or an animation throws along the ground rather than
 	-- into it -- the vertical part of the launch is ThrowUpVelocity's alone. The root, not a hand,
 	-- consistent with every other facing-relative effect in this stack (DamageConstants.AttackerLunge,
@@ -653,6 +700,25 @@ function GrabSystem.Throw(attackerModel: Model, now: number): (boolean, string?)
 	local forward = if flat.Magnitude > 1e-3 then flat.Unit else Vector3.new(0, 0, -1)
 	local config = hold.Config
 	local victimRoot = hold.VictimRoot
+
+	-- A throw clip plays on past the release as the follow-through: its manager comes off the hold so
+	-- detachHold does not fade it out, and the clip's own finish (beginThrowClip's OnFinished) retires
+	-- it. The delay is only the backstop for a finish that never comes -- stopHoldClip fades whatever is
+	-- still playing before destroying, and is harmless on a manager already cleared.
+	local followThrough = if hold.ThrowDeadline ~= nil then hold.AttackerAnimator else nil
+	if followThrough then
+		hold.AttackerAnimator = nil
+		local throwing = GrabConstants.Throw
+		task.delay(throwing.MaxClipSeconds + throwing.DeadlineGraceSeconds, function()
+			stopHoldClip(followThrough)
+		end)
+	end
+
+	-- The victim's thrown clip rides on with the flight the same way (dropFlight ends it).
+	local victimAnimator = if hold.VictimThrown then hold.VictimAnimator else nil
+	if victimAnimator then
+		hold.VictimAnimator = nil
+	end
 
 	detachHold(attackerModel, hold)
 	-- The server takes the now-separate body BEFORE writing its velocity -- see this file's header, THE
@@ -679,6 +745,7 @@ function GrabSystem.Throw(attackerModel: Model, now: number): (boolean, string?)
 		ExpiresAt = now + GrabConstants.Impact.MaxFlightSeconds,
 		LastPosition = victimRoot.Position,
 		StalledSince = nil,
+		VictimAnimator = victimAnimator,
 	}
 
 	debugLog(
@@ -686,16 +753,139 @@ function GrabSystem.Throw(attackerModel: Model, now: number): (boolean, string?)
 		"Grab thrown",
 		{ attacker = attackerModel.Name, victim = hold.Victim.Name }
 	)
+end
+
+-- Plays the move's ThrowAnimation on the holder, once, and launches the victim at its release point
+-- (MoveGrabConfig.ThrowReleaseAt, a fraction of the clip -- Step watches the playhead for it) or at its
+-- end, whichever comes first. Until then the hold stays exactly as it is -- welded, massless,
+-- PlatformStand -- so the victim rides the hand through the wind-up and leaves it from wherever the
+-- clip has the hand at that moment. The rest of the clip plays on as the follow-through (see launch).
+--
+-- THE ARM IS HANDED TO THE CLIP. For the hold, the shoulder C0 is posed and the chain from root to hand
+-- is pinned against animation (pinHolds here, Client/FX/GrabHoldPose.lua on every client) precisely so
+-- nothing can swing the hand. A throw clip has to swing it, so the posed C0 goes back and both pins come
+-- off: the server's by emptying PinnedJoints, every client's by dropping the HolderTag (GrabHoldPose
+-- forgets a holder the moment it is untagged). The HeldTag stays -- the victim is still held, and still
+-- claws at the hand that has them.
+--
+-- OF THE CLIP'S OWN ENDINGS, ONLY A FINISH LAUNCHES: Completed, Expired (AnimationManager's own ceiling for a clip that
+-- overran, or one whose Length never resolved), or Failed (no asset, or it would not load -- a missing
+-- clip must not strand a hold). Cleared/Superseded only ever come from this module tearing the hold down
+-- itself, and Stopped from the rig dying, which Step's sweep turns into a release. The hold identity
+-- check covers a finish arriving after a release. OnFinished can fire INSIDE Claim (the Failed path), so
+-- everything the launch reads is in place before the claim is pushed.
+local function beginThrowClip(attackerModel: Model, hold: Hold, clip: string, now: number): ()
+	local throwing = GrabConstants.Throw
+	hold.ThrowDeadline = now + throwing.MaxClipSeconds + throwing.DeadlineGraceSeconds
+
+	local shoulder, originalC0 = hold.Shoulder, hold.OriginalShoulderC0
+	if shoulder and originalC0 and shoulder.Parent ~= nil then
+		shoulder.C0 = originalC0
+	end
+	hold.PinnedJoints = {}
+	attackerModel:SetAttribute(GrabConstants.Hold.ArmAttribute, nil)
+	CollectionService:RemoveTag(attackerModel, GrabConstants.Hold.HolderTag)
+	-- Takes the "[G] to throw" cue down now: the press has been taken. detachHold sends it again on the
+	-- launch, which is harmless (the cue is already hidden).
+	sendHoldChanged(attackerModel, "Attacker", false)
+
+	local manager = hold.AttackerAnimator or newGrabAnimator(attackerModel, "Attacker")
+	if not manager then
+		launch(attackerModel, hold, now)
+		return
+	end
+	hold.AttackerAnimator = manager
+
+	-- Rooted for the whole clip, follow-through included: RootControlLocked parks client parkour and
+	-- shift lock's yaw (the same pair BlimpSystem sets for a mount), GrabThrowing pins WalkSpeed through
+	-- RunSystem and stands the client's jump and AutoRotate down (GrabInputClient). Lifted by this clip's
+	-- own OnFinished, which every ending of it reaches -- finish, release, death, teardown.
+	local attackerHumanoid = hold.AttackerHumanoid
+	attackerHumanoid:SetAttribute(Constants.Attributes.GrabThrowing, true)
+	attackerHumanoid:SetAttribute(Constants.Attributes.RootControlLocked, true)
+
+	-- Same layer and source as the hold clip, so this replaces it rather than layering over it.
+	local animation = GrabConstants.Animation
+	manager:Claim(animation.Layer, "GrabSystem", {
+		Clip = clip,
+		Looped = false,
+		-- Played by the server on a body every client watches -- see ClipSpec.ReplicatedOneShot. Without
+		-- it a clip exported looped kept playing on every screen after the throw.
+		ReplicatedOneShot = true,
+		Priority = animation.Priority,
+		FadeIn = throwing.FadeInSeconds,
+		FadeOut = animation.FadeOutSeconds,
+		MaxSeconds = throwing.MaxClipSeconds,
+		OnFinished = function(_clip: string, reason: AnimationManager.FinishReason)
+			if
+				holds[attackerModel] == hold
+				and (reason == "Completed" or reason == "Expired" or reason == "Failed")
+			then
+				launch(attackerModel, hold, os.clock())
+			end
+			if attackerHumanoid.Parent ~= nil then
+				attackerHumanoid:SetAttribute(Constants.Attributes.GrabThrowing, nil)
+				-- Not if a grab has taken this body since (thrown or held mid-follow-through): that lock is
+				-- the new grab's, and it clears its own.
+				if heldBy[attackerModel] == nil and flights[attackerModel] == nil then
+					attackerHumanoid:SetAttribute(Constants.Attributes.RootControlLocked, nil)
+				end
+			end
+			-- Handed to the follow-through by launch (just now, or earlier at the release point): the clip
+			-- is over, so is its manager -- faded and destroyed on stopHoldClip's delay, never destroyed in
+			-- the same frame as the stop, which would race the stop's replication. A released hold still
+			-- owns the manager, and its own stopHoldClip is already doing this.
+			if hold.AttackerAnimator ~= manager then
+				task.defer(stopHoldClip, manager)
+			end
+		end,
+	})
+end
+
+-- The throw press. PUBLIC, so a bot's decision-making (or a scripted boss beat) can throw through
+-- exactly the same path a player's press does -- the same "public function the remote calls, so nothing
+-- needs a special case" convention DefenseSystem.SetBlocking/AttackRequestSystem.Press are exposed
+-- alongside their own remote handlers for. Accepted means the throw is COMMITTED, not that the victim
+-- has left the hand yet: with a ThrowAnimation authored, they leave it at the clip's release point.
+function GrabSystem.Throw(attackerModel: Model, now: number): (boolean, string?)
+	local hold = holds[attackerModel]
+	if not hold then
+		return false, "NotHolding"
+	end
+	if hold.ThrowDeadline ~= nil then
+		return false, "AlreadyThrowing"
+	end
+	if hold.VictimRoot.Parent == nil or hold.VictimHumanoid.Parent == nil then
+		releaseHold(attackerModel, hold)
+		return false, "NoCharacter"
+	end
+
+	-- Before either path: the victim's thrown clip starts on the press, alongside the holder's own.
+	playVictimThrowClip(hold)
+	local clip = hold.Config.ThrowAnimation
+	if clip == nil or clip == "" then
+		launch(attackerModel, hold, now)
+	else
+		beginThrowClip(attackerModel, hold, clip, now)
+	end
 	return true, nil
 end
 
 -- Impact -----------------------------------------------------------------------------------------
 
+-- Stops tracking a flight, however it ended, and fades out the victim's thrown clip if it is still
+-- playing -- a clip longer than the flight is cut on landing.
+local function dropFlight(victim: Model, flight: Flight): ()
+	flights[victim] = nil
+	stopHoldClip(flight.VictimAnimator)
+	flight.VictimAnimator = nil
+end
+
 -- Ends a flight, applying its own damage and handing control back. `impactTarget` is the other
 -- combatant the thrown body collided with, or nil for a plain landing on geometry / the safety
 -- timeout.
 local function landFlight(victim: Model, flight: Flight, impactTarget: Model?): ()
-	flights[victim] = nil
+	dropFlight(victim, flight)
 
 	if
 		flight.VictimHumanoid.Parent ~= nil
@@ -735,13 +925,13 @@ end
 local function stepFlight(victim: Model, flight: Flight, now: number): ()
 	local root = flight.VictimRoot
 	if victim.Parent == nil or root.Parent == nil or flight.VictimHumanoid.Parent == nil then
-		flights[victim] = nil
+		dropFlight(victim, flight)
 		return
 	end
 	if flight.VictimHumanoid.Health <= 0 then
 		-- Death takes over from here (Humanoid.Died, PlayerDeathSystem) -- this module just stops
 		-- tracking a flight for a body that no longer needs to land anywhere.
-		flights[victim] = nil
+		dropFlight(victim, flight)
 		return
 	end
 	if now >= flight.ExpiresAt then
@@ -810,6 +1000,20 @@ end
 
 -- The loop -----------------------------------------------------------------------------------------
 
+-- Whether a committed throw's clip has reached its authored release point. Read off the clip's own
+-- playhead, not a clock started on the press, so it lands on the same frame of the animation however
+-- long the asset took to load. A release point of 1 (or none) is the clip's end, which OnFinished
+-- already catches; so is a Length that has not resolved yet (0), which waits.
+local function reachedRelease(hold: Hold): boolean
+	local releaseAt = hold.Config.ThrowReleaseAt
+	local manager = hold.AttackerAnimator
+	if releaseAt == nil or releaseAt >= 1 or not manager then
+		return false
+	end
+	local position, length = manager:GetPlayback(GrabConstants.Animation.Layer)
+	return position ~= nil and length > 0 and position >= length * releaseAt
+end
+
 -- One frame. `now` is the caller's clock, matching every other System's Step in this stack.
 -- DELIBERATELY FULL WALKS, both of them -- the one place in this stack that did NOT get an amortised
 -- reclaim cursor when AttackRequestSystem/SwingSequencer/DamageSystem did. Neither loop below is a
@@ -834,8 +1038,14 @@ function GrabSystem.Step(_deltaTime: number, now: number): ()
 		-- The weld itself going (BreakJointsOnDeath, a rig torn down under it) ends the hold even if
 		-- both Humanoids somehow still read alive -- there is nothing holding the body any more.
 		local weldGone = hold.Weld.Parent == nil
-		if attackerGone or victimGone or weldGone or now >= hold.ExpiresAt then
+		-- A committed throw is past the hold's own timer (the clip, not HoldSeconds, decides when the
+		-- victim leaves the hand); its deadline is only the backstop for a finish that never came.
+		local throwDeadline = hold.ThrowDeadline
+		local expired = throwDeadline == nil and now >= hold.ExpiresAt
+		if attackerGone or victimGone or weldGone or expired then
 			releaseHold(attacker, hold)
+		elseif throwDeadline ~= nil and (now >= throwDeadline or reachedRelease(hold)) then
+			launch(attacker, hold, now)
 		end
 	end
 
@@ -882,6 +1092,12 @@ end
 
 function GrabSystem.IsHolding(model: Model): boolean
 	return holds[model] ~= nil
+end
+
+-- Holding, with the throw pressed and its ThrowAnimation still playing.
+function GrabSystem.IsThrowing(model: Model): boolean
+	local hold = holds[model]
+	return hold ~= nil and hold.ThrowDeadline ~= nil
 end
 
 function GrabSystem.IsHeld(model: Model): boolean
@@ -977,7 +1193,10 @@ function GrabSystem.Init(): ()
 				releaseHold(heldByAttacker, attackersHold)
 			end
 		end
-		flights[character] = nil
+		local flight = flights[character]
+		if flight then
+			dropFlight(character, flight)
+		end
 	end)
 
 	logger:info("GrabSystem.Init() complete")

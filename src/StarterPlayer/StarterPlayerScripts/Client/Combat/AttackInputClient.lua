@@ -502,6 +502,11 @@ local function startSwing(payload: AttackStartedPayload, now: number): ()
 	playingStartedAt = now
 	playSwing(payload)
 	LocalCombatState.SetSwing(now + swingSecondsOf(payload))
+	if AttackConstants.GuardCut.Enabled and AirComboMoves.RoleOf(payload.MoveId) == nil then
+		LocalCombatState.SetGuardCutAt(
+			AttackConstants.GuardCutAt(now, payload.WindupSeconds, payload.ActiveSeconds, payload.RecoverySeconds)
+		)
+	end
 	for _, listener in attackStartedListeners do
 		listener(payload)
 	end
@@ -525,9 +530,10 @@ local stringLapsesAt = -math.huge
 local predictionGeneration = 0
 local bufferGeneration = 0
 
--- When the server's feint recovery ends (AttackCancelledPayload.RecoverySeconds), mirrored so a press
--- inside it is buffered-and-predicted rather than predicted into a refusal.
-local feintRecoveredAt = -math.huge
+-- When the server's feint recovery, or a trade's shared recovery, ends (AttackCancelledPayload.
+-- RecoverySeconds), mirrored so a press inside it is buffered-and-predicted rather than predicted into a
+-- refusal.
+local cancelRecoveredAt = -math.huge
 
 -- The same count SwingSequencer probes the catalogue for. Every weapon is built from the one Baseline
 -- move set (WeaponRoster), so the baseline's length IS every weapon's.
@@ -575,7 +581,7 @@ local function nextSwingAt(now: number, kind: AttackTypes.AttackKind?): number
 			and cancelAt < swingEnd
 		then cancelAt
 		else swingEnd + AttackConstants.Sequence.ChainDelaySeconds
-	return math.max(LocalCombatState.FreeAt(now, cancelable), swingGate, feintRecoveredAt)
+	return math.max(LocalCombatState.FreeAt(now, cancelable), swingGate, cancelRecoveredAt)
 end
 
 -- Every other server gate this client can see the answer to: the guard (DefenseSystem "Guarding"), the
@@ -828,10 +834,14 @@ local function onAttackCancelled(raw: unknown): ()
 	local recovery = if typeof(payload.RecoverySeconds) == "number" then payload.RecoverySeconds else 0
 	local now = os.clock()
 
-	-- PARRIED: the server kept this player's chain (AttackRequestSystem.KeepChainThroughParry) and held it
-	-- through the stagger. Only the mirror moves. The clip was already cut by Combat_Feedback
-	-- (CancelSwing), and the stagger gates prediction through the published defence state.
-	if payload.Reason == "Parried" then
+	-- PARRIED / TRADED: the server kept this player's chain (AttackRequestSystem.KeepChainThroughParry /
+	-- KeepChainThroughTrade) and held it through the stagger or the trade's recovery. Only the mirror moves.
+	-- The clip was already cut by Combat_Feedback (CancelSwing). A stagger gates prediction through the
+	-- published defence state; a trade has none, so its shared recovery gates it here instead.
+	if payload.Reason == "Parried" or payload.Reason == "Traded" then
+		if payload.Reason == "Traded" then
+			cancelRecoveredAt = now + math.clamp(recovery, 0, 2)
+		end
 		local kind = payload.StringKind
 		local stage = payload.StringStage
 		if (kind == "Basic" or kind == "Heavy") and typeof(stage) == "number" and stage > 0 then
@@ -859,7 +869,7 @@ local function onAttackCancelled(raw: unknown): ()
 	if payload.Reason ~= "Feint" then
 		return
 	end
-	feintRecoveredAt = now + math.clamp(recovery, 0, 2)
+	cancelRecoveredAt = now + math.clamp(recovery, 0, 2)
 	stringKind = nil
 	stringStage = 0
 	releaseJumpSuppression()
@@ -913,7 +923,7 @@ local function bindCharacter(character: Model, humanoid: Humanoid): ()
 	pendingPrediction = nil
 	bufferedPress = nil
 	playingMoveId = nil
-	feintRecoveredAt = -math.huge
+	cancelRecoveredAt = -math.huge
 	stringKind = nil
 	stringStage = 0
 	-- A fresh Humanoid jumps; a suppression scheduled against the last life must not reach this one.

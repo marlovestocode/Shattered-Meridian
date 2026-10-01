@@ -155,6 +155,12 @@ function AttackStateMachine.IsAttacking(self: Machine): boolean
 	return self._state ~= "Idle"
 end
 
+-- When the machine last went Idle, or nil while a swing is in flight. A swing may not be backdated to
+-- before this (HitboxEngine.RequestAttack's startedAt): the body was still in its previous swing then.
+function AttackStateMachine.GetIdleSince(self: Machine): number?
+	return if self._state == "Idle" then self._enteredAt else nil
+end
+
 function AttackStateMachine.GetStateElapsed(self: Machine, now: number): number
 	return math.max(now - self._enteredAt, 0)
 end

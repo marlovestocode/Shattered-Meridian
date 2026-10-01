@@ -310,6 +310,11 @@ local DebugConstants = {
 	--
 	-- Not Studio-gated and not whitelist-gated: it reads nothing but the local frame clock, so it is
 	-- harmless on any client, and frame rate is most worth checking on a real device in a real server.
+	-- Fusion's own development checks (Client/UI/FusionTuning.lua's header has the measurement). false -- the
+	-- default, in Studio and live alike -- turns off the lifetime checker, whose cost on every binding
+	-- update grows with the size of the UI; true restores it, for a session hunting a scope-lifetime bug.
+	FusionLifetimeChecks = false,
+
 	FpsCounter = {
 		Enabled = true,
 		-- Shown on join; the key toggles it. Set false to have it start hidden.
@@ -343,26 +348,70 @@ local DebugConstants = {
 		OkFps = 30,
 	},
 
+	-- The admin panel (Client/UI/Screens/DevTools/DevMenu, driven by Client/DevTools/DevMenu/
+	-- DevMenuClient.lua, gated and executed by Server/Systems/DevMenuSystem.lua). Rebuilt 2026-09-29 as
+	-- a three-column tool -- roster, tabs, inspector -- on the Move Editor's frame; see
+	-- docs/design/admin-panel-guide.md.
 	DevMenu = {
-		-- AuthorizedUserIds moved to ServerScriptService/Server/Config/AdminConfig.lua. Everything in
+		-- AuthorizedUserIds lives in ServerScriptService/Server/Config/AdminConfig.lua. Everything in
 		-- this file replicates to every client, so the roster of privileged accounts was readable by
 		-- anyone with an instance explorer. Authorization never rested on that list being secret
 		-- (DevMenuSystem re-checks server-side and always has), but publishing it bought nothing.
-		-- DevMenuClient now asks the server whether to start instead of reading a local list.
+		-- DevMenuClient asks the server whether to start instead of reading a local list.
 
 		-- Seconds a dev-menu status message (DevMenuClient.lua) stays visible before auto-clearing.
 		StatusClearDelaySeconds = 3,
 
-		-- Roblox's own factory-default Humanoid.JumpPower -- the fallback CombatSystem.SetPlayerFrozen
+		-- How often the open panel re-reads the server. The OVERVIEW (roster + server status) is the
+		-- situational picture and changes on the order of seconds; the INSPECTION is the one player the
+		-- admin is looking at, whose vitals move every swing, so it polls faster. Both stop the moment
+		-- the panel closes -- a closed panel costs nothing.
+		OverviewPollSeconds = 2,
+		InspectPollSeconds = 1,
+		-- The two polling remotes (GetOverview, InspectPlayer) get their OWN rate-limit bucket, sized
+		-- here. They are the "genuinely different call-frequency profile" DevMenuSystem's shared bucket
+		-- header anticipates: sharing it, a steady 1.5 polls a second left an admin 2.5 actions a second
+		-- before a button press was refused as rate-limited.
+		PollRemoteCallsPerSecond = 4,
+
+		-- Every irreversible button on the panel (ban, reset saved data, kill, despawn all, unban) is a
+		-- two-press ARMED button: the first press arms it and says so, a second press inside this window
+		-- commits. Enforced client-side only -- the server authorizes every request on its own merits.
+		-- Shutdown/Restart are the exception and are armed SERVER-side (the two windows below), because
+		-- those take everyone in the server with them.
+		ConfirmWindowSeconds = 4,
+
+		-- Roblox's own factory-default Humanoid.JumpPower -- the fallback AdminActionSystem.ApplyFrozen
 		-- restores to on unfreeze if a player was somehow never actually frozen this life (defensive;
-		-- the normal path restores the JumpPower captured at freeze-time instead, see
-		-- CombatState.savedJumpPower's own header).
+		-- the normal path restores the JumpPower captured at freeze-time).
 		DefaultJumpPower = 50,
 
-		-- Speed Multiplier admin action (SetTargetSpeedMultiplier) -- preset buttons in the Admin tab's
-		-- Character Utility section, rather than a free-typed number, so an admin can't accidentally
-		-- set an absurd/negative value through a typo.
+		-- Speed Multiplier admin action (SetTargetSpeedMultiplier) -- a segmented control rather than a
+		-- free-typed number, so an admin can't set an absurd/negative value through a typo.
 		SpeedMultiplierPresets = { 0.5, 1, 1.5, 2, 3 },
+
+		-- Meridian XP grants (GrantMeridianXP). A closed list the server resolves by KEY, never a
+		-- client-sent number -- the same "no untrusted field for no benefit" reasoning the bloodline
+		-- reroll grant uses. "NextTier" has no Amount: the server grants exactly the XP between the
+		-- target's current total and the next tier's threshold, which is the grant a tester actually
+		-- wants ("put me at tier 3") and the one number a client could not compute without the profile.
+		XpGrants = {
+			{ Key = "Small", Amount = 100, Label = "+100" },
+			{ Key = "Medium", Amount = 1000, Label = "+1,000" },
+			{ Key = "Large", Amount = 10000, Label = "+10,000" },
+			{ Key = "NextTier", Label = "Next tier" },
+		},
+
+		-- Ban durations (BanPlayer). Resolved by KEY server-side into an ExpiresAt on the SERVER's clock,
+		-- rather than the client sending a timestamp: the client's os.time() is not the server's, and a
+		-- key is a closed set with nothing to validate beyond membership. "Permanent" has no Seconds.
+		BanDurations = {
+			{ Key = "Hour", Seconds = 3600, Label = "1 hour" },
+			{ Key = "Day", Seconds = 86400, Label = "1 day" },
+			{ Key = "Week", Seconds = 604800, Label = "7 days" },
+			{ Key = "Month", Seconds = 2592000, Label = "30 days" },
+			{ Key = "Permanent", Label = "Permanent" },
+		},
 
 		-- Broadcast Announcement admin action -- an admin-authored message shown to every player
 		-- (Client/Announcement/AnnouncementClient.lua). Deliberately NOT run through
@@ -376,195 +425,151 @@ local DebugConstants = {
 		-- StatusClearDelaySeconds above.
 		AnnouncementDisplayDurationSeconds = 6,
 
-		-- Tuning tab's Ability Slot Preview harness (ContentArea.lua) -- how long the "Run Cooldown
-		-- Demo" button's fake countdown takes to drain from full to empty. Purely a local client-side
-		-- animation duration for verifying AbilitySlot's cooldown-overlay/timer rendering ahead of
-		-- ArtSystem; not tied to any real ability's actual cooldown length.
-		AbilityPreviewCooldownDemoSeconds = 4,
-
 		-- Shutdown Server admin action -- a second confirming press within this window (server-side
 		-- armed state, not just a client UI flag) actually triggers the kick-all; the first press only
-		-- arms it. SHUTDOWN_DELAY_SECONDS below is how long every player sees the warning banner
-		-- before actually being kicked.
+		-- arms it. ShutdownDelaySeconds is how long every player sees the warning banner before
+		-- actually being kicked.
 		ShutdownConfirmWindowSeconds = 10,
 		ShutdownDelaySeconds = 10,
 
 		-- Instant Restart Server admin action -- same two-press server-armed confirm SHAPE as
-		-- ShutdownConfirmWindowSeconds above (DevMenuSystem.handleInstantRestartServer), but a
-		-- DISTINCT, independently-tunable window (same "own constant even where two happen to
-		-- match today" convention BanConfirmWindowSeconds/ResetPlayerDataConfirmWindowSeconds
-		-- already establish): unlike Shutdown Server's ShutdownDelaySeconds countdown-warned kick,
-		-- the second press here kicks immediately, no delay -- for an admin who just published a
-		-- place update and wants THIS server cycled onto it right away rather than waiting out a
-		-- countdown.
+		-- ShutdownConfirmWindowSeconds above (DevMenuSystem.handleInstantRestartServer), but its own
+		-- window: the second press kicks immediately, no countdown -- for an admin who just published a
+		-- place update and wants THIS server cycled onto it right away.
 		InstantRestartConfirmWindowSeconds = 10,
 
-		-- Ban Player admin action (Players tab roster row) -- UNLIKE ShutdownConfirmWindowSeconds
-		-- above, this arm/confirm window is enforced ENTIRELY client-side (DevMenu/init.lua's
-		-- playerRosterRow): a first press just shows "press again to confirm" and starts this local
-		-- timer, a second press within the window is what actually fires BanPlayerRequested. Ban is
-		-- permanent and DataStore-backed (survives rejoin) where Kick is cheap and reversible (a kicked
-		-- player can just rejoin), so it earns the extra friction Kick doesn't need. No server-side
-		-- state backs this window -- the server still authorizes/executes every Ban request on its own
-		-- merits regardless of how the client arrived at sending it.
-		BanConfirmWindowSeconds = 4,
-
-		-- Reset Player Data admin action (Players tab roster row) -- same permanent/DataStore-backed
-		-- reasoning as BanConfirmWindowSeconds above (arguably more severe: a wipe has no reversal
-		-- path at all, where an admin can still un-ban or let a ban expire), so it gets the same
-		-- two-press arm/confirm treatment. Kept as its own independently-tunable constant even though
-		-- it starts equal to BanConfirmWindowSeconds -- same reasoning Constants.Combat.AirCombo's
-		-- own tunables stay separate numbers even where two of them happen to match today.
-		ResetPlayerDataConfirmWindowSeconds = 4,
-
 		RemoteNames = {
-			-- Debug Dummy (Server/Systems/DebugDummySystem.lua) -- a real, fully-registered combatant
-			-- against the rebuilt HitboxEngine/DefenseSystem stack, not the deleted CombatSystem's own
-			-- training dummy. SpawnDummy is the same name that module's own SpawnDummy action used
-			-- (never renamed -- this is the direct successor to that action, not a new feature sharing
-			-- an old label), reused here rather than minted fresh.
-			SpawnDummy = "DevMenu_SpawnDummy",
-			-- Clears every active debug dummy at once -- the Spawn tab's companion to SpawnDummy, so a
-			-- tester can reset the training area without waiting out MaxActive eviction one dummy at a
-			-- time.
-			DespawnAllDebugDummies = "DevMenu_DespawnAllDebugDummies",
-			-- Server-wide toggle: every currently-active (and every future) debug dummy holds its guard
-			-- up until toggled off again -- see DebugDummySystem.SetGuard's own header for why this
-			-- makes Blocked/Parried/GuardBroken all testable against a dummy, not just Clean/Backstab.
-			SetDummyGuard = "DevMenu_SetDummyGuard",
-			-- Fetch-once-on-open for the Spawn tab's Guard toggle and active-count readout -- same
-			-- "never let a joining admin's client guess a server-wide toggle's truth" reasoning
-			-- GetHitboxDebug already establishes for the swing-volume visualiser.
-			GetDebugDummyState = "DevMenu_GetDebugDummyState",
-			-- The AI sparring partner (Server/Combat/TrainingBot/TrainingBotSystem.lua), rebuilt
-			-- 2026-09-28 against the four-layer stack. SpawnTrainingBot is the old action's name, re-owned
-			-- rather than re-minted, now carrying (style, difficulty) -- see
-			-- Shared/TrainingBot/TrainingBotConstants.lua for both lists. DespawnTrainingBots clears every
-			-- active bot at once, the same companion role DespawnAllDebugDummies plays for the dummy.
-			SpawnTrainingBot = "DevMenu_SpawnTrainingBot",
-			DespawnTrainingBots = "DevMenu_DespawnTrainingBots",
-			-- Blimp Fuel System's dev/test convenience (Server/Systems/ResourceGatheringSystem.
-			-- SpawnDebugNode) -- spawns one tagged CoalDeposit/WaterSource Part near the requesting
-			-- admin, the same "spawn near me" shape SpawnDummy above already uses, so a tester can
-			-- gather without a builder having placed real world nodes yet.
-			SpawnCoalDeposit = "DevMenu_SpawnCoalDeposit",
-			SpawnWaterSource = "DevMenu_SpawnWaterSource",
-			-- Tops the requesting admin's own carried coal AND water up to their carry cap in one
-			-- call. The companion to the two node spawns above, and the one a tester actually reaches
-			-- for: those place a rock to mine, this skips the mining. Between them, "I want to test a
-			-- blimp" stops being a gathering trip.
-			FillCarriedFuel = "DevMenu_FillCarriedFuel",
-			-- Admin actions -- all three target whichever player the requesting admin currently has
-			-- locked on (CombatState.lockOnTarget), falling back to themselves if nothing's locked --
-			-- reuses the existing lock-on system as the "who am I targeting" picker instead of a new
-			-- player-select UI. See DevMenuSystem.lua's handleSetHealth/handleSetGodmode/
-			-- handleSetFlight for the resolution.
-			-- Hands the resolved target BloodlineConstants.DevGrantRerollAmount bloodline rerolls.
-			-- The ONLY grant path that exists for them -- a fresh profile gets StartingRerolls and
-			-- nothing in the game has ever added one since, so the character menu's reroll control was
-			-- permanently dead for anyone who spent theirs. See BloodlineSystem.GrantRerolls.
-			GrantBloodlineRerolls = "DevMenu_GrantBloodlineRerolls",
-			SetTargetHealth = "DevMenu_SetTargetHealth",
+			-- === Situational picture (polled while the panel is open, own rate-limit bucket) ===
+
+			-- The roster and the server's status in ONE round trip -- see Shared/Admin/AdminTypes.lua's
+			-- OverviewResult. Also the panel's authorization probe: a rejection IS the "not an admin"
+			-- answer, so there is no separate "am I an admin" remote. Replaced three fetch-once remotes
+			-- (ListPlayers, GetSidebarStats, GetServerVersionInfo) that the old panel fired together at
+			-- boot and that tripped its own rate limit doing so.
+			GetOverview = "DevMenu_GetOverview",
+			-- Everything the inspector rail shows about one player -- vitals, cultivation, combat,
+			-- overrides, moderation state. Takes a UserId; always a player in THIS server.
+			InspectPlayer = "DevMenu_InspectPlayer",
+
+			-- === Acting on the selected player ===
+			--
+			-- Every one of these takes the target's UserId as its LAST argument, nil meaning the calling
+			-- admin. The roster selection is the target -- which is what the old panel's "Target: Self"
+			-- header was missing: the lock-on lookup that used to pick a target went with the old combat
+			-- system, and every Admin-tab action had silently applied to the admin themselves since.
+
 			SetTargetGodmode = "DevMenu_SetTargetGodmode",
 			SetTargetFlight = "DevMenu_SetTargetFlight",
 			-- Toggles Collide mode for an already-flying target (Client/Flight/FlightPhysics.lua) --
 			-- see AdminActionSystem.SetFlightCollide's own header.
 			SetTargetFlightCollide = "DevMenu_SetTargetFlightCollide",
-			-- Live flight-feel tuner (Server/DevMenu/FlightTuning.lua) -- fetch-once/adjust/reset
-			-- shape, scoped to Constants.Flight's own tunables. The equivalent live-tuner remotes for
-			-- hand-authored attack timing/hitbox fields moved out of DevMenu entirely -- see the
-			-- comment just below this block.
+			SetTargetFrozen = "DevMenu_SetTargetFrozen",
+			SetTargetInvisible = "DevMenu_SetTargetInvisible",
+			SetTargetSpeedMultiplier = "DevMenu_SetTargetSpeedMultiplier",
+			-- Moves the ADMIN to the target.
+			TeleportToTarget = "DevMenu_TeleportToTarget",
+			-- Moves the TARGET to the admin.
+			BringTarget = "DevMenu_BringTarget",
+			ForceRespawnTarget = "DevMenu_ForceRespawnTarget",
+			-- Full Health and full Qi. Not a Health SETTER -- the retired SetTargetHealth below was one,
+			-- and a free-typed health value is a combat-state lever with no test it serves that "top
+			-- them off" does not.
+			RestoreTarget = "DevMenu_RestoreTarget",
+			-- Health to zero, through the ordinary Humanoid death path, so PlayerDeathSystem, the death
+			-- overlay and the respawn all run exactly as they would for a real death (with no killer
+			-- credited -- nobody dealt the damage).
+			KillTarget = "DevMenu_KillTarget",
+			-- Meridian XP by preset key (XpGrants above), through MeridianSystem.AwardMeridianXP --
+			-- the owner's public grant, so TierSystem promotes off it the normal way.
+			GrantMeridianXP = "DevMenu_GrantMeridianXP",
+			-- BloodlineConstants.DevGrantRerollAmount rerolls. The ONLY grant path that exists for them --
+			-- a fresh profile gets StartingRerolls and nothing in the game adds one since, so the
+			-- character menu's reroll control is permanently dead for anyone who spent theirs.
+			GrantBloodlineRerolls = "DevMenu_GrantBloodlineRerolls",
+			-- A roll of the "RareEmotes" pool (EmoteUnlockService.RollEmote) -- the one way to exercise
+			-- the emote roll path end to end until AchievementSystem/a quest calls it for real.
+			RollEmote = "DevMenu_RollEmote",
+
+			-- Moderation (Server/Systems/ModerationSystem.lua). Kick and Reset need the target online;
+			-- Ban/Mute/Unban/LookupBan take a bare UserId and work on anyone.
+			KickPlayer = "DevMenu_KickPlayer",
+			-- (userId, reason, durationKey) -- durationKey from BanDurations above.
+			BanPlayer = "DevMenu_BanPlayer",
+			MutePlayer = "DevMenu_MutePlayer",
+			SetSuspectedCheater = "DevMenu_SetSuspectedCheater",
+			-- Wipes a target's SAVED progression data back to a fresh profile
+			-- (PlayerDataSystem.ResetProfile). Irreversible. Needs the target online with a loaded
+			-- profile -- an offline wipe would be a raw DataStore write around PlayerDataSystem.
+			ResetTargetPlayerData = "DevMenu_ResetTargetPlayerData",
+			-- Offline moderation (Server tab): read a UserId's ban record, and lift one.
+			LookupBan = "DevMenu_LookupBan",
+			UnbanPlayer = "DevMenu_UnbanPlayer",
+
+			-- === World ===
+
+			-- Debug Dummy (Server/Systems/DebugDummySystem.lua) -- a real, fully-registered combatant.
+			-- SpawnDummy/SetDummyGuard/GetDebugDummyState/DespawnAllDebugDummies are also the Move
+			-- Editor's test bench (MoveEditorClient.lua) -- keep the names.
+			SpawnDummy = "DevMenu_SpawnDummy",
+			DespawnAllDebugDummies = "DevMenu_DespawnAllDebugDummies",
+			SetDummyGuard = "DevMenu_SetDummyGuard",
+			GetDebugDummyState = "DevMenu_GetDebugDummyState",
+			-- The AI sparring partner (Server/Combat/TrainingBot/TrainingBotSystem.lua), carrying
+			-- (style, difficulty, weapon) -- see Shared/TrainingBot/TrainingBotConstants.lua.
+			SpawnTrainingBot = "DevMenu_SpawnTrainingBot",
+			DespawnTrainingBots = "DevMenu_DespawnTrainingBots",
+			-- The server-wide swing-volume visualiser (HitboxEngine.SetDebugVolumesEnabled). Real
+			-- server-side Parts, visible to every player. Also used by the Move Editor.
+			GetHitboxDebug = "DevMenu_GetHitboxDebug",
+			SetHitboxDebug = "DevMenu_SetHitboxDebug",
+			-- Moves the calling admin to typed coordinates.
+			TeleportToCoordinates = "DevMenu_TeleportToCoordinates",
+			-- Blimp Fuel System's dev/test convenience (ResourceGatheringSystem.SpawnDebugNode) -- one
+			-- tagged node near the requesting admin -- and the shortcut past it: filling the admin's own
+			-- carried coal and water to the cap.
+			SpawnCoalDeposit = "DevMenu_SpawnCoalDeposit",
+			SpawnWaterSource = "DevMenu_SpawnWaterSource",
+			FillCarriedFuel = "DevMenu_FillCarriedFuel",
+
+			-- === Server ===
+
+			-- An admin-authored banner. Announcement is a RemoteEvent (fired to EVERY client -- see
+			-- Client/Announcement/AnnouncementClient.lua, which runs for every player), unlike every other
+			-- name in this table.
+			BroadcastAnnouncement = "DevMenu_BroadcastAnnouncement",
+			Announcement = "DevMenu_Announcement",
+			ShutdownServer = "DevMenu_ShutdownServer",
+			InstantRestartServer = "DevMenu_InstantRestartServer",
+
+			-- === Tuning ===
+
+			-- Live flight-feel tuner (Server/DevMenu/FlightTuning.lua), in-memory only. List returns every
+			-- field with its bounds and file default; Set writes one absolute value (clamped); Reset
+			-- restores one field's file default.
 			ListFlightTuning = "DevMenu_ListFlightTuning",
-			AdjustFlightTuning = "DevMenu_AdjustFlightTuning",
+			SetFlightTuning = "DevMenu_SetFlightTuning",
 			ResetFlightTuning = "DevMenu_ResetFlightTuning",
-			-- Live tuning of hand-authored attacks (weapon stages, DashPunch/DashHit) moved out of the
-			-- DevMenu entirely -- they are the Move Editor's Default moves now (Server/Combat/
-			-- DefaultMoveRegistry.lua's override layer, Constants.MoveEditor.RemoteNames).
-			-- Bug report triage (DevMenu/init.lua's "Reports" tab) -- handlers live in
-			-- DevMenuSystem.lua but call straight into BugReportSystem.ListReports/UpdateStatus, the
-			-- same "gate here, compute there" split as every other admin action above. The PUBLIC
-			-- submit remote is a separate name, Constants.BugReport.RemoteNames.Submit, since
-			-- BugReportSystem itself (not DevMenuSystem) creates/handles that one -- any player may
-			-- call it, no whitelist check.
+
+			-- === Bug report triage (Reports tab) ===
+			--
+			-- Handlers gate here and call straight into BugReportSystem. The PUBLIC submit remote is
+			-- Constants.BugReport.RemoteNames.Submit, created by BugReportSystem itself.
 			ListBugReports = "DevMenu_ListBugReports",
 			UpdateBugReportStatus = "DevMenu_UpdateBugReportStatus",
-			-- Triage mutations added alongside UpdateBugReportStatus above -- same "gate here,
-			-- compute in BugReportSystem" split, same admin-only home rather than
-			-- Constants.BugReport.RemoteNames (that table is reserved for the PUBLIC submit remote
-			-- only).
 			AddBugReportNote = "DevMenu_AddBugReportNote",
 			SetBugReportPriority = "DevMenu_SetBugReportPriority",
 			AssignBugReport = "DevMenu_AssignBugReport",
 			-- Teleports the requesting admin to wherever the report's reporter currently is IN THIS
-			-- SERVER -- see DevMenuSystem.handleJumpToReporter's own header for why this doesn't
-			-- reuse TeleportToTarget's lock-on resolution.
+			-- SERVER.
 			JumpToReporter = "DevMenu_JumpToReporter",
-			-- Teleportation -- all three apply to the requesting admin's own position/the resolved
-			-- lock-on target's position (see resolveActionTarget), no player-select UI, same
-			-- reasoning as every other admin action above.
-			TeleportToTarget = "DevMenu_TeleportToTarget",
-			BringTarget = "DevMenu_BringTarget",
-			TeleportToCoordinates = "DevMenu_TeleportToCoordinates",
-			-- Character utility.
-			SetTargetFrozen = "DevMenu_SetTargetFrozen",
-			SetTargetInvisible = "DevMenu_SetTargetInvisible",
-			SetTargetSpeedMultiplier = "DevMenu_SetTargetSpeedMultiplier",
-			ForceRespawnTarget = "DevMenu_ForceRespawnTarget",
-			-- Server-wide tools. Announcement is a RemoteEvent (fired to EVERY client, not just the
-			-- requesting admin), unlike every other name in this table -- see
-			-- Client/Announcement/AnnouncementClient.lua, which (unlike DevMenuClient.lua) runs
-			-- unconditionally for every player since the banner it drives isn't admin-only.
-			BroadcastAnnouncement = "DevMenu_BroadcastAnnouncement",
-			ShutdownServer = "DevMenu_ShutdownServer",
-			-- Same two-press server-armed shape as ShutdownServer above, no countdown delay on
-			-- confirm -- see InstantRestartConfirmWindowSeconds's own comment above.
-			InstantRestartServer = "DevMenu_InstantRestartServer",
-			-- Passive "a newer version has been published" fetch (Server/Systems/
-			-- VersionWatchSystem.lua) -- fetch-once-on-open, same shape as GetHitboxDebug/
-			-- GetSidebarStats below.
-			GetServerVersionInfo = "DevMenu_GetServerVersionInfo",
-			Announcement = "DevMenu_Announcement",
-			-- Player roster ("Players" tab) -- fetch-on-open (the admin presses Refresh/opens the tab),
-			-- not pushed on a timer/change, same trade-off ListBugReports already accepts: a stale
-			-- roster snapshot a few seconds old is fine for triage, and a per-tick or per-join/leave
-			-- push would be one more always-on remote for a panel most players never open.
-			ListPlayers = "DevMenu_ListPlayers",
-			-- Wipes cooldowns/combo/vitals-timers/air-combo state on a still-ALIVE target (no respawn)
-			-- -- see CombatSystem.ResetCombatState's own header.
+
+			-- === Retired ===
+			--
+			-- Kept only so Server/Config/BootManifest.lua's RetiredRemotes can name them and
+			-- Tests/Boot/BootManifest.spec.lua can assert nothing creates them again. Both went with the
+			-- old combat system: a free-typed health setter and a combat-state reset.
+			SetTargetHealth = "DevMenu_SetTargetHealth",
 			ResetTargetCombatState = "DevMenu_ResetTargetCombatState",
-			-- Moderation (Server/Systems/ModerationSystem.lua) -- targets an explicit UserId from a
-			-- "Players" tab roster row, never the lock-on target (see DevMenuSystem.lua's
-			-- resolveOptionalExplicitTarget/resolveTargetUserId for why these three don't go through
-			-- resolveActionTarget the way every action above does).
-			KickPlayer = "DevMenu_KickPlayer",
-			BanPlayer = "DevMenu_BanPlayer",
-			MutePlayer = "DevMenu_MutePlayer",
-			-- Wipes a target's SAVED progression data back to a fresh profile
-			-- (PlayerDataSystem.ResetProfile) -- deliberately grouped here with Kick/Ban/Mute above,
-			-- not owned by ModerationSystem, but sharing their exact "explicit UserId from a roster
-			-- row, never the lock-on target" reasoning: a data wipe is irreversible, at least as
-			-- severe as Ban. See DevMenuSystem.lua's handleResetTargetPlayerData.
-			ResetTargetPlayerData = "DevMenu_ResetTargetPlayerData",
-			-- Reversible manual cheater-flag toggle (see ModerationSystem.lua's FlagSuspectedCheater/
-			-- UnflagSuspectedCheater) -- same explicit-UserId-from-a-roster-row targeting as
-			-- KickPlayer/BanPlayer/MutePlayer above, never the lock-on target.
-			SetSuspectedCheater = "DevMenu_SetSuspectedCheater",
-			-- Sidebar header stats (persistent Sidebar, Screens/DevTools/DevMenu/Sidebar.lua) -- one combined
-			-- RemoteFunction rather than folding into ListPlayers/ListBugReports, since neither of
-			-- those two remotes' existing callers need the other's count.
-			GetSidebarStats = "DevMenu_GetSidebarStats",
-			-- Runtime hitbox-visualization toggle (Server/Combat/HitboxDebugState.lua) -- server-wide,
-			-- not per-player (a rendered debug Part is a real Workspace object every nearby player
-			-- already sees), works in Studio AND a published server. Get is fetched once on DevMenu
-			-- open (Admin tab) the same "fetch-once, cache client-side" shape as GetSidebarStats.
-			GetHitboxDebug = "DevMenu_GetHitboxDebug",
-			SetHitboxDebug = "DevMenu_SetHitboxDebug",
-			-- One-shot test trigger for the Emote System's roll path (Server/Systems/
-			-- EmoteUnlockService.lua's RollEmote, "RareEmotes" pool only) -- see DevMenuSystem.
-			-- handleRollEmote. Not a general-purpose "roll any pool" remote; this exists purely so a
-			-- human tester can exercise GrantEmote/RollEmote end to end before AchievementSystem/a
-			-- future quest or live-ops system calls RollEmote for real.
-			RollEmote = "DevMenu_RollEmote",
 		},
 	},
 }

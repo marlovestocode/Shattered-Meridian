@@ -4,6 +4,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
 local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
 
 -- The schema module's own contract: the vocabulary is the engine's, the wire encoding round-trips
@@ -82,6 +83,24 @@ return function()
 			expect(MoveTypes.FeintableByStage.Basic).to.equal(true)
 			expect(MoveTypes.FeintableByStage.Heavy).to.equal(true)
 			expect(MoveTypes.FeintableByStage.Finisher).to.equal(false)
+		end)
+	end)
+
+	describe("LocksWindup", function()
+		it("is off by default and survives Validate, ToWire, Clone and the engine projection", function()
+			expect(move().LocksWindup).to.equal(false)
+			local locked = move({ LocksWindup = true, LocksMovement = false })
+			expect(locked.LocksWindup).to.equal(true)
+			-- The two locks are independent.
+			expect(locked.LocksMovement).to.equal(false)
+			local again = MoveRegistryManager.Validate(MoveTypes.ToWire(locked)) :: MoveTypes.MoveDefinition
+			expect(again.LocksWindup).to.equal(true)
+			expect(MoveTypes.Clone(locked).LocksWindup).to.equal(true)
+			expect(MoveTypes.ToEngineAttackDefinition(locked).LocksWindup).to.equal(true)
+		end)
+
+		it("changes the fingerprint, so an edit to it counts as an edit", function()
+			expect(MoveTypes.Fingerprint(move({ LocksWindup = true })) ~= MoveTypes.Fingerprint(move())).to.equal(true)
 		end)
 	end)
 
@@ -259,6 +278,63 @@ return function()
 			local definition = MoveTypes.ToEngineAttackDefinition(source)
 			definition.BaseDimensions.Width = 99
 			expect(source.Dimensions.Width).to.equal(4)
+		end)
+	end)
+
+	describe("MoveTypes -- the projectile move type", function()
+		local function projectileWire(): { [string]: any }
+			local spec = ProjectileTypes.Defaults() :: any
+			spec.SpreadPattern = "Fan"
+			spec.Count = 5
+			spec.SpreadAngle = 30
+			spec.Homing = true
+			spec.ParryBehavior = "ParryAll"
+			spec.ParryResponse = "Reflect"
+			spec.ReflectedDamageMultiplier = 1.5
+			return spec
+		end
+
+		it("is melee without the block and projectile with it", function()
+			expect(MoveTypes.IsProjectile(move())).to.equal(false)
+			expect(MoveTypes.IsProjectile(move({ Projectile = projectileWire() }))).to.equal(true)
+		end)
+
+		it("round-trips every projectile field through ToWire and Validate", function()
+			local source = move({ Projectile = projectileWire() })
+			local again = MoveRegistryManager.Validate(MoveTypes.ToWire(source) :: any) :: MoveTypes.MoveDefinition
+			expect(again).to.be.ok()
+			for _, field in ProjectileTypes.Fields do
+				expect((again.Projectile :: any)[field.Name]).to.equal((source.Projectile :: any)[field.Name])
+			end
+			expect(MoveTypes.Fingerprint(again)).to.equal(MoveTypes.Fingerprint(source))
+		end)
+
+		it("clones the block rather than aliasing it", function()
+			local source = move({ Projectile = projectileWire() })
+			local copy = MoveTypes.Clone(source);
+			(copy.Projectile :: any).Count = 9
+			expect((source.Projectile :: any).Count).to.equal(5)
+		end)
+
+		it("sees a projectile edit as a change", function()
+			local source = move({ Projectile = projectileWire() })
+			local edited = MoveTypes.Clone(source);
+			(edited.Projectile :: any).Speed += 10
+			expect(MoveTypes.Fingerprint(edited)).never.to.equal(MoveTypes.Fingerprint(source))
+			expect(MoveTypes.Fingerprint(move())).never.to.equal(MoveTypes.Fingerprint(source))
+		end)
+
+		it("hands the engine the block as a copy", function()
+			local source = move({ Projectile = projectileWire() })
+			local definition = MoveTypes.ToEngineAttackDefinition(source)
+			expect(definition.Projectile).to.be.ok()
+			expect((definition.Projectile :: any).Count).to.equal(5);
+			(definition.Projectile :: any).Count = 1
+			expect((source.Projectile :: any).Count).to.equal(5)
+			-- And the engine's own sanitiser keeps it.
+			local sanitized = HitboxTypes.SanitizeDefinition(MoveTypes.ToEngineAttackDefinition(source))
+			expect((sanitized.Projectile :: any).SpreadPattern).to.equal("Fan")
+			expect(HitboxTypes.SanitizeDefinition(MoveTypes.ToEngineAttackDefinition(move())).Projectile).to.equal(nil)
 		end)
 	end)
 end

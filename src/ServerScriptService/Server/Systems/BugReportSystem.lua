@@ -63,8 +63,8 @@ local adminPagingSessions: { [Player]: DataStorePages? } = {}
 local mainStore: DataStore? = nil
 local orderedStore: OrderedDataStore? = nil
 
--- In-memory count of every report currently Status == "Open" -- the DevMenu Sidebar's "Bug Reports"
--- stat (DevMenu_GetSidebarStats). Seeded ONCE in Init() from the persisted OPEN_COUNT_KEY counter
+-- In-memory count of every report currently Status == "Open" -- the admin panel's "Open reports"
+-- stat (DevMenu_GetOverview). Seeded ONCE in Init() from the persisted OPEN_COUNT_KEY counter
 -- (a single GetAsync -- see seedOpenReportCount below, and OPEN_COUNT_KEY/persistOpenCountDelta's own
 -- headers for why this replaced an earlier version that paged the full OrderedDataStore, and
 -- GetAsync'd every report ever submitted, on every server boot), then kept accurate incrementally in
@@ -778,7 +778,7 @@ function BugReportSystem.Init(): ()
 	-- stale/zero count for the brief window between Init() returning and this seed actually
 	-- finishing -- openReportCount's own header already documents it as "seeded once... then kept
 	-- accurate incrementally," this just makes that initial seed asynchronous rather than blocking.
-	-- The only real read site (DevMenuSystem's GetSidebarStats) fires per-request, off a remote an
+	-- The only real read site (DevMenuSystem's GetOverview) fires per-request, off a remote an
 	-- admin's client calls well after boot, never during or immediately after Init().
 	task.spawn(seedOpenReportCount)
 

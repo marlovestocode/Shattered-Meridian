@@ -32,7 +32,9 @@
 	    the contact was found in rather than from the end of the frame.
 	  * PASS 2 runs at the end of the frame, ARBITRATES trades across the batch, then applies and
 	    emits. Trades need the whole batch by definition, and applying eagerly would mean whichever
-	    report arrived first cancelled the other before the trade could be seen.
+	    report arrived first cancelled the other before the trade could be seen. That is also what
+	    makes a CLASH possible (DefenseConstants.Clash): two Clean hits that land on each other in the
+	    same frame are one exchange, not two independent hits, and only the batch can see both.
 
 	THE ONE-FRAME RESIDUAL, stated rather than hidden. Because cancels apply in pass 2, a parried
 	attacker's swing keeps sampling for the remainder of the frame it was parried in and can land a
@@ -61,6 +63,7 @@ local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAtt
 local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboConstants)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
+local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnership)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
@@ -77,6 +80,7 @@ local DefenseStateMachine = require(script.Parent.DefenseStateMachine)
 local GuardMeter = require(script.Parent.GuardMeter)
 local OutcomeResolver = require(script.Parent.OutcomeResolver)
 local HitboxEngine = require(script.Parent.Parent.HitboxEngine.HitboxEngine)
+local NetworkLatency = require(script.Parent.Parent.NetworkLatency)
 
 type DefenseState = DefenseTypes.DefenseState
 type DefenseOutcome = DefenseTypes.DefenseOutcome
@@ -178,6 +182,13 @@ local function debugLog(message: string, data: { [string]: any }?): ()
 	end
 end
 
+-- Whether a parry can answer this contact at all. Every swing can; a projectile authored CannotParry
+-- cannot (ProjectileTypes' header) -- the one projectile rule this layer applies itself.
+local function isParryable(report: HitReport): boolean
+	local projectile = report.Projectile
+	return projectile == nil or projectile.Parryable
+end
+
 -- Spec-only replacement for the ping lookup below (SetPingResolver). A dummy has no Player and so no ping,
 -- which would leave every latency rule in this system untestable without a live client.
 local pingResolver: ((model: Model) -> number)? = nil
@@ -189,17 +200,7 @@ local function pingSecondsFor(model: Model): number
 	if resolver then
 		return resolver(model)
 	end
-	local player = Players:GetPlayerFromCharacter(model)
-	if not player then
-		return 0
-	end
-	local ok, ping = pcall(function()
-		return player:GetNetworkPing()
-	end)
-	if not ok or typeof(ping) ~= "number" or ping ~= ping or ping < 0 then
-		return 0
-	end
-	return ping
+	return NetworkLatency.PingSeconds(model)
 end
 
 -- Whether this body is held in an air combo, or lying in a slam's intangible knockdown -- the Attributes
@@ -691,6 +692,11 @@ function DefenseSystem.BeginEvade(model: Model, now: number): (boolean, string?)
 	if isAirHeld(humanoid) then
 		return false, "AirHeld"
 	end
+	-- A realm that forbids the evade (a NoEvade rule, Shared/Domain/DomainRules.lua): read as an Attribute
+	-- on the defender, like the air combo's own holds above, never through the realm runtime above this layer.
+	if DomainRules.Has(humanoid, "NoEvade") then
+		return false, "DomainSealed"
+	end
 	local ok, reason = registration.Machine:BeginEvade(now, pingSecondsFor(model))
 	if ok then
 		-- A guard press held for later (SetBlocking's deferral) is dropped along with the raised guard the
@@ -783,8 +789,16 @@ local function onHit(report: HitReport): ()
 		return
 	end
 
+	-- A PROJECTILE HITS FROM ITS OWN DIRECTION OF TRAVEL, not from wherever its thrower now stands: a shot
+	-- that curved round a defender, or a thrower who ran past the shot they fired, must be judged against
+	-- the side the shot actually arrived from. The engine states that point (ProjectileContact.
+	-- SourcePosition); everything below measures against it exactly as it measures against an attacker.
+	local projectile = report.Projectile
 	local attackerRoot = CharacterUtil.RootOf(report.Attacker)
-	local attackerPosition = if attackerRoot then attackerRoot.Position else report.ContactPosition
+	local attackerPosition = if projectile
+		then projectile.SourcePosition
+		elseif attackerRoot then attackerRoot.Position
+		else report.ContactPosition
 	local defenderCFrame = registration.RootPart.CFrame
 	local bearing = OutcomeResolver.BearingDegrees(defenderCFrame.LookVector, defenderCFrame.Position, attackerPosition)
 
@@ -800,6 +814,17 @@ local function onHit(report: HitReport): ()
 	local humanoid = registration.Humanoid
 	local intangible = isAirComboIntangible(humanoid)
 	local airHeld = not intangible and isAirHeld(humanoid)
+
+	-- A REALM'S TWO DEFENCE RULES, read the same way (Shared/Domain/DomainRules.lua):
+	--   * NoParry -- a live window meets this contact as though it were already spent, exactly the
+	--     unparryable shot's treatment below: a held key still blocks, a tap does nothing, and the window
+	--     is not consumed.
+	--   * NoBlock -- a contact that would have been Blocked (or a Backstab/GuardBroken, which exist only
+	--     because a guard was up) resolves Clean, the air-held rule. A parry, if the realm allows one, still
+	--     counts: that is the realm saying "only a perfect read saves you here".
+	local realmNow = DomainRules.ServerNow()
+	local realmNoParry = DomainRules.Has(humanoid, "NoParry", realmNow)
+	local realmNoBlock = DomainRules.Has(humanoid, "NoBlock", realmNow)
 
 	-- ADVANCED TO THE CONTACT'S OWN TIME BEFORE IT IS QUERIED. Pass 1 runs inside the engine's Step,
 	-- which is the frame BEFORE this system's own Step advances anything -- so without this the
@@ -817,10 +842,17 @@ local function onHit(report: HitReport): ()
 		GuardMax = registration.Guard:GetMax(),
 		BlockHeld = machine:BlockHeldAt(at),
 		ParryLive = machine:IsParryLiveAt(at),
-		ParryConsumed = parryConsumedThisBatch[report.Target] == true,
+		-- An unparryable shot (ProjectileTypes' CannotParry) meets a live window as though it were already
+		-- spent -- which is exactly the resolver's "a held key behind a used parry is a block" rule
+		-- (OutcomeResolver.Mitigates). So the shot is blocked, never parried, and the window itself is NOT
+		-- spent: ConsumesParry stays false, and the next contact can still be parried.
+		ParryConsumed = parryConsumedThisBatch[report.Target] == true or not isParryable(report) or realmNoParry,
 		Evading = intangible or machine:IsEvadingAt(at),
 	})
-	if airHeld and (result.Kind == "Blocked" or result.Kind == "Backstab" or result.Kind == "GuardBroken") then
+	if
+		(airHeld or realmNoBlock)
+		and (result.Kind == "Blocked" or result.Kind == "Backstab" or result.Kind == "GuardBroken")
+	then
 		result = {
 			Kind = "Clean",
 			Guard = batchGuard[report.Target] or registration.Guard:Get(),
@@ -829,6 +861,22 @@ local function onHit(report: HitReport): ()
 		}
 	end
 	batchGuard[report.Target] = result.Guard
+
+	-- THE CLASH MEASUREMENT (DefenseConstants.Clash), taken here at the contact's own substep, where the
+	-- defender's live volume is where it really was. Only a Clean melee hit between two grounded bodies can
+	-- clash; OutcomeResolver.ArbitrateClashes decides in pass 2.
+	local defenderSwingReaches: boolean? = nil
+	if
+		DefenseConstants.Clash.Enabled
+		and result.Kind == "Clean"
+		and projectile == nil
+		and not intangible
+		and not airHeld
+	then
+		local defenderId = HitboxEngine.GetCombatantId(report.Target)
+		defenderSwingReaches = defenderId ~= nil
+			and HitboxEngine.ActiveSwingReaches(defenderId, report.Attacker, DefenseConstants.Clash.ReachMarginStuds)
+	end
 
 	if result.ConsumesParry then
 		-- Marked in the batch, not on the machine: pass 1 applies nothing, and the machine's own flag
@@ -847,6 +895,7 @@ local function onHit(report: HitReport): ()
 		-- Judged here, at the contact's own SampleTime, against the same window the parry itself was just
 		-- judged against -- never re-derived in pass 2, where ConsumeParry has already closed it.
 		Perfect = result.Kind == "Parried" and machine:IsPerfectParryAt(at),
+		DefenderSwingReaches = defenderSwingReaches,
 	})
 end
 
@@ -903,7 +952,23 @@ local function applyContact(contact: PendingContact, now: number): ()
 		end
 	end
 
-	if kind == "Parried" or kind == "Trade" then
+	-- A PARRIED OR EVADED PROJECTILE is answered on the SHOT, through the engine's projectile counterparts
+	-- of CancelAttack -- the thrower's swing is not what was parried: it may be long over, or be a
+	-- different swing entirely by now, and cancelling it would punish a thrower for whatever they are
+	-- doing when their shot arrives. Only a shot authored with the existing parry response
+	-- (ProjectileContact.StaggersOwner) goes on to cancel and stagger its thrower below, exactly as a
+	-- parried swing does. OutcomeResolver.ArbitrateTrades never makes a projectile contact a Trade.
+	local projectile = contact.Report.Projectile
+	if projectile then
+		if kind == "Parried" then
+			HitboxEngine.ParryProjectile(projectile.Id, contact.Defender, contact.SampleTime)
+		elseif kind == "Evaded" then
+			HitboxEngine.PassProjectile(projectile.Id, contact.Defender, contact.SampleTime)
+		end
+	end
+	local punishesAttacker = projectile == nil or projectile.StaggersOwner
+
+	if (kind == "Parried" or kind == "Trade") and punishesAttacker then
 		local attackerId = HitboxEngine.GetCombatantId(contact.Attacker)
 		if attackerId then
 			-- CANCELLED BEFORE STAGGERED, and the order is load-bearing: the engine clears
@@ -914,18 +979,31 @@ local function applyContact(contact: PendingContact, now: number): ()
 			HitboxEngine.CancelAttack(attackerId, if kind == "Trade" then "Traded" else "Parried", contact.SampleTime)
 		end
 	end
+	-- A CLASH COSTS BOTH SWINGS. A mutual parry's defender was parrying, not swinging, so only a clash
+	-- reaches the defender's own swing -- which was out and meeting the attacker's (DefenseConstants.Clash).
+	if kind == "Trade" and contact.Clash == true then
+		local defenderId = HitboxEngine.GetCombatantId(contact.Defender)
+		if defenderId then
+			HitboxEngine.CancelAttack(defenderId, "Traded", contact.SampleTime)
+		end
+	end
 
 	if kind == "Parried" then
 		-- A TRADE STAGGERS NOBODY. Both sides read correctly and both lose their swing; punishing
 		-- either would make a mutual success into a mutual failure.
 		local attackerRegistration = registrations[contact.Attacker]
-		if attackerRegistration then
+		if attackerRegistration and punishesAttacker then
 			-- A PERFECT parry staggers longer (DefenseConstants.PerfectParry) -- the one gameplay difference
 			-- it makes; the rest of its reward is presentation, keyed off Perfect on the outcome below.
 			attackerRegistration.Machine:Stagger(now, parryStaggerSeconds(contact.Perfect == true))
 		end
 		if defenderRegistration then
-			notifyClient(defenderRegistration, defenderRegistration.Machine:GetState(), contact.Report.ContactPosition)
+			-- The facing snap turns the parrier toward where the blow came from -- for a shot, its source.
+			notifyClient(
+				defenderRegistration,
+				defenderRegistration.Machine:GetState(),
+				if projectile then projectile.SourcePosition else contact.Report.ContactPosition
+			)
 		end
 		noteRallyParry(contact.Defender, contact.Attacker, now)
 	elseif kind == "Clean" or kind == "Backstab" or kind == "GuardBroken" then
@@ -944,6 +1022,7 @@ local function applyContact(contact: PendingContact, now: number): ()
 		GuardDelta = contact.Result.GuardDelta,
 		SampleTime = contact.SampleTime,
 		Perfect = contact.Perfect == true,
+		Clash = if contact.Clash == true then true else nil,
 	})
 	debugLog("Contact resolved", { kind = kind, defender = contact.Defender.Name, perfect = contact.Perfect })
 end
@@ -1062,6 +1141,10 @@ resolveHeldContactsFor = function(
 	local parriedAt: number? = nil
 	if armed then
 		for _, held in candidates do
+			-- An unparryable shot is not a candidate for the window; the guard pass below may still block it.
+			if not isParryable(held.Contact.Report) then
+				continue
+			end
 			local covers, perfect = machine:RewoundParryCovers(pressAt, held.Contact.SampleTime, window, scale)
 			if covers then
 				local result = resolveAs(held, "ParryWindow", true, false)
@@ -1108,7 +1191,9 @@ resolveHeldContactsFor = function(
 		if at >= guardUpAt then
 			stateThen = guardState
 			result = resolveAs(held, stateThen, false, false)
-		elseif parriedAt ~= nil and at >= parriedAt then
+		elseif (parriedAt ~= nil and at >= parriedAt) or not isParryable(held.Contact.Report) then
+			-- Behind the parry, or an unparryable shot inside the window: the held key blocks it (pass 1's
+			-- CannotParry rule, judged on the rewind).
 			stateThen = "ParryWindow"
 			result = resolveAs(held, stateThen, false, true)
 		else
@@ -1182,6 +1267,7 @@ function DefenseSystem.Step(deltaTime: number, now: number): ()
 	end
 
 	OutcomeResolver.ArbitrateTrades(pending)
+	OutcomeResolver.ArbitrateClashes(pending)
 	for _, contact in pending do
 		local hold = rewindHoldFor(contact, now)
 		if hold > 0 then
@@ -1219,11 +1305,36 @@ function DefenseSystem.CanAttack(model: Model): (boolean, string?)
 	return registration.Machine:CanAttack()
 end
 
+-- The earliest moment this layer would have let the body start a swing that is being judged NOW: when its
+-- current attack-allowing state began, and never before its last guard release. math.huge while CanAttack
+-- refuses, -math.huge for a body this system does not know. For the attack layer's latency refund
+-- (AttackConstants.Latency), which may not backdate a swing into a stagger or a raised guard. Conservative
+-- on purpose: a body that went Neutral -> Evading -> Neutral reports the second Neutral, not the first.
+function DefenseSystem.AttackFreeSince(model: Model, now: number): number
+	local registration = registrations[model]
+	if not registration then
+		return -math.huge
+	end
+	if registration.GuardDeferred or not registration.Machine:CanAttack() then
+		return math.huge
+	end
+	local enteredAt = now - registration.Machine:GetStateElapsed(now)
+	return math.max(enteredAt, registration.ReleasedAt)
+end
+
 -- How long a Parried outcome staggers its attacker, from the outcome's own Perfect flag. A pure query on
 -- the rule applyContact staggers with, so the attack layer never restates the two stagger lengths. A
 -- rally parry out of a stagger can END a stagger early; this is the length it was stamped with.
 function DefenseSystem.ParryStaggerSeconds(perfect: boolean): number
 	return parryStaggerSeconds(perfect)
+end
+
+-- Whether a guard press is being held for this body until it is free of its own swing or a stun -- the
+-- press Step will raise the moment it can. The attack layer reads it to cut the tail of that swing's
+-- recovery so the guard comes up sooner (AttackConstants.GuardCut).
+function DefenseSystem.IsGuardDeferred(model: Model): boolean
+	local registration = registrations[model]
+	return registration ~= nil and registration.GuardDeferred
 end
 
 function DefenseSystem.GetState(model: Model): DefenseState?

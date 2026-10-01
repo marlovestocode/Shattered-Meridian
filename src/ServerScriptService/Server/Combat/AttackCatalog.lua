@@ -223,6 +223,43 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 		end
 	end
 
+	-- 1c. A CLIP THE AUTHORED TIMELINE DOES NOT FIT (AttackConstants.Windows.RetimeUnfitClips). No marker, a
+	-- clip of known length, and a hitbox that would still be opening or open when the clip has ENDED: the
+	-- authored windup is provably not where this clip hits. So the hitbox goes to the clip's estimated
+	-- strike, and the clip is slowed toward the authored windup (bounded by RetimeMinFactor, never sped up)
+	-- so a heavy keeps most of its read. With no estimate, nothing changes and step 3 warns as before.
+	if
+		AttackConstants.Windows.RetimeUnfitClips
+		and not borrowedFrom
+		and not windupOverride
+		and clipLength
+		and clipSeconds
+		and definition.WindupSeconds + definition.ActiveSeconds > clipSeconds
+	then
+		local strike = AttackWindows.EstimatedStrike(animationId)
+		if strike and strike > 0 and definition.WindupSeconds > 0 then
+			local factor = math.clamp(
+				strike / (definition.WindupSeconds * playbackSpeed),
+				AttackConstants.Windows.RetimeMinFactor,
+				1
+			)
+			playbackSpeed *= factor
+			clipSeconds = clipLength / playbackSpeed
+			definition.WindupSeconds = strike / playbackSpeed
+			warnOnce(
+				`{moveId}|retimed|{animationId}`,
+				"Clip too short for its move -- hitbox moved to its estimated strike",
+				{
+					moveId = moveId,
+					estimatedStrikeClipSeconds = strike,
+					windupSeconds = definition.WindupSeconds,
+					playbackSpeed = playbackSpeed,
+					hint = 'add a "Hit" marker on the impact frame to pin it',
+				}
+			)
+		end
+	end
+
 	-- 1b. THE WEAPON'S OWN SPAWN DELAY, added after the marker override, deliberately.
 	--
 	-- Both numbers answer "when does the hitbox go live", from different authorities: the marker says
@@ -288,6 +325,7 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 		PlaybackSpeed = playbackSpeed,
 		PowerLevel = MoveTypes.PowerLevelOf(move),
 		Feintable = MoveTypes.IsFeintable(move),
+		IsDomain = MoveTypes.IsDomain(move),
 		BorrowedFrom = borrowedFrom,
 	}
 end

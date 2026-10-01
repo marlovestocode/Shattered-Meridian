@@ -300,6 +300,40 @@ DefenseConstants.Rally = {
 	LapseSeconds = 2.5,
 }
 
+-- Clash ---------------------------------------------------------------------------------------------
+
+-- TWO SWINGS THAT MEET CLASH (2026-09-30). Before this, two players swinging into each other got one of
+-- two answers, and neither read as a trade: both hits landing in the same server frame was a double hit
+-- (both stunned, both damaged), and anything else went to whichever hit the server HEARD first -- which is
+-- to say the lower-ping player, every time.
+--
+-- A clash is resolved as the existing "Trade" outcome (OutcomeResolver.ArbitrateClashes): no damage, no
+-- stun, no guard change, BOTH swings cancelled, both bodies pushed apart (DamageConstants.Spacing.Clash),
+-- a shared hit-stop, and both players keep their place in their string (AttackRequestSystem). Both are
+-- free to swing again RecoverySeconds after the contact -- one symmetric beat, rather than each side
+-- waiting out whatever was left of the swing that got cut.
+--
+-- WHEN IT IS A CLASH -- and this is deliberately NOT a time window. Two Clean melee contacts:
+--   * in ONE batch (one server frame) that are mutual -- each one's attacker is the other's defender; or
+--   * a Clean melee contact on a defender whose own swing is in its ACTIVE window with a volume that
+--     already reaches the attacker (within ReachMarginStuds -- HitboxEngine.ActiveSwingReaches).
+-- A defender still WINDING UP loses, however close. That is load-bearing: a defender mashing out of
+-- hitstun is ~0.06s from Active when the attacker's next M1 lands (the M1 read is tuned to sit just
+-- under the weapon's own windup -- see DamageConstants.Hitstun), so any time window wide enough to be
+-- felt would turn every mash-out into a clash and hand the defender a free escape from the string.
+-- "Both blades are out and reach each other" is the rule that cannot do that.
+--
+-- Projectiles never clash (a shot is answered on the shot), and neither does anything in an air combo.
+DefenseConstants.Clash = {
+	Enabled = true,
+	-- Slack on the defender's live volume, in studs, on top of the engine's own narrow-phase margin: a
+	-- blade a hair short of the attacker is still a blade meeting one.
+	ReachMarginStuds = 1,
+	-- Seconds after the contact until either side may swing again. Longer than the push apart lasts
+	-- (DamageConstants.Knockback.HoldSeconds), so the next swing is thrown from the new spacing.
+	RecoverySeconds = 0.25,
+}
+
 -- Evade ---------------------------------------------------------------------------------------------
 
 -- THE EVADE'S FRAMES. A contact landing inside the window resolves to OutcomeKind "Evaded" -- no damage,

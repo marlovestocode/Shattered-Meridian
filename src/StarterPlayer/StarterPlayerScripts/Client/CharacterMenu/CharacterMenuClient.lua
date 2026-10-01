@@ -41,6 +41,7 @@ local BloodlineTypes = require(ReplicatedStorage.Shared.Bloodline.BloodlineTypes
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local SlowWatch = require(ReplicatedStorage.Shared.SlowWatch)
 
 local MenusModule = require(script.Parent.Parent.UI.Screens.Menus)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
@@ -200,13 +201,23 @@ function CharacterMenuClient.Start(handle: MenusHandle, chrome: Chrome.ChromeHan
 	local spinBloodline = NetworkBridge.GetRemoteFunction(BloodlineConstants.RemoteNames.Spin)
 	local setEmoteSlot = NetworkBridge.GetRemoteEvent(EmoteConstants.RemoteNames.RequestSetLoadoutSlot)
 
-	sheetUpdated.OnClientEvent:Connect(function(payload: Types.CharacterSheetPayload)
-		if not isValidSheet(payload) then
-			logger:warn("Malformed Character_SheetUpdated payload ignored", { payload = tostring(payload) })
-			return
-		end
-		handle.Sheet:set(payload)
-	end)
+	-- A CLOSED MENU IGNORES THE PUSH (2026-09-30). Every `set` here re-runs each Computed the sheet feeds
+	-- across the whole character menu -- ~55ms, measured -- and that menu is built at boot and alive while
+	-- hidden. Nothing shows the sheet but the menu, and opening it refetches (handle.Opened ->
+	-- refreshSheet), so a push that lands while it is shut would be paid for and never seen. Watched
+	-- (Shared/SlowWatch.lua) so a slow one says so.
+	sheetUpdated.OnClientEvent:Connect(
+		SlowWatch.Handler(logger, "CharacterMenu.onSheetUpdated", function(payload: Types.CharacterSheetPayload)
+			if not peek(handle.IsOpen) then
+				return
+			end
+			if not isValidSheet(payload) then
+				logger:warn("Malformed Character_SheetUpdated payload ignored", { payload = tostring(payload) })
+				return
+			end
+			handle.Sheet:set(payload)
+		end)
+	)
 
 	artStateUpdated.OnClientEvent:Connect(function(payload: Types.ArtStatePayload)
 		local mastery, equipped, info = sanitizeArtState(payload)

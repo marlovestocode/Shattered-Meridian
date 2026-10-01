@@ -58,6 +58,7 @@ local BountyConstants = require(ReplicatedStorage.Shared.BountyConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local SlowWatch = require(ReplicatedStorage.Shared.SlowWatch)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local logger = Logger.scope("ClientState")
@@ -252,16 +253,19 @@ function ClientState.Bootstrap(state: ClientState): ()
 	local qiUpdated = NetworkBridge.GetRemoteEvent(Constants.Qi.RemoteNames.QiUpdated)
 	logger:debug("Progression_QiUpdated remote found")
 
-	qiUpdated.OnClientEvent:Connect(function(payload: Types.QiUpdatePayload)
-		if typeof(payload) ~= "table" or typeof(payload.Qi) ~= "number" or typeof(payload.MaxQi) ~= "number" then
-			logger:warn("Malformed Progression_QiUpdated payload ignored", { payload = tostring(payload) })
-			return
-		end
+	-- Watched (Shared/SlowWatch.lua): pushed on every Qi spend, so at a realm's upkeep rate a steady stream.
+	qiUpdated.OnClientEvent:Connect(
+		SlowWatch.Handler(logger, "ClientState.onQiUpdated", function(payload: Types.QiUpdatePayload)
+			if typeof(payload) ~= "table" or typeof(payload.Qi) ~= "number" or typeof(payload.MaxQi) ~= "number" then
+				logger:warn("Malformed Progression_QiUpdated payload ignored", { payload = tostring(payload) })
+				return
+			end
 
-		logger:debug("Qi payload received", { qi = payload.Qi, maxQi = payload.MaxQi })
-		state.Qi:set(payload.Qi)
-		state.MaxQi:set(payload.MaxQi)
-	end)
+			logger:debug("Qi payload received", { qi = payload.Qi, maxQi = payload.MaxQi })
+			state.Qi:set(payload.Qi)
+			state.MaxQi:set(payload.MaxQi)
+		end)
+	)
 
 	logger:debug("Waiting for Progression_MeridianXPUpdated remote")
 	local meridianXpUpdated = NetworkBridge.GetRemoteEvent(Constants.Meridian.RemoteNames.XPUpdated)

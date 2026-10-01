@@ -87,14 +87,14 @@ end
 
 -- Frame data and balance numbers for `move` swung on `effective`'s timeline.
 --
--- Advantage counts from the moment of contact. On hit, the defender is stunned for
--- DamageConstants.Hitstun.Seconds while the attacker still owes whatever is left of their active window
--- and their recovery; Min puts the contact on the first active frame (the attacker's worst case), Max on
+-- Advantage counts from the moment of contact. On hit, the defender is stunned for the move's own hitstun
+-- (MoveDefinition.HitstunSeconds, else DamageConstants.Hitstun.Seconds) while the attacker still owes
+-- whatever is left of their active window and their recovery; Min puts the contact on the first active frame (the attacker's worst case), Max on
 -- the last. On block there is NO blockstun (DamageResolver: a Blocked contact applies none), so the
 -- defender acts at once and the numbers are simply minus the attacker's remaining commitment.
 function MoveBalance.Compute(effective: EffectiveTiming, move: MoveDefinition): Balance
 	local frameRate = Constants.MoveEditor.FrameRate
-	local hitstun = DamageConstants.Hitstun.Seconds
+	local hitstun = move.HitstunSeconds or DamageConstants.Hitstun.Seconds
 	local windup, active, recovery = effective.WindupSeconds, effective.ActiveSeconds, effective.RecoverySeconds
 	local totalSeconds = windup + active + recovery
 

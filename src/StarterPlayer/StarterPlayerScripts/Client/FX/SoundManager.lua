@@ -39,12 +39,20 @@
 	than a per-frame ramp -- see PlayLooped's own comment for why that is a different shape from
 	SetLoopedVolume's "the caller eases every frame" contract, and not a replacement for it.
 
-	2D-only (SoundService-parented) for now -- positional/3D audio (a Sound parented to a world
-	Part) is a different concern nothing has asked for yet; adding it later is a new Register()
-	option, not a rewrite of this module's shape.
+	POSITIONAL PLAYBACK (PlayAt, 2026-09-30 -- a move's authored cue with a rolloff distance, see
+	Shared/Combat/MovePresentationTypes.lua). Play stays 2D (SoundService-parented, heard at full volume
+	anywhere). PlayAt plays the SAME registration from a point in the world: each name keeps a second
+	round-robin pool of PoolSize Sounds, each parented to its own Attachment on Workspace.Terrain (an
+	Attachment there is world-positioned), moved to the point per play. Built lazily -- a name nobody
+	plays positionally never makes one -- and repointed by Reconfigure like the 2D pool. No instance per
+	play, the same budget rule as Play.
+
+	Both take an optional per-play volume scale (Play's third argument), reset every play exactly like
+	PlaybackSpeed, so a quiet play never leaks into a pooled instance's next one.
 ]]
 
 local SoundService = game:GetService("SoundService")
+local Workspace = game:GetService("Workspace")
 local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Constants = require(ReplicatedStorage.Shared.Constants)
@@ -71,6 +79,9 @@ type RegisteredSound = {
 	-- and forgotten: a fade-out that is still running when a fresh PlayLooped arrives must be
 	-- cancelled, or its own Completed handler would stop the loop that was just restarted.
 	loopTween: Tween?,
+	-- PlayAt's pool -- see this file's header. Built on first positional play.
+	positional: { Sound },
+	nextPositionalIndex: number,
 }
 
 local registeredSounds: { [string]: RegisteredSound } = {}
@@ -114,7 +125,13 @@ function SoundManager.Register(name: string, definition: SoundDefinition): ()
 	-- Sound with an unresolvable id raises nothing. Warned rather than corrected: silently rewriting a
 	-- caller's asset id would hide a genuine typo just as effectively as ignoring it, and this is the
 	-- kind of mistake that should be fixed at the constant.
-	if definition.SoundId ~= "" and not string.match(definition.SoundId, "^rbxassetid://") then
+	-- `rbxasset://` is Roblox's own built-in content (sounds/electronicpingshort.wav and friends): a content
+	-- URL too, and not a typo.
+	if
+		definition.SoundId ~= ""
+		and not string.match(definition.SoundId, "^rbxassetid://")
+		and not string.match(definition.SoundId, "^rbxasset://")
+	then
 		logger:warn(
 			"Sound registered with a SoundId that is not a content URL -- Roblox will fail to load it "
 				.. "and every Play() will silently do nothing. Prefix the asset id with 'rbxassetid://'.",
@@ -122,8 +139,15 @@ function SoundManager.Register(name: string, definition: SoundDefinition): ()
 		)
 	end
 
-	registeredSounds[name] =
-		{ definition = definition, poolSize = poolSize, instances = {}, nextIndex = 1, loopTween = nil }
+	registeredSounds[name] = {
+		definition = definition,
+		poolSize = poolSize,
+		instances = {},
+		nextIndex = 1,
+		loopTween = nil,
+		positional = {},
+		nextPositionalIndex = 1,
+	}
 	logger:debug("Sound registered", { name = name, hasSoundId = definition.SoundId ~= "", poolSize = poolSize })
 end
 
@@ -172,14 +196,145 @@ end
 -- step system replaying one identical sample reads as a metronome, and a few percent of random pitch
 -- is the cheapest fix there is). Omitting it restores 1, so a pooled instance that was pitched by an
 -- earlier play never leaks that pitch into an unrelated later one.
-function SoundManager.Play(name: string, playbackSpeed: number?): ()
+-- One warning per (call kind, sound) for a sound with no SoundId. The gap is a config fact, not an event: a
+-- landing that plays every second warned once per landing (25 lines in one ten-minute session), each
+-- through the Logger's capture and the Output window, to say the same thing.
+local warnedSilent: { [string]: boolean } = {}
+local function warnSilentOnce(kind: string, name: string): ()
+	local key = `{kind}:{name}`
+	if warnedSilent[key] then
+		return
+	end
+	warnedSilent[key] = true
+	logger:warn(`{kind} skipped: sound has no SoundId configured`, { name = name })
+end
+
+-- Fades -----------------------------------------------------------------------------------------------------
+
+-- A one-shot's optional fade, in seconds: `In` rises from silence as it starts, `Out` sinks back to silence over
+-- its last seconds. Either may be nil or 0; both gives a fade in AND out. A move's authored FadeIn / FadeOut
+-- (Shared/Combat/MovePresentationTypes.lua, SOUND FADES) arrive here through CombatAudio.
+export type FadeSpec = { In: number?, Out: number? }
+
+-- PURE. When a fade-out should start and how long it runs, given how long the sound still has to play (wall
+-- seconds, at its current pitch) and the fade asked for. It always ENDS where the sound ends, and a sound with
+-- less left than the fade fades over what it has. Returns (secondsUntilStart, durationSeconds); a duration of
+-- 0 means no fade-out (none asked for, or the sound's length is not known yet).
+function SoundManager.FadeOutTiming(remainingSeconds: number, fadeOutSeconds: number): (number, number)
+	if remainingSeconds ~= remainingSeconds or remainingSeconds <= 0 then
+		return 0, 0
+	end
+	if fadeOutSeconds ~= fadeOutSeconds or fadeOutSeconds <= 0 then
+		return 0, 0
+	end
+	local duration = math.min(fadeOutSeconds, remainingSeconds)
+	return remainingSeconds - duration, duration
+end
+
+type FadeState = { Tweens: { Tween } }
+
+-- The fade running on each pooled Sound, if any. Weak-keyed: a destroyed Sound takes its entry with it.
+local activeFades: { [Sound]: FadeState } = setmetatable({}, { __mode = "k" }) :: any
+
+-- Stops whatever fade a Sound had going. Called at the start of EVERY play of a pooled instance, faded or not:
+-- a fade-out left running from the previous play would otherwise drag the next play's volume to zero.
+local function cancelFade(sound: Sound): ()
+	local state = activeFades[sound]
+	if state == nil then
+		return
+	end
+	activeFades[sound] = nil
+	for _, tween in state.Tweens do
+		tween:Cancel()
+	end
+end
+
+-- Wall seconds a STARTED sound has left, at its current pitch -- nil while its length is not known (not loaded
+-- yet). Honours a playback region: a sliced asset plays only its slice.
+local function remainingSecondsOf(sound: Sound): number?
+	local speed = math.max(sound.PlaybackSpeed, 1e-3)
+	if sound.PlaybackRegionsEnabled then
+		local region = sound.PlaybackRegion
+		if region.Max <= region.Min then
+			return nil
+		end
+		return (region.Max - math.max(sound.TimePosition, region.Min)) / speed
+	end
+	local length = sound.TimeLength
+	if length <= 0 then
+		return nil
+	end
+	return (length - sound.TimePosition) / speed
+end
+
+-- Arms the fade-out: from the sound's remaining playtime once that is known. A sound that has not loaded yet
+-- waits for its Loaded signal, so the first play of a cold pooled instance fades out like every later one.
+local function armFadeOut(sound: Sound, state: FadeState, fadeOutSeconds: number): ()
+	local function arm(): ()
+		if activeFades[sound] ~= state then
+			return
+		end
+		local remaining = remainingSecondsOf(sound)
+		if remaining == nil then
+			return
+		end
+		local startsIn, duration = SoundManager.FadeOutTiming(remaining, fadeOutSeconds)
+		if duration <= 0 then
+			return
+		end
+		task.delay(startsIn, function()
+			if activeFades[sound] ~= state then
+				return
+			end
+			-- The fade-out takes over from wherever a fade-in had got to.
+			for _, tween in state.Tweens do
+				tween:Cancel()
+			end
+			local tween = TweenService:Create(sound, TweenInfo.new(duration, Enum.EasingStyle.Linear), { Volume = 0 })
+			table.insert(state.Tweens, tween)
+			tween:Play()
+		end)
+	end
+	if sound.IsLoaded then
+		arm()
+	else
+		sound.Loaded:Once(arm)
+	end
+end
+
+-- Plays `sound` at `volume`, with the optional fade. The one place Play and PlayAt start a pooled instance.
+local function playWithFade(sound: Sound, volume: number, fade: FadeSpec?): ()
+	cancelFade(sound)
+	local fadeIn = if fade and fade.In then math.max(fade.In, 0) else 0
+	local fadeOut = if fade and fade.Out then math.max(fade.Out, 0) else 0
+	if fadeIn <= 0 and fadeOut <= 0 then
+		sound.Volume = volume
+		sound:Play()
+		return
+	end
+	local state: FadeState = { Tweens = {} }
+	activeFades[sound] = state
+	-- Silent BEFORE it starts, so a fade-in has no pop at its first sample.
+	sound.Volume = if fadeIn > 0 then 0 else volume
+	sound:Play()
+	if fadeIn > 0 then
+		local tween = TweenService:Create(sound, TweenInfo.new(fadeIn, Enum.EasingStyle.Linear), { Volume = volume })
+		table.insert(state.Tweens, tween)
+		tween:Play()
+	end
+	if fadeOut > 0 then
+		armFadeOut(sound, state, fadeOut)
+	end
+end
+
+function SoundManager.Play(name: string, playbackSpeed: number?, volumeScale: number?, fade: FadeSpec?): ()
 	local registered = registeredSounds[name]
 	if not registered then
 		logger:warn("Play requested for unregistered sound", { name = name })
 		return
 	end
 	if registered.definition.SoundId == "" then
-		logger:warn("Play skipped: sound has no SoundId configured", { name = name })
+		warnSilentOnce("Play", name)
 		return
 	end
 
@@ -188,8 +343,180 @@ function SoundManager.Play(name: string, playbackSpeed: number?): ()
 
 	local sound = getOrCreateInstanceAt(name, registered, index)
 	sound.PlaybackSpeed = playbackSpeed or 1
-	sound:Play()
+	playWithFade(sound, registered.definition.Volume * (volumeScale or 1), fade)
 	logger:debug("Sound played", { name = name, poolIndex = index })
+end
+
+-- The positional pool slot `index` for `name`, built (or rebuilt, if something destroyed it) on demand.
+local function getOrCreatePositionalAt(name: string, registered: RegisteredSound, index: number): Sound
+	local existing = registered.positional[index]
+	if existing and existing.Parent and existing.Parent.Parent then
+		return existing
+	end
+	local attachment = Instance.new("Attachment")
+	attachment.Name = `SoundAt_{name}{index}`
+	attachment.Parent = Workspace.Terrain
+	local sound = Instance.new("Sound")
+	sound.Name = name
+	applyDefinition(sound, registered.definition)
+	sound.Parent = attachment
+	registered.positional[index] = sound
+	return sound
+end
+
+-- Plays `name` FROM `position`, fading out to nothing at `rollOffMaxDistance` studs -- see this file's
+-- header. Same registration, same warnings and same per-play pitch/volume as Play.
+function SoundManager.PlayAt(
+	name: string,
+	position: Vector3,
+	rollOffMaxDistance: number,
+	playbackSpeed: number?,
+	volumeScale: number?,
+	fade: FadeSpec?
+): ()
+	local registered = registeredSounds[name]
+	if not registered then
+		logger:warn("PlayAt requested for unregistered sound", { name = name })
+		return
+	end
+	if registered.definition.SoundId == "" then
+		warnSilentOnce("PlayAt", name)
+		return
+	end
+	if position ~= position then
+		return
+	end
+
+	local index = registered.nextPositionalIndex
+	registered.nextPositionalIndex = (registered.nextPositionalIndex % registered.poolSize) + 1
+
+	local sound = getOrCreatePositionalAt(name, registered, index)
+	local attachment = sound.Parent :: Attachment
+	attachment.WorldPosition = position
+	local maxDistance = math.max(rollOffMaxDistance, 1)
+	sound.RollOffMaxDistance = maxDistance
+	-- Full volume within a small radius of the source, then the engine's own tapered falloff.
+	sound.RollOffMinDistance = math.clamp(maxDistance * 0.15, 1, 10)
+	sound.PlaybackSpeed = playbackSpeed or 1
+	playWithFade(sound, registered.definition.Volume * (volumeScale or 1), fade)
+end
+
+-- Loop handles -------------------------------------------------------------------------------------------------
+
+-- One running loop. `Stop` ends it (idempotent), sinking over `fadeOutSeconds` first when given.
+export type LoopHandle = { Stop: (fadeOutSeconds: number?) -> () }
+
+-- A loop that is never stopped (a caller that lost its handle) ends on its own after this long.
+local MAX_LOOP_SECONDS = 300
+
+local liveLoopCount = 0
+
+-- How many loop handles are playing right now -- the caller's cap (FXConstants.MovePresentation.MaxLoopingCues)
+-- is enforced against this, since this module has no gameplay knowledge of its own.
+function SoundManager.LoopCount(): number
+	return liveLoopCount
+end
+
+-- Plays the sound registered under `name` as its OWN looping instance and returns a handle that ends it.
+--
+-- NOT PlayLooped, deliberately: PlayLooped addresses pool slot 1 of a NAME, so there is exactly one loop per
+-- name and a second caller of the same asset would either no-op or have its loop stopped by the first's Stop.
+-- A move's authored loop is per-play (two realms, or two players' swings, may share one asset), so each is its
+-- own Sound, destroyed when stopped -- bounded by the caller's cap, and by MAX_LOOP_SECONDS if a handle is lost.
+--
+-- `fade.In` rises from silence as it starts; the fade OUT is the Stop argument's, because only the caller knows
+-- when the loop is going to end. From `position` when `rollOffMaxDistance` is given, like PlayAt.
+function SoundManager.PlayLoop(
+	name: string,
+	playbackSpeed: number?,
+	volumeScale: number?,
+	fade: FadeSpec?,
+	position: Vector3?,
+	rollOffMaxDistance: number?
+): LoopHandle?
+	local registered = registeredSounds[name]
+	if not registered then
+		logger:warn("PlayLoop requested for unregistered sound", { name = name })
+		return nil
+	end
+	if registered.definition.SoundId == "" then
+		warnSilentOnce("PlayLoop", name)
+		return nil
+	end
+
+	local sound = Instance.new("Sound")
+	sound.Name = `{name}Loop`
+	applyDefinition(sound, registered.definition)
+	sound.Looped = true
+	sound.PlaybackSpeed = playbackSpeed or 1
+	local volume = registered.definition.Volume * (volumeScale or 1)
+
+	local attachment: Attachment? = nil
+	if position ~= nil and position == position and rollOffMaxDistance ~= nil and rollOffMaxDistance > 0 then
+		local anchor = Instance.new("Attachment")
+		anchor.Name = `LoopAt_{name}`
+		anchor.WorldPosition = position
+		anchor.Parent = Workspace.Terrain
+		attachment = anchor
+		local maxDistance = math.max(rollOffMaxDistance, 1)
+		sound.RollOffMaxDistance = maxDistance
+		sound.RollOffMinDistance = math.clamp(maxDistance * 0.15, 1, 10)
+		sound.Parent = anchor
+	else
+		sound.Parent = SoundService
+	end
+	liveLoopCount += 1
+
+	local fadeIn = if fade and fade.In then math.max(fade.In, 0) else 0
+	sound.Volume = if fadeIn > 0 then 0 else volume
+	sound:Play()
+	local fadeInTween: Tween? = nil
+	if fadeIn > 0 then
+		local tween = TweenService:Create(sound, TweenInfo.new(fadeIn, Enum.EasingStyle.Linear), { Volume = volume })
+		fadeInTween = tween
+		tween:Play()
+	end
+
+	local stopped = false
+	local finished = false
+	local function finish(): ()
+		if finished then
+			return
+		end
+		finished = true
+		liveLoopCount -= 1
+		sound:Stop()
+		sound:Destroy()
+		if attachment then
+			attachment:Destroy()
+		end
+	end
+
+	local handle: LoopHandle = {
+		Stop = function(fadeOutSeconds: number?): ()
+			if stopped then
+				return
+			end
+			stopped = true
+			if fadeInTween then
+				fadeInTween:Cancel()
+			end
+			local fadeOut = if fadeOutSeconds then math.max(fadeOutSeconds, 0) else 0
+			if fadeOut <= 0 then
+				finish()
+				return
+			end
+			local tween = TweenService:Create(sound, TweenInfo.new(fadeOut, Enum.EasingStyle.Linear), { Volume = 0 })
+			tween.Completed:Once(finish)
+			tween:Play()
+			-- A tween that never reports (the Sound was destroyed under it) must not strand the loop.
+			task.delay(fadeOut + 0.5, finish)
+		end,
+	}
+	task.delay(MAX_LOOP_SECONDS, function()
+		handle.Stop(0)
+	end)
+	return handle
 end
 
 -- Repoints an ALREADY-REGISTERED name at a new definition, in place -- the runtime half of "the step
@@ -213,6 +540,9 @@ function SoundManager.Reconfigure(name: string, definition: SoundDefinition): ()
 	-- characteristics change that much is a different registration, not a reconfiguration.
 	registered.definition = definition
 	for _, sound in registered.instances do
+		applyDefinition(sound, definition)
+	end
+	for _, sound in registered.positional do
 		applyDefinition(sound, definition)
 	end
 	logger:debug("Sound reconfigured", { name = name, hasSoundId = definition.SoundId ~= "" })
@@ -263,7 +593,7 @@ function SoundManager.PlayLooped(name: string, fadeInSeconds: number?): ()
 		return
 	end
 	if registered.definition.SoundId == "" then
-		logger:warn("PlayLooped skipped: sound has no SoundId configured", { name = name })
+		warnSilentOnce("PlayLooped", name)
 		return
 	end
 

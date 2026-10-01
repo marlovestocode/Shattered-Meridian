@@ -87,7 +87,7 @@
 	Logging (Logger.scope("ShiftLockCamera"), Studio-only per Logger.lua): toggle and engage/
 	disengage transitions and character (re)binds only -- nothing logs at render-step frequency.
 
-	Input suspension (2026-08-10, radial emote wheel): SetInputSuspended(true) tells this module to
+	Input suspension (2026-08-10, radial emote wheel): SetInputSuspended(owner, true) tells this module to
 	skip its own per-frame MouseBehavior/yaw writes below without touching `enabled`/`engaged` at all
 	-- CameraOffset easing keeps running regardless, so a shift-locked player's shoulder framing
 	doesn't visibly snap away and back. Client/Emotes/EmoteWheelClient.lua is the one caller today: the
@@ -207,8 +207,10 @@ local crosshairEngaged: Fusion.Value<boolean>? = nil
 
 -- See this file's header, "Input suspension" section. Read once per render step in onRenderStep
 -- below -- a plain boolean check, not a GetAttribute/remote lookup, so suspending costs nothing on
--- every OTHER frame this mode isn't engaged anyway.
+-- every OTHER frame this mode isn't engaged anyway. Derived from `suspendedBy`, which holds one entry
+-- per caller currently suspending, so one caller's release can never cancel another's hold.
 local inputSuspended = false
+local suspendedBy: { [string]: boolean } = {}
 
 -- Mirrors this character's own Humanoid "ParkourFacingOwned" Attribute -- see this file's header,
 -- "Yaw suspension" section, and Constants.Attributes.ParkourFacingOwned's own note. Same cached-local
@@ -546,9 +548,13 @@ local function onCharacterRemoving(): ()
 	rootPart = nil
 end
 
--- See this file's header, "Input suspension" section.
-function ShiftLockCamera.SetInputSuspended(suspended: boolean): ()
-	inputSuspended = suspended
+-- See this file's header, "Input suspension" section. KEYED BY OWNER (2026-09-29, when the Move
+-- Editor's Place mode became the second caller, exactly the point the header named): input stays
+-- suspended while ANY owner holds it, so the emote wheel closing cannot hand the mouse back to shift
+-- lock in the middle of a placement, or the reverse.
+function ShiftLockCamera.SetInputSuspended(owner: string, suspended: boolean): ()
+	suspendedBy[owner] = if suspended then true else nil
+	inputSuspended = next(suspendedBy) ~= nil
 end
 
 -- shiftLockEngaged is CombatFeedback's handle field of the same name (Main.client.lua passes it

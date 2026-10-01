@@ -17,6 +17,9 @@
 	The optional blocks follow the same split: absent is valid (nil), present-but-not-a-table is a hard
 	reject (the author clearly meant to author one), and the numbers inside are clamped. Grab reads its
 	bounds from GrabConstants.Limits and Art from ArtConstants.Limits -- each runtime owns its own range.
+	Projectile (the move type) goes through ProjectileTypes.Validate, whose Limits the editor renders too,
+	and Presentation through MovePresentationTypes.Validate, and Domain through DomainTypes.Validate, the
+	same way.
 
 	Upsert/Delete touch memory only. That is what makes a Preview take effect on the very next swing with
 	no DataStore round trip; MoveEditorSystem decides when anything is persisted.
@@ -31,17 +34,37 @@ local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
+local Logger = require(ReplicatedStorage.Shared.Logger)
+local DomainTypes = require(ReplicatedStorage.Shared.Domain.DomainTypes)
+local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
 local Sanitize = require(ReplicatedStorage.Shared.Sanitize)
 local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
 
 local MoveRegistryManager = {}
+
+local logger = Logger.scope("MoveRegistryManager")
 
 local LIMITS = Constants.MoveEditor.Limits
 
 type Range = { Min: number, Max: number }
 
 local moves: { [string]: MoveTypes.MoveDefinition } = {}
+
+-- Called with a MoveId after every Upsert/Delete -- the one seam Server/Combat/MovePresentationSystem.lua
+-- reads to keep the client catalogue in step, whichever writer (the editor, the source library, a spec)
+-- changed the registry. pcall'd per listener: a publisher erroring must never fail a registry write.
+local changedListeners: { (moveId: string) -> () } = {}
+
+local function notifyChanged(moveId: string): ()
+	for _, listener in changedListeners do
+		local ok, err = pcall(listener, moveId)
+		if not ok then
+			logger:warn("OnChanged listener failed", { moveId = moveId, error = tostring(err) })
+		end
+	end
+end
 
 local function isNonEmptyString(value: unknown): boolean
 	return typeof(value) == "string" and (value :: string) ~= ""
@@ -148,13 +171,27 @@ local function validateGrab(raw: unknown): (MoveTypes.MoveGrabConfig?, string?)
 	end
 	local victimAnimation, victimOk = grabAnimation(candidate.VictimAnimation)
 	local attackerAnimation, attackerOk = grabAnimation(candidate.AttackerAnimation)
-	if not victimOk or not attackerOk then
+	local throwAnimation, throwOk = grabAnimation(candidate.ThrowAnimation)
+	local victimThrowAnimation, victimThrowOk = grabAnimation(candidate.VictimThrowAnimation)
+	if not victimOk or not attackerOk or not throwOk or not victimThrowOk then
 		return nil, "InvalidGrab"
+	end
+	-- Optional, and left absent when absent (GrabSystem reads nil as the clip's end), so a grab saved
+	-- before it existed round-trips unchanged; present, it must be a number.
+	local releaseAt: number? = nil
+	if candidate.ThrowReleaseAt ~= nil then
+		releaseAt = clamp(candidate.ThrowReleaseAt, limits.ThrowReleaseAt)
+		if releaseAt == nil then
+			return nil, "InvalidGrab"
+		end
 	end
 	return {
 		Mode = modeName :: any,
 		VictimAnimation = victimAnimation,
 		AttackerAnimation = attackerAnimation,
+		VictimThrowAnimation = victimThrowAnimation,
+		ThrowAnimation = throwAnimation,
+		ThrowReleaseAt = releaseAt,
 		HoldSeconds = hold,
 		ThrowUpVelocity = up,
 		ThrowHorizontalVelocity = horizontal,
@@ -327,6 +364,46 @@ function MoveRegistryManager.Validate(candidate: unknown): (MoveTypes.MoveDefini
 		return nil, artError
 	end
 
+	-- The move type (MoveTypes.IsProjectile). ProjectileTypes owns its own gate, the way GrabConstants and
+	-- ArtConstants own their ranges: strict on option names and value types, clamping on numbers.
+	local projectile: MoveTypes.MoveProjectileConfig? = nil
+	if raw.Projectile ~= nil then
+		local spec, projectileError = ProjectileTypes.Validate(raw.Projectile)
+		if not spec then
+			return nil, projectileError or "InvalidProjectile"
+		end
+		projectile = spec
+	end
+	-- A grab welds the victim to the holder's hand. From a shot that landed across the arena that is a
+	-- teleport, not a grab -- so a projectile move cannot carry one, and saying so beats flying it.
+	if projectile and grab then
+		return nil, "ProjectileCannotGrab"
+	end
+
+	-- The realm (MoveTypes.IsDomain). DomainTypes owns its own gate, the same arrangement: strict on option
+	-- names, value types and move-id shape, clamping on numbers. Handed the move's own id so an effect that
+	-- references the realm itself is refused rather than re-opening it on every pulse.
+	local domain: MoveTypes.MoveDomainConfig? = nil
+	if raw.Domain ~= nil then
+		local spec, domainError = DomainTypes.Validate(raw.Domain, moveId)
+		if not spec then
+			return nil, domainError or "InvalidDomain"
+		end
+		domain = spec
+	end
+	-- A grab is a hold on one body; a realm is a law over many. The swing that opens a realm is its tell,
+	-- and a tell that also welds its first victim to the caster's hand is two ultimates in one press.
+	if domain and grab then
+		return nil, "DomainCannotGrab"
+	end
+
+	-- Presentation: strict on moment/preset/id/colour identity, clamping on numbers, every asset id
+	-- normalised -- MovePresentationTypes.Validate. It never meets a combat layer.
+	local presentation, presentationError = MovePresentationTypes.Validate(raw.Presentation)
+	if presentationError then
+		return nil, presentationError
+	end
+
 	return {
 		MoveId = moveId,
 		DisplayName = displayName,
@@ -344,6 +421,7 @@ function MoveRegistryManager.Validate(candidate: unknown): (MoveTypes.MoveDefini
 		OffsetRotation = rotation,
 		AttachmentPart = attachment,
 		LocksMovement = raw.LocksMovement == true,
+		LocksWindup = raw.LocksWindup == true,
 
 		WindupSeconds = windup,
 		ActiveSeconds = active,
@@ -361,6 +439,9 @@ function MoveRegistryManager.Validate(candidate: unknown): (MoveTypes.MoveDefini
 		Knockback = knockback,
 		Grab = grab,
 		Art = art,
+		Projectile = projectile,
+		Presentation = presentation,
+		Domain = domain,
 	},
 		nil
 end
@@ -389,10 +470,23 @@ end
 -- `validated` must already have passed Validate; this trusts its caller on that.
 function MoveRegistryManager.Upsert(validated: MoveTypes.MoveDefinition): ()
 	moves[validated.MoveId] = MoveTypes.Clone(validated)
+	notifyChanged(validated.MoveId)
 end
 
 function MoveRegistryManager.Delete(moveId: string): ()
 	moves[moveId] = nil
+	notifyChanged(moveId)
+end
+
+-- Subscribes to every Upsert/Delete; returns the unsubscribe. See changedListeners.
+function MoveRegistryManager.OnChanged(listener: (moveId: string) -> ()): () -> ()
+	table.insert(changedListeners, listener)
+	return function()
+		local index = table.find(changedListeners, listener)
+		if index then
+			table.remove(changedListeners, index)
+		end
+	end
 end
 
 -- Server-generated, never client-chosen, so two admins creating moves at once can never collide. The

@@ -1095,7 +1095,7 @@ export type DevMenuGrantRerollsResult = {
 -- (Shared/MoveTypes.lua) already cover the request/response shape.
 
 -- Live flight-tuning field names (Server/DevMenu/FlightTuning.lua, DevMenu_ListFlightTuning/
--- DevMenu_AdjustFlightTuning/DevMenu_ResetFlightTuning) -- a CURATED subset of Constants.Flight's own
+-- DevMenu_SetFlightTuning/DevMenu_ResetFlightTuning) -- a CURATED subset of Constants.Flight's own
 -- fields worth exposing to hands-on playtesting, a deliberately scoped-down editor rather than a
 -- general Constants one (unlike Server/Combat/DefaultMoveRegistry.lua's now-full-field Default-move
 -- editor, movement feel has no MoveRegistryManager.Validate-style clamp table to reuse). Deliberately
@@ -1122,6 +1122,10 @@ export type FlightTuningInfo = {
 	Field: FlightTuningFieldName,
 	DisplayName: string,
 	Value: number,
+	-- FlightTuning's per-field clamp, and the value the file shipped with (what Reset restores).
+	Min: number,
+	Max: number,
+	Default: number,
 }
 
 -- Result of DevMenu_ListFlightTuning -- every tunable field, fetched ONCE by DevMenuClient.lua and
@@ -1133,7 +1137,7 @@ export type DevMenuListFlightTuningResult = {
 	Reason: string?,
 }
 
--- Result of DevMenu_AdjustFlightTuning / DevMenu_ResetFlightTuning.
+-- Result of DevMenu_SetFlightTuning / DevMenu_ResetFlightTuning.
 export type DevMenuFlightTuningResult = {
 	Success: boolean,
 	Field: FlightTuningInfo?,
@@ -1246,24 +1250,6 @@ export type DevMenuBugReportMutationResult = {
 -- DevMenuActionResult with Reason = "ConfirmationRequired" -- not a distinct type, just another
 -- Reason string for DevMenuClient.lua to special-case in its own describeX function.
 
--- Result of DevMenu_GetServerVersionInfo (RemoteFunction, Server/Systems/VersionWatchSystem.lua) --
--- fetched once at DevMenuClient.Start(), same "fetch-once, cache client-side" shape as
--- DevMenuHitboxDebugResult/DevMenuSidebarStatsResult above. BootPlaceVersion is THIS server's own
--- game.PlaceVersion, fixed for its whole lifetime. LatestKnownPlaceVersion is the highest
--- PlaceVersion any server (this one included) has reported booting with, via a shared DataStore
--- counter that only ever ratchets upward -- see VersionWatchSystem.lua's own header for why that
--- self-reported max is enough to detect a publish with no external tooling. NewerVersionAvailable
--- is true only once LatestKnownPlaceVersion is strictly greater than BootPlaceVersion; nil/false
--- otherwise (before the first DataStore round trip resolves, or the ordinary case of no newer
--- version existing).
-export type DevMenuServerVersionInfoResult = {
-	Success: boolean,
-	Reason: string?,
-	BootPlaceVersion: number?,
-	LatestKnownPlaceVersion: number?,
-	NewerVersionAvailable: boolean?,
-}
-
 -- Broadcast Announcement (DevMenu_Announcement, a RemoteEvent fired to EVERY client -- see that
 -- remote's own header in Constants.lua). "Warning" is used for the Shutdown Server countdown;
 -- "Info" for a plain admin broadcast.
@@ -1274,31 +1260,6 @@ export type DevMenuAnnouncementKind = "Info" | "Warning"
 export type DevMenuAnnouncementPayload = {
 	Kind: DevMenuAnnouncementKind,
 	Message: string,
-}
-
--- Player roster ("Players" tab, DevMenu/init.lua) -- one entry per Players:GetPlayers() at fetch
--- time, RemoteFunction (fetch-on-open, not push -- see DevMenu_ListPlayers's own Constants.lua
--- comment). Snapshot is nil only if CombatSystem has no state for that Player yet (a brand-new join
--- before its own PlayerAdded handler has run) -- see CombatSystem.GetCombatState's own nil contract.
-export type PlayerRosterEntry = {
-	UserId: number,
-	Name: string,
-	Snapshot: CombatSnapshot?,
-	Ping: number,
-	-- ModerationSystem.IsMuted(UserId) at fetch time -- lets the "Players" tab's Mute button reflect
-	-- real server state instead of a locally-guessed toggle, same "read real state, don't guess"
-	-- precedent as DevMenuClient.watchTarget's Godmode/Flight Attribute tracking.
-	Muted: boolean,
-	-- ModerationSystem.IsSuspectedCheater(UserId) at fetch time -- same "read real state, don't
-	-- guess" contract as Muted above, for the roster row's Flag-Suspected-Cheater action.
-	SuspectedCheater: boolean,
-}
-
--- Result of DevMenu_ListPlayers (RemoteFunction).
-export type DevMenuListPlayersResult = {
-	Success: boolean,
-	Reason: string?,
-	Players: { PlayerRosterEntry }?,
 }
 
 -- Suspected-cheater manual flagging (Server/Systems/ModerationSystem.lua, DevMenu_SetSuspectedCheater)
@@ -1323,35 +1284,16 @@ export type SuspicionRecord = {
 	ReasonCode: string?,
 }
 
--- Result of DevMenu_GetSidebarStats (RemoteFunction) -- fetched eagerly at Sidebar mount (same "pay
--- one round trip even if the admin never looks" trade-off ListPlayers/ListBugReports already
--- accept) and re-fetched after a successful Flag/Unflag action. BugReportOpenCount/
--- SuspectedCheaterCount are each an in-memory counter maintained entirely by their owning System
--- (BugReportSystem.GetOpenCount / ModerationSystem.GetSuspectedCheaterCount) -- DevMenuSystem only
--- combines the two into one response so the Sidebar pays a single round trip instead of two.
 -- Result of LiveConsole_Subscribe (RemoteFunction, Server/Systems/LiveConsoleSystem.lua) -- fired
 -- by Client/DevTools/LiveConsole/LiveConsoleClient.lua the moment the admin's console panel actually opens,
 -- doubling as both the authorization check (a rejection here IS the "not admin" answer, same
--- "first remote call is the real gate" idiom DevMenu_GetSidebarStats/MoveEditor_ListMoves already
+-- "first remote call is the real gate" idiom DevMenu_GetOverview/MoveEditor_ListMoves already
 -- use) and the fetch that populates the panel with whatever Shared/Logger.lua's capture buffer
 -- already holds at that exact moment, oldest first.
 export type LiveConsoleSubscribeResult = {
 	Success: boolean,
 	Reason: string?,
 	Snapshot: { LogTypes.LogEntry }?,
-}
-
--- Result of DevMenu_GetSidebarStats (RemoteFunction) -- fetched eagerly at Sidebar mount (same "pay
--- one round trip even if the admin never looks" trade-off ListPlayers/ListBugReports already
--- accept) and re-fetched after a successful Flag/Unflag action. BugReportOpenCount/
--- SuspectedCheaterCount are each an in-memory counter maintained entirely by their owning System
--- (BugReportSystem.GetOpenCount / ModerationSystem.GetSuspectedCheaterCount) -- DevMenuSystem only
--- combines the two into one response so the Sidebar pays a single round trip instead of two.
-export type DevMenuSidebarStatsResult = {
-	Success: boolean,
-	Reason: string?,
-	BugReportOpenCount: number?,
-	SuspectedCheaterCount: number?,
 }
 
 -- First-time-player onboarding / character creation (Server/Systems/CharacterCreationSystem.lua,

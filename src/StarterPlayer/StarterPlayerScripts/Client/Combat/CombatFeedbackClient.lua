@@ -46,6 +46,17 @@
 	    heavier sparks and a lower strained clang. The strained pose itself is not here -- it is on every
 	    client, off the replicated tag (Client/FX/GuardStrainPose.lua).
 
+	A MOVE MAY RESHAPE ALL OF IT (2026-09-30). The attacking move's Hit cue for the outcome
+	(Shared/Combat/MovePresentationTypes.lua -- HitClean ... HitEvaded, HitPerfectParry for the Perfect
+	variant) is resolved ONCE per contact (MovePresentation.CueFor, off payload.MoveId) and handed to each
+	step below, which lays it over its own default: the shake preset and scale, the stinger (CombatAudio's
+	move > weapon > shared precedence), the flash colour, the spark burst and its punch, the exchange
+	freeze and an authored template at the contact. No cue is exactly the behaviour before it existed.
+	Only the COSMETIC steps read it (PresentHit): the victim's movement freeze, the knockback launch, the
+	cancelled swing and the damage number mirror what the server already decided, and a move's
+	presentation must never reach them. PresentHit is exported so the Move Editor's per-moment Preview
+	plays a hit through this exact path rather than an editor-only copy of it.
+
 	Does not own: the surfaces themselves (Client/UI/Screens/CombatFeedback), the shake compositor
 	(Client/FX/CameraShake.lua) or the FOV compositor (Client/FX/FOVOffset.lua), the press-side cue
 	(Client/Combat/AttackInputClient.lua), or the HUD's own vitals (Client/UI/State/ClientState.lua
@@ -94,10 +105,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
+local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 
 local AttackInputClient = require(script.Parent.AttackInputClient)
@@ -110,9 +123,11 @@ local CombatFeedbackModule = require(script.Parent.Parent.UI.Screens.CombatFeedb
 local HitFlash = require(script.Parent.Parent.FX.HitFlash)
 local HitStop = require(script.Parent.Parent.FX.HitStop)
 local ImpactSparks = require(script.Parent.Parent.FX.ImpactSparks)
+local MovePresentation = require(script.Parent.Parent.FX.MovePresentation)
 local RollAfterimage = require(script.Parent.Parent.FX.RollAfterimage)
 
 type CombatFeedback = DamageTypes.CombatFeedback
+type Cue = MovePresentationTypes.Cue
 type Handle = CombatFeedbackModule.CombatFeedbackHandle
 
 local logger = Logger.scope("CombatFeedbackClient")
@@ -156,7 +171,7 @@ local SUPPRESSES_DAMAGE_NUMBERS: { [string]: boolean } = {
 
 -- Presentation -------------------------------------------------------------------------------------
 
-local function shakeFor(payload: CombatFeedback): ()
+local function shakeFor(payload: CombatFeedback, cue: Cue?): ()
 	local table_ = if payload.Role == "Defender"
 		then AttackConstants.Presentation.ShakePresets.Defender
 		else AttackConstants.Presentation.ShakePresets.Attacker
@@ -165,8 +180,9 @@ local function shakeFor(payload: CombatFeedback): ()
 		else table_[payload.Kind] or AttackConstants.Presentation.DefaultShakePreset
 	-- Indexed rather than switched, so a preset renamed in Constants.FX is a nil (no shake) rather
 	-- than a runtime error -- Constants.FX's own "a missing preset degrades to no shake, never to a
-	-- wrong hit" rule, which CameraShake.Shake already tolerates on its own side too.
-	CameraShake.Shake((Constants.FX.CameraShake :: any)[presetName])
+	-- wrong hit" rule, which CameraShake.Shake already tolerates on its own side too. A move's cue may
+	-- name its own preset for both roles, scale this one, or say None.
+	CameraShake.Shake(MovePresentation.Shake(cue, (Constants.FX.CameraShake :: any)[presetName]) :: any)
 end
 
 -- Which of Constants.FX.HitFlash's three named colors a resolution pops on the defender -- the same
@@ -187,8 +203,8 @@ local HIT_FLASH_COLORS: { [string]: Color3 } = {
 -- participant's client is running this, since a Highlight reads the same for both. Evaded is the one
 -- OutcomeKind with no entry, deliberately: nothing touched the defender, and a hit-flash on a body the
 -- swing went through would say it had.
-local function flashFor(payload: CombatFeedback): ()
-	local color = HIT_FLASH_COLORS[payload.Kind]
+local function flashFor(payload: CombatFeedback, cue: Cue?): ()
+	local color = MovePresentation.FlashColor(cue, HIT_FLASH_COLORS[payload.Kind])
 	if not color then
 		return
 	end
@@ -243,21 +259,29 @@ local EXCHANGE_SECONDS_BY_KIND: { [string]: number } = {
 	Backstab = Constants.FX.HitStop.PostureBreakSeconds,
 	GuardBroken = Constants.FX.HitStop.PostureBreakSeconds,
 	Parried = Constants.FX.HitStop.ParrySeconds,
+	-- Two swings meeting (DefenseConstants.Clash) is the same clash beat as a parry: both bodies stop,
+	-- then both are shoved apart.
+	Trade = Constants.FX.HitStop.ParrySeconds,
 }
 
-local function freezeExchangeFor(payload: CombatFeedback): ()
+local function freezeExchangeFor(payload: CombatFeedback, cue: Cue?): ()
 	local seconds = EXCHANGE_SECONDS_BY_KIND[payload.Kind]
-	if not seconds then
+	if seconds then
+		if variantOf(payload) == "ParriedPerfect" then
+			-- The perfect parry replaces the clash beat outright rather than adding to it: the whole
+			-- exchange stops for PerfectParrySeconds, on both bodies, on both clients.
+			seconds = Constants.FX.HitStop.PerfectParrySeconds
+		elseif typeof(payload.MoveId) == "string" and string.find(payload.MoveId, ":Heavy:", 1, true) then
+			seconds += Constants.FX.HitStop.HeavyBonusSeconds
+		end
+	end
+	-- A move's authored freeze replaces the whole computed beat (0 is none). Pose only: the victim's
+	-- movement freeze below mirrors real server hitstun and no cue reaches it.
+	local resolved = MovePresentation.HitStopSeconds(cue, seconds)
+	if not resolved or resolved <= 0 then
 		return
 	end
-	if variantOf(payload) == "ParriedPerfect" then
-		-- The perfect parry replaces the clash beat outright rather than adding to it: the whole exchange
-		-- stops for PerfectParrySeconds, on both bodies, on both clients.
-		seconds = Constants.FX.HitStop.PerfectParrySeconds
-	elseif typeof(payload.MoveId) == "string" and string.find(payload.MoveId, ":Heavy:", 1, true) then
-		seconds += Constants.FX.HitStop.HeavyBonusSeconds
-	end
-	HitStop.FreezeExchange(payload.Attacker, payload.Defender, seconds)
+	HitStop.FreezeExchange(payload.Attacker, payload.Defender, resolved)
 end
 
 -- Victim-only, like the freeze above, and deliberately sequenced AFTER it: the launch the server put on
@@ -274,18 +298,21 @@ end
 -- The spacing push (DamageConstants.Spacing), on EITHER role: the defender sliding back, the attacker
 -- following a hit or rebounding off a block. Started after this client's freeze for the same reason as
 -- the launch above -- the victim's movement freeze, or the exchange's pose freeze for the attacker.
-local function pushFor(payload: CombatFeedback): ()
+local function pushFor(payload: CombatFeedback, cue: Cue?): ()
 	if typeof(payload.Push) ~= "Vector3" or typeof(payload.Knockback) == "Vector3" then
 		return
 	end
-	local delay = if payload.Role == "Defender"
+	-- The attacker's push waits out the exchange freeze -- the move's own, when it authored one.
+	-- A trade is even, so both sides wait out the same clash freeze before they part.
+	local delay = if payload.Role == "Defender" and payload.Kind ~= "Trade"
 		then FREEZE_SECONDS_BY_KIND[payload.Kind] or 0
-		else EXCHANGE_SECONDS_BY_KIND[payload.Kind] or 0
+		else MovePresentation.HitStopSeconds(cue, EXCHANGE_SECONDS_BY_KIND[payload.Kind]) or 0
 	KnockbackClient.Push(payload.Push :: Vector3, delay)
 end
 
 -- Outcomes that cancel the ATTACKER's own swing server-side: DefenseSystem.applyContact calls
--- HitboxEngine.CancelAttack on a parried attacker ("Parried") and on both sides of a trade ("Traded").
+-- HitboxEngine.CancelAttack on a parried attacker ("Parried") and on both sides of a trade ("Traded") --
+-- for a clash, on the DEFENDER's swing too, which cancelSwingFor handles on the Defender copy.
 local ATTACKER_SWING_CANCELLED_BY_KIND: { [string]: boolean } = {
 	Parried = true,
 	Trade = true,
@@ -296,12 +323,25 @@ local ATTACKER_SWING_CANCELLED_BY_KIND: { [string]: boolean } = {
 -- prediction (AttackInputClient) and the held guard (DefenseClient).
 local function cancelSwingFor(payload: CombatFeedback): ()
 	if payload.Role == "Defender" then
+		if payload.Kind == "Trade" then
+			-- A clash cut this player's own swing as well as the attacker's (DefenseSystem.applyContact); no
+			-- stun, so nothing is recorded -- the shared recovery arrives on Attack_Cancelled ("Traded").
+			-- For a mutual parry this client was parrying, not swinging, and cutting nothing is a no-op.
+			AttackInputClient.CancelSwing()
+			return
+		end
 		if not FREEZE_SECONDS_BY_KIND[payload.Kind] then
 			return
 		end
 		-- The same three kinds DamageResolver grants DamageConstants.Hitstun for -- recorded so no swing
-		-- is predicted, and no guard animation started, while the server is refusing both.
-		LocalCombatState.NoteHitstun(os.clock() + DamageConstants.Hitstun.Seconds)
+		-- is predicted, and no guard animation started, while the server is refusing both. The length is
+		-- the server's own for this contact (it varies by weapon); the shared one only covers an older server.
+		local stun = if typeof(payload.HitstunSeconds) == "number"
+			then payload.HitstunSeconds
+			else DamageConstants.Hitstun.Seconds
+		LocalCombatState.NoteHitstun(os.clock() + stun)
+		-- And the body cannot simply walk out of the next swing while it is stunned (HitStop's header).
+		HitStop.SlowVictimMovement(stun, CombatConstants.HitSlowMultiplier)
 		AttackInputClient.CancelSwing()
 	elseif ATTACKER_SWING_CANCELLED_BY_KIND[payload.Kind] then
 		-- Without this a parried swing kept playing to its end on the attacker's screen while the
@@ -383,6 +423,157 @@ local function reportHitCost(payload: CombatFeedback): ()
 	table.clear(stepSeconds)
 end
 
+-- The cue a contact plays: the attacking move's Hit cue for this outcome (and variant), or nil.
+function CombatFeedbackClient.CueFor(payload: CombatFeedback): Cue?
+	local moment = MovePresentationTypes.HitMomentFor(payload.Kind, payload.Perfect)
+	return if moment then MovePresentation.CueFor(payload.MoveId, moment) else nil
+end
+
+-- The COSMETIC half of a resolved contact -- shake, stinger, flash, sparks, the exchange freeze and a
+-- move's template -- with `cue` laid over each step's default (this file's header). Everything that
+-- mirrors a server decision stays in onFeedback.
+local function presentHit(payload: CombatFeedback, cue: Cue?): ()
+	timed("Hit.Shake", function()
+		shakeFor(payload, cue)
+	end)
+	timed("Hit.Audio", function()
+		if payload.Kind == "Evaded" then
+			-- A contact that never happened: no impact stinger, no hit-flash, no number (Damage is 0). The
+			-- dodger hears the bright whiff and the attacker the muted one (CombatAudio.PlayEvaded), and
+			-- BOTH see one bright ghost on the dodger's rig -- the swing went through where they were, and
+			-- the attacker is the one who most needs to read that it did.
+			CombatAudio.PlayEvaded(payload.Role == "Defender", cue, payload.ContactPosition)
+			if typeof(payload.Defender) == "Instance" and payload.Defender:IsA("Model") then
+				RollAfterimage.FlashEvade(payload.Defender)
+			end
+		else
+			-- payload.Defender, not the local character: the block/parry sound belongs to the weapon that
+			-- CAUGHT the swing, and this same event reaches the attacker's machine too -- see CombatAudio's
+			-- own header. It resolves the weapon itself; this module hands it the participant and nothing
+			-- more.
+			local variant = variantOf(payload)
+			CombatAudio.PlayImpact(
+				payload.Kind,
+				payload.Defender,
+				if variant then VARIANT_PITCH[variant] else nil,
+				cue,
+				payload.ContactPosition
+			)
+		end
+	end)
+	timed("Hit.Flash", function()
+		flashFor(payload, cue)
+	end)
+	-- Sparks at the blades for the steel-on-steel outcomes (parry, block, trade, guard break), and the
+	-- parry's camera punch -- see ImpactSparks' own header. A body-only outcome has no preset and no-ops,
+	-- unless the move's cue names one. The cue's own punch and template land at the same contact.
+	timed("Hit.Sparks", function()
+		if typeof(payload.ContactPosition) == "Vector3" then
+			local preset, overrides = MovePresentation.Sparks(cue, variantOf(payload) or payload.Kind)
+			if preset then
+				ImpactSparks.Play(preset, payload.ContactPosition, overrides)
+			end
+			MovePresentation.PlayPunch(cue)
+			MovePresentation.PlayTemplate(
+				cue,
+				CFrame.new(payload.ContactPosition),
+				payload.MoveId,
+				MovePresentationTypes.HitMomentFor(payload.Kind, payload.Perfect) or payload.Kind
+			)
+		end
+	end)
+	timed("Hit.FreezeExchange", function()
+		freezeExchangeFor(payload, cue)
+	end)
+end
+
+-- presentHit for the Move Editor's Preview, which hands it a local payload and the DRAFT's cue, so a
+-- previewed hit takes this exact path. Its step timings are dropped rather than reported: a preview is
+-- not a hit, and they would otherwise pad the next real hit's cost line.
+function CombatFeedbackClient.PresentHit(payload: CombatFeedback, cue: Cue?): ()
+	presentHit(payload, cue)
+	table.clear(stepLabels)
+	table.clear(stepSeconds)
+end
+
+-- Predicted hits -----------------------------------------------------------------------------------------
+--
+-- AttackConstants.Presentation.HitPrediction's header has the whole contract. Two small ledgers, keyed by
+-- the defender: hits this client PREDICTED and is waiting on a verdict for, and verdicts that arrived
+-- FIRST, so a prediction that fires late (the server was quicker, e.g. in Studio) never repeats one.
+
+local HIT_PREDICTION = AttackConstants.Presentation.HitPrediction
+
+type ContactRecord = { MoveId: string, At: number }
+
+local predictedContacts: { [Model]: ContactRecord } = {}
+local confirmedContacts: { [Model]: ContactRecord } = {}
+
+local function matchesContact(record: ContactRecord?, moveId: string, now: number): boolean
+	return record ~= nil and record.MoveId == moveId and now - record.At <= HIT_PREDICTION.MatchSeconds
+end
+
+-- Drops records past their match window, so a despawned body is never held by either ledger.
+local function pruneContacts(ledger: { [Model]: ContactRecord }, now: number): ()
+	for model, record in ledger do
+		if now - record.At > HIT_PREDICTION.MatchSeconds then
+			ledger[model] = nil
+		end
+	end
+end
+
+-- Plays the attacker's side of a Clean hit that has not been confirmed yet -- the thud, the flash, the
+-- exchange freeze, the shake -- and records it so the server's matching verdict does not play it twice.
+-- Returns whether it played (false when this contact was already presented, predicted or confirmed).
+-- Client/Combat/HitPrediction.lua is the caller.
+function CombatFeedbackClient.PresentPredictedHit(
+	attacker: Model,
+	defender: Model,
+	contactPosition: Vector3,
+	moveId: string
+): boolean
+	local now = os.clock()
+	if
+		matchesContact(confirmedContacts[defender], moveId, now)
+		or matchesContact(predictedContacts[defender], moveId, now)
+	then
+		return false
+	end
+	pruneContacts(predictedContacts, now)
+	predictedContacts[defender] = { MoveId = moveId, At = now }
+	local payload: CombatFeedback = {
+		Kind = "Clean",
+		Role = "Attacker",
+		Attacker = attacker,
+		Defender = defender,
+		Damage = 0,
+		GuardDrain = 0,
+		ComboStage = 0,
+		MoveId = moveId,
+		ContactPosition = contactPosition,
+	}
+	presentHit(payload, CombatFeedbackClient.CueFor(payload))
+	return true
+end
+
+-- Whether this verdict's impact presentation was already played by a prediction. Only a Clean verdict
+-- is skipped: a Backstab or GuardBroken is heavier than what was predicted, and a Blocked/Parried/Evaded
+-- verdict contradicts it -- both play in full, which is what tells the attacker what really happened.
+local function consumePrediction(payload: CombatFeedback): boolean
+	if payload.Role ~= "Attacker" or typeof(payload.Defender) ~= "Instance" then
+		return false
+	end
+	local defender = payload.Defender
+	local now = os.clock()
+	local predicted = matchesContact(predictedContacts[defender], payload.MoveId, now)
+	if predicted then
+		predictedContacts[defender] = nil
+	end
+	pruneContacts(confirmedContacts, now)
+	confirmedContacts[defender] = { MoveId = payload.MoveId, At = now }
+	return predicted and payload.Kind == "Clean"
+end
+
 local function onFeedback(raw: unknown): ()
 	if typeof(raw) ~= "table" then
 		return
@@ -393,9 +584,10 @@ local function onFeedback(raw: unknown): ()
 	end
 
 	debug.profilebegin("CombatFeedback")
-	timed("Hit.Shake", function()
-		shakeFor(payload)
-	end)
+	local cue = CombatFeedbackClient.CueFor(payload)
+	if not consumePrediction(payload) then
+		presentHit(payload, cue)
+	end
 	-- The air combo's weight on top of the ordinary hit presentation: a camera punch per air hit, the
 	-- finisher hardest, and the air parry's own clash (docs/design/air-combat-and-evade.md B4).
 	if payload.AirCombo ~= nil then
@@ -403,44 +595,12 @@ local function onFeedback(raw: unknown): ()
 			AirComboFX.OnFeedback(payload)
 		end)
 	end
-	timed("Hit.Audio", function()
-		if payload.Kind == "Evaded" then
-			-- A contact that never happened: no impact stinger, no hit-flash, no number (Damage is 0). The
-			-- dodger hears the bright whiff and the attacker the muted one (CombatAudio.PlayEvaded), and
-			-- BOTH see one bright ghost on the dodger's rig -- the swing went through where they were, and
-			-- the attacker is the one who most needs to read that it did.
-			CombatAudio.PlayEvaded(payload.Role == "Defender")
-			if typeof(payload.Defender) == "Instance" and payload.Defender:IsA("Model") then
-				RollAfterimage.FlashEvade(payload.Defender)
-			end
-		else
-			-- payload.Defender, not the local character: the block/parry sound belongs to the weapon that
-			-- CAUGHT the swing, and this same event reaches the attacker's machine too -- see CombatAudio's
-			-- own header. It resolves the weapon itself; this module hands it the participant and nothing
-			-- more.
-			local variant = variantOf(payload)
-			CombatAudio.PlayImpact(payload.Kind, payload.Defender, if variant then VARIANT_PITCH[variant] else nil)
-		end
-	end)
-	timed("Hit.Flash", function()
-		flashFor(payload)
-	end)
-	-- Sparks at the blades for the steel-on-steel outcomes (parry, block, trade, guard break), and the
-	-- parry's camera punch -- see ImpactSparks' own header. A body-only outcome has no preset and no-ops.
-	timed("Hit.Sparks", function()
-		if typeof(payload.ContactPosition) == "Vector3" then
-			ImpactSparks.Play(variantOf(payload) or payload.Kind, payload.ContactPosition)
-		end
-	end)
-	timed("Hit.FreezeExchange", function()
-		freezeExchangeFor(payload)
-	end)
 	timed("Hit.FreezeVictim", function()
 		freezeVictimFor(payload)
 	end)
 	timed("Hit.Knockback", function()
 		launchFor(payload)
-		pushFor(payload)
+		pushFor(payload, cue)
 	end)
 	timed("Hit.CancelSwing", function()
 		cancelSwingFor(payload)

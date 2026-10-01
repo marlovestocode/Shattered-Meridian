@@ -33,6 +33,8 @@ local guardHeld = false
 -- When the current swing's recovery may be cut, because it LANDED (AttackConstants.HitConfirm), or 0 when
 -- it may not. Written by AttackInputClient on the attacker's own Combat_Feedback; reset with the swing.
 local cancelAt = 0
+-- When a guard may cut this swing's recovery (AttackConstants.GuardCut); 0 = never.
+local guardCutAt = 0
 
 -- Called whenever a commitment ends EARLY -- a swing cancelled mid-flight -- so a module waiting for the
 -- body to be free (DefenseClient's held guard) can act on this frame rather than at the deadline it
@@ -48,6 +50,11 @@ end
 function LocalCombatState.SetSwing(endsAt: number): ()
 	swingEndsAt = endsAt
 	cancelAt = 0
+	guardCutAt = 0
+end
+
+function LocalCombatState.SetGuardCutAt(at: number): ()
+	guardCutAt = at
 end
 
 function LocalCombatState.ClearSwing(): ()
@@ -87,6 +94,16 @@ end
 -- When the body is next free of both a swing and a stun, or `now` if it already is. `cancelable` asks for
 -- an action that may take a landed swing's cut (AttackConstants.HitConfirm.CancelInto): for it the swing
 -- ends at its cut point instead of its real end.
+-- When a GUARD may next come up: FreeAt, except that a swing ends at its guard cut point
+-- (AttackConstants.GuardCut) instead of its real end -- the server's own rule, mirrored.
+function LocalCombatState.GuardFreeAt(now: number): number
+	local swing = swingEndsAt
+	if guardCutAt > 0 and guardCutAt < swing then
+		swing = guardCutAt
+	end
+	return math.max(now, swing, stunEndsAt)
+end
+
 function LocalCombatState.FreeAt(now: number, cancelable: boolean?): number
 	local swing = swingEndsAt
 	if cancelable and cancelAt > 0 and cancelAt < swing then

@@ -174,6 +174,14 @@ export type ClipSpec = {
 	-- Expiry ceiling for a one-shot whose Length has not resolved yet -- see
 	-- UNKNOWN_LENGTH_MAX_SECONDS.
 	MaxSeconds: number?,
+	-- For a one-shot the SERVER plays on a rig clients watch (a bot, or a player's character through
+	-- GrabSystem). AnimationTrack.Looped does not replicate -- every client plays the track with the loop
+	-- flag saved in the asset -- and a one-shot that ends by itself on the server sends clients no stop.
+	-- So a clip exported looped, played "once" from the server, played forever on every screen. With this
+	-- set the track plays looped everywhere (agreeing with any asset), and Step stops it explicitly, while
+	-- it is still playing, at the end of its first pass; an explicit Stop of a playing track DOES replicate.
+	-- Reported as Completed, like any one-shot. Ignored when Looped is set.
+	ReplicatedOneShot: boolean?,
 	OnFinished: ((clip: string, reason: FinishReason) -> ())?,
 }
 
@@ -205,6 +213,10 @@ type ActiveEntry = {
 	-- Loop-repair budget, see REPAIR_WINDOW_SECONDS.
 	Repairs: number,
 	RepairWindowStartedAt: number,
+	-- ClipSpec.ReplicatedOneShot on a one-shot: the track is looped underneath and Step ends it. The
+	-- playhead last frame, so a pass that wrapped between two Steps is still caught.
+	ExplicitEnd: boolean,
+	LastPosition: number,
 	-- Set the instant this entry stops owning its layer, so a Stopped signal already in flight (or a
 	-- watchdog pass on the same frame) cannot finalise it twice.
 	Retired: boolean,
@@ -518,6 +530,7 @@ local function start(self: AnimationManagerInstance, claim: Claim): ()
 	end
 
 	local looped = spec.Looped == true
+	local explicitEnd = not looped and spec.ReplicatedOneShot == true
 	local weight = spec.Weight or 1
 	local speed = spec.Speed or 1
 	local fadeIn = spec.FadeIn or DEFAULT_FADE_IN
@@ -542,6 +555,8 @@ local function start(self: AnimationManagerInstance, claim: Claim): ()
 		Stopped = nil,
 		Repairs = 0,
 		RepairWindowStartedAt = now,
+		ExplicitEnd = explicitEnd,
+		LastPosition = 0,
 		Retired = false,
 	}
 
@@ -551,7 +566,7 @@ local function start(self: AnimationManagerInstance, claim: Claim): ()
 	self.active[claim.Layer] = entry
 
 	local played = protectedCall(clip, "Play", function()
-		track.Looped = looped
+		track.Looped = looped or explicitEnd
 		if spec.Priority then
 			track.Priority = spec.Priority
 		end
@@ -745,6 +760,19 @@ function AnimationManager.GetActiveClip(self: AnimationManagerInstance, layer: s
 	return if entry then entry.Clip else nil
 end
 
+-- Where the clip on `layer` is: its playhead and its Length, both in the clip's own seconds, or nil when
+-- the layer is empty. Length reads 0 until the asset has loaded, so a caller comparing against it has to
+-- treat 0 as "not yet known". For a caller that acts at a point INSIDE a clip rather than at its end
+-- (GrabSystem releasing a thrown body partway through the throw clip).
+function AnimationManager.GetPlayback(self: AnimationManagerInstance, layer: string): (number?, number)
+	local entry = self.active[layer]
+	if not entry or entry.Retired then
+		return nil, 0
+	end
+	local track = entry.Track
+	return track.TimePosition, track.Length
+end
+
 function AnimationManager.GetPhase(self: AnimationManagerInstance): Phase
 	return self.phase
 end
@@ -899,6 +927,22 @@ function AnimationManager.Step(self: AnimationManagerInstance, _deltaTime: numbe
 			-- genuinely takes twice as long.
 			local speed = math.abs(entry.DesiredSpeed)
 			local length = track.Length
+			-- ReplicatedOneShot: end the first pass ourselves, a fade-out early so the fade finishes on the
+			-- clip's own last frame rather than bleeding into the start of a second pass.
+			if entry.ExplicitEnd and length > 0 then
+				local position = track.TimePosition
+				local wrapped = position < entry.LastPosition
+				entry.LastPosition = position
+				local fade = math.min(entry.FadeOut * speed, length * 0.25)
+				if wrapped or position >= length - fade then
+					local layerClaims = self.claims[layer]
+					if layerClaims then
+						layerClaims[entry.Source] = nil
+					end
+					retire(self, entry, "Completed", true)
+					continue
+				end
+			end
 			local limit = if length > 0 and speed > 0
 				then length / speed + ONE_SHOT_GRACE_SECONDS
 				else entry.Spec.MaxSeconds or UNKNOWN_LENGTH_MAX_SECONDS

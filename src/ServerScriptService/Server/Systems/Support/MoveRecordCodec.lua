@@ -28,6 +28,17 @@
 	timeline itself, and Knockback.RagdollSeconds. Decode reports which of those a record actually had,
 	so the loader can log "this move lost its projectile" rather than dropping it in silence.
 
+	THE v3 PROJECTILE BLOCK IS A DIFFERENT THING (2026-09-30) and needs no schema bump: it is an optional
+	block a v3 record either carries or does not, so every v3 record without one is a melee move exactly
+	as it was. It is passed through like any v3 field and judged by ProjectileTypes.Validate. Only a v1/v2
+	record's Projectile -- the retired shape above, which nothing ever flew -- is dropped, and it is never
+	read as the new one: the two share a name and nothing else.
+
+	PRESENTATION (2026-09-30) is another optional v3 block, passed through like Projectile and judged by
+	MovePresentationTypes.Validate -- no schema bump, since no stored shape changed meaning. It is the one
+	optional block a Default move's override carries, and in an override record its ABSENCE is
+	authoritative (see DecodeOverride): the record is the whole overridable set as it was saved.
+
 	Nothing rewrites a stored record on load. It is re-written in the new shape the next time an admin
 	saves it.
 
@@ -275,6 +286,12 @@ function MoveRecordCodec.DecodeOverride(built: MoveTypes.MoveDefinition, raw: un
 		if key ~= "SchemaVersion" and value ~= nil then
 			candidate[key] = value
 		end
+	end
+	-- Optional, so the overlay above cannot say "none": a v3 override record is the whole overridable
+	-- set as saved, and a save with no presentation must not inherit a shipped one it replaced -- the
+	-- same "the live override wins wholesale" rule every numeric field already follows.
+	if numberOr(record.SchemaVersion, 1) >= 3 then
+		candidate.Presentation = record.Presentation
 	end
 	return candidate, dropped
 end

@@ -63,7 +63,59 @@ DamageConstants.Hitstun = {
 	-- job is expiring a press buffered at the moment of being hit rather than firing it the instant
 	-- hitstun clears, and every second this number gains is a second more room for that rule to hold.
 	Seconds = 0.65,
+
+	-- PER-STAGE, then PER-WEAPON, OVERRIDES of Seconds -- the same shape and the same "replaces, does not
+	-- multiply" rule as AttackConstants.Tempo.ByStage/ByWeapon. A weapon's entry wins over the stage's, and a
+	-- stage neither names stuns for Seconds. DefaultMoveRegistry stamps the resolved value on each Default move
+	-- (MoveDefinition.HitstunSeconds); a custom Move Editor move stuns for Seconds.
+	--
+	-- WHY FISTS HAVE THEIR OWN (2026-09-30): "defending against hands is literally impossible." Measured,
+	-- not guessed: the M1 clips are 0.583s with no Hit marker (Studio boot log), and Fists played them at
+	-- WeaponSpeed 1.5 x Tempo 0.72. Impact to impact came to 0.66s against the shared 0.65s stun, so the next
+	-- punch landed 0.01s after the stun ended, and any contact past the first active frame landed INSIDE it
+	-- -- a true combo. A jab stunning less than a sword cut is the honest fix: slowing the punches enough to
+	-- open the same gap would make hands slower to throw than their weight suggests, on every press.
+	--
+	-- BOUNDS: every entry must stay above AttackConstants.Input.BufferSeconds (0.35), or a press buffered at
+	-- the moment of being hit fires the instant the stun clears instead of expiring. And the read must stay
+	-- SHORTER than the weapon's own M1 windup, so the attacker still wins a straight M1 mash-out on a kept
+	-- rhythm: answering a string is a parry, a block or an evade, not a button race.
+	-- Tests/Combat/Attack/AttackRequestSystem.spec.lua holds every roster weapon's M1 string to a parry read.
+	--
+	-- THE RESPONSIVENESS PASS (2026-09-30, "combat in general feels pretty unresponsive"). The blade M1 took
+	-- 0.48s to land and 1.02s to cycle: the 2026-09-28 pacing pass bought the defender's parry read by
+	-- slowing the ATTACKER (Tempo 0.65, ChainDelay 0.12), because the stun was one fixed 0.65s. With a
+	-- per-stage stun the read can be bought from the stun instead. So the string is faster (Tempo.ByStage.
+	-- Basic 0.8, ChainDelay 0.05 -- see those) and an M1 stuns for less:
+	--
+	--   Blade (speed 1, 0.583s clip): windup 0.39, impact to impact 0.78 (was 1.02), read 0.78 - 0.45 = 0.33
+	--   (was 0.37). Fists (speed 1.5, Tempo 0.65): windup 0.32, impact to impact 0.65, read 0.65 - 0.40 = 0.25.
+	--
+	-- THE READ IS HELD NEAR THE BLADE'S OLD 0.37 ON PURPOSE. 2026-09-28 found ~0.2s "not nearly enough time
+	-- to even try to parry"; this pass makes the attacker faster, not the defender's window smaller. Every
+	-- weapon still wins a straight M1 mash-out on a kept rhythm (the defender's own windup outlasts the read).
+	-- The launcher off a landed B3 is now a read too (~0.24s after the stun on a blade, was ~0.07s) -- no
+	-- ground move is a true combo off an M1.
+	ByStage = {
+		Basic = 0.45,
+	} :: { [string]: number },
+	ByWeapon = {
+		Fists = {
+			Basic = 0.40,
+		},
+	} :: { [string]: { [string]: number } },
 }
+
+-- The hitstun one stage of one weapon's string inflicts: that weapon's ByWeapon override when it names the
+-- stage, else the ByStage value, else Hitstun.Seconds. Read LIVE on every call, like AttackConstants.TempoFor.
+function DamageConstants.HitstunFor(weaponId: string?, stage: string?): number
+	local HITSTUN = DamageConstants.Hitstun
+	if not stage then
+		return HITSTUN.Seconds
+	end
+	local override = if weaponId then HITSTUN.ByWeapon[weaponId] else nil
+	return (override and override[stage]) or HITSTUN.ByStage[stage] or HITSTUN.Seconds
+end
 
 -- Combo ---------------------------------------------------------------------------------------------
 
@@ -251,6 +303,9 @@ DamageConstants.Knockback = {
 --     removed for).
 --   * Blocked: both are pushed APART. The defender slides back further than on a hit, and the attacker
 --     rebounds a little, so a blocked string separates and has to be walked back into.
+--   * Clash (a Trade -- DefenseConstants.Clash): both are pushed apart by the SAME distance, since neither
+--     won the exchange. The mirrored outcome of a mutual clash pushes the same two bodies the same way, and
+--     a client push replaces rather than adds (KnockbackClient.Push), so it is never applied twice.
 -- Distances in studs. The client holds a linear decay over DamageConstants.Knockback.HoldSeconds, so the
 -- speed is 2 * studs / HoldSeconds (about 13 studs/s for 1.2). That is well under Knockback.Audit's
 -- MinHorizontalVelocity, so a push is never audited as a knockback.
@@ -260,6 +315,7 @@ DamageConstants.Spacing = {
 	Enabled = true,
 	Hit = { DefenderStuds = 1.2, AttackerFollowStuds = 1.2 },
 	Blocked = { DefenderStuds = 1.8, AttackerStuds = 0.7 },
+	Clash = { Studs = 1.4 },
 }
 
 -- Network -------------------------------------------------------------------------------------------

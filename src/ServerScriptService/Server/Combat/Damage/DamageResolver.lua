@@ -125,6 +125,13 @@ function DamageResolver.Resolve(
 	local authoredDamage = safeNumber(profile.Damage)
 	local authoredPosture = safeNumber(profile.PostureDamage)
 	local comboScale = DamageResolver.ComboMultiplier(stage)
+	-- The move's own stun when its weapon names one (DamageConstants.Hitstun.ByWeapon -- a jab stuns less
+	-- than a sword cut), else the shared length. safeNumber turns a malformed value into 0, which would be
+	-- NO stun, so that case falls back too rather than silently making a move stunless.
+	local hitstunSeconds = safeNumber(profile.HitstunSeconds)
+	if hitstunSeconds <= 0 then
+		hitstunSeconds = DamageConstants.Hitstun.Seconds
+	end
 
 	local result: DamageResult = {
 		Kind = kind,
@@ -141,12 +148,12 @@ function DamageResolver.Resolve(
 		local outcomeScale = if kind == "Backstab" then DamageConstants.Backstab.Multiplier else 1
 		result.Damage = authoredDamage * comboScale * outcomeScale
 		result.GuardDrain = authoredPosture * DamageConstants.Guard.PressurePerPostureDamage * outcomeScale
-		result.HitstunSeconds = DamageConstants.Hitstun.Seconds
+		result.HitstunSeconds = hitstunSeconds
 		result.Knockback = profile.Knockback
 		result.Grab = profile.Grab
 	elseif kind == "GuardBroken" then
 		result.Damage = authoredDamage * comboScale
-		result.HitstunSeconds = DamageConstants.Hitstun.Seconds
+		result.HitstunSeconds = hitstunSeconds
 		result.Knockback = profile.Knockback
 		result.Grab = profile.Grab
 	elseif kind == "Blocked" then

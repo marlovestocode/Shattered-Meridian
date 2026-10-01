@@ -27,6 +27,9 @@ local AttackCatalog = require(ServerScriptService.Server.Combat.AttackCatalog)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackRequestSystem = require(ServerScriptService.Server.Combat.Attack.AttackRequestSystem)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
+local DamageSystem = require(ServerScriptService.Server.Combat.Damage.DamageSystem)
+local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
+local NetworkLatency = require(ServerScriptService.Server.Combat.NetworkLatency)
 local DefenseSystem = require(ServerScriptService.Server.Combat.Defense.DefenseSystem)
 local GuardMeter = require(ServerScriptService.Server.Combat.Defense.GuardMeter)
 local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.HitboxEngine)
@@ -308,6 +311,61 @@ return function()
 		end)
 	end)
 
+	describe("AttackRequestSystem -- the guard cut", function()
+		-- Where a guard may cut the first Basic stage thrown at `base` (AttackConstants.GuardCut).
+		local function guardCutAt(base: number): number
+			local definition = (AttackCatalog.Get(`default:{FIRST_WEAPON}:Basic:1`) :: any).Definition
+			return AttackConstants.GuardCutAt(
+				base,
+				definition.WindupSeconds,
+				definition.ActiveSeconds,
+				definition.RecoverySeconds
+			)
+		end
+
+		it("cuts the swing's recovery for a guard held against it, at the cut point", function()
+			local attacker = makeDummy("GuardCut", Vector3.new(0, 5, 0))
+			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
+			local base = os.clock()
+			expect((AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base))).to.equal(true)
+			-- Pressed mid-swing, so the defence layer holds it until the body is free.
+			DefenseSystem.SetBlocking(attacker.Model, true, base + 0.01)
+			expect(DefenseSystem.IsGuardDeferred(attacker.Model)).to.equal(true)
+
+			local cutAt = guardCutAt(base) + 1e-3
+			step(cutAt)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).never.to.equal("Recovery")
+		end)
+
+		it("does not cut before the cut point", function()
+			local attacker = makeDummy("GuardTooSoon", Vector3.new(0, 5, 0))
+			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			DefenseSystem.SetBlocking(attacker.Model, true, base + 0.01)
+
+			local definition = (AttackCatalog.Get(`default:{FIRST_WEAPON}:Basic:1`) :: any).Definition
+			local intoRecovery = base + definition.WindupSeconds + definition.ActiveSeconds + 1e-3
+			if intoRecovery < guardCutAt(base) then
+				step(intoRecovery)
+				expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Recovery")
+			end
+		end)
+
+		it("leaves a swing alone when no guard is waiting on it", function()
+			local attacker = makeDummy("NoGuard", Vector3.new(0, 5, 0))
+			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+
+			local definition = (AttackCatalog.Get(`default:{FIRST_WEAPON}:Basic:1`) :: any).Definition
+			if definition.RecoverySeconds > 0.02 then
+				step(guardCutAt(base) + 1e-3)
+				expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Recovery")
+			end
+		end)
+	end)
+
 	describe("AttackRequestSystem -- the beat between links", function()
 		it("refuses the next stage during the chain delay, even with the engine idle", function()
 			-- The engine is explicitly free here (the swing was cancelled), so "Busy" cannot be the
@@ -540,6 +598,47 @@ return function()
 		end)
 	end)
 
+	describe("AttackRequestSystem -- the parry read between M1s", function()
+		-- A landed M1 is not a true combo (2026-09-28): the defender comes out of the stun with time to
+		-- press a parry before the next punch arrives. Measured the way the combo-window case above is, on
+		-- the attacker's best case -- contact on the first active frame, the next press buffered so it
+		-- throws the instant the chain beat ends. 0.2s is the floor: ~0.2s was once judged "not nearly
+		-- enough time to even try to parry" (2026-09-28), and the Fists string sat at 0.01s before
+		-- DamageConstants.Hitstun.ByWeapon ("literally impossible").
+		local MIN_PARRY_READ_SECONDS = 0.2
+
+		it("leaves every roster weapon's string a parry read after each landed hit", function()
+			for _, weaponId in ROSTER do
+				for stage = 1, AttackConstants.Sequence.MaxStageProbe - 1 do
+					local current = AttackCatalog.Get(`default:{weaponId}:Basic:{stage}`)
+					local following = AttackCatalog.Get(`default:{weaponId}:Basic:{stage + 1}`)
+					if not (current and following) then
+						break
+					end
+					local definition = current.Definition
+					local impactToImpact = definition.ActiveSeconds
+						+ definition.RecoverySeconds
+						+ CHAIN_DELAY
+						+ following.Definition.WindupSeconds
+					local stun = current.Profile.HitstunSeconds or DamageConstants.Hitstun.Seconds
+					local read = impactToImpact - stun
+					if read < MIN_PARRY_READ_SECONDS then
+						error(`{weaponId} Basic {stage} -> {stage + 1}: {read}s between stun end and the next impact`)
+					end
+				end
+			end
+		end)
+
+		it("stuns less on a Fists jab than on a blade's M1", function()
+			local fists = AttackCatalog.Get("default:Fists:Basic:1") :: any
+			expect(fists).to.be.ok()
+			expect(fists.Profile.HitstunSeconds).to.equal(DamageConstants.HitstunFor("Fists", "Basic"))
+			expect(fists.Profile.HitstunSeconds < DamageConstants.Hitstun.Seconds).to.equal(true)
+			-- The ceiling that keeps a press buffered at the moment of being hit from firing out of the stun.
+			expect(fists.Profile.HitstunSeconds > AttackConstants.Input.BufferSeconds).to.equal(true)
+		end)
+	end)
+
 	describe("AttackRequestSystem -- weapons", function()
 		it("reports the weapon the sequencer is holding", function()
 			local attacker = makeDummy("Armed", Vector3.new(0, 5, 0))
@@ -665,6 +764,93 @@ return function()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
 			expect((AttackRequestSystem.Feint(attacker.Model, base + 0.01))).to.equal(true)
 			expect(CollectionService:HasTag(attacker.Model, TELL.Tag)).to.equal(false)
+		end)
+	end)
+
+	-- AttackConstants.Latency: a player's swing starts half a round trip before its press arrived, and never
+	-- before the body was free to swing.
+	describe("AttackRequestSystem -- the attacker's latency refund", function()
+		afterEach(function()
+			NetworkLatency.SetResolver(nil)
+		end)
+
+		it("starts a player's swing half a round trip before the press arrived", function()
+			local attacker = makeDummy("Remote", Vector3.new(0, 5, 0))
+			NetworkLatency.SetResolver(function()
+				return 0.1
+			end)
+			local base = os.clock()
+			expect((AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base))).to.equal(true)
+			local swing = AttackRequestSystem.GetInFlight(attacker.Model)
+			assert(swing, "an accepted swing is in flight")
+			expect(swing.StartedAt).to.be.near(base - 0.05, 1e-6)
+		end)
+
+		it("caps the refund", function()
+			local attacker = makeDummy("FarAway", Vector3.new(0, 5, 0))
+			NetworkLatency.SetResolver(function()
+				return 2
+			end)
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			local swing = AttackRequestSystem.GetInFlight(attacker.Model)
+			assert(swing, "an accepted swing is in flight")
+			expect(swing.StartedAt).to.be.near(base - AttackConstants.Latency.MaxLeadSeconds, 1e-6)
+		end)
+
+		it("never reaches back into a stun", function()
+			local attacker = makeDummy("JustFreed", Vector3.new(0, 5, 0))
+			NetworkLatency.SetResolver(function()
+				return 0.1
+			end)
+			local base = os.clock()
+			-- Stunned until 10ms before the press arrived: the swing may start no earlier than that.
+			DamageSystem.ExtendHitstun(attacker.Model, base - 0.01, base - 0.5)
+			expect((AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base))).to.equal(true)
+			local swing = AttackRequestSystem.GetInFlight(attacker.Model)
+			assert(swing, "an accepted swing is in flight")
+			expect(swing.StartedAt).to.be.near(base - 0.01, 1e-6)
+		end)
+
+		it("refunds nothing to a body with no connection", function()
+			local attacker = makeDummy("Bot", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			local swing = AttackRequestSystem.GetInFlight(attacker.Model)
+			assert(swing, "an accepted swing is in flight")
+			expect(swing.StartedAt).to.equal(base)
+		end)
+	end)
+
+	-- DefenseConstants.Clash: two swings that met cost each side its swing, not its place in the string.
+	describe("AttackRequestSystem -- a trade keeps the chain", function()
+		it("puts the string back and frees it after the shared recovery", function()
+			local attacker = makeDummy("Trader", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			local gate = chainGateSeconds()
+
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			local frames = math.ceil((gate + FRAME) / FRAME)
+			for frame = 0, frames do
+				step(base + frame * FRAME)
+			end
+			local second = base + frames * FRAME
+			expect((AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, second))).to.equal(true)
+			expect(SwingSequencer.GetStageIndex(attacker.Model, "Basic", second)).to.equal(2)
+			local swing = AttackRequestSystem.GetInFlight(attacker.Model)
+			assert(swing, "the second swing is in flight")
+
+			local cut = second + 0.05
+			HitboxEngine.CancelAttack(attacker.Id, "Traded", cut)
+			expect(AttackRequestSystem.KeepChainThroughTrade(attacker.Model, swing.MoveId, cut)).to.equal(true)
+
+			-- The traded B2 never landed, so the next press is B2 again ...
+			expect(SwingSequencer.GetStageIndex(attacker.Model, "Basic", cut)).to.equal(1)
+			-- ... thrown after the one shared beat, not after whatever was left of the swing that got cut.
+			expect(SwingSequencer.ChainDelayRemaining(attacker.Model, cut)).to.be.near(
+				DefenseConstants.Clash.RecoverySeconds,
+				1e-6
+			)
 		end)
 	end)
 end

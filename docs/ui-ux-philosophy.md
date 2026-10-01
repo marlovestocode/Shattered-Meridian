@@ -345,17 +345,25 @@ Rules:
 - **Combat-state badge** — removed with the rest of the old combat system. Nothing publishes an
   in-combat edge in the rebuilt stack (`ClientState.InCombat` exists and stays false), so the
   engagement readout above the dock reports the state it is given rather than fabricating one.
-- **DevMenu shell** (`Screens/DevMenu/{init,Sidebar,ContentArea}.lua`) — a persistent left
-  `Sidebar` (stats header + player roster) beside a tabbed `ContentArea` (Spawn/Admin/Tuning/
-  Reports). Roster rows use `ActionIcon` (Kick/Ban/Mute/Flag), with a distinct `Armed` state for
-  Ban's two-press confirm.
+- **Admin panel** (`Screens/DevTools/DevMenu/*`, rebuilt 2026-09-29) — the live-server control tool,
+  on the Move Editor's shape: `ScreenFrame` tabs (`Player`/`World`/`Server`/`Reports`/`Tuning`)
+  between two pinned rails — a live roster on the left whose selection is the TARGET of the Player
+  tab, and an inspector on the right showing that player's server-side state (vitals, combat,
+  cultivation, overrides). No cards; built from shared components through a small local `Kit.lua`.
+  Irreversible actions use `Components/ArmedButton`. See `docs/design/admin-panel-guide.md`.
 - **Move Editor** (`Screens/DevTools/MoveEditor/*`, rebuilt 2026-09-29) — the admin-only authoring
   tool for combat moves, and the reference for how a dense TOOL wears this frame: `ScreenFrame` tabs
   (`Hitbox`/`Timing`/`Impact`/`Identity`) between two pinned rails — a grouped move browser on the
   left, and a readout on the right holding the RESULTS of the inputs (hitbox plots, the effective
   timeline, notes, actions). No cards: groups are bronze `SectionHeading`s and spacing. Built only from
   shared components and `Tokens` — no screen-scoped palette. Its hitbox plots rasterise the engine's
-  own `ContainsPoint` rather than drawing a shape, so the preview cannot disagree with the hit. See
+  own `ContainsPoint` rather than drawing a shape, so the preview cannot disagree with the hit. A fifth
+  tab, `Tools` (2026-09-29), holds what acts on more than one move's inputs -- bulk edit, version
+  history, and the Studio-only SOURCE section -- and the readout grew FRAME DATA, the TEST BENCH and a
+  HIT LOG as components of their own. **Place mode** is the one surface that leaves the frame: the modal
+  steps aside (the session stays open) and a small unscaled `Shell/Surface` bar in the Overlay band
+  (`PlacementBar.lua`) carries the tool/snap segments, a live offset readout, Done and a `KeyLegend`,
+  while Roblox `Handles`/`ArcHandles` on the in-world volume do the dragging. See
   `docs/design/move-editor-guide.md`.
 - **Onboarding** (`Screens/Onboarding/*`) — a skippable intro cinematic followed by a mandatory
   4-screen character creator, gated purely on `profile.raceId == nil`. Runs its own temporary

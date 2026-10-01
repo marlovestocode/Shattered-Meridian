@@ -47,6 +47,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local QiDeviationConstants = require(ReplicatedStorage.Shared.QiDeviationConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local SlowWatch = require(ReplicatedStorage.Shared.SlowWatch)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local CharacterSheetSystem = require(script.Parent.CharacterSheetSystem)
@@ -112,7 +113,9 @@ local function onQiSpent(player: Player, _amount: number, remaining: number, max
 	local elapsedSeconds = now - (lastSpendAt[player] or now)
 	lastSpendAt[player] = now
 
+	debug.profilebegin("QiDeviation.GetProfile")
 	local profile = PlayerDataSystem.GetProfile(player)
+	debug.profileend()
 	if not profile then
 		return
 	end
@@ -120,9 +123,11 @@ local function onQiSpent(player: Player, _amount: number, remaining: number, max
 	local newRisk, triggered =
 		QiDeviationSystem.ComputeRiskAfterSpend(profile.qiDeviationRisk, remainingFraction, elapsedSeconds)
 
+	debug.profilebegin("QiDeviation.Transform")
 	local committed = PlayerDataSystem.Transform(player, function(liveProfile)
 		liveProfile.qiDeviationRisk = newRisk
 	end)
+	debug.profileend()
 	if not committed then
 		return
 	end
@@ -135,7 +140,9 @@ local function onQiSpent(player: Player, _amount: number, remaining: number, max
 		})
 	end
 
+	debug.profilebegin("QiDeviation.SheetRefresh")
 	CharacterSheetSystem.Refresh(player)
+	debug.profileend()
 end
 
 local function onPlayerRemoving(player: Player): ()
@@ -144,7 +151,9 @@ local function onPlayerRemoving(player: Player): ()
 end
 
 function QiDeviationSystem.Init(): ()
-	GameplayEvents.OnQiSpent(onQiSpent)
+	-- Watched (Shared/SlowWatch.lua): this handler runs once per Qi spend, and a realm's upkeep is a steady
+	-- stream of them -- a slow one here shows as a burst the frame counter's scripts figure never sees.
+	GameplayEvents.OnQiSpent(SlowWatch.Handler(logger, "QiDeviation.onQiSpent", onQiSpent))
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "QiDeviationSystem",
 		OnPlayerRemoving = onPlayerRemoving,

@@ -118,6 +118,15 @@ export type FreezeGuardInstance = typeof(setmetatable(
 		-- already zeroed, so a per-call sample would record 0 as the "original" and restore it to 0
 		-- forever. Cleared as a unit by whichever freeze's timer wins the generation check.
 		frozenSpeeds: { [AnimationTrack]: number },
+		-- os.clock() when the current freeze chain began, for the catch-up (how long the chain held).
+		chainStartedAt: number,
+		-- Tracks playing FAST after a freeze to win back the time it cost (FreezeTracks' catchUp), mapped
+		-- to the speed they return to. A freeze landing mid-catch-up records THAT speed, not the boosted
+		-- one it would otherwise sample -- the same poisoning (a) above describes, one step removed.
+		catchingUp: { [AnimationTrack]: number },
+		-- Bumped by every restore that starts a catch-up, so a stale catch-up's end timer never settles a
+		-- track a newer catch-up now owns. A track re-frozen mid-catch-up leaves `catchingUp` instead.
+		catchUpGeneration: number,
 	},
 	FreezeGuard
 ))
@@ -126,7 +135,10 @@ export type FreezeGuardInstance = typeof(setmetatable(
 -- logically-distinct track family (CombatAnimator's own combat tracks vs. FlightAnimator's own
 -- flight tracks) so an unrelated freeze on one family can never affect the other's restore timing.
 function AnimationTrackUtil.NewFreezeGuard(): FreezeGuardInstance
-	return setmetatable({ generation = 0, frozenSpeeds = {} }, FreezeGuard)
+	return setmetatable(
+		{ generation = 0, frozenSpeeds = {}, chainStartedAt = 0, catchingUp = {}, catchUpGeneration = 0 },
+		FreezeGuard
+	)
 end
 
 -- Momentarily freezes every currently-playing track in `tracks` (AdjustSpeed to 0, restored to
@@ -142,9 +154,22 @@ end
 -- fixes what used to be a real bug in FlightAnimator.FreezeActiveFlightTrack (no generation guard
 -- at all, so an overlapping freeze there really could resume early) and generalizes the guard
 -- CombatAnimator.FreezeActiveCombatTrack already had to every caller.
-function FreezeGuard.FreezeTracks(self: FreezeGuardInstance, tracks: { AnimationTrack }, seconds: number): ()
+--
+-- `catchUp` (optional, > 1) WINS THE FROZEN TIME BACK. A hit-stop pauses a swing clip, but the server's
+-- swing does not pause -- so after every landed hit the clip ran that much behind the swing it was drawing,
+-- and the next swing cut its follow-through short by the same amount. With a catch-up, each track still
+-- playing at the restore runs at catchUp times its speed until the time the freeze cost is recovered,
+-- then settles back. Omitted (the flight freeze), a restore is exactly what it always was.
+function FreezeGuard.FreezeTracks(
+	self: FreezeGuardInstance,
+	tracks: { AnimationTrack },
+	seconds: number,
+	catchUp: number?
+): ()
 	local frozenSpeeds = self.frozenSpeeds
+	local catchingUp = self.catchingUp
 	local frozenAny = false
+	local chainWasIdle = next(frozenSpeeds) == nil
 	for _, track in tracks do
 		if frozenSpeeds[track] ~= nil then
 			-- Already held frozen by an earlier freeze whose restore hasn't fired yet. Its real
@@ -153,7 +178,9 @@ function FreezeGuard.FreezeTracks(self: FreezeGuardInstance, tracks: { Animation
 			-- below, which extends the hold rather than resuming mid-freeze.
 			frozenAny = true
 		elseif track.IsPlaying then
-			frozenSpeeds[track] = track.Speed
+			-- A track mid-catch-up returns to its base speed, not the boosted one it is playing at.
+			frozenSpeeds[track] = catchingUp[track] or track.Speed
+			catchingUp[track] = nil
 			track:AdjustSpeed(0)
 			frozenAny = true
 		end
@@ -162,6 +189,9 @@ function FreezeGuard.FreezeTracks(self: FreezeGuardInstance, tracks: { Animation
 		-- Nothing playing and nothing still held frozen: don't bump the generation, or an unrelated
 		-- no-op freeze would orphan a pending restore and strand its tracks at speed 0.
 		return
+	end
+	if chainWasIdle then
+		self.chainStartedAt = os.clock()
 	end
 
 	self.generation += 1
@@ -178,10 +208,39 @@ function FreezeGuard.FreezeTracks(self: FreezeGuardInstance, tracks: { Animation
 		-- landing while the locomotion evaluator crossfades Walking out, a swing completing under
 		-- the freeze) would otherwise keep Speed = 0 and play frozen the NEXT time it's started --
 		-- permanently, since nothing else ever writes Speed back.
+		local boost = if typeof(catchUp) == "number" and catchUp > 1 then catchUp else nil
+		local heldFor = os.clock() - self.chainStartedAt
 		for track, speed in frozenSpeeds do
-			track:AdjustSpeed(speed)
+			if boost and track.IsPlaying and speed > 0 then
+				catchingUp[track] = speed
+				track:AdjustSpeed(speed * boost)
+			else
+				track:AdjustSpeed(speed)
+			end
 		end
 		table.clear(frozenSpeeds)
+		if boost == nil or next(catchingUp) == nil then
+			return
+		end
+
+		-- Held for heldFor at speed 0; playing at boost x speed wins back (boost - 1) x speed each second.
+		self.catchUpGeneration += 1
+		local catchUpGeneration = self.catchUpGeneration
+		task.delay(heldFor / (boost - 1), function()
+			if self.catchUpGeneration ~= catchUpGeneration then
+				return
+			end
+			for track, speed in catchingUp do
+				-- Only a track still at the speed this guard set: a new swing on the same track, or anyone
+				-- else's AdjustSpeed since, owns it now. Compared with a tolerance -- Speed is stored at
+				-- lower precision than the product written to it, so an exact compare never matches.
+				-- Settled even when stopped, since Speed outlives Stop() (defect (b) above).
+				if math.abs(track.Speed - speed * boost) < 1e-3 then
+					track:AdjustSpeed(speed)
+				end
+			end
+			table.clear(catchingUp)
+		end)
 	end)
 end
 

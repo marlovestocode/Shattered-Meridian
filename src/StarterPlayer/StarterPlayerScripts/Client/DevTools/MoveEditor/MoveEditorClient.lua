@@ -10,6 +10,15 @@
 	whose first Open is refused is simply not an admin, and this module never builds the screen (the
 	Lazy is never forced, so a player's client does not even mount it).
 
+	THE SCREEN IS BUILT ON THE FIRST PRESS OF ITS KEY, NOT ON AUTHORIZATION (2026-09-30). An authorized
+	admin used to have the whole editor mounted one round trip after joining -- a 1.0-1.4 second freeze
+	in every capture (1355, 1141, 1123, 1047ms at "MoveEditorClient started"), plus its per-frame
+	hitbox-preview loop running for the whole session whether or not the editor was ever opened. Now
+	Start only binds the key; the first press mounts, wires and opens it, paying the build at the moment
+	the author asked for the editor. `skipInput` keeps the editor's own key handler from seeing that same
+	press and toggling it straight back shut -- for a quarter of a second only: an identity check alone once
+	swallowed every later press too, and the editor would not reopen after its first close.
+
 	THE DRAFT, AND WHO WINS. The screen sets Draft optimistically on every edit; this module debounces
 	those into one Preview (Constants.MoveEditor.DraftDebounceSeconds). The server's answer is the
 	authority -- it may have clamped a number or normalised an animation id -- so it is written back into
@@ -53,9 +62,11 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local AttackInputClient = require(script.Parent.Parent.Parent.Combat.AttackInputClient)
 local Chrome = require(script.Parent.Parent.Parent.UI.Shell.Chrome)
 local Copy = require(script.Parent.Parent.Parent.UI.Screens.DevTools.MoveEditor.Copy)
+local HitboxWorldPreview = require(script.Parent.HitboxWorldPreview)
 local HotbarBindings = require(script.Parent.Parent.Parent.Combat.HotbarBindings)
 local KeybindManager = require(script.Parent.Parent.Parent.Input.KeybindManager)
 local MoveEditorScreenTypes = require(script.Parent.Parent.Parent.UI.Screens.DevTools.MoveEditor.Types)
+local PresentationPreview = require(script.Parent.PresentationPreview)
 local RemoteInvoker = require(script.Parent.Parent.Parent.Network.RemoteInvoker)
 
 local peek = Fusion.peek
@@ -99,6 +110,7 @@ local function newMoveDraft(): Move
 		OffsetRotation = Vector3.zero,
 		AttachmentPart = "Root",
 		LocksMovement = false,
+		LocksWindup = false,
 		WindupSeconds = template.WindupSeconds,
 		ActiveSeconds = template.ActiveSeconds,
 		RecoverySeconds = template.RecoverySeconds,
@@ -114,8 +126,19 @@ local function invoke(remoteName: string, ...: any): (boolean, any)
 	return RemoteInvoker.Invoke(NetworkBridge.GetRemoteFunction(remoteName), ...)
 end
 
-local function startEditor(handle: MoveEditorHandle, chrome: Chrome.ChromeHandle, initial: { MoveEntry }): ()
+-- Returns the editor's `setOpen`, so the caller that built it on a first key press can open it. `skipInput`
+-- is that press: the key handler below ignores it (see this file's header).
+local function startEditor(
+	handle: MoveEditorHandle,
+	chrome: Chrome.ChromeHandle,
+	initial: { MoveEntry },
+	skipInput: InputObject?
+): (open: boolean) -> ()
 	handle.Entries:set(initial)
+	-- `skipInput` is only meant to swallow the press that BUILT the editor. Roblox may hand the same InputObject
+	-- back for every later press of that key, so an identity test alone would swallow them all and the editor
+	-- could never be opened again after its first close -- the skip lapses a moment after the build instead.
+	local skipUntil = os.clock() + 0.25
 	local names = Config.RemoteNames
 	local setEditorOpenRemote = NetworkBridge.GetRemoteEvent(names.SetEditorOpen)
 
@@ -258,6 +281,7 @@ local function startEditor(handle: MoveEditorHandle, chrome: Chrome.ChromeHandle
 	local function setOpen(open: boolean): ()
 		if not open then
 			flush()
+			handle.PlacementMode:set(false)
 		end
 		handle.IsOpen:set(open)
 		setEditorOpenRemote:FireServer(open)
@@ -284,6 +308,13 @@ local function startEditor(handle: MoveEditorHandle, chrome: Chrome.ChromeHandle
 	chrome:BindEscape("MoveEditor", handle.IsOpen, requestClose)
 	handle.CloseRequested:Connect(requestClose)
 
+	-- Place mode pushes its own Escape entry on entry, so it sits above the editor's: the first Escape
+	-- leaves placement and brings the modal back; only the next one closes the editor.
+	HitboxWorldPreview.Start(handle)
+	chrome:BindEscape("MoveEditorPlacement", handle.PlacementMode, function()
+		handle.PlacementMode:set(false)
+	end)
+
 	-- Selection, creation ----------------------------------------------------------------------------------
 
 	handle.SelectRequested:Connect(function(moveId: string)
@@ -295,6 +326,8 @@ local function startEditor(handle: MoveEditorHandle, chrome: Chrome.ChromeHandle
 		handle.StatusText:set("")
 		-- The log is about the open move's tests; another move's contacts would read as this one's.
 		handle.HitLog:set({})
+		handle.HistoryVersions:set(nil)
+		handle.ExportText:set(nil)
 	end)
 
 	-- Creating is a Preview with no MoveId: the server assigns one and answers with the entry.
@@ -359,6 +392,8 @@ local function startEditor(handle: MoveEditorHandle, chrome: Chrome.ChromeHandle
 			openMove(entry)
 		end
 		handle.StatusText:set(`Saved {entry.Move.DisplayName}.`)
+		-- A loaded history just gained a version; drop it rather than show a list missing the newest.
+		handle.HistoryVersions:set(nil)
 	end
 	handle.SaveRequested:Connect(save)
 
@@ -428,6 +463,152 @@ local function startEditor(handle: MoveEditorHandle, chrome: Chrome.ChromeHandle
 		upsertEntry(entry)
 		openMove(entry)
 		handle.StatusText:set("Reset to the weapon's own values.")
+	end)
+
+	-- Version history -----------------------------------------------------------------------------------
+
+	local function loadHistory(): ()
+		local moveId = peek(handle.SelectedId)
+		if not moveId then
+			return
+		end
+		local ok, result = invoke(names.History, moveId)
+		local answer = if ok then result :: MoveEditorTypes.HistoryResult else nil
+		if not answer or not answer.Success then
+			report("History", if answer then answer.Reason else nil)
+			return
+		end
+		-- A slow answer for a move the admin has since left belongs to nobody.
+		if peek(handle.SelectedId) == moveId then
+			handle.HistoryVersions:set(answer.Versions or {})
+		end
+	end
+	handle.LoadHistoryRequested:Connect(loadHistory)
+
+	handle.RestoreVersionRequested:Connect(function(version: number)
+		local moveId = peek(handle.SelectedId)
+		if not moveId then
+			return
+		end
+		pendingDraft = nil
+		pendingToken += 1
+		editSerial += 1
+		local ok, result = invoke(names.RestoreVersion, moveId, version)
+		local answer = if ok then result :: MoveEditorTypes.EntryResult else nil
+		if not answer or not answer.Success or not answer.Entry then
+			report("Not restored", if answer then answer.Reason else nil)
+			return
+		end
+		handle.ClearHistory(moveId)
+		local entry = answer.Entry :: MoveEntry
+		upsertEntry(entry)
+		openMove(entry)
+		handle.StatusText:set(`Restored v{version} -- live, not saved.`)
+	end)
+
+	-- Source (Studio only) --------------------------------------------------------------------------------
+
+	-- Write and Remove act on the LIVE move, so a pending edit is sent first -- the file must be what the
+	-- author is looking at.
+	local function sourceAction(
+		remoteName: string,
+		verb: string,
+		describe: (MoveEditorTypes.SourceResult) -> string
+	): ()
+		local moveId = peek(handle.SelectedId)
+		if not moveId then
+			return
+		end
+		flush()
+		local ok, result = invoke(remoteName, moveId)
+		local answer = if ok then result :: MoveEditorTypes.SourceResult else nil
+		if not answer or not answer.Success then
+			report(verb, if answer then answer.Reason else nil)
+			return
+		end
+		if answer.Entry then
+			upsertEntry(answer.Entry)
+			if peek(handle.SelectedId) == moveId then
+				openMove(answer.Entry)
+			end
+		end
+		handle.StatusText:set(describe(answer))
+	end
+
+	handle.WriteToSourceRequested:Connect(function()
+		sourceAction(names.WriteToSource, "Not written", function(answer)
+			local warning = if answer.Reason then ` (but: {Copy.Failure(answer.Reason).Message})` else ""
+			return `Written to {answer.Path or "source"}{warning}`
+		end)
+	end)
+
+	handle.RemoveFromSourceRequested:Connect(function()
+		sourceAction(names.RemoveFromSource, "Not removed", function(answer)
+			return `Removed {answer.Path or "the file"} -- the move stays live, unsaved, until a restart.`
+		end)
+	end)
+
+	handle.ExportSourceRequested:Connect(function()
+		local moveId = peek(handle.SelectedId)
+		if not moveId then
+			return
+		end
+		flush()
+		local ok, result = invoke(names.ExportSource, moveId)
+		local answer = if ok then result :: MoveEditorTypes.SourceResult else nil
+		if not answer or not answer.Success or not answer.Source then
+			report("Not exported", if answer then answer.Reason else nil)
+			return
+		end
+		handle.ExportText:set(answer.Source)
+		handle.StatusText:set(`Exported -- copy it into {answer.Path or "the AuthoredMoves folder"}.`)
+	end)
+
+	-- Presentation preview ----------------------------------------------------------------------------
+
+	-- Plays the DRAFT's cue, locally, through the runtime's own path (PresentationPreview's header) -- no
+	-- flush and no remote: what is previewed is exactly what is on screen, saved or not.
+	handle.PreviewCueRequested:Connect(function(moment: string)
+		local draft = peek(handle.Draft)
+		if not draft then
+			return
+		end
+		local entry = peek(handle.SelectedEntry)
+		local isWeaponStage = entry ~= nil and entry.Source == "Default" and entry.Stage ~= nil
+		handle.StatusText:set(PresentationPreview.Play(draft, moment, {
+			Stage = if isWeaponStage and entry then entry.Stage else nil,
+			WeaponId = if isWeaponStage and entry then entry.Group else nil,
+		}))
+	end)
+
+	-- Bulk edit ------------------------------------------------------------------------------------------
+
+	handle.BulkScaleRequested:Connect(function(request: MoveEditorTypes.BulkScaleRequest)
+		flush()
+		local ok, result = invoke(names.BulkScale, request)
+		local answer = if ok then result :: MoveEditorTypes.BulkScaleResult else nil
+		if not answer or not answer.Success or not answer.Entries then
+			report("Not scaled", if answer then answer.Reason else nil)
+			return
+		end
+		local selected = peek(handle.SelectedId)
+		for _, entry in answer.Entries do
+			upsertEntry(entry)
+			if entry.Move.MoveId == selected then
+				-- The open move changed under the draft: its undo stack holds states from before the
+				-- scale, and stepping into one would silently undo part of a bulk edit.
+				editSerial += 1
+				handle.ClearHistory(entry.Move.MoveId)
+				if request.Save then
+					handle.HistoryVersions:set(nil)
+				end
+				openMove(entry)
+			end
+		end
+		local count = #answer.Entries
+		local verb = if request.Save then "Scaled and saved" else "Scaled"
+		local tail = if answer.Reason then `, but not all: {Copy.Failure(answer.Reason).Message}` else "."
+		handle.StatusText:set(`{verb} {count} move{if count == 1 then "" else "s"}{tail}`)
 	end)
 
 	-- Test ---------------------------------------------------------------------------------------------
@@ -601,7 +782,7 @@ local function startEditor(handle: MoveEditorHandle, chrome: Chrome.ChromeHandle
 	-- Keys -------------------------------------------------------------------------------------------
 
 	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-		if gameProcessed then
+		if gameProcessed or (input == skipInput and os.clock() < skipUntil) then
 			return
 		end
 		if KeybindManager.Matches("OpenMoveEditor", input) then
@@ -641,6 +822,7 @@ local function startEditor(handle: MoveEditorHandle, chrome: Chrome.ChromeHandle
 	end)
 
 	logger:info("MoveEditorClient started", { moves = #initial })
+	return setOpen
 end
 
 function MoveEditorClient.Start(deferredHandle: Lazy.Lazy<MoveEditorHandle>, chrome: Chrome.ChromeHandle): ()
@@ -656,7 +838,22 @@ function MoveEditorClient.Start(deferredHandle: Lazy.Lazy<MoveEditorHandle>, chr
 			logger:debug("Move Editor not started: this client is not authorized")
 			return
 		end
-		startEditor(deferredHandle.Get(), chrome, answer.Entries or {})
+		-- Authorized: bind the key and build NOTHING yet (this file's header).
+		local entries = answer.Entries or {}
+		local connection: RBXScriptConnection? = nil
+		connection = UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
+			if gameProcessed or not KeybindManager.Matches("OpenMoveEditor", input) then
+				return
+			end
+			local waiting = connection
+			connection = nil
+			if waiting == nil then
+				return
+			end
+			waiting:Disconnect()
+			local setOpen = startEditor(deferredHandle.Get(), chrome, entries, input)
+			setOpen(true)
+		end)
 	end)
 end
 

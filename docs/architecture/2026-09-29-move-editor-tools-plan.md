@@ -4,6 +4,11 @@
 same day the Move Editor was rebuilt from nothing — read `docs/design/move-editor-guide.md` first, then
 this. Re-verify any line you are about to depend on; the tree moves fast.
 
+> **STATUS (2026-09-29, end of day): BUILT — all of Phases 0–7.** Phase 0 results are under Phase 0;
+> where the build departed from this text, and why, is in **§11 As built** at the end (Phase 1's are also
+> inline under 1.3). This document is now the record of the design; `docs/design/move-editor-guide.md` is
+> how to use it. Section 9's playtest checklist has NOT been run yet.
+
 **Scope, as requested by the owner:**
 
 1. Frame data + balance numbers in the readout.
@@ -563,3 +568,88 @@ module is skipped. A pytest-free smoke for the Python helper: `python scripts/mo
 Phase 0 (spikes) → 1 → 2 → 3 → 4 → 5 → 6 → 7. Each phase is independently shippable and ends with the
 gates in §0. Rough size: P1 ~450 lines, P2 ~200, P3 ~250, P4 ~650, P5 ~300, P6 ~350, P7 ~650 + the Python
 helper ~150, plus specs.
+
+## 11. As built (2026-09-29) — departures from the text above, and why
+
+Phase 1's are listed under 1.3. The rest:
+
+**Phase 2 — undo/redo**
+- Coalescing is a **sliding** window: every `Record` inside `UndoCoalesceSeconds` of the previous one is
+  dropped AND moves the window, so a drag of any length is one step. `Undo`/`Redo` close the window, so the
+  first edit after either always records.
+- Undo/Redo also clear on a restored version, a bulk scale that touched the open move, and Write/Remove
+  from source only insofar as those replace the draft (restore and bulk do; source writes do not change
+  values). Undo / Redo buttons are a row in ACTIONS; the readout's `LayoutOrder`s went sparse (×10) so
+  later sections slot in without renumbering.
+
+**Phase 3 — bench + hit log**
+- `TrainingBotConstants` already had `StyleOrder`/`DifficultyOrder` (presentation order, **eight** styles —
+  `ParryTrade` too). The dropdowns use those rather than sorting the keys.
+- The bench and the log are their own components (`TestBench.lua`, `HitLog.lua`). The log clears when the
+  selection changes (it is "this move's tests"). Bench refusal codes (`InvalidPreset`, `InvalidWeapon`,
+  `InvalidRequest`) are in `Copy.FAILURES`.
+- Observed in the Phase 0 playtest log, not fixed here: `DevMenuClient` hits its own rate limit at boot
+  (`GetDebugDummyState` / `ListPlayers` / `ListFlightTuning` / `ListBugReports` "RateLimited"). The editor's
+  one extra `GetDebugDummyState` on open shares that bucket; a refusal just leaves the toggle's last value.
+
+**Phase 4 — in-world hitbox + Place mode**
+- The pure parts are two modules, both specced (`Tests/MoveEditor/PlacementPreview.spec.lua`):
+  `Client/DevTools/MoveEditor/HitboxPreviewShapes.lua` (shape → part *pieces*, data only) and
+  `PlacementMath.lua` (move / one-sided resize / rotate / snap / the 2π `UnwrapDelta`).
+- Gizmo adornees: an invisible part the size of the volume's **bounding box** (`HitboxGeometry.BoundingBox`)
+  for Move/Resize, and a small part at the volume's **origin** for Rotate — `ComposeOffset` rotates about the
+  origin, so the rings sit there.
+- **1/2/3 are also hotbar keys.** Place mode binds 1/2/3/Enter through `ContextActionService` at
+  `High + 100` and sinks them, so they never reach the hotbar while placing; unbound on exit.
+- Resize rules the plan left open: a Sphere's or Arc's radius grows around its fixed origin (the dragged
+  face tracks the radius 1:1, no shift); Cylinder/Capsule/Beam radius is one-sided (radius += d/2, centre
+  shifts d/2); a reach shape's (Beam/Cone) Back face moves the origin, its Front face moves the tip; a
+  Cone's X/Y do nothing (its width is its angle); a weapon-anchored Box is not resizable (the blade sizes it).
+- **Place mode owns the camera** (owner playtest, 2026-09-29: "the camera doesn't move"). Freeing the mouse
+  every frame, as first built, froze the view -- the stock camera only orbits while it holds the mouse
+  locked during a right-drag, and the frozen character cannot walk it anywhere. `PlacementCamera.lua` now
+  sets `Scriptable` and orbits a focus point (right-drag orbit, middle-drag / WASD-QE pan, wheel zoom, F
+  re-centre), locking the mouse only while dragging the view. The focus does NOT follow the volume per
+  frame: Handles measure the mouse against the axis as seen from the camera, so a following camera would
+  feed back into the drag. ShiftLockCamera is suspended through `SetInputSuspended`, which is now KEYED BY
+  OWNER (the emote wheel was its only caller; a single boolean would let one release the other's hold).
+- **Place in world / Show on my character live in the Hitbox tab** (end of PLACEMENT), not the readout's
+  ACTIONS as 4.3 says -- owner's call after the first look: they are a way of typing the offset and
+  rotation fields they sit beside.
+- The handle gained `EditDraft` (the screen's own `context.Edit`), `ShowOnCharacter`, `PlacementMode`,
+  `PlacementTool`, `PlacementSnap` (default 0.25 studs).
+
+**Phase 5 — bulk edit**
+- `MoveEntry.Stage` was added (Default weapon moves) — the client needs it to offer the stages present in
+  a group. The stage picker is a row of buttons, not a Dropdown: `Dropdown`'s options are fixed at mount
+  and a group's stages change with the selection.
+- A move that fails to apply or save is skipped and counted; the result carries every move that DID change
+  plus the first reason one did not (`Scaled 11 moves, but not all: …`). Refusals: `NoMovesMatched`,
+  `TooManyMoves` (> `BulkScaleMaxMoves` = 64), `InvalidRequest` (malformed, or every factor is 1).
+- The percentages reset to 0 after each apply, so a second press is a decision (the scale compounds).
+- `persist(player, move, source)` is the one write path for Save and bulk Save (and appends history).
+
+**Phase 6 — history**
+- Listed **newest first**; each summary is against the version before it. The arrow is ASCII `->`.
+- A Save (or bulk Save touching the open move) drops a loaded history list rather than silently showing
+  one without the newest version; "Reload history" fetches it again.
+- Restore decodes through `MoveRecordCodec.Decode` / `DecodeOverride` and goes through `applyDraft` — i.e. it
+  is exactly a Preview. Refusals: `InvalidVersion`, `VersionNotFound`.
+
+**Phase 7 — source**
+- `Constants.MoveEditor.SourceWriter` is `{ Url }` only: `HttpService:RequestAsync` takes no timeout, so a
+  `TimeoutSeconds` would be a field no runtime reads.
+- `MoveSourceWriter` escapes strings **by hand**, not with `%q` — `%q` writes a newline as backslash +
+  a real line break, splitting one value across lines in the file and in every diff.
+- `AuthoredMoveLibrary.spec` uses real fixture files (`src/Tests/Fixtures/AuthoredMoves/`), through a
+  `LoadFrom(root)` seam, rather than writing `ModuleScript.Source` at runtime — no dependence on the
+  harness's security level.
+- `DefaultMoveRegistry` gained the shipped layer (`SetShipped`, `IsShipped`), and `ApplyEdit`/`SetShipped`
+  share one `validateOverride`.
+- A shipped custom move with no DataStore record reads as SAVED (its file is its saved state):
+  `savedMove` falls back to `AuthoredMoveLibrary.GetShippedMove`, and Revert follows it.
+- **Delete refuses `InSource`** for a custom move that ships in source — deleting only the live copy would
+  bring it back from its file at the next boot. Remove it from source first.
+- Remove from source keeps the move live this session: a custom move reads NEVER SAVED, a Default move
+  becomes an ordinary unsaved live override (it is back to its weapon's values after a restart).
+- The IN SOURCE chip is in the readout's title row (bronze), not in the browser rail.

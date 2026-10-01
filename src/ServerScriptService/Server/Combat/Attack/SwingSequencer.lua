@@ -497,7 +497,13 @@ end
 --
 -- MATCHED BY MoveId, so a parry of an older swing can never rewind a newer one, and one throw restores at
 -- most once. Air moves keep no undo (see Advance), so a parried air hit restores nothing.
-function SwingSequencer.RestoreParried(model: Model, moveId: string, resumeAt: number): boolean
+--
+-- A TRADE uses this too (AttackRequestSystem.KeepChainThroughTrade) and passes `readyAt`: the next link
+-- may be thrown from then, replacing the beat the cut swing set. A stagger always outlasts what was left
+-- of a parried swing, so a parry never needs it -- but a clash cuts BOTH swings at one instant, and
+-- without it each side would wait out whatever was left of its own, turning an even exchange into
+-- whoever threw the shorter move going first.
+function SwingSequencer.RestoreParried(model: Model, moveId: string, resumeAt: number, readyAt: number?): boolean
 	local record = records[model]
 	local undo = record and record.Undo
 	if not record or not undo or undo.MoveId ~= moveId then
@@ -508,6 +514,9 @@ function SwingSequencer.RestoreParried(model: Model, moveId: string, resumeAt: n
 	record.StageIndex = undo.StageIndex
 	record.LockedUntil = undo.LockedUntil
 	record.LapsesAt = resumeAt + AttackConstants.Sequence.ResetSeconds
+	if readyAt then
+		record.ChainReadyAt = readyAt
+	end
 	return true
 end
 

@@ -371,7 +371,10 @@ local function raiseGuardWhenFree(): ()
 		return
 	end
 	local now = os.clock()
-	local freeAt = LocalCombatState.FreeAt(now)
+	-- GuardFreeAt, not FreeAt: a guard may cut the tail of this body's own swing (AttackConstants.GuardCut),
+	-- and the server does exactly that. bodyIsFree above keeps the full swing -- a guard raised by the cut is
+	-- a BLOCK, so it must not be predicted as a parry.
+	local freeAt = LocalCombatState.GuardFreeAt(now)
 	if freeAt > now and not isAirHeld() then
 		guardGeneration += 1
 		local generation = guardGeneration
@@ -383,6 +386,10 @@ local function raiseGuardWhenFree(): ()
 		return
 	end
 	guardAnimationDeferred = false
+	-- The guard came up by cutting this body's own swing: stop that swing's clip here, as the server has.
+	if LocalCombatState.SwingEndsAt() > now then
+		LocalCombatState.RequestSwingCut()
+	end
 	predictor:NoteGuardRaised()
 	claimGuardPress()
 end

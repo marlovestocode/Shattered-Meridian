@@ -199,6 +199,32 @@ local function onHoldChanged(raw: unknown): ()
 	end
 end
 
+-- Throw rooting --------------------------------------------------------------------------------------
+
+-- The client half of rooting a thrower for their throw clip (Constants.Attributes.GrabThrowing, written
+-- by GrabSystem). The server pins WalkSpeed and parks parkour and shift lock's yaw; what only the client
+-- that simulates this body can stop is the engine's own jump and its turn-to-face-movement. Jump goes
+-- through the Humanoid's Jumping state, the switch AttackInputClient already uses for the launcher
+-- window; AutoRotate is captured and put back only if nothing else changed it meanwhile, SwingTracking's
+-- rule.
+local restoreAutoRotate: boolean? = nil
+
+local function setThrowRooted(humanoid: Humanoid, rooted: boolean): ()
+	if rooted then
+		if restoreAutoRotate == nil then
+			restoreAutoRotate = humanoid.AutoRotate
+		end
+		humanoid.AutoRotate = false
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+		return
+	end
+	if restoreAutoRotate == true and humanoid.AutoRotate == false then
+		humanoid.AutoRotate = true
+	end
+	restoreAutoRotate = nil
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+end
+
 -- Lifecycle ------------------------------------------------------------------------------------------
 
 function GrabInputClient.Start(): ()
@@ -219,11 +245,20 @@ function GrabInputClient.Start(): ()
 	-- the fifteen byte-identical copies of it. See that module's header.
 	PlayerLifecycle.BindLocalCharacter({
 		Scope = "GrabInputClient",
-		OnCharacter = function(_character: Model, humanoid: Humanoid)
+		OnCharacter = function(_character: Model, humanoid: Humanoid, life)
 			boundHumanoid = humanoid
 			-- A new life is never mid-hold -- GrabSystem's own Players.PlayerRemoving/Step sweeps
 			-- already cleared any hold this player was part of when the previous character ended.
 			setCue(nil)
+			-- A fresh Humanoid starts with its own defaults, so nothing from the last life is restored.
+			restoreAutoRotate = nil
+			local throwing = Constants.Attributes.GrabThrowing
+			life:Connect(humanoid:GetAttributeChangedSignal(throwing), function()
+				setThrowRooted(humanoid, humanoid:GetAttribute(throwing) == true)
+			end)
+			if humanoid:GetAttribute(throwing) == true then
+				setThrowRooted(humanoid, true)
+			end
 		end,
 		OnCharacterRemoving = function()
 			boundHumanoid = nil

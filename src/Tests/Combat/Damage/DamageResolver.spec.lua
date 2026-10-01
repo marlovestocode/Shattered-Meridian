@@ -77,6 +77,19 @@ return function()
 			expect(result.AdvancesCombo).to.equal(true)
 		end)
 
+		it("stuns for the move's own hitstun when it carries one", function()
+			local withStun = profile({ HitstunSeconds = 0.4 })
+			expect(DamageResolver.Resolve("Clean", "Neutral", withStun, 1).HitstunSeconds).to.equal(0.4)
+			expect(DamageResolver.Resolve("GuardBroken", "Neutral", withStun, 1).HitstunSeconds).to.equal(0.4)
+		end)
+
+		it("falls back to the shared hitstun for a malformed per-move one, never to no stun", function()
+			local broken = profile({ HitstunSeconds = 0 / 0 })
+			expect(DamageResolver.Resolve("Clean", "Neutral", broken, 1).HitstunSeconds).to.equal(
+				DamageConstants.Hitstun.Seconds
+			)
+		end)
+
 		it("scales with the stage it is told it landed at", function()
 			local result = DamageResolver.Resolve("Clean", "Neutral", profile(), 3)
 			expect(result.Damage).to.be.near(DAMAGE * DamageResolver.ComboMultiplier(3), 1e-6)

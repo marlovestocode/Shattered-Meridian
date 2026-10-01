@@ -90,6 +90,45 @@ return function()
 		it("returns nothing for a record that is not even a table", function()
 			expect(MoveRecordCodec.Decode("corrupt")).to.equal(nil)
 		end)
+
+		it("reads back a projectile move's whole block", function()
+			local original = MoveRegistryManager.Validate({
+				MoveId = "saved-volley",
+				DisplayName = "Volley",
+				Author = "Spec",
+				CreatedAt = 1,
+				UpdatedAt = 2,
+				Shape = "Sphere",
+				Dimensions = { Radius = 1 },
+				OffsetX = 0,
+				OffsetY = 1,
+				OffsetZ = -2,
+				WindupSeconds = 0.3,
+				ActiveSeconds = 0.1,
+				RecoverySeconds = 0.4,
+				Cooldown = 3,
+				Damage = 8,
+				PostureDamage = 4,
+				Projectile = {
+					Count = 7,
+					SpreadPattern = "Radial",
+					SpreadAngle = 50,
+					CollisionBehavior = "Bounce",
+					MaxBounces = 3,
+					Homing = true,
+					ParryBehavior = "ParryAll",
+					ParryResponse = "Reverse",
+				},
+			}) :: MoveTypes.MoveDefinition
+			local loaded, dropped = load(MoveRecordCodec.Encode(original))
+			expect(#dropped).to.equal(0)
+			expect(MoveTypes.Fingerprint(loaded)).to.equal(MoveTypes.Fingerprint(original))
+			local projectile = loaded.Projectile :: MoveTypes.MoveProjectileConfig
+			expect(projectile.Count).to.equal(7)
+			expect(projectile.SpreadPattern).to.equal("Radial")
+			expect(projectile.MaxBounces).to.equal(3)
+			expect(projectile.ParryResponse).to.equal("Reverse")
+		end)
 	end)
 
 	describe("MoveRecordCodec -- upgrading v1/v2 records", function()
@@ -186,6 +225,9 @@ return function()
 			for _, field in { "ArcDegrees", "Movement", "Projectile", "ObjectStun", "Knockback.RagdollSeconds" } do
 				expect(table.find(dropped, field)).to.be.ok()
 			end
+			-- The retired block shares a name with today's move type and nothing else: an old record never
+			-- turns into a projectile move.
+			expect(loaded.Projectile).to.equal(nil)
 		end)
 
 		it("carries an art binding through untouched", function()

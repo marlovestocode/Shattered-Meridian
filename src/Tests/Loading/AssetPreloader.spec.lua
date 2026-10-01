@@ -34,6 +34,8 @@ local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixtur
 
 local Client = StarterPlayer.StarterPlayerScripts.Client
 local AssetPreloader = require(Client.Loading.AssetPreloader)
+local MovePresentationCatalog = require(Client.FX.MovePresentationCatalog)
+local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
 
 -- Installed once, at file scope, never removed -- the same convention every WeaponFixture consumer in
 -- this suite keeps (see Tests/Combat/Attack/AttackAnimations.spec.lua's own header for why a per-test
@@ -174,6 +176,28 @@ return function()
 			-- The most player-visible textures in the game: they render the frame the loading screen
 			-- clears, so an unpreloaded one pops in blank on the first frame of actual gameplay.
 			expectAllAuthoredIdsPresent(manifestKeys(), Constants.UI.VitalIconIds, "Constants.UI.VitalIconIds")
+		end)
+
+		it("covers every asset a move's presentation references, wrapped by kind", function()
+			-- The catalogue usually arrives after boot (its later ids go through PreloadLabelled), but
+			-- whatever it already holds when the manifest is built must be in it, sounds as Sounds and
+			-- textures as Decals -- a bare id would be refused by PreloadAsync.
+			MovePresentationCatalog.ResetForTesting()
+			local block = MovePresentationTypes.Validate({
+				HitClean = { SoundId = "70000001", SparkTexture = "70000002" },
+			})
+			MovePresentationCatalog.Apply({ Kind = "Snapshot", Version = 1, Entries = { ["spec-move"] = block :: any } })
+			local soundFound, imageFound = false, false
+			for _, item in AssetPreloader.BuildManifest() do
+				if item:IsA("Sound") and item.SoundId == "rbxassetid://70000001" then
+					soundFound = true
+				elseif item:IsA("Decal") and item.Texture == "rbxassetid://70000002" then
+					imageFound = true
+				end
+			end
+			MovePresentationCatalog.ResetForTesting()
+			expect(soundFound).to.equal(true)
+			expect(imageFound).to.equal(true)
 		end)
 
 		it("covers the movement dust texture", function()

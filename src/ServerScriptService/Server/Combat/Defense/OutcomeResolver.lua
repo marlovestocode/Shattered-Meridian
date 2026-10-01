@@ -207,19 +207,30 @@ end
 -- substep, already the finest distinction the engine can make. A trade window invented on top of
 -- that would be a second, arbitrary number free to disagree with the first.
 --
+-- A PROJECTILE NEVER TRADES. A trade is two swings meeting, each cancelled by the other's parry; a
+-- parried shot is answered on the shot (HitboxEngine.ParryProjectile), and the thrower's own swing -- if
+-- one is even running -- was never in the exchange. A parried shot and a parried swing in one batch are
+-- two separate parries.
+--
 -- Pure over the list it is handed. Mutates the contacts in place because they are the caller's own
 -- freshly-built records and copying a frame's batch to change two fields would be allocation for
 -- nothing.
+-- Whether a projectile made this contact. A contact built by hand (a spec) may carry no report at all.
+local function isProjectile(contact: PendingContact): boolean
+	local report = contact.Report
+	return report ~= nil and report.Projectile ~= nil
+end
+
 function OutcomeResolver.ArbitrateTrades(contacts: { PendingContact }): number
 	local traded = 0
 	for i = 1, #contacts do
 		local first = contacts[i]
-		if first.Result.Kind ~= "Parried" then
+		if first.Result.Kind ~= "Parried" or isProjectile(first) then
 			continue
 		end
 		for j = i + 1, #contacts do
 			local second = contacts[j]
-			if second.Result.Kind ~= "Parried" then
+			if second.Result.Kind ~= "Parried" or isProjectile(second) then
 				continue
 			end
 			-- The mirror test: each one's attacker is the other's defender. Model identity, not
@@ -241,6 +252,67 @@ function OutcomeResolver.ArbitrateTrades(contacts: { PendingContact }): number
 		end
 	end
 	return traded
+end
+
+-- Collapses swings that MET into Trades, in place (DefenseConstants.Clash). Returns how many contacts it
+-- turned. Two rules, both over Clean melee contacts only:
+--   * MUTUAL IN ONE BATCH: two Clean contacts where each one's attacker is the other's defender -- both
+--     hits landed in the same server frame. Both become Trades.
+--   * THE DEFENDER'S BLADE WAS OUT: a Clean contact whose defender's own swing was Active and already
+--     reaching the attacker when it landed (PendingContact.DefenderSwingReaches, measured in pass 1).
+--     The one contact becomes a Trade; applyContact cancels the defender's swing along with the
+--     attacker's, since a clash costs both sides their swing.
+--
+-- A trade of this kind changes no guard, exactly like a mutual parry's (see ArbitrateTrades on why the
+-- only non-exploitable neutral is to grant nothing). A contact that is anything but Clean -- a block, a
+-- parry, a backstab, an evade -- is already answered and never clashes: a guarded body is not swinging.
+function OutcomeResolver.ArbitrateClashes(contacts: { PendingContact }): number
+	if not DefenseConstants.Clash.Enabled then
+		return 0
+	end
+	local clashed = 0
+	local function turn(contact: PendingContact): ()
+		contact.Result.GuardDelta = DefenseConstants.Guard.TradeRestore
+		contact.Result.Kind = "Trade"
+		contact.Result.ConsumesParry = false
+		contact.Clash = true
+		clashed += 1
+	end
+	for i = 1, #contacts do
+		local first = contacts[i]
+		if first.Result.Kind ~= "Clean" or isProjectile(first) then
+			continue
+		end
+		if first.DefenderSwingReaches == true then
+			turn(first)
+			continue
+		end
+		for j = i + 1, #contacts do
+			local second = contacts[j]
+			if second.Result.Kind ~= "Clean" or isProjectile(second) then
+				continue
+			end
+			if first.Attacker == second.Defender and first.Defender == second.Attacker then
+				turn(first)
+				turn(second)
+				break
+			end
+		end
+	end
+	-- A contact turned by the first rule may have been the mirror of a later one still Clean: its partner
+	-- landed in the same batch, so it clashed too.
+	for _, contact in contacts do
+		if contact.Result.Kind ~= "Clean" or isProjectile(contact) then
+			continue
+		end
+		for _, other in contacts do
+			if other.Clash and other.Attacker == contact.Defender and other.Defender == contact.Attacker then
+				turn(contact)
+				break
+			end
+		end
+	end
+	return clashed
 end
 
 return OutcomeResolver

@@ -15,10 +15,15 @@
 
 	Now the stage tables are never written. A Default move is:
 
-	    built projection (fresh from the weapon-built stage table)  +  optional override (editor-owned)
+	    weapon projection (fresh from the stage table)  +  shipped override  +  live override
 
-	Get returns the two composed; Reset forgets the override and the move is its built self again, with
-	nothing to restore because nothing was changed. The override holds exactly the fields an admin may
+	The SHIPPED override (2026-09-29) is a retune written into the game's source as a file under
+	Server/Combat/AuthoredMoves/Overrides (the Move Editor's Studio-only "Write to source") and installed
+	at boot by Server/Combat/AuthoredMoveLibrary.lua through SetShipped. It is part of what the game
+	ships, so it is part of what GetBuilt returns: "Reset to default" means "back to what ships", and a
+	save equal to that clears the live override rather than storing a copy. The LIVE override is the
+	editor's own (DataStore-backed, MoveEditorSystem's). Get returns all three composed; Reset forgets
+	the live override, with nothing to restore because nothing was changed. The override holds exactly the fields an admin may
 	retune (OVERRIDABLE below) and is itself a validated MoveDefinition's worth of values.
 
 	WHAT A DEFAULT MOVE MAY NOT CHANGE, and why: its id and name (fixed by its place in the roster), its
@@ -26,6 +31,12 @@
 	and feintability (properties of the stage -- MoveTypes.PowerLevelByStage/FeintableByStage), and
 	Knockback/Grab/Art (a stage has none, and the damage layer applies a weapon string's launch through
 	its own constants).
+
+	WHAT IT MAY, BEYOND THE NUMBERS: Presentation (2026-09-30, MovePresentationTypes). A weapon stage is
+	the move a player hears and sees most -- a heavy that clangs differently from a basic, a finisher
+	with its own sparks -- and the block decides nothing the server does, so overriding it cannot make a
+	stage a different move. Everything the list above protects is gameplay identity; this is not. The
+	weapon's own SFX folder still answers every moment the override leaves unset.
 
 	Persistence is MoveEditorSystem's: it writes an override record per move and replays it through
 	ApplyEdit at boot. This module is memory-only, like MoveRegistryManager.
@@ -42,7 +53,9 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
+local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
+local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local Types = require(ReplicatedStorage.Shared.Types)
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
@@ -55,7 +68,7 @@ local DefaultMoveRegistry = {}
 -- The browser group every standalone attack files under.
 DefaultMoveRegistry.StandaloneGroup = "Standalone"
 
-type StageCategory = "Basic" | "Heavy" | "Finisher" | "Launcher" | "Air" | "AirFinisher"
+export type StageCategory = "Basic" | "Heavy" | "Finisher" | "Launcher" | "Air" | "AirFinisher"
 
 type Descriptor = {
 	MoveId: string,
@@ -85,6 +98,7 @@ export type Override = {
 	Damage: number,
 	PostureDamage: number,
 	MaxTargets: number?,
+	Presentation: MoveTypes.MovePresentation?,
 }
 
 -- The descriptor list and its index, built once. Safe to cache for the session: the roster is built at
@@ -93,6 +107,18 @@ local cachedDescriptors: { Descriptor }? = nil
 local descriptorById: { [string]: Descriptor } = {}
 
 local overrides: { [string]: Override } = {}
+-- Retunes that ship in source (see this file's header), beneath the live overrides.
+local shipped: { [string]: Override } = {}
+
+-- Called with a MoveId whenever what Get returns for it may have changed -- MoveRegistryManager.OnChanged's
+-- twin, for the same reader (Server/Combat/MovePresentationSystem.lua).
+local changedListeners: { (moveId: string) -> () } = {}
+
+local function notifyChanged(moveId: string): ()
+	for _, listener in changedListeners do
+		pcall(listener, moveId)
+	end
+end
 
 -- A Blade-mode weapon's swings are anchored to the weapon (and a Box takes the blade's size); a BodyBox
 -- weapon swings a root-anchored box. Read per weapon, so a roster can mix the two.
@@ -208,6 +234,7 @@ local function project(descriptor: Descriptor): MoveTypes.MoveDefinition
 		OffsetRotation = Vector3.zero,
 		AttachmentPart = descriptor.AttachmentPart,
 		LocksMovement = false,
+		LocksWindup = false,
 
 		WindupSeconds = definition.WindupSeconds,
 		ActiveSeconds = definition.ActiveSeconds,
@@ -230,6 +257,8 @@ local function project(descriptor: Descriptor): MoveTypes.MoveDefinition
 		-- The string's pace (AttackConstants.Tempo), read at projection time so a tempo edit is never
 		-- shadowed by the cached descriptor. A standalone is not a link in a string and keeps 1.
 		Tempo = if stage then AttackConstants.TempoFor(descriptor.WeaponId, stage) else nil,
+		-- The stun a landed hit inflicts (DamageConstants.Hitstun.ByWeapon), read live for Tempo's reason.
+		HitstunSeconds = if stage then DamageConstants.HitstunFor(descriptor.WeaponId, stage) else nil,
 	}
 end
 
@@ -245,10 +274,21 @@ local function applyOverride(move: MoveTypes.MoveDefinition, override: Override)
 	move.Damage = override.Damage
 	move.PostureDamage = override.PostureDamage
 	move.MaxTargets = override.MaxTargets
+	move.Presentation = if override.Presentation then MovePresentationTypes.Copy(override.Presentation) else nil
+end
+
+-- The move as the game ships it: the weapon's projection with any shipped override laid over it.
+local function built(descriptor: Descriptor): MoveTypes.MoveDefinition
+	local move = project(descriptor)
+	local shippedOverride = shipped[descriptor.MoveId]
+	if shippedOverride then
+		applyOverride(move, shippedOverride)
+	end
+	return move
 end
 
 local function resolve(descriptor: Descriptor): MoveTypes.MoveDefinition
-	local move = project(descriptor)
+	local move = built(descriptor)
 	local override = overrides[descriptor.MoveId]
 	if override then
 		applyOverride(move, override)
@@ -272,10 +312,16 @@ function DefaultMoveRegistry.Get(moveId: string): MoveTypes.MoveDefinition?
 	return if descriptor then resolve(descriptor) else nil
 end
 
--- The move as its weapon built it, ignoring any override -- what Reset returns to.
+-- The move as the game ships it -- its weapon's projection plus any shipped override, ignoring the live
+-- one. What Reset returns to.
 function DefaultMoveRegistry.GetBuilt(moveId: string): MoveTypes.MoveDefinition?
 	local descriptor = findDescriptor(moveId)
-	return if descriptor then project(descriptor) else nil
+	return if descriptor then built(descriptor) else nil
+end
+
+-- Whether a retune of this move ships in source.
+function DefaultMoveRegistry.IsShipped(moveId: string): boolean
+	return shipped[moveId] ~= nil
 end
 
 function DefaultMoveRegistry.IsOverridden(moveId: string): boolean
@@ -291,10 +337,16 @@ function DefaultMoveRegistry.GroupOf(moveId: string): string?
 	return descriptor.WeaponId or DefaultMoveRegistry.StandaloneGroup
 end
 
--- Validates a wire-shaped candidate and installs the overridable part of it. Identity comes from the
--- move itself, never the candidate -- `moveId` alone decides which move is tuned, whatever MoveId,
--- name or author the payload claims. Returns the resolved move, or (nil, reason).
-function DefaultMoveRegistry.ApplyEdit(moveId: string, candidate: unknown): (MoveTypes.MoveDefinition?, string?)
+-- Which stage of its weapon's string a Default move is, or nil for a standalone or an unknown id. The Move
+-- Editor's bulk edit filters a weapon group by it ("all Sword Basics").
+function DefaultMoveRegistry.StageOf(moveId: string): StageCategory?
+	local descriptor = findDescriptor(moveId)
+	return if descriptor then descriptor.Stage else nil
+end
+
+-- A wire-shaped candidate validated into the overridable part of a Default move, or (nil, reason). Shared
+-- by the live and the shipped layer, so the two can never accept different things.
+local function validateOverride(moveId: string, candidate: unknown): (Override?, string?)
 	local descriptor = findDescriptor(moveId)
 	if not descriptor then
 		return nil, "MoveNotFound"
@@ -314,12 +366,17 @@ function DefaultMoveRegistry.ApplyEdit(moveId: string, candidate: unknown): (Mov
 	stamped.Knockback = nil
 	stamped.Grab = nil
 	stamped.Art = nil
+	-- A weapon stage is a swing: its string, its clip and its reach are all the weapon's. A projectile
+	-- weapon stage would be a new weapon, authored as one, not an override of this one.
+	stamped.Projectile = nil
+	-- Nor does a weapon stage open a realm: an M1 that unfurls a domain is an ultimate on a mouse button.
+	stamped.Domain = nil
 
 	local validated, reason = MoveRegistryManager.Validate(stamped)
 	if not validated then
 		return nil, reason
 	end
-	overrides[moveId] = {
+	return {
 		Shape = validated.Shape,
 		Dimensions = validated.Dimensions,
 		Offset = validated.Offset,
@@ -331,8 +388,43 @@ function DefaultMoveRegistry.ApplyEdit(moveId: string, candidate: unknown): (Mov
 		Damage = validated.Damage,
 		PostureDamage = validated.PostureDamage,
 		MaxTargets = validated.MaxTargets,
-	}
-	return resolve(descriptor), nil
+		Presentation = validated.Presentation,
+	},
+		nil
+end
+
+-- Validates a wire-shaped candidate and installs the overridable part of it as the LIVE override.
+-- Identity comes from the move itself, never the candidate -- `moveId` alone decides which move is tuned,
+-- whatever MoveId, name or author the payload claims. Returns the resolved move, or (nil, reason).
+function DefaultMoveRegistry.ApplyEdit(moveId: string, candidate: unknown): (MoveTypes.MoveDefinition?, string?)
+	local override, reason = validateOverride(moveId, candidate)
+	if not override then
+		return nil, reason
+	end
+	overrides[moveId] = override
+	notifyChanged(moveId)
+	return resolve(findDescriptor(moveId) :: Descriptor), nil
+end
+
+-- Installs (or, with nil, removes) the SHIPPED override for a move -- validated exactly like ApplyEdit.
+-- Called by Server/Combat/AuthoredMoveLibrary at boot, and by the Move Editor when a move is written to
+-- or removed from source in Studio. Returns the move as it now ships, or (nil, reason).
+function DefaultMoveRegistry.SetShipped(moveId: string, candidate: unknown?): (MoveTypes.MoveDefinition?, string?)
+	if candidate == nil then
+		if not findDescriptor(moveId) then
+			return nil, "MoveNotFound"
+		end
+		shipped[moveId] = nil
+		notifyChanged(moveId)
+		return DefaultMoveRegistry.GetBuilt(moveId), nil
+	end
+	local override, reason = validateOverride(moveId, candidate)
+	if not override then
+		return nil, reason
+	end
+	shipped[moveId] = override
+	notifyChanged(moveId)
+	return DefaultMoveRegistry.GetBuilt(moveId), nil
 end
 
 -- Forgets the override. Returns the move as built, or nil for an unknown id.
@@ -342,7 +434,19 @@ function DefaultMoveRegistry.Reset(moveId: string): MoveTypes.MoveDefinition?
 		return nil
 	end
 	overrides[moveId] = nil
-	return project(descriptor)
+	notifyChanged(moveId)
+	return built(descriptor)
+end
+
+-- Subscribes to every change of what Get returns for a move; returns the unsubscribe.
+function DefaultMoveRegistry.OnChanged(listener: (moveId: string) -> ()): () -> ()
+	table.insert(changedListeners, listener)
+	return function()
+		local index = table.find(changedListeners, listener)
+		if index then
+			table.remove(changedListeners, index)
+		end
+	end
 end
 
 -- Spec-only: drops the cached descriptor list (built from whichever roster a previous case stood up) and
@@ -351,6 +455,7 @@ function DefaultMoveRegistry.ResetCache(): ()
 	cachedDescriptors = nil
 	table.clear(descriptorById)
 	table.clear(overrides)
+	table.clear(shipped)
 end
 
 return DefaultMoveRegistry

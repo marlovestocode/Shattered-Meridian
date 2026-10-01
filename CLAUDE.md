@@ -34,12 +34,16 @@ stop and use the module on the right instead.
 | add a new server System | Add an entry to [`Server/Config/BootManifest.lua`](src/ServerScriptService/Server/Config/BootManifest.lua) (`Name`, `Path`, `Remotes`) — checked at boot (`AssertBootComplete`) and in `Tests/Boot/BootManifest.spec.lua` | leaving it boot-list-only — a System dropped from `Main.server.lua` or never declared here fails silently: clients `WaitForChild`-timeout one at a time instead of the boot itself erroring |
 | size a container by subtracting its siblings' heights from its parent's (`UDim2.new(1, 0, 1, -HEADER_ALLOWANCE)`) | [`UI/Components/Stack.lua`](src/StarterPlayer/StarterPlayerScripts/Client/UI/Components/Stack.lua) — `Stack.New`/`Stack.Row` for the container, `Stack.Fill(scope, child)` to mark the one child that takes what is left (a `UIFlexItem`; works inside ANY `UIListLayout`, not just a Stack's) | a hand-summed allowance constant — it is correct for exactly one set of child heights, and a one-pixel type change invalidates it silently, with no compile error and no runtime error, just a container that clips |
 | put a decorative element (a closing rule, a pinned close button, a corner bracket) in a frame that has a `UIListLayout` | [`UI/Components/Layer.lua`](src/StarterPlayer/StarterPlayerScripts/Client/UI/Components/Layer.lua) — `Flow`/`Content` for what the layout arranges, `Over`/`Under` for what is pinned to the container | dropping it in beside the flow children — a `UIListLayout` positions EVERY `GuiObject` child, so it gets swept into the run; this caused three separate bugs in one session |
+| make a button for something irreversible (delete, ban, wipe, reset) | [`UI/Components/ArmedButton.lua`](src/StarterPlayer/StarterPlayerScripts/Client/UI/Components/ArmedButton.lua) — first press arms and says so, a second inside `WindowSeconds` commits | a per-screen `isArmed` Value + generation counter; the old admin roster had two of those in one row |
 | draw a key the player is being told to press (a bordered well with a mono glyph in it) | [`UI/Components/KeyCap.lua`](src/StarterPlayer/StarterPlayerScripts/Client/UI/Components/KeyCap.lua) — `Tone = "Quiet"` inside a legend, `"Lit"` for the one cap that IS the call to action; `KeyHint` stacks them in a fixed column, `KeyLegend` runs them inline | a Frame + UICorner + UIStroke + mono Label written out per screen — three surfaces did it independently, at two different sizes and two different border weights, before this existed |
 | write a `UIPadding` with four `UDim.new(0, ...)` lines | [`UI/Components/Inset.lua`](src/StarterPlayer/StarterPlayerScripts/Client/UI/Components/Inset.lua) — `Inset(scope, Tokens.Space.L)` or `Inset(scope, { X = 20, Top = 12 })` | six lines of boilerplate and four independent places for a typo |
 | build a new full-screen modal (tab strip, body, footer, close control) | [`UI/Components/ScreenFrame.lua`](src/StarterPlayer/StarterPlayerScripts/Client/UI/Components/ScreenFrame.lua) — `ScreenFrame.BodySize(w, h)` for the body budget, `NewTabState` for the shared tab Value+Computeds, `Mount` for the frame; pass `Tabs` OR `Title` | hand-rolling a header band, a tab row and a status line per screen — six screens did, which is how the layout bugs above got copied around. `ModalScreen` directly is still right for a differently-shaped panel (a content-sized form, a transient overlay) |
 | ease a value toward a target where the OVERSHOOT is the information -- a camera on something heavy, a body braced against acceleration, anything whose job is to say "this has mass and is being pushed" | [`Shared/FlightMath.lua`](src/ReplicatedStorage/Shared/FlightMath.lua) -- `SpringStep(value, velocity, target, frequency, damping, dt)`, returning both as multiple returns | `EaseAlpha` (the right tool for a value with no mass of its own -- it arrives from one side and CANNOT overshoot), or a hand-rolled "ease with a bit of bounce", which is a spring somebody wrote badly. The implicit-Euler form there is also unconditionally stable at any `dt`; the semi-implicit one everybody writes first diverges and flings whatever it drives the first time a hitch exceeds `2/frequency` |
 | build a **crewed vehicle** — a tagged hull a player mounts, steers and rides | [`Shared/Vessel/`](src/ReplicatedStorage/Shared/Vessel) + [`Server/Vessel/`](src/ServerScriptService/Server/Vessel) — every module there is a `New(config)` factory you bind once: `VesselTagging` (stations, the model walk, where a body stands and which way that makes the bow), `VesselAssembly` (a pile of anchored meshes → one AlignPosition/AlignOrientation-driven body), `VesselMount` (prompt, reach check, movement lock, weld, ordered release), `VesselArmPose`/`VesselPilotPose` (hands and lean, per-client, `Motor6D.Transform`), `VesselMotion` (the filtered hull sample both feed on), `VesselSpeedLadder`/`VesselSpeedStage` (an engine telegraph / sail rig, and the audio bands), `VesselSafety` (the contact-speed clamp). `Shared/Blimp` and `Shared/Boat` are each one binding of that set plus the parts that really are vehicle-specific | a second copy of any of it. The two vehicles differ in exactly two files each — the drive integrator and the mode machine — and everything else being shared is what keeps a mount cue, a station and a rung one shape on the wire rather than two that drift |
 | find who the local player could be fighting (a lock-on pick, an aim assist, a step toward a target) | [`Client/Combat/CombatTargets.lua`](src/StarterPlayer/StarterPlayerScripts/Client/Combat/CombatTargets.lua) -- `All`, `NearestInCone`, `LiveRoot`, plus `YawOf`/`AngleDelta`; the lock-on target itself is `LockOnController.GetTarget()`, and "what would this swing track" is `SwingTracking.PickTarget(root)` | `Players:GetPlayers()` (misses training bots and dummies -- the `Combatant` tag HitboxEngine puts on every registered combatant is the list), or a fourth hand-rolled yaw-from-vector with the sign flipped |
+| make a combat layer behave differently for a body standing in a realm (damage, guard, speed, seals, escapes) | [`Shared/Domain/DomainRules.lua`](src/ReplicatedStorage/Shared/Domain/DomainRules.lua) -- `Scale(humanoid, kind)`, `Has(humanoid, flag)`, `IsSealed(humanoid, moveId, traits)`, all read through the realm's `DomainUntil` lease; a new kind is a `DomainTypes.RuleKinds` entry plus one reader | a `require` of `DomainSystem` from a combat layer (it sits ABOVE all four), or a domain-specific branch |
+| refund a combatant's network latency (a parry rewind, a swing lead, an air-combo deadline) | [`Server/Combat/NetworkLatency.lua`](src/ServerScriptService/Server/Combat/NetworkLatency.lua) -- `PingSeconds(model)` (a ROUND trip; 0 for a bot or dummy), `SetResolver(fn)` in a spec | a fifth hand-copied `player:GetNetworkPing()` pcall -- four combat modules each carried their own before it existed |
+| decide whether two combatants are on the same side, or match a target filter | [`Shared/Combat/Allegiance.lua`](src/ReplicatedStorage/Shared/Combat/Allegiance.lua) -- `AreAllies`, `Matches(filter, owner, target)`, `MatchesType` | a second "is this an ally" check -- there is no party system yet, and this is the one function one will change |
 | log inside a module | [`Shared/Logger.lua`](src/ReplicatedStorage/Shared/Logger.lua) — `Logger.scope("ModuleName")`, then `:info/:warn/:error/:debug` | `print`/`warn` directly — scoped logs feed the Live Console (F5) capture ring |
 
 Full rationale for each module (why it exists, what it deliberately does NOT own, the specific bugs
@@ -78,6 +82,32 @@ subscribes to `DamageSystem.OnApplied` (that function's own documented extension
 `DamageSystem.CanAttack` already are. It boots immediately after `AttackRequestSystem`. Extending combat
 with a new interaction kind should default to this sibling shape (subscribe to an existing extension
 point, get read through a narrow gate) before assuming it needs to become a fifth stacked layer.
+
+**Projectile moves are delivery, not a fifth layer** (2026-09-30). A move carrying a `Projectile` block
+(`Shared/HitboxEngine/ProjectileTypes.lua`) runs the ordinary swing lifecycle, but its Active window
+launches a volley that `Server/Combat/HitboxEngine/ProjectileSimulator.lua` flies inside `HitboxEngine`'s
+own substep loop; contacts leave through `OnHit` as ordinary `HitReport`s with `HitReport.Projectile`
+attached, so block/parry/evade/damage are decided by the existing layers. The defence layer's one
+projectile seam is `HitboxEngine.ParryProjectile`/`PassProjectile` — the shot's counterparts of
+`CancelAttack` — never cancelling the thrower's current swing unless the move chose `ExistingParry`. A new
+projectile behaviour belongs in the simulator or `ProjectileTypes`, not in a layer above.
+
+**Realms (domains) are a sibling, not a fifth layer** (2026-09-30, `docs/design/domains.md`). A move carrying a
+`Domain` block (`Shared/Domain/DomainTypes.lua`) opens a realm when `AttackRequestSystem.OnSwingAccepted`
+reports its swing; `Server/Combat/Domain/DomainSystem.lua` runs it. It delivers effects only through
+existing public entry points (`HitboxEngine.LaunchVolley` -- the realm's one engine seam, with
+`SetProjectileBarrier` for closed edges -- `DamageSystem.ExtendHitstun`, `DefenseSystem.DrainGuard`,
+`AttackRequestSystem.ThrowMove`), so a strike is blocked/parried/priced/credited exactly as the move it
+names. Its RULES reach the layers as Humanoid Attributes through `Shared/Domain/DomainRules.lua` (every rule
+read through the `DomainUntil` lease); no combat layer requires `DomainSystem`. A new realm behaviour is a new
+effect kind or rule kind there, never a domain-specific branch in a layer.
+
+**Two swings that meet clash** (2026-09-30, `DefenseConstants.Clash`). Two Clean melee hits on each other in one
+batch, or a hit on a defender whose own Active volume already reaches the attacker (`HitboxEngine.ActiveSwingReaches`),
+resolve as a `Trade` (`OutcomeResolver.ArbitrateClashes`): no damage or stun, both swings cancelled, both pushed
+apart, both strings kept. A defender still WINDING UP loses -- a time window would turn every M1 mash-out into a
+clash. Player swings are also started half a round trip early (`AttackConstants.Latency`), so "who landed first"
+means who pressed first, not who has the lower ping.
 
 `TrainingBotSystem` (`Server/Combat/TrainingBot/`, the AI sparring partner) is the same sibling shape
 from the other direction: it only ever acts through the public player entry points
@@ -133,6 +163,13 @@ is what this omission removes. Place file: 6.44 MB → 5.69 MB.
   server without them boots with empty content registries and degrades *quietly* — no error, no
   missing-move warning, just content that was never there. They also cost a player nothing (server
   modules never replicate), which is why they stay in `Server/Systems/`.
+- **Moves shipped in source ship in BOTH configs.** `Server/Combat/AuthoredMoves/` (written by the Move
+  Editor's Studio-only "Write to source") is ordinary gameplay content under `Server/Combat`, which both
+  project files map; `Server/Combat/AuthoredMoveLibrary.lua` loads it from `Main.server.lua`, before
+  the combat Inits and independent of any admin System. The helper that writes those files,
+  `scripts/move-writer.py`, is dev-only and never part of a build. `MoveEditorSystem` is still required
+  in every build for the DataStore content above -- shipped files are an additional layer beneath it
+  (a DataStore record/override with the same id wins), not a replacement.
 - `Client/Flight/` is the same correction pointing the other way: `FlightController`/`FlightPhysics`
   used to sit under `Client/DevMenu/` and are **not** dev tooling — an admin can grant flight to a
   *non*-admin, whose own client must drive the movement, so they run for every player and stay in

@@ -11,7 +11,10 @@
 	FOR while an author works:
 
 	    Browser (rail)   every move, grouped, with its save state -- where you go to pick
-	    Form (tabs)      Hitbox / Timing / Impact / Identity -- the inputs, one concern per tab
+	    Form (tabs)      Hitbox / Timing / Impact / Domain / Presentation / Identity -- the inputs, one
+	                     concern per tab (Domain: the realm the move opens, if any; Presentation: what the
+	                     move sounds and looks like, per moment) -- and
+	                     Tools, for what acts on more than one move's inputs (bulk, history, source)
 	    Readout (rail)   plots, the effective timeline, notes, actions -- the RESULTS of those inputs
 
 	Both rails are pinned, so a result is never a tab switch away from the input that caused it (the
@@ -52,13 +55,17 @@ local ScreenFrame = require(script.Parent.Parent.Parent.Components.ScreenFrame)
 local Stack = require(script.Parent.Parent.Parent.Components.Stack)
 
 local Browser = require(script.Browser)
+local DomainTab = require(script.DomainTab)
 local Fields = require(script.Fields)
 local HitboxTab = require(script.HitboxTab)
 local IdentityTab = require(script.IdentityTab)
 local ImpactTab = require(script.ImpactTab)
 local MoveEditorScreenTypes = require(script.Types)
+local PlacementBar = require(script.PlacementBar)
+local PresentationTab = require(script.PresentationTab)
 local Readout = require(script.Readout)
 local TimingTab = require(script.TimingTab)
+local ToolsTab = require(script.ToolsTab)
 
 local peek = Fusion.peek
 
@@ -74,7 +81,7 @@ local ROOT_HEIGHT = 780
 local BROWSER_WIDTH = 272
 local READOUT_WIDTH = 344
 
-local TAB_NAMES: { string } = { "Hitbox", "Timing", "Impact", "Identity" }
+local TAB_NAMES: { string } = { "Hitbox", "Timing", "Impact", "Domain", "Presentation", "Identity", "Tools" }
 
 function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 	local isOpen = scope:Value(false)
@@ -86,6 +93,12 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 	local botStyle = scope:Value(TrainingBotConstants.DefaultStyle :: string)
 	local botDifficulty = scope:Value(TrainingBotConstants.DefaultDifficulty :: string)
 	local hitLog = scope:Value({} :: { MoveEditorScreenTypes.HitLogEntry })
+	local showOnCharacter = scope:Value(true)
+	local placementMode = scope:Value(false)
+	local placementTool = scope:Value("Move")
+	local placementSnap = scope:Value(0.25)
+	local historyVersions = scope:Value(nil :: { MoveEditorTypes.HistoryVersion }?)
+	local exportText = scope:Value(nil :: string?)
 	local selectedId = scope:Value(nil :: string?)
 	local draft = scope:Value(nil :: MoveTypes.MoveDefinition?)
 	local tabs = ScreenFrame.NewTabState(scope, TAB_NAMES)
@@ -143,6 +156,13 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 	local spawnBotRequested = signal()
 	local clearBenchRequested = signal()
 	local clearHitLogRequested = signal()
+	local bulkScaleRequested = signal()
+	local loadHistoryRequested = signal()
+	local restoreVersionRequested = signal()
+	local writeToSourceRequested = signal()
+	local removeFromSourceRequested = signal()
+	local exportSourceRequested = signal()
+	local previewCueRequested = signal()
 
 	local history = DraftHistory.new(Constants.MoveEditor.UndoDepth, Constants.MoveEditor.UndoCoalesceSeconds)
 	-- DraftHistory is plain data; this bumps whenever it changes so CanUndo/CanRedo recompute.
@@ -216,10 +236,47 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 			Inset(scope, { Top = Tokens.Space.M, X = Tokens.Space.L }),
 			-- Exactly one page is visible at a time, so the Stack places it at the origin; a page is a
 			-- full-height ScrollArea.
-			HitboxTab(scope, context, pageVisible("Hitbox")),
+			HitboxTab(scope, context, pageVisible("Hitbox"), {
+				ShowOnCharacter = showOnCharacter,
+				OnPlace = function()
+					if peek(draft) then
+						placementMode:set(true)
+					end
+				end,
+			}),
 			TimingTab(scope, context, pageVisible("Timing")),
 			ImpactTab(scope, context, pageVisible("Impact")),
+			DomainTab(scope, context, pageVisible("Domain")),
+			PresentationTab(scope, context, {
+				OnPreview = function(moment: string)
+					previewCueRequested:Fire(moment)
+				end,
+			}, pageVisible("Presentation")),
 			IdentityTab(scope, context, pageVisible("Identity")),
+			ToolsTab(scope, {
+				Entry = selectedEntry,
+				Entries = entries,
+				OnBulkScale = function(request: MoveEditorTypes.BulkScaleRequest)
+					bulkScaleRequested:Fire(request)
+				end,
+				History = historyVersions,
+				OnLoadHistory = function()
+					loadHistoryRequested:Fire()
+				end,
+				OnRestoreVersion = function(version: number)
+					restoreVersionRequested:Fire(version)
+				end,
+				ExportText = exportText,
+				OnWriteToSource = function()
+					writeToSourceRequested:Fire()
+				end,
+				OnRemoveFromSource = function()
+					removeFromSourceRequested:Fire()
+				end,
+				OnExportSource = function()
+					exportSourceRequested:Fire()
+				end,
+			}, pageVisible("Tools")),
 			Label(scope, {
 				Text = "Pick a move on the left, or make a new one.",
 				Scale = "Body",
@@ -235,7 +292,11 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 	ScreenFrame.Mount(scope, playerGui, {
 		Name = "MoveEditor",
 		Size = UDim2.fromOffset(ROOT_WIDTH, ROOT_HEIGHT),
-		IsOpen = isOpen,
+		-- Place mode steps the modal aside -- the SESSION stays open (IsOpen, and the character's freeze),
+		-- only the frame goes, so the cursor and camera are free to work the gizmo.
+		IsOpen = scope:Computed(function(use)
+			return use(isOpen) and not use(placementMode)
+		end),
 		-- No HeaderAccessory: the tab run spans the whole strip, so anything pinned there sits on top of
 		-- the last tab. The move count and unsaved count live in the browser rail's own header instead.
 		Tabs = tabs,
@@ -322,8 +383,21 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 		}),
 	})
 
+	PlacementBar(scope, {
+		PlayerGui = playerGui,
+		Active = placementMode,
+		Tool = placementTool,
+		Snap = placementSnap,
+		Draft = draft,
+	})
+
 	return {
 		IsOpen = isOpen,
+		ShowOnCharacter = showOnCharacter,
+		PlacementMode = placementMode,
+		PlacementTool = placementTool,
+		PlacementSnap = placementSnap,
+		EditDraft = context.Edit,
 		StatusText = statusText,
 		Entries = entries,
 		HotbarBindings = hotbarBindings,
@@ -362,6 +436,15 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 		ClearBenchRequested = clearBenchRequested.Event,
 		HitLog = hitLog,
 		ClearHitLogRequested = clearHitLogRequested.Event,
+		BulkScaleRequested = bulkScaleRequested.Event,
+		HistoryVersions = historyVersions,
+		LoadHistoryRequested = loadHistoryRequested.Event,
+		RestoreVersionRequested = restoreVersionRequested.Event,
+		ExportText = exportText,
+		WriteToSourceRequested = writeToSourceRequested.Event,
+		RemoveFromSourceRequested = removeFromSourceRequested.Event,
+		ExportSourceRequested = exportSourceRequested.Event,
+		PreviewCueRequested = previewCueRequested.Event,
 	} :: any
 end
 

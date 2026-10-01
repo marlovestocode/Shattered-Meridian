@@ -246,7 +246,7 @@ local function updateMarker(camera: Camera, targetModel: Model, targetRoot: Base
 	handle.SetGuard(if typeof(guard) == "number" then guard else nil)
 end
 
-local function onRenderStep(deltaTime: number): ()
+local function lockStep(deltaTime: number): ()
 	local current = target
 	if current == nil then
 		return
@@ -283,6 +283,16 @@ local function onRenderStep(deltaTime: number): ()
 		pullCamera(camera, aim, deltaTime)
 	end
 	updateMarker(camera, current, targetRoot)
+end
+
+-- Labelled for the MicroProfiler (Ctrl+F6), so a lock-on frame cost shows up as its own bar.
+local function onRenderStep(deltaTime: number): ()
+	if target == nil then
+		return
+	end
+	debug.profilebegin("LockOn")
+	lockStep(deltaTime)
+	debug.profileend()
 end
 
 local function onCharacter(newCharacter: Model, newHumanoid: Humanoid, _life: Trove.TroveInstance): ()

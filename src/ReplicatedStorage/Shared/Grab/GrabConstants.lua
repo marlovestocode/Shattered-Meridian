@@ -128,6 +128,7 @@ GrabConstants.Defaults = {
 	ThrowHorizontalVelocity = 55,
 	ThrowImpactDamage = 15,
 	ThrowSelfDamage = 10,
+	ThrowReleaseAt = 1,
 }
 
 -- Clamp bounds for MoveRegistryManager's validateGrab, in Constants.MoveEditor.Limits' {Min, Max}
@@ -138,6 +139,7 @@ GrabConstants.Limits = {
 	ThrowHorizontalVelocity = { Min = 0, Max = 150 },
 	ThrowImpactDamage = { Min = 0, Max = 200 },
 	ThrowSelfDamage = { Min = 0, Max = 200 },
+	ThrowReleaseAt = { Min = 0, Max = 1 },
 }
 
 -- Hold physics -------------------------------------------------------------------------------------
@@ -195,6 +197,25 @@ GrabConstants.Animation = {
 	Priority = Enum.AnimationPriority.Action4,
 	FadeInSeconds = 0.12,
 	FadeOutSeconds = 0.15,
+}
+
+-- Throw animation (MoveGrabConfig.ThrowAnimation) -------------------------------------------------------
+
+-- A one-shot on the holder, on the same layer and priority as the hold clip (it replaces it). The victim
+-- stays welded to the hand until the move's ThrowReleaseAt (a fraction of the clip; its end by default)
+-- and is launched on that frame; the clip plays on after it -- see GrabSystem.Throw.
+-- The arm is handed back to the clip for it (the hold's posed shoulder C0 goes back and the pin comes
+-- off), so author the clip against a normal R6 rest pose, starting from the arm out where the hold has it.
+GrabConstants.Throw = {
+	-- Short, so the hand goes from the hold into the clip's first frame rather than visibly dipping
+	-- toward the idle pose on the way.
+	FadeInSeconds = 0.05,
+	-- The longest throw clip honoured. Also AnimationManager's ceiling for a clip whose Length has not
+	-- resolved yet (a cold asset), which expires the claim and launches anyway.
+	MaxClipSeconds = 5,
+	-- Past MaxClipSeconds plus this, GrabSystem.Step launches the victim itself -- the backstop for a
+	-- finish callback that never came (a manager torn down under the clip).
+	DeadlineGraceSeconds = 0.5,
 }
 
 -- Hold pose (Client/FX/GrabHoldPose.lua) --------------------------------------------------------------

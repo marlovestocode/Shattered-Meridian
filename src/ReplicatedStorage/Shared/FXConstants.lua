@@ -90,6 +90,11 @@ local FXConstants = {
 		PerfectParrySeconds = 0.2,
 		PostureBreakSeconds = 0.14,
 		MinIntervalSeconds = 0.1,
+		-- After a combat freeze the frozen clips play this much faster until the time the freeze cost is won
+		-- back (AnimationTrackUtil FreezeTracks' catchUp) -- the server's swing never paused, so without it
+		-- every landed hit left the clip behind the swing and the next swing cut its follow-through short.
+		-- 1.5 recovers a 0.09s freeze over the next 0.18s. Combat only; the flight freeze does not catch up.
+		CatchUpSpeedMultiplier = 1.5,
 		-- Flight landing-impact freeze (HitStop.FreezeFlightLanding, Client/FX/FlightAnimator.
 		-- FreezeActiveFlightTrack) -- much lighter than a combat hit-stop since this is cosmetic
 		-- feedback, not a clash beat; Hard is closer to PostureBreakSeconds' weight (a real, heavy
@@ -329,6 +334,19 @@ local FXConstants = {
 				Acceleration = Vector3.new(0, -55, 0),
 				LightEmission = 0.6,
 			},
+			-- A projectile ending on world geometry (Client/FX/ProjectileFX.lua) -- not an exchange, so
+			-- small and cool: the Qi of the shot scattering off stone. A shot that hits a BODY gets its
+			-- outcome's own preset through Combat_Feedback, like any other contact.
+			ProjectileWorld = {
+				Count = 10,
+				Color = ColorSequence.new(Color3.fromRGB(215, 200, 255), Color3.fromRGB(140, 110, 230)),
+				Speed = NumberRange.new(6, 14),
+				LifetimeSeconds = NumberRange.new(0.12, 0.28),
+				Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.3), NumberSequenceKeypoint.new(1, 0) }),
+				Drag = 6,
+				Acceleration = Vector3.new(0, -10, 0),
+				LightEmission = 1,
+			},
 		},
 		-- The camera punch a preset carries, if any -- a fast FOV tighten-and-release through FOVOffset (so
 		-- the settings.Comfort.FieldOfViewEffects toggle covers it), on both participants' clients. Keyed
@@ -337,6 +355,117 @@ local FXConstants = {
 			Parried = { FOVDelta = -4, OutSeconds = 0.04, BackSeconds = 0.2 },
 			ParriedPerfect = { FOVDelta = -8, OutSeconds = 0.035, BackSeconds = 0.32 },
 		} :: { [string]: { FOVDelta: number, OutSeconds: number, BackSeconds: number } },
+	},
+
+	-- Per-move presentation (Shared/Combat/MovePresentationTypes.lua, Client/FX/MovePresentation.lua): the
+	-- budget every move-authored cue plays inside, on ONE client. A cue past a cap is dropped, never
+	-- allocated -- the same rule every pool above keeps.
+	--
+	-- Per-client ceiling, all of it pooled and none of it growing with the number of moves:
+	--   * templates     MaxActiveTemplates live clones at once, at most TemplatePoolPerName of any one
+	--                   template (FXPool per name, carriers reused)
+	--   * one-shots     MoveSoundPoolSize 2D + MoveSoundPoolSize positional Sounds per DISTINCT authored
+	--                   sound id (SoundManager, round-robin -- no instance per play)
+	--   * shot loops    MaxLoopingShots looping Sounds, one per volley at most, each living on a pooled
+	--                   ProjectileFX carrier and stopped when the carrier is released
+	--   * sparks        the existing ImpactSparks pool (ImpactSparks.PoolMaxSize); overrides recolour a
+	--                   pooled burst, they never add one
+	MovePresentation = {
+		-- ReplicatedStorage.<TemplateFolder> holds authored effect templates (an Attachment, ParticleEmitter,
+		-- Beam, Part or Model), placed in Studio beside Workspace.Weapons. A cue names one by Name.
+		TemplateFolder = "MoveFX",
+		TemplatePoolPerName = 4,
+		MaxActiveTemplates = 16,
+		-- A template's ParticleEmitters are fired with :Emit(EmitCount attribute, else this).
+		TemplateDefaultEmitCount = 16,
+		-- A template is released after its LifetimeSeconds attribute, else its longest emitter lifetime,
+		-- never longer than this.
+		TemplateMaxLifetimeSeconds = 3,
+		MoveSoundPoolSize = 3,
+		-- The volume a move-authored sound plays at before the cue's Volume scale -- the authored layer has
+		-- no SoundDefinition of its own to carry one.
+		MoveSoundBaseVolume = 0.6,
+		MaxLoopingShots = 6,
+		-- Looping cue sounds playing at once on one client (a cue's Loop = "RestOfMove": a swing's or a realm's
+		-- sound repeating until the move ends). Past it a loop does not start. One real Sound each, so bounded.
+		MaxLoopingCues = 8,
+	},
+
+	-- Shots in flight (Client/FX/ProjectileFX.lua). The DEFAULT look -- a move's own In flight cue
+	-- (MovePresentationTypes) overrides any of it per move, field by field. The drawn core IS the hit volume
+	-- (its diameter is twice the move's Size), so what a player dodges is what the server tests; a move's
+	-- SizeScale scales the glow and the trail around it, never the core.
+	Projectile = {
+		-- Shots drawn at once on one client; past it a launch is not drawn (the server still flies it).
+		PoolMaxSize = 128,
+		CoreColor = Color3.fromRGB(205, 185, 255),
+		CoreTransparency = 0.15,
+		-- The glow shell around the core, as a multiple of its size.
+		GlowScale = 1.8,
+		GlowTransparency = 0.7,
+		-- Shots drawn WITH their glow at once. The glow is a second, larger ForceField ball per shot -- the
+		-- dearer half of drawing one -- so a flood (a realm's strikes, a wide volley) past this draws the
+		-- rest as bare cores. The core is the hit volume and is always drawn.
+		MaxGlowingShots = 24,
+		TrailColor = ColorSequence.new(Color3.fromRGB(215, 200, 255), Color3.fromRGB(120, 90, 220)),
+		TrailLifetimeSeconds = 0.18,
+		TrailTransparency = NumberSequence.new(0.35, 1),
+		-- A shot whose End never arrives (a dropped batch) is cleaned up this long past its lifetime.
+		OrphanGraceSeconds = 1,
+		-- How fast a drawn shot eases onto a corrected position from the server, rather than snapping.
+		CorrectionSeconds = 0.08,
+	},
+
+	-- Realms (Client/FX/DomainFX.lua). The DEFAULT look -- a domain move's own Realm established cue
+	-- (MovePresentationTypes, CoreColor/GlowColor) overrides the two colours per move. The drawn shell IS
+	-- the gameplay boundary (DomainGeometry), so the edge a player sees is the edge the server enforces.
+	Domain = {
+		-- The realm's tint: the colour grade laid over the screen of anyone under its law.
+		CoreColor = Color3.fromRGB(70, 40, 120),
+		-- The shell's colour -- the ForceField rim glow that draws the edge.
+		GlowColor = Color3.fromRGB(190, 150, 255),
+		-- THE SHELL'S THREE LOOKS, picked by how much of the screen it covers -- never by which side of the
+		-- edge the camera is on (see Client/FX/DomainFX.lua's header, FRAME COST):
+		--   Far     small on screen: the animated ForceField (ShellMaterial), whose rim draws the edge.
+		--   Near    the camera is outside, but the realm fills much of the view (a big realm from close by,
+		--           or a third-person camera poking out behind a body standing inside near its edge): a
+		--           plain, nearly clear surface -- one cheap blended layer, never a screen-sized shader pass.
+		--   Inside  hidden (a fully transparent part is culled) except within EdgeRevealStuds of the edge.
+		ShellMaterial = Enum.Material.ForceField,
+		ShellPlainMaterial = Enum.Material.SmoothPlastic,
+		ShellTransparency = 0.82,
+		ShellNearTransparency = 0.88,
+		ShellInsideTransparency = 0.9,
+		-- Far -> Near once the realm's bounding sphere spans this fraction of the camera's half vertical field
+		-- of view (DomainGeometry.AngularRadius), and back to Far only below ShellFillExit -- the gap keeps a
+		-- camera hovering at the threshold from swapping materials every frame. 0.6 of the half-FOV is a disc
+		-- about a fifth of a 16:9 screen; past that the ForceField's per-pixel cost stops being small.
+		ShellFillEnter = 0.6,
+		ShellFillExit = 0.5,
+		-- From inside, the shell is hidden (culled) unless the camera is within this many studs of the edge,
+		-- where it fades in -- so it only ever covers the screen when a player is about to meet it.
+		EdgeRevealStuds = 8,
+		-- THE VICTIM'S VIEW (Client/FX/DomainFX.lua's header): to a body the realm governs that is not its
+		-- owner, the barrier is a solid wall of this colour. Neon, because Neon is unlit -- a lit black
+		-- surface still catches specular and ambient and reads charcoal, where an emissive black is black.
+		VictimInteriorColor = Color3.new(0, 0, 0),
+		VictimInteriorMaterial = Enum.Material.Neon,
+		-- A pulse's point cues: at most this many bodies per pulse, and only those this near the camera.
+		MaxPulseBursts = 6,
+		PulseRangeStuds = 200,
+		-- The colour grade for a body inside: how far toward the tint, and how much colour is drained.
+		InsideTintBlend = 0.35,
+		InsideSaturation = -0.35,
+		InsideContrast = 0.12,
+		-- How the grade eases in and out as the local player crosses the edge or the realm folds.
+		GradeFadeSeconds = 0.4,
+		-- The shell's unfurl ease: it grows from nothing to full over the realm's activation, with this ease
+		-- out; it folds back over the ending the same way.
+		UnfurlEasingStyle = Enum.EasingStyle.Quint,
+		-- A barred edge's owning-client prediction: the local body is held this far from the line.
+		PredictedMarginStuds = 1,
+		-- Realm effect pulses drawn at the bodies they touched when the move authors no DomainPulse sparks.
+		PulseSparks = "ProjectileWorld",
 	},
 
 	-- The strained guard (Client/FX/GuardStrainPose.lua) -- a procedural brace-and-tremble layered over
@@ -363,6 +492,23 @@ local FXConstants = {
 		GuardStates = { Raising = true, ParryWindow = true, Blocking = true } :: { [string]: boolean },
 		-- Bodies further than this from the camera are not posed at all: a tremble of two degrees is
 		-- invisible at range, and every posed body is per-frame Transform writes.
+		MaxDistanceStuds = 150,
+	},
+
+	-- The hit flinch (Client/FX/HitFlinchPose.lua): the recoil every body plays, on every client, when a hit
+	-- stuns it. Angles in DEGREES, R6 joints, composed on top of whatever the body's clips are doing.
+	HitFlinch = {
+		-- The recoil: torso rocked back off the blow and twisted (alternating side per hit), head snapped
+		-- back, both arms thrown behind the body. Big enough to read at fighting distance, small enough
+		-- that a string of hits reads as one body being driven back, not as a ragdoll.
+		TorsoLeanDegrees = 12,
+		TorsoTwistDegrees = 6,
+		HeadSnapDegrees = 14,
+		ArmThrowDegrees = 14,
+		-- Near-instant onset (the hit IS the rise) and an eased settle, well inside the shortest stun (0.40s
+		-- on a Fists jab) so the body is upright again by the time it can act.
+		RiseSeconds = 0.04,
+		SettleSeconds = 0.28,
 		MaxDistanceStuds = 150,
 	},
 

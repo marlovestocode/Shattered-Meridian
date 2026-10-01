@@ -61,12 +61,14 @@ local BountyConstants = require(ReplicatedStorage.Shared.BountyConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DeathConstants = require(ReplicatedStorage.Shared.Death.DeathConstants)
+local DomainConstants = require(ReplicatedStorage.Shared.Domain.DomainConstants)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
 local EngagementConstants = require(ReplicatedStorage.Shared.Engagement.EngagementConstants)
 local EnvironmentConstants = require(ReplicatedStorage.Shared.Combat.EnvironmentConstants)
 local GatheringConstants = require(ReplicatedStorage.Shared.Gathering.GatheringConstants)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
+local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
@@ -199,6 +201,13 @@ local ENTRIES: { BootEntry } = {
 		Remotes = namesOf(Constants.Kit.RemoteNames),
 	},
 	{ Name = "MoveRegistryManager", Path = { "Combat", "MoveRegistryManager" }, Remotes = {} },
+	-- The per-move presentation catalogue clients read (MovePresentationTypes' header). Not a combat
+	-- layer: it only reads the two registries, through their OnChanged seams.
+	{
+		Name = "MovePresentationSystem",
+		Path = { "Combat", "MovePresentationSystem" },
+		Remotes = namesOf(MovePresentationTypes.Network.RemoteNames),
+	},
 	{ Name = "HitboxEngine", Path = { "Combat", "HitboxEngine", "HitboxEngine" }, Remotes = {} },
 	{
 		Name = "DefenseSystem",
@@ -252,6 +261,13 @@ local ENTRIES: { BootEntry } = {
 		Name = "EnvironmentReactionSystem",
 		Path = { "Combat", "Environment", "EnvironmentReactionSystem" },
 		Remotes = namesOf(EnvironmentConstants.Network.RemoteNames),
+	},
+	-- Realms. Owns Domain_State (server -> clients: open/phase/clash/pulse/snapshot, and a player's own
+	-- impulse) and Domain_Request (a client asking for every live realm, rate-limited).
+	{
+		Name = "DomainSystem",
+		Path = { "Combat", "Domain", "DomainSystem" },
+		Remotes = namesOf(DomainConstants.Network.RemoteNames),
 	},
 	-- Owns no remote -- purely cosmetic, replicates for free as a Tool parented under the character
 	-- rather than through NetworkBridge. See its own header for why it is a sibling of the attack

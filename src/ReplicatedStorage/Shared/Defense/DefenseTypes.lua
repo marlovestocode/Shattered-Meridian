@@ -51,8 +51,8 @@ export type DefenseState =
 -- What a contact turned out to be. The whole output vocabulary of this system.
 --
 -- Trade is deliberately NOT producible by OutcomeResolver.Resolve, which classifies one report in
--- isolation and cannot see a second one. It is produced only by ArbitrateTrades, which runs over a
--- whole frame's batch -- see DefenseSystem.lua's two-pass header. A resolver that could return Trade
+-- isolation and cannot see a second one. It is produced only by ArbitrateTrades and ArbitrateClashes,
+-- which run over a whole frame's batch -- see DefenseSystem.lua's two-pass header. A resolver that could return Trade
 -- would be a resolver that had to know about the batch, which is exactly the coupling keeping it
 -- pure avoids.
 export type OutcomeKind =
@@ -61,7 +61,7 @@ export type OutcomeKind =
 	| "GuardBroken" -- inside the arc, guard emptied on this hit
 	| "Backstab" -- blocking, but struck from the rear hemisphere
 	| "Parried" -- landed inside the defender's live parry window
-	| "Trade" -- both combatants parried each other in the same batch
+	| "Trade" -- two swings met: mutual parries in one batch, or a clash (DefenseConstants.Clash)
 	| "Evaded" -- landed inside the defender's roll evade window (DefenseConstants.Evade)
 
 -- The two authored times that define a parry, plus the recovery a whiff costs.
@@ -108,6 +108,10 @@ export type DefenseOutcome = {
 	-- DefenseConstants.PerfectParry.WindowSeconds of the window going live. Optional so every outcome a
 	-- spec builds by hand still typechecks as "not perfect".
 	Perfect: boolean?,
+	-- Only ever true alongside Kind "Trade": the trade was two SWINGS meeting (DefenseConstants.Clash), not
+	-- two parries. Both swings were cancelled -- the defender's too -- so the attack layer keeps BOTH
+	-- players' strings, not just the attacker's.
+	Clash: boolean?,
 }
 
 -- What OutcomeResolver.Resolve is given. Primitives only -- no Instances, no clock, no services --
@@ -159,6 +163,12 @@ export type PendingContact = {
 	-- See DefenseOutcome.Perfect. Classified in pass 1 at the contact's own SampleTime, like everything
 	-- else about the contact, and carried unchanged to pass 2.
 	Perfect: boolean?,
+	-- Whether the DEFENDER's own swing was in its Active window with a volume reaching the attacker at the
+	-- contact (HitboxEngine.ActiveSwingReaches). Measured in pass 1, at the substep the contact was found;
+	-- read by OutcomeResolver.ArbitrateClashes. Only ever set on a Clean melee contact.
+	DefenderSwingReaches: boolean?,
+	-- Set by ArbitrateClashes on a contact it turned into a clash. See DefenseOutcome.Clash.
+	Clash: boolean?,
 }
 
 -- The Defense_StateChanged payload, server -> the defending client. One shape for both ends, so the

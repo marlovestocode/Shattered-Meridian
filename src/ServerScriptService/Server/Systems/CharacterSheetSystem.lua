@@ -52,6 +52,8 @@ local logger = Logger.scope("CharacterSheetSystem")
 local CharacterSheetSystem = {}
 
 local sheetRemote: RemoteEvent? = nil
+-- The sheet each player was last pushed, so a Refresh that would send the same thing sends nothing.
+local lastSent: { [Player]: Types.CharacterSheetPayload } = {}
 local requestRateLimiter = RateLimiter.New(Constants.CharacterSheet.RequestMaxCallsPerSecond)
 
 -- The pure profile -> payload projection, exported so TestEZ can exercise it against a plain
@@ -88,7 +90,42 @@ function CharacterSheetSystem.GetSheet(player: Player): Types.CharacterSheetPayl
 	return CharacterSheetSystem.BuildSheet(profile)
 end
 
--- Pushes `player`'s sheet to their own client. Public so any System that writes one of these fields
+-- Whether two values are the same, tables compared by content. The sheet is a shallow record of scalars
+-- and small arrays/dicts of scalars, so this is a few comparisons -- far cheaper than what a client does
+-- with a sheet it is handed.
+local function valuesEqual(a: any, b: any): boolean
+	if a == b then
+		return true
+	end
+	if typeof(a) ~= "table" or typeof(b) ~= "table" then
+		return false
+	end
+	for key, value in a do
+		if not valuesEqual(value, b[key]) then
+			return false
+		end
+	end
+	for key in b do
+		if a[key] == nil then
+			return false
+		end
+	end
+	return true
+end
+
+-- Whether two sheets say the same thing. Exported for TestEZ.
+function CharacterSheetSystem.SheetsEqual(a: Types.CharacterSheetPayload, b: Types.CharacterSheetPayload): boolean
+	return valuesEqual(a, b)
+end
+
+-- Pushes `player`'s sheet to their own client -- unless it is the sheet they already have.
+--
+-- ONLY WHAT CHANGED IS PUSHED (2026-09-30). Qi Deviation refreshes the sheet after every Qi spend, and a
+-- realm's upkeep is a steady stream of spends; nearly all of them leave every field identical. The client
+-- cannot tell an identical sheet from a new one (it arrives as a fresh table), so each one re-ran every
+-- Computed the character menu hangs off it -- ~55ms a push. A client that has never heard a push still
+-- gets its sheet by the pull (GetSheet, on boot and whenever the menu opens), so skipping a repeat
+-- loses nothing. Public so any System that writes one of these fields
 -- (CharacterCreationSystem finalizing a chargen, a future FactionManager assigning a faction, a
 -- future corruption tick) can announce the change without this module having to watch for it --
 -- there is no change-notification hook on PlayerDataSystem.Transform to subscribe to, and polling a
@@ -102,6 +139,11 @@ function CharacterSheetSystem.Refresh(player: Player): ()
 	if not sheet then
 		return
 	end
+	local previous = lastSent[player]
+	if previous ~= nil and valuesEqual(previous, sheet) then
+		return
+	end
+	lastSent[player] = sheet
 	sheetRemote:FireClient(player, sheet)
 end
 
@@ -126,6 +168,7 @@ function CharacterSheetSystem.Init(): ()
 		Scope = "CharacterSheetSystem",
 		OnPlayerRemoving = function(player: Player)
 			requestRateLimiter:Clear(player)
+			lastSent[player] = nil
 		end,
 	})
 

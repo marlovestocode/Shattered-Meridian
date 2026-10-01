@@ -153,18 +153,18 @@ local IDS: { [string]: string } = {
 	-- The heavy swing. A single stage, much longer windup (0.6s) -- a clip here has real room to
 	-- telegraph, which is the whole point of a heavy in this game's defence model: the windup IS the
 	-- tell a defender parries off.
-	["Heavy:1"] = "83363364108102",
+	["Heavy:1"] = "133055498256963",
 	-- The weapon's Finisher move. No M1 throws it any more (the string's 4th hit is the air combo's
 	-- launcher), but its clip is what the launcher and the Spike borrow until their own are authored.
 	["Finisher"] = "138196103225171",
 
 	-- The air combo. BLANK UNTIL AUTHORED -- each borrows a ground clip meanwhile (BORROWED_FROM above).
-	["Launcher"] = "",
+	["Launcher"] = "138196103225171",
 	["Air:1"] = "",
 	["Air:2"] = "",
 	["Air:3"] = "",
-	["AirFinisher:Slam"] = "",
-	["AirFinisher:Spike"] = "",
+	["AirFinisher:Slam"] = "105833669294370",
+	["AirFinisher:Spike"] = "106111823142540",
 
 	-- Standalone attacks --------------------------------------------------------------------------
 	-- Catalogued and throwable through the hotbar, but not part of either string. Listed so they are

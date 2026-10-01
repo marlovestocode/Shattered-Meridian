@@ -284,8 +284,14 @@ end
 -- has not been a real state id since the kick was folded into WallRunning as a phase (see that file's
 -- header) -- ParkourConstants.CombatGate.BlockedStates is itself typed { [string]: boolean } for
 -- exactly this reason, so a combat-gate tag can outlive the state it used to name one-for-one.
+--
+-- A REALM'S NoParkour RULE rides the same question (ParkourConstants.DomainGate, a wider roster): the
+-- states that already ask it are exactly the escapes a realm closes, so no state needs a second check.
 function StateSupport.CombatBlocks(context: ParkourContext, gateKey: string): boolean
-	return context.InCombat == true and ParkourConstants.CombatGate.BlockedStates[gateKey] == true
+	if context.InCombat == true and ParkourConstants.CombatGate.BlockedStates[gateKey] == true then
+		return true
+	end
+	return context.DomainSealed == true and ParkourConstants.DomainGate.BlockedStates[gateKey] == true
 end
 
 -- THE ONE ANSWER TO "IS A LEDGE GRAB AVAILABLE RIGHT NOW", and the regrab bookkeeping behind it.

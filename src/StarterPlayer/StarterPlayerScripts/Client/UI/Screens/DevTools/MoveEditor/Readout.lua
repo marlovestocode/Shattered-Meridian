@@ -23,7 +23,6 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
-local Constants = require(ReplicatedStorage.Shared.Constants)
 local MoveEditorTypes = require(ReplicatedStorage.Shared.Authoring.MoveEditorTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 
@@ -36,14 +35,13 @@ local SectionHeading = require(script.Parent.Parent.Parent.Parent.Components.Sec
 local Stack = require(script.Parent.Parent.Parent.Parent.Components.Stack)
 local StatusTag = require(script.Parent.Parent.Parent.Parent.Components.StatusTag)
 
+local Fields = require(script.Parent.Fields)
 local FrameData = require(script.Parent.FrameData)
 local HitLog = require(script.Parent.HitLog)
 local HitboxPlot = require(script.Parent.HitboxPlot)
 local MoveEditorScreenTypes = require(script.Parent.Types)
 local TestBench = require(script.Parent.TestBench)
 local TimelineBar = require(script.Parent.TimelineBar)
-
-local peek = Fusion.peek
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
@@ -83,7 +81,7 @@ export type ReadoutProps = {
 local BUTTON_HEIGHT = Tokens.Control.StepButtonSize
 local CHIP_ROW_HEIGHT = 20
 
--- A legacy-path button (live text) that needs a second press within the confirm window.
+-- A two-press button at the readout's half width -- Fields.ArmedButton.
 local function armedButton(
 	scope: Scope,
 	idleText: string,
@@ -93,38 +91,14 @@ local function armedButton(
 	visible: UsedAs<boolean>?,
 	onConfirm: () -> ()
 ): Frame
-	local armed = scope:Value(false)
-	local armedAt = 0
-	return scope:New "Frame" {
-		Name = idleText,
-		Size = UDim2.new(0.5, -Tokens.Space.S / 2, 0, BUTTON_HEIGHT),
-		BackgroundTransparency = 1,
+	return Fields.ArmedButton(scope, {
+		Idle = idleText,
+		Armed = armedText,
 		LayoutOrder = order,
+		Disabled = disabled,
 		Visible = visible,
-
-		[Fusion.Children] = Button(scope, {
-			Text = scope:Computed(function(use)
-				return if use(armed) then armedText else idleText
-			end),
-			Size = UDim2.fromScale(1, 1),
-			Disabled = disabled,
-			OnActivated = function()
-				if peek(armed) then
-					armed:set(false)
-					onConfirm()
-					return
-				end
-				armed:set(true)
-				local stamp = os.clock()
-				armedAt = stamp
-				task.delay(Constants.MoveEditor.ConfirmWindowSeconds, function()
-					if armedAt == stamp then
-						armed:set(false)
-					end
-				end)
-			end,
-		}),
-	} :: Frame
+		OnConfirm = onConfirm,
+	})
 end
 
 local function halfButton(
@@ -191,6 +165,10 @@ local function Readout(scope: Scope, props: ReadoutProps): Frame
 	local hasBalance = scope:Computed(function(use)
 		local entry = use(props.Entry)
 		return entry ~= nil and entry.Balance ~= nil
+	end)
+	local isShipped = scope:Computed(function(use)
+		local entry = use(props.Entry)
+		return entry ~= nil and entry.Shipped
 	end)
 	local notUndoable = scope:Computed(function(use)
 		return not use(props.CanUndo)
@@ -309,6 +287,18 @@ local function Readout(scope: Scope, props: ReadoutProps): Frame
 					Children = {
 						StatusTag(scope, { Label = kindText, Color = Tokens.Color.AccentPrimary, LayoutOrder = 10 }),
 						StatusTag(scope, { Label = stateText, Color = stateColor, LayoutOrder = 20 }),
+						scope:New "Frame" {
+							Name = "InSource",
+							Size = UDim2.fromScale(0, 1),
+							AutomaticSize = Enum.AutomaticSize.X,
+							BackgroundTransparency = 1,
+							LayoutOrder = 30,
+							Visible = isShipped,
+							[Fusion.Children] = StatusTag(scope, {
+								Label = "IN SOURCE",
+								Color = Tokens.Color.AccentSecondary,
+							}),
+						},
 					},
 				}),
 			},

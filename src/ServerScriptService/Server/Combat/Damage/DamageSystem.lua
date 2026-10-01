@@ -64,6 +64,13 @@
 	    toward its cheater flag, and Server/Combat/Damage/KnockbackAudit.lua checks the client honoured it.
 	The client decides nothing about a knock but WHEN inside its own frame to write it.
 
+	READS A REALM'S RULES (2026-09-30), through the Attribute seam and nothing else (Shared/Domain/
+	DomainRules.lua -- this layer never requires the realm runtime, which sits above it). A contact's damage
+	is scaled by its attacker's DamageDealt and its defender's DamageTaken rule, its guard drain by the
+	defender's GuardDamageTaken, its hitstun by the defender's HitstunTaken -- all 1 for a body no realm
+	governs. A contact a REALM delivered (ProjectileContact.DomainId) is priced flat, like an M1, and does
+	not advance its owner's combo: it is the realm striking, not a link in the owner's string.
+
 	Does not own: contact detection (HitboxEngine), what kind of hit something was (DefenseSystem), the
 	guard pool itself (DefenseSystem.DrainGuard -- this decides how much, that owns the meter), per-move
 	damage or knockback numbers (the Move Editor's moves, via AttackCatalog), air-combo treatment
@@ -82,6 +89,7 @@ local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
+local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local Knockback = require(ReplicatedStorage.Shared.Damage.Knockback)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -203,12 +211,27 @@ local function launchFor(outcome: DefenseOutcome, result: DamageResult): Vector3
 	if authored.StartsAirCombo == true then
 		return nil
 	end
+	local defenderRoot = outcome.Defender.PrimaryPart
+	if defenderRoot == nil then
+		return nil
+	end
+	-- A PROJECTILE KNOCKS ALONG ITS FLIGHT, away from where it came from -- not away from a thrower who may
+	-- be anywhere by now. It is also the one case where a hit on your own body launches you: a shot
+	-- authored CanHitOwner that comes back is still a shot.
+	local projectile = outcome.Report.Projectile
+	if projectile then
+		return Knockback.LaunchVelocity(
+			projectile.SourcePosition,
+			defenderRoot.Position,
+			projectile.Direction,
+			authored
+		)
+	end
 	if outcome.Defender == outcome.Attacker then
 		return nil
 	end
 	local attackerRoot = outcome.Attacker.PrimaryPart
-	local defenderRoot = outcome.Defender.PrimaryPart
-	if attackerRoot == nil or defenderRoot == nil then
+	if attackerRoot == nil then
 		return nil
 	end
 	return Knockback.LaunchVelocity(
@@ -285,6 +308,11 @@ local function spacingFor(
 	if not spacing.Enabled or outcome.Defender == outcome.Attacker or result.Grab ~= nil then
 		return nil, nil
 	end
+	-- Spacing is the melee exchange's footwork -- the defender eased off, the attacker following in. A
+	-- shot's thrower is not in reach to step anywhere, and its target's reaction is the move's knockback.
+	if outcome.Report.Projectile ~= nil then
+		return nil, nil
+	end
 	if AirComboMoves.RoleOf(moveId) ~= nil then
 		return nil, nil
 	end
@@ -331,6 +359,10 @@ local function spacingFor(
 		return defenderPush, attackerPush
 	elseif kind == "Blocked" then
 		return direction * speedFor(spacing.Blocked.DefenderStuds), -direction * speedFor(spacing.Blocked.AttackerStuds)
+	elseif kind == "Trade" then
+		-- Two swings met and neither won: an even shove apart (DamageConstants.Spacing.Clash).
+		local speed = speedFor(spacing.Clash.Studs)
+		return direction * speed, -direction * speed
 	end
 	return nil, nil
 end
@@ -350,13 +382,16 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	end
 
 	local at = outcome.SampleTime
+	local projectile = outcome.Report.Projectile
+	-- A realm's strike or volley (see this file's header): flat-priced, and not a link in the owner's string.
+	local fromRealm = projectile ~= nil and projectile.DomainId ~= nil
 
 	-- ADVANCED BEFORE RESOLVING, not after, so the stage handed to the resolver is the one this hit
 	-- counts as. Resolving first and advancing afterwards would scale every hit by the stage of the one
 	-- before it -- the first two hits of every string would both deal flat authored damage, which is
 	-- invisible in play right up until someone measures a combo.
 	local stage
-	if DamageResolver.AdvancesCombo(outcome.Kind) then
+	if DamageResolver.AdvancesCombo(outcome.Kind) and not fromRealm then
 		stage = ComboEscalation.Advance(outcome.Attacker, at)
 	else
 		stage = ComboEscalation.GetStage(outcome.Attacker, at)
@@ -370,8 +405,35 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	-- GuardBroken pricing rules as everything else, just at ComboMultiplier(1) == 1.
 	-- Every air hit and finisher is flat-priced the same way (AirComboMoves.IsFlatPriced): the air combo
 	-- scales them itself, and ComboEscalation's multiplier on top would make the two scalings stack.
-	local pricingStage = if isBasicMoveId(entry.MoveId) or AirComboMoves.IsFlatPriced(entry.MoveId) then 1 else stage
+	local pricingStage = if fromRealm
+			or isBasicMoveId(entry.MoveId)
+			or AirComboMoves.IsFlatPriced(entry.MoveId)
+		then 1
+		else stage
 	local result = DamageResolver.Resolve(outcome.Kind, outcome.DefenderStateAtContact, entry.Profile, pricingStage)
+
+	-- A shot a parry reflected hits as hard as its ReflectedDamageMultiplier says -- the engine carries the
+	-- product of every one it has picked up (ProjectileContact.DamageScale), this applies it, to health and
+	-- posture alike, before anything reads the result. 1 for every shot nobody turned, and every swing. A
+	-- contested realm's strike arrives already scaled the same way (DomainEffects hands it a start scale).
+	if projectile and projectile.DamageScale ~= 1 then
+		local scale = math.max(projectile.DamageScale, 0)
+		result.Damage *= scale
+		result.GuardDrain *= scale
+	end
+
+	-- A REALM'S RULES, read off the two bodies (this file's header). One server-clock read for all four, and
+	-- every one is exactly 1 for a body no realm governs, so an ordinary fight multiplies by nothing.
+	local realmNow = DomainRules.ServerNow()
+	local attackerHumanoid = CharacterUtil.HumanoidOf(outcome.Attacker)
+	local defenderHumanoid = CharacterUtil.HumanoidOf(outcome.Defender)
+	result.Damage *= DomainRules.Scale(attackerHumanoid, "DamageDealt", realmNow) * DomainRules.Scale(
+		defenderHumanoid,
+		"DamageTaken",
+		realmNow
+	)
+	result.GuardDrain *= DomainRules.Scale(defenderHumanoid, "GuardDamageTaken", realmNow)
+	result.HitstunSeconds *= DomainRules.Scale(defenderHumanoid, "HitstunTaken", realmNow)
 
 	-- The air combo's scaling and presentation tag, before any reader sees the result (see airComboHook).
 	local airComboTag: string? = nil
@@ -398,8 +460,9 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 
 	-- A landed M1 (Basic weapon-string) hit gives the ATTACKER a brief forced-forward nudge, driven
 	-- from Step below -- see DamageConstants.AttackerLunge's own comment. Parried and Evaded are excluded
-	-- because nothing of the attacker's own swing actually connected; every other resolved kind (Clean,
-	-- Blocked, Backstab, GuardBroken, Trade) still counts as the swing having landed on something.
+	-- because nothing of the attacker's own swing actually connected, and Trade because it pushes the two
+	-- apart; every other resolved kind (Clean, Blocked, Backstab, GuardBroken) still counts as the swing
+	-- having landed on something.
 	--
 	-- SERVER-OWNED ATTACKERS ONLY (bots, dummies). A player's character is network-owned by their own
 	-- client, and Humanoid:Move from the server on a body it does not simulate is silently inert -- so
@@ -410,6 +473,8 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 		DamageConstants.AttackerLunge.Enabled
 		and outcome.Kind ~= "Parried"
 		and outcome.Kind ~= "Evaded"
+		-- A trade shoves both apart (Spacing.Clash); stepping the attacker in would undo it.
+		and outcome.Kind ~= "Trade"
 		and isBasicMoveId(entry.MoveId)
 		and Players:GetPlayerFromCharacter(outcome.Attacker) == nil
 	then
@@ -484,6 +549,7 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 		-- Only a player's own client applies a launch; a server-owned body already has it.
 		defenderFeedback.Knockback = if launchedPlayer then launch else nil
 		defenderFeedback.Push = if pushedDefender then defenderPush else nil
+		defenderFeedback.HitstunSeconds = if result.HitstunSeconds > 0 then result.HitstunSeconds else nil
 		sendFeedback(outcome.Defender, defenderFeedback)
 	end
 
@@ -584,6 +650,12 @@ function DamageSystem.CanAttack(model: Model, now: number): (boolean, string?)
 		return false, "Hitstun"
 	end
 	return true, nil
+end
+
+-- When this body's current hitstun ends, or -math.huge when it has none on record. For the attack layer's
+-- latency refund (AttackConstants.Latency), which may not backdate a swing into a stun.
+function DamageSystem.HitstunUntil(model: Model): number
+	return hitstunUntil[model] or -math.huge
 end
 
 function DamageSystem.IsHitstunned(model: Model, now: number): boolean

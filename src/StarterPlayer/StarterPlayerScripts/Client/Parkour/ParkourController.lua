@@ -45,6 +45,7 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
+local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local EvadeConstants = require(ReplicatedStorage.Shared.Combat.EvadeConstants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
@@ -200,6 +201,7 @@ local function buildInitialContext(boundCharacter: Model, boundHumanoid: Humanoi
 		WallLaunchDashBoostUntil = 0,
 		CombatOwned = false,
 		InCombat = false,
+		DomainSealed = false,
 		CombatCommitted = false,
 		Assists = InputBuffer.GetAssists(),
 		Motor = ParkourMotor.BeginFrame(),
@@ -416,6 +418,9 @@ local function step(deltaTime: number): ()
 	-- keep correct across respawns. Unset (a life that has never fought) reads as false, which is
 	-- exactly right.
 	context.InCombat = currentHumanoid:GetAttribute(Constants.Attributes.InCombat) == true
+	-- A realm's NoParkour rule, read off the same Humanoid through its lease (Shared/Domain/DomainRules.lua).
+	-- The server refuses the same kinds (ParkourSystem); this is the client declining to start them.
+	context.DomainSealed = DomainRules.Has(currentHumanoid, "NoParkour")
 	-- Pulled from the combat client's own mirror, the same way SprintHeld is pulled from RunController:
 	-- LocalCombatState is the one place this client already records its own swing and its own stun, and
 	-- a second copy kept here would be a third answer to a question the server has already answered.

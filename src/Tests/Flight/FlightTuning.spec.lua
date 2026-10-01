@@ -10,7 +10,7 @@ local LiveTuningContract = require(ServerScriptService.Tests.TestHelpers.LiveTun
 -- Constants.Flight afterward. Every test that mutates something resets it back inline before
 -- returning, rather than relying on an afterEach hook, same discipline as HitboxTuning.spec.lua --
 -- see TestHelpers/LiveTuningContract.lua's own header for the shared "mutate+assert, then
--- guarantee the reset still runs" wrapper this file's AdjustField tests use.
+-- guarantee the reset still runs" wrapper this file's SetField tests use.
 
 return function()
 	describe("FlightTuning.ListFields", function()
@@ -34,21 +34,21 @@ return function()
 		end)
 	end)
 
-	describe("FlightTuning.AdjustField", function()
-		it("nudges the live field by the given fraction and returns the updated value", function()
-			local before: number? = nil
+	describe("FlightTuning.ListFields bounds", function()
+		it("carries each field's clamp and a file default inside it", function()
 			for _, info in ipairs(FlightTuning.ListFields()) do
-				if info.Field == "CruiseSpeed" then
-					before = info.Value
-				end
+				expect(info.Min < info.Max).to.equal(true)
+				expect(info.Default >= info.Min and info.Default <= info.Max).to.equal(true)
 			end
-			expect(before).to.be.ok()
-			local baseline = before :: number
+		end)
+	end)
 
+	describe("FlightTuning.SetField", function()
+		it("writes the absolute value and returns it", function()
 			LiveTuningContract.withRestore(function()
-				local result = FlightTuning.AdjustField("CruiseSpeed", 0.1)
+				local result = FlightTuning.SetField("CruiseSpeed", 120)
 				expect(result).to.be.ok()
-				expect(result.Value).to.equal(baseline * 1.1)
+				expect(result.Value).to.equal(120)
 			end, function()
 				FlightTuning.ResetField("CruiseSpeed")
 			end)
@@ -56,12 +56,12 @@ return function()
 
 		it("persists the mutation for a later ListFields call (proves the live-reference claim)", function()
 			LiveTuningContract.withRestore(function()
-				FlightTuning.AdjustField("Acceleration", 0.5)
+				FlightTuning.SetField("Acceleration", 77)
 				local found = false
 				for _, info in ipairs(FlightTuning.ListFields()) do
 					if info.Field == "Acceleration" then
 						found = true
-						expect(info.Value > 0).to.equal(true)
+						expect(info.Value).to.equal(77)
 					end
 				end
 				expect(found).to.equal(true)
@@ -72,7 +72,7 @@ return function()
 
 		it("clamps to the field's sanity ceiling instead of an unbounded value", function()
 			LiveTuningContract.withRestore(function()
-				local result = FlightTuning.AdjustField("MaxBankAngleDegrees", 999)
+				local result = FlightTuning.SetField("MaxBankAngleDegrees", 999)
 				expect(result).to.be.ok()
 				expect(result.Value).to.equal(89)
 			end, function()
@@ -82,7 +82,7 @@ return function()
 
 		it("clamps to the field's sanity floor instead of zero/negative", function()
 			LiveTuningContract.withRestore(function()
-				local result = FlightTuning.AdjustField("MaxBankAngleDegrees", -999)
+				local result = FlightTuning.SetField("MaxBankAngleDegrees", -999)
 				expect(result).to.be.ok()
 				expect(result.Value).to.equal(0)
 			end, function()
@@ -90,8 +90,13 @@ return function()
 			end)
 		end)
 
+		it("refuses NaN and infinity rather than poisoning the shared table", function()
+			expect(FlightTuning.SetField("CruiseSpeed", 0 / 0)).to.equal(nil)
+			expect(FlightTuning.SetField("CruiseSpeed", math.huge)).to.equal(nil)
+		end)
+
 		it("returns nil for a field name outside the curated set", function()
-			expect(FlightTuning.AdjustField("DefaultCollideMode", 0.1)).to.equal(nil)
+			expect(FlightTuning.SetField("DefaultCollideMode", 1)).to.equal(nil)
 		end)
 	end)
 
@@ -105,7 +110,7 @@ return function()
 			end
 			expect(original).to.be.ok()
 
-			FlightTuning.AdjustField("BoostSpeedMultiplier", 1)
+			FlightTuning.SetField("BoostSpeedMultiplier", 4)
 			local restored = FlightTuning.ResetField("BoostSpeedMultiplier")
 			expect(restored).to.be.ok()
 			expect(restored.Value).to.equal(original)

@@ -378,4 +378,80 @@ return function()
 			expect(contacts[2].Result.Kind).to.equal("Blocked")
 		end)
 	end)
+
+	-- DefenseConstants.Clash: two swings that meet are one exchange that neither side wins.
+	describe("OutcomeResolver.ArbitrateClashes", function()
+		local alpha = Instance.new("Model")
+		local beta = Instance.new("Model")
+		local gamma = Instance.new("Model")
+
+		local function makeClean(attacker: Model, defender: Model, reaches: boolean?): any
+			return {
+				Report = nil :: any,
+				Attacker = attacker,
+				Defender = defender,
+				BearingDegrees = 0,
+				DefenderStateAtContact = "Neutral",
+				Result = { Kind = "Clean", Guard = 40, GuardDelta = 0, ConsumesParry = false },
+				SampleTime = 0,
+				DefenderSwingReaches = reaches,
+			}
+		end
+
+		it("turns two Clean hits on each other in one batch into a Trade on both sides", function()
+			-- Before this, the same frame was a double hit: both stunned, both damaged.
+			local contacts = { makeClean(alpha, beta), makeClean(beta, alpha) }
+			expect(OutcomeResolver.ArbitrateClashes(contacts)).to.equal(2)
+			expect(contacts[1].Result.Kind).to.equal("Trade")
+			expect(contacts[2].Result.Kind).to.equal("Trade")
+			expect(contacts[1].Clash).to.equal(true)
+			expect(contacts[2].Clash).to.equal(true)
+			expect(contacts[1].Result.GuardDelta).to.equal(0)
+		end)
+
+		it("clashes a hit on a defender whose own blade is out and reaching", function()
+			local contacts = { makeClean(alpha, beta, true) }
+			expect(OutcomeResolver.ArbitrateClashes(contacts)).to.equal(1)
+			expect(contacts[1].Result.Kind).to.equal("Trade")
+			expect(contacts[1].Clash).to.equal(true)
+		end)
+
+		it("clashes the mirror of a reaching contact that comes later in the batch", function()
+			local contacts = { makeClean(alpha, beta, true), makeClean(beta, alpha, false) }
+			expect(OutcomeResolver.ArbitrateClashes(contacts)).to.equal(2)
+			expect(contacts[2].Result.Kind).to.equal("Trade")
+		end)
+
+		it("lets a hit on a defender still winding up land clean", function()
+			-- THE MASH-OUT RULE. A defender mashing out of hitstun is only ~0.06s from Active when the next
+			-- M1 lands; a winding-up defender must lose, or every mash-out would escape the string.
+			local contacts = { makeClean(alpha, beta, false) }
+			expect(OutcomeResolver.ArbitrateClashes(contacts)).to.equal(0)
+			expect(contacts[1].Result.Kind).to.equal("Clean")
+		end)
+
+		it("leaves two Clean hits that are not mutual alone", function()
+			local contacts = { makeClean(alpha, beta), makeClean(gamma, beta) }
+			expect(OutcomeResolver.ArbitrateClashes(contacts)).to.equal(0)
+			expect(contacts[1].Result.Kind).to.equal("Clean")
+			expect(contacts[2].Result.Kind).to.equal("Clean")
+		end)
+
+		it("never clashes a contact that was already answered", function()
+			local blocked = makeClean(beta, alpha)
+			blocked.Result.Kind = "Blocked"
+			local contacts = { makeClean(alpha, beta), blocked }
+			expect(OutcomeResolver.ArbitrateClashes(contacts)).to.equal(0)
+			expect(contacts[1].Result.Kind).to.equal("Clean")
+			expect(contacts[2].Result.Kind).to.equal("Blocked")
+		end)
+
+		it("never clashes a projectile", function()
+			local shot = makeClean(alpha, beta, true)
+			shot.Report = { Projectile = {} }
+			local contacts = { shot }
+			expect(OutcomeResolver.ArbitrateClashes(contacts)).to.equal(0)
+			expect(contacts[1].Result.Kind).to.equal("Clean")
+		end)
+	end)
 end

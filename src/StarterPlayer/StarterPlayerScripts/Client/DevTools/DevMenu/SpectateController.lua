@@ -15,9 +15,8 @@
 	"watch a Humanoid, rebind on respawn" idiom, just for a possibly-other player's Humanoid instead of
 	always the local one.
 
-	Does not own: which player is the current spectate target -- DevMenuClient.lua resolves that the
-	same way its own Admin-tab target tracking already does (Combat_LockOnChanged), and only calls
-	Start/Stop here. Nor the toggle button itself (UI/Screens/DevTools/DevMenu/init.lua).
+	Does not own: which player is the current spectate target -- the admin panel's roster selection,
+	which DevMenuClient.lua passes to Start. Nor the toggle button itself (the panel's Player tab).
 ]]
 
 local Players = game:GetService("Players")

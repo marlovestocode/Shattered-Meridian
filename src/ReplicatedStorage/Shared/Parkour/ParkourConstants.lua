@@ -1205,6 +1205,29 @@ ParkourConstants.CombatGate = {
 	} :: { [string]: boolean },
 }
 
+-- A REALM'S NoParkour RULE (Shared/Domain/DomainRules.lua) -- the escape mobility a realm can close, as a
+-- wider roster than the combat gate above: a realm is an ultimate, and "you cannot leave" includes the
+-- airborne dash the ordinary combat tag deliberately leaves open. Vault, mantle and ledge climb stay open:
+-- they are how a body gets over the arena's own geometry, not away from the fight. The evade is its own
+-- rule (NoEvade), not part of this roster.
+--   BlockedStates -- the client's gate keys (StateSupport.CombatBlocks, asked by each state's CanEnter).
+--   BlockedKinds  -- the server's refusal (ParkourSystem), by the ActionKind a state reports.
+ParkourConstants.DomainGate = {
+	BlockedStates = {
+		WallRunning = true,
+		WallJumping = true,
+		Leaping = true,
+		Sliding = true,
+		Dashing = true,
+	} :: { [string]: boolean },
+	BlockedKinds = {
+		WallRun = true,
+		Leap = true,
+		Slide = true,
+		Dash = true,
+	} :: { [string]: boolean },
+}
+
 -- THE DASH -- an AIR-ONLY, camera-aimed, steerable launch on its own key
 -- (Constants.Keybinds.Defaults.Dash, Q / gamepad B). ONE rule: it sends you exactly where you are
 -- looking, at full power, and you fly it with the mouse for as long as it lasts.
@@ -1699,9 +1722,9 @@ ParkourConstants.AnimationIds = {
 	-- own header) until a real clip exists; a blank id plays nothing, not an error, so the charge still
 	-- times out and fires the leap on schedule even unauthored.
 	LeapCharge = "",
-	LandSoft = "rbxassetid://125167812303491",
+	LandSoft = "",
 	LandHard = "rbxassetid://78765593305701",
-	FallLoop = "rbxassetid://125167812303491",
+	FallLoop = "",
 } :: { [string]: string }
 
 -- Animation blend/priority tuning. FadeSeconds is deliberately short across the board: an

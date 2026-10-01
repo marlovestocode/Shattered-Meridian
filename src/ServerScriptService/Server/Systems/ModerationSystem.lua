@@ -199,6 +199,26 @@ function ModerationSystem.IsPendingBan(userId: number): boolean
 	return pendingBanUserIds[userId] == true
 end
 
+-- Lifts a ban by deleting its record. Until this existed a ban could only end by expiring: a
+-- permanent ban placed by mistake had no way back short of a hand edit in the DataStore.
+--
+-- REMOVES rather than rewriting the record as expired: IsBanned already treats a missing key and an
+-- expired one identically, and a removed key is one fewer stale record for ListKeys to page through.
+-- The audit trail for the lift is the admin panel's own warn-level log line, not the store.
+function ModerationSystem.UnbanPlayer(targetUserId: number): boolean
+	if not banStore then
+		return false
+	end
+	-- The pending flag is the in-memory half of a ban still being written; a lift clears it too, so the
+	-- target is not kicked on join by a ban the admin has just withdrawn. (A BanPlayer SetAsync still in
+	-- flight will land after this and re-ban -- the panel's lookup shows the record either way.)
+	pendingBanUserIds[targetUserId] = nil
+	local ok = withRetry("Moderation UnbanPlayer RemoveAsync", function()
+		(banStore :: DataStore):RemoveAsync(tostring(targetUserId))
+	end)
+	return ok
+end
+
 -- Stateless -- Kick has no persistence of its own (contrast Ban above); a fresh join is a fresh
 -- start. Takes a live Player (unlike Ban/Mute, which target a bare UserId) since kicking someone
 -- who isn't currently connected is meaningless.
@@ -486,7 +506,7 @@ function ModerationSystem.Init(): ()
 	-- between Init() returning and this seed actually finishing -- an extension of the same
 	-- eventual-consistency contract suspectedCheaterUserIds' own header already describes ("a fast
 	-- cache... rebuilt from it every boot"), now just an async rebuild instead of a synchronous one.
-	-- Both real read sites (DevMenuSystem's buildRosterEntry/GetSidebarStats) only fire per-request,
+	-- Both real read sites (DevMenuSystem's buildRosterEntry/GetOverview) only fire per-request,
 	-- off a remote an admin's client calls well after boot, never during or immediately after Init().
 	task.spawn(seedSuspectedCheaterState)
 

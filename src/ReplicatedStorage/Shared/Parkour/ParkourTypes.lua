@@ -423,6 +423,11 @@ export type ParkourContext = {
 	-- ParkourConstants.CombatGate.BlockedStates for which states that removes and why.
 	InCombat: boolean,
 
+	-- Whether a realm the player stands in forbids the escapes (a NoParkour rule, Shared/Domain/
+	-- DomainRules.lua) -- read off the same Humanoid through the realm's lease. Optional so every synthetic
+	-- context that predates it reads as "not sealed". See ParkourConstants.DomainGate.
+	DomainSealed: boolean?,
+
 	-- Whether the local player is COMMITTED to a combat action this frame -- their own swing still
 	-- playing, or reeling from a stunning hit. Mirrored each frame by ParkourController from
 	-- Client/Combat/LocalCombatState (the client's own copy of what the server enforces through

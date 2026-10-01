@@ -51,6 +51,15 @@
 	thin wrapper that connects Heartbeat to Step -- the user asked for a module that runs itself, and
 	it does, but "runs itself" is one function call wide so nothing about it is untestable.
 
+	PROJECTILES ARE THE SAME ENGINE. An AttackDefinition carrying a Projectile block (ProjectileTypes)
+	runs the identical swing lifecycle, but its Active window opens by LAUNCHING a volley instead of
+	sampling a volume on the body. The shots fly in ProjectileSimulator.lua, stepped inside this file's
+	own substep loop, and their contacts leave through the same OnHit fan-out as a swing's -- so every
+	layer above sees one stream of HitReports in ascending SampleTime, and a projectile is blocked,
+	parried, evaded and priced by exactly the systems a swing is. The two things the defence layer can
+	do to a shot after judging it -- ParryProjectile and PassProjectile -- are the projectile
+	counterparts of CancelAttack, and OnProjectileEvents is what the attack layer replicates to clients.
+
 	Does not own: damage, posture, blocking, parry outcomes, ragdoll, knockback, status effects,
 	animation, audio, VFX, remotes, or any client-side code. It does not touch the InCombat Attribute
 	-- that is a broader "still fighting" signal belonging to whatever layer applies damage, not to a
@@ -63,6 +72,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 local Workspace = game:GetService("Workspace")
 
+local HitboxAnchor = require(ReplicatedStorage.Shared.HitboxEngine.HitboxAnchor)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local HitboxGeometry = require(ReplicatedStorage.Shared.HitboxEngine.HitboxGeometry)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
@@ -71,6 +81,7 @@ local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local AttackStateMachine = require(ServerScriptService.Server.Combat.HitboxEngine.AttackStateMachine)
 local CandidateGatherer = require(ServerScriptService.Server.Combat.HitboxEngine.CandidateGatherer)
+local ProjectileSimulator = require(ServerScriptService.Server.Combat.HitboxEngine.ProjectileSimulator)
 
 type AttackDefinition = HitboxTypes.AttackDefinition
 type Dimensions = HitboxTypes.Dimensions
@@ -139,6 +150,13 @@ local engaged: { Combatant } = {}
 local registeredModels: { Model } = {}
 
 local hitCallbacks: { (HitReport) -> () } = {}
+local projectileEventCallbacks: { ({ ProjectileSimulator.ProjectileEvent }) -> () } = {}
+
+-- The engine clock at the moment a state machine hook is running. The machine's hooks are handed a Swing,
+-- not a time, and a projectile volley has to launch at the substep its Active window actually opened --
+-- so the two places that drive a machine into Active (RequestAttack's Begin, and the substep loop's
+-- Update) record the time they are driving it at, here, immediately before.
+local hookNow = 0
 
 -- Reused across every sample of every swing. The gatherer fills it, the narrow phase drains it, and
 -- nothing outside one sampleSwing call ever reads it.
@@ -306,6 +324,7 @@ local function rebuildBroadphaseFilter(): ()
 		registeredModels[index] = combatant.Model
 	end
 	CandidateGatherer.SetRegisteredModels(registeredModels)
+	ProjectileSimulator.SetRegisteredModels(registeredModels)
 end
 
 local function newDimensions(): Dimensions
@@ -314,49 +333,10 @@ end
 
 -- Which part a definition's Offset is composed against. Resolved once when the Active window opens
 -- rather than per sample -- a rig's part set does not change mid-swing, and the sample loop checks
--- the resolved part is still parented anyway.
---
--- Falls back rather than failing: an R6 rig has no "RightHand", a character with no tool equipped has
--- no weapon, and an attack authored for one rig should still swing on the other from the nearest
--- sensible anchor instead of silently never hitting.
+-- the resolved part is still parented anyway. The chain itself is Shared/HitboxEngine/HitboxAnchor's,
+-- so the Move Editor's in-world preview anchors exactly where this does.
 local function resolveAttachmentPart(combatant: Combatant, attachment: HitboxTypes.AttachmentPoint): BasePart
-	local model = combatant.Model
-
-	local function findPart(name: string): BasePart?
-		local found = model:FindFirstChild(name)
-		return if found and found:IsA("BasePart") then found else nil
-	end
-
-	if attachment == "RightHand" then
-		return findPart("RightHand") or findPart("Right Arm") or combatant.RootPart
-	elseif attachment == "LeftHand" then
-		return findPart("LeftHand") or findPart("Left Arm") or combatant.RootPart
-	elseif attachment == "Weapon" then
-		local tool = model:FindFirstChildOfClass("Tool")
-		if tool then
-			-- Blade first: WeaponModelRegistry's Model-wrapping path already lifts a part named "Blade"
-			-- to be a direct child of the built Tool, the same promotion Handle itself gets (see that
-			-- module's wrapModel), so a real weapon equipped through the normal pipeline carries its
-			-- Blade straight into the Tool with zero extra wiring. Anchoring here rather than on Handle
-			-- is what makes a swing's hitbox track and (with SizeFromAttachmentPart) size itself off the
-			-- actual edge of the weapon instead of its grip. Searched at any depth, not just the direct
-			-- child the Model path already guarantees, as a second line of defense for the OTHER
-			-- authoring path -- a hand-authored Tool (buildMaster's passthrough case, which deliberately
-			-- does not restructure anything) that nests its own Blade a level down. Handle remains the
-			-- fallback for a weapon authored with no Blade part at all (a fist weapon, an old reskin) --
-			-- see this function's own header on why every branch here degrades rather than fails.
-			local blade = tool:FindFirstChild("Blade", true)
-			if blade and blade:IsA("BasePart") then
-				return blade
-			end
-			local handle = tool:FindFirstChild("Handle")
-			if handle and handle:IsA("BasePart") then
-				return handle
-			end
-		end
-		return findPart("RightHand") or findPart("Right Arm") or combatant.RootPart
-	end
-	return combatant.RootPart
+	return HitboxAnchor.Resolve(combatant.Model, combatant.RootPart, attachment)
 end
 
 local function setMovementLock(combatant: Combatant, locked: boolean): ()
@@ -372,6 +352,10 @@ local function setMovementLock(combatant: Combatant, locked: boolean): ()
 	-- resolveCombatOwned polls exactly this. See HitboxEngineConstants.RootControlLockedAttribute --
 	-- that constant's header is where the contract is documented.
 	humanoid:SetAttribute(HitboxEngineConstants.RootControlLockedAttribute, if locked then true else nil)
+	-- The body is HELD, not just handed over: RunSystem pins WalkSpeed to 0 off this one (a move's "Locks
+	-- movement" used to set only the Attribute above, which nothing zeroes speed for, so it slowed the
+	-- attacker to committed pace instead of stopping them).
+	humanoid:SetAttribute(HitboxEngineConstants.SwingRootedAttribute, if locked then true else nil)
 end
 
 -- Scaling -------------------------------------------------------------------------------------------
@@ -444,6 +428,21 @@ local function resolveOwner(part: BasePart): Combatant?
 	return nil
 end
 
+-- The engine's one output, for a swing's contact and a projectile's alike.
+--
+-- Iterated over a snapshot-free forward walk, and every callback is pcall'd: a consumer that errors must
+-- not abort the remaining consumers, and above all must not unwind out of the Heartbeat and stop the
+-- engine sampling for everyone. This is the single point where foreign code runs inside the engine's
+-- loop, so it is the only place that needs the guard.
+local function emitHit(report: HitReport): ()
+	for _, callback in hitCallbacks do
+		local ok, err = pcall(callback, report)
+		if not ok then
+			logger:warn("OnHit callback errored", { error = tostring(err) })
+		end
+	end
+end
+
 local function reportHit(
 	attacker: Combatant,
 	target: Combatant,
@@ -487,16 +486,26 @@ local function reportHit(
 		})
 	end
 
-	-- Iterated over a snapshot-free forward walk, and every callback is pcall'd: a consumer that
-	-- errors must not abort the remaining consumers, and above all must not unwind out of the
-	-- Heartbeat and stop the engine sampling for everyone. This is the single point where foreign
-	-- code runs inside the engine's loop, so it is the only place that needs the guard.
-	for _, callback in hitCallbacks do
-		local ok, err = pcall(callback, report)
-		if not ok then
-			logger:warn("OnHit callback errored", { error = tostring(err) })
-		end
+	emitHit(report)
+end
+
+-- How far BEHIND its live position a moving target is tested as well (HitboxEngineConstants.TargetTrail),
+-- or nil for a body that is standing still or when the allowance is off. Horizontal only: the lag in the
+-- attacker's view is along the ground the target is covering, and a jump's vertical speed would otherwise
+-- stretch the test into the air above or below them.
+local function trailOffsetOf(target: Combatant): Vector3?
+	local trail = HitboxEngineConstants.TargetTrail
+	if not trail.Enabled then
+		return nil
 	end
+	local velocity = target.RootPart.AssemblyLinearVelocity
+	local flat = Vector3.new(velocity.X, 0, velocity.Z)
+	local speed = flat.Magnitude
+	if speed < trail.MinSpeed then
+		return nil
+	end
+	local studs = math.min(speed * trail.TrailSeconds, trail.MaxStuds)
+	return flat.Unit * studs
 end
 
 -- One combatant, one substep. `alpha` is how far through the current frame this substep sits, used to
@@ -584,7 +593,25 @@ local function sampleSwing(combatant: Combatant, record: ActiveSwing, now: numbe
 			margin
 		)
 		if not contained then
-			continue
+			-- THE MOVING-TARGET ALLOWANCE (HitboxEngineConstants.TargetTrail): tested again where the attacker
+			-- most likely SAW this body, a little behind it along its own motion. A miss only -- a part
+			-- already inside never pays for this.
+			local trail = trailOffsetOf(owner)
+			if trail == nil then
+				continue
+			end
+			contained = HitboxGeometry.SweptContainsPoint(
+				record.Shape,
+				record.PreviousDimensions,
+				previousPose,
+				record.Dimensions,
+				pose,
+				part.Position - trail,
+				margin
+			)
+			if not contained then
+				continue
+			end
 		end
 
 		if not contacts then
@@ -619,6 +646,27 @@ local function beginActiveWindow(combatant: Combatant, swing: Swing): ()
 	local definition = swing.Definition
 	local record = combatant.Record
 
+	-- A projectile attack's Active window opens by launching its volley, and nothing on the body samples:
+	-- ActiveSwing stays nil, so the loop below never looks for a volume here. The movement lock is the
+	-- same as a swing's -- a caster planting their feet to fire is authored exactly the way a heavy is.
+	if definition.Projectile then
+		local anchor = resolveAttachmentPart(combatant, definition.AttachmentPart)
+		ProjectileSimulator.Launch(combatant, anchor, definition, swing.ComboStage, swing.PowerLevel, hookNow)
+		if definition.LocksMovement then
+			setMovementLock(combatant, true)
+		elseif definition.LocksWindup then
+			-- Only the windup was locked: the volley is out, the caster is free.
+			setMovementLock(combatant, false)
+		end
+		if debugEnabled() and HitboxEngineConstants.Debug.LogSwings then
+			logger:debug("Projectile volley launched", {
+				attack = definition.DebugName,
+				attacker = combatant.Model.Name,
+			})
+		end
+		return
+	end
+
 	record.Swing = swing
 	record.Shape = definition.Shape
 	record.AttachmentPart = resolveAttachmentPart(combatant, definition.AttachmentPart)
@@ -642,6 +690,9 @@ local function beginActiveWindow(combatant: Combatant, swing: Swing): ()
 
 	if definition.LocksMovement then
 		setMovementLock(combatant, true)
+	elseif definition.LocksWindup then
+		-- Only the windup was locked: the Active window opens and the attacker is free to move.
+		setMovementLock(combatant, false)
 	end
 
 	if debugEnabled() and HitboxEngineConstants.Debug.LogSwings then
@@ -797,12 +848,20 @@ end
 -- The caller decides whether to buffer the input or drop it; this engine has no input buffer because
 -- how long an input should survive is a feel question, and feel questions belong to the layer that
 -- knows what the move is.
+--
+-- `startedAt` (optional) BACKDATES the swing: the moment the caller judges it to have begun, for a press
+-- that spent time on the wire (AttackConstants.Latency). The engine enforces the two limits that are about
+-- the swing rather than the player: never before this combatant's previous swing ended, and never so far
+-- back that the Active window would already have been due -- only the windup ever shortens, so a
+-- backdated swing can never hit on the frame it arrives. Returns the start actually used as a third value,
+-- so the caller builds the rest of the swing's timeline from the same instant.
 function HitboxEngine.RequestAttack(
 	combatantId: number,
 	definition: AttackDefinition,
 	comboStage: number,
-	powerLevel: number
-): (boolean, string?)
+	powerLevel: number,
+	startedAt: number?
+): (boolean, string?, number?)
 	local combatant = combatantById[combatantId]
 	if combatant == nil then
 		return false, "NotRegistered"
@@ -840,13 +899,29 @@ function HitboxEngine.RequestAttack(
 	local safePower = if typeof(powerLevel) == "number" and powerLevel == powerLevel then math.max(powerLevel, 0) else 0
 
 	local now = os.clock()
-	local accepted, reason = combatant.Machine:Begin(sanitized, safeCombo, safePower, now)
+	local begin = now
+	if typeof(startedAt) == "number" and startedAt == startedAt and startedAt < now then
+		-- One substep short of the windup, so the machine is still winding up when it is next stepped.
+		local earliest = now - math.max(sanitized.WindupSeconds - HitboxEngineConstants.MinSubstepSeconds, 0)
+		local idleSince = combatant.Machine:GetIdleSince()
+		if idleSince then
+			earliest = math.max(earliest, idleSince)
+		end
+		begin = math.clamp(startedAt, math.min(earliest, now), now)
+	end
+	hookNow = begin
+	local accepted, reason = combatant.Machine:Begin(sanitized, safeCombo, safePower, begin)
 	if not accepted then
 		return false, reason
 	end
 
 	table.insert(engaged, combatant)
-	return true, nil
+	-- A move that locks its WINDUP holds the body from the first instant of the swing, not from the Active
+	-- window (beginActiveWindow releases it again there unless LocksMovement carries the lock on).
+	if sanitized.LocksWindup == true then
+		setMovementLock(combatant, true)
+	end
+	return true, nil, begin
 end
 
 -- Cuts a swing short. What a consumer layer calls when a parry, a stun or a ragdoll needs to end an
@@ -933,6 +1008,109 @@ function HitboxEngine.GetAttackState(combatantId: number): AttackStateMachine.At
 	return if combatant then combatant.Machine:GetState() else nil
 end
 
+-- Whether this combatant's swing is in its Active window RIGHT NOW with a volume that reaches `target`'s
+-- root, within `marginStuds` on top of the engine's own narrow-phase margin. False for a swing winding up
+-- or recovering, a projectile attack (its volume is the shot, not the body), and a target this swing has
+-- already struck. The defence layer's clash test (DefenseConstants.Clash): two blades that are both out
+-- and reach each other. A query only -- like every other answer here, what it MEANS is the caller's.
+function HitboxEngine.ActiveSwingReaches(combatantId: number, target: Model, marginStuds: number): boolean
+	local combatant = combatantById[combatantId]
+	local record = if combatant then combatant.ActiveSwing else nil
+	if record == nil or record.HitTargets[target] then
+		return false
+	end
+	local attachment = record.AttachmentPart
+	local targetCombatant = modelToCombatant[target]
+	if attachment.Parent == nil or targetCombatant == nil then
+		return false
+	end
+	local pose = attachment.CFrame * record.Swing.Definition.Offset
+	return HitboxGeometry.ContainsPoint(
+		record.Shape,
+		record.Dimensions,
+		pose:PointToObjectSpace(targetCombatant.RootPart.Position),
+		HitboxEngineConstants.NarrowPhaseMarginStuds + math.max(marginStuds, 0)
+	)
+end
+
+-- Projectiles ---------------------------------------------------------------------------------------
+
+-- What a PARRY does to a shot, once the defence layer has judged one: the shot's own authored response
+-- (ProjectileTypes' ParryBehavior/ParryResponse) -- ended, or reflected or reversed as the parrier's. The
+-- projectile counterpart of CancelAttack, which is what the same layer calls for a parried swing, and
+-- like it the engine decides nothing here: whether a parry happened is the caller's answer. Returns
+-- whether the id named a shot (one ended longer ago than RetireGraceSeconds is forgotten).
+function HitboxEngine.ParryProjectile(projectileId: number, parrier: Model, now: number?): boolean
+	return ProjectileSimulator.Parry(projectileId, parrier, now or os.clock())
+end
+
+-- What an EVADE does to a shot: undoes the contact, so the shot flies on through the body it touched.
+function HitboxEngine.PassProjectile(projectileId: number, target: Model, now: number?): boolean
+	return ProjectileSimulator.Pass(projectileId, target, now or os.clock())
+end
+
+-- THE REALM'S ONE SEAM INTO THE ENGINE (Server/Combat/Domain/DomainSystem.lua, which sits above every combat
+-- layer as a sibling of the attack layer). A realm delivers its strikes and volleys as shots -- so the
+-- defence layer still judges each contact and the damage layer still prices it, as the move it names -- but
+-- no swing throws them. Two functions, one concern: launching a volley from a world aim, and holding the
+-- barrier slot a realm's closed edge is enforced through. Nothing here learns what a realm is: `options`
+-- is a target, an exclusivity flag, an opaque id and a damage scale (ProjectileSimulator.LaunchOptions).
+--
+-- `definition` must carry a Projectile block (a realm's strike synthesises one; its volley uses the move's
+-- own). `owner` must be registered -- the contacts are reported as its. Returns (groupId, launched); (0, 0)
+-- for an unregistered owner or a definition with no Projectile block.
+function HitboxEngine.LaunchVolley(
+	owner: Model,
+	definition: AttackDefinition,
+	aim: CFrame,
+	powerLevel: number,
+	now: number,
+	options: ProjectileSimulator.LaunchOptions?
+): (number, number)
+	local combatant = modelToCombatant[owner]
+	if combatant == nil or definition.Projectile == nil then
+		return 0, 0
+	end
+	return ProjectileSimulator.LaunchAimed(combatant, aim, definition, powerLevel, now, options)
+end
+
+-- Holds (or clears, with nil) the projectile barrier slot. One slot, one holder: the realm runtime sets it
+-- while any realm with a closed edge is up and clears it when the last one ends, so a server with no realm
+-- pays one nil check per shot step.
+function HitboxEngine.SetProjectileBarrier(callback: ProjectileSimulator.Barrier?): ()
+	ProjectileSimulator.SetBarrier(callback)
+end
+
+-- Every change to a shot a client needs to draw it (ProjectileSimulator.ProjectileEvent), batched once
+-- per engine frame. The engine has no remote; the attack layer subscribes and sends these on. Returns a
+-- disconnect function, like OnHit.
+function HitboxEngine.OnProjectileEvents(callback: ({ ProjectileSimulator.ProjectileEvent }) -> ()): () -> ()
+	table.insert(projectileEventCallbacks, callback)
+	return function()
+		local index = table.find(projectileEventCallbacks, callback)
+		if index then
+			table.remove(projectileEventCallbacks, index)
+		end
+	end
+end
+
+function HitboxEngine.LiveProjectileCount(): number
+	return ProjectileSimulator.LiveCount()
+end
+
+local function flushProjectileEvents(now: number): ()
+	local events = ProjectileSimulator.Flush(now)
+	if #events == 0 then
+		return
+	end
+	for _, callback in projectileEventCallbacks do
+		local ok, err = pcall(callback, events)
+		if not ok then
+			logger:warn("OnProjectileEvents callback errored", { error = tostring(err) })
+		end
+	end
+end
+
 -- The engine's sole output. Returns a disconnect function rather than a connection object so a
 -- consumer's teardown is one call with no handle type to learn.
 function HitboxEngine.OnHit(callback: (HitReport) -> ()): () -> ()
@@ -978,7 +1156,11 @@ function HitboxEngine.Step(deltaTime: number, now: number): ()
 	local frameSeconds = math.clamp(deltaTime, 0, HitboxEngineConstants.MaxFrameSeconds)
 	sweepLiveness(now)
 
-	if #engaged == 0 then
+	if #engaged == 0 and ProjectileSimulator.LiveCount() == 0 then
+		-- Events can still be waiting: a parry reflects or ends a shot from DefenseSystem's Step, after
+		-- this one has run, and those go out with the next frame's batch.
+		ProjectileSimulator.Step(0, now)
+		flushProjectileEvents(now)
 		return
 	end
 
@@ -1015,6 +1197,7 @@ function HitboxEngine.Step(deltaTime: number, now: number): ()
 			if combatant.Model.Parent == nil or combatant.RootPart.Parent == nil then
 				combatant.Machine:Reset(subNow)
 			else
+				hookNow = subNow
 				combatant.Machine:Update(subNow)
 				local record = combatant.ActiveSwing
 				if record then
@@ -1029,10 +1212,17 @@ function HitboxEngine.Step(deltaTime: number, now: number): ()
 			end
 		end
 
-		if #engaged == 0 then
+		-- Shots fly after the swings, in the same substep: one launched by a window that opened this
+		-- substep takes its first step now, and every contact either kind reports carries this substep's
+		-- time, so the stream OnHit subscribers see stays in ascending SampleTime.
+		ProjectileSimulator.Step(frameSeconds / substeps, subNow)
+
+		if #engaged == 0 and ProjectileSimulator.LiveCount() == 0 then
 			break
 		end
 	end
+
+	flushProjectileEvents(now)
 end
 
 -- Connects the engine's own Heartbeat. The user asked for a module that handles everything itself and
@@ -1072,7 +1262,9 @@ function HitboxEngine.Reset(): ()
 	table.clear(combatants)
 	table.clear(engaged)
 	table.clear(hitCallbacks)
+	table.clear(projectileEventCallbacks)
 	table.clear(registeredModels)
+	ProjectileSimulator.Reset()
 	combatantById = {}
 	modelToCombatant = {}
 	livenessCursor = 1
@@ -1080,6 +1272,21 @@ function HitboxEngine.Reset(): ()
 	-- same "no case serves another its state" contract every other line in this function keeps.
 	HitboxEngine.ClearDebugVolumesOverride()
 	CandidateGatherer.SetRegisteredModels(registeredModels)
+	ProjectileSimulator.SetRegisteredModels(registeredModels)
 end
+
+-- The simulator's view of this engine: its registry and its one output, never a way to change either.
+ProjectileSimulator.Bind({
+	OwnerOf = function(part: BasePart): ProjectileSimulator.Owner?
+		return resolveOwner(part)
+	end,
+	CombatantOf = function(model: Model): ProjectileSimulator.Owner?
+		return modelToCombatant[model]
+	end,
+	Combatants = function(): { ProjectileSimulator.Owner }
+		return combatants :: any
+	end,
+	Report = emitHit,
+})
 
 return HitboxEngine

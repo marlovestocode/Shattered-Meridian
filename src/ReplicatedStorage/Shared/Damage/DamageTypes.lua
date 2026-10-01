@@ -67,6 +67,10 @@ export type AttackCatalogEntry = {
 	PowerLevel: number,
 	-- Whether this move may be feinted (MoveTypes.IsFeintable). Read by AttackRequestSystem.Feint.
 	Feintable: boolean,
+	-- Whether this move opens a realm (MoveTypes.IsDomain). Only its PRESENCE rides here: the attack layer
+	-- asks "is this a domain cast" for its own two gates (one realm per caster, a realm's SealDomains rule)
+	-- and nothing more. The realm itself is Server/Combat/Domain/DomainSystem's to read off the registry.
+	IsDomain: boolean,
 	-- The move whose clip this one borrows (Shared/Attack/AttackAnimations' BORROWED_FROM), or nil when it
 	-- plays its own. A borrowed clip is retimed to the move rather than the move to the clip, so anything
 	-- reading the clip's marker for THIS move must read it under the lender's id -- the Move Editor's
@@ -159,6 +163,9 @@ export type CombatFeedback = {
 	-- "Hit" (an air beat), "Finisher", or "Clash" (an air parry -- its own effect, distinct from a ground
 	-- parry). Set by the air combo's damage hook (DamageSystem.SetAirComboHook); nil for every other contact.
 	AirCombo: string?,
+	-- The stun this contact put the RECEIVING client under, on the Defender copy only: it varies by move
+	-- (DamageConstants.Hitstun.ByWeapon), so the client's own stun mirror cannot assume the shared length.
+	HitstunSeconds: number?,
 }
 
 return DamageTypes

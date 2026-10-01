@@ -50,6 +50,7 @@ local FlightAnimator = require(script.Parent.Parent.FX.FlightAnimator)
 local EmoteAnimator = require(script.Parent.Parent.FX.EmoteAnimator)
 local ParkourAnimator = require(script.Parent.Parent.Parkour.ParkourAnimator)
 local DefenseClient = require(script.Parent.Parent.Defense.DefenseClient)
+local MovePresentationCatalog = require(script.Parent.Parent.FX.MovePresentationCatalog)
 
 -- SoundManager holds a REGISTRY, not a fixed set -- it only knows about the sounds someone has
 -- Register()ed into it, and these six modules are the ones who do that (FlightAudio at load,
@@ -210,6 +211,11 @@ function AssetPreloader.BuildManifest(): { Instance }
 	for _, assetId in WeaponSounds.GetPreloadIds() do
 		table.insert(raw, soundFor(assetId))
 	end
+	-- Per-move presentation (Client/FX/MovePresentationCatalog.lua). Usually empty at boot -- the
+	-- catalogue arrives just after -- and every id it gains later goes through PreloadLabelled instead.
+	for _, entry in MovePresentationCatalog.GetPreloadEntries() do
+		table.insert(raw, if entry.Kind == "Sound" then soundFor(entry.AssetId) else imageFor(entry.AssetId))
+	end
 	-- The one standalone texture id not owned by a domain module with its own instance-pooling
 	-- concern -- Constants.FX.MovementDust.lua's own header note on why nothing else instances this
 	-- eagerly. Skipped like every other still-unauthored placeholder if ever set back to "".
@@ -298,6 +304,9 @@ function AssetPreloader.BuildLabelIndex(): { [string]: string }
 	for assetId, label in WeaponSounds.GetPreloadLabels() do
 		labels[assetId] = `WeaponSound.{label}`
 	end
+	for _, entry in MovePresentationCatalog.GetPreloadEntries() do
+		labels[entry.AssetId] = entry.Label
+	end
 	return labels
 end
 
@@ -369,6 +378,42 @@ function AssetPreloader.Run(onProgress: ((completed: number, total: number) -> (
 	end
 
 	logger:debug("Preload end", { total = total, failed = failed })
+end
+
+-- A preload AFTER boot, for ids that did not exist when Run built its manifest -- the per-move
+-- presentation catalogue, which arrives just after the loading pass and grows whenever a Move Editor
+-- Preview adds an asset (Client/FX/MovePresentationCatalog.lua). Same rule as Run: every id is wrapped in
+-- the Instance that carries it (never a bare string -- see soundFor above), and a failure is a WARNING
+-- naming the entry's label, never silence. Runs on its own thread: nothing waits for it, and a cue that
+-- fires before it lands simply plays cold once.
+export type LabelledAsset = {
+	AssetId: string,
+	Kind: "Sound" | "Image",
+	Label: string,
+}
+
+function AssetPreloader.PreloadLabelled(entries: { LabelledAsset }): ()
+	if #entries == 0 then
+		return
+	end
+	local items: { Instance } = {}
+	local labels: { [string]: string } = {}
+	for _, entry in entries do
+		table.insert(items, if entry.Kind == "Sound" then soundFor(entry.AssetId) else imageFor(entry.AssetId))
+		labels[entry.AssetId] = entry.Label
+	end
+	task.spawn(function()
+		ContentProvider:PreloadAsync(items, function(contentId: string, status: Enum.AssetFetchStatus)
+			if status ~= Enum.AssetFetchStatus.Success then
+				logger:warn("Asset failed to preload", {
+					contentId = contentId,
+					asset = labels[contentId] or contentId,
+					status = status.Name,
+				})
+			end
+		end)
+		logger:debug("Late preload done", { count = #items })
+	end)
 end
 
 return AssetPreloader

@@ -40,6 +40,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
+local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Constants = require(ReplicatedStorage.Shared.Constants)
@@ -348,6 +349,21 @@ local function handleReport(player: Player, rawPayload: unknown): ()
 	if humanoid and AirComboAttributes.IsParticipant(humanoid) then
 		notifyRejected(player, report.Kind, report.Phase, "CombatRestricted")
 		return
+	end
+	-- A realm that forbids the escape (Shared/Domain/DomainRules.lua): NoParkour closes the mobility a
+	-- player would leave a fight with (ParkourConstants.DomainGate.BlockedKinds), NoEvade the evade. Only
+	-- a START is refused -- an End report closes an action that was already legitimately open. The client
+	-- gates the same kinds itself (StateSupport.CombatBlocks reads the same flags), so an honest client
+	-- never reaches this; it is the server not trusting that.
+	if humanoid and report.Phase == "Start" then
+		local now_ = DomainRules.ServerNow()
+		local sealedEscape = ParkourConstants.DomainGate.BlockedKinds[report.Kind] == true
+			and DomainRules.Has(humanoid, "NoParkour", now_)
+		local sealedEvade = report.Kind == "Evade" and DomainRules.Has(humanoid, "NoEvade", now_)
+		if sealedEscape or sealedEvade then
+			notifyRejected(player, report.Kind, report.Phase, "CombatRestricted")
+			return
+		end
 	end
 
 	local accepted, rejectionReason = ParkourValidation.Validate(report, {

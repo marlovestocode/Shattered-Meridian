@@ -50,6 +50,10 @@
 	briefly in AttackConstants.Presentation.SwingTrail.FeintColor as the arm pulls back -- the feint
 	cue, readable in hindsight.
 
+	A MOVE MAY RECOLOUR OR REMOVE ITS TRAIL: the Active cue's TrailColor (Shared/Combat/
+	MovePresentationTypes.lua, resolved by Client/FX/MovePresentation.lua) replaces
+	SwingTrail.Color for that swing, and None draws no trail at all. Unset keeps the default.
+
 	Does not own: WHEN a swing starts or how long it runs (AttackInputClient/AttackStartedPayload
 	decide that; this module only reacts), what the swing looks like otherwise (Client/FX/
 	CombatAnimator.lua), or its sound (Client/FX/CombatAudio.lua). Purely local presentation; nothing
@@ -62,11 +66,13 @@ local RunService = game:GetService("RunService")
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
 local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
 local AttackInputClient = require(script.Parent.Parent.Combat.AttackInputClient)
 local SwingLunge = require(script.Parent.Parent.Combat.SwingLunge)
+local MovePresentation = require(script.Parent.MovePresentation)
 
 type AttackStartedPayload = AttackTypes.AttackStartedPayload
 
@@ -248,6 +254,13 @@ local function onAttackStarted(payload: AttackStartedPayload): ()
 		return
 	end
 
+	-- The move's own trail colour, or None for no trail -- see this file's header.
+	local cue = MovePresentation.CueFor(payload.MoveId, "Active")
+	local authoredColor = if cue then cue.TrailColor else nil
+	if authoredColor == MovePresentationTypes.None then
+		return
+	end
+
 	local part, offsetNear, offsetFar = resolveAnchor(payload, currentCharacter)
 	if not part then
 		-- Not an error -- see this file's header on the Tool-replication race. Silent: a swing missing
@@ -259,6 +272,10 @@ local function onAttackStarted(payload: AttackStartedPayload): ()
 	-- moment) so the pair has settled by the time it draws; Roblox trails an Attachment from wherever it
 	-- first renders, so moving it on the enable frame would draw a spurious segment from the old spot.
 	acquire(part, offsetNear, offsetFar)
+	local color = MovePresentation.Color(authoredColor, nil)
+	if color and trail then
+		(trail :: Trail).Color = ColorSequence.new(color)
+	end
 
 	-- The hit window plus a lead into it and a tail after it (SwingTrail.LeadSeconds/TailSeconds) --
 	-- the trail traces the swing, the hitbox stays exactly the window.

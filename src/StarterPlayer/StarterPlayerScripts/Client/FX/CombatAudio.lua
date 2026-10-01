@@ -16,6 +16,13 @@
 	     weapon authored nothing for that slot, or for the outcomes no weapon slot describes at all
 	     (Clean/Backstab/Trade/GuardBroken -- see IMPACT_WEAPON_SLOTS below).
 
+	  0. THE MOVE'S OWN (2026-09-30), above both: a move's authored presentation cue for the moment
+	     (Shared/Combat/MovePresentationTypes.lua, resolved by Client/FX/MovePresentation.lua). Its SoundId
+	     replaces the sound -- or None silences it -- and its Volume/Pitch/PitchVariance/RolloffDistance
+	     shape WHICHEVER layer answered, so a move that only lowers its pitch still clangs with its
+	     defender's own sword. Every play function below takes the cue as an optional argument; without
+	     one it behaves exactly as before. playLayered is the one place the three layers meet.
+
 	That is EXACTLY the precedence Shared/Attack/AttackAnimations.lua already runs for swing clips
 	(weapon override first, shared baseline second) and it is deliberately the same one: a weapon
 	builder who has posed M1/M2/M3 on their sword and dropped a whoosh next to them should not have to
@@ -78,12 +85,15 @@ local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
+local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 local WeaponSounds = require(ReplicatedStorage.Shared.Combat.WeaponSounds)
 
+local MovePresentation = require(script.Parent.MovePresentation)
 local SoundManager = require(script.Parent.SoundManager)
 local AttackInputClient = require(script.Parent.Parent.Combat.AttackInputClient)
 -- Reused for exactly one function, DelayFor(windupSeconds, delaySeconds) -- see this file's own
@@ -94,6 +104,7 @@ local SwingLunge = require(script.Parent.Parent.Combat.SwingLunge)
 type AttackKind = AttackTypes.AttackKind
 type OutcomeKind = DefenseTypes.OutcomeKind
 type SoundDefinition = Constants.SoundDefinition
+type Cue = MovePresentationTypes.Cue
 
 local logger = Logger.scope("CombatAudio")
 
@@ -165,11 +176,13 @@ local WEAPON_POOL_SIZES: { [string]: number } = {
 	[SLOTS.Sheathe] = 1,
 }
 
-local function jitteredSpeed(): number
-	if PITCH_JITTER <= 0 then
+-- `variance` is a move cue's own PitchVariance; the shared jitter when it has none.
+local function jitteredSpeed(variance: number?): number
+	local jitter = variance or PITCH_JITTER
+	if jitter <= 0 then
 		return 1
 	end
-	return 1 + random:NextNumber(-PITCH_JITTER, PITCH_JITTER)
+	return 1 + random:NextNumber(-jitter, jitter)
 end
 
 -- Weapon layer ---------------------------------------------------------------------------------------
@@ -221,14 +234,93 @@ local function ensureWeaponSound(weaponId: string?, slot: string): string?
 	return name
 end
 
--- Plays `weaponId`'s own sound for `slot` if it has one, and reports whether it did -- the single
--- "try the weapon first" step every play function below starts with.
+-- Plays `weaponId`'s own sound for `slot` if it has one, and reports whether it did -- the step the
+-- draw and sheathe start and end with (they have no move and no shared layer).
 local function playWeaponSlot(weaponId: string?, slot: string, pitchScale: number?): boolean
 	local name = ensureWeaponSound(weaponId, slot)
 	if not name then
 		return false
 	end
 	SoundManager.Play(name, jitteredSpeed() * (pitchScale or 1))
+	return true
+end
+
+-- Move layer -----------------------------------------------------------------------------------------
+
+local MOVE_SOUND_CONFIG = FXConstants.MovePresentation
+
+-- A move-authored sound id, registered once per distinct id (never per move or per play) -- the same
+-- lazy shape as ensureWeaponSound, with no reconfigure path because the name IS the id.
+local registeredMoveSounds: { [string]: string } = {}
+
+local function ensureMoveSound(soundId: string): string
+	local existing = registeredMoveSounds[soundId]
+	if existing then
+		return existing
+	end
+	local name = `Move:{soundId}`
+	SoundManager.Register(name, {
+		SoundId = soundId,
+		Volume = MOVE_SOUND_CONFIG.MoveSoundBaseVolume,
+		PoolSize = MOVE_SOUND_CONFIG.MoveSoundPoolSize,
+	})
+	registeredMoveSounds[soundId] = name
+	return name
+end
+
+-- Plays a registered name shaped by the cue: its pitch and volume scales, its own pitch variance (else the
+-- shared jitter), and from `position` when the cue asks for a rolloff and there is a place to play it.
+local function playShaped(name: string, cue: Cue?, pitchScale: number?, position: Vector3?): ()
+	local speed = jitteredSpeed(if cue then cue.PitchVariance else nil)
+		* (if cue and cue.Pitch then cue.Pitch else 1)
+		* (pitchScale or 1)
+	local volume = if cue and cue.Volume then cue.Volume else 1
+	local rolloff = if cue and cue.RolloffDistance then cue.RolloffDistance else 0
+	-- The cue's own FadeIn / FadeOut, whichever layer's sound answered.
+	local fade = MovePresentation.Fade(cue)
+	if rolloff > 0 and position then
+		SoundManager.PlayAt(name, position, rolloff, speed, volume, fade)
+	else
+		SoundManager.Play(name, speed, volume, fade)
+	end
+end
+
+-- THE precedence for one sound (this file's header): the move's id or None, else the weapon's slot, else
+-- the shared name. Returns whether the moment was answered -- a None counts, it is an answer.
+--
+-- THE CUE'S SoundDelay IS APPLIED HERE (when positive), for every moment that plays through this function: a
+-- sound the author wants later is simply played later. `immediate` is for a caller that has ALREADY placed
+-- the sound in time -- one that knows its moment ahead and has folded the delay, lead included, into when it
+-- called (the whoosh, a realm's established cue) -- so the delay is never applied twice.
+local function playLayered(
+	cue: Cue?,
+	weaponId: string?,
+	slot: string?,
+	sharedName: string?,
+	pitchScale: number?,
+	position: Vector3?,
+	immediate: boolean?
+): boolean
+	local moveSoundId = if cue then cue.SoundId else nil
+	-- The weapon is only consulted when the move leaves the sound to it.
+	local weaponName = if moveSoundId == nil and slot then ensureWeaponSound(weaponId, slot) else nil
+	local source = MovePresentation.SoundSource(cue, weaponName ~= nil, sharedName ~= nil)
+	local name: string
+	if source == "Move" then
+		name = ensureMoveSound(moveSoundId :: string)
+	elseif source == "Weapon" then
+		name = weaponName :: string
+	elseif source == "Default" then
+		name = sharedName :: string
+	else
+		return source == "None"
+	end
+	local delay = if immediate then 0 else MovePresentation.SoundDelay(cue)
+	if delay > 0 then
+		task.delay(delay, playShaped, name, cue, pitchScale, position)
+	else
+		playShaped(name, cue, pitchScale, position)
+	end
 	return true
 end
 
@@ -267,15 +359,15 @@ end
 -- layers are answering. Gating on that one table keeps it a single switch: the day Hotbar earns a
 -- shared entry it opts into weapon overrides at the same moment, rather than needing a second list here
 -- that could quietly disagree with the first.
-function CombatAudio.PlaySwing(kind: AttackKind, weaponId: string?): ()
+--
+-- `cue` is the move's Active cue: its own whoosh (for any kind -- an art with no shared swing entry can
+-- still author one), its None, or scales on the weapon/shared whoosh.
+--
+-- `immediate`: the caller has placed the whoosh in time already (CombatAudio's own scheduler folds the cue's
+-- SoundDelay into when it calls) -- see playLayered.
+function CombatAudio.PlaySwing(kind: AttackKind, weaponId: string?, cue: Cue?, immediate: boolean?): ()
 	local name = SWING_SOUND_NAMES[kind]
-	if not name then
-		return
-	end
-	if playWeaponSlot(weaponId, SLOTS.Swing) then
-		return
-	end
-	SoundManager.Play(name, jitteredSpeed())
+	playLayered(cue, if name then weaponId else nil, if name then SLOTS.Swing else nil, name, nil, nil, immediate)
 end
 
 -- The landed-contact stinger. `outcomeKind` is keyed the same way
@@ -295,28 +387,85 @@ end
 -- strained clang and a PERFECT parry rings higher -- CombatFeedbackClient picks it from the payload. A
 -- pitch shift of the one authored sound rather than two more sound slots, so a weapon that authored its
 -- own SFX/Block keeps its own voice when it strains.
-function CombatAudio.PlayImpact(outcomeKind: OutcomeKind, defender: Instance?, pitchScale: number?): ()
+--
+-- `cue` is the attacking move's Hit cue for this outcome; `position` the contact, used only when the cue
+-- asks for a rolloff.
+function CombatAudio.PlayImpact(
+	outcomeKind: OutcomeKind,
+	defender: Instance?,
+	pitchScale: number?,
+	cue: Cue?,
+	position: Vector3?
+): ()
 	local slot = IMPACT_WEAPON_SLOTS[outcomeKind]
-	if slot and playWeaponSlot(drawnWeaponIdOf(defender), slot, pitchScale) then
-		return
-	end
-	local name = IMPACT_SOUND_NAMES[outcomeKind]
-	if not name then
-		return
-	end
-	SoundManager.Play(name, jitteredSpeed() * (pitchScale or 1))
+	local weaponId = if slot and (cue == nil or cue.SoundId == nil) then drawnWeaponIdOf(defender) else nil
+	playLayered(cue, weaponId, slot, IMPACT_SOUND_NAMES[outcomeKind], pitchScale, position)
 end
 
 -- An evade, split by who is listening -- the one outcome whose two participants should NOT hear the
 -- same sound. PlayImpact above is role-blind because every other outcome is a contact both sides
 -- felt; an evade is a contact that never happened, and what it sounds like depends on whose blade
 -- missed. The dodger gets the bright whiff (Impact.Evaded), the attacker the muted one.
-function CombatAudio.PlayEvaded(isDodger: boolean): ()
+--
+-- A move's HitEvaded cue answers for both listeners at once: an authored whiff is the move's, not a role's.
+function CombatAudio.PlayEvaded(isDodger: boolean, cue: Cue?, position: Vector3?): ()
 	local name = if isDodger then IMPACT_SOUND_NAMES.Evaded else EVADED_ATTACKER_SOUND
-	if not name then
-		return
+	playLayered(cue, nil, nil, name, nil, position)
+end
+
+-- A move cue's sound at a moment no weapon and no shared default speak for (a windup, a recovery, a
+-- projectile launch, bounce or fizzle, a shot on the world, a shot's loop is ProjectileFX's own). Nothing
+-- plays unless the cue names a sound: unset falls through to what that moment always played -- nothing.
+--
+-- Honours a positive SoundDelay (the sound plays that much later). A lead cannot be honoured from here -- this
+-- call IS the moment -- so a caller that knows its moment ahead schedules itself and calls PlayCueNow.
+function CombatAudio.PlayCue(cue: Cue?, position: Vector3?): ()
+	playLayered(cue, nil, nil, nil, nil, position)
+end
+
+-- A cue's own sound as a LOOP that runs until the caller stops it (the cue's Loop = "RestOfMove", the caller
+-- being the swing or realm whose end it is). Returns nil when the cue does not loop, names no sound of its own,
+-- or the cap on concurrent loops is reached -- the moment is then simply silent, never an error.
+--
+-- `Stop(seconds?)` ends it, sinking over the cue's FadeOut unless told otherwise; `FadeOutSeconds` is that
+-- authored fade, so the caller can START its stop that long before the move's last instant and land the fade on
+-- it. The cue's FadeIn, volume, pitch and rolloff shape the loop like any other sound of the cue.
+export type CueLoop = { Stop: (seconds: number?) -> (), FadeOutSeconds: number }
+
+function CombatAudio.PlayCueLoop(cue: Cue?, position: Vector3?): CueLoop?
+	if cue == nil or not MovePresentation.LoopsToEnd(cue) then
+		return nil
 	end
-	SoundManager.Play(name, jitteredSpeed())
+	if SoundManager.LoopCount() >= MOVE_SOUND_CONFIG.MaxLoopingCues then
+		return nil
+	end
+	local name = ensureMoveSound(cue.SoundId :: string)
+	local speed = jitteredSpeed(cue.PitchVariance) * (cue.Pitch or 1)
+	local fade = MovePresentation.Fade(cue)
+	local fadeOut = if fade and fade.Out then fade.Out else 0
+	local handle = SoundManager.PlayLoop(
+		name,
+		speed,
+		cue.Volume or 1,
+		if fade and fade.In then { In = fade.In } else nil,
+		position,
+		cue.RolloffDistance
+	)
+	if handle == nil then
+		return nil
+	end
+	return {
+		Stop = function(seconds: number?): ()
+			handle.Stop(if seconds ~= nil then seconds else fadeOut)
+		end,
+		FadeOutSeconds = fadeOut,
+	}
+end
+
+-- PlayCue for a caller that has already placed the sound in time (SoundDelay, lead included, folded into when
+-- it called): plays now, whatever the cue says.
+function CombatAudio.PlayCueNow(cue: Cue?, position: Vector3?): ()
+	playLayered(cue, nil, nil, nil, nil, position, true)
 end
 
 -- The feint cue -- see CombatConstants.Sound.Feint.
@@ -380,9 +529,19 @@ local lastSelected: string? = nil
 local function onAttackStarted(payload: AttackTypes.AttackStartedPayload): ()
 	local windupSeconds = if typeof(payload.WindupSeconds) == "number" then payload.WindupSeconds else 0
 	local weaponId = if typeof(payload.WeaponId) == "string" then payload.WeaponId else nil
-	local delaySeconds = SwingLunge.DelayFor(windupSeconds, SWING_DELAY[payload.Kind] or 0)
+	-- The whoosh IS the move's Active moment's sound (it lands as the hit window opens) -- read when the
+	-- swing starts, like the weapon, so an edit mid-windup does not change a swing already thrown.
+	local cue = MovePresentation.CueFor(payload.MoveId, "Active")
+	-- A cue that LOOPS its own sound for the rest of the move has no whoosh: SwingPresentation starts that loop.
+	if MovePresentation.LoopsToEnd(cue) then
+		return
+	end
+	-- The cue's own SoundDelay shifts the whoosh from its per-kind offset, a lead included: the Active moment
+	-- is the windup's end, which this swing knows now.
+	local delaySeconds =
+		SwingLunge.DelayFor(windupSeconds, (SWING_DELAY[payload.Kind] or 0) + MovePresentation.SoundDelay(cue))
 	if delaySeconds <= 0 then
-		CombatAudio.PlaySwing(payload.Kind, weaponId)
+		CombatAudio.PlaySwing(payload.Kind, weaponId, cue, true)
 		return
 	end
 	local epoch = cancelEpoch
@@ -390,7 +549,7 @@ local function onAttackStarted(payload: AttackTypes.AttackStartedPayload): ()
 		if cancelEpoch ~= epoch then
 			return
 		end
-		CombatAudio.PlaySwing(payload.Kind, weaponId)
+		CombatAudio.PlaySwing(payload.Kind, weaponId, cue, true)
 	end)
 end
 

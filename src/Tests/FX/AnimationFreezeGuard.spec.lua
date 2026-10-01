@@ -178,6 +178,60 @@ return function()
 		end)
 	end)
 
+	-- The combat hit-stop's catch-up (Constants.FX.HitStop.CatchUpSpeedMultiplier): the server's swing never
+	-- paused, so the clip plays fast after the freeze until it is back in step.
+	describe("FreezeGuard.FreezeTracks -- catch-up", function()
+		-- Long enough a window (FREEZE_SECONDS / (BOOST - 1) = 0.32s) that a wait landing a frame late is
+		-- still inside it.
+		local BOOST = 1.25
+
+		it("plays fast after the freeze, then settles back to the pre-freeze speed", function()
+			local guard = AnimationTrackUtil.NewFreezeGuard()
+			local track = newFakeTrack()
+
+			guard:FreezeTracks({ track } :: any, FREEZE_SECONDS, BOOST)
+			task.wait(FREEZE_SECONDS + 0.04)
+			expect(track.Speed).to.equal(BOOST)
+
+			task.wait(SETTLE_SECONDS)
+			expect(track.Speed).to.equal(1)
+		end)
+
+		it("does not boost a track that stopped during the freeze", function()
+			local guard = AnimationTrackUtil.NewFreezeGuard()
+			local track = newFakeTrack()
+
+			guard:FreezeTracks({ track } :: any, FREEZE_SECONDS, BOOST)
+			track.IsPlaying = false
+			task.wait(FREEZE_SECONDS + 0.04)
+			expect(track.Speed).to.equal(1)
+		end)
+
+		it("leaves a track alone that something else re-sped during the catch-up", function()
+			-- A new swing on the same track sets its own speed; the catch-up must not overwrite it.
+			local guard = AnimationTrackUtil.NewFreezeGuard()
+			local track = newFakeTrack()
+
+			guard:FreezeTracks({ track } :: any, FREEZE_SECONDS, BOOST)
+			task.wait(FREEZE_SECONDS + 0.04)
+			track:AdjustSpeed(0.7)
+			task.wait(SETTLE_SECONDS)
+			expect(track.Speed).to.equal(0.7)
+		end)
+
+		it("records the base speed, not the boosted one, when a freeze lands mid-catch-up", function()
+			local guard = AnimationTrackUtil.NewFreezeGuard()
+			local track = newFakeTrack()
+
+			guard:FreezeTracks({ track } :: any, FREEZE_SECONDS, BOOST)
+			task.wait(FREEZE_SECONDS + 0.04)
+			expect(track.Speed).to.equal(BOOST)
+			guard:FreezeTracks({ track } :: any, FREEZE_SECONDS)
+			task.wait(SETTLE_SECONDS)
+			expect(track.Speed).to.equal(1)
+		end)
+	end)
+
 	describe("AnimationTrackUtil.DriveDominantLoop", function()
 		it("plays a newly-eligible track and re-asserts its weight while it keeps playing", function()
 			local played: { number } = {}

@@ -35,6 +35,8 @@ local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixtur
 local WEAPON = WeaponFixture.Install()[1]
 
 local FRAME = 1 / 60
+-- The stun MOVE_ID (a Basic stage) inflicts -- per stage and weapon since DamageConstants.Hitstun.ByStage.
+local STUN = DamageConstants.HitstunFor(WEAPON, "Basic")
 local PARRY_ANIMATION = "rbxassetid://spec-damage-parry"
 local WINDOW_OPEN = 0
 local WINDOW_CLOSE = 0.3
@@ -295,7 +297,7 @@ return function()
 
 			local busyUntil = defender.Humanoid:GetAttribute("CombatBusyUntil")
 			expect(busyUntil).to.be.a("number")
-			expect(busyUntil).to.be.near(base + FRAME + DamageConstants.Hitstun.Seconds, 0.05)
+			expect(busyUntil).to.be.near(base + FRAME + STUN, 0.05)
 		end)
 
 		it("publishes the stun on its own Attribute for the defence layer", function()
@@ -311,7 +313,7 @@ return function()
 
 			local stunnedUntil = defender.Humanoid:GetAttribute("HitstunUntil")
 			expect(stunnedUntil).to.be.a("number")
-			expect(stunnedUntil).to.be.near(base + FRAME + DamageConstants.Hitstun.Seconds, 0.05)
+			expect(stunnedUntil).to.be.near(base + FRAME + STUN, 0.05)
 		end)
 
 		it("does not stop the run of a defender whose guard held", function()
@@ -337,7 +339,7 @@ return function()
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
 			step(FRAME, base + FRAME)
 
-			local after = base + FRAME + DamageConstants.Hitstun.Seconds
+			local after = base + FRAME + STUN
 			expect(DamageSystem.CanAttack(defender.Model, after)).to.equal(true)
 		end)
 
@@ -377,12 +379,12 @@ return function()
 		end)
 	end)
 
-	describe("DamageSystem -- a genuine trade", function()
-		it("hitstuns both combatants and cancels both swings, symmetrically", function()
-			-- Two Clean hits in one batch. No arbitration pass produces this: it falls out of applying
-			-- one symmetric per-contact rule twice, which is exactly why this layer needs no Trade
-			-- equivalent of its own. Damage and posture are COSTS, not rewards, so there is nothing
-			-- here two players could farm by trading on purpose.
+	describe("DamageSystem -- a clash", function()
+		it("cancels both swings and hurts nobody, symmetrically", function()
+			-- Two Clean hits on each other in one batch are ONE exchange (DefenseConstants.Clash), resolved
+			-- as a Trade. This used to be a double hit -- both stunned, both damaged -- and anything a frame
+			-- apart went to whoever the server heard first. Neither side wins a clash: both lose the swing,
+			-- neither takes a hit.
 			local base = os.clock()
 			local alpha = makeDummy("Alpha", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
 			local beta = makeDummy("Beta", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
@@ -393,13 +395,26 @@ return function()
 
 			expect(HitboxEngine.GetAttackState(alpha.Id)).to.equal("Idle")
 			expect(HitboxEngine.GetAttackState(beta.Id)).to.equal("Idle")
-			expect(DamageSystem.IsHitstunned(alpha.Model, base + FRAME)).to.equal(true)
-			expect(DamageSystem.IsHitstunned(beta.Model, base + FRAME)).to.equal(true)
+			expect(DamageSystem.IsHitstunned(alpha.Model, base + FRAME)).to.equal(false)
+			expect(DamageSystem.IsHitstunned(beta.Model, base + FRAME)).to.equal(false)
+			expect(alpha.Humanoid.Health).to.be.near(100, 1e-3)
+			expect(beta.Humanoid.Health).to.be.near(100, 1e-3)
+		end)
 
-			-- Neither is favoured: both paid the same authored damage.
-			local damage = authored()
-			expect(alpha.Humanoid.Health).to.be.near(beta.Humanoid.Health, 1e-3)
-			expect(alpha.Humanoid.Health).to.be.near(100 - damage, 1e-3)
+		it("reports a defender's active volume as reaching only when it covers the attacker", function()
+			-- The measurement the clash's second rule reads (HitboxEngine.ActiveSwingReaches): a blade that is
+			-- out and pointed at the attacker reaches; one swinging at nothing does not, which is what keeps
+			-- the counter-hit above a counter-hit rather than a clash.
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local bystander = makeDummy("Bystander", Vector3.new(30, 5, 0), Vector3.new(30, 5, -4))
+
+			HitboxEngine.RequestAttack(defender.Id, makeDefinition(), 1, 1)
+			HitboxEngine.RequestAttack(bystander.Id, makeMissingDefinition(), 1, 1)
+
+			expect(HitboxEngine.ActiveSwingReaches(defender.Id, attacker.Model, 0)).to.equal(true)
+			expect(HitboxEngine.ActiveSwingReaches(bystander.Id, attacker.Model, 0)).to.equal(false)
+			expect(HitboxEngine.ActiveSwingReaches(attacker.Id, defender.Model, 0)).to.equal(false)
 		end)
 	end)
 

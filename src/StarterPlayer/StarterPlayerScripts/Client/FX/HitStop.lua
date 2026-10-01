@@ -18,6 +18,12 @@
 	    resolved Clean/Backstab/GuardBroken contact (the same three outcomes DamageResolver grants
 	    DamageConstants.Hitstun to). Stops the local body where it stands for the beat.
 
+	  * SlowVictimMovement -- the rest of the stun (2026-09-30). After the freeze, a stunned body walks at a
+	    fraction of its speed (CombatConstants.HitSlowMultiplier) until the stun ends. Before this nothing
+	    slowed a stunned player at all: they walked out of an 8-stud swing box at full walking speed inside
+	    one stun, so an M1 string that landed its first hit whiffed its second -- the "chains stop in the
+	    middle" report. Same input-hold binding as the freeze; the freeze wins while both are live.
+
 	Both throttle rapid repeats on their own independent clock (see makeThrottledFreeze), so landings
 	or hits close in time can't stack into unintended slow motion.
 
@@ -162,7 +168,8 @@ function HitStop.FreezeExchange(attacker: Model?, defender: Model?, seconds: num
 	if defender and defender ~= attacker then
 		appendPlayingTracks(defender, tracks)
 	end
-	exchangeGuard:FreezeTracks(tracks, seconds)
+	-- Caught up afterwards: the server's swing kept running through the freeze (CatchUpSpeedMultiplier).
+	exchangeGuard:FreezeTracks(tracks, seconds, CONFIG.CatchUpSpeedMultiplier)
 	logger:debug("Combat exchange hit-stop", { seconds = seconds, tracks = #tracks })
 end
 
@@ -188,15 +195,12 @@ local function localRig(): (Humanoid?, BasePart?)
 	return CharacterUtil.LiveHumanoidOf(character), CharacterUtil.RootOf(character)
 end
 
--- Tears down both per-frame writers. Safe to call when nothing is running.
+-- Tears down the freeze's velocity writer. The input hold unbinds itself once neither the freeze nor the
+-- stun slow is live (onInputHold). Safe to call when nothing is running.
 local function stopVictimFreeze(): ()
 	if victimFreezeConnection then
 		victimFreezeConnection:Disconnect()
 		victimFreezeConnection = nil
-	end
-	if inputHoldBound then
-		RunService:UnbindFromRenderStep(INPUT_HOLD_BINDING)
-		inputHoldBound = false
 	end
 	victimFreezeUntil = nil
 end
@@ -210,14 +214,59 @@ local function freezeActive(): boolean
 	return true
 end
 
--- The half that makes it hold a RUNNING player: take this frame's input away before physics sees it.
+-- The stun slow (SlowVictimMovement): until when, and to what fraction of the player's own input.
+local victimSlowUntil: number? = nil
+local victimSlowMultiplier = 1
+
+local function slowActive(now: number): boolean
+	local until_ = victimSlowUntil
+	if not until_ or now >= until_ then
+		victimSlowUntil = nil
+		return false
+	end
+	return true
+end
+
+local function unbindInputHold(): ()
+	if inputHoldBound then
+		RunService:UnbindFromRenderStep(INPUT_HOLD_BINDING)
+		inputHoldBound = false
+	end
+end
+
+-- The half that makes it hold a RUNNING player: take this frame's input away before physics sees it. And,
+-- once the freeze is over, the stun slow: this frame's input scaled down rather than removed.
+--
+-- The slow NORMALISES before scaling. MoveDirection is read after the control script's own Move this frame,
+-- so it is the player's input; normalising means that even if it were ever last frame's scaled write
+-- instead, the slow could not compound toward a standstill.
 local function onInputHold(): ()
-	if not freezeActive() then
+	local frozen = freezeActive()
+	local slowed = not frozen and slowActive(os.clock())
+	if not frozen and not slowed then
+		unbindInputHold()
 		return
 	end
 	local humanoid = localRig()
-	if humanoid then
+	if not humanoid then
+		return
+	end
+	if frozen then
 		humanoid:Move(Vector3.zero, false)
+		return
+	end
+	local direction = humanoid.MoveDirection
+	if direction.Magnitude > 1e-3 then
+		humanoid:Move(direction.Unit * victimSlowMultiplier, false)
+	end
+	-- No jumping out of a stun either: a hop carries the body out of the next swing just as a walk did.
+	humanoid.Jump = false
+end
+
+local function bindInputHold(): ()
+	if not inputHoldBound then
+		RunService:BindToRenderStep(INPUT_HOLD_BINDING, INPUT_HOLD_PRIORITY, onInputHold)
+		inputHoldBound = true
 	end
 end
 
@@ -245,10 +294,7 @@ local function freezeVictimMovement(seconds: number): ()
 	if not victimFreezeConnection then
 		victimFreezeConnection = RunService.Heartbeat:Connect(onVictimFreezeHeartbeat)
 	end
-	if not inputHoldBound then
-		RunService:BindToRenderStep(INPUT_HOLD_BINDING, INPUT_HOLD_PRIORITY, onInputHold)
-		inputHoldBound = true
-	end
+	bindInputHold()
 end
 
 local freezeVictim = makeThrottledFreeze(freezeVictimMovement, "Combat victim hit-stop")
@@ -259,6 +305,21 @@ local freezeVictim = makeThrottledFreeze(freezeVictimMovement, "Combat victim hi
 -- long.
 function HitStop.FreezeVictimMovement(seconds: number): ()
 	freezeVictim(seconds)
+end
+
+-- Slows the LOCAL player's own walking to `multiplier` of their input until `seconds` from now -- the stun
+-- after the hit-stop's freeze. NOT throttled: every stunning hit extends it (never shortens it), because
+-- the stun it mirrors is extended by every hit too. Caller supplies both numbers.
+function HitStop.SlowVictimMovement(seconds: number, multiplier: number): ()
+	if seconds <= 0 then
+		return
+	end
+	local until_ = os.clock() + seconds
+	if victimSlowUntil == nil or until_ > victimSlowUntil then
+		victimSlowUntil = until_
+	end
+	victimSlowMultiplier = math.clamp(multiplier, 0, 1)
+	bindInputHold()
 end
 
 return HitStop

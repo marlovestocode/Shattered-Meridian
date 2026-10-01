@@ -8,6 +8,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local AttackAnimations = require(ReplicatedStorage.Shared.Attack.AttackAnimations)
 local AttackCatalog = require(ServerScriptService.Server.Combat.AttackCatalog)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
@@ -41,6 +42,29 @@ local function serveClip(length: number, marker: number?, markerName: string?): 
 		local closing = Instance.new("Keyframe")
 		closing.Time = length
 		closing.Parent = sequence
+		return sequence
+	end)
+end
+
+-- Serves every clip as a sequence `length` seconds long whose right arm strikes at `strike` -- a slow
+-- wind-up into a fast blow -- and carries no marker at all, so only AttackWindows' estimate can place it.
+local function serveStrikingClip(length: number, strike: number): ()
+	AttackWindows.SetExtractor(function(): KeyframeSequence?
+		local sequence = Instance.new("KeyframeSequence")
+		local function pose(time: number, degrees: number): ()
+			local keyframe = Instance.new("Keyframe")
+			keyframe.Time = time
+			local arm = Instance.new("Pose")
+			arm.Name = "Right Arm"
+			arm.Weight = 1
+			arm.CFrame = CFrame.Angles(math.rad(degrees), 0, 0)
+			arm.Parent = keyframe
+			keyframe.Parent = sequence
+		end
+		pose(0, 0)
+		pose(strike - 0.05, 20)
+		pose(strike, -70)
+		pose(length, 0)
 		return sequence
 	end)
 end
@@ -228,7 +252,9 @@ return function()
 		-- Basic[1]: Windup 0.31, Active 0.22, Recovery 0.14 (total 0.67), Cooldown 0.44.
 		-- Heavy[1]: Windup 0.600, Active 0.22, Recovery 0.55 (total 1.37), Cooldown 1.37.
 		local BASIC_CLIP = "rbxassetid://104588315151150"
-		local HEAVY_CLIP = "rbxassetid://83363364108102"
+		-- Resolved, not pasted: the baseline Heavy clip was re-authored (a new asset id), and a literal here
+		-- silently prefetched a clip no move uses, so every Heavy case below tested the unsynced timeline.
+		local HEAVY_CLIP = AttackAnimations.Get(HEAVY_MOVE_ID)
 
 		afterEach(clearClips)
 
@@ -289,6 +315,30 @@ return function()
 			expect(entry.Definition.WindupSeconds).to.be.near(0.45, 1e-6)
 			expect(entry.Definition.ActiveSeconds).to.be.near(0.22, 1e-6)
 			expect(total(entry)).to.be.near(1.6, 1e-6)
+		end)
+
+		it("moves a clip-too-short move's hitbox onto the clip's estimated strike", function()
+			-- Heavy: Windup 0.6 + Active 0.22 against a 0.62s clip -- the hitbox would open after the clip.
+			serveStrikingClip(0.62, 0.35)
+			AttackWindows.Prefetch(HEAVY_CLIP)
+			local entry = AttackCatalog.Get(HEAVY_MOVE_ID) :: any
+			-- The hitbox opens on the strike, in the clip's own (retimed) time...
+			expect(entry.Definition.WindupSeconds * entry.PlaybackSpeed).to.be.near(0.35, 1e-6)
+			-- ...the clip is slowed toward the authored windup, but never past RetimeMinFactor...
+			expect(entry.PlaybackSpeed >= AttackConstants.Windows.RetimeMinFactor - 1e-6).to.equal(true)
+			expect(entry.PlaybackSpeed <= 1).to.equal(true)
+			-- ...and the whole hit window now lies inside the clip.
+			expect(entry.Definition.WindupSeconds + entry.Definition.ActiveSeconds <= total(entry) + 1e-6).to.equal(
+				true
+			)
+		end)
+
+		it("leaves a move whose timeline fits its clip on its authored windup, whatever the estimate", function()
+			serveStrikingClip(1.6, 0.35)
+			AttackWindows.Prefetch(HEAVY_CLIP)
+			local entry = AttackCatalog.Get(HEAVY_MOVE_ID) :: any
+			expect(entry.Definition.WindupSeconds).to.be.near(0.6, 1e-6)
+			expect(entry.PlaybackSpeed).to.equal(1)
 		end)
 
 		it("pulls a swing-length Cooldown down with a shorter clip, so no dead time follows it", function()

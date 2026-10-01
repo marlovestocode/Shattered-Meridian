@@ -26,7 +26,7 @@
 
 local LiveTuningContract = {}
 
--- Runs `mutateAndAssert` (expected to call the module's AdjustField and `expect()` against the
+-- Runs `mutateAndAssert` (expected to call the module's mutator and `expect()` against the
 -- result) inside a pcall, then ALWAYS runs `reset` (expected to call the module's own Reset
 -- function) before returning -- even if an assertion inside `mutateAndAssert` failed and threw.
 -- Without this, a failing assertion would skip the inline reset call that used to follow it

@@ -52,6 +52,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 
 local AttackRequestSystem = require(script.Parent.Parent.Attack.AttackRequestSystem)
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
+local NetworkLatency = require(script.Parent.Parent.NetworkLatency)
 
 local logger = Logger.scope("EnvironmentReactionSystem")
 
@@ -95,20 +96,9 @@ local function surfaceColor(hit: EnvironmentProbe.Hit): Color3
 	)
 end
 
--- One-way-ish latency for a player-backed body, 0 for a server-owned one. Same pcall shape as
--- DefenseSystem's pingSecondsFor.
+-- Round-trip latency for a player-backed body, 0 for a server-owned one (NetworkLatency).
 local function pingSecondsFor(model: Model): number
-	local player = Players:GetPlayerFromCharacter(model)
-	if not player then
-		return 0
-	end
-	local ok, ping = pcall(function()
-		return player:GetNetworkPing()
-	end)
-	if not ok or typeof(ping) ~= "number" or ping ~= ping or ping < 0 then
-		return 0
-	end
-	return ping
+	return NetworkLatency.PingSeconds(model)
 end
 
 -- Every player whose character is within `radius` of `position`, except `skip`.

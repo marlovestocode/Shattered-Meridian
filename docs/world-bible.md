@@ -74,6 +74,9 @@ sentences — this is a lookup table, not an essay.
 - **Ascension** — the gate through which a Human can claim power outside their birth race.
 - **Corruption** — accumulated cost of Demonic-leaning or forbidden power use.
 - **Qi Deviation** — a failure state from qi misuse or overreach; mechanics in `progression-systems.md`.
+- **Unfurling** — a cultivator turning their own Meridian Particle inside out, so that for a few seconds the
+  ground around them runs on their meridian's law — a fragment of the unified Meridian restored under one
+  will. The rarest ultimate a fighter can hold; mechanics in `docs/design/domains.md`.
 
 ## Extending this file
 

@@ -107,6 +107,25 @@ HitboxEngineConstants.BroadphaseMarginStuds = 2
 -- just outside the volume while the limb itself is plainly inside it should count.
 HitboxEngineConstants.NarrowPhaseMarginStuds = 0.5
 
+-- THE MOVING-TARGET ALLOWANCE (2026-09-30). The engine tests a swing against where the target is on the
+-- SERVER. The attacker was aiming at where the target was on THEIR screen, which is behind that -- a
+-- replicated body is drawn one network trip plus the interpolation buffer in the past. At walking speed
+-- (~18 studs/s) and ~100ms of it, that is nearly two studs of an 8-stud box: the "that should have hit"
+-- miss against someone backing off.
+--
+-- So a candidate that misses is tested once more at the point it was TrailSeconds ago along its own
+-- horizontal velocity, capped at MaxStuds. Only ever BEHIND the target (the direction the attacker's view
+-- lags in), never ahead, and only for a body moving faster than MinSpeed -- a standing target has no
+-- trail, so a whiff at one is still a whiff. The cheap answer by design: it needs no position history
+-- and no rollback (this engine's header rules both out), at the price of assuming the target has been
+-- moving the way it is moving now for the last TrailSeconds.
+HitboxEngineConstants.TargetTrail = {
+	Enabled = true,
+	TrailSeconds = 0.1,
+	MaxStuds = 2,
+	MinSpeed = 2,
+}
+
 -- Ceiling on interpolation steps inside one swept narrow-phase test. Distinct from
 -- MaxSubstepsPerFrame: that bounds how often the world is QUERIED, this bounds how finely one
 -- already-gathered candidate is tested against one already-known pair of poses. Cheap enough to be
@@ -119,6 +138,44 @@ HitboxEngineConstants.MaxSweptSteps = 8
 -- (from a hostile power level, or a combo stage authored as 0) would collapse the hitbox to nothing
 -- or invert it; refusing to go below this keeps a mis-authored scale merely small rather than broken.
 HitboxEngineConstants.MinScaleMultiplier = 0.05
+
+-- Projectiles ------------------------------------------------------------------------------------
+--
+-- The engine-side tunables of projectile flight (Server/Combat/HitboxEngine/ProjectileSimulator.lua).
+-- Nothing per move: every number an author sets is in ProjectileTypes.ProjectileSpec. These are the
+-- bounds that keep a server honest whatever gets authored.
+HitboxEngineConstants.Projectile = {
+	-- Shots alive at once, server-wide. A volley that would pass it launches what fits and logs the rest
+	-- -- the MaxActiveSwings reasoning: degrade one attack in a mass brawl, not everyone's frame.
+	MaxLive = 256,
+
+	-- How long a shot that has ended is remembered. A parry can resolve after the contact that ended the
+	-- shot -- at the end of the frame, or out of DefenseSystem's rewind hold up to a round trip later --
+	-- and a Reflect has to bring back the shot that parry hit. Longer than both, with room to spare.
+	RetireGraceSeconds = 1.5,
+
+	-- How far behind a contact, along the shot's heading, the HitReport says the blow came from
+	-- (ProjectileContact.SourcePosition). Only the direction matters to the block arc; the distance just
+	-- keeps that direction from being dominated by where on the body the shot touched.
+	SourceProbeStuds = 8,
+
+	-- A homing shot re-picks its target this often, and whenever the one it has stops being valid. Not
+	-- every substep: a target list is a scan over every registered combatant.
+	RetargetSeconds = 0.1,
+
+	-- A homing shot's client visual steers on the client's copy of the target, which lags the server's.
+	-- The server re-states a homing shot's position and velocity this often so the two cannot drift far.
+	HomingResyncSeconds = 0.25,
+
+	-- A bounce leaves the surface by this much, so the next step's cast does not start touching the wall
+	-- it just left.
+	BounceSeparationStuds = 0.05,
+
+	-- A shot authored CanHitOwner ignores its own thrower for this long after launch. It spawns inside or
+	-- beside the body that threw it, and without the grace every such shot would hit its thrower on the
+	-- first step. A shot a parry handed to someone else has a new owner and needs none.
+	OwnerHitGraceSeconds = 0.25,
+}
 
 -- Integration ------------------------------------------------------------------------------------
 
@@ -140,6 +197,11 @@ HitboxEngineConstants.CombatantTag = "Combatant"
 -- literal -- GrabSystem.lua reads the same Attribute through that table directly, and two independently
 -- typed copies of this string could rename out of sync with no compile error and no test failure.
 HitboxEngineConstants.RootControlLockedAttribute = Constants.Attributes.RootControlLocked
+
+-- Set and cleared together with RootControlLocked by the same movement lock, for the two consumers that
+-- need the body held rather than merely handed over: RunSystem zeroes WalkSpeed off it, and
+-- Client/Combat/SwingRootClient.lua stands the jump down. See Constants.Attributes.SwingRooted.
+HitboxEngineConstants.SwingRootedAttribute = Constants.Attributes.SwingRooted
 
 -- Debug ------------------------------------------------------------------------------------------
 

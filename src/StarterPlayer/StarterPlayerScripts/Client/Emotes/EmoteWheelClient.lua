@@ -54,7 +54,7 @@
 	EVERY render step (see that file's header on why once isn't enough), which would silently fight
 	this module's own Default write one frame later if left alone. Rather than duplicating that
 	re-assertion or guessing at a priority order, this module now coordinates with it directly:
-	ShiftLockCamera.SetInputSuspended(true/false) tells that module to skip its own per-frame
+	ShiftLockCamera.SetInputSuspended("EmoteWheel", true/false) tells that module to skip its own per-frame
 	MouseBehavior/yaw writes for exactly this module's open/close window, the same "named continuous
 	slot" spirit CameraOffsetComposer/FOVOffset already use for camera properties with more than one
 	writer -- MouseBehavior just doesn't have that generalized composer today, so this is a direct,
@@ -282,7 +282,7 @@ local function closeWheel(handle: EmoteWheelHandle): ()
 	handle.State.IsOpen:set(false)
 	handle.State.SelectedIndex:set(nil)
 
-	ShiftLockCamera.SetInputSuspended(false)
+	ShiftLockCamera.SetInputSuspended("EmoteWheel", false)
 	UserInputService.MouseBehavior = savedMouseBehavior
 	UserInputService.MouseIconEnabled = savedMouseIconEnabled
 
@@ -347,7 +347,7 @@ local function openWheel(handle: EmoteWheelHandle, clientState: ClientState): ()
 
 	savedMouseBehavior = UserInputService.MouseBehavior
 	savedMouseIconEnabled = UserInputService.MouseIconEnabled
-	ShiftLockCamera.SetInputSuspended(true)
+	ShiftLockCamera.SetInputSuspended("EmoteWheel", true)
 	sinkCameraStick()
 	UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 	UserInputService.MouseIconEnabled = true

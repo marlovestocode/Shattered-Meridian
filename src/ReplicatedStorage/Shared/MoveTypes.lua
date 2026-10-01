@@ -22,12 +22,26 @@
 	  * AnimationId -- the one clip AttackCatalog syncs the swing to (Shared/Attack/AttackWindows.lua).
 	  * Knockback (Shared/Damage/Knockback.lua, AirComboSystem's launcher test), Grab (GrabSystem) and
 	    Art (ArtSystem / ArtTreeManager -- an art IS a move with this block on it).
+	  * Projectile (2026-09-30) -- the move's MOVE TYPE. Absent, the move is melee: its volume rides the
+	    body. Present, it is a projectile move: the same swing, but its Active window launches the
+	    volley this block describes (HitboxEngine's ProjectileSimulator), and Shape/Dimensions are unread.
+	    The block is ProjectileTypes.ProjectileSpec -- the engine's own vocabulary again, so projecting it
+	    is a copy. It is not the retired pre-rebuild Projectile block, which nothing ever flew:
+	    MoveRecordCodec still drops that one from v1/v2 records, and a v3 record's block is this one.
+	  * Domain (2026-09-30) -- the move opens a REALM (Shared/Domain/DomainTypes.lua, and the domain design
+	    doc). The swing is the activation sequence; when AttackRequestSystem accepts it, DomainSystem opens
+	    the realm this block describes. Like Presentation it is absent from ToEngineAttackDefinition -- the
+	    swing's own hitbox is unchanged -- and AttackCatalog surfaces only its presence (IsDomain).
+	  * Presentation (2026-09-30) -- what the move sounds and looks like at a fixed set of moments
+	    (Shared/Combat/MovePresentationTypes.lua). The one block no server system reads: it is carried,
+	    validated, persisted and replicated to clients, and deliberately absent from
+	    ToEngineAttackDefinition, so it can never change a hit. Absent is today's behaviour exactly.
 
 	A record persisted under the old schema still loads: Server/Systems/Support/MoveRecordCodec.lua
 	upgrades it into this shape before validation, keeping every field that still means something and
 	dropping the rest. That upgrade is the only place the old vocabulary is still spoken.
 
-	PROJECTED-ONLY FIELDS. SizeMultiplier, SpawnDelaySeconds, WeaponSpeed and Tempo describe the WEAPON
+	PROJECTED-ONLY FIELDS. SizeMultiplier, SpawnDelaySeconds, WeaponSpeed, Tempo and HitstunSeconds describe the WEAPON
 	a Default move belongs to, not the move; DefaultMoveRegistry stamps them on every read and nothing
 	authors them. They ride on the definition because AttackCatalog needs them beside the timing they
 	modify, and they are deliberately absent from ToWire and Fingerprint.
@@ -38,8 +52,11 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local DomainTypes = require(ReplicatedStorage.Shared.Domain.DomainTypes)
 local GrabTypes = require(ReplicatedStorage.Shared.Grab.GrabTypes)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
+local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
+local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
 
 local MoveTypes = {}
 
@@ -86,6 +103,17 @@ function MoveTypes.IsFeintable(move: { Feintable: boolean? }): boolean
 	return move.Feintable == true
 end
 
+-- The move type. There is no separate enum to fall out of step with the block: a move IS a projectile
+-- move exactly when it carries a Projectile block.
+function MoveTypes.IsProjectile(move: { Projectile: ProjectileTypes.ProjectileSpec? }): boolean
+	return move.Projectile ~= nil
+end
+
+-- Whether the move opens a realm. The same "the block IS the type" rule as IsProjectile.
+function MoveTypes.IsDomain(move: { Domain: DomainTypes.DomainSpec? }): boolean
+	return move.Domain ~= nil
+end
+
 -- Schema ------------------------------------------------------------------------------------------------
 
 export type MoveShape = HitboxTypes.ShapeKind
@@ -119,6 +147,15 @@ export type MoveGrabConfig = {
 	-- the clip is the author's say over what those arms do.
 	VictimAnimation: string?,
 	AttackerAnimation: string?,
+	-- Played ONCE on the victim from the throw press on -- through the holder's ThrowAnimation, if any, and
+	-- the flight -- in place of VictimAnimation; faded out on landing if still playing. nil or "" is none.
+	VictimThrowAnimation: string?,
+	-- Played ONCE on the holder when they press Throw, with the victim still welded to their hand; the
+	-- launch waits for the clip to end. nil or "" throws on the press, as before this existed.
+	ThrowAnimation: string?,
+	-- How far through ThrowAnimation the victim leaves the hand, 0..1 of the clip's length; the clip
+	-- keeps playing past it as the follow-through. nil is 1, the clip's end. Inert without a clip.
+	ThrowReleaseAt: number?,
 	HoldSeconds: number,
 	ThrowUpVelocity: number,
 	ThrowHorizontalVelocity: number,
@@ -138,6 +175,16 @@ export type MoveArtBinding = {
 	-- The ArtId (== MoveId) that must be mastered first. nil for an entry form.
 	Prerequisite: string?,
 }
+
+-- How a projectile move's volley flies and what meets it -- see ProjectileTypes' header for every field.
+export type MoveProjectileConfig = ProjectileTypes.ProjectileSpec
+
+-- What the move sounds and looks like, per moment -- see MovePresentationTypes' header (precedence, the
+-- moments and the events they hang off).
+export type MovePresentation = MovePresentationTypes.Presentation
+
+-- The realm the move opens -- see DomainTypes' header for every field.
+export type MoveDomainConfig = DomainTypes.DomainSpec
 
 export type MoveDefinition = {
 	-- Identity. MoveId is server-assigned once and immutable; Author/CreatedAt/UpdatedAt are stamped from
@@ -165,8 +212,14 @@ export type MoveDefinition = {
 	-- Which part the volume is anchored to, resolved live every sample. "Weapon" also sizes a Box off the
 	-- equipped weapon's own Blade part (HitboxTypes.AttackDefinition.SizeFromAttachmentPart).
 	AttachmentPart: MoveAttachmentPoint,
-	-- Root control is locked for the Active window (HitboxEngineConstants.RootControlLockedAttribute).
+	-- The attacker is HELD from the start of the Active window through recovery: root control is handed over
+	-- (HitboxEngineConstants.RootControlLockedAttribute) and WalkSpeed is pinned to 0 and jumping stood down
+	-- (HitboxEngineConstants.SwingRootedAttribute -- RunSystem and Client/Combat/SwingRootClient).
 	LocksMovement: boolean,
+	-- The attacker is held through the WINDUP as well: the same lock, taken as the swing begins instead of when
+	-- the Active window opens. Alone, it is released as Active begins; with LocksMovement the lock runs the
+	-- whole swing. Optional: absent is false.
+	LocksWindup: boolean?,
 
 	-- Timing, in seconds. AttackCatalog re-derives the effective timeline from the move's clip; these
 	-- are what the author typed.
@@ -192,12 +245,21 @@ export type MoveDefinition = {
 	Knockback: MoveKnockback?,
 	Grab: MoveGrabConfig?,
 	Art: MoveArtBinding?,
+	-- Present = a projectile move (MoveTypes.IsProjectile). The spawn point is still AttachmentPart and
+	-- Offset -- Offset's rotation turns the volley -- and LocksMovement and the whole timeline still apply.
+	Projectile: MoveProjectileConfig?,
+	-- Presentation only: read by client FX, never by a combat layer. nil = every moment at its defaults.
+	Presentation: MovePresentation?,
+	-- Present = the move opens a realm when its swing is accepted (MoveTypes.IsDomain).
+	Domain: MoveDomainConfig?,
 
 	-- Projected-only (see this file's header). Never authored, never on the wire, never persisted.
 	SizeMultiplier: number?,
 	SpawnDelaySeconds: number?,
 	WeaponSpeed: number?,
 	Tempo: number?,
+	-- The stun a landed hit inflicts (DamageConstants.HitstunFor). nil = DamageConstants.Hitstun.Seconds.
+	HitstunSeconds: number?,
 }
 
 -- What the damage layer needs from a move and the engine does not: the price of a landed hit and what it
@@ -208,6 +270,8 @@ export type DamageProfile = {
 	PostureDamage: number,
 	Knockback: MoveKnockback?,
 	Grab: MoveGrabConfig?,
+	-- Projected from MoveDefinition.HitstunSeconds. nil = DamageConstants.Hitstun.Seconds.
+	HitstunSeconds: number?,
 }
 
 -- Copying -----------------------------------------------------------------------------------------------
@@ -235,6 +299,7 @@ function MoveTypes.Clone(move: MoveDefinition): MoveDefinition
 		OffsetRotation = move.OffsetRotation,
 		AttachmentPart = move.AttachmentPart,
 		LocksMovement = move.LocksMovement,
+		LocksWindup = move.LocksWindup == true,
 
 		WindupSeconds = move.WindupSeconds,
 		ActiveSeconds = move.ActiveSeconds,
@@ -253,11 +318,16 @@ function MoveTypes.Clone(move: MoveDefinition): MoveDefinition
 		Knockback = if move.Knockback then table.clone(move.Knockback) else nil,
 		Grab = if move.Grab then table.clone(move.Grab) else nil,
 		Art = if move.Art then table.clone(move.Art) else nil,
+		-- Through the schema's own field list, never table.clone -- ProjectileTypes.Copy's header.
+		Projectile = if move.Projectile then ProjectileTypes.Copy(move.Projectile) else nil,
+		Presentation = if move.Presentation then MovePresentationTypes.Copy(move.Presentation) else nil,
+		Domain = if move.Domain then DomainTypes.Copy(move.Domain) else nil,
 
 		SizeMultiplier = move.SizeMultiplier,
 		SpawnDelaySeconds = move.SpawnDelaySeconds,
 		WeaponSpeed = move.WeaponSpeed,
 		Tempo = move.Tempo,
+		HitstunSeconds = move.HitstunSeconds,
 	}
 end
 
@@ -295,6 +365,7 @@ function MoveTypes.ToWire(move: MoveDefinition): MoveWire
 		OffsetRoll = move.OffsetRotation.Z,
 		AttachmentPart = move.AttachmentPart,
 		LocksMovement = move.LocksMovement,
+		LocksWindup = move.LocksWindup == true,
 
 		WindupSeconds = move.WindupSeconds,
 		ActiveSeconds = move.ActiveSeconds,
@@ -321,6 +392,9 @@ function MoveTypes.ToWire(move: MoveDefinition): MoveWire
 			Mode = move.Grab.Mode,
 			VictimAnimation = move.Grab.VictimAnimation,
 			AttackerAnimation = move.Grab.AttackerAnimation,
+			VictimThrowAnimation = move.Grab.VictimThrowAnimation,
+			ThrowAnimation = move.Grab.ThrowAnimation,
+			ThrowReleaseAt = move.Grab.ThrowReleaseAt,
 			HoldSeconds = move.Grab.HoldSeconds,
 			ThrowUpVelocity = move.Grab.ThrowUpVelocity,
 			ThrowHorizontalVelocity = move.Grab.ThrowHorizontalVelocity,
@@ -336,6 +410,18 @@ function MoveTypes.ToWire(move: MoveDefinition): MoveWire
 			RequiredTier = move.Art.RequiredTier,
 			Prerequisite = move.Art.Prerequisite,
 		}
+	end
+	if move.Projectile then
+		-- Every field is a number, a string or a boolean, so the spec's own copy IS its flat encoding.
+		wire.Projectile = ProjectileTypes.Copy(move.Projectile)
+	end
+	if move.Presentation then
+		-- Strings and numbers only, moment -> cue, so the block's own copy is its flat encoding too.
+		wire.Presentation = MovePresentationTypes.Copy(move.Presentation)
+	end
+	if move.Domain then
+		-- Numbers, strings, booleans and three arrays of the same -- the block's own copy is its encoding.
+		wire.Domain = DomainTypes.Copy(move.Domain)
 	end
 	return wire
 end
@@ -463,16 +549,19 @@ function MoveTypes.ToEngineAttackDefinition(move: MoveDefinition): (HitboxTypes.
 		RecoverySeconds = move.RecoverySeconds,
 		MaxTargetsPerSwing = move.MaxTargets,
 		LocksMovement = move.LocksMovement,
+		LocksWindup = move.LocksWindup == true,
 		-- A weapon-anchored swing IS the blade: a Box takes the equipped weapon's own part size (inert for
 		-- every other shape -- the engine only reads it for Box).
 		SizeFromAttachmentPart = move.AttachmentPart == "Weapon",
 		SizeMultiplier = move.SizeMultiplier,
+		Projectile = if move.Projectile then ProjectileTypes.Copy(move.Projectile) else nil,
 	}
 	local profile: DamageProfile = {
 		Damage = move.Damage,
 		PostureDamage = move.PostureDamage,
 		Knockback = move.Knockback,
 		Grab = move.Grab,
+		HitstunSeconds = move.HitstunSeconds,
 	}
 	return definition, profile
 end

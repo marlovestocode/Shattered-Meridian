@@ -63,6 +63,8 @@ local AchievementSystem = require(Systems.AchievementSystem)
 local QiDeviationSystem = require(Systems.QiDeviationSystem)
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 local MoveRegistryManager = require(Combat.MoveRegistryManager)
+local AuthoredMoveLibrary = require(Combat.AuthoredMoveLibrary)
+local MovePresentationSystem = require(Combat.MovePresentationSystem)
 local PlayerDeathSystem = require(Systems.PlayerDeathSystem)
 local HitboxEngine = require(Combat.HitboxEngine.HitboxEngine)
 local DefenseSystem = require(Combat.Defense.DefenseSystem)
@@ -73,6 +75,7 @@ local AirComboSystem = require(Combat.AirCombo.AirComboSystem)
 local EngagementSystem = require(Combat.Engagement.EngagementSystem)
 local KnockbackAudit = require(Combat.Damage.KnockbackAudit)
 local EnvironmentReactionSystem = require(Combat.Environment.EnvironmentReactionSystem)
+local DomainSystem = require(Combat.Domain.DomainSystem)
 local WeaponVisualSystem = require(Combat.Weapon.WeaponVisualSystem)
 local WeaponInventorySystem = require(Combat.Weapon.WeaponInventorySystem)
 local ParkourSystem = require(Systems.ParkourSystem)
@@ -263,6 +266,21 @@ boot("KitAbilitySystem", KitAbilitySystem)
 WeaponRoster.Start()
 
 boot("MoveRegistryManager", MoveRegistryManager)
+
+-- 12-shipped. The moves that ship IN SOURCE (Server/Combat/AuthoredMoves, written by the Move Editor's
+--      Studio-only "Write to source") load here: after the registry exists and the roster is built (a
+--      shipped retune is laid over a weapon move, so the move has to exist), and before every combat Init
+--      below -- AttackRequestSystem's boot warm pass reads the registry and must see them. Gameplay
+--      content, so it loads here and never depends on an admin System booting; MoveEditorSystem (22b)
+--      still loads the DataStore after it, and a DataStore record with the same id wins.
+AuthoredMoveLibrary.Load()
+
+-- 12-presentation. The per-move presentation catalogue (Server/Combat/MovePresentationSystem.lua) -- what a
+--      client needs to play a move's authored sounds and effects. Here, beside the registries it reads,
+--      but its position is readability only: Init rebuilds from both registries and hears every later
+--      write (including MoveEditorSystem's DataStore hydration, step 22b) through their OnChanged seams.
+boot("MovePresentationSystem", MovePresentationSystem)
+
 boot("HitboxEngine", HitboxEngine)
 
 --     DefenseSystem is the engine's first consumer -- it turns a contact into a KIND of hit (clean,
@@ -392,6 +410,16 @@ boot("KnockbackAudit", KnockbackAudit)
 --     both, so both subscriptions have something to attach to; its Heartbeat only watches its own rows,
 --     so it has no place in the combat layers' connection-order requirement.
 boot("EnvironmentReactionSystem", EnvironmentReactionSystem)
+
+--     DomainSystem -- realms (Shared/Domain/DomainTypes.lua's header). A sibling of the attack layer on the
+--     same extension point EnvironmentReactionSystem uses (AttackRequestSystem.OnSwingAccepted: a domain
+--     move's swing committing is what opens a realm), delivering its effects only through public entry
+--     points of the four layers (HitboxEngine.LaunchVolley, DamageSystem.ExtendHitstun, DefenseSystem.
+--     DrainGuard, AttackRequestSystem.ThrowMove) and laying down its law as Humanoid Attributes every layer
+--     reads for itself (Shared/Domain/DomainRules.lua). AFTER every combat layer and QiSystem (its upkeep),
+--     all of which it requires. Its Heartbeat connects after the four layers', which is the order it wants:
+--     a strike launched this frame first flies in the engine's next Step, the same as a swing's volley.
+boot("DomainSystem", DomainSystem)
 
 --     WeaponVisualSystem is a further sibling, purely cosmetic -- it subscribes to
 --     AttackRequestSystem.OnWeaponChanged (the same public extension-point shape GrabSystem's own

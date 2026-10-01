@@ -57,6 +57,53 @@ return function()
 		end)
 	end)
 
+	describe("AttackWindows.EstimateStrikeTime", function()
+		-- One keyframe at `time` posing the right arm at `degrees` about X, nested the way an exported R6
+		-- clip nests it (HumanoidRootPart > Torso > Right Arm).
+		local function keyframeAt(sequence: KeyframeSequence, time: number, degrees: number?): ()
+			local keyframe = Instance.new("Keyframe")
+			keyframe.Time = time
+			if degrees then
+				local root = Instance.new("Pose")
+				root.Name = "HumanoidRootPart"
+				root.Parent = keyframe
+				local torso = Instance.new("Pose")
+				torso.Name = "Torso"
+				torso.Parent = root
+				local arm = Instance.new("Pose")
+				arm.Name = "Right Arm"
+				arm.Weight = 1
+				arm.CFrame = CFrame.Angles(math.rad(degrees), 0, 0)
+				arm.Parent = torso
+			end
+			keyframe.Parent = sequence
+		end
+
+		it("finds the end of the fastest limb movement -- the blow, not the wind-back", function()
+			local sequence = Instance.new("KeyframeSequence")
+			keyframeAt(sequence, 0, 0)
+			keyframeAt(sequence, 0.2, 30) -- a slow wind-back: 30 degrees in 0.2s
+			keyframeAt(sequence, 0.3, -60) -- the blow: 90 degrees in 0.1s
+			keyframeAt(sequence, 0.6, 0) -- the recovery: 60 degrees in 0.3s
+			expect(AttackWindows.EstimateStrikeTime(sequence, 0.6)).to.be.near(0.3, 1e-6)
+		end)
+
+		it("finds nothing in a clip too slow to hold a blow", function()
+			local sequence = Instance.new("KeyframeSequence")
+			keyframeAt(sequence, 0, 0)
+			keyframeAt(sequence, 0.5, 10)
+			keyframeAt(sequence, 1, 0)
+			expect(AttackWindows.EstimateStrikeTime(sequence, 1)).to.equal(nil)
+		end)
+
+		it("finds nothing in a clip with no poses at all", function()
+			local sequence = Instance.new("KeyframeSequence")
+			keyframeAt(sequence, 0)
+			keyframeAt(sequence, 0.5)
+			expect(AttackWindows.EstimateStrikeTime(sequence, 0.5)).to.equal(nil)
+		end)
+	end)
+
 	describe("AttackWindows.MarkerNameFor", function()
 		it("derives AttackM<stage> for every Basic stage of every weapon", function()
 			expect(AttackWindows.MarkerNameFor("default:Primary:Basic:1")).to.equal("AttackM1")

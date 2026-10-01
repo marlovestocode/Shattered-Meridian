@@ -34,9 +34,13 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local EngineLogCapture = require(ReplicatedStorage.Shared.EngineLogCapture)
 
+local FusionTuning = require(script.Parent.UI.FusionTuning)
 local UI = require(script.Parent.UI)
 local StartMenuClient = require(script.Parent.StartMenu.StartMenuClient)
 local LoadingClient = require(script.Parent.Loading.LoadingClient)
+local AssetPreloader = require(script.Parent.Loading.AssetPreloader)
+local MovePresentationCatalog = require(script.Parent.FX.MovePresentationCatalog)
+local SwingPresentation = require(script.Parent.FX.SwingPresentation)
 local IntroClient = require(script.Parent.Intro.IntroClient)
 local CombatAnimator = require(script.Parent.FX.CombatAnimator)
 local MovementVFX = require(script.Parent.FX.MovementVFX)
@@ -56,6 +60,7 @@ local DefenseClient = require(script.Parent.Defense.DefenseClient)
 local AttackInputClient = require(script.Parent.Combat.AttackInputClient)
 local WeaponInventoryClient = require(script.Parent.Combat.WeaponInventoryClient)
 local GrabInputClient = require(script.Parent.Combat.GrabInputClient)
+local SwingRootClient = require(script.Parent.Combat.SwingRootClient)
 local AirComboClient = require(script.Parent.Combat.AirComboClient)
 local AirComboFX = require(script.Parent.FX.AirComboFX)
 local BlimpController = require(script.Parent.Blimp.BlimpController)
@@ -67,12 +72,16 @@ local SwingTracking = require(script.Parent.Combat.SwingTracking)
 local SwingTellFX = require(script.Parent.FX.SwingTellFX)
 local CombatAudio = require(script.Parent.FX.CombatAudio)
 local AttackTrail = require(script.Parent.FX.AttackTrail)
+local ProjectileFX = require(script.Parent.FX.ProjectileFX)
+local DomainFX = require(script.Parent.FX.DomainFX)
 local RollAfterimage = require(script.Parent.FX.RollAfterimage)
 local FpsCounter = require(script.Parent.Diagnostics.FpsCounter)
 local RemoteMovementFX = require(script.Parent.FX.RemoteMovementFX)
 local GrabHoldPose = require(script.Parent.FX.GrabHoldPose)
 local GuardStrainPose = require(script.Parent.FX.GuardStrainPose)
+local HitFlinchPose = require(script.Parent.FX.HitFlinchPose)
 local CombatFeedbackClient = require(script.Parent.Combat.CombatFeedbackClient)
+local HitPrediction = require(script.Parent.Combat.HitPrediction)
 local DeathNoticeClient = require(script.Parent.Combat.DeathNoticeClient)
 local BugReportClient = require(script.Parent.BugReport.BugReportClient)
 local AnnouncementClient = require(script.Parent.Announcement.AnnouncementClient)
@@ -81,6 +90,9 @@ local SettingsClient = require(script.Parent.Settings.SettingsClient)
 local logger = Logger.scope("Main")
 
 logger:info("Client boot start")
+
+-- BEFORE anything builds a Computed (the onboarding flow and UI.Mount both do): see that module's header.
+FusionTuning.Apply()
 
 -- Connects LogService before anything else below gets a chance to log a boot-time error/warning it
 -- should have seen -- same "boots before everything else, gates nothing" reasoning as the server's
@@ -110,6 +122,12 @@ logger:debug("StartMenuClient run end")
 -- immediately, in order), so the full sound registry exists before AssetPreloader.lua ever reads it.
 -- See LoadingClient.lua's own header for why this always runs (unlike IntroClient.Run() below,
 -- which skips for returning players).
+-- The per-move presentation catalogue (Client/FX/MovePresentationCatalog.lua) asks for its snapshot
+-- BEFORE the loading pass, so its asset ids start preloading in parallel with it rather than after. Its
+-- preloads go through AssetPreloader.PreloadLabelled -- injected, so the require graph stays one-way
+-- (AssetPreloader reads the catalogue for its boot manifest).
+MovePresentationCatalog.Start(AssetPreloader.PreloadLabelled)
+
 logger:debug("LoadingClient run start")
 LoadingClient.Run()
 logger:debug("LoadingClient run end")
@@ -281,6 +299,10 @@ logger:debug("GrabInputClient start")
 GrabInputClient.Start()
 logger:debug("GrabInputClient end")
 
+logger:debug("SwingRootClient start")
+SwingRootClient.Start()
+logger:debug("SwingRootClient end")
+
 -- The air combo (docs/design/air-combat-and-evade.md, Part B): the local attacker's follow, and every
 -- combatant's phase readability. Both read only replicated Attributes, so neither depends on the other or on
 -- anything started above beyond the parkour controller, which parks itself off the same Attributes.
@@ -350,6 +372,19 @@ logger:debug("AttackTrail start")
 AttackTrail.Start()
 logger:debug("AttackTrail end")
 
+-- Projectile moves' shots in flight, drawn off Attack_Projectile (AttackRequestSystem creates it at boot,
+-- like every other attack remote). No dependency on anything above; every client draws every shot.
+logger:debug("ProjectileFX start")
+ProjectileFX.Start()
+logger:debug("ProjectileFX end")
+
+-- Realms (Client/FX/DomainFX.lua), drawn off Domain_State (DomainSystem creates it at boot). No dependency on
+-- anything above but the presentation catalogue (MovePresentationCatalog.Start, earlier) for each realm's
+-- look; a realm open when this client joins arrives on the snapshot it asks for at start.
+logger:debug("DomainFX start")
+DomainFX.Start()
+logger:debug("DomainFX end")
+
 -- Same one real dependency as SwingLunge directly above -- AttackInputClient.OnAttackStarted, which
 -- this module subscribes to for the swing whoosh (Client/FX/CombatAudio.lua's own header on why it
 -- keeps its own subscription rather than being called out to). Registration itself already happened
@@ -358,6 +393,10 @@ logger:debug("AttackTrail end")
 logger:debug("CombatAudio start")
 CombatAudio.Start()
 logger:debug("CombatAudio end")
+
+-- A move's own Windup/Active/Recovery cues (Client/FX/SwingPresentation.lua) -- the same one dependency,
+-- AttackInputClient.OnAttackStarted, read as one unit with the whoosh and the trail above.
+SwingPresentation.Start()
 
 -- The roll's afterimage (the ghosts' fade loop), then the watcher that draws OTHER players' rolls off
 -- the replicated ParkourState Attribute. The local player's own roll reaches RollAfterimage through
@@ -378,6 +417,12 @@ logger:debug("GuardStrainPose start")
 GuardStrainPose.Start()
 logger:debug("GuardStrainPose end")
 
+-- Every body a hit stuns flinches, on every client, off the HitstunUntil Attribute DamageSystem extends on
+-- each stunning hit (no remote) -- same Transform-layer shape as the guard strain, one priority below it.
+logger:debug("HitFlinchPose start")
+HitFlinchPose.Start()
+logger:debug("HitFlinchPose end")
+
 -- Every grab being held puts the holder's right hand on the victim's collar (and the victim's hands on
 -- that arm), on every client, off the tags GrabSystem publishes (no remote) -- same shape as the guard
 -- strain above, bound one render priority after it.
@@ -390,6 +435,13 @@ logger:debug("GrabHoldPose end")
 -- CombatFeedback screen's own handle, which does not exist until UI.Mount() returns.
 logger:debug("CombatFeedbackClient start")
 CombatFeedbackClient.Start(uiHandles.CombatFeedback)
+
+-- The attacker's own hits, played the frame their swing overlaps a target on this screen instead of a
+-- round trip later (AttackConstants.Presentation.HitPrediction). After CombatFeedbackClient, which it
+-- presents through, and AttackInputClient, whose swings it watches.
+logger:debug("HitPrediction start")
+HitPrediction.Start()
+logger:debug("HitPrediction end")
 logger:debug("CombatFeedbackClient end")
 
 -- Death presentation -- the local player's death overlay and the kill feed, driven off

@@ -19,7 +19,7 @@
 	one place to edit when someone joins or leaves the team.
 
 	Client note: DevMenuClient.lua can no longer read this list to decide whether to start itself.
-	It asks the server instead, over the DevMenu_GetSidebarStats RemoteFunction it already called at
+	It asks the server instead, over the DevMenu_GetOverview RemoteFunction the panel polls anyway, at
 	startup -- see that file's own Start() header. A rejection from any DevMenuSystem handler is the
 	authorization answer; no separate "am I an admin" remote exists or is needed.
 ]]
@@ -34,6 +34,8 @@ AdminConfig.AuthorizedUserIds = {
 	[2620785150] = true, -- domingo
 	[5123402196] = true, -- miraj
 	[846436815] = true, -- dink
+	[1785892535] = true, -- jay
+	[4689336404] = true, -- chris
 } :: { [number]: boolean }
 
 return AdminConfig

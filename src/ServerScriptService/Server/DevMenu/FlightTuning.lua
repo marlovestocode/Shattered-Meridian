@@ -3,7 +3,7 @@
 	FlightTuning.lua
 
 	Owns: LIVE, IN-MEMORY tuning of FlightConstants' feel numbers -- a Studio-only dev tool
-	(DevMenuSystem.lua's ListFlightTuning/AdjustFlightTuning/ResetFlightTuning) mirroring
+	(DevMenuSystem.lua's ListFlightTuning/SetFlightTuning/ResetFlightTuning) mirroring
 	Server/Combat/HitboxTuning.lua's shape: FlightConstants is read BY REFERENCE every frame
 	(Client/Flight/FlightController.lua never snapshots it), so mutating a field here takes effect
 	on the very next Heartbeat, including for an admin already mid-flight. Lives under a new
@@ -15,10 +15,11 @@
 	of Shared/Constants.lua into its own Shared/Flight/FlightConstants.lua sibling -- see that file's
 	own header.
 
-	Deviation from HitboxTuning.lua: AdjustField takes a FRACTIONAL delta (e.g. 0.1 = +10% of the
-	field's CURRENT value), not an absolute delta -- FlightConstants' fields span degrees, studs/s,
-	studs/s^2, and unitless multipliers, so one fixed absolute step size can't sensibly apply to all
-	of them the way HitboxTuning's seconds-only fields could share one.
+	Writes are ABSOLUTE (SetField), clamped per field. They used to be a fractional nudge (AdjustField,
+	+-1%/+-10% of the current value) because the old panel had only step buttons and FlightConstants'
+	fields span degrees, studs/s and unitless multipliers, so no one absolute step fitted them all. The
+	rebuilt panel draws a real slider per field over its FIELD_LIMITS range (ListFields carries the
+	bounds and the file default), which makes the step-size problem the slider's, not this module's.
 
 	Captures every field's ORIGINAL value once, lazily, on first use -- same "the only backup that
 	exists, never written to disk" contract as HitboxTuning.lua's own header: there is no
@@ -72,7 +73,7 @@ local FIELD_DISPLAY_NAMES: { [string]: string } = {
 	SonicBoomSpeedThreshold = "Sonic Boom Threshold",
 }
 
--- Per-field sanity floor/ceiling -- prevents a fat-fingered/spammed AdjustField from driving e.g.
+-- Per-field sanity floor/ceiling -- prevents a fat-fingered SetField from driving e.g.
 -- MaxBankAngleDegrees past 90 or a threshold to zero/negative. Not a balance opinion, just a floor
 -- against a value that reads as broken -- same reasoning as HitboxTuning.lua's own CLAMP_MIN/MAX.
 local FIELD_LIMITS: { [string]: { Min: number, Max: number } } = {
@@ -106,8 +107,19 @@ local function ensureDefaultsCaptured(): ()
 	end
 end
 
+-- Carries the field's bounds and file default alongside its value, so the admin panel's tuning tab
+-- can draw a real slider over the real range and mark where the file's own value sits -- rather than
+-- the ±% nudge buttons it used to have, which could never say how far a field could go.
 local function toInfo(field: Types.FlightTuningFieldName): Types.FlightTuningInfo
-	return { Field = field, DisplayName = FIELD_DISPLAY_NAMES[field], Value = FlightConstants[field] }
+	local limits = FIELD_LIMITS[field]
+	return {
+		Field = field,
+		DisplayName = FIELD_DISPLAY_NAMES[field],
+		Value = FlightConstants[field],
+		Min = limits.Min,
+		Max = limits.Max,
+		Default = defaultsByField[field],
+	}
 end
 
 function FlightTuning.ListFields(): { Types.FlightTuningInfo }
@@ -119,25 +131,21 @@ function FlightTuning.ListFields(): { Types.FlightTuningInfo }
 	return result
 end
 
--- deltaFraction: e.g. 0.1 nudges the field UP by 10% of its current value, -0.1 nudges it DOWN by
--- 10%. Clamped to FIELD_LIMITS after applying. Returns nil for a field name outside FIELD_LIMITS
--- (the caller, DevMenuSystem.lua, already validates against a closed whitelist before calling this,
--- so that should never happen in practice -- this is defense in depth, not the primary gate).
-function FlightTuning.AdjustField(field: Types.FlightTuningFieldName, deltaFraction: number): Types.FlightTuningInfo?
+-- Writes one absolute value, clamped to the field's FIELD_LIMITS. Returns nil for a field outside the
+-- curated set or a non-finite value -- DevMenuSystem validates both first; this is defense in depth,
+-- and the NaN case matters in particular: a NaN survives math.clamp unchanged (it fails both of the
+-- comparisons a clamp is built from) and would permanently poison this SHARED FlightConstants[field]
+-- value that every flying client reads by reference.
+function FlightTuning.SetField(field: Types.FlightTuningFieldName, value: number): Types.FlightTuningInfo?
 	ensureDefaultsCaptured()
 	local limits = FIELD_LIMITS[field]
 	if not limits then
 		return nil
 	end
-	-- Defense in depth, same tier as the `limits` check above -- DevMenuSystem.handleAdjustFlightTuning
-	-- is the primary NaN gate, but a NaN here would otherwise survive math.clamp unchanged (NaN fails
-	-- both its < and > comparisons) and permanently poison this SHARED FlightConstants[field] value.
-	if deltaFraction ~= deltaFraction then
+	if value ~= value or value == math.huge or value == -math.huge then
 		return nil
 	end
-	local current = FlightConstants[field]
-	local updated = math.clamp(current * (1 + deltaFraction), limits.Min, limits.Max)
-	FlightConstants[field] = updated
+	FlightConstants[field] = math.clamp(value, limits.Min, limits.Max)
 	return toInfo(field)
 end
 

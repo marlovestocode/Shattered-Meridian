@@ -357,12 +357,12 @@ local CombatConstants = {
 	-- retuned) when BaseWalkSpeed above dropped -- this placeholder's own value isn't the thing
 	-- being retuned here, only the resulting default speed.
 	DefaultBonusWalkSpeed = 8,
-	-- The "can't just run away" factor: every unmitigated hit clips WalkSpeed to base * this
-	-- multiplier for HitSlowDuration. NOTHING APPLIES THIS TODAY -- the hit-slow tier lived in the
-	-- deleted Server/Combat/Movement.lua, and Server/Systems/RunSystem.lua's resolver has no
-	-- equivalent; combat reaches WalkSpeed only through Constants.Attributes.CombatBusyUntil, which
-	-- zeroes the run's charge rather than clipping speed. The tuned pair below is kept because the
-	-- reasoning it records is still the design intent, not because anything reads it. 0.6/0.3s (was ~14.4 studs/sec off a 24 base, barely slower than a brisk
+	-- The "can't just run away" factor: a stunned body walks at this fraction of its input for the whole
+	-- stun. APPLIED AGAIN SINCE 2026-09-30, client-side on the victim's own body (Client/FX/HitStop.
+	-- SlowVictimMovement, from CombatFeedbackClient), after two years of nothing reading it -- during which
+	-- a stunned player walked out of an 8-stud swing box inside one stun and every M1 string whiffed its
+	-- second hit. HitSlowDuration is NOT read: the slow lasts exactly the stun the server applied
+	-- (DamageConstants.HitstunFor), so the two cannot disagree. Kept for the reasoning below. 0.6/0.3s (was ~14.4 studs/sec off a 24 base, barely slower than a brisk
 	-- walk) let a hit target just hold their sprint key and disengage immediately. 0.25/0.5s (~6
 	-- studs/sec, a near-crawl for half a second) gives the attacker a real follow-up window without
 	-- fully rooting the target in place -- tuning, not design, per combat-philosophy.md's Tuning

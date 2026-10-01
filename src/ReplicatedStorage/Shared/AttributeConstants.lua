@@ -247,6 +247,21 @@ local AttributeConstants = {
 	-- GrabSystem.CanAttack itself -- that reads its own internal `holds` table directly, since it is
 	-- the authority this Attribute only mirrors.
 	Grabbing = "Grabbing",
+	-- Set true on the HOLDER'S Humanoid by GrabSystem for exactly the length of a committed throw's
+	-- ThrowAnimation (press to release), alongside RootControlLocked: the thrower is rooted for the clip.
+	-- RunSystem.isMovementLocked pins WalkSpeed to 0 off this one (RootControlLocked has never carried
+	-- that meaning -- see Grabbed above), and Client/Combat/GrabInputClient.lua stands the local
+	-- Humanoid's jump and AutoRotate down off it, since the client is the one simulating that body.
+	GrabThrowing = "GrabThrowing",
+	-- True on an attacker's Humanoid for as long as the HitboxEngine holds a LocksMovement move's lock --
+	-- from the start of its Active window through its recovery (HitboxEngine.setMovementLock sets it beside
+	-- RootControlLocked and clears it beside it). RunSystem.isMovementLocked pins WalkSpeed to 0 off this one,
+	-- and Client/Combat/SwingRootClient.lua stands the local Humanoid's jump down, since the client is the one
+	-- simulating that body. A separate Attribute for the reason Grabbed/GrabThrowing/Mounted are: RootControlLocked
+	-- is also set on a staggered or guard-broken body, an air-combo victim and a mounted player, and has
+	-- never meant "WalkSpeed is zero" -- so a move's "Locks movement" toggle, which only ever set that
+	-- one, parked parkour and the camera and left the body walking at committed pace.
+	SwingRooted = "SwingRooted",
 	-- Server os.clock() deadline until which this body's movement may legitimately include a knockback
 	-- launch. Written by Server/Combat/Damage/DamageSystem.lua on every launch it hands a player's client
 	-- (DamageConstants.Knockback.MovementAllowanceSeconds after the hit); read by
@@ -278,6 +293,31 @@ local AttributeConstants = {
 	-- On the VICTIM of a Slam: every contact until this time resolves Evaded (DefenseSystem pass 1). The
 	-- hard knockdown is intangible so a slam can never be followed by a free hit on a body lying down.
 	AirComboIntangibleUntil = "AirComboIntangibleUntil",
+	-- Domains (Server/Combat/Domain/DomainSystem.lua writes, Shared/Domain/DomainRules.lua reads -- that
+	-- module's header is the contract and lists every consumer). Server-written on each realm MEMBER's
+	-- Humanoid, replicated, and like the air combo's five above every deadline is in
+	-- workspace:GetServerTimeNow() time, so a member's own client can read its gates too.
+	--
+	-- The lease every rule below is read through: the governing realm's scheduled end. Nothing reads a
+	-- rule attribute without first checking this is still in the future, so a set DomainSystem failed to
+	-- clear lapses on its own when the realm was always going to end.
+	DomainUntil = "DomainUntil",
+	-- The governing realm's instance id (a string), for presentation: whose law this body is under.
+	DomainGovernor = "DomainGovernor",
+	-- Bitmask of DomainRules.FlagBits (seals, NoBlock/NoParry/NoEvade/NoParkour/Rooted). Absent = 0.
+	DomainFlags = "DomainFlags",
+	-- ",id,id," -- the moves this body may not throw. Absent = none.
+	DomainSealedMoves = "DomainSealedMoves",
+	-- The six scale rules, each a multiplier. Absent = 1 (no change).
+	DomainDamageDealt = "DomainDamageDealt",
+	DomainDamageTaken = "DomainDamageTaken",
+	DomainGuardDamageTaken = "DomainGuardDamageTaken",
+	DomainHitstunTaken = "DomainHitstunTaken",
+	DomainMoveSpeed = "DomainMoveSpeed",
+	DomainCooldown = "DomainCooldown",
+	-- On the realm's OWNER, not its members: this body's own realm is up until this time. The attack layer
+	-- refuses a second domain cast while it is -- one realm per caster.
+	DomainOwnedUntil = "DomainOwnedUntil",
 }
 
 return AttributeConstants

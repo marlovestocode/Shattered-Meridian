@@ -12,7 +12,8 @@
 	zero-velocity knockback or a zero-second hold reads as broken the first time it is tried.
 
 	A weapon stage carries neither: its launch and finish are the air combo's (AirComboSystem), so a
-	Default move shows only its two costs.
+	Default move shows only its two costs. A projectile move carries no grab (Validate refuses the pair),
+	so its GRAB group is hidden; its knockback pushes along the shot's flight.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -63,6 +64,17 @@ local function ImpactTab(scope: Scope, context: Fields.FormContext, visible: Use
 	local hasGrab = scope:Computed(function(use)
 		local move = use(context.Draft)
 		return move ~= nil and move.Grab ~= nil and not use(context.IsDefault)
+	end)
+	-- A projectile move cannot grab (MoveRegistryManager.Validate refuses the pair), so its GRAB group is
+	-- not offered at all; the Hitbox tab's move type drops any grab when a move becomes a projectile. The same
+	-- for a move that opens a realm (the Domain tab's toggle drops the grab).
+	local canGrab = scope:Computed(function(use)
+		local move = use(context.Draft)
+		return use(isCustom) and move ~= nil and move.Projectile == nil and move.Domain == nil
+	end)
+	local isCustomProjectile = scope:Computed(function(use)
+		local move = use(context.Draft)
+		return use(isCustom) and move ~= nil and move.Projectile ~= nil
 	end)
 
 	local children: { Instance } = {
@@ -158,12 +170,12 @@ local function ImpactTab(scope: Scope, context: Fields.FormContext, visible: Use
 			end,
 		}),
 
-		Fields.Heading(scope, "GRAB", 20, isCustom),
+		Fields.Heading(scope, "GRAB", 20, canGrab),
 		Fields.Toggle(scope, context, {
 			Label = "Grab instead of knocking away",
 			Hint = Copy.Hints.Grab,
 			LayoutOrder = 21,
-			Visible = isCustom,
+			Visible = canGrab,
 			Get = function(move)
 				return move.Grab ~= nil
 			end,
@@ -177,6 +189,9 @@ local function ImpactTab(scope: Scope, context: Fields.FormContext, visible: Use
 					Mode = defaults.Mode :: any,
 					VictimAnimation = "",
 					AttackerAnimation = "",
+					ThrowAnimation = "",
+					VictimThrowAnimation = "",
+					ThrowReleaseAt = defaults.ThrowReleaseAt,
 					HoldSeconds = defaults.HoldSeconds,
 					ThrowUpVelocity = defaults.ThrowUpVelocity,
 					ThrowHorizontalVelocity = defaults.ThrowHorizontalVelocity,
@@ -233,12 +248,68 @@ local function ImpactTab(scope: Scope, context: Fields.FormContext, visible: Use
 				end
 			end,
 		}),
+		Fields.Text(scope, context, {
+			Label = "Your throw animation id",
+			Placeholder = "rbxassetid://... or a bare id",
+			MaxLength = LIMITS.AnimationIdLength,
+			Hint = Copy.Hints.GrabThrowAnimation,
+			LayoutOrder = 31,
+			Visible = hasGrab,
+			Get = function(move)
+				return if move.Grab then move.Grab.ThrowAnimation or "" else ""
+			end,
+			Set = function(move, value)
+				if move.Grab then
+					move.Grab.ThrowAnimation = value
+				end
+			end,
+		}),
+		Fields.Number(scope, context, {
+			Label = "Release at",
+			Unit = "of the throw clip",
+			Range = GrabConstants.Limits.ThrowReleaseAt,
+			Steps = { 0.01, 0.1 },
+			Decimals = 2,
+			Hint = Copy.Hints.GrabThrowReleaseAt,
+			LayoutOrder = 32,
+			Visible = hasGrab,
+			Get = function(move: Move)
+				return if move.Grab then move.Grab.ThrowReleaseAt or GrabConstants.Defaults.ThrowReleaseAt else 1
+			end,
+			Set = function(move: Move, value)
+				if move.Grab then
+					move.Grab.ThrowReleaseAt = value
+				end
+			end,
+		}),
+		Fields.Text(scope, context, {
+			Label = "Thrown target's animation id",
+			Placeholder = "rbxassetid://... or a bare id",
+			MaxLength = LIMITS.AnimationIdLength,
+			Hint = Copy.Hints.GrabVictimThrowAnimation,
+			LayoutOrder = 33,
+			Visible = hasGrab,
+			Get = function(move)
+				return if move.Grab then move.Grab.VictimThrowAnimation or "" else ""
+			end,
+			Set = function(move, value)
+				if move.Grab then
+					move.Grab.VictimThrowAnimation = value
+				end
+			end,
+		}),
 
 		Fields.Prose(
 			scope,
 			"A weapon stage has no knockback or grab of its own: the string's launch and finish belong to the air combo.",
 			40,
 			context.IsDefault
+		),
+		Fields.Prose(
+			scope,
+			"A projectile's knockback pushes along the shot's flight, not away from the thrower. It cannot grab. A reflected shot's damage and posture damage are scaled by its reflected damage (Hitbox tab, PARRY).",
+			41,
+			isCustomProjectile
 		),
 	}
 

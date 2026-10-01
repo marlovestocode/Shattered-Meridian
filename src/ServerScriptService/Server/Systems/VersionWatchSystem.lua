@@ -24,8 +24,8 @@
 	Does not own: actually restarting anything -- DevMenuSystem.handleInstantRestartServer/
 	handleShutdownServer are the only things that ever kick a player, and only in response to an
 	admin's own button press. This module is read-only/advisory: it never kicks anyone and never
-	announces anything, it purely answers "is a newer version out there" for the Admin tab's passive
-	banner (DevMenuSystem.handleGetServerVersionInfo).
+	announces anything, it purely answers "is a newer version out there" for the admin panel's Server
+	tab (DevMenuSystem's GetOverview, LatestPlaceVersion).
 ]]
 
 local DataStoreService = game:GetService("DataStoreService")

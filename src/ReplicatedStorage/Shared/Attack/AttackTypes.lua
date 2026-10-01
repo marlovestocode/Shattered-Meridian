@@ -30,6 +30,8 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
+local ProjectileMotion = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileMotion)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local AttackTypes = {}
@@ -76,6 +78,30 @@ export type AttackRequest = {
 -- Mirrors the deleted Types.AttackStartedPayload almost field for field. That shape was already
 -- right for its one job -- letting the client's animation/FX layer sync to what the server actually
 -- scheduled -- and nothing about the rebuilt engine changes what that job needs.
+-- A box, in the space of the part it is anchored on: Size, centred at Offset. What HitPrediction.Contains tests.
+export type ContactBox = {
+	Size: Vector3,
+	Offset: CFrame,
+}
+
+-- The swing's volume for the attacker's own predicted hit cue (Client/Combat/HitPrediction), described the
+-- way the engine builds it: a shape and its dimensions, composed as attachment part * Offset, with the
+-- attachment resolved on the attacker's own rig through the shared HitboxAnchor chain. Any shape and any
+-- anchor -- the client tests it with the engine's own HitboxGeometry.
+--
+-- Sent only when the client can reproduce the size exactly: a FLAT-scaled move (no combo, power or charge
+-- growth -- every projected move today) that is not a projectile. Anything else sends nil and the hit waits
+-- for the server, as every hit used to. SizeFromAttachmentPart is the engine's Box-only rule: the resolved
+-- part's own Size, times SizeMultiplier, stands in for Width/Height/Length.
+export type ContactVolume = {
+	Shape: HitboxTypes.ShapeKind,
+	Dimensions: HitboxTypes.Dimensions,
+	Offset: CFrame,
+	AttachmentPart: HitboxTypes.AttachmentPoint,
+	SizeFromAttachmentPart: boolean?,
+	SizeMultiplier: number?,
+}
+
 export type AttackStartedPayload = {
 	MoveId: string,
 	-- Echoed back so a client that fired several presses in flight can tell which one this answers.
@@ -103,6 +129,8 @@ export type AttackStartedPayload = {
 	-- length at THIS speed (AttackCatalog.Get), so playing it at any other speed puts the hit frame
 	-- somewhere the hitbox is not. The weapon's own WeaponSpeed; 1 for anything without one.
 	PlaybackSpeed: number,
+	-- Presentation only -- see ContactVolume. Never trusted for a hit: the server's engine decides every one.
+	ContactVolume: ContactVolume?,
 }
 
 -- Server -> owner, on every change to which weapon their strings come from. Its own event rather
@@ -113,9 +141,10 @@ export type WeaponChangedPayload = {
 
 -- Why the server cut a swing short -- see AttackConstants.Network.RemoteNames.Cancelled. "Feint" is the
 -- attacker's own cancel (the string resets). "Parried" is sent after a parry, and only to say where the
--- string went BACK to (AttackRequestSystem.KeepChainThroughParry). The swing itself was already cut through
--- Combat_Feedback.
-export type AttackCancelReason = "Feint" | "Parried"
+-- string went BACK to (AttackRequestSystem.KeepChainThroughParry). "Traded" is the same for a trade -- two
+-- swings that met (AttackRequestSystem.KeepChainThroughTrade) -- and its RecoverySeconds is when either side
+-- may swing again. The swing itself was already cut through Combat_Feedback in both.
+export type AttackCancelReason = "Feint" | "Parried" | "Traded"
 
 -- Server -> the attacker alone, on Attack_Cancelled. Carries the MoveId so a client whose own
 -- prediction has already moved on to a different swing can ignore a cancel that is not about it.
@@ -129,6 +158,37 @@ export type AttackCancelledPayload = {
 	-- StringKind nil means no string is live (the parried swing was a fresh string's first hit).
 	StringKind: AttackKind?,
 	StringStage: number?,
+}
+
+-- One change to one shot in flight, server -> every client on Attack_Projectile -- the wire form of
+-- Server/Combat/HitboxEngine/ProjectileSimulator.ProjectileEvent (see its header for what each Kind means).
+-- Presentation only: nothing a client does with it reaches the server, and every contact is still the
+-- engine's answer alone.
+export type ProjectileEventKind = "Launch" | "Update" | "End"
+export type ProjectileWireEvent = {
+	Kind: ProjectileEventKind,
+	Id: number,
+	GroupId: number,
+	Position: Vector3,
+	Velocity: Vector3,
+	-- Seconds the event is older than SentAt (it happened earlier in the frame that sent it).
+	Lead: number,
+	Owner: Model?,
+	MoveId: string?,
+	Radius: number?,
+	LifetimeSeconds: number?,
+	Motion: ProjectileMotion.Motion?,
+	Target: Model?,
+	-- End: why the shot ended ("World", "Range", "Expired", "Hit", ...). Update: "Bounce" for a bounce off
+	-- the world, nil otherwise (ProjectileSimulator's ProjectileEvent) -- presentation only.
+	Reason: string?,
+}
+
+-- One engine frame's worth of shot changes. SentAt is Workspace:GetServerTimeNow() at the send, so a
+-- client can fly each shot forward by exactly how old its event is by the time it arrives.
+export type ProjectileBatchPayload = {
+	SentAt: number,
+	Events: { ProjectileWireEvent },
 }
 
 return AttackTypes

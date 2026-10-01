@@ -15,11 +15,10 @@
 	replicate from the owner alone, but it would REPLACE the weapon's own block clip rather than strain it,
 	and there is no such asset; the day one exists this module is still the tremble on top of it.
 
-	COMPOSES, NEVER ACCUMULATES. A joint an animation drives gets its Transform rewritten every frame, so
-	"animated pose * offset" is stable. A joint NO clip drives keeps whatever was last written -- and
-	multiplying onto that would ratchet the offset every frame. So each write remembers the base it composed
-	onto and the result it wrote; if the joint still holds our own result next frame, nothing rewrote it and
-	the remembered base is reused. On release the base is written back, so the joint is left as it was found.
+	COMPOSES, NEVER ACCUMULATES -- through Client/FX/TransformLayer.lua, which owns the base-and-write
+	bookkeeping for every pose layer. This module used to hand-roll it with an exact CFrame comparison that a
+	Transform read-back never satisfies, so on an undriven joint the strain compounded every frame; too small
+	to notice here, it was HitFlinchPose's copy of the same code that made a hit body spin (2026-09-30).
 
 	ZERO IDLE COST. The RenderStep binding exists only while at least one body is tagged or still blending
 	out; with no cracking guard anywhere this module costs one tag subscription and nothing per frame.
@@ -39,6 +38,8 @@ local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstan
 local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Trove = require(ReplicatedStorage.Shared.Trove)
+
+local TransformLayer = require(script.Parent.TransformLayer)
 
 local logger = Logger.scope("GuardStrainPose")
 
@@ -67,19 +68,12 @@ local NOISE_SEEDS: { [string]: number } = {
 	["Left Shoulder"] = 66.7,
 }
 
-type JointState = {
-	Motor: Motor6D,
-	-- What the joint held before we composed onto it, and what we wrote. See COMPOSES, NEVER ACCUMULATES.
-	Base: CFrame,
-	Written: CFrame?,
-}
-
 type Entry = {
 	Humanoid: Humanoid,
 	Tagged: boolean,
 	Weight: number,
 	Seed: number,
-	Joints: { JointState }?,
+	Joints: { Motor6D }?,
 }
 
 local entries: { [Humanoid]: Entry } = {}
@@ -128,33 +122,30 @@ end
 
 -- Joints ---------------------------------------------------------------------------------------------
 
-local function resolveJoints(humanoid: Humanoid): { JointState }?
+local function resolveJoints(humanoid: Humanoid): { Motor6D }?
 	local model = humanoid.Parent
 	if model == nil then
 		return nil
 	end
-	local joints: { JointState } = {}
+	local joints: { Motor6D } = {}
 	for _, spec in JOINTS do
 		local holder = model:FindFirstChild(spec.Holder)
 		local motor = if holder then holder:FindFirstChild(spec.Name) else nil
 		if motor and motor:IsA("Motor6D") then
-			table.insert(joints, { Motor = motor, Base = motor.Transform, Written = nil })
+			table.insert(joints, motor)
 		end
 	end
 	return if #joints > 0 then joints else nil
 end
 
--- Puts every joint back to the base it was composed onto -- only where the joint still holds our own
--- write. A joint an animation rewrote since has nothing of ours left on it to take off.
+-- Takes this layer off every joint -- see TransformLayer.Restore.
 local function restore(entry: Entry): ()
 	local joints = entry.Joints
 	if not joints then
 		return
 	end
-	for _, joint in joints do
-		if joint.Written and joint.Motor.Parent ~= nil and joint.Motor.Transform == joint.Written then
-			joint.Motor.Transform = joint.Base
-		end
+	for _, motor in joints do
+		TransformLayer.Restore(motor)
 	end
 	entry.Joints = nil
 end
@@ -168,19 +159,8 @@ local function applyPose(entry: Entry, t: number): ()
 			return
 		end
 	end
-	for _, joint in joints do
-		local motor = joint.Motor
-		if motor.Parent == nil then
-			continue
-		end
-		local current = motor.Transform
-		if joint.Written == nil or current ~= joint.Written then
-			-- Something (the animation step) rewrote the joint since our last write: that is the new base.
-			joint.Base = current
-		end
-		local written = joint.Base * GuardStrainPose.JointOffset(motor.Name, t, entry.Weight, entry.Seed)
-		motor.Transform = written
-		joint.Written = written
+	for _, motor in joints do
+		TransformLayer.Compose(motor, GuardStrainPose.JointOffset(motor.Name, t, entry.Weight, entry.Seed))
 	end
 end
 

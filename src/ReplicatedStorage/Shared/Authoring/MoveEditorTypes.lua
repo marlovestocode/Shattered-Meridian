@@ -92,6 +92,12 @@ export type MoveEntry = {
 	SavedFingerprint: string?,
 	-- Default moves only: an override is live, so the move differs from its CombatConstants self.
 	Overridden: boolean,
+	-- A file under Server/Combat/AuthoredMoves ships this move (or, for a Default move, its retune) in the
+	-- game's source -- see Server/Combat/AuthoredMoveLibrary.lua.
+	Shipped: boolean,
+	-- Default weapon moves only: the stage of the string (Basic, Heavy, Finisher, Launcher, Air,
+	-- AirFinisher) -- what bulk edit filters a weapon group by. nil for custom and standalone moves.
+	Stage: string?,
 	-- nil when the catalogue could not resolve the move (which is itself worth showing).
 	Effective: EffectiveTiming?,
 	-- Frame data and balance numbers. nil exactly when Effective is.
@@ -124,6 +130,61 @@ export type DiscardResult = {
 	Success: boolean,
 	Reason: string?,
 	Entry: MoveEntry?,
+}
+
+-- Bulk edit's request: which fields to multiply, by how much (1 = unchanged; absent = untouched).
+export type BulkScaleFactors = {
+	WindupSeconds: number?,
+	ActiveSeconds: number?,
+	RecoverySeconds: number?,
+	Cooldown: number?,
+	Damage: number?,
+	PostureDamage: number?,
+}
+
+export type BulkScaleRequest = {
+	Group: string,
+	-- A Default group's stage; ignored for a custom group. nil = every stage.
+	Stage: string?,
+	Scale: BulkScaleFactors,
+	-- true persists each scaled move through the Save path; false leaves them live and unsaved.
+	Save: boolean,
+}
+
+export type BulkScaleResult = {
+	Success: boolean,
+	Reason: string?,
+	-- Every scaled move's new entry.
+	Entries: { MoveEntry }?,
+}
+
+-- One saved version as the Tools tab lists it. The stored record itself stays on the server.
+export type HistoryVersion = {
+	Version: number,
+	-- os.time() of the save.
+	SavedAt: number,
+	AdminName: string,
+	-- The authored fields that differ from the version before it ("WindupSeconds 0.30->0.26, ...").
+	Summary: string,
+}
+
+export type HistoryResult = {
+	Success: boolean,
+	Reason: string?,
+	-- Newest first. Empty for a move that was never saved since history began.
+	Versions: { HistoryVersion }?,
+}
+
+-- The Studio source remotes' answer.
+export type SourceResult = {
+	Success: boolean,
+	Reason: string?,
+	-- The file written or removed, repo-relative.
+	Path: string?,
+	-- The move's entry afterwards (Write/Remove).
+	Entry: MoveEntry?,
+	-- The generated module text (Export).
+	Source: string?,
 }
 
 export type ActionResult = {

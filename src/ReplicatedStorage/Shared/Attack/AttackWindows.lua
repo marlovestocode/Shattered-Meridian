@@ -65,6 +65,9 @@ type ClipTiming = {
 	Length: number?,
 	-- Only the usable ones (see isUsableTime), so a reader never has to re-check a time it is handed.
 	Markers: { [string]: number },
+	-- Where the clip's strike appears to land, read off its own keyframe motion (EstimateStrikeTime), or nil.
+	-- A GUESS, used only where the authored timeline cannot fit the clip at all -- see AttackCatalog step 1c.
+	Strike: number?,
 }
 
 -- Successfully read clips, keyed by animation id. Also holds `false` for a clip whose extraction
@@ -122,6 +125,76 @@ function AttackWindows.MarkerNameFor(moveId: string): string?
 	return "AttackM" .. stage
 end
 
+-- The parts whose motion can be a strike: the R6 limbs and the torso that throws them (the game is
+-- R6-locked). A head nod or a root drift is never the blow.
+local STRIKE_PARTS: { [string]: boolean } = {
+	["Right Arm"] = true,
+	["Left Arm"] = true,
+	["Right Leg"] = true,
+	["Left Leg"] = true,
+	Torso = true,
+}
+
+-- Below this angular speed (radians per second) nothing in the clip is fast enough to call a strike -- a
+-- clip that only sways has no impact frame to find.
+local MIN_STRIKE_RADIANS_PER_SECOND = 4
+-- A strike in the first sliver of a clip is a snap into the start pose, not a blow.
+local MIN_STRIKE_FRACTION = 0.1
+
+-- WHERE THE CLIP'S BLOW LANDS, estimated from its keyframes when nobody marked it (2026-09-30). The
+-- strike of a swing is the END of its fastest limb movement: the arm or leg covers the most angle in
+-- the least time on the way in, and the pose that movement arrives at is the contact. So: for every
+-- limb, every pair of consecutive keyed poses, angle / time; the fastest pair's later keyframe is the
+-- strike.
+--
+-- A HEURISTIC, AND LABELLED AS ONE EVERYWHERE IT SURFACES. A clip whose wind-back is faster than its
+-- blow will fool it. It is therefore only ever used where the authored timeline is already known to be
+-- wrong (the hitbox would open after the clip ended -- AttackCatalog step 1c), never to override an
+-- authored windup that fits, and a Hit marker always outranks it. The boot log prints every estimate.
+function AttackWindows.EstimateStrikeTime(sequence: KeyframeSequence, length: number?): number?
+	local keyframes: { Keyframe } = {}
+	for _, child in sequence:GetChildren() do
+		if child:IsA("Keyframe") and isUsableTime(child.Time) then
+			table.insert(keyframes, child)
+		end
+	end
+	table.sort(keyframes, function(a: Keyframe, b: Keyframe): boolean
+		return a.Time < b.Time
+	end)
+
+	local lastPose: { [string]: { Time: number, CFrame: CFrame } } = {}
+	local bestSpeed = MIN_STRIKE_RADIANS_PER_SECOND
+	local bestTime: number? = nil
+	for _, keyframe in keyframes do
+		for _, descendant in keyframe:GetDescendants() do
+			if not descendant:IsA("Pose") or not STRIKE_PARTS[descendant.Name] or descendant.Weight <= 0 then
+				continue
+			end
+			local previous = lastPose[descendant.Name]
+			if previous then
+				local elapsed = keyframe.Time - previous.Time
+				if elapsed > 1e-4 then
+					local _, angle = (previous.CFrame:Inverse() * descendant.CFrame):ToAxisAngle()
+					local speed = math.abs(angle) / elapsed
+					if speed > bestSpeed then
+						bestSpeed = speed
+						bestTime = keyframe.Time
+					end
+				end
+			end
+			lastPose[descendant.Name] = { Time = keyframe.Time, CFrame = descendant.CFrame }
+		end
+	end
+
+	if bestTime == nil then
+		return nil
+	end
+	if length and length > 0 and bestTime < length * MIN_STRIKE_FRACTION then
+		return nil
+	end
+	return bestTime
+end
+
 local function readSequence(sequence: KeyframeSequence): ClipTiming
 	local markers: { [string]: number } = {}
 	for name, markerTime in KeyframeMarkers.TimesOn(sequence) do
@@ -129,7 +202,12 @@ local function readSequence(sequence: KeyframeSequence): ClipTiming
 			markers[name] = markerTime
 		end
 	end
-	return { Length = AttackWindows.ExtractClipLength(sequence), Markers = markers }
+	local length = AttackWindows.ExtractClipLength(sequence)
+	return {
+		Length = length,
+		Markers = markers,
+		Strike = AttackWindows.EstimateStrikeTime(sequence, length),
+	}
 end
 
 -- Fetches and caches one clip's timing. YIELDS (GetKeyframeSequenceAsync is a web call). Safe to call
@@ -238,6 +316,16 @@ function AttackWindows.WindupOverride(moveId: string, animationId: string): numb
 	return markerTime
 end
 
+-- The cached ESTIMATED strike of `animationId`'s clip in CLIP time (EstimateStrikeTime), or nil. NEVER
+-- YIELDS. A guess -- see EstimateStrikeTime for the only place it is allowed to decide anything.
+function AttackWindows.EstimatedStrike(animationId: string): number?
+	if not AttackConstants.Windows.Enabled then
+		return nil
+	end
+	local timing = cachedTiming(animationId)
+	return if timing then timing.Strike else nil
+end
+
 -- The cached length of `animationId`'s clip in CLIP time (seconds at playback speed 1), or nil. NEVER
 -- YIELDS. nil while AttackConstants.Windows.SyncToClipLength is false, for a blank id, or for a clip
 -- that has not been read (or had no keyframes) -- all of which mean "keep the authored timeline."
@@ -322,6 +410,9 @@ function AttackWindows.ValidateAll(entries: { { MoveId: string, AnimationId: str
 				clipSeconds = record.ClipLength,
 				expected = AttackConstants.Windows.HitMarkerName,
 				foundMarkers = markerNamesOf(timing),
+				-- Only acted on if the authored windup cannot fit this clip (AttackCatalog step 1c). Check it
+				-- against the clip in the Animation Editor; a Hit marker there replaces the guess.
+				estimatedStrikeSeconds = timing.Strike,
 			})
 		end
 	end
