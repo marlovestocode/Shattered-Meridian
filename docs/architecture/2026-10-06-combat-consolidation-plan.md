@@ -150,6 +150,16 @@ parry that missed because the window had closed or the realm forbade it.
 
 ### Phase 5 — Tests for the brief's matrix
 
+**Status: done (2026-10-06).** The death, corpse, refused-press and duplicate-press cases landed with Phase 1,
+and the precedence table with 2a. Added here:
+- hitch: a short Active window inside one 0.2s frame lands exactly once, and a stall past `MaxFrameSeconds`
+  never fast-forwards a swing;
+- fresh life: a new body after a death mid-string starts with no stun, buffered press or string, and its
+  presses throw.
+
+A dead grabber was already covered by `GrabSystem`'s own release-on-death sweep. All of Phases 1-5 are still
+unrun against the TestEZ suite, which needs Studio.
+
 Coverage is already broad: 53 combat specs, with parry/block/clash/projectile/realm/grab all present.
 Add only what is missing:
 - the Phase 1 cases: death mid-swing, corpse, dead grabber, throw credit, refused press, duplicate press;

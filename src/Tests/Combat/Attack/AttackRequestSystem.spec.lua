@@ -311,6 +311,29 @@ return function()
 		end)
 	end)
 
+	describe("AttackRequestSystem -- a fresh life", function()
+		-- A respawn is a new character Model: none of the previous life's stun, buffered press or string carries.
+		it("starts the next body clean after a death mid-string", function()
+			local base = os.clock()
+			local first = makeDummy("Life1", Vector3.new(0, 5, 0))
+			AttackRequestSystem.Throw(first.Model, { Kind = "Basic" }, false, base)
+			AttackRequestSystem.Press(first.Model, { Kind = "Basic", PressId = 1 }, false, base + 0.01)
+			DamageSystem.ExtendHitstun(first.Model, base + 1, base + 0.01)
+			first.Humanoid.Health = 0
+			first.Model:Destroy()
+			step(base + 0.02)
+
+			local second = makeDummy("Life2", Vector3.new(0, 5, 0))
+			expect(DamageSystem.CanAttack(second.Model, base + 0.03)).to.equal(true)
+			expect(AttackRequestSystem.HasBufferedPress(second.Model, base + 0.03)).to.equal(false)
+			expect(SwingSequencer.GetStageIndex(second.Model, "Basic", base + 0.03)).to.equal(0)
+			-- The new life's press ids are its own: a press the client numbers on from the old life still throws.
+			expect((AttackRequestSystem.Press(second.Model, { Kind = "Basic", PressId = 2 }, false, base + 0.03))).to.equal(
+				true
+			)
+		end)
+	end)
+
 	describe("AttackRequestSystem -- the press verdict", function()
 		-- A press carrying an id that will not throw is answered (AttackRequestSystem.OnPressRefused, and a
 		-- "Refused" Attack_Cancelled for a player), so the client cuts its prediction instead of timing out.

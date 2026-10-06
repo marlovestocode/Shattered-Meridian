@@ -690,6 +690,44 @@ return function()
 		end)
 	end)
 
+	describe("HitboxEngine -- a server hitch", function()
+		-- A frame far longer than one sample (HitboxEngineConstants' header): the substeps must still make a short
+		-- Active window real -- one hit, not none and not two.
+		it("lands a short Active window inside one long frame, exactly once", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			makeDummy("Target", Vector3.new(0, 5, -4))
+			local hits, disconnect = captureHits()
+
+			local base = os.clock()
+			HitboxEngine.RequestAttack(
+				attacker.Id,
+				makeDefinition({ WindupSeconds = 0.1, ActiveSeconds = 0.05, RecoverySeconds = 0.02 }),
+				1,
+				0
+			)
+			HitboxEngine.Step(0.2, base + 0.2)
+			disconnect()
+
+			expect(#hits).to.equal(1)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Idle")
+		end)
+
+		it("does not fast-forward past the frame cap", function()
+			-- A stall longer than MaxFrameSeconds is clamped: the swing advances at most that much this frame.
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			local cap = HitboxEngineConstants.MaxFrameSeconds
+			HitboxEngine.RequestAttack(
+				attacker.Id,
+				makeDefinition({ WindupSeconds = 0, ActiveSeconds = cap * 4, RecoverySeconds = 0 }),
+				1,
+				0
+			)
+			HitboxEngine.Step(cap * 10, base + cap)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Active")
+		end)
+	end)
+
 	describe("HitboxEngine -- lifecycle housekeeping", function()
 		it("retires a combatant whose character has been destroyed", function()
 			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))

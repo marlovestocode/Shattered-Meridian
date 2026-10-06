@@ -116,6 +116,17 @@ ground body follows the air combo's held-body rule (`DefenseConstants.StunParry`
 the guard does nothing, an evade is refused, a timed parry counts and ends the stun (`DamageSystem.endHitstunOf`).
 `LinkMarginSeconds` must stay above `Parry.RewindMaxSeconds` -- the rewind hold delays the hit that extends the stun.
 
+**Seams added by the 2026-10-06 consolidation** (`docs/architecture/2026-10-06-combat-consolidation-plan.md`):
+- Damage that is not a swing or a shot goes through `DamageSystem.ApplyImpact`, never a bare `TakeDamage`. That keeps
+  kill credit, engagement, realm scaling and feedback.
+- "Where did this contact come from" is `HitboxTypes.SourceOf(report)` / `IsShot`. Never infer it from `Report.Projectile`.
+- A rule that turns a guard off is a `ResolveInput.GuardDisabled` cause. Never patch a result after `OutcomeResolver.Resolve`.
+- Post-pricing multipliers live in `DamageResolver.ApplyScales`. Add a stage there, in order.
+- Attack presses carry `PressId`. A press that won't throw is answered: `AttackRequestSystem.OnPressRefused`, plus a
+  "Refused" `Attack_Cancelled`.
+- `Server/Combat/CombatTrace.lua` logs each step to the Live Console (search "CombatTrace"). Read it before guessing
+  why a hit resolved the way it did.
+
 `TrainingBotSystem` (`Server/Combat/TrainingBot/`, the AI sparring partner) is the same sibling shape
 from the other direction: it only ever acts through the public player entry points
 (`AttackRequestSystem.Throw/Feint`, `DefenseSystem.SetBlocking/BeginEvade`) and reads through queries
