@@ -248,7 +248,7 @@ function UI.Mount(): UIHandles
 
 	-- THE UI MODE, DERIVED FROM TWO FACTS THAT ALREADY EXIST. Nothing sets it -- see Shell/Chrome.lua
 	-- on why a mode a screen can assert is a mode that eventually gets stuck on. The modal half comes
-	-- through the Constants.Attributes.UiModalOpen seam that combat input already reads, rather than
+	-- through the AttributeConstants.UiModalOpen seam that combat input already reads, rather than
 	-- through a second count of this file's own.
 	local chrome = Chrome.New(scope, {
 		ModalOpen = Chrome.ObserveModalGate(scope),

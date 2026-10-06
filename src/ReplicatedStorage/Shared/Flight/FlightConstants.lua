@@ -20,7 +20,7 @@
 	without editing the game's central constants table is the concrete form of "this is a module."
 
 	Does not own: whether flight is currently active (the Flying Humanoid Attribute,
-	Constants.Attributes.Flying) or Collide-mode's own toggle (FlyCollide) -- both cross-system
+	AttributeConstants.Flying) or Collide-mode's own toggle (FlyCollide) -- both cross-system
 	Attribute names stay in Shared/Constants.lua's Attributes registry since other systems key off
 	them by name; this file owns only the numbers that describe HOW flight moves and sounds once it
 	is on.

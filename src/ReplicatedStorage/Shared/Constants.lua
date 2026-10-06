@@ -28,14 +28,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 -- BugReport) now lives in its own module and carries that require itself. What is left here is
 -- plain data and re-exports.
 
-local SoundTypes = require(ReplicatedStorage.Shared.SoundTypes)
-
 local Constants = {}
 
--- The sound shapes moved to a leaf, Shared/SoundTypes.lua, so a constants module can annotate a sound table
--- without requiring this hub. Re-exported for existing callers; new code requires SoundTypes directly.
-export type SoundDefinition = SoundTypes.SoundDefinition
-export type LoopSoundDefinition = SoundTypes.LoopSoundDefinition
+-- The sound shapes live in Shared/SoundTypes.lua (2026-10-06); require it for SoundDefinition/LoopSoundDefinition.
 
 -- Studio-only diagnostics config -- lifted out to Shared/DebugConstants.lua, which carries the
 -- Logger production-safety contract and the note on why it stays in Shared/ rather than following
@@ -127,11 +122,8 @@ Constants.Network = {
 	WaitForChildTimeoutSeconds = 10,
 }
 
--- Humanoid/Player Attribute names shared across systems -- lifted out to
--- Shared/AttributeConstants.lua, which carries the per-name contracts. Re-exported here so every
--- existing Constants.Attributes.X call site keeps working; new code should require that module
--- directly. See its header, and this file's own header above, for why sections leave.
-Constants.Attributes = require(ReplicatedStorage.Shared.AttributeConstants)
+-- AttributeConstants was a re-export of Shared/AttributeConstants.lua; every caller now requires that leaf
+-- directly (2026-10-06), so the re-export is gone.
 
 -- Default keybinds for both devices -- lifted out to Shared/Input/KeybindConstants.lua, which
 -- carries the rationale (chiefly that these are DEFAULTS, cloned by KeybindManager at boot and

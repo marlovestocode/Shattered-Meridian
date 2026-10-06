@@ -85,7 +85,7 @@ return function()
 
 	describe("modal ordering inside the band", function()
 		-- WHY A COUNTER AT ALL. Two modals open at once is documented behaviour, not a hypothetical --
-		-- Constants.Attributes.UiModalOpen's own comment cites the Move Editor over the character
+		-- AttributeConstants.UiModalOpen's own comment cites the Move Editor over the character
 		-- menu. If every modal took the bare Layers.Modal they would z-fight, and the winner would be
 		-- PlayerGui insertion order: for the five Lazy-deferred screens that is FIRST-OPEN order, so
 		-- which panel covered which would vary between sessions depending on what the player happened

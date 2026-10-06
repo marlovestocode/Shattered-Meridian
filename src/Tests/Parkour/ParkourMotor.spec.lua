@@ -21,7 +21,7 @@ local StarterPlayer = game:GetService("StarterPlayer")
 local Workspace = game:GetService("Workspace")
 
 local ParkourMotor = require(StarterPlayer.StarterPlayerScripts.Client.Parkour.ParkourMotor)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 
 local ATTACHMENT_NAME = "ParkourAttachment"
 local VELOCITY_DRIVE_NAME = "ParkourVelocityDrive"
@@ -320,7 +320,7 @@ return function()
 			-- RootControlLocked is set by CombatSystem while a ragdoll or an air-combo hold owns the
 			-- character; writing velocity underneath either is the exact fight this framework avoids.
 			local rig = makeRig()
-			rig.Humanoid:SetAttribute(Constants.Attributes.RootControlLocked, true)
+			rig.Humanoid:SetAttribute(AttributeConstants.RootControlLocked, true)
 			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
 
 			local command = ParkourMotor.BeginFrame()
@@ -342,7 +342,7 @@ return function()
 			ParkourMotor.Apply()
 			expect(rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME)).never.to.equal(nil)
 
-			rig.Humanoid:SetAttribute(Constants.Attributes.RootControlLocked, true)
+			rig.Humanoid:SetAttribute(AttributeConstants.RootControlLocked, true)
 			command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
 			expect(ParkourMotor.Apply()).to.equal(false)
@@ -353,7 +353,7 @@ return function()
 
 		it("refuses an impulse while the server holds the body", function()
 			local rig = makeRig()
-			rig.Humanoid:SetAttribute(Constants.Attributes.RootControlLocked, true)
+			rig.Humanoid:SetAttribute(AttributeConstants.RootControlLocked, true)
 			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
 
 			expect(ParkourMotor.ApplyImpulse(Vector3.new(0, 50, 0))).to.equal(false)
@@ -541,7 +541,7 @@ return function()
 			command.Mode = "Velocity"
 			command.Velocity = Vector3.new(0, 0, 30)
 			ParkourMotor.Apply()
-			rig.Humanoid:SetAttribute(Constants.Attributes.RootControlLocked, true)
+			rig.Humanoid:SetAttribute(AttributeConstants.RootControlLocked, true)
 
 			expect(ParkourMotor.ApplyExternalImpulse(Vector3.new(40, 0, 0))).to.equal(false)
 			expect(ParkourMotor.ConsumeInterrupt()).to.equal(nil)

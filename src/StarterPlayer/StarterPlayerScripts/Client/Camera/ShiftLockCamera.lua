@@ -117,7 +117,7 @@
 	into the parkour state registry's load chain (Client/Camera is not mounted in test.project.json, so
 	Tests/Parkour/StateRegistry.spec would fail outright). Reading it costs the same cached-boolean
 	watch this module already runs for Flying and RootControlLocked, and adds no dependency in either
-	direction -- see Constants.Attributes.ParkourFacingOwned's own note.
+	direction -- see AttributeConstants.ParkourFacingOwned's own note.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -126,6 +126,7 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -213,7 +214,7 @@ local inputSuspended = false
 local suspendedBy: { [string]: boolean } = {}
 
 -- Mirrors this character's own Humanoid "ParkourFacingOwned" Attribute -- see this file's header,
--- "Yaw suspension" section, and Constants.Attributes.ParkourFacingOwned's own note. Same cached-local
+-- "Yaw suspension" section, and AttributeConstants.ParkourFacingOwned's own note. Same cached-local
 -- + GetAttributeChangedSignal shape as rootControlLocked/flying above, and cached for the same reason:
 -- onRenderStep reads it every frame and a GetAttribute call there would not be free. Deliberately
 -- separate from `inputSuspended` above, which also releases the mouse -- right for the emote wheel,
@@ -223,7 +224,7 @@ local parkourFacingOwned = false
 
 -- Mirrors the client-written "CombatFacingOwned" Attribute: Client/Combat/SwingTracking.lua is turning (or
 -- holding) the body toward a target for a swing's windup and hit window. Exactly the ParkourFacingOwned
--- carve-out above, for a second owner -- see Constants.Attributes.CombatFacingOwned.
+-- carve-out above, for a second owner -- see AttributeConstants.CombatFacingOwned.
 local combatFacingOwned = false
 
 -- The shoulder framing's 0..1 engage blend, eased here (see the header's camera-space note). And the last
@@ -470,22 +471,22 @@ local function onCharacterAdded(character: Model, humanoidInstance: Humanoid, li
 	-- whatever the server has already set (normally false/unset on a fresh spawn, but read it
 	-- rather than assume in case this bind is racing a same-tick server write) and keep it live
 	-- from here on. Same watch shape as FlightController.BindCharacter's "Flying" signal.
-	rootControlLocked = humanoidInstance:GetAttribute(Constants.Attributes.RootControlLocked) == true
-	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.RootControlLocked), function()
-		rootControlLocked = humanoidInstance:GetAttribute(Constants.Attributes.RootControlLocked) == true
+	rootControlLocked = humanoidInstance:GetAttribute(AttributeConstants.RootControlLocked) == true
+	life:Connect(humanoidInstance:GetAttributeChangedSignal(AttributeConstants.RootControlLocked), function()
+		rootControlLocked = humanoidInstance:GetAttribute(AttributeConstants.RootControlLocked) == true
 	end)
 
-	flying = humanoidInstance:GetAttribute(Constants.Attributes.Flying) == true
-	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.Flying), function()
-		flying = humanoidInstance:GetAttribute(Constants.Attributes.Flying) == true
+	flying = humanoidInstance:GetAttribute(AttributeConstants.Flying) == true
+	life:Connect(humanoidInstance:GetAttributeChangedSignal(AttributeConstants.Flying), function()
+		flying = humanoidInstance:GetAttribute(AttributeConstants.Flying) == true
 	end)
 
 	-- Same shape again -- see the `mounted` local's own comment. Seeded rather than assumed false for
 	-- the same reason as its neighbours: a player who dies at a blimp helm and respawns can land this
 	-- bind after the server has already written the new character's Attributes.
-	mounted = humanoidInstance:GetAttribute(Constants.Attributes.Mounted) == true
-	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.Mounted), function()
-		mounted = humanoidInstance:GetAttribute(Constants.Attributes.Mounted) == true
+	mounted = humanoidInstance:GetAttribute(AttributeConstants.Mounted) == true
+	life:Connect(humanoidInstance:GetAttributeChangedSignal(AttributeConstants.Mounted), function()
+		mounted = humanoidInstance:GetAttribute(AttributeConstants.Mounted) == true
 	end)
 
 	-- Same shape again for the two reads behind `punishLocked`'s carve-out -- see those locals.
@@ -493,7 +494,7 @@ local function onCharacterAdded(character: Model, humanoidInstance: Humanoid, li
 	-- stagger's lock stays on through it, and a guarding body cannot be holding any other lock -- a guard
 	-- press mid-swing is deferred until the swing ends, and a grab or a mount is excluded by name below.
 	local function readPunishLocked(): boolean
-		local state = humanoidInstance:GetAttribute(Constants.Attributes.DefenseState)
+		local state = humanoidInstance:GetAttribute(AttributeConstants.DefenseState)
 		return state == "Staggered"
 			or state == "GuardBroken"
 			or state == "Raising"
@@ -501,22 +502,22 @@ local function onCharacterAdded(character: Model, humanoidInstance: Humanoid, li
 			or state == "ParryRecovery"
 	end
 	punishLocked = readPunishLocked()
-	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.DefenseState), function()
+	life:Connect(humanoidInstance:GetAttributeChangedSignal(AttributeConstants.DefenseState), function()
 		punishLocked = readPunishLocked()
 	end)
 
-	grabbed = humanoidInstance:GetAttribute(Constants.Attributes.Grabbed) == true
-	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.Grabbed), function()
-		grabbed = humanoidInstance:GetAttribute(Constants.Attributes.Grabbed) == true
+	grabbed = humanoidInstance:GetAttribute(AttributeConstants.Grabbed) == true
+	life:Connect(humanoidInstance:GetAttributeChangedSignal(AttributeConstants.Grabbed), function()
+		grabbed = humanoidInstance:GetAttribute(AttributeConstants.Grabbed) == true
 	end)
 
 	-- Same shape again, one owner further out: this one is written by another CLIENT module
 	-- (Client/Parkour/ParkourMotor.lua) rather than by the server, which changes nothing about how it
 	-- is read. Seeded rather than assumed false for the same reason as the two above -- a rapid respawn
 	-- can land this bind after the motor has already taken the new character.
-	parkourFacingOwned = humanoidInstance:GetAttribute(Constants.Attributes.ParkourFacingOwned) == true
-	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.ParkourFacingOwned), function()
-		local nowOwned = humanoidInstance:GetAttribute(Constants.Attributes.ParkourFacingOwned) == true
+	parkourFacingOwned = humanoidInstance:GetAttribute(AttributeConstants.ParkourFacingOwned) == true
+	life:Connect(humanoidInstance:GetAttributeChangedSignal(AttributeConstants.ParkourFacingOwned), function()
+		local nowOwned = humanoidInstance:GetAttribute(AttributeConstants.ParkourFacingOwned) == true
 		parkourFacingOwned = nowOwned
 		-- Parkour just handed rotation back. ParkourMotor.restoreRestorables writes Humanoid.AutoRotate
 		-- back to whatever it captured at the MOMENT parkour first took ownership -- but if this player
@@ -535,9 +536,9 @@ local function onCharacterAdded(character: Model, humanoidInstance: Humanoid, li
 		end
 	end)
 
-	combatFacingOwned = humanoidInstance:GetAttribute(Constants.Attributes.CombatFacingOwned) == true
-	life:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.CombatFacingOwned), function()
-		combatFacingOwned = humanoidInstance:GetAttribute(Constants.Attributes.CombatFacingOwned) == true
+	combatFacingOwned = humanoidInstance:GetAttribute(AttributeConstants.CombatFacingOwned) == true
+	life:Connect(humanoidInstance:GetAttributeChangedSignal(AttributeConstants.CombatFacingOwned), function()
+		combatFacingOwned = humanoidInstance:GetAttribute(AttributeConstants.CombatFacingOwned) == true
 	end)
 
 	logger:debug("Character bound", { enabled = enabled, rootControlLocked = rootControlLocked })

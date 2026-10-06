@@ -41,7 +41,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
@@ -228,10 +228,10 @@ end
 -- someone else driving," they are already replicated, and a fifth signal would be one more thing to
 -- keep in sync.
 local function resolveCombatOwned(boundHumanoid: Humanoid): boolean
-	return boundHumanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true
-		or boundHumanoid:GetAttribute(Constants.Attributes.Flying) == true
-		or boundHumanoid:GetAttribute(Constants.Attributes.Frozen) == true
-		or boundHumanoid:GetAttribute(Constants.Attributes.EmoteMovementLocked) == true
+	return boundHumanoid:GetAttribute(AttributeConstants.RootControlLocked) == true
+		or boundHumanoid:GetAttribute(AttributeConstants.Flying) == true
+		or boundHumanoid:GetAttribute(AttributeConstants.Frozen) == true
+		or boundHumanoid:GetAttribute(AttributeConstants.EmoteMovementLocked) == true
 		-- Either side of a live air combo (docs/design/air-combat-and-evade.md B6): the victim's body is the
 		-- server's, the attacker's is Client/Combat/AirComboClient's follow. Read off the deadlines rather
 		-- than trusting RootControlLocked alone, which has other writers that clear it on their own schedule.
@@ -279,7 +279,7 @@ end
 -- THE STRANDED-OWNERSHIP WATCHDOG.
 --
 -- A Start report asks the server to stand its WalkSpeed resolver down for the duration of an action
--- (Constants.Attributes.ParkourVelocityOwned -> Server/Systems/RunSystem.lua resolves 0), and the
+-- (AttributeConstants.ParkourVelocityOwned -> Server/Systems/RunSystem.lua resolves 0), and the
 -- End report is the only thing that gives it back. If an End never lands -- dropped by the server's own
 -- rate limiter, lost to a dropped packet, or refused by a validation rule -- the player stands frozen
 -- until the server's window expiry rescues them, which is most of a second of the character simply not
@@ -304,7 +304,7 @@ local function releaseStrandedOwnership(currentHumanoid: Humanoid, definition: P
 	if definition and definition.Reports then
 		return
 	end
-	if currentHumanoid:GetAttribute(Constants.Attributes.ParkourVelocityOwned) ~= true then
+	if currentHumanoid:GetAttribute(AttributeConstants.ParkourVelocityOwned) ~= true then
 		ownedReportKind = nil
 		return
 	end
@@ -316,7 +316,7 @@ local function releaseStrandedOwnership(currentHumanoid: Humanoid, definition: P
 	ParkourNetwork.ReportEnd(kind, context.Momentum, context.RootPart.Position)
 end
 
--- Publishes Constants.Attributes.ParkourActionOwned for the combat layers' own client-side gate. An
+-- Publishes AttributeConstants.ParkourActionOwned for the combat layers' own client-side gate. An
 -- Attribute rather than a call into Client/Combat, for the identical require-graph reason
 -- ParkourFacingOwned is one: the combat modules are not in this framework's load chain and must not
 -- become part of it just to be told a state changed. See that Attribute's own header in Constants for
@@ -330,7 +330,7 @@ local function setActionOwned(owned: boolean): ()
 	if not currentHumanoid then
 		return
 	end
-	currentHumanoid:SetAttribute(Constants.Attributes.ParkourActionOwned, if owned then true else nil)
+	currentHumanoid:SetAttribute(AttributeConstants.ParkourActionOwned, if owned then true else nil)
 end
 
 local function onTransition(previousId: MovementStateId, nextId: MovementStateId): ()
@@ -408,7 +408,7 @@ local function step(deltaTime: number): ()
 	-- server publishes anyway, rather than a second subscription and a cached mirror to keep in sync.
 	-- Non-number (never set yet, on the first frames of a life) reads as stage 0, which is exactly
 	-- what a character that has not started running yet is.
-	local stageValue = currentHumanoid:GetAttribute(Constants.Attributes.SprintStage)
+	local stageValue = currentHumanoid:GetAttribute(AttributeConstants.SprintStage)
 	context.SprintStage = if typeof(stageValue) == "number" then stageValue else 0
 	context.Assists = InputBuffer.GetAssists()
 	context.CombatOwned = resolveCombatOwned(currentHumanoid)
@@ -417,7 +417,7 @@ local function step(deltaTime: number): ()
 	-- a cached mirror fed by the Combat_InCombatChanged remote would be a second source of truth to
 	-- keep correct across respawns. Unset (a life that has never fought) reads as false, which is
 	-- exactly right.
-	context.InCombat = currentHumanoid:GetAttribute(Constants.Attributes.InCombat) == true
+	context.InCombat = currentHumanoid:GetAttribute(AttributeConstants.InCombat) == true
 	-- A realm's NoParkour rule, read off the same Humanoid through its lease (Shared/Domain/DomainRules.lua).
 	-- The server refuses the same kinds (ParkourSystem); this is the client declining to start them.
 	context.DomainSealed = DomainRules.Has(currentHumanoid, "NoParkour")

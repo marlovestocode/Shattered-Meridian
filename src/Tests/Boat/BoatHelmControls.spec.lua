@@ -27,7 +27,7 @@ local CONTROLS = BoatConstants.Controls
 -- asserted separately below.
 local PRESS_CONTROLS = { "SailUp", "SailDown", "Furl", "Adrift", "Release" }
 
--- Global gamepad bindings whose own consumer already declines to act while Constants.Attributes.Mounted
+-- Global gamepad bindings whose own consumer already declines to act while AttributeConstants.Mounted
 -- is set, and is therefore safe for a helm control to share. Each entry names the module that does the
 -- declining, because that module is what a future reader has to go and re-check if they want to move a
 -- binding off this list. Identical to the blimp spec's list, and deliberately duplicated rather than

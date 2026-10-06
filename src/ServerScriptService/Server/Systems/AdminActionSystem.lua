@@ -5,7 +5,7 @@
 	Owns: the admin-only per-player override flags that used to live directly on CombatSystem's own
 	CombatState -- Godmode, Frozen, SpeedMultiplier, Invisible, plus the Flying/Collide flight toggle
 	-- and the Humanoid Attribute mirrors every one of those flags is read back through
-	(Constants.Attributes.Godmode/Frozen/SpeedMultiplier/Invisible/Flying/FlyCollide). None of these
+	(AttributeConstants.Godmode/Frozen/SpeedMultiplier/Invisible/Flying/FlyCollide). None of these
 	are combat resolution: they're a developer reaching in and overriding a player's own state from
 	outside normal gameplay, which is a genuinely different responsibility from CombatSystem.lua's
 	"resolve an accepted attack" job -- see software-architecture.md's ownership-boundary guidance
@@ -42,6 +42,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 
@@ -136,7 +137,7 @@ end
 -- no live Player required, the fixture pattern every Instance-only spec in this suite uses.
 function AdminActionSystem.ApplyGodmode(state: AdminOverrideState, humanoid: Humanoid, enabled: boolean): ()
 	state.Godmode = enabled
-	humanoid:SetAttribute(Constants.Attributes.Godmode, enabled)
+	humanoid:SetAttribute(AttributeConstants.Godmode, enabled)
 end
 
 -- Toggles flight: PlatformStand suspends the Humanoid's own ground movement/gravity response, and
@@ -149,7 +150,7 @@ end
 -- of controller state. Same Instance-only testability as ApplyGodmode above.
 function AdminActionSystem.ApplyFlying(state: AdminOverrideState, humanoid: Humanoid, enabled: boolean): ()
 	humanoid.PlatformStand = enabled
-	humanoid:SetAttribute(Constants.Attributes.Flying, enabled)
+	humanoid:SetAttribute(AttributeConstants.Flying, enabled)
 
 	if enabled then
 		state.SavedFlightAutoRotate = humanoid.AutoRotate
@@ -172,7 +173,7 @@ end
 -- same trust tier as Flying itself. Independent of whether Flying is currently true or false --
 -- FlightController.lua watches BOTH Attributes live.
 function AdminActionSystem.ApplyFlightCollide(humanoid: Humanoid, enabled: boolean): ()
-	humanoid:SetAttribute(Constants.Attributes.FlyCollide, enabled)
+	humanoid:SetAttribute(AttributeConstants.FlyCollide, enabled)
 end
 
 -- Toggles the admin movement lock (see AdminOverrideState.Frozen's own header) -- mirrors the
@@ -184,7 +185,7 @@ end
 -- ApplyGodmode/ApplyFlying above.
 function AdminActionSystem.ApplyFrozen(state: AdminOverrideState, humanoid: Humanoid, enabled: boolean): ()
 	state.Frozen = enabled
-	humanoid:SetAttribute(Constants.Attributes.Frozen, enabled)
+	humanoid:SetAttribute(AttributeConstants.Frozen, enabled)
 	if enabled then
 		state.SavedJumpPower = humanoid.JumpPower
 		humanoid.JumpPower = 0
@@ -206,7 +207,7 @@ function AdminActionSystem.ApplyInvisible(
 	enabled: boolean
 ): ()
 	state.Invisible = enabled
-	humanoid:SetAttribute(Constants.Attributes.Invisible, enabled)
+	humanoid:SetAttribute(AttributeConstants.Invisible, enabled)
 	setCharacterTransparency(character, if enabled then 1 else 0)
 end
 
@@ -223,7 +224,7 @@ function AdminActionSystem.ApplySpeedMultiplier(
 		return false
 	end
 	state.SpeedMultiplier = multiplier
-	humanoid:SetAttribute(Constants.Attributes.SpeedMultiplier, multiplier)
+	humanoid:SetAttribute(AttributeConstants.SpeedMultiplier, multiplier)
 	return true
 end
 
@@ -237,15 +238,15 @@ end
 -- Transparency directly, since a Transparency edit doesn't survive a character being replaced the way
 -- an Attribute mirror does.
 function AdminActionSystem.ReapplyRespawnOverrides(state: AdminOverrideState, character: Model, humanoid: Humanoid): ()
-	humanoid:SetAttribute(Constants.Attributes.Godmode, state.Godmode)
-	humanoid:SetAttribute(Constants.Attributes.Frozen, state.Frozen)
-	humanoid:SetAttribute(Constants.Attributes.SpeedMultiplier, state.SpeedMultiplier)
+	humanoid:SetAttribute(AttributeConstants.Godmode, state.Godmode)
+	humanoid:SetAttribute(AttributeConstants.Frozen, state.Frozen)
+	humanoid:SetAttribute(AttributeConstants.SpeedMultiplier, state.SpeedMultiplier)
 	if state.Frozen then
 		state.SavedJumpPower = humanoid.JumpPower
 		humanoid.JumpPower = 0
 	end
 
-	humanoid:SetAttribute(Constants.Attributes.Invisible, state.Invisible)
+	humanoid:SetAttribute(AttributeConstants.Invisible, state.Invisible)
 	if state.Invisible then
 		setCharacterTransparency(character, 1)
 	end
@@ -267,7 +268,7 @@ function AdminActionSystem.SetGodmode(targetPlayer: Player, enabled: boolean): b
 	state.Godmode = enabled
 	local _, humanoid = CharacterUtil.LiveRig(targetPlayer)
 	if humanoid then
-		humanoid:SetAttribute(Constants.Attributes.Godmode, enabled)
+		humanoid:SetAttribute(AttributeConstants.Godmode, enabled)
 	end
 	return true
 end

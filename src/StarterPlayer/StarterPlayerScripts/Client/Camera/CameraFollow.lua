@@ -45,7 +45,7 @@ local Workspace = game:GetService("Workspace")
 local CameraConstants = require(ReplicatedStorage.Shared.CameraConstants)
 local CameraFollowMath = require(ReplicatedStorage.Shared.CameraFollowMath)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
@@ -121,7 +121,7 @@ local function onCharacter(character: Model, boundHumanoid: Humanoid, life: Trov
 	humanoid = boundHumanoid
 	rootPart = root
 
-	local attributes = Constants.Attributes
+	local attributes = AttributeConstants
 	flying = boundHumanoid:GetAttribute(attributes.Flying) == true
 	life:Connect(boundHumanoid:GetAttributeChangedSignal(attributes.Flying), function()
 		flying = boundHumanoid:GetAttribute(attributes.Flying) == true

@@ -43,7 +43,7 @@ local RunConstants = {}
 -- "not sprinting" without adding a second speed path.
 export type StageDefinition = {
 	-- The stage's own id, and its index in the array. Published verbatim on the Humanoid as
-	-- Constants.Attributes.SprintStage, so it is the number every client-side consumer keys off.
+	-- AttributeConstants.SprintStage, so it is the number every client-side consumer keys off.
 	Id: number,
 	-- Multiplier on the effective base walk speed (Constants.Combat.BaseWalkSpeed + the per-player
 	-- BonusWalkSpeed Attribute, itself scaled by the admin SpeedMultiplier Attribute). A multiplier
@@ -124,7 +124,7 @@ RunConstants.Network = {
 		-- more than an edge is bandwidth spent restating something the server already knows.
 		--
 		-- There is deliberately no server -> client counterpart. The resolved stage travels as a
-		-- Humanoid Attribute (Constants.Attributes.SprintStage), which replicates to EVERY client for
+		-- Humanoid Attribute (AttributeConstants.SprintStage), which replicates to EVERY client for
 		-- free -- so a remote player's own client can pick the matching run animation for them with no
 		-- per-stage broadcast of ours. Same reasoning as Attributes.ParkourState's own note.
 		SetSprinting = "Run_SetSprinting",

@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local AdminActionSystem = require(ServerScriptService.Server.Systems.AdminActionSystem)
 
 type AdminOverrideState = AdminActionSystem.AdminOverrideState
@@ -28,19 +29,19 @@ return function()
 			AdminActionSystem.ApplyGodmode(state, humanoid, true)
 
 			expect(state.Godmode).to.equal(true)
-			expect(humanoid:GetAttribute(Constants.Attributes.Godmode)).to.equal(true)
+			expect(humanoid:GetAttribute(AttributeConstants.Godmode)).to.equal(true)
 		end)
 
 		it("clears the override flag and mirrors the Godmode Attribute false", function()
 			local state = AdminActionSystem.CreateOverrideState()
 			state.Godmode = true
 			local humanoid = Instance.new("Humanoid")
-			humanoid:SetAttribute(Constants.Attributes.Godmode, true)
+			humanoid:SetAttribute(AttributeConstants.Godmode, true)
 
 			AdminActionSystem.ApplyGodmode(state, humanoid, false)
 
 			expect(state.Godmode).to.equal(false)
-			expect(humanoid:GetAttribute(Constants.Attributes.Godmode)).to.equal(false)
+			expect(humanoid:GetAttribute(AttributeConstants.Godmode)).to.equal(false)
 		end)
 	end)
 
@@ -53,7 +54,7 @@ return function()
 			AdminActionSystem.ApplyFlying(state, humanoid, true)
 
 			expect(humanoid.PlatformStand).to.equal(true)
-			expect(humanoid:GetAttribute(Constants.Attributes.Flying)).to.equal(true)
+			expect(humanoid:GetAttribute(AttributeConstants.Flying)).to.equal(true)
 			expect(state.SavedFlightAutoRotate).to.equal(true)
 			expect(humanoid.AutoRotate).to.equal(false)
 		end)
@@ -69,7 +70,7 @@ return function()
 			AdminActionSystem.ApplyFlying(state, humanoid, false)
 
 			expect(humanoid.PlatformStand).to.equal(false)
-			expect(humanoid:GetAttribute(Constants.Attributes.Flying)).to.equal(false)
+			expect(humanoid:GetAttribute(AttributeConstants.Flying)).to.equal(false)
 			expect(humanoid.AutoRotate).to.equal(false)
 		end)
 
@@ -88,10 +89,10 @@ return function()
 		it("mirrors the FlyCollide Attribute", function()
 			local humanoid = Instance.new("Humanoid")
 			AdminActionSystem.ApplyFlightCollide(humanoid, true)
-			expect(humanoid:GetAttribute(Constants.Attributes.FlyCollide)).to.equal(true)
+			expect(humanoid:GetAttribute(AttributeConstants.FlyCollide)).to.equal(true)
 
 			AdminActionSystem.ApplyFlightCollide(humanoid, false)
-			expect(humanoid:GetAttribute(Constants.Attributes.FlyCollide)).to.equal(false)
+			expect(humanoid:GetAttribute(AttributeConstants.FlyCollide)).to.equal(false)
 		end)
 	end)
 
@@ -116,9 +117,9 @@ return function()
 
 			AdminActionSystem.ReapplyRespawnOverrides(state, character, humanoid)
 
-			expect(humanoid:GetAttribute(Constants.Attributes.Godmode)).to.equal(true)
-			expect(humanoid:GetAttribute(Constants.Attributes.Frozen)).to.equal(false)
-			expect(humanoid:GetAttribute(Constants.Attributes.SpeedMultiplier)).to.equal(1.5)
+			expect(humanoid:GetAttribute(AttributeConstants.Godmode)).to.equal(true)
+			expect(humanoid:GetAttribute(AttributeConstants.Frozen)).to.equal(false)
+			expect(humanoid:GetAttribute(AttributeConstants.SpeedMultiplier)).to.equal(1.5)
 		end)
 
 		it("zeroes JumpPower and captures the pre-freeze value when Frozen is persisted true", function()
@@ -173,7 +174,7 @@ return function()
 
 			AdminActionSystem.ReapplyRespawnOverrides(state, character, humanoid)
 
-			expect(humanoid:GetAttribute(Constants.Attributes.Invisible)).to.equal(true)
+			expect(humanoid:GetAttribute(AttributeConstants.Invisible)).to.equal(true)
 			expect(torso.Transparency).to.equal(1)
 		end)
 
@@ -193,7 +194,7 @@ return function()
 
 			AdminActionSystem.ReapplyRespawnOverrides(state, character, humanoid)
 
-			expect(humanoid:GetAttribute(Constants.Attributes.Invisible)).to.equal(false)
+			expect(humanoid:GetAttribute(AttributeConstants.Invisible)).to.equal(false)
 			expect(torso.Transparency).to.equal(0)
 		end)
 	end)
@@ -207,7 +208,7 @@ return function()
 			AdminActionSystem.ApplyFrozen(state, humanoid, true)
 
 			expect(state.Frozen).to.equal(true)
-			expect(humanoid:GetAttribute(Constants.Attributes.Frozen)).to.equal(true)
+			expect(humanoid:GetAttribute(AttributeConstants.Frozen)).to.equal(true)
 			expect(humanoid.JumpPower).to.equal(0)
 			expect(state.SavedJumpPower).to.equal(42)
 		end)
@@ -221,7 +222,7 @@ return function()
 			AdminActionSystem.ApplyFrozen(state, humanoid, false)
 
 			expect(state.Frozen).to.equal(false)
-			expect(humanoid:GetAttribute(Constants.Attributes.Frozen)).to.equal(false)
+			expect(humanoid:GetAttribute(AttributeConstants.Frozen)).to.equal(false)
 			expect(humanoid.JumpPower).to.equal(42)
 		end)
 
@@ -254,7 +255,7 @@ return function()
 			AdminActionSystem.ApplyInvisible(state, character, humanoid, true)
 
 			expect(state.Invisible).to.equal(true)
-			expect(humanoid:GetAttribute(Constants.Attributes.Invisible)).to.equal(true)
+			expect(humanoid:GetAttribute(AttributeConstants.Invisible)).to.equal(true)
 			expect(torso.Transparency).to.equal(1)
 		end)
 
@@ -266,7 +267,7 @@ return function()
 			AdminActionSystem.ApplyInvisible(state, character, humanoid, false)
 
 			expect(state.Invisible).to.equal(false)
-			expect(humanoid:GetAttribute(Constants.Attributes.Invisible)).to.equal(false)
+			expect(humanoid:GetAttribute(AttributeConstants.Invisible)).to.equal(false)
 			expect(torso.Transparency).to.equal(0)
 		end)
 	end)
@@ -280,7 +281,7 @@ return function()
 				local ok = AdminActionSystem.ApplySpeedMultiplier(state, humanoid, preset)
 				expect(ok).to.equal(true)
 				expect(state.SpeedMultiplier).to.equal(preset)
-				expect(humanoid:GetAttribute(Constants.Attributes.SpeedMultiplier)).to.equal(preset)
+				expect(humanoid:GetAttribute(AttributeConstants.SpeedMultiplier)).to.equal(preset)
 			end
 		end)
 
@@ -293,7 +294,7 @@ return function()
 
 			expect(ok).to.equal(false)
 			expect(state.SpeedMultiplier).to.equal(1)
-			expect(humanoid:GetAttribute(Constants.Attributes.SpeedMultiplier)).to.equal(nil)
+			expect(humanoid:GetAttribute(AttributeConstants.SpeedMultiplier)).to.equal(nil)
 		end)
 	end)
 

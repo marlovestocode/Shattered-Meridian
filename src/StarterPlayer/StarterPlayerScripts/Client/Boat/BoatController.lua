@@ -80,7 +80,7 @@ local BoatConstants = require(ReplicatedStorage.Shared.Boat.BoatConstants)
 local BoatMotion = require(ReplicatedStorage.Shared.Boat.BoatMotion)
 local BoatPilotPose = require(ReplicatedStorage.Shared.Boat.BoatPilotPose)
 local BoatTypes = require(ReplicatedStorage.Shared.Boat.BoatTypes)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local VesselTypes = require(ReplicatedStorage.Shared.Vessel.VesselTypes)
@@ -362,12 +362,12 @@ end
 -- Input -----------------------------------------------------------------------------------------
 
 -- True while any modal UI panel is up (Components/ModalScreen.lua publishes the count as
--- Constants.Attributes.UiModalOpen). The same gate AttackInputClient and GrabInputClient hold, for the
+-- AttributeConstants.UiModalOpen). The same gate AttackInputClient and GrabInputClient hold, for the
 -- same reason: gameProcessedEvent only covers presses that LAND on the GUI, and a centred panel leaves
 -- most of the viewport uncovered.
 local function isModalUiOpen(): boolean
 	local player = Players.LocalPlayer
-	return player ~= nil and player:GetAttribute(Constants.Attributes.UiModalOpen) == true
+	return player ~= nil and player:GetAttribute(AttributeConstants.UiModalOpen) == true
 end
 
 -- One rung, or furled outright on a delta of 0 -- VesselSpeedLadder.Shift owns both meanings

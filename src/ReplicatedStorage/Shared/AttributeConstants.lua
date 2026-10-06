@@ -12,8 +12,7 @@
 	at line 706 of 2,834. Constants.lua's own header names the precedent and asks for exactly this --
 	Constants.Combat and Constants.Flight left the same way, for the same reason.
 
-	Constants.Attributes re-exports this module, so every existing `Constants.Attributes.X` call site
-	keeps working unchanged. New code should require this module directly.
+	Callers require this module directly; the old Constants.Attributes re-export was removed (2026-10-06).
 
 	WHY A REGISTRY AT ALL, restated because it is the thing that decays first: these names cross
 	module boundaries as bare strings. A typo at a SetAttribute call site does not fail to compile,

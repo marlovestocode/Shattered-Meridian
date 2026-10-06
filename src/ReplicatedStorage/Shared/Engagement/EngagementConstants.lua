@@ -17,7 +17,7 @@
 
 	Does not own: what actually refreshes a tag (Server/Combat/Engagement/EngagementSystem.lua -- see
 	its header for the trigger list and why a whiffed swing is deliberately not one), what reads the
-	resulting Constants.Attributes.InCombat seam (Client/Parkour's combat gate, EmoteSystem), or how
+	resulting AttributeConstants.InCombat seam (Client/Parkour's combat gate, EmoteSystem), or how
 	the engagement is presented (Client/UI/Screens/HUD/EngagementDetail.lua).
 ]]
 

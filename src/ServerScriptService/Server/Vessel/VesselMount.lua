@@ -24,11 +24,11 @@
 	paragraph on. It is the same technique Roblox's own Seat uses, for the same reason.
 
 	THE MOVEMENT LOCK REUSES TWO EXISTING SEAMS AND A THIRD THAT WAS ADDED FOR IT:
-	  * Constants.Attributes.RootControlLocked -- already read generically by ParkourController's
+	  * AttributeConstants.RootControlLocked -- already read generically by ParkourController's
 	    resolveCombatOwned as "something else owns this body". Parks client-side parkour for free.
 	  * Humanoid.PlatformStand -- suspends the Humanoid's own ground movement so a welded body behaves as
 	    part of the hull instead of trying to walk on it.
-	  * Constants.Attributes.Mounted -- a separate Attribute rather than a widened meaning for
+	  * AttributeConstants.Mounted -- a separate Attribute rather than a widened meaning for
 	    RootControlLocked, for the reason that Attribute's own comment gives: in this codebase
 	    RootControlLocked has never carried WalkSpeed-zeroing semantics, a dedicated Attribute always
 	    does that job. Read by RunSystem.isMovementLocked's tier list, and nowhere else.
@@ -51,7 +51,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local VesselSafety = require(ReplicatedStorage.Shared.Vessel.VesselSafety)
 local VesselTypes = require(ReplicatedStorage.Shared.Vessel.VesselTypes)
@@ -148,8 +148,8 @@ function VesselMount.New(config: Config): Mounter
 		end
 
 		humanoid.PlatformStand = true
-		humanoid:SetAttribute(Constants.Attributes.RootControlLocked, true)
-		humanoid:SetAttribute(Constants.Attributes.Mounted, true)
+		humanoid:SetAttribute(AttributeConstants.RootControlLocked, true)
+		humanoid:SetAttribute(AttributeConstants.Mounted, true)
 
 		-- Anchored is checked rather than assumed: a character anchored by an admin freeze would
 		-- otherwise anchor the entire hull it is welded into, and the vehicle would stop moving for
@@ -246,8 +246,8 @@ function VesselMount.New(config: Config): Mounter
 			humanoid.PlatformStand = false
 			-- nil rather than false, clearing the Attribute entirely -- the convention every sibling read
 			-- in RunSystem.isMovementLocked uses (`== true`), which treats absent and false identically.
-			humanoid:SetAttribute(Constants.Attributes.RootControlLocked, nil)
-			humanoid:SetAttribute(Constants.Attributes.Mounted, nil)
+			humanoid:SetAttribute(AttributeConstants.RootControlLocked, nil)
+			humanoid:SetAttribute(AttributeConstants.Mounted, nil)
 		end
 	end
 

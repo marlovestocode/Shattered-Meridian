@@ -8,7 +8,7 @@
 	IT IS LIVE AS OF 2026-08-25, AND IT LIT UP WITHOUT ONE LINE CHANGING IN THIS FILE. For most of this
 	module's life it said "AWAITING ENGAGEMENT" and nothing else could happen: the combat teardown had
 	removed Combat_InCombatChanged's creator, so ClientState.InCombat stayed false for a whole session
-	and Constants.Attributes.InCombat was read by Client/Parkour but written by nobody. This rendered
+	and AttributeConstants.InCombat was read by Client/Parkour but written by nobody. This rendered
 	the state it was given, which was genuinely "not in a tracked engagement" -- honest rather than
 	fabricated. Server/Combat/Engagement/EngagementSystem.lua is the producer that was missing; it
 	publishes both that Attribute and the Engagement_Changed payload ClientState now reflects into

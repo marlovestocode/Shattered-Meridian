@@ -18,7 +18,7 @@ Scope note (owner, 2026-10-06): M1 step-in and evade clips/sound are **out**.
 | 9, 10 Engine and simulator scope | **Already true.** The engine reports contacts and refuses meaning. The simulator flies shots, and its contacts are judged by the same layers. |
 | 7 Timing | **Already one clock.** Every server combat layer is Step-driven with `now` passed down from one Heartbeat, in `Main.server.lua` boot order. Server combat has no `task.wait`, `tick()` or `time()`. Its three `task.delay` calls are animation backstops and a bot respawn. `GetServerTimeNow` is used only where a client must read the deadline (air combo, realm attributes), as documented in `AttributeConstants`. A new CombatClock would be a second clock. |
 | 16 Legacy removal | **Nothing to remove.** No V2, legacy, StatusEffect, CharacterState, armor or ragdoll runtime exists. The old move schema's dead blocks were already deleted (`MoveTypes` header). |
-| 17 Constants hub | **Mostly done.** `Constants.Combat`, `.Weapons` and `.AnimationIds` are gone, and only stale comments name them. What remains is listed in Phase 3. |
+| 17 Constants hub | **Done.** `Constants.Combat`, `.Weapons`, `.AnimationIds`, `.FX`, `.Run` and `.Attributes` are gone from the hub. See Phase 3. |
 | 18 Layering rules | **Already enforced** by CLAUDE.md's combat-stack rules: one upward seam per layer, siblings over stacked layers, DomainRules instead of a DomainSystem require. |
 
 ## What the brief asks for that does not exist — deliberately not built
@@ -109,13 +109,12 @@ character, weapon and status stages wait for the progression work, where they ge
 ### Phase 3 — Constants and dependency direction
 
 **Status: done (2026-10-06).**
-- The sound shapes moved to a leaf, `Shared/SoundTypes.lua`, and Constants re-exports the types for old
-  callers. `DefenseConstants`, `HitboxEngineConstants`, `CombatConstants` and `FlightConstants` no longer
+- The sound shapes moved to a leaf, `Shared/SoundTypes.lua`. `DefenseConstants`, `HitboxEngineConstants`, `CombatConstants` and `FlightConstants` no longer
   require the hub.
 - `Constants.FX` and `Constants.Run` were migrated repo-wide, and both re-exports are deleted.
-- `Constants.Attributes` was migrated in every combat folder. The re-export stays, because roughly 200
-  non-combat callers still use it, mostly UI and systems. Moving those is a mechanical follow-up; the
-  migrator script logic is described in the Phase 3 commit.
+- `Constants.Attributes` was migrated everywhere (combat folders first, then the remaining UI, systems,
+  vehicles and specs in a follow-up). Its re-export and the hub's `SoundDefinition` type re-exports are
+  deleted; `Constants` no longer requires `AttributeConstants` or `SoundTypes`.
 - Stale `Constants.Combat.*` comment pointers now name `CombatConstants`.
 
 - `DefenseConstants`, `HitboxEngineConstants` and `CombatConstants` require `Shared/Constants.lua`. A

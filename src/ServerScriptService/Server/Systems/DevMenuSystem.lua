@@ -49,6 +49,7 @@ local AdminTypes = require(ReplicatedStorage.Shared.Admin.AdminTypes)
 local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
@@ -85,7 +86,7 @@ local DevMenuSystem = {}
 local logger = Logger.scope("DevMenuSystem")
 
 local DevMenuConfig = Constants.Debug.DevMenu
-local Attributes = Constants.Attributes
+local Attributes = AttributeConstants
 
 type ActionResult = Types.DevMenuActionResult
 

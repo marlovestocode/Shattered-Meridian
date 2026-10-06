@@ -34,7 +34,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
@@ -54,7 +54,7 @@ local started = false
 local jumpWasDown = false
 
 -- Whether the local character is welded to a blimp station right now (Server/Systems/BlimpSystem.lua
--- writes the Attribute; see Constants.Attributes.Mounted). Read straight off the Humanoid rather than
+-- writes the Attribute; see AttributeConstants.Mounted). Read straight off the Humanoid rather than
 -- cached, the same way ParkourController's own resolveCombatOwned reads its four ownership Attributes --
 -- this runs once per keypress on one branch, not per frame.
 local function isMounted(): boolean
@@ -63,7 +63,7 @@ local function isMounted(): boolean
 		return false
 	end
 	local humanoid = CharacterUtil.HumanoidOf(character)
-	return humanoid ~= nil and humanoid:GetAttribute(Constants.Attributes.Mounted) == true
+	return humanoid ~= nil and humanoid:GetAttribute(AttributeConstants.Mounted) == true
 end
 
 -- Bound through InputRouter's "Gameplay" layer -- see ParkourInput.Start below for the one
@@ -154,7 +154,7 @@ end
 -- Binds the input handlers. Called from ParkourController.Start. Idempotent.
 --
 -- BEHAVIOUR NOTE FROM THE InputRouter MIGRATION: Slide/Evade/Leap/Dash previously checked only
--- gameProcessed, never Constants.Attributes.UiModalOpen -- unlike Client/Combat/AttackInputClient.lua
+-- gameProcessed, never AttributeConstants.UiModalOpen -- unlike Client/Combat/AttackInputClient.lua
 -- and Client/Combat/GrabInputClient.lua, which both already gate on it. InputRouter's "Gameplay"
 -- layer applies that gate uniformly (see InputRouter.lua's own header), so these four actions now
 -- also go quiet while a modal panel is open, which they did not before. This brings ParkourInput in

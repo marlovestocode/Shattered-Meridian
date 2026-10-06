@@ -843,7 +843,7 @@ export type KeybindAction =
 	| "Leap"
 	-- The Grab layer's follow-up throw (Client/Combat/GrabInputClient.lua via
 	-- Server/Combat/Grab/GrabSystem.lua). Fires Grab_Throw only while the local player's own Grabbing
-	-- Attribute is true -- see Constants.Attributes.Grabbing's own header -- the same "the client
+	-- Attribute is true -- see AttributeConstants.Grabbing's own header -- the same "the client
 	-- declines to send what it can already see is illegal" convention ParkourOwnership.OwnsBody's
 	-- consumers already use.
 	| "GrabThrow"

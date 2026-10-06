@@ -16,7 +16,7 @@
 	home for cross-system tunables every System reads, and a feature this size would otherwise add
 	~400 lines to a file that is already 3,700. The handful of parkour values that genuinely ARE
 	cross-system (the Humanoid Attribute NAMES the server writes and the client reads) stay in
-	Constants.Attributes, not here -- see that table's own ParkourVelocityOwned/ParkourState/
+	AttributeConstants, not here -- see that table's own ParkourVelocityOwned/ParkourState/
 	ParkourSpeedFloor entries.
 
 	Units, stated once so no field below has to repeat them: distances/heights are STUDS, speeds are
@@ -97,7 +97,7 @@ ParkourConstants.Locomotion = {
 	AirTurnRateDegreesPerSecond = 220,
 
 	-- How long a finished parkour action's earned speed survives as a WalkSpeed floor before decaying
-	-- to nothing (Constants.Attributes.ParkourSpeedFloor, applied by Server/Systems/RunSystem.lua's
+	-- to nothing (AttributeConstants.ParkourSpeedFloor, applied by Server/Systems/RunSystem.lua's
 	-- own parkourSpeedFloor). This is the server-side half of momentum: the
 	-- client simulates the action, reports the speed it ended with, and this window is how long that
 	-- speed keeps the server's own WalkSpeed resolver from snapping the player back to sprint pace.
@@ -1158,7 +1158,7 @@ ParkourConstants.WallJump = {
 }
 
 -- THE COMBAT GATE: which traversal states are unavailable while the player is in combat
--- (Constants.Attributes.InCombat, mirrored onto ParkourContext.InCombat).
+-- (AttributeConstants.InCombat, mirrored onto ParkourContext.InCombat).
 --
 -- The rule, stated as the design asked for it: while fighting, a player may still get onto things --
 -- ledge hang, ledge climb, mantle, vault -- and may not use the mobility set. Climbing is

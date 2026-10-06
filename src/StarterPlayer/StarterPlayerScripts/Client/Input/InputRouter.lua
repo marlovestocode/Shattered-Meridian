@@ -32,7 +32,7 @@
 	Chord matching is by KeyCode, so a keyboard press can never resolve to a chord (the map holds only
 	gamepad KeyCodes) and no device branch is needed here either.
 
-	FOUR LAYERS, AND WHAT EACH ONE MEANS FOR THE MODAL GATE (Constants.Attributes.UiModalOpen,
+	FOUR LAYERS, AND WHAT EACH ONE MEANS FOR THE MODAL GATE (AttributeConstants.UiModalOpen,
 	published by Components/ModalScreen.lua):
 	  * "Gameplay" -- ordinary world input (combat, movement). Began does NOT fire while a modal panel
 	    is open. Ended ALWAYS fires, regardless of the modal Attribute -- see the next paragraph.
@@ -93,7 +93,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
@@ -138,7 +138,7 @@ local bindings: { [Types.KeybindAction]: { Binding } } = {}
 -- scripts/run-tests.lua, where there is no LocalPlayer to read an Attribute off).
 local function isModalOpenFromAttribute(): boolean
 	local player = Players.LocalPlayer
-	return player ~= nil and player:GetAttribute(Constants.Attributes.UiModalOpen) == true
+	return player ~= nil and player:GetAttribute(AttributeConstants.UiModalOpen) == true
 end
 
 local isModalOpen: () -> boolean = isModalOpenFromAttribute

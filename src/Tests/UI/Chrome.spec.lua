@@ -36,7 +36,7 @@ return function()
 		local modalOpen: Fusion.Value<boolean> = scope:Value(false)
 		local dead: Fusion.Value<boolean> = scope:Value(false)
 		-- Plain Values rather than the real sources, which is what the ChromeProps split is FOR: the
-		-- real modal fact arrives through Constants.Attributes.UiModalOpen and there is no LocalPlayer
+		-- real modal fact arrives through AttributeConstants.UiModalOpen and there is no LocalPlayer
 		-- in this place to publish it, so a Chrome that read the Attribute internally would have an
 		-- undrivable Menu branch. The real wiring is asserted separately, at the bottom of this file.
 		return scope, modalOpen, dead, Chrome.New(scope, { ModalOpen = modalOpen, Dead = dead })

@@ -22,7 +22,7 @@
 	    Autorun -- four routes, one answer, fired to the server only on its edges.
 	  * The SERVER owns the STAGE. Server/Systems/RunSystem.lua runs the charge clock against its own
 	    view of whether the character is genuinely moving, resolves which gear that earns, publishes it
-	    as Constants.Attributes.SprintStage and writes the WalkSpeed to match.
+	    as AttributeConstants.SprintStage and writes the WalkSpeed to match.
 	  * This module then owns everything that stage MEANS to look at and listen to.
 	A client that lies about intent gets no speed it did not earn -- the server still has to see the
 	character actually moving, tick after tick, on its own clock. A client that lies to itself about
@@ -57,6 +57,7 @@ local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Trove = require(ReplicatedStorage.Shared.Trove)
@@ -503,11 +504,11 @@ function RunController.BindCharacter(nextCharacter: Model): ()
 	-- Attribute every Heartbeat would be 60 reads a second to observe nothing. Seeded immediately below
 	-- the connection, because the server may well have published a stage before this client got around
 	-- to binding (a rapid respawn mid-run), and a signal only fires on future changes.
-	lifeTrove:Connect(humanoidInstance:GetAttributeChangedSignal(Constants.Attributes.SprintStage), function()
-		local value = humanoidInstance:GetAttribute(Constants.Attributes.SprintStage)
+	lifeTrove:Connect(humanoidInstance:GetAttributeChangedSignal(AttributeConstants.SprintStage), function()
+		local value = humanoidInstance:GetAttribute(AttributeConstants.SprintStage)
 		setStage(if typeof(value) == "number" then value else 0)
 	end)
-	local initialStage = humanoidInstance:GetAttribute(Constants.Attributes.SprintStage)
+	local initialStage = humanoidInstance:GetAttribute(AttributeConstants.SprintStage)
 	setStage(if typeof(initialStage) == "number" then initialStage else 0)
 
 	-- INTENT IS RESTATED FOR THE NEW BODY. The server's per-player intent survives a respawn (a player

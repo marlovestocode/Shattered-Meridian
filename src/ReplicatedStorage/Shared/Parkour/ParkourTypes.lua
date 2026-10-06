@@ -342,7 +342,7 @@ export type ParkourContext = {
 	SprintHeld: boolean,
 	-- Which run stage the SERVER currently has this character in: 0 = not sprinting, 1/2 = the
 	-- ladder Shared/Run/RunConstants.lua's Stages array defines (that file, not this comment, is the
-	-- source of truth for each stage's threshold). Mirrored from Constants.Attributes.SprintStage by
+	-- source of truth for each stage's threshold). Mirrored from AttributeConstants.SprintStage by
 	-- the controller each frame -- the client never resolves it, since the stage decides a WalkSpeed
 	-- multiplier (see Server/Systems/RunSystem.lua).
 	--
@@ -413,7 +413,7 @@ export type ParkourContext = {
 	-- runs.
 	CombatOwned: boolean,
 
-	-- Whether this player is currently IN COMBAT -- mirrored from the Constants.Attributes.InCombat
+	-- Whether this player is currently IN COMBAT -- mirrored from the AttributeConstants.InCombat
 	-- Humanoid Attribute the server publishes, read every frame beside the four CombatOwned reads.
 	--
 	-- Distinct from CombatOwned above, and the distinction matters: CombatOwned means something else is

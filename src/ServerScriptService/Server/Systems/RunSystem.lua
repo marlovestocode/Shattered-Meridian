@@ -3,7 +3,7 @@
 	RunSystem.lua
 
 	Owns: the run, authoritatively. Sprint intent as received from each client, the charge clock that
-	turns sustained running into a gear, the resolved stage published as Constants.Attributes.
+	turns sustained running into a gear, the resolved stage published as AttributeConstants.
 	SprintStage, and -- the part that makes all of that mean something -- Humanoid.WalkSpeed itself.
 
 	THIS SYSTEM IS THE WALKSPEED OWNER. Exactly one thing in this codebase may write that property,
@@ -49,7 +49,7 @@
 
 	THE SEAM FOR COMBAT, now taken. The rebuilt combat layer publishes two things this System reads,
 	and neither layer required a line of code in the other:
-	  * Constants.Attributes.CombatBusyUntil -- an os.clock() deadline written by
+	  * AttributeConstants.CombatBusyUntil -- an os.clock() deadline written by
 	    Server/Combat/Attack/AttackRequestSystem.lua covering the swing it just accepted, AND by
 	    Server/Combat/Damage/DamageSystem.lua covering the hitstun of a hit the player just took -- so
 	    getting hit while running drops the run exactly as throwing a swing does.
@@ -84,7 +84,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -103,7 +103,7 @@ local logger = Logger.scope("RunSystem")
 
 local RunSystem = {}
 
-local ATTRIBUTES = Constants.Attributes
+local ATTRIBUTES = AttributeConstants
 local REMOTE_NAMES = RunConstants.Network.RemoteNames
 
 -- Per-player run state. Deliberately small, and deliberately NOT a mirror of anything the client
@@ -347,23 +347,23 @@ local function isMovementLocked(live: LiveAttributes): boolean
 		or live.EmoteMovementLocked
 		-- Grab layer (Server/Combat/Grab/GrabSystem.lua) -- true for the whole hold-then-flight
 		-- lifetime. Same "external system freezes movement without touching this System's own
-		-- resolver" shape as the three above; see Constants.Attributes.Grabbed's own header for why
+		-- resolver" shape as the three above; see AttributeConstants.Grabbed's own header for why
 		-- this is a separate Attribute from RootControlLocked rather than a widened meaning for it.
 		or live.Grabbed
-		-- The other end of a grab: a holder rooted for their throw clip. See Constants.Attributes.GrabThrowing.
+		-- The other end of a grab: a holder rooted for their throw clip. See AttributeConstants.GrabThrowing.
 		or live.GrabThrowing
 		-- Blimp layer (Server/Systems/BlimpSystem.lua) -- true for as long as this player is welded to a
-		-- station. Same shape as Grabbed immediately above; see Constants.Attributes.Mounted's own header.
+		-- station. Same shape as Grabbed immediately above; see AttributeConstants.Mounted's own header.
 		or live.Mounted
 		-- A move that Locks movement holds its attacker from the start of its Active window through its
-		-- recovery (HitboxEngine.setMovementLock). See Constants.Attributes.SwingRooted.
+		-- recovery (HitboxEngine.setMovementLock). See AttributeConstants.SwingRooted.
 		or live.SwingRooted
 		-- A realm's Rooted rule (Shared/Domain/DomainRules.lua) -- the same "an external system holds this
 		-- body where it is" tier, gated on the realm's lease.
 		or (live.DomainRooted and realmGoverns(live))
 end
 
--- The decaying WalkSpeed floor a just-finished parkour action leaves behind (Constants.Attributes.
+-- The decaying WalkSpeed floor a just-finished parkour action leaves behind (AttributeConstants.
 -- ParkourSpeedFloor, stamped by Server/Systems/ParkourSystem.lua off the client's action reports).
 --
 -- Decays linearly to zero across ParkourConstants.Locomotion.MomentumCarrySeconds. Linear rather than

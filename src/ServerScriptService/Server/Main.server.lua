@@ -385,7 +385,7 @@ boot("AirComboSystem", AirComboSystem)
 
 --     EngagementSystem is another sibling of the same shape -- it subscribes to DamageSystem.OnApplied
 --     exactly as GrabSystem does, and is read by nobody through a require at all: it publishes the
---     Constants.Attributes.InCombat seam and its own Engagement_Changed remote, and every consumer
+--     AttributeConstants.InCombat seam and its own Engagement_Changed remote, and every consumer
 --     (Client/Parkour's combat gate, EmoteSystem's CombatAllowed refusal, the HUD engagement panel)
 --     reads one of those two. Boots after GrabSystem for readability, not correctness -- its Step
 --     reclaims only its own expired rows.

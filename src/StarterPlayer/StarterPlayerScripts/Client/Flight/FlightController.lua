@@ -64,7 +64,7 @@ local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
@@ -198,8 +198,8 @@ end
 -- LinearVelocity/AlignOrientation rig to move), and Flying=false needs it unanchored too, so
 -- gravity resumes normally for the post-flight free-fall landing path.
 local function syncCollideMode(humanoid: Humanoid, rootPart: BasePart): ()
-	local flying = humanoid:GetAttribute(Constants.Attributes.Flying) == true
-	local collide = humanoid:GetAttribute(Constants.Attributes.FlyCollide) == true
+	local flying = humanoid:GetAttribute(AttributeConstants.Flying) == true
+	local collide = humanoid:GetAttribute(AttributeConstants.FlyCollide) == true
 	rootPart.Anchored = flying and not collide
 	if flying and collide then
 		FlightPhysics.EnterCollideMode(rootPart)
@@ -317,7 +317,7 @@ local function stepFlight(humanoid: Humanoid, rootPart: BasePart, deltaTime: num
 		cfg.HoverBobPeriodSeconds
 	) * bobBlend
 
-	local collideMode = humanoid:GetAttribute(Constants.Attributes.FlyCollide) == true
+	local collideMode = humanoid:GetAttribute(AttributeConstants.FlyCollide) == true
 	-- Server-owned root control always wins -- see this file's header, "Root-control lock". Skips
 	-- ONLY the position/orientation write itself, the same narrow scope ShiftLockCamera.lua's own
 	-- gated yaw write uses: currentVelocity/previousHoverBobOffset keep updating underneath so flight
@@ -478,22 +478,22 @@ function FlightController.BindCharacter(character: Model): ()
 	-- the server has already set (same "read rather than assume" reasoning as the Flying/FlyCollide
 	-- reads below) and keep it live from here on. See this file's header, "Root-control lock", and
 	-- ShiftLockCamera.lua's onCharacterAdded for the identical watch shape on the same Attribute.
-	rootControlLocked = humanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true
-	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.RootControlLocked), function()
-		rootControlLocked = humanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true
+	rootControlLocked = humanoid:GetAttribute(AttributeConstants.RootControlLocked) == true
+	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(AttributeConstants.RootControlLocked), function()
+		rootControlLocked = humanoid:GetAttribute(AttributeConstants.RootControlLocked) == true
 	end)
 
 	FlightAnimator.BindCharacter(character)
 
-	if humanoid:GetAttribute(Constants.Attributes.Flying) == true then
+	if humanoid:GetAttribute(AttributeConstants.Flying) == true then
 		startFlying(humanoid, character)
 	end
 	if rootPart then
 		syncCollideMode(humanoid, rootPart)
 	end
 
-	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.Flying), function()
-		if humanoid:GetAttribute(Constants.Attributes.Flying) == true then
+	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(AttributeConstants.Flying), function()
+		if humanoid:GetAttribute(AttributeConstants.Flying) == true then
 			startFlying(humanoid, character)
 		else
 			FlightController.StopFlying()
@@ -507,7 +507,7 @@ function FlightController.BindCharacter(character: Model): ()
 		end
 	end)
 
-	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.FlyCollide), function()
+	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(AttributeConstants.FlyCollide), function()
 		if rootPart then
 			syncCollideMode(humanoid, rootPart)
 		end
