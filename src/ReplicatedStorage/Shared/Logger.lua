@@ -302,6 +302,13 @@ end
 
 -- The floor currently in force, not the idle one -- exposed for the Live Console's own status line
 -- and for specs, which need to assert the raise/restore edges without reaching into an upvalue.
+-- Whether an entry at `level` would be captured right now -- for a caller whose log line is expensive to build
+-- (Server/Combat/CombatTrace.lua builds a field table per combat event), so it can skip the work entirely while
+-- nobody is watching. The cheap answer to the question emitBody asks first.
+function Logger.IsCapturing(level: LogLevel): boolean
+	return (LEVEL_RANK[level] or LEVEL_RANK.Off) >= captureLevelRank
+end
+
 function Logger.GetCaptureLevel(): LogLevel
 	for level, rank in pairs(LEVEL_RANK) do
 		if rank == captureLevelRank then

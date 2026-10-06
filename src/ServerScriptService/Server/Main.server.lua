@@ -75,6 +75,7 @@ local AirComboSystem = require(Combat.AirCombo.AirComboSystem)
 local EngagementSystem = require(Combat.Engagement.EngagementSystem)
 local KnockbackAudit = require(Combat.Damage.KnockbackAudit)
 local EnvironmentReactionSystem = require(Combat.Environment.EnvironmentReactionSystem)
+local CombatTrace = require(Combat.CombatTrace)
 local DomainSystem = require(Combat.Domain.DomainSystem)
 local WeaponVisualSystem = require(Combat.Weapon.WeaponVisualSystem)
 local WeaponInventorySystem = require(Combat.Weapon.WeaponInventorySystem)
@@ -410,6 +411,11 @@ boot("KnockbackAudit", KnockbackAudit)
 --     both, so both subscriptions have something to attach to; its Heartbeat only watches its own rows,
 --     so it has no place in the combat layers' connection-order requirement.
 boot("EnvironmentReactionSystem", EnvironmentReactionSystem)
+
+--     CombatTrace -- the "why did that attack do that" log (Live Console, scope CombatTrace). A read-only sibling on
+--     OnPressRefused, OnSwingAccepted, OnResolved and OnApplied; after all three layers so every one exists. It
+--     decides nothing, so its place in the order is for readability only.
+boot("CombatTrace", CombatTrace)
 
 --     DomainSystem -- realms (Shared/Domain/DomainTypes.lua's header). A sibling of the attack layer on the
 --     same extension point EnvironmentReactionSystem uses (AttackRequestSystem.OnSwingAccepted: a domain

@@ -129,6 +129,15 @@ character, weapon and status stages wait for the progression work, where they ge
 
 ### Phase 4 — "Why did this attack fail?" (extends Live Console, no new tooling)
 
+**Status: done (2026-10-06).** `Server/Combat/CombatTrace.lua` is a read-only sibling on `OnPressRefused`,
+`OnSwingAccepted`, `OnResolved` and `OnApplied`. It logs four Debug lines: Press refused, Swing thrown,
+Contact and Applied. The Contact line carries the resolver's own inputs, which travel on
+`DefenseOutcome.Inputs`. Lines land in the Live Console (F5) through the existing Logger capture; type
+"CombatTrace" in the console's search to filter to them. It costs nothing while no console is open
+(`Logger.IsCapturing`). `DebugConstants.CombatTrace.Enabled` is the off switch. Not traced: the rewind hold
+itself, and a swing that never contacted anything. Both stay visible as a "Swing thrown" line with no
+"Contact" after it.
+
 The Move Editor's `HitLog` sees only contacts that resolved, and only for the move under test. Nothing
 records the misses that matter: a refused press and its reason, a contact that never happened, or a
 parry that missed because the window had closed or the realm forbade it.

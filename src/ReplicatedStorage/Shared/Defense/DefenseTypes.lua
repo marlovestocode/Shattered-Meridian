@@ -112,6 +112,9 @@ export type DefenseOutcome = {
 	-- two parries. Both swings were cancelled -- the defender's too -- so the attack layer keeps BOTH
 	-- players' strings, not just the attacker's.
 	Clash: boolean?,
+	-- The resolver's inputs for this contact (PendingContact.Inputs): the state, window and guard it was judged
+	-- against. Diagnostics only -- nothing gameplay-facing reads it. Absent for a hand-built outcome.
+	Inputs: ResolveInput?,
 }
 
 -- What OutcomeResolver.Resolve is given. Primitives only -- no Instances, no clock, no services --
@@ -174,6 +177,9 @@ export type PendingContact = {
 	DefenderSwingReaches: boolean?,
 	-- Set by ArbitrateClashes on a contact it turned into a clash. See DefenseOutcome.Clash.
 	Clash: boolean?,
+	-- What pass 1 handed the resolver for this contact, kept so the outcome can say WHY it resolved as it did
+	-- (Server/Combat/CombatTrace.lua). Absent for a contact built by hand.
+	Inputs: ResolveInput?,
 }
 
 -- The Defense_StateChanged payload, server -> the defending client. One shape for both ends, so the

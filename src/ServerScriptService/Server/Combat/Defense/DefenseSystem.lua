@@ -871,7 +871,7 @@ local function onHit(report: HitReport): ()
 	-- ascending SampleTime, so it is monotonic, and an `at` that predates the last Update is a no-op
 	-- because transitions only fire when now >= the time they were due.
 	machine:Update(at)
-	local result = OutcomeResolver.Resolve({
+	local inputs: DefenseTypes.ResolveInput = {
 		DefenderState = machine:StateAt(at),
 		BearingDegrees = bearing,
 		PowerLevel = report.PowerLevel,
@@ -887,7 +887,8 @@ local function onHit(report: HitReport): ()
 		Evading = intangible or machine:IsEvadingAt(at),
 		-- The held-body rule and the realm's NoBlock, decided inside the resolver (ResolveInput.GuardDisabled).
 		GuardDisabled = airHeld or stunHeld or realmNoBlock,
-	})
+	}
+	local result = OutcomeResolver.Resolve(inputs)
 	batchGuard[report.Target] = result.Guard
 
 	-- THE CLASH MEASUREMENT (DefenseConstants.Clash), taken here at the contact's own substep, where the
@@ -924,6 +925,7 @@ local function onHit(report: HitReport): ()
 		-- judged against -- never re-derived in pass 2, where ConsumeParry has already closed it.
 		Perfect = result.Kind == "Parried" and machine:IsPerfectParryAt(at),
 		DefenderSwingReaches = defenderSwingReaches,
+		Inputs = inputs,
 	})
 end
 
@@ -1051,6 +1053,7 @@ local function applyContact(contact: PendingContact, now: number): ()
 		SampleTime = contact.SampleTime,
 		Perfect = contact.Perfect == true,
 		Clash = if contact.Clash == true then true else nil,
+		Inputs = contact.Inputs,
 	})
 	debugLog("Contact resolved", { kind = kind, defender = contact.Defender.Name, perfect = contact.Perfect })
 end

@@ -262,6 +262,9 @@ local ENTRIES: { BootEntry } = {
 		Path = { "Combat", "Environment", "EnvironmentReactionSystem" },
 		Remotes = namesOf(EnvironmentConstants.Network.RemoteNames),
 	},
+	-- The combat trace (Live Console, scope CombatTrace): a read-only sibling on the layers' signals. No remote:
+	-- its lines ride the Logger capture LiveConsoleSystem already streams.
+	{ Name = "CombatTrace", Path = { "Combat", "CombatTrace" }, Remotes = {} },
 	-- Realms. Owns Domain_State (server -> clients: open/phase/clash/pulse/snapshot, and a player's own
 	-- impulse) and Domain_Request (a client asking for every live realm, rate-limited).
 	{

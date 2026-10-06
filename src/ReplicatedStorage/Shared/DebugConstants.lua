@@ -635,4 +635,13 @@ DebugConstants.TrainingDummy = {
 	LabelColor = Color3.fromRGB(199, 149, 34),
 }
 
+-- THE COMBAT TRACE (Server/Combat/CombatTrace.lua): one structured line per press, swing, resolved contact and
+-- applied hit, at Debug level on the "CombatTrace" scope -- so it is captured only while a Live Console (F5) is
+-- open (LiveConsoleSystem raises the capture level then) and costs nothing otherwise: the trace checks
+-- Logger.IsCapturing before it builds a single field. Answers "why did that attack fail?" from the console.
+-- Enabled = false turns it off even with a console open.
+DebugConstants.CombatTrace = {
+	Enabled = true,
+}
+
 return DebugConstants
