@@ -89,6 +89,7 @@ local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAtt
 local AirComboMoves = require(ReplicatedStorage.Shared.AirCombo.AirComboMoves)
 local AmortizedReclaim = require(ReplicatedStorage.Shared.AmortizedReclaim)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local CombatPower = require(ReplicatedStorage.Shared.Progression.CombatPower)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
@@ -130,7 +131,9 @@ local hitstunReclaim = AmortizedReclaim.New()
 -- registry" shape as hitstunUntil above -- see this file's header's AttackerLunge paragraph.
 local lungeUntil: { [Model]: number } = {}
 
-local appliedCallbacks: { (DefenseOutcome, DamageResult) -> () } = {}
+-- OnApplied's subscribers (Shared/CallbackList.lua: pcall'd per consumer, safe to disconnect mid-dispatch).
+local appliedListeners: CallbackList.CallbackList<DefenseOutcome, DamageResult> =
+	CallbackList.New(logger, "DamageSystem.OnApplied")
 
 -- THE AIR COMBO'S ONE SEAM INTO THIS LAYER (Server/Combat/AirCombo/AirComboSystem.lua, which sits ABOVE this
 -- one as a sibling of the attack layer and so is never required from here). One slot, set by that System's
@@ -533,14 +536,9 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	-- first is what leaves kill attribution a pure follow-up in that module rather than a restructuring
 	-- of this one. Nothing here attributes a kill today -- see this file's header on what it does not
 	-- own -- but nothing here forecloses it either.
-	for _, callback in appliedCallbacks do
-		-- pcall'd for the same reason DefenseSystem pcalls its own consumers: one subscriber erroring
-		-- must not abort the rest, and above all must not unwind out of the Heartbeat.
-		local ok, err = pcall(callback, outcome, result)
-		if not ok then
-			logger:error("A DamageSystem.OnApplied consumer errored", { errorMessage = tostring(err) })
-		end
-	end
+	-- Each consumer pcall'd (CallbackList): one subscriber erroring must not abort the rest, and above all
+	-- must not unwind out of the Heartbeat.
+	appliedListeners:Fire(outcome, result)
 
 	if result.Damage > 0 then
 		local humanoid = CharacterUtil.LiveHumanoidOf(outcome.Defender)
@@ -595,7 +593,13 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 		-- Only a player's own client applies a launch; a server-owned body already has it.
 		defenderFeedback.Knockback = if launchedPlayer then launch else nil
 		defenderFeedback.Push = if pushedDefender then defenderPush else nil
-		defenderFeedback.HitstunSeconds = if result.HitstunSeconds > 0 then result.HitstunSeconds else nil
+		-- The stun STILL TO RUN as this leaves, not the contact's authored length: the stun was timed from the
+		-- contact (SampleTime), so a contact that waited out the rewind hold has already spent up to
+		-- Parry.RewindMaxSeconds of it, and a hit inside a longer stun ends with that one. Sending the length
+		-- had the defender's own mirror run long by both, which held their comeback swing back.
+		defenderFeedback.HitstunSeconds = if result.HitstunSeconds > 0
+			then math.max((hitstunUntil[outcome.Defender] or 0) - os.clock(), 0)
+			else nil
 		sendFeedback(outcome.Defender, defenderFeedback)
 	end
 
@@ -750,12 +754,7 @@ function DamageSystem.ApplyImpact(attacker: Model, target: Model, amount: number
 		GuardDelta = 0,
 		SampleTime = at,
 	}
-	for _, callback in appliedCallbacks do
-		local ok, err = pcall(callback, outcome, result)
-		if not ok then
-			logger:error("A DamageSystem.OnApplied consumer errored", { errorMessage = tostring(err) })
-		end
-	end
+	appliedListeners:Fire(outcome, result)
 	humanoid:TakeDamage(damage)
 
 	if attacker ~= target then
@@ -839,13 +838,7 @@ end
 --
 -- Fired BEFORE the health write. See applyOutcome for why that ordering is load-bearing.
 function DamageSystem.OnApplied(callback: (DefenseOutcome, DamageResult) -> ()): () -> ()
-	table.insert(appliedCallbacks, callback)
-	return function()
-		local index = table.find(appliedCallbacks, callback)
-		if index then
-			table.remove(appliedCallbacks, index)
-		end
-	end
+	return appliedListeners:Connect(callback)
 end
 
 -- Lifecycle ----------------------------------------------------------------------------------------
@@ -909,7 +902,7 @@ function DamageSystem.Reset(): ()
 	table.clear(hitstunUntil)
 	table.clear(lungeUntil)
 	hitstunReclaim:Reset()
-	table.clear(appliedCallbacks)
+	appliedListeners:Clear()
 	airComboHook = nil
 	ComboEscalation.Reset()
 	AttackCatalog.Reset()

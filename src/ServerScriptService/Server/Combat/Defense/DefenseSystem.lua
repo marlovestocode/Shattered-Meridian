@@ -58,6 +58,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
 local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboConstants)
@@ -163,7 +164,9 @@ type HeldContact = {
 }
 local heldContacts: { HeldContact } = {}
 
-local outcomeCallbacks: { (DefenseOutcome) -> () } = {}
+-- OnResolved's subscribers (Shared/CallbackList.lua).
+local resolvedListeners: CallbackList.CallbackList<DefenseOutcome> =
+	CallbackList.New(logger, "DefenseSystem.OnResolved")
 
 local started = false
 local heartbeatTrove = Trove.New()
@@ -932,14 +935,9 @@ end
 -- Pass 2 -------------------------------------------------------------------------------------------
 
 local function emit(outcome: DefenseOutcome): ()
-	for _, callback in outcomeCallbacks do
-		-- pcall'd because a consumer erroring must not take down the rest of the batch -- an outcome
-		-- half-applied across two subscribers is worse than one subscriber missing an outcome.
-		local ok, err = pcall(callback, outcome)
-		if not ok then
-			logger:error("A DefenseSystem.OnResolved consumer errored", { errorMessage = tostring(err) })
-		end
-	end
+	-- Each consumer pcall'd (CallbackList): one erroring must not take down the rest of the batch -- an
+	-- outcome half-applied across two subscribers is worse than one subscriber missing an outcome.
+	resolvedListeners:Fire(outcome)
 end
 
 -- How long a parry staggers the attacker -- longer for a PERFECT parry (DefenseConstants.PerfectParry).
@@ -1082,7 +1080,13 @@ end
 --   * outside the block arc: a parry or a block from that side does nothing either way;
 --   * the key already down at contact: a held guard mints no window, and there is no press left to arrive;
 --   * on the ground, a body committed to its own swing or a stun: a press arriving now is deferred and
---     comes up as a plain block later (SetBlocking), never judged against this contact.
+--     comes up as a plain block later (SetBlocking), never judged against this contact;
+--   * a HELD body (stunned on the ground, or air-held) that cannot arm a parry: its guard does nothing
+--     (parriesThroughStun), so the parry is the only answer, and a body in its whiff lockout -- the
+--     defender who mashed parry through the string -- has none. Every rewound press time a held contact
+--     could be judged at is at or before `now`, and the lockout only ever lengthens (a whiff extends it, a
+--     release moves the MinUnguarded clock later), so refusing at `now` refuses at all of them. This is
+--     the common case inside a linked M1 string, and holding it delayed every hit by up to the cap.
 -- Also 0 for a bot or a dummy (rewindSecondsFor), which has no round trip.
 local function rewindHoldFor(contact: PendingContact, now: number): number
 	if contact.Result.Kind ~= "Clean" then
@@ -1098,7 +1102,11 @@ local function rewindHoldFor(contact: PendingContact, now: number): number
 	if registration.Machine:BlockHeldAt(contact.SampleTime) then
 		return 0
 	end
-	if bodyCommitted(registration, now) and not parriesThroughStun(registration, now) then
+	local held = parriesThroughStun(registration, now)
+	if bodyCommitted(registration, now) and not held then
+		return 0
+	end
+	if held and not registration.Machine:CanArmParryAt(now) then
 		return 0
 	end
 	return rewindSecondsFor(registration)
@@ -1450,13 +1458,7 @@ end
 -- This system's sole output. Returns a disconnect function rather than a connection object, matching
 -- HitboxEngine.OnHit's own contract so a consumer of both learns one shape.
 function DefenseSystem.OnResolved(callback: (DefenseOutcome) -> ()): () -> ()
-	table.insert(outcomeCallbacks, callback)
-	return function()
-		local index = table.find(outcomeCallbacks, callback)
-		if index then
-			table.remove(outcomeCallbacks, index)
-		end
-	end
+	return resolvedListeners:Connect(callback)
 end
 
 -- Lifecycle ----------------------------------------------------------------------------------------
@@ -1598,7 +1600,7 @@ function DefenseSystem.Reset(): ()
 	table.clear(heldContacts)
 	table.clear(parryConsumedThisBatch)
 	table.clear(batchGuard)
-	table.clear(outcomeCallbacks)
+	resolvedListeners:Clear()
 	defaultParryAnimationId = ""
 	pingResolver = nil
 end

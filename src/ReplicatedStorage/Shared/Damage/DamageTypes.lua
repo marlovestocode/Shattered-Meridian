@@ -163,8 +163,9 @@ export type CombatFeedback = {
 	-- "Hit" (an air beat), "Finisher", or "Clash" (an air parry -- its own effect, distinct from a ground
 	-- parry). Set by the air combo's damage hook (DamageSystem.SetAirComboHook); nil for every other contact.
 	AirCombo: string?,
-	-- The stun this contact put the RECEIVING client under, on the Defender copy only: it varies by move
-	-- (DamageConstants.Hitstun.ByWeapon), so the client's own stun mirror cannot assume the shared length.
+	-- How much of the RECEIVING client's stun is still to run when this is sent, on the Defender copy only of
+	-- a stunning contact: it varies by move (DamageConstants.Hitstun.ByWeapon), a held contact has already
+	-- spent part of it, and a stun already running may outlast it. The client takes its one-way trip off.
 	HitstunSeconds: number?,
 	-- True when this landed hit was the LAST M1 of its string (nothing follows it to link into -- see
 	-- DamageConstants.Hitstun.LinkBasicString): the cue for the heavier string-ender beat on both clients.

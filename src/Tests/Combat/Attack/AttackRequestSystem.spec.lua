@@ -295,6 +295,40 @@ return function()
 			expect(SwingSequencer.GetStageIndex(attacker.Model, "Basic", base + gate + FRAME)).to.equal(2)
 		end)
 
+		it("drops a buffered press the moment its re-validation refuses for a reason that does not clear", function()
+			-- Buffered mid-swing (Busy), then the guard is held. Kept waiting, the press would throw the
+			-- instant the guard came back down -- the free swing out of a guard "does not buffer a refusal
+			-- the player is choosing to cause" exists to prevent, reached through the flush instead.
+			local attacker = makeDummy("GuardedBuffer", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			local gate = chainGateSeconds()
+			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
+
+			local seen = {}
+			local disconnect = AttackRequestSystem.OnPressRefused(function(_model, pressId, reason)
+				table.insert(seen, { PressId = pressId, Reason = reason })
+			end)
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 3 }, false, base + 0.01)
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.01)).to.equal(true)
+			-- Mid-swing, so the guard is deferred (DefenseSystem.CanAttack answers "Guarding").
+			DefenseSystem.SetBlocking(attacker.Model, true, base + 0.02)
+			step(base + 0.03)
+			disconnect()
+
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.03)).to.equal(false)
+			expect(#seen).to.equal(1)
+			expect(seen[1].PressId).to.equal(3)
+			expect(seen[1].Reason).to.equal("Guarding")
+
+			-- Releasing the guard inside the old buffer window throws nothing.
+			DefenseSystem.SetBlocking(attacker.Model, false, base + 0.04)
+			for frame = 3, math.ceil((gate + FRAME) / FRAME) do
+				step(base + frame * FRAME)
+			end
+			expect(SwingSequencer.GetStageIndex(attacker.Model, "Basic", base + gate + FRAME)).to.equal(1)
+		end)
+
 		it("does not buffer a refusal the player is choosing to cause", function()
 			-- Holding a guard refuses an attack, and that refusal is NOT transient in the sense the
 			-- buffer means: firing a queued swing the instant a player lets go of a block they were

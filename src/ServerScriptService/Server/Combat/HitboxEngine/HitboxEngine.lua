@@ -76,6 +76,7 @@ local HitboxAnchor = require(ReplicatedStorage.Shared.HitboxEngine.HitboxAnchor)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local HitboxGeometry = require(ReplicatedStorage.Shared.HitboxEngine.HitboxGeometry)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
@@ -149,8 +150,11 @@ local engaged: { Combatant } = {}
 -- gatherer needs a plain { Model } and rebuilding one per sample would allocate on the hot path.
 local registeredModels: { Model } = {}
 
-local hitCallbacks: { (HitReport) -> () } = {}
-local projectileEventCallbacks: { ({ ProjectileSimulator.ProjectileEvent }) -> () } = {}
+-- OnHit's and OnProjectileEvents' subscribers (Shared/CallbackList.lua): pcall'd per consumer, and Fire allocates
+-- nothing, which matters for OnHit -- it fires once per contact inside the Heartbeat.
+local hitListeners: CallbackList.CallbackList<HitReport> = CallbackList.New(logger, "HitboxEngine.OnHit")
+local projectileListeners: CallbackList.CallbackList<{ ProjectileSimulator.ProjectileEvent }> =
+	CallbackList.New(logger, "HitboxEngine.OnProjectileEvents")
 
 -- The engine clock at the moment a state machine hook is running. The machine's hooks are handed a Swing,
 -- not a time, and a projectile volley has to launch at the substep its Active window actually opened --
@@ -448,17 +452,12 @@ end
 
 -- The engine's one output, for a swing's contact and a projectile's alike.
 --
--- Iterated over a snapshot-free forward walk, and every callback is pcall'd: a consumer that errors must
--- not abort the remaining consumers, and above all must not unwind out of the Heartbeat and stop the
--- engine sampling for everyone. This is the single point where foreign code runs inside the engine's
--- loop, so it is the only place that needs the guard.
+-- Every callback is pcall'd (CallbackList): a consumer that errors must not abort the remaining consumers,
+-- and above all must not unwind out of the Heartbeat and stop the engine sampling for everyone. This is
+-- the single point where foreign code runs inside the engine's loop, so it is the only place that needs
+-- the guard.
 local function emitHit(report: HitReport): ()
-	for _, callback in hitCallbacks do
-		local ok, err = pcall(callback, report)
-		if not ok then
-			logger:warn("OnHit callback errored", { error = tostring(err) })
-		end
-	end
+	hitListeners:Fire(report)
 end
 
 local function reportHit(
@@ -1107,13 +1106,7 @@ end
 -- per engine frame. The engine has no remote; the attack layer subscribes and sends these on. Returns a
 -- disconnect function, like OnHit.
 function HitboxEngine.OnProjectileEvents(callback: ({ ProjectileSimulator.ProjectileEvent }) -> ()): () -> ()
-	table.insert(projectileEventCallbacks, callback)
-	return function()
-		local index = table.find(projectileEventCallbacks, callback)
-		if index then
-			table.remove(projectileEventCallbacks, index)
-		end
-	end
+	return projectileListeners:Connect(callback)
 end
 
 function HitboxEngine.LiveProjectileCount(): number
@@ -1125,24 +1118,13 @@ local function flushProjectileEvents(now: number): ()
 	if #events == 0 then
 		return
 	end
-	for _, callback in projectileEventCallbacks do
-		local ok, err = pcall(callback, events)
-		if not ok then
-			logger:warn("OnProjectileEvents callback errored", { error = tostring(err) })
-		end
-	end
+	projectileListeners:Fire(events)
 end
 
 -- The engine's sole output. Returns a disconnect function rather than a connection object so a
 -- consumer's teardown is one call with no handle type to learn.
 function HitboxEngine.OnHit(callback: (HitReport) -> ()): () -> ()
-	table.insert(hitCallbacks, callback)
-	return function()
-		local index = table.find(hitCallbacks, callback)
-		if index then
-			table.remove(hitCallbacks, index)
-		end
-	end
+	return hitListeners:Connect(callback)
 end
 
 -- The loop -------------------------------------------------------------------------------------------
@@ -1287,8 +1269,8 @@ function HitboxEngine.Reset(): ()
 	end
 	table.clear(combatants)
 	table.clear(engaged)
-	table.clear(hitCallbacks)
-	table.clear(projectileEventCallbacks)
+	hitListeners:Clear()
+	projectileListeners:Clear()
 	table.clear(registeredModels)
 	ProjectileSimulator.Reset()
 	combatantById = {}

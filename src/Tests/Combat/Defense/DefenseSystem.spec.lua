@@ -378,6 +378,47 @@ return function()
 			expect(outcomes[1].Kind).to.equal("Clean")
 		end)
 
+		it("does not hold a hit on a stunned defender locked out of the parry", function()
+			-- A stunned body's guard does nothing, so only a parry could answer the hit -- and a whiffed parry's
+			-- lockout means none can. Holding the contact would only delay the next link of the string.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			defender.Humanoid:SetAttribute("HitstunUntil", base + 2)
+
+			-- The mashed parry: pressed, released, and its window closes on nothing.
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			DefenseSystem.SetBlocking(defender.Model, false, base + FRAME)
+			local afterWhiff = base + WINDOW_CLOSE + 2 * FRAME
+			step(FRAME, afterWhiff)
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, afterWhiff + FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Clean")
+		end)
+
+		it("still holds a hit on a stunned defender who could parry it", function()
+			-- The other half: a stunned body with its parry free is exactly who the rewind is for.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			defender.Humanoid:SetAttribute("HitstunUntil", base + 2)
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			expect(#outcomes).to.equal(0)
+			step(FRAME, base + FRAME + PING + FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Clean")
+		end)
+
 		it("caps the rewind at Parry.RewindMaxSeconds however bad the round trip", function()
 			DefenseSystem.SetPingResolver(function(): number
 				return 1

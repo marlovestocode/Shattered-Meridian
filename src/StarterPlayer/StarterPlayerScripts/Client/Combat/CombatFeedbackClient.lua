@@ -101,6 +101,7 @@
 	outcome grant real hitstun" is one question, and the freeze above already answers it correctly.
 ]]
 
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
@@ -348,10 +349,12 @@ local function cancelSwingFor(payload: CombatFeedback): ()
 			return
 		end
 		-- The same three kinds DamageResolver grants DamageConstants.Hitstun for -- recorded so no swing
-		-- is predicted, and no guard animation started, while the server is refusing both. The length is
-		-- the server's own for this contact (it varies by weapon); the shared one only covers an older server.
+		-- is predicted, and no guard animation started, while the server is refusing both. The server sends
+		-- what is left of the stun as it sends this (it varies by weapon, and a held contact has spent some);
+		-- the trip here spent about half a round trip more. The shared length only covers an older server.
+		-- Ending a hair early is harmless: a press the server still refuses as Hitstun is buffered and thrown.
 		local stun = if typeof(payload.HitstunSeconds) == "number"
-			then payload.HitstunSeconds
+			then math.max(payload.HitstunSeconds - Players.LocalPlayer:GetNetworkPing() / 2, 0)
 			else DamageConstants.Hitstun.Seconds
 		LocalCombatState.NoteHitstun(os.clock() + stun)
 		-- And the body cannot simply walk out of the next swing while it is stunned (HitStop's header).

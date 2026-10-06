@@ -55,12 +55,11 @@
 	holding block" would fire an attack the moment a player let go of a guard they were holding on
 	purpose, which is a worse answer than doing nothing.
 
-	NO CLIENT PREDICTION, inherited deliberately. HitboxEngine's header states the stance ("SERVER-
-	AUTHORITATIVE, WITH NO CLIENT PREDICTION... the deleted PredictionMirror/CombatClient pair is not
-	being rebuilt") and this layer does not quietly reintroduce it one level up. The client plays its
-	own local windup cue on press and Attack_Started is the confirmation, never a rollback -- the same
-	shape DefenseClient already established for the block press. Nothing the client does can decide a
-	hit, so nothing it does can need undoing.
+	NO HIT PREDICTION, inherited deliberately from HitboxEngine's stance. The client predicts only
+	PRESENTATION (AttackInputClient's header, 2026-09-28): the swing clip, replayed from a server copy of the
+	move -- the last Attack_Started for it, or the per-stage templates this layer sends with every weapon
+	change (notifyWeaponChanged) -- and Attack_Started or a "Refused" verdict is the confirmation or the
+	cut. Nothing the client does can decide a hit, so nothing it does can need undoing.
 
 	HEARTBEAT ORDER IS LOAD-BEARING, the same way it is for the three layers below. Roblox fires
 	Heartbeat connections in connection order, and this module's Step flushes buffered presses --
@@ -116,6 +115,7 @@ local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local AmortizedReclaim = require(ReplicatedStorage.Shared.AmortizedReclaim)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
@@ -176,8 +176,9 @@ local buffered: { [Model]: Buffered } = {}
 -- starts clean; the client's count runs on across lives, so its ids only ever grow.
 local lastPressId: { [Model]: number } = {}
 
--- OnPressRefused's subscribers -- see answerRefused.
-local pressRefusedCallbacks: { (Model, number, string) -> () } = {}
+-- OnPressRefused's subscribers -- see answerRefused, and the extension-point note further down.
+local pressRefusedListeners: CallbackList.CallbackList<Model, number, string> =
+	CallbackList.New(logger, "AttackRequestSystem.OnPressRefused")
 
 -- The largest press id accepted; the client counts up from 1 per session.
 local MAX_PRESS_ID = 2 ^ 31
@@ -227,15 +228,15 @@ local requestLimiter = RateLimiter.New(AttackConstants.Network.MaxCallsPerSecond
 local swapLimiter = RateLimiter.New(AttackConstants.Network.MaxSwapsPerSecondPerPlayer)
 local feintLimiter = RateLimiter.New(AttackConstants.Network.MaxFeintsPerSecondPerPlayer)
 
--- OnWeaponChanged's subscriber list -- see that function's own header. A plain array, not a
--- RateLimiter/Trove-tracked resource: subscribers are Systems that live for the server's whole
--- lifetime (WeaponVisualSystem today), never a per-player thing to clear on PlayerRemoving.
-local weaponChangedCallbacks: { (Model, Types.WeaponId) -> () } = {}
-
--- OnSwingAccepted's subscriber list -- same lifetime and same reasoning as weaponChangedCallbacks above.
--- Typed loosely here because InFlightView is declared further down; OnSwingAccepted's own signature
--- carries the real type.
-local swingAcceptedCallbacks: { (Model, any) -> () } = {}
+-- This layer's three extension points (Shared/CallbackList.lua: each consumer pcall'd, safe to disconnect
+-- mid-dispatch). Subscribers are Systems that live for the server's whole lifetime (WeaponVisualSystem,
+-- EnvironmentReactionSystem, CombatTrace), never a per-player thing to clear on PlayerRemoving.
+-- swingAcceptedListeners is typed loosely because InFlightView is declared further down; OnSwingAccepted's
+-- own signature carries the real type.
+local weaponChangedListeners: CallbackList.CallbackList<Model, Types.WeaponId?> =
+	CallbackList.New(logger, "AttackRequestSystem.OnWeaponChanged")
+local swingAcceptedListeners: CallbackList.CallbackList<Model, any> =
+	CallbackList.New(logger, "AttackRequestSystem.OnSwingAccepted")
 
 -- Helpers ------------------------------------------------------------------------------------------
 
@@ -253,12 +254,7 @@ local function answerRefused(model: Model, request: AttackRequest, reason: strin
 	if pressId == nil then
 		return
 	end
-	for _, callback in pressRefusedCallbacks do
-		local ok, err = pcall(callback, model, pressId, reason)
-		if not ok then
-			logger:error("An OnPressRefused consumer errored", { errorMessage = tostring(err) })
-		end
-	end
+	pressRefusedListeners:Fire(model, pressId, reason)
 	local remote = cancelledRemote
 	local player = Players:GetPlayerFromCharacter(model)
 	if remote == nil or player == nil then
@@ -383,6 +379,58 @@ local function contactVolumeOf(definition: any): AttackTypes.ContactVolume?
 	}
 end
 
+-- What the attacker's client is told about a swing of this catalogue entry: the one builder for both the
+-- confirmation of a real throw (Throw) and the templates a weapon change hands the client to predict from
+-- (notifyWeaponChanged), so a predicted swing and its confirmation can never be built two different ways.
+local function startedPayloadOf(
+	entry: DamageTypes.AttackCatalogEntry,
+	moveId: string,
+	kind: AttackTypes.AttackKind,
+	weaponId: Types.WeaponId?,
+	stageIndex: number,
+	comboStage: number,
+	cooldownSeconds: number
+): AttackStartedPayload
+	return {
+		MoveId = moveId,
+		Kind = kind,
+		WeaponId = weaponId,
+		StageIndex = stageIndex,
+		ComboStage = comboStage,
+		WindupSeconds = entry.Definition.WindupSeconds,
+		ActiveSeconds = entry.Definition.ActiveSeconds,
+		RecoverySeconds = entry.Definition.RecoverySeconds,
+		CooldownSeconds = cooldownSeconds,
+		-- "" for every Default move today (DefaultMoveRegistry's own header). The client treats a blank
+		-- id as "no clip", never as an error.
+		AnimationId = entry.AnimationId,
+		PlaybackSpeed = entry.PlaybackSpeed,
+		ContactVolume = contactVolumeOf(entry.Definition),
+		StringEnd = if AttackCatalog.IsStringEnder(moveId) then true else nil,
+	}
+end
+
+-- THE PREDICTION SEED (AttackTypes.WeaponChangedPayload.Moves): one template per ground stage of the
+-- weapon now in hand. AttackInputClient only predicts a move it holds a server copy of, and before this
+-- it got that copy from the move's first confirmation -- so the first press of every stage of every
+-- weapon, every session, waited a full round trip to show. Empty for an empty hand.
+local function predictionSeedFor(weaponId: Types.WeaponId?): { AttackStartedPayload }
+	local seed: { AttackStartedPayload } = {}
+	if weaponId == nil then
+		return seed
+	end
+	for _, stage in SwingSequencer.StageMoveIds(weaponId) do
+		local entry = AttackCatalog.Get(stage.MoveId)
+		if entry then
+			table.insert(
+				seed,
+				startedPayloadOf(entry, stage.MoveId, stage.Kind, weaponId, stage.StageIndex, 0, entry.Cooldown)
+			)
+		end
+	end
+	return seed
+end
+
 -- Tells the attacker, and only the attacker, what the server just started. Silently does nothing for
 -- a bot or a dummy, which have no player to tell -- the same "not every combatant is a Player"
 -- tolerance every other module in this stack keeps.
@@ -398,28 +446,34 @@ local function sendStarted(model: Model, payload: AttackStartedPayload): ()
 	remote:FireClient(player, payload)
 end
 
--- Every OnWeaponChanged subscriber, in registration order. pcall'd for the same reason DamageSystem.
--- OnApplied's own dispatch loop is: one subscriber erroring (WeaponVisualSystem today) must not abort
--- the rest and above all must not unwind out of handleSwap/bindCharacter into this System's own
--- Heartbeat/PlayerAdded plumbing.
+-- Every OnWeaponChanged subscriber, in registration order, then the owner's client. pcall'd per subscriber
+-- (CallbackList): one erroring (WeaponVisualSystem today) must not abort the rest and above all must not
+-- unwind out of handleSwap/bindCharacter into this System's own Heartbeat/PlayerAdded plumbing.
+--
+-- THE CLIENT IS TOLD HERE, ON EVERY CHANGE -- a swap, a draw or sheathe (SetWeapon), and a fresh life
+-- (bindCharacter). It used to be told from handleSwap alone, so a player who drew a weapon instead of
+-- pressing the swap key never learned what they held: AttackInputClient could not name the move a press
+-- meant and predicted no swing at all, and after a draw it could predict the PREVIOUS weapon's clip.
 local function notifyWeaponChanged(character: Model, weaponId: Types.WeaponId?): ()
-	for _, callback in weaponChangedCallbacks do
-		local ok, err = pcall(callback, character, weaponId)
-		if not ok then
-			logger:error("An AttackRequestSystem.OnWeaponChanged consumer errored", { errorMessage = tostring(err) })
-		end
+	weaponChangedListeners:Fire(character, weaponId)
+	local remote = weaponChangedRemote
+	local player = Players:GetPlayerFromCharacter(character)
+	if remote == nil or player == nil then
+		return
 	end
+	remote:FireClient(
+		player,
+		{
+			WeaponId = weaponId,
+			Moves = predictionSeedFor(weaponId),
+		} :: AttackTypes.WeaponChangedPayload
+	)
 end
 
--- Every OnSwingAccepted subscriber, pcall'd for the notifyWeaponChanged reason directly above: a
--- cosmetic sibling erroring must never unwind into Throw and leave a swing half-committed.
+-- Every OnSwingAccepted subscriber, pcall'd for the notifyWeaponChanged reason above: a cosmetic sibling
+-- erroring must never unwind into Throw and leave a swing half-committed.
 local function notifySwingAccepted(model: Model, view: any): ()
-	for _, callback in swingAcceptedCallbacks do
-		local ok, err = pcall(callback, model, view)
-		if not ok then
-			logger:error("An AttackRequestSystem.OnSwingAccepted consumer errored", { errorMessage = tostring(err) })
-		end
-	end
+	swingAcceptedListeners:Fire(model, view)
 end
 
 -- Throwing -----------------------------------------------------------------------------------------
@@ -948,25 +1002,18 @@ local function throw(
 		humanoidForBusy:SetAttribute(AttributeConstants.CombatBusyUntil, math.max(busyUntil, startedAt + commitment))
 	end
 
-	sendStarted(model, {
-		MoveId = resolution.MoveId,
-		Kind = request.Kind,
-		Slot = request.Slot,
-		WeaponId = resolution.WeaponId,
-		StageIndex = resolution.StageIndex,
-		ComboStage = comboStage,
-		WindupSeconds = entry.Definition.WindupSeconds,
-		ActiveSeconds = entry.Definition.ActiveSeconds,
-		RecoverySeconds = entry.Definition.RecoverySeconds,
-		CooldownSeconds = cooldownSeconds,
-		-- "" for every Default move today (DefaultMoveRegistry's own header). The client treats a blank
-		-- id as "no clip", never as an error.
-		AnimationId = entry.AnimationId,
-		PlaybackSpeed = entry.PlaybackSpeed,
-		ContactVolume = contactVolumeOf(entry.Definition),
-		StringEnd = if AttackCatalog.IsStringEnder(resolution.MoveId) then true else nil,
-		PressId = request.PressId,
-	})
+	local confirmation = startedPayloadOf(
+		entry,
+		resolution.MoveId,
+		request.Kind,
+		resolution.WeaponId,
+		resolution.StageIndex,
+		comboStage,
+		cooldownSeconds
+	)
+	confirmation.Slot = request.Slot
+	confirmation.PressId = request.PressId
+	sendStarted(model, confirmation)
 
 	debugLog(AttackConstants.Debug.LogAccepted, "Attack thrown", {
 		model = model.Name,
@@ -1307,13 +1354,7 @@ end
 -- and then expired, superseded or dropped -- `reason` says which. The same moment the pressing client hears its
 -- "Refused" verdict. For a spec, and for whatever wants to explain a missing swing. Returns a disconnect.
 function AttackRequestSystem.OnPressRefused(callback: (Model, number, string) -> ()): () -> ()
-	table.insert(pressRefusedCallbacks, callback)
-	return function()
-		local index = table.find(pressRefusedCallbacks, callback)
-		if index then
-			table.remove(pressRefusedCallbacks, index)
-		end
-	end
+	return pressRefusedListeners:Connect(callback)
 end
 
 -- Whether a press is currently sitting in this combatant's buffer. For a spec, and for any future
@@ -1326,16 +1367,23 @@ end
 -- Re-runs every buffered press against the CURRENT state, dropping whatever has expired. Re-validated
 -- rather than replayed: the whole point is that a press buffered a moment ago may have become illegal
 -- since, and firing it anyway would hand a parried player a swing out of their own stagger.
+--
+-- A RE-VALIDATION THAT NOW REFUSES FOR A REASON THAT DOES NOT CLEAR ON ITS OWN DROPS THE PRESS, the same rule
+-- rememberRefused applies on arrival. Kept waiting, it would fire the moment that gate opened: a press buffered
+-- mid-swing, then the guard held (Guarding) or a vault started (ParkourAction), threw on release or on landing --
+-- the free swing out of a guard or a traversal that both gates exist to refuse.
 local function flushBuffers(now: number): ()
 	for model, entry in buffered do
 		if model.Parent == nil or now >= entry.ExpiresAt then
 			dropBuffered(model, "Expired")
 			continue
 		end
-		local accepted = AttackRequestSystem.Throw(model, entry.Request, entry.Authorized, now)
+		local accepted, reason = AttackRequestSystem.Throw(model, entry.Request, entry.Authorized, now)
 		if accepted then
 			buffered[model] = nil
 			debugLog(AttackConstants.Debug.LogBuffer, "Buffered press flushed", { model = model.Name })
+		elseif not AttackConstants.Input.TransientRefusals[reason or "Busy"] then
+			dropBuffered(model, reason or "Busy")
 		end
 	end
 end
@@ -1459,11 +1507,6 @@ local function handleSwap(player: Player): ()
 	-- A swap abandons the in-progress string, so anything buffered against it is stale by definition.
 	dropBuffered(character, "Dropped")
 	notifyWeaponChanged(character, weaponId)
-
-	local remote = weaponChangedRemote
-	if remote then
-		remote:FireClient(player, { WeaponId = weaponId } :: AttackTypes.WeaponChangedPayload)
-	end
 end
 
 -- Registry -----------------------------------------------------------------------------------------
@@ -1552,13 +1595,7 @@ end
 -- its strike asks GetInFlight again at that time: a feint, a parry or a stun can end it in between, and
 -- this signal deliberately says nothing about the future.
 function AttackRequestSystem.OnSwingAccepted(callback: (Model, InFlightView) -> ()): () -> ()
-	table.insert(swingAcceptedCallbacks, callback)
-	return function()
-		local index = table.find(swingAcceptedCallbacks, callback)
-		if index then
-			table.remove(swingAcceptedCallbacks, index)
-		end
-	end
+	return swingAcceptedListeners:Connect(callback)
 end
 
 -- Seconds until this combatant may throw this move again. For a HUD, a bot's own planning, or a spec.
@@ -1607,14 +1644,8 @@ end
 -- per character bind (spawn/respawn -- see bindCharacter), so a subscriber never has to special-case
 -- what a fresh life starts holding separately from what a swap changes it to. Returns a disconnect
 -- function rather than a connection object, matching DamageSystem.OnApplied's own contract.
-function AttackRequestSystem.OnWeaponChanged(callback: (Model, Types.WeaponId) -> ()): () -> ()
-	table.insert(weaponChangedCallbacks, callback)
-	return function()
-		local index = table.find(weaponChangedCallbacks, callback)
-		if index then
-			table.remove(weaponChangedCallbacks, index)
-		end
-	end
+function AttackRequestSystem.OnWeaponChanged(callback: (Model, Types.WeaponId?) -> ()): () -> ()
+	return weaponChangedListeners:Connect(callback)
 end
 
 -- The loop -----------------------------------------------------------------------------------------
@@ -1786,8 +1817,9 @@ function AttackRequestSystem.Reset(): ()
 	end
 	inFlightReclaim:Reset()
 	feintReadyReclaim:Reset()
-	table.clear(weaponChangedCallbacks)
-	table.clear(swingAcceptedCallbacks)
+	weaponChangedListeners:Clear()
+	swingAcceptedListeners:Clear()
+	pressRefusedListeners:Clear()
 	projectileRelevance:Reset()
 	SwingSequencer.Reset()
 end

@@ -112,7 +112,8 @@ export type AttackStartedPayload = {
 	-- Echoed back so a client that fired several presses in flight can tell which one this answers.
 	Kind: AttackKind,
 	Slot: number?,
-	WeaponId: Types.WeaponId,
+	-- nil for an art cast empty-handed (SwingSequencer.Resolution.WeaponId); readers already treat it as optional.
+	WeaponId: Types.WeaponId?,
 	-- Which stage of the string this was. 0 means the Finisher, matching DefaultMoveRegistry's own
 	-- stageIndex sentinel rather than inventing a second convention.
 	StageIndex: number,
@@ -143,10 +144,16 @@ export type AttackStartedPayload = {
 	StringEnd: boolean?,
 }
 
--- Server -> owner, on every change to which weapon their strings come from. Its own event rather
--- than a field on AttackStartedPayload above: a swap is exactly the case where NO attack started.
+-- Server -> owner, on every change to which weapon their strings come from: a swap, a draw or sheathe,
+-- and every fresh life (AttackRequestSystem.notifyWeaponChanged). Its own event rather than a field on
+-- AttackStartedPayload above: a swap is exactly the case where NO attack started.
 export type WeaponChangedPayload = {
-	WeaponId: Types.WeaponId,
+	-- nil for an empty hand (sheathed, or a life that has drawn nothing yet).
+	WeaponId: Types.WeaponId?,
+	-- One Attack_Started template per ground stage of WeaponId, Basic then Heavy, with no PressId and a
+	-- ComboStage of 0 -- what the client predicts a swing from before that move has ever been confirmed.
+	-- Presentation only, exactly like the confirmation it stands in for. Empty for an empty hand.
+	Moves: { AttackStartedPayload }?,
 }
 
 -- Why the server cut a swing short -- see AttackConstants.Network.RemoteNames.Cancelled. "Feint" is the

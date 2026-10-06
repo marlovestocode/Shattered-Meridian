@@ -158,6 +158,26 @@ local function stageCountFor(weaponId: WeaponId, category: AttackKind): number
 	return count
 end
 
+export type StageMove = { MoveId: string, Kind: AttackKind, StageIndex: number }
+
+-- Every ground-string stage this weapon can throw, Basic then Heavy, in stage order -- exactly the ids
+-- Resolve probes for, built by the same two helpers. For the attack layer's prediction seed
+-- (AttackRequestSystem.predictionSeedFor), which hands the client one template per stage.
+function SwingSequencer.StageMoveIds(weaponId: WeaponId): { StageMove }
+	local stages: { StageMove } = {}
+	local function addAll(kind: AttackKind)
+		for stageIndex = 1, stageCountFor(weaponId, kind) do
+			table.insert(
+				stages,
+				{ MoveId = stageMoveId(weaponId, kind, stageIndex), Kind = kind, StageIndex = stageIndex }
+			)
+		end
+	end
+	addAll("Basic")
+	addAll("Heavy")
+	return stages
+end
+
 -- Records --------------------------------------------------------------------------------------------
 
 local function recordFor(model: Model): Record
