@@ -103,7 +103,7 @@ source contradicts) · **new** (found this pass) · **negative** (checked, nothi
 | L-7 | Stale CombatSystem prose in touched files (RespawnSystem Init, Constants.Meridian/Respawn, BloodlineTypes, BloodlineSystem header, MeridianSystem header) | as named | **resolved** | Low | each file | 1–2 | read |
 | L-8 | BloodlineSystem still subscribes to PlayerKilled directly for stage-ups | `BloodlineSystem.lua:647` | **resolved 2026-10-06** — `BloodlineStage` component → `BloodlineSystem.CountKill`, subscription deleted | Medium — a second progression path outside the gate | BloodlineSystem → ProgressionSystem route | next | header updated with migration condition |
 | L-9 | BountySystem pays Meridian XP directly on claim | `BountySystem.lua:276` | **resolved 2026-10-06** — `BountyClaim` component → `BountySystem.PayClaim` (weighted) | Medium — reward outside the manifest | RewardSystem (a `BountyClaim` component) | next | — |
-| L-10 | `RivalrySystem.Init` is not idempotent (subscribes PlayerKilled each call); its spec calls Init repeatedly | `RivalrySystem.lua:195-200`, `Tests/Progression/RivalrySystem.spec.lua:9` | **new** | Low in prod (one Init), leaks subscriptions in the test VM | RivalrySystem | later | read |
+| L-10 | `RivalrySystem.Init` is not idempotent (subscribes PlayerKilled each call); its spec calls Init repeatedly | `RivalrySystem.lua:195-200`, `Tests/Progression/RivalrySystem.spec.lua:9` | **resolved 2026-10-06** — Init cleans a Trove of its previous subscriptions first | Low in prod (one Init), leaks subscriptions in the test VM | RivalrySystem | later | read |
 | L-11 | 2026-08-19 audit §3 lists Bloodline/BloodlineManager/QiDeviation as stubs | `2026-08-19-audit.md:183-188` vs real bodies | **stale** | Low (misleads triage) | this doc | — | `wc -l`, bodies read |
 | L-12 | `software-architecture.md` described a monolithic CombatSystem and Constants/Types-first layout | `docs/software-architecture.md` | **resolved** — rewritten against source | Medium | docs | 3 | read |
 | L-13 | Six planned Systems are empty and required only by `Main.server.lua` | Faction/Achievement/Absorb/Awakening/Territory/World | **open (by decision)** — kept, now spec-guarded as Init-only | Low | roadmap | 3 | inbound-require grep: `Main.server.lua` only |
@@ -179,5 +179,6 @@ Docs are revised in the same change as the architecture they describe — see
   death must end a run too. The payout rides the spine. The two subscribers have no defined order, so the
   claim is resolved by whichever hears the death first and keyed by `deathId` (`BountySystem.owedByDeath`;
   an owed claim the gate refused lapses after `BountyConstants.OwedClaimSeconds`).
+- **O-5 Rivalry.** `RivalrySystem.Init` is idempotent (a Trove of its subscriptions, cleaned first).
 - Not runnable here: the TestEZ suite. `Tests/Progression/SpineRoutes.spec.lua` covers both orders, the
   weighting and the zero-weight refusal.

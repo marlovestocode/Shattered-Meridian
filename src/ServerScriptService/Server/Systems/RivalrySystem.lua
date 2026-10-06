@@ -33,6 +33,7 @@ local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 
 local logger = Logger.scope("RivalrySystem")
@@ -52,6 +53,9 @@ local rivalryStandings: { [Player]: { [Player]: number } } = {}
 local playerScores: { [Player]: number } = {}
 
 local queryRateLimiter = RateLimiter.New(Constants.Rivalry.QueryMaxCallsPerSecond)
+
+-- Everything Init() subscribes, so a second Init() can tear it down first.
+local subscriptions: Trove.TroveInstance? = nil
 
 local function ensureScoreEntry(player: Player): ()
 	if playerScores[player] == nil then
@@ -192,20 +196,29 @@ local function handleGetStanding(player: Player, rawTargetUserId: unknown): numb
 	return RivalrySystem.GetRivalryStanding(player, target)
 end
 
+-- IDEMPOTENT. A second Init() tears down the first's subscriptions before subscribing again -- the same
+-- reason BountySystem.Init gives: this System's spec calls Init() between cases, and a duplicated
+-- PlayerKilled subscription would count every kill twice (progression spine audit, L-10).
 function RivalrySystem.Init(): ()
+	if subscriptions then
+		subscriptions:Clean()
+	end
+	local scope = Trove.New()
+	subscriptions = scope
+
 	rivalryStandings = {}
 	playerScores = {}
 
-	GameplayEvents.OnPlayerKilled(function(victim: Player, killer: Player?)
+	scope:Add(GameplayEvents.OnPlayerKilled(function(victim: Player, killer: Player?)
 		if killer ~= nil then
 			RivalrySystem.RegisterPvPKill(killer, victim)
 		end
-	end)
+	end))
 
-	PlayerLifecycle.BindAllPlayers({
+	scope:Add(PlayerLifecycle.BindAllPlayers({
 		Scope = "RivalrySystem",
 		OnPlayerRemoving = RivalrySystem.ClearPlayerReferences,
-	})
+	}))
 
 	local getTopRivalsRemote = NetworkBridge.CreateRemoteFunction(Constants.Rivalry.RemoteNames.GetTopRivals)
 	getTopRivalsRemote.OnServerInvoke =
