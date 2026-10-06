@@ -20,7 +20,7 @@
 	teardown removed CombatSystem.lua, which owned the tag; every CONSUMER of it survived, wired to
 	nothing. All of them are live again, five without any change to themselves:
 
-	  Constants.Attributes.InCombat      read every frame by Client/Parkour's ParkourController
+	  AttributeConstants.InCombat      read every frame by Client/Parkour's ParkourController
 	                                     (resolveCombatOwned) -- written by nobody until this module
 	  EmoteDefinition.CombatAllowed      authored on all 11 emotes, validated by EmoteRegistry, and
 	                                     never once read (EmoteSystem's header admits the loss)
@@ -61,7 +61,7 @@
 	lands: something that fights back SHOULD tag you, and it will, for free.
 
 	THREE CONSEQUENCES, ONE OF WHICH IS LOUD:
-	  * Constants.Attributes.InCombat is written on each true/false edge, through a Shared/
+	  * AttributeConstants.InCombat is written on each true/false edge, through a Shared/
 	    ChangeNotifier (the module built for exactly this, and named in that Attribute's own comment).
 	    ParkourConstants.CombatGate.BlockedStates refuses Slide, Leap and WallRun while it
 	    is true -- five movement states that have NEVER been gated in the current build, because
@@ -113,7 +113,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local ChangeNotifier = require(ReplicatedStorage.Shared.ChangeNotifier)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local EngagementConstants = require(ReplicatedStorage.Shared.Engagement.EngagementConstants)
@@ -263,7 +263,7 @@ local function publish(player: Player, now: number): ()
 		local character = player.Character
 		local humanoid = if character then CharacterUtil.HumanoidOf(character) else nil
 		if humanoid then
-			humanoid:SetAttribute(Constants.Attributes.InCombat, inCombat)
+			humanoid:SetAttribute(AttributeConstants.InCombat, inCombat)
 		end
 	end
 

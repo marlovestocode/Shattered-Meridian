@@ -32,13 +32,13 @@ local RunService = game:GetService("RunService")
 local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
 local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
-local ATTRIBUTES = Constants.Attributes
+local ATTRIBUTES = AttributeConstants
 local FOLLOW = AirComboConstants.Follow
 
 local logger = Logger.scope("AirComboClient")

@@ -33,7 +33,7 @@ local Workspace = game:GetService("Workspace")
 
 local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -171,7 +171,7 @@ local function heldVisuals(character: Model, humanoid: Humanoid): Trove.TroveIns
 		return nil
 	end
 	local trove = Trove.New()
-	local isVictim = humanoid:GetAttribute(Constants.Attributes.AirHeldUntil) ~= nil
+	local isVictim = humanoid:GetAttribute(AttributeConstants.AirHeldUntil) ~= nil
 	if isVictim then
 		-- The light column under the body, following it every frame.
 		local column = trove:Add(effectPart(Enum.PartType.Block, COLORS.Held, PRESENTATION.ColumnTransparency))
@@ -212,7 +212,7 @@ local function heldVisuals(character: Model, humanoid: Humanoid): Trove.TroveIns
 end
 
 local function onPhaseChanged(character: Model, humanoid: Humanoid, state: Watched): ()
-	local phase = humanoid:GetAttribute(Constants.Attributes.AirComboPhase)
+	local phase = humanoid:GetAttribute(AttributeConstants.AirComboPhase)
 	local live = phase == "Rising" or phase == "Held" or phase == "Finishing"
 	if live and state.Held == nil then
 		state.Held = heldVisuals(character, humanoid)
@@ -258,7 +258,7 @@ local function watch(instance: Instance): ()
 	local state: Watched = { Trove = Trove.New(), Held = nil }
 	watched[character] = state
 	local boundHumanoid = humanoid :: Humanoid
-	state.Trove:Connect(boundHumanoid:GetAttributeChangedSignal(Constants.Attributes.AirComboPhase), function()
+	state.Trove:Connect(boundHumanoid:GetAttributeChangedSignal(AttributeConstants.AirComboPhase), function()
 		onPhaseChanged(character, boundHumanoid, state)
 	end)
 	-- A combatant that streamed in mid-combo reads correctly from its first frame.

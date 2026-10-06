@@ -46,7 +46,7 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local DamageSystem = require(ServerScriptService.Server.Combat.Damage.DamageSystem)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseSystem = require(ServerScriptService.Server.Combat.Defense.DefenseSystem)
@@ -533,7 +533,7 @@ return function()
 
 			exchange(attacker, attackerPlayer, defender, defenderPlayer, base + FRAME)
 
-			expect(attacker.Humanoid:GetAttribute(Constants.Attributes.InCombat)).to.equal(true)
+			expect(attacker.Humanoid:GetAttribute(AttributeConstants.InCombat)).to.equal(true)
 		end)
 
 		it("writes it back to false on the expiry edge", function()
@@ -546,7 +546,7 @@ return function()
 			exchange(attacker, attackerPlayer, defender, defenderPlayer, at)
 			EngagementSystem.Step(FRAME, at + TAG)
 
-			expect(attacker.Humanoid:GetAttribute(Constants.Attributes.InCombat)).to.equal(false)
+			expect(attacker.Humanoid:GetAttribute(AttributeConstants.InCombat)).to.equal(false)
 		end)
 	end)
 

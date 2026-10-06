@@ -83,7 +83,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local SoundTypes = require(ReplicatedStorage.Shared.SoundTypes)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
@@ -103,7 +103,7 @@ local SwingLunge = require(script.Parent.Parent.Combat.SwingLunge)
 
 type AttackKind = AttackTypes.AttackKind
 type OutcomeKind = DefenseTypes.OutcomeKind
-type SoundDefinition = Constants.SoundDefinition
+type SoundDefinition = SoundTypes.SoundDefinition
 type Cue = MovePresentationTypes.Cue
 
 local logger = Logger.scope("CombatAudio")

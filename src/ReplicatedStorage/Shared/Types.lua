@@ -1371,7 +1371,7 @@ export type EmoteUnlockRequirement = {
 -- One emote's full authored data (Shared/Emotes/EmoteDefinitions.lua's `{ [EmoteId]: EmoteDefinition
 -- }` table) -- pure content, no Instance/Player coupling, so it's requirable and testable from a
 -- plain TestEZ spec (Shared/Emotes/EmoteRegistry.lua's own header). AnimationId/Icon follow
--- Constants.Combat.AnimationIds' own "wired but unauthored" convention: an empty string means no
+-- CombatConstants.AnimationIds' own "wired but unauthored" convention: an empty string means no
 -- real asset exists yet, never a guessed/placeholder id (this codebase never fabricates one -- see
 -- that constant's own header). Duration is nil for a Loop == true emote (Sit/Dance -- stopped only
 -- by RequestPlay/death/interruption, never on a timer); a positive number for a one-shot (Wave,

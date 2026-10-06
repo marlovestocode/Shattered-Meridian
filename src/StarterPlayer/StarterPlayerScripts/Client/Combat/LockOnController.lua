@@ -37,7 +37,7 @@ local Workspace = game:GetService("Workspace")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
@@ -111,8 +111,8 @@ local function bodyRefusesLock(): boolean
 	if currentHumanoid == nil or currentHumanoid.Health <= 0 or rootPart == nil then
 		return true
 	end
-	return currentHumanoid:GetAttribute(Constants.Attributes.Mounted) == true
-		or currentHumanoid:GetAttribute(Constants.Attributes.Flying) == true
+	return currentHumanoid:GetAttribute(AttributeConstants.Mounted) == true
+		or currentHumanoid:GetAttribute(AttributeConstants.Flying) == true
 end
 
 -- The live combatant nearest the centre of the screen, inside the acquire cone and range, or nil.

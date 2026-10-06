@@ -116,7 +116,7 @@ local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local AmortizedReclaim = require(ReplicatedStorage.Shared.AmortizedReclaim)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -727,7 +727,7 @@ local function throw(
 	-- Deliberately NOT in AttackConstants.Input.TransientRefusals, for the same reason ParkourAction is
 	-- not: a buffered press would fire on the frame the pilot let go of the wheel, which is a free hit
 	-- out of a state the player was not in when they pressed.
-	if humanoid and humanoid:GetAttribute(Constants.Attributes.Mounted) == true then
+	if humanoid and humanoid:GetAttribute(AttributeConstants.Mounted) == true then
 		return false, "Mounted"
 	end
 
@@ -924,7 +924,7 @@ local function throw(
 	})
 
 	-- PUBLISHED FOR RunSystem, which reads it and forces the run down for the duration -- see
-	-- Constants.Attributes.CombatBusyUntil for the whole contract and for why it is a deadline rather
+	-- AttributeConstants.CombatBusyUntil for the whole contract and for why it is a deadline rather
 	-- than a flag. This layer knows nothing about running and gains no dependency on it; it states when
 	-- this swing is over and lets anyone who cares read that.
 	--
@@ -943,9 +943,9 @@ local function throw(
 	-- walk through the swing they just cancelled.
 	local humanoidForBusy = CharacterUtil.HumanoidOf(model)
 	if humanoidForBusy then
-		local existingBusy = humanoidForBusy:GetAttribute(Constants.Attributes.CombatBusyUntil)
+		local existingBusy = humanoidForBusy:GetAttribute(AttributeConstants.CombatBusyUntil)
 		local busyUntil = if typeof(existingBusy) == "number" then existingBusy else 0
-		humanoidForBusy:SetAttribute(Constants.Attributes.CombatBusyUntil, math.max(busyUntil, startedAt + commitment))
+		humanoidForBusy:SetAttribute(AttributeConstants.CombatBusyUntil, math.max(busyUntil, startedAt + commitment))
 	end
 
 	sendStarted(model, {
@@ -1087,7 +1087,7 @@ function AttackRequestSystem.Feint(model: Model, now: number): (boolean, string?
 	-- A bare write, deliberately -- the one exception the math.max note in Throw names.
 	local humanoid = CharacterUtil.HumanoidOf(model)
 	if humanoid then
-		humanoid:SetAttribute(Constants.Attributes.CombatBusyUntil, recoveredAt)
+		humanoid:SetAttribute(AttributeConstants.CombatBusyUntil, recoveredAt)
 	end
 
 	local remote = cancelledRemote

@@ -5,8 +5,8 @@
 	Owns: the presentation-layer tuning every client-side effect module reads -- hit feedback, screen
 	shake, damage numbers, the pooled-effect budgets and the sound entries that go with them.
 
-	Lifted out of Constants.lua. Constants.FX re-exports this module, so every existing
-	Constants.FX.X call site keeps working unchanged; new code should require this module directly.
+	Lifted out of Constants.lua. Callers require this module directly
+	(the old Constants.FX re-export was removed 2026-10-06).
 
 	PRESENTATION ONLY, AND THAT LINE IS LOAD-BEARING. Nothing here may decide an outcome. These
 	numbers run on the client, where a player can change them; a value that reached a gameplay

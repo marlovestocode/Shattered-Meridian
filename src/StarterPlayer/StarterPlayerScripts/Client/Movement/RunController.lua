@@ -77,7 +77,7 @@ local logger = Logger.scope("RunController")
 
 local RunController = {}
 
-local RUN_CONFIG = Constants.Run
+local RUN_CONFIG = RunConstants
 local FOOTSTEPS = RUN_CONFIG.Footsteps
 local WALL_RUN_STEP = ParkourConstants.WallRun.Step
 

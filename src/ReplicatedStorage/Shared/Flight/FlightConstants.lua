@@ -27,7 +27,7 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local SoundTypes = require(ReplicatedStorage.Shared.SoundTypes)
 
 local FlightConstants = {
 	-- Baseline cruise speed with no boost held -- same number the old bare-noclip FlightController's
@@ -100,7 +100,7 @@ local FlightConstants = {
 	-- shake/hit-stop).
 	SoftLandingSpeedThreshold = 15,
 	-- Downward speed (studs/s) at/above which a landing is "hard" (full shockwave: camera shake +
-	-- pooled ring VFX + brief hit-stop) -- see Constants.FX.FlightLandingRing/HitStop fields.
+	-- pooled ring VFX + brief hit-stop) -- see FXConstants.FlightLandingRing/HitStop fields.
 	HardLandingSpeedThreshold = 45,
 	-- Seconds after Flying flips false during which a genuine free-fall-to-ground landing (detected
 	-- via the Humanoid's native Landed state, not this module's own raycast) still counts as a
@@ -150,10 +150,10 @@ local FlightConstants = {
 	-- faster than they finish playing (you can't take off or land twice in the same second), so the
 	-- single-instance default is correct here, not an oversight.
 	Sound = {
-		Takeoff = { SoundId = "", Volume = 0.6 } :: Constants.SoundDefinition,
-		LandingSoft = { SoundId = "", Volume = 0.5 } :: Constants.SoundDefinition,
-		LandingHard = { SoundId = "", Volume = 0.85 } :: Constants.SoundDefinition,
-		SonicBoom = { SoundId = "", Volume = 0.9 } :: Constants.SoundDefinition,
+		Takeoff = { SoundId = "", Volume = 0.6 } :: SoundTypes.SoundDefinition,
+		LandingSoft = { SoundId = "", Volume = 0.5 } :: SoundTypes.SoundDefinition,
+		LandingHard = { SoundId = "", Volume = 0.85 } :: SoundTypes.SoundDefinition,
+		SonicBoom = { SoundId = "", Volume = 0.9 } :: SoundTypes.SoundDefinition,
 		-- Continuous wind-rush loop (SoundManager.PlayLooped/StopLooped, new capability -- see
 		-- FlightAudio.lua). LoopSoundDefinition, not SoundDefinition -- a loop has no single Volume,
 		-- only a ramped range: Volume/PlaybackSpeed are eased every frame between these bounds based
@@ -164,7 +164,7 @@ local FlightConstants = {
 			MaxVolume = 0.5,
 			MinPlaybackSpeed = 0.9,
 			MaxPlaybackSpeed = 1.3,
-		} :: Constants.LoopSoundDefinition,
+		} :: SoundTypes.LoopSoundDefinition,
 	},
 }
 

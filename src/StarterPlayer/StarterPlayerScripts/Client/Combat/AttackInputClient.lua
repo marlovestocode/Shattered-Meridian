@@ -89,7 +89,7 @@ local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationMan
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
@@ -189,7 +189,7 @@ local boundHumanoid: Humanoid? = nil
 -- which one this is here to cover.
 local function parkourOwnsBody(): boolean
 	local currentHumanoid = boundHumanoid
-	return currentHumanoid ~= nil and currentHumanoid:GetAttribute(Constants.Attributes.ParkourActionOwned) == true
+	return currentHumanoid ~= nil and currentHumanoid:GetAttribute(AttributeConstants.ParkourActionOwned) == true
 end
 
 -- Returns the press id it stamped, or nil when the press never left this client.
@@ -295,7 +295,7 @@ end
 -- Every attack-layer action goes through Client/Input/InputRouter.lua on its "Gameplay" layer, which
 -- is what drops a click that landed on the GUI (gameProcessed -- a HUD ability slot fires its own
 -- OnActivated, which routes here through AttackInputClient.PressHotbarSlot) and every press while a
--- modal panel is open (Constants.Attributes.UiModalOpen). This module used to hand-roll both checks
+-- modal panel is open (AttributeConstants.UiModalOpen). This module used to hand-roll both checks
 -- on its own raw InputBegan connection.
 --
 -- THE ROUTER IS ALSO THE ONLY THING THAT RESOLVES THE GAMEPAD CHORD LAYER, which is why the move was
@@ -608,9 +608,9 @@ local function bodyAllowsSwing(): boolean
 	if defenceState ~= nil and defenceState ~= "Neutral" then
 		return false
 	end
-	return humanoid:GetAttribute(Constants.Attributes.Mounted) ~= true
-		and humanoid:GetAttribute(Constants.Attributes.Grabbed) ~= true
-		and humanoid:GetAttribute(Constants.Attributes.Grabbing) ~= true
+	return humanoid:GetAttribute(AttributeConstants.Mounted) ~= true
+		and humanoid:GetAttribute(AttributeConstants.Grabbed) ~= true
+		and humanoid:GetAttribute(AttributeConstants.Grabbing) ~= true
 end
 
 local function cutUnconfirmedSwing(): ()

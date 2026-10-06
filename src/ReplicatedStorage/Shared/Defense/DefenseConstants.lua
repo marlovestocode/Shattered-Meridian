@@ -6,7 +6,7 @@
 	Shared/Constants.lua -- the same choice HitboxEngineConstants.lua makes and for the same reason:
 	this system is a module, and a module that can be added or removed without editing the game's
 	central constants table is the concrete form of that claim. The one exception is
-	DefenseStateAttribute below, which aliases onto Constants.Attributes.DefenseState rather than
+	DefenseStateAttribute below, which aliases onto AttributeConstants.DefenseState rather than
 	duplicating the literal -- see that field's own header for why.
 
 	THERE IS NO PARRY WINDOW LENGTH IN THIS FILE, and its absence is the point. A parry's timing comes
@@ -24,9 +24,9 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Only reference into Shared/Constants.lua this file makes: DefenseStateAttribute below is an alias
--- onto Constants.Attributes.DefenseState, not a second definition of the string -- see that field's
+-- onto AttributeConstants.DefenseState, not a second definition of the string -- see that field's
 -- own header.
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 -- For the Evade table, which derives every number from the glide it covers -- see that table.
 -- EvadeConstants has no requires of its own, so this cannot form a cycle.
 local EvadeConstants = require(ReplicatedStorage.Shared.Combat.EvadeConstants)
@@ -389,7 +389,7 @@ DefenseConstants.Evade = {
 
 -- The clip every combatant registered without their own ParryAnimationId uses (DefenseSystem.
 -- RegisterCombatant's default-parry-animation path -- see DefenseSystem.SetDefaultParryAnimation).
--- Lives here rather than in Constants.Combat.AnimationIds because that table is READ GENERICALLY by
+-- Lives here rather than in CombatConstants.AnimationIds because that table is READ GENERICALLY by
 -- Client/FX/CombatAnimator.lua's BindCharacter loop (every entry in it gets a template built and
 -- loaded as a LOCOMOTION track) -- see that table's own header on being scoped to Walking/Running/
 -- RunningStage2 since the combat teardown. Adding a non-locomotion id there would get it loaded and
@@ -463,13 +463,13 @@ DefenseConstants.MaxPendingContactsPerFrame = 128
 -- gates on it -- but something outside it now does, so it is no longer purely informational and must
 -- not be renamed or made lossy on that assumption: Server/Systems/RunSystem.lua reads anything other
 -- than "Neutral" as "a combat action is committing this body" and forces the run's stage and charge to
--- zero for the duration. See Constants.Attributes.CombatBusyUntil, its counterpart for the attack
+-- zero for the duration. See AttributeConstants.CombatBusyUntil, its counterpart for the attack
 -- side, for the whole contract. It exists because Humanoid Attributes replicate to every client
 -- for free, so the HUD -- and any future spectator or debug tooling -- can read what a remote
 -- character is doing without this system adding a broadcast remote of its own. Same shape and same
--- reasoning as Constants.Attributes.ParkourState. Aliased onto Constants.Attributes.DefenseState
+-- reasoning as AttributeConstants.ParkourState. Aliased onto AttributeConstants.DefenseState
 -- rather than a second literal, now that RunSystem.lua also reads this Attribute by name.
-DefenseConstants.DefenseStateAttribute = Constants.Attributes.DefenseState
+DefenseConstants.DefenseStateAttribute = AttributeConstants.DefenseState
 
 DefenseConstants.Network = {
 	RemoteNames = {

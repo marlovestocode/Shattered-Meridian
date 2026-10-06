@@ -74,7 +74,7 @@ local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
@@ -541,18 +541,18 @@ local function perceive(bot: Bot, now: number): Perception
 		-- hitstun half still holds the body. Read raw, a parried bot believed itself committed through the
 		-- whole cancelled swing and let the counter land rather than parrying it back.
 		SelfBusyUntil = if attackStateOf(model) == "Idle"
-			then numberAttribute(humanoid, Constants.Attributes.HitstunUntil)
-			else numberAttribute(humanoid, Constants.Attributes.CombatBusyUntil),
+			then numberAttribute(humanoid, AttributeConstants.HitstunUntil)
+			else numberAttribute(humanoid, AttributeConstants.CombatBusyUntil),
 		SelfDefenseState = selfState,
 		SelfGuardFraction = guardFractionOf(model),
 		SelfHealthFraction = if humanoid.MaxHealth > 0 then humanoid.Health / humanoid.MaxHealth else 0,
-		SelfDisabled = numberAttribute(humanoid, Constants.Attributes.HitstunUntil) > now or humanoid:GetAttribute(
-			Constants.Attributes.Grabbed
-		) == true or humanoid:GetAttribute(Constants.Attributes.Grabbing) == true or DISABLED_STATES[selfState] == true,
+		SelfDisabled = numberAttribute(humanoid, AttributeConstants.HitstunUntil) > now or humanoid:GetAttribute(
+			AttributeConstants.Grabbed
+		) == true or humanoid:GetAttribute(AttributeConstants.Grabbing) == true or DISABLED_STATES[selfState] == true,
 		-- A stagger no longer stops a guard from mattering when parry trading is on (DefenseConstants.Rally):
 		-- a staggered combatant may parry back, and so may the bot.
-		SelfLocked = humanoid:GetAttribute(Constants.Attributes.Grabbed) == true
-			or humanoid:GetAttribute(Constants.Attributes.Grabbing) == true
+		SelfLocked = humanoid:GetAttribute(AttributeConstants.Grabbed) == true
+			or humanoid:GetAttribute(AttributeConstants.Grabbing) == true
 			or selfState == "GuardBroken"
 			or (selfState == "Staggered" and not DefenseConstants.Rally.ParryFromStagger),
 		ParryArmableAt = if bot.GuardHeld
@@ -582,7 +582,7 @@ local function perceive(bot: Bot, now: number): Perception
 		perception.TargetAttackState = attackStateOf(target)
 		perception.TargetDefenseState = DefenseSystem.GetState(target) or "Neutral"
 		perception.TargetGuardFraction = guardFractionOf(target)
-		perception.TargetStunned = numberAttribute(targetHumanoid, Constants.Attributes.HitstunUntil) > now
+		perception.TargetStunned = numberAttribute(targetHumanoid, AttributeConstants.HitstunUntil) > now
 	end
 
 	-- The air combo, from its own queries -- the same "read through the public surface" shape every other
@@ -592,7 +592,7 @@ local function perceive(bot: Bot, now: number): Perception
 	perception.SelfStunHeld = DefenseConstants.StunParry.Enabled
 		and DefenseConstants.StunParry.WindowScale > 0
 		and attackStateOf(model) == "Idle"
-		and numberAttribute(humanoid, Constants.Attributes.HitstunUntil) > now
+		and numberAttribute(humanoid, AttributeConstants.HitstunUntil) > now
 	local combo = AirComboSystem.GetCombo(model)
 	if combo and combo.Attacker == model then
 		perception.SelfAirAttacker = true
@@ -715,7 +715,7 @@ local function applyIntent(bot: Bot, intent: Intent, perception: Perception, now
 	-- (held as the victim, or driven to its follow slot as the attacker -- AirComboSystem), or a finisher's
 	-- flight (platform-standing under the server's velocity). Turning the root here would fight all of them.
 	if
-		humanoid:GetAttribute(Constants.Attributes.Grabbed) == true
+		humanoid:GetAttribute(AttributeConstants.Grabbed) == true
 		or AirComboAttributes.IsParticipant(humanoid)
 		or humanoid.PlatformStand
 	then
@@ -731,7 +731,7 @@ local function applyIntent(bot: Bot, intent: Intent, perception: Perception, now
 		root.AssemblyLinearVelocity = bot.EvadeDirection * EvadeMotion.SpeedAt(now - bot.EvadeStartedAt)
 			+ Vector3.new(0, velocity.Y, 0)
 	else
-		local locked = humanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true
+		local locked = humanoid:GetAttribute(AttributeConstants.RootControlLocked) == true
 			or perception.SelfDisabled
 			or perception.SelfAttackState == "Windup"
 			or perception.SelfAttackState == "Active"

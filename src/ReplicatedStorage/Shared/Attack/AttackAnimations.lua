@@ -43,7 +43,7 @@
 
 	WHY THIS FILE EXISTS AT ALL, given the Move Creation System already has an AnimationId field.
 	Because that field is only reachable for a CUSTOM move. A "Default" move -- every hand-authored
-	attack in Constants.Combat.Weapons, which is the entire live move set -- is a fresh projection built
+	attack in CombatConstants.Weapons, which is the entire live move set -- is a fresh projection built
 	by DefaultMoveRegistry on every read, and that projection hardcodes AnimationId = "" and never
 	stores one (the Move Editor does not offer a Default move a clip field). So a Default move has
 	nowhere to put a clip id, and before this file the
@@ -53,7 +53,7 @@
 	see AttackCatalog.Get, which is the one place the two are combined. A custom move authored in the
 	Move Editor with a real clip keeps it; a Default move with nothing to author reaches here.
 
-	"" MEANS "WIRED, NOT YET AUTHORED", the same convention Constants.Combat.AnimationIds and
+	"" MEANS "WIRED, NOT YET AUTHORED", the same convention CombatConstants.AnimationIds and
 	Constants.Flight.AnimationIds already use, and it is a first-class value here rather than an
 	oversight: every slot below is deliberately blank because THIS REPO DOES NOT GUESS ASSET IDS (see
 	Constants.UI.VitalIconIds' own note, and AdminConfig's "never guess or invent a UserId"). A blank id

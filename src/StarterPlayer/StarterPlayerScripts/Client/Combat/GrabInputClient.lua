@@ -11,7 +11,7 @@
 	sends the press and presents whatever GrabSystem.Grab_HoldChanged says happened.
 
 	THE ONE CLIENT-SIDE FILTER THIS MODULE APPLIES IS HONEST, not a guess. It declines to send
-	Grab_Throw unless the local player's own Constants.Attributes.Grabbing Attribute is true -- the
+	Grab_Throw unless the local player's own AttributeConstants.Grabbing Attribute is true -- the
 	same "the client declines to send what it can already see is illegal" convention Shared/Parkour/
 	ParkourOwnership.OwnsBody's own consumers already use. That Attribute is server-written and
 	replicated, so this is not a prediction of server state, it is a read of it: a press sent while
@@ -52,7 +52,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
 local GrabTypes = require(ReplicatedStorage.Shared.Grab.GrabTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -139,7 +139,7 @@ end
 
 local function requestThrow(): ()
 	local humanoid = boundHumanoid
-	if not humanoid or humanoid:GetAttribute(Constants.Attributes.Grabbing) ~= true then
+	if not humanoid or humanoid:GetAttribute(AttributeConstants.Grabbing) ~= true then
 		-- Not currently holding anyone, as far as this client can already see -- see file header on
 		-- why this is a read of replicated server state rather than a guess.
 		return
@@ -153,13 +153,13 @@ local function requestThrow(): ()
 end
 
 -- True while any modal UI panel is up (Components/ModalScreen.lua publishes the count as
--- Constants.Attributes.UiModalOpen -- see that constant's own comment). Roblox's own
+-- AttributeConstants.UiModalOpen -- see that constant's own comment). Roblox's own
 -- gameProcessedEvent only covers clicks that LAND on the GUI, and a centred 760x620 panel leaves
 -- most of the viewport uncovered, so a player reading their character sheet was still throwing a
 -- punch every time they clicked anywhere else on screen.
 local function isModalUiOpen(): boolean
 	local player = Players.LocalPlayer
-	return player ~= nil and player:GetAttribute(Constants.Attributes.UiModalOpen) == true
+	return player ~= nil and player:GetAttribute(AttributeConstants.UiModalOpen) == true
 end
 
 local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
@@ -201,7 +201,7 @@ end
 
 -- Throw rooting --------------------------------------------------------------------------------------
 
--- The client half of rooting a thrower for their throw clip (Constants.Attributes.GrabThrowing, written
+-- The client half of rooting a thrower for their throw clip (AttributeConstants.GrabThrowing, written
 -- by GrabSystem). The server pins WalkSpeed and parks parkour and shift lock's yaw; what only the client
 -- that simulates this body can stop is the engine's own jump and its turn-to-face-movement. Jump goes
 -- through the Humanoid's Jumping state, the switch AttackInputClient already uses for the launcher
@@ -252,7 +252,7 @@ function GrabInputClient.Start(): ()
 			setCue(nil)
 			-- A fresh Humanoid starts with its own defaults, so nothing from the last life is restored.
 			restoreAutoRotate = nil
-			local throwing = Constants.Attributes.GrabThrowing
+			local throwing = AttributeConstants.GrabThrowing
 			life:Connect(humanoid:GetAttributeChangedSignal(throwing), function()
 				setThrowRooted(humanoid, humanoid:GetAttribute(throwing) == true)
 			end)

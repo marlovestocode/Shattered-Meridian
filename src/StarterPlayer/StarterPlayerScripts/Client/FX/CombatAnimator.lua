@@ -54,7 +54,9 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
+local RunConstants = require(ReplicatedStorage.Shared.Run.RunConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -81,16 +83,16 @@ local ANIMATION_IDS = CombatConstants.AnimationIds
 -- baked-in walk/run cycle uses, and win the resulting tie on DOMINANT_WEIGHT alone -- not on priority
 -- (Core is the BOTTOM of Enum.AnimationPriority, not the top; see loadArmedIdleTrack's own header for
 -- what that costs the moment something ABOVE Core starts playing).
--- Constants.FX.Animation.Combat -- see that table's own header in Constants.lua.
+-- FXConstants.Animation.Combat -- see that table's own header in Constants.lua.
 -- Shared by Walking and Running: a start/crossfade (Play(), or a Stop() that's really a handoff to
 -- the OTHER locomotion loop -- see the evaluator below) uses this softer duration; a genuine
 -- interrupt (the character stopping) uses LOCOMOTION_INTERRUPT_FADE_TIME instead, since that one
 -- wants a fast cut, not a blend.
-local LOCOMOTION_FADE_TIME = Constants.FX.Animation.Combat.LocomotionFadeSeconds
-local LOCOMOTION_INTERRUPT_FADE_TIME = Constants.FX.Animation.Combat.LocomotionInterruptFadeSeconds
+local LOCOMOTION_FADE_TIME = FXConstants.Animation.Combat.LocomotionFadeSeconds
+local LOCOMOTION_INTERRUPT_FADE_TIME = FXConstants.Animation.Combat.LocomotionInterruptFadeSeconds
 -- The normal run's playback rate and the armed-pose crossfade duration.
-local RUN_STAGE_CROSSFADE_TIME = Constants.Run.Animation.StageCrossfadeSeconds
-local RUN_PLAYBACK_SPEEDS = Constants.Run.Animation.PlaybackSpeeds
+local RUN_STAGE_CROSSFADE_TIME = RunConstants.Animation.StageCrossfadeSeconds
+local RUN_PLAYBACK_SPEEDS = RunConstants.Animation.PlaybackSpeeds
 
 -- The MoveDirection magnitude below which there's no meaningful held movement input -- shared with
 -- Client/FX/MovementVFX.lua; see CombatConstants.MovementInputMagnitudeThreshold's own header for the
@@ -106,9 +108,9 @@ local LOCOMOTION_THRESHOLD = CombatConstants.MovementInputMagnitudeThreshold
 -- default Animate script keeps re-evaluating and re-asserting its OWN track's weight on every
 -- Humanoid movement-state change, and that re-assertion can win the tie again after ours -- the
 -- Walking/Running evaluator below re-calls AdjustWeight every Heartbeat for exactly this reason.
--- Constants.FX.Animation.DominantWeight -- shared with Server/Combat/BotAnimator.lua (removed) and
+-- FXConstants.Animation.DominantWeight -- shared with Server/Combat/BotAnimator.lua (removed) and
 -- Client/FX/FlightAnimator.lua, see that field's own header.
-local DOMINANT_WEIGHT = Constants.FX.Animation.DominantWeight
+local DOMINANT_WEIGHT = FXConstants.Animation.DominantWeight
 
 local animationTemplates: { [string]: Animation } = {}
 for name, id in pairs(ANIMATION_IDS) do
@@ -526,7 +528,7 @@ RunService.Heartbeat:Connect(function()
 		-- character's animation entirely during flight) -- Boost reuses the Sprint keybind and raw
 		-- WASD can still register nonzero MoveDirection mid-flight, so without this guard the
 		-- ground-locomotion loop could blend in underneath a Hover/Cruise/Boost flight pose.
-		local flying = currentHumanoid ~= nil and currentHumanoid:GetAttribute(Constants.Attributes.Flying) == true
+		local flying = currentHumanoid ~= nil and currentHumanoid:GetAttribute(AttributeConstants.Flying) == true
 		local moving = not flying
 			and currentHumanoid ~= nil
 			and currentHumanoid.MoveDirection.Magnitude > LOCOMOTION_THRESHOLD

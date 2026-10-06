@@ -56,7 +56,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -442,7 +442,7 @@ end
 -- server-side in DefenseSystem.SetBlocking regardless -- see Shared/Parkour/ParkourOwnership.
 local function parkourOwnsBody(): boolean
 	local currentHumanoid = boundHumanoid
-	return currentHumanoid ~= nil and currentHumanoid:GetAttribute(Constants.Attributes.ParkourActionOwned) == true
+	return currentHumanoid ~= nil and currentHumanoid:GetAttribute(AttributeConstants.ParkourActionOwned) == true
 end
 
 -- Presentation --------------------------------------------------------------------------------------
@@ -544,7 +544,7 @@ end
 -- released) and harmless -- Release on a machine whose guard is down is a no-op. Re-pressing the key
 -- after the evade raises the guard as normal.
 local function onParkourStateChanged(humanoid: Humanoid): ()
-	if blockHeld and humanoid:GetAttribute(Constants.Attributes.ParkourState) == "Evade" then
+	if blockHeld and humanoid:GetAttribute(AttributeConstants.ParkourState) == "Evade" then
 		setBlockHeld(false)
 	end
 end
@@ -573,7 +573,7 @@ local function bindCharacter(nextCharacter: Model, humanoid: Humanoid, life: Tro
 	-- thing inside Bind()) -- nothing here needs to clear DEFENSE_LAYER separately.
 	manager:Bind(nextCharacter)
 
-	life:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.ParkourState), function()
+	life:Connect(humanoid:GetAttributeChangedSignal(AttributeConstants.ParkourState), function()
 		onParkourStateChanged(humanoid)
 	end)
 end
@@ -609,7 +609,7 @@ function DefenseClient.Start(): ()
 	inventoryChanged.OnClientEvent:Connect(onInventoryChanged)
 
 	-- Bound through InputRouter's "Gameplay" layer, which now owns both the gameProcessed check and
-	-- the Constants.Attributes.UiModalOpen gate this used to hand-roll -- right-clicking inside your
+	-- the AttributeConstants.UiModalOpen gate this used to hand-roll -- right-clicking inside your
 	-- own character sheet should not raise your guard any more than left-clicking there should throw
 	-- a punch, the same reasoning Client/Combat/AttackInputClient.lua's identical gate documents for
 	-- itself. parkourOwnsBody() stays here, inline, because it is a parkour-ownership question, not a

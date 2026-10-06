@@ -16,7 +16,7 @@
 	surfaces draw.
 
 	DAMAGE NUMBER STACKING is kept from the original, and for the original's reason: consecutive hits
-	inside Constants.FX.DamageNumbers.StackWindowSeconds accumulate into ONE running total rather than
+	inside FXConstants.DamageNumbers.StackWindowSeconds accumulate into ONE running total rather than
 	each spawning its own label, so a three-hit string reads as "24" climbing rather than three numbers
 	fighting for the same patch of screen. Deliberately a single current stack, not a per-target
 	ledger -- Types are per-contact and this is a melee game where a player is fighting what is in
@@ -39,7 +39,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 
 local Layers = require(script.Parent.Parent.Shell.Layers)
 local Surface = require(script.Parent.Parent.Shell.Surface)
@@ -80,8 +80,8 @@ export type CombatFeedbackHandle = {
 	SuppressDamageNumbers: (seconds: number) -> (),
 }
 
-local DAMAGE_NUMBER_LIFETIME = Constants.FX.DamageNumbers.LifetimeSeconds
-local STACK_WINDOW_SECONDS = Constants.FX.DamageNumbers.StackWindowSeconds
+local DAMAGE_NUMBER_LIFETIME = FXConstants.DamageNumbers.LifetimeSeconds
+local STACK_WINDOW_SECONDS = FXConstants.DamageNumbers.StackWindowSeconds
 
 -- Returns its handle AND its banner tile. The tile is unparented -- UI/init.lua hands it to
 -- Shell/Regions.lua's TopCentre at order 5, above the announcement banner at 10. See the note at the

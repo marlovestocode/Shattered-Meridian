@@ -33,7 +33,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -187,7 +187,7 @@ local function step(deltaTime: number): ()
 		end
 
 		local wants = entry.Tagged
-			and GuardStrainPose.IsGuarding(humanoid:GetAttribute(Constants.Attributes.DefenseState))
+			and GuardStrainPose.IsGuarding(humanoid:GetAttribute(AttributeConstants.DefenseState))
 			and (cameraPosition == nil or (root.Position - cameraPosition).Magnitude <= CONFIG.MaxDistanceStuds)
 		local rate = if wants then deltaTime / CONFIG.BlendInSeconds else -deltaTime / CONFIG.BlendOutSeconds
 		entry.Weight = math.clamp(entry.Weight + rate, 0, 1)

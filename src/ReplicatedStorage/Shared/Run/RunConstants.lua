@@ -22,11 +22,7 @@
 	                            deliberately informational: see MotorCommand.DesiredSpeed's header.
 	A number that decides a WalkSpeed belongs here and only here.
 
-	Constants.Run is now a re-export of this module, so existing Constants.Run.Footsteps/StageOnset/
-	Animation call sites keep working; new code should require this module directly. That re-export
-	widens Constants.Run from the presentation tables alone to this whole file -- nothing reads it
-	wholesale (all seventeen call sites go through one of those three keys), but a future one that
-	iterated it would now walk the ladder too.
+	Callers require this module directly; the old Constants.Run re-export was removed (2026-10-06).
 
 	SEPARATE FROM Constants.Combat ON PURPOSE. The sprint tier used to live in Constants.Combat
 	(SprintSpeedMultiplier, SprintStage2*) because the combat monolith owned WalkSpeed. It no longer
@@ -237,7 +233,7 @@ RunConstants.Footsteps = {
 -- No stage-onset cue: there is no higher speed to announce.
 RunConstants.StageOnset = {}
 
--- ANIMATION. Stage 1 keeps Constants.Combat.AnimationIds.Running, the ordinary sprint loop.
+-- ANIMATION. Stage 1 keeps CombatConstants.AnimationIds.Running, the ordinary sprint loop.
 RunConstants.Animation = {
 	-- Playback speed for the run loop, keyed by stage. Applied on stage CHANGE only, never per
 	-- frame: CombatAnimator.FreezeActiveCombatTrack (hit-stop) drives the same property, and a

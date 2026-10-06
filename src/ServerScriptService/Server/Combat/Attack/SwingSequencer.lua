@@ -26,7 +26,7 @@
 	only to decide the launcher, which is the single place the two counters legitimately meet.
 
 	NO KNOWLEDGE OF HOW MANY STAGES A STRING HAS. The stage count is discovered by probing
-	AttackCatalog for consecutive MoveIds rather than read from Constants.Combat.Weapons, so widening
+	AttackCatalog for consecutive MoveIds rather than read from CombatConstants.Weapons, so widening
 	a string is a data edit in one place and this module never drifts from it. The probe is memoised
 	because the stage ARRAYS are fixed at file scope -- DefaultMoveRegistry.ApplyEdit mutates a
 	stage's fields in place and never adds or removes one -- so a count, unlike a move's contents,

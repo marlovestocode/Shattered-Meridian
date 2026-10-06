@@ -26,6 +26,8 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local StarterPlayer = game:GetService("StarterPlayer")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
+local RunConstants = require(ReplicatedStorage.Shared.Run.RunConstants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
@@ -201,8 +203,8 @@ return function()
 		end)
 
 		it("covers the movement dust texture", function()
-			if Constants.FX.MovementDust.Texture ~= "" then
-				expect(manifestKeys()[Constants.FX.MovementDust.Texture]).to.equal(true)
+			if FXConstants.MovementDust.Texture ~= "" then
+				expect(manifestKeys()[FXConstants.MovementDust.Texture]).to.equal(true)
 			end
 		end)
 
@@ -261,14 +263,14 @@ return function()
 			-- The normal run has one footstep sound, so this checks its asset directly rather than
 			-- depending on a registrar's module-load order.
 			local keys = manifestKeys()
-			local stage1 = Constants.Run.Footsteps.Stages[1]
+			local stage1 = RunConstants.Footsteps.Stages[1]
 			if stage1.Sound.SoundId ~= "" then
 				expect(keys[stage1.Sound.SoundId]).to.equal(true)
 			end
 			-- Guards the shape as well as the manifest: a stage entry missing ReferenceSpeed or
 			-- StepIntervalSeconds would divide by nil inside RunController's cadence, which is a
 			-- crash in a per-frame loop rather than a missing sound.
-			for stage, config in Constants.Run.Footsteps.Stages do
+			for stage, config in RunConstants.Footsteps.Stages do
 				expect(typeof(config.ReferenceSpeed)).to.equal("number")
 				expect(config.StepIntervalSeconds > 0).to.equal(true)
 				expect(stage > 0).to.equal(true)

@@ -7,7 +7,7 @@
 	docs/ui-ux-philosophy.md's Hit Feedback section asks for and animation-systems.md's "every combat
 	state with a visible moment needs a VFX cue" mandate, which the game had no camera-level answer to
 	before this module (only SwingEffect's FOV punch and StunEffect's colour dip). Presets live in
-	Constants.FX.CameraShake; CombatClient.lua's Combat_FeedbackEvent handler is the only caller, so a
+	FXConstants.CameraShake; CombatClient.lua's Combat_FeedbackEvent handler is the only caller, so a
 	shake only ever fires on a resolution the server already confirmed -- never optimistically.
 
 	Implementation: a single active shake (newest wins -- upstream HitStop.MinIntervalSeconds already
@@ -37,7 +37,7 @@
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local logger = Logger.scope("CameraShake")
@@ -45,7 +45,7 @@ local logger = Logger.scope("CameraShake")
 local RENDER_STEP_NAME = "CombatCameraShake"
 local UNDO_STEP_NAME = "CombatCameraShakeUndo"
 
-local NOISE_SEEDS = Constants.FX.CameraShake.NoiseSeeds
+local NOISE_SEEDS = FXConstants.CameraShake.NoiseSeeds
 
 export type ShakePreset = {
 	Amplitude: number,
@@ -87,9 +87,9 @@ function CameraShake.SetEnabled(enabled: boolean): ()
 	end
 end
 
--- Starts (or restarts) a shake from a Constants.FX.CameraShake preset. Cheap and allocation-light;
+-- Starts (or restarts) a shake from a FXConstants.CameraShake preset. Cheap and allocation-light;
 -- safe to call every confirmed impact. A nil/malformed preset is a no-op (a missing shake degrades
--- to no shake, never an error) -- consistent with Constants.FX's "presentation, not outcome" note.
+-- to no shake, never an error) -- consistent with FXConstants's "presentation, not outcome" note.
 function CameraShake.Shake(preset: ShakePreset?): ()
 	-- Refused here rather than inside onRenderStep so a disabled player pays nothing at all: no active
 	-- slot means the render step's own first line returns immediately, exactly as it does when nothing

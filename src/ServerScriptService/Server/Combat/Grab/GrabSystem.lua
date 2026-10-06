@@ -76,11 +76,11 @@
 	linear speed -- the canonical Roblox fling, one more time.
 
 	MOVEMENT LOCK REUSES TWO EXISTING SEAMS, NEITHER OF WHICH THIS MODULE OWNS:
-	  * Constants.Attributes.RootControlLocked -- the exact Attribute ParkourController.
+	  * AttributeConstants.RootControlLocked -- the exact Attribute ParkourController.
 	    resolveCombatOwned already polls generically as "something else owns this body right now" (its
 	    own header lists a HoldAloft pin as one of the historical legitimate setters). Set on the
 	    victim while held OR in flight; parks client-side parkour for free, no ParkourController edit.
-	  * Constants.Attributes.Grabbed -- a NEW boolean, added to RunSystem.isMovementLocked's existing
+	  * AttributeConstants.Grabbed -- a NEW boolean, added to RunSystem.isMovementLocked's existing
 	    tier list, because RootControlLocked has never carried WalkSpeed-zeroing semantics in this
 	    codebase (a dedicated Attribute always did that job -- the since-deleted CombatTypes.lua's own
 	    airComboChaseExpiry was the precedent). Pins the victim's WalkSpeed to 0 while held or in flight.
@@ -136,7 +136,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
@@ -428,8 +428,8 @@ local function restoreControl(victim: Model, humanoid: Humanoid, root: BasePart)
 	end
 	if humanoid.Parent ~= nil then
 		humanoid.PlatformStand = false
-		humanoid:SetAttribute(Constants.Attributes.RootControlLocked, nil)
-		humanoid:SetAttribute(Constants.Attributes.Grabbed, nil)
+		humanoid:SetAttribute(AttributeConstants.RootControlLocked, nil)
+		humanoid:SetAttribute(AttributeConstants.Grabbed, nil)
 	end
 end
 
@@ -502,7 +502,7 @@ local function detachHold(attacker: Model, hold: Hold): ()
 	restoreBody(hold.Body)
 	clearOfWalls(attacker, hold.AttackerRoot, hold.Victim, hold.VictimRoot)
 	if hold.AttackerHumanoid.Parent ~= nil then
-		hold.AttackerHumanoid:SetAttribute(Constants.Attributes.Grabbing, nil)
+		hold.AttackerHumanoid:SetAttribute(AttributeConstants.Grabbing, nil)
 	end
 	sendHoldChanged(attacker, "Attacker", false)
 end
@@ -555,7 +555,7 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 	--
 	-- Read as an Attribute, not through a BlimpSystem require, the same seam AttackRequestSystem's and
 	-- DefenseSystem's own Mounted gates use.
-	if victimHumanoid:GetAttribute(Constants.Attributes.Mounted) == true then
+	if victimHumanoid:GetAttribute(AttributeConstants.Mounted) == true then
 		return
 	end
 	-- Either side of a live air combo: AirComboSystem is already driving that body server-side, and a
@@ -603,9 +603,9 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 	weld.C1 = solution.C1
 	weld.Parent = solution.Part1
 
-	attackerHumanoid:SetAttribute(Constants.Attributes.Grabbing, true)
-	victimHumanoid:SetAttribute(Constants.Attributes.Grabbed, true)
-	victimHumanoid:SetAttribute(Constants.Attributes.RootControlLocked, true)
+	attackerHumanoid:SetAttribute(AttributeConstants.Grabbing, true)
+	victimHumanoid:SetAttribute(AttributeConstants.Grabbed, true)
+	victimHumanoid:SetAttribute(AttributeConstants.RootControlLocked, true)
 
 	-- What every client's Client/FX/GrabHoldPose.lua needs: which of the holder's arms to pin (so no
 	-- animation swings the hand the victim is welded to), the victim's mode, whether an authored clip
@@ -732,7 +732,7 @@ local function launch(attackerModel: Model, hold: Hold, now: number): ()
 	victimRoot.AssemblyAngularVelocity = Vector3.zero
 	victimRoot.AssemblyLinearVelocity = forward * config.ThrowHorizontalVelocity
 		+ Vector3.new(0, config.ThrowUpVelocity, 0)
-	-- Deliberately NO sendHoldChanged for the victim here: Constants.Attributes.Grabbed spans the whole
+	-- Deliberately NO sendHoldChanged for the victim here: AttributeConstants.Grabbed spans the whole
 	-- hold-then-flight lifetime (see this file's header), and so does the "GRABBED" client cue it
 	-- drives -- the victim's own Active=false fires once, on landing, not twice.
 
@@ -801,8 +801,8 @@ local function beginThrowClip(attackerModel: Model, hold: Hold, clip: string, no
 	-- RunSystem and stands the client's jump and AutoRotate down (GrabInputClient). Lifted by this clip's
 	-- own OnFinished, which every ending of it reaches -- finish, release, death, teardown.
 	local attackerHumanoid = hold.AttackerHumanoid
-	attackerHumanoid:SetAttribute(Constants.Attributes.GrabThrowing, true)
-	attackerHumanoid:SetAttribute(Constants.Attributes.RootControlLocked, true)
+	attackerHumanoid:SetAttribute(AttributeConstants.GrabThrowing, true)
+	attackerHumanoid:SetAttribute(AttributeConstants.RootControlLocked, true)
 
 	-- Same layer and source as the hold clip, so this replaces it rather than layering over it.
 	local animation = GrabConstants.Animation
@@ -824,11 +824,11 @@ local function beginThrowClip(attackerModel: Model, hold: Hold, clip: string, no
 				launch(attackerModel, hold, os.clock())
 			end
 			if attackerHumanoid.Parent ~= nil then
-				attackerHumanoid:SetAttribute(Constants.Attributes.GrabThrowing, nil)
+				attackerHumanoid:SetAttribute(AttributeConstants.GrabThrowing, nil)
 				-- Not if a grab has taken this body since (thrown or held mid-follow-through): that lock is
 				-- the new grab's, and it clears its own.
 				if heldBy[attackerModel] == nil and flights[attackerModel] == nil then
-					attackerHumanoid:SetAttribute(Constants.Attributes.RootControlLocked, nil)
+					attackerHumanoid:SetAttribute(AttributeConstants.RootControlLocked, nil)
 				end
 			end
 			-- Handed to the follow-through by launch (just now, or earlier at the release point): the clip

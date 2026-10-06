@@ -42,7 +42,7 @@ DamageConstants.Hitstun = {
 	-- ORDER OF MAGNITUDE from the deleted system's HitStunDuration (0.6) as a placeholder -- it was
 	-- never a re-derivation, because the real constraint (its relationship to the rebuilt move set's
 	-- WindupSeconds) could not be checked until the rebuilt move set existed. With the real Basic/Heavy
-	-- stages authored (Constants.Combat.Weapons -- Basic windups 0.14-0.18, Heavy 0.35/0.6), 0.45 read
+	-- stages authored (CombatConstants.Weapons -- Basic windups 0.14-0.18, Heavy 0.35/0.6), 0.45 read
 	-- as a flinch rather than a stun in play: a hit landed and the victim's next legal action arrived
 	-- before the attacker's own follow-up swing had even finished its windup, so "you got hit" cost
 	-- less than a single beat of pressure. 0.65 is a full, felt lockout a player cannot mistake for

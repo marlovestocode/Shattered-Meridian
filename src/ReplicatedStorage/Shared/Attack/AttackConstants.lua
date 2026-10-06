@@ -87,7 +87,7 @@ AttackConstants.Sequence = {
 	-- SwingSequencer applies this same beat between every consecutive pair of stages, including into
 	-- the Finisher (see SwingSequencer.Advance, which stamps ChainReadyAt after every accepted throw
 	-- regardless of which stage it was). That worst case, checked by hand against
-	-- Constants.Combat.Weapons, is Primary's own Basic3->Finisher transition (0.20 recovery + 0.28
+	-- CombatConstants.Weapons, is Primary's own Basic3->Finisher transition (0.20 recovery + 0.28
 	-- windup = 0.48s). At the 0.01 delay authored here that totals 0.49s against the 0.9s ceiling -- a
 	-- 0.41s margin, the widest this constant has had. If a future retune ever pushes this constant, or
 	-- any stage's Windup/RecoverySeconds, past the point where 0.48 + ChainDelaySeconds clears 0.9, the
@@ -120,7 +120,7 @@ AttackConstants.Sequence = {
 	ResetOnCategorySwitch = true,
 
 	-- How far the stage probe will count before concluding a string has no further stages. Sized well
-	-- above the largest authored string (3) so widening one in Constants.Combat.Weapons needs no edit
+	-- above the largest authored string (3) so widening one in CombatConstants.Weapons needs no edit
 	-- here, and bounded at all so a malformed registry cannot spin the probe.
 	MaxStageProbe = 16,
 }

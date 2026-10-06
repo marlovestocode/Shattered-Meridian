@@ -65,6 +65,7 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
@@ -168,7 +169,7 @@ local function handleLandingEvent(isHard: boolean, position: Vector3): ()
 	if isHard then
 		FlightAnimator.PlayLandingHard()
 		FlightAudio.PlayHardLanding()
-		CameraShake.Shake(Constants.FX.CameraShake.FinisherSlam)
+		CameraShake.Shake(FXConstants.CameraShake.FinisherSlam)
 	else
 		FlightAnimator.PlayLandingSoft()
 		FlightAudio.PlaySoftLanding()

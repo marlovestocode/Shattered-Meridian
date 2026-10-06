@@ -376,7 +376,7 @@ end
 
 --[[
 	REGISTRY. Maps a clip key to a content id. Callers register whatever table their own constants
-	file already owns (Constants.Combat.AnimationIds, ParkourConstants.AnimationIds, an EmoteRegistry
+	file already owns (CombatConstants.AnimationIds, ParkourConstants.AnimationIds, an EmoteRegistry
 	sweep), so this module never becomes a second place asset ids live.
 
 	An id of "" is registered as absent, not as a broken id: this codebase's convention is that a

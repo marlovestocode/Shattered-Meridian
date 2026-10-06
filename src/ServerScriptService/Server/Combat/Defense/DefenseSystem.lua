@@ -57,7 +57,7 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
 local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboConstants)
@@ -526,7 +526,7 @@ local function bodyCommitted(registration: Registration, now: number): boolean
 			return true
 		end
 	end
-	local stunnedUntil = registration.Humanoid:GetAttribute(Constants.Attributes.HitstunUntil)
+	local stunnedUntil = registration.Humanoid:GetAttribute(AttributeConstants.HitstunUntil)
 	return typeof(stunnedUntil) == "number" and now < stunnedUntil
 end
 
@@ -538,7 +538,7 @@ local function isStunHeld(registration: Registration, now: number): boolean
 	if not config.Enabled or config.WindowScale <= 0 then
 		return false
 	end
-	local stunnedUntil = registration.Humanoid:GetAttribute(Constants.Attributes.HitstunUntil)
+	local stunnedUntil = registration.Humanoid:GetAttribute(AttributeConstants.HitstunUntil)
 	if typeof(stunnedUntil) ~= "number" or now >= stunnedUntil then
 		return false
 	end
@@ -716,9 +716,9 @@ function DefenseSystem.BeginEvade(model: Model, now: number): (boolean, string?)
 	end
 	local humanoid = registration.Humanoid
 	if
-		humanoid:GetAttribute(Constants.Attributes.Grabbed) == true
-		or humanoid:GetAttribute(Constants.Attributes.Grabbing) == true
-		or humanoid:GetAttribute(Constants.Attributes.Mounted) == true
+		humanoid:GetAttribute(AttributeConstants.Grabbed) == true
+		or humanoid:GetAttribute(AttributeConstants.Grabbing) == true
+		or humanoid:GetAttribute(AttributeConstants.Mounted) == true
 	then
 		return false, "Restrained"
 	end
@@ -775,7 +775,7 @@ local function handleSetBlocking(player: Player, rawBlocking: unknown, rawPressI
 	-- station belongs to the vehicle, and a guard raised from one would be a defence the arm pose is
 	-- already overwriting the animation for. Read as an Attribute, not through a BlimpSystem require.
 	local humanoid = CharacterUtil.HumanoidOf(character)
-	if humanoid and humanoid:GetAttribute(Constants.Attributes.Mounted) == true then
+	if humanoid and humanoid:GetAttribute(AttributeConstants.Mounted) == true then
 		return
 	end
 	local armed = DefenseSystem.SetBlocking(character, rawBlocking, os.clock())

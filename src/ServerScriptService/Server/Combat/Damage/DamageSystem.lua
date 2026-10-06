@@ -153,7 +153,7 @@ local function debugLog(message: string, data: { [string]: any }?): ()
 end
 
 -- Whether `moveId` is a weapon's Basic (M1) string hit -- gates DamageConstants.AttackerLunge.
--- LIVE MoveIds never match the hand-authored DebugName fields on Constants.Combat.Weapons[...].
+-- LIVE MoveIds never match the hand-authored DebugName fields on CombatConstants.Weapons[...].
 -- Stages.Basic ("Basic1", "Dagger1", ...); every attack actually thrown resolves through
 -- DefaultMoveRegistry's synthetic scheme instead. Restated here rather than shared, the same
 -- "coupling is to the naming convention, not to a shared function" reasoning Shared/Attack/

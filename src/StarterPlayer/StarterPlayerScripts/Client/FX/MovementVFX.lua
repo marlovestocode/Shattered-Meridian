@@ -5,13 +5,13 @@
 	Owns: ground dust kicked up under a character's feet -- a steady trickle while the local player
 	sprints (moving, grounded, not flying), one bigger burst at Slide-start, and a puff at each end of
 	a roll (the local player's own, and -- through Client/FX/RemoteMovementFX.lua -- everyone else's),
-	colored by the standing surface's Humanoid.FloorMaterial (Constants.FX.MovementDust.ColorByFloorMaterial).
+	colored by the standing surface's Humanoid.FloorMaterial (FXConstants.MovementDust.ColorByFloorMaterial).
 	Also the local player's roll-start camera kick and afterimage hand-off, from the same state hook. The visual idea
 	is the one a downloaded reference Sprint asset already demonstrated (floor-material-colored dust
 	puffs), rebuilt from scratch through this codebase's own pooling conventions rather than copied --
 	that asset used raw Instance.new + Debris per puff, which has no place here.
 
-	Pooled via FXPool (Constants.FX.MovementDust.PoolMaxSize), same acquire -> configure -> parent to
+	Pooled via FXPool (FXConstants.MovementDust.PoolMaxSize), same acquire -> configure -> parent to
 	a persistent holder -> release-after-lifetime shape HitFlash.lua/FlightVFX.lua already establish.
 	Unlike either of those (Highlight / tweened Part), the pooled item here carries a real
 	ParticleEmitter -- the first one in this FX library -- fired via one-shot :Emit(count) bursts
@@ -32,7 +32,7 @@
 	extra dust puff exactly at the instant a combat action interrupts a sprint).
 
 	Foot position is a fixed downward offset from HumanoidRootPart.Position
-	(Constants.FX.MovementDust.FootOffsetStuds), not a raycast to the actual ground -- a first-pass
+	(FXConstants.MovementDust.FootOffsetStuds), not a raycast to the actual ground -- a first-pass
 	approximation, retune in Studio.
 
 	THE STATE HOOK. OnStateChanged is one more call in Client/Parkour/ParkourController.lua's
@@ -50,7 +50,8 @@ local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -60,7 +61,7 @@ local RollAfterimage = require(script.Parent.RollAfterimage)
 
 local logger = Logger.scope("MovementVFX")
 
-local CONFIG = Constants.FX.MovementDust
+local CONFIG = FXConstants.MovementDust
 
 -- Same threshold CombatAnimator's own locomotion evaluator uses for "is there real held movement
 -- input right now" -- now CombatConstants.MovementInputMagnitudeThreshold, see that field's own header
@@ -203,7 +204,7 @@ function MovementVFX.OnStateChanged(previous: string, next: string): ()
 	if next == "Evading" and previous ~= "Evading" then
 		MovementVFX.PlayRollBurst(character)
 		RollAfterimage.PlayRoll(character)
-		CameraShake.Shake(Constants.FX.CameraShake.Roll)
+		CameraShake.Shake(FXConstants.CameraShake.Roll)
 	end
 end
 
@@ -218,7 +219,7 @@ RunService.Heartbeat:Connect(function()
 	if not humanoid or not rootPart then
 		return
 	end
-	if humanoid:GetAttribute(Constants.Attributes.Flying) == true then
+	if humanoid:GetAttribute(AttributeConstants.Flying) == true then
 		return
 	end
 	if humanoid.FloorMaterial == Enum.Material.Air then

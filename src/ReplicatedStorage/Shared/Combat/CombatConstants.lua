@@ -30,7 +30,7 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local SoundTypes = require(ReplicatedStorage.Shared.SoundTypes)
 
 -- DashPunch's own Windup/Active/Recovery seconds, factored out to local variables so
 -- DashFrontCommitmentSeconds (below, in the main CombatConstants table) can be DERIVED from
@@ -1066,7 +1066,7 @@ local CombatConstants = {
 		-- physical pop rather than a silent collapse -- the ragdoll itself, independent of whether
 		-- Client/FX/SlamImpactVFX.BeginWatch's own detection catches it (see
 		-- SlamImmediateImpactDropStuds below for that half of the story). First pass shipped this at a
-		-- bare 25 -- just past Constants.FX.SlamImpact.FastFallSpeedThreshold (20 studs/s) -- and it
+		-- bare 25 -- just past FXConstants.SlamImpact.FastFallSpeedThreshold (20 studs/s) -- and it
 		-- read as barely any hit at all (RagdollController.SlamToGround's own FaceDownSpin is
 		-- deliberately NOT gated by this same clearance clamp, so the pitch was never the missing
 		-- piece; the velocity floor was). 50 is still well clear of the tunnel-through-the-floor regime
@@ -1124,12 +1124,12 @@ local CombatConstants = {
 		-- kind a weapon swing" stays one switch rather than two lists that could quietly disagree. Give
 		-- Hotbar an entry and it opts into both layers at the same moment.
 		Swing = {
-			Basic = { SoundId = "rbxassetid://123533685284641", Volume = 0.5 } :: Constants.SoundDefinition,
+			Basic = { SoundId = "rbxassetid://123533685284641", Volume = 0.5 } :: SoundTypes.SoundDefinition,
 			-- Slightly louder than Basic -- a heavy swing commits harder, and the sound should say so
 			-- before the hit does, the same reasoning AttackConstants.Presentation.SwingLunge's own
 			-- "further and longer than a Basic" comment gives for the step.
-			Heavy = { SoundId = "", Volume = 0.65 } :: Constants.SoundDefinition,
-		} :: { [string]: Constants.SoundDefinition },
+			Heavy = { SoundId = "", Volume = 0.65 } :: SoundTypes.SoundDefinition,
+		} :: { [string]: SoundTypes.SoundDefinition },
 
 		-- How long AFTER the windup ends the swing sound plays, per AttackKind -- same shape and same
 		-- job as AttackConstants.Presentation.SwingLunge.ByKind's own DelaySeconds, and deliberately
@@ -1160,36 +1160,36 @@ local CombatConstants = {
 		-- natural length. Parried/GuardBroken are rarer, at-most-once-per-exchange events and need less
 		-- headroom.
 		Impact = {
-			Clean = { SoundId = "rbxassetid://78167398013554", Volume = 0.7, PoolSize = 3 } :: Constants.SoundDefinition,
+			Clean = { SoundId = "rbxassetid://78167398013554", Volume = 0.7, PoolSize = 3 } :: SoundTypes.SoundDefinition,
 			-- Its own registration rather than a quieter Clean -- "distinct, duller" is the brief, and a
 			-- shared sample pitched down only approximates that; a real asset can be pointed here
 			-- without touching the ordinary hit sound at all.
-			Blocked = { SoundId = "rbxassetid://136811265205147", Volume = 0.55, PoolSize = 3 } :: Constants.SoundDefinition,
+			Blocked = { SoundId = "rbxassetid://136811265205147", Volume = 0.55, PoolSize = 3 } :: SoundTypes.SoundDefinition,
 			-- THE STANDOUT CUE. A parry is the hardest defensive read in the system
 			-- (DefenseConstants.Parry's own MinUnguardedSeconds/lockout machinery exists because it is
 			-- the option worth gatekeeping) and the one outcome this codebase already treats as
 			-- deserving unmistakable feedback -- see CameraShake's own asymmetry, where Parried is the
 			-- one Attacker preset as loud as its Defender counterpart. Its own registration, own pool,
 			-- so landing one never competes with an ordinary hit for the same Sound instance.
-			Parried = { SoundId = "rbxassetid://131206760792389", Volume = 0.85, PoolSize = 2 } :: Constants.SoundDefinition,
+			Parried = { SoundId = "rbxassetid://131206760792389", Volume = 0.85, PoolSize = 2 } :: SoundTypes.SoundDefinition,
 			-- Heavier than Blocked, not a louder Clean -- a guard break is a real opening
 			-- (DefenseStateMachine.BreakGuard), and DamageConstants.Guard's own header already treats it
 			-- as a distinct, consequential moment rather than a bigger version of an ordinary hit.
-			GuardBroken = { SoundId = "rbxassetid://132492701741331", Volume = 0.9, PoolSize = 2 } :: Constants.SoundDefinition,
+			GuardBroken = { SoundId = "rbxassetid://132492701741331", Volume = 0.9, PoolSize = 2 } :: SoundTypes.SoundDefinition,
 			-- THE DODGER'S HALF of an evade: a bright whiff, the sound of a blade cutting air right where
 			-- you were. Played on the defender's client only -- see EvadedAttacker below for the other
 			-- half, and CombatAudio.PlayEvaded for the split.
-			Evaded = { SoundId = "rbxassetid://117848751549656", Volume = 0.75, PoolSize = 2 } :: Constants.SoundDefinition,
-		} :: { [string]: Constants.SoundDefinition },
+			Evaded = { SoundId = "rbxassetid://117848751549656", Volume = 0.75, PoolSize = 2 } :: SoundTypes.SoundDefinition,
+		} :: { [string]: SoundTypes.SoundDefinition },
 
 		-- The ATTACKER's half of an evade -- a muted whiff. Deliberately quieter and duller than the
 		-- dodger's: the dodge is the dodger's moment, and the attacker's cue only has to say "that went
 		-- through nothing" without rewarding the swing that missed.
-		EvadedAttacker = { SoundId = "rbxassetid://126172687057831", Volume = 0.8, PoolSize = 2 } :: Constants.SoundDefinition,
+		EvadedAttacker = { SoundId = "rbxassetid://126172687057831", Volume = 0.8, PoolSize = 2 } :: SoundTypes.SoundDefinition,
 
 		-- The feint cue, on the feinting player's own client when the server confirms the cancel
 		-- (Attack_Cancelled). Short and breathy -- a weight pulled back, not a strike.
-		Feint = { SoundId = "", Volume = 0.5 } :: Constants.SoundDefinition,
+		Feint = { SoundId = "", Volume = 0.5 } :: SoundTypes.SoundDefinition,
 
 		-- A few percent of per-play pitch variation, shared across every sound above -- the identical
 		-- "identical sample on a metronome" fix Client/FX/RunAudio.lua's own PitchJitter documents,

@@ -14,7 +14,7 @@
 	EmoteSystem.lua already owns and this module never touches.
 
 	Entries in Shared/Emotes/EmoteDefinitions.lua without a clip yet author AnimationId = "" (this
-	codebase never fabricates a plausible-looking asset id -- see Constants.Combat.AnimationIds' own
+	codebase never fabricates a plausible-looking asset id -- see CombatConstants.AnimationIds' own
 	header for the precedent) -- every play/preload path below already degrades safely to a no-op for
 	an empty id, the same way CombatAnimator's own Heavy1/Heavy2 slots do until a real clip is
 	supplied. Note that `AnimationId ~= ""` is a load-bearing test on BOTH sides of the wire, not just
@@ -31,7 +31,7 @@
 	mid-motion -- see EmoteSystem.lua's WHAT ENDS A ONE-SHOT EMOTE header.
 
 	DOMINANT_WEIGHT / per-Heartbeat reassert: reuses the exact mechanism (and the exact shared
-	Constants.FX.Animation.DominantWeight value) CombatAnimator.lua's own header documents at length
+	FXConstants.Animation.DominantWeight value) CombatAnimator.lua's own header documents at length
 	-- Roblox's default character rig keeps re-asserting its own walk/run cycle's track weight at the
 	same Core priority this module also uses, which can otherwise win the tie for a REMOTE viewer even
 	when the LOCAL (emoting) player's own screen already shows the emote correctly. A single
@@ -46,7 +46,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
 local EmoteRegistry = require(ReplicatedStorage.Shared.Emotes.EmoteRegistry)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -57,10 +57,10 @@ local logger = Logger.scope("EmoteAnimator")
 
 local EmoteAnimator = {}
 
--- Shared with CombatAnimator.lua/BotAnimator.lua/FlightAnimator.lua -- see Constants.FX.Animation's
+-- Shared with CombatAnimator.lua/BotAnimator.lua/FlightAnimator.lua -- see FXConstants.Animation's
 -- own header for why every combat/flight/emote track in this codebase asserts the same dominant
 -- weight rather than each picking its own number.
-local DOMINANT_WEIGHT = Constants.FX.Animation.DominantWeight
+local DOMINANT_WEIGHT = FXConstants.Animation.DominantWeight
 local ONE_SHOT_FADE_TIME = EmoteConstants.AnimationFade.OneShotFadeSeconds
 local LOOP_FADE_TIME = EmoteConstants.AnimationFade.LoopFadeSeconds
 local STOP_FADE_TIME = EmoteConstants.AnimationFade.StopFadeSeconds

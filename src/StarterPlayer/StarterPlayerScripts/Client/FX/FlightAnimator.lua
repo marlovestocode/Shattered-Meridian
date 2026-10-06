@@ -18,7 +18,7 @@
 	-- see FreezeGuard's own header).
 
 	All six Constants.Flight.AnimationIds entries ship as empty-string placeholders (the same
-	wired-but-unauthored convention Constants.Combat.AnimationIds already established for Heavy1/
+	wired-but-unauthored convention CombatConstants.AnimationIds already established for Heavy1/
 	Heavy2/etc) -- every play path below degrades to a silent no-op until a real rbxassetid is
 	supplied, no code change needed once one is.
 
@@ -30,7 +30,8 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -46,13 +47,13 @@ local ANIMATION_IDS = FlightConstants.AnimationIds
 -- Same reasoning as CombatAnimator.lua's own DOMINANT_WEIGHT: a single Play()-time weight isn't
 -- enough for a sustained/held track, since Roblox's default Animate script keeps re-asserting its
 -- own track's weight on every Humanoid movement-state change -- the loop evaluator below re-calls
--- AdjustWeight every Heartbeat instead of trusting one Play() call to stick. Now Constants.FX.
+-- AdjustWeight every Heartbeat instead of trusting one Play() call to stick. Now FXConstants.
 -- Animation.DominantWeight/Flight -- shared with Server/Combat/BotAnimator.lua and Client/FX/
 -- CombatAnimator.lua (DominantWeight) -- see that table's own header in Constants.lua for why these
 -- were independently hand-typed here before (ONE_SHOT_FADE_TIME/LOOP_FADE_TIME).
-local DOMINANT_WEIGHT = Constants.FX.Animation.DominantWeight
-local ONE_SHOT_FADE_TIME = Constants.FX.Animation.Flight.OneShotFadeSeconds
-local LOOP_FADE_TIME = Constants.FX.Animation.Flight.LoopFadeSeconds
+local DOMINANT_WEIGHT = FXConstants.Animation.DominantWeight
+local ONE_SHOT_FADE_TIME = FXConstants.Animation.Flight.OneShotFadeSeconds
+local LOOP_FADE_TIME = FXConstants.Animation.Flight.LoopFadeSeconds
 
 local animationTemplates: { [string]: Animation } = {}
 for name, id in pairs(ANIMATION_IDS) do
@@ -193,7 +194,7 @@ RunService.Heartbeat:Connect(function()
 		return
 	end
 
-	local flying = currentHumanoid ~= nil and currentHumanoid:GetAttribute(Constants.Attributes.Flying) == true
+	local flying = currentHumanoid ~= nil and currentHumanoid:GetAttribute(AttributeConstants.Flying) == true
 	local shouldHover = flying and currentSpeed < FlightConstants.HoverSpeedThreshold
 	local shouldCruise = flying and not shouldHover and not currentlyBoosting
 	local shouldBoost = flying and not shouldHover and currentlyBoosting

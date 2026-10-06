@@ -75,7 +75,7 @@
 	fact rather than a decision -- nothing publishes one yet.
 
 	Does not own: sprint INPUT (Client/Movement/RunController.lua owns the key, the hold-vs-toggle
-	preference and Autorun, and pushes the resulting boolean here), any presentation (Constants.Run and
+	preference and Autorun, and pushes the resulting boolean here), any presentation (RunConstants and
 	that same client module), the ladder's arithmetic (Shared/Run/RunLadder.lua) or its numbers
 	(Shared/Run/RunConstants.lua).
 ]]

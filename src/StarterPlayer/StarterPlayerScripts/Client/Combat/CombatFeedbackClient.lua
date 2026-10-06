@@ -107,6 +107,7 @@ local Workspace = game:GetService("Workspace")
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
@@ -181,25 +182,25 @@ local function shakeFor(payload: CombatFeedback, cue: Cue?): ()
 		then "PerfectParry"
 		elseif payload.StringEnd == true and payload.Kind == "Clean" then "HitHeavy"
 		else table_[payload.Kind] or AttackConstants.Presentation.DefaultShakePreset
-	-- Indexed rather than switched, so a preset renamed in Constants.FX is a nil (no shake) rather
-	-- than a runtime error -- Constants.FX's own "a missing preset degrades to no shake, never to a
+	-- Indexed rather than switched, so a preset renamed in FXConstants is a nil (no shake) rather
+	-- than a runtime error -- FXConstants's own "a missing preset degrades to no shake, never to a
 	-- wrong hit" rule, which CameraShake.Shake already tolerates on its own side too. A move's cue may
 	-- name its own preset for both roles, scale this one, or say None.
-	CameraShake.Shake(MovePresentation.Shake(cue, (Constants.FX.CameraShake :: any)[presetName]) :: any)
+	CameraShake.Shake(MovePresentation.Shake(cue, (FXConstants.CameraShake :: any)[presetName]) :: any)
 end
 
--- Which of Constants.FX.HitFlash's three named colors a resolution pops on the defender -- the same
+-- Which of FXConstants.HitFlash's three named colors a resolution pops on the defender -- the same
 -- "white = a plain hit, gold = a parry deflection, red-gold = a posture break" family that config's own
 -- header describes. Fewer buckets than DefenseTypes.OutcomeKind has entries, deliberately: Backstab and
 -- Trade already get their own answer through the shake presets and the impact sounds, so they read here
 -- as "a plain hit" rather than earning a fourth/fifth color with nothing else to distinguish it by.
 local HIT_FLASH_COLORS: { [string]: Color3 } = {
-	Clean = Constants.FX.HitFlash.HitColor,
-	Blocked = Constants.FX.HitFlash.HitColor,
-	Backstab = Constants.FX.HitFlash.HitColor,
-	Trade = Constants.FX.HitFlash.HitColor,
-	Parried = Constants.FX.HitFlash.ParryColor,
-	GuardBroken = Constants.FX.HitFlash.PostureBreakColor,
+	Clean = FXConstants.HitFlash.HitColor,
+	Blocked = FXConstants.HitFlash.HitColor,
+	Backstab = FXConstants.HitFlash.HitColor,
+	Trade = FXConstants.HitFlash.HitColor,
+	Parried = FXConstants.HitFlash.ParryColor,
+	GuardBroken = FXConstants.HitFlash.PostureBreakColor,
 }
 
 -- Victim-only, per HitFlash's own header -- fired on outcome.Defender's body regardless of which
@@ -226,9 +227,9 @@ end
 -- rather than re-derived so the two tables cannot quietly disagree about which outcomes read as
 -- "heavier" to the player being hit.
 local FREEZE_SECONDS_BY_KIND: { [string]: number } = {
-	Clean = Constants.FX.HitStop.VictimSeconds,
-	Backstab = Constants.FX.HitStop.PostureBreakSeconds,
-	GuardBroken = Constants.FX.HitStop.PostureBreakSeconds,
+	Clean = FXConstants.HitStop.VictimSeconds,
+	Backstab = FXConstants.HitStop.PostureBreakSeconds,
+	GuardBroken = FXConstants.HitStop.PostureBreakSeconds,
 }
 
 -- Victim-only, unlike shakeFor/flashFor/CombatAudio.PlayImpact above which fire for both roles (or are
@@ -258,13 +259,13 @@ end
 -- table as the victim freeze, plus a clash-freeze on a parry, plus the tuned heavy bonus for a Heavy
 -- move. See HitStop.FreezeExchange.
 local EXCHANGE_SECONDS_BY_KIND: { [string]: number } = {
-	Clean = Constants.FX.HitStop.VictimSeconds,
-	Backstab = Constants.FX.HitStop.PostureBreakSeconds,
-	GuardBroken = Constants.FX.HitStop.PostureBreakSeconds,
-	Parried = Constants.FX.HitStop.ParrySeconds,
+	Clean = FXConstants.HitStop.VictimSeconds,
+	Backstab = FXConstants.HitStop.PostureBreakSeconds,
+	GuardBroken = FXConstants.HitStop.PostureBreakSeconds,
+	Parried = FXConstants.HitStop.ParrySeconds,
 	-- Two swings meeting (DefenseConstants.Clash) is the same clash beat as a parry: both bodies stop,
 	-- then both are shoved apart.
-	Trade = Constants.FX.HitStop.ParrySeconds,
+	Trade = FXConstants.HitStop.ParrySeconds,
 }
 
 local function freezeExchangeFor(payload: CombatFeedback, cue: Cue?): ()
@@ -273,12 +274,12 @@ local function freezeExchangeFor(payload: CombatFeedback, cue: Cue?): ()
 		if variantOf(payload) == "ParriedPerfect" then
 			-- The perfect parry replaces the clash beat outright rather than adding to it: the whole
 			-- exchange stops for PerfectParrySeconds, on both bodies, on both clients.
-			seconds = Constants.FX.HitStop.PerfectParrySeconds
+			seconds = FXConstants.HitStop.PerfectParrySeconds
 		elseif typeof(payload.MoveId) == "string" and string.find(payload.MoveId, ":Heavy:", 1, true) then
-			seconds += Constants.FX.HitStop.HeavyBonusSeconds
+			seconds += FXConstants.HitStop.HeavyBonusSeconds
 		elseif payload.StringEnd == true then
-			-- The string ender stops a beat longer than the links before it (Constants.FX.HitStop.StringEndBonusSeconds).
-			seconds += Constants.FX.HitStop.StringEndBonusSeconds
+			-- The string ender stops a beat longer than the links before it (FXConstants.HitStop.StringEndBonusSeconds).
+			seconds += FXConstants.HitStop.StringEndBonusSeconds
 		end
 	end
 	-- A move's authored freeze replaces the whole computed beat (0 is none). Pose only: the victim's

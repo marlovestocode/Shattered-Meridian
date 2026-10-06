@@ -108,6 +108,16 @@ character, weapon and status stages wait for the progression work, where they ge
 
 ### Phase 3 — Constants and dependency direction
 
+**Status: done (2026-10-06).**
+- The sound shapes moved to a leaf, `Shared/SoundTypes.lua`, and Constants re-exports the types for old
+  callers. `DefenseConstants`, `HitboxEngineConstants`, `CombatConstants` and `FlightConstants` no longer
+  require the hub.
+- `Constants.FX` and `Constants.Run` were migrated repo-wide, and both re-exports are deleted.
+- `Constants.Attributes` was migrated in every combat folder. The re-export stays, because roughly 200
+  non-combat callers still use it, mostly UI and systems. Moving those is a mechanical follow-up; the
+  migrator script logic is described in the Phase 3 commit.
+- Stale `Constants.Combat.*` comment pointers now name `CombatConstants`.
+
 - `DefenseConstants`, `HitboxEngineConstants` and `CombatConstants` require `Shared/Constants.lua`. A
   domain constants file depending on the hub runs upward. Point them at `AttributeConstants` (or the
   specific leaf) directly.
