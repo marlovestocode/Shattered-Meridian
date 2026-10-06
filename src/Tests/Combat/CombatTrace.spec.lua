@@ -2,8 +2,11 @@
 -- Covers Server/Combat/CombatTrace.lua's descriptions -- what a Live Console line says about a contact and a hit.
 -- The subscriptions themselves are one line each over the layers' own signals, which their own specs cover.
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local CombatPower = require(ReplicatedStorage.Shared.Progression.CombatPower)
 local CombatTrace = require(ServerScriptService.Server.Combat.CombatTrace)
 
 local function model(name: string): Model
@@ -106,6 +109,24 @@ return function()
 				})
 			expect(fields.stun).to.equal(nil)
 			expect(fields.source).to.equal("Impact")
+		end)
+
+		it("names the tier gap only while cultivation power is on", function()
+			local attacker = model("A")
+			local defender = model("D")
+			attacker:SetAttribute(AttributeConstants.CultivationTier, 5)
+			defender:SetAttribute(AttributeConstants.CultivationTier, 2)
+			local applied: any =
+				{ Kind = "Clean", Damage = 10, GuardDrain = 0, HitstunSeconds = 0, AdvancesCombo = false }
+
+			CombatPower.SetEnabledForTest(false)
+			local off = CombatTrace.DescribeApplied(outcome({ Attacker = attacker, Defender = defender }), applied)
+			CombatPower.SetEnabledForTest(true)
+			local on = CombatTrace.DescribeApplied(outcome({ Attacker = attacker, Defender = defender }), applied)
+			CombatPower.SetEnabledForTest(nil)
+
+			expect(off.tierGap).to.equal(nil)
+			expect(on.tierGap).to.equal(3)
 		end)
 	end)
 end

@@ -71,6 +71,10 @@
 	governs. A contact a REALM delivered (ProjectileContact.DomainId) is priced flat, like an M1, and does
 	not advance its owner's combo: it is the realm striking, not a link in the owner's string.
 
+	READS CULTIVATION POWER (2026-10-06), the same way: the tier gap between attacker and defender
+	(Shared/Progression/CombatPower.lua, published by TierSystem as an Attribute) scales damage and guard
+	drain, never hitstun. Off behind CombatPowerConstants.Enabled; exactly 1 between two bodies of one tier.
+
 	Does not own: contact detection (HitboxEngine), what kind of hit something was (DefenseSystem), the
 	guard pool itself (DefenseSystem.DrainGuard -- this decides how much, that owns the meter), per-move
 	damage or knockback numbers (the Move Editor's moves, via AttackCatalog), air-combo treatment
@@ -86,6 +90,7 @@ local AirComboMoves = require(ReplicatedStorage.Shared.AirCombo.AirComboMoves)
 local AmortizedReclaim = require(ReplicatedStorage.Shared.AmortizedReclaim)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
+local CombatPower = require(ReplicatedStorage.Shared.Progression.CombatPower)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
@@ -446,10 +451,16 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	-- every one is exactly 1 for a body no realm governs, so an ordinary fight multiplies by nothing. The
 	-- arithmetic itself is DamageResolver.ApplyScales'; this only reads the inputs.
 	local realmNow = DomainRules.ServerNow()
+	--
+	-- CULTIVATION POWER: the tier gap between the two (Shared/Progression/CombatPower.lua). Exactly 1 while
+	-- CombatPowerConstants.Enabled is off, and between two bodies of one tier.
 	local attackerHumanoid = CharacterUtil.HumanoidOf(outcome.Attacker)
 	local defenderHumanoid = CharacterUtil.HumanoidOf(outcome.Defender)
+	local powerDamage, powerGuard = CombatPower.Scales(outcome.Attacker, outcome.Defender)
 	DamageResolver.ApplyScales(result, {
 		Shot = if projectile then projectile.DamageScale else nil,
+		PowerDamage = powerDamage,
+		PowerGuard = powerGuard,
 		DamageDealt = DomainRules.Scale(attackerHumanoid, "DamageDealt", realmNow),
 		DamageTaken = DomainRules.Scale(defenderHumanoid, "DamageTaken", realmNow),
 		GuardDamageTaken = DomainRules.Scale(defenderHumanoid, "GuardDamageTaken", realmNow),
@@ -680,7 +691,7 @@ end
 -- no engagement tag, no realm scaling, no damage number.
 --
 -- THE SECOND WAY INTO OnApplied, and deliberately narrow. No defence (a thrown body was never blockable or
--- parryable, so nothing here asks DefenseSystem), no stun, no guard, no combo -- only the realm's damage scales and
+-- parryable, so nothing here asks DefenseSystem), no stun, no guard, no combo -- only the damage scales (power, realm) and
 -- the same announce-then-write order applyOutcome keeps for kill credit. The outcome it publishes is a Clean hit
 -- whose Report.DebugName is DamageConstants.Impact.DebugName: no MoveId, so nothing keyed on a move (hit confirm,
 -- the air combo's roles, a grab's trigger) can mistake it for one.
@@ -698,6 +709,7 @@ function DamageSystem.ApplyImpact(attacker: Model, target: Model, amount: number
 		return 0
 	end
 	local realmNow = DomainRules.ServerNow()
+	local powerDamage = CombatPower.Scales(attacker, target)
 	local result: DamageResult = DamageResolver.ApplyScales({
 		Kind = "Clean",
 		Damage = amount,
@@ -705,6 +717,7 @@ function DamageSystem.ApplyImpact(attacker: Model, target: Model, amount: number
 		HitstunSeconds = 0,
 		AdvancesCombo = false,
 	}, {
+		PowerDamage = powerDamage,
 		DamageDealt = DomainRules.Scale(CharacterUtil.HumanoidOf(attacker), "DamageDealt", realmNow),
 		DamageTaken = DomainRules.Scale(humanoid, "DamageTaken", realmNow),
 	})

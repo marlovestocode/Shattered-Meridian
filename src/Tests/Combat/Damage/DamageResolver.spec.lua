@@ -225,6 +225,22 @@ return function()
 			expect(result.HitstunSeconds).to.be.near(1, 1e-9)
 		end)
 
+		it("scales health and posture by cultivation power, never stun", function()
+			local result = DamageResolver.ApplyScales(priced(), { PowerDamage = 1.25, PowerGuard = 1.1 })
+			expect(result.Damage).to.be.near(12.5, 1e-9)
+			expect(result.GuardDrain).to.be.near(4.4, 1e-9)
+			expect(result.HitstunSeconds).to.equal(0.5)
+		end)
+
+		it("composes power with a shot and a realm by multiplication", function()
+			local result = DamageResolver.ApplyScales(
+				priced(),
+				{ Shot = 2, PowerDamage = 0.5, PowerGuard = 0.5, DamageDealt = 3, GuardDamageTaken = 2 }
+			)
+			expect(result.Damage).to.be.near(10 * 2 * 0.5 * 3, 1e-9)
+			expect(result.GuardDrain).to.be.near(4 * 2 * 0.5 * 2, 1e-9)
+		end)
+
 		it("treats a negative or NaN scale as no damage or no scale respectively", function()
 			expect(DamageResolver.ApplyScales(priced(), { Shot = -1 }).Damage).to.equal(0)
 			expect(DamageResolver.ApplyScales(priced(), { DamageTaken = 0 / 0 }).Damage).to.equal(10)

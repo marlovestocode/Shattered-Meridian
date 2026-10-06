@@ -24,8 +24,9 @@
 	  * WHO WRITES IT -- most are server-written, but ParkourFacingOwned, ParkourActionOwned and
 	    UiModalOpen are client-written and therefore do NOT replicate. A client-set Attribute can
 	    never be an authority; the server's own gate always is.
-	  * WHAT IT HANGS ON -- every entry here is a Humanoid Attribute except UiModalOpen, which lives
-	    on the Player because it has to outlive the character across a respawn.
+	  * WHAT IT HANGS ON -- every entry here is a Humanoid Attribute except UiModalOpen and
+	    CultivationTier, which live on the Player because they have to outlive the character across
+	    a respawn.
 	  * WHETHER IT IS A FLAG OR A DEADLINE -- CombatBusyUntil and ParkourSpeedFloorExpiry are
 	    os.clock() timestamps precisely so nothing has to remember to clear them. A stale deadline has
 	    merely passed; a stale `true` strands the player forever with no error to explain it.
@@ -317,6 +318,13 @@ local AttributeConstants = {
 	-- On the realm's OWNER, not its members: this body's own realm is up until this time. The attack layer
 	-- refuses a second domain cast while it is -- one realm per caster.
 	DomainOwnedUntil = "DomainOwnedUntil",
+	-- Cultivation power (Shared/Progression/CombatPower.lua). The tier a combatant fights at, an integer
+	-- 1..TierConstants.MaxTier. ON THE PLAYER, not the Humanoid (like UiModalOpen): a tier outlives every
+	-- character, and TierSystem writes it on profile load and on each promotion. A combatant with no Player
+	-- (a training bot, a dummy) may carry it on its own Model instead, so an admin can stage a tier gap
+	-- without a second account. Absent = no tier, which CombatPower reads as "no power gap" -- never as tier
+	-- 1. Server-written; replicated so every client can show an opponent's tier (readable power).
+	CultivationTier = "CultivationTier",
 }
 
 return AttributeConstants

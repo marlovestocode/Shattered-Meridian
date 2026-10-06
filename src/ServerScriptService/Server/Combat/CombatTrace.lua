@@ -26,6 +26,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local CombatPower = require(ReplicatedStorage.Shared.Progression.CombatPower)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DebugConstants = require(ReplicatedStorage.Shared.DebugConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
@@ -90,12 +91,16 @@ function CombatTrace.DescribeApplied(
 	outcome: DefenseTypes.DefenseOutcome,
 	result: DamageTypes.DamageResult
 ): { [string]: unknown }
+	-- The cultivation tier gap that scaled this hit, only when power is on and there was one -- a hit that
+	-- landed for more or less than its move says should say why.
+	local tierGap = if CombatPower.IsEnabled() then CombatPower.TierGap(outcome.Attacker, outcome.Defender) else 0
 	return {
 		attacker = nameOf(outcome.Attacker),
 		defender = nameOf(outcome.Defender),
 		move = outcome.Report.DebugName,
 		source = HitboxTypes.SourceOf(outcome.Report),
 		kind = outcome.Kind,
+		tierGap = if tierGap ~= 0 then tierGap else nil,
 		damage = round(result.Damage),
 		posture = round(result.GuardDrain),
 		stun = if result.HitstunSeconds > 0 then round(result.HitstunSeconds) else nil,

@@ -126,6 +126,10 @@ the guard does nothing, an evade is refused, a timed parry counts and ends the s
   "Refused" `Attack_Cancelled`.
 - `Server/Combat/CombatTrace.lua` logs each step to the Live Console (search "CombatTrace"). Read it before guessing
   why a hit resolved the way it did.
+- Cultivation power reaches combat ONLY as the tier gap from `Shared/Progression/CombatPower.lua` (TierSystem publishes
+  `AttributeConstants.CultivationTier` on the Player; a stage in `ApplyScales`). Off behind
+  `CombatPowerConstants.Enabled`; never scales stun. A new power source composes inside `CombatPower.Scales`, and no
+  combat layer requires a progression System (`docs/design/cultivation-combat-power.md`).
 
 `TrainingBotSystem` (`Server/Combat/TrainingBot/`, the AI sparring partner) is the same sibling shape
 from the other direction: it only ever acts through the public player entry points
