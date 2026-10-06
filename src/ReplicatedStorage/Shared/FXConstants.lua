@@ -84,6 +84,10 @@ local FXConstants = {
 		AttackerSeconds = 0.06,
 		VictimSeconds = 0.09,
 		HeavyBonusSeconds = 0.03,
+		-- The LAST M1 of a string (DamageTypes.CombatFeedback.StringEnd) stops a beat longer than the links
+		-- before it, so a finished string reads as finished. Kept under PostureBreakSeconds' total: a string
+		-- ending is a punctuation mark, not a guard break.
+		StringEndBonusSeconds = 0.04,
 		ParrySeconds = 0.12,
 		-- A PERFECT parry's clash freeze, both bodies (CombatFeedbackClient). Longer than any hit's on
 		-- purpose: the perfect parry is the one moment the whole exchange should visibly stop.

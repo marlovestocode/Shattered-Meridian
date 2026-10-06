@@ -65,7 +65,9 @@
 	CHANGED 2026-09-28 FROM A CHARGE RESET. It used to zero the charge on every swing and every hit, so
 	a player re-earned the gear from scratch after each exchange -- and an M1 string, one swing every
 	half second, never let the ladder climb past first gear at all. Playtest read that as combat being
-	stop-start. The old argument for the reset ("pinning a number would hand the gear straight back the
+	stop-start. (2026-10-06: the player's OWN swing now keeps part of that held gear rather than dropping to
+	walking -- RunConstants.Combat.SwingGearCarry, see swingOnly. A guard, a stagger or a stun still walks.)
+	The old argument for the reset ("pinning a number would hand the gear straight back the
 	instant the pin lifted") is exactly what is wanted now: you cannot SPRINT while swinging, guarding or
 	stunned, and you do not pay for a whole run every time you throw a punch.
 
@@ -139,6 +141,9 @@ type LiveAttributes = {
 	-- Deadlines and states compared against `now` each tick -- the COMPARISON stays per-frame, only
 	-- the read of the number behind it moves to event rate.
 	CombatBusyUntil: number,
+	-- The stun alone (DamageSystem), so a commitment that is only the player's own swing can be told from one
+	-- that is a hit they took -- see swingOnly.
+	HitstunUntil: number,
 	DefenseState: string,
 	ParkourSpeedFloor: number,
 	ParkourSpeedFloorExpiry: number,
@@ -167,6 +172,7 @@ local MIRRORED_ATTRIBUTES: { [string]: true } = {
 	[ATTRIBUTES.SwingRooted] = true,
 	[ATTRIBUTES.ParkourVelocityOwned] = true,
 	[ATTRIBUTES.CombatBusyUntil] = true,
+	[ATTRIBUTES.HitstunUntil] = true,
 	[DefenseConstants.DefenseStateAttribute] = true,
 	[ATTRIBUTES.ParkourSpeedFloor] = true,
 	[ATTRIBUTES.ParkourSpeedFloorExpiry] = true,
@@ -252,6 +258,7 @@ local function getState(player: Player): PlayerRunState
 			SwingRooted = false,
 			ParkourVelocityOwned = false,
 			CombatBusyUntil = 0,
+			HitstunUntil = 0,
 			DefenseState = "",
 			ParkourSpeedFloor = 0,
 			ParkourSpeedFloorExpiry = 0,
@@ -295,6 +302,7 @@ local function readLiveAttributes(live: LiveAttributes, humanoid: Humanoid): ()
 	live.SwingRooted = humanoid:GetAttribute(ATTRIBUTES.SwingRooted) == true
 	live.ParkourVelocityOwned = humanoid:GetAttribute(ATTRIBUTES.ParkourVelocityOwned) == true
 	live.CombatBusyUntil = numberAttribute(humanoid, ATTRIBUTES.CombatBusyUntil, 0)
+	live.HitstunUntil = numberAttribute(humanoid, ATTRIBUTES.HitstunUntil, 0)
 	local defenceState = humanoid:GetAttribute(DefenseConstants.DefenseStateAttribute)
 	live.DefenseState = if typeof(defenceState) == "string" then defenceState :: string else ""
 	live.ParkourSpeedFloor = numberAttribute(humanoid, ATTRIBUTES.ParkourSpeedFloor, 0)
@@ -382,6 +390,16 @@ local function combatCommitted(live: LiveAttributes, now: number): boolean
 	end
 	local defenceState = live.DefenseState
 	return defenceState ~= "" and defenceState ~= "Neutral"
+end
+
+-- Whether the commitment is ONLY the player's own swing -- not a stun they are reeling from, and no guard,
+-- stagger or guard break. Only that one keeps part of its gear (RunConstants.Combat.SwingGearCarry).
+local function swingOnly(live: LiveAttributes, now: number): boolean
+	if now >= live.CombatBusyUntil or now < live.HitstunUntil then
+		return false
+	end
+	local defenceState = live.DefenseState
+	return defenceState == "" or defenceState == "Neutral"
 end
 
 local function parkourSpeedFloor(live: LiveAttributes, now: number): number
@@ -547,6 +565,12 @@ local function stepPlayer(player: Player, state: PlayerRunState, deltaTime: numb
 		desired = 0
 	else
 		desired = live.BaseSpeed * RunLadder.SpeedMultiplier(nextStage)
+		-- A swing keeps part of the gear it was thrown from (RunConstants.Combat.SwingGearCarry): pressure on the
+		-- run stays on the run. Walking pace is the floor, so a walking swing is unchanged.
+		if committed and swingOnly(live, now) then
+			local carry = RunLadder.SpeedMultiplier(state.Stage) * math.max(RunConstants.Combat.SwingGearCarry, 0)
+			desired = live.BaseSpeed * math.max(1, carry)
+		end
 		-- A realm's MoveSpeed rule scales the gear, and -- like every tier above the floor -- sits under the
 		-- parkour carry below, which can preserve a speed a player earned but never grant one.
 		if live.DomainMoveSpeed ~= 1 and realmGoverns(live) then

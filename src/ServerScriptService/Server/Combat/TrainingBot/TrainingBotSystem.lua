@@ -588,6 +588,11 @@ local function perceive(bot: Bot, now: number): Perception
 	-- The air combo, from its own queries -- the same "read through the public surface" shape every other
 	-- field here keeps (AirComboSystem.GetCombo is a read-only view).
 	perception.SelfAirHeld = AirComboAttributes.IsHeld(humanoid)
+	-- The ground stun parry (DefenseConstants.StunParry): stunned, not swinging -- the rule DefenseSystem applies.
+	perception.SelfStunHeld = DefenseConstants.StunParry.Enabled
+		and DefenseConstants.StunParry.WindowScale > 0
+		and attackStateOf(model) == "Idle"
+		and numberAttribute(humanoid, Constants.Attributes.HitstunUntil) > now
 	local combo = AirComboSystem.GetCombo(model)
 	if combo and combo.Attacker == model then
 		perception.SelfAirAttacker = true

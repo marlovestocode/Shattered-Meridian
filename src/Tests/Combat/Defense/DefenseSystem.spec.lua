@@ -473,32 +473,48 @@ return function()
 			expect((DefenseSystem.CanAttack(fighter.Model))).to.equal(true)
 		end)
 
-		it("holds a guard pressed while stunned until the stun ends", function()
+		-- With the stun parry OFF (DefenseConstants.StunParry): the pre-2026-10-06 rule, still the behaviour for
+		-- anyone who turns it off. With it on, a stunned press arms at once -- see "parrying out of a stun".
+		local function withoutStunParry(case: () -> ()): ()
+			local previous = DefenseConstants.StunParry.Enabled
+			DefenseConstants.StunParry.Enabled = false
+			local ok, err = pcall(case)
+			DefenseConstants.StunParry.Enabled = previous
+			if not ok then
+				error(err, 0)
+			end
+		end
+
+		it("holds a guard pressed while stunned until the stun ends, with the stun parry off", function()
 			-- HitstunUntil is the damage layer's published stun (AttributeConstants) -- the seam this layer
 			-- reads because it may not require the layer above it.
-			local base = os.clock()
-			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
-			fighter.Humanoid:SetAttribute("HitstunUntil", base + 0.5)
+			withoutStunParry(function()
+				local base = os.clock()
+				local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+				fighter.Humanoid:SetAttribute("HitstunUntil", base + 0.5)
 
-			DefenseSystem.SetBlocking(fighter.Model, true, base)
-			step(FRAME, base + 0.2)
-			expect(DefenseSystem.GetState(fighter.Model)).to.equal("Neutral")
+				DefenseSystem.SetBlocking(fighter.Model, true, base)
+				step(FRAME, base + 0.2)
+				expect(DefenseSystem.GetState(fighter.Model)).to.equal("Neutral")
 
-			step(FRAME, base + 0.6)
-			expect(DefenseSystem.GetState(fighter.Model)).never.to.equal("Neutral")
+				step(FRAME, base + 0.6)
+				expect(DefenseSystem.GetState(fighter.Model)).never.to.equal("Neutral")
+			end)
 		end)
 
-		it("raises a guard HELD through a stun as a block, never a parry window", function()
+		it("raises a guard HELD through a stun as a block, never a parry window, with the stun parry off", function()
 			-- A free press arms a parry (see "arms the spawn-time clip's window" below). The same press
 			-- held through hitstun must not: otherwise holding the key parried the next hit of any tight
 			-- string with no timing at all.
-			local base = os.clock()
-			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
-			fighter.Humanoid:SetAttribute("HitstunUntil", base + 0.5)
+			withoutStunParry(function()
+				local base = os.clock()
+				local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+				fighter.Humanoid:SetAttribute("HitstunUntil", base + 0.5)
 
-			DefenseSystem.SetBlocking(fighter.Model, true, base)
-			step(FRAME, base + 0.6)
-			expect(DefenseSystem.GetState(fighter.Model)).to.equal("Blocking")
+				DefenseSystem.SetBlocking(fighter.Model, true, base)
+				step(FRAME, base + 0.6)
+				expect(DefenseSystem.GetState(fighter.Model)).to.equal("Blocking")
+			end)
 		end)
 
 		it("raises a guard HELD through a swing as a block, never a parry window", function()
@@ -517,6 +533,85 @@ return function()
 
 			DefenseSystem.SetBlocking(fighter.Model, true, base)
 			expect(DefenseSystem.GetState(fighter.Model)).never.to.equal("Neutral")
+		end)
+	end)
+
+	describe("DefenseSystem -- parrying out of a stun", function()
+		-- M1s link (DamageConstants.Hitstun.LinkBasicString), so a stunned defender's answer is the stun parry
+		-- (DefenseConstants.StunParry): the press arms at once, the guard blocks nothing, a timed parry counts.
+		it("arms a parry the moment a stunned body presses", function()
+			local base = os.clock()
+			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+			fighter.Humanoid:SetAttribute("HitstunUntil", base + 0.5)
+
+			expect(DefenseSystem.SetBlocking(fighter.Model, true, base)).to.equal(true)
+			expect(DefenseSystem.GetState(fighter.Model)).to.equal("ParryWindow")
+		end)
+
+		it("parries the next hit of a string from inside the stun", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			defender.Humanoid:SetAttribute("HitstunUntil", base + 0.5)
+
+			local outcomes, disconnect = captureOutcomes()
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Parried")
+			expect(DefenseSystem.GetState(attacker.Model)).to.equal("Staggered")
+		end)
+
+		it("blocks nothing with a guard held through the stun", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			defender.Humanoid:SetAttribute("HitstunUntil", base + 1)
+
+			local outcomes, disconnect = captureOutcomes()
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			-- Past the window, key still down: a block on a free body, nothing on a stunned one.
+			step(FRAME, base + WINDOW_CLOSE + FRAME)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + WINDOW_CLOSE + 2 * FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Clean")
+		end)
+
+		it("gives a stunned press a shorter window than a free one", function()
+			local scale = DefenseConstants.StunParry.WindowScale
+			expect(scale < 1).to.equal(true)
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			defender.Humanoid:SetAttribute("HitstunUntil", base + 1)
+
+			local outcomes, disconnect = captureOutcomes()
+			DefenseSystem.SetBlocking(defender.Model, true, base)
+			-- Inside the free window's close, past the scaled one's.
+			local contactAt = base + WINDOW_CLOSE * (1 + scale) / 2
+			step(FRAME, contactAt - FRAME)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, contactAt)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).never.to.equal("Parried")
+		end)
+
+		it("still refuses an evade out of the stun", function()
+			local base = os.clock()
+			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+			fighter.Humanoid:SetAttribute("HitstunUntil", base + 0.5)
+
+			local ok, reason = DefenseSystem.BeginEvade(fighter.Model, base)
+			expect(ok).to.equal(false)
+			expect(reason).to.equal("Committed")
 		end)
 	end)
 

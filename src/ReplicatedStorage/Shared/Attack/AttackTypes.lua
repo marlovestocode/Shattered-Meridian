@@ -131,6 +131,9 @@ export type AttackStartedPayload = {
 	PlaybackSpeed: number,
 	-- Presentation only -- see ContactVolume. Never trusted for a hit: the server's engine decides every one.
 	ContactVolume: ContactVolume?,
+	-- True when this swing is the LAST M1 of its string, so a predicted hit off it plays the heavier
+	-- string-ender beat (DamageTypes.CombatFeedback.StringEnd) without waiting on the server's verdict.
+	StringEnd: boolean?,
 }
 
 -- Server -> owner, on every change to which weapon their strings come from. Its own event rather

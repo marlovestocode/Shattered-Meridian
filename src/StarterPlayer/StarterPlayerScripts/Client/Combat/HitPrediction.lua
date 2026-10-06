@@ -54,6 +54,8 @@ local CONFIG = AttackConstants.Presentation.HitPrediction
 
 type PendingSwing = {
 	MoveId: string,
+	-- The last M1 of its string (AttackTypes.AttackStartedPayload.StringEnd): its predicted hit lands heavier.
+	StringEnd: boolean,
 	Volume: AttackTypes.ContactVolume,
 	-- The rig part the volume is anchored on, resolved once the window opens (HitboxAnchor).
 	Anchor: BasePart?,
@@ -182,7 +184,15 @@ local function step(): ()
 		swing.Struck[model] = true
 		-- The contact point the server would report sits on the target, not the attacker: its root is the
 		-- honest stand-in.
-		if CombatFeedbackClient.PresentPredictedHit(character, model, target.Root.Position, swing.MoveId) then
+		if
+			CombatFeedbackClient.PresentPredictedHit(
+				character,
+				model,
+				target.Root.Position,
+				swing.MoveId,
+				swing.StringEnd
+			)
+		then
 			HitFlinchPose.Predict(humanoid)
 		end
 	end
@@ -199,6 +209,7 @@ local function onAttackStarted(payload: AttackTypes.AttackStartedPayload): ()
 	local opensAt = now + payload.WindupSeconds
 	pending = {
 		MoveId = payload.MoveId,
+		StringEnd = payload.StringEnd == true,
 		Volume = volume,
 		Anchor = nil,
 		OpensAt = opensAt,

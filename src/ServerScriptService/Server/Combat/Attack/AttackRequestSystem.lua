@@ -910,6 +910,7 @@ local function throw(
 		AnimationId = entry.AnimationId,
 		PlaybackSpeed = entry.PlaybackSpeed,
 		ContactVolume = contactVolumeOf(entry.Definition),
+		StringEnd = if AttackCatalog.IsStringEnder(resolution.MoveId) then true else nil,
 	})
 
 	debugLog(AttackConstants.Debug.LogAccepted, "Attack thrown", {

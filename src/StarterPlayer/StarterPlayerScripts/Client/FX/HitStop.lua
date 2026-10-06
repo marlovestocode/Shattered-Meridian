@@ -322,4 +322,12 @@ function HitStop.SlowVictimMovement(seconds: number, multiplier: number): ()
 	bindInputHold()
 end
 
+-- Ends the stun slow early -- a parry out of the stun (DefenseConstants.StunParry) frees the body on the spot,
+-- and the walk should come back with it rather than at the deadline the last hit set.
+function HitStop.EndVictimSlow(): ()
+	if victimSlowUntil ~= nil then
+		victimSlowUntil = os.clock()
+	end
+end
+
 return HitStop

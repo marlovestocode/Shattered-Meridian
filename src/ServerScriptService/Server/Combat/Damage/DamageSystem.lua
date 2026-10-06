@@ -88,6 +88,7 @@ local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
+local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local Knockback = require(ReplicatedStorage.Shared.Damage.Knockback)
@@ -286,6 +287,28 @@ local function extendDeadline(humanoid: Humanoid, attribute: string, until_: num
 	end
 end
 
+-- THE STUN PARRY'S EXIT (DefenseConstants.StunParry). A defender who parries their way out of a hitstun is free
+-- the moment the parry lands, not when the stun would have run out: they won the exchange, and making them
+-- stand there while the attacker sits in the stagger would turn the punish into a wait. Brings both deadlines
+-- down to `at` -- but CombatBusyUntil only when the stun is what was holding it, since that Attribute is also
+-- the attack layer's swing deadline.
+local function endHitstunOf(defender: Model, at: number): ()
+	local stunnedUntil = hitstunUntil[defender]
+	if stunnedUntil == nil or stunnedUntil <= at then
+		return
+	end
+	hitstunUntil[defender] = at
+	local humanoid = CharacterUtil.HumanoidOf(defender)
+	if humanoid == nil then
+		return
+	end
+	humanoid:SetAttribute(AttributeConstants.HitstunUntil, at)
+	local busy = humanoid:GetAttribute(AttributeConstants.CombatBusyUntil)
+	if typeof(busy) == "number" and busy > at and busy <= stunnedUntil + 1e-6 then
+		humanoid:SetAttribute(AttributeConstants.CombatBusyUntil, at)
+	end
+end
+
 local function publishHitstunOf(defender: Model, until_: number): ()
 	local humanoid = CharacterUtil.HumanoidOf(defender)
 	if humanoid == nil then
@@ -458,6 +481,16 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 		DamageSystem.ExtendHitstun(outcome.Defender, at + result.HitstunSeconds, at)
 	end
 
+	-- A parry out of a ground stun frees the parrier on the spot (endHitstunOf). The air combo releases its own
+	-- held victim on a parry and owns that body's deadlines, so it is left alone here.
+	if
+		outcome.Kind == "Parried"
+		and DefenseConstants.StunParry.Enabled
+		and not (defenderHumanoid ~= nil and AirComboAttributes.IsParticipant(defenderHumanoid))
+	then
+		endHitstunOf(outcome.Defender, at)
+	end
+
 	-- A landed M1 (Basic weapon-string) hit gives the ATTACKER a brief forced-forward nudge, driven
 	-- from Step below -- see DamageConstants.AttackerLunge's own comment. Parried and Evaded are excluded
 	-- because nothing of the attacker's own swing actually connected, and Trade because it pushes the two
@@ -540,6 +573,10 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 			else nil,
 		Perfect = if outcome.Perfect then true else nil,
 		AirCombo = airComboTag,
+		-- The string-ender beat (DamageTypes.CombatFeedback.StringEnd): only on a hit that really landed.
+		StringEnd = if DamageResolver.AdvancesCombo(outcome.Kind) and AttackCatalog.IsStringEnder(entry.MoveId)
+			then true
+			else nil,
 		Push = if pushedAttacker then attackerPush else nil,
 	}
 	sendFeedback(outcome.Attacker, feedback)

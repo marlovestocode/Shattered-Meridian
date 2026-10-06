@@ -109,6 +109,13 @@ apart, both strings kept. A defender still WINDING UP loses -- a time window wou
 clash. Player swings are also started half a round trip early (`AttackConstants.Latency`), so "who landed first"
 means who pressed first, not who has the lower ping.
 
+**M1s link; the answer is the stun parry** (2026-10-06, `docs/architecture/2026-10-06-combat-feel-pass.md`). A
+landed Basic with a next stage stuns until that next hit lands (`DamageConstants.Hitstun.LinkBasicString`,
+derived in `AttackCatalog.Get` from the clip-synced timeline -- never hand-type an M1 stun again). A stunned
+ground body follows the air combo's held-body rule (`DefenseConstants.StunParry`, `DefenseSystem.parriesThroughStun`):
+the guard does nothing, an evade is refused, a timed parry counts and ends the stun (`DamageSystem.endHitstunOf`).
+`LinkMarginSeconds` must stay above `Parry.RewindMaxSeconds` -- the rewind hold delays the hit that extends the stun.
+
 `TrainingBotSystem` (`Server/Combat/TrainingBot/`, the AI sparring partner) is the same sibling shape
 from the other direction: it only ever acts through the public player entry points
 (`AttackRequestSystem.Throw/Feint`, `DefenseSystem.SetBlocking/BeginEvade`) and reads through queries

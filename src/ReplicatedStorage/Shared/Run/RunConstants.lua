@@ -107,6 +107,20 @@ RunConstants.MoveInputThreshold = 0.1
 RunConstants.WalkSpeedAcceleration = 90
 RunConstants.WalkSpeedDeceleration = 140
 
+-- HOW MUCH OF A HELD GEAR A SWING KEEPS (2026-10-06, "combat feels clunky"). A combat commitment pins the body
+-- to walking pace (Server/Systems/RunSystem.lua's header), and for a guard, a stagger or a stun that is right.
+-- For the player's OWN swing it made pressure stop-start: every M1 thrown on the run dropped ~32 studs/s to 18,
+-- so chasing with a string meant stalling on every press. Now a swing (and nothing else) moves at
+--
+--   base x max(1, held gear's multiplier x SwingGearCarry)
+--
+-- -- walking stays walking (the max), and a sprint gear (x1.8) carries about 1.26x base through the swing. The
+-- published stage is still walking: you are not SPRINTING mid-swing, you are pressing forward. 0 restores
+-- plain walking pace for every commitment.
+RunConstants.Combat = {
+	SwingGearCarry = 0.7,
+}
+
 RunConstants.Network = {
 	RemoteNames = {
 		-- Client -> server, fired ONLY on the edges of sprint intent (pressed, released) rather than

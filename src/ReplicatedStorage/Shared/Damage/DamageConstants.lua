@@ -104,6 +104,38 @@ DamageConstants.Hitstun = {
 			Basic = 0.40,
 		},
 	} :: { [string]: { [string]: number } },
+
+	-- M1s LINK (2026-10-06, "clunky, not smooth like a battlegrounds game"). Everything above made a landed
+	-- M1 a parry READ: the defender came out of the stun ~0.25s before the next punch. In play that read as
+	-- stop-start -- every exchange broke after one hit into a scramble of blocks, trades and clashes. Now a
+	-- landed Basic that has a NEXT Basic in its string stuns until that next hit arrives:
+	--
+	--   stun = this swing's Active + Recovery + Sequence.ChainDelaySeconds + the next stage's Windup + margin
+	--
+	-- measured on the CLIP-SYNCED timeline (Server/Combat/AttackCatalog.Get works it out, so every weapon,
+	-- at every WeaponSpeed and Tempo, links without a hand-typed number). That is impact to impact on the
+	-- attacker's best rhythm -- contact on the first active frame, the next press buffered -- plus a margin
+	-- for a contact a little later in the window. A player who presses late drops the string; that is the
+	-- skill, not a bug.
+	--
+	-- The values above still apply to the LAST Basic in a string (nothing follows it to link into), so a
+	-- finished string ends with the defender free a beat before the launcher can land -- that is still a read.
+	--
+	-- THE ANSWER IS THE STUN PARRY (DefenseConstants.StunParry): a stunned defender cannot block or evade, but
+	-- a timed parry on the next impact breaks the string. That is what keeps "defending against hands" possible
+	-- with no gap between hits.
+	--
+	-- LinkMarginSeconds is kept SHORT on purpose. A generous one starts covering the windup of something that
+	-- is not the next M1 -- a Heavy off a landed M1 would become guaranteed -- and the link should guarantee the
+	-- next M1, not every follow-up.
+	--
+	-- BUT NEVER SHORTER THAN THE PARRY REWIND (DefenseConstants.Parry.RewindMaxSeconds, 0.12). Against a laggy
+	-- defender the next hit is HELD up to that long before it applies, waiting to see whether a parry press is
+	-- still in flight -- and it is that hit that extends the stun. A margin under the hold would leave the
+	-- defender free for the difference, mid-string, on the server: long enough for a buffered evade to come out.
+	-- Tests/Combat/Attack/AttackRequestSystem.spec.lua asserts the ordering.
+	LinkBasicString = true,
+	LinkMarginSeconds = 0.14,
 }
 
 -- The hitstun one stage of one weapon's string inflicts: that weapon's ByWeapon override when it names the

@@ -35,8 +35,6 @@ local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixtur
 local WEAPON = WeaponFixture.Install()[1]
 
 local FRAME = 1 / 60
--- The stun MOVE_ID (a Basic stage) inflicts -- per stage and weapon since DamageConstants.Hitstun.ByStage.
-local STUN = DamageConstants.HitstunFor(WEAPON, "Basic")
 local PARRY_ANIMATION = "rbxassetid://spec-damage-parry"
 local WINDOW_OPEN = 0
 local WINDOW_CLOSE = 0.3
@@ -45,6 +43,15 @@ local WINDOW_CLOSE = 0.3
 -- damage layer has for looking an attack back up. A DebugName that is not a MoveId resolves to nothing
 -- and the whole layer silently deals zero -- which is itself one of the cases below.
 local MOVE_ID = `default:{WEAPON}:Basic:1`
+
+-- The stun MOVE_ID (a Basic stage) inflicts. Read off the catalogue rather than DamageConstants.HitstunFor: a
+-- stage with a next stage LINKS (DamageConstants.Hitstun.LinkBasicString), so its stun is derived from the
+-- string's own timeline and only the catalogue knows it.
+local function stunSeconds(): number
+	local entry = AttackCatalog.Get(MOVE_ID)
+	assert(entry ~= nil, "the spec weapon's Basic 1 must be catalogued")
+	return (entry :: any).Profile.HitstunSeconds or DamageConstants.HitstunFor(WEAPON, "Basic")
+end
 
 type Dummy = {
 	Model: Model,
@@ -297,7 +304,7 @@ return function()
 
 			local busyUntil = defender.Humanoid:GetAttribute("CombatBusyUntil")
 			expect(busyUntil).to.be.a("number")
-			expect(busyUntil).to.be.near(base + FRAME + STUN, 0.05)
+			expect(busyUntil).to.be.near(base + FRAME + stunSeconds(), 0.05)
 		end)
 
 		it("publishes the stun on its own Attribute for the defence layer", function()
@@ -313,7 +320,7 @@ return function()
 
 			local stunnedUntil = defender.Humanoid:GetAttribute("HitstunUntil")
 			expect(stunnedUntil).to.be.a("number")
-			expect(stunnedUntil).to.be.near(base + FRAME + STUN, 0.05)
+			expect(stunnedUntil).to.be.near(base + FRAME + stunSeconds(), 0.05)
 		end)
 
 		it("does not stop the run of a defender whose guard held", function()
@@ -339,8 +346,30 @@ return function()
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
 			step(FRAME, base + FRAME)
 
-			local after = base + FRAME + STUN
+			local after = base + FRAME + stunSeconds()
 			expect(DamageSystem.CanAttack(defender.Model, after)).to.equal(true)
+		end)
+
+		it("ends the moment the defender parries their way out of it", function()
+			-- DefenseConstants.StunParry: a parry landed from inside a stun frees the parrier on the spot, so the
+			-- punish is theirs to take rather than a wait for the stun to run out.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local second = makeDummy("Second", Vector3.new(0.5, 5, 0), Vector3.new(0.5, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			expect(DamageSystem.CanAttack(defender.Model, base + 2 * FRAME)).to.equal(false)
+
+			DefenseSystem.SetBlocking(defender.Model, true, base + 2 * FRAME)
+			HitboxEngine.RequestAttack(second.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + 3 * FRAME)
+
+			expect(DefenseSystem.GetState(second.Model)).to.equal("Staggered")
+			expect(DamageSystem.CanAttack(defender.Model, base + 3 * FRAME + 1e-3)).to.equal(true)
+			local stunnedUntil = defender.Humanoid:GetAttribute("HitstunUntil")
+			expect(stunnedUntil <= base + 3 * FRAME + 1e-3).to.equal(true)
 		end)
 
 		it("cancels the defender's own in-flight swing", function()

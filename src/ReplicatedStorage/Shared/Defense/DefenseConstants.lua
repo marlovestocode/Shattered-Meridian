@@ -300,6 +300,27 @@ DefenseConstants.Rally = {
 	LapseSeconds = 2.5,
 }
 
+-- Stun parry ----------------------------------------------------------------------------------------
+
+-- PARRYING OUT OF A STRING (2026-10-06). M1s now LINK: a landed Basic stuns until the next one in the
+-- string arrives (DamageConstants.Hitstun.LinkBasicString), so a string that keeps its rhythm lands every
+-- hit -- the battlegrounds feel. What keeps it from being a free three hits is this rule, the air combo's
+-- own (docs/design/air-combat-and-evade.md B4) brought to the ground: while stunned, the guard does
+-- NOTHING (a block resolves Clean), an evade is still refused, but a timed parry still counts. A parry
+-- landed out of the stun ends the stun on the spot (DamageSystem) and staggers the attacker as usual.
+--
+-- So answering a string is a read on the NEXT impact, not a gap you are handed between hits. Mashing it
+-- fails on its own: a whiffed window pays Parry.RecoverySeconds, which outlasts a link, so one wrong
+-- guess eats the rest of the string.
+--
+-- WindowScale multiplies the window's DURATION exactly as Rally does (and stacks with it): a parry out of
+-- a stun is a harder read than one made on a free body, not an equal one. 1 makes them equal; 0 turns
+-- the rule off as surely as Enabled = false does.
+DefenseConstants.StunParry = {
+	Enabled = true,
+	WindowScale = 0.75,
+}
+
 -- Clash ---------------------------------------------------------------------------------------------
 
 -- TWO SWINGS THAT MEET CLASH (2026-09-30). Before this, two players swinging into each other got one of

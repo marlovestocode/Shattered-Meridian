@@ -348,10 +348,25 @@ local function isAirHeld(): boolean
 	return humanoid ~= nil and AirComboAttributes.IsHeld(humanoid)
 end
 
+-- The ground half of the same rule (DefenseConstants.StunParry): stunned by a hit, not running a swing of
+-- its own. The server's DefenseSystem.isStunHeld, mirrored off LocalCombatState.
+local function isStunHeld(now: number): boolean
+	local config = DefenseConstants.StunParry
+	return config.Enabled
+		and config.WindowScale > 0
+		and LocalCombatState.IsStunned(now)
+		and LocalCombatState.SwingEndsAt() <= now
+end
+
+-- A held body -- air-held or stunned on the ground -- parries through the stun rather than waiting it out.
+local function parriesThroughStun(now: number): boolean
+	return isAirHeld() or isStunHeld(now)
+end
+
 -- Whether a press made at `now` reaches the server on a free body -- the same rule as its bodyCommitted
 -- gate, read off this client's own mirror of the swing and the stun.
 local function bodyIsFree(now: number): boolean
-	return LocalCombatState.FreeAt(now) <= now or isAirHeld()
+	return LocalCombatState.FreeAt(now) <= now or parriesThroughStun(now)
 end
 
 -- A guard animation waiting for the body to be free: pressed mid-swing or while stunned. See
@@ -375,7 +390,7 @@ local function raiseGuardWhenFree(): ()
 	-- and the server does exactly that. bodyIsFree above keeps the full swing -- a guard raised by the cut is
 	-- a BLOCK, so it must not be predicted as a parry.
 	local freeAt = LocalCombatState.GuardFreeAt(now)
-	if freeAt > now and not isAirHeld() then
+	if freeAt > now and not parriesThroughStun(now) then
 		guardGeneration += 1
 		local generation = guardGeneration
 		task.delay(freeAt - now, function()

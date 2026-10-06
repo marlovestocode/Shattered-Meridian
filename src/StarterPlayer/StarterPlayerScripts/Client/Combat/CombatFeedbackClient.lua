@@ -109,6 +109,7 @@ local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
+local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -175,8 +176,10 @@ local function shakeFor(payload: CombatFeedback, cue: Cue?): ()
 	local table_ = if payload.Role == "Defender"
 		then AttackConstants.Presentation.ShakePresets.Defender
 		else AttackConstants.Presentation.ShakePresets.Attacker
+	-- The last hit of a string lands heavy on both screens (DamageTypes.CombatFeedback.StringEnd).
 	local presetName = if variantOf(payload) == "ParriedPerfect"
 		then "PerfectParry"
+		elseif payload.StringEnd == true and payload.Kind == "Clean" then "HitHeavy"
 		else table_[payload.Kind] or AttackConstants.Presentation.DefaultShakePreset
 	-- Indexed rather than switched, so a preset renamed in Constants.FX is a nil (no shake) rather
 	-- than a runtime error -- Constants.FX's own "a missing preset degrades to no shake, never to a
@@ -273,6 +276,9 @@ local function freezeExchangeFor(payload: CombatFeedback, cue: Cue?): ()
 			seconds = Constants.FX.HitStop.PerfectParrySeconds
 		elseif typeof(payload.MoveId) == "string" and string.find(payload.MoveId, ":Heavy:", 1, true) then
 			seconds += Constants.FX.HitStop.HeavyBonusSeconds
+		elseif payload.StringEnd == true then
+			-- The string ender stops a beat longer than the links before it (Constants.FX.HitStop.StringEndBonusSeconds).
+			seconds += Constants.FX.HitStop.StringEndBonusSeconds
 		end
 	end
 	-- A move's authored freeze replaces the whole computed beat (0 is none). Pose only: the victim's
@@ -328,6 +334,13 @@ local function cancelSwingFor(payload: CombatFeedback): ()
 			-- stun, so nothing is recorded -- the shared recovery arrives on Attack_Cancelled ("Traded").
 			-- For a mutual parry this client was parrying, not swinging, and cutting nothing is a no-op.
 			AttackInputClient.CancelSwing()
+			return
+		end
+		if payload.Kind == "Parried" and DefenseConstants.StunParry.Enabled then
+			-- This player parried -- possibly out of a stun, which the server ends on the spot
+			-- (DefenseConstants.StunParry). A no-op when they were not stunned.
+			LocalCombatState.ClearHitstun()
+			HitStop.EndVictimSlow()
 			return
 		end
 		if not FREEZE_SECONDS_BY_KIND[payload.Kind] then
@@ -530,7 +543,8 @@ function CombatFeedbackClient.PresentPredictedHit(
 	attacker: Model,
 	defender: Model,
 	contactPosition: Vector3,
-	moveId: string
+	moveId: string,
+	stringEnd: boolean?
 ): boolean
 	local now = os.clock()
 	if
@@ -551,6 +565,7 @@ function CombatFeedbackClient.PresentPredictedHit(
 		ComboStage = 0,
 		MoveId = moveId,
 		ContactPosition = contactPosition,
+		StringEnd = if stringEnd then true else nil,
 	}
 	presentHit(payload, CombatFeedbackClient.CueFor(payload))
 	return true

@@ -91,6 +91,16 @@ function LocalCombatState.IsStunned(now: number): boolean
 	return now < stunEndsAt
 end
 
+-- Ends the recorded stun now -- the server does the same when this body parries out of one
+-- (DefenseConstants.StunParry). Notifies like a cut swing does, so anything waiting on the body acts now.
+function LocalCombatState.ClearHitstun(): ()
+	if stunEndsAt <= os.clock() then
+		return
+	end
+	stunEndsAt = 0
+	notifyReleased()
+end
+
 -- When the body is next free of both a swing and a stun, or `now` if it already is. `cancelable` asks for
 -- an action that may take a landed swing's cut (AttackConstants.HitConfirm.CancelInto): for it the swing
 -- ends at its cut point instead of its real end.

@@ -153,7 +153,10 @@ AttackConstants.Tempo = {
 		-- 0.8 (2026-09-30): the blade M1 took 0.48s to land and 1.02s to cycle, which read as unresponsive. The
 		-- defender's read is now kept by a shorter M1 stun (DamageConstants.Hitstun.ByStage) rather than by a
 		-- slower attacker. Windup 0.39, impact to impact 0.78.
-		Basic = 0.8,
+		-- 1 (2026-10-06): M1s LINK now (DamageConstants.Hitstun.LinkBasicString) and the defender's read moved
+		-- onto the stun parry (DefenseConstants.StunParry), so nothing needs the string slowed any more. Blade
+		-- windup 0.31, impact to impact ~0.63 on the shipped 0.583s clip.
+		Basic = 1,
 		Heavy = 1,
 		Finisher = 1,
 		-- The air combo's moves play at their authored pace: their windups are the parry read
@@ -177,9 +180,13 @@ AttackConstants.Tempo = {
 	-- shared tempo would cycle a punch every 0.54s, too fast to read even with the short Fists stun. At 0.65
 	-- (playback 0.975) a punch lands 0.32s after the press and every 0.65s, still well ahead of a blade's 0.78
 	-- -- see DamageConstants.Hitstun.ByStage for the read it leaves.
+	--
+	-- Fists Basic 1.1 (2026-10-06): with M1s linking, a jab can be as fast as its weight suggests. Playback
+	-- 1.65 lands a punch ~0.19s after the press and every ~0.40s -- battlegrounds pace. The defender answers
+	-- with a stun parry on the next impact, not a gap between punches.
 	ByWeapon = {
 		Fists = {
-			Basic = 0.65,
+			Basic = 1.1,
 		},
 	} :: { [string]: { [string]: number } },
 }

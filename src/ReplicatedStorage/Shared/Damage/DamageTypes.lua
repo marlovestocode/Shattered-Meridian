@@ -166,6 +166,9 @@ export type CombatFeedback = {
 	-- The stun this contact put the RECEIVING client under, on the Defender copy only: it varies by move
 	-- (DamageConstants.Hitstun.ByWeapon), so the client's own stun mirror cannot assume the shared length.
 	HitstunSeconds: number?,
+	-- True when this landed hit was the LAST M1 of its string (nothing follows it to link into -- see
+	-- DamageConstants.Hitstun.LinkBasicString): the cue for the heavier string-ender beat on both clients.
+	StringEnd: boolean?,
 }
 
 return DamageTypes

@@ -598,16 +598,12 @@ return function()
 		end)
 	end)
 
-	describe("AttackRequestSystem -- the parry read between M1s", function()
-		-- A landed M1 is not a true combo (2026-09-28): the defender comes out of the stun with time to
-		-- press a parry before the next punch arrives. Measured the way the combo-window case above is, on
-		-- the attacker's best case -- contact on the first active frame, the next press buffered so it
-		-- throws the instant the chain beat ends. 0.2s is the floor: ~0.2s was once judged "not nearly
-		-- enough time to even try to parry" (2026-09-28), and the Fists string sat at 0.01s before
-		-- DamageConstants.Hitstun.ByWeapon ("literally impossible").
-		local MIN_PARRY_READ_SECONDS = 0.2
-
-		it("leaves every roster weapon's string a parry read after each landed hit", function()
+	describe("AttackRequestSystem -- M1s link", function()
+		-- A landed M1 holds the defender until the next one in its string arrives (2026-10-06,
+		-- DamageConstants.Hitstun.LinkBasicString) -- measured on the attacker's best rhythm, contact on the
+		-- first active frame and the next press buffered so it throws the instant the chain beat ends. The
+		-- defender's answer is a stun parry on the next impact (DefenseConstants.StunParry), not a gap.
+		it("stuns every linked M1 until the next one in its string has landed", function()
 			for _, weaponId in ROSTER do
 				for stage = 1, AttackConstants.Sequence.MaxStageProbe - 1 do
 					local current = AttackCatalog.Get(`default:{weaponId}:Basic:{stage}`)
@@ -621,16 +617,65 @@ return function()
 						+ CHAIN_DELAY
 						+ following.Definition.WindupSeconds
 					local stun = current.Profile.HitstunSeconds or DamageConstants.Hitstun.Seconds
-					local read = impactToImpact - stun
-					if read < MIN_PARRY_READ_SECONDS then
-						error(`{weaponId} Basic {stage} -> {stage + 1}: {read}s between stun end and the next impact`)
+					if stun < impactToImpact + DamageConstants.Hitstun.LinkMarginSeconds - 1e-6 then
+						error(
+							`{weaponId} Basic {stage} -> {stage + 1}: stun {stun}s ends before the next impact ({impactToImpact}s)`
+						)
 					end
 				end
 			end
 		end)
 
-		it("stuns less on a Fists jab than on a blade's M1", function()
-			local fists = AttackCatalog.Get("default:Fists:Basic:1") :: any
+		it("keeps the link's margin past the parry rewind's hold", function()
+			-- A stunned defender's next hit can wait up to RewindMaxSeconds before it applies (DefenseSystem's
+			-- rewind hold) -- and that is the hit that extends the stun. The margin must outlast the wait.
+			expect(DamageConstants.Hitstun.LinkMarginSeconds > DefenseConstants.Parry.RewindMaxSeconds).to.equal(true)
+		end)
+
+		it("does not hand out a Heavy off a landed M1", function()
+			-- The margin is kept short so the link guarantees the next M1, not every follow-up: an attacker who
+			-- switches to a Heavy after a landed Basic 1 must still be readable by the time it lands.
+			for _, weaponId in ROSTER do
+				local basic = AttackCatalog.Get(`default:{weaponId}:Basic:1`)
+				local heavy = AttackCatalog.Get(`default:{weaponId}:Heavy:1`)
+				if basic and heavy then
+					local definition = basic.Definition
+					local freeAfterContact = definition.ActiveSeconds + definition.RecoverySeconds
+					local stun = basic.Profile.HitstunSeconds or DamageConstants.Hitstun.Seconds
+					local heavyLandsAt = freeAfterContact + heavy.Definition.WindupSeconds
+					if heavyLandsAt <= stun then
+						error(`{weaponId}: a Heavy off Basic 1 lands at {heavyLandsAt}s, inside the {stun}s stun`)
+					end
+				end
+			end
+		end)
+
+		it("leaves the last M1 of a string at its authored stun", function()
+			for _, weaponId in ROSTER do
+				local last = 0
+				for stage = 1, AttackConstants.Sequence.MaxStageProbe do
+					if AttackCatalog.Get(`default:{weaponId}:Basic:{stage}`) == nil then
+						break
+					end
+					last = stage
+				end
+				if last > 0 then
+					local entry = AttackCatalog.Get(`default:{weaponId}:Basic:{last}`) :: any
+					expect(entry.Profile.HitstunSeconds).to.equal(DamageConstants.HitstunFor(weaponId, "Basic"))
+				end
+			end
+		end)
+
+		it("links nothing when the rule is off", function()
+			local previous = DamageConstants.Hitstun.LinkBasicString
+			DamageConstants.Hitstun.LinkBasicString = false
+			local entry = AttackCatalog.Get(`default:{FIRST_WEAPON}:Basic:1`) :: any
+			DamageConstants.Hitstun.LinkBasicString = previous
+			expect(entry.Profile.HitstunSeconds).to.equal(DamageConstants.HitstunFor(FIRST_WEAPON, "Basic"))
+		end)
+
+		it("stuns less on a Fists jab than on a blade's M1 at the end of a string", function()
+			local fists = AttackCatalog.Get("default:Fists:Basic:3") :: any
 			expect(fists).to.be.ok()
 			expect(fists.Profile.HitstunSeconds).to.equal(DamageConstants.HitstunFor("Fists", "Basic"))
 			expect(fists.Profile.HitstunSeconds < DamageConstants.Hitstun.Seconds).to.equal(true)
