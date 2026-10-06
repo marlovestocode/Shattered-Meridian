@@ -91,6 +91,7 @@ local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
+local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local Knockback = require(ReplicatedStorage.Shared.Damage.Knockback)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -105,6 +106,7 @@ local HitboxEngine = require(script.Parent.Parent.HitboxEngine.HitboxEngine)
 
 type DefenseOutcome = DefenseTypes.DefenseOutcome
 type DamageResult = DamageTypes.DamageResult
+type HitReport = HitboxTypes.HitReport
 type CombatFeedback = DamageTypes.CombatFeedback
 
 local logger = Logger.scope("DamageSystem")
@@ -672,6 +674,95 @@ function DamageSystem.ExtendHitstun(model: Model, until_: number, at: number): (
 	hitstunUntil[model] = stunnedUntil
 	cancelSwingOf(model, at)
 	publishHitstunOf(model, stunnedUntil)
+end
+
+-- Impact damage ----------------------------------------------------------------------------------
+
+-- Health removed by something that was never a swing or a shot -- today, a thrown body landing (GrabSystem): the
+-- thrown victim's own landing, and the bystander it crashes into. It used to be a bare Humanoid:TakeDamage in the
+-- grab layer, which kept it out of everything that hears about damage here: no kill credit (PlayerDeathSystem),
+-- no engagement tag, no realm scaling, no damage number.
+--
+-- THE SECOND WAY INTO OnApplied, and deliberately narrow. No defence (a thrown body was never blockable or
+-- parryable, so nothing here asks DefenseSystem), no stun, no guard, no combo -- only the realm's damage scales and
+-- the same announce-then-write order applyOutcome keeps for kill credit. The outcome it publishes is a Clean hit
+-- whose Report.DebugName is DamageConstants.Impact.DebugName: no MoveId, so nothing keyed on a move (hit confirm,
+-- the air combo's roles, a grab's trigger) can mistake it for one.
+--
+-- Feedback goes to the ATTACKER only (their damage number, the impact on the other body). The defender's copy is
+-- withheld on purpose: their client treats a Clean feedback as a stun and cuts its own swing, and the server did
+-- neither.
+function DamageSystem.ApplyImpact(attacker: Model, target: Model, amount: number, at: number): number
+	if typeof(amount) ~= "number" or amount ~= amount or amount <= 0 then
+		return 0
+	end
+	local humanoid = CharacterUtil.LiveHumanoidOf(target)
+	local root = target.PrimaryPart
+	if humanoid == nil or root == nil then
+		return 0
+	end
+	local realmNow = DomainRules.ServerNow()
+	local damage = amount
+		* DomainRules.Scale(CharacterUtil.HumanoidOf(attacker), "DamageDealt", realmNow)
+		* DomainRules.Scale(humanoid, "DamageTaken", realmNow)
+	if not (damage > 0) then
+		return 0
+	end
+
+	local report: HitReport = {
+		Attacker = attacker,
+		Target = target,
+		TargetPart = root,
+		Shape = "Sphere",
+		Dimensions = { Width = 0, Height = 0, Length = 0, Radius = 0, InnerRadius = 0, AngleDegrees = 0 },
+		ContactPosition = root.Position,
+		ComboStage = 0,
+		PowerLevel = 0,
+		SampleTime = at,
+		DebugName = DamageConstants.Impact.DebugName,
+	}
+	local outcome: DefenseOutcome = {
+		Kind = "Clean",
+		Report = report,
+		Attacker = attacker,
+		Defender = target,
+		BearingDegrees = 0,
+		DefenderStateAtContact = "Neutral",
+		Guard = 0,
+		GuardDelta = 0,
+		SampleTime = at,
+	}
+	local result: DamageResult = {
+		Kind = "Clean",
+		Damage = damage,
+		GuardDrain = 0,
+		HitstunSeconds = 0,
+		AdvancesCombo = false,
+	}
+
+	for _, callback in appliedCallbacks do
+		local ok, err = pcall(callback, outcome, result)
+		if not ok then
+			logger:error("A DamageSystem.OnApplied consumer errored", { errorMessage = tostring(err) })
+		end
+	end
+	humanoid:TakeDamage(damage)
+
+	if attacker ~= target then
+		sendFeedback(attacker, {
+			Kind = "Clean",
+			Role = "Attacker",
+			Attacker = attacker,
+			Defender = target,
+			Damage = damage,
+			GuardDrain = 0,
+			ComboStage = 0,
+			MoveId = DamageConstants.Impact.DebugName,
+			ContactPosition = root.Position,
+		})
+	end
+	debugLog("Impact damage applied", { attacker = attacker.Name, target = target.Name, damage = damage })
+	return damage
 end
 
 -- Public queries -----------------------------------------------------------------------------------

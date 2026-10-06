@@ -428,6 +428,24 @@ local function resolveOwner(part: BasePart): Combatant?
 	return nil
 end
 
+-- Whether a combatant's body is dead -- a LIVENESS fact, like a model that left the world (sweepLiveness), and
+-- answered here for the same reason: a corpse is not something to report a contact on, and a dead body's swing
+-- is not still being thrown. What a death MEANS (credit, respawn) stays with the layers above.
+local function isDead(combatant: Combatant): boolean
+	local humanoid = combatant.Humanoid
+	return humanoid.Parent == nil or humanoid.Health <= 0
+end
+
+-- The LIVING registered combatant `part` belongs to, or nil -- the owner a swing or a shot may report a contact
+-- on. A corpse's parts resolve to nil, which both sampling loops already skip, so a shot passes through it.
+local function livingOwnerOf(part: BasePart): Combatant?
+	local owner = resolveOwner(part)
+	if owner and isDead(owner) then
+		return nil
+	end
+	return owner
+end
+
 -- The engine's one output, for a swing's contact and a projectile's alike.
 --
 -- Iterated over a snapshot-free forward walk, and every callback is pcall'd: a consumer that errors must
@@ -550,7 +568,7 @@ local function sampleSwing(combatant: Combatant, record: ActiveSwing, now: numbe
 	local contacts: { ContactCandidate }? = nil
 	for index = 1, count do
 		local part = candidateBuffer[index]
-		local owner = resolveOwner(part)
+		local owner = livingOwnerOf(part)
 		-- An unowned part cannot happen while the Include filter holds only registered models, but the
 		-- check is not free to omit: the filter is rebuilt from a registry this loop does not lock, and
 		-- a part whose owner unregistered between the query and this line would otherwise be reported
@@ -868,6 +886,9 @@ function HitboxEngine.RequestAttack(
 	end
 	if combatant.Model.Parent == nil or combatant.RootPart.Parent == nil then
 		return false, "NoCharacter"
+	end
+	if isDead(combatant) then
+		return false, "Dead"
 	end
 	if combatant.Machine:IsAttacking() then
 		return false, "Busy"
@@ -1196,6 +1217,10 @@ function HitboxEngine.Step(deltaTime: number, now: number): ()
 
 			if combatant.Model.Parent == nil or combatant.RootPart.Parent == nil then
 				combatant.Machine:Reset(subNow)
+			elseif isDead(combatant) then
+				-- Killed mid-swing: the swing ends here, through the ordinary Interrupt path, so its movement
+				-- lock and hit set clean up as for any other end. Nothing more of it can land.
+				combatant.Machine:Interrupt("Died", subNow)
 			else
 				hookNow = subNow
 				combatant.Machine:Update(subNow)
@@ -1278,7 +1303,7 @@ end
 -- The simulator's view of this engine: its registry and its one output, never a way to change either.
 ProjectileSimulator.Bind({
 	OwnerOf = function(part: BasePart): ProjectileSimulator.Owner?
-		return resolveOwner(part)
+		return livingOwnerOf(part)
 	end,
 	CombatantOf = function(model: Model): ProjectileSimulator.Owner?
 		return modelToCombatant[model]

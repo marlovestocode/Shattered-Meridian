@@ -170,6 +170,17 @@ type Buffered = {
 }
 local buffered: { [Model]: Buffered } = {}
 
+-- The highest attack press id each body has pressed (AttackRequest.PressId). A press at or below it is a
+-- duplicate -- a retransmit, a replay -- and is dropped before it reaches a gate. Per character, so a new life
+-- starts clean; the client's count runs on across lives, so its ids only ever grow.
+local lastPressId: { [Model]: number } = {}
+
+-- OnPressRefused's subscribers -- see answerRefused.
+local pressRefusedCallbacks: { (Model, number, string) -> () } = {}
+
+-- The largest press id accepted; the client counts up from 1 per session.
+local MAX_PRESS_ID = 2 ^ 31
+
 -- The swing each combatant most recently had ACCEPTED, for Feint to judge. Only what the feint gate
 -- needs, captured from the same catalogue entry the engine was handed, so "how far into the windup"
 -- is measured against the windup that is actually running. Stale once the swing ends -- Feint asks
@@ -231,6 +242,48 @@ local function debugLog(flag: boolean, message: string, data: { [string]: any }?
 	if AttackConstants.Debug.Enabled and flag then
 		logger:debug(message, data)
 	end
+end
+
+-- THE PRESS VERDICT: tells the pressing player this press will not throw, so their client cuts its prediction
+-- of it now (AttackTypes.AttackCancelReason "Refused"). A press with no id (a bot, a scripted throw) has nobody
+-- waiting on it.
+local function answerRefused(model: Model, request: AttackRequest, reason: string): ()
+	local pressId = request.PressId
+	if pressId == nil then
+		return
+	end
+	for _, callback in pressRefusedCallbacks do
+		local ok, err = pcall(callback, model, pressId, reason)
+		if not ok then
+			logger:error("An OnPressRefused consumer errored", { errorMessage = tostring(err) })
+		end
+	end
+	local remote = cancelledRemote
+	local player = Players:GetPlayerFromCharacter(model)
+	if remote == nil or player == nil then
+		return
+	end
+	remote:FireClient(
+		player,
+		{
+			MoveId = request.MoveId or "",
+			Reason = "Refused",
+			RecoverySeconds = 0,
+			PressId = pressId,
+			RefusedReason = reason,
+		} :: AttackTypes.AttackCancelledPayload
+	)
+end
+
+-- Drops this combatant's buffered press, if any, and answers it -- every path that throws one away goes
+-- through here, so no buffered press is ever left for the client to time out.
+local function dropBuffered(model: Model, reason: string): ()
+	local entry = buffered[model]
+	if entry == nil then
+		return
+	end
+	buffered[model] = nil
+	answerRefused(model, entry.Request, reason)
 end
 
 -- Every move this server might throw that has a clip, paired with its resolved AnimationId -- what
@@ -911,6 +964,7 @@ local function throw(
 		PlaybackSpeed = entry.PlaybackSpeed,
 		ContactVolume = contactVolumeOf(entry.Definition),
 		StringEnd = if AttackCatalog.IsStringEnder(resolution.MoveId) then true else nil,
+		PressId = request.PressId,
 	})
 
 	debugLog(AttackConstants.Debug.LogAccepted, "Attack thrown", {
@@ -1019,7 +1073,7 @@ function AttackRequestSystem.Feint(model: Model, now: number): (boolean, string?
 	-- A press buffered against the swing being cancelled was aimed at what came after THAT swing. The
 	-- player now decides afresh -- firing it on the recovery's last frame would turn every feint into a
 	-- guaranteed follow-up the player never chose.
-	buffered[model] = nil
+	dropBuffered(model, "Dropped")
 
 	local recoveredAt = now + AttackConstants.Feint.RecoverySeconds
 	SwingSequencer.CancelString(model, recoveredAt, now)
@@ -1183,7 +1237,7 @@ function AttackRequestSystem.CancelRecoveryForEvade(model: Model, now: number): 
 		return false
 	end
 	-- A press buffered against the swing just cut was aimed at what came after it, not at an evade.
-	buffered[model] = nil
+	dropBuffered(model, "Dropped")
 	return true
 end
 
@@ -1198,11 +1252,13 @@ local function rememberRefused(
 ): ()
 	if not AttackConstants.Input.TransientRefusals[reason] then
 		-- Not a "not yet" -- see this file's header on why holding a guard, or an unauthorised hotbar
-		-- press, must not be queued.
+		-- press, must not be queued. Answered at once.
+		answerRefused(model, request, reason)
 		return
 	end
 	-- Newest wins, one slot. Replacing rather than queueing is the whole reason mashing cannot build a
-	-- backlog that fires as a burst once the gate opens.
+	-- backlog that fires as a burst once the gate opens. The press it replaces is answered.
+	dropBuffered(model, "Superseded")
 	buffered[model] = {
 		Request = request,
 		ExpiresAt = now + AttackConstants.Input.BufferSeconds,
@@ -1228,12 +1284,34 @@ function AttackRequestSystem.Press(
 	authorized: boolean,
 	now: number
 ): (boolean, string?)
+	local pressId = request.PressId
+	if pressId then
+		local last = lastPressId[model]
+		if last and pressId <= last then
+			-- Already answered: nothing to throw and nothing to say.
+			return false, "Duplicate"
+		end
+		lastPressId[model] = pressId
+	end
 	local accepted, reason = AttackRequestSystem.Throw(model, request, authorized, now)
 	if accepted then
 		return true, nil
 	end
 	rememberRefused(model, request, authorized, reason or "Busy", now)
 	return false, reason
+end
+
+-- Fires when a press that carried an id (AttackRequest.PressId) will not throw: refused on arrival, or buffered
+-- and then expired, superseded or dropped -- `reason` says which. The same moment the pressing client hears its
+-- "Refused" verdict. For a spec, and for whatever wants to explain a missing swing. Returns a disconnect.
+function AttackRequestSystem.OnPressRefused(callback: (Model, number, string) -> ()): () -> ()
+	table.insert(pressRefusedCallbacks, callback)
+	return function()
+		local index = table.find(pressRefusedCallbacks, callback)
+		if index then
+			table.remove(pressRefusedCallbacks, index)
+		end
+	end
 end
 
 -- Whether a press is currently sitting in this combatant's buffer. For a spec, and for any future
@@ -1249,7 +1327,7 @@ end
 local function flushBuffers(now: number): ()
 	for model, entry in buffered do
 		if model.Parent == nil or now >= entry.ExpiresAt then
-			buffered[model] = nil
+			dropBuffered(model, "Expired")
 			continue
 		end
 		local accepted = AttackRequestSystem.Throw(model, entry.Request, entry.Authorized, now)
@@ -1270,6 +1348,18 @@ local function sanitizeRequest(raw: unknown): AttackRequest?
 		return nil
 	end
 	local candidate = raw :: { [string]: unknown }
+	-- Optional, and anything that is not a whole number in range is simply no id (the press still counts).
+	local rawPressId = candidate.PressId
+	local pressId: number? = nil
+	if
+		typeof(rawPressId) == "number"
+		and rawPressId == rawPressId
+		and rawPressId >= 1
+		and rawPressId <= MAX_PRESS_ID
+		and math.floor(rawPressId) == rawPressId
+	then
+		pressId = rawPressId
+	end
 	local kind = candidate.Kind
 	if kind ~= "Basic" and kind ~= "Heavy" and kind ~= "Hotbar" then
 		return nil
@@ -1282,6 +1372,7 @@ local function sanitizeRequest(raw: unknown): AttackRequest?
 		return {
 			Kind = kind :: AttackTypes.AttackKind,
 			Modifier = if candidate.Modifier == "Up" then "Up" else nil,
+			PressId = pressId,
 		}
 	end
 
@@ -1301,7 +1392,7 @@ local function sanitizeRequest(raw: unknown): AttackRequest?
 		return nil
 	end
 
-	return { Kind = "Hotbar", Slot = slot, MoveId = rawMoveId :: string }
+	return { Kind = "Hotbar", Slot = slot, MoveId = rawMoveId :: string, PressId = pressId }
 end
 
 local function handleRequest(player: Player, raw: unknown): ()
@@ -1364,7 +1455,7 @@ local function handleSwap(player: Player): ()
 		return
 	end
 	-- A swap abandons the in-progress string, so anything buffered against it is stale by definition.
-	buffered[character] = nil
+	dropBuffered(character, "Dropped")
 	notifyWeaponChanged(character, weaponId)
 
 	local remote = weaponChangedRemote
@@ -1400,7 +1491,8 @@ local function unbindCharacter(character: Model): ()
 	-- A new life inherits none of the previous one's string, cooldowns or buffered press. Dropped here
 	-- rather than left to the Step sweep so a respawn is immediate rather than up-to-a-frame stale.
 	cooldownUntil[character] = nil
-	buffered[character] = nil
+	lastPressId[character] = nil
+	dropBuffered(character, "Dropped")
 	inFlight[character] = nil
 	feintReadyAt[character] = nil
 	clearTell(character)
@@ -1495,7 +1587,7 @@ function AttackRequestSystem.SetWeapon(model: Model, weaponId: Types.WeaponId?, 
 		SwingSequencer.ClearWeapon(model, now)
 		-- A swap abandons the in-progress string, so anything buffered against it is stale -- the same
 		-- reasoning handleSwap's own buffer clear gives.
-		buffered[model] = nil
+		dropBuffered(model, "Dropped")
 		notifyWeaponChanged(model, nil)
 		return true
 	end
@@ -1503,7 +1595,7 @@ function AttackRequestSystem.SetWeapon(model: Model, weaponId: Types.WeaponId?, 
 	if not SwingSequencer.SetWeapon(model, weaponId, now) then
 		return false
 	end
-	buffered[model] = nil
+	dropBuffered(model, "Dropped")
 	notifyWeaponChanged(model, weaponId)
 	return true
 end
@@ -1567,7 +1659,7 @@ function AttackRequestSystem.Step(_deltaTime: number, now: number): ()
 			local combatantId = combatantIds[model] or HitboxEngine.GetCombatantId(model)
 			if now >= cutAt and combatantId and HitboxEngine.CancelRecovery(combatantId, now) then
 				-- A press buffered against the swing just cut was aimed at what came after it, not at a guard.
-				buffered[model] = nil
+				dropBuffered(model, "Dropped")
 			end
 		end
 	end
@@ -1684,6 +1776,7 @@ function AttackRequestSystem.Reset(): ()
 	combatantIdsReclaim:Reset()
 	cooldownReclaim:Reset()
 	table.clear(buffered)
+	table.clear(lastPressId)
 	table.clear(inFlight)
 	table.clear(feintReadyAt)
 	for model in tellEndsAt do

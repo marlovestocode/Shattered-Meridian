@@ -311,6 +311,95 @@ return function()
 		end)
 	end)
 
+	describe("AttackRequestSystem -- the press verdict", function()
+		-- A press carrying an id that will not throw is answered (AttackRequestSystem.OnPressRefused, and a
+		-- "Refused" Attack_Cancelled for a player), so the client cuts its prediction instead of timing out.
+		local function captureRefusals(): ({ { Model: Model, PressId: number, Reason: string } }, () -> ())
+			local seen = {}
+			local disconnect = AttackRequestSystem.OnPressRefused(function(model, pressId, reason)
+				table.insert(seen, { Model = model, PressId = pressId, Reason = reason })
+			end)
+			return seen, disconnect
+		end
+
+		it("answers a press refused on arrival", function()
+			local attacker = makeDummy("Refused", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
+			DefenseSystem.SetBlocking(attacker.Model, true, base)
+
+			local seen, disconnect = captureRefusals()
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 7 }, false, base + 0.01)
+			disconnect()
+
+			expect(#seen).to.equal(1)
+			expect(seen[1].PressId).to.equal(7)
+			expect(seen[1].Reason).to.equal("Guarding")
+		end)
+
+		it("answers a buffered press that expires, and says so", function()
+			local attacker = makeDummy("Expired", Vector3.new(0, 5, 0))
+			local base = os.clock()
+
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			local seen, disconnect = captureRefusals()
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 1 }, false, base + 0.01)
+			expect(#seen).to.equal(0)
+			step(base + 0.01 + BUFFER + FRAME)
+			disconnect()
+
+			expect(#seen).to.equal(1)
+			expect(seen[1].PressId).to.equal(1)
+			expect(seen[1].Reason).to.equal("Expired")
+		end)
+
+		it("answers the buffered press a newer one replaces", function()
+			local attacker = makeDummy("Superseded", Vector3.new(0, 5, 0))
+			local base = os.clock()
+
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			local seen, disconnect = captureRefusals()
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 1 }, false, base + 0.01)
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 2 }, false, base + 0.02)
+			disconnect()
+
+			expect(#seen).to.equal(1)
+			expect(seen[1].PressId).to.equal(1)
+			expect(seen[1].Reason).to.equal("Superseded")
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.02)).to.equal(true)
+		end)
+
+		it("does not answer a press that throws", function()
+			local attacker = makeDummy("Thrown", Vector3.new(0, 5, 0))
+			local base = os.clock()
+
+			local seen, disconnect = captureRefusals()
+			local accepted = AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 1 }, false, base)
+			disconnect()
+
+			expect(accepted).to.equal(true)
+			expect(#seen).to.equal(0)
+		end)
+
+		it("drops a press id it has already seen, without throwing or answering", function()
+			local attacker = makeDummy("Duplicate", Vector3.new(0, 5, 0))
+			local base = os.clock()
+
+			expect((AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 5 }, false, base))).to.equal(
+				true
+			)
+			local seen, disconnect = captureRefusals()
+			local accepted, reason =
+				AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 5 }, false, base + 0.01)
+			disconnect()
+
+			expect(accepted).to.equal(false)
+			expect(reason).to.equal("Duplicate")
+			expect(#seen).to.equal(0)
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.01)).to.equal(false)
+		end)
+	end)
+
 	describe("AttackRequestSystem -- the guard cut", function()
 		-- Where a guard may cut the first Basic stage thrown at `base` (AttackConstants.GuardCut).
 		local function guardCutAt(base: number): number

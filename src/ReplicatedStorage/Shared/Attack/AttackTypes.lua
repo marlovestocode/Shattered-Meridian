@@ -65,6 +65,11 @@ export type AttackRequest = {
 	-- Deviation gating anyone else does, not a free pass just because their account also carries
 	-- dev-tool trust. A slot with nothing equipped simply refuses -- MoveId was never read at all.
 	MoveId: string?,
+	-- This client's own count of attack presses this session, the same scheme as the guard's press ids
+	-- (DefenseSystem's verdict). Echoed on Attack_Started when the press throws, or answered with a "Refused"
+	-- Attack_Cancelled when it will not, so a mispredicted swing is cut on the verdict rather than a timeout.
+	-- An id at or below the last one seen from this player is a duplicate and dropped. Optional: a bot has none.
+	PressId: number?,
 	-- "Up" when the jump key (Space / gamepad A) was held at the press -- the air combo's modifier: Space + M1
 	-- is the launcher branch, Space + Heavy in the air is the Spike (docs/design/air-combat-and-evade.md B2).
 	-- Basic/Heavy only. The SERVER decides whether it means anything (SwingSequencer.Resolve, AirComboSystem),
@@ -131,6 +136,8 @@ export type AttackStartedPayload = {
 	PlaybackSpeed: number,
 	-- Presentation only -- see ContactVolume. Never trusted for a hit: the server's engine decides every one.
 	ContactVolume: ContactVolume?,
+	-- The press this swing answers (AttackRequest.PressId), echoed so the client confirms the exact prediction.
+	PressId: number?,
 	-- True when this swing is the LAST M1 of its string, so a predicted hit off it plays the heavier
 	-- string-ender beat (DamageTypes.CombatFeedback.StringEnd) without waiting on the server's verdict.
 	StringEnd: boolean?,
@@ -147,7 +154,10 @@ export type WeaponChangedPayload = {
 -- string went BACK to (AttackRequestSystem.KeepChainThroughParry). "Traded" is the same for a trade -- two
 -- swings that met (AttackRequestSystem.KeepChainThroughTrade) -- and its RecoverySeconds is when either side
 -- may swing again. The swing itself was already cut through Combat_Feedback in both.
-export type AttackCancelReason = "Feint" | "Parried" | "Traded"
+-- "Refused" is the press VERDICT (AttackRequest.PressId): the server will not throw that press -- refused on
+-- arrival, or buffered and then expired, superseded by a newer press, or dropped with the swing it waited on.
+-- The client cuts that press's prediction on it instead of waiting out a timeout. RefusedReason says why.
+export type AttackCancelReason = "Feint" | "Parried" | "Traded" | "Refused"
 
 -- Server -> the attacker alone, on Attack_Cancelled. Carries the MoveId so a client whose own
 -- prediction has already moved on to a different swing can ignore a cancel that is not about it.
@@ -161,6 +171,9 @@ export type AttackCancelledPayload = {
 	-- StringKind nil means no string is live (the parried swing was a fresh string's first hit).
 	StringKind: AttackKind?,
 	StringStage: number?,
+	-- On a "Refused" verdict: the press it answers, and why (a refusal reason, "Expired" or "Superseded").
+	PressId: number?,
+	RefusedReason: string?,
 }
 
 -- One change to one shot in flight, server -> every client on Attack_Projectile -- the wire form of

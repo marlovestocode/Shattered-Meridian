@@ -149,6 +149,14 @@ function DamageConstants.HitstunFor(weaponId: string?, stage: string?): number
 	return (override and override[stage]) or HITSTUN.ByStage[stage] or HITSTUN.Seconds
 end
 
+-- Impact --------------------------------------------------------------------------------------------
+
+-- Damage that is not a swing or a shot (DamageSystem.ApplyImpact -- a thrown body landing). Its outcome's
+-- Report.DebugName: deliberately not a MoveId, so nothing keyed on a move mistakes an impact for one.
+DamageConstants.Impact = {
+	DebugName = "impact",
+}
+
 -- Combo ---------------------------------------------------------------------------------------------
 
 DamageConstants.Combo = {

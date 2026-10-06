@@ -41,6 +41,14 @@ Scope note (owner, 2026-10-06): M1 step-in and evade clips/sound are **out**.
 
 ### Phase 1 — Correctness holes the audit found (do first)
 
+**Status: done (2026-10-06).** 1a is in `HitboxEngine` (`isDead`/`livingOwnerOf`; a mid-swing death interrupts
+with reason "Died"; `RequestAttack` refuses "Dead"). Grabs and the air combo already released on death, and a
+dead player's buffered press was already refused. 1b is `DamageSystem.ApplyImpact`. Feedback goes to the
+attacker only, because a defender copy would make their client fake a stun and cut its own swing. 1c is
+`AttackRequest.PressId` with a "Refused" verdict on `Attack_Cancelled` and `AttackRequestSystem.OnPressRefused`.
+A superseded press hands its prediction to the newer press rather than cutting it, so mashed strings don't
+stutter. Duplicate ids are dropped per character.
+
 **1a. Death does not gate combat.** No layer checks `Health <= 0`. A player killed mid-swing keeps their
 Active window live until the character is removed. A corpse can still be hit, which can trigger
 combo escalation, engagement tags, damage numbers and grab triggers.

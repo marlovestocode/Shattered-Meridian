@@ -617,6 +617,50 @@ return function()
 		end)
 	end)
 
+	describe("HitboxEngine -- death", function()
+		it("reports no contact on a dead body", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = makeDummy("Target", Vector3.new(0, 5, -4))
+			target.Humanoid.Health = 0
+			local hits, disconnect = captureHits()
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
+			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+			disconnect()
+
+			expect(#hits).to.equal(0)
+		end)
+
+		it("ends the swing of an attacker killed mid-swing, with nothing more landing", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local hits, disconnect = captureHits()
+			local base = os.clock()
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
+			HitboxEngine.Step(FRAME, base + FRAME)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).never.to.equal("Idle")
+
+			attacker.Humanoid.Health = 0
+			-- A body walks into the still-open volume after the death: it must not be struck.
+			makeDummy("Late", Vector3.new(0, 5, -4))
+			HitboxEngine.Step(FRAME, base + 2 * FRAME)
+			disconnect()
+
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Idle")
+			expect(HitboxEngine.EngagedCount()).to.equal(0)
+			expect(#hits).to.equal(0)
+		end)
+
+		it("refuses a swing from a dead body", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			attacker.Humanoid.Health = 0
+
+			local accepted, reason = HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
+			expect(accepted).to.equal(false)
+			expect(reason).to.equal("Dead")
+		end)
+	end)
+
 	describe("HitboxEngine -- lifecycle housekeeping", function()
 		it("retires a combatant whose character has been destroyed", function()
 			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))

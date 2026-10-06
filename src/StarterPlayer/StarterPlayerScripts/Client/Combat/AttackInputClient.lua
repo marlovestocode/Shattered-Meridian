@@ -162,7 +162,12 @@ local currentWeapon: Types.WeaponId? = nil
 local manager = AnimationManager.new({ Name = "AttackInputClient" })
 
 -- Assigned in the Prediction section below; declared here because the input handlers above it call it.
-local predictPress: (kind: AttackTypes.AttackKind) -> ()
+local predictPress: (kind: AttackTypes.AttackKind, pressId: number?) -> ()
+
+-- This session's attack press ids (AttackTypes.AttackRequest.PressId), counted up from 1. The server echoes
+-- one on Attack_Started or answers it with a "Refused" Attack_Cancelled, which is what cuts a prediction of a
+-- press that will never throw -- the timeout in predictSwing is only the backstop now.
+local nextPressId = 0
 -- Assigned beside the jump suppression below, for the same reason.
 local notePressForJump: (kind: AttackTypes.AttackKind, now: number) -> ()
 
@@ -187,7 +192,8 @@ local function parkourOwnsBody(): boolean
 	return currentHumanoid ~= nil and currentHumanoid:GetAttribute(Constants.Attributes.ParkourActionOwned) == true
 end
 
-local function sendRequest(request: AttackTypes.AttackRequest): ()
+-- Returns the press id it stamped, or nil when the press never left this client.
+local function sendRequest(request: AttackTypes.AttackRequest): number?
 	if parkourOwnsBody() then
 		-- Dropped outright, never buffered -- the same choice the server's own gate makes by keeping
 		-- "ParkourAction" out of AttackConstants.Input.TransientRefusals. A press queued through a vault
@@ -198,7 +204,7 @@ local function sendRequest(request: AttackTypes.AttackRequest): ()
 		if AttackConstants.Debug.Enabled and AttackConstants.Debug.LogRefused then
 			logger:debug("Attack press dropped -- a parkour action owns the body")
 		end
-		return
+		return nil
 	end
 	local remote = requestRemote
 	if not remote then
@@ -207,9 +213,12 @@ local function sendRequest(request: AttackTypes.AttackRequest): ()
 		-- ordering regression in Main.client.lua is visible rather than felt as "attacks sometimes
 		-- don't work at boot."
 		logger:warn("Attack pressed before the request remote was ready")
-		return
+		return nil
 	end
+	nextPressId += 1
+	request.PressId = nextPressId
 	remote:FireServer(request)
+	return nextPressId
 end
 
 -- The immediate, local "that registered" cue. Cosmetic in the strictest sense: a camera FOV nudge,
@@ -260,9 +269,9 @@ local function requestWeaponAttack(kind: AttackTypes.AttackKind): ()
 	local modifierUp = KeybindManager.IsJumpKeyDown()
 	notePressForJump(kind, os.clock())
 	playPressCue(kind)
-	sendRequest({ Kind = kind, Modifier = if modifierUp then "Up" else nil })
+	local pressId = sendRequest({ Kind = kind, Modifier = if modifierUp then "Up" else nil })
 	if not skipsPrediction(modifierUp) then
-		predictPress(kind)
+		predictPress(kind, pressId)
 	end
 end
 
@@ -415,8 +424,9 @@ end
 -- A plain SetClaim(nil): retiring a claim nothing currently holds is Clear's own documented no-op (see
 -- AnimationManager.Clear), so calling this on every qualifying hit costs nothing when the victim was
 -- not mid-swing at all -- there is no need to check GetActiveClip first.
-local pendingPrediction: { MoveId: string, Generation: number }? = nil
-local bufferedPress: { Kind: AttackTypes.AttackKind, Generation: number }? = nil
+-- PressId is the press the prediction answers, so a "Refused" verdict for it cuts exactly this one.
+local pendingPrediction: { MoveId: string, Generation: number, PressId: number? }? = nil
+local bufferedPress: { Kind: AttackTypes.AttackKind, Generation: number, PressId: number? }? = nil
 
 -- Why a swing this client was playing stopped early. "Feint" is the server's Attack_Cancelled;
 -- "Interrupted" is every other server-side cut this client infers (hitstun, parried, traded -- see
@@ -609,7 +619,7 @@ end
 
 -- Plays the predicted move now, if every local gate agrees and the move has a confirmed copy to replay.
 -- Returns whether it did.
-local function predictSwing(kind: AttackTypes.AttackKind): boolean
+local function predictSwing(kind: AttackTypes.AttackKind, pressId: number?): boolean
 	if not PREDICTION.Enabled or pendingPrediction ~= nil then
 		return false
 	end
@@ -625,7 +635,7 @@ local function predictSwing(kind: AttackTypes.AttackKind): boolean
 
 	predictionGeneration += 1
 	local generation = predictionGeneration
-	pendingPrediction = { MoveId = cached.MoveId, Generation = generation }
+	pendingPrediction = { MoveId = cached.MoveId, Generation = generation, PressId = pressId }
 	startSwing(cached, now)
 
 	-- Two pings covers the round trip; BufferSeconds covers a press the server held before throwing.
@@ -644,11 +654,11 @@ local function predictSwing(kind: AttackTypes.AttackKind): boolean
 	return true
 end
 
-predictPress = function(kind: AttackTypes.AttackKind): ()
+predictPress = function(kind: AttackTypes.AttackKind, pressId: number?): ()
 	if not PREDICTION.Enabled then
 		return
 	end
-	if predictSwing(kind) then
+	if predictSwing(kind, pressId) then
 		bufferedPress = nil
 		return
 	end
@@ -664,12 +674,12 @@ predictPress = function(kind: AttackTypes.AttackKind): ()
 	end
 	bufferGeneration += 1
 	local generation = bufferGeneration
-	bufferedPress = { Kind = kind, Generation = generation }
+	bufferedPress = { Kind = kind, Generation = generation, PressId = pressId }
 	task.delay(freeAt - now, function()
 		local current = bufferedPress
 		if current and current.Generation == generation then
 			bufferedPress = nil
-			predictSwing(current.Kind)
+			predictSwing(current.Kind, current.PressId)
 		end
 	end)
 end
@@ -833,6 +843,38 @@ local function onAttackCancelled(raw: unknown): ()
 	end
 	local recovery = if typeof(payload.RecoverySeconds) == "number" then payload.RecoverySeconds else 0
 	local now = os.clock()
+
+	-- THE PRESS VERDICT: this press will not throw. Cut its prediction now (or forget it, if it was still
+	-- waiting on the local buffer) rather than leaving the swing on screen until the timeout. Only the press it
+	-- names: a newer press's prediction is not this verdict's business.
+	if payload.Reason == "Refused" then
+		local pressId = payload.PressId
+		if typeof(pressId) ~= "number" then
+			return
+		end
+		local waiting = bufferedPress
+		if waiting and waiting.PressId == pressId then
+			bufferedPress = nil
+		end
+		local prediction = pendingPrediction
+		if prediction and prediction.PressId == pressId and payload.RefusedReason == "Superseded" then
+			-- Replaced in the server's buffer by a newer press, which is the one that will throw -- the swing on
+			-- screen is now that press's prediction, not a refused one. (The server only supersedes with the
+			-- newest press it has, which is the newest this client sent.)
+			prediction.PressId = nextPressId
+			return
+		end
+		if prediction and prediction.PressId == pressId then
+			if AttackConstants.Debug.Enabled and AttackConstants.Debug.LogRefused then
+				logger:debug("Predicted swing refused -- cut", {
+					moveId = prediction.MoveId,
+					reason = payload.RefusedReason,
+				})
+			end
+			cutUnconfirmedSwing()
+		end
+		return
+	end
 
 	-- PARRIED / TRADED: the server kept this player's chain (AttackRequestSystem.KeepChainThroughParry /
 	-- KeepChainThroughTrade) and held it through the stagger or the trade's recovery. Only the mirror moves.

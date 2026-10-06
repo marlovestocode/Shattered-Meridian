@@ -575,6 +575,58 @@ return function()
 		end)
 	end)
 
+	describe("DamageSystem.ApplyImpact", function()
+		-- A thrown body landing (GrabSystem): health removed outside any swing, credited to the thrower.
+		it("removes the health and announces it, credited to the attacker, before the write", function()
+			local base = os.clock()
+			local thrower = makeDummy("Thrower", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local bystander = makeDummy("Bystander", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local before = bystander.Humanoid.Health
+
+			local seen: { any } = {}
+			local disconnect = DamageSystem.OnApplied(function(outcome, result)
+				table.insert(seen, {
+					Attacker = outcome.Attacker,
+					Defender = outcome.Defender,
+					DebugName = outcome.Report.DebugName,
+					Damage = result.Damage,
+					HealthAtCallback = bystander.Humanoid.Health,
+				})
+			end)
+			local dealt = DamageSystem.ApplyImpact(thrower.Model, bystander.Model, 15, base)
+			disconnect()
+
+			expect(dealt).to.equal(15)
+			expect(bystander.Humanoid.Health).to.be.near(before - 15, 1e-6)
+			expect(#seen).to.equal(1)
+			expect(seen[1].Attacker).to.equal(thrower.Model)
+			expect(seen[1].Defender).to.equal(bystander.Model)
+			expect(seen[1].DebugName).to.equal(DamageConstants.Impact.DebugName)
+			expect(seen[1].HealthAtCallback).to.equal(before)
+		end)
+
+		it("stuns nothing and leaves the target free to swing", function()
+			local base = os.clock()
+			local thrower = makeDummy("Thrower", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local bystander = makeDummy("Bystander", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			DamageSystem.ApplyImpact(thrower.Model, bystander.Model, 15, base)
+
+			expect(DamageSystem.CanAttack(bystander.Model, base + FRAME)).to.equal(true)
+			expect(bystander.Humanoid:GetAttribute("HitstunUntil")).to.equal(nil)
+		end)
+
+		it("deals nothing to a dead target or for a non-positive amount", function()
+			local base = os.clock()
+			local thrower = makeDummy("Thrower", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local bystander = makeDummy("Bystander", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			expect(DamageSystem.ApplyImpact(thrower.Model, bystander.Model, 0, base)).to.equal(0)
+			bystander.Humanoid.Health = 0
+			expect(DamageSystem.ApplyImpact(thrower.Model, bystander.Model, 15, base)).to.equal(0)
+		end)
+	end)
+
 	describe("DamageSystem.OnApplied", function()
 		it("fires before the health write, so a death is still attributable", function()
 			-- Humanoid:TakeDamage raises Humanoid.Died synchronously, so a subscriber notified

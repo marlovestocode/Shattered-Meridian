@@ -887,18 +887,14 @@ end
 local function landFlight(victim: Model, flight: Flight, impactTarget: Model?): ()
 	dropFlight(victim, flight)
 
-	if
-		flight.VictimHumanoid.Parent ~= nil
-		and flight.VictimHumanoid.Health > 0
-		and flight.Config.ThrowSelfDamage > 0
-	then
-		flight.VictimHumanoid:TakeDamage(flight.Config.ThrowSelfDamage)
+	-- Both through DamageSystem.ApplyImpact, credited to the thrower: a throw that kills -- the landing or the body
+	-- it crashed into -- is the thrower's kill, and both are realm-scaled and tagged like any other damage.
+	local now = os.clock()
+	if flight.Config.ThrowSelfDamage > 0 then
+		DamageSystem.ApplyImpact(flight.Attacker, victim, flight.Config.ThrowSelfDamage, now)
 	end
 	if impactTarget and flight.Config.ThrowImpactDamage > 0 then
-		local targetHumanoid = CharacterUtil.LiveHumanoidOf(impactTarget)
-		if targetHumanoid then
-			targetHumanoid:TakeDamage(flight.Config.ThrowImpactDamage)
-		end
+		DamageSystem.ApplyImpact(flight.Attacker, impactTarget, flight.Config.ThrowImpactDamage, now)
 	end
 
 	-- restoreControl zeroes the velocity first -- a thrown body that skids through the landing reads as
