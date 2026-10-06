@@ -77,6 +77,16 @@ with a press id and a verdict (`DefenseSystem` notifyClient).
 
 ### Phase 2 — Consolidate what is split today
 
+**Status: done (2026-10-06).**
+- 2a: `ResolveInput.GuardDisabled`. The held-body and NoBlock rules are now inside `OutcomeResolver.Resolve`,
+  and the precedence is pinned by one table spec.
+- 2b: `HitReport.Source` (`HitboxTypes.ContactSource`), stamped by the engine, the simulator and
+  `ApplyImpact`, and read through `HitboxTypes.SourceOf`/`IsShot`. Correction to the count below: five sites
+  were inferring the source. The other matches either need the projectile record itself, or are move-role
+  lookups (`AirComboMoves.RoleOf`, `isBasicMoveId`) that are correctly keyed by MoveId. Those stay.
+- 2c: `DamageResolver.ApplyScales`. The shot and realm scales are one ordered pure chain, and
+  `ApplyImpact` uses the same chain.
+
 **2a. Defence precedence in one function.** `OutcomeResolver.Resolve` owns the ladder (Evaded → Parry →
 Block/Backstab/GuardBroken → Clean), but three overrides are bolted on afterwards in
 `DefenseSystem.onHit`: air-held, stun-held and realm NoBlock all turn a guard result into Clean. Realm

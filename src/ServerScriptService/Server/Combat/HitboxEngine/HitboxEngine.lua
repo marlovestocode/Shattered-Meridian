@@ -492,6 +492,7 @@ local function reportHit(
 		PowerLevel = record.Swing.PowerLevel,
 		SampleTime = now,
 		DebugName = record.Swing.Definition.DebugName,
+		Source = "Melee",
 	}
 
 	if debugEnabled() and HitboxEngineConstants.Debug.LogSwings then

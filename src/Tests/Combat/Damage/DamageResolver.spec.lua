@@ -198,4 +198,36 @@ return function()
 			expect(result.GuardDrain).to.equal(0)
 		end)
 	end)
+
+	describe("DamageResolver.ApplyScales -- the chain after pricing", function()
+		local function priced(): any
+			return { Kind = "Clean", Damage = 10, GuardDrain = 4, HitstunSeconds = 0.5, AdvancesCombo = true }
+		end
+
+		it("changes nothing with no scales", function()
+			local result = DamageResolver.ApplyScales(priced(), {})
+			expect(result.Damage).to.equal(10)
+			expect(result.GuardDrain).to.equal(4)
+			expect(result.HitstunSeconds).to.equal(0.5)
+		end)
+
+		it("scales health and posture by the shot, health only by dealt and taken", function()
+			local result = DamageResolver.ApplyScales(priced(), { Shot = 2, DamageDealt = 1.5, DamageTaken = 0.5 })
+			expect(result.Damage).to.be.near(10 * 2 * 1.5 * 0.5, 1e-9)
+			expect(result.GuardDrain).to.be.near(4 * 2, 1e-9)
+			expect(result.HitstunSeconds).to.equal(0.5)
+		end)
+
+		it("scales posture and stun by their own realm rules", function()
+			local result = DamageResolver.ApplyScales(priced(), { GuardDamageTaken = 3, HitstunTaken = 2 })
+			expect(result.Damage).to.equal(10)
+			expect(result.GuardDrain).to.be.near(12, 1e-9)
+			expect(result.HitstunSeconds).to.be.near(1, 1e-9)
+		end)
+
+		it("treats a negative or NaN scale as no damage or no scale respectively", function()
+			expect(DamageResolver.ApplyScales(priced(), { Shot = -1 }).Damage).to.equal(0)
+			expect(DamageResolver.ApplyScales(priced(), { DamageTaken = 0 / 0 }).Damage).to.equal(10)
+		end)
+	end)
 end

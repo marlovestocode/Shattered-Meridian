@@ -144,6 +144,9 @@ export type AttackDefinition = {
 
 -- What the engine answers with. Everything a consumer needs to decide what a contact MEANS, and
 -- nothing that presumes an answer.
+-- What made a contact -- see HitReport.Source.
+export type ContactSource = "Melee" | "Projectile" | "Realm" | "Impact"
+
 export type HitReport = {
 	Attacker: Model,
 	Target: Model,
@@ -175,6 +178,10 @@ export type HitReport = {
 	-- (ProjectileTypes.ProjectileContact). Absent on every swing's report, so every consumer that predates
 	-- projectiles reads a report exactly as it always did.
 	Projectile: ProjectileTypes.ProjectileContact?,
+	-- WHERE THE CONTACT CAME FROM, stamped by whoever made the report: a swing's volume (HitboxEngine), a shot
+	-- (ProjectileSimulator -- "Realm" for a realm's own volley), or health removed outside both (DamageSystem.
+	-- ApplyImpact). Read through HitboxTypes.SourceOf, which also answers for a report built by hand without one.
+	Source: ContactSource?,
 }
 
 -- Per-field bounds. Upper bounds are generous -- this is a "no NaN, no negative, nothing absurd"
@@ -203,6 +210,28 @@ local SHAPE_FIELDS: { [ShapeKind]: { Convention: string, Fields: { string } } } 
 	Cone = { Convention = "reach", Fields = { "Length", "AngleDegrees" } },
 	Beam = { Convention = "reach", Fields = { "Radius", "Length" } },
 }
+
+-- Where a contact came from: its stamped Source, or -- for a report built without one (a spec, an older caller)
+-- -- what its shape says: a shot carrying a realm id is the realm's, any other shot is a projectile, the rest
+-- melee. The ONE place that inference lives; everything else asks this.
+function HitboxTypes.SourceOf(report: HitReport): ContactSource
+	local stamped = report.Source
+	if stamped ~= nil then
+		return stamped :: ContactSource
+	end
+	local projectile = report.Projectile
+	if projectile ~= nil then
+		return (if projectile.DomainId ~= nil then "Realm" else "Projectile") :: ContactSource
+	end
+	return "Melee"
+end
+
+-- Whether a contact was carried by a shot -- a projectile or a realm's volley. Either way the report carries its
+-- ProjectileContact, and it is answered on the shot rather than on a swing.
+function HitboxTypes.IsShot(report: HitReport): boolean
+	local source = HitboxTypes.SourceOf(report)
+	return source == "Projectile" or source == "Realm"
+end
 
 function HitboxTypes.IsShapeKind(value: unknown): boolean
 	return typeof(value) == "string" and SHAPE_FIELDS[value :: ShapeKind] ~= nil

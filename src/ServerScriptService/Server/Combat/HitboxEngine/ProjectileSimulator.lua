@@ -560,6 +560,7 @@ local function report(projectile: Projectile, target: Owner, part: BasePart, at:
 		SampleTime = now,
 		DebugName = projectile.DebugName,
 		Projectile = contact,
+		Source = (if projectile.DomainId ~= nil then "Realm" else "Projectile") :: HitboxTypes.ContactSource,
 	})
 end
 

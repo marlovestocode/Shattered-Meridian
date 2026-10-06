@@ -885,18 +885,9 @@ local function onHit(report: HitReport): ()
 		-- spent: ConsumesParry stays false, and the next contact can still be parried.
 		ParryConsumed = parryConsumedThisBatch[report.Target] == true or not isParryable(report) or realmNoParry,
 		Evading = intangible or machine:IsEvadingAt(at),
+		-- The held-body rule and the realm's NoBlock, decided inside the resolver (ResolveInput.GuardDisabled).
+		GuardDisabled = airHeld or stunHeld or realmNoBlock,
 	})
-	if
-		(airHeld or stunHeld or realmNoBlock)
-		and (result.Kind == "Blocked" or result.Kind == "Backstab" or result.Kind == "GuardBroken")
-	then
-		result = {
-			Kind = "Clean",
-			Guard = batchGuard[report.Target] or registration.Guard:Get(),
-			GuardDelta = 0,
-			ConsumesParry = false,
-		}
-	end
 	batchGuard[report.Target] = result.Guard
 
 	-- THE CLASH MEASUREMENT (DefenseConstants.Clash), taken here at the contact's own substep, where the

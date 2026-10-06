@@ -335,7 +335,7 @@ local function spacingFor(
 	end
 	-- Spacing is the melee exchange's footwork -- the defender eased off, the attacker following in. A
 	-- shot's thrower is not in reach to step anywhere, and its target's reaction is the move's knockback.
-	if outcome.Report.Projectile ~= nil then
+	if HitboxTypes.SourceOf(outcome.Report) ~= "Melee" then
 		return nil, nil
 	end
 	if AirComboMoves.RoleOf(moveId) ~= nil then
@@ -409,7 +409,7 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	local at = outcome.SampleTime
 	local projectile = outcome.Report.Projectile
 	-- A realm's strike or volley (see this file's header): flat-priced, and not a link in the owner's string.
-	local fromRealm = projectile ~= nil and projectile.DomainId ~= nil
+	local fromRealm = HitboxTypes.SourceOf(outcome.Report) == "Realm"
 
 	-- ADVANCED BEFORE RESOLVING, not after, so the stage handed to the resolver is the one this hit
 	-- counts as. Resolving first and advancing afterwards would scale every hit by the stage of the one
@@ -441,24 +441,20 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	-- product of every one it has picked up (ProjectileContact.DamageScale), this applies it, to health and
 	-- posture alike, before anything reads the result. 1 for every shot nobody turned, and every swing. A
 	-- contested realm's strike arrives already scaled the same way (DomainEffects hands it a start scale).
-	if projectile and projectile.DamageScale ~= 1 then
-		local scale = math.max(projectile.DamageScale, 0)
-		result.Damage *= scale
-		result.GuardDrain *= scale
-	end
-
+	--
 	-- A REALM'S RULES, read off the two bodies (this file's header). One server-clock read for all four, and
-	-- every one is exactly 1 for a body no realm governs, so an ordinary fight multiplies by nothing.
+	-- every one is exactly 1 for a body no realm governs, so an ordinary fight multiplies by nothing. The
+	-- arithmetic itself is DamageResolver.ApplyScales'; this only reads the inputs.
 	local realmNow = DomainRules.ServerNow()
 	local attackerHumanoid = CharacterUtil.HumanoidOf(outcome.Attacker)
 	local defenderHumanoid = CharacterUtil.HumanoidOf(outcome.Defender)
-	result.Damage *= DomainRules.Scale(attackerHumanoid, "DamageDealt", realmNow) * DomainRules.Scale(
-		defenderHumanoid,
-		"DamageTaken",
-		realmNow
-	)
-	result.GuardDrain *= DomainRules.Scale(defenderHumanoid, "GuardDamageTaken", realmNow)
-	result.HitstunSeconds *= DomainRules.Scale(defenderHumanoid, "HitstunTaken", realmNow)
+	DamageResolver.ApplyScales(result, {
+		Shot = if projectile then projectile.DamageScale else nil,
+		DamageDealt = DomainRules.Scale(attackerHumanoid, "DamageDealt", realmNow),
+		DamageTaken = DomainRules.Scale(defenderHumanoid, "DamageTaken", realmNow),
+		GuardDamageTaken = DomainRules.Scale(defenderHumanoid, "GuardDamageTaken", realmNow),
+		HitstunTaken = DomainRules.Scale(defenderHumanoid, "HitstunTaken", realmNow),
+	})
 
 	-- The air combo's scaling and presentation tag, before any reader sees the result (see airComboHook).
 	local airComboTag: string? = nil
@@ -702,9 +698,17 @@ function DamageSystem.ApplyImpact(attacker: Model, target: Model, amount: number
 		return 0
 	end
 	local realmNow = DomainRules.ServerNow()
-	local damage = amount
-		* DomainRules.Scale(CharacterUtil.HumanoidOf(attacker), "DamageDealt", realmNow)
-		* DomainRules.Scale(humanoid, "DamageTaken", realmNow)
+	local result: DamageResult = DamageResolver.ApplyScales({
+		Kind = "Clean",
+		Damage = amount,
+		GuardDrain = 0,
+		HitstunSeconds = 0,
+		AdvancesCombo = false,
+	}, {
+		DamageDealt = DomainRules.Scale(CharacterUtil.HumanoidOf(attacker), "DamageDealt", realmNow),
+		DamageTaken = DomainRules.Scale(humanoid, "DamageTaken", realmNow),
+	})
+	local damage = result.Damage
 	if not (damage > 0) then
 		return 0
 	end
@@ -720,6 +724,7 @@ function DamageSystem.ApplyImpact(attacker: Model, target: Model, amount: number
 		PowerLevel = 0,
 		SampleTime = at,
 		DebugName = DamageConstants.Impact.DebugName,
+		Source = "Impact",
 	}
 	local outcome: DefenseOutcome = {
 		Kind = "Clean",
@@ -732,14 +737,6 @@ function DamageSystem.ApplyImpact(attacker: Model, target: Model, amount: number
 		GuardDelta = 0,
 		SampleTime = at,
 	}
-	local result: DamageResult = {
-		Kind = "Clean",
-		Damage = damage,
-		GuardDrain = 0,
-		HitstunSeconds = 0,
-		AdvancesCombo = false,
-	}
-
 	for _, callback in appliedCallbacks do
 		local ok, err = pcall(callback, outcome, result)
 		if not ok then

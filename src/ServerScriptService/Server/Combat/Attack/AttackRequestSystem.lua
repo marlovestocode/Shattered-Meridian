@@ -109,6 +109,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
+local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local AirComboMoves = require(ReplicatedStorage.Shared.AirCombo.AirComboMoves)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
@@ -1186,7 +1187,8 @@ local function onDamageApplied(outcome: DefenseTypes.DefenseOutcome, _result: Da
 	-- through a parry. A projectile's contact arrives on its own clock, long after (or during some other)
 	-- swing, so it confirms nothing and keeps nothing; the shot's own parry response was the defence
 	-- layer's to apply (HitboxEngine.ParryProjectile).
-	if outcome.Report.Projectile ~= nil then
+	-- An impact (DamageSystem.ApplyImpact) is no swing's contact either.
+	if HitboxTypes.SourceOf(outcome.Report) ~= "Melee" then
 		return
 	end
 	if AttackConstants.HitConfirm.ConfirmKinds[outcome.Kind] then

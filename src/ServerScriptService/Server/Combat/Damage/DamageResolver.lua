@@ -168,4 +168,36 @@ function DamageResolver.Resolve(
 	return result
 end
 
+-- The multipliers a priced hit still takes after Resolve, all optional and all 1 when absent. Each is read by
+-- its owner and handed in: a shot's own scale (ProjectileContact.DamageScale -- reflections, a contested realm's
+-- start scale), and a realm's four rules (Shared/Domain/DomainRules.lua). Pure numbers, so this file stays a pure
+-- function of what it is given.
+export type ResultScales = {
+	Shot: number?,
+	DamageDealt: number?,
+	DamageTaken: number?,
+	GuardDamageTaken: number?,
+	HitstunTaken: number?,
+}
+
+local function scaleOf(value: number?): number
+	if typeof(value) ~= "number" or value ~= value then
+		return 1
+	end
+	return math.max(value, 0)
+end
+
+-- THE ORDERED CHAIN AFTER PRICING, in one place: base (Resolve) -> the shot's scale (health and posture) ->
+-- the realm's (dealt x taken on health, its own scale on posture and on stun). It used to be inline in
+-- DamageSystem.applyOutcome, the one caller, which made the full arithmetic for a hit live in two files.
+-- Mutates and returns `result`. New stages (a character's stats, a status) belong here, in order, when a real
+-- input exists for them.
+function DamageResolver.ApplyScales(result: DamageResult, scales: ResultScales): DamageResult
+	local shot = scaleOf(scales.Shot)
+	result.Damage *= shot * scaleOf(scales.DamageDealt) * scaleOf(scales.DamageTaken)
+	result.GuardDrain *= shot * scaleOf(scales.GuardDamageTaken)
+	result.HitstunSeconds *= scaleOf(scales.HitstunTaken)
+	return result
+end
+
 return DamageResolver

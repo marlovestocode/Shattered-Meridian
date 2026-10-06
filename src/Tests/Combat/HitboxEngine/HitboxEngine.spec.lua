@@ -617,6 +617,35 @@ return function()
 		end)
 	end)
 
+	describe("HitboxTypes.SourceOf", function()
+		it("stamps a swing's contact as Melee", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			makeDummy("Target", Vector3.new(0, 5, -4))
+			local hits, disconnect = captureHits()
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
+			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+			disconnect()
+
+			expect(#hits).to.equal(1)
+			expect(hits[1].Source).to.equal("Melee")
+			expect(HitboxTypes.SourceOf(hits[1])).to.equal("Melee")
+		end)
+
+		it("infers a source for a report built without one", function()
+			local bare = {} :: any
+			expect(HitboxTypes.SourceOf(bare)).to.equal("Melee")
+			expect(HitboxTypes.SourceOf({ Projectile = {} } :: any)).to.equal("Projectile")
+			expect(HitboxTypes.SourceOf({ Projectile = { DomainId = 3 } } :: any)).to.equal("Realm")
+			expect(HitboxTypes.IsShot({ Projectile = { DomainId = 3 } } :: any)).to.equal(true)
+			expect(HitboxTypes.IsShot({ Source = "Impact" } :: any)).to.equal(false)
+		end)
+
+		it("prefers the stamped source over the shape", function()
+			expect(HitboxTypes.SourceOf({ Source = "Impact", Projectile = {} } :: any)).to.equal("Impact")
+		end)
+	end)
+
 	describe("HitboxEngine -- death", function()
 		it("reports no contact on a dead body", function()
 			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))

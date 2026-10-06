@@ -37,6 +37,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
+local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 
 local GuardMeter = require(script.Parent.GuardMeter)
 
@@ -142,7 +143,12 @@ function OutcomeResolver.Resolve(input: ResolveInput): ResolveResult
 		}
 	end
 
-	local mitigates = OutcomeResolver.Mitigates(input.DefenderState, input.BlockHeld, input.ParryConsumed)
+	-- A disabled guard (ResolveInput.GuardDisabled -- air-held, stunned, a NoBlock realm) mitigates nothing, so it
+	-- never blocks and never backstabs; only the parry is left. This is the whole held-body rule, here rather than
+	-- patched onto a result afterwards, so the precedence below is the only one there is.
+	local guardDisabled = input.GuardDisabled == true
+	local mitigates = not guardDisabled
+		and OutcomeResolver.Mitigates(input.DefenderState, input.BlockHeld, input.ParryConsumed)
 	local parryAvailable = input.ParryLive and not input.ParryConsumed
 	local covering = mitigates or parryAvailable
 
@@ -150,7 +156,7 @@ function OutcomeResolver.Resolve(input: ResolveInput): ResolveResult
 	--    A rear hit on someone who was NOT covering is an ordinary clean hit, not a backstab --
 	--    a backstab is the punish for a false sense of security, and there is none to punish if they
 	--    never raised anything.
-	if covering and OutcomeResolver.IsRear(input.BearingDegrees) then
+	if covering and not guardDisabled and OutcomeResolver.IsRear(input.BearingDegrees) then
 		return {
 			Kind = "Backstab" :: DefenseTypes.OutcomeKind,
 			Guard = guard,
@@ -218,7 +224,7 @@ end
 -- Whether a projectile made this contact. A contact built by hand (a spec) may carry no report at all.
 local function isProjectile(contact: PendingContact): boolean
 	local report = contact.Report
-	return report ~= nil and report.Projectile ~= nil
+	return report ~= nil and HitboxTypes.IsShot(report)
 end
 
 function OutcomeResolver.ArbitrateTrades(contacts: { PendingContact }): number

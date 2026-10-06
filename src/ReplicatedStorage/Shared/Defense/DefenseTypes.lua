@@ -138,6 +138,11 @@ export type ResolveInput = {
 	-- (DefenseStateMachine.IsEvadingAt). Optional so a caller that predates evasion -- every existing
 	-- resolver spec builds this table by hand -- reads as "not evading" rather than failing to typecheck.
 	Evading: boolean?,
+	-- The defender's guard does NOTHING for this contact -- held in an air combo, stunned on the ground
+	-- (DefenseConstants.StunParry), or standing in a realm with NoBlock. A guard that would have blocked lets the
+	-- hit through as Clean, and there is no backstab, since a backstab exists only because a guard was up. A live
+	-- parry still counts. Optional: absent is "the guard works".
+	GuardDisabled: boolean?,
 }
 
 -- What it returns. Kind plus the guard arithmetic, so the caller applies rather than recomputes.

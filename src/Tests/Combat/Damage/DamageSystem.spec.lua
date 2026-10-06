@@ -589,6 +589,7 @@ return function()
 					Attacker = outcome.Attacker,
 					Defender = outcome.Defender,
 					DebugName = outcome.Report.DebugName,
+					Source = outcome.Report.Source,
 					Damage = result.Damage,
 					HealthAtCallback = bystander.Humanoid.Health,
 				})
@@ -602,6 +603,7 @@ return function()
 			expect(seen[1].Attacker).to.equal(thrower.Model)
 			expect(seen[1].Defender).to.equal(bystander.Model)
 			expect(seen[1].DebugName).to.equal(DamageConstants.Impact.DebugName)
+			expect(seen[1].Source).to.equal("Impact")
 			expect(seen[1].HealthAtCallback).to.equal(before)
 		end)
 
