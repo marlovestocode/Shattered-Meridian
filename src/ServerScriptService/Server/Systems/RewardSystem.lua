@@ -11,6 +11,8 @@
 	      -> RewardSystem.HandlePlayerKilled       this module: eligible? for what?
 	      -> ProgressionSystem.Apply(manifest)      legitimate? routed to whom?
 	      -> MeridianSystem.AwardKillXP             how much; the write; MeridianXPAwarded
+	      -> BloodlineSystem.CountKill              stage progress
+	      -> BountySystem.PayClaim                  the victim's mark, if any
 	      -> TierSystem (via MeridianXPAwarded)     promotion
 
 	WHAT "ELIGIBLE" MEANS HERE, AND WHAT IT DOES NOT. Taxonomy, not judgement: a PlayerKilled with a
@@ -32,12 +34,11 @@
 	loaded, say) is refused and logged by its owner, never retried from here. A reward that could be
 	retried is a reward that could be granted twice.
 
-	Components today: Meridian XP only. software-architecture.md names absorbed essence as the other
-	PvP-kill reward, but AbsorbSystem is an empty roadmap entry with no balance authority; composing an
-	"Absorb" component nobody can apply would be a promise, not a reward. Bounty payouts
-	(BountySystem.ClaimBounty) and bloodline stage-ups (BloodlineSystem's own interim PlayerKilled
-	subscription) still reach their owners without passing through this spine -- both are recorded as
-	open migrations in docs/architecture/2026-09-28-progression-spine-audit.md, not silently absorbed.
+	Components today: Meridian XP, Bloodline stage progress and the victim's Bounty, if any (the last two
+	joined 2026-10-06; before that both reached their owners through their own PlayerKilled subscriptions,
+	outside the gate). software-architecture.md names absorbed essence as another PvP-kill reward, but
+	AbsorbSystem is an empty roadmap entry with no balance authority; composing an "Absorb" component
+	nobody can apply would be a promise, not a reward.
 
 	No client remote, and there must never be one: a reward requested by a client is exactly the
 	client-claimed progression project-vision.md's first pillar forbids.
@@ -65,8 +66,13 @@ local RewardSystem = {}
 
 -- Which reward kinds each source is structurally eligible for. Frozen: a new kind or source is a code
 -- change with a review, never a runtime mutation.
+local PVP_KILL_COMPONENTS: { RewardComponentKind } = table.freeze({
+	"MeridianXP" :: RewardComponentKind,
+	"BloodlineStage" :: RewardComponentKind,
+	"BountyClaim" :: RewardComponentKind,
+})
 local REWARD_TAXONOMY: { [ProgressionTypes.RewardSource]: { RewardComponentKind } } = table.freeze({
-	PvPKill = table.freeze({ "MeridianXP" :: RewardComponentKind }),
+	PvPKill = PVP_KILL_COMPONENTS,
 })
 
 -- Why a fact composed no manifest. Returned for specs and logged at debug; none of these is an error.
@@ -109,7 +115,7 @@ function RewardSystem.ComposeKillManifest(
 			Recipient = killer,
 			Victim = victim,
 		}),
-		Components = REWARD_TAXONOMY.PvPKill,
+		Components = PVP_KILL_COMPONENTS,
 	}
 	return table.freeze(manifest), nil
 end

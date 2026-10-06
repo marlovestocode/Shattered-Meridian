@@ -25,9 +25,8 @@ local BloodlineTypes = {}
 
 -- Open string Kind (not a closed union) because a bloodline's awakening/stage-advancement trigger is
 -- a per-content decision, not a fixed roster this file can enumerate ahead of time -- v1 ships
--- exactly one, "OnPlayerKilled", fed by BloodlineSystem's interim GameplayEvents.PlayerKilled
--- subscription (MeridianSystem, which it used to mirror, now receives kills through the
--- RewardSystem -> ProgressionSystem spine instead). Params carries whatever numbers that Kind needs to interpret --
+-- exactly one, "OnPlayerKilled", fed by the fight-to-grow spine (RewardSystem -> ProgressionSystem ->
+-- BloodlineSystem.CountKill, the "BloodlineStage" reward component). Params carries whatever numbers that Kind needs to interpret --
 -- e.g. a kill-count threshold for a first awakening, additional-kills-since-this-stage for
 -- advancement, or a harder threshold for the Human-Ascension case world-bible.md's "contested
 -- authority" framing describes -- so a new Kind never needs a new top-level field on this struct.

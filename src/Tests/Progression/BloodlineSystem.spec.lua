@@ -1,7 +1,7 @@
 --!strict
 local ServerScriptService = game:GetService("ServerScriptService")
 
-local BloodlineSystem = require(ServerScriptService.Server.Systems.BloodlineSystem)
+local BloodlineSystem = require(ServerScriptService.Server.Systems.BloodlineSystem) :: any
 local BloodlineManager = require(ServerScriptService.Server.Managers.BloodlineManager)
 
 -- BloodlineSystem.Init() is never called here -- it subscribes to PlayerDataSystem/GameplayEvents,

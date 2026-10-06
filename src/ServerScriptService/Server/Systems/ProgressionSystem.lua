@@ -38,22 +38,22 @@
 	is a server hop; that and alt-account detection are recorded as open in
 	docs/architecture/2026-09-28-progression-spine-audit.md.
 
-	Not covered by this rule, because they do not pass through here yet: Bounty payouts and Bloodline
-	stage-ups (their own PlayerKilled subscriptions -- the same audit, O-1/O-3). Both remain farmable
-	until they are routed through this gate.
+	Every progression a kill grants passes this rule: Meridian XP, Bloodline stage progress and Bounty
+	payouts (the last two moved onto the spine 2026-10-06, closing the audit's O-1/O-3).
 
-	THE ROUTES. ROUTES maps each component kind to its owner's API. One entry today, because one owner
-	exists with a tested award API: MeridianSystem.AwardKillXP, which computes the amount, writes it
-	through PlayerDataSystem, replicates it, and publishes MeridianXPAwarded -- which is what TierSystem
-	promotes from. That makes the chain after this module one-directional and event-driven: no routed
-	System ever calls back in here, and nothing here computes an XP amount or a tier.
+	THE ROUTES. ROUTES maps each component kind to its owner's API: MeridianSystem.AwardKillXP (which
+	writes, replicates and publishes MeridianXPAwarded, what TierSystem promotes from),
+	BloodlineSystem.CountKill and BountySystem.PayClaim. Each owner scales its own amount by the weight.
+	The chain after this module is one-directional: no routed System ever calls back in here, and nothing
+	here computes an XP amount, a stage or a tier.
 
 	NO MILESTONE CHECK. software-architecture.md has this module trigger AchievementSystem after a
 	pipeline run lands. AchievementSystem is an empty roadmap entry with no milestone definitions, so a
 	call into it would be a fake check -- it is left out until there is something real to evaluate.
 
-	Boot: needs MeridianSystem (its one route) and nothing else; boots before RewardSystem, its one
-	caller, which asserts at Init that every kind it composes is routable here (CanRoute).
+	Boot: needs its three route owners' modules (not their Init -- each route is a plain call); boots
+	before RewardSystem, its one caller, which asserts at Init that every kind it composes is routable
+	here (CanRoute).
 
 	Does not own: what an event is eligible for (RewardSystem), any magnitude or balance (MeridianSystem),
 	tier math (TierSystem), persistence (PlayerDataSystem), or kill attribution (PlayerDeathSystem).
@@ -65,6 +65,8 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local ProgressionConstants = require(ReplicatedStorage.Shared.Progression.ProgressionConstants)
 local ProgressionTypes = require(ReplicatedStorage.Shared.Progression.ProgressionTypes)
 local Types = require(ReplicatedStorage.Shared.Types)
+local BloodlineSystem = require(script.Parent.BloodlineSystem)
+local BountySystem = require(script.Parent.BountySystem)
 local MeridianSystem = require(script.Parent.MeridianSystem)
 
 type RewardManifest = ProgressionTypes.RewardManifest
@@ -88,6 +90,12 @@ local LEGITIMATE_SOURCES: { [ProgressionTypes.RewardSource]: boolean } = table.f
 local ROUTES: { [RewardComponentKind]: (event: ProgressionEvent, weight: number) -> boolean } = table.freeze({
 	MeridianXP = function(event: ProgressionEvent, weight: number): boolean
 		return MeridianSystem.AwardKillXP(event.Recipient, event.Victim, weight)
+	end,
+	BloodlineStage = function(event: ProgressionEvent, weight: number): boolean
+		return BloodlineSystem.CountKill(event.Recipient, weight)
+	end,
+	BountyClaim = function(event: ProgressionEvent, weight: number): boolean
+		return BountySystem.PayClaim(event.Victim, event.Recipient, event.EventId, weight)
 	end,
 })
 
@@ -226,8 +234,10 @@ function ProgressionSystem.Init(): ()
 	if started then
 		return
 	end
-	-- Its one route's owner must be up. A comment in Main.server.lua cannot fail a boot.
+	-- Every route's owner must be up. A comment in Main.server.lua cannot fail a boot.
 	assert(MeridianSystem.AwardKillXP ~= nil, "ProgressionSystem.Init() requires MeridianSystem to be available")
+	assert(BloodlineSystem.CountKill ~= nil, "ProgressionSystem.Init() requires BloodlineSystem to be available")
+	assert(BountySystem.PayClaim ~= nil, "ProgressionSystem.Init() requires BountySystem to be available")
 	started = true
 
 	logger:info("ProgressionSystem.Init() complete")

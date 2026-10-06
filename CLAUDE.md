@@ -145,9 +145,12 @@ about deaths). Progression from a kill flows `RewardSystem` (eligibility, frozen
 `ProgressionSystem` (fight-to-grow gate, routes) → the owner's public API (`MeridianSystem.AwardKillXP`
 today) → `MeridianXPAwarded` → `TierSystem`. Don't add a new direct `PlayerKilled` subscription that
 grants progression — add a reward kind + route instead. The repeat-victim anti-farming weight lives in
-that same gate (`ProgressionConstants.RepeatVictim`), so anything that bypasses it is farmable. Bloodline stage-ups and Bounty payouts are the
-two known exceptions still to migrate; see
-[`docs/architecture/2026-09-28-progression-spine-audit.md`](docs/architecture/2026-09-28-progression-spine-audit.md).
+that same gate (`ProgressionConstants.RepeatVictim`), so anything that bypasses it is farmable. Every kill reward
+rides one manifest: `MeridianXP`, `BloodlineStage` (`BloodlineSystem.CountKill`) and `BountyClaim`
+(`BountySystem.PayClaim`); there are no exceptions left (2026-10-06, see
+[`docs/architecture/2026-09-28-progression-spine-audit.md`](docs/architecture/2026-09-28-progression-spine-audit.md) §7).
+Two `PlayerKilled` subscribers never rely on hearing a death in a given order; BountySystem's claim is keyed by `deathId`
+for exactly that reason.
 
 ## Before claiming something is "wired" or "done"
 

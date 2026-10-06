@@ -22,8 +22,8 @@
 
 	  * OBTAINED by the roll at character creation (BloodlineSystem.Spin). Blood is luck. You do not
 	    earn what already runs in you, and nothing in the canon says you should.
-	  * ADVANCED by combat, one stage at a time (BloodlineSystem's own OnPlayerKilled dispatch
-	    against AwakeningCondition.Params.RequiredKills). This is the half progression-systems.md
+	  * ADVANCED by combat, one stage at a time (BloodlineSystem.CountKill, routed by the progression
+	    spine, against AwakeningCondition.Params.RequiredKills). This is the half progression-systems.md
 	    pins down: "a real in-combat achievement, not a purchase or timer -- reinforcing
 	    fight-to-grow." Every RequiredKills below is therefore a PER-STAGE-STEP cost, not a one-time
 	    unlock price.

@@ -123,24 +123,28 @@ Humanoid.Died          ──► PlayerDeathSystem.ConfirmDeath (exactly once pe
           GameplayEvents.PlayerKilled(victim, killer?, deathId)
              ├─► RespawnSystem        every death respawns
              ├─► RewardSystem         attributed kills only → frozen RewardManifest
-             │      └─► ProgressionSystem.Apply   legitimacy gate → route
-             │             └─► MeridianSystem.AwardKillXP → PlayerDataSystem.Transform
-             │                    └─► GameplayEvents.MeridianXPAwarded ─► TierSystem ─► TierChanged ─► Qi/Race
-             ├─► RivalrySystem, BountySystem   their own standings/streaks
-             ├─► BloodlineSystem      interim stage-advancement (to be routed through the spine)
+             │      └─► ProgressionSystem.Apply   legitimacy gate → route (weight 0..1)
+             │             ├─► MeridianSystem.AwardKillXP → PlayerDataSystem.Transform
+             │             │      └─► GameplayEvents.MeridianXPAwarded ─► TierSystem ─► TierChanged ─► Qi/Race
+             │             ├─► BloodlineSystem.CountKill   weighted kill toward the next stage
+             │             └─► BountySystem.PayClaim       the victim's mark, if any
+             ├─► RivalrySystem, BountySystem   their own standings/streaks/marks (no progression)
              └─► Blimp/Boat/Emote     cleanup for the dead
 ```
 
 - `killer` is nil for every unattributed death; a non-nil killer is always a different, still-present
   player. `deathId` is monotonic per server and is RewardSystem's replay guard.
 - **RewardSystem composes, ProgressionSystem judges and routes, owners compute.** RewardSystem holds the
-  taxonomy (`PvPKill → { MeridianXP }`); ProgressionSystem holds `LEGITIMATE_SOURCES` and the route
-  table; the amount lives in `MeridianSystem` (`Constants.Meridian.BaseXPPerKill`). Neither coordinator
+  taxonomy (`PvPKill → { MeridianXP, BloodlineStage, BountyClaim }`); ProgressionSystem holds `LEGITIMATE_SOURCES` and the route
+  table; amounts live in the owners (`Constants.Meridian.BaseXPPerKill`, a bloodline's `RequiredKills`, the
+  bounty's reward). Neither coordinator
   computes a number or owns a remote — a client-requestable grant is what the first pillar forbids.
 - A new progression source is a new `RewardSource` **and** a deliberate `LEGITIMATE_SOURCES` entry; a
   new reward kind is a taxonomy entry **and** a route to its owner's public API. Direct subscriptions
-  to `PlayerKilled` that grant progression outside this path are debt (Bloodline stage-ups and Bounty
-  payouts today — see the dated audit).
+  to `PlayerKilled` that grant progression outside this path are a bug. The last two (Bloodline stage-ups,
+  Bounty payouts) were moved onto the spine on 2026-10-06. BountySystem still subscribes for streaks and
+  marks, and resolves a claim keyed by `deathId` so the spine's payout works whichever subscriber hears
+  the death first.
 - **Anti-farming lives in the gate.** ProgressionSystem weighs each kill by how many times this killer
   has already killed this victim in an open run (`ProgressionConstants.RepeatVictim`, keyed by UserId so
   a rejoin does not reset it) and passes the 0..1 weight to each owner, which scales its own amount. A

@@ -9,8 +9,22 @@
 
 	Does not own: rivalry standing between specific players (RivalrySystem), the Meridian XP grant
 	itself (MeridianSystem.AwardMeridianXP is called here; this System never touches a profile or a
-	DataStore directly), the tier a reward scales against (TierSystem.GetTier), or any tuning number
-	(Shared/BountyConstants.lua owns every one -- see its own dynamic-tuning contract).
+	DataStore directly), whether a kill may pay at all (ProgressionSystem's gate), the tier a reward
+	scales against (TierSystem.GetTier), or any tuning number (Shared/BountyConstants.lua owns every
+	one -- see its own dynamic-tuning contract).
+
+	TWO HALVES, ON TWO PATHS (2026-10-06). The mark is a social fact: streaks, placement, the board and
+	clearing a mark on death stay on this System's own PlayerKilled subscription (RegisterKill), because
+	an unattributed death must end a run too. The PAYOUT is progression, so it rides the fight-to-grow
+	spine as the "BountyClaim" component of the kill's reward manifest: ProgressionSystem gates it and
+	routes it to PayClaim with the repeat-victim weight, the same gate Meridian XP passes. Two friends
+	who trade a bounty back and forth are paid less each time, then nothing.
+
+	The two halves hear the same death in no guaranteed order (two subscribers to one signal), so a
+	claim is RESOLVED by whichever arrives first and keyed by the death's id (owedByDeath): RegisterKill
+	resolving first leaves the reward owed, PayClaim resolving first claims and pays in one step, and
+	either way the other half finds nothing left to do. An owed claim the spine never comes for (the
+	kill was weighted to zero) lapses after BountyConstants.OwedClaimSeconds.
 
 	SERVER-PLACED ONLY -- there is no placement remote, and adding one would be a design change, not
 	a feature completion. BountyConstants.lua's header carries the full reasoning (it serves the
@@ -79,6 +93,10 @@ local activeBountyByTarget: { [Player]: BountyState } = {}
 local killStreaks: { [Player]: number } = {}
 local nextBountyId = 1
 local lastExpirySweepAt = 0
+
+-- A resolved claim waiting for the spine's payout, keyed by the death's id. See this file's header.
+type OwedClaim = { Claimer: Player, Reward: number, BountyId: string, TargetName: string, ResolvedAt: number }
+local owedByDeath: { [number]: OwedClaim } = {}
 
 local boardUpdatedRemote: RemoteEvent? = nil
 local markedChangedRemote: RemoteEvent? = nil
@@ -253,38 +271,85 @@ local function clearBounty(target: Player, reason: string): BountyState?
 	return state
 end
 
--- Pays `claimer` for ending `target`'s run. Returns the Meridian XP actually awarded, or nil if
--- there was no bounty to claim. The award goes through MeridianSystem.AwardMeridianXP -- the same
--- grant primitive every other XP source uses, so a bounty payout replicates, persists, and feeds
--- TierSystem's promotion check exactly like an ordinary kill's XP does, with no parallel path.
-function BountySystem.ClaimBounty(target: Player, claimer: Player): number?
+-- Ends `target`'s run in `claimer`'s favour: removes the mark and returns its reward, or nil if there was no
+-- mark to claim. PAYS NOTHING -- the payout is the spine's (PayClaim). With a `deathId`, the reward is left
+-- owed to that death so the spine's route can pay it; without one (a direct call), the claim is simply
+-- consumed.
+function BountySystem.ClaimBounty(target: Player, claimer: Player, deathId: number?): number?
 	local state = activeBountyByTarget[target]
 	if not state then
 		return nil
 	end
 	if claimer == target then
-		-- Nothing in the kill path should produce this (CombatSystem doesn't attribute a suicide to
-		-- the victim as killer), but a self-claim would be a free payout for dying, so it's refused
-		-- here rather than trusted not to happen upstream.
+		-- Nothing in the kill path should produce this (PlayerDeathSystem never credits a victim with their
+		-- own death), but a self-claim would be a free payout for dying, so it's refused here rather than
+		-- trusted not to happen upstream.
 		logger:warn("Self-claim refused", { bountyId = state.bountyId, target = target.Name })
 		return nil
 	end
 
 	local reward = state.reward
 	clearBounty(target, "claimed")
-
-	local awarded = MeridianSystem.AwardMeridianXP(claimer, reward, "BountyClaim")
+	if deathId ~= nil then
+		owedByDeath[deathId] = {
+			Claimer = claimer,
+			Reward = reward,
+			BountyId = state.bountyId,
+			TargetName = state.targetName,
+			ResolvedAt = os.clock(),
+		}
+	end
 	logger:info("Bounty claimed", {
 		bountyId = state.bountyId,
 		target = target.Name,
 		claimer = claimer.Name,
 		reward = reward,
+	})
+	return reward
+end
+
+-- THE SPINE'S ROUTE (ProgressionSystem's "BountyClaim" component): pays `claimer` for the mark `target` carried
+-- into death `deathId`, scaled by `weight` (0..1, the repeat-victim weight). Returns whether XP was awarded --
+-- false for a victim who carried no mark, which is the ordinary case. Resolves the claim itself when it hears
+-- the death before RegisterKill does (this file's header).
+function BountySystem.PayClaim(target: Player, claimer: Player, deathId: number, weight: number?): boolean
+	local owed = owedByDeath[deathId]
+	if owed == nil then
+		if BountySystem.ClaimBounty(target, claimer, deathId) == nil then
+			return false
+		end
+		broadcastBoard()
+		owed = owedByDeath[deathId]
+	end
+	owedByDeath[deathId] = nil
+	if owed == nil or owed.Claimer ~= claimer then
+		return false
+	end
+
+	local fraction = if typeof(weight) == "number" and weight == weight then math.clamp(weight, 0, 1) else 1
+	local amount = math.floor(owed.Reward * fraction + 0.5)
+	if amount <= 0 then
+		return false
+	end
+	-- An unloaded claimer profile returns false here and is logged by MeridianSystem. The mark is gone
+	-- either way: leaving it on the board because the payout failed would let the next killer claim the same
+	-- run twice.
+	local awarded = MeridianSystem.AwardMeridianXP(claimer, amount, "BountyClaim")
+	logger:info("Bounty paid", {
+		bountyId = owed.BountyId,
+		target = owed.TargetName,
+		claimer = claimer.Name,
+		reward = owed.Reward,
+		weight = fraction,
 		awarded = awarded,
 	})
-	-- Reported even if AwardMeridianXP returned false (an unloaded claimer profile). The bounty is
-	-- genuinely gone either way -- the target's run ended -- and leaving it on the board because the
-	-- payout failed would let the next killer claim the same run twice.
-	return reward
+	return awarded
+end
+
+-- Spec seam: the reward owed to death `deathId`, if RegisterKill resolved a claim the spine has not paid yet.
+function BountySystem.GetOwedReward(deathId: number): number?
+	local owed = owedByDeath[deathId]
+	return if owed then owed.Reward else nil
 end
 
 -- The whole Notoriety lifecycle for one confirmed death, in the order it has to happen. `killer` is
@@ -297,7 +362,7 @@ end
 -- which deep-copies plain-table arguments across Fire(), so a double would arrive as a different
 -- table than the one the spec holds and could never match as a table key. Real Player Instances
 -- cross a BindableEvent by reference, so that is an artifact of the double, not of production.
-function BountySystem.RegisterKill(killer: Player?, victim: Player): ()
+function BountySystem.RegisterKill(killer: Player?, victim: Player, deathId: number?): ()
 	if killer == victim then
 		-- Covers a self-kill. A nil killer can never equal a real victim, so the unattributed path
 		-- below is unaffected by this guard.
@@ -306,10 +371,10 @@ function BountySystem.RegisterKill(killer: Player?, victim: Player): ()
 
 	local boardChanged = false
 
-	-- 1. Resolve the victim's own mark first, while it still exists -- paid out if someone earned it,
-	--    simply dropped if nobody did.
+	-- 1. Resolve the victim's own mark first, while it still exists -- owed to the killer (the spine pays it,
+	--    PayClaim), simply dropped if nobody earned it.
 	if killer ~= nil then
-		if BountySystem.ClaimBounty(victim, killer) ~= nil then
+		if BountySystem.ClaimBounty(victim, killer, deathId) ~= nil then
 			boardChanged = true
 		end
 	elseif clearBounty(victim, "died unattributed") ~= nil then
@@ -357,6 +422,11 @@ function BountySystem.ClearPlayerReferences(departingPlayer: Player): ()
 		broadcastBoard()
 	end
 	killStreaks[departingPlayer] = nil
+	for deathId, owed in owedByDeath do
+		if owed.Claimer == departingPlayer then
+			owedByDeath[deathId] = nil
+		end
+	end
 	queryRateLimiter:Clear(departingPlayer)
 end
 
@@ -369,6 +439,12 @@ local function onHeartbeatTick(): ()
 		return
 	end
 	lastExpirySweepAt = now
+
+	for deathId, owed in owedByDeath do
+		if now - owed.ResolvedAt >= BountyConstants.OwedClaimSeconds then
+			owedByDeath[deathId] = nil
+		end
+	end
 
 	local expired: { Player } = {}
 	for target, state in pairs(activeBountyByTarget) do
@@ -397,6 +473,7 @@ end
 function BountySystem.ResetState(): ()
 	activeBountyByTarget = {}
 	killStreaks = {}
+	owedByDeath = {}
 	nextBountyId = 1
 	lastExpirySweepAt = os.clock()
 end
@@ -434,9 +511,10 @@ function BountySystem.Init(): ()
 
 	table.insert(
 		connections,
-		GameplayEvents.OnPlayerKilled(function(victim: Player, killer: Player?)
-			-- Both the attributed and unattributed cases live in RegisterKill -- see its header.
-			BountySystem.RegisterKill(killer, victim)
+		GameplayEvents.OnPlayerKilled(function(victim: Player, killer: Player?, deathId: number)
+			-- Both the attributed and unattributed cases live in RegisterKill -- see its header. The payout
+			-- does not: it arrives through the spine (PayClaim).
+			BountySystem.RegisterKill(killer, victim, deathId)
 		end)
 	)
 
@@ -451,4 +529,4 @@ function BountySystem.Init(): ()
 	})
 end
 
-return BountySystem :: Types.SystemModule
+return BountySystem :: Types.SystemModule & typeof(BountySystem)

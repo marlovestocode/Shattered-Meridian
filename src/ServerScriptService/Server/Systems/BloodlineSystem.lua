@@ -15,21 +15,19 @@
 	carries the id) with no stage (bloodlineStageProgress has no entry) -- see that field's own header
 	in Types.lua for the contract this upholds.
 
-	INTERIM DISPATCH NOTE: Init() below subscribes directly to GameplayEvents.PlayerKilled for stage
-	advancement on every confirmed, attributed PvP kill. RewardSystem and ProgressionSystem ARE real now
-	(2026-09-28) and Meridian XP already flows through them; this System is the next component to move
-	onto that spine (a "BloodlineStage" reward kind routed to a public advance API here), and its direct
-	subscription must be removed in that same change, not left as a second, competing trigger path.
-	Deferred rather than done because it changes WHEN a stage-up is judged legitimate, which is a
-	product decision -- docs/architecture/2026-09-28-progression-spine-audit.md.
+	ON THE FIGHT-TO-GROW SPINE (2026-10-06). Stage progress arrives as the "BloodlineStage" component of a
+	PvP kill's reward manifest: RewardSystem composes it, ProgressionSystem gates it (legitimate source,
+	no self-reward, the repeat-victim weight) and routes it to BloodlineSystem.CountKill. This System no
+	longer subscribes to PlayerKilled at all, so a stage-up obeys exactly the gate Meridian XP does, and
+	a farmed kill that earns no XP earns no stage progress either. The weight counts as a fraction of a
+	kill: a second kill of the same victim inside the repeat window is half a kill toward the next stage.
 
 	STAGE ADVANCEMENT REUSES THE SAME TRIGGER AS AWAKENING, deliberately, rather than inventing a
 	second progression currency: each bloodline's AwakeningCondition (Kind + Params) is the single
 	on-kill gate for BOTH the first awakening AND every subsequent stage-up -- "N additional qualifying
 	kills since reaching this stage." The "since reaching this stage" count is kept as in-memory,
-	SESSION-ONLY per-player-per-bloodline state (killsTowardNextStage below), never persisted -- the
-	same "this whole mechanism is interim scaffolding, not permanent progression" reasoning that makes
-	a rejoin restarting the count from zero an acceptable trade-off, not a bug. v1 ships exactly one
+	SESSION-ONLY per-player-per-bloodline state (killsTowardNextStage below), never persisted -- a
+	rejoin restarting the count from zero is an accepted trade-off, not a bug. v1 ships exactly one
 	Kind, "OnPlayerKilled", reading Params.RequiredKills (a positive number) and optionally
 	Params.RequiresAscended (a truthy number gating the condition on profile.hasAscended, per
 	BloodlineTypes.BloodlineAwakeningCondition's own header on a harder Human-Ascension threshold).
@@ -77,8 +75,8 @@ local BloodlineSystem = {}
 -- reachable per bloodline at a time (whichever the player's CURRENT stage grants).
 local cooldowns: { [Player]: { [string]: number } } = {}
 
--- Per-player, per-bloodline count of qualifying kills toward the NEXT awaken/advance threshold -- see
--- this file's own header on why this is interim, session-only state rather than a persisted field.
+-- Per-player, per-bloodline count of qualifying kills toward the NEXT stage -- weighted, so it can be
+-- fractional (see this file's header on the spine). Session-only rather than a persisted field.
 local killsTowardNextStage: { [Player]: { [string]: number } } = {}
 
 -- Every public remote in this codebase has one -- see CLAUDE.md's own module table. The spin is
@@ -547,14 +545,20 @@ local function meetsAscensionGate(
 	return true
 end
 
-local function onPlayerKilled(_victim: Player, killer: Player?): ()
-	if killer == nil then
-		return
+-- THE SPINE'S ROUTE (ProgressionSystem's "BloodlineStage" component): one counted kill by `killer`, worth
+-- `weight` (0..1, the repeat-victim weight) of a kill toward each held bloodline's next stage. Returns
+-- whether it counted toward anything -- false for a player with no bloodline that can still climb, which is
+-- a normal answer. Never call this from a PlayerKilled subscription: the gate is the point.
+function BloodlineSystem.CountKill(killer: Player, weight: number?): boolean
+	local fraction = if typeof(weight) == "number" and weight == weight then math.clamp(weight, 0, 1) else 1
+	if fraction <= 0 then
+		return false
 	end
 	local profile = PlayerDataSystem.GetProfile(killer)
 	if not profile then
-		return
+		return false
 	end
+	local counted = false
 
 	-- ADVANCEMENT ONLY -- this loop never awakens anything any more, and that is the whole shape of
 	-- the feature. A bloodline is OBTAINED by the roll at character creation (BloodlineSystem.Spin);
@@ -590,9 +594,11 @@ local function onPlayerKilled(_victim: Player, killer: Player?): ()
 			playerKills = {}
 			killsTowardNextStage[killer] = playerKills
 		end
-		local kills = (playerKills[bloodlineId] or 0) + 1
+		local kills = (playerKills[bloodlineId] or 0) + fraction
+		counted = true
 
-		if kills < requiredKills then
+		-- The epsilon keeps four quarter-kills a whole kill despite float sums.
+		if kills + 1e-9 < requiredKills then
 			playerKills[bloodlineId] = kills
 			continue
 		end
@@ -600,6 +606,13 @@ local function onPlayerKilled(_victim: Player, killer: Player?): ()
 		playerKills[bloodlineId] = 0
 		BloodlineSystem.AdvanceStage(killer, bloodlineId)
 	end
+	return counted
+end
+
+-- Spec seam: the weighted kills `player` has toward `bloodlineId`'s next stage.
+function BloodlineSystem.GetKillsTowardNextStage(player: Player, bloodlineId: string): number
+	local playerKills = killsTowardNextStage[player]
+	return if playerKills then playerKills[bloodlineId] or 0 else 0
 end
 
 local function onProfileLoaded(player: Player): ()
@@ -644,7 +657,6 @@ function BloodlineSystem.Init(): ()
 	killsTowardNextStage = {}
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(onProfileLoaded)
-	GameplayEvents.OnPlayerKilled(onPlayerKilled)
 	PlayerLifecycle.BindAllPlayers({ Scope = "BloodlineSystem", OnPlayerRemoving = onPlayerRemoving })
 
 	-- Defensive pass for a profile that loaded before this Init() ran -- same reasoning QiSystem.
@@ -669,4 +681,4 @@ function BloodlineSystem.Init(): ()
 	logger:info("BloodlineSystem.Init() complete")
 end
 
-return BloodlineSystem :: Types.SystemModule
+return BloodlineSystem :: Types.SystemModule & typeof(BloodlineSystem)
