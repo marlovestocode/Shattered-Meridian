@@ -15,6 +15,18 @@
 	otherwise send a Preview per keystroke and re-sort the browser under the cursor; a number dragged is
 	already throttled by NumericField itself.
 
+	SECTIONS AND LAZINESS (2026-10-01). A tab is a run of Fields.Section groups: a foldable bronze heading
+	with a one-line SUMMARY of what is inside (so a folded group still answers "what is this set to"), whose
+	body is BUILT the first time it is both visible and open -- not at mount. Fields.Lazy is the same idea
+	for a whole page: init.lua mounts each tab inside one, so a tab nobody visits never builds its fields,
+	and a realm's six effect slots cost nothing until the realm has six effects. Built once, a body is
+	kept (toggling Visible), so a scroll position or a half-typed field survives a fold or a tab switch.
+
+	CHIPS, NOT DROPDOWNS, for a short closed set an author picks by sight (the fifteen hitbox shapes, a
+	realm's three, a spread pattern): every option is on screen, one press picks it, and nothing expands
+	600px over the fields below. Dropdowns stay for the long lists (fifteen rule kinds). Segmented is the
+	same chip, filling a row, for the one choice that reshapes the whole editor (the move type bar).
+
 	Does not own: which fields exist or what they are called (the tab modules), the bounds (Constants
 	.MoveEditor.Limits and the runtime tables it defers to), or the primitives' own look.
 ]]
@@ -27,6 +39,7 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 
 local Tokens = require(script.Parent.Parent.Parent.Parent.Tokens)
 local ArmedButton = require(script.Parent.Parent.Parent.Parent.Components.ArmedButton)
+local Button = require(script.Parent.Parent.Parent.Parent.Components.Button)
 local DropdownModule = require(script.Parent.Parent.Parent.Parent.Components.Dropdown)
 local Label = require(script.Parent.Parent.Parent.Parent.Components.Label)
 local NumericFieldModule = require(script.Parent.Parent.Parent.Parent.Components.NumericField)
@@ -35,6 +48,7 @@ local SectionHeading = require(script.Parent.Parent.Parent.Parent.Components.Sec
 local Selection = require(script.Parent.Parent.Parent.Parent.Components.Selection)
 local Stack = require(script.Parent.Parent.Parent.Parent.Components.Stack)
 local StatRow = require(script.Parent.Parent.Parent.Parent.Components.StatRow)
+local Tab = require(script.Parent.Parent.Parent.Parent.Components.Tab)
 local TextField = require(script.Parent.Parent.Parent.Parent.Components.TextField)
 local Toggle = require(script.Parent.Parent.Parent.Parent.Components.Toggle)
 
@@ -73,11 +87,14 @@ export type NumberSpec = {
 	Steps: { number },
 	Decimals: number?,
 	Unit: string?,
-	Hint: string?,
+	-- May be a state object: one field can mean two things (a swing's Windup, a realm's) -- NumericField.Hint.
+	Hint: UsedAs<string>?,
 	Visible: UsedAs<boolean>?,
 	LayoutOrder: number,
 }
 
+-- Every Move Editor number is a COMPACT NumericField (2026-10-01): two lines instead of four, a full-row
+-- slider, and a value snapped to the field's own Decimals -- see that component's header.
 function Fields.Number(scope: Scope, context: FormContext, spec: NumberSpec): Frame
 	return NumericFieldModule.Mount(scope, {
 		Label = spec.Label,
@@ -91,6 +108,7 @@ function Fields.Number(scope: Scope, context: FormContext, spec: NumberSpec): Fr
 		Decimals = spec.Decimals,
 		Unit = spec.Unit,
 		Hint = spec.Hint,
+		Compact = true,
 		Visible = spec.Visible,
 		LayoutOrder = spec.LayoutOrder,
 		OnChanged = function(value: number)
@@ -422,6 +440,435 @@ function Fields.Pair(
 		LayoutOrder = layoutOrder,
 		Children = { cell(1, left), cell(2, right) },
 	})
+end
+
+-- Laziness -------------------------------------------------------------------------------------------------
+
+-- Calls `build` once, the first time `wanted` is true, and hands its result to `into`. The result is kept
+-- from then on -- a body is never rebuilt, only shown and hidden -- see this file's header.
+local function buildOnce(
+	scope: Scope,
+	wanted: Fusion.Computed<boolean>,
+	build: () -> { Instance }
+): Fusion.Value<{ Instance }>
+	local content = scope:Value({} :: { Instance })
+	local built = false
+	scope:Observer(wanted):onBind(function()
+		if built or not peek(wanted) then
+			return
+		end
+		built = true
+		content:set(build())
+	end)
+	return content
+end
+
+export type LazySpec = {
+	Name: string,
+	Visible: UsedAs<boolean>,
+	-- Defaults to filling the parent (a page holder).
+	Size: UDim2?,
+	LayoutOrder: number?,
+	Build: () -> { Instance },
+}
+
+-- A frame whose contents are built the first time it is shown. For a whole tab page (init.lua) or anything
+-- else expensive that most sessions never open.
+function Fields.Lazy(scope: Scope, spec: LazySpec): Frame
+	local wanted = scope:Computed(function(use): boolean
+		return use(spec.Visible)
+	end)
+	return scope:New "Frame" {
+		Name = spec.Name,
+		Size = spec.Size or UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Visible = wanted,
+		LayoutOrder = spec.LayoutOrder,
+		[Fusion.Children] = buildOnce(scope, wanted, spec.Build),
+	} :: Frame
+end
+
+-- A section heading's right-hand side: the fold state's fixed slot, and the share of the row the summary may
+-- take (the bronze title keeps the rest).
+local SECTION_STATE_WIDTH = 44
+local SECTION_SUMMARY_SHARE = 0.68
+
+export type SectionSpec = {
+	Title: string,
+	-- What the group is set to, at a glance, opposite the title ("Box  ·  4 x 5 x 5"). Shown folded or not.
+	Summary: UsedAs<string>?,
+	LayoutOrder: number,
+	Visible: UsedAs<boolean>?,
+	-- Starts folded: for a page of many optional groups, where an author opens the one they came for.
+	StartClosed: boolean?,
+	-- The fields. Called once, the first time the section is visible and open.
+	Build: () -> { Instance },
+}
+
+-- A foldable, lazily built group of fields -- see this file's header. The fields inside keep their own
+-- LayoutOrder (they are laid out in the section's body, not the page) and their own Visible conditions.
+function Fields.Section(scope: Scope, spec: SectionSpec): Frame
+	local open = scope:Value(spec.StartClosed ~= true)
+	local engagement = Selection.New(scope)
+	local visible: UsedAs<boolean> = if spec.Visible == nil then true else spec.Visible
+	local wanted = scope:Computed(function(use): boolean
+		return use(visible) == true and use(open) == true
+	end)
+	local summary = spec.Summary
+
+	local headingParts: { Instance } = {
+		SectionHeading(scope, {
+			Text = spec.Title,
+			Size = UDim2.fromScale(1, 1),
+		}),
+		-- The summary and the fold state are two labels, not one Note: a long summary truncates on its
+		-- own and never pushes "Show" out of sight.
+		Label(scope, {
+			Text = if summary == nil then "" else summary,
+			Scale = "NumeralSmall",
+			Color = Tokens.Color.TextSecondary,
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -SECTION_STATE_WIDTH, 0.5, 0),
+			Size = UDim2.new(SECTION_SUMMARY_SHARE, -SECTION_STATE_WIDTH, 1, 0),
+			TextXAlignment = Enum.TextXAlignment.Right,
+		}),
+		Label(scope, {
+			Text = scope:Computed(function(use)
+				return if use(open) then "Hide" else "Show"
+			end),
+			Scale = "NumeralSmall",
+			Color = scope:Computed(function(use)
+				return if use(engagement.Active) then Tokens.Color.TextPrimary else Tokens.Color.AccentSecondary
+			end),
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.fromScale(1, 0.5),
+			Size = UDim2.new(0, SECTION_STATE_WIDTH - Tokens.Space.S, 1, 0),
+			TextXAlignment = Enum.TextXAlignment.Right,
+		}),
+	}
+	local heading = scope:New "TextButton" {
+		Name = "Heading",
+		Size = UDim2.new(1, 0, 0, FOLD_HEIGHT),
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		Text = "",
+		LayoutOrder = 1,
+
+		[Fusion.OnEvent "SelectionGained"] = engagement.OnSelectionGained,
+		[Fusion.OnEvent "SelectionLost"] = engagement.OnSelectionLost,
+		[Fusion.OnEvent "MouseEnter"] = engagement.OnPointerEnter,
+		[Fusion.OnEvent "MouseLeave"] = engagement.OnPointerLeave,
+		[Fusion.OnEvent "Activated"] = function()
+			open:set(not peek(open))
+		end,
+
+		[Fusion.Children] = headingParts,
+	} :: TextButton
+
+	local parts: { Instance } = {
+		heading,
+		Stack.New(scope, {
+			Name = "Body",
+			Size = UDim2.fromScale(1, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			Gap = Tokens.Space.M,
+			Visible = open,
+			LayoutOrder = 2,
+			Children = buildOnce(scope, wanted, spec.Build),
+		}),
+	}
+	return Stack.New(scope, {
+		Name = `Section_{spec.Title}`,
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Gap = Tokens.Space.S,
+		Visible = visible,
+		LayoutOrder = spec.LayoutOrder,
+		Children = parts,
+	})
+end
+
+-- Chips ---------------------------------------------------------------------------------------------------
+
+export type Option = { Value: string, Text: string }
+
+local CHIP_HEIGHT = 28
+local CHIP_MIN_WIDTH = 52
+-- An estimate of the chip font's average advance. A chip is sized from its text once, at mount (the text is
+-- static); a few pixels of slack either way is the whole cost of not measuring.
+local CHIP_CHAR_WIDTH = 7.4
+local CHIP_PADDING = 22
+
+local function chipWidth(text: string): number
+	return math.max(CHIP_MIN_WIDTH, math.ceil(utf8.len(text) or #text) * CHIP_CHAR_WIDTH + CHIP_PADDING)
+end
+
+-- A labelled, wrapping run of chips. `selected` says which value is lit (nil lights none); `onPick` is told
+-- the value pressed.
+local function chipRow(
+	scope: Scope,
+	label: string?,
+	options: { Option },
+	selected: Fusion.Computed<string>?,
+	onPick: (string) -> (),
+	hint: UsedAs<string>?,
+	visible: UsedAs<boolean>?,
+	layoutOrder: number
+): Frame
+	local chips: { Instance } = {}
+	for index, option in options do
+		table.insert(
+			chips,
+			Tab(scope, {
+				Text = option.Text,
+				Size = UDim2.fromOffset(chipWidth(option.Text), CHIP_HEIGHT),
+				LayoutOrder = index,
+				Selected = if selected
+					then scope:Computed(function(use)
+						return use(selected) == option.Value
+					end)
+					else false,
+				OnActivated = function()
+					onPick(option.Value)
+				end,
+			})
+		)
+	end
+
+	local children: { Instance } = {}
+	if label then
+		table.insert(
+			children,
+			Label(scope, {
+				Text = label,
+				Scale = "Body",
+				Color = Tokens.Color.TextSecondary,
+				Size = UDim2.new(1, 0, 0, Tokens.Type.Body.Size + Tokens.Space.XS),
+				LayoutOrder = 1,
+			})
+		)
+	end
+	table.insert(
+		children,
+		Stack.Row(scope, {
+			Name = "Chips",
+			Size = UDim2.fromScale(1, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			Gap = Tokens.Space.XS,
+			Wraps = true,
+			LayoutOrder = 2,
+			Children = chips,
+		})
+	)
+	if hint then
+		table.insert(
+			children,
+			Label(scope, {
+				Text = hint,
+				Scale = "Detail",
+				Color = Tokens.Color.TextSecondary,
+				Size = UDim2.fromScale(1, 0),
+				AutoHeight = true,
+				TextWrapped = true,
+				LineHeight = Tokens.Leading.Prose,
+				LayoutOrder = 3,
+			})
+		)
+	end
+
+	return Stack.New(scope, {
+		Name = `Chips_{label or "Row"}`,
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Gap = Tokens.Space.XS,
+		Visible = visible,
+		LayoutOrder = layoutOrder,
+		Children = children,
+	})
+end
+
+export type ChipsSpec = {
+	Label: string?,
+	Options: { Option },
+	Get: (Move) -> string,
+	Set: (Move, string) -> (),
+	Hint: UsedAs<string>?,
+	Visible: UsedAs<boolean>?,
+	LayoutOrder: number,
+}
+
+-- One choice from a short closed set, every option on screen -- see this file's header.
+function Fields.Chips(scope: Scope, context: FormContext, spec: ChipsSpec): Frame
+	local current = scope:Computed(function(use): string
+		local move = use(context.Draft)
+		return if move then spec.Get(move) else ""
+	end)
+	return chipRow(scope, spec.Label, spec.Options, current, function(value: string)
+		if peek(current) == value then
+			return
+		end
+		context.Edit(function(move)
+			spec.Set(move, value)
+		end)
+	end, spec.Hint, spec.Visible, spec.LayoutOrder)
+end
+
+export type ActionChipsSpec = {
+	Label: string?,
+	Options: { Option },
+	-- Applies the option pressed to the clone the edit hands it.
+	Apply: (Move, string) -> (),
+	Hint: UsedAs<string>?,
+	Visible: UsedAs<boolean>?,
+	LayoutOrder: number,
+}
+
+-- A run of chips that each DO something rather than select something -- the "Start from" presets. Nothing
+-- stays lit: a preset is a starting point an author then edits away from.
+function Fields.ActionChips(scope: Scope, context: FormContext, spec: ActionChipsSpec): Frame
+	return chipRow(scope, spec.Label, spec.Options, nil, function(value: string)
+		context.Edit(function(move)
+			spec.Apply(move, value)
+		end)
+	end, spec.Hint, spec.Visible, spec.LayoutOrder)
+end
+
+export type SegmentedSpec = {
+	Options: { Option },
+	Value: UsedAs<string>,
+	OnChanged: (string) -> (),
+	LayoutOrder: number,
+	Visible: UsedAs<boolean>?,
+}
+
+-- One choice that fills a row, its options sharing the width -- the move type bar (init.lua). Option text is
+-- static (it is set in tracked caps, which reads it once).
+function Fields.Segmented(scope: Scope, spec: SegmentedSpec): Frame
+	local segments: { Instance } = {}
+	for index, option in spec.Options do
+		table.insert(
+			segments,
+			Stack.Fill(
+				scope,
+				Tab(scope, {
+					Text = option.Text,
+					TrackedCaps = true,
+					Size = UDim2.fromScale(0, 1),
+					LayoutOrder = index,
+					Selected = scope:Computed(function(use)
+						return use(spec.Value) == option.Value
+					end),
+					OnActivated = function()
+						spec.OnChanged(option.Value)
+					end,
+				})
+			)
+		)
+	end
+	return Stack.Row(scope, {
+		Name = "Segmented",
+		Size = UDim2.new(1, 0, 0, Tokens.Control.StepButtonSize),
+		Gap = Tokens.Space.XS,
+		Visible = spec.Visible,
+		LayoutOrder = spec.LayoutOrder,
+		Children = segments,
+	})
+end
+
+export type ButtonRowSpec = {
+	Label: string,
+	Buttons: { { Text: string, OnActivated: () -> () } },
+	Hint: string?,
+	Visible: UsedAs<boolean>?,
+	LayoutOrder: number,
+}
+
+local ROW_BUTTON_WIDTH = 58
+
+-- A caption and a run of small action buttons on one line ("Scale  x0.5 x0.8 x1.25 x2").
+function Fields.ButtonRow(scope: Scope, spec: ButtonRowSpec): Frame
+	local cells: { Instance } = {
+		Stack.Fill(
+			scope,
+			Label(scope, {
+				Text = spec.Label,
+				Scale = "Body",
+				Color = Tokens.Color.TextSecondary,
+				Size = UDim2.fromScale(0, 1),
+				LayoutOrder = 0,
+			})
+		),
+	}
+	for index, entry in spec.Buttons do
+		table.insert(
+			cells,
+			Button(scope, {
+				Text = entry.Text,
+				Size = UDim2.fromOffset(ROW_BUTTON_WIDTH, CHIP_HEIGHT),
+				LayoutOrder = index,
+				OnActivated = entry.OnActivated,
+			})
+		)
+	end
+	local row = Stack.Row(scope, {
+		Name = "Buttons",
+		Size = UDim2.new(1, 0, 0, CHIP_HEIGHT),
+		Gap = Tokens.Space.XS,
+		AlignY = Enum.VerticalAlignment.Center,
+		LayoutOrder = 1,
+		Children = cells,
+	})
+	local children: { Instance } = { row }
+	if spec.Hint then
+		table.insert(
+			children,
+			Label(scope, {
+				Text = spec.Hint,
+				Scale = "Detail",
+				Color = Tokens.Color.TextSecondary,
+				Size = UDim2.fromScale(1, 0),
+				AutoHeight = true,
+				TextWrapped = true,
+				LineHeight = Tokens.Leading.Prose,
+				LayoutOrder = 2,
+			})
+		)
+	end
+	return Stack.New(scope, {
+		Name = `ButtonRow_{spec.Label}`,
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Gap = Tokens.Space.XS,
+		Visible = spec.Visible,
+		LayoutOrder = spec.LayoutOrder,
+		Children = children,
+	})
+end
+
+-- A plain vertical group, for fields that must move or hide together inside a page or a section (a
+-- dropdown and the hint under it; a list of slots). No heading: Fields.Section is the group with one.
+function Fields.Pile(scope: Scope, layoutOrder: number, visible: UsedAs<boolean>?, children: { Instance }): Frame
+	return Stack.New(scope, {
+		Name = "Pile",
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Gap = Tokens.Space.M,
+		Visible = visible,
+		LayoutOrder = layoutOrder,
+		Children = children,
+	})
+end
+
+-- Option lists from a value list and optional display text per value. The values are any closed set of
+-- strings (a list typed as a union of literals is not a `{ string }` to the checker, hence `any`).
+function Fields.OptionsOf(values: { any }, text: { [string]: string }?): { Option }
+	local result: { Option } = {}
+	for _, raw in values do
+		local value: string = raw
+		table.insert(result, { Value = value, Text = if text and text[value] then text[value] else value })
+	end
+	return result
 end
 
 return Fields

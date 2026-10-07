@@ -181,8 +181,10 @@ local function startEditor(
 	local function report(action: string, reason: string?): ()
 		local failure = Copy.Failure(reason)
 		handle.StatusText:set(`{action}: {failure.Message}`)
-		if failure.Tab then
-			handle.CurrentTab:set(failure.Tab)
+		-- A realm's damage lives on Effects, not Impact (it has no Impact tab): Copy says which.
+		local tab = Copy.FailureTab(failure, peek(handle.IsDomain))
+		if tab then
+			handle.CurrentTab:set(tab)
 		end
 	end
 

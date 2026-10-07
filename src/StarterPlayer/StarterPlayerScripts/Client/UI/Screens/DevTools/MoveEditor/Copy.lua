@@ -24,6 +24,9 @@ export type Failure = {
 	Message: string,
 	-- The form tab that holds the offending field, when there is one; the driver jumps there.
 	Tab: string?,
+	-- Where the same field lives when the open move is a domain expansion, if that is a different tab (a
+	-- realm has no Impact tab: its own strike's price is on Effects). The driver prefers it for a realm.
+	DomainTab: string?,
 }
 
 local FAILURES: { [string]: Failure } = {
@@ -38,10 +41,10 @@ local FAILURES: { [string]: Failure } = {
 	InvalidOffset = { Message = "The hitbox offset is not a number.", Tab = "Hitbox" },
 	InvalidAttachmentPart = { Message = "That anchor does not exist.", Tab = "Hitbox" },
 	InvalidTiming = { Message = "A timing field is not a number.", Tab = "Timing" },
-	InvalidDamage = { Message = "Damage or posture damage is not a number.", Tab = "Impact" },
+	InvalidDamage = { Message = "Damage or posture damage is not a number.", Tab = "Impact", DomainTab = "Effects" },
 	InvalidMaxTargets = { Message = "Max targets is not a number.", Tab = "Hitbox" },
 	InvalidAnimationId = { Message = "The animation id is not text.", Tab = "Timing" },
-	InvalidKnockback = { Message = "The knockback block is malformed.", Tab = "Impact" },
+	InvalidKnockback = { Message = "The knockback block is malformed.", Tab = "Impact", DomainTab = "Effects" },
 	InvalidGrab = { Message = "The grab block is malformed, or names a hold mode that does not exist.", Tab = "Impact" },
 	InvalidArt = { Message = "The art block is malformed.", Tab = "Identity" },
 	InvalidArtTreeId = { Message = "Pick an art tree.", Tab = "Identity" },
@@ -58,38 +61,40 @@ local FAILURES: { [string]: Failure } = {
 	ProjectileCannotGrab = {
 		Message = "A projectile move cannot grab -- turn the grab off, or make the move melee.",
 		Tab = "Impact",
+		DomainTab = "Realm",
 	},
 	InvalidDomain = {
 		Message = "The realm block is malformed, or names an option that does not exist.",
-		Tab = "Domain",
+		Tab = "Realm",
 	},
 	InvalidDomainEffect = {
 		Message = "A realm effect is malformed -- a kind, a filter or a move id in it is not what it should be.",
-		Tab = "Domain",
+		Tab = "Effects",
 	},
 	InvalidDomainRule = {
 		Message = "A realm rule is malformed -- a kind, a filter or a move id in it is not what it should be.",
-		Tab = "Domain",
+		Tab = "Law",
 	},
 	InvalidDomainClash = {
 		Message = "A clash override is malformed, or names no opposing realm.",
-		Tab = "Domain",
+		Tab = "Clash",
 	},
 	DomainEffectNeedsMove = {
 		Message = "A Volley or Owner cast effect needs a move id to deliver. (A Strike may leave it blank: that is the realm's own strike.)",
-		Tab = "Domain",
+		Tab = "Effects",
 	},
 	DomainRuleNeedsMove = {
 		Message = "A Seal move rule needs the id of the move it seals.",
-		Tab = "Domain",
+		Tab = "Law",
 	},
 	DomainSelfReference = {
 		Message = "A realm effect cannot deliver the realm's own move -- it would re-open itself.",
-		Tab = "Domain",
+		Tab = "Effects",
 	},
 	DomainCannotGrab = {
-		Message = "A move that opens a realm cannot also grab -- turn one of them off.",
+		Message = "A move that opens a realm cannot also grab -- pick Domain Expansion in the type bar again to clear the grab, or make it Melee.",
 		Tab = "Impact",
+		DomainTab = "Realm",
 	},
 	InvalidPresentation = {
 		Message = "The presentation block is malformed -- a cue or a number in it is not what it should be.",
@@ -174,6 +179,12 @@ function Copy.Failure(reason: string?): Failure
 	return known or { Message = reason or "Unknown error." }
 end
 
+-- The tab a failure points at for the open move: its DomainTab when the move is a domain expansion and it
+-- names one, else its Tab.
+function Copy.FailureTab(failure: Failure, isDomain: boolean): string?
+	return if isDomain and failure.DomainTab then failure.DomainTab else failure.Tab
+end
+
 -- Field hints. Only for fields whose meaning is not obvious from the label and unit.
 Copy.Hints = {
 	Anchor = "What the hitbox rides on. Root follows the body; a hand or the weapon follows the animation.",
@@ -205,10 +216,22 @@ Copy.Hints = {
 	Category = "A grouping tag for this list only. Nothing in combat reads it.",
 	Description = "What this move is FOR -- the intent the numbers cannot carry.",
 	-- Projectile moves (ProjectileTypes' header is the long version of each of these).
-	MoveType = "Melee hits with a volume on the body. Projectile launches shots when the active window opens -- same timing, block, parry and damage.",
+	-- Under the move type bar, per type (init.lua).
+	MoveTypes = {
+		Melee = "Hits with a volume on the body while the active window is open.",
+		Projectile = "Launches a volley when the active window opens -- same timing, block, parry and damage as a swing.",
+		Domain = "Casts a realm: the swing plays its clip and windup, then the realm unfurls. No hitbox spawns in front of you -- the realm's effects are its hits.",
+	} :: { [string]: string },
+	ShapePresets = "Sets the shape, its size and how far in front of the body it sits. Everything else is kept.",
+	BodyPresets = "Sets the shot's shape and size. Its flight, volley and parry answers are kept.",
+	ScaleVolume = "Multiplies every measurement the shape reads (not its angle), within the editor's limits.",
+	ProjectileShape = "What flies. Pointed shapes (Cone, Pyramid, Wedge, Frustum) fly point first; the rest lie along the flight.",
+	SpreadPattern = "Single: one shot. Fan: spread across an arc. Row and Column: side by side, or stacked. Ring: around the aim.",
+	SpawnDirection = "Body facing: where the thrower faces. Anchor facing: where the anchor points. At target: at the homing target below.",
+	TargetSelection = "Closest to heading picks the target nearest the line of flight; Nearest, the closest body.",
+	ParryBehavior = "Parry one: the shot parried. Parry all: the whole volley. Cannot parry: the shot is blocked instead.",
 	SpawnPoint = "Where the shots spawn: the anchor, plus the offset below. Yaw and pitch aim the volley; roll turns its spread (a rolled fan is vertical).",
 	SpreadAngle = "Fan: the arc every shot shares, end to end (360 is a full ring). Ring: how wide the cone the shots form.",
-	ProjectileSize = "The radius of the sphere that flies -- the drawn shot is exactly the volume that hits.",
 	Gravity = "Pulls shots down; negative floats them up. Zero flies straight.",
 	Homing = "Turns each shot toward a target within the range and angle below, at the strength's rate.",
 	Piercing = "Passes through the targets it hits, up to Max pierces; otherwise the first target stops it.",
@@ -239,12 +262,13 @@ Copy.Hints = {
 	PresentationGlowColor = "#RRGGBB. On a realm: its edge. On a shot: its glow.",
 }
 
--- The Domain tab (Shared/Domain/DomainTypes.lua's header is the long version of all of it).
+-- A domain expansion's five pages (DomainTab.lua; Shared/Domain/DomainTypes.lua's header is the long version).
 Copy.Domain = {
-	Intro = "A realm is a move: its swing is the activation, its clip the animation, its cooldown the realm's cooldown, and its art binding's Qi the cost. This tab is what the swing does not already say.",
-	DefaultMove = "A weapon stage cannot open a realm.",
 	QiCostNotArt = "No Qi cost yet: bind the move to an art tree (Identity tab) to give it one -- that is also what lets a player put it on the hotbar.",
 	Presentation = "What the realm looks and sounds like lives on the Presentation tab: its four Realm moments.",
+	Overrides = "Answers to one particular realm, by its move id, in place of the behaviour above.",
+	StrikePrice = "What one of this realm's own strikes costs the body it lands on: a Strike effect with no move id hits for this, times its Power. A strike naming another move pays that move's price instead.",
+	Realm = "A domain expansion is a move: its swing is the cast (Timing tab), its clip the animation, its cooldown the realm's, and its art binding's Qi the cost (Identity tab). These tabs are what the swing does not say.",
 	Hints = {
 		ActivationSeconds = "The unfurl, after the move's windup: the boundary grows, nothing is governed yet, and the owner is exposed.",
 		ActiveSeconds = "How long the law holds once established.",
@@ -270,7 +294,7 @@ Copy.Domain = {
 		ErodeRate = "Seconds of the loser's time this realm wears away per second of overlap (Erode).",
 		ContestScale = "How much of this realm's effects and rules survive a contest. 1 is all.",
 		Interacts = "Off: this realm ignores every other, and they ignore it.",
-		EffectMoveId = "The move this effect delivers -- its damage, knockback and hit cues are that move's. A Strike may leave it blank: it then hits for THIS move's own Damage, Posture damage, Power level and Knockback (Impact tab).",
+		EffectMoveId = "The move this effect delivers -- its damage, knockback and hit cues are that move's. A Strike may leave it blank: it then hits for this realm's own STRIKE PRICE (top of this tab).",
 		EffectPower = "Multiplies the price of each hit this effect lands. 1 is the move's price; 2 hits twice as hard.",
 		Parryable = "Off: a parry reads as a held guard against this strike.",
 		Origin = "Where each strike comes from: above the target, the realm's centre, the owner, or a random point on a ring.",
@@ -278,6 +302,23 @@ Copy.Domain = {
 		RuleValue = "A multiplier: 0.5 halves, 2 doubles.",
 		SealMoveId = "The move bodies under this rule may not throw.",
 		OpponentMoveId = "The other realm's move id this override answers.",
+	} :: { [string]: string },
+	-- The kind and behaviour chips (short); the long lines below are each chip's hint.
+	EffectKindChips = {
+		Strike = "Strike",
+		Volley = "Volley",
+		Hitstun = "Stun",
+		GuardDrain = "Drain posture",
+		Pull = "Pull",
+		Push = "Push",
+		OwnerCast = "Owner cast",
+	} :: { [string]: string },
+	ClashBehaviorChips = {
+		Coexist = "Coexist",
+		Suppress = "Suppress",
+		Erode = "Erode",
+		Dominate = "Dominate",
+		Shatter = "Shatter",
 	} :: { [string]: string },
 	-- Short labels per option, in the editor's dropdowns.
 	EffectKinds = {
@@ -323,11 +364,19 @@ Copy.Domain = {
 	} :: { [string]: string },
 }
 
+-- The Timing tab's phase hints, read as a domain expansion's cast (TimingTab: a realm is still a move).
+Copy.DomainTiming = {
+	Windup = "The cast's windup. The realm begins to unfurl the moment it ends -- a strike marker on the clip moves that moment.",
+	Active = "The cast's committed window. No hitbox opens: the realm is already unfurling, and its effects are the move's hits.",
+	Recovery = "After the cast. The realm keeps its own clock (Realm tab) whatever this says.",
+	Cooldown = "Before this move can be cast again. However short, a second realm of yours cannot open while the first still holds.",
+} :: { [string]: string }
+
 -- The Presentation tab (MovePresentationTypes' header is the long version of all of it).
 Copy.Presentation = {
 	Precedence = "Every field is optional. Left blank, a moment plays what it always played: the weapon's own sound where it has one, else the game's default. Only None silences or hides.",
-	Melee = "Projectile moments appear once the move is a projectile (Hitbox tab).",
-	NoRealm = "Realm moments appear once the move opens a realm (Domain tab).",
+	Melee = "Projectile moments appear once the move is a projectile (the type bar above).",
+	NoRealm = "Realm moments appear once the move is a domain expansion (the type bar above).",
 	-- Under each moment's heading: when it fires, and who sees it.
 	Moments = {
 		Windup = "As the swing starts. Only the thrower's client knows a swing started, so only they see and hear it.",

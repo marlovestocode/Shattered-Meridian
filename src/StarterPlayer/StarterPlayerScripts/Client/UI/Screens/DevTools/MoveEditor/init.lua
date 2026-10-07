@@ -11,11 +11,26 @@
 	FOR while an author works:
 
 	    Browser (rail)   every move, grouped, with its save state -- where you go to pick
-	    Form (tabs)      Hitbox / Timing / Impact / Domain / Presentation / Identity -- the inputs, one
-	                     concern per tab (Domain: the realm the move opens, if any; Presentation: what the
-	                     move sounds and looks like, per moment) -- and
-	                     Tools, for what acts on more than one move's inputs (bulk, history, source)
+	    Form (tabs)      the move TYPE bar, then the inputs, one concern per tab -- and Tools, for what
+	                     acts on more than one move's inputs (bulk, history, source)
 	    Readout (rail)   plots, the effective timeline, notes, actions -- the RESULTS of those inputs
+
+	THE MOVE TYPE IS THE FIRST QUESTION, AND IT RESHAPES THE FORM (2026-10-01). A custom move is Melee,
+	Projectile or a Domain Expansion, chosen in a segmented bar above the pages. It is not a field on a tab,
+	because it decides which tabs there ARE (ScreenFrame.NewTabState's availability):
+
+	    Melee, Projectile    Hitbox  Timing  Impact  Presentation  Identity  Tools
+	    Domain Expansion     Realm  Boundary  Effects  Law  Clash  Timing  Presentation  Identity  Tools
+
+	A domain expansion shows only what a realm reads -- no volume to place, no Impact tab (its own strike's
+	price is on Effects) -- and still everything a move has: Timing (its cast), Presentation, Identity, Tools,
+	the readout. The type IS the blocks: Projectile seeds MoveDefinition.Projectile, Domain Expansion seeds
+	.Domain, each drops the other and any grab (Validate refuses a grab on either), Melee drops both. Nothing
+	holds a separate "type" field that could fall out of step with them. Switching type is an edit like any
+	other, so undo brings back the block it dropped.
+
+	PAGES ARE BUILT ON FIRST VISIT (Fields.Lazy), and inside them each group on first open (Fields.Section):
+	a session that never opens Clash never builds it. A built page is kept, so it keeps its scroll position.
 
 	Both rails are pinned, so a result is never a tab switch away from the input that caused it (the
 	character menu's IdentityRail argument). The form takes whatever the rails leave (Stack.Fill), not a
@@ -43,9 +58,11 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local DomainTypes = require(ReplicatedStorage.Shared.Domain.DomainTypes)
 local DraftHistory = require(ReplicatedStorage.Shared.Authoring.DraftHistory)
 local MoveEditorTypes = require(ReplicatedStorage.Shared.Authoring.MoveEditorTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
 local TrainingBotConstants = require(ReplicatedStorage.Shared.TrainingBot.TrainingBotConstants)
 
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
@@ -55,6 +72,7 @@ local ScreenFrame = require(script.Parent.Parent.Parent.Components.ScreenFrame)
 local Stack = require(script.Parent.Parent.Parent.Components.Stack)
 
 local Browser = require(script.Browser)
+local Copy = require(script.Copy)
 local DomainTab = require(script.DomainTab)
 local Fields = require(script.Fields)
 local HitboxTab = require(script.HitboxTab)
@@ -81,7 +99,59 @@ local ROOT_HEIGHT = 780
 local BROWSER_WIDTH = 272
 local READOUT_WIDTH = 344
 
-local TAB_NAMES: { string } = { "Hitbox", "Timing", "Impact", "Domain", "Presentation", "Identity", "Tools" }
+-- One strip order for every type; the availability below hides what a type does not have.
+local TAB_NAMES: { string } = {
+	"Hitbox",
+	"Realm",
+	"Boundary",
+	"Effects",
+	"Law",
+	"Clash",
+	"Timing",
+	"Impact",
+	"Presentation",
+	"Identity",
+	"Tools",
+}
+
+-- The tabs only a domain expansion has, and the two it does not.
+local DOMAIN_TABS = { "Realm", "Boundary", "Effects", "Law", "Clash" }
+local VOLUME_TABS = { "Hitbox", "Impact" }
+
+local MOVE_TYPE_OPTIONS = {
+	{ Value = "Melee", Text = "Melee" },
+	{ Value = "Projectile", Text = "Projectile" },
+	{ Value = "Domain", Text = "Domain Expansion" },
+}
+
+-- Which type a move is: the blocks it carries (see this file's header). Public, with setMoveType, for the
+-- screen spec: they are the whole of what the type bar does to a move.
+local function moveTypeOf(move: MoveTypes.MoveDefinition): string
+	if move.Domain ~= nil then
+		return "Domain"
+	end
+	return if move.Projectile ~= nil then "Projectile" else "Melee"
+end
+
+-- Makes `move` the given type. Re-choosing the current type re-applies it, which is also how an old record
+-- carrying both a realm and a grab (or a projectile) is cleaned up: Copy's DomainCannotGrab says so.
+local function setMoveType(move: MoveTypes.MoveDefinition, kind: string): ()
+	if kind == "Domain" then
+		move.Domain = move.Domain or DomainTypes.Defaults()
+		move.Projectile = nil
+		move.Grab = nil
+	elseif kind == "Projectile" then
+		move.Projectile = move.Projectile or ProjectileTypes.Defaults()
+		move.Domain = nil
+		move.Grab = nil
+	else
+		move.Projectile = nil
+		move.Domain = nil
+	end
+end
+
+MoveEditor.MoveTypeOf = moveTypeOf
+MoveEditor.SetMoveType = setMoveType
 
 function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 	local isOpen = scope:Value(false)
@@ -101,7 +171,21 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 	local exportText = scope:Value(nil :: string?)
 	local selectedId = scope:Value(nil :: string?)
 	local draft = scope:Value(nil :: MoveTypes.MoveDefinition?)
-	local tabs = ScreenFrame.NewTabState(scope, TAB_NAMES)
+	local isDomain = scope:Computed(function(use)
+		local current = use(draft)
+		return current ~= nil and current.Domain ~= nil
+	end)
+	local notDomain = scope:Computed(function(use)
+		return not use(isDomain)
+	end)
+	local availability: { [string]: Fusion.UsedAs<boolean> } = {}
+	for _, name in DOMAIN_TABS do
+		availability[name] = isDomain
+	end
+	for _, name in VOLUME_TABS do
+		availability[name] = notDomain
+	end
+	local tabs = ScreenFrame.NewTabState(scope, TAB_NAMES, availability)
 
 	local selectedEntry = scope:Computed(function(use): MoveEntry?
 		local id = use(selectedId)
@@ -227,33 +311,102 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 			return use(tabs.Selected[name]) and use(hasDraft)
 		end)
 	end
+	-- A page, built the first time its tab is shown (see this file's header).
+	local function page(name: string, build: (visible: Fusion.Computed<boolean>) -> Instance): Frame
+		local visible = pageVisible(name)
+		return Fields.Lazy(scope, {
+			Name = `{name}Page`,
+			Visible = visible,
+			Build = function()
+				return { build(visible) }
+			end,
+		})
+	end
 
-	local form = Stack.New(scope, {
-		Name = "Form",
-		LayoutOrder = 2,
-		ClipsDescendants = true,
-		Children = {
-			Inset(scope, { Top = Tokens.Space.M, X = Tokens.Space.L }),
-			-- Exactly one page is visible at a time, so the Stack places it at the origin; a page is a
-			-- full-height ScrollArea.
-			HitboxTab(scope, context, pageVisible("Hitbox"), {
+	local currentType = scope:Computed(function(use): string
+		local current = use(draft)
+		return if current then moveTypeOf(current) else "Melee"
+	end)
+	local showTypeBar = scope:Computed(function(use)
+		return use(hasDraft) and not use(isDefault)
+	end)
+	-- The move type bar (see this file's header). A weapon stage is always melee and shows none.
+	local typeBarChildren: { Instance } = {
+		Fields.Segmented(scope, {
+			Options = MOVE_TYPE_OPTIONS,
+			Value = currentType,
+			LayoutOrder = 1,
+			OnChanged = function(kind: string)
+				context.Edit(function(move)
+					setMoveType(move, kind)
+				end)
+			end,
+		}),
+		Fields.Prose(
+			scope,
+			scope:Computed(function(use)
+				return Copy.Hints.MoveTypes[use(currentType)] or ""
+			end),
+			2
+		),
+	}
+	local typeBar = Stack.New(scope, {
+		Name = "TypeBar",
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Gap = Tokens.Space.XS,
+		LayoutOrder = 1,
+		Visible = showTypeBar,
+		Children = typeBarChildren,
+	})
+
+	local placeInWorld = function()
+		if peek(draft) then
+			placementMode:set(true)
+		end
+	end
+
+	-- Exactly one page is visible at a time, each at the holder's origin; a page is a full-height ScrollArea.
+	local pageList: { Instance } = {
+		page("Hitbox", function(visible)
+			return HitboxTab(scope, context, visible, {
 				ShowOnCharacter = showOnCharacter,
-				OnPlace = function()
-					if peek(draft) then
-						placementMode:set(true)
-					end
-				end,
-			}),
-			TimingTab(scope, context, pageVisible("Timing")),
-			ImpactTab(scope, context, pageVisible("Impact")),
-			DomainTab(scope, context, pageVisible("Domain")),
-			PresentationTab(scope, context, {
+				OnPlace = placeInWorld,
+			})
+		end),
+		page("Realm", function(visible)
+			return DomainTab.Realm(scope, context, visible)
+		end),
+		page("Boundary", function(visible)
+			return DomainTab.Boundary(scope, context, visible, { ShowOnCharacter = showOnCharacter })
+		end),
+		page("Effects", function(visible)
+			return DomainTab.Effects(scope, context, visible)
+		end),
+		page("Law", function(visible)
+			return DomainTab.Law(scope, context, visible)
+		end),
+		page("Clash", function(visible)
+			return DomainTab.Clash(scope, context, visible)
+		end),
+		page("Timing", function(visible)
+			return TimingTab(scope, context, visible)
+		end),
+		page("Impact", function(visible)
+			return ImpactTab(scope, context, visible)
+		end),
+		page("Presentation", function(visible)
+			return PresentationTab(scope, context, {
 				OnPreview = function(moment: string)
 					previewCueRequested:Fire(moment)
 				end,
-			}, pageVisible("Presentation")),
-			IdentityTab(scope, context, pageVisible("Identity")),
-			ToolsTab(scope, {
+			}, visible)
+		end),
+		page("Identity", function(visible)
+			return IdentityTab(scope, context, visible)
+		end),
+		page("Tools", function(visible)
+			return ToolsTab(scope, {
 				Entry = selectedEntry,
 				Entries = entries,
 				OnBulkScale = function(request: MoveEditorTypes.BulkScaleRequest)
@@ -276,17 +429,39 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 				OnExportSource = function()
 					exportSourceRequested:Fire()
 				end,
-			}, pageVisible("Tools")),
-			Label(scope, {
-				Text = "Pick a move on the left, or make a new one.",
-				Scale = "Body",
-				Color = Tokens.Color.TextDisabled,
-				Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
-				Visible = scope:Computed(function(use)
-					return not use(hasDraft)
-				end),
-			}),
-		},
+			}, visible)
+		end),
+		Label(scope, {
+			Text = "Pick a move on the left, or make a new one.",
+			Scale = "Body",
+			Color = Tokens.Color.TextDisabled,
+			Size = UDim2.new(1, 0, 0, Tokens.Control.RowHeight),
+			Visible = scope:Computed(function(use)
+				return not use(hasDraft)
+			end),
+		}),
+	}
+	local pages = scope:New "Frame" {
+		Name = "Pages",
+		Size = UDim2.fromScale(1, 0),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		LayoutOrder = 2,
+		[Fusion.Children] = pageList,
+	} :: Frame
+
+	local formChildren: { Instance } = {
+		Inset(scope, { Top = Tokens.Space.M, X = Tokens.Space.L }),
+		typeBar,
+		-- The pages take whatever the type bar leaves.
+		Stack.Fill(scope, pages),
+	}
+	local form = Stack.New(scope, {
+		Name = "Form",
+		LayoutOrder = 2,
+		Gap = Tokens.Space.M,
+		ClipsDescendants = true,
+		Children = formChildren,
 	})
 
 	ScreenFrame.Mount(scope, playerGui, {
@@ -407,6 +582,8 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 		SelectedEntry = selectedEntry,
 		IsDirty = isDirty,
 		CurrentTab = tabs.Current,
+		ShownTab = tabs.Shown,
+		IsDomain = isDomain,
 		CanUndo = canUndo,
 		CanRedo = canRedo,
 		Undo = undo,

@@ -141,8 +141,10 @@ export type NumericFieldProps = {
 	-- Detail scale, TextSecondary, at LayoutOrder 4 (below the slider).
 	--
 	-- nil renders NOTHING -- no empty row, no reserved height -- so every pre-existing call site is
-	-- byte-for-byte unchanged. Static string rather than UsedAs<string>: a field's explanation is a
-	-- fact about the field, not about its current value, so nothing here should ever be reactive.
+	-- byte-for-byte unchanged. A fact about the field, not about its current value -- but the SAME field
+	-- can mean something different in a different context (the Move Editor's Windup is "before the hitbox
+	-- exists" on a swing and "before the realm unfurls" on a domain expansion), so it may be a state
+	-- object the caller switches. Whether there is a hint at all is decided once, at mount.
 	--
 	-- Where the text itself lives is the caller's business, but the Move Editor keeps every one of
 	-- its hints in Screens/DevTools/MoveEditor/Copy.lua rather than inline, so the prose is editable in one
@@ -152,7 +154,7 @@ export type NumericFieldProps = {
 	-- every field carries a Hint or none does. The row's cells are AutomaticSize.Y and
 	-- top-aligned, so one hinted field beside an unhinted one leaves the short cell's control
 	-- floating against a taller neighbour.
-	Hint: string?,
+	Hint: UsedAs<string>?,
 	-- The two-line layout described in the header, with snapped values. Off by default.
 	Compact: boolean?,
 }
@@ -798,7 +800,7 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 	local hint: Instance? = nil
 	if props.Hint then
 		hint = Label(scope, {
-			Text = props.Hint :: string,
+			Text = props.Hint :: UsedAs<string>,
 			Scale = "Detail",
 			Color = Tokens.Color.TextSecondary,
 			AutoHeight = true,

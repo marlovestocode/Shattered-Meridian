@@ -53,8 +53,13 @@ export type MoveEditorHandle = {
 	SelectedEntry: Fusion.Computed<MoveEditorTypes.MoveEntry?>,
 	IsDirty: Fusion.Computed<boolean>,
 
-	-- Which form tab is showing; writable so the driver can jump to the tab a refusal names.
+	-- Which form tab was asked for; writable so the driver can jump to the tab a refusal names. A tab the
+	-- open move's type does not have is not on offer (init.lua) and is not shown -- ShownTab is then the first
+	-- that is -- so the driver asks Copy.FailureTab, which knows a realm's fields live on other tabs.
 	CurrentTab: Fusion.Value<string>,
+	ShownTab: Fusion.Computed<string>,
+	-- Whether the open move is a domain expansion -- what decides which tabs are on offer.
+	IsDomain: Fusion.Computed<boolean>,
 
 	-- Undo/redo, owned by the screen (see init.lua's header). The driver binds the keys to Undo/Redo and
 	-- calls ClearHistory after anything that replaces a move with server state the history never saw.

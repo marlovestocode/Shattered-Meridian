@@ -89,15 +89,11 @@ function HitboxGeometry.BoundingBox(shape: ShapeKind, dimensions: Dimensions): (
 	elseif shape == "Beam" then
 		local diameter = dimensions.Radius * 2
 		return Vector3.new(diameter, diameter, dimensions.Length), CFrame.new(0, 0, -dimensions.Length / 2)
-	elseif shape == "Arc" then
-		-- Conservatively the FULL ring, not the swept sector: an oriented box cannot express a sector,
-		-- and the narrow-phase bearing test is what actually trims it. Over-gathering here is correct
-		-- -- a broadphase that missed part of the sector would lose hits the narrow phase never sees.
-		local diameter = dimensions.Radius * 2
-		return Vector3.new(diameter, dimensions.Height, diameter), CFrame.identity
-	elseif shape == "Pillar" or shape == "Crescent" then
-		-- Both are a flat disc of Height, one standing and one with a bite out of it: the full disc is the
-		-- broadphase (an oriented box cannot express the bite, and the narrow phase trims it).
+	elseif shape == "Arc" or shape == "Pillar" or shape == "Crescent" then
+		-- Conservatively the FULL disc of Height: an Arc's swept sector, a Pillar standing, a Crescent with
+		-- its bite out. An oriented box cannot express a sector or a bite, and the narrow phase is what
+		-- trims them. Over-gathering here is correct -- a broadphase that missed part of the volume would
+		-- lose hits the narrow phase never sees.
 		local diameter = dimensions.Radius * 2
 		return Vector3.new(diameter, dimensions.Height, diameter), CFrame.identity
 	elseif shape == "Ellipsoid" then
@@ -162,7 +158,7 @@ function HitboxGeometry.MinExtent(shape: ShapeKind, dimensions: Dimensions): num
 	local extent: number
 	if shape == "Sphere" or shape == "Capsule" then
 		extent = dimensions.Radius * 2
-	elseif shape == "Cylinder" or shape == "Beam" then
+	elseif shape == "Cylinder" or shape == "Beam" or shape == "Frustum" then
 		extent = math.min(dimensions.Radius * 2, dimensions.Length)
 	elseif shape == "Cone" then
 		extent = math.min(coneBaseRadius(dimensions) * 2, dimensions.Length)
@@ -172,10 +168,6 @@ function HitboxGeometry.MinExtent(shape: ShapeKind, dimensions: Dimensions): num
 		extent = math.min(dimensions.Radius * 2, dimensions.Height)
 	elseif shape == "Hemisphere" then
 		extent = dimensions.Radius
-	elseif shape == "Frustum" then
-		extent = math.min(dimensions.Radius * 2, dimensions.Length)
-	elseif shape == "Ellipsoid" or shape == "Pyramid" or shape == "Wedge" then
-		extent = math.min(dimensions.Width, math.min(dimensions.Height, dimensions.Length))
 	elseif shape == "Crescent" then
 		-- The sickle's thickest point, dead ahead: from the outer rim at -Radius to where the bite begins.
 		-- A bite of 0 is a whole disc.
@@ -184,6 +176,7 @@ function HitboxGeometry.MinExtent(shape: ShapeKind, dimensions: Dimensions): num
 			else dimensions.Radius * 2
 		extent = math.min(dimensions.Height, thickness)
 	else
+		-- Box, Ellipsoid, Pyramid, Wedge: the thinnest of the three axes.
 		extent = math.min(dimensions.Width, math.min(dimensions.Height, dimensions.Length))
 	end
 	return math.max(extent, EPSILON)

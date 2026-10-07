@@ -1,9 +1,9 @@
 # Move Editor overhaul -- handoff (2026-10-01)
 
-**Branch:** `constants-split`. **Status:** PARTIALLY DONE -- the engine/domain half and the editor's low-level
-primitives are built and specced; the editor's tab restructure (the "much better area sectioning" half) is NOT
-started beyond primitives. Read "What is done", "What is NOT done" and "Verification" before touching anything.
-Per CLAUDE.md: re-verify any line against current source before depending on it.
+**Branch:** `constants-split`. **Status:** BUILT (2026-10-07) -- the engine/domain half (2026-10-01) and the editor
+restructure (2026-10-07, "The editor restructure" below) are both in. What is left is a Studio pass: the full
+TestEZ suite and opening the editor by hand (see "Verification"). Per CLAUDE.md: re-verify any line against
+current source before depending on it.
 
 ## What the owner asked for (verbatim)
 
@@ -77,38 +77,72 @@ Breaking that into requirements:
 `MoveTypes.spec` (15 shapes, presets, Volumeless), `DomainTypes.spec` (own strike, Power), `DomainStrike.spec`
 (own strike, Power), `HitboxEngine.spec` (Volumeless), `Projectile.spec` (shaped bodies, wall tip, wire Body).
 
-## What is NOT done (the remaining plan)
+## The editor restructure (DONE 2026-10-07)
 
-The editor restructure -- task #3. Intended design (nothing below exists yet):
-1. **Move type bar** above the form pages (custom moves only): `Melee | Projectile | Domain Expansion` segmented
-   control. Setting a type clears the others' blocks (Domain: `Domain = DomainTypes.Defaults()`, `Grab=nil`,
-   `Projectile=nil`; Projectile: seed `ProjectileTypes.Defaults()`, `Grab=nil`, `Domain=nil`; Melee: both nil).
-2. **Dynamic tabs** via the new `availability`:
-   - Melee/Projectile: `Hitbox, Timing, Impact, Presentation, Identity, Tools`.
-   - Domain: `Realm, Boundary, Effects, Law, Clash, Timing, Presentation, Identity, Tools` (no Hitbox, no Impact).
-   - Update `Copy.lua` failure->`Tab` mapping (the old `"Domain"` tab goes away; `MoveEditorClient` does
-     `handle.CurrentTab:set(failure.Tab)`), and `Copy.Presentation` text that says "Hitbox tab"/"Domain tab".
-3. **Relocate misplaced settings:** "Lock movement while winding up/active" (Hitbox tab) -> Timing `COMMITMENT`
-   with Feintable; Power level (Timing) -> Impact `COST`; the Domain tab's duplicated Name/Description/Cooldown ->
-   they already live in Identity/Timing (domain mode just shows them where relevant).
-4. **Sections:** new `Fields.Section` (foldable heading + summary text + *lazily built* body), `Fields.Lazy`,
-   lazy pages (build on first visit), `Fields.Chips` (wrapping chip group -- for the 15 shapes and the preset
-   "Start from" rows; a Dropdown of 15 would expand 600px), `Fields.Segmented`. Domain effect/rule/override slots
-   built only when the slot first exists (today all 6+10+6 slots' fields are mounted up front: ~300 fields).
-5. **Hitbox tab content:** presets + shape chips + only the dimensions the shape reads (per-shape label overrides,
-   e.g. Cross Radius = "Bar half-width"), a "scale volume x0.5/x0.8/x1.25/x2" row; projectile `BODY` group (weapon
-   preset chips, shape chips, measurements), then Volley / Flight / Homing / Collision / Parry / Spawn.
-   Domain `Boundary` tab hosts "Show on my character" (realm preview already supported by `HitboxWorldPreview`).
-6. **Domain Effects tab** gets a `STRIKE PRICE` section (Damage, Posture, Power level, Knockback) -- the realm's own
-   strike price -- and `NumericField.Hint` should become `UsedAs<string>` so domain-mode hints can differ.
-7. Switch `Fields.Number` to `Compact = true`; update `Tests/UI` specs (`ScreenFrame.spec` for availability).
-8. Docs: update `docs/design/move-editor-guide.md` and CLAUDE.md shared-module table (ProjectileBody, Compact
-   NumericField, tab availability) when the above lands.
+Every step of the plan this section used to hold, as built. `Screens/DevTools/MoveEditor/init.lua`'s header is the
+long version.
 
-Also open: in-engine specs (`HitboxEngine`, `Projectile`, `DomainStrike`, UI specs) were written but **could not
-be run** here; `Packages/`+`DevPackages/` (wally) are absent and `run-in-roblox` needs Studio.
+1. **Move type bar** (`init.lua`): `Melee | Projectile | Domain Expansion`, a `Fields.Segmented` above the pages,
+   custom moves only. `MoveEditor.SetMoveType` IS the edit: Domain seeds `DomainTypes.Defaults()` (keeping one that
+   is there), drops Projectile and Grab; Projectile likewise; Melee drops both. Re-picking the current type
+   re-applies it, which is how an old record with a realm AND a grab is cleaned (`DomainCannotGrab` says so).
+2. **Dynamic tabs**: one strip order (`Hitbox Realm Boundary Effects Law Clash Timing Impact Presentation Identity
+   Tools`); `Realm..Clash` are offered while the draft has a Domain block, `Hitbox`/`Impact` while it does not.
+   `Copy` points every realm refusal at Realm/Effects/Law/Clash, and a `Failure.DomainTab` (`Copy.FailureTab`)
+   sends Damage/Knockback refusals to Effects for a realm. The driver uses it.
+   - **ScreenFrame's availability mechanism was REPLACED.** As first built (2026-10-01) an Observer rewrote
+     `Current` when it stopped being offered; that writes the Value its own Computed reads, and Fusion 0.3 refuses
+     it at runtime (`Graph/change`: a "busy" dependent -> `infiniteLoop`) -- confirmed headless. Now `TabState.Shown`
+     is a Computed (Current while offered, else the first offered tab) and `Selected` reads it; `Current` is never
+     rewritten, so the author's tab comes back when the move changes back. The handle exposes it as `ShownTab`.
+3. **Relocations**: the two movement locks left the Hitbox tab for Timing's new `COMMITMENT` section (with
+   Feintable); Power level left Timing for Impact's `COST`; the old Domain tab's duplicated Name / Description /
+   Cooldown are gone (Identity and Timing own them, and Timing's hints read as the cast's for a realm --
+   `Copy.DomainTiming`, via `NumericField.Hint` now accepting a state object).
+4. **Sections and laziness** (`Fields.lua`): `Fields.Section` (foldable heading, a live one-line summary opposite
+   it, body built on first visible+open), `Fields.Lazy` (each page is built on its first visit), `Fields.Chips`,
+   `Fields.ActionChips` (presets), `Fields.Segmented`, `Fields.ButtonRow`, `Fields.Pile`, `Fields.OptionsOf`. Realm
+   effect / rule / override slots are a Section each, so a slot's fields are built only once the slot exists.
+5. **Hitbox tab**: melee `VOLUME` (Start-from preset chips, 15 shape chips, only the dimensions the shape reads
+   under that shape's own label -- `SHAPE_LABELS`, one field per distinct label -- and a x0.5/x0.8/x1.25/x2 scale
+   row), `PLACEMENT`, `TARGETS`; projectile `BODY` (weapon preset chips, 12 body shape chips, measurements, scale
+   row), `VOLLEY`, `FLIGHT`, `HOMING`, `COLLISION`, `PARRY`, `SPAWN`. Short closed choices are chips throughout.
+6. **Domain pages** (`DomainTab.lua` now returns `Realm`, `Boundary`, `Effects`, `Law`, `Clash`): Boundary hosts
+   "Show on my character"; Effects opens with `STRIKE PRICE` (Damage, Posture, Power level, Knockback -- the
+   realm's own strike), built by the new `PriceFields.lua`, which the Impact tab mounts too.
+7. `Fields.Number` passes `Compact = true` (every editor number is the compact slider). Specs: `ScreenFrame.spec`
+   (availability / Shown), NEW `Tests/MoveEditor/MoveEditorScreen.spec.lua` (type helpers, tabs per type, the
+   hand-over and back, lazy pages, lazy slots, every page of every type built, refusal routing).
+8. Docs: `docs/design/move-editor-guide.md` (the screen, the type bar and tabs, sections, melee, projectile and
+   domain sections), CLAUDE.md's shared-module table (ScreenFrame's Shown, compact NumericField, ProjectileBody).
+
+Also fixed on the way: three `if_same_then_else` duplicate branches selene found in `HitboxGeometry`
+(`BoundingBox`, `MinExtent`) from the 2026-10-01 shape work, merged with no change in behaviour (54/54 still).
 
 ## Verification state
+
+As of 2026-10-07:
+- **selene 0.31.0** (the version `aftman.toml` pins) on `src/`: **0 errors, 0 warnings, 0 parse errors.** (The
+  2026-10-01 run used 0.27.1, which cannot parse some of this tree's syntax.) Generating the std needs the API
+  dump; selene's prebuilt binary does not trust a TLS-inspecting proxy, so it was built from the crate with
+  ureq's `native-certs` feature -- a local workaround, nothing in the repo changed for it.
+- `stylua --check` clean on every touched file.
+- **luau-lsp analyze** (Roblox definitions + rojo sourcemap, Fusion 0.3.0 from its own repo at the commit that
+  published it) on every touched file: no new type errors -- the few left are on lines this change did not write
+  (table-literal `Children` inference in `Fields.Pair`, `init.lua`'s Body row, `ScreenFrame` bands, NumericField's
+  stacked layout), and the old `DomainTab`'s ten are gone.
+- Headless (Lune, `scripts/dev/lune-spec-harness.luau`): `HitboxGeometry` 54/54, `ProjectileBody` 17/17,
+  `DomainTypes` 18/18, `DomainClash`/`DomainGeometry`/`DomainRules` all pass, `ScreenFrame.spec` 12/12,
+  **`MoveEditorScreen.spec` 12/12 with `--fake-dom`**, `MoveTypes` 27/29 (the 2 pre-existing `InvalidAuthor`
+  failures, unchanged). The harness learned `Packages/` + `.luau` modules and an opt-in `--fake-dom` (a pure-Lua
+  Instance tree with signals, for specs that mount Fusion UI -- structure only, no layout). `ScreenFrameScreens`
+  under it mounts the Move Editor; its Settings and Dev Menu cases need Workspace/camera the harness does not
+  model.
+- **Still needs Studio:** the full TestEZ suite (`rojo build test.project.json` + `run-in-roblox`), and opening the
+  editor -- nothing headless renders, so chip widths (estimated from text length), the section summary's
+  truncation and the compact sliders' feel are unseen.
+
+### Earlier (2026-10-01)
 
 - Ran headless (Lune): `HitboxGeometry.spec` 54/54, `ProjectileBody.spec` 17/17, `DomainTypes.spec` 18/18,
   `MoveTypes.spec` 27/29 -- the 2 failures are **pre-existing at HEAD** (`Validate(ToWire(x))` returns

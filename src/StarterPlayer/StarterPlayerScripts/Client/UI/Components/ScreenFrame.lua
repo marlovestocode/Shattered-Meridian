@@ -42,9 +42,13 @@
 	A STRIP WHOSE TABS COME AND GO (2026-10-01, NewTabState's optional `availability`). The Move Editor's tabs
 	depend on what kind of move is open -- a realm has no hitbox to place and a swing has no boundary to
 	draw -- so a tab can be given a boolean it is shown by. A hidden tab holds no space and the rest share
-	the strip (a flex fill, not 1/N of the names the caller listed), and a CURRENT tab that stops being
-	available hands the selection to the first one that still is, so the body never sits on a page the
-	strip no longer offers. A state with no availability behaves exactly as it always did.
+	the strip (a flex fill, not 1/N of the names the caller listed). What is SHOWN is then derived, not
+	written: the tab asked for (Current) while it is on offer, else the first one that is (Shown). So the
+	body never sits on a page the strip no longer offers, and when the asked-for tab comes back (the move
+	turned back into a swing), so does the author's place on it. It is a Computed rather than an observer
+	that rewrites Current because an observer writing the very Value its own Computed reads is a cycle
+	Fusion refuses (Graph/change: a "busy" dependent is an infinite loop). A state with no availability
+	behaves exactly as it always did: Shown is Current.
 
 	TAB STATE IS ONE OBJECT, not a Value plus a bag of Computeds the caller assembles. The strip's
 	buttons and the body's panels are asking the same question -- which tab is showing -- and when each
@@ -85,7 +89,6 @@ local Layer = require(script.Parent.Layer)
 local Inset = require(script.Parent.Inset)
 
 local Children = Fusion.Children
-local peek = Fusion.peek
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
@@ -111,8 +114,11 @@ export type TabState = {
 	-- it, and "jump to the tab that owns this thing" navigation (the Move Editor does it when a save is
 	-- refused over a field on another tab) is just a set.
 	Current: Fusion.Value<string>,
-	-- One shared Computed per tab name -- see this file's header on why the caller must read these
-	-- rather than build its own.
+	-- The tab actually showing: Current while it is on offer, else the first tab that is (see this file's
+	-- header). Equal to Current for a state with no availability.
+	Shown: Fusion.Computed<string>,
+	-- One shared Computed per tab name, true for the SHOWN tab -- see this file's header on why the caller
+	-- must read these rather than build its own.
 	Selected: { [string]: Fusion.Computed<boolean> },
 	-- Which tabs are on offer, by name (a missing name is always available), or nil when every tab is.
 	Available: { [string]: UsedAs<boolean> }?,
@@ -163,39 +169,31 @@ function ScreenFrame.NewTabState(
 	assert(#names > 0, "ScreenFrame.NewTabState needs at least one tab name")
 
 	local current = scope:Value(names[1])
+	local function isOffered(use: Fusion.Use, name: string): boolean
+		local offered = if availability then availability[name] else nil
+		return offered == nil or use(offered) == true
+	end
+	local shown = scope:Computed(function(use): string
+		local asked = use(current)
+		if availability == nil or isOffered(use, asked) then
+			return asked
+		end
+		for _, name in ipairs(names) do
+			if isOffered(use, name) then
+				return name
+			end
+		end
+		-- Nothing on offer at all: show what was asked rather than nothing.
+		return asked
+	end)
 	local selected: { [string]: Fusion.Computed<boolean> } = {}
 	for _, name in ipairs(names) do
 		selected[name] = scope:Computed(function(use)
-			return use(current) == name
+			return use(shown) == name
 		end)
 	end
 
-	if availability then
-		local function isAvailable(name: string): boolean
-			local offered = availability[name]
-			return offered == nil or peek(offered)
-		end
-		-- Whether the selected tab is still on offer. Its OBSERVER is the hand-over: the moment the answer turns
-		-- false (the move changed kind under the open tab, or a caller set a tab that is not on offer) the
-		-- selection moves to the first tab that is.
-		local currentIsOffered = scope:Computed(function(use): boolean
-			local offered = availability[use(current)]
-			return offered == nil or use(offered)
-		end)
-		scope:Observer(currentIsOffered):onChange(function()
-			if peek(currentIsOffered) then
-				return
-			end
-			for _, name in ipairs(names) do
-				if isAvailable(name) then
-					current:set(name)
-					return
-				end
-			end
-		end)
-	end
-
-	return { Names = names, Current = current, Selected = selected, Available = availability }
+	return { Names = names, Current = current, Shown = shown, Selected = selected, Available = availability }
 end
 
 -- A band's closing hairline. Bands are flush against each other, so the seam between two of them is

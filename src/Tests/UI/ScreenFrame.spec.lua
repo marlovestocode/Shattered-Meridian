@@ -76,6 +76,54 @@ return function()
 			expect(tabs.Selected["Arts"]).to.equal(tabs.Selected["Arts"])
 		end)
 
+		it("shows the current tab when given no availability", function()
+			local tabs = ScreenFrame.NewTabState(newScope(), { "Character", "Arts" })
+			expect(tabs.Available).to.equal(nil)
+			tabs.Current:set("Arts")
+			expect(peek(tabs.Shown)).to.equal("Arts")
+		end)
+
+		it("shows the first offered tab while the current one is withdrawn, and the current one again after", function()
+			-- The Move Editor's case: a move turned into a domain expansion under an open Impact tab, and back.
+			local scope = newScope()
+			local isRealm = scope:Value(false)
+			local notRealm = scope:Computed(function(use)
+				return not use(isRealm)
+			end)
+			local availability: { [string]: Fusion.UsedAs<boolean> } = { Hitbox = notRealm, Realm = isRealm }
+			local tabs = ScreenFrame.NewTabState(scope, { "Hitbox", "Realm", "Timing" }, availability)
+			expect(peek(tabs.Shown)).to.equal("Hitbox")
+			isRealm:set(true)
+			expect(peek(tabs.Shown)).to.equal("Realm")
+			expect(peek(tabs.Selected["Realm"])).to.equal(true)
+			expect(peek(tabs.Selected["Hitbox"])).to.equal(false)
+			-- Current was never rewritten: the author's place comes back with the tab.
+			expect(peek(tabs.Current)).to.equal("Hitbox")
+			isRealm:set(false)
+			expect(peek(tabs.Shown)).to.equal("Hitbox")
+		end)
+
+		it("leaves the shown tab alone while the current one stays offered", function()
+			local scope = newScope()
+			local isRealm = scope:Value(false)
+			local availability: { [string]: Fusion.UsedAs<boolean> } = { Realm = isRealm }
+			local tabs = ScreenFrame.NewTabState(scope, { "Hitbox", "Realm", "Timing" }, availability)
+			tabs.Current:set("Timing")
+			isRealm:set(true)
+			expect(peek(tabs.Shown)).to.equal("Timing")
+		end)
+
+		it("never shows a tab that is not on offer, and treats a missing name as offered", function()
+			local scope = newScope()
+			local availability: { [string]: Fusion.UsedAs<boolean> } = { Hitbox = false }
+			local tabs = ScreenFrame.NewTabState(scope, { "Hitbox", "Timing" }, availability)
+			-- The first tab is not on offer, so it is not the one shown -- not even at construction.
+			expect(peek(tabs.Shown)).to.equal("Timing")
+			tabs.Current:set("Hitbox")
+			expect(peek(tabs.Shown)).to.equal("Timing")
+			expect(peek(tabs.Selected["Hitbox"])).to.equal(false)
+		end)
+
 		it("refuses an empty tab list", function()
 			-- A screen with no tabs has no way to say what it is: the frame deliberately has no title
 			-- bar, so the strip is the only thing that names it.

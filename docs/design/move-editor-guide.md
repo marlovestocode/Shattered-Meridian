@@ -29,10 +29,40 @@ A ScreenFrame modal with three columns:
 | Column | What it is for |
 |---|---|
 | **Moves** (left rail) | Every move the game knows, grouped: Arts, your categories, Custom, one group per roster weapon (collapsed), Standalone. Filter by name, id or group. A bronze chip says `NEW`, `UNSAVED` or `TUNED`. |
-| **Form** (tabs) | `Hitbox` · `Timing` · `Impact` · `Identity` — the inputs. Only fields that do something for this move are shown. `Tools` holds what acts on more than one move's inputs: bulk edit, version history, and (Studio) source. |
+| **Form** (tabs) | The **move type bar** (`Melee` · `Projectile` · `Domain Expansion`), then the inputs, one concern per tab. Which tabs there are depends on the type (below). Only fields that do something for this move are shown. `Tools` holds what acts on more than one move's inputs: bulk edit, version history, and (Studio) source. |
 | **Readout** (right rail) | The results: top and side hitbox plots, the **effective** timeline, frame data, the server's notes, every action, the test bench and the hit log. |
 
 The rails are pinned so a result is never a tab switch away from the input that caused it.
+
+### The move type, and the tabs it gives you (2026-10-01)
+
+A custom move's first question is its **type**, picked in the segmented bar above the tabs. It is not a
+field: the type *is* the blocks the move carries (a `Projectile` block, a `Domain` block, or neither), so
+choosing one seeds its block and drops the others' (and any grab — neither a projectile nor a realm may
+grab). Switching is an ordinary edit: undo brings back the block it dropped. A weapon (Default) stage is
+always melee and shows no bar.
+
+| Type | Tabs |
+|---|---|
+| Melee, Projectile | `Hitbox` · `Timing` · `Impact` · `Presentation` · `Identity` · `Tools` |
+| Domain Expansion | `Realm` · `Boundary` · `Effects` · `Law` · `Clash` · `Timing` · `Presentation` · `Identity` · `Tools` |
+
+A tab the type does not have is not offered; if you were on it, the editor shows the first tab that is,
+and brings you back to it if the move changes back.
+
+### Sections
+
+Every tab is a run of **sections**: a bronze heading you click to fold (`Hide` / `Show`), with a one-line
+**summary** of what is inside opposite it (`Box  W 4  H 5  L 5`, `0.30 / 0.20 / 0.30  ·  0.8s cd`), so a
+folded section still answers "what is this set to". A short closed choice (the 15 shapes, a spread
+pattern, an anchor) is a row of **chips** — every option on screen, one press — instead of a dropdown;
+long lists (rule kinds) stay dropdowns. Every number is a **compact slider**: label, unit and value on one
+line, the step buttons and a full-width slider on the next (click the value to type it; the wheel, Shift
+×10 and Alt ÷10 work as before; a gamepad nudges a selected slider with the DPad), and every value is
+snapped to the field's own precision.
+
+**Nothing is built before you look at it.** A tab is built the first time you open it, and a section the
+first time it is open and showing — a realm with two effects has built two effects' fields, not six.
 
 ## Custom moves vs. weapon (Default) moves
 
@@ -48,9 +78,28 @@ The rails are pinned so a result is never a tab switch away from the input that 
 A custom move is reachable in play **only if it is an art** (Identity tab → "This move is an art"): a
 hotbar slot can only hold an art. The readout says so in its notes for every custom move that is not.
 
+## Melee moves
+
+The Hitbox tab, for a melee move, is three sections:
+
+- **VOLUME** — *Start from* a preset (Fist, Jab, Thrust, Slash, Sweep, Spin, Cleave, Smash, Dome, Breath,
+  Funnel, Lance, Burst, Egg — each sets the shape, its size and how far in front of the body it sits, and
+  nothing else), the 15 **shape** chips (Box, Sphere, Capsule, Cylinder, Cone, Beam, Arc, Ellipsoid,
+  Hemisphere, Frustum, Pyramid, Wedge, Crescent, Cross, Pillar), only the measurements that shape reads —
+  under the name that shape gives them (a Crescent's *Bite radius* and *Bite offset*, a Cross's *Bar
+  half-width*, a Frustum's *Near* and *Far radius*) — and a *Scale* row (×0.5 ×0.8 ×1.25 ×2, every
+  measurement but the angle, clamped to the limits).
+- **PLACEMENT** — the anchor (Body / Right hand / Left hand / Weapon), the offset and rotation, *Place in
+  world* and *Show on my character*.
+- **TARGETS** — how many bodies one swing may hit.
+
+What the thrower is held to is the Timing tab's **COMMITMENT** (lock movement while winding up / while
+active, feintable), and the power level is the Impact tab's **COST**, beside the damage it prices — a
+blocked hit drains guard by it.
+
 ## Projectile moves (added 2026-09-30)
 
-Hitbox tab → **Move type** → `Projectile`. A projectile move is the same move in every other respect —
+Type bar → `Projectile`. A projectile move is the same move in every other respect —
 same windup/active/recovery/cooldown, same clip sync, same feint, same Test, same art binding — but when
 its active window opens it **launches a volley** instead of sampling a volume on the body. There is no
 separate "move type" field: the move *is* a projectile move exactly when it carries a `Projectile` block
@@ -69,21 +118,26 @@ The differences the layers above apply, each one line:
 | DamageSystem | Damage and posture × the shot's `DamageScale` (reflected multipliers). Knockback pushes along the flight. No melee spacing push. |
 | AttackRequestSystem | A shot's contact does not hit-confirm-cancel or keep-the-chain on the thrower's *swing*. Replicates shots on `Attack_Projectile` to the clients within `AttackConstants.Network.ProjectileRelevanceStuds` of their path (`ProjectileRelevance`). |
 
-The Hitbox tab, for a projectile move, shows four folding groups (click a heading to Hide/Show):
+The Hitbox tab, for a projectile move, is seven sections:
 
-- **PROJECTILE** — Spread pattern, Count, Spread angle (Fan/Ring) or Spacing (Row/Column), Speed, Lifetime,
-  Max range, Size (the *radius* of the flying sphere — what is drawn is exactly what hits).
-- **SPAWN** — Anchor and Offset (the spawn point), **Fires** (`Facing` the body, where the `Anchor` points,
-  or `At the target`), and Yaw/Pitch/Roll, which aim the volley (roll turns a fan's plane — a fan rolled 90°
-  is vertical). *Place in world* places the spawn sphere; Resize sets Size.
-- **MOVEMENT** — Gravity (studs/s², negative floats), Acceleration along the heading, Homing + strength
-  (degrees/s of turn), max homing angle, homing range, target selection (`Aim` = smallest angle off the
-  heading, `Nearest`). Range/angle/selection also pick the target for `Fires: At the target`. Targets are
-  the engine's registered combatants — players, bots, dummies — never the thrower.
+- **BODY** — what flies. *Start from* a weapon preset (Orb, Fireball, Arrow, Spear, Kunai, Shuriken,
+  SwordWave, Cutter, Boulder, Log, Wall, Drill, Blade, Tide — each sets only the shape and its size), the
+  shape chips (12 body shapes; pointed ones fly point first), the measurements that shape reads (the
+  sphere's Radius is the spec's `Size`), and a *Scale* row (×0.5 ×0.8 ×1.25 ×2). What is drawn is exactly
+  what hits.
+- **VOLLEY** — Pattern (Single / Fan / Row / Column / Ring), Count, Spread angle (Fan/Ring) or Spacing
+  (Row/Column).
+- **FLIGHT** — Speed, Lifetime, Max range, Gravity (studs/s², negative floats), Acceleration along the heading.
+- **HOMING** — Homing + strength (degrees/s of turn), max homing angle, homing range, target selection
+  (`Closest to heading`, `Nearest`). Range/angle/selection also pick the target for `Fires: At target`.
+  Targets are the engine's registered combatants — players, bots, dummies — never the thrower.
 - **COLLISION** — On walls: `Destroy` / `Bounce off` (× Max bounces) / `Pass through`. Piercing + Max
   pierces is the separate question of **bodies**: off, the first target ends the shot; on, it passes through
   Max pierces targets and the next ends it. Each target is hit once per shot. *Can hit its thrower* (never in
   the first 0.25 s).
+- **SPAWN** — Anchor and Offset (the spawn point), **Fires** (`Body facing`, `Anchor facing`, or
+  `At target`), and Yaw/Pitch/Roll, which aim the volley (roll turns a fan's plane — a fan rolled 90° is
+  vertical). *Place in world* places the spawn; Resize sets its size.
 - **PARRY** — Parry behavior: `Parry one` (the shot parried), `Parry all` (every shot of the same volley
   still flying — every shot carries its own id and the volley's shared group id), `Cannot be parried`
   (blocked instead). When parried: `Existing parry` (shot ends, thrower staggered exactly as a parried
@@ -99,33 +153,43 @@ A projectile move cannot grab (Validate: `ProjectileCannotGrab`), and a weapon s
 look of a shot in flight is one shared default (`FXConstants.Projectile`, drawn by `Client/FX/ProjectileFX.lua`);
 its clip, trail, hit sparks and sounds come through the same paths every move's do.
 
-## Realms (added 2026-09-30)
+## Domain expansions (realms; added 2026-09-30, own tabs 2026-10-01)
 
-**Domain** tab → *This move opens a realm*. A realm (an Unfurling) is a move whose accepted swing opens a
-temporary combat space with its own law — the full design is `docs/design/domains.md`. The swing is the
-activation: its clip, windup, cooldown, art binding (Qi cost) and Presentation are authored where they
-always are, and the Domain tab is only what the swing does not say, in five groups:
+Type bar → `Domain Expansion`. A realm (an Unfurling) is a move whose accepted swing opens a temporary combat
+space with its own law — the full design is `docs/design/domains.md`.
 
-- **BASIC** — name/description (the move's own), activation / duration / fold seconds, cooldown (the move's),
-  Qi cost (the art binding's — bind it to a tree on Identity to have one), Qi upkeep per second, max targets.
-- **BOUNDARY** — shape, radius, height, anchor (fixed / follow owner), centre offset, entry and exit rules
-  (Open / Barred), entry grace, exit linger, physical wall, whether shots may enter / leave, and the two
-  owner-side collapse conditions.
-- **EFFECTS** — up to 6 periodic effects: *Strike* (deliver a move to each target as a guaranteed, homing,
-  parryable-if-you-say-so shot), *Volley* (launch a projectile move at each target), *Stun*, *Drain posture*,
-  *Pull*, *Push*, *Owner casts a move* — each with its interval, first delay, target filter and per-pulse cap.
-  Strike/Volley/Owner cast name a **move id**: that move's damage, knockback and hit cues are what lands.
-- **COMBAT** — up to 10 continuous rules on a filter: damage dealt/taken, posture taken, hitstun taken,
-  movement speed, cooldowns (multipliers), seal a move / arts / projectile moves / realms, no blocking /
-  parrying / evading / escape mobility, rooted.
-- **CLASH** — priority, the default behaviour toward a weaker realm (Coexist / Suppress / Erode / Dominate /
-  Shatter), the tie-break, erode rate, contest strength, whether it interacts at all, and per-opponent
-  overrides keyed by the other realm's move id.
+**It is still a move.** Its swing is the cast: the clip, windup, active and recovery, cooldown and locks are
+the **Timing** tab's (their hints read as the cast's — the realm begins to unfurl the moment the windup ends),
+the art binding and its Qi cost are **Identity**'s, its look and sound are **Presentation**'s four Realm
+moments, and undo, save, Test and the readout work as for any move. What it does **not** have is a volume: a
+domain move casts *volumeless* (`HitboxTypes.AttackDefinition.Volumeless`, set by
+`MoveTypes.ToEngineAttackDefinition`), so the swing keeps its whole lifecycle and movement locks but samples
+nothing in front of you. That is why it has no Hitbox or Impact tab. Its five tabs are what the swing does
+not say:
 
-Its look and sound are the Presentation tab's four **Realm** moments (unfurls / established / effect fires /
-folds); `DomainActive`'s core colour tints the realm and its glow draws the edge. A realm move cannot grab
-(`DomainCannotGrab`), and a weapon stage cannot open one. Test fires it like any move (bench bots and dummies
-are valid targets).
+- **Realm** — CLOCK (unfurl / held / fold seconds), COST (Qi cost — the art binding's; bind the move to a tree
+  on Identity to have one — and Qi upkeep per second), GOVERNS (how many bodies, nearest first).
+- **Boundary** — SHAPE (Sphere / Cylinder / Box, radius, height), PLACEMENT (fixed / follow owner, centre
+  forward, *Show on my character* to see the realm's boundary on you), CROSSING (entry and exit rules — Open /
+  Barred — entry grace, exit linger, physical wall), SHOTS (may enter / may leave), COLLAPSE (owner hit while
+  unfurling, owner leaves).
+- **Effects** — **STRIKE PRICE** first: the realm's own way to the attack resolver. A *Strike* effect with no
+  move id hits for this move's own Damage, Posture damage, Power level and Knockback — through the same
+  `AttackCatalog` → `DamageSystem` path a swing takes — times the effect's **Power** (0–5, default 1). Then up
+  to 6 periodic effects: *Strike* (a guaranteed, homing, parryable-if-you-say-so shot at each target),
+  *Volley* (launch a projectile move at each target), *Stun*, *Drain posture*, *Pull*, *Push*, *Owner cast* —
+  each with its interval, first delay, target filter and per-pulse cap. Volley and Owner cast name a **move
+  id** (that move's damage, knockback and hit cues are what lands); a Strike may name one too.
+- **Law** — up to 10 continuous rules on a filter: damage dealt/taken, posture taken, hitstun taken, movement
+  speed, cooldowns (multipliers), seal a move / arts / projectile moves / realms, no blocking / parrying /
+  evading / escape mobility, rooted.
+- **Clash** — whether it interacts with other realms at all, priority, the behaviour toward a weaker realm
+  (Coexist / Suppress / Erode / Dominate / Shatter), the tie-break, erode rate, contest strength, and
+  per-opponent overrides keyed by the other realm's move id.
+
+A realm move cannot grab (`DomainCannotGrab` — re-pick *Domain Expansion* in the type bar to clear an old
+record's grab), and a weapon stage cannot open one. Test fires it like any move (bench bots and dummies are
+valid targets).
 
 ## Preview vs. Save — the one concept to understand
 
@@ -191,8 +255,9 @@ clears it.
 
 ## On your character, and Place mode
 
-Both controls live at the end of the **Hitbox tab's PLACEMENT** section, beside the offset and rotation
-they edit.
+Both controls live at the end of the **Hitbox tab's PLACEMENT** section (a projectile's **SPAWN**), beside
+the offset and rotation they edit. A domain expansion has *Show on my character* on its **Boundary** tab, where
+it draws the realm's boundary instead.
 
 **Show on my character** (on by default) draws the open move's volume on your own character while the
 editor is open, anchored exactly where the engine anchors it (`Shared/HitboxEngine/HitboxAnchor`, the
@@ -282,7 +347,7 @@ the editor. Outside Studio the SOURCE section is absent and its remotes refuse `
 | Remotes, persistence, notes, bulk, history, source remotes | `Server/Systems/MoveEditorSystem.lua` |
 | DataStore records + legacy upgrade | `Server/Systems/Support/MoveRecordCodec.lua` |
 | Client driver | `Client/DevTools/MoveEditor/MoveEditorClient.lua` |
-| Screen | `Client/UI/Screens/DevTools/MoveEditor/` |
+| Screen | `Client/UI/Screens/DevTools/MoveEditor/` — `init.lua` (type bar, tab availability, lazy pages), `Fields.lua` (Section, Chips, Segmented, Lazy), `HitboxTab` / `DomainTab` (Realm, Boundary, Effects, Law, Clash) / `TimingTab` / `ImpactTab` / `PriceFields` (cost + knockback, shared by Impact and STRIKE PRICE) |
 
 **Adding a field** means: the type in `MoveTypes.MoveDefinition`, `Clone`, `ToWire`, `Validate` (with its
 bound in `Constants.MoveEditor.Limits`), the engine or damage projection if a runtime reads it, and a
@@ -297,7 +362,9 @@ Every one of these was authored, validated, persisted and shown in the old edito
 
 - **The twelve-shape vocabulary.** The engine runs seven; Disc, Wedge, Pyramid, Blade and Slice were
   approximated to a Cylinder or Box at swing time with a warning. The schema is now the engine's own
-  (`HitboxTypes`), so nothing is approximated. `Shared/HitboxShapes.lua` is gone.
+  (`HitboxTypes`), so nothing is approximated. `Shared/HitboxShapes.lua` is gone. *(The engine itself
+  grew to fifteen real shapes on 2026-10-01 — Wedge and Pyramid among them, now exact rather than
+  approximated: see "Melee moves" above.)*
 - **The multi-clip animation timeline** (`Shared/AnimationTimeline.lua`) — the rebuilt client plays one
   clip per move. A move keeps a single `AnimationId`.
 - **Projectile, Movement (lunge), ObjectStun (+ follow-up), Slam-on-move, ArcDegrees,
