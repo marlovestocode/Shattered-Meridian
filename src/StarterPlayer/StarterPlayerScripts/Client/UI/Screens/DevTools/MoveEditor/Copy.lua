@@ -76,7 +76,7 @@ local FAILURES: { [string]: Failure } = {
 		Tab = "Domain",
 	},
 	DomainEffectNeedsMove = {
-		Message = "A Strike, Volley or Owner cast effect needs a move id to deliver.",
+		Message = "A Volley or Owner cast effect needs a move id to deliver. (A Strike may leave it blank: that is the realm's own strike.)",
 		Tab = "Domain",
 	},
 	DomainRuleNeedsMove = {
@@ -270,7 +270,8 @@ Copy.Domain = {
 		ErodeRate = "Seconds of the loser's time this realm wears away per second of overlap (Erode).",
 		ContestScale = "How much of this realm's effects and rules survive a contest. 1 is all.",
 		Interacts = "Off: this realm ignores every other, and they ignore it.",
-		EffectMoveId = "The move this effect delivers -- its damage, knockback and hit cues are that move's.",
+		EffectMoveId = "The move this effect delivers -- its damage, knockback and hit cues are that move's. A Strike may leave it blank: it then hits for THIS move's own Damage, Posture damage, Power level and Knockback (Impact tab).",
+		EffectPower = "Multiplies the price of each hit this effect lands. 1 is the move's price; 2 hits twice as hard.",
 		Parryable = "Off: a parry reads as a held guard against this strike.",
 		Origin = "Where each strike comes from: above the target, the realm's centre, the owner, or a random point on a ring.",
 		TravelSeconds = "How long a strike takes to arrive -- the target's window to read it.",

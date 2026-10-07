@@ -7,11 +7,14 @@
 	stun, guard or movement logic in this file; there is only the choice of which existing entry point a
 	kind goes through, and the geometry of where a strike comes from.
 
-	    Strike     the referenced move, delivered to each target as ONE homing shot pinned to that body
+	    Strike     the referenced move -- or, naming none, the REALM'S OWN (the domain move itself: its
+	               Damage, PostureDamage, PowerLevel and Knockback, authored once and read by every
+	               unnamed Strike) -- delivered to each target as ONE homing shot pinned to that body
 	               (HitboxEngine.LaunchVolley, Exclusive). The engine reports the contact as the owner's;
 	               DefenseSystem decides block / parry / evade exactly as for any shot (Parryable picks
 	               CannotParry, and a parry DESTROYS the strike -- it never staggers an owner who may be on
-	               the far side of the realm); DamageSystem prices it as the referenced move, flat.
+	               the far side of the realm); DamageSystem prices it as that move, flat, times the
+	               effect's Power.
 	    Volley     the referenced PROJECTILE move's own volley, aimed at each target from the realm. Its own
 	               spread, piercing, bounces and parry answers apply; it can hit whoever it meets. A move
 	               with no Projectile block is delivered as a Strike instead (warned once).
@@ -75,6 +78,8 @@ export type Ports = {
 -- What one pulse is told about the realm it belongs to.
 export type Source = {
 	Id: string,
+	-- The move that opened the realm: the price of every Strike that names no move of its own.
+	MoveId: string,
 	Owner: Model,
 	Center: Vector3,
 	-- Seeded per realm so a Ring strike's bearing is varied but a spec's is reproducible.
@@ -234,14 +239,18 @@ function DomainEffects.Deliver(
 	end
 
 	if kind == "Strike" or kind == "Volley" then
-		local entry = ports.CatalogGet(effect.MoveId)
+		-- A Strike that names no move is the realm's own: priced by the move that opened it.
+		local moveId = if effect.MoveId == "" and kind == "Strike" then source.MoveId else effect.MoveId
+		local entry = ports.CatalogGet(moveId)
 		if entry == nil then
-			warnOnce(`missing:{effect.MoveId}`, "A realm effect names a move the catalogue cannot resolve; skipped", {
+			warnOnce(`missing:{moveId}`, "A realm effect names a move the catalogue cannot resolve; skipped", {
 				realm = source.Id,
-				moveId = effect.MoveId,
+				moveId = moveId,
 			})
 			return reached, 0
 		end
+		-- Power multiplies whatever the contest left of the price.
+		scale *= effect.Power
 		local asVolley = kind == "Volley" and entry.Definition.Projectile ~= nil
 		if kind == "Volley" and not asVolley then
 			warnOnce(`notProjectile:{effect.MoveId}`, "A realm Volley names a melee move; delivering it as a Strike", {

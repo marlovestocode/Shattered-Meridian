@@ -850,6 +850,7 @@ local function runEffects(instance: DomainInstance, now: number): ()
 		end
 		local source: DomainEffects.Source = {
 			Id = instance.Id,
+			MoveId = instance.MoveId,
 			Owner = instance.Owner,
 			Center = instance.Center,
 			Random = randoms[instance.Id] or Random.new(),

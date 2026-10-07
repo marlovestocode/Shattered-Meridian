@@ -23,13 +23,21 @@
 	it closes is the one MoveTypes.Clone's header describes: a hand-written copy that forgets a field.
 
 	Where a field's semantics are not obvious from its name:
+	  * Shape and the body's measurements (2026-10-01). A shot is a VOLUME, not only a point with a radius:
+	    Shape names one of HitboxTypes' shapes (Shapes, below -- the ones that make sense flying) and Size,
+	    Length, Width, Height, InnerRadius and AngleDegrees are the measurements it reads, exactly the
+	    fields HitboxTypes.FieldsFor lists for it (Size IS the Radius field). The body is oriented along
+	    its heading; a shape that grows from its origin (Cone, Pyramid, Wedge, Frustum) flies point first.
+	    Sphere is the default and reads only Size, so every record from before this existed still means
+	    what it meant. Shared/HitboxEngine/ProjectileBody.lua turns a spec into the geometry the simulator
+	    sweeps and the client draws.
 	  * Spread. Single fires ONE projectile whatever Count says (the count is kept, so switching back
 	    restores it). Fan spreads Count evenly across SpreadAngle in the aim's horizontal plane -- 5 at 30
 	    degrees fly at -15, -7.5, 0, 7.5, 15 -- and a 360 fan is a full ring with no doubled shot.
 	    Horizontal and Vertical are PARALLEL formations, a row or a column Spacing studs apart, none
 	    diverging. Radial is a ring around the aim axis, every shot SpreadAngle/2 off it (a hollow cone;
 	    180 is a flat disc). The aim's roll turns every pattern's plane (a Fan rolled 90 is vertical).
-	  * Size is the RADIUS of the sphere that flies, in studs.
+	  * Size is the RADIUS of a round shape, in studs -- the sphere that flies by default.
 	  * Gravity pulls down in studs/s^2 (negative floats up). Acceleration is along the heading; speed is
 	    clamped to [0, Limits.Speed.Max], so a decelerating shot stops and hangs until its lifetime ends.
 	  * Characters and world are separate questions. Piercing (+ MaxPierces) is what a CHARACTER does to
@@ -59,6 +67,19 @@ local Sanitize = require(ReplicatedStorage.Shared.Sanitize)
 local ProjectileTypes = {}
 
 export type SpreadPattern = "Single" | "Fan" | "Horizontal" | "Vertical" | "Radial"
+export type BodyShape =
+	"Sphere"
+	| "Capsule"
+	| "Ellipsoid"
+	| "Cylinder"
+	| "Box"
+	| "Cone"
+	| "Pyramid"
+	| "Wedge"
+	| "Frustum"
+	| "Crescent"
+	| "Cross"
+	| "Pillar"
 export type SpawnDirection = "Facing" | "Anchor" | "Target"
 export type CollisionBehavior = "Destroy" | "Bounce" | "Continue"
 export type TargetSelection = "Nearest" | "Aim"
@@ -74,7 +95,13 @@ export type ProjectileSpec = {
 	Speed: number,
 	LifetimeSeconds: number,
 	MaxRange: number,
+	Shape: BodyShape,
 	Size: number,
+	Length: number,
+	Width: number,
+	Height: number,
+	InnerRadius: number,
+	AngleDegrees: number,
 	SpawnDirection: SpawnDirection,
 	Gravity: number,
 	Acceleration: number,
@@ -121,6 +148,24 @@ export type ProjectileContact = {
 }
 
 -- Option lists, in the order the editor offers them.
+-- The shapes a shot may be: HitboxTypes' own, less the ones that make no sense flying (Beam and Arc are
+-- reaches from a body, Hemisphere is a dome sat on a face). Spelled out here rather than read from
+-- HitboxTypes because HitboxTypes requires this module; MoveTypes.spec pins every entry to a real
+-- ShapeKind.
+ProjectileTypes.Shapes = {
+	"Sphere",
+	"Capsule",
+	"Ellipsoid",
+	"Cylinder",
+	"Box",
+	"Cone",
+	"Pyramid",
+	"Wedge",
+	"Frustum",
+	"Crescent",
+	"Cross",
+	"Pillar",
+} :: { BodyShape }
 ProjectileTypes.SpreadPatterns = { "Single", "Fan", "Horizontal", "Vertical", "Radial" } :: { SpreadPattern }
 ProjectileTypes.SpawnDirections = { "Facing", "Anchor", "Target" } :: { SpawnDirection }
 ProjectileTypes.CollisionBehaviors = { "Destroy", "Bounce", "Continue" } :: { CollisionBehavior }
@@ -141,7 +186,12 @@ ProjectileTypes.Limits = {
 	Speed = { Min = 1, Max = 400 },
 	LifetimeSeconds = { Min = 0.1, Max = 10 },
 	MaxRange = { Min = 1, Max = 1000 },
-	Size = { Min = 0.1, Max = 16 },
+	Size = { Min = 0.1, Max = 24 },
+	Length = { Min = 0.2, Max = 60 },
+	Width = { Min = 0.2, Max = 40 },
+	Height = { Min = 0.2, Max = 40 },
+	InnerRadius = { Min = 0, Max = 24 },
+	AngleDegrees = { Min = 1, Max = 179 },
 	Gravity = { Min = -200, Max = 200 },
 	Acceleration = { Min = -400, Max = 400 },
 	MaxPierces = { Min = 1, Max = 64 },
@@ -172,7 +222,13 @@ ProjectileTypes.Fields = {
 	{ Name = "Speed", Kind = "Number", Default = 90 },
 	{ Name = "LifetimeSeconds", Kind = "Number", Default = 2 },
 	{ Name = "MaxRange", Kind = "Number", Default = 150 },
+	{ Name = "Shape", Kind = "Enum", Default = "Sphere", Options = ProjectileTypes.Shapes },
 	{ Name = "Size", Kind = "Number", Default = 1 },
+	{ Name = "Length", Kind = "Number", Default = 4 },
+	{ Name = "Width", Kind = "Number", Default = 2 },
+	{ Name = "Height", Kind = "Number", Default = 2 },
+	{ Name = "InnerRadius", Kind = "Number", Default = 0 },
+	{ Name = "AngleDegrees", Kind = "Number", Default = 60 },
 	{ Name = "SpawnDirection", Kind = "Enum", Default = "Facing", Options = ProjectileTypes.SpawnDirections },
 	{ Name = "Gravity", Kind = "Number", Default = 0 },
 	{ Name = "Acceleration", Kind = "Number", Default = 0 },
@@ -197,6 +253,114 @@ ProjectileTypes.Fields = {
 	{ Name = "ReflectedDamageMultiplier", Kind = "Number", Default = 1 },
 	{ Name = "ReflectedSpeedMultiplier", Kind = "Number", Default = 1 },
 } :: { Field }
+
+-- Starting points ------------------------------------------------------------------------------------------
+--
+-- A WEAPON, a spell or a wave by name. The editor's "Start from" menu writes Values onto the spec -- its
+-- shape and measurements and nothing else, so the flight, the volley and the parry answers an author has
+-- set are kept. Every value is inside Limits and names a field its shape reads (MoveTypes.spec pins both).
+export type Preset = {
+	Id: string,
+	Label: string,
+	Note: string,
+	Values: { [string]: any },
+}
+
+ProjectileTypes.Presets = {
+	{
+		Id = "Orb",
+		Label = "Orb -- a plain sphere",
+		Note = "The default. Round, so it is equally easy to hit from every side.",
+		Values = { Shape = "Sphere", Size = 1 },
+	},
+	{
+		Id = "Fireball",
+		Label = "Fireball -- a big sphere",
+		Note = "Slow and wide. A target has to leave the whole line, not just step aside.",
+		Values = { Shape = "Sphere", Size = 2.5 },
+	},
+	{
+		Id = "Arrow",
+		Label = "Arrow -- a thin shaft",
+		Note = "Narrow and fast; threads a gap a sphere would not.",
+		Values = { Shape = "Capsule", Size = 0.3, Length = 3.5 },
+	},
+	{
+		Id = "Spear",
+		Label = "Spear -- a long capsule",
+		Note = "Long as well as thin: it clips a target a body-length before the tip arrives.",
+		Values = { Shape = "Capsule", Size = 0.55, Length = 8 },
+	},
+	{
+		Id = "Kunai",
+		Label = "Kunai -- a pointed dart",
+		Note = "A small pyramid flying point first.",
+		Values = { Shape = "Pyramid", Width = 0.9, Height = 0.5, Length = 3 },
+	},
+	{
+		Id = "Shuriken",
+		Label = "Shuriken -- a flat cross",
+		Note = "Four short blades in one plane; small, flat and quick.",
+		Values = { Shape = "Cross", Width = 3.2, Length = 3.2, Height = 0.5, Size = 0.45 },
+	},
+	{
+		Id = "SwordWave",
+		Label = "Sword wave -- a crescent",
+		Note = "A cut thrown forward: wide across, thin front to back, bulging in the direction of travel.",
+		Values = { Shape = "Crescent", Size = 5, InnerRadius = 4.2, Length = 2, Height = 1.6 },
+	},
+	{
+		Id = "Cutter",
+		Label = "Cutter -- a flat disc",
+		Note = "A spinning saucer, wide and very thin.",
+		Values = { Shape = "Pillar", Size = 2.6, Height = 0.5 },
+	},
+	{
+		Id = "Boulder",
+		Label = "Boulder -- a squat ellipsoid",
+		Note = "Heavy and blunt; wider and taller than long.",
+		Values = { Shape = "Ellipsoid", Width = 5, Height = 4.5, Length = 5 },
+	},
+	{
+		Id = "Log",
+		Label = "Log -- a rolling cylinder",
+		Note = "A thick rod flying end first.",
+		Values = { Shape = "Cylinder", Size = 1.2, Length = 7 },
+	},
+	{
+		Id = "Wall",
+		Label = "Wall -- a slab",
+		Note = "A flat sheet that has to be jumped, not sidestepped.",
+		Values = { Shape = "Box", Width = 12, Height = 6, Length = 1.5 },
+	},
+	{
+		Id = "Drill",
+		Label = "Drill -- a cone",
+		Note = "A cone flying point first; narrow at the leading edge.",
+		Values = { Shape = "Cone", Length = 5, AngleDegrees = 40 },
+	},
+	{
+		Id = "Blade",
+		Label = "Blade -- a flat wedge",
+		Note = "A dagger-shaped slab: pointed ahead, widening behind, always the same height.",
+		Values = { Shape = "Wedge", Width = 3, Height = 0.8, Length = 5 },
+	},
+	{
+		Id = "Tide",
+		Label = "Tide -- a low wide bar",
+		Note = "A box wider than the player and no taller than their shins.",
+		Values = { Shape = "Box", Width = 16, Height = 2, Length = 3 },
+	},
+} :: { Preset }
+
+function ProjectileTypes.PresetById(id: string): Preset?
+	for _, preset in ProjectileTypes.Presets do
+		if preset.Id == id then
+			return preset
+		end
+	end
+	return nil
+end
 
 -- A fresh spec at every default -- what the editor seeds a newly projectile move with.
 function ProjectileTypes.Defaults(): ProjectileSpec

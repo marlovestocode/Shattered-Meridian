@@ -667,6 +667,25 @@ local function beginActiveWindow(combatant: Combatant, swing: Swing): ()
 		return
 	end
 
+	-- A VOLUMELESS swing (a realm's cast: Server/Combat/Domain) is a real swing -- its windup, Active window,
+	-- recovery, locks, feint and clip sync all run -- that samples nothing on the body. ActiveSwing stays nil
+	-- exactly as it does for a projectile's, so no volume is gathered, tested or drawn, and nothing in front
+	-- of the caster can be hit by the cast itself. The movement locks are the same.
+	if definition.Volumeless then
+		if definition.LocksMovement then
+			setMovementLock(combatant, true)
+		elseif definition.LocksWindup then
+			setMovementLock(combatant, false)
+		end
+		if debugEnabled() and HitboxEngineConstants.Debug.LogSwings then
+			logger:debug("Volumeless swing opened its Active window", {
+				attack = definition.DebugName,
+				attacker = combatant.Model.Name,
+			})
+		end
+		return
+	end
+
 	record.Swing = swing
 	record.Shape = definition.Shape
 	record.AttachmentPart = resolveAttachmentPart(combatant, definition.AttachmentPart)

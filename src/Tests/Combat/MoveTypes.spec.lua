@@ -2,6 +2,8 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local Constants = require(ReplicatedStorage.Shared.Constants)
+local DomainTypes = require(ReplicatedStorage.Shared.Domain.DomainTypes)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
@@ -49,10 +51,52 @@ end
 
 return function()
 	describe("MoveTypes vocabulary", function()
-		it("offers exactly the engine's seven shapes", function()
-			expect(#MoveTypes.Shapes).to.equal(7)
+		it("offers exactly the engine's shapes, once each", function()
+			expect(#MoveTypes.Shapes).to.equal(15)
+			local seen: { [string]: boolean } = {}
 			for _, shape in MoveTypes.Shapes do
 				expect(HitboxTypes.IsShapeKind(shape)).to.equal(true)
+				expect(seen[shape]).to.equal(nil)
+				seen[shape] = true
+			end
+		end)
+
+		it("accepts every shape the editor offers through the server's own gate", function()
+			for _, shape in MoveTypes.Shapes do
+				local validated, reason = MoveRegistryManager.Validate(wire({ Shape = shape }))
+				expect(reason).to.equal(nil)
+				expect((validated :: MoveTypes.MoveDefinition).Shape).to.equal(shape)
+			end
+		end)
+
+		it("keeps every shape preset inside the editor's authoring limits and the shape's own fields", function()
+			expect(#HitboxTypes.Presets > 0).to.equal(true)
+			local ids: { [string]: boolean } = {}
+			for _, preset in HitboxTypes.Presets do
+				expect(ids[preset.Id]).to.equal(nil)
+				ids[preset.Id] = true
+				expect(HitboxTypes.IsShapeKind(preset.Shape)).to.equal(true)
+				local fields = HitboxTypes.FieldsFor(preset.Shape)
+				for field, value in preset.Dimensions do
+					local range = Constants.MoveEditor.Limits.Dimensions[field]
+					expect(range).to.be.ok()
+					expect(value >= range.Min and value <= range.Max).to.equal(true)
+					-- A preset sets what its shape reads and nothing else.
+					expect(table.find(fields, field) ~= nil).to.equal(true)
+				end
+				local z = Constants.MoveEditor.Limits.OffsetStuds
+				expect(preset.OffsetZ >= z.Min and preset.OffsetZ <= z.Max).to.equal(true)
+				expect(HitboxTypes.PresetById(preset.Id)).to.equal(preset)
+			end
+			expect(HitboxTypes.PresetById("nope")).to.equal(nil)
+		end)
+
+		it("keeps a preset's InnerRadius at or below its Radius", function()
+			for _, preset in HitboxTypes.Presets do
+				local inner, radius = preset.Dimensions.InnerRadius, preset.Dimensions.Radius
+				if inner ~= nil and radius ~= nil then
+					expect(inner <= radius).to.equal(true)
+				end
 			end
 		end)
 
@@ -250,6 +294,17 @@ return function()
 			local definition = MoveTypes.ToEngineAttackDefinition(move({ Shape = "Arc" }))
 			local _, problems = HitboxTypes.SanitizeDefinition(definition)
 			expect(#problems).to.equal(0)
+		end)
+
+		it("casts a realm move volumeless and every other move with its volume", function()
+			local plain = MoveTypes.ToEngineAttackDefinition(move())
+			expect(plain.Volumeless).to.equal(false)
+			local realm = MoveTypes.ToEngineAttackDefinition(move({ Domain = DomainTypes.Defaults() }))
+			expect(realm.Volumeless).to.equal(true)
+			-- The swing around it is untouched: the same timing, the same locks.
+			expect(realm.WindupSeconds).to.equal(plain.WindupSeconds)
+			expect(realm.ActiveSeconds).to.equal(plain.ActiveSeconds)
+			expect(realm.RecoverySeconds).to.equal(plain.RecoverySeconds)
 		end)
 
 		it("sizes a weapon-anchored swing off the blade", function()

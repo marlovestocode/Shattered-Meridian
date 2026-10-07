@@ -103,7 +103,13 @@ local function strikeEffect(overrides: { [string]: any }?): DomainTypes.Effect
 end
 
 local function source(owner: Dummy, id: string?): DomainEffects.Source
-	return { Id = id or "D-spec", Owner = owner.Model, Center = owner.Root.Position, Random = Random.new(1) }
+	return {
+		Id = id or "D-spec",
+		MoveId = MOVE_ID,
+		Owner = owner.Model,
+		Center = owner.Root.Position,
+		Random = Random.new(1),
+	}
 end
 
 local function authoredDamage(): number
@@ -176,6 +182,54 @@ return function()
 			DomainEffects.Deliver(strikeEffect(), source(owner), { target.Model }, clock, 0.5, realPorts())
 			run(clock, 1)
 			expect(target.Humanoid.Health).to.be.near(before - authoredDamage() * 0.5, 1e-3)
+		end)
+	end)
+
+	describe("A realm's OWN strike (a Strike that names no move)", function()
+		it("is priced by the move that opened the realm", function()
+			local owner = makeDummy("Owner", Vector3.new(0, 5, 0))
+			local target = makeDummy("Target", Vector3.new(0, 5, -15))
+			local before = target.Humanoid.Health
+			local clock = os.clock()
+			local reached = DomainEffects.Deliver(
+				strikeEffect({ MoveId = "" }),
+				source(owner),
+				{ target.Model },
+				clock,
+				1,
+				realPorts()
+			)
+			expect(#reached).to.equal(1)
+			run(clock, 1)
+			-- The source's own move (the fixture's, here) is what priced it.
+			expect(target.Humanoid.Health).to.be.near(before - authoredDamage(), 1e-3)
+		end)
+
+		it("multiplies that price by the effect's Power, and by a contest's scale on top", function()
+			local owner = makeDummy("Owner", Vector3.new(0, 5, 0))
+			local target = makeDummy("Target", Vector3.new(0, 5, -15))
+			local before = target.Humanoid.Health
+			local clock = os.clock()
+			DomainEffects.Deliver(
+				strikeEffect({ MoveId = "", Power = 2 }),
+				source(owner),
+				{ target.Model },
+				clock,
+				0.5,
+				realPorts()
+			)
+			run(clock, 1)
+			expect(target.Humanoid.Health).to.be.near(before - authoredDamage() * 2 * 0.5, 1e-3)
+		end)
+
+		it("is skipped, not thrown, when the realm's own move cannot be resolved", function()
+			local owner = makeDummy("Owner", Vector3.new(0, 5, 0))
+			local target = makeDummy("Target", Vector3.new(0, 5, -15))
+			local lost = source(owner)
+			lost.MoveId = "no-such-move"
+			local reached =
+				DomainEffects.Deliver(strikeEffect({ MoveId = "" }), lost, { target.Model }, os.clock(), 1, realPorts())
+			expect(#reached).to.equal(0)
 		end)
 	end)
 

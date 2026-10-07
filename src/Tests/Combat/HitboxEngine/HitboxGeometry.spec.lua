@@ -175,6 +175,163 @@ return function()
 		end)
 	end)
 
+	describe("HitboxGeometry.ContainsPoint -- the engine's second tier of shapes", function()
+		local function inside(shape: string, d: Dimensions, x: number, y: number, z: number, margin: number?): boolean
+			return HitboxGeometry.ContainsPoint(shape :: any, d, Vector3.new(x, y, z), margin or 0)
+		end
+
+		it("Ellipsoid is round in each axis at its own semi-axis, and rejects the corners a Box would hold", function()
+			local ellipsoid = dims({ Width = 4, Height = 6, Length = 10 })
+			expect(inside("Ellipsoid", ellipsoid, 0, 0, -4.9)).to.equal(true)
+			expect(inside("Ellipsoid", ellipsoid, 1.9, 0, 0)).to.equal(true)
+			expect(inside("Ellipsoid", ellipsoid, 0, 2.9, 0)).to.equal(true)
+			expect(inside("Ellipsoid", ellipsoid, 0, 0, -5.1)).to.equal(false)
+			-- The corner of its own bounding box is well outside it.
+			expect(inside("Ellipsoid", ellipsoid, 1.9, 2.9, 4.9)).to.equal(false)
+		end)
+
+		it("Ellipsoid survives a zero axis without dividing by it", function()
+			local flat = dims({ Width = 0, Height = 4, Length = 4 })
+			expect(inside("Ellipsoid", flat, 0, 0, 0)).to.equal(true)
+			expect(inside("Ellipsoid", flat, 1, 0, 0)).to.equal(false)
+		end)
+
+		it("Hemisphere is a dome: nothing behind its flat face, round in front of it", function()
+			local dome = dims({ Radius = 6 })
+			expect(inside("Hemisphere", dome, 0, 0, -5.9)).to.equal(true)
+			expect(inside("Hemisphere", dome, 3, 3, -3)).to.equal(true)
+			expect(inside("Hemisphere", dome, 0, 0, 0.5)).to.equal(false)
+			expect(inside("Hemisphere", dome, 0, 0, -6.1)).to.equal(false)
+			expect(inside("Hemisphere", dome, 5, 0, -5)).to.equal(false)
+		end)
+
+		it("Frustum is wide at its origin and widens (or narrows) to its far radius", function()
+			local funnel = dims({ Radius = 6, InnerRadius = 2, Length = 10 })
+			-- At the origin it is already InnerRadius wide...
+			expect(inside("Frustum", funnel, 1.9, 0, -0.1)).to.equal(true)
+			expect(inside("Frustum", funnel, 2.5, 0, -0.1)).to.equal(false)
+			-- ...and Radius wide at Length.
+			expect(inside("Frustum", funnel, 5.9, 0, -9.9)).to.equal(true)
+			expect(inside("Frustum", funnel, 6.5, 0, -9.9)).to.equal(false)
+			-- Halfway it is halfway between the two.
+			expect(inside("Frustum", funnel, 3.9, 0, -5)).to.equal(true)
+			expect(inside("Frustum", funnel, 4.2, 0, -5)).to.equal(false)
+			expect(inside("Frustum", funnel, 0, 0, 1)).to.equal(false)
+		end)
+
+		it("Pyramid closes in on BOTH axes toward its apex; Wedge only sideways", function()
+			local box = dims({ Width = 8, Height = 8, Length = 10 })
+			-- Halfway along, each half-extent is half of the far face's.
+			expect(inside("Pyramid", box, 1.9, 1.9, -5)).to.equal(true)
+			expect(inside("Pyramid", box, 2.2, 0, -5)).to.equal(false)
+			expect(inside("Pyramid", box, 0, 2.2, -5)).to.equal(false)
+			expect(inside("Wedge", box, 2.2, 0, -5)).to.equal(false)
+			-- A Wedge keeps its whole height all the way back to the apex edge; a Pyramid does not.
+			expect(inside("Wedge", box, 0, 3.9, -1)).to.equal(true)
+			expect(inside("Pyramid", box, 0, 3.9, -1)).to.equal(false)
+			-- Both grow forward only.
+			expect(inside("Pyramid", box, 0, 0, 1)).to.equal(false)
+			expect(inside("Wedge", box, 0, 0, 1)).to.equal(false)
+			expect(inside("Wedge", box, 3.9, 0, -9.9)).to.equal(true)
+			expect(inside("Wedge", box, 0, 0, -10.5)).to.equal(false)
+		end)
+
+		it("Pillar stands upright: round in the ground plane, tall in Y", function()
+			local pillar = dims({ Radius = 3, Height = 10 })
+			expect(inside("Pillar", pillar, 2.9, 4.9, 0)).to.equal(true)
+			expect(inside("Pillar", pillar, 0, 5.1, 0)).to.equal(false)
+			expect(inside("Pillar", pillar, 2.2, 0, 2.2)).to.equal(false)
+			-- Unlike a Cylinder it does not lie along the facing.
+			expect(inside("Pillar", pillar, 0, 0, -6)).to.equal(false)
+		end)
+
+		it("Crescent is the outer disc minus a bite taken from behind -- thick ahead, hollow behind", function()
+			local sickle = dims({ Radius = 8, InnerRadius = 7, Length = 3, Height = 4 })
+			-- Dead ahead the rim is at -8 and the bite starts at 3 - 7 = -4: a thick front.
+			expect(inside("Crescent", sickle, 0, 0, -6)).to.equal(true)
+			-- Inside the bite.
+			expect(inside("Crescent", sickle, 0, 0, 0)).to.equal(false)
+			expect(inside("Crescent", sickle, 0, 0, 2)).to.equal(false)
+			-- Past the outer rim.
+			expect(inside("Crescent", sickle, 0, 0, -8.5)).to.equal(false)
+			-- A horn trails back past the origin on the outer edge.
+			expect(inside("Crescent", sickle, 7.5, 0, 1)).to.equal(true)
+			expect(inside("Crescent", sickle, 0, 2.5, -6)).to.equal(false)
+		end)
+
+		it("a Crescent with no bite is a plain disc", function()
+			local disc = dims({ Radius = 4, InnerRadius = 0, Length = 3, Height = 2 })
+			expect(inside("Crescent", disc, 0, 0, 0)).to.equal(true)
+			expect(inside("Crescent", disc, 3.9, 0, 0)).to.equal(true)
+		end)
+
+		it("Cross is two bars through the origin and leaves its corners empty", function()
+			local cross = dims({ Width = 12, Length = 8, Height = 4, Radius = 1 })
+			expect(inside("Cross", cross, 5.9, 0, 0.9)).to.equal(true)
+			expect(inside("Cross", cross, 0.9, 0, 3.9)).to.equal(true)
+			expect(inside("Cross", cross, 5, 0, 3)).to.equal(false)
+			expect(inside("Cross", cross, 6.5, 0, 0)).to.equal(false)
+			expect(inside("Cross", cross, 0, 2.5, 0)).to.equal(false)
+		end)
+
+		it("every new shape honours the margin by growing, never by shrinking", function()
+			local d = dims({ Width = 4, Height = 4, Length = 4, Radius = 2, InnerRadius = 1, AngleDegrees = 90 })
+			for _, shape in { "Ellipsoid", "Hemisphere", "Frustum", "Pyramid", "Wedge", "Crescent", "Cross", "Pillar" } do
+				-- Whatever is inside at margin 0 is still inside at a positive one.
+				for _, point in { Vector3.new(0, 0, -1), Vector3.new(0.5, 0.2, -1.5), Vector3.new(1, 0, -0.5) } do
+					if HitboxGeometry.ContainsPoint(shape :: any, d, point, 0) then
+						expect(HitboxGeometry.ContainsPoint(shape :: any, d, point, 0.75)).to.equal(true)
+					end
+				end
+			end
+		end)
+	end)
+
+	describe("HitboxGeometry -- every shape's bounding box actually bounds it", function()
+		it("holds every contained sample point inside BoundingBox, for every shape", function()
+			local d = dims({ Width = 6, Height = 5, Length = 9, Radius = 3, InnerRadius = 1, AngleDegrees = 100 })
+			for _, shape in HitboxTypes.ShapeOrder do
+				local size, centre = HitboxGeometry.BoundingBox(shape, d)
+				local half = size / 2 + Vector3.one * 1e-3
+				for x = -10, 10, 1 do
+					for y = -10, 10, 1 do
+						for z = -14, 14, 1 do
+							local point = Vector3.new(x * 0.5, y * 0.5, z * 0.5)
+							if HitboxGeometry.ContainsPoint(shape, d, point, 0) then
+								local inBox = centre:PointToObjectSpace(point)
+								expect(
+									math.abs(inBox.X) <= half.X
+										and math.abs(inBox.Y) <= half.Y
+										and math.abs(inBox.Z) <= half.Z
+								).to.equal(true)
+							end
+						end
+					end
+				end
+			end
+		end)
+
+		it("reports a reach no smaller than the furthest contained point forward", function()
+			local d = dims({ Width = 6, Height = 5, Length = 9, Radius = 3, InnerRadius = 1, AngleDegrees = 100 })
+			for _, shape in HitboxTypes.ShapeOrder do
+				local reach = HitboxGeometry.Reach(shape, d)
+				for z = 1, 40 do
+					local forward = z * 0.5
+					if HitboxGeometry.ContainsPoint(shape, d, Vector3.new(0, 0, -forward), 0) then
+						expect(forward <= reach + 1e-6).to.equal(true)
+					end
+				end
+			end
+		end)
+
+		it("gives every shape a positive MinExtent", function()
+			local d = dims({ Width = 6, Height = 5, Length = 9, Radius = 3, InnerRadius = 1, AngleDegrees = 100 })
+			for _, shape in HitboxTypes.ShapeOrder do
+				expect(HitboxGeometry.MinExtent(shape, d) > 0).to.equal(true)
+			end
+		end)
+	end)
+
 	describe("HitboxGeometry.BoundingBox", function()
 		it("returns a centred box for centred shapes", function()
 			local size, centre = HitboxGeometry.BoundingBox("Box", dims({ Width = 4, Height = 6, Length = 8 }))

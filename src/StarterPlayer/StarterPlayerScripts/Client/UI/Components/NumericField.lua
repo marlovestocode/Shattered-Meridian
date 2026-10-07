@@ -72,6 +72,21 @@
 	with nothing keeping the four in agreement. The default belongs in the Hint sentence instead
 	("... Default 0.20s"), where it costs no state and cannot drift silently.
 
+	COMPACT (2026-10-01, `Compact = true`) is the same four routes in half the height, for a form that
+	stacks forty of these. One line carries the label, its unit and the value (which is still the click-to-
+	type readout); one line carries the step buttons and a slider that takes every pixel they leave:
+
+	    Spread angle                                          degrees   30
+	    [-30][-5] ━━━━━━━━━━━━━●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ [+5][+30]
+
+	Beyond the saving in height, the bar is a real slider rather than a 6px strip: its hit area is the full
+	row (a track you could not miss), its handle grows while it is held, and it takes the gamepad -- a
+	selected slider moves by its finest step on DPad left/right, the same nudge the wheel gives a mouse.
+	Every value it commits is SNAPPED to the field's own Decimals, so what the readout says is what is
+	stored (a drag across a 400-wide range otherwise stores 37.2314 under a readout of 37). The default
+	layout is untouched, and does not snap: its other callers (the flight tuner, the Dev Menu) keep
+	exactly what they had.
+
 	The stepper+readout Row sits on Tokens.Wash.Inset -- that token's own comment already names "a
 	stepper button's face" as one of its intended uses, so this is that use, not a new one -- with a
 	thin Border.Standard outline, reading as one contained field control instead of three buttons and
@@ -85,6 +100,8 @@ local Tokens = require(script.Parent.Parent.Tokens)
 local Label = require(script.Parent.Label)
 local Button = require(script.Parent.Button)
 local Inset = require(script.Parent.Inset)
+local Selection = require(script.Parent.Selection)
+local Stack = require(script.Parent.Stack)
 
 local Children = Fusion.Children
 local OnEvent = Fusion.OnEvent
@@ -136,7 +153,21 @@ export type NumericFieldProps = {
 	-- top-aligned, so one hinted field beside an unhinted one leaves the short cell's control
 	-- floating against a taller neighbour.
 	Hint: string?,
+	-- The two-line layout described in the header, with snapped values. Off by default.
+	Compact: boolean?,
 }
+
+-- COMPACT layout metrics.
+local COMPACT_ROW_HEIGHT = 22
+local COMPACT_CONTROL_HEIGHT = 24
+local COMPACT_VALUE_WIDTH = 76
+local COMPACT_STEP_WIDTH = 42
+local COMPACT_RAIL_HEIGHT = 4
+local COMPACT_HANDLE_SIZE = 14
+local COMPACT_HANDLE_HOT_SIZE = 18
+-- How far the rail is inset from each end of the track's hit area, so the handle at either extreme is
+-- still wholly inside it.
+local COMPACT_TRACK_INSET = COMPACT_HANDLE_HOT_SIZE / 2
 
 -- Narrower than this file's original 44 -- a full NumericField (up to 4 step buttons + a value
 -- readout) needs to fit inside a half-width cell of a form pane (the Move Editor's Fields.Pair), and
@@ -175,6 +206,7 @@ local NumericFieldModule = {}
 function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 	local decimals = props.Decimals or 2
 	local range = math.max(props.Max - props.Min, 1e-6)
+	local compact = props.Compact == true
 
 	-- The single funnel every one of the three input routes writes through -- see file header.
 	local function commit(candidate: number): ()
@@ -183,7 +215,13 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 			-- than clamped: math.clamp would pass it straight through and hand the caller a NaN.
 			return
 		end
-		props.OnChanged(math.clamp(candidate, props.Min, props.Max))
+		local value = math.clamp(candidate, props.Min, props.Max)
+		if compact then
+			-- Snapped to what the readout shows. Through the formatter, not floor(x / q) * q, which hands
+			-- back 0.30000000000000004 for a 0.3.
+			value = math.clamp(tonumber(formatValue(value, decimals)) or value, props.Min, props.Max)
+		end
+		props.OnChanged(value)
 	end
 
 	-- Read at the moment of the press/scroll rather than tracked as state -- the input event already
@@ -263,16 +301,20 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 		-- number, which the reverted display already invites.
 	end
 
+	local valueFont = if compact then Tokens.Type.Numeral else Tokens.Type.NumeralLarge
+	local valueSize = if compact
+		then UDim2.fromOffset(COMPACT_VALUE_WIDTH, COMPACT_ROW_HEIGHT)
+		else UDim2.fromOffset(VALUE_WIDTH, Tokens.Control.StepButtonSize)
 	local valueReadout = scope:New "TextButton" {
 		Name = "Value",
-		Size = UDim2.fromOffset(VALUE_WIDTH, Tokens.Control.StepButtonSize),
+		Size = valueSize,
 		BackgroundTransparency = 1,
 		AutoButtonColor = false,
 		Text = valueText,
-		FontFace = Tokens.Type.NumeralLarge.Face,
-		TextSize = Tokens.Type.NumeralLarge.Size,
+		FontFace = valueFont.Face,
+		TextSize = valueFont.Size,
 		TextColor3 = Tokens.Color.AccentPrimaryBright,
-		TextXAlignment = Enum.TextXAlignment.Center,
+		TextXAlignment = if compact then Enum.TextXAlignment.Right else Enum.TextXAlignment.Center,
 		LayoutOrder = 0, -- overwritten below, once the step count is known
 		Visible = scope:Computed(function(use)
 			return not use(isEditing)
@@ -283,12 +325,12 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 
 	local valueInput = scope:New "TextBox" {
 		Name = "ValueInput",
-		Size = UDim2.fromOffset(VALUE_WIDTH, Tokens.Control.StepButtonSize),
+		Size = valueSize,
 		BackgroundColor3 = Tokens.Color.Surface,
 		BorderSizePixel = 0,
 		Text = editText,
-		FontFace = Tokens.Type.NumeralLarge.Face,
-		TextSize = Tokens.Type.NumeralLarge.Size,
+		FontFace = valueFont.Face,
+		TextSize = valueFont.Size,
 		TextColor3 = Tokens.Color.TextPrimary,
 		TextXAlignment = Enum.TextXAlignment.Center,
 		-- Typing replaces rather than appends: an author clicking a number to change it almost never
@@ -376,6 +418,37 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 
 	local function stepButton(delta: number, order: number): TextButton
 		local sign = if delta < 0 then "-" else "+"
+		if compact then
+			-- A bare TextButton rather than Components/Button: forty of these rows carry four each, and
+			-- Button's full hover/press/variant machinery is a lot of instances to sit idle. It still shows
+			-- the pointer-or-gamepad engagement Selection exists for.
+			local engagement = Selection.New(scope)
+			return scope:New "TextButton" {
+				Name = if delta < 0 then "StepDown" else "StepUp",
+				Size = UDim2.fromOffset(COMPACT_STEP_WIDTH, COMPACT_CONTROL_HEIGHT),
+				LayoutOrder = order,
+				AutoButtonColor = false,
+				BorderSizePixel = 0,
+				BackgroundColor3 = Tokens.Color.AccentPrimary,
+				BackgroundTransparency = scope:Computed(function(use)
+					return if use(engagement.Active) then 0.72 else 0.92
+				end),
+				Text = sign .. formatValue(math.abs(delta), decimals),
+				FontFace = Tokens.Type.NumeralSmall.Face,
+				TextSize = Tokens.Type.NumeralSmall.Size,
+				TextColor3 = Tokens.Color.TextPrimary,
+
+				[OnEvent "SelectionGained"] = engagement.OnSelectionGained,
+				[OnEvent "SelectionLost"] = engagement.OnSelectionLost,
+				[OnEvent "MouseEnter"] = engagement.OnPointerEnter,
+				[OnEvent "MouseLeave"] = engagement.OnPointerLeave,
+				[OnEvent "Activated"] = function()
+					commit(peek(props.Value) + delta * modifierScale())
+				end,
+
+				[Children] = scope:New "UICorner" { CornerRadius = Tokens.Radius.Hairline },
+			} :: TextButton
+		end
 		return Button(scope, {
 			Text = sign .. formatValue(math.abs(delta), decimals),
 			Size = UDim2.fromOffset(STEP_BUTTON_WIDTH, Tokens.Control.StepButtonSize),
@@ -386,40 +459,45 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 		})
 	end
 
-	local rowChildren: { Instance } = {
-		scope:New "UIListLayout" {
-			FillDirection = Enum.FillDirection.Horizontal,
-			VerticalAlignment = Enum.VerticalAlignment.Center,
-			Padding = UDim.new(0, Tokens.Space.XS),
-			SortOrder = Enum.SortOrder.LayoutOrder,
-		},
-	}
-
-	-- Largest magnitude outermost -- see file header. Steps sorted descending for the left side...
+	-- Largest magnitude outermost -- see file header. Steps sorted descending for the left side, ascending
+	-- for the right, so the smallest magnitude sits nearest the readout on both sides.
 	local descendingSteps = table.clone(props.Steps)
 	table.sort(descendingSteps, function(a, b)
 		return a > b
 	end)
-	for order, magnitude in ipairs(descendingSteps) do
-		table.insert(rowChildren, stepButton(-magnitude, order))
-	end
-
-	-- Both presentations of the readout occupy the SAME layout slot -- only one is ever Visible, and
-	-- a hidden child still holds its place in a UIListLayout unless it is also zero-sized, so giving
-	-- them one shared LayoutOrder is what keeps the row from reflowing when edit mode toggles.
-	valueReadout.LayoutOrder = #descendingSteps + 1
-	valueInput.LayoutOrder = #descendingSteps + 1
-	table.insert(rowChildren, valueReadout)
-	table.insert(rowChildren, valueInput)
-
-	-- ...ascending for the right side, so the smallest magnitude sits nearest the readout on both
-	-- sides.
 	local ascendingSteps = table.clone(props.Steps)
 	table.sort(ascendingSteps, function(a, b)
 		return a < b
 	end)
-	for order, magnitude in ipairs(ascendingSteps) do
-		table.insert(rowChildren, stepButton(magnitude, #descendingSteps + 2 + order))
+
+	-- The stacked layout's one-row cluster. A compact field arranges the same pieces itself (below), so it
+	-- builds none of this: the step buttons would otherwise exist twice.
+	local rowChildren: { Instance } = {}
+	if not compact then
+		table.insert(
+			rowChildren,
+			scope:New "UIListLayout" {
+				FillDirection = Enum.FillDirection.Horizontal,
+				VerticalAlignment = Enum.VerticalAlignment.Center,
+				Padding = UDim.new(0, Tokens.Space.XS),
+				SortOrder = Enum.SortOrder.LayoutOrder,
+			}
+		)
+		for order, magnitude in ipairs(descendingSteps) do
+			table.insert(rowChildren, stepButton(-magnitude, order))
+		end
+
+		-- Both presentations of the readout occupy the SAME layout slot -- only one is ever Visible, and
+		-- a hidden child still holds its place in a UIListLayout unless it is also zero-sized, so giving
+		-- them one shared LayoutOrder is what keeps the row from reflowing when edit mode toggles.
+		valueReadout.LayoutOrder = #descendingSteps + 1
+		valueInput.LayoutOrder = #descendingSteps + 1
+		table.insert(rowChildren, valueReadout)
+		table.insert(rowChildren, valueInput)
+
+		for order, magnitude in ipairs(ascendingSteps) do
+			table.insert(rowChildren, stepButton(magnitude, #descendingSteps + 2 + order))
+		end
 	end
 
 	--
@@ -460,7 +538,9 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 		if not trackFrame then
 			return nil
 		end
-		local width = trackFrame.AbsoluteSize.X
+		-- The rail's own span: the whole track, less the inset a compact track keeps clear for its handle.
+		local inset = if compact then COMPACT_TRACK_INSET else 0
+		local width = trackFrame.AbsoluteSize.X - inset * 2
 		if width <= 0 then
 			return nil
 		end
@@ -472,7 +552,7 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 			local delta = (pointerX - anchor.PointerX) / width * range / FINE_SCRUB_FACTOR
 			return math.clamp(anchor.Value + delta, props.Min, props.Max)
 		end
-		local alpha = math.clamp((pointerX - trackFrame.AbsolutePosition.X) / width, 0, 1)
+		local alpha = math.clamp((pointerX - trackFrame.AbsolutePosition.X - inset) / width, 0, 1)
 		return props.Min + range * alpha
 	end
 
@@ -552,7 +632,116 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 		)
 	end
 
-	if sliderEnabled then
+	-- The compact slider: a full-height hit area (nothing to miss), a thin rail and a handle that grows
+	-- while the pointer or the pad is on it. Gamepad: while selected, DPad left/right nudges by the
+	-- finest step -- the connection lives only as long as the selection.
+	local function buildCompactTrack(): Frame
+		local engagement = Selection.New(scope)
+		local hot = scope:Computed(function(use): boolean
+			return use(engagement.Active) or use(scrubValue) ~= nil
+		end)
+
+		local padConnection: RBXScriptConnection? = nil
+		local function disconnectPad(): ()
+			if padConnection then
+				padConnection:Disconnect()
+				padConnection = nil
+			end
+		end
+		table.insert(scope, disconnectPad)
+		scope:Observer(engagement.Selected):onChange(function()
+			disconnectPad()
+			if not peek(engagement.Selected) then
+				return
+			end
+			padConnection = UserInputService.InputBegan:Connect(function(input: InputObject)
+				local direction = if input.KeyCode == Enum.KeyCode.DPadLeft
+					then -1
+					elseif input.KeyCode == Enum.KeyCode.DPadRight then 1
+					else 0
+				if direction ~= 0 then
+					commit(peek(props.Value) + (nudgeStep or range / 100) * direction)
+				end
+			end)
+		end)
+
+		return scope:New "Frame" {
+			Name = "SliderTrack",
+			Size = UDim2.fromOffset(0, COMPACT_CONTROL_HEIGHT),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			LayoutOrder = 100,
+			-- Without this the click falls through to whatever is behind the panel.
+			Active = true,
+			Selectable = true,
+
+			[OnEvent "SelectionGained"] = engagement.OnSelectionGained,
+			[OnEvent "SelectionLost"] = engagement.OnSelectionLost,
+			[OnEvent "MouseEnter"] = engagement.OnPointerEnter,
+			[OnEvent "MouseLeave"] = engagement.OnPointerLeave,
+			[OnEvent "InputBegan"] = function(input: InputObject)
+				if
+					input.UserInputType == Enum.UserInputType.MouseButton1
+					or input.UserInputType == Enum.UserInputType.Touch
+				then
+					beginScrub(input.Position.X)
+				end
+			end,
+
+			[Children] = {
+				scope:New "UIPadding" {
+					PaddingLeft = UDim.new(0, COMPACT_TRACK_INSET),
+					PaddingRight = UDim.new(0, COMPACT_TRACK_INSET),
+				},
+				scope:New "Frame" {
+					Name = "Rail",
+					AnchorPoint = Vector2.new(0, 0.5),
+					Position = UDim2.fromScale(0, 0.5),
+					Size = UDim2.new(1, 0, 0, COMPACT_RAIL_HEIGHT),
+					BackgroundColor3 = Tokens.Wash.TrackBase.Color,
+					BackgroundTransparency = Tokens.Wash.TrackBase.Transparency,
+					BorderSizePixel = 0,
+
+					[Children] = scope:New "UICorner" { CornerRadius = Tokens.Radius.Hairline },
+				},
+				scope:New "Frame" {
+					Name = "Fill",
+					AnchorPoint = Vector2.new(0, 0.5),
+					Position = UDim2.fromScale(0, 0.5),
+					Size = scope:Computed(function(use)
+						return UDim2.new(use(fillScale), 0, 0, COMPACT_RAIL_HEIGHT)
+					end),
+					BackgroundColor3 = Tokens.Color.AccentPrimary,
+					BorderSizePixel = 0,
+
+					[Children] = scope:New "UICorner" { CornerRadius = Tokens.Radius.Hairline },
+				},
+				scope:New "Frame" {
+					Name = "Handle",
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					Position = scope:Computed(function(use)
+						return UDim2.fromScale(use(fillScale), 0.5)
+					end),
+					Size = scope:Computed(function(use)
+						local diameter = if use(hot) then COMPACT_HANDLE_HOT_SIZE else COMPACT_HANDLE_SIZE
+						return UDim2.fromOffset(diameter, diameter)
+					end),
+					BackgroundColor3 = scope:Computed(function(use)
+						return if use(hot) then Tokens.Color.AccentPrimaryBright else Tokens.Color.AccentPrimary
+					end),
+					BorderSizePixel = 0,
+					-- Purely a position readout: the track takes every pointer event.
+					Active = false,
+
+					[Children] = scope:New "UICorner" { CornerRadius = UDim.new(1, 0) },
+				},
+			},
+		} :: Frame
+	end
+
+	if sliderEnabled and compact then
+		track = buildCompactTrack()
+	elseif sliderEnabled then
 		track = scope:New "Frame" {
 			Name = "SliderTrack",
 			Size = UDim2.new(1, 0, 0, TRACK_HEIGHT),
@@ -617,6 +806,113 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 			Size = UDim2.fromScale(1, 0),
 			LayoutOrder = 4,
 		})
+	end
+
+	if compact then
+		-- The two lines (see the header): [label ... unit value] over [steps  slider  steps]. The readout and
+		-- its text box share one slot, as in the stacked layout, so entering edit mode never reflows.
+		local controls: { Instance } = {
+			scope:New "UIListLayout" {
+				FillDirection = Enum.FillDirection.Horizontal,
+				VerticalAlignment = Enum.VerticalAlignment.Center,
+				Padding = UDim.new(0, Tokens.Space.XS),
+				SortOrder = Enum.SortOrder.LayoutOrder,
+			},
+		}
+		for order, magnitude in ipairs(descendingSteps) do
+			table.insert(controls, stepButton(-magnitude, order))
+		end
+		if track then
+			table.insert(controls, Stack.Fill(scope, track))
+		end
+		for order, magnitude in ipairs(ascendingSteps) do
+			table.insert(controls, stepButton(magnitude, 200 + order))
+		end
+		-- The wheel nudges from anywhere on the control row, as it does on the stacked row.
+		local controlRow = scope:New "Frame" {
+			Name = "Controls",
+			Size = UDim2.new(1, 0, 0, COMPACT_CONTROL_HEIGHT),
+			BackgroundTransparency = 1,
+			LayoutOrder = 2,
+			Active = true,
+
+			[OnEvent "InputChanged"] = function(input: InputObject)
+				local magnitude = nudgeStep
+				if input.UserInputType ~= Enum.UserInputType.MouseWheel or magnitude == nil then
+					return
+				end
+				commit(peek(props.Value) + magnitude * math.sign(input.Position.Z) * modifierScale())
+			end,
+
+			[Children] = controls,
+		} :: Frame
+
+		valueReadout.LayoutOrder = 2
+		valueInput.LayoutOrder = 2
+		return scope:New "Frame" {
+			Name = "NumericField",
+			Size = UDim2.fromScale(1, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			Visible = if props.Visible == nil then true else props.Visible,
+			LayoutOrder = props.LayoutOrder,
+
+			[Children] = {
+				scope:New "UIListLayout" {
+					FillDirection = Enum.FillDirection.Vertical,
+					Padding = UDim.new(0, 2),
+					SortOrder = Enum.SortOrder.LayoutOrder,
+				},
+				scope:New "Frame" {
+					Name = "Header",
+					Size = UDim2.new(1, 0, 0, COMPACT_ROW_HEIGHT),
+					BackgroundTransparency = 1,
+					LayoutOrder = 1,
+
+					[Children] = {
+						Label(scope, {
+							Text = props.Label,
+							Scale = "Body",
+							Color = Tokens.Color.TextPrimary,
+							Size = UDim2.new(1, -COMPACT_VALUE_WIDTH - 90, 1, 0),
+						}),
+						scope:New "Frame" {
+							Name = "Readout",
+							AnchorPoint = Vector2.new(1, 0.5),
+							Position = UDim2.fromScale(1, 0.5),
+							Size = UDim2.fromOffset(0, COMPACT_ROW_HEIGHT),
+							AutomaticSize = Enum.AutomaticSize.X,
+							BackgroundTransparency = 1,
+
+							[Children] = {
+								scope:New "UIListLayout" {
+									FillDirection = Enum.FillDirection.Horizontal,
+									HorizontalAlignment = Enum.HorizontalAlignment.Right,
+									VerticalAlignment = Enum.VerticalAlignment.Center,
+									Padding = UDim.new(0, Tokens.Space.XS),
+									SortOrder = Enum.SortOrder.LayoutOrder,
+								},
+								scope:New "TextLabel" {
+									Name = "Unit",
+									Size = UDim2.fromOffset(0, COMPACT_ROW_HEIGHT),
+									AutomaticSize = Enum.AutomaticSize.X,
+									BackgroundTransparency = 1,
+									LayoutOrder = 1,
+									Text = props.Unit or "",
+									FontFace = Tokens.Type.Detail.Face,
+									TextSize = Tokens.Type.Detail.Size,
+									TextColor3 = Tokens.Color.TextDisabled,
+								},
+								valueReadout,
+								valueInput,
+							},
+						},
+					},
+				},
+				controlRow,
+				hint,
+			},
+		} :: Frame
 	end
 
 	return scope:New "Frame" {

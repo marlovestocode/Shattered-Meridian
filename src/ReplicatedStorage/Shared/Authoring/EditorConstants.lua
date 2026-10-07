@@ -96,11 +96,13 @@ EditorConstants.MoveEditor = {
 		-- Tighter than HitboxTypes' own "nothing absurd" engine clamp on purpose: the engine guards
 		-- against math.huge, this guards against an author typing a hitbox the size of a district.
 		Dimensions = {
-			Width = { Min = 0.1, Max = 40 },
-			Height = { Min = 0.1, Max = 40 },
-			Length = { Min = 0.1, Max = 60 },
-			Radius = { Min = 0.1, Max = 30 },
-			InnerRadius = { Min = 0, Max = 30 },
+			-- Widened 2026-10-01 (the shape vocabulary went from seven to fifteen, and a Dome or a Smash is
+			-- naturally bigger than a Fist): still a long way inside the engine's own clamp.
+			Width = { Min = 0.1, Max = 60 },
+			Height = { Min = 0.1, Max = 60 },
+			Length = { Min = 0.1, Max = 80 },
+			Radius = { Min = 0.1, Max = 40 },
+			InnerRadius = { Min = 0, Max = 40 },
 			AngleDegrees = { Min = 1, Max = 360 },
 		},
 		Damage = { Min = 0, Max = 200 },

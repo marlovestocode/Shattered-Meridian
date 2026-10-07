@@ -290,6 +290,67 @@ return function()
 		end)
 	end)
 
+	describe("HitboxEngine -- a Volumeless swing", function()
+		it("hits nothing in front of the attacker, where an ordinary swing of the same shape would", function()
+			makeDummy("Target", Vector3.new(0, 5, -4))
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local hits, disconnect = captureHits()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ Volumeless = true }), 1, 0)
+			local base = os.clock()
+			HitboxEngine.Step(FRAME, base + 0.01)
+			HitboxEngine.Step(FRAME, base + 0.1)
+			disconnect()
+			expect(#hits).to.equal(0)
+
+			HitboxEngine.Reset()
+			local again = makeDummy("Attacker2", Vector3.new(0, 5, 0))
+			makeDummy("Target2", Vector3.new(0, 5, -4))
+			local controlHits, disconnectControl = captureHits()
+			HitboxEngine.RequestAttack(again.Id, makeDefinition({}), 1, 0)
+			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+			disconnectControl()
+			expect(#controlHits).to.equal(1)
+		end)
+
+		it("still runs the whole swing: it is accepted, active, and ends", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local accepted = HitboxEngine.RequestAttack(
+				attacker.Id,
+				makeDefinition({ Volumeless = true, ActiveSeconds = 0.1, RecoverySeconds = 0.05 }),
+				1,
+				0
+			)
+			expect(accepted).to.equal(true)
+			local base = os.clock()
+			HitboxEngine.Step(FRAME, base + 0.01)
+			expect(HitboxEngine.EngagedCount()).to.equal(1)
+			HitboxEngine.Step(FRAME, base + 0.5)
+			expect(HitboxEngine.EngagedCount()).to.equal(0)
+		end)
+
+		it("keeps the movement lock a locking cast asks for, and releases it when the swing ends", function()
+			local LOCK = HitboxEngineConstants.RootControlLockedAttribute
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			HitboxEngine.RequestAttack(
+				attacker.Id,
+				makeDefinition({ Volumeless = true, LocksMovement = true, ActiveSeconds = 0.1, RecoverySeconds = 0.05 }),
+				1,
+				0
+			)
+			local base = os.clock()
+			HitboxEngine.Step(FRAME, base + 0.01)
+			expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(true)
+			HitboxEngine.Step(FRAME, base + 0.5)
+			expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(nil)
+		end)
+
+		it("survives the sanitiser: absent is false, and a stray value is false", function()
+			expect(HitboxTypes.SanitizeDefinition({ Shape = "Box" }).Volumeless).to.equal(false)
+			expect(HitboxTypes.SanitizeDefinition({ Shape = "Box", Volumeless = "yes" }).Volumeless).to.equal(false)
+			expect(HitboxTypes.SanitizeDefinition({ Shape = "Box", Volumeless = true }).Volumeless).to.equal(true)
+		end)
+	end)
+
 	describe("HitboxEngine -- dynamic sizing", function()
 		local function scalingDefinition(): HitboxTypes.AttackDefinition
 			return makeDefinition({

@@ -82,18 +82,26 @@ function PlacementMath.DimensionFor(shape: Shape, face: Enum.NormalId): (string?
 		then "X"
 		elseif face == Enum.NormalId.Top or face == Enum.NormalId.Bottom then "Y"
 		else "Z"
-	if shape == "Box" then
+	if shape == "Box" or shape == "Ellipsoid" or shape == "Pyramid" or shape == "Wedge" then
 		return if axis == "X" then "Width" elseif axis == "Y" then "Height" else "Length", false
-	elseif shape == "Sphere" then
+	elseif shape == "Sphere" or shape == "Hemisphere" then
 		-- Centred on its origin (see Resize): the dragged face tracks the radius itself.
 		return "Radius", false
-	elseif shape == "Arc" then
+	elseif shape == "Arc" or shape == "Pillar" or shape == "Crescent" then
 		if axis == "Y" then
 			return "Height", false
 		end
 		return "Radius", false
 	elseif shape == "Cone" then
 		return if axis == "Z" then "Length" else nil, false
+	elseif shape == "Cross" then
+		return if axis == "X" then "Width" elseif axis == "Y" then "Height" else "Length", false
+	elseif shape == "Frustum" then
+		-- Long along Z like a Cone, round across like a Beam: its far radius is the one a face drag sizes.
+		if axis == "Z" then
+			return "Length", false
+		end
+		return "Radius", true
 	end
 	-- Cylinder, Capsule, Beam: round across, long along Z.
 	if axis == "Z" then
@@ -105,7 +113,18 @@ end
 -- Whether `shape` grows forward FROM its origin along Z rather than around it (HitboxGeometry's reach
 -- shapes). Its Front face moves the tip; its Back face moves the origin.
 local function isReach(shape: Shape): boolean
-	return shape == "Cone" or shape == "Beam"
+	return shape == "Cone"
+		or shape == "Beam"
+		or shape == "Frustum"
+		or shape == "Pyramid"
+		or shape == "Wedge"
+		or shape == "Hemisphere"
+end
+
+-- Shapes whose Radius grows around the origin rather than from one side: a ring, a ball, a dome, a standing
+-- pillar, a sickle. Dragging a face moves the radius one-for-one and the centre never shifts.
+local function radiusAboutOrigin(shape: Shape): boolean
+	return shape == "Sphere" or shape == "Arc" or shape == "Hemisphere" or shape == "Pillar" or shape == "Crescent"
 end
 
 -- A Resize-tool drag, one-sided like Studio's: the dragged face moves `distance` studs (snapped) along
@@ -136,7 +155,7 @@ function PlacementMath.Resize(
 	local gained = if isRadius then (after - before) * 2 else after - before
 	local normal = Vector3.FromNormalId(face)
 	local shift: number
-	if shape == "Arc" and field == "Radius" or shape == "Sphere" then
+	if field == "Radius" and radiusAboutOrigin(shape) then
 		-- Centred on the origin by definition: a ring or ball grows around it.
 		shift = 0
 	elseif isReach(shape) and field == "Length" then

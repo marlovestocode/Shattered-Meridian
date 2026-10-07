@@ -3,8 +3,9 @@
 	ProjectileFX.lua
 
 	Owns: drawing every projectile in flight on this client -- the shot itself (a glowing sphere whose
-	diameter IS the hit volume's, with a trail), flown locally between the server's Attack_Projectile
-	events, and the scatter when one ends on a wall.
+	diameter IS the hit volume's, with a trail; or, for a shot authored as another Shape, a cylinder or the
+	body's bounding block laid along its flight -- Shared/HitboxEngine/ProjectileBody), flown locally between
+	the server's Attack_Projectile events, and the scatter when one ends on a wall.
 
 	FLOWN, NOT STREAMED. The server does not send positions every frame. It sends an event when something
 	a client could not work out for itself happens -- a launch (or a parry handing a shot to someone else),
@@ -55,6 +56,7 @@ local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local ProjectileBody = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileBody)
 local ProjectileMotion = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileMotion)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
@@ -101,6 +103,10 @@ type Shot = {
 	Velocity: Vector3,
 	Motion: ProjectileMotion.Motion,
 	Radius: number,
+	-- The volume the shot flies as, when it is not a plain sphere (the launch's Body), and the look
+	-- ProjectileBody.Look gave it: how to place the core so it lies along the flight.
+	Body: ProjectileBody.Body?,
+	Turn: CFrame,
 	Target: Model?,
 	-- os.clock() past which the shot is dropped even if its End never arrives.
 	ExpiresAt: number,
@@ -181,6 +187,9 @@ local function restoreDefaultLook(carrier: Carrier): ()
 end
 
 local function resetCarrier(carrier: Carrier): ()
+	-- A pooled carrier may have drawn a shaped body: back to the ball every shot starts from.
+	carrier.Core.Shape = Enum.PartType.Ball
+	carrier.Glow.Shape = Enum.PartType.Ball
 	carrier.Trail.Enabled = false
 	carrier.Trail:Clear()
 	carrier.Core.Parent = nil
@@ -193,13 +202,39 @@ end
 
 local pool = FXPool.New(makeCarrier, resetCarrier, CONFIG.PoolMaxSize)
 
-local function sizeCarrier(carrier: Carrier, radius: number): ()
-	local diameter = math.max(radius * 2, 0.05)
+local PART_TYPES: { [string]: Enum.PartType } = {
+	Ball = Enum.PartType.Ball,
+	Cylinder = Enum.PartType.Cylinder,
+	Block = Enum.PartType.Block,
+}
+
+-- Dresses the carrier as the shot's volume. A plain sphere is the radius it has always been; any other
+-- body takes the part type and size ProjectileBody.Look gives it (a Cylinder for the round-and-long, its
+-- bounding Block for the rest -- the server's contact test is the exact shape, this is the picture of it).
+-- Returns the extra turn the core is placed with.
+local function sizeCarrier(carrier: Carrier, radius: number, body: ProjectileBody.Body?): CFrame
 	local lookScale = carrier.LookScale
-	carrier.Core.Size = Vector3.one * diameter
-	carrier.Glow.Size = Vector3.one * diameter * CONFIG.GlowScale * lookScale
-	carrier.Top.Position = Vector3.new(0, radius * 0.6 * lookScale, 0)
-	carrier.Bottom.Position = Vector3.new(0, -radius * 0.6 * lookScale, 0)
+	if body == nil then
+		local diameter = math.max(radius * 2, 0.05)
+		carrier.Core.Shape = Enum.PartType.Ball
+		carrier.Glow.Shape = Enum.PartType.Ball
+		carrier.Core.Size = Vector3.one * diameter
+		carrier.Glow.Size = Vector3.one * diameter * CONFIG.GlowScale * lookScale
+		carrier.Top.Position = Vector3.new(0, radius * 0.6 * lookScale, 0)
+		carrier.Bottom.Position = Vector3.new(0, -radius * 0.6 * lookScale, 0)
+		return CFrame.identity
+	end
+	local partType, size, turn = ProjectileBody.Look(body)
+	size = Vector3.new(math.max(size.X, 0.05), math.max(size.Y, 0.05), math.max(size.Z, 0.05))
+	carrier.Core.Shape = PART_TYPES[partType] or Enum.PartType.Block
+	carrier.Glow.Shape = carrier.Core.Shape
+	carrier.Core.Size = size
+	carrier.Glow.Size = size * CONFIG.GlowScale * lookScale
+	-- The trail hangs from the body's own top and bottom (its bounding box's height).
+	local half = body.Extents.Y * 0.3 * lookScale
+	carrier.Top.Position = Vector3.new(0, half, 0)
+	carrier.Bottom.Position = Vector3.new(0, -half, 0)
+	return turn
 end
 
 -- A move's In flight look over the defaults, field by field (MovePresentationTypes' precedence).
@@ -301,7 +336,15 @@ local function playPointCue(
 end
 
 local function place(shot: Shot): ()
-	local drawn = CFrame.new(shot.Position + shot.Correction)
+	local position = shot.Position + shot.Correction
+	local body = shot.Body
+	local drawn: CFrame
+	if body == nil then
+		drawn = CFrame.new(position)
+	else
+		-- Along the flight, as the server's sweep has it; a shot that has stopped keeps its last heading.
+		drawn = ProjectileBody.PoseAt(body, position, shot.Velocity) * shot.Turn
+	end
 	shot.Carrier.Core.CFrame = drawn
 	shot.Carrier.Glow.CFrame = drawn
 end
@@ -368,6 +411,8 @@ local function onLaunch(event: WireEvent, age: number, presentation: Presentatio
 			Velocity = event.Velocity,
 			Motion = motion,
 			Radius = event.Radius or 1,
+			Body = nil,
+			Turn = CFrame.identity,
 			Target = event.Target,
 			ExpiresAt = 0,
 			Correction = Vector3.zero,
@@ -409,6 +454,9 @@ local function onLaunch(event: WireEvent, age: number, presentation: Presentatio
 	shot.Velocity = event.Velocity
 	shot.Motion = motion
 	shot.Radius = event.Radius or shot.Radius
+	if event.Body ~= nil then
+		shot.Body = ProjectileBody.Of(event.Body :: any)
+	end
 	shot.Target = event.Target
 	-- A parry that turns the shot hands it to the parrier -- the owner its cues' audience now means.
 	shot.Owner = event.Owner or shot.Owner
@@ -417,7 +465,7 @@ local function onLaunch(event: WireEvent, age: number, presentation: Presentatio
 	flyForward(shot, age)
 
 	local carrier = shot.Carrier
-	sizeCarrier(carrier, shot.Radius)
+	shot.Turn = sizeCarrier(carrier, shot.Radius, shot.Body)
 	carrier.Trail.Enabled = false
 	carrier.Trail:Clear()
 	place(shot)

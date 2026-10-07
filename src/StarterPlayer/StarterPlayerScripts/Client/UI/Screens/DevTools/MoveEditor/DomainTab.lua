@@ -351,7 +351,9 @@ local function DomainTab(scope: Scope, context: Fields.FormContext, visible: Use
 			end)
 		end
 		local needsMove = within(effectIs(function(effect)
+			-- A Strike may name a move too (blank is the realm's own strike), so it shows the field as well.
 			return DomainTypes.EffectNeedsMove[effect.Kind] == true
+				or DomainTypes.EffectMayUseOwnMove[effect.Kind] == true
 		end))
 		local isStrike = within(effectIs(function(effect)
 			return effect.Kind == "Strike"
@@ -495,6 +497,7 @@ local function DomainTab(scope: Scope, context: Fields.FormContext, visible: Use
 		effectNumber("From distance", "OriginDistance", "studs", { 1, 5 }, 0, isShot, nil, HINTS.Origin)
 		effectNumber("Arrives in", "TravelSeconds", "seconds", { 0.05, 0.25 }, 2, isStrike, nil, HINTS.TravelSeconds)
 		effectNumber("Strike size", "StrikeSize", "studs radius", { 0.1, 1 }, 1, isStrike)
+		effectNumber("Power", "Power", "x the move's price", { 0.1, 0.5 }, 2, isShot, nil, HINTS.EffectPower)
 		add(Fields.Toggle(scope, context, {
 			Label = "Parryable",
 			Hint = HINTS.Parryable,

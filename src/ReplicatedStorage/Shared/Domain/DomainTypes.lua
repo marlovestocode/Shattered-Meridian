@@ -20,9 +20,10 @@
 
 	THE FRAMEWORK HAS NO DOMAINS IN IT. Nothing below names an ability. A domain's identity is its data:
 	  * Effects -- periodic, delivered to the realm's members on a timer. Each is a KIND of delivery
-	    through a system that already exists: Strike (the referenced move, delivered to every target as a
-	    guaranteed homing shot through HitboxEngine, so DefenseSystem still decides block/parry and
-	    DamageSystem prices it as that move), Volley (a PROJECTILE move's own volley, launched at every
+	    through a system that already exists: Strike (a guaranteed homing shot through HitboxEngine, so
+	    DefenseSystem still decides block/parry and DamageSystem prices it -- as the REFERENCED move, or,
+	    with no move named, as the REALM'S OWN: the domain move's own Damage, PostureDamage, PowerLevel and
+	    Knockback, authored once on the move and read by every Strike that names nothing), Volley (a PROJECTILE move's own volley, launched at every
 	    target from the realm), Hitstun (DamageSystem.ExtendHitstun), GuardDrain (DefenseSystem.DrainGuard),
 	    Pull/Push (the knockback path's own owner split) and OwnerCast (the owner throws the referenced
 	    move through AttackRequestSystem.ThrowMove, every gate included).
@@ -54,7 +55,9 @@
 	    Seconds is how long a leaver keeps the realm's rules (a slow that does not end the instant you
 	    step over the line).
 	  * An effect's Magnitude means what its Kind needs: Hitstun seconds, GuardDrain posture, Pull/Push
-	    studs per second; Strike/Volley/OwnerCast ignore it (the referenced move prices itself).
+	    studs per second; Strike/Volley/OwnerCast ignore it (the move prices itself). Power is the strike's
+	    own multiplier on whatever price that is (1 is the move's price, 2 hits twice as hard), so two
+	    Strikes in one realm -- a light one every second, a heavy one every six -- share one authored price.
 	  * A rule's Value is a multiplier for the scale kinds (0.5 halves, 2 doubles) and is unread by the
 	    flag kinds. SealMove names its move in MoveId.
 
@@ -96,7 +99,8 @@ export type TieBreak = "Older" | "Newer" | "Contest"
 
 export type Effect = {
 	Kind: EffectKind,
-	-- "" when the kind references no move.
+	-- "" when the kind references no move -- and for a Strike, that is the realm's own price (see this
+	-- file's header).
 	MoveId: string,
 	IntervalSeconds: number,
 	FirstDelaySeconds: number,
@@ -109,6 +113,8 @@ export type Effect = {
 	TravelSeconds: number,
 	Parryable: boolean,
 	StrikeSize: number,
+	-- Strike / Volley: a multiplier on the move's price (ProjectileContact.DamageScale). Unread by the rest.
+	Power: number,
 }
 
 export type Rule = {
@@ -191,10 +197,22 @@ DomainTypes.TieBreaks = { "Contest", "Older", "Newer" } :: { TieBreak }
 
 -- Which effect kinds deliver a referenced move (and so must name one), and which rule kinds are
 -- multipliers rather than flags. Read by Validate, the runtime and the editor alike.
+--
+-- A Strike is NOT in the first list any more (2026-10-01): named, it delivers that move; unnamed, it is the
+-- realm's own strike, priced by the domain move itself. A Volley still needs a PROJECTILE move to fly, and
+-- an OwnerCast needs a move to throw -- the realm cannot be either of those for itself.
 DomainTypes.EffectNeedsMove = {
-	Strike = true,
 	Volley = true,
 	OwnerCast = true,
+} :: { [string]: boolean }
+-- The kinds that may deliver the realm's own move (a blank MoveId, or its own id, which is the same thing).
+DomainTypes.EffectMayUseOwnMove = {
+	Strike = true,
+} :: { [string]: boolean }
+-- The kinds that carry a Power multiplier.
+DomainTypes.EffectUsesPower = {
+	Strike = true,
+	Volley = true,
 } :: { [string]: boolean }
 
 DomainTypes.ScaleRules = {
@@ -240,6 +258,7 @@ DomainTypes.Limits = {
 	OriginDistance = { Min = 2, Max = 60 },
 	TravelSeconds = { Min = 0.05, Max = 2 },
 	StrikeSize = { Min = 0.2, Max = 8 },
+	Power = { Min = 0, Max = 5 },
 	-- Rule
 	Value = { Min = 0, Max = 5 },
 } :: { [string]: Range }
@@ -298,6 +317,7 @@ DomainTypes.EffectFields = {
 	{ Name = "TravelSeconds", Kind = "Number", Default = 0.35 },
 	{ Name = "Parryable", Kind = "Boolean", Default = true },
 	{ Name = "StrikeSize", Kind = "Number", Default = 1.5 },
+	{ Name = "Power", Kind = "Number", Default = 1 },
 } :: { Field }
 
 DomainTypes.RuleFields = {
@@ -520,6 +540,10 @@ function DomainTypes.Validate(raw: unknown, ownMoveId: string?): (DomainSpec?, s
 			if ownMoveId ~= nil and effect.MoveId == ownMoveId then
 				return nil, "DomainSelfReference"
 			end
+		elseif DomainTypes.EffectMayUseOwnMove[effect.Kind] and ownMoveId ~= nil and effect.MoveId == ownMoveId then
+			-- Naming the realm's own move IS the realm's own strike -- stored as the blank it means, so one
+			-- meaning has one encoding (and a duplicated move keeps the strike its own, not its source's).
+			effect.MoveId = ""
 		end
 	end
 

@@ -44,11 +44,27 @@ local Sanitize = require(ReplicatedStorage.Shared.Sanitize)
 
 local HitboxTypes = {}
 
--- The shape vocabulary. Seven, and deliberately so: each has an exact analytic containment test and a
--- meaningfully different silhouette in play. The old Move Editor offered twelve; the five editor-only
--- ones (Disc, Wedge, Pyramid, Blade, Slice) were projected onto these at swing time, and since the
--- 2026-09-29 rebuild the editor authors in exactly this list (MoveTypes.Shapes).
-export type ShapeKind = "Box" | "Sphere" | "Capsule" | "Cone" | "Cylinder" | "Arc" | "Beam"
+-- The shape vocabulary. Every entry has an exact analytic containment test (HitboxGeometry.ContainsPoint)
+-- and a meaningfully different silhouette in play. The 2026-09-29 rebuild cut the old editor's twelve to the
+-- seven the engine could test; the engine has since learned the five it had dropped (Wedge, Pyramid, a
+-- standing Pillar standing in for Disc, Crescent for Blade/Slice) plus Ellipsoid, Hemisphere, Frustum and
+-- Cross -- fifteen in all, and the editor authors in exactly this list (MoveTypes.Shapes).
+export type ShapeKind =
+	"Box"
+	| "Sphere"
+	| "Capsule"
+	| "Cone"
+	| "Cylinder"
+	| "Arc"
+	| "Beam"
+	| "Ellipsoid"
+	| "Hemisphere"
+	| "Frustum"
+	| "Pyramid"
+	| "Wedge"
+	| "Crescent"
+	| "Cross"
+	| "Pillar"
 
 -- Where on the attacker the hitbox's local space is anchored. Resolved against the LIVE part every
 -- sample, never baked at swing start -- see AttackDefinition.Offset.
@@ -135,6 +151,13 @@ export type AttackDefinition = {
 	-- Types.HitboxAttackDefinition.SizeMultiplier's own header for the full chain. Ignored whenever
 	-- SizeFromAttachmentPart is false, same as BaseDimensions already scales by hand in that case.
 	SizeMultiplier: number?,
+	-- When true the swing runs its whole lifecycle -- windup, active, recovery, movement locks, feint, clip
+	-- sync -- and samples NO volume: nothing on the body is ever tested for contacts, Shape and
+	-- BaseDimensions are unread, and no debug volume is drawn. It is how a move whose effect is delivered
+	-- somewhere else (a realm: Server/Combat/Domain) is a real, cancellable swing without also throwing a
+	-- hitbox in front of the caster. Optional: absent is false, so every attack authored before it existed
+	-- samples exactly as it did. Ignored when Projectile is present (a volley has no body volume either).
+	Volumeless: boolean?,
 	-- Present = this attack is DELIVERED BY PROJECTILE (ProjectileTypes' header). The swing's lifecycle is
 	-- unchanged -- windup, active, recovery, movement lock -- but when the Active window opens the engine
 	-- launches the volley instead of sampling Shape/BaseDimensions on the body, and those two are unread.
@@ -202,7 +225,51 @@ local SHAPE_FIELDS: { [ShapeKind]: { Convention: string, Fields: { string } } } 
 	Arc = { Convention = "centred", Fields = { "Radius", "InnerRadius", "Height", "AngleDegrees" } },
 	Cone = { Convention = "reach", Fields = { "Length", "AngleDegrees" } },
 	Beam = { Convention = "reach", Fields = { "Radius", "Length" } },
+	-- Width/Height/Length are FULL axis lengths, as a Box's are.
+	Ellipsoid = { Convention = "centred", Fields = { "Width", "Height", "Length" } },
+	-- A dome: its flat face is on the origin plane and it bulges forward.
+	Hemisphere = { Convention = "reach", Fields = { "Radius" } },
+	-- A cone cut short: InnerRadius at the origin widening (or narrowing) to Radius at Length.
+	Frustum = { Convention = "reach", Fields = { "Radius", "InnerRadius", "Length" } },
+	-- Apex at the origin, a Width x Height rectangle at Length.
+	Pyramid = { Convention = "reach", Fields = { "Width", "Height", "Length" } },
+	-- Apex edge at the origin widening sideways only: Height stays constant, Width is reached at Length.
+	Wedge = { Convention = "reach", Fields = { "Width", "Height", "Length" } },
+	-- A flat sickle: the outer disc (Radius) minus a bite (InnerRadius) centred Length behind the origin.
+	Crescent = { Convention = "centred", Fields = { "Radius", "InnerRadius", "Length", "Height" } },
+	-- Two bars crossing at the origin: Width across, Length along, Radius the half-thickness of both.
+	Cross = { Convention = "centred", Fields = { "Width", "Length", "Height", "Radius" } },
+	-- An upright cylinder (axis Y), where Cylinder lies along the facing.
+	Pillar = { Convention = "centred", Fields = { "Radius", "Height" } },
 }
+
+-- Every shape, in the order an editor should offer them: the seven the engine began with, then the
+-- additions grouped by what they are for. A shape added to SHAPE_FIELDS and left out of this list is
+-- caught by MoveTypes.spec, which pins the two together.
+HitboxTypes.ShapeOrder = {
+	"Box",
+	"Sphere",
+	"Capsule",
+	"Cylinder",
+	"Cone",
+	"Beam",
+	"Arc",
+	"Ellipsoid",
+	"Hemisphere",
+	"Frustum",
+	"Pyramid",
+	"Wedge",
+	"Crescent",
+	"Cross",
+	"Pillar",
+} :: { ShapeKind }
+
+-- Whether a shape's origin is its centre ("centred") or its base ("reach") -- the one thing the field
+-- names do not say. Read by the editor's plot and the placement math.
+function HitboxTypes.ConventionOf(shape: ShapeKind): string
+	local entry = SHAPE_FIELDS[shape]
+	return if entry then entry.Convention else "centred"
+end
 
 function HitboxTypes.IsShapeKind(value: unknown): boolean
 	return typeof(value) == "string" and SHAPE_FIELDS[value :: ShapeKind] ~= nil
@@ -211,6 +278,150 @@ end
 function HitboxTypes.FieldsFor(shape: ShapeKind): { string }
 	local entry = SHAPE_FIELDS[shape]
 	return if entry then entry.Fields else SHAPE_FIELDS.Box.Fields
+end
+
+-- Starting points ------------------------------------------------------------------------------------------
+--
+-- A shape and a size an author reaches for by NAME ("a slash", "a thrust") rather than by choosing a shape
+-- and then guessing its numbers. The editor's "Start from" menu applies one: it writes Shape, the
+-- dimensions below and the forward offset, and touches nothing else -- timing, damage and the rest of the
+-- move are the author's. Every entry is inside Constants.MoveEditor.Limits (MoveTypes.spec pins that), and
+-- OffsetZ puts a centred shape in front of the body and leaves a reach shape on its origin, since a reach
+-- shape already grows forward from it.
+export type Preset = {
+	Id: string,
+	Label: string,
+	-- One line on what it is for, shown under the menu.
+	Note: string,
+	Shape: ShapeKind,
+	Dimensions: { [string]: number },
+	-- Studs along the facing (negative is forward), written to the move's Offset Z.
+	OffsetZ: number,
+}
+
+HitboxTypes.Presets = {
+	{
+		Id = "Fist",
+		Label = "Fist -- a short box",
+		Note = "One target, in front of the hand. The default for a basic strike.",
+		Shape = "Box",
+		Dimensions = { Width = 4, Height = 5, Length = 5 },
+		OffsetZ = -3,
+	},
+	{
+		Id = "Jab",
+		Label = "Jab -- a narrow reach",
+		Note = "A thin, quick poke that beats a wide swing at range.",
+		Shape = "Capsule",
+		Dimensions = { Radius = 1.25, Length = 5 },
+		OffsetZ = -3.5,
+	},
+	{
+		Id = "Thrust",
+		Label = "Thrust -- a long line",
+		Note = "A spear or rapier: very narrow, a long way out from the origin.",
+		Shape = "Beam",
+		Dimensions = { Radius = 1.25, Length = 11 },
+		OffsetZ = 0,
+	},
+	{
+		Id = "Slash",
+		Label = "Slash -- a flat wedge",
+		Note = "A blade cut: widens with distance, stays one height.",
+		Shape = "Wedge",
+		Dimensions = { Width = 10, Height = 5, Length = 7 },
+		OffsetZ = 0,
+	},
+	{
+		Id = "Sweep",
+		Label = "Sweep -- a wide arc",
+		Note = "A horizontal sweep across the front. Hits what a Slash would miss at the sides.",
+		Shape = "Arc",
+		Dimensions = { Radius = 8, InnerRadius = 1, Height = 5, AngleDegrees = 150 },
+		OffsetZ = 0,
+	},
+	{
+		Id = "Spin",
+		Label = "Spin -- a full ring",
+		Note = "All the way round the body, close in.",
+		Shape = "Arc",
+		Dimensions = { Radius = 8, InnerRadius = 0, Height = 5, AngleDegrees = 360 },
+		OffsetZ = 0,
+	},
+	{
+		Id = "Cleave",
+		Label = "Cleave -- a crescent",
+		Note = "A moon-shaped cut: strongest dead ahead, thin at the horns.",
+		Shape = "Crescent",
+		Dimensions = { Radius = 7, InnerRadius = 6, Length = 3, Height = 4 },
+		OffsetZ = -2,
+	},
+	{
+		Id = "Smash",
+		Label = "Smash -- an upright pillar",
+		Note = "A slam straight down on a spot in front -- tall, round, no sweep.",
+		Shape = "Pillar",
+		Dimensions = { Radius = 5, Height = 7 },
+		OffsetZ = -5,
+	},
+	{
+		Id = "Dome",
+		Label = "Dome -- a forward blast",
+		Note = "A half-sphere pushed out in front: a shockwave with no back to it.",
+		Shape = "Hemisphere",
+		Dimensions = { Radius = 9 },
+		OffsetZ = 0,
+	},
+	{
+		Id = "Breath",
+		Label = "Breath -- a cone",
+		Note = "Narrow at the mouth, wide at the far end.",
+		Shape = "Cone",
+		Dimensions = { Length = 13, AngleDegrees = 50 },
+		OffsetZ = 0,
+	},
+	{
+		Id = "Funnel",
+		Label = "Funnel -- a cut cone",
+		Note = "A cone with its tip taken off: already wide at the origin, wider at the end.",
+		Shape = "Frustum",
+		Dimensions = { Radius = 7, InnerRadius = 2, Length = 11 },
+		OffsetZ = 0,
+	},
+	{
+		Id = "Lance",
+		Label = "Lance -- a pyramid",
+		Note = "A point at the origin opening into a square face -- a charge or a drill.",
+		Shape = "Pyramid",
+		Dimensions = { Width = 4, Height = 4, Length = 10 },
+		OffsetZ = 0,
+	},
+	{
+		Id = "Burst",
+		Label = "Burst -- a cross",
+		Note = "Two bars through the body: reaches out front, back and both sides, not the corners.",
+		Shape = "Cross",
+		Dimensions = { Width = 14, Length = 14, Height = 4, Radius = 1.5 },
+		OffsetZ = 0,
+	},
+	{
+		Id = "Egg",
+		Label = "Egg -- a stretched ellipsoid",
+		Note = "A rounded volume longer than it is wide; kinder at the edges than a Box.",
+		Shape = "Ellipsoid",
+		Dimensions = { Width = 4, Height = 5, Length = 8 },
+		OffsetZ = -3,
+	},
+} :: { Preset }
+
+-- Looks a preset up by id, or nil. The editor applies it; nothing else reads Presets.
+function HitboxTypes.PresetById(id: string): Preset?
+	for _, preset in HitboxTypes.Presets do
+		if preset.Id == id then
+			return preset
+		end
+	end
+	return nil
 end
 
 -- Sanitisation -------------------------------------------------------------------------------------
@@ -379,6 +590,7 @@ function HitboxTypes.SanitizeDefinition(raw: unknown): (AttackDefinition, { stri
 		-- merely small rather than broken. 16 is generous the same way FIELD_BOUNDS' own uppers are --
 		-- a "no NaN, no negative, nothing absurd" guard, not a balance pass.
 		SizeMultiplier = Sanitize.ClampNumberOr(source.SizeMultiplier, 0.05, 16, 1),
+		Volumeless = source.Volumeless == true,
 		Projectile = projectile,
 	},
 		problems

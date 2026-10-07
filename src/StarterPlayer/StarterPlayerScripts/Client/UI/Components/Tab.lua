@@ -61,6 +61,9 @@ export type TabProps = {
 	Variant: ("Boxed" | "Underline")?,
 	-- "Underline" only: the color of the selected tab's bottom rule. Defaults to the bronze accent.
 	UnderlineColor: UsedAs<Color3>?,
+	-- Defaults to true. A hidden tab holds no space in a list layout, which is what lets a strip whose
+	-- tabs come and go (ScreenFrame.NewTabState's availability) close up around the ones that remain.
+	Visible: UsedAs<boolean>?,
 }
 
 local UNDERLINE_THICKNESS = 3
@@ -165,6 +168,7 @@ local function Tab(scope: Scope, props: TabProps): TextButton
 	return scope:New "TextButton" {
 		Size = props.Size or UDim2.fromOffset(120, Tokens.Control.StepButtonSize),
 		LayoutOrder = props.LayoutOrder,
+		Visible = props.Visible,
 		AutoButtonColor = false,
 		BackgroundColor3 = backgroundColor,
 		-- Underline tabs sit on the strip's own Surface band, so an unselected one paints nothing at

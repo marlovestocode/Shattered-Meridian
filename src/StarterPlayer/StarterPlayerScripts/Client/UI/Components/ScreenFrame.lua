@@ -39,6 +39,13 @@
 	exclusive, and passing neither is an error rather than a bare strip -- a frame that names itself
 	nowhere is the one outcome this component should not make easy.
 
+	A STRIP WHOSE TABS COME AND GO (2026-10-01, NewTabState's optional `availability`). The Move Editor's tabs
+	depend on what kind of move is open -- a realm has no hitbox to place and a swing has no boundary to
+	draw -- so a tab can be given a boolean it is shown by. A hidden tab holds no space and the rest share
+	the strip (a flex fill, not 1/N of the names the caller listed), and a CURRENT tab that stops being
+	available hands the selection to the first one that still is, so the body never sits on a page the
+	strip no longer offers. A state with no availability behaves exactly as it always did.
+
 	TAB STATE IS ONE OBJECT, not a Value plus a bag of Computeds the caller assembles. The strip's
 	buttons and the body's panels are asking the same question -- which tab is showing -- and when each
 	built its own Computed to ask it there were two answers in the tree that could in principle
@@ -78,6 +85,7 @@ local Layer = require(script.Parent.Layer)
 local Inset = require(script.Parent.Inset)
 
 local Children = Fusion.Children
+local peek = Fusion.peek
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 type UsedAs<T> = Fusion.UsedAs<T>
@@ -106,6 +114,8 @@ export type TabState = {
 	-- One shared Computed per tab name -- see this file's header on why the caller must read these
 	-- rather than build its own.
 	Selected: { [string]: Fusion.Computed<boolean> },
+	-- Which tabs are on offer, by name (a missing name is always available), or nil when every tab is.
+	Available: { [string]: UsedAs<boolean> }?,
 }
 
 export type ScreenFrameProps = {
@@ -143,8 +153,13 @@ function ScreenFrame.BodySize(rootWidth: number, rootHeight: number): (number, n
 	return rootWidth, rootHeight - ScreenFrame.TabStripHeight - ScreenFrame.FooterHeight
 end
 
--- Builds the shared tab state. `names` is the strip order; the first is selected on mount.
-function ScreenFrame.NewTabState(scope: Scope, names: { string }): TabState
+-- Builds the shared tab state. `names` is the strip order; the first is selected on mount. `availability`
+-- (optional, see this file's header) maps a name to the boolean it is offered by.
+function ScreenFrame.NewTabState(
+	scope: Scope,
+	names: { string },
+	availability: { [string]: UsedAs<boolean> }?
+): TabState
 	assert(#names > 0, "ScreenFrame.NewTabState needs at least one tab name")
 
 	local current = scope:Value(names[1])
@@ -155,7 +170,32 @@ function ScreenFrame.NewTabState(scope: Scope, names: { string }): TabState
 		end)
 	end
 
-	return { Names = names, Current = current, Selected = selected }
+	if availability then
+		local function isAvailable(name: string): boolean
+			local offered = availability[name]
+			return offered == nil or peek(offered)
+		end
+		-- Whether the selected tab is still on offer. Its OBSERVER is the hand-over: the moment the answer turns
+		-- false (the move changed kind under the open tab, or a caller set a tab that is not on offer) the
+		-- selection moves to the first tab that is.
+		local currentIsOffered = scope:Computed(function(use): boolean
+			local offered = availability[use(current)]
+			return offered == nil or use(offered)
+		end)
+		scope:Observer(currentIsOffered):onChange(function()
+			if peek(currentIsOffered) then
+				return
+			end
+			for _, name in ipairs(names) do
+				if isAvailable(name) then
+					current:set(name)
+					return
+				end
+			end
+		end)
+	end
+
+	return { Names = names, Current = current, Selected = selected, Available = availability }
 end
 
 -- A band's closing hairline. Bands are flush against each other, so the seam between two of them is
@@ -194,24 +234,26 @@ end
 -- The tabbed strip content: one Underline tab per name, butted against each other.
 local function tabRun(scope: Scope, tabs: TabState): Frame
 	local names = tabs.Names
+	local available = tabs.Available
 	local buttons: { Instance } = {}
 	for index, name in ipairs(names) do
-		table.insert(
-			buttons,
-			Tab(scope, {
-				Text = name,
-				Variant = "Underline",
-				-- Tab names are static strings from the caller's own literal list, which is the one
-				-- case Tab.lua allows the tracked-caps treatment for -- see its header.
-				TrackedCaps = true,
-				Size = UDim2.fromScale(1 / #names, 1),
-				LayoutOrder = index,
-				Selected = tabs.Selected[name],
-				OnActivated = function()
-					tabs.Current:set(name)
-				end,
-			})
-		)
+		local tab = Tab(scope, {
+			Text = name,
+			Variant = "Underline",
+			-- Tab names are static strings from the caller's own literal list, which is the one
+			-- case Tab.lua allows the tracked-caps treatment for -- see its header.
+			TrackedCaps = true,
+			Size = UDim2.fromScale(1 / #names, 1),
+			LayoutOrder = index,
+			Selected = tabs.Selected[name],
+			Visible = if available then available[name] else nil,
+			OnActivated = function()
+				tabs.Current:set(name)
+			end,
+		})
+		-- With tabs that come and go, 1/#names of the strip would leave a gap where a hidden one was: the
+		-- visible tabs share it out instead.
+		table.insert(buttons, if available then Stack.Fill(scope, tab) else tab)
 	end
 
 	return Stack.Row(scope, {

@@ -95,6 +95,32 @@ function HitboxGeometry.BoundingBox(shape: ShapeKind, dimensions: Dimensions): (
 		-- -- a broadphase that missed part of the sector would lose hits the narrow phase never sees.
 		local diameter = dimensions.Radius * 2
 		return Vector3.new(diameter, dimensions.Height, diameter), CFrame.identity
+	elseif shape == "Pillar" or shape == "Crescent" then
+		-- Both are a flat disc of Height, one standing and one with a bite out of it: the full disc is the
+		-- broadphase (an oriented box cannot express the bite, and the narrow phase trims it).
+		local diameter = dimensions.Radius * 2
+		return Vector3.new(diameter, dimensions.Height, diameter), CFrame.identity
+	elseif shape == "Ellipsoid" then
+		return Vector3.new(dimensions.Width, dimensions.Height, dimensions.Length), CFrame.identity
+	elseif shape == "Hemisphere" then
+		local diameter = dimensions.Radius * 2
+		return Vector3.new(diameter, diameter, dimensions.Radius), CFrame.new(0, 0, -dimensions.Radius / 2)
+	elseif shape == "Frustum" then
+		local diameter = math.max(dimensions.Radius, dimensions.InnerRadius) * 2
+		return Vector3.new(diameter, diameter, dimensions.Length), CFrame.new(0, 0, -dimensions.Length / 2)
+	elseif shape == "Pyramid" or shape == "Wedge" then
+		return Vector3.new(dimensions.Width, dimensions.Height, dimensions.Length),
+			CFrame.new(0, 0, -dimensions.Length / 2)
+	elseif shape == "Cross" then
+		-- A bar thicker than the other arm's span would poke out of Width x Length, so the box takes the
+		-- larger of the two on each axis.
+		local thickness = dimensions.Radius * 2
+		return Vector3.new(
+			math.max(dimensions.Width, thickness),
+			dimensions.Height,
+			math.max(dimensions.Length, thickness)
+		),
+			CFrame.identity
 	end
 	-- Box, and the defensive fallback for a shape the sanitiser somehow let through.
 	return Vector3.new(dimensions.Width, dimensions.Height, dimensions.Length), CFrame.identity
@@ -118,8 +144,12 @@ function HitboxGeometry.Reach(shape: ShapeKind, dimensions: Dimensions): number
 		return dimensions.Length / 2
 	elseif shape == "Cone" or shape == "Beam" then
 		return dimensions.Length
-	elseif shape == "Arc" then
+	elseif shape == "Arc" or shape == "Pillar" or shape == "Crescent" or shape == "Hemisphere" then
 		return dimensions.Radius
+	elseif shape == "Frustum" or shape == "Pyramid" or shape == "Wedge" then
+		return dimensions.Length
+	elseif shape == "Cross" then
+		return math.max(dimensions.Length, dimensions.Radius * 2) / 2
 	end
 	return dimensions.Length / 2
 end
@@ -138,6 +168,21 @@ function HitboxGeometry.MinExtent(shape: ShapeKind, dimensions: Dimensions): num
 		extent = math.min(coneBaseRadius(dimensions) * 2, dimensions.Length)
 	elseif shape == "Arc" then
 		extent = math.min(dimensions.Height, dimensions.Radius - dimensions.InnerRadius)
+	elseif shape == "Pillar" or shape == "Cross" then
+		extent = math.min(dimensions.Radius * 2, dimensions.Height)
+	elseif shape == "Hemisphere" then
+		extent = dimensions.Radius
+	elseif shape == "Frustum" then
+		extent = math.min(dimensions.Radius * 2, dimensions.Length)
+	elseif shape == "Ellipsoid" or shape == "Pyramid" or shape == "Wedge" then
+		extent = math.min(dimensions.Width, math.min(dimensions.Height, dimensions.Length))
+	elseif shape == "Crescent" then
+		-- The sickle's thickest point, dead ahead: from the outer rim at -Radius to where the bite begins.
+		-- A bite of 0 is a whole disc.
+		local thickness = if dimensions.InnerRadius > 0
+			then dimensions.Radius + dimensions.Length - dimensions.InnerRadius
+			else dimensions.Radius * 2
+		extent = math.min(dimensions.Height, thickness)
 	else
 		extent = math.min(dimensions.Width, math.min(dimensions.Height, dimensions.Length))
 	end
@@ -180,6 +225,55 @@ function HitboxGeometry.ContainsPoint(
 			return false
 		end
 		return math.sqrt(x * x + y * y) <= dimensions.Radius + m
+	elseif shape == "Ellipsoid" then
+		local nx = x / math.max(dimensions.Width / 2 + m, EPSILON)
+		local ny = y / math.max(dimensions.Height / 2 + m, EPSILON)
+		local nz = z / math.max(dimensions.Length / 2 + m, EPSILON)
+		return nx * nx + ny * ny + nz * nz <= 1
+	elseif shape == "Hemisphere" then
+		return forward >= -m and localPoint.Magnitude <= dimensions.Radius + m
+	elseif shape == "Frustum" then
+		if forward < -m or forward > dimensions.Length + m then
+			return false
+		end
+		-- Clamped, so the slack past either end still reads the end's own radius rather than extrapolating.
+		local along = if dimensions.Length > EPSILON then math.clamp(forward / dimensions.Length, 0, 1) else 1
+		local allowed = dimensions.InnerRadius + (dimensions.Radius - dimensions.InnerRadius) * along
+		return math.sqrt(x * x + y * y) <= allowed + m
+	elseif shape == "Pyramid" or shape == "Wedge" then
+		if forward < -m or forward > dimensions.Length + m then
+			return false
+		end
+		local along = if dimensions.Length > EPSILON then math.clamp(forward / dimensions.Length, 0, 1) else 1
+		if math.abs(x) > dimensions.Width / 2 * along + m then
+			return false
+		end
+		-- A Wedge keeps its full height all the way; a Pyramid closes in on both axes.
+		local halfHeight = if shape == "Pyramid" then dimensions.Height / 2 * along else dimensions.Height / 2
+		return math.abs(y) <= halfHeight + m
+	elseif shape == "Pillar" then
+		return math.abs(y) <= dimensions.Height / 2 + m and math.sqrt(x * x + z * z) <= dimensions.Radius + m
+	elseif shape == "Crescent" then
+		if math.abs(y) > dimensions.Height / 2 + m or math.sqrt(x * x + z * z) > dimensions.Radius + m then
+			return false
+		end
+		-- The bite is a disc centred Length BEHIND the origin (+Z), so what is left bulges forward with its
+		-- horns trailing back. The margin shrinks the bite, as it grows every other volume.
+		local bite = math.max(dimensions.InnerRadius - m, 0)
+		if bite <= 0 then
+			return true
+		end
+		local behind = z - dimensions.Length
+		return math.sqrt(x * x + behind * behind) >= bite
+	elseif shape == "Cross" then
+		if math.abs(y) > dimensions.Height / 2 + m then
+			return false
+		end
+		local halfBar = dimensions.Radius + m
+		if math.abs(z) <= halfBar and math.abs(x) <= dimensions.Width / 2 + m then
+			return true
+		end
+		return math.abs(x) <= halfBar and math.abs(z) <= dimensions.Length / 2 + m
 	elseif shape == "Arc" then
 		if math.abs(y) > dimensions.Height / 2 + m then
 			return false

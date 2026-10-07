@@ -12,9 +12,15 @@
 	hitbox will. A weapon-anchored Box takes the resolved blade's own size (x SizeMultiplier), mirroring
 	the engine's SizeFromAttachmentPart, and is tinted to say the blade decides it.
 
-	A PROJECTILE MOVE draws its SPAWN SPHERE instead -- the shot's own radius, at the spawn point, which
-	is where the volley starts (the readout's plots draw where it goes). Move and Rotate place and aim it
-	exactly as they do a volume; Resize sets the shot's Size.
+	A PROJECTILE MOVE draws its SPAWN BODY instead -- the shot's own shape and size (a sphere of its radius
+	by default; any ProjectileBody otherwise, in the pose it flies in), at the spawn point, which is where
+	the volley starts (the readout's plots draw where it goes). Move and Rotate place and aim it exactly as
+	they do a volume; Resize sets the shot's own measurements and never moves the spawn point.
+
+	A DOMAIN MOVE draws its REALM'S BOUNDARY (Shared/Domain) -- a ball, a standing cylinder or a box, centred
+	CenterForward studs ahead of the root, turned with the body's yaw only -- because a domain move has no
+	volume of its own to place. It is a picture, not a gizmo: there is nothing to drag, and Place mode is
+	not offered for it.
 
 	CLIENT-ONLY BY CONSTRUCTION. Every part lives under workspace.CurrentCamera, which never replicates;
 	each is anchored, non-colliding, non-queryable and non-touching, so the preview cannot be hit, cast
@@ -55,6 +61,7 @@ local HitboxGeometry = require(ReplicatedStorage.Shared.HitboxEngine.HitboxGeome
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
+local ProjectileBody = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileBody)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
@@ -104,18 +111,39 @@ end
 -- The Box a weapon-anchored move actually swings: the anchor part's own size, the engine's
 -- SizeFromAttachmentPart branch. Never a projectile's: its shot is its own size.
 local function bladeSized(move: Move): boolean
-	return move.Projectile == nil and move.AttachmentPart == "Weapon" and move.Shape == "Box"
+	return move.Projectile == nil and move.Domain == nil and move.AttachmentPart == "Weapon" and move.Shape == "Box"
 end
 
--- What is drawn at the origin: the move's volume, or a projectile's spawn sphere (this file's header).
-local function previewVolume(move: Move): (MoveTypes.MoveShape, MoveTypes.MoveDimensions)
+-- What is drawn at the origin (this file's header): the move's volume, a projectile's spawn body, or a
+-- realm's boundary. The third value turns the drawn pieces about the origin -- a shot that flies point
+-- first is drawn the way it flies.
+local function previewVolume(move: Move): (MoveTypes.MoveShape, MoveTypes.MoveDimensions, CFrame)
+	local domain = move.Domain
+	if domain then
+		local dimensions = HitboxTypes.DefaultDimensions()
+		if domain.Shape == "Sphere" then
+			dimensions.Radius = domain.Radius
+			return "Sphere", dimensions, CFrame.identity
+		elseif domain.Shape == "Cylinder" then
+			dimensions.Radius = domain.Radius
+			dimensions.Height = domain.Height
+			return "Pillar", dimensions, CFrame.identity
+		end
+		-- A Box's Radius is its HALF-width (DomainTypes' header).
+		dimensions.Width = domain.Radius * 2
+		dimensions.Length = domain.Radius * 2
+		dimensions.Height = domain.Height
+		return "Box", dimensions, CFrame.identity
+	end
 	local spec = move.Projectile
 	if spec then
-		local dimensions = HitboxTypes.DefaultDimensions()
-		dimensions.Radius = spec.Size
-		return "Sphere", dimensions
+		local body = ProjectileBody.Of(spec)
+		local turn = if body.Pointed
+			then CFrame.new(0, 0, -body.LeadStuds) * CFrame.Angles(0, math.pi, 0)
+			else CFrame.identity
+		return body.Shape, body.Dimensions, turn
 	end
-	return move.Shape, move.Dimensions
+	return move.Shape, move.Dimensions, CFrame.identity
 end
 
 function HitboxWorldPreview.Start(handle: MoveEditorHandle): ()
@@ -150,6 +178,7 @@ function HitboxWorldPreview.Start(handle: MoveEditorHandle): ()
 		local shape, dimensions = previewVolume(move)
 		local signature = HitboxPreviewShapes.Signature(shape, dimensions)
 			.. (if bladeSized(move) then "|blade" else "")
+			.. (if move.Domain then "|realm" elseif move.Projectile then "|shot" else "")
 		if signature == builtSignature then
 			return
 		end
@@ -159,7 +188,10 @@ function HitboxWorldPreview.Start(handle: MoveEditorHandle): ()
 		end
 		table.clear(parts)
 		pieces = HitboxPreviewShapes.Build(shape, dimensions)
-		local color = if bladeSized(move) then Tokens.Color.AccentSecondary else Tokens.Color.Danger
+		local color = if bladeSized(move)
+			then Tokens.Color.AccentSecondary
+			elseif move.Domain then Tokens.Color.AccentPrimary
+			else Tokens.Color.Danger
 		for index, piece in pieces do
 			local part = newPart(`Volume{index}`)
 			part.Shape = piece.PartType
@@ -195,7 +227,8 @@ function HitboxWorldPreview.Start(handle: MoveEditorHandle): ()
 		if not model or not root or not root.Parent then
 			return nil
 		end
-		return HitboxAnchor.Resolve(model, root, move.AttachmentPart)
+		-- A realm is centred on the body, whatever anchor the swing that opens it was authored with.
+		return HitboxAnchor.Resolve(model, root, if move.Domain then "Root" else move.AttachmentPart)
 	end
 
 	local function isVisible(): boolean
@@ -216,7 +249,17 @@ function HitboxWorldPreview.Start(handle: MoveEditorHandle): ()
 			return
 		end
 		rebuild(move)
-		local origin = anchor.CFrame * move.Offset
+		local domain = move.Domain
+		local origin: CFrame
+		if domain then
+			-- Position and yaw only: a realm does not tilt with a body that is leaning into a run.
+			local look = anchor.CFrame.LookVector
+			local yaw = math.atan2(-look.X, -look.Z)
+			origin = CFrame.new(anchor.Position) * CFrame.Angles(0, yaw, 0) * CFrame.new(0, 0, -domain.CenterForward)
+		else
+			origin = anchor.CFrame * move.Offset
+		end
+		local _, _, turn = previewVolume(move)
 
 		if bladeSized(move) then
 			local size = anchor.Size * (move.SizeMultiplier or 1)
@@ -232,13 +275,14 @@ function HitboxWorldPreview.Start(handle: MoveEditorHandle): ()
 			frame.CFrame = origin
 		else
 			for index, part in parts do
-				part.CFrame = origin * pieces[index].Local
+				part.CFrame = origin * turn * pieces[index].Local
 				part.Transparency = VOLUME_TRANSPARENCY
 			end
 			local shape, dimensions = previewVolume(move)
 			local size, centre = HitboxGeometry.BoundingBox(shape, dimensions)
 			frame.Size = size
-			frame.CFrame = origin * centre
+			-- A shot drawn point first is a turned body whose bounding box is centred on the spawn point.
+			frame.CFrame = if turn == CFrame.identity then origin * centre else origin
 		end
 		pivot.CFrame = origin
 		lastOrigin = origin
@@ -312,16 +356,32 @@ function HitboxWorldPreview.Start(handle: MoveEditorHandle): ()
 						-- The blade decides a weapon-anchored Box's size; there is nothing to resize.
 						return
 					end
-					local spec = move.Projectile
-					local shape = if spec then "Sphere" else move.Shape
-					local dimensions, position =
-						PlacementMath.Resize(shape, start.Dimensions, start.Offset, face, distance, snap)
-					if spec then
-						local range = ProjectileTypes.Limits.Size
-						spec.Size = math.clamp(dimensions.Radius, range.Min, range.Max)
-					else
-						move.Dimensions = dimensions
+					if move.Domain then
+						return
 					end
+					local spec = move.Projectile
+					local shape = if spec then spec.Shape else move.Shape
+					local dimensions, position = PlacementMath.Resize(
+						shape :: MoveTypes.MoveShape,
+						start.Dimensions,
+						start.Offset,
+						face,
+						distance,
+						snap
+					)
+					if spec then
+						-- A shot's own measurements, each inside its own limits. Its spawn point stays where it
+						-- is: the body is centred on it, so a one-sided drag has no origin to carry.
+						local limits = ProjectileTypes.Limits
+						spec.Size = math.clamp(dimensions.Radius, limits.Size.Min, limits.Size.Max)
+						spec.Width = math.clamp(dimensions.Width, limits.Width.Min, limits.Width.Max)
+						spec.Height = math.clamp(dimensions.Height, limits.Height.Min, limits.Height.Max)
+						spec.Length = math.clamp(dimensions.Length, limits.Length.Min, limits.Length.Max)
+						spec.InnerRadius =
+							math.clamp(dimensions.InnerRadius, limits.InnerRadius.Min, limits.InnerRadius.Max)
+						return
+					end
+					move.Dimensions = dimensions
 					move.Offset = MoveTypes.ComposeOffset(position, move.OffsetRotation)
 				end)
 			else

@@ -176,6 +176,10 @@ export type ProjectileWireEvent = {
 	Owner: Model?,
 	MoveId: string?,
 	Radius: number?,
+	-- Launch only, and only when the shot is not a plain sphere: the spec's body fields (Shape, Size,
+	-- Length, Width, Height, InnerRadius, AngleDegrees), from which the client builds the same
+	-- ProjectileBody the server sweeps. nil is a sphere of Radius.
+	Body: { [string]: any }?,
 	LifetimeSeconds: number?,
 	Motion: ProjectileMotion.Motion?,
 	Target: Model?,

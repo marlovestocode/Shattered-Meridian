@@ -22,15 +22,19 @@
 	instead, which moves with the animation -- the readout's notes say so; this view cannot know where the
 	part will be mid-swing.
 
-	A PROJECTILE MOVE IS DRAWN AS ITS VOLLEY: every shot's path for its first PROJECTILE_REACH studs, each
-	piece a Capsule of the shot's radius -- the swept volume the server tests a step against -- laid along
-	the points Shared/HitboxEngine/ProjectileMotion flies (Volley for the spread, Path for gravity and
-	acceleration). So a 5-shot 30-degree fan shows five evenly spaced lanes because the server fires five
-	evenly spaced lanes. Drawn as fired "Facing" from the root with no homing: an anchor-aimed or
-	target-aimed volley, and a homing shot's turn, depend on a pose and a target this view does not have.
+	A PROJECTILE MOVE IS DRAWN AS ITS VOLLEY: every shot's path for its first PROJECTILE_REACH studs, laid
+	along the points Shared/HitboxEngine/ProjectileMotion flies (Volley for the spread, Path for gravity and
+	acceleration). A sphere is a run of Capsules of the shot's radius -- the swept volume the server tests a
+	step against. Any other Shape is the BODY itself (Shared/HitboxEngine/ProjectileBody) stood at points
+	along the path, close enough to overlap, so a slab reads as a slab and a crescent as a crescent. So a
+	5-shot 30-degree fan shows five evenly spaced lanes because the server fires five evenly spaced lanes.
+	Drawn as fired "Facing" from the root with no homing: an anchor-aimed or target-aimed volley, and a
+	homing shot's turn, depend on a pose and a target this view does not have.
 
-	Cells are built once and only recoloured on an edit: a few hundred Frames toggling a transparency is
-	cheap, a few hundred being rebuilt on every keystroke is not.
+	Cells are built once and only recoloured when their state CHANGES: a few hundred Frames toggling a
+	transparency is cheap, a few hundred being rebuilt -- or even re-written with the value they already
+	hold -- on every keystroke is not. Each volume visits only the cells its own box covers, so a wide
+	volley costs what it covers rather than volumes x cells.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -38,6 +42,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local HitboxGeometry = require(ReplicatedStorage.Shared.HitboxEngine.HitboxGeometry)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local ProjectileBody = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileBody)
 local ProjectileMotion = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileMotion)
 
 local Tokens = require(script.Parent.Parent.Parent.Parent.Tokens)
@@ -80,8 +85,12 @@ local PROJECTILE_REACH = 24
 -- Pieces per shot path when something bends it (gravity, acceleration); a straight shot is one.
 local CURVED_PATH_SEGMENTS = 4
 -- Past this many volumes a cell takes fewer depth samples, so a wide volley still redraws at drag speed.
-local MANY_VOLUMES = 8
+local MANY_VOLUMES = 24
 local FEW_DEPTH_SAMPLES = 3
+-- A shaped body is stood along its path at most this many times, and no closer than the stride that makes
+-- neighbours just overlap (its own length, but never under MIN_BODY_STRIDE studs).
+local MAX_BODY_STANDS = 12
+local MIN_BODY_STRIDE = 2
 
 -- One volume to rasterise: a shape at a root-space pose, plus that pose's inverse and the root-space
 -- box around it (a cell outside the box skips the exact test).
@@ -115,6 +124,28 @@ local function volleyVolumes(move: MoveTypes.MoveDefinition, spec: MoveTypes.Mov
 	local aim = CFrame.new(move.Offset.Position) * move.Offset.Rotation
 	local curved = spec.Gravity ~= 0 or spec.Acceleration ~= 0
 	local segments = if curved then CURVED_PATH_SEGMENTS else 1
+	local body = ProjectileBody.Of(spec)
+	if not body.IsSphere then
+		-- The body itself, stood along each path. A stand every body-length overlaps its neighbour; the
+		-- path's own bend is honoured by sampling it at least as finely as it curves.
+		local stride = math.max(body.Extents.Z, MIN_BODY_STRIDE)
+		segments = math.clamp(math.ceil(PROJECTILE_REACH / stride), segments, MAX_BODY_STANDS)
+		for _, shot in ProjectileMotion.Volley(spec, aim) do
+			local points = ProjectileMotion.Path(spec, shot, PROJECTILE_REACH, segments)
+			for index, point in points do
+				local before, after = points[math.max(index - 1, 1)], points[math.min(index + 1, #points)]
+				local heading = after - before
+				if heading.Magnitude < 1e-4 then
+					heading = shot.Direction
+				end
+				table.insert(
+					volumes,
+					newVolume(body.Shape, body.Dimensions, ProjectileBody.PoseAt(body, point, heading))
+				)
+			end
+		end
+		return volumes
+	end
 	for _, shot in ProjectileMotion.Volley(spec, aim) do
 		local points = ProjectileMotion.Path(spec, shot, PROJECTILE_REACH, segments)
 		for index = 1, #points - 1 do
@@ -304,11 +335,37 @@ local function HitboxPlot(scope: Scope, props: HitboxPlotProps): Frame
 		end
 	end
 
+	-- What each cell is showing, so a redraw writes only the cells that changed.
+	local shown: { boolean } = table.create(GRID * GRID, false)
+	local lit: { boolean } = table.create(GRID * GRID, false)
+
+	local function setCell(index: number, on: boolean): ()
+		if shown[index] ~= on then
+			shown[index] = on
+			cells[index].BackgroundTransparency = if on then 0.35 else 1
+		end
+	end
+
+	-- The columns and rows a volume's root-space box can touch in this view, clamped to the grid.
+	local function cellRange(volume: Volume, halfExtent: number): (number, number, number, number)
+		local step = halfExtent * 2 / GRID
+		local across0, across1, down0, down1
+		if props.View == "Top" then
+			across0, across1, down0, down1 = volume.Min.X, volume.Max.X, volume.Min.Z, volume.Max.Z
+		else
+			across0, across1, down0, down1 = -volume.Max.Z, -volume.Min.Z, -volume.Max.Y, -volume.Min.Y
+		end
+		local function index(value: number): number
+			return math.clamp(math.floor((value + halfExtent) / step), 0, GRID - 1)
+		end
+		return index(across0), index(across1), index(down0), index(down1)
+	end
+
 	local function redraw(): ()
 		local move = peek(props.Draft)
 		if not move then
-			for _, cell in cells do
-				cell.BackgroundTransparency = 1
+			for index = 1, GRID * GRID do
+				setCell(index, false)
 			end
 			extentText:set("")
 			placeBody(MIN_HALF_EXTENT)
@@ -318,28 +375,39 @@ local function HitboxPlot(scope: Scope, props: HitboxPlotProps): Frame
 		local volumes = volumesOf(move)
 		local fit = fitView(props.View, worldCorners(volumes))
 		local depthSamples = if #volumes > MANY_VOLUMES then FEW_DEPTH_SAMPLES else DEPTH_SAMPLES
-		local depthStep = if depthSamples > 1 then (fit.DepthMax - fit.DepthMin) / (depthSamples - 1) else 0
-		for row = 0, GRID - 1 do
-			for column = 0, GRID - 1 do
-				local lit = false
-				for sample = 0, depthSamples - 1 do
-					local depth = fit.DepthMin + depthStep * sample
-					local point = cellPoint(props.View, column, row, fit.HalfExtent, depth)
-					for _, volume in volumes do
+		table.clear(lit)
+		for _, volume in volumes do
+			local columnMin, columnMax, rowMin, rowMax = cellRange(volume, fit.HalfExtent)
+			-- Sampled through THIS volume's own depth, not the whole plot's: fewer wasted samples, and a
+			-- thin volume far from the others is not missed between them.
+			local depthMin, depthMax
+			if props.View == "Top" then
+				depthMin, depthMax = volume.Min.Y, volume.Max.Y
+			else
+				depthMin, depthMax = volume.Min.X, volume.Max.X
+			end
+			local depthStep = if depthSamples > 1 then (depthMax - depthMin) / (depthSamples - 1) else 0
+			for row = rowMin, rowMax do
+				for column = columnMin, columnMax do
+					local index = row * GRID + column + 1
+					if lit[index] then
+						continue
+					end
+					for sample = 0, depthSamples - 1 do
+						local point = cellPoint(props.View, column, row, fit.HalfExtent, depthMin + depthStep * sample)
 						if
 							insideBox(volume, point)
 							and HitboxGeometry.ContainsPoint(volume.Shape, volume.Dimensions, volume.Inverse * point, 0)
 						then
-							lit = true
+							lit[index] = true
 							break
 						end
 					end
-					if lit then
-						break
-					end
 				end
-				cells[row * GRID + column + 1].BackgroundTransparency = if lit then 0.35 else 1
 			end
+		end
+		for index = 1, GRID * GRID do
+			setCell(index, lit[index] == true)
 		end
 		extentText:set(`±{fit.HalfExtent} studs`)
 		placeBody(fit.HalfExtent)

@@ -83,9 +83,17 @@ return function()
 			expect(#validated.Rules).to.equal(0)
 		end)
 
-		it("refuses a delivering effect that names no move", function()
-			local _, reason = DomainTypes.Validate(withEffect({ MoveId = "" }))
-			expect(reason).to.equal("DomainEffectNeedsMove")
+		it("refuses a move-delivering effect that names no move", function()
+			for _, kind in { "Volley", "OwnerCast" } do
+				local _, reason = DomainTypes.Validate(withEffect({ Kind = kind, MoveId = "" }))
+				expect(reason).to.equal("DomainEffectNeedsMove")
+			end
+		end)
+
+		it("lets a Strike name no move: it is then the realm's own strike", function()
+			local validated, reason = DomainTypes.Validate(withEffect({ Kind = "Strike", MoveId = "" }))
+			expect(reason).to.equal(nil)
+			expect((validated :: DomainTypes.DomainSpec).Effects[1].MoveId).to.equal("")
 		end)
 
 		it("does not require a move for a kind that delivers none", function()
@@ -94,9 +102,35 @@ return function()
 			expect((validated :: DomainTypes.DomainSpec).Effects[1].Kind).to.equal("Hitstun")
 		end)
 
-		it("refuses an effect that delivers the realm's own move", function()
-			local _, reason = DomainTypes.Validate(withEffect({ MoveId = "my-realm-1234" }), "my-realm-1234")
-			expect(reason).to.equal("DomainSelfReference")
+		it("refuses a Volley or an OwnerCast that delivers the realm's own move", function()
+			for _, kind in { "Volley", "OwnerCast" } do
+				local _, reason =
+					DomainTypes.Validate(withEffect({ Kind = kind, MoveId = "my-realm-1234" }), "my-realm-1234")
+				expect(reason).to.equal("DomainSelfReference")
+			end
+		end)
+
+		it("reads a Strike that names the realm's own move as the realm's own strike", function()
+			local validated, reason =
+				DomainTypes.Validate(withEffect({ Kind = "Strike", MoveId = "my-realm-1234" }), "my-realm-1234")
+			expect(reason).to.equal(nil)
+			expect((validated :: DomainTypes.DomainSpec).Effects[1].MoveId).to.equal("")
+		end)
+
+		it("clamps a strike's Power into its range and defaults it to 1", function()
+			local plain = DomainTypes.Validate(withEffect({})) :: DomainTypes.DomainSpec
+			expect(plain.Effects[1].Power).to.equal(1)
+			local huge = DomainTypes.Validate(withEffect({ Power = 99 })) :: DomainTypes.DomainSpec
+			expect(huge.Effects[1].Power).to.equal(DomainTypes.Limits.Power.Max)
+			local negative = DomainTypes.Validate(withEffect({ Power = -2 })) :: DomainTypes.DomainSpec
+			expect(negative.Effects[1].Power).to.equal(DomainTypes.Limits.Power.Min)
+		end)
+
+		it("fills an effect saved before Power existed with 1", function()
+			local spec = withEffect({}) :: any
+			spec.Effects[1].Power = nil
+			local validated = DomainTypes.Validate(spec) :: DomainTypes.DomainSpec
+			expect(validated.Effects[1].Power).to.equal(1)
 		end)
 
 		it("refuses a move id with characters no id can have", function()

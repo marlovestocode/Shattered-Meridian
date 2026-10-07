@@ -16,7 +16,8 @@
 	the editor, and did nothing. What is left is exactly what a live system reads:
 
 	  * Shape / Dimensions / AttachmentPart / LocksMovement are HitboxTypes' own vocabulary, so the
-	    projection is a copy, never an approximation.
+	    projection is a copy, never an approximation. (Fifteen shapes since 2026-10-01 -- see
+	    HitboxTypes.ShapeKind -- and the editor starts a volume from a named preset, HitboxTypes.Presets.)
 	  * Timing, Damage / PostureDamage / MaxTargets, PowerLevel (GuardMeter.DrainFor) and Feintable
 	    (AttackRequestSystem.Feint).
 	  * AnimationId -- the one clip AttackCatalog syncs the swing to (Shared/Attack/AttackWindows.lua).
@@ -30,8 +31,10 @@
 	    MoveRecordCodec still drops that one from v1/v2 records, and a v3 record's block is this one.
 	  * Domain (2026-09-30) -- the move opens a REALM (Shared/Domain/DomainTypes.lua, and the domain design
 	    doc). The swing is the activation sequence; when AttackRequestSystem accepts it, DomainSystem opens
-	    the realm this block describes. Like Presentation it is absent from ToEngineAttackDefinition -- the
-	    swing's own hitbox is unchanged -- and AttackCatalog surfaces only its presence (IsDomain).
+	    the realm this block describes. The block itself is absent from ToEngineAttackDefinition, but its
+	    presence is not: a realm move casts VOLUMELESS (HitboxTypes.AttackDefinition.Volumeless), so the
+	    swing keeps its whole lifecycle and samples nothing in front of the caster -- the realm, and the
+	    strikes it delivers, are the move's only hits. AttackCatalog also surfaces the presence (IsDomain).
 	  * Presentation (2026-09-30) -- what the move sounds and looks like at a fixed set of moments
 	    (Shared/Combat/MovePresentationTypes.lua). The one block no server system reads: it is carried,
 	    validated, persisted and replicated to clients, and deliberately absent from
@@ -121,8 +124,9 @@ export type MoveDimensions = HitboxTypes.Dimensions
 export type MoveAttachmentPoint = HitboxTypes.AttachmentPoint
 
 -- Every shape, in the order the editor offers them. The engine's IsShapeKind is the authority on
--- membership; this list is only the presentation order, and MoveTypes.spec pins the two together.
-MoveTypes.Shapes = { "Box", "Sphere", "Capsule", "Cylinder", "Cone", "Beam", "Arc" } :: { MoveShape }
+-- membership and HitboxTypes.ShapeOrder is the presentation order, so a shape the engine learns is
+-- offered here with no second edit; MoveTypes.spec pins the two together.
+MoveTypes.Shapes = HitboxTypes.ShapeOrder :: { MoveShape }
 MoveTypes.AttachmentPoints = { "Root", "RightHand", "LeftHand", "Weapon" } :: { MoveAttachmentPoint }
 
 -- The velocity a landed hit hands its target (Shared/Damage/Knockback.lua), along the attacker's facing.
@@ -554,6 +558,9 @@ function MoveTypes.ToEngineAttackDefinition(move: MoveDefinition): (HitboxTypes.
 		-- every other shape -- the engine only reads it for Box).
 		SizeFromAttachmentPart = move.AttachmentPart == "Weapon",
 		SizeMultiplier = move.SizeMultiplier,
+		-- A move that opens a realm casts without a body volume: the realm is where it acts, and a hitbox in
+		-- front of the caster during the cast would be a second, unwanted attack (HitboxTypes.Volumeless).
+		Volumeless = move.Domain ~= nil,
 		Projectile = if move.Projectile then ProjectileTypes.Copy(move.Projectile) else nil,
 	}
 	local profile: DamageProfile = {

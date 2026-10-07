@@ -16,10 +16,16 @@
 	combo and knockback. There is no damage, parry or block logic in this file.
 
 	SWEPT, BOTH WAYS. Each step moves a shot from where it was to where it will be, and tests that whole
-	segment: against bodies as a Capsule (CandidateGatherer's include-filtered broadphase, then
-	HitboxGeometry's own Capsule containment -- the same narrow phase a swing uses), and against the world
-	as a Spherecast. A fast shot cannot tunnel through a body or a wall between two samples, whatever the
-	frame rate.
+	segment: against bodies (CandidateGatherer's include-filtered broadphase, then HitboxGeometry's own
+	containment -- the same narrow phase a swing uses), and against the world as a Spherecast. A fast shot
+	cannot tunnel through a body or a wall between two samples, whatever the frame rate.
+
+	THE SHOT IS A VOLUME (2026-10-01, ProjectileBody). A plain sphere keeps its original path: the segment
+	is a Capsule of the shot's radius. Any other Shape is swept as the shape itself -- HitboxGeometry's
+	SweptContainsPoint between the body's pose at the start and the end of the step, the exact test a
+	swinging hitbox gets -- with a bounding sphere around the segment for the broadphase, and the world cast
+	moved to the body's leading edge with a radius of its thinnest half, so a long spear meets a wall with
+	its tip rather than its middle.
 
 	CONTACTS ALONG THE SEGMENT, NEAREST FIRST, each target once per shot (the per-shot HitTargets set is
 	the same dedupe a swing's per-swing set is). A body in front of a wall is hit before the wall is.
@@ -61,6 +67,7 @@ local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.Hitb
 local HitboxGeometry = require(ReplicatedStorage.Shared.HitboxEngine.HitboxGeometry)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local ProjectileBody = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileBody)
 local ProjectileMotion = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileMotion)
 local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
 
@@ -133,6 +140,9 @@ export type ProjectileEvent = {
 	Owner: Model?,
 	MoveId: string?,
 	Radius: number?,
+	-- Launch only, and only for a shot that is not a plain sphere: the spec's body fields, from which a
+	-- client builds the same ProjectileBody the server sweeps.
+	Body: { [string]: any }?,
 	LifetimeSeconds: number?,
 	Motion: ProjectileMotion.Motion?,
 	-- Launch/Update: the homing target, if any.
@@ -153,6 +163,8 @@ type Projectile = {
 	Spec: ProjectileSpec,
 	Motion: ProjectileMotion.Motion,
 	DebugName: string,
+	-- The volume the shot flies as (ProjectileBody), built once per volley and shared by its shots.
+	Body: ProjectileBody.Body,
 	ComboStage: number,
 	PowerLevel: number,
 	Position: Vector3,
@@ -236,6 +248,19 @@ local function push(event: ProjectileEvent): ()
 	table.insert(pendingEvents, event)
 end
 
+-- The body fields of a spec, for the wire: just the ones a ProjectileBody reads.
+local function bodyWire(spec: ProjectileSpec): { [string]: any }
+	return {
+		Shape = spec.Shape,
+		Size = spec.Size,
+		Length = spec.Length,
+		Width = spec.Width,
+		Height = spec.Height,
+		InnerRadius = spec.InnerRadius,
+		AngleDegrees = spec.AngleDegrees,
+	}
+end
+
 local function pushLaunch(projectile: Projectile, at: number): ()
 	push({
 		Kind = "Launch",
@@ -247,6 +272,7 @@ local function pushLaunch(projectile: Projectile, at: number): ()
 		Owner = projectile.Owner.Model,
 		MoveId = projectile.DebugName,
 		Radius = projectile.Spec.Size,
+		Body = if projectile.Body.IsSphere then nil else bodyWire(projectile.Spec),
 		-- What is LEFT, so a shot a parry turned round is not drawn for a fresh full lifetime it has not got.
 		LifetimeSeconds = math.max(projectile.Spec.LifetimeSeconds - projectile.Age, 0),
 		Motion = if projectile.NoHoming
@@ -444,6 +470,7 @@ local function launchVolley(
 	local groupId = nextGroupId
 	nextGroupId += 1
 	local motion = ProjectileMotion.MotionOf(spec)
+	local body = ProjectileBody.Of(spec)
 	local shots = ProjectileMotion.Volley(spec, aim)
 
 	local launched = 0
@@ -463,6 +490,7 @@ local function launchVolley(
 			Spec = spec,
 			Motion = motion,
 			DebugName = definition.DebugName,
+			Body = body,
 			ComboStage = comboStage,
 			PowerLevel = powerLevel,
 			Position = shot.Origin,
@@ -536,8 +564,7 @@ end
 
 local function report(projectile: Projectile, target: Owner, part: BasePart, at: Vector3, now: number): ()
 	local heading = headingOf(projectile)
-	local dimensions = HitboxTypes.DefaultDimensions()
-	dimensions.Radius = projectile.Spec.Size
+	local body = projectile.Body
 	local contact: ProjectileTypes.ProjectileContact = {
 		Id = projectile.Id,
 		GroupId = projectile.GroupId,
@@ -552,8 +579,9 @@ local function report(projectile: Projectile, target: Owner, part: BasePart, at:
 		Attacker = projectile.Owner.Model,
 		Target = target.Model,
 		TargetPart = part,
-		Shape = "Sphere",
-		Dimensions = dimensions,
+		Shape = body.Shape,
+		-- A copy: a consumer may keep a report, and the body's own table is shared by every shot of the volley.
+		Dimensions = table.clone(body.Dimensions),
 		ContactPosition = part:GetClosestPointOnSurface(at),
 		ComboStage = projectile.ComboStage,
 		PowerLevel = projectile.PowerLevel,
@@ -578,15 +606,27 @@ end
 -- Every new body the segment a -> b passes through, nearest first; reports each and applies Piercing.
 local function sweepBodies(projectile: Projectile, a: Vector3, b: Vector3, now: number): ()
 	local engine = requireHooks()
+	local body = projectile.Body
 	local delta = b - a
 	local length = delta.Magnitude
-	sweepDimensions.Radius = projectile.Spec.Size
+	local heading = if length > EPSILON then delta / length else headingOf(projectile)
+	-- The broadphase is a capsule round the segment: exact for a sphere, a bounding sphere for any other
+	-- body (over-gathering is correct here -- the narrow phase below is what trims it).
+	sweepDimensions.Radius = if body.IsSphere then body.CastRadius else body.BoundRadius
 	sweepDimensions.Length = length
-	local pose = if length > EPSILON then lookAlong((a + b) / 2, delta / length) else CFrame.new(a)
+	local pose = if length > EPSILON then lookAlong((a + b) / 2, heading) else CFrame.new(a)
 
 	local count = CandidateGatherer.Gather("Capsule", sweepDimensions, pose, candidateBuffer)
 	if count == 0 then
 		return
+	end
+
+	-- The body at both ends of the step, for the swept test; unused by a sphere.
+	local poseStart: CFrame? = nil
+	local poseEnd: CFrame? = nil
+	if not body.IsSphere then
+		poseStart = ProjectileBody.PoseAt(body, a, heading)
+		poseEnd = ProjectileBody.PoseAt(body, b, heading)
 	end
 
 	local margin = HitboxEngineConstants.NarrowPhaseMarginStuds
@@ -604,9 +644,22 @@ local function sweepBodies(projectile: Projectile, a: Vector3, b: Vector3, now: 
 		if owner.Model == projectile.Owner.Model and not mayHitOwner(projectile) then
 			continue
 		end
-		if
-			not HitboxGeometry.ContainsPoint("Capsule", sweepDimensions, pose:PointToObjectSpace(part.Position), margin)
-		then
+		local touching: boolean
+		if body.IsSphere then
+			touching =
+				HitboxGeometry.ContainsPoint("Capsule", sweepDimensions, pose:PointToObjectSpace(part.Position), margin)
+		else
+			touching = HitboxGeometry.SweptContainsPoint(
+				body.Shape,
+				body.Dimensions,
+				poseStart :: CFrame,
+				body.Dimensions,
+				poseEnd :: CFrame,
+				part.Position,
+				margin
+			)
+		end
+		if not touching then
 			continue
 		end
 		local along = if length > EPSILON
@@ -721,7 +774,11 @@ local function stepOne(projectile: Projectile, dt: number, now: number): ()
 	local segment = to - from
 	local worldHit: RaycastResult? = nil
 	if spec.CollisionBehavior ~= "Continue" and segment.Magnitude > EPSILON then
-		worldHit = Workspace:Spherecast(from, spec.Size, segment, worldParams)
+		-- From the body's leading edge: for a long shape the tip meets a wall before the middle does. A
+		-- sphere's lead is zero, so it casts from its centre exactly as it always did.
+		local body = projectile.Body
+		local castFrom = if body.CastLead > 0 then from + segment.Unit * body.CastLead else from
+		worldHit = Workspace:Spherecast(castFrom, body.CastRadius, segment, worldParams)
 	end
 	local reach = if worldHit then from + segment.Unit * worldHit.Distance else to
 

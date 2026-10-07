@@ -193,6 +193,91 @@ return function()
 		end)
 	end)
 
+	describe("HitboxEngine -- projectile bodies (Shape)", function()
+		it("reports a plain sphere's contact as a Sphere of its Size", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			makeDummy("Target", Vector3.new(0, 5, -20))
+			local hits, disconnect = captureHits()
+			run(throw(attacker, projectileAttack({ Size = 1.5 })), 0.4)
+			disconnect()
+			expect(#hits).to.equal(1)
+			expect(hits[1].Shape).to.equal("Sphere")
+			expect(hits[1].Dimensions.Radius).to.equal(1.5)
+		end)
+
+		it("sweeps a wide slab through a target a sphere of the same Size would miss", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			makeDummy("Beside", Vector3.new(4, 5, -20))
+
+			local hits, disconnect = captureHits()
+			run(throw(attacker, projectileAttack({ Size = 1 })), 0.4)
+			disconnect()
+			expect(#hits).to.equal(0)
+
+			HitboxEngine.Reset()
+			local again = makeDummy("Attacker2", Vector3.new(0, 5, 0))
+			makeDummy("Beside2", Vector3.new(4, 5, -20))
+			local slabHits, disconnectSlab = captureHits()
+			run(throw(again, projectileAttack({ Shape = "Box", Width = 12, Height = 6, Length = 1.5 })), 0.4)
+			disconnectSlab()
+			expect(#slabHits).to.equal(1)
+			expect(slabHits[1].Shape).to.equal("Box")
+			expect(slabHits[1].Dimensions.Width).to.equal(12)
+		end)
+
+		it("does not tunnel a thin shaped shot through a body between two steps", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			makeDummy("Target", Vector3.new(0, 5, -30))
+			local hits, disconnect = captureHits()
+			-- 400 studs/s is more than six studs a frame against a 0.6-stud body.
+			run(throw(attacker, projectileAttack({ Shape = "Capsule", Size = 0.3, Length = 2, Speed = 400 })), 0.4)
+			disconnect()
+			expect(#hits).to.equal(1)
+		end)
+
+		it("sends a body only for a shot that is not a plain sphere", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local events, disconnect = captureEvents()
+			run(throw(attacker, projectileAttack({ Shape = "Wedge", Width = 3, Height = 1, Length = 5 })), 0.1)
+			HitboxEngine.Reset()
+			local again = makeDummy("Attacker2", Vector3.new(0, 5, 0))
+			run(throw(again, projectileAttack({})), 0.1)
+			disconnect()
+			local wedgeLaunch, sphereLaunch
+			for _, event in events do
+				if event.Kind == "Launch" then
+					if event.Body ~= nil then
+						wedgeLaunch = event
+					else
+						sphereLaunch = event
+					end
+				end
+			end
+			expect(wedgeLaunch).to.be.ok()
+			expect((wedgeLaunch :: any).Body.Shape).to.equal("Wedge")
+			expect((wedgeLaunch :: any).Body.Length).to.equal(5)
+			expect(sphereLaunch).to.be.ok()
+		end)
+
+		it("meets a wall with its tip, not its middle", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			makeWall(Vector3.new(0, 5, -20))
+			local events, disconnect = captureEvents()
+			run(throw(attacker, projectileAttack({ Shape = "Capsule", Size = 0.5, Length = 10 })), 0.5)
+			disconnect()
+			local ended: ProjectileEvent? = nil
+			for _, event in events do
+				if event.Kind == "End" and event.Reason == "World" then
+					ended = event
+				end
+			end
+			expect(ended).to.be.ok()
+			-- The wall's near face is at z = -19.5. The shot's middle stops a tip's reach (5.5) short of it.
+			local z = (ended :: ProjectileEvent).Position.Z
+			expect(z > -15 and z < -13).to.equal(true)
+		end)
+	end)
+
 	describe("HitboxEngine -- projectile contacts", function()
 		it("reports a contact as an ordinary HitReport with the shot attached", function()
 			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
