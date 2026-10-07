@@ -163,23 +163,19 @@ DamageConstants.Combo = {
 	-- How long after a LANDED hit the attacker's string stays connected. A hit landed inside this
 	-- window escalates; one landed after it starts again at stage 1.
 	--
-	-- MUST STAY STRICTLY BELOW DefenseConstants.Stagger.DurationSeconds (1.5), and that relationship
-	-- is load-bearing rather than incidental: it is the entire reason this system needs no
-	-- "reset the combo when you get parried" rule. A parried attacker is staggered for longer than
-	-- their own window lasts, so by the time they can act again the window has lapsed on its own. That
-	-- is the same "let the timer expire, don't special-case it" economy DefenseStateMachine already
-	-- practices with its own lockout timestamps.
-	--
-	-- So if Stagger.DurationSeconds is ever retuned down (its own comment flags 0.6-0.75 as the
-	-- previous design's derived bound), THIS number has to move with it or the parry silently stops
-	-- interrupting combos. The spec asserts the ordering rather than either number.
+	-- NO LONGER BOUND BELOW THE STAGGER (2026-10-07). This window used to have to stay shorter than
+	-- DefenseConstants.Stagger.DurationSeconds so that a parry lapsed the parried attacker's combo on its
+	-- own. That stopped being the design on 2026-09-29: a parried MELEE swing deliberately KEEPS its chain
+	-- (AttackRequestSystem.KeepChainThroughParry holds this combo a full window past the stagger). The one
+	-- parry the hold does not cover is a reflected shot whose move staggers its thrower (StaggersOwner):
+	-- its combo may outlive the 0.9s stagger by the difference, and only Heavies, arts and shots escalate
+	-- (M1s and air hits are flat-priced). ComboEscalation.spec pins that leftover under one Basic swing.
 	--
 	-- RAISED FROM 0.9 TO 1.15 with AttackConstants.Tempo (M1s at 0.75x). The slowed string lands its hits
 	-- further apart -- stage 2 into 3 came out at ~0.9s hit-to-hit on the authored numbers alone, i.e. AT
 	-- the old window -- and a string whose gaps outgrow this number can never reach its Finisher. Scaled
-	-- with the string rather than left at the edge, and kept under the two bounds either side of it:
-	-- Stagger.DurationSeconds (1.5) above, and AttackConstants.Sequence.ResetSeconds (1.2), which is
-	-- deliberately the longer of the two.
+	-- with the string rather than left at the edge, and kept under AttackConstants.Sequence.ResetSeconds
+	-- (1.2), which is deliberately the longer of the two.
 	WindowSeconds = 1.15,
 
 	-- Ceiling on escalation. Past this, further landed hits keep the window alive but grant no more

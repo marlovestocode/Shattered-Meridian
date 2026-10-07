@@ -183,7 +183,7 @@ local CombatConstants = {
 	--     retiming a parry is retiming the animation and nothing else.
 	--   * The ping refund survives as DefenseConstants.Parry.PingCompensationMaxSeconds, at the same
 	--     0.12 -- it is a latency correction, not a window length, so it is still a constant.
-	--   * The parried attacker's punish is DefenseConstants.Stagger.DurationSeconds. Note it is 1.5s
+	--   * The parried attacker's punish is DefenseConstants.Stagger.DurationSeconds (0.9s since 2026-10-07)
 	--     where GuardOpenSeconds was 0.6 -- and that 0.6 was DERIVED, not guessed: sized to cover
 	--     reaction plus one-way latency plus the slowest weapon's own windup (Primary Basic1, 0.31,
 	--     still live below) so the parrier got exactly ONE guaranteed follow-up, with a hard upper

@@ -115,5 +115,22 @@ Per-hit and per-swing message counts are unchanged from the feel pass's table.
 
 - Run the suite in Studio before trusting any of this.
 - The non-combat subscriber lists.
-- The client's prediction timeout uses `2 * GetNetworkPing()`, which is a round trip already — harmless (it is
-  only the backstop now that refusals are answered) but twice what it needs.
+- **Is `GetNetworkPing` a round trip or one way?** This codebase assumes round trip (`NetworkLatency`'s header).
+  Roblox's reference page does not say, and DevForum measurements suggest ONE WAY (about half the ping
+  in the stats overlay). If one way: the swing lead (`ping/2`) and the parry rewind (`min(ping, cap)`) refund
+  half of what they mean to, the stun mirror's `ping/2` subtracts half a trip too little (harmless, errs
+  long), and the client's `2 * GetNetworkPing()` prediction timeout is exactly one round trip (which is why
+  it was NOT halved). Measure in Studio: print `GetNetworkPing()` beside the stats-overlay ping under the
+  Network Simulator, then fix `NetworkLatency.PingSeconds` in one place.
+
+## Follow-ups (2026-10-07)
+
+- **Fists always in hand** when nothing else is drawn (`WeaponInventorySystem`, `inHandOf`); the HUD hides the
+  Draw/Sheathe hint for Fists.
+- **Stagger shortened** 1.5s → 0.9s, perfect 1.8s → 1.1s (`DefenseConstants.Stagger`/`PerfectParry`). M1s now
+  link, so the stagger only has to cover the punish's first hit. Parrying back out of the stagger was
+  already allowed (`Rally.ParryFromStagger`). The old rule "the combo window stays below the stagger" had
+  been obsolete since parried melee swings started keeping their chain (2026-09-29); its spec now pins the
+  one case nothing holds (a reflected shot that staggers its thrower) to under one Basic swing of leftover.
+- **Checked and left alone:** a whiffed M1 does not reset the string (`SwingSequencer.Advance` runs on every
+  accepted throw); the prediction timeout was not halved (see the `GetNetworkPing` question above).

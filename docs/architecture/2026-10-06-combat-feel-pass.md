@@ -98,5 +98,6 @@ cap on the refund doing its job.
 
 - Evade clips and sound are blank (`EvadeConstants.AnimationIds`/`Sound`). Each is a one-line id.
 - M1 step-in toward the lock-on target. Only Heavy has a `SwingLunge` today.
-- Stagger length (1.5s / 1.8s perfect) is still flagged in `DefenseConstants.Stagger`.
+- ~~Stagger length (1.5s / 1.8s perfect)~~ — shortened to 0.9s / 1.1s on 2026-10-07 (see
+  `2026-10-06-combat-transactions-pass.md`, follow-ups).
 - `docs/design/parry-block-system-plan.md` still says "proposed, not built".
