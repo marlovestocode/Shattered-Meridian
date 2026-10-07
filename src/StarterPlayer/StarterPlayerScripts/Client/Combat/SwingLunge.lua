@@ -57,7 +57,7 @@
 	function is the existing single seam for "something outside the state machine needs this body to
 	move now", and going through it buys the two refusals this module would otherwise have to
 	re-implement and keep in sync: a kinematic traversal (a vault, a mantle) owns the body outright,
-	and the server can hold root control (Constants.Attributes.RootControlLocked, admin flight/freeze).
+	and the server can hold root control (AttributeConstants.RootControlLocked, admin flight/freeze).
 	Both correctly mean "not now" for a swing step too, and both already return false there.
 
 	NEVER WRITES WalkSpeed. Server/Systems/RunSystem.lua is the sole writer of that property and a

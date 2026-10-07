@@ -176,7 +176,7 @@ local KeybindConstants = {
 		--   * Pressing E to BOARD also buffers a leap, but Leaping's own CanEnter refuses a standing
 		--     character, and the mount sets RootControlLocked a frame later, which parks parkour outright.
 		--   * Pressing E to LEAVE cannot buffer a leap at all -- ParkourInput skips the Leap branch while
-		--     Constants.Attributes.Mounted is set, which is the one case that would otherwise have fired
+		--     AttributeConstants.Mounted is set, which is the one case that would otherwise have fired
 		--     (a buffered press surviving the release and launching the player off the deck).
 		-- E is the conventional interact key this genre trains players to reach for, which is the same
 		-- argument Leap's own comment makes; if the overlap ever stops being acceptable, MOVE Leap -- a

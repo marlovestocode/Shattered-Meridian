@@ -21,7 +21,7 @@
 
 	WHY SPACED BY 100 AND NOT BY 1. Bands need headroom because ordering within one is a real
 	requirement, not a hypothetical: two modals open at once is documented behaviour (see
-	Constants.Attributes.UiModalOpen's own comment, and the fact that ModalScreen's openModalCount is
+	AttributeConstants.UiModalOpen's own comment, and the fact that ModalScreen's openModalCount is
 	module-scope rather than per-instance precisely because of it). If every modal took the same
 	number they would z-fight and the winner would be PlayerGui insertion order -- which, for the
 	Lazy-deferred screens, is FIRST-OPEN order, so it would vary between sessions depending on which

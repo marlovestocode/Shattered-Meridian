@@ -12,7 +12,7 @@
 
 local AirComboTypes = {}
 
--- The AirComboPhase Attribute's values (Constants.Attributes.AirComboPhase). Rising/Held/Finishing while
+-- The AirComboPhase Attribute's values (AttributeConstants.AirComboPhase). Rising/Held/Finishing while
 -- a combo runs; the rest are END states, published for Timing.PhaseLingerSeconds so a spectator can read
 -- how it ended.
 export type Phase = "Rising" | "Held" | "Finishing" | "Parried" | "Dropped" | "Recovering" | "Slammed" | "Spiked"

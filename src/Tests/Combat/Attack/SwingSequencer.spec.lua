@@ -133,6 +133,36 @@ return function()
 			expect(SwingSequencer.SetWeapon(attacker, "Tertiary" :: any, T)).to.equal(false)
 			expect(SwingSequencer.GetWeapon(attacker)).to.equal(FIRST_WEAPON)
 		end)
+
+		it("lists every stage it would resolve, Basic then Heavy, as the prediction seed's ids", function()
+			-- StageMoveIds is what AttackRequestSystem seeds the client's prediction from, so it must name
+			-- exactly the moves Resolve throws: the probed count of each, in stage order, every id catalogued.
+			local stages = SwingSequencer.StageMoveIds(FIRST_WEAPON)
+			local seen: { [string]: number } = {}
+			local lastKind = "Basic"
+			for _, stage in stages do
+				expect(AttackCatalog.Has(stage.MoveId)).to.equal(true)
+				expect(stage.MoveId).to.equal(`default:{FIRST_WEAPON}:{stage.Kind}:{stage.StageIndex}`)
+				seen[stage.Kind] = (seen[stage.Kind] or 0) + 1
+				expect(stage.StageIndex).to.equal(seen[stage.Kind])
+				if stage.Kind == "Basic" then
+					expect(lastKind).to.equal("Basic")
+				end
+				lastKind = stage.Kind
+			end
+			expect(seen.Basic).to.equal(firstWeaponBasicCount())
+			expect((seen.Heavy or 0) > 0).to.equal(true)
+
+			-- And they ARE the moves Resolve throws: walk the real Basic string stage by stage.
+			local basicIndex = 0
+			for _, stage in stages do
+				if stage.Kind == "Basic" then
+					basicIndex += 1
+					local attacker = makeAttacker(`SeedWalk{basicIndex}`)
+					expect(throwBasic(attacker, basicIndex, 1).MoveId).to.equal(stage.MoveId)
+				end
+			end
+		end)
 	end)
 
 	describe("SwingSequencer -- a fresh combatant", function()

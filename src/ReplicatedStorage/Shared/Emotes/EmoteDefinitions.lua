@@ -10,7 +10,7 @@
 	four races don't, but a bloodline/art roster eventually will.
 
 	AnimationId/Icon are "" for every unauthored entry below -- this codebase never fabricates a
-	plausible-looking asset id (see Constants.Combat.AnimationIds' own header for the precedent:
+	plausible-looking asset id (see CombatConstants.AnimationIds' own header for the precedent:
 	Heavy1/Heavy2 sit exactly as empty, wired-but-unauthored strings until a real clip is supplied).
 	Every play/preload path already degrades safely on an empty id (Client/FX/EmoteAnimator.lua skips
 	building a template for it, the same way CombatAnimator.lua does). Wave/Taunt/Cheer are the

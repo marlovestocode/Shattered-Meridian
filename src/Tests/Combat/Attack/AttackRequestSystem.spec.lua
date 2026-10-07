@@ -30,6 +30,7 @@ local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageSystem = require(ServerScriptService.Server.Combat.Damage.DamageSystem)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local NetworkLatency = require(ServerScriptService.Server.Combat.NetworkLatency)
+local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
 local DefenseSystem = require(ServerScriptService.Server.Combat.Defense.DefenseSystem)
 local GuardMeter = require(ServerScriptService.Server.Combat.Defense.GuardMeter)
 local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.HitboxEngine)
@@ -58,6 +59,7 @@ local CHAIN_DELAY = AttackConstants.Sequence.ChainDelaySeconds
 -- own header documents for its Player-keyed wrappers -- so that coverage is deferred to
 -- Studio/live-server verification; there is no synthetic-dummy substitute for it here.
 local HOTBAR_MOVE = `default:{FIRST_WEAPON}:Heavy:1`
+local PARRY_ANIMATION = "rbxassetid://spec-attack-parry"
 
 type Dummy = {
 	Model: Model,
@@ -139,6 +141,7 @@ return function()
 	afterEach(function()
 		AttackRequestSystem.Reset()
 		DefenseSystem.Reset()
+		ParryWindows.Reset()
 		HitboxEngine.Reset()
 		AttackCatalog.Reset()
 		for _, model in spawned do
@@ -295,6 +298,71 @@ return function()
 			expect(SwingSequencer.GetStageIndex(attacker.Model, "Basic", base + gate + FRAME)).to.equal(2)
 		end)
 
+		it("drops a buffered press the moment its re-validation refuses for a reason that does not clear", function()
+			-- Buffered mid-swing (Busy), then the guard is held. Kept waiting, the press would throw the
+			-- instant the guard came back down -- the free swing out of a guard "does not buffer a refusal
+			-- the player is choosing to cause" exists to prevent, reached through the flush instead.
+			local attacker = makeDummy("GuardedBuffer", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
+
+			local seen = {}
+			local disconnect = AttackRequestSystem.OnPressRefused(function(_model, pressId, reason)
+				table.insert(seen, { PressId = pressId, Reason = reason })
+			end)
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 3 }, false, base + 0.01)
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.01)).to.equal(true)
+			-- Mid-swing, so the guard is deferred (DefenseSystem.CanAttack answers "Guarding").
+			DefenseSystem.SetBlocking(attacker.Model, true, base + 0.02)
+			step(base + 0.03)
+			disconnect()
+
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.03)).to.equal(false)
+			expect(#seen).to.equal(1)
+			expect(seen[1].PressId).to.equal(3)
+			expect(seen[1].Reason).to.equal("Guarding")
+		end)
+
+		it("never throws a dropped press once that gate reopens inside the old buffer window", function()
+			-- The proof the drop matters: buffered against a short stun (transient), refused at flush by a
+			-- mount (not transient), and the mount let go of while the original buffer window is still open.
+			-- Kept waiting, the press would throw on the frame after the dismount.
+			local attacker = makeDummy("MountedBuffer", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			DamageSystem.ExtendHitstun(attacker.Model, base + 0.1, base)
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 4 }, false, base + 0.01)
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.01)).to.equal(true)
+
+			attacker.Humanoid:SetAttribute("Mounted", true)
+			step(base + 0.12)
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.12)).to.equal(false)
+
+			attacker.Humanoid:SetAttribute("Mounted", false)
+			local last = base + BUFFER - FRAME
+			for frame = 0, math.ceil((last - (base + 0.12)) / FRAME) do
+				step(base + 0.12 + frame * FRAME)
+			end
+			expect(SwingSequencer.GetStageIndex(attacker.Model, "Basic", last)).to.equal(0)
+		end)
+
+		it("keeps a press buffered through a stun parry's window, so a landed parry can counter", function()
+			-- The one guard that waits rather than drops (waitsOutGuard): a parry window is decided within its
+			-- own few tenths of a second, and the buffered M1 is the counter a landed stun parry earns.
+			local attacker = makeDummy("StunCounter", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			ParryWindows.Register(PARRY_ANIMATION, 0, 0.3)
+			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid, PARRY_ANIMATION)
+			DamageSystem.ExtendHitstun(attacker.Model, base + 0.1, base)
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic" }, false, base + 0.01)
+			-- Stunned, so the press arms at once (DefenseConstants.StunParry).
+			DefenseSystem.SetBlocking(attacker.Model, true, base + 0.02)
+			expect(DefenseSystem.GetState(attacker.Model)).to.equal("ParryWindow")
+
+			step(base + 0.11)
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.11)).to.equal(true)
+		end)
+
 		it("does not buffer a refusal the player is choosing to cause", function()
 			-- Holding a guard refuses an attack, and that refusal is NOT transient in the sense the
 			-- buffer means: firing a queued swing the instant a player lets go of a block they were
@@ -307,6 +375,161 @@ return function()
 			local accepted, reason = AttackRequestSystem.Press(attacker.Model, { Kind = "Basic" }, false, base + 0.01)
 			expect(accepted).to.equal(false)
 			expect(reason).to.equal("Guarding")
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.01)).to.equal(false)
+		end)
+	end)
+
+	describe("AttackRequestSystem -- weapon changes", function()
+		it("does nothing for a re-select of the weapon already in hand", function()
+			-- Y with a one-weapon inventory: no notify (the client would reset its string mirror while the
+			-- server's string carries on), no dropped press, and the string keeps its place.
+			local attacker = makeDummy("Reselect", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			local fired = 0
+			local disconnect = AttackRequestSystem.OnWeaponChanged(function()
+				fired += 1
+			end)
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic" }, false, base + 0.01)
+
+			expect(AttackRequestSystem.SetWeapon(attacker.Model, FIRST_WEAPON, base + 0.02)).to.equal(true)
+			expect(fired).to.equal(0)
+			expect(SwingSequencer.GetStageIndex(attacker.Model, "Basic", base + 0.02)).to.equal(1)
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.02)).to.equal(true)
+
+			-- A real change still notifies.
+			expect(AttackRequestSystem.SetWeapon(attacker.Model, SECOND_WEAPON, base + 0.03)).to.equal(true)
+			disconnect()
+			expect(fired).to.equal(1)
+		end)
+
+		it("seeds one template per ground stage, built exactly as the confirmation is", function()
+			local seed = AttackRequestSystem.PredictionSeedFor(FIRST_WEAPON)
+			local stages = SwingSequencer.StageMoveIds(FIRST_WEAPON)
+			expect(#seed).to.equal(#stages)
+			for index, template in seed do
+				local entry = AttackCatalog.Get(template.MoveId) :: any
+				expect(template.MoveId).to.equal(stages[index].MoveId)
+				expect(template.Kind).to.equal(stages[index].Kind)
+				expect(template.StageIndex).to.equal(stages[index].StageIndex)
+				expect(template.WindupSeconds).to.equal(entry.Definition.WindupSeconds)
+				expect(template.ActiveSeconds).to.equal(entry.Definition.ActiveSeconds)
+				expect(template.RecoverySeconds).to.equal(entry.Definition.RecoverySeconds)
+				expect(template.PlaybackSpeed).to.equal(entry.PlaybackSpeed)
+				expect(template.PressId).to.equal(nil)
+			end
+			expect(#AttackRequestSystem.PredictionSeedFor(nil)).to.equal(0)
+		end)
+	end)
+
+	describe("AttackRequestSystem -- a fresh life", function()
+		-- A respawn is a new character Model: none of the previous life's stun, buffered press or string carries.
+		it("starts the next body clean after a death mid-string", function()
+			local base = os.clock()
+			local first = makeDummy("Life1", Vector3.new(0, 5, 0))
+			AttackRequestSystem.Throw(first.Model, { Kind = "Basic" }, false, base)
+			AttackRequestSystem.Press(first.Model, { Kind = "Basic", PressId = 1 }, false, base + 0.01)
+			DamageSystem.ExtendHitstun(first.Model, base + 1, base + 0.01)
+			first.Humanoid.Health = 0
+			first.Model:Destroy()
+			step(base + 0.02)
+
+			local second = makeDummy("Life2", Vector3.new(0, 5, 0))
+			expect(DamageSystem.CanAttack(second.Model, base + 0.03)).to.equal(true)
+			expect(AttackRequestSystem.HasBufferedPress(second.Model, base + 0.03)).to.equal(false)
+			expect(SwingSequencer.GetStageIndex(second.Model, "Basic", base + 0.03)).to.equal(0)
+			-- The new life's press ids are its own: a press the client numbers on from the old life still throws.
+			expect((AttackRequestSystem.Press(second.Model, { Kind = "Basic", PressId = 2 }, false, base + 0.03))).to.equal(
+				true
+			)
+		end)
+	end)
+
+	describe("AttackRequestSystem -- the press verdict", function()
+		-- A press carrying an id that will not throw is answered (AttackRequestSystem.OnPressRefused, and a
+		-- "Refused" Attack_Cancelled for a player), so the client cuts its prediction instead of timing out.
+		local function captureRefusals(): ({ { Model: Model, PressId: number, Reason: string } }, () -> ())
+			local seen = {}
+			local disconnect = AttackRequestSystem.OnPressRefused(function(model, pressId, reason)
+				table.insert(seen, { Model = model, PressId = pressId, Reason = reason })
+			end)
+			return seen, disconnect
+		end
+
+		it("answers a press refused on arrival", function()
+			local attacker = makeDummy("Refused", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
+			DefenseSystem.SetBlocking(attacker.Model, true, base)
+
+			local seen, disconnect = captureRefusals()
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 7 }, false, base + 0.01)
+			disconnect()
+
+			expect(#seen).to.equal(1)
+			expect(seen[1].PressId).to.equal(7)
+			expect(seen[1].Reason).to.equal("Guarding")
+		end)
+
+		it("answers a buffered press that expires, and says so", function()
+			local attacker = makeDummy("Expired", Vector3.new(0, 5, 0))
+			local base = os.clock()
+
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			local seen, disconnect = captureRefusals()
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 1 }, false, base + 0.01)
+			expect(#seen).to.equal(0)
+			step(base + 0.01 + BUFFER + FRAME)
+			disconnect()
+
+			expect(#seen).to.equal(1)
+			expect(seen[1].PressId).to.equal(1)
+			expect(seen[1].Reason).to.equal("Expired")
+		end)
+
+		it("answers the buffered press a newer one replaces", function()
+			local attacker = makeDummy("Superseded", Vector3.new(0, 5, 0))
+			local base = os.clock()
+
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			local seen, disconnect = captureRefusals()
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 1 }, false, base + 0.01)
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 2 }, false, base + 0.02)
+			disconnect()
+
+			expect(#seen).to.equal(1)
+			expect(seen[1].PressId).to.equal(1)
+			expect(seen[1].Reason).to.equal("Superseded")
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.02)).to.equal(true)
+		end)
+
+		it("does not answer a press that throws", function()
+			local attacker = makeDummy("Thrown", Vector3.new(0, 5, 0))
+			local base = os.clock()
+
+			local seen, disconnect = captureRefusals()
+			local accepted = AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 1 }, false, base)
+			disconnect()
+
+			expect(accepted).to.equal(true)
+			expect(#seen).to.equal(0)
+		end)
+
+		it("drops a press id it has already seen, without throwing or answering", function()
+			local attacker = makeDummy("Duplicate", Vector3.new(0, 5, 0))
+			local base = os.clock()
+
+			expect((AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 5 }, false, base))).to.equal(
+				true
+			)
+			local seen, disconnect = captureRefusals()
+			local accepted, reason =
+				AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 5 }, false, base + 0.01)
+			disconnect()
+
+			expect(accepted).to.equal(false)
+			expect(reason).to.equal("Duplicate")
+			expect(#seen).to.equal(0)
 			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.01)).to.equal(false)
 		end)
 	end)
@@ -598,16 +821,12 @@ return function()
 		end)
 	end)
 
-	describe("AttackRequestSystem -- the parry read between M1s", function()
-		-- A landed M1 is not a true combo (2026-09-28): the defender comes out of the stun with time to
-		-- press a parry before the next punch arrives. Measured the way the combo-window case above is, on
-		-- the attacker's best case -- contact on the first active frame, the next press buffered so it
-		-- throws the instant the chain beat ends. 0.2s is the floor: ~0.2s was once judged "not nearly
-		-- enough time to even try to parry" (2026-09-28), and the Fists string sat at 0.01s before
-		-- DamageConstants.Hitstun.ByWeapon ("literally impossible").
-		local MIN_PARRY_READ_SECONDS = 0.2
-
-		it("leaves every roster weapon's string a parry read after each landed hit", function()
+	describe("AttackRequestSystem -- M1s link", function()
+		-- A landed M1 holds the defender until the next one in its string arrives (2026-10-06,
+		-- DamageConstants.Hitstun.LinkBasicString) -- measured on the attacker's best rhythm, contact on the
+		-- first active frame and the next press buffered so it throws the instant the chain beat ends. The
+		-- defender's answer is a stun parry on the next impact (DefenseConstants.StunParry), not a gap.
+		it("stuns every linked M1 until the next one in its string has landed", function()
 			for _, weaponId in ROSTER do
 				for stage = 1, AttackConstants.Sequence.MaxStageProbe - 1 do
 					local current = AttackCatalog.Get(`default:{weaponId}:Basic:{stage}`)
@@ -621,16 +840,65 @@ return function()
 						+ CHAIN_DELAY
 						+ following.Definition.WindupSeconds
 					local stun = current.Profile.HitstunSeconds or DamageConstants.Hitstun.Seconds
-					local read = impactToImpact - stun
-					if read < MIN_PARRY_READ_SECONDS then
-						error(`{weaponId} Basic {stage} -> {stage + 1}: {read}s between stun end and the next impact`)
+					if stun < impactToImpact + DamageConstants.Hitstun.LinkMarginSeconds - 1e-6 then
+						error(
+							`{weaponId} Basic {stage} -> {stage + 1}: stun {stun}s ends before the next impact ({impactToImpact}s)`
+						)
 					end
 				end
 			end
 		end)
 
-		it("stuns less on a Fists jab than on a blade's M1", function()
-			local fists = AttackCatalog.Get("default:Fists:Basic:1") :: any
+		it("keeps the link's margin past the parry rewind's hold", function()
+			-- A stunned defender's next hit can wait up to RewindMaxSeconds before it applies (DefenseSystem's
+			-- rewind hold) -- and that is the hit that extends the stun. The margin must outlast the wait.
+			expect(DamageConstants.Hitstun.LinkMarginSeconds > DefenseConstants.Parry.RewindMaxSeconds).to.equal(true)
+		end)
+
+		it("does not hand out a Heavy off a landed M1", function()
+			-- The margin is kept short so the link guarantees the next M1, not every follow-up: an attacker who
+			-- switches to a Heavy after a landed Basic 1 must still be readable by the time it lands.
+			for _, weaponId in ROSTER do
+				local basic = AttackCatalog.Get(`default:{weaponId}:Basic:1`)
+				local heavy = AttackCatalog.Get(`default:{weaponId}:Heavy:1`)
+				if basic and heavy then
+					local definition = basic.Definition
+					local freeAfterContact = definition.ActiveSeconds + definition.RecoverySeconds
+					local stun = basic.Profile.HitstunSeconds or DamageConstants.Hitstun.Seconds
+					local heavyLandsAt = freeAfterContact + heavy.Definition.WindupSeconds
+					if heavyLandsAt <= stun then
+						error(`{weaponId}: a Heavy off Basic 1 lands at {heavyLandsAt}s, inside the {stun}s stun`)
+					end
+				end
+			end
+		end)
+
+		it("leaves the last M1 of a string at its authored stun", function()
+			for _, weaponId in ROSTER do
+				local last = 0
+				for stage = 1, AttackConstants.Sequence.MaxStageProbe do
+					if AttackCatalog.Get(`default:{weaponId}:Basic:{stage}`) == nil then
+						break
+					end
+					last = stage
+				end
+				if last > 0 then
+					local entry = AttackCatalog.Get(`default:{weaponId}:Basic:{last}`) :: any
+					expect(entry.Profile.HitstunSeconds).to.equal(DamageConstants.HitstunFor(weaponId, "Basic"))
+				end
+			end
+		end)
+
+		it("links nothing when the rule is off", function()
+			local previous = DamageConstants.Hitstun.LinkBasicString
+			DamageConstants.Hitstun.LinkBasicString = false
+			local entry = AttackCatalog.Get(`default:{FIRST_WEAPON}:Basic:1`) :: any
+			DamageConstants.Hitstun.LinkBasicString = previous
+			expect(entry.Profile.HitstunSeconds).to.equal(DamageConstants.HitstunFor(FIRST_WEAPON, "Basic"))
+		end)
+
+		it("stuns less on a Fists jab than on a blade's M1 at the end of a string", function()
+			local fists = AttackCatalog.Get("default:Fists:Basic:3") :: any
 			expect(fists).to.be.ok()
 			expect(fists.Profile.HitstunSeconds).to.equal(DamageConstants.HitstunFor("Fists", "Basic"))
 			expect(fists.Profile.HitstunSeconds < DamageConstants.Hitstun.Seconds).to.equal(true)

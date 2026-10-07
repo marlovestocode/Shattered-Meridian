@@ -65,7 +65,7 @@
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -329,7 +329,7 @@ local function setGravityCancel(part: BasePart, enabled: boolean): ()
 end
 
 -- Announces whether this module currently owns the character's ROTATION, via the Attribute
--- Client/Camera/ShiftLockCamera.lua watches (see Constants.Attributes.ParkourFacingOwned for why this
+-- Client/Camera/ShiftLockCamera.lua watches (see AttributeConstants.ParkourFacingOwned for why this
 -- is an Attribute rather than a direct call). That module writes root.CFrame to camera yaw EVERY
 -- render step while shift lock is engaged and has no idea parkour exists -- its only other guards are
 -- the combat/flight Attributes -- so for the full duration of a traversal it contested this module's
@@ -348,7 +348,7 @@ local function setFacingOwned(currentHumanoid: Humanoid?, owned: boolean): ()
 	end
 	facingOwned = owned
 	if currentHumanoid then
-		currentHumanoid:SetAttribute(Constants.Attributes.ParkourFacingOwned, owned)
+		currentHumanoid:SetAttribute(AttributeConstants.ParkourFacingOwned, owned)
 	end
 end
 
@@ -574,7 +574,7 @@ function ParkourMotor.Apply(): boolean
 	if not part or not currentHumanoid or not part.Parent then
 		return false
 	end
-	if currentHumanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true then
+	if currentHumanoid:GetAttribute(AttributeConstants.RootControlLocked) == true then
 		-- `ownsBody` for the same reason the Humanoid branch below asks it: a body that was captured but
 		-- never committed to a mode still has to be handed back when the server takes root control, and
 		-- an activeMode-only test would walk straight past exactly that case.
@@ -706,7 +706,7 @@ function ParkourMotor.ApplyImpulse(velocity: Vector3): boolean
 	if not part or not currentHumanoid or not part.Parent or activeMode == "Kinematic" then
 		return false
 	end
-	if currentHumanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true then
+	if currentHumanoid:GetAttribute(AttributeConstants.RootControlLocked) == true then
 		return false
 	end
 	part.AssemblyLinearVelocity = velocity
@@ -737,7 +737,7 @@ function ParkourMotor.ApplyExternalImpulse(velocity: Vector3): boolean
 	if not part or not currentHumanoid or not part.Parent then
 		return false
 	end
-	if currentHumanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true then
+	if currentHumanoid:GetAttribute(AttributeConstants.RootControlLocked) == true then
 		return false
 	end
 	if activeMode == "Kinematic" then

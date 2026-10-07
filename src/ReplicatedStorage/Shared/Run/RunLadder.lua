@@ -8,7 +8,7 @@
 
 	WHY PURE, AND WHY SHARED. The stage decides a WalkSpeed multiplier, so the SERVER must be the one
 	that resolves it -- Server/Systems/RunSystem.lua drives these functions once per tick and publishes
-	the result as Constants.Attributes.SprintStage. But the client needs the same answers too, for its
+	the result as AttributeConstants.SprintStage. But the client needs the same answers too, for its
 	own presentation (which run clip, which footstep, how deep the FOV pull) and for the parkour
 	framework's ground-speed belief. Two implementations of "what stage is this" is exactly the split
 	that lets a client show full stride while the server is granting stage 1.

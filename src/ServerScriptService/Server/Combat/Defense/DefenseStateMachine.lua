@@ -420,9 +420,9 @@ end
 --
 -- A BREAK CAN NEVER SHORTEN A STAGGER, and the max below is what guarantees it. GuardBroken and
 -- Staggered both end at their own timestamp (see phaseEnd), so transitioning from one to the other
--- abandons the timer that was running -- and since GuardBrokenSeconds (1.0) is shorter than
--- Stagger.DurationSeconds (1.5), breaking a staggered combatant's guard would let them act SOONER
--- than if their guard had held. That inverts both mechanics at once: the counterweight that makes
+-- abandons the timer that was running -- and a break landing late in a stagger (or a perfect parry's
+-- longer one, PerfectParry.StaggerSeconds 1.1 against GuardBrokenSeconds 1.0) would otherwise let them
+-- act SOONER than if their guard had held. That inverts both mechanics at once: the counterweight that makes
 -- "a parried attacker may still block" cost something (DefenseConstants.Stagger.GuardDrainMultiplier
 -- exists precisely so a turtling stagger ends one hit from a break) would instead be an escape hatch
 -- out of the punish it is supposed to sharpen.

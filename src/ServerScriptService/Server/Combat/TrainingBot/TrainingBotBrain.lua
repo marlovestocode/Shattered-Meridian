@@ -117,6 +117,9 @@ export type Perception = {
 	-- Held in the air by your combo: the ONLY answer left is a timed parry -- a guard does nothing, an evade
 	-- is refused, and it cannot swing. Its rhythm read applies to your air beats like any other swing.
 	SelfAirHeld: boolean?,
+	-- Stunned on the ground by a hit, not swinging: the ground half of the same rule (DefenseConstants.StunParry)
+	-- -- a guard does nothing, an evade is refused, and a timed parry on the next impact breaks the string.
+	SelfStunHeld: boolean?,
 	-- The attacker of a live combo -- its launcher landed on you.
 	SelfAirAttacker: boolean?,
 	-- How many of its air beats have landed, and when its first air press may be thrown.
@@ -513,8 +516,10 @@ local function decideResponse(brain: Brain, threat: Threat, p: Perception): ()
 	-- while committed, so it needs the body free before its own startup.
 	-- AIR-HELD, the press is never deferred: DefenseSystem.SetBlocking lets an air-held victim's press through
 	-- the stun, because the parry is their one way out. So the body is "free" to press right now.
+	-- STUN-HELD on the ground, likewise (DefenseConstants.StunParry): the press goes through the stun and arms.
 	local airHeld = p.SelfAirHeld == true
-	local freeAt = if airHeld then now else math.max(now, p.SelfBusyUntil)
+	local heldInStun = airHeld or p.SelfStunHeld == true
+	local freeAt = if heldInStun then now else math.max(now, p.SelfBusyUntil)
 	local canGuard = not p.SelfLocked and freeAt <= threat.ImpactAt - 0.02
 	local canRoll = canGuard and p.EvadeReady and freeAt <= threat.ImpactAt - p.EvadeStartup - 0.02
 
@@ -568,7 +573,8 @@ local function decideResponse(brain: Brain, threat: Threat, p: Perception): ()
 	-- parry is the one way out, read off your air beats exactly like any other swing (baited by your delays
 	-- at the difficulty's own rate). A guard still up from the last beat simply comes down, so the next
 	-- press can arm.
-	if airHeld then
+	-- Stunned in a linked M1 string on the ground is the same answer (DefenseConstants.StunParry).
+	if heldInStun then
 		weights.Block = 0
 		weights.Evade = 0
 		weights.Trade = 0

@@ -10,7 +10,7 @@
 	logic -- see animation-systems.md's "All VFX are object-pooled, never instanced-and-destroyed
 	per use" principle, applied here to SFX.
 
-	Each registered name owns a small pool of Sound instances (Constants.SoundDefinition.PoolSize,
+	Each registered name owns a small pool of Sound instances (SoundTypes.SoundDefinition.PoolSize,
 	default 1) rather than exactly one -- a single shared instance meant a second Play() while the
 	first was still audible cut it off and restarted from zero, which reads as a missed hit for
 	fast-combo sounds like Constants.Combat.Sound's Hit/BlockImpact/HandToHandParried. Play() round-
@@ -55,7 +55,7 @@ local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
 local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local SoundTypes = require(ReplicatedStorage.Shared.SoundTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local logger = Logger.scope("SoundManager")
@@ -65,7 +65,7 @@ local SoundManager = {}
 -- Constants.lua owns the canonical shape (it's Shared, client+server-safe; this module is client-
 -- only, so the dependency has to run this direction) -- see that module's own SoundDefinition
 -- comment for why PoolSize is optional and what it's for.
-export type SoundDefinition = Constants.SoundDefinition
+export type SoundDefinition = SoundTypes.SoundDefinition
 
 type RegisteredSound = {
 	definition: SoundDefinition,

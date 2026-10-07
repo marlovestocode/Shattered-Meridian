@@ -39,7 +39,7 @@
 	  2. A modal does not fill the screen. This panel is 760x620 centred; the rest of the viewport is
 	     still the world, and clicking there is still a click on nothing. `Active` cannot help with
 	     that, because the input genuinely did not touch the GUI. Fixed by publishing
-	     Constants.Attributes.UiModalOpen, which combat input reads as a hard gate -- see that
+	     AttributeConstants.UiModalOpen, which combat input reads as a hard gate -- see that
 	     constant's own comment for why it lives on the Player and why it is count-backed.
 
 	This file owns the count because it is the only thing in the codebase that creates a modal, and
@@ -63,7 +63,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local ViewportScale = require(script.Parent.Parent.ViewportScale)
 local Tokens = require(script.Parent.Parent.Tokens)
 local Panel = require(script.Parent.Panel)
@@ -122,7 +122,7 @@ local openModalCount = 0
 -- the Lazy-deferred screens (DevMenu, MoveEditor, KitEditor, LiveConsole, Storybook) is FIRST-OPEN
 -- order, so which panel covered which would vary between sessions depending on what the player
 -- happened to open first that day. Two modals open at once is documented behaviour, not a
--- hypothetical: Constants.Attributes.UiModalOpen's own comment cites the Move Editor over the
+-- hypothetical: AttributeConstants.UiModalOpen's own comment cites the Move Editor over the
 -- character menu, and it is why openModalCount above is module-scope rather than per-instance.
 --
 -- Bumped on each OPEN edge, beside the count, and reset when the count returns to zero -- so it
@@ -143,7 +143,7 @@ local function publishModalGate(): ()
 		-- Attribute exists to gate a local player's own input, and there is no local player.
 		return
 	end
-	player:SetAttribute(Constants.Attributes.UiModalOpen, openModalCount > 0)
+	player:SetAttribute(AttributeConstants.UiModalOpen, openModalCount > 0)
 end
 
 local function noteCountChanged(): ()

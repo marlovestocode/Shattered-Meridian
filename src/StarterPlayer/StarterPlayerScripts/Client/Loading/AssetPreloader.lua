@@ -9,7 +9,7 @@
 	raw content id from the categories that have no instance to borrow (Client/Parkour/
 	ParkourAnimator.lua's twenty lazily-built clips, Client/Defense/DefenseClient.lua's defensive
 	pair, the per-weapon clip and SFX overrides, Constants.Intro.AnimationIds,
-	Constants.UI.VitalIconIds, Constants.FX.MovementDust.Texture) -- see animationFor/soundFor/
+	Constants.UI.VitalIconIds, FXConstants.MovementDust.Texture) -- see animationFor/soundFor/
 	imageFor below for why a BARE ID CANNOT GO IN THE LIST. Dedupes them by underlying asset id, and
 	runs ONE ContentProvider:PreloadAsync call across the combined list -- one real progress count
 	across every asset category, not a separate fire-and-forget preload per module.
@@ -41,6 +41,7 @@ local WeaponIdleAnimations = require(ReplicatedStorage.Shared.Combat.WeaponIdleA
 local WeaponDefenseAnimations = require(ReplicatedStorage.Shared.Defense.WeaponDefenseAnimations)
 local WeaponSounds = require(ReplicatedStorage.Shared.Combat.WeaponSounds)
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
@@ -217,10 +218,10 @@ function AssetPreloader.BuildManifest(): { Instance }
 		table.insert(raw, if entry.Kind == "Sound" then soundFor(entry.AssetId) else imageFor(entry.AssetId))
 	end
 	-- The one standalone texture id not owned by a domain module with its own instance-pooling
-	-- concern -- Constants.FX.MovementDust.lua's own header note on why nothing else instances this
+	-- concern -- FXConstants.MovementDust.lua's own header note on why nothing else instances this
 	-- eagerly. Skipped like every other still-unauthored placeholder if ever set back to "".
-	if Constants.FX.MovementDust.Texture ~= "" then
-		table.insert(raw, imageFor(Constants.FX.MovementDust.Texture))
+	if FXConstants.MovementDust.Texture ~= "" then
+		table.insert(raw, imageFor(FXConstants.MovementDust.Texture))
 	end
 
 	-- The two intro animation ids (Client/Intro/IntroClient.lua's lying-down/get-up clips) -- raw

@@ -25,6 +25,13 @@
 	has merely passed, the same reasoning AttributeConstants gives for CombatBusyUntil.
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
+local Logger = require(ReplicatedStorage.Shared.Logger)
+
+local logger = Logger.scope("LocalCombatState")
+
 local LocalCombatState = {}
 
 local swingEndsAt = 0
@@ -39,12 +46,12 @@ local guardCutAt = 0
 -- Called whenever a commitment ends EARLY -- a swing cancelled mid-flight -- so a module waiting for the
 -- body to be free (DefenseClient's held guard) can act on this frame rather than at the deadline it
 -- scheduled against.
-local releasedListeners: { () -> () } = {}
+-- Pcall'd per listener (Shared/CallbackList.lua): this runs from inside a swing cut or a parry's stun exit,
+-- and one listener erroring must not leave the others waiting on a body that is already free.
+local releasedListeners: CallbackList.CallbackList<> = CallbackList.New(logger, "LocalCombatState.OnReleased")
 
 local function notifyReleased(): ()
-	for _, listener in releasedListeners do
-		listener()
-	end
+	releasedListeners:Fire()
 end
 
 function LocalCombatState.SetSwing(endsAt: number): ()
@@ -91,6 +98,16 @@ function LocalCombatState.IsStunned(now: number): boolean
 	return now < stunEndsAt
 end
 
+-- Ends the recorded stun now -- the server does the same when this body parries out of one
+-- (DefenseConstants.StunParry). Notifies like a cut swing does, so anything waiting on the body acts now.
+function LocalCombatState.ClearHitstun(): ()
+	if stunEndsAt <= os.clock() then
+		return
+	end
+	stunEndsAt = 0
+	notifyReleased()
+end
+
 -- When the body is next free of both a swing and a stun, or `now` if it already is. `cancelable` asks for
 -- an action that may take a landed swing's cut (AttackConstants.HitConfirm.CancelInto): for it the swing
 -- ends at its cut point instead of its real end.
@@ -114,22 +131,15 @@ end
 
 -- Asks whoever is playing the local swing to cut it now -- the parkour framework, when an evade takes a
 -- landed swing's cut. A leaf-module signal because Client/Parkour must not require Client/Combat.
-local cutListeners: { () -> () } = {}
+-- Pcall'd too: it runs from the parkour evade path, which must not unwind on a combat listener's error.
+local cutListeners: CallbackList.CallbackList<> = CallbackList.New(logger, "LocalCombatState.OnSwingCutRequested")
 
 function LocalCombatState.RequestSwingCut(): ()
-	for _, listener in cutListeners do
-		listener()
-	end
+	cutListeners:Fire()
 end
 
 function LocalCombatState.OnSwingCutRequested(listener: () -> ()): () -> ()
-	table.insert(cutListeners, listener)
-	return function()
-		local index = table.find(cutListeners, listener)
-		if index then
-			table.remove(cutListeners, index)
-		end
-	end
+	return cutListeners:Connect(listener)
 end
 
 function LocalCombatState.SetGuardHeld(held: boolean): ()
@@ -141,13 +151,7 @@ function LocalCombatState.IsGuardHeld(): boolean
 end
 
 function LocalCombatState.OnReleased(listener: () -> ()): () -> ()
-	table.insert(releasedListeners, listener)
-	return function()
-		local index = table.find(releasedListeners, listener)
-		if index then
-			table.remove(releasedListeners, index)
-		end
-	end
+	return releasedListeners:Connect(listener)
 end
 
 -- A new life carries no commitments over. The guard key is deliberately NOT reset: it describes a key

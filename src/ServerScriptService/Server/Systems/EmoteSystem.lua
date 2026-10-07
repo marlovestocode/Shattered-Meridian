@@ -82,7 +82,7 @@
 	in combat. That module was deleted in the combat teardown and every one of those gates went with it.
 
 	Exactly ONE of them is back: EmoteDefinition.CombatAllowed. Server/Combat/Engagement/
-	EngagementSystem.lua now publishes Constants.Attributes.InCombat, so a non-CombatAllowed emote (Sit,
+	EngagementSystem.lua now publishes AttributeConstants.InCombat, so a non-CombatAllowed emote (Sit,
 	Dance, Meditate, Kneel, Sleep -- the sustained, vulnerable poses) is refused while that Attribute is
 	set, and an already-running one is interrupted the moment it becomes set. That field had been
 	authored on all 11 emotes and validated by EmoteRegistry while being read by literally nothing.
@@ -101,7 +101,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local Types = require(ReplicatedStorage.Shared.Types)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
 local EmoteRegistry = require(ReplicatedStorage.Shared.Emotes.EmoteRegistry)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -156,12 +156,12 @@ local function setMovementLocked(player: Player, locked: boolean): ()
 		return
 	end
 	if locked then
-		humanoid:SetAttribute(Constants.Attributes.EmoteMovementLocked, true)
+		humanoid:SetAttribute(AttributeConstants.EmoteMovementLocked, true)
 	else
 		-- nil clears the Attribute entirely (SetAttribute(name, nil) removes it) rather than leaving
 		-- a stale `false` behind -- matches Server/Systems/RunSystem.lua's own `== true` reads for
 		-- every sibling Attribute (Frozen/Flying), which treat "absent" and "false" identically.
-		humanoid:SetAttribute(Constants.Attributes.EmoteMovementLocked, nil)
+		humanoid:SetAttribute(AttributeConstants.EmoteMovementLocked, nil)
 	end
 end
 
@@ -233,7 +233,7 @@ end
 -- refusal in handleRequestPlay and the interruption in onHeartbeatTick can never disagree about what
 -- "in combat" means.
 local function isInCombat(humanoid: Humanoid): boolean
-	return humanoid:GetAttribute(Constants.Attributes.InCombat) == true
+	return humanoid:GetAttribute(AttributeConstants.InCombat) == true
 end
 
 local function handleRequestPlay(player: Player, rawEmoteId: unknown): ()
@@ -262,7 +262,7 @@ local function handleRequestPlay(player: Player, rawEmoteId: unknown): ()
 	-- half-overwrites, which looks like a bug in both systems at once. Read as an Attribute rather than
 	-- through a BlimpSystem require -- the same seam the two combat gates use.
 	local _, gateHumanoid = CharacterUtil.LiveRig(player)
-	if gateHumanoid and gateHumanoid:GetAttribute(Constants.Attributes.Mounted) == true then
+	if gateHumanoid and gateHumanoid:GetAttribute(AttributeConstants.Mounted) == true then
 		logger:debug("RequestPlay rejected: Mounted", { player = player.Name, emoteId = emoteId })
 		return
 	end

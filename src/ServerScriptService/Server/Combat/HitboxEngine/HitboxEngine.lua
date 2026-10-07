@@ -76,6 +76,7 @@ local HitboxAnchor = require(ReplicatedStorage.Shared.HitboxEngine.HitboxAnchor)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local HitboxGeometry = require(ReplicatedStorage.Shared.HitboxEngine.HitboxGeometry)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
@@ -149,8 +150,11 @@ local engaged: { Combatant } = {}
 -- gatherer needs a plain { Model } and rebuilding one per sample would allocate on the hot path.
 local registeredModels: { Model } = {}
 
-local hitCallbacks: { (HitReport) -> () } = {}
-local projectileEventCallbacks: { ({ ProjectileSimulator.ProjectileEvent }) -> () } = {}
+-- OnHit's and OnProjectileEvents' subscribers (Shared/CallbackList.lua): pcall'd per consumer, and Fire allocates
+-- nothing, which matters for OnHit -- it fires once per contact inside the Heartbeat.
+local hitListeners: CallbackList.CallbackList<HitReport> = CallbackList.New(logger, "HitboxEngine.OnHit")
+local projectileListeners: CallbackList.CallbackList<{ ProjectileSimulator.ProjectileEvent }> =
+	CallbackList.New(logger, "HitboxEngine.OnProjectileEvents")
 
 -- The engine clock at the moment a state machine hook is running. The machine's hooks are handed a Swing,
 -- not a time, and a projectile volley has to launch at the substep its Active window actually opened --
@@ -428,19 +432,32 @@ local function resolveOwner(part: BasePart): Combatant?
 	return nil
 end
 
+-- Whether a combatant's body is dead -- a LIVENESS fact, like a model that left the world (sweepLiveness), and
+-- answered here for the same reason: a corpse is not something to report a contact on, and a dead body's swing
+-- is not still being thrown. What a death MEANS (credit, respawn) stays with the layers above.
+local function isDead(combatant: Combatant): boolean
+	local humanoid = combatant.Humanoid
+	return humanoid.Parent == nil or humanoid.Health <= 0
+end
+
+-- The LIVING registered combatant `part` belongs to, or nil -- the owner a swing or a shot may report a contact
+-- on. A corpse's parts resolve to nil, which both sampling loops already skip, so a shot passes through it.
+local function livingOwnerOf(part: BasePart): Combatant?
+	local owner = resolveOwner(part)
+	if owner and isDead(owner) then
+		return nil
+	end
+	return owner
+end
+
 -- The engine's one output, for a swing's contact and a projectile's alike.
 --
--- Iterated over a snapshot-free forward walk, and every callback is pcall'd: a consumer that errors must
--- not abort the remaining consumers, and above all must not unwind out of the Heartbeat and stop the
--- engine sampling for everyone. This is the single point where foreign code runs inside the engine's
--- loop, so it is the only place that needs the guard.
+-- Every callback is pcall'd (CallbackList): a consumer that errors must not abort the remaining consumers,
+-- and above all must not unwind out of the Heartbeat and stop the engine sampling for everyone. One of
+-- the two points where foreign code runs inside the engine's loop -- flushProjectileEvents is the other,
+-- guarded the same way.
 local function emitHit(report: HitReport): ()
-	for _, callback in hitCallbacks do
-		local ok, err = pcall(callback, report)
-		if not ok then
-			logger:warn("OnHit callback errored", { error = tostring(err) })
-		end
-	end
+	hitListeners:Fire(report)
 end
 
 local function reportHit(
@@ -474,6 +491,7 @@ local function reportHit(
 		PowerLevel = record.Swing.PowerLevel,
 		SampleTime = now,
 		DebugName = record.Swing.Definition.DebugName,
+		Source = "Melee",
 	}
 
 	if debugEnabled() and HitboxEngineConstants.Debug.LogSwings then
@@ -550,7 +568,7 @@ local function sampleSwing(combatant: Combatant, record: ActiveSwing, now: numbe
 	local contacts: { ContactCandidate }? = nil
 	for index = 1, count do
 		local part = candidateBuffer[index]
-		local owner = resolveOwner(part)
+		local owner = livingOwnerOf(part)
 		-- An unowned part cannot happen while the Include filter holds only registered models, but the
 		-- check is not free to omit: the filter is rebuilt from a registry this loop does not lock, and
 		-- a part whose owner unregistered between the query and this line would otherwise be reported
@@ -888,6 +906,9 @@ function HitboxEngine.RequestAttack(
 	if combatant.Model.Parent == nil or combatant.RootPart.Parent == nil then
 		return false, "NoCharacter"
 	end
+	if isDead(combatant) then
+		return false, "Dead"
+	end
 	if combatant.Machine:IsAttacking() then
 		return false, "Busy"
 	end
@@ -1104,13 +1125,7 @@ end
 -- per engine frame. The engine has no remote; the attack layer subscribes and sends these on. Returns a
 -- disconnect function, like OnHit.
 function HitboxEngine.OnProjectileEvents(callback: ({ ProjectileSimulator.ProjectileEvent }) -> ()): () -> ()
-	table.insert(projectileEventCallbacks, callback)
-	return function()
-		local index = table.find(projectileEventCallbacks, callback)
-		if index then
-			table.remove(projectileEventCallbacks, index)
-		end
-	end
+	return projectileListeners:Connect(callback)
 end
 
 function HitboxEngine.LiveProjectileCount(): number
@@ -1122,24 +1137,13 @@ local function flushProjectileEvents(now: number): ()
 	if #events == 0 then
 		return
 	end
-	for _, callback in projectileEventCallbacks do
-		local ok, err = pcall(callback, events)
-		if not ok then
-			logger:warn("OnProjectileEvents callback errored", { error = tostring(err) })
-		end
-	end
+	projectileListeners:Fire(events)
 end
 
 -- The engine's sole output. Returns a disconnect function rather than a connection object so a
 -- consumer's teardown is one call with no handle type to learn.
 function HitboxEngine.OnHit(callback: (HitReport) -> ()): () -> ()
-	table.insert(hitCallbacks, callback)
-	return function()
-		local index = table.find(hitCallbacks, callback)
-		if index then
-			table.remove(hitCallbacks, index)
-		end
-	end
+	return hitListeners:Connect(callback)
 end
 
 -- The loop -------------------------------------------------------------------------------------------
@@ -1215,6 +1219,10 @@ function HitboxEngine.Step(deltaTime: number, now: number): ()
 
 			if combatant.Model.Parent == nil or combatant.RootPart.Parent == nil then
 				combatant.Machine:Reset(subNow)
+			elseif isDead(combatant) then
+				-- Killed mid-swing: the swing ends here, through the ordinary Interrupt path, so its movement
+				-- lock and hit set clean up as for any other end. Nothing more of it can land.
+				combatant.Machine:Interrupt("Died", subNow)
 			else
 				hookNow = subNow
 				combatant.Machine:Update(subNow)
@@ -1280,8 +1288,8 @@ function HitboxEngine.Reset(): ()
 	end
 	table.clear(combatants)
 	table.clear(engaged)
-	table.clear(hitCallbacks)
-	table.clear(projectileEventCallbacks)
+	hitListeners:Clear()
+	projectileListeners:Clear()
 	table.clear(registeredModels)
 	ProjectileSimulator.Reset()
 	combatantById = {}
@@ -1297,7 +1305,7 @@ end
 -- The simulator's view of this engine: its registry and its one output, never a way to change either.
 ProjectileSimulator.Bind({
 	OwnerOf = function(part: BasePart): ProjectileSimulator.Owner?
-		return resolveOwner(part)
+		return livingOwnerOf(part)
 	end,
 	CombatantOf = function(model: Model): ProjectileSimulator.Owner?
 		return modelToCombatant[model]

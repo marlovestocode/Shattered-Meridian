@@ -3,7 +3,7 @@
 	SwingRootClient.lua
 
 	Owns: the client half of "a move that Locks movement actually holds its attacker" -- standing the local
-	Humanoid's jump down for as long as Constants.Attributes.SwingRooted is set on it.
+	Humanoid's jump down for as long as AttributeConstants.SwingRooted is set on it.
 
 	WHY THE CLIENT HAS A HALF AT ALL. Server/Systems/RunSystem.lua pins WalkSpeed to 0 off SwingRooted, which
 	stops the body walking -- but the client is the one simulating its own Humanoid, and a Humanoid at
@@ -20,7 +20,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 
@@ -33,7 +33,7 @@ local started = false
 -- Hands jumping back -- unless a grab throw is still standing it down (GrabInputClient's own
 -- GrabThrowing), in which case that module restores it when the throw ends.
 local function restoreJump(humanoid: Humanoid): ()
-	if humanoid:GetAttribute(Constants.Attributes.GrabThrowing) == true then
+	if humanoid:GetAttribute(AttributeConstants.GrabThrowing) == true then
 		return
 	end
 	humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
@@ -56,7 +56,7 @@ function SwingRootClient.Start(): ()
 	PlayerLifecycle.BindLocalCharacter({
 		Scope = "SwingRootClient",
 		OnCharacter = function(_character: Model, humanoid: Humanoid, life)
-			local attribute = Constants.Attributes.SwingRooted
+			local attribute = AttributeConstants.SwingRooted
 			life:Connect(humanoid:GetAttributeChangedSignal(attribute), function()
 				apply(humanoid, humanoid:GetAttribute(attribute) == true)
 			end)

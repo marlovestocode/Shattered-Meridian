@@ -71,6 +71,10 @@
 	governs. A contact a REALM delivered (ProjectileContact.DomainId) is priced flat, like an M1, and does
 	not advance its owner's combo: it is the realm striking, not a link in the owner's string.
 
+	READS CULTIVATION POWER (2026-10-06), the same way: the tier gap between attacker and defender
+	(Shared/Progression/CombatPower.lua, published by TierSystem as an Attribute) scales damage and guard
+	drain, never hitstun. Off behind CombatPowerConstants.Enabled; exactly 1 between two bodies of one tier.
+
 	Does not own: contact detection (HitboxEngine), what kind of hit something was (DefenseSystem), the
 	guard pool itself (DefenseSystem.DrainGuard -- this decides how much, that owns the meter), per-move
 	damage or knockback numbers (the Move Editor's moves, via AttackCatalog), air-combo treatment
@@ -85,11 +89,15 @@ local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAtt
 local AirComboMoves = require(ReplicatedStorage.Shared.AirCombo.AirComboMoves)
 local AmortizedReclaim = require(ReplicatedStorage.Shared.AmortizedReclaim)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
+local CombatPower = require(ReplicatedStorage.Shared.Progression.CombatPower)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
+local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
+local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local Knockback = require(ReplicatedStorage.Shared.Damage.Knockback)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -104,6 +112,7 @@ local HitboxEngine = require(script.Parent.Parent.HitboxEngine.HitboxEngine)
 
 type DefenseOutcome = DefenseTypes.DefenseOutcome
 type DamageResult = DamageTypes.DamageResult
+type HitReport = HitboxTypes.HitReport
 type CombatFeedback = DamageTypes.CombatFeedback
 
 local logger = Logger.scope("DamageSystem")
@@ -122,7 +131,9 @@ local hitstunReclaim = AmortizedReclaim.New()
 -- registry" shape as hitstunUntil above -- see this file's header's AttackerLunge paragraph.
 local lungeUntil: { [Model]: number } = {}
 
-local appliedCallbacks: { (DefenseOutcome, DamageResult) -> () } = {}
+-- OnApplied's subscribers (Shared/CallbackList.lua: pcall'd per consumer, safe to disconnect mid-dispatch).
+local appliedListeners: CallbackList.CallbackList<DefenseOutcome, DamageResult> =
+	CallbackList.New(logger, "DamageSystem.OnApplied")
 
 -- THE AIR COMBO'S ONE SEAM INTO THIS LAYER (Server/Combat/AirCombo/AirComboSystem.lua, which sits ABOVE this
 -- one as a sibling of the attack layer and so is never required from here). One slot, set by that System's
@@ -150,7 +161,7 @@ local function debugLog(message: string, data: { [string]: any }?): ()
 end
 
 -- Whether `moveId` is a weapon's Basic (M1) string hit -- gates DamageConstants.AttackerLunge.
--- LIVE MoveIds never match the hand-authored DebugName fields on Constants.Combat.Weapons[...].
+-- LIVE MoveIds never match the hand-authored DebugName fields on CombatConstants.Weapons[...].
 -- Stages.Basic ("Basic1", "Dagger1", ...); every attack actually thrown resolves through
 -- DefaultMoveRegistry's synthetic scheme instead. Restated here rather than shared, the same
 -- "coupling is to the naming convention, not to a shared function" reasoning Shared/Attack/
@@ -286,6 +297,28 @@ local function extendDeadline(humanoid: Humanoid, attribute: string, until_: num
 	end
 end
 
+-- THE STUN PARRY'S EXIT (DefenseConstants.StunParry). A defender who parries their way out of a hitstun is free
+-- the moment the parry lands, not when the stun would have run out: they won the exchange, and making them
+-- stand there while the attacker sits in the stagger would turn the punish into a wait. Brings both deadlines
+-- down to `at` -- but CombatBusyUntil only when the stun is what was holding it, since that Attribute is also
+-- the attack layer's swing deadline.
+local function endHitstunOf(defender: Model, at: number): ()
+	local stunnedUntil = hitstunUntil[defender]
+	if stunnedUntil == nil or stunnedUntil <= at then
+		return
+	end
+	hitstunUntil[defender] = at
+	local humanoid = CharacterUtil.HumanoidOf(defender)
+	if humanoid == nil then
+		return
+	end
+	humanoid:SetAttribute(AttributeConstants.HitstunUntil, at)
+	local busy = humanoid:GetAttribute(AttributeConstants.CombatBusyUntil)
+	if typeof(busy) == "number" and busy > at and busy <= stunnedUntil + 1e-6 then
+		humanoid:SetAttribute(AttributeConstants.CombatBusyUntil, at)
+	end
+end
+
 local function publishHitstunOf(defender: Model, until_: number): ()
 	local humanoid = CharacterUtil.HumanoidOf(defender)
 	if humanoid == nil then
@@ -310,7 +343,7 @@ local function spacingFor(
 	end
 	-- Spacing is the melee exchange's footwork -- the defender eased off, the attacker following in. A
 	-- shot's thrower is not in reach to step anywhere, and its target's reaction is the move's knockback.
-	if outcome.Report.Projectile ~= nil then
+	if HitboxTypes.SourceOf(outcome.Report) ~= "Melee" then
 		return nil, nil
 	end
 	if AirComboMoves.RoleOf(moveId) ~= nil then
@@ -384,7 +417,7 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	local at = outcome.SampleTime
 	local projectile = outcome.Report.Projectile
 	-- A realm's strike or volley (see this file's header): flat-priced, and not a link in the owner's string.
-	local fromRealm = projectile ~= nil and projectile.DomainId ~= nil
+	local fromRealm = HitboxTypes.SourceOf(outcome.Report) == "Realm"
 
 	-- ADVANCED BEFORE RESOLVING, not after, so the stage handed to the resolver is the one this hit
 	-- counts as. Resolving first and advancing afterwards would scale every hit by the stage of the one
@@ -416,24 +449,26 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	-- product of every one it has picked up (ProjectileContact.DamageScale), this applies it, to health and
 	-- posture alike, before anything reads the result. 1 for every shot nobody turned, and every swing. A
 	-- contested realm's strike arrives already scaled the same way (DomainEffects hands it a start scale).
-	if projectile and projectile.DamageScale ~= 1 then
-		local scale = math.max(projectile.DamageScale, 0)
-		result.Damage *= scale
-		result.GuardDrain *= scale
-	end
-
+	--
 	-- A REALM'S RULES, read off the two bodies (this file's header). One server-clock read for all four, and
-	-- every one is exactly 1 for a body no realm governs, so an ordinary fight multiplies by nothing.
+	-- every one is exactly 1 for a body no realm governs, so an ordinary fight multiplies by nothing. The
+	-- arithmetic itself is DamageResolver.ApplyScales'; this only reads the inputs.
 	local realmNow = DomainRules.ServerNow()
+	--
+	-- CULTIVATION POWER: the tier gap between the two (Shared/Progression/CombatPower.lua). Exactly 1 while
+	-- CombatPowerConstants.Enabled is off, and between two bodies of one tier.
 	local attackerHumanoid = CharacterUtil.HumanoidOf(outcome.Attacker)
 	local defenderHumanoid = CharacterUtil.HumanoidOf(outcome.Defender)
-	result.Damage *= DomainRules.Scale(attackerHumanoid, "DamageDealt", realmNow) * DomainRules.Scale(
-		defenderHumanoid,
-		"DamageTaken",
-		realmNow
-	)
-	result.GuardDrain *= DomainRules.Scale(defenderHumanoid, "GuardDamageTaken", realmNow)
-	result.HitstunSeconds *= DomainRules.Scale(defenderHumanoid, "HitstunTaken", realmNow)
+	local powerDamage, powerGuard = CombatPower.Scales(outcome.Attacker, outcome.Defender)
+	DamageResolver.ApplyScales(result, {
+		Shot = if projectile then projectile.DamageScale else nil,
+		PowerDamage = powerDamage,
+		PowerGuard = powerGuard,
+		DamageDealt = DomainRules.Scale(attackerHumanoid, "DamageDealt", realmNow),
+		DamageTaken = DomainRules.Scale(defenderHumanoid, "DamageTaken", realmNow),
+		GuardDamageTaken = DomainRules.Scale(defenderHumanoid, "GuardDamageTaken", realmNow),
+		HitstunTaken = DomainRules.Scale(defenderHumanoid, "HitstunTaken", realmNow),
+	})
 
 	-- The air combo's scaling and presentation tag, before any reader sees the result (see airComboHook).
 	local airComboTag: string? = nil
@@ -456,6 +491,16 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 
 	if result.HitstunSeconds > 0 then
 		DamageSystem.ExtendHitstun(outcome.Defender, at + result.HitstunSeconds, at)
+	end
+
+	-- A parry out of a ground stun frees the parrier on the spot (endHitstunOf). The air combo releases its own
+	-- held victim on a parry and owns that body's deadlines, so it is left alone here.
+	if
+		outcome.Kind == "Parried"
+		and DefenseConstants.StunParry.Enabled
+		and not (defenderHumanoid ~= nil and AirComboAttributes.IsParticipant(defenderHumanoid))
+	then
+		endHitstunOf(outcome.Defender, at)
 	end
 
 	-- A landed M1 (Basic weapon-string) hit gives the ATTACKER a brief forced-forward nudge, driven
@@ -491,14 +536,9 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 	-- first is what leaves kill attribution a pure follow-up in that module rather than a restructuring
 	-- of this one. Nothing here attributes a kill today -- see this file's header on what it does not
 	-- own -- but nothing here forecloses it either.
-	for _, callback in appliedCallbacks do
-		-- pcall'd for the same reason DefenseSystem pcalls its own consumers: one subscriber erroring
-		-- must not abort the rest, and above all must not unwind out of the Heartbeat.
-		local ok, err = pcall(callback, outcome, result)
-		if not ok then
-			logger:error("A DamageSystem.OnApplied consumer errored", { errorMessage = tostring(err) })
-		end
-	end
+	-- Each consumer pcall'd (CallbackList): one subscriber erroring must not abort the rest, and above all
+	-- must not unwind out of the Heartbeat.
+	appliedListeners:Fire(outcome, result)
 
 	if result.Damage > 0 then
 		local humanoid = CharacterUtil.LiveHumanoidOf(outcome.Defender)
@@ -540,6 +580,10 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 			else nil,
 		Perfect = if outcome.Perfect then true else nil,
 		AirCombo = airComboTag,
+		-- The string-ender beat (DamageTypes.CombatFeedback.StringEnd): only on a hit that really landed.
+		StringEnd = if DamageResolver.AdvancesCombo(outcome.Kind) and AttackCatalog.IsStringEnder(entry.MoveId)
+			then true
+			else nil,
 		Push = if pushedAttacker then attackerPush else nil,
 	}
 	sendFeedback(outcome.Attacker, feedback)
@@ -549,7 +593,10 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 		-- Only a player's own client applies a launch; a server-owned body already has it.
 		defenderFeedback.Knockback = if launchedPlayer then launch else nil
 		defenderFeedback.Push = if pushedDefender then defenderPush else nil
-		defenderFeedback.HitstunSeconds = if result.HitstunSeconds > 0 then result.HitstunSeconds else nil
+		-- The stun STILL TO RUN as this leaves (DamageSystem.StunRemaining), not the contact's authored length.
+		defenderFeedback.HitstunSeconds = if result.HitstunSeconds > 0
+			then DamageSystem.StunRemaining(outcome.Defender, os.clock())
+			else nil
 		sendFeedback(outcome.Defender, defenderFeedback)
 	end
 
@@ -637,6 +684,93 @@ function DamageSystem.ExtendHitstun(model: Model, until_: number, at: number): (
 	publishHitstunOf(model, stunnedUntil)
 end
 
+-- Impact damage ----------------------------------------------------------------------------------
+
+-- Health removed by something that was never a swing or a shot -- today, a thrown body landing (GrabSystem): the
+-- thrown victim's own landing, and the bystander it crashes into. It used to be a bare Humanoid:TakeDamage in the
+-- grab layer, which kept it out of everything that hears about damage here: no kill credit (PlayerDeathSystem),
+-- no engagement tag, no realm scaling, no damage number.
+--
+-- THE SECOND WAY INTO OnApplied, and deliberately narrow. No defence (a thrown body was never blockable or
+-- parryable, so nothing here asks DefenseSystem), no stun, no guard, no combo -- only the damage scales (power, realm) and
+-- the same announce-then-write order applyOutcome keeps for kill credit. The outcome it publishes is a Clean hit
+-- whose Report.DebugName is DamageConstants.Impact.DebugName: no MoveId, so nothing keyed on a move (hit confirm,
+-- the air combo's roles, a grab's trigger) can mistake it for one.
+--
+-- Feedback goes to the ATTACKER only (their damage number, the impact on the other body). The defender's copy is
+-- withheld on purpose: their client treats a Clean feedback as a stun and cuts its own swing, and the server did
+-- neither.
+function DamageSystem.ApplyImpact(attacker: Model, target: Model, amount: number, at: number): number
+	if typeof(amount) ~= "number" or amount ~= amount or amount <= 0 then
+		return 0
+	end
+	local humanoid = CharacterUtil.LiveHumanoidOf(target)
+	local root = target.PrimaryPart
+	if humanoid == nil or root == nil then
+		return 0
+	end
+	local realmNow = DomainRules.ServerNow()
+	local powerDamage = CombatPower.Scales(attacker, target)
+	local result: DamageResult = DamageResolver.ApplyScales({
+		Kind = "Clean",
+		Damage = amount,
+		GuardDrain = 0,
+		HitstunSeconds = 0,
+		AdvancesCombo = false,
+	}, {
+		PowerDamage = powerDamage,
+		DamageDealt = DomainRules.Scale(CharacterUtil.HumanoidOf(attacker), "DamageDealt", realmNow),
+		DamageTaken = DomainRules.Scale(humanoid, "DamageTaken", realmNow),
+	})
+	local damage = result.Damage
+	if not (damage > 0) then
+		return 0
+	end
+
+	local report: HitReport = {
+		Attacker = attacker,
+		Target = target,
+		TargetPart = root,
+		Shape = "Sphere",
+		Dimensions = { Width = 0, Height = 0, Length = 0, Radius = 0, InnerRadius = 0, AngleDegrees = 0 },
+		ContactPosition = root.Position,
+		ComboStage = 0,
+		PowerLevel = 0,
+		SampleTime = at,
+		DebugName = DamageConstants.Impact.DebugName,
+		Source = "Impact",
+	}
+	local outcome: DefenseOutcome = {
+		Kind = "Clean",
+		Report = report,
+		Attacker = attacker,
+		Defender = target,
+		BearingDegrees = 0,
+		DefenderStateAtContact = "Neutral",
+		Guard = 0,
+		GuardDelta = 0,
+		SampleTime = at,
+	}
+	appliedListeners:Fire(outcome, result)
+	humanoid:TakeDamage(damage)
+
+	if attacker ~= target then
+		sendFeedback(attacker, {
+			Kind = "Clean",
+			Role = "Attacker",
+			Attacker = attacker,
+			Defender = target,
+			Damage = damage,
+			GuardDrain = 0,
+			ComboStage = 0,
+			MoveId = DamageConstants.Impact.DebugName,
+			ContactPosition = root.Position,
+		})
+	end
+	debugLog("Impact damage applied", { attacker = attacker.Name, target = target.Name, damage = damage })
+	return damage
+end
+
 -- Public queries -----------------------------------------------------------------------------------
 
 -- Whether this combatant may start an attack, and why not when they may not.
@@ -656,6 +790,17 @@ end
 -- latency refund (AttackConstants.Latency), which may not backdate a swing into a stun.
 function DamageSystem.HitstunUntil(model: Model): number
 	return hitstunUntil[model] or -math.huge
+end
+
+-- How much of `model`'s stun is still to run at `now`, 0 when none -- what the defender's Combat_Feedback
+-- carries as HitstunSeconds. The STUN STILL TO RUN, not the contact's authored length, for two reasons:
+-- the stun is timed from the contact (SampleTime), so a contact that waited out the rewind hold has already
+-- spent up to that hold's cap of it (Parry.RewindMaxSeconds on the ground, AirComboConstants.Parry.
+-- RewindMaxSeconds air-held); and a hit inside a longer stun ends with that one. Sending the length had the
+-- defender's own mirror run long by both, which held their comeback swing back.
+function DamageSystem.StunRemaining(model: Model, now: number): number
+	local until_ = hitstunUntil[model]
+	return if until_ then math.max(until_ - now, 0) else 0
 end
 
 function DamageSystem.IsHitstunned(model: Model, now: number): boolean
@@ -701,13 +846,7 @@ end
 --
 -- Fired BEFORE the health write. See applyOutcome for why that ordering is load-bearing.
 function DamageSystem.OnApplied(callback: (DefenseOutcome, DamageResult) -> ()): () -> ()
-	table.insert(appliedCallbacks, callback)
-	return function()
-		local index = table.find(appliedCallbacks, callback)
-		if index then
-			table.remove(appliedCallbacks, index)
-		end
-	end
+	return appliedListeners:Connect(callback)
 end
 
 -- Lifecycle ----------------------------------------------------------------------------------------
@@ -771,7 +910,7 @@ function DamageSystem.Reset(): ()
 	table.clear(hitstunUntil)
 	table.clear(lungeUntil)
 	hitstunReclaim:Reset()
-	table.clear(appliedCallbacks)
+	appliedListeners:Clear()
 	airComboHook = nil
 	ComboEscalation.Reset()
 	AttackCatalog.Reset()

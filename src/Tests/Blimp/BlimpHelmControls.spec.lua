@@ -25,7 +25,7 @@ local CONTROLS = BlimpConstants.Controls
 local PRESS_CONTROLS = { "ThrottleUp", "ThrottleDown", "AllStop", "Autopilot", "Release" }
 
 -- Global gamepad bindings whose own consumer already declines to act while
--- Constants.Attributes.Mounted is set, and is therefore safe for a helm control to share. Each entry
+-- AttributeConstants.Mounted is set, and is therefore safe for a helm control to share. Each entry
 -- names the module that does the declining, because that module is what a future reader has to go and
 -- re-check if they want to move a binding off this list.
 local GATED_WHILE_MOUNTED: { [string]: string } = {

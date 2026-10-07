@@ -44,6 +44,7 @@ stop and use the module on the right instead.
 | make a combat layer behave differently for a body standing in a realm (damage, guard, speed, seals, escapes) | [`Shared/Domain/DomainRules.lua`](src/ReplicatedStorage/Shared/Domain/DomainRules.lua) -- `Scale(humanoid, kind)`, `Has(humanoid, flag)`, `IsSealed(humanoid, moveId, traits)`, all read through the realm's `DomainUntil` lease; a new kind is a `DomainTypes.RuleKinds` entry plus one reader | a `require` of `DomainSystem` from a combat layer (it sits ABOVE all four), or a domain-specific branch |
 | refund a combatant's network latency (a parry rewind, a swing lead, an air-combo deadline) | [`Server/Combat/NetworkLatency.lua`](src/ServerScriptService/Server/Combat/NetworkLatency.lua) -- `PingSeconds(model)` (a ROUND trip; 0 for a bot or dummy), `SetResolver(fn)` in a spec | a fifth hand-copied `player:GetNetworkPing()` pcall -- four combat modules each carried their own before it existed |
 | decide whether two combatants are on the same side, or match a target filter | [`Shared/Combat/Allegiance.lua`](src/ReplicatedStorage/Shared/Combat/Allegiance.lua) -- `AreAllies`, `Matches(filter, owner, target)`, `MatchesType` | a second "is this an ally" check -- there is no party system yet, and this is the one function one will change |
+| expose an extension point other modules subscribe to (`OnX(callback) -> disconnect`) | [`Shared/CallbackList.lua`](src/ReplicatedStorage/Shared/CallbackList.lua) — `CallbackList.New(logger, "Module.OnX")` once at module scope, `:Connect(fn)` returns the disconnect, `:Fire(...)` pcall's each subscriber, `:Clear()` in a spec Reset | an array + `table.insert` + a `table.find`/`table.remove` disconnect + a pcall loop — those copies skipped the next subscriber whenever one disconnected mid-dispatch. Synchronous on purpose (not a BindableEvent): DamageSystem announces a hit before the health write. Every combat module uses it (server layers, `AttackInputClient`, `LocalCombatState`, `LockOnController`); the remaining copies are outside combat (Parkour, Input, HotbarBindings, MoveRegistryManager, DefaultMoveRegistry, MovePresentationCatalog) |
 | log inside a module | [`Shared/Logger.lua`](src/ReplicatedStorage/Shared/Logger.lua) — `Logger.scope("ModuleName")`, then `:info/:warn/:error/:debug` | `print`/`warn` directly — scoped logs feed the Live Console (F5) capture ring |
 
 Full rationale for each module (why it exists, what it deliberately does NOT own, the specific bugs
@@ -109,6 +110,28 @@ apart, both strings kept. A defender still WINDING UP loses -- a time window wou
 clash. Player swings are also started half a round trip early (`AttackConstants.Latency`), so "who landed first"
 means who pressed first, not who has the lower ping.
 
+**M1s link; the answer is the stun parry** (2026-10-06, `docs/architecture/2026-10-06-combat-feel-pass.md`). A
+landed Basic with a next stage stuns until that next hit lands (`DamageConstants.Hitstun.LinkBasicString`,
+derived in `AttackCatalog.Get` from the clip-synced timeline -- never hand-type an M1 stun again). A stunned
+ground body follows the air combo's held-body rule (`DefenseConstants.StunParry`, `DefenseSystem.parriesThroughStun`):
+the guard does nothing, an evade is refused, a timed parry counts and ends the stun (`DamageSystem.endHitstunOf`).
+`LinkMarginSeconds` must stay above `Parry.RewindMaxSeconds` -- the rewind hold delays the hit that extends the stun.
+
+**Seams added by the 2026-10-06 consolidation** (`docs/architecture/2026-10-06-combat-consolidation-plan.md`):
+- Damage that is not a swing or a shot goes through `DamageSystem.ApplyImpact`, never a bare `TakeDamage`. That keeps
+  kill credit, engagement, realm scaling and feedback.
+- "Where did this contact come from" is `HitboxTypes.SourceOf(report)` / `IsShot`. Never infer it from `Report.Projectile`.
+- A rule that turns a guard off is a `ResolveInput.GuardDisabled` cause. Never patch a result after `OutcomeResolver.Resolve`.
+- Post-pricing multipliers live in `DamageResolver.ApplyScales`. Add a stage there, in order.
+- Attack presses carry `PressId`. A press that won't throw is answered: `AttackRequestSystem.OnPressRefused`, plus a
+  "Refused" `Attack_Cancelled`.
+- `Server/Combat/CombatTrace.lua` logs each step to the Live Console (search "CombatTrace"). Read it before guessing
+  why a hit resolved the way it did.
+- Cultivation power reaches combat ONLY as the tier gap from `Shared/Progression/CombatPower.lua` (TierSystem publishes
+  `AttributeConstants.CultivationTier` on the Player; a stage in `ApplyScales`). Off behind
+  `CombatPowerConstants.Enabled`; never scales stun. A new power source composes inside `CombatPower.Scales`, and no
+  combat layer requires a progression System (`docs/design/cultivation-combat-power.md`).
+
 `TrainingBotSystem` (`Server/Combat/TrainingBot/`, the AI sparring partner) is the same sibling shape
 from the other direction: it only ever acts through the public player entry points
 (`AttackRequestSystem.Throw/Feint`, `DefenseSystem.SetBlocking/BeginEvade`) and reads through queries
@@ -123,9 +146,12 @@ about deaths). Progression from a kill flows `RewardSystem` (eligibility, frozen
 `ProgressionSystem` (fight-to-grow gate, routes) → the owner's public API (`MeridianSystem.AwardKillXP`
 today) → `MeridianXPAwarded` → `TierSystem`. Don't add a new direct `PlayerKilled` subscription that
 grants progression — add a reward kind + route instead. The repeat-victim anti-farming weight lives in
-that same gate (`ProgressionConstants.RepeatVictim`), so anything that bypasses it is farmable. Bloodline stage-ups and Bounty payouts are the
-two known exceptions still to migrate; see
-[`docs/architecture/2026-09-28-progression-spine-audit.md`](docs/architecture/2026-09-28-progression-spine-audit.md).
+that same gate (`ProgressionConstants.RepeatVictim`), so anything that bypasses it is farmable. Every kill reward
+rides one manifest: `MeridianXP`, `BloodlineStage` (`BloodlineSystem.CountKill`) and `BountyClaim`
+(`BountySystem.PayClaim`); there are no exceptions left (2026-10-06, see
+[`docs/architecture/2026-09-28-progression-spine-audit.md`](docs/architecture/2026-09-28-progression-spine-audit.md) §7).
+Two `PlayerKilled` subscribers never rely on hearing a death in a given order; BountySystem's claim is keyed by `deathId`
+for exactly that reason.
 
 ## Before claiming something is "wired" or "done"
 

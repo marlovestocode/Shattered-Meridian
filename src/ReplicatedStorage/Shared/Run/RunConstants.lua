@@ -22,11 +22,7 @@
 	                            deliberately informational: see MotorCommand.DesiredSpeed's header.
 	A number that decides a WalkSpeed belongs here and only here.
 
-	Constants.Run is now a re-export of this module, so existing Constants.Run.Footsteps/StageOnset/
-	Animation call sites keep working; new code should require this module directly. That re-export
-	widens Constants.Run from the presentation tables alone to this whole file -- nothing reads it
-	wholesale (all seventeen call sites go through one of those three keys), but a future one that
-	iterated it would now walk the ladder too.
+	Callers require this module directly; the old Constants.Run re-export was removed (2026-10-06).
 
 	SEPARATE FROM Constants.Combat ON PURPOSE. The sprint tier used to live in Constants.Combat
 	(SprintSpeedMultiplier, SprintStage2*) because the combat monolith owned WalkSpeed. It no longer
@@ -47,7 +43,7 @@ local RunConstants = {}
 -- "not sprinting" without adding a second speed path.
 export type StageDefinition = {
 	-- The stage's own id, and its index in the array. Published verbatim on the Humanoid as
-	-- Constants.Attributes.SprintStage, so it is the number every client-side consumer keys off.
+	-- AttributeConstants.SprintStage, so it is the number every client-side consumer keys off.
 	Id: number,
 	-- Multiplier on the effective base walk speed (Constants.Combat.BaseWalkSpeed + the per-player
 	-- BonusWalkSpeed Attribute, itself scaled by the admin SpeedMultiplier Attribute). A multiplier
@@ -107,6 +103,20 @@ RunConstants.MoveInputThreshold = 0.1
 RunConstants.WalkSpeedAcceleration = 90
 RunConstants.WalkSpeedDeceleration = 140
 
+-- HOW MUCH OF A HELD GEAR A SWING KEEPS (2026-10-06, "combat feels clunky"). A combat commitment pins the body
+-- to walking pace (Server/Systems/RunSystem.lua's header), and for a guard, a stagger or a stun that is right.
+-- For the player's OWN swing it made pressure stop-start: every M1 thrown on the run dropped ~32 studs/s to 18,
+-- so chasing with a string meant stalling on every press. Now a swing (and nothing else) moves at
+--
+--   base x max(1, held gear's multiplier x SwingGearCarry)
+--
+-- -- walking stays walking (the max), and a sprint gear (x1.8) carries about 1.26x base through the swing. The
+-- published stage is still walking: you are not SPRINTING mid-swing, you are pressing forward. 0 restores
+-- plain walking pace for every commitment.
+RunConstants.Combat = {
+	SwingGearCarry = 0.7,
+}
+
 RunConstants.Network = {
 	RemoteNames = {
 		-- Client -> server, fired ONLY on the edges of sprint intent (pressed, released) rather than
@@ -114,7 +124,7 @@ RunConstants.Network = {
 		-- more than an edge is bandwidth spent restating something the server already knows.
 		--
 		-- There is deliberately no server -> client counterpart. The resolved stage travels as a
-		-- Humanoid Attribute (Constants.Attributes.SprintStage), which replicates to EVERY client for
+		-- Humanoid Attribute (AttributeConstants.SprintStage), which replicates to EVERY client for
 		-- free -- so a remote player's own client can pick the matching run animation for them with no
 		-- per-stage broadcast of ours. Same reasoning as Attributes.ParkourState's own note.
 		SetSprinting = "Run_SetSprinting",
@@ -223,7 +233,7 @@ RunConstants.Footsteps = {
 -- No stage-onset cue: there is no higher speed to announce.
 RunConstants.StageOnset = {}
 
--- ANIMATION. Stage 1 keeps Constants.Combat.AnimationIds.Running, the ordinary sprint loop.
+-- ANIMATION. Stage 1 keeps CombatConstants.AnimationIds.Running, the ordinary sprint loop.
 RunConstants.Animation = {
 	-- Playback speed for the run loop, keyed by stage. Applied on stage CHANGE only, never per
 	-- frame: CombatAnimator.FreezeActiveCombatTrack (hit-stop) drives the same property, and a

@@ -42,7 +42,7 @@ DamageConstants.Hitstun = {
 	-- ORDER OF MAGNITUDE from the deleted system's HitStunDuration (0.6) as a placeholder -- it was
 	-- never a re-derivation, because the real constraint (its relationship to the rebuilt move set's
 	-- WindupSeconds) could not be checked until the rebuilt move set existed. With the real Basic/Heavy
-	-- stages authored (Constants.Combat.Weapons -- Basic windups 0.14-0.18, Heavy 0.35/0.6), 0.45 read
+	-- stages authored (CombatConstants.Weapons -- Basic windups 0.14-0.18, Heavy 0.35/0.6), 0.45 read
 	-- as a flinch rather than a stun in play: a hit landed and the victim's next legal action arrived
 	-- before the attacker's own follow-up swing had even finished its windup, so "you got hit" cost
 	-- less than a single beat of pressure. 0.65 is a full, felt lockout a player cannot mistake for
@@ -104,6 +104,38 @@ DamageConstants.Hitstun = {
 			Basic = 0.40,
 		},
 	} :: { [string]: { [string]: number } },
+
+	-- M1s LINK (2026-10-06, "clunky, not smooth like a battlegrounds game"). Everything above made a landed
+	-- M1 a parry READ: the defender came out of the stun ~0.25s before the next punch. In play that read as
+	-- stop-start -- every exchange broke after one hit into a scramble of blocks, trades and clashes. Now a
+	-- landed Basic that has a NEXT Basic in its string stuns until that next hit arrives:
+	--
+	--   stun = this swing's Active + Recovery + Sequence.ChainDelaySeconds + the next stage's Windup + margin
+	--
+	-- measured on the CLIP-SYNCED timeline (Server/Combat/AttackCatalog.Get works it out, so every weapon,
+	-- at every WeaponSpeed and Tempo, links without a hand-typed number). That is impact to impact on the
+	-- attacker's best rhythm -- contact on the first active frame, the next press buffered -- plus a margin
+	-- for a contact a little later in the window. A player who presses late drops the string; that is the
+	-- skill, not a bug.
+	--
+	-- The values above still apply to the LAST Basic in a string (nothing follows it to link into), so a
+	-- finished string ends with the defender free a beat before the launcher can land -- that is still a read.
+	--
+	-- THE ANSWER IS THE STUN PARRY (DefenseConstants.StunParry): a stunned defender cannot block or evade, but
+	-- a timed parry on the next impact breaks the string. That is what keeps "defending against hands" possible
+	-- with no gap between hits.
+	--
+	-- LinkMarginSeconds is kept SHORT on purpose. A generous one starts covering the windup of something that
+	-- is not the next M1 -- a Heavy off a landed M1 would become guaranteed -- and the link should guarantee the
+	-- next M1, not every follow-up.
+	--
+	-- BUT NEVER SHORTER THAN THE PARRY REWIND (DefenseConstants.Parry.RewindMaxSeconds, 0.12). Against a laggy
+	-- defender the next hit is HELD up to that long before it applies, waiting to see whether a parry press is
+	-- still in flight -- and it is that hit that extends the stun. A margin under the hold would leave the
+	-- defender free for the difference, mid-string, on the server: long enough for a buffered evade to come out.
+	-- Tests/Combat/Attack/AttackRequestSystem.spec.lua asserts the ordering.
+	LinkBasicString = true,
+	LinkMarginSeconds = 0.14,
 }
 
 -- The hitstun one stage of one weapon's string inflicts: that weapon's ByWeapon override when it names the
@@ -117,29 +149,33 @@ function DamageConstants.HitstunFor(weaponId: string?, stage: string?): number
 	return (override and override[stage]) or HITSTUN.ByStage[stage] or HITSTUN.Seconds
 end
 
+-- Impact --------------------------------------------------------------------------------------------
+
+-- Damage that is not a swing or a shot (DamageSystem.ApplyImpact -- a thrown body landing). Its outcome's
+-- Report.DebugName: deliberately not a MoveId, so nothing keyed on a move mistakes an impact for one.
+DamageConstants.Impact = {
+	DebugName = "impact",
+}
+
 -- Combo ---------------------------------------------------------------------------------------------
 
 DamageConstants.Combo = {
 	-- How long after a LANDED hit the attacker's string stays connected. A hit landed inside this
 	-- window escalates; one landed after it starts again at stage 1.
 	--
-	-- MUST STAY STRICTLY BELOW DefenseConstants.Stagger.DurationSeconds (1.5), and that relationship
-	-- is load-bearing rather than incidental: it is the entire reason this system needs no
-	-- "reset the combo when you get parried" rule. A parried attacker is staggered for longer than
-	-- their own window lasts, so by the time they can act again the window has lapsed on its own. That
-	-- is the same "let the timer expire, don't special-case it" economy DefenseStateMachine already
-	-- practices with its own lockout timestamps.
-	--
-	-- So if Stagger.DurationSeconds is ever retuned down (its own comment flags 0.6-0.75 as the
-	-- previous design's derived bound), THIS number has to move with it or the parry silently stops
-	-- interrupting combos. The spec asserts the ordering rather than either number.
+	-- NO LONGER BOUND BELOW THE STAGGER (2026-10-07). This window used to have to stay shorter than
+	-- DefenseConstants.Stagger.DurationSeconds so that a parry lapsed the parried attacker's combo on its
+	-- own. That stopped being the design on 2026-09-29: a parried MELEE swing deliberately KEEPS its chain
+	-- (AttackRequestSystem.KeepChainThroughParry holds this combo a full window past the stagger). The one
+	-- parry the hold does not cover is a reflected shot whose move staggers its thrower (StaggersOwner):
+	-- its combo may outlive the 0.9s stagger by the difference, and only Heavies, arts and shots escalate
+	-- (M1s and air hits are flat-priced). ComboEscalation.spec pins that leftover under one Basic swing.
 	--
 	-- RAISED FROM 0.9 TO 1.15 with AttackConstants.Tempo (M1s at 0.75x). The slowed string lands its hits
 	-- further apart -- stage 2 into 3 came out at ~0.9s hit-to-hit on the authored numbers alone, i.e. AT
 	-- the old window -- and a string whose gaps outgrow this number can never reach its Finisher. Scaled
-	-- with the string rather than left at the edge, and kept under the two bounds either side of it:
-	-- Stagger.DurationSeconds (1.5) above, and AttackConstants.Sequence.ResetSeconds (1.2), which is
-	-- deliberately the longer of the two.
+	-- with the string rather than left at the edge, and kept under AttackConstants.Sequence.ResetSeconds
+	-- (1.2), which is deliberately the longer of the two.
 	WindowSeconds = 1.15,
 
 	-- Ceiling on escalation. Past this, further landed hits keep the window alive but grant no more

@@ -75,6 +75,7 @@ local AirComboSystem = require(Combat.AirCombo.AirComboSystem)
 local EngagementSystem = require(Combat.Engagement.EngagementSystem)
 local KnockbackAudit = require(Combat.Damage.KnockbackAudit)
 local EnvironmentReactionSystem = require(Combat.Environment.EnvironmentReactionSystem)
+local CombatTrace = require(Combat.CombatTrace)
 local DomainSystem = require(Combat.Domain.DomainSystem)
 local WeaponVisualSystem = require(Combat.Weapon.WeaponVisualSystem)
 local WeaponInventorySystem = require(Combat.Weapon.WeaponInventorySystem)
@@ -355,8 +356,9 @@ boot("AttackRequestSystem", AttackRequestSystem)
 --     which clip to play -- two callers of one function rather than the server trusting a client-sent
 --     id, so what the player SEES and what the server TIMES cannot drift apart.
 --
---     The signal fires on every accepted swap AND once per character bind (see notifyWeaponChanged's
---     own header), so a fresh life's weapon is covered without a separate spawn hookup here. A nil
+--     The signal fires on every real weapon change -- swap, draw, sheathe -- AND once per character bind
+--     (see AttackRequestSystem.OnWeaponChanged), so a fresh life's weapon is covered without a separate
+--     spawn hookup here. A nil
 --     weaponId (sheathed) resolves to the shared baseline, which is what an unarmed player parries
 --     with. SetParryAnimation ignores an unregistered model, so a bind that beats DefenseSystem's own
 --     PlayerLifecycle registration costs nothing -- RegisterCombatant seeds the default for the new
@@ -384,7 +386,7 @@ boot("AirComboSystem", AirComboSystem)
 
 --     EngagementSystem is another sibling of the same shape -- it subscribes to DamageSystem.OnApplied
 --     exactly as GrabSystem does, and is read by nobody through a require at all: it publishes the
---     Constants.Attributes.InCombat seam and its own Engagement_Changed remote, and every consumer
+--     AttributeConstants.InCombat seam and its own Engagement_Changed remote, and every consumer
 --     (Client/Parkour's combat gate, EmoteSystem's CombatAllowed refusal, the HUD engagement panel)
 --     reads one of those two. Boots after GrabSystem for readability, not correctness -- its Step
 --     reclaims only its own expired rows.
@@ -410,6 +412,11 @@ boot("KnockbackAudit", KnockbackAudit)
 --     both, so both subscriptions have something to attach to; its Heartbeat only watches its own rows,
 --     so it has no place in the combat layers' connection-order requirement.
 boot("EnvironmentReactionSystem", EnvironmentReactionSystem)
+
+--     CombatTrace -- the "why did that attack do that" log (Live Console, scope CombatTrace). A read-only sibling on
+--     OnPressRefused, OnSwingAccepted, OnResolved and OnApplied; after all three layers so every one exists. It
+--     decides nothing, so its place in the order is for readability only.
+boot("CombatTrace", CombatTrace)
 
 --     DomainSystem -- realms (Shared/Domain/DomainTypes.lua's header). A sibling of the attack layer on the
 --     same extension point EnvironmentReactionSystem uses (AttackRequestSystem.OnSwingAccepted: a domain

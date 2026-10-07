@@ -56,9 +56,9 @@
 	documentation, not runtime machinery, and nothing enforces it but this sentence.
 
 	  PlayerKilled     -> published ONLY by PlayerDeathSystem. RespawnSystem (new body), RewardSystem
-	                      (the fight-to-grow spine: RewardSystem -> ProgressionSystem -> MeridianSystem),
-	                      RivalrySystem (standings), BountySystem (streaks/claim), BloodlineSystem
-	                      (interim stage-advancement dispatch, not yet routed through the spine),
+	                      (the fight-to-grow spine: RewardSystem -> ProgressionSystem -> Meridian XP,
+	                      Bloodline stage progress, Bounty payout), RivalrySystem (standings),
+	                      BountySystem (streaks, marks; resolves a claim the spine pays),
 	                      BlimpSystem/BoatSystem (dismount the dead), EmoteSystem (stop a dying emote)
 	  MeridianXPAwarded-> TierSystem (promotion check)
 	  TierChanged      -> QiSystem (recompute the Max Qi ceiling for the new tier),

@@ -442,7 +442,7 @@ function Regions.Mount(
 	--
 	-- IT DOES NOT SWALLOW INPUT. A plain Frame is invisible to Roblox's hit-testing unless it is
 	-- Active or a GuiButton (Components/ModalScreen.lua's header has the long version), so the dock's
-	-- ability slots underneath stay clickable. They are gated by Constants.Attributes.UiModalOpen
+	-- ability slots underneath stay clickable. They are gated by AttributeConstants.UiModalOpen
 	-- anyway while this is up; the point is that the scrim adds no second, quieter gate of its own.
 	--
 	-- THE TWEEN IS ON THE GOAL, NOT DOWNSTREAM OF IT. The Computed below runs on mode EDGES only and

@@ -16,7 +16,7 @@
 	surfaces draw.
 
 	DAMAGE NUMBER STACKING is kept from the original, and for the original's reason: consecutive hits
-	inside Constants.FX.DamageNumbers.StackWindowSeconds accumulate into ONE running total rather than
+	inside FXConstants.DamageNumbers.StackWindowSeconds accumulate into ONE running total rather than
 	each spawning its own label, so a three-hit string reads as "24" climbing rather than three numbers
 	fighting for the same patch of screen. Deliberately a single current stack, not a per-target
 	ledger -- Types are per-contact and this is a melee game where a player is fighting what is in
@@ -39,7 +39,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 
 local Layers = require(script.Parent.Parent.Shell.Layers)
 local Surface = require(script.Parent.Parent.Shell.Surface)
@@ -55,7 +55,7 @@ type Scope = Fusion.Scope<typeof(Fusion)>
 local CombatFeedback = {}
 
 export type DamageNumberSpawnProps = {
-	Text: string,
+	Text: Fusion.UsedAs<string>,
 	Kind: DamageNumberLabel.DamageKind?,
 	Position: UDim2?,
 }
@@ -80,8 +80,8 @@ export type CombatFeedbackHandle = {
 	SuppressDamageNumbers: (seconds: number) -> (),
 }
 
-local DAMAGE_NUMBER_LIFETIME = Constants.FX.DamageNumbers.LifetimeSeconds
-local STACK_WINDOW_SECONDS = Constants.FX.DamageNumbers.StackWindowSeconds
+local DAMAGE_NUMBER_LIFETIME = FXConstants.DamageNumbers.LifetimeSeconds
+local STACK_WINDOW_SECONDS = FXConstants.DamageNumbers.StackWindowSeconds
 
 -- Returns its handle AND its banner tile. The tile is unparented -- UI/init.lua hands it to
 -- Shell/Regions.lua's TopCentre at order 5, above the announcement banner at 10. See the note at the
@@ -123,6 +123,33 @@ function CombatFeedback.Mount(
 	local currentStackTotal = 0
 	local currentStackExpiresAt = 0
 	local suppressDamageUntil = 0
+	-- THE STACK'S TEXT IS ITS OWN STATE (2026-09-28 audit F3). Writing a fresh table at the same key on every
+	-- stacked hit made ForPairs see a changed value and rebuild the whole label -- springs included -- on
+	-- every hit of a combo. Now the keyed table changes only when a stack opens or closes; a hit in between
+	-- only sets this. Each stack gets its own small scope so its Value is released with it.
+	local currentStackText: Fusion.Value<string>? = nil
+	local stackScopes: { [string]: Scope } = {}
+	-- Any stack still open when this surface unmounts goes with it.
+	table.insert(scope, function()
+		for _, stackScope in stackScopes do
+			stackScope:doCleanup()
+		end
+		table.clear(stackScopes)
+	end)
+
+	-- Drops a stack's entry, then its scope -- deferred so the label reading the Value is gone first.
+	local function closeStack(id: string): ()
+		local latest = table.clone(Fusion.peek(damageNumbers))
+		latest[id] = nil
+		damageNumbers:set(latest)
+		local stackScope = stackScopes[id]
+		stackScopes[id] = nil
+		if stackScope then
+			task.defer(function()
+				stackScope:doCleanup()
+			end)
+		end
+	end
 
 	local function scheduleStackExpiry(id: string): ()
 		task.delay(STACK_WINDOW_SECONDS, function()
@@ -133,9 +160,8 @@ function CombatFeedback.Mount(
 				return
 			end
 			currentStackId = nil
-			local latest = table.clone(Fusion.peek(damageNumbers))
-			latest[id] = nil
-			damageNumbers:set(latest)
+			currentStackText = nil
+			closeStack(id)
 		end)
 	end
 
@@ -146,24 +172,30 @@ function CombatFeedback.Mount(
 		end
 
 		local id: string
-		if currentStackId ~= nil and now < currentStackExpiresAt then
+		local text = currentStackText
+		if currentStackId ~= nil and text ~= nil and now < currentStackExpiresAt then
+			-- Extending the live stack: one Value write, no table write, no rebuild.
 			id = currentStackId :: string
 			currentStackTotal += props.Amount
+			text:set(tostring(math.floor(currentStackTotal + 0.5)))
 		else
 			nextId += 1
 			id = tostring(nextId)
 			currentStackId = id
 			currentStackTotal = props.Amount
+			local stackScope = Fusion.scoped(Fusion)
+			stackScopes[id] = stackScope
+			local newText = stackScope:Value(tostring(math.floor(currentStackTotal + 0.5)))
+			currentStackText = newText
+			local updated = table.clone(Fusion.peek(damageNumbers))
+			updated[id] = {
+				Text = newText,
+				Kind = props.Kind,
+				Position = props.Position,
+			}
+			damageNumbers:set(updated)
 		end
 		currentStackExpiresAt = now + STACK_WINDOW_SECONDS
-
-		local updated = table.clone(Fusion.peek(damageNumbers))
-		updated[id] = {
-			Text = tostring(math.floor(currentStackTotal + 0.5)),
-			Kind = props.Kind,
-			Position = props.Position,
-		}
-		damageNumbers:set(updated)
 
 		scheduleStackExpiry(id)
 	end
@@ -173,9 +205,8 @@ function CombatFeedback.Mount(
 		local activeId = currentStackId
 		if activeId ~= nil then
 			currentStackId = nil
-			local latest = table.clone(Fusion.peek(damageNumbers))
-			latest[activeId] = nil
-			damageNumbers:set(latest)
+			currentStackText = nil
+			closeStack(activeId)
 		end
 	end
 
@@ -214,10 +245,9 @@ function CombatFeedback.Mount(
 				Size = UDim2.fromScale(1, 1),
 				BackgroundTransparency = 1,
 
-				-- ForPairs, not ForValues: entries are mutated in place at a stable id (AddDamageHit
-				-- bumps the same key's Text as a stack grows), and ForValues dedupes by value identity
-				-- rather than by key -- it has no way to recognise "same id, updated value" as a
-				-- continuation instead of one entry vanishing and an unrelated one appearing.
+				-- ForPairs, keyed by a stable id: an entry is written once when its stack opens and removed
+				-- when it closes. A growing stack changes its own Text Value (AddDamageHit), never the
+				-- entry, so its label is built once and only its text moves.
 				[Children] = scope:ForPairs(damageNumbers, function(_use, innerScope, id, entry)
 					return id,
 						DamageNumberLabel(innerScope, {

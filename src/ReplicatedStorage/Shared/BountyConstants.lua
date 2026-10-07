@@ -94,6 +94,12 @@ BountyConstants.ExpirySeconds = 900
 -- opening a second connection -- same discipline QiSystem's passive regen follows.
 BountyConstants.ExpirySweepIntervalSeconds = 15
 
+-- How long a claim RegisterKill resolved stays owed to its death, waiting for the progression spine to pay
+-- it (BountySystem.PayClaim), seconds. Both halves hear the same death within a frame or two; this only
+-- bounds the entry for a kill the spine refused (weighted to zero), which never comes back for it. Swept on
+-- the expiry sweep above, so an entry may live up to this plus one interval.
+BountyConstants.OwedClaimSeconds = 10
+
 -- Read-only query remote, still rate limited -- same reasoning and same value as
 -- Constants.Rivalry.QueryMaxCallsPerSecond: a modified client looping it gains nothing but costs
 -- server time for free otherwise.

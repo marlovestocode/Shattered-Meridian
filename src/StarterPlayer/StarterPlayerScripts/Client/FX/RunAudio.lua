@@ -5,20 +5,20 @@
 	Owns: the run system's sound registrations and the verb-named play functions
 	Client/Movement/RunController.lua calls -- the same "domain module owns WHICH sounds exist and
 	gives them a typed API" shape Client/FX/CombatAudio.lua and Client/FX/FlightAudio.lua already
-	establish. Definitions come from Constants.Run (an empty SoundId placeholder until a real asset is
+	establish. Definitions come from RunConstants (an empty SoundId placeholder until a real asset is
 	supplied -- SoundManager.Play already no-ops safely on that).
 
-	ONE registered sound, not one per gear. Only Constants.Run.Footsteps.Stages[1] carries a Sound; every
+	ONE registered sound, not one per gear. Only RunConstants.Footsteps.Stages[1] carries a Sound; every
 	stage above it reuses that same registration and just plays it faster
 	(Footsteps.Stages[n].PlaybackSpeedMultiplier), rather than each stage owning its own asset. There
 	used to also be a separate one-shot "gear change" whoosh (RunStage<n>Onset, keyed off
-	Constants.Run.StageOnset) that fired once on the instant a faster stage engaged -- removed, because
+	RunConstants.StageOnset) that fired once on the instant a faster stage engaged -- removed, because
 	a faster gear pitching the SAME step sound up already sells "this is quicker now" through the
 	footsteps themselves, and a second competing audio event on top of that read as clutter rather than
-	clarity. StageOnset still exists in Constants.Run for its FOVDelta pull (RunController reads that
+	clarity. StageOnset still exists in RunConstants for its FOVDelta pull (RunController reads that
 	directly); this module no longer has anything to do with it.
 
-	Pitch jitter (Constants.Run.Footsteps.Stages[n].PitchJitter) is applied per play on top of the
+	Pitch jitter (RunConstants.Footsteps.Stages[n].PitchJitter) is applied per play on top of the
 	stage's PlaybackSpeedMultiplier, because a fixed-interval step system replaying one identical
 	sample is instantly recognizable as a metronome. It's a few percent -- enough to break the pattern,
 	not enough to read as a different surface.
@@ -31,14 +31,15 @@
 	uses -- this module has no per-frame loop of its own for either.
 
 	Does not own: WHEN a step happens or which stage is engaged (RunController.lua re-derives both
-	every frame from live speed and the server's Constants.Attributes.SprintStage), the Sound-instance
+	every frame from live speed and the server's AttributeConstants.SprintStage), the Sound-instance
 	mechanics (SoundManager.lua), or any gameplay decision -- nothing here crosses the network and
 	nothing here can affect an outcome.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local RunConstants = require(ReplicatedStorage.Shared.Run.RunConstants)
+local SoundTypes = require(ReplicatedStorage.Shared.SoundTypes)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -49,7 +50,7 @@ local logger = Logger.scope("RunAudio")
 
 local RunAudio = {}
 
-local RUN_CONFIG = Constants.Run
+local RUN_CONFIG = RunConstants
 local WALL_RUN_STEP = ParkourConstants.WallRun.Step
 
 -- The one registered name every stage plays through -- see this file's header for why the gears above
@@ -58,7 +59,7 @@ local WALL_RUN_STEP = ParkourConstants.WallRun.Step
 local STEP_SOUND_NAME = "RunStep"
 
 -- DERIVED FROM THE CONFIG, not hand-listed alongside it. Resizing the ladder is an edit to
--- Constants.Run.Footsteps.Stages alone; iterating it here rather than naming stage numbers is what
+-- RunConstants.Footsteps.Stages alone; iterating it here rather than naming stage numbers is what
 -- keeps that true.
 local STEP_PITCH_JITTER: { [number]: number } = {}
 local STEP_SPEED_MULTIPLIER: { [number]: number } = {}
@@ -124,11 +125,11 @@ function RunAudio.StopRunSounds(): ()
 end
 
 -- Runtime swap for the step sound, so step audio can be changed without an edit-and-rejoin cycle
--- (Constants.Run.Footsteps.Stages[1].Sound remains the shipped default and the thing to edit for a
+-- (RunConstants.Footsteps.Stages[1].Sound remains the shipped default and the thing to edit for a
 -- permanent change). Routed through SoundManager.Reconfigure rather than Register so the existing
 -- pooled instances are repointed instead of orphaned -- see that function's own header. No stage
 -- parameter anymore: every stage plays through the one registration this swaps.
-function RunAudio.SetStepSound(definition: Constants.SoundDefinition): ()
+function RunAudio.SetStepSound(definition: SoundTypes.SoundDefinition): ()
 	SoundManager.Reconfigure(STEP_SOUND_NAME, definition)
 	logger:info("Run step sound changed", { soundId = definition.SoundId })
 end

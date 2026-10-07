@@ -35,8 +35,6 @@ local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixtur
 local WEAPON = WeaponFixture.Install()[1]
 
 local FRAME = 1 / 60
--- The stun MOVE_ID (a Basic stage) inflicts -- per stage and weapon since DamageConstants.Hitstun.ByStage.
-local STUN = DamageConstants.HitstunFor(WEAPON, "Basic")
 local PARRY_ANIMATION = "rbxassetid://spec-damage-parry"
 local WINDOW_OPEN = 0
 local WINDOW_CLOSE = 0.3
@@ -45,6 +43,15 @@ local WINDOW_CLOSE = 0.3
 -- damage layer has for looking an attack back up. A DebugName that is not a MoveId resolves to nothing
 -- and the whole layer silently deals zero -- which is itself one of the cases below.
 local MOVE_ID = `default:{WEAPON}:Basic:1`
+
+-- The stun MOVE_ID (a Basic stage) inflicts. Read off the catalogue rather than DamageConstants.HitstunFor: a
+-- stage with a next stage LINKS (DamageConstants.Hitstun.LinkBasicString), so its stun is derived from the
+-- string's own timeline and only the catalogue knows it.
+local function stunSeconds(): number
+	local entry = AttackCatalog.Get(MOVE_ID)
+	assert(entry ~= nil, "the spec weapon's Basic 1 must be catalogued")
+	return (entry :: any).Profile.HitstunSeconds or DamageConstants.HitstunFor(WEAPON, "Basic")
+end
 
 type Dummy = {
 	Model: Model,
@@ -270,6 +277,21 @@ return function()
 	end)
 
 	describe("DamageSystem -- hitstun", function()
+		it("reports the stun still to run, which is what the defender's feedback carries", function()
+			-- StunRemaining is HitstunSeconds on the Defender copy: measured from now, not the contact's length,
+			-- and the longer of two overlapping stuns.
+			local base = os.clock()
+			local defender = makeDummy("Stunned", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			expect(DamageSystem.StunRemaining(defender.Model, base)).to.equal(0)
+
+			DamageSystem.ExtendHitstun(defender.Model, base + 1, base)
+			expect(DamageSystem.StunRemaining(defender.Model, base + 0.12)).to.be.near(0.88, 1e-6)
+			-- A shorter stun inside it changes nothing; the remainder is still the longer one's.
+			DamageSystem.ExtendHitstun(defender.Model, base + 0.5, base + 0.2)
+			expect(DamageSystem.StunRemaining(defender.Model, base + 0.2)).to.be.near(0.8, 1e-6)
+			expect(DamageSystem.StunRemaining(defender.Model, base + 2)).to.equal(0)
+		end)
+
 		it("gates the defender out of attacking", function()
 			local base = os.clock()
 			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
@@ -297,7 +319,7 @@ return function()
 
 			local busyUntil = defender.Humanoid:GetAttribute("CombatBusyUntil")
 			expect(busyUntil).to.be.a("number")
-			expect(busyUntil).to.be.near(base + FRAME + STUN, 0.05)
+			expect(busyUntil).to.be.near(base + FRAME + stunSeconds(), 0.05)
 		end)
 
 		it("publishes the stun on its own Attribute for the defence layer", function()
@@ -313,7 +335,7 @@ return function()
 
 			local stunnedUntil = defender.Humanoid:GetAttribute("HitstunUntil")
 			expect(stunnedUntil).to.be.a("number")
-			expect(stunnedUntil).to.be.near(base + FRAME + STUN, 0.05)
+			expect(stunnedUntil).to.be.near(base + FRAME + stunSeconds(), 0.05)
 		end)
 
 		it("does not stop the run of a defender whose guard held", function()
@@ -339,8 +361,30 @@ return function()
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
 			step(FRAME, base + FRAME)
 
-			local after = base + FRAME + STUN
+			local after = base + FRAME + stunSeconds()
 			expect(DamageSystem.CanAttack(defender.Model, after)).to.equal(true)
+		end)
+
+		it("ends the moment the defender parries their way out of it", function()
+			-- DefenseConstants.StunParry: a parry landed from inside a stun frees the parrier on the spot, so the
+			-- punish is theirs to take rather than a wait for the stun to run out.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local second = makeDummy("Second", Vector3.new(0.5, 5, 0), Vector3.new(0.5, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			expect(DamageSystem.CanAttack(defender.Model, base + 2 * FRAME)).to.equal(false)
+
+			DefenseSystem.SetBlocking(defender.Model, true, base + 2 * FRAME)
+			HitboxEngine.RequestAttack(second.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + 3 * FRAME)
+
+			expect(DefenseSystem.GetState(second.Model)).to.equal("Staggered")
+			expect(DamageSystem.CanAttack(defender.Model, base + 3 * FRAME + 1e-3)).to.equal(true)
+			local stunnedUntil = defender.Humanoid:GetAttribute("HitstunUntil")
+			expect(stunnedUntil <= base + 3 * FRAME + 1e-3).to.equal(true)
 		end)
 
 		it("cancels the defender's own in-flight swing", function()
@@ -543,6 +587,60 @@ return function()
 			end, function()
 				DamageConstants.AttackerLunge.Enabled = true
 			end)
+		end)
+	end)
+
+	describe("DamageSystem.ApplyImpact", function()
+		-- A thrown body landing (GrabSystem): health removed outside any swing, credited to the thrower.
+		it("removes the health and announces it, credited to the attacker, before the write", function()
+			local base = os.clock()
+			local thrower = makeDummy("Thrower", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local bystander = makeDummy("Bystander", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local before = bystander.Humanoid.Health
+
+			local seen: { any } = {}
+			local disconnect = DamageSystem.OnApplied(function(outcome, result)
+				table.insert(seen, {
+					Attacker = outcome.Attacker,
+					Defender = outcome.Defender,
+					DebugName = outcome.Report.DebugName,
+					Source = outcome.Report.Source,
+					Damage = result.Damage,
+					HealthAtCallback = bystander.Humanoid.Health,
+				})
+			end)
+			local dealt = DamageSystem.ApplyImpact(thrower.Model, bystander.Model, 15, base)
+			disconnect()
+
+			expect(dealt).to.equal(15)
+			expect(bystander.Humanoid.Health).to.be.near(before - 15, 1e-6)
+			expect(#seen).to.equal(1)
+			expect(seen[1].Attacker).to.equal(thrower.Model)
+			expect(seen[1].Defender).to.equal(bystander.Model)
+			expect(seen[1].DebugName).to.equal(DamageConstants.Impact.DebugName)
+			expect(seen[1].Source).to.equal("Impact")
+			expect(seen[1].HealthAtCallback).to.equal(before)
+		end)
+
+		it("stuns nothing and leaves the target free to swing", function()
+			local base = os.clock()
+			local thrower = makeDummy("Thrower", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local bystander = makeDummy("Bystander", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			DamageSystem.ApplyImpact(thrower.Model, bystander.Model, 15, base)
+
+			expect(DamageSystem.CanAttack(bystander.Model, base + FRAME)).to.equal(true)
+			expect(bystander.Humanoid:GetAttribute("HitstunUntil")).to.equal(nil)
+		end)
+
+		it("deals nothing to a dead target or for a non-positive amount", function()
+			local base = os.clock()
+			local thrower = makeDummy("Thrower", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local bystander = makeDummy("Bystander", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			expect(DamageSystem.ApplyImpact(thrower.Model, bystander.Model, 0, base)).to.equal(0)
+			bystander.Humanoid.Health = 0
+			expect(DamageSystem.ApplyImpact(thrower.Model, bystander.Model, 15, base)).to.equal(0)
 		end)
 	end)
 

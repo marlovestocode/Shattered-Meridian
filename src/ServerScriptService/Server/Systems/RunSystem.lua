@@ -3,7 +3,7 @@
 	RunSystem.lua
 
 	Owns: the run, authoritatively. Sprint intent as received from each client, the charge clock that
-	turns sustained running into a gear, the resolved stage published as Constants.Attributes.
+	turns sustained running into a gear, the resolved stage published as AttributeConstants.
 	SprintStage, and -- the part that makes all of that mean something -- Humanoid.WalkSpeed itself.
 
 	THIS SYSTEM IS THE WALKSPEED OWNER. Exactly one thing in this codebase may write that property,
@@ -49,7 +49,7 @@
 
 	THE SEAM FOR COMBAT, now taken. The rebuilt combat layer publishes two things this System reads,
 	and neither layer required a line of code in the other:
-	  * Constants.Attributes.CombatBusyUntil -- an os.clock() deadline written by
+	  * AttributeConstants.CombatBusyUntil -- an os.clock() deadline written by
 	    Server/Combat/Attack/AttackRequestSystem.lua covering the swing it just accepted, AND by
 	    Server/Combat/Damage/DamageSystem.lua covering the hitstun of a hit the player just took -- so
 	    getting hit while running drops the run exactly as throwing a swing does.
@@ -65,7 +65,9 @@
 	CHANGED 2026-09-28 FROM A CHARGE RESET. It used to zero the charge on every swing and every hit, so
 	a player re-earned the gear from scratch after each exchange -- and an M1 string, one swing every
 	half second, never let the ladder climb past first gear at all. Playtest read that as combat being
-	stop-start. The old argument for the reset ("pinning a number would hand the gear straight back the
+	stop-start. (2026-10-06: the player's OWN swing now keeps part of that held gear rather than dropping to
+	walking -- RunConstants.Combat.SwingGearCarry, see swingOnly. A guard, a stagger or a stun still walks.)
+	The old argument for the reset ("pinning a number would hand the gear straight back the
 	instant the pin lifted") is exactly what is wanted now: you cannot SPRINT while swinging, guarding or
 	stunned, and you do not pay for a whole run every time you throw a punch.
 
@@ -73,7 +75,7 @@
 	fact rather than a decision -- nothing publishes one yet.
 
 	Does not own: sprint INPUT (Client/Movement/RunController.lua owns the key, the hold-vs-toggle
-	preference and Autorun, and pushes the resulting boolean here), any presentation (Constants.Run and
+	preference and Autorun, and pushes the resulting boolean here), any presentation (RunConstants and
 	that same client module), the ladder's arithmetic (Shared/Run/RunLadder.lua) or its numbers
 	(Shared/Run/RunConstants.lua).
 ]]
@@ -82,7 +84,7 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -101,7 +103,7 @@ local logger = Logger.scope("RunSystem")
 
 local RunSystem = {}
 
-local ATTRIBUTES = Constants.Attributes
+local ATTRIBUTES = AttributeConstants
 local REMOTE_NAMES = RunConstants.Network.RemoteNames
 
 -- Per-player run state. Deliberately small, and deliberately NOT a mirror of anything the client
@@ -139,6 +141,9 @@ type LiveAttributes = {
 	-- Deadlines and states compared against `now` each tick -- the COMPARISON stays per-frame, only
 	-- the read of the number behind it moves to event rate.
 	CombatBusyUntil: number,
+	-- The stun alone (DamageSystem), so a commitment that is only the player's own swing can be told from one
+	-- that is a hit they took -- see swingOnly.
+	HitstunUntil: number,
 	DefenseState: string,
 	ParkourSpeedFloor: number,
 	ParkourSpeedFloorExpiry: number,
@@ -167,6 +172,7 @@ local MIRRORED_ATTRIBUTES: { [string]: true } = {
 	[ATTRIBUTES.SwingRooted] = true,
 	[ATTRIBUTES.ParkourVelocityOwned] = true,
 	[ATTRIBUTES.CombatBusyUntil] = true,
+	[ATTRIBUTES.HitstunUntil] = true,
 	[DefenseConstants.DefenseStateAttribute] = true,
 	[ATTRIBUTES.ParkourSpeedFloor] = true,
 	[ATTRIBUTES.ParkourSpeedFloorExpiry] = true,
@@ -252,6 +258,7 @@ local function getState(player: Player): PlayerRunState
 			SwingRooted = false,
 			ParkourVelocityOwned = false,
 			CombatBusyUntil = 0,
+			HitstunUntil = 0,
 			DefenseState = "",
 			ParkourSpeedFloor = 0,
 			ParkourSpeedFloorExpiry = 0,
@@ -295,6 +302,7 @@ local function readLiveAttributes(live: LiveAttributes, humanoid: Humanoid): ()
 	live.SwingRooted = humanoid:GetAttribute(ATTRIBUTES.SwingRooted) == true
 	live.ParkourVelocityOwned = humanoid:GetAttribute(ATTRIBUTES.ParkourVelocityOwned) == true
 	live.CombatBusyUntil = numberAttribute(humanoid, ATTRIBUTES.CombatBusyUntil, 0)
+	live.HitstunUntil = numberAttribute(humanoid, ATTRIBUTES.HitstunUntil, 0)
 	local defenceState = humanoid:GetAttribute(DefenseConstants.DefenseStateAttribute)
 	live.DefenseState = if typeof(defenceState) == "string" then defenceState :: string else ""
 	live.ParkourSpeedFloor = numberAttribute(humanoid, ATTRIBUTES.ParkourSpeedFloor, 0)
@@ -339,23 +347,23 @@ local function isMovementLocked(live: LiveAttributes): boolean
 		or live.EmoteMovementLocked
 		-- Grab layer (Server/Combat/Grab/GrabSystem.lua) -- true for the whole hold-then-flight
 		-- lifetime. Same "external system freezes movement without touching this System's own
-		-- resolver" shape as the three above; see Constants.Attributes.Grabbed's own header for why
+		-- resolver" shape as the three above; see AttributeConstants.Grabbed's own header for why
 		-- this is a separate Attribute from RootControlLocked rather than a widened meaning for it.
 		or live.Grabbed
-		-- The other end of a grab: a holder rooted for their throw clip. See Constants.Attributes.GrabThrowing.
+		-- The other end of a grab: a holder rooted for their throw clip. See AttributeConstants.GrabThrowing.
 		or live.GrabThrowing
 		-- Blimp layer (Server/Systems/BlimpSystem.lua) -- true for as long as this player is welded to a
-		-- station. Same shape as Grabbed immediately above; see Constants.Attributes.Mounted's own header.
+		-- station. Same shape as Grabbed immediately above; see AttributeConstants.Mounted's own header.
 		or live.Mounted
 		-- A move that Locks movement holds its attacker from the start of its Active window through its
-		-- recovery (HitboxEngine.setMovementLock). See Constants.Attributes.SwingRooted.
+		-- recovery (HitboxEngine.setMovementLock). See AttributeConstants.SwingRooted.
 		or live.SwingRooted
 		-- A realm's Rooted rule (Shared/Domain/DomainRules.lua) -- the same "an external system holds this
 		-- body where it is" tier, gated on the realm's lease.
 		or (live.DomainRooted and realmGoverns(live))
 end
 
--- The decaying WalkSpeed floor a just-finished parkour action leaves behind (Constants.Attributes.
+-- The decaying WalkSpeed floor a just-finished parkour action leaves behind (AttributeConstants.
 -- ParkourSpeedFloor, stamped by Server/Systems/ParkourSystem.lua off the client's action reports).
 --
 -- Decays linearly to zero across ParkourConstants.Locomotion.MomentumCarrySeconds. Linear rather than
@@ -382,6 +390,16 @@ local function combatCommitted(live: LiveAttributes, now: number): boolean
 	end
 	local defenceState = live.DefenseState
 	return defenceState ~= "" and defenceState ~= "Neutral"
+end
+
+-- Whether the commitment is ONLY the player's own swing -- not a stun they are reeling from, and no guard,
+-- stagger or guard break. Only that one keeps part of its gear (RunConstants.Combat.SwingGearCarry).
+local function swingOnly(live: LiveAttributes, now: number): boolean
+	if now >= live.CombatBusyUntil or now < live.HitstunUntil then
+		return false
+	end
+	local defenceState = live.DefenseState
+	return defenceState == "" or defenceState == "Neutral"
 end
 
 local function parkourSpeedFloor(live: LiveAttributes, now: number): number
@@ -547,6 +565,12 @@ local function stepPlayer(player: Player, state: PlayerRunState, deltaTime: numb
 		desired = 0
 	else
 		desired = live.BaseSpeed * RunLadder.SpeedMultiplier(nextStage)
+		-- A swing keeps part of the gear it was thrown from (RunConstants.Combat.SwingGearCarry): pressure on the
+		-- run stays on the run. Walking pace is the floor, so a walking swing is unchanged.
+		if committed and swingOnly(live, now) then
+			local carry = RunLadder.SpeedMultiplier(state.Stage) * math.max(RunConstants.Combat.SwingGearCarry, 0)
+			desired = live.BaseSpeed * math.max(1, carry)
+		end
 		-- A realm's MoveSpeed rule scales the gear, and -- like every tier above the floor -- sits under the
 		-- parkour carry below, which can preserve a speed a player earned but never grant one.
 		if live.DomainMoveSpeed ~= 1 and realmGoverns(live) then

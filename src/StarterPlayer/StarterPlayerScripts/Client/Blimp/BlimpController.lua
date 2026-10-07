@@ -95,7 +95,7 @@ local BlimpCameraMath = require(ReplicatedStorage.Shared.Blimp.BlimpCameraMath)
 local BlimpConstants = require(ReplicatedStorage.Shared.Blimp.BlimpConstants)
 local BlimpPilotPose = require(ReplicatedStorage.Shared.Blimp.BlimpPilotPose)
 local BlimpTypes = require(ReplicatedStorage.Shared.Blimp.BlimpTypes)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local GatheringConstants = require(ReplicatedStorage.Shared.Gathering.GatheringConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -703,12 +703,12 @@ end
 -- Input -----------------------------------------------------------------------------------------
 
 -- True while any modal UI panel is up (Components/ModalScreen.lua publishes the count as
--- Constants.Attributes.UiModalOpen). The same gate AttackInputClient and GrabInputClient hold, for
+-- AttributeConstants.UiModalOpen). The same gate AttackInputClient and GrabInputClient hold, for
 -- the same reason: gameProcessedEvent only covers presses that LAND on the GUI, and a centred panel
 -- leaves most of the viewport uncovered.
 local function isModalUiOpen(): boolean
 	local player = Players.LocalPlayer
-	return player ~= nil and player:GetAttribute(Constants.Attributes.UiModalOpen) == true
+	return player ~= nil and player:GetAttribute(AttributeConstants.UiModalOpen) == true
 end
 
 -- One rung, or All Stop on a delta of 0 -- BlimpSpeedLadder.Shift owns both meanings server-side, and

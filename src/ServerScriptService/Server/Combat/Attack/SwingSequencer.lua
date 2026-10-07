@@ -26,7 +26,7 @@
 	only to decide the launcher, which is the single place the two counters legitimately meet.
 
 	NO KNOWLEDGE OF HOW MANY STAGES A STRING HAS. The stage count is discovered by probing
-	AttackCatalog for consecutive MoveIds rather than read from Constants.Combat.Weapons, so widening
+	AttackCatalog for consecutive MoveIds rather than read from CombatConstants.Weapons, so widening
 	a string is a data edit in one place and this module never drifts from it. The probe is memoised
 	because the stage ARRAYS are fixed at file scope -- DefaultMoveRegistry.ApplyEdit mutates a
 	stage's fields in place and never adds or removes one -- so a count, unlike a move's contents,
@@ -156,6 +156,26 @@ local function stageCountFor(weaponId: WeaponId, category: AttackKind): number
 
 	stageCounts[key] = count
 	return count
+end
+
+export type StageMove = { MoveId: string, Kind: AttackKind, StageIndex: number }
+
+-- Every ground-string stage this weapon can throw, Basic then Heavy, in stage order -- exactly the ids
+-- Resolve probes for, built by the same two helpers. For the attack layer's prediction seed
+-- (AttackRequestSystem.predictionSeedFor), which hands the client one template per stage.
+function SwingSequencer.StageMoveIds(weaponId: WeaponId): { StageMove }
+	local stages: { StageMove } = {}
+	local function addAll(kind: AttackKind)
+		for stageIndex = 1, stageCountFor(weaponId, kind) do
+			table.insert(
+				stages,
+				{ MoveId = stageMoveId(weaponId, kind, stageIndex), Kind = kind, StageIndex = stageIndex }
+			)
+		end
+	end
+	addAll("Basic")
+	addAll("Heavy")
+	return stages
 end
 
 -- Records --------------------------------------------------------------------------------------------

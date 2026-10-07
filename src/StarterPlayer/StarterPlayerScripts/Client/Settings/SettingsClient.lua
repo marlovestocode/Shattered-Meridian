@@ -518,7 +518,7 @@ function SettingsClient.Start(handle: SettingsHandle, chrome: Chrome.ChromeHandl
 	-- reasoning behind that layer. Concretely for THIS toggle: "Menu" only fires Began while a modal is
 	-- already open, which would make K unable to ever OPEN the panel (nothing is open yet when this
 	-- fires); "Gameplay" only fires Began while nothing is open, which would make K unable to ever
-	-- CLOSE it once Settings itself raises Constants.Attributes.UiModalOpen. "System" is the one layer
+	-- CLOSE it once Settings itself raises AttributeConstants.UiModalOpen. "System" is the one layer
 	-- InputRouter does not modal-gate in either direction, which is exactly what a two-way toggle needs
 	-- -- the same reasoning DevMenuToggle/CharacterMenuToggle's own un-migrated toggles already lean on
 	-- by having no modal check at all today.

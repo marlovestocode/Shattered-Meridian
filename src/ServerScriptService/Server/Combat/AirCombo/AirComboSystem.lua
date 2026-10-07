@@ -44,7 +44,7 @@ local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboCons
 local AirComboMoves = require(ReplicatedStorage.Shared.AirCombo.AirComboMoves)
 local AirComboTypes = require(ReplicatedStorage.Shared.AirCombo.AirComboTypes)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
@@ -65,7 +65,7 @@ type FinisherKind = AirComboTypes.FinisherKind
 type DefenseOutcome = DefenseTypes.DefenseOutcome
 type DamageResult = DamageTypes.DamageResult
 
-local ATTRIBUTES = Constants.Attributes
+local ATTRIBUTES = AttributeConstants
 local HOVER = AirComboConstants.Hover
 local FOLLOW = AirComboConstants.Follow
 local TIMING = AirComboConstants.Timing
@@ -144,7 +144,7 @@ local function debugLog(message: string, data: { [string]: any }?): ()
 end
 
 -- A server os.clock() time converted to workspace:GetServerTimeNow() time, for an Attribute a client reads
--- (Constants.Attributes' air-combo note on why the published deadlines use the shared clock).
+-- (AttributeConstants' air-combo note on why the published deadlines use the shared clock).
 local function toServerTime(at: number, now: number): number
 	return Workspace:GetServerTimeNow() + (at - now)
 end

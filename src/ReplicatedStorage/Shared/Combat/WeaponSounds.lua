@@ -4,7 +4,7 @@
 
 	Owns: resolving a weapon's own authored SOUND EFFECTS off its model in Workspace.Weapons -- the
 	Sound instances a weapon builder drops into their model's own SFX folder (SFX/Swing, SFX/Block,
-	SFX/Parry, SFX/Equip, SFX/Sheathe, one Sound per slot) -- into the Constants.SoundDefinition shape
+	SFX/Parry, SFX/Equip, SFX/Sheathe, one Sound per slot) -- into the SoundTypes.SoundDefinition shape
 	Client/FX/SoundManager.lua registers and plays.
 
 	THE AUDIO HALF OF A CONVENTION THAT ALREADY EXISTS FOR CLIPS. Shared/Attack/AttackAnimations.lua's
@@ -65,7 +65,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local SoundTypes = require(ReplicatedStorage.Shared.SoundTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
 
@@ -73,7 +73,7 @@ local logger = Logger.scope("WeaponSounds")
 
 local WeaponSounds = {}
 
-export type SoundDefinition = Constants.SoundDefinition
+export type SoundDefinition = SoundTypes.SoundDefinition
 
 -- The one fixed folder this module reads -- see its header on why this is kept as this module's own
 -- copy rather than going through Shared/Combat/WeaponRoster.lua. Same constant, same reasoning, as

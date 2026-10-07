@@ -67,6 +67,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local Allegiance = require(ReplicatedStorage.Shared.Combat.Allegiance)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DomainClash = require(ReplicatedStorage.Shared.Domain.DomainClash)
 local DomainConstants = require(ReplicatedStorage.Shared.Domain.DomainConstants)
@@ -155,7 +156,9 @@ local pendingCasts: { PendingCast } = {}
 local membershipAccumulator = 0
 local barrierHeld = false
 
-local phaseCallbacks: { (id: string, transition: Transition) -> () } = {}
+-- OnPhaseChanged's subscribers (Shared/CallbackList.lua).
+local phaseListeners: CallbackList.CallbackList<string, Transition> =
+	CallbackList.New(logger, "DomainSystem.OnPhaseChanged")
 
 local started = false
 local trove = Trove.New()
@@ -410,12 +413,7 @@ local function notifyPhase(instance: DomainInstance, transition: Transition): ()
 		PhaseEndsAt = if instance.PhaseEndsAt == math.huge then 0 else serverTimeOf(instance.PhaseEndsAt, instance.Id),
 		Reason = transition.Reason,
 	})
-	for _, callback in phaseCallbacks do
-		local ok, err = pcall(callback, instance.Id, transition)
-		if not ok then
-			logger:error("A DomainSystem.OnPhaseChanged consumer errored", { errorMessage = tostring(err) })
-		end
-	end
+	phaseListeners:Fire(instance.Id, transition)
 	debugLog(DomainConstants.Debug.LogLifecycle, "Realm phase", {
 		id = instance.Id,
 		from = transition.From,
@@ -1192,13 +1190,7 @@ end
 -- Every lifecycle transition of every realm, including the Erode notices (From == To == "Active").
 -- Returns a disconnect function.
 function DomainSystem.OnPhaseChanged(callback: (id: string, transition: Transition) -> ()): () -> ()
-	table.insert(phaseCallbacks, callback)
-	return function()
-		local index = table.find(phaseCallbacks, callback)
-		if index then
-			table.remove(phaseCallbacks, index)
-		end
-	end
+	return phaseListeners:Connect(callback)
 end
 
 -- The shared-clock time of an instance-clock moment -- for a spec reading a rule lease against its own
@@ -1337,7 +1329,7 @@ function DomainSystem.Reset(): ()
 	table.clear(clashes)
 	table.clear(combatants)
 	table.clear(domainMoves)
-	table.clear(phaseCallbacks)
+	phaseListeners:Clear()
 	if barrierHeld then
 		ports.SetBarrier(nil)
 	end

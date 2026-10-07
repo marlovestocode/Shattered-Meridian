@@ -5,8 +5,8 @@
 	Owns: the presentation-layer tuning every client-side effect module reads -- hit feedback, screen
 	shake, damage numbers, the pooled-effect budgets and the sound entries that go with them.
 
-	Lifted out of Constants.lua. Constants.FX re-exports this module, so every existing
-	Constants.FX.X call site keeps working unchanged; new code should require this module directly.
+	Lifted out of Constants.lua. Callers require this module directly
+	(the old Constants.FX re-export was removed 2026-10-06).
 
 	PRESENTATION ONLY, AND THAT LINE IS LOAD-BEARING. Nothing here may decide an outcome. These
 	numbers run on the client, where a player can change them; a value that reached a gameplay
@@ -84,6 +84,10 @@ local FXConstants = {
 		AttackerSeconds = 0.06,
 		VictimSeconds = 0.09,
 		HeavyBonusSeconds = 0.03,
+		-- The LAST M1 of a string (DamageTypes.CombatFeedback.StringEnd) stops a beat longer than the links
+		-- before it, so a finished string reads as finished. Kept under PostureBreakSeconds' total: a string
+		-- ending is a punctuation mark, not a guard break.
+		StringEndBonusSeconds = 0.04,
 		ParrySeconds = 0.12,
 		-- A PERFECT parry's clash freeze, both bodies (CombatFeedbackClient). Longer than any hit's on
 		-- purpose: the perfect parry is the one moment the whole exchange should visibly stop.

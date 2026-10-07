@@ -23,7 +23,9 @@ type Scope = Fusion.Scope<typeof(Fusion)>
 export type DamageKind = "Normal" | "Heavy" | "Critical" | "Posture"
 
 export type DamageNumberLabelProps = {
-	Text: string,
+	-- A state object for a STACK, whose total grows in place (CombatFeedback.AddDamageHit) -- so a growing combo
+	-- rewrites one label's text rather than rebuilding the label, springs and all, on every hit.
+	Text: Fusion.UsedAs<string>,
 	Kind: DamageKind?,
 	-- Where the number starts, in the parent's scale-space. Defaults to dead center so a caller
 	-- without a real hit-location yet still gets a sane on-screen position.

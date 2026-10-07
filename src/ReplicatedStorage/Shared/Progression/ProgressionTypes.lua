@@ -9,7 +9,7 @@
 	    PlayerKilled (GameplayEvents, PlayerDeathSystem)
 	      -> RewardSystem       what is this event eligible for          -> RewardManifest
 	      -> ProgressionSystem  is it legitimate, and who owns each part -> ProgressionOutcome
-	      -> MeridianSystem     how much, and the write
+	      -> the owners         how much, and the write (Meridian, Bloodline, Bounty)
 
 	Deliberately NOT a section of Shared/Types.lua, for the reason DamageTypes.lua gives for itself: a
 	domain whose types live in the shared hub cannot be moved or removed without unpicking the hub.
@@ -35,7 +35,12 @@ export type RewardSource = "PvPKill"
 -- the manifest only says the event is eligible for it. Absorb, loot, currencies and faction standing
 -- are not here because no System owns them yet -- adding a kind without an owner would be a component
 -- ProgressionSystem can only refuse.
-export type RewardComponentKind = "MeridianXP"
+--   MeridianXP      MeridianSystem.AwardKillXP -- every counted kill.
+--   BloodlineStage  BloodlineSystem.CountKill -- a weighted kill toward the killer's next stage.
+--   BountyClaim     BountySystem.PayClaim -- the victim's mark, if they carried one.
+-- A component whose owner has nothing to do for this kill (no bloodline, no mark) reports false in
+-- ProgressionOutcome.Granted; that is a normal answer, not a fault.
+export type RewardComponentKind = "MeridianXP" | "BloodlineStage" | "BountyClaim"
 
 -- The confirmed fact a manifest is composed from. Frozen by RewardSystem.
 export type ProgressionEvent = {

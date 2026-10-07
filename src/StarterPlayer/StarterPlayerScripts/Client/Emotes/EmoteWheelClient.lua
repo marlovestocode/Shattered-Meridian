@@ -86,7 +86,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Trove = require(ReplicatedStorage.Shared.Trove)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local EmoteRegistry = require(ReplicatedStorage.Shared.Emotes.EmoteRegistry)
 
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
@@ -315,7 +315,7 @@ end
 -- the furnace prompt used to answer a press with.
 --
 -- READ AS AN ATTRIBUTE, matching the gate it is mirroring rather than requiring BlimpController --
--- Constants.Attributes.Mounted is the seam, and this module has no business knowing which System
+-- AttributeConstants.Mounted is the seam, and this module has no business knowing which System
 -- writes it (see Client/Blimp/BlimpController.lua's own posture and EmoteSystem's header).
 --
 -- REFUSING TO OPEN rather than opening and reporting a refusal, because the player is standing at a
@@ -323,7 +323,7 @@ end
 -- legible message, and a toast over the helm HUD would be answering a question nobody asked.
 local function isMounted(): boolean
 	local _, humanoid = CharacterUtil.LiveRig(Players.LocalPlayer)
-	return humanoid ~= nil and humanoid:GetAttribute(Constants.Attributes.Mounted) == true
+	return humanoid ~= nil and humanoid:GetAttribute(AttributeConstants.Mounted) == true
 end
 
 local function openWheel(handle: EmoteWheelHandle, clientState: ClientState): ()

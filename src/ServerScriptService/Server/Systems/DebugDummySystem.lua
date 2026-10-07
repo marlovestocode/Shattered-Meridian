@@ -88,6 +88,7 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
@@ -253,7 +254,7 @@ end
 local function statusLine(dummy: Dummy): string
 	local humanoid = dummy.Humanoid
 	local guard, guardMax = DefenseSystem.GetGuard(dummy.Model)
-	local grabbedSuffix = if humanoid:GetAttribute(Constants.Attributes.Grabbed) == true then " | GRABBED" else ""
+	local grabbedSuffix = if humanoid:GetAttribute(AttributeConstants.Grabbed) == true then " | GRABBED" else ""
 	return string.format(
 		"HP %d/%d | Guard %d/%d%s",
 		math.max(math.floor(humanoid.Health), 0),
@@ -423,8 +424,8 @@ local function spawnAt(spawnCFrame: CFrame): Model?
 	)
 	table.insert(
 		dummy.Connections,
-		humanoid:GetAttributeChangedSignal(Constants.Attributes.Grabbed):Connect(function()
-			local grabbed = humanoid:GetAttribute(Constants.Attributes.Grabbed) == true
+		humanoid:GetAttributeChangedSignal(AttributeConstants.Grabbed):Connect(function()
+			local grabbed = humanoid:GetAttribute(AttributeConstants.Grabbed) == true
 			pushLogLine(dummy, if grabbed then "[Grab] Held" else "[Grab] Released")
 		end)
 	)

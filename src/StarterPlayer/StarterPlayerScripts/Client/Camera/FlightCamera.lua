@@ -50,6 +50,7 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -103,7 +104,7 @@ local function onRenderStep(deltaTime: number): ()
 	local hasLiveCharacter = camera ~= nil and currentHumanoid ~= nil and currentHumanoid.Health > 0
 	local wantsEngaged = hasLiveCharacter
 		and currentHumanoid ~= nil
-		and currentHumanoid:GetAttribute(Constants.Attributes.Flying) == true
+		and currentHumanoid:GetAttribute(AttributeConstants.Flying) == true
 
 	setEngaged(wantsEngaged, camera)
 	if not engaged or not camera or not currentHumanoid then

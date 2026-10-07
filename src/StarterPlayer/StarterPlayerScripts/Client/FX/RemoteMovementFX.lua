@@ -5,7 +5,7 @@
 	Owns: drawing OTHER players' evades on this client -- the dust at each end and the afterimage across
 	the evade window -- off the replicated Humanoid ParkourState Attribute.
 
-	NO REMOTE. Server/Systems/ParkourSystem.lua writes Constants.Attributes.ParkourState = "Evade" on
+	NO REMOTE. Server/Systems/ParkourSystem.lua writes AttributeConstants.ParkourState = "Evade" on
 	exactly the reports it ACCEPTS (beginAction) and clears it when the action ends, and Humanoid
 	Attributes replicate to every client for free. That write is the same accepted report
 	Main.server.lua turns into DefenseSystem.BeginEvade -- so a ghost drawn here is an evade the server
@@ -28,7 +28,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -72,9 +72,9 @@ function RemoteMovementFX.Classify(previous: unknown, current: unknown): ("Start
 end
 
 local function bindRemoteCharacter(character: Model, humanoid: Humanoid, life: Trove.TroveInstance): ()
-	local last: unknown = humanoid:GetAttribute(Constants.Attributes.ParkourState)
-	life:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.ParkourState), function()
-		local current = humanoid:GetAttribute(Constants.Attributes.ParkourState)
+	local last: unknown = humanoid:GetAttribute(AttributeConstants.ParkourState)
+	life:Connect(humanoid:GetAttributeChangedSignal(AttributeConstants.ParkourState), function()
+		local current = humanoid:GetAttribute(AttributeConstants.ParkourState)
 		local edge = RemoteMovementFX.Classify(last, current)
 		last = current
 		if not edge or not withinDrawDistance(character) then

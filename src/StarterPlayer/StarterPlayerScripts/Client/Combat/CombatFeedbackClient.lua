@@ -101,14 +101,17 @@
 	outcome grant real hitstun" is one question, and the freeze above already answers it correctly.
 ]]
 
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
+local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -175,28 +178,30 @@ local function shakeFor(payload: CombatFeedback, cue: Cue?): ()
 	local table_ = if payload.Role == "Defender"
 		then AttackConstants.Presentation.ShakePresets.Defender
 		else AttackConstants.Presentation.ShakePresets.Attacker
+	-- The last hit of a string lands heavy on both screens (DamageTypes.CombatFeedback.StringEnd).
 	local presetName = if variantOf(payload) == "ParriedPerfect"
 		then "PerfectParry"
+		elseif payload.StringEnd == true and payload.Kind == "Clean" then "HitHeavy"
 		else table_[payload.Kind] or AttackConstants.Presentation.DefaultShakePreset
-	-- Indexed rather than switched, so a preset renamed in Constants.FX is a nil (no shake) rather
-	-- than a runtime error -- Constants.FX's own "a missing preset degrades to no shake, never to a
+	-- Indexed rather than switched, so a preset renamed in FXConstants is a nil (no shake) rather
+	-- than a runtime error -- FXConstants's own "a missing preset degrades to no shake, never to a
 	-- wrong hit" rule, which CameraShake.Shake already tolerates on its own side too. A move's cue may
 	-- name its own preset for both roles, scale this one, or say None.
-	CameraShake.Shake(MovePresentation.Shake(cue, (Constants.FX.CameraShake :: any)[presetName]) :: any)
+	CameraShake.Shake(MovePresentation.Shake(cue, (FXConstants.CameraShake :: any)[presetName]) :: any)
 end
 
--- Which of Constants.FX.HitFlash's three named colors a resolution pops on the defender -- the same
+-- Which of FXConstants.HitFlash's three named colors a resolution pops on the defender -- the same
 -- "white = a plain hit, gold = a parry deflection, red-gold = a posture break" family that config's own
 -- header describes. Fewer buckets than DefenseTypes.OutcomeKind has entries, deliberately: Backstab and
 -- Trade already get their own answer through the shake presets and the impact sounds, so they read here
 -- as "a plain hit" rather than earning a fourth/fifth color with nothing else to distinguish it by.
 local HIT_FLASH_COLORS: { [string]: Color3 } = {
-	Clean = Constants.FX.HitFlash.HitColor,
-	Blocked = Constants.FX.HitFlash.HitColor,
-	Backstab = Constants.FX.HitFlash.HitColor,
-	Trade = Constants.FX.HitFlash.HitColor,
-	Parried = Constants.FX.HitFlash.ParryColor,
-	GuardBroken = Constants.FX.HitFlash.PostureBreakColor,
+	Clean = FXConstants.HitFlash.HitColor,
+	Blocked = FXConstants.HitFlash.HitColor,
+	Backstab = FXConstants.HitFlash.HitColor,
+	Trade = FXConstants.HitFlash.HitColor,
+	Parried = FXConstants.HitFlash.ParryColor,
+	GuardBroken = FXConstants.HitFlash.PostureBreakColor,
 }
 
 -- Victim-only, per HitFlash's own header -- fired on outcome.Defender's body regardless of which
@@ -223,9 +228,9 @@ end
 -- rather than re-derived so the two tables cannot quietly disagree about which outcomes read as
 -- "heavier" to the player being hit.
 local FREEZE_SECONDS_BY_KIND: { [string]: number } = {
-	Clean = Constants.FX.HitStop.VictimSeconds,
-	Backstab = Constants.FX.HitStop.PostureBreakSeconds,
-	GuardBroken = Constants.FX.HitStop.PostureBreakSeconds,
+	Clean = FXConstants.HitStop.VictimSeconds,
+	Backstab = FXConstants.HitStop.PostureBreakSeconds,
+	GuardBroken = FXConstants.HitStop.PostureBreakSeconds,
 }
 
 -- Victim-only, unlike shakeFor/flashFor/CombatAudio.PlayImpact above which fire for both roles (or are
@@ -255,13 +260,13 @@ end
 -- table as the victim freeze, plus a clash-freeze on a parry, plus the tuned heavy bonus for a Heavy
 -- move. See HitStop.FreezeExchange.
 local EXCHANGE_SECONDS_BY_KIND: { [string]: number } = {
-	Clean = Constants.FX.HitStop.VictimSeconds,
-	Backstab = Constants.FX.HitStop.PostureBreakSeconds,
-	GuardBroken = Constants.FX.HitStop.PostureBreakSeconds,
-	Parried = Constants.FX.HitStop.ParrySeconds,
+	Clean = FXConstants.HitStop.VictimSeconds,
+	Backstab = FXConstants.HitStop.PostureBreakSeconds,
+	GuardBroken = FXConstants.HitStop.PostureBreakSeconds,
+	Parried = FXConstants.HitStop.ParrySeconds,
 	-- Two swings meeting (DefenseConstants.Clash) is the same clash beat as a parry: both bodies stop,
 	-- then both are shoved apart.
-	Trade = Constants.FX.HitStop.ParrySeconds,
+	Trade = FXConstants.HitStop.ParrySeconds,
 }
 
 local function freezeExchangeFor(payload: CombatFeedback, cue: Cue?): ()
@@ -270,9 +275,12 @@ local function freezeExchangeFor(payload: CombatFeedback, cue: Cue?): ()
 		if variantOf(payload) == "ParriedPerfect" then
 			-- The perfect parry replaces the clash beat outright rather than adding to it: the whole
 			-- exchange stops for PerfectParrySeconds, on both bodies, on both clients.
-			seconds = Constants.FX.HitStop.PerfectParrySeconds
+			seconds = FXConstants.HitStop.PerfectParrySeconds
 		elseif typeof(payload.MoveId) == "string" and string.find(payload.MoveId, ":Heavy:", 1, true) then
-			seconds += Constants.FX.HitStop.HeavyBonusSeconds
+			seconds += FXConstants.HitStop.HeavyBonusSeconds
+		elseif payload.StringEnd == true then
+			-- The string ender stops a beat longer than the links before it (FXConstants.HitStop.StringEndBonusSeconds).
+			seconds += FXConstants.HitStop.StringEndBonusSeconds
 		end
 	end
 	-- A move's authored freeze replaces the whole computed beat (0 is none). Pose only: the victim's
@@ -330,14 +338,23 @@ local function cancelSwingFor(payload: CombatFeedback): ()
 			AttackInputClient.CancelSwing()
 			return
 		end
+		if payload.Kind == "Parried" and DefenseConstants.StunParry.Enabled then
+			-- This player parried -- possibly out of a stun, which the server ends on the spot
+			-- (DefenseConstants.StunParry). A no-op when they were not stunned.
+			LocalCombatState.ClearHitstun()
+			HitStop.EndVictimSlow()
+			return
+		end
 		if not FREEZE_SECONDS_BY_KIND[payload.Kind] then
 			return
 		end
 		-- The same three kinds DamageResolver grants DamageConstants.Hitstun for -- recorded so no swing
-		-- is predicted, and no guard animation started, while the server is refusing both. The length is
-		-- the server's own for this contact (it varies by weapon); the shared one only covers an older server.
+		-- is predicted, and no guard animation started, while the server is refusing both. The server sends
+		-- what is left of the stun as it sends this (it varies by weapon, and a held contact has spent some);
+		-- the trip here spent about half a round trip more. The shared length only covers an older server.
+		-- Ending a hair early is harmless: a press the server still refuses as Hitstun is buffered and thrown.
 		local stun = if typeof(payload.HitstunSeconds) == "number"
-			then payload.HitstunSeconds
+			then math.max(payload.HitstunSeconds - Players.LocalPlayer:GetNetworkPing() / 2, 0)
 			else DamageConstants.Hitstun.Seconds
 		LocalCombatState.NoteHitstun(os.clock() + stun)
 		-- And the body cannot simply walk out of the next swing while it is stunned (HitStop's header).
@@ -530,7 +547,8 @@ function CombatFeedbackClient.PresentPredictedHit(
 	attacker: Model,
 	defender: Model,
 	contactPosition: Vector3,
-	moveId: string
+	moveId: string,
+	stringEnd: boolean?
 ): boolean
 	local now = os.clock()
 	if
@@ -551,6 +569,7 @@ function CombatFeedbackClient.PresentPredictedHit(
 		ComboStage = 0,
 		MoveId = moveId,
 		ContactPosition = contactPosition,
+		StringEnd = if stringEnd then true else nil,
 	}
 	presentHit(payload, CombatFeedbackClient.CueFor(payload))
 	return true

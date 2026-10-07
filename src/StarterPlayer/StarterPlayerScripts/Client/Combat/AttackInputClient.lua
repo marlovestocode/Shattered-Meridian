@@ -43,8 +43,9 @@
 	  * WHAT is predicted comes from a mirror of SwingSequencer's string (stage, lapse, the landed-combo
 	    Finisher rule), updated from every Attack_Started and every Combat_Feedback this client gets.
 	  * HOW it plays -- clip, speed, windup/active/recovery -- is the server's own last Attack_Started
-	    for that exact MoveId, replayed (confirmedByMoveId). A move this client has never seen confirmed
-	    is not predicted at all, so a prediction never invents a number.
+	    for that exact MoveId, replayed (confirmedByMoveId), seeded for every stage of a weapon the moment
+	    it is in hand (Attack_WeaponChanged's Moves). A move with no server copy is not predicted at all,
+	    so a prediction never invents a number.
 	  * WHEN: only while the body is free by every local measure the server also gates on (own swing and
 	    chain beat over, not stunned, not guarding, neutral defence state, not grabbed/mounted/in a
 	    traversal). A press made mid-swing mirrors the server's input buffer and is predicted at the
@@ -89,7 +90,8 @@ local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationMan
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
@@ -139,7 +141,8 @@ local HOTBAR_ACTIONS: { Types.KeybindAction } =
 -- cooldown regardless, and this only exists so the HUD can draw it and so an obviously-doomed press
 -- is not sent at all.
 local slotReadyAt: { [number]: number } = {}
-local slotListeners: { (slot: number, seconds: number) -> () } = {}
+local slotListeners: CallbackList.CallbackList<number, number> =
+	CallbackList.New(logger, "AttackInputClient.OnSlotCooldown")
 
 -- Throttle for the local press cue -- see AttackConstants.Presentation.SwingPunch.MinIntervalSeconds
 -- for why mashing must not strobe the camera.
@@ -148,10 +151,9 @@ local lastPunchAt = 0
 -- The local player's weapon, as last reported by the server. Presentation only: nothing here decides
 -- which weapon is held, and no request payload carries it.
 --
--- Starts nil rather than at a default, because there is no client-knowable default any more -- the
--- roster lives in Workspace.Weapons and the server picks the starting weapon from it. The server
--- reports it through Combat_WeaponChanged on every character bind (AttackRequestSystem's own
--- bindCharacter), so this is only nil for the moment before that first message lands.
+-- nil for an empty hand. The server reports every change on Attack_WeaponChanged -- a swap, a draw or
+-- sheathe, and every fresh life (AttackRequestSystem.notifyWeaponChanged) -- so this is only stale for
+-- the one-way trip of that message.
 local currentWeapon: Types.WeaponId? = nil
 
 -- ONE manager for the local player's whole lifetime, bound/unbound per life -- the same "construct
@@ -162,7 +164,12 @@ local currentWeapon: Types.WeaponId? = nil
 local manager = AnimationManager.new({ Name = "AttackInputClient" })
 
 -- Assigned in the Prediction section below; declared here because the input handlers above it call it.
-local predictPress: (kind: AttackTypes.AttackKind) -> ()
+local predictPress: (kind: AttackTypes.AttackKind, pressId: number?) -> ()
+
+-- This session's attack press ids (AttackTypes.AttackRequest.PressId), counted up from 1. The server echoes
+-- one on Attack_Started or answers it with a "Refused" Attack_Cancelled, which is what cuts a prediction of a
+-- press that will never throw -- the timeout in predictSwing is only the backstop now.
+local nextPressId = 0
 -- Assigned beside the jump suppression below, for the same reason.
 local notePressForJump: (kind: AttackTypes.AttackKind, now: number) -> ()
 
@@ -184,10 +191,11 @@ local boundHumanoid: Humanoid? = nil
 -- which one this is here to cover.
 local function parkourOwnsBody(): boolean
 	local currentHumanoid = boundHumanoid
-	return currentHumanoid ~= nil and currentHumanoid:GetAttribute(Constants.Attributes.ParkourActionOwned) == true
+	return currentHumanoid ~= nil and currentHumanoid:GetAttribute(AttributeConstants.ParkourActionOwned) == true
 end
 
-local function sendRequest(request: AttackTypes.AttackRequest): ()
+-- Returns the press id it stamped, or nil when the press never left this client.
+local function sendRequest(request: AttackTypes.AttackRequest): number?
 	if parkourOwnsBody() then
 		-- Dropped outright, never buffered -- the same choice the server's own gate makes by keeping
 		-- "ParkourAction" out of AttackConstants.Input.TransientRefusals. A press queued through a vault
@@ -198,7 +206,7 @@ local function sendRequest(request: AttackTypes.AttackRequest): ()
 		if AttackConstants.Debug.Enabled and AttackConstants.Debug.LogRefused then
 			logger:debug("Attack press dropped -- a parkour action owns the body")
 		end
-		return
+		return nil
 	end
 	local remote = requestRemote
 	if not remote then
@@ -207,9 +215,12 @@ local function sendRequest(request: AttackTypes.AttackRequest): ()
 		-- ordering regression in Main.client.lua is visible rather than felt as "attacks sometimes
 		-- don't work at boot."
 		logger:warn("Attack pressed before the request remote was ready")
-		return
+		return nil
 	end
+	nextPressId += 1
+	request.PressId = nextPressId
 	remote:FireServer(request)
+	return nextPressId
 end
 
 -- The immediate, local "that registered" cue. Cosmetic in the strictest sense: a camera FOV nudge,
@@ -260,9 +271,9 @@ local function requestWeaponAttack(kind: AttackTypes.AttackKind): ()
 	local modifierUp = KeybindManager.IsJumpKeyDown()
 	notePressForJump(kind, os.clock())
 	playPressCue(kind)
-	sendRequest({ Kind = kind, Modifier = if modifierUp then "Up" else nil })
+	local pressId = sendRequest({ Kind = kind, Modifier = if modifierUp then "Up" else nil })
 	if not skipsPrediction(modifierUp) then
-		predictPress(kind)
+		predictPress(kind, pressId)
 	end
 end
 
@@ -277,7 +288,7 @@ local function requestHotbar(slot: number): ()
 		-- The one place a local drop is honest: this cooldown is the server's own number, echoed back.
 		return
 	end
-	playPressCue()
+	playPressCue("Hotbar")
 	sendRequest({ Kind = "Hotbar", Slot = slot, MoveId = moveId })
 end
 
@@ -286,7 +297,7 @@ end
 -- Every attack-layer action goes through Client/Input/InputRouter.lua on its "Gameplay" layer, which
 -- is what drops a click that landed on the GUI (gameProcessed -- a HUD ability slot fires its own
 -- OnActivated, which routes here through AttackInputClient.PressHotbarSlot) and every press while a
--- modal panel is open (Constants.Attributes.UiModalOpen). This module used to hand-roll both checks
+-- modal panel is open (AttributeConstants.UiModalOpen). This module used to hand-roll both checks
 -- on its own raw InputBegan connection.
 --
 -- THE ROUTER IS ALSO THE ONLY THING THAT RESOLVES THE GAMEPAD CHORD LAYER, which is why the move was
@@ -415,15 +426,17 @@ end
 -- A plain SetClaim(nil): retiring a claim nothing currently holds is Clear's own documented no-op (see
 -- AnimationManager.Clear), so calling this on every qualifying hit costs nothing when the victim was
 -- not mid-swing at all -- there is no need to check GetActiveClip first.
-local pendingPrediction: { MoveId: string, Generation: number }? = nil
-local bufferedPress: { Kind: AttackTypes.AttackKind, Generation: number }? = nil
+-- PressId is the press the prediction answers, so a "Refused" verdict for it cuts exactly this one.
+local pendingPrediction: { MoveId: string, Generation: number, PressId: number? }? = nil
+local bufferedPress: { Kind: AttackTypes.AttackKind, Generation: number, PressId: number? }? = nil
 
 -- Why a swing this client was playing stopped early. "Feint" is the server's Attack_Cancelled;
 -- "Interrupted" is every other server-side cut this client infers (hitstun, parried, traded -- see
 -- CancelSwing's own header); "Unconfirmed" is a prediction the server never confirmed.
 export type SwingCancelReason = "Feint" | "Interrupted" | "Unconfirmed"
 
-local swingCancelledListeners: { (SwingCancelReason) -> () } = {}
+local swingCancelledListeners: CallbackList.CallbackList<SwingCancelReason> =
+	CallbackList.New(logger, "AttackInputClient.OnSwingCancelled")
 
 -- The MoveId of the swing most recently started on the attack layer, or nil once it is cut. What an
 -- Attack_Cancelled is matched against, so a cancel that raced a newer swing does not cut the newer
@@ -434,16 +447,10 @@ local playingMoveId: string? = nil
 local playingPayload: AttackStartedPayload? = nil
 local playingStartedAt = 0
 
--- Tells every OnSwingCancelled listener. Pcall'd per listener for the reason onAttackStarted's own
--- dispatch cannot afford to be: this runs from remote handlers and task.delay callbacks, and one FX
--- module erroring must not stop the lunge being cancelled.
+-- Tells every OnSwingCancelled listener, pcall'd per listener (CallbackList): this runs from remote
+-- handlers and task.delay callbacks, and one FX module erroring must not stop the lunge being cancelled.
 local function notifySwingCancelled(reason: SwingCancelReason): ()
-	for _, listener in swingCancelledListeners do
-		local ok, err = pcall(listener, reason)
-		if not ok then
-			logger:error("An OnSwingCancelled listener errored", { errorMessage = tostring(err) })
-		end
-	end
+	swingCancelledListeners:Fire(reason)
 end
 
 local function cutSwing(reason: SwingCancelReason): ()
@@ -473,9 +480,7 @@ local function noteSlotCooldown(slot: number, seconds: number): ()
 	end
 	local readyAt = os.clock() + seconds
 	slotReadyAt[slot] = readyAt
-	for _, listener in slotListeners do
-		listener(slot, seconds)
-	end
+	slotListeners:Fire(slot, seconds)
 
 	task.delay(seconds, function()
 		-- Guarded against a newer press: a second use of the same slot inside the first cooldown
@@ -485,13 +490,14 @@ local function noteSlotCooldown(slot: number, seconds: number): ()
 			return
 		end
 		slotReadyAt[slot] = nil
-		for _, listener in slotListeners do
-			listener(slot, 0)
-		end
+		slotListeners:Fire(slot, 0)
 	end)
 end
 
-local attackStartedListeners: { (AttackStartedPayload) -> () } = {}
+-- Pcall'd per listener (CallbackList), so one FX listener erroring (trail, lunge, swing audio) cannot stop
+-- the others -- or the rest of startSwing -- for a swing that is already on screen.
+local attackStartedListeners: CallbackList.CallbackList<AttackStartedPayload> =
+	CallbackList.New(logger, "AttackInputClient.OnAttackStarted")
 
 -- Starts a swing locally -- the clip, the body's local commitment, and every OnAttackStarted listener
 -- (trail, lunge, swing audio) -- from a payload that is either the server's confirmation or the cached
@@ -507,9 +513,7 @@ local function startSwing(payload: AttackStartedPayload, now: number): ()
 			AttackConstants.GuardCutAt(now, payload.WindupSeconds, payload.ActiveSeconds, payload.RecoverySeconds)
 		)
 	end
-	for _, listener in attackStartedListeners do
-		listener(payload)
-	end
+	attackStartedListeners:Fire(payload)
 end
 
 -- Prediction -----------------------------------------------------------------------------------------
@@ -535,9 +539,17 @@ local bufferGeneration = 0
 -- refusal.
 local cancelRecoveredAt = -math.huge
 
--- The same count SwingSequencer probes the catalogue for. Every weapon is built from the one Baseline
--- move set (WeaponRoster), so the baseline's length IS every weapon's.
+-- How many stages each string of the weapon in hand has, from its prediction seed: the server's own probe
+-- (SwingSequencer.StageMoveIds), so a weapon whose string differs from the Baseline is mirrored exactly.
+-- Replaced by every Attack_WeaponChanged that carries Moves (an empty hand's empty seed included); only a
+-- message without Moves -- an older server -- leaves it nil, and the Baseline length stands in.
+local seededStageCounts: { [string]: number }? = nil
+
 local function stageCount(kind: AttackTypes.AttackKind): number
+	local seeded = seededStageCounts
+	if seeded then
+		return seeded[kind] or 0
+	end
 	local stages = (CombatConstants.Weapons.Baseline.Stages :: any)[kind]
 	return if typeof(stages) == "table" then #stages else 0
 end
@@ -598,9 +610,9 @@ local function bodyAllowsSwing(): boolean
 	if defenceState ~= nil and defenceState ~= "Neutral" then
 		return false
 	end
-	return humanoid:GetAttribute(Constants.Attributes.Mounted) ~= true
-		and humanoid:GetAttribute(Constants.Attributes.Grabbed) ~= true
-		and humanoid:GetAttribute(Constants.Attributes.Grabbing) ~= true
+	return humanoid:GetAttribute(AttributeConstants.Mounted) ~= true
+		and humanoid:GetAttribute(AttributeConstants.Grabbed) ~= true
+		and humanoid:GetAttribute(AttributeConstants.Grabbing) ~= true
 end
 
 local function cutUnconfirmedSwing(): ()
@@ -609,7 +621,7 @@ end
 
 -- Plays the predicted move now, if every local gate agrees and the move has a confirmed copy to replay.
 -- Returns whether it did.
-local function predictSwing(kind: AttackTypes.AttackKind): boolean
+local function predictSwing(kind: AttackTypes.AttackKind, pressId: number?): boolean
 	if not PREDICTION.Enabled or pendingPrediction ~= nil then
 		return false
 	end
@@ -625,7 +637,7 @@ local function predictSwing(kind: AttackTypes.AttackKind): boolean
 
 	predictionGeneration += 1
 	local generation = predictionGeneration
-	pendingPrediction = { MoveId = cached.MoveId, Generation = generation }
+	pendingPrediction = { MoveId = cached.MoveId, Generation = generation, PressId = pressId }
 	startSwing(cached, now)
 
 	-- Two pings covers the round trip; BufferSeconds covers a press the server held before throwing.
@@ -644,11 +656,11 @@ local function predictSwing(kind: AttackTypes.AttackKind): boolean
 	return true
 end
 
-predictPress = function(kind: AttackTypes.AttackKind): ()
+predictPress = function(kind: AttackTypes.AttackKind, pressId: number?): ()
 	if not PREDICTION.Enabled then
 		return
 	end
-	if predictSwing(kind) then
+	if predictSwing(kind, pressId) then
 		bufferedPress = nil
 		return
 	end
@@ -664,12 +676,12 @@ predictPress = function(kind: AttackTypes.AttackKind): ()
 	end
 	bufferGeneration += 1
 	local generation = bufferGeneration
-	bufferedPress = { Kind = kind, Generation = generation }
+	bufferedPress = { Kind = kind, Generation = generation, PressId = pressId }
 	task.delay(freeAt - now, function()
 		local current = bufferedPress
 		if current and current.Generation == generation then
 			bufferedPress = nil
-			predictSwing(current.Kind)
+			predictSwing(current.Kind, current.PressId)
 		end
 	end)
 end
@@ -752,14 +764,24 @@ notePressForJump = function(kind: AttackTypes.AttackKind, now: number): ()
 	end
 end
 
-local function onAttackStarted(raw: unknown): ()
+-- Whether a value off the wire has the fields a swing is started from. One check for a confirmation and for
+-- a seeded template, so a malformed one of either is never cached and replayed.
+local function isStartedPayload(raw: unknown): boolean
 	if typeof(raw) ~= "table" then
+		return false
+	end
+	local payload = raw :: AttackStartedPayload
+	return typeof(payload.MoveId) == "string"
+		and typeof(payload.WindupSeconds) == "number"
+		and typeof(payload.ActiveSeconds) == "number"
+		and typeof(payload.RecoverySeconds) == "number"
+end
+
+local function onAttackStarted(raw: unknown): ()
+	if not isStartedPayload(raw) then
 		return
 	end
 	local payload = raw :: AttackStartedPayload
-	if typeof(payload.MoveId) ~= "string" then
-		return
-	end
 
 	local now = os.clock()
 	confirmedByMoveId[payload.MoveId] = payload
@@ -834,6 +856,38 @@ local function onAttackCancelled(raw: unknown): ()
 	local recovery = if typeof(payload.RecoverySeconds) == "number" then payload.RecoverySeconds else 0
 	local now = os.clock()
 
+	-- THE PRESS VERDICT: this press will not throw. Cut its prediction now (or forget it, if it was still
+	-- waiting on the local buffer) rather than leaving the swing on screen until the timeout. Only the press it
+	-- names: a newer press's prediction is not this verdict's business.
+	if payload.Reason == "Refused" then
+		local pressId = payload.PressId
+		if typeof(pressId) ~= "number" then
+			return
+		end
+		local waiting = bufferedPress
+		if waiting and waiting.PressId == pressId then
+			bufferedPress = nil
+		end
+		local prediction = pendingPrediction
+		if prediction and prediction.PressId == pressId and payload.RefusedReason == "Superseded" then
+			-- Replaced in the server's buffer by a newer press, which is the one that will throw -- the swing on
+			-- screen is now that press's prediction, not a refused one. (The server only supersedes with the
+			-- newest press it has, which is the newest this client sent.)
+			prediction.PressId = nextPressId
+			return
+		end
+		if prediction and prediction.PressId == pressId then
+			if AttackConstants.Debug.Enabled and AttackConstants.Debug.LogRefused then
+				logger:debug("Predicted swing refused -- cut", {
+					moveId = prediction.MoveId,
+					reason = payload.RefusedReason,
+				})
+			end
+			cutUnconfirmedSwing()
+		end
+		return
+	end
+
 	-- PARRIED / TRADED: the server kept this player's chain (AttackRequestSystem.KeepChainThroughParry /
 	-- KeepChainThroughTrade) and held it through the stagger or the trade's recovery. Only the mirror moves.
 	-- The clip was already cut by Combat_Feedback (CancelSwing). A stagger gates prediction through the
@@ -889,12 +943,29 @@ local function onWeaponChanged(raw: unknown): ()
 	-- Any non-empty string is accepted: weapon ids are roster model names now, so there is no closed
 	-- set to check against here. Deliberately NOT re-validated client-side -- the server picked this
 	-- id out of its own roster and is the only authority on it, and this value is used for
-	-- presentation only (nothing gated on it), so the worst a bad one could do is mislabel a log line.
-	if typeof(payload.WeaponId) ~= "string" or payload.WeaponId == "" then
-		return
+	-- presentation only. Anything else is an empty hand: nothing is predicted until a weapon is drawn.
+	local weaponId = payload.WeaponId
+	currentWeapon = if typeof(weaponId) == "string" and weaponId ~= "" then weaponId else nil
+	-- THE PREDICTION SEED: a server copy of every stage of the weapon now in hand, so its very first press
+	-- is predicted too (AttackTypes.WeaponChangedPayload.Moves). Later confirmations overwrite these.
+	local moves = payload.Moves
+	if typeof(moves) == "table" then
+		local counts: { [string]: number } = {}
+		for _, move in moves do
+			if isStartedPayload(move) then
+				confirmedByMoveId[move.MoveId] = move
+				if typeof(move.StageIndex) == "number" then
+					counts[move.Kind] = math.max(counts[move.Kind] or 0, move.StageIndex)
+				end
+			end
+		end
+		seededStageCounts = counts
+	else
+		seededStageCounts = nil
 	end
-	currentWeapon = payload.WeaponId
-	-- A swap resets the server's string (SwingSequencer.SetWeapon/SwapWeapon), so the mirror follows.
+	-- Every message is a server-side string reset, so the mirror always follows. ALWAYS, not only when the id
+	-- differs: the swap key resets the string even onto the same weapon (SwingSequencer.SwapWeapon with a
+	-- one-weapon roster), while a re-select that changes nothing is never sent (AttackRequestSystem.SetWeapon).
 	stringKind = nil
 	stringStage = 0
 	releaseJumpSuppression()
@@ -909,9 +980,7 @@ local function bindCharacter(character: Model, humanoid: Humanoid): ()
 	-- restriction that no longer exists.
 	table.clear(slotReadyAt)
 	for slot = 1, SLOT_COUNT do
-		for _, listener in slotListeners do
-			listener(slot, 0)
-		end
+		slotListeners:Fire(slot, 0)
 	end
 
 	-- Already waited out by Shared/PlayerLifecycle.lua, which is also what guarantees this is only
@@ -1052,13 +1121,7 @@ end
 -- OnAttackStarted and must not play for a swing that no longer exists (SwingLunge's step,
 -- AttackTrail's trail). Returns an unsubscribe function.
 function AttackInputClient.OnSwingCancelled(listener: (SwingCancelReason) -> ()): () -> ()
-	table.insert(swingCancelledListeners, listener)
-	return function()
-		local index = table.find(swingCancelledListeners, listener)
-		if index then
-			table.remove(swingCancelledListeners, index)
-		end
-	end
+	return swingCancelledListeners:Connect(listener)
 end
 
 -- Fires the hotbar slot as if its key had been pressed. The HUD's ability slots are real buttons
@@ -1083,30 +1146,18 @@ end
 -- Returns an unsubscribe function, the same contract HotbarBindings.OnChanged and every server-side
 -- signal in this stack already use.
 function AttackInputClient.OnSlotCooldown(listener: (slot: number, seconds: number) -> ()): () -> ()
-	table.insert(slotListeners, listener)
-	return function()
-		local index = table.find(slotListeners, listener)
-		if index then
-			table.remove(slotListeners, index)
-		end
-	end
+	return slotListeners:Connect(listener)
 end
 
 -- Fires on every server-confirmed throw. For a consumer that wants to react to what actually started
 -- -- a combo counter, a stage readout, an audio cue per move -- without connecting its own listener
 -- to the same remote and having to re-validate the payload.
 function AttackInputClient.OnAttackStarted(listener: (AttackStartedPayload) -> ()): () -> ()
-	table.insert(attackStartedListeners, listener)
-	return function()
-		local index = table.find(attackStartedListeners, listener)
-		if index then
-			table.remove(attackStartedListeners, index)
-		end
-	end
+	return attackStartedListeners:Connect(listener)
 end
 
 -- The weapon the server last said this player is holding. Presentation only.
-function AttackInputClient.GetWeapon(): Types.WeaponId
+function AttackInputClient.GetWeapon(): Types.WeaponId?
 	return currentWeapon
 end
 

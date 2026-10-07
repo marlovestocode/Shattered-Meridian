@@ -101,9 +101,9 @@ source contradicts) · **new** (found this pass) · **negative** (checked, nothi
 | L-5 | Reward/Progression booted in the PLANNED loop | `Main.server.lua:176-188`, `BootManifest.lua:155-159` | **resolved** — step 7b; `BootManifest.Planned` exposed and specced | Medium | Main / BootManifest | 2 | `Tests/Boot/BootManifest.spec.lua` "planned Systems are honestly planned" |
 | L-6 | `GameplayEvents` PlayerKilled prose + subscriber inventory named deleted CombatSystem, omitted Blimp/Boat/Emote | `GameplayEvents.lua:57-63, 96-122` | **resolved** | Low (misleading) | GameplayEvents | 1 | read |
 | L-7 | Stale CombatSystem prose in touched files (RespawnSystem Init, Constants.Meridian/Respawn, BloodlineTypes, BloodlineSystem header, MeridianSystem header) | as named | **resolved** | Low | each file | 1–2 | read |
-| L-8 | BloodlineSystem still subscribes to PlayerKilled directly for stage-ups | `BloodlineSystem.lua:647` | **open** — goes LIVE with L-1 | Medium — a second progression path outside the gate | BloodlineSystem → ProgressionSystem route | next | header updated with migration condition |
-| L-9 | BountySystem pays Meridian XP directly on claim | `BountySystem.lua:276` | **open** — goes LIVE with L-1 | Medium — reward outside the manifest | RewardSystem (a `BountyClaim` component) | next | — |
-| L-10 | `RivalrySystem.Init` is not idempotent (subscribes PlayerKilled each call); its spec calls Init repeatedly | `RivalrySystem.lua:195-200`, `Tests/Progression/RivalrySystem.spec.lua:9` | **new** | Low in prod (one Init), leaks subscriptions in the test VM | RivalrySystem | later | read |
+| L-8 | BloodlineSystem still subscribes to PlayerKilled directly for stage-ups | `BloodlineSystem.lua:647` | **resolved 2026-10-06** — `BloodlineStage` component → `BloodlineSystem.CountKill`, subscription deleted | Medium — a second progression path outside the gate | BloodlineSystem → ProgressionSystem route | next | header updated with migration condition |
+| L-9 | BountySystem pays Meridian XP directly on claim | `BountySystem.lua:276` | **resolved 2026-10-06** — `BountyClaim` component → `BountySystem.PayClaim` (weighted) | Medium — reward outside the manifest | RewardSystem (a `BountyClaim` component) | next | — |
+| L-10 | `RivalrySystem.Init` is not idempotent (subscribes PlayerKilled each call); its spec calls Init repeatedly | `RivalrySystem.lua:195-200`, `Tests/Progression/RivalrySystem.spec.lua:9` | **resolved 2026-10-06** — Init cleans a Trove of its previous subscriptions first | Low in prod (one Init), leaks subscriptions in the test VM | RivalrySystem | later | read |
 | L-11 | 2026-08-19 audit §3 lists Bloodline/BloodlineManager/QiDeviation as stubs | `2026-08-19-audit.md:183-188` vs real bodies | **stale** | Low (misleads triage) | this doc | — | `wc -l`, bodies read |
 | L-12 | `software-architecture.md` described a monolithic CombatSystem and Constants/Types-first layout | `docs/software-architecture.md` | **resolved** — rewritten against source | Medium | docs | 3 | read |
 | L-13 | Six planned Systems are empty and required only by `Main.server.lua` | Faction/Achievement/Absorb/Awakening/Territory/World | **open (by decision)** — kept, now spec-guarded as Init-only | Low | roadmap | 3 | inbound-require grep: `Main.server.lua` only |
@@ -136,7 +136,7 @@ source contradicts) · **new** (found this pass) · **negative** (checked, nothi
 |---|---|---|---|---|
 | L-22 | Death overlay and kill feed had no producer since the combat rewrite | `PlayerDeathSystem` Death_Notice broadcast; `Client/Combat/DeathNoticeClient.lua`; `Screens/DeathFeed` `PushKill` | **resolved** | `Tests/Progression/DeathNotice.spec.lua`, `Tests/UI/KillFeed.spec.lua` |
 | L-23 | Killer got no readable "+XP" | `MeridianXPUpdatePayload.Gained/Reason` → `ClientState.MeridianXPGain` → TierBadge readout | **resolved** | playtest only (render) |
-| L-24 (O-2) | Kill farming: same pair could trade kills for full XP forever | `ProgressionSystem` repeat-victim rule, `ProgressionConstants.RepeatVictim` (runs keyed by UserId; 1 / 0.5 / 0.25 / 0 inside a 10-min run) | **resolved for Meridian XP**; Bounty streaks/claims and Bloodline stage-ups still bypass it (O-1, O-3) | `Tests/Progression/KillFarming.spec.lua` |
+| L-24 (O-2) | Kill farming: same pair could trade kills for full XP forever | `ProgressionSystem` repeat-victim rule, `ProgressionConstants.RepeatVictim` (runs keyed by UserId; 1 / 0.5 / 0.25 / 0 inside a 10-min run) | **resolved for Meridian XP**; Bounty payouts and Bloodline stage-ups joined 2026-10-06 (`Tests/Progression/SpineRoutes.spec.lua`). Bounty *streaks* still count every kill, by design: a mark is a social fact, not progression | `Tests/Progression/KillFarming.spec.lua` |
 | L-25 | Authored knockback resolved but applied by nothing | `Shared/Damage/Knockback.lua`, `DamageSystem` (`DamageResult.Launch`, server-owned bodies), `Client/Combat/KnockbackClient.lua` (players, after hit-stop) | **resolved** | `Tests/Combat/Damage/Knockback.spec.lua` |
 | L-26 | Honest knockback could count toward the parkour cheater flag | `Attributes.KnockbackUntil` + `ParkourSystem.noteRejection` | **resolved** | read |
 | L-27 | A client could ignore knockback undetected | `Server/Combat/Damage/KnockbackAudit.lua` (samples replicated velocity; flags after 6 failures / 120 s) | **resolved (detector)** | same spec |
@@ -166,3 +166,19 @@ and the real `Humanoid.Died` wiring).
 
 Docs are revised in the same change as the architecture they describe — see
 [`software-architecture.md`](../software-architecture.md).
+
+## 7. Follow-up, 2026-10-06: O-1 and O-3 closed
+
+- **O-1 Bloodline.** The kill's manifest carries a `BloodlineStage` component, and ProgressionSystem routes it
+  to `BloodlineSystem.CountKill(killer, weight)`. The direct subscription is deleted. The weight counts as a
+  fraction of a kill, so a second kill of the same victim inside the repeat window is half a kill toward the
+  next stage. The audit marked this as needing a product call: stage-ups now obey the same gate as XP. That
+  matches the fight-to-grow pillar, and reverting is one taxonomy entry.
+- **O-3 Bounty.** Answered as a separate reward kind (`BountyClaim`), not an XP modifier, because the
+  bounty owns its own amount. The mark stays on BountySystem's own subscription, since an unattributed
+  death must end a run too. The payout rides the spine. The two subscribers have no defined order, so the
+  claim is resolved by whichever hears the death first and keyed by `deathId` (`BountySystem.owedByDeath`;
+  an owed claim the gate refused lapses after `BountyConstants.OwedClaimSeconds`).
+- **O-5 Rivalry.** `RivalrySystem.Init` is idempotent (a Trove of its subscriptions, cleaned first).
+- Not runnable here: the TestEZ suite. `Tests/Progression/SpineRoutes.spec.lua` covers both orders, the
+  weighting and the zero-weight refusal.

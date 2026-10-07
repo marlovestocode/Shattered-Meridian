@@ -3,7 +3,7 @@
 	HitFlash.lua
 
 	Owns: the victim hit-flash -- a colored Highlight popped onto whoever just took a resolved contact,
-	color-coded by what kind of resolution it was (Constants.FX.HitFlash's own "white = a plain hit,
+	color-coded by what kind of resolution it was (FXConstants.HitFlash's own "white = a plain hit,
 	gold = a parry deflection, red-gold = a posture break" family).
 
 	GENERIC, LIKE CameraShake.lua, NOT COMBAT-VOCABULARY-AWARE. This module knows how to pop a colored
@@ -19,19 +19,19 @@
 	switched OFF again the moment the fade ends. A disabled Highlight is not rendered at all, so a body
 	that is not flashing costs nothing.
 
-	NOT ON YOUR OWN BODY by default (Constants.FX.HitFlash.SkipLocalCharacter): on the victim's own
+	NOT ON YOUR OWN BODY by default (FXConstants.HitFlash.SkipLocalCharacter): on the victim's own
 	client that flash is the most expensive one -- the largest model on screen, drawn over everything --
 	and the least informative, since the shake, the impact sound and the health bar all land on the same
 	frame. Everyone else still sees it on you, on their own clients.
 
-	BOUNDED at Constants.FX.HitFlash.PoolMaxSize bodies -- well under Roblox's 31-Highlight render limit.
+	BOUNDED at FXConstants.HitFlash.PoolMaxSize bodies -- well under Roblox's 31-Highlight render limit.
 	Past it, the least recently flashed body gives its Highlight up.
 
 	INSTANT POP, FAST FADE, NO HOLD: snaps to full visibility on the frame it is called and tweens back
 	to invisible over DurationSeconds.
 
 	Does not own: WHAT a resolved contact means (Client/Combat/CombatFeedbackClient.lua decides which
-	color), or the "parry window is currently armed" hold-glint (Constants.FX.HitFlash.ParryWindowColor)
+	color), or the "parry window is currently armed" hold-glint (FXConstants.HitFlash.ParryWindowColor)
 	-- that tell fires off a block/parry PRESS and is still documented-but-unbuilt.
 ]]
 
@@ -40,12 +40,12 @@ local Workspace = game:GetService("Workspace")
 local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local FXPool = require(script.Parent.FXPool)
 
 local HitFlash = {}
 
-local CONFIG = Constants.FX.HitFlash
+local CONFIG = FXConstants.HitFlash
 
 -- Visible resting values for an active flash -- a wash on the fill, a crisp outline, both eased back to
 -- fully transparent. This module's own rendering choice, not a balance number.

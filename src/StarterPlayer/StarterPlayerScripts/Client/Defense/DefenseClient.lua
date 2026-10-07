@@ -56,7 +56,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -200,11 +200,9 @@ end
 -- module for driving the inventory HUD and nothing else, and Roblox remotes support any number of
 -- independent listeners for free.
 --
--- THIS REMOTE, NOT AttackConstants' WeaponChanged, and the difference is not cosmetic: the combat
--- layer's WeaponChanged remote fires only from handleSwap (the swap key), NOT from
--- AttackRequestSystem.SetWeapon (draw/sheathe) and NOT from bindCharacter (spawn) -- so a client
--- listening to it would miss the two events that matter most here. Weapon_InventoryChanged is
--- re-pushed on every pickup/draw/sheathe/select and on every bind, which is the complete signal.
+-- THIS REMOTE, NOT AttackConstants' WeaponChanged, so the guard and CombatAnimator's idle stance arm from one
+-- push (InHand: Fists whenever nothing else is drawn). Weapon_InventoryChanged is re-pushed on every
+-- pickup/draw/sheathe/select and bind; an older server's payload without InHand falls back to Selected/Drawn.
 local function onInventoryChanged(raw: unknown): ()
 	if typeof(raw) ~= "table" then
 		return
@@ -213,7 +211,13 @@ local function onInventoryChanged(raw: unknown): ()
 	if typeof(payload.Drawn) ~= "boolean" then
 		return
 	end
-	setArmedWeapon(payload.Selected, payload.Drawn)
+	-- InHand is what the server's parry hookup times against (Fists whenever nothing else is drawn); an older
+	-- server without it falls back to Selected/Drawn.
+	if typeof(payload.InHand) == "string" then
+		setArmedWeapon(payload.InHand, true)
+	else
+		setArmedWeapon(payload.Selected, payload.Drawn)
+	end
 end
 
 -- Input --------------------------------------------------------------------------------------------
@@ -348,10 +352,25 @@ local function isAirHeld(): boolean
 	return humanoid ~= nil and AirComboAttributes.IsHeld(humanoid)
 end
 
+-- The ground half of the same rule (DefenseConstants.StunParry): stunned by a hit, not running a swing of
+-- its own. The server's DefenseSystem.isStunHeld, mirrored off LocalCombatState.
+local function isStunHeld(now: number): boolean
+	local config = DefenseConstants.StunParry
+	return config.Enabled
+		and config.WindowScale > 0
+		and LocalCombatState.IsStunned(now)
+		and LocalCombatState.SwingEndsAt() <= now
+end
+
+-- A held body -- air-held or stunned on the ground -- parries through the stun rather than waiting it out.
+local function parriesThroughStun(now: number): boolean
+	return isAirHeld() or isStunHeld(now)
+end
+
 -- Whether a press made at `now` reaches the server on a free body -- the same rule as its bodyCommitted
 -- gate, read off this client's own mirror of the swing and the stun.
 local function bodyIsFree(now: number): boolean
-	return LocalCombatState.FreeAt(now) <= now or isAirHeld()
+	return LocalCombatState.FreeAt(now) <= now or parriesThroughStun(now)
 end
 
 -- A guard animation waiting for the body to be free: pressed mid-swing or while stunned. See
@@ -375,7 +394,7 @@ local function raiseGuardWhenFree(): ()
 	-- and the server does exactly that. bodyIsFree above keeps the full swing -- a guard raised by the cut is
 	-- a BLOCK, so it must not be predicted as a parry.
 	local freeAt = LocalCombatState.GuardFreeAt(now)
-	if freeAt > now and not isAirHeld() then
+	if freeAt > now and not parriesThroughStun(now) then
 		guardGeneration += 1
 		local generation = guardGeneration
 		task.delay(freeAt - now, function()
@@ -427,7 +446,7 @@ end
 -- server-side in DefenseSystem.SetBlocking regardless -- see Shared/Parkour/ParkourOwnership.
 local function parkourOwnsBody(): boolean
 	local currentHumanoid = boundHumanoid
-	return currentHumanoid ~= nil and currentHumanoid:GetAttribute(Constants.Attributes.ParkourActionOwned) == true
+	return currentHumanoid ~= nil and currentHumanoid:GetAttribute(AttributeConstants.ParkourActionOwned) == true
 end
 
 -- Presentation --------------------------------------------------------------------------------------
@@ -529,7 +548,7 @@ end
 -- released) and harmless -- Release on a machine whose guard is down is a no-op. Re-pressing the key
 -- after the evade raises the guard as normal.
 local function onParkourStateChanged(humanoid: Humanoid): ()
-	if blockHeld and humanoid:GetAttribute(Constants.Attributes.ParkourState) == "Evade" then
+	if blockHeld and humanoid:GetAttribute(AttributeConstants.ParkourState) == "Evade" then
 		setBlockHeld(false)
 	end
 end
@@ -558,7 +577,7 @@ local function bindCharacter(nextCharacter: Model, humanoid: Humanoid, life: Tro
 	-- thing inside Bind()) -- nothing here needs to clear DEFENSE_LAYER separately.
 	manager:Bind(nextCharacter)
 
-	life:Connect(humanoid:GetAttributeChangedSignal(Constants.Attributes.ParkourState), function()
+	life:Connect(humanoid:GetAttributeChangedSignal(AttributeConstants.ParkourState), function()
 		onParkourStateChanged(humanoid)
 	end)
 end
@@ -594,7 +613,7 @@ function DefenseClient.Start(): ()
 	inventoryChanged.OnClientEvent:Connect(onInventoryChanged)
 
 	-- Bound through InputRouter's "Gameplay" layer, which now owns both the gameProcessed check and
-	-- the Constants.Attributes.UiModalOpen gate this used to hand-roll -- right-clicking inside your
+	-- the AttributeConstants.UiModalOpen gate this used to hand-roll -- right-clicking inside your
 	-- own character sheet should not raise your guard any more than left-clicking there should throw
 	-- a punch, the same reasoning Client/Combat/AttackInputClient.lua's identical gate documents for
 	-- itself. parkourOwnsBody() stays here, inline, because it is a parkour-ownership question, not a

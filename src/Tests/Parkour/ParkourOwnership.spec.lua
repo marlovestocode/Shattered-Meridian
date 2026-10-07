@@ -2,7 +2,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnership)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 
 return function()
@@ -57,7 +57,7 @@ return function()
 		local function humanoidWith(value: any): Humanoid
 			local humanoid = Instance.new("Humanoid")
 			if value ~= nil then
-				humanoid:SetAttribute(Constants.Attributes.ParkourVelocityOwned, value)
+				humanoid:SetAttribute(AttributeConstants.ParkourVelocityOwned, value)
 			end
 			return humanoid
 		end

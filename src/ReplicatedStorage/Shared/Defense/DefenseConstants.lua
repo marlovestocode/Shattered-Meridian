@@ -6,7 +6,7 @@
 	Shared/Constants.lua -- the same choice HitboxEngineConstants.lua makes and for the same reason:
 	this system is a module, and a module that can be added or removed without editing the game's
 	central constants table is the concrete form of that claim. The one exception is
-	DefenseStateAttribute below, which aliases onto Constants.Attributes.DefenseState rather than
+	DefenseStateAttribute below, which aliases onto AttributeConstants.DefenseState rather than
 	duplicating the literal -- see that field's own header for why.
 
 	THERE IS NO PARRY WINDOW LENGTH IN THIS FILE, and its absence is the point. A parry's timing comes
@@ -24,9 +24,9 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Only reference into Shared/Constants.lua this file makes: DefenseStateAttribute below is an alias
--- onto Constants.Attributes.DefenseState, not a second definition of the string -- see that field's
+-- onto AttributeConstants.DefenseState, not a second definition of the string -- see that field's
 -- own header.
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 -- For the Evade table, which derives every number from the glide it covers -- see that table.
 -- EvadeConstants has no requires of its own, so this cannot form a cycle.
 local EvadeConstants = require(ReplicatedStorage.Shared.Combat.EvadeConstants)
@@ -152,10 +152,15 @@ DefenseConstants.Stagger = {
 	-- recorded a hard UPPER bound near 0.75, past which a Secondary user's second swing also lands
 	-- inside the window -- "a combo handed out for one read rather than a conversion."
 	--
-	-- 1.5 is double that bound, so a parry here converts into a full combo rather than a single
-	-- punish. That is a deliberate design choice from the brief, not an oversight, and it is one
-	-- constant to change if it plays too strong. Worth re-measuring once real attacks exist.
-	DurationSeconds = 1.5,
+	-- SHORTENED TO 0.9 (2026-10-07, owner-approved), from the brief's 1.5. 1.5 was chosen so a parry
+	-- converted into a full combo while M1s were slow (one every ~0.78s, before the feel pass). Two things
+	-- changed under it: M1s land every ~0.40-0.63s now, so 1.5s stood a fight still for three or four
+	-- swings' worth of time; and M1s LINK (DamageConstants.Hitstun.LinkBasicString), so the stagger no
+	-- longer has to cover the whole punish -- only its FIRST hit. Once that lands, the link stun carries
+	-- the rest of the string. 0.9 is the derived ~0.6 above (reaction + one-way latency + the slowest
+	-- Basic windup) plus ~0.3s for a laggier punisher. The parried side can still parry back the whole
+	-- time (Rally.ParryFromStagger), so a good read is rewarded without a long wait. Playtest it.
+	DurationSeconds = 0.9,
 
 	-- Blocking while staggered is ALLOWED (the brief is explicit) but must not be free, or the punish
 	-- is hollow -- which the previous design measured directly and said so. Three costs, all applied
@@ -168,9 +173,10 @@ DefenseConstants.Stagger = {
 	-- So a parried attacker who turtles through the punish spends their guard doing it and comes out
 	-- one hit from a break. They kept the option and it still cost them the exchange.
 	--
-	-- Tuned against DurationSeconds above: at 1.5s and this multiplier, a full guard does not survive
-	-- a sustained follow-up. If DurationSeconds drops to the derived 0.6, this wants lowering with
-	-- it, or the counterweight becomes a guaranteed guard break rather than a cost.
+	-- Tuned against DurationSeconds above, when it was 1.5. Left at 1.75 when that dropped to 0.9: a
+	-- shorter stagger means fewer blocked hits fit inside it, so the total drain a turtling stagger pays
+	-- already fell with the duration -- lowering this as well would make blocking through it nearly free.
+	-- Re-check in play: the target is "comes out low on guard", not "comes out broken".
 	GuardDrainMultiplier = 1.75,
 
 	-- Fraction of normal damage reduction a staggered block provides. Published on the outcome for a
@@ -264,13 +270,14 @@ DefenseConstants.Parry = {
 -- 0.05 is the brief. The window itself is 0.2 (RegisteredParryWindows), so the perfect band is the first
 -- quarter of it: common enough to be a goal, rare enough to mean something.
 --
--- StaggerSeconds is FLAGGED in the same spirit Stagger.DurationSeconds is: 1.5 already converts a parry
--- into a full combo, and +0.3 adds roughly one more Basic swing (0.31s windup at WeaponSpeed 1) to it. It
--- extends the punish; it does not create a new one. The whiff lockout it also extends
--- (_parryLockedUntil follows the stagger) is the attacker's, and is correct to extend with it.
+-- StaggerSeconds is FLAGGED in the same spirit Stagger.DurationSeconds is. +0.2 over the ordinary stagger
+-- (1.1s against 0.9s) is about half a blade M1 or one Fists M1 at the current tempo: room for a slower
+-- or laggier opener, not a second free hit -- the link stun is what carries the string once one lands.
+-- The whiff lockout it also extends (_parryLockedUntil follows the stagger) is the attacker's, and is
+-- correct to extend with it.
 DefenseConstants.PerfectParry = {
 	WindowSeconds = 0.05,
-	StaggerSeconds = DefenseConstants.Stagger.DurationSeconds + 0.3,
+	StaggerSeconds = DefenseConstants.Stagger.DurationSeconds + 0.2,
 }
 
 -- Rally --------------------------------------------------------------------------------------------
@@ -291,13 +298,34 @@ DefenseConstants.PerfectParry = {
 --
 -- A rally is between TWO combatants and lapses after LapseSeconds with no parry between them, or the
 -- moment either one takes a clean hit, a backstab or a guard break. Longer than the longest stagger
--- (PerfectParry.StaggerSeconds, 1.8), so a counter thrown at the very end of a punish still counts as
+-- (PerfectParry.StaggerSeconds, 1.1), so a counter thrown at the very end of a punish still counts as
 -- the same rally.
 DefenseConstants.Rally = {
 	ParryFromStagger = true,
 	WindowScalePerParry = 0.8,
 	MinWindowScale = 0.35,
 	LapseSeconds = 2.5,
+}
+
+-- Stun parry ----------------------------------------------------------------------------------------
+
+-- PARRYING OUT OF A STRING (2026-10-06). M1s now LINK: a landed Basic stuns until the next one in the
+-- string arrives (DamageConstants.Hitstun.LinkBasicString), so a string that keeps its rhythm lands every
+-- hit -- the battlegrounds feel. What keeps it from being a free three hits is this rule, the air combo's
+-- own (docs/design/air-combat-and-evade.md B4) brought to the ground: while stunned, the guard does
+-- NOTHING (a block resolves Clean), an evade is still refused, but a timed parry still counts. A parry
+-- landed out of the stun ends the stun on the spot (DamageSystem) and staggers the attacker as usual.
+--
+-- So answering a string is a read on the NEXT impact, not a gap you are handed between hits. Mashing it
+-- fails on its own: a whiffed window pays Parry.RecoverySeconds, which outlasts a link, so one wrong
+-- guess eats the rest of the string.
+--
+-- WindowScale multiplies the window's DURATION exactly as Rally does (and stacks with it): a parry out of
+-- a stun is a harder read than one made on a free body, not an equal one. 1 makes them equal; 0 turns
+-- the rule off as surely as Enabled = false does.
+DefenseConstants.StunParry = {
+	Enabled = true,
+	WindowScale = 0.75,
 }
 
 -- Clash ---------------------------------------------------------------------------------------------
@@ -368,7 +396,7 @@ DefenseConstants.Evade = {
 
 -- The clip every combatant registered without their own ParryAnimationId uses (DefenseSystem.
 -- RegisterCombatant's default-parry-animation path -- see DefenseSystem.SetDefaultParryAnimation).
--- Lives here rather than in Constants.Combat.AnimationIds because that table is READ GENERICALLY by
+-- Lives here rather than in CombatConstants.AnimationIds because that table is READ GENERICALLY by
 -- Client/FX/CombatAnimator.lua's BindCharacter loop (every entry in it gets a template built and
 -- loaded as a LOCOMOTION track) -- see that table's own header on being scoped to Walking/Running/
 -- RunningStage2 since the combat teardown. Adding a non-locomotion id there would get it loaded and
@@ -442,13 +470,13 @@ DefenseConstants.MaxPendingContactsPerFrame = 128
 -- gates on it -- but something outside it now does, so it is no longer purely informational and must
 -- not be renamed or made lossy on that assumption: Server/Systems/RunSystem.lua reads anything other
 -- than "Neutral" as "a combat action is committing this body" and forces the run's stage and charge to
--- zero for the duration. See Constants.Attributes.CombatBusyUntil, its counterpart for the attack
+-- zero for the duration. See AttributeConstants.CombatBusyUntil, its counterpart for the attack
 -- side, for the whole contract. It exists because Humanoid Attributes replicate to every client
 -- for free, so the HUD -- and any future spectator or debug tooling -- can read what a remote
 -- character is doing without this system adding a broadcast remote of its own. Same shape and same
--- reasoning as Constants.Attributes.ParkourState. Aliased onto Constants.Attributes.DefenseState
+-- reasoning as AttributeConstants.ParkourState. Aliased onto AttributeConstants.DefenseState
 -- rather than a second literal, now that RunSystem.lua also reads this Attribute by name.
-DefenseConstants.DefenseStateAttribute = Constants.Attributes.DefenseState
+DefenseConstants.DefenseStateAttribute = AttributeConstants.DefenseState
 
 DefenseConstants.Network = {
 	RemoteNames = {

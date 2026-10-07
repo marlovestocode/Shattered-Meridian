@@ -8,7 +8,7 @@
 	training bot's body drive, and the attacker's follow.
 
 	WHY A MODULE FOR THREE COMPARISONS. The deadlines are in workspace:GetServerTimeNow() time, not os.clock()
-	(Constants.Attributes' air-combo note), and every other deadline Attribute in this codebase is os.clock.
+	(AttributeConstants' air-combo note), and every other deadline Attribute in this codebase is os.clock.
 	A reader that compared one of these against os.clock() would be wrong by the server's uptime -- silently,
 	and forever. One reader cannot get the clock wrong in five places.
 

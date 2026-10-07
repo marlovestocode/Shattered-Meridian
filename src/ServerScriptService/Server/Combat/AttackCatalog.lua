@@ -91,6 +91,52 @@ local function resolveMove(moveId: string): MoveTypes.MoveDefinition?
 	return DefaultMoveRegistry.Get(moveId)
 end
 
+-- A weapon string's Basic stage id, split into everything before the stage number and the number itself --
+-- DefaultMoveRegistry's own "default:<WeaponId>:Basic:<stage>" scheme, restated here the same way
+-- Shared/Attack/AttackWindows.MarkerNameFor already restates it.
+local BASIC_STAGE_PATTERN = "^(default:[^:]+:Basic:)(%d+)$"
+
+local buildEntry: (moveId: string, linkString: boolean) -> AttackCatalogEntry?
+
+-- 4. THE LINK (DamageConstants.Hitstun.LinkBasicString). A Basic stage with a NEXT Basic stage in its string
+-- stuns until that next hit arrives, on the attacker's best rhythm: what is left of this swing after first
+-- contact, the chain beat, and the next swing's windup -- plus the margin. Worked out here because this is the
+-- one place both swings' CLIP-SYNCED timelines exist; a hand-typed stun is right for exactly one weapon speed.
+--
+-- Raises the authored stun, never lowers it: an author who wants a longer stun on a stage still gets it. The
+-- LAST stage has nothing to link into and keeps its authored stun, which is what ends a string with a read.
+local function linkedHitstunFor(moveId: string, entry: AttackCatalogEntry): ()
+	local hitstun = DamageConstants.Hitstun
+	if not hitstun.LinkBasicString then
+		return
+	end
+	local profile = entry.Profile :: any
+	local authored = profile.HitstunSeconds
+	if typeof(authored) ~= "number" then
+		return
+	end
+	local prefix, stageText = string.match(moveId, BASIC_STAGE_PATTERN)
+	local stage = tonumber(stageText)
+	if prefix == nil or stage == nil then
+		return
+	end
+	-- Built without its own link: only its windup is needed, and following the chain to the end of the
+	-- string on every Get would price every stage after it for nothing.
+	local following = buildEntry(`{prefix}{stage + 1}`, false)
+	if following == nil then
+		return
+	end
+	local definition = entry.Definition
+	local impactToImpact = definition.ActiveSeconds
+		+ definition.RecoverySeconds
+		+ AttackConstants.Sequence.ChainDelaySeconds
+		+ following.Definition.WindupSeconds
+	local linked = impactToImpact + math.max(hitstun.LinkMarginSeconds, 0)
+	if linked > authored then
+		profile.HitstunSeconds = linked
+	end
+end
+
 -- The catalogue's whole public surface: a MoveId in, everything the combat stack needs out.
 --
 -- Returns nil for an unknown id rather than a default attack. A missing move is a bug in whatever
@@ -98,6 +144,10 @@ end
 -- attack would turn that bug into "this ability does the wrong thing," which is far harder to notice
 -- than it doing nothing. Callers are expected to treat nil as "do not swing."
 function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
+	return buildEntry(moveId, true)
+end
+
+buildEntry = function(moveId: string, linkString: boolean): AttackCatalogEntry?
 	if typeof(moveId) ~= "string" or moveId == "" then
 		return nil
 	end
@@ -316,7 +366,7 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 		end
 	end
 
-	return {
+	local entry: AttackCatalogEntry = {
 		MoveId = move.MoveId,
 		Definition = definition,
 		Profile = profile,
@@ -328,6 +378,10 @@ function AttackCatalog.Get(moveId: string): AttackCatalogEntry?
 		IsDomain = MoveTypes.IsDomain(move),
 		BorrowedFrom = borrowedFrom,
 	}
+	if linkString then
+		linkedHitstunFor(moveId, entry)
+	end
+	return entry
 end
 
 -- Whether an id resolves at all, without paying for the projection. For a validation pass over a
@@ -337,6 +391,21 @@ function AttackCatalog.Has(moveId: string): boolean
 		return false
 	end
 	return resolveMove(moveId) ~= nil
+end
+
+-- Whether `moveId` is the LAST Basic stage of its weapon's string -- nothing follows it to link into, so it
+-- keeps its authored stun (linkedHitstunFor) and is the hit a string ends on (the string-ender beat,
+-- DamageTypes.CombatFeedback.StringEnd). False for anything that is not a weapon string's Basic stage.
+function AttackCatalog.IsStringEnder(moveId: string): boolean
+	if typeof(moveId) ~= "string" then
+		return false
+	end
+	local prefix, stageText = string.match(moveId, BASIC_STAGE_PATTERN)
+	local stage = tonumber(stageText)
+	if prefix == nil or stage == nil then
+		return false
+	end
+	return AttackCatalog.Has(moveId) and not AttackCatalog.Has(`{prefix}{stage + 1}`)
 end
 
 -- Spec-only, so one case cannot serve another its suppressed warnings.

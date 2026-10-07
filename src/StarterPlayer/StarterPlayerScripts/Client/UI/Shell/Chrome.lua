@@ -43,7 +43,7 @@
 	A few seconds of an undimmed menu during a respawn countdown is the cheaper wrong.
 
 	WHY THE MODAL GATE IS READ FROM AN Attribute RATHER THAN FROM ModalScreen DIRECTLY. The count is
-	module-scope state inside a Component, published to Constants.Attributes.UiModalOpen -- which is
+	module-scope state inside a Component, published to AttributeConstants.UiModalOpen -- which is
 	already the seam Client/Combat/AttackInputClient.lua, GrabInputClient.lua, DefenseClient.lua and
 	Client/Blimp/BlimpController.lua all read as a hard input gate. This codebase's rule is that
 	cross-system influence travels through an Attribute seam rather than a require, and adding a
@@ -114,7 +114,7 @@
 
 	ButtonB IS ALSO Dash, AND THE TWO DO NOT COLLIDE, because they are never both live. Dash is bound
 	on the "Gameplay" layer, which Client/Input/InputRouter.lua drops entirely while
-	Constants.Attributes.UiModalOpen is set; and an empty stack makes HandleEscape a no-op (see the
+	AttributeConstants.UiModalOpen is set; and an empty stack makes HandleEscape a no-op (see the
 	sinkability note above). So ButtonB with a panel open is Back and only Back, ButtonB with nothing
 	open is Dash and only Dash, and neither needs to know about the other. Unlike Escape, ButtonB is
 	NOT sunk by Roblox at the CoreGui level, so this really is the whole arbitration for it.
@@ -129,7 +129,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 
 local peek = Fusion.peek
 
@@ -201,7 +201,7 @@ export type ChromeProps = {
 
 local Chrome = {}
 
--- The one adapter between Constants.Attributes.UiModalOpen and Fusion. Returns a Value that mirrors
+-- The one adapter between AttributeConstants.UiModalOpen and Fusion. Returns a Value that mirrors
 -- the Attribute for as long as the scope lives.
 --
 -- RETURNS A PERMANENTLY-false VALUE WHEN THERE IS NO LocalPlayer, rather than erroring. That is not
@@ -218,7 +218,7 @@ function Chrome.ObserveModalGate(scope: Scope): Fusion.Value<boolean>
 	end
 
 	local function read(): ()
-		open:set(player:GetAttribute(Constants.Attributes.UiModalOpen) == true)
+		open:set(player:GetAttribute(AttributeConstants.UiModalOpen) == true)
 	end
 
 	-- Read once before connecting, not only on the next change. A modal open at the moment this is
@@ -226,7 +226,7 @@ function Chrome.ObserveModalGate(scope: Scope): Fusion.Value<boolean>
 	-- while UI.Mount() is not a window in which a modal can already be open today, "the first value
 	-- arrives on the first edge" is exactly the assumption that breaks the day one can be.
 	read()
-	table.insert(scope, player:GetAttributeChangedSignal(Constants.Attributes.UiModalOpen):Connect(read))
+	table.insert(scope, player:GetAttributeChangedSignal(AttributeConstants.UiModalOpen):Connect(read))
 
 	return open
 end

@@ -4,9 +4,9 @@
 
 	Owns: the dev-menu flight feature's world-space impact VFX -- a takeoff dust ring, a landing
 	shockwave ring (soft/hard variants), and a sonic-boom burst -- all sharing ONE pooled "ring" Part
-	factory (Constants.FX.FlightRingPool.PoolMaxSize) rather than three separate pools, since all
+	factory (FXConstants.FlightRingPool.PoolMaxSize) rather than three separate pools, since all
 	three are visually the same primitive (an expanding flat ring) just with different starting/
-	ending radii and colors (Constants.FX.FlightTakeoffDust/FlightLandingRing/FlightSonicBoom). Same
+	ending radii and colors (FXConstants.FlightTakeoffDust/FlightLandingRing/FlightSonicBoom). Same
 	acquire-from-pool -> animate -> release-on-Completed shape Client/FX/HitFlash.lua already
 	established for its own pooled Highlights, adapted here to tween Size (radius) instead of just
 	Transparency, per performance-optimization.md/animation-systems.md's "all VFX are object-pooled,
@@ -22,7 +22,7 @@ local Workspace = game:GetService("Workspace")
 local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local FXPool = require(script.Parent.FXPool)
 
@@ -54,7 +54,7 @@ local function makeRing(): Part
 	part.CanTouch = false
 	part.CastShadow = false
 	part.Material = Enum.Material.Neon
-	part.Size = Constants.FX.FlightRingPool.StartSize
+	part.Size = FXConstants.FlightRingPool.StartSize
 	part.Parent = nil
 	return part
 end
@@ -63,7 +63,7 @@ local function resetRing(part: Part): ()
 	part.Parent = nil
 end
 
-local pool = FXPool.New(makeRing, resetRing, Constants.FX.FlightRingPool.PoolMaxSize)
+local pool = FXPool.New(makeRing, resetRing, FXConstants.FlightRingPool.PoolMaxSize)
 
 local function playRing(position: Vector3, color: Color3, maxRadiusStuds: number, expandDurationSeconds: number): ()
 	local part = pool:Acquire()
@@ -74,8 +74,8 @@ local function playRing(position: Vector3, color: Color3, maxRadiusStuds: number
 
 	part.CFrame = CFrame.new(position) * CFrame.Angles(0, 0, math.rad(90))
 	part.Color = color
-	part.Transparency = Constants.FX.FlightRingPool.StartTransparency
-	part.Size = Constants.FX.FlightRingPool.StartSize
+	part.Transparency = FXConstants.FlightRingPool.StartTransparency
+	part.Size = FXConstants.FlightRingPool.StartSize
 	part.Parent = getHolder()
 
 	local diameter = maxRadiusStuds * 2
@@ -91,19 +91,19 @@ local function playRing(position: Vector3, color: Color3, maxRadiusStuds: number
 end
 
 function FlightVFX.PlayTakeoffDust(position: Vector3): ()
-	local cfg = Constants.FX.FlightTakeoffDust
+	local cfg = FXConstants.FlightTakeoffDust
 	playRing(position, cfg.Color, cfg.MaxRadiusStuds, cfg.ExpandDurationSeconds)
 end
 
 function FlightVFX.PlayLandingRing(position: Vector3, isHard: boolean): ()
-	local cfg = Constants.FX.FlightLandingRing
+	local cfg = FXConstants.FlightLandingRing
 	local radius = if isHard then cfg.HardMaxRadiusStuds else cfg.SoftMaxRadiusStuds
 	local color = if isHard then cfg.HardColor else cfg.SoftColor
 	playRing(position, color, radius, cfg.ExpandDurationSeconds)
 end
 
 function FlightVFX.PlaySonicBoomBurst(position: Vector3): ()
-	local cfg = Constants.FX.FlightSonicBoom
+	local cfg = FXConstants.FlightSonicBoom
 	playRing(position, cfg.Color, cfg.MaxRadiusStuds, cfg.ExpandDurationSeconds)
 end
 

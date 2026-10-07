@@ -103,19 +103,21 @@ return function()
 	end)
 
 	describe("ComboEscalation -- the stagger relationship", function()
-		it("has lapsed by the time a parried attacker's stagger ends", function()
-			-- THE LOAD-BEARING RELATIONSHIP, asserted rather than the two numbers themselves: this is
-			-- the entire reason the damage layer needs no "reset the combo on a parry" rule. If someone
-			-- retunes Stagger.DurationSeconds down toward the 0.6-0.75 its own comment flags as the
-			-- previous design's derived bound, this fails and says why.
-			expect(WINDOW < DefenseConstants.Stagger.DurationSeconds).to.equal(true)
+		it("leaves a parried shot's thrower less than one Basic swing of escalation past the stagger", function()
+			-- A parried MELEE swing keeps its combo on purpose (AttackRequestSystem.KeepChainThroughParry). The
+			-- one parry nothing holds is a reflected shot that staggers its thrower; its combo may outlive the
+			-- stagger by WINDOW - stagger (DamageConstants.Combo's header). Pinned small, so retuning either
+			-- number cannot quietly hand a thrower a long escalated punish-back out of their own stagger.
+			local leftover = WINDOW - DefenseConstants.Stagger.DurationSeconds
+			expect(leftover < 0.31).to.equal(true)
 
 			local attacker = makeAttacker("Parried")
 			ComboEscalation.Advance(attacker, T)
 			ComboEscalation.Advance(attacker, T + 0.1)
-			-- Parried at T + 0.1; the earliest they can act again is one full stagger later.
+			-- Parried at T + 0.1: gone no later than `leftover` after the stagger ends.
 			local staggerEnds = T + 0.1 + DefenseConstants.Stagger.DurationSeconds
-			expect(ComboEscalation.GetStage(attacker, staggerEnds)).to.equal(1)
+			-- (+1e-6: WINDOW - stagger + stagger need not round back to WINDOW exactly.)
+			expect(ComboEscalation.GetStage(attacker, staggerEnds + math.max(leftover, 0) + 1e-6)).to.equal(1)
 		end)
 	end)
 

@@ -30,34 +30,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = {}
 
--- Shape shared by Constants.Combat.Sound/Constants.Flight.Sound's one-shot entries and consumed by
--- Client/FX/SoundManager.lua's Register() -- declared here, not in SoundManager.lua, because this
--- module is Shared (client+server-safe) while SoundManager.lua is client-only; a client-only module
--- can depend on Shared, never the other way around. PoolSize is optional (Register() defaults it to
--- 1) -- only sounds prone to overlapping replays during play (fast combat combos) need to name one.
--- PlaybackRegion is optional and, when supplied, restricts playback to that [start, stop] slice of
--- the asset in seconds (SoundManager applies it via Sound.PlaybackRegion + PlaybackRegionsEnabled).
--- It exists so ONE asset containing several distinct sounds -- Constants.Run's stage-2 file, which
--- opens with a speed whoosh and continues into footsteps -- can be registered as two independent
--- named sounds instead of needing the audio split into two uploads, and so trimming is done by the
--- engine rather than by a task.delay stop (which would be both audibly imprecise and one more timer
--- per play to keep track of).
-export type SoundDefinition = {
-	SoundId: string,
-	Volume: number,
-	PoolSize: number?,
-	PlaybackRegion: NumberRange?,
-}
--- The one deliberate exception to SoundDefinition's shape -- a continuous loop (Constants.Flight.
--- Sound.WindLoop, played via SoundManager.PlayLooped) has no single Volume, only a ramped range the
--- caller eases across every frame (Client/FX/FlightAudio.lua's SetWindIntensity) -- see that
--- function for how MaxVolume/MinPlaybackSpeed/MaxPlaybackSpeed get used.
-export type LoopSoundDefinition = {
-	SoundId: string,
-	MaxVolume: number,
-	MinPlaybackSpeed: number,
-	MaxPlaybackSpeed: number,
-}
+-- The sound shapes live in Shared/SoundTypes.lua (2026-10-06); require it for SoundDefinition/LoopSoundDefinition.
 
 -- Studio-only diagnostics config -- lifted out to Shared/DebugConstants.lua, which carries the
 -- Logger production-safety contract and the note on why it stays in Shared/ rather than following
@@ -149,11 +122,8 @@ Constants.Network = {
 	WaitForChildTimeoutSeconds = 10,
 }
 
--- Humanoid/Player Attribute names shared across systems -- lifted out to
--- Shared/AttributeConstants.lua, which carries the per-name contracts. Re-exported here so every
--- existing Constants.Attributes.X call site keeps working; new code should require that module
--- directly. See its header, and this file's own header above, for why sections leave.
-Constants.Attributes = require(ReplicatedStorage.Shared.AttributeConstants)
+-- AttributeConstants was a re-export of Shared/AttributeConstants.lua; every caller now requires that leaf
+-- directly (2026-10-06), so the re-export is gone.
 
 -- Default keybinds for both devices -- lifted out to Shared/Input/KeybindConstants.lua, which
 -- carries the rationale (chiefly that these are DEFAULTS, cloned by KeybindManager at boot and
@@ -320,7 +290,7 @@ Constants.Camera = require(ReplicatedStorage.Shared.CameraConstants)
 -- screen cleared. Lifting them to a table the preloader can sweep (the same raw-content-id path
 -- Constants.Intro.AnimationIds already uses) is what makes them preloadable at all.
 --
--- Not merged into Constants.FX below: these are UI chrome, not impact-feel tunables, and nothing
+-- Not merged into Shared/FXConstants.lua: these are UI chrome, not impact-feel tunables, and nothing
 -- here is a tunable at all -- it's an asset manifest.
 Constants.UI = {
 	-- Vital gauge icons (Client/UI/Screens/HUD/init.lua, passed to Components/VitalIcon.lua's
@@ -339,17 +309,8 @@ Constants.UI = {
 	} :: { [string]: string },
 }
 
--- Client-side presentation tuning -- lifted out to Shared/FXConstants.lua. Re-exported here so
--- every existing Constants.FX.X call site keeps working; new code should require that module
--- directly.
-Constants.FX = require(ReplicatedStorage.Shared.FXConstants)
-
--- The run system's presentation tables (Footsteps/StageOnset/Animation) were absorbed into
--- Shared/Run/RunConstants.lua, which already owned the Stages ladder they are keyed by -- see
--- that file for why, and for the one type annotation the move had to give up. Re-exported here
--- so every existing Constants.Run.X call site keeps working; new code should require that module
--- directly.
-Constants.Run = require(ReplicatedStorage.Shared.Run.RunConstants)
+-- Constants.FX and Constants.Run were re-exports of Shared/FXConstants.lua and Shared/Run/RunConstants.lua.
+-- Every caller now requires those leaves directly (2026-10-06), so the re-exports are gone.
 
 -- Hand-authored combat content and physics-feel numbers (weapon move catalog, DashPunch/DashHit/
 -- AirSlam, AirCombo, Finisher/Ragdoll physics, AnimationIds, Sound) moved to

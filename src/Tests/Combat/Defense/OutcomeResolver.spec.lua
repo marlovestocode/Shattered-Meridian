@@ -313,6 +313,105 @@ return function()
 		end)
 	end)
 
+	describe("OutcomeResolver.Resolve -- the precedence table", function()
+		-- One row per decision the resolver makes, so the whole ladder -- evade, backstab, parry, block, guard
+		-- break, clean -- and the held-body rule (GuardDisabled) are read off one table. A new rule is a new row.
+		local FRONT, REAR, FLANK = 0, 180, ARC_HALF + 10
+		local blocking = { DefenderState = "Blocking", BlockHeld = true }
+		local function with(base: { [string]: any }, extra: { [string]: any }): { [string]: any }
+			local merged = table.clone(base)
+			for key, value in extra do
+				merged[key] = value
+			end
+			return merged
+		end
+		local ROWS: { { Name: string, Input: { [string]: any }, Kind: string } } = {
+			{ Name = "unguarded, front", Input = { BearingDegrees = FRONT }, Kind = "Clean" },
+			{
+				Name = "evading beats everything",
+				Input = with(blocking, { Evading = true, ParryLive = true, BearingDegrees = REAR }),
+				Kind = "Evaded",
+			},
+			{ Name = "blocking, front", Input = with(blocking, { BearingDegrees = FRONT }), Kind = "Blocked" },
+			{ Name = "blocking, flank", Input = with(blocking, { BearingDegrees = FLANK }), Kind = "Clean" },
+			{ Name = "blocking, rear", Input = with(blocking, { BearingDegrees = REAR }), Kind = "Backstab" },
+			{
+				Name = "blocking, empty guard",
+				Input = with(blocking, { BearingDegrees = FRONT, Guard = 0.001 }),
+				Kind = "GuardBroken",
+			},
+			{
+				Name = "parry live, front",
+				Input = { DefenderState = "ParryWindow", ParryLive = true, BearingDegrees = FRONT },
+				Kind = "Parried",
+			},
+			{
+				Name = "parry live, rear",
+				Input = { DefenderState = "ParryWindow", ParryLive = true, BearingDegrees = REAR },
+				Kind = "Backstab",
+			},
+			{
+				Name = "parry spent, key held",
+				Input = {
+					DefenderState = "ParryWindow",
+					ParryLive = true,
+					ParryConsumed = true,
+					BlockHeld = true,
+					BearingDegrees = FRONT,
+				},
+				Kind = "Blocked",
+			},
+			{
+				Name = "guard broken, key held",
+				Input = { DefenderState = "GuardBroken", BlockHeld = true, BearingDegrees = FRONT },
+				Kind = "Clean",
+			},
+			{
+				Name = "guard disabled: block lets it through",
+				Input = with(blocking, { GuardDisabled = true, BearingDegrees = FRONT }),
+				Kind = "Clean",
+			},
+			{
+				Name = "guard disabled: no backstab",
+				Input = with(blocking, { GuardDisabled = true, BearingDegrees = REAR }),
+				Kind = "Clean",
+			},
+			{
+				Name = "guard disabled: the parry still counts",
+				Input = {
+					DefenderState = "ParryWindow",
+					ParryLive = true,
+					GuardDisabled = true,
+					BearingDegrees = FRONT,
+				},
+				Kind = "Parried",
+			},
+			{
+				Name = "guard disabled: a rear parry is just a hit",
+				Input = { DefenderState = "ParryWindow", ParryLive = true, GuardDisabled = true, BearingDegrees = REAR },
+				Kind = "Clean",
+			},
+			{
+				Name = "guard disabled: evading still evades",
+				Input = with(blocking, { GuardDisabled = true, Evading = true }),
+				Kind = "Evaded",
+			},
+		}
+
+		for _, row in ROWS do
+			it(row.Name, function()
+				expect(OutcomeResolver.Resolve(makeInput(row.Input)).Kind).to.equal(row.Kind)
+			end)
+		end
+
+		it("leaves the guard untouched on a disabled-guard hit", function()
+			local result = OutcomeResolver.Resolve(makeInput(with(blocking, { GuardDisabled = true, Guard = 40 })))
+			expect(result.Guard).to.equal(40)
+			expect(result.GuardDelta).to.equal(0)
+			expect(result.ConsumesParry).to.equal(false)
+		end)
+	end)
+
 	describe("OutcomeResolver.ArbitrateTrades", function()
 		local alpha = Instance.new("Model")
 		local beta = Instance.new("Model")

@@ -1,5 +1,4 @@
 -- Dev-only: runs PURE Luau modules + TestEZ-style specs headless under Lune (https://lune-org.github.io/docs). Usage, from the repo root: lune run scripts/dev/lune-spec-harness.luau -- src/Tests/Domain/DomainTypes.spec.lua. Cannot run specs that need a real Workspace/Instances (HitboxEngine, Projectile, DomainStrike) -- those need Studio. Patches Lune's CFrame.lookAt, which is wrong along the Z axis.
--- from @lune/roblox. Not part of the repo.
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local process = require("@lune/process")

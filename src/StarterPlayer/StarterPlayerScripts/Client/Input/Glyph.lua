@@ -19,7 +19,7 @@
 	(the device switched) and KeybindManager.OnChanged (a binding was rebound, on either device, or
 	reset to defaults). Both are plain callback lists, so both get bridged into one epoch Value a
 	Computed can `use()` -- the same bridge-into-a-Fusion-Value shape Shell/Chrome.lua's
-	ObserveModalGate uses for Constants.Attributes.UiModalOpen.
+	ObserveModalGate uses for AttributeConstants.UiModalOpen.
 
 	DELIBERATELY NOT BUILT ON InputDevice.Observe, even though that adapter exists for exactly this
 	kind of consumer. Observe guards a nil Players.LocalPlayer by returning a value that never updates

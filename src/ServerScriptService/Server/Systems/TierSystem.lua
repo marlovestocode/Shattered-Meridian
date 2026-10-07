@@ -12,7 +12,9 @@
 	Does not own: awarding Meridian XP (MeridianSystem), persisting it (PlayerDataSystem -- this
 	System, like MeridianSystem, mutates only through Transform and never writes a DataStore itself),
 	the tier ladder's NUMBERS (Shared/TierConstants.lua owns every one, see that file's own
-	dynamic-tuning contract), or what a tier is worth mechanically. That last one is the important
+	dynamic-tuning contract), or what a tier is worth mechanically. It PUBLISHES the tier as a Player
+	Attribute (AttributeConstants.CultivationTier) and Shared/Progression/CombatPower.lua decides what a
+	gap between two of them is worth in a fight -- the same signal-not-call boundary as Max Qi. That last one is the important
 	boundary: QiConstants.MaxQiByTier already prices tier into Max Qi and owns that curve on its own,
 	and this System never reads it -- it fires TierChanged and QiSystem decides what its own ceiling
 	should be (GameplayEvents.FireTierChanged's own header on why that's a signal, not a call).
@@ -51,6 +53,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local TierConstants = require(ReplicatedStorage.Shared.TierConstants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -153,10 +156,19 @@ local function buildPayload(tier: number, previousTier: number?): Types.TierUpda
 	}
 end
 
+-- Publishes `tier` on the Player (AttributeConstants.CultivationTier): the one place combat reads a tier
+-- from (Shared/Progression/CombatPower.lua -- a combat layer must never call into this System, and a
+-- profile read per hit would be a deep copy per hit), and what an opponent's client can show. Written on
+-- the same two edges as the remote below, so it is never newer or older than what the owner was told.
+local function publishTier(player: Player, tier: number): ()
+	player:SetAttribute(AttributeConstants.CultivationTier, tier)
+end
+
 -- Replicates `tier` to its owning client only. `previousTier` is passed ONLY for a real promotion --
 -- it is what lets the client tell "here is your tier, you just logged in" apart from "you just ranked
 -- up" without having to remember its own previous value and guess. See Types.TierUpdatePayload.
 local function sendTierUpdate(player: Player, tier: number, previousTier: number?): ()
+	publishTier(player, tier)
 	if not tierUpdatedRemote then
 		return
 	end

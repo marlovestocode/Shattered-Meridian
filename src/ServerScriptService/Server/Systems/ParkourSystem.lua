@@ -43,7 +43,7 @@ local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAtt
 local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
@@ -139,8 +139,8 @@ local function releaseOwnership(player: Player): ()
 	if not humanoid then
 		return
 	end
-	humanoid:SetAttribute(Constants.Attributes.ParkourVelocityOwned, false)
-	humanoid:SetAttribute(Constants.Attributes.ParkourState, "")
+	humanoid:SetAttribute(AttributeConstants.ParkourVelocityOwned, false)
+	humanoid:SetAttribute(AttributeConstants.ParkourState, "")
 end
 
 local function notifyRejected(
@@ -174,7 +174,7 @@ local function noteRejection(player: Player, state: PlayerParkourState, reason: 
 	-- players who get hit hardest. Knockback compliance has its own detector (KnockbackAudit).
 	if KNOCKBACK_DISTORTABLE[reason] then
 		local _, humanoid = CharacterUtil.LiveRig(player)
-		local allowance = if humanoid then humanoid:GetAttribute(Constants.Attributes.KnockbackUntil) else nil
+		local allowance = if humanoid then humanoid:GetAttribute(AttributeConstants.KnockbackUntil) else nil
 		if typeof(allowance) == "number" and now <= allowance then
 			return
 		end
@@ -217,13 +217,13 @@ local function beginAction(player: Player, state: PlayerParkourState, report: Ac
 	local duration = math.clamp(report.DurationSeconds or VALIDATION.MaxActionSeconds, 0, VALIDATION.MaxActionSeconds)
 	state.OpenExpiresAt = now + duration
 
-	humanoid:SetAttribute(Constants.Attributes.ParkourVelocityOwned, true)
-	humanoid:SetAttribute(Constants.Attributes.ParkourState, report.Kind)
+	humanoid:SetAttribute(AttributeConstants.ParkourVelocityOwned, true)
+	humanoid:SetAttribute(AttributeConstants.ParkourState, report.Kind)
 	-- Any momentum carry from a PREVIOUS action ends the moment a new one begins: the new action is
 	-- now driving velocity directly, and a stale floor would apply the instant it ended, on top of
 	-- whatever the new action's own exit grants.
-	humanoid:SetAttribute(Constants.Attributes.ParkourSpeedFloor, 0)
-	humanoid:SetAttribute(Constants.Attributes.ParkourSpeedFloorExpiry, 0)
+	humanoid:SetAttribute(AttributeConstants.ParkourSpeedFloor, 0)
+	humanoid:SetAttribute(AttributeConstants.ParkourSpeedFloorExpiry, 0)
 
 	-- Announced last, once every Attribute above is already written, so a subscriber reading them sees
 	-- the action it is being told about rather than the one before it.
@@ -269,8 +269,8 @@ local function endAction(
 	if not humanoid then
 		return
 	end
-	humanoid:SetAttribute(Constants.Attributes.ParkourVelocityOwned, false)
-	humanoid:SetAttribute(Constants.Attributes.ParkourState, "")
+	humanoid:SetAttribute(AttributeConstants.ParkourVelocityOwned, false)
+	humanoid:SetAttribute(AttributeConstants.ParkourState, "")
 
 	-- What the server can SEE the body doing, planar only -- the carry governs WalkSpeed, so a fall's
 	-- vertical component must not inflate it. nil when the root can't be read at all, which
@@ -292,9 +292,9 @@ local function endAction(
 		return
 	end
 
-	humanoid:SetAttribute(Constants.Attributes.ParkourSpeedFloor, carry)
+	humanoid:SetAttribute(AttributeConstants.ParkourSpeedFloor, carry)
 	humanoid:SetAttribute(
-		Constants.Attributes.ParkourSpeedFloorExpiry,
+		AttributeConstants.ParkourSpeedFloorExpiry,
 		now + ParkourConstants.Locomotion.MomentumCarrySeconds
 	)
 end
@@ -339,7 +339,7 @@ local function handleReport(player: Player, rawPayload: unknown): ()
 	-- way granting velocity ownership would put the parkour framework and RagdollController's
 	-- AlignPosition pin on the same body at once. The client's own controller independently parks in
 	-- its CombatHeld state for the same signal, so an honest client never reaches this branch.
-	if humanoid and humanoid:GetAttribute(Constants.Attributes.RootControlLocked) == true then
+	if humanoid and humanoid:GetAttribute(AttributeConstants.RootControlLocked) == true then
 		notifyRejected(player, report.Kind, report.Phase, "CombatRestricted")
 		return
 	end

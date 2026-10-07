@@ -37,7 +37,7 @@ local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAtt
 local AirComboMoves = require(ReplicatedStorage.Shared.AirCombo.AirComboMoves)
 local AttackTypes = require(ReplicatedStorage.Shared.Attack.AttackTypes)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local LockOnConstants = require(ReplicatedStorage.Shared.Combat.LockOnConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
@@ -73,7 +73,7 @@ local started = false
 
 -- Whether something else owns this body's rotation right now.
 local function rotationOwnedElsewhere(currentHumanoid: Humanoid): boolean
-	local attributes = Constants.Attributes
+	local attributes = AttributeConstants
 	return currentHumanoid:GetAttribute(attributes.RootControlLocked) == true
 		or currentHumanoid:GetAttribute(attributes.ParkourFacingOwned) == true
 		or currentHumanoid:GetAttribute(attributes.Mounted) == true
@@ -88,7 +88,7 @@ local function finish(): ()
 	if current == nil or currentHumanoid == nil or currentHumanoid.Parent == nil then
 		return
 	end
-	currentHumanoid:SetAttribute(Constants.Attributes.CombatFacingOwned, nil)
+	currentHumanoid:SetAttribute(AttributeConstants.CombatFacingOwned, nil)
 	-- Only put AutoRotate back if nothing changed it while this window held it (a shift-lock toggle).
 	if current.RestoreAutoRotate and currentHumanoid.AutoRotate == false then
 		currentHumanoid.AutoRotate = true
@@ -141,7 +141,7 @@ local function onAttackStarted(payload: AttackStartedPayload): ()
 		HoldEndsAt = now + windup + active,
 		RestoreAutoRotate = currentHumanoid.AutoRotate,
 	}
-	currentHumanoid:SetAttribute(Constants.Attributes.CombatFacingOwned, true)
+	currentHumanoid:SetAttribute(AttributeConstants.CombatFacingOwned, true)
 	currentHumanoid.AutoRotate = false
 end
 

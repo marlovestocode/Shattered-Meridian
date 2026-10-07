@@ -3,7 +3,7 @@
 	HitStop.lua
 
 	Owns: the purely-cosmetic freeze effects that share one throttled-freeze factory and one
-	Constants.FX.HitStop tuning table --
+	FXConstants.HitStop tuning table --
 
 	  * FreezeFlightLanding -- the dev-menu flight feature's landing-impact freeze.
 	    Client/Flight/FlightController.lua is the only caller. Delegates to
@@ -56,7 +56,7 @@
 
 	NOT THE SAME DURATION AS THE HITSTUN IT RIDES ALONGSIDE, and that gap is the whole design. Hitstun
 	(DamageConstants.Hitstun.Seconds, 0.65) is a real, felt lockout -- how long the victim cannot act.
-	This freeze (Constants.FX.HitStop.VictimSeconds/PostureBreakSeconds, both under 0.15s) is a stinger
+	This freeze (FXConstants.HitStop.VictimSeconds/PostureBreakSeconds, both under 0.15s) is a stinger
 	at the START of that lockout -- the frame-perfect punctuation that says "that connected," not a
 	second, shorter stun layered under the first. Holding it for anywhere near the full Hitstun window
 	would just be hitstun with extra steps and would fight the player's own next input the moment
@@ -74,7 +74,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local AnimationTrackUtil = require(script.Parent.AnimationTrackUtil)
@@ -83,7 +83,7 @@ local ParkourMotor = require(script.Parent.Parent.Parkour.ParkourMotor)
 
 local logger = Logger.scope("HitStop")
 
-local CONFIG = Constants.FX.HitStop
+local CONFIG = FXConstants.HitStop
 
 local HitStop = {}
 
@@ -320,6 +320,14 @@ function HitStop.SlowVictimMovement(seconds: number, multiplier: number): ()
 	end
 	victimSlowMultiplier = math.clamp(multiplier, 0, 1)
 	bindInputHold()
+end
+
+-- Ends the stun slow early -- a parry out of the stun (DefenseConstants.StunParry) frees the body on the spot,
+-- and the walk should come back with it rather than at the deadline the last hit set.
+function HitStop.EndVictimSlow(): ()
+	if victimSlowUntil ~= nil then
+		victimSlowUntil = os.clock()
+	end
 end
 
 return HitStop

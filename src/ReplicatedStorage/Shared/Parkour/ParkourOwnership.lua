@@ -16,7 +16,7 @@
 	THE TWO FORMS DO NOT COVER THE SAME SET, and pretending otherwise would be the bug this header
 	exists to prevent:
 
-	  * OwnsBody reads Constants.Attributes.ParkourVelocityOwned, which ParkourSystem raises only for
+	  * OwnsBody reads AttributeConstants.ParkourVelocityOwned, which ParkourSystem raises only for
 	    a REPORTED action -- ParkourTypes.ActionKind, which is Slide/Vault/Mantle/WallRun/LedgeClimb/
 	    Roll/Leap and deliberately nothing else (see that type's own header on why only the states
 	    that take velocity are network events). A ledge hang or a mid-air state is invisible to it.
@@ -42,7 +42,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
 
 type MovementStateId = ParkourTypes.MovementStateId
@@ -80,7 +80,7 @@ local ACTION_STATES: { [string]: boolean } = {
 -- works for a Model with no Player behind it -- a bot has no parkour and no Attribute, so it reads
 -- false and is never gated, with no special case anywhere.
 function ParkourOwnership.OwnsBody(humanoid: Humanoid): boolean
-	return humanoid:GetAttribute(Constants.Attributes.ParkourVelocityOwned) == true
+	return humanoid:GetAttribute(AttributeConstants.ParkourVelocityOwned) == true
 end
 
 -- Whether this live MovementStateId is a parkour action, as the local CLIENT can see it. `nil` is a

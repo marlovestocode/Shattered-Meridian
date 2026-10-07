@@ -57,7 +57,8 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Constants = require(ReplicatedStorage.Shared.Constants)
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
 local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboConstants)
@@ -163,7 +164,9 @@ type HeldContact = {
 }
 local heldContacts: { HeldContact } = {}
 
-local outcomeCallbacks: { (DefenseOutcome) -> () } = {}
+-- OnResolved's subscribers (Shared/CallbackList.lua).
+local resolvedListeners: CallbackList.CallbackList<DefenseOutcome> =
+	CallbackList.New(logger, "DefenseSystem.OnResolved")
 
 local started = false
 local heartbeatTrove = Trove.New()
@@ -526,8 +529,36 @@ local function bodyCommitted(registration: Registration, now: number): boolean
 			return true
 		end
 	end
-	local stunnedUntil = registration.Humanoid:GetAttribute(Constants.Attributes.HitstunUntil)
+	local stunnedUntil = registration.Humanoid:GetAttribute(AttributeConstants.HitstunUntil)
 	return typeof(stunnedUntil) == "number" and now < stunnedUntil
+end
+
+-- Whether this body is reeling from a GROUND hitstun the stun parry covers (DefenseConstants.StunParry): stunned,
+-- and not also running a swing of its own (a stun cancels one, so that is only ever a frame of overlap). The air
+-- combo's hold is the other half of the same rule and is asked separately -- see parriesThroughStun.
+local function isStunHeld(registration: Registration, now: number): boolean
+	local config = DefenseConstants.StunParry
+	if not config.Enabled or config.WindowScale <= 0 then
+		return false
+	end
+	local stunnedUntil = registration.Humanoid:GetAttribute(AttributeConstants.HitstunUntil)
+	if typeof(stunnedUntil) ~= "number" or now >= stunnedUntil then
+		return false
+	end
+	local combatantId = HitboxEngine.GetCombatantId(registration.Model)
+	if combatantId then
+		local attackState = HitboxEngine.GetAttackState(combatantId)
+		if attackState ~= nil and attackState ~= "Idle" then
+			return false
+		end
+	end
+	return true
+end
+
+-- THE ONE RULE FOR A HELD BODY, on the ground or in the air: the guard does nothing, an evade is refused, and a
+-- timed parry is the way out. So a press here is never deferred -- it arms (or misses) the instant it arrives.
+local function parriesThroughStun(registration: Registration, now: number): boolean
+	return isAirHeld(registration.Humanoid) or isStunHeld(registration, now)
 end
 
 -- The guard press itself, once every gate has passed -- shared by a press that arrives with the body
@@ -601,6 +632,11 @@ local resolveHeldContactsFor: (
 local function pressGuard(registration: Registration, now: number, blockOnly: boolean?): boolean
 	local window = if blockOnly then nil else parryWindowFor(registration)
 	local scale = rallyScale(registration, now)
+	-- A parry out of a ground stun is a harder read than one on a free body (DefenseConstants.StunParry).
+	-- Stacks with the rally's own scale, the same duration-only multiplier.
+	if not blockOnly and isStunHeld(registration, now) then
+		scale *= DefenseConstants.StunParry.WindowScale
+	end
 	local armed = registration.Machine:Press(now, window, pingSecondsFor(registration.Model), scale)
 	-- The press may be the parry -- or, on the ground, the block -- for a contact still in its rewind hold,
 	-- judged at the press's REWOUND time rather than now. See resolveHeldContactsFor. Never for a press
@@ -637,11 +673,12 @@ function DefenseSystem.SetBlocking(model: Model, blocking: boolean, now: number)
 		-- still reeling -- gets the guard the instant they are free (Step), as long as the key is still
 		-- down. Refusing it outright would make the guard feel dropped at exactly the moment it matters.
 		--
-		-- EXCEPT WHILE AIR-HELD. Every air hit stuns, so deferring the press past the stun would hold an
-		-- air-held victim's parry until the combo was already over -- and the parry is their one way out
-		-- (docs/design/air-combat-and-evade.md B4). The stun still means what it means everywhere else:
-		-- the held guard does nothing (pass 1's AirHeld rule), and only a timed parry counts.
-		if bodyCommitted(registration, now) and not isAirHeld(registration.Humanoid) then
+		-- EXCEPT WHILE HELD IN A STUN -- an air combo's hold, or a ground hitstun the stun parry covers
+		-- (DefenseConstants.StunParry). Deferring the press past the stun would hold the victim's parry until
+		-- the string was already over, and the parry is their one way out (docs/design/air-combat-and-evade.md
+		-- B4, and M1 strings since they link). The stun still means what it means everywhere else: the held
+		-- guard does nothing (pass 1's held-body rule), and only a timed parry counts.
+		if bodyCommitted(registration, now) and not parriesThroughStun(registration, now) then
 			registration.GuardDeferred = true
 			return false
 		end
@@ -682,9 +719,9 @@ function DefenseSystem.BeginEvade(model: Model, now: number): (boolean, string?)
 	end
 	local humanoid = registration.Humanoid
 	if
-		humanoid:GetAttribute(Constants.Attributes.Grabbed) == true
-		or humanoid:GetAttribute(Constants.Attributes.Grabbing) == true
-		or humanoid:GetAttribute(Constants.Attributes.Mounted) == true
+		humanoid:GetAttribute(AttributeConstants.Grabbed) == true
+		or humanoid:GetAttribute(AttributeConstants.Grabbing) == true
+		or humanoid:GetAttribute(AttributeConstants.Mounted) == true
 	then
 		return false, "Restrained"
 	end
@@ -741,7 +778,7 @@ local function handleSetBlocking(player: Player, rawBlocking: unknown, rawPressI
 	-- station belongs to the vehicle, and a guard raised from one would be a defence the arm pose is
 	-- already overwriting the animation for. Read as an Attribute, not through a BlimpSystem require.
 	local humanoid = CharacterUtil.HumanoidOf(character)
-	if humanoid and humanoid:GetAttribute(Constants.Attributes.Mounted) == true then
+	if humanoid and humanoid:GetAttribute(AttributeConstants.Mounted) == true then
 		return
 	end
 	local armed = DefenseSystem.SetBlocking(character, rawBlocking, os.clock())
@@ -814,6 +851,9 @@ local function onHit(report: HitReport): ()
 	local humanoid = registration.Humanoid
 	local intangible = isAirComboIntangible(humanoid)
 	local airHeld = not intangible and isAirHeld(humanoid)
+	-- THE SAME RULE ON THE GROUND (DefenseConstants.StunParry): a defender reeling from a hitstun -- a linked M1
+	-- string, most often -- blocks nothing, and only a timed parry still counts. Judged at the contact's own time.
+	local stunHeld = not intangible and not airHeld and isStunHeld(registration, report.SampleTime)
 
 	-- A REALM'S TWO DEFENCE RULES, read the same way (Shared/Domain/DomainRules.lua):
 	--   * NoParry -- a live window meets this contact as though it were already spent, exactly the
@@ -834,7 +874,7 @@ local function onHit(report: HitReport): ()
 	-- ascending SampleTime, so it is monotonic, and an `at` that predates the last Update is a no-op
 	-- because transitions only fire when now >= the time they were due.
 	machine:Update(at)
-	local result = OutcomeResolver.Resolve({
+	local inputs: DefenseTypes.ResolveInput = {
 		DefenderState = machine:StateAt(at),
 		BearingDegrees = bearing,
 		PowerLevel = report.PowerLevel,
@@ -848,18 +888,10 @@ local function onHit(report: HitReport): ()
 		-- spent: ConsumesParry stays false, and the next contact can still be parried.
 		ParryConsumed = parryConsumedThisBatch[report.Target] == true or not isParryable(report) or realmNoParry,
 		Evading = intangible or machine:IsEvadingAt(at),
-	})
-	if
-		(airHeld or realmNoBlock)
-		and (result.Kind == "Blocked" or result.Kind == "Backstab" or result.Kind == "GuardBroken")
-	then
-		result = {
-			Kind = "Clean",
-			Guard = batchGuard[report.Target] or registration.Guard:Get(),
-			GuardDelta = 0,
-			ConsumesParry = false,
-		}
-	end
+		-- The held-body rule and the realm's NoBlock, decided inside the resolver (ResolveInput.GuardDisabled).
+		GuardDisabled = airHeld or stunHeld or realmNoBlock,
+	}
+	local result = OutcomeResolver.Resolve(inputs)
 	batchGuard[report.Target] = result.Guard
 
 	-- THE CLASH MEASUREMENT (DefenseConstants.Clash), taken here at the contact's own substep, where the
@@ -896,20 +928,16 @@ local function onHit(report: HitReport): ()
 		-- judged against -- never re-derived in pass 2, where ConsumeParry has already closed it.
 		Perfect = result.Kind == "Parried" and machine:IsPerfectParryAt(at),
 		DefenderSwingReaches = defenderSwingReaches,
+		Inputs = inputs,
 	})
 end
 
 -- Pass 2 -------------------------------------------------------------------------------------------
 
 local function emit(outcome: DefenseOutcome): ()
-	for _, callback in outcomeCallbacks do
-		-- pcall'd because a consumer erroring must not take down the rest of the batch -- an outcome
-		-- half-applied across two subscribers is worse than one subscriber missing an outcome.
-		local ok, err = pcall(callback, outcome)
-		if not ok then
-			logger:error("A DefenseSystem.OnResolved consumer errored", { errorMessage = tostring(err) })
-		end
-	end
+	-- Each consumer pcall'd (CallbackList): one erroring must not take down the rest of the batch -- an
+	-- outcome half-applied across two subscribers is worse than one subscriber missing an outcome.
+	resolvedListeners:Fire(outcome)
 end
 
 -- How long a parry staggers the attacker -- longer for a PERFECT parry (DefenseConstants.PerfectParry).
@@ -1023,6 +1051,7 @@ local function applyContact(contact: PendingContact, now: number): ()
 		SampleTime = contact.SampleTime,
 		Perfect = contact.Perfect == true,
 		Clash = if contact.Clash == true then true else nil,
+		Inputs = contact.Inputs,
 	})
 	debugLog("Contact resolved", { kind = kind, defender = contact.Defender.Name, perfect = contact.Perfect })
 end
@@ -1051,7 +1080,17 @@ end
 --   * outside the block arc: a parry or a block from that side does nothing either way;
 --   * the key already down at contact: a held guard mints no window, and there is no press left to arrive;
 --   * on the ground, a body committed to its own swing or a stun: a press arriving now is deferred and
---     comes up as a plain block later (SetBlocking), never judged against this contact.
+--     comes up as a plain block later (SetBlocking), never judged against this contact;
+--   * a HELD body (stunned on the ground, or air-held) that cannot arm a parry: its guard does nothing
+--     (parriesThroughStun), so the parry is the only answer, and a body in its whiff lockout -- the
+--     defender who mashed parry through the string -- has none. Why refusing at `now` is enough: a press
+--     rewound to at or before `now` meets a lockout that is at least as long then (it is only ever raised,
+--     through math.max, and the MinUnguarded clock only moves later); a press rewound PAST `now` (a release
+--     that arrives during the hold) opens its window after SampleTime and cannot cover the contact at all.
+--     One case this changes: a stun that ENDS inside the hold no longer lets a rewound plain block turn the
+--     contact Blocked -- correct, since that press was made while stunned, and unreachable inside a linked
+--     string anyway (DamageConstants.Hitstun.LinkMarginSeconds > Parry.RewindMaxSeconds). This is the
+--     common case inside a linked M1 string, and holding it delayed every hit by up to the cap.
 -- Also 0 for a bot or a dummy (rewindSecondsFor), which has no round trip.
 local function rewindHoldFor(contact: PendingContact, now: number): number
 	if contact.Result.Kind ~= "Clean" then
@@ -1067,7 +1106,11 @@ local function rewindHoldFor(contact: PendingContact, now: number): number
 	if registration.Machine:BlockHeldAt(contact.SampleTime) then
 		return 0
 	end
-	if not isAirHeld(registration.Humanoid) and bodyCommitted(registration, now) then
+	local held = parriesThroughStun(registration, now)
+	if bodyCommitted(registration, now) and not held then
+		return 0
+	end
+	if held and not registration.Machine:CanArmParryAt(now) then
 		return 0
 	end
 	return rewindSecondsFor(registration)
@@ -1160,8 +1203,8 @@ resolveHeldContactsFor = function(
 		end
 	end
 
-	-- 2. The guard.
-	if isAirHeld(registration.Humanoid) then
+	-- 2. The guard. A held body's guard does nothing -- air-held or stunned on the ground (pass 1's rule).
+	if parriesThroughStun(registration, now) then
 		return
 	end
 	-- The posture the guard settles into once it is up. A press into a guard break raised nothing.
@@ -1419,13 +1462,7 @@ end
 -- This system's sole output. Returns a disconnect function rather than a connection object, matching
 -- HitboxEngine.OnHit's own contract so a consumer of both learns one shape.
 function DefenseSystem.OnResolved(callback: (DefenseOutcome) -> ()): () -> ()
-	table.insert(outcomeCallbacks, callback)
-	return function()
-		local index = table.find(outcomeCallbacks, callback)
-		if index then
-			table.remove(outcomeCallbacks, index)
-		end
-	end
+	return resolvedListeners:Connect(callback)
 end
 
 -- Lifecycle ----------------------------------------------------------------------------------------
@@ -1567,7 +1604,7 @@ function DefenseSystem.Reset(): ()
 	table.clear(heldContacts)
 	table.clear(parryConsumedThisBatch)
 	table.clear(batchGuard)
-	table.clear(outcomeCallbacks)
+	resolvedListeners:Clear()
 	defaultParryAnimationId = ""
 	pingResolver = nil
 end

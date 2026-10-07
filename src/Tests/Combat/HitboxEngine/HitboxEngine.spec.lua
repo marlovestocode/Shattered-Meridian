@@ -678,6 +678,117 @@ return function()
 		end)
 	end)
 
+	describe("HitboxTypes.SourceOf", function()
+		it("stamps a swing's contact as Melee", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			makeDummy("Target", Vector3.new(0, 5, -4))
+			local hits, disconnect = captureHits()
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
+			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+			disconnect()
+
+			expect(#hits).to.equal(1)
+			expect(hits[1].Source).to.equal("Melee")
+			expect(HitboxTypes.SourceOf(hits[1])).to.equal("Melee")
+		end)
+
+		it("infers a source for a report built without one", function()
+			local bare = {} :: any
+			expect(HitboxTypes.SourceOf(bare)).to.equal("Melee")
+			expect(HitboxTypes.SourceOf({ Projectile = {} } :: any)).to.equal("Projectile")
+			expect(HitboxTypes.SourceOf({ Projectile = { DomainId = 3 } } :: any)).to.equal("Realm")
+			expect(HitboxTypes.IsShot({ Projectile = { DomainId = 3 } } :: any)).to.equal(true)
+			expect(HitboxTypes.IsShot({ Source = "Impact" } :: any)).to.equal(false)
+		end)
+
+		it("prefers the stamped source over the shape", function()
+			expect(HitboxTypes.SourceOf({ Source = "Impact", Projectile = {} } :: any)).to.equal("Impact")
+		end)
+	end)
+
+	describe("HitboxEngine -- death", function()
+		it("reports no contact on a dead body", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = makeDummy("Target", Vector3.new(0, 5, -4))
+			target.Humanoid.Health = 0
+			local hits, disconnect = captureHits()
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
+			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+			disconnect()
+
+			expect(#hits).to.equal(0)
+		end)
+
+		it("ends the swing of an attacker killed mid-swing, with nothing more landing", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local hits, disconnect = captureHits()
+			local base = os.clock()
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
+			HitboxEngine.Step(FRAME, base + FRAME)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).never.to.equal("Idle")
+
+			attacker.Humanoid.Health = 0
+			-- A body walks into the still-open volume after the death: it must not be struck.
+			makeDummy("Late", Vector3.new(0, 5, -4))
+			HitboxEngine.Step(FRAME, base + 2 * FRAME)
+			disconnect()
+
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Idle")
+			expect(HitboxEngine.EngagedCount()).to.equal(0)
+			expect(#hits).to.equal(0)
+		end)
+
+		it("refuses a swing from a dead body", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			attacker.Humanoid.Health = 0
+
+			local accepted, reason = HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
+			expect(accepted).to.equal(false)
+			expect(reason).to.equal("Dead")
+		end)
+	end)
+
+	describe("HitboxEngine -- a server hitch", function()
+		-- A frame far longer than one sample (HitboxEngineConstants' header): the substeps must still make a short
+		-- Active window real -- one hit, not none and not two.
+		it("lands a short Active window inside one long frame, exactly once", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			makeDummy("Target", Vector3.new(0, 5, -4))
+			local hits, disconnect = captureHits()
+
+			local base = os.clock()
+			HitboxEngine.RequestAttack(
+				attacker.Id,
+				makeDefinition({ WindupSeconds = 0.1, ActiveSeconds = 0.05, RecoverySeconds = 0.02 }),
+				1,
+				0
+			)
+			HitboxEngine.Step(0.2, base + 0.2)
+			disconnect()
+
+			expect(#hits).to.equal(1)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Idle")
+		end)
+
+		it("does not fast-forward past the frame cap", function()
+			-- A stall longer than MaxFrameSeconds is clamped: the swing advances at most that much this frame.
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			local cap = HitboxEngineConstants.MaxFrameSeconds
+			HitboxEngine.RequestAttack(
+				attacker.Id,
+				makeDefinition({ WindupSeconds = 0, ActiveSeconds = cap * 4, RecoverySeconds = 0 }),
+				1,
+				0
+			)
+			HitboxEngine.Step(cap * 10, base + cap)
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Active")
+		end)
+	end)
+
 	describe("HitboxEngine -- lifecycle housekeeping", function()
 		it("retires a combatant whose character has been destroyed", function()
 			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))

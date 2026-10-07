@@ -11,7 +11,13 @@
 	  * OWNED    -- the set of weapon ids this player has picked up. Grows on a prompt; never shrinks.
 	  * SELECTED -- which owned weapon the draw key will pull out. Survives sheathing, so drawing again
 	                gives you back the sword you just put away rather than resetting to the first one.
-	  * DRAWN    -- whether SELECTED is actually in hand right now. This is the only one combat reads.
+	  * DRAWN    -- whether SELECTED is actually in hand right now.
+
+	FISTS ARE ALWAYS IN HAND WHEN NOTHING ELSE IS (2026-10-06, owner: "you don't have to equip your fists, they're
+	always auto equipped"). What combat reads is IN HAND (inHandOf): the selected weapon while it is drawn, and
+	Fists otherwise -- on spawn, after a sheathe, before anything is picked up. So there is no unarmed state left
+	to fight out of: sheathing a sword puts your fists up, and the draw key only ever matters for a real weapon.
+	Selecting Fists counts as drawn (there is nothing to sheathe them into), and the draw key does nothing then.
 
 	DRAWN IS EXPRESSED AS "DOES SwingSequencer HAVE A WEAPON", NOT AS A FOURTH CanAttack GATE. Sheathing
 	calls SwingSequencer.ClearWeapon, and SwingSequencer.Resolve ALREADY returns nil for a combatant
@@ -105,6 +111,15 @@ local function recordFor(player: Player): Record
 	return created
 end
 
+-- What is actually in this player's hand: the selected weapon while drawn, Fists otherwise (this file's
+-- header, FISTS ARE ALWAYS IN HAND). Never nil -- there is no empty hand any more.
+local function inHandOf(record: Record): WeaponId
+	if record.Drawn and record.Selected ~= nil then
+		return record.Selected
+	end
+	return WeaponRoster.FISTS_ID
+end
+
 -- Server -> owner only. The whole inventory every time rather than a delta: it is at most a handful of
 -- short strings, and a client that missed one delta (joined late, hit a dropped packet) would otherwise
 -- be wrong until the next pickup with nothing to correct it.
@@ -114,12 +129,15 @@ local function pushInventory(player: Player): ()
 		return
 	end
 	local record = recordFor(player)
+	local inHand = inHandOf(record)
 	remote:FireClient(
 		player,
 		{
 			Owned = table.clone(record.Order),
 			Selected = record.Selected,
-			Drawn = record.Drawn,
+			-- "Is the selected weapon the one in hand" -- true for Fists whenever they are selected.
+			Drawn = record.Selected ~= nil and inHand == record.Selected,
+			InHand = inHand,
 		} :: WeaponConstants.InventoryPayload
 	)
 end
@@ -137,9 +155,7 @@ local function applyToCharacter(player: Player): ()
 	if not character then
 		return
 	end
-	local record = recordFor(player)
-	local drawnWeapon = if record.Drawn then record.Selected else nil
-	AttackRequestSystem.SetWeapon(character, drawnWeapon, os.clock())
+	AttackRequestSystem.SetWeapon(character, inHandOf(recordFor(player)), os.clock())
 end
 
 -- Adds `weaponId` to this player's inventory. Returns whether anything changed -- picking up a weapon
@@ -179,6 +195,10 @@ function WeaponInventorySystem.ToggleDraw(player: Player): boolean
 	if record.Selected == nil then
 		return false
 	end
+	-- Fists are never sheathed (this file's header): with them selected the key has nothing to do.
+	if record.Selected == WeaponRoster.FISTS_ID then
+		return true
+	end
 
 	record.Drawn = not record.Drawn
 	applyToCharacter(player)
@@ -201,11 +221,17 @@ function WeaponInventorySystem.SelectNext(player: Player): WeaponId?
 	return record.Selected
 end
 
--- Whether this player currently has their weapon out. Read by nothing in combat (see this file's
--- header on why drawn-ness is expressed through SwingSequencer rather than as a gate) -- this exists
--- for a HUD or a spec.
+-- Whether this player's SELECTED weapon is the one in hand -- the payload's Drawn, so always true for
+-- Fists. Read by nothing in combat (see this file's header on why drawn-ness is expressed through
+-- SwingSequencer rather than as a gate) -- this exists for a HUD or a spec.
 function WeaponInventorySystem.IsDrawn(player: Player): boolean
-	return recordFor(player).Drawn
+	local record = recordFor(player)
+	return record.Selected ~= nil and inHandOf(record) == record.Selected
+end
+
+-- What is in this player's hand right now -- Fists whenever nothing else is drawn. For a HUD or a spec.
+function WeaponInventorySystem.InHand(player: Player): WeaponId
+	return inHandOf(recordFor(player))
 end
 
 function WeaponInventorySystem.GetOwned(player: Player): { WeaponId }
@@ -326,12 +352,14 @@ function WeaponInventorySystem.Init(): ()
 		OnPlayer = function(player: Player)
 			pushInventory(player)
 		end,
-		-- A NEW LIFE STARTS SHEATHED, always. The character is new and holds nothing; re-applying the
-		-- old life's drawn state would mean a corpse's weapon following someone into their next body.
-		-- The inventory itself survives -- only the drawn flag resets.
+		-- A NEW LIFE STARTS SHEATHED -- WHICH NOW MEANS FISTS UP. Re-applying the old life's drawn state
+		-- would mean a corpse's weapon following someone into their next body, so the drawn flag resets;
+		-- applying it puts the new body's fists in hand at once, so a fresh spawn can fight (and predict
+		-- its swings) without pressing anything. The inventory itself survives.
 		OnCharacter = function(player: Player)
 			local record = recordFor(player)
 			record.Drawn = false
+			applyToCharacter(player)
 			pushInventory(player)
 		end,
 		OnPlayerRemoving = function(player: Player)

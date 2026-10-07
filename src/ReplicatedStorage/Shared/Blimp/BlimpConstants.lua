@@ -947,7 +947,7 @@ BlimpConstants.Audio = {
 -- THE GAMEPAD COLUMN IS CONFLICT-FREE BY CONSTRUCTION, and Tests/Blimp/BlimpHelmControls.spec.lua is
 -- what keeps it that way. Every input below has a global meaning that is either physically inert
 -- while mounted (the left stick -- BlimpSystem.mount sets PlatformStand, and RunSystem pins WalkSpeed
--- to 0 off Constants.Attributes.Mounted) or already gated on that same Attribute by its own consumer
+-- to 0 off AttributeConstants.Mounted) or already gated on that same Attribute by its own consumer
 -- (Client/Parkour/ParkourInput.lua for Slide/Evade/Dash/Leap, Client/Emotes/EmoteWheelClient.lua for
 -- the wheel, Client/Camera/ShiftLockCamera.lua for shift lock). That is why this layer needs no
 -- ContextActionService sink and no suppression switch of its own: nothing it takes was answering.
