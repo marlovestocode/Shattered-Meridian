@@ -11,7 +11,8 @@ file. A luau-lsp before/after diff (message level) shows no new error in any mod
 "only returns 1 value") that the 200 removed elsewhere were made of — net −146. `CallbackList.spec` was
 executed under plain Luau; the combat specs were not run.
 
-Reviewed by an independent agent on a 1–10 loop until it graded the work 8 or higher; the decisions it
+Reviewed by an independent agent on a 1–10 loop: iteration 1 graded 6/10 (a no-op `SetWeapon` regression,
+stale headers, a vacuous spec tail), iteration 2 graded 8/10 with no blocking issues. The decisions the review
 forced are recorded inline below.
 
 ## 1. Bugs fixed

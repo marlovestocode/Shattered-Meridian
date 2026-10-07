@@ -541,7 +541,8 @@ local cancelRecoveredAt = -math.huge
 
 -- How many stages each string of the weapon in hand has, from its prediction seed: the server's own probe
 -- (SwingSequencer.StageMoveIds), so a weapon whose string differs from the Baseline is mirrored exactly.
--- nil until a seed arrives, and the Baseline length (what every weapon is built from today) stands in.
+-- Replaced by every Attack_WeaponChanged that carries Moves (an empty hand's empty seed included); only a
+-- message without Moves -- an older server -- leaves it nil, and the Baseline length stands in.
 local seededStageCounts: { [string]: number }? = nil
 
 local function stageCount(kind: AttackTypes.AttackKind): number

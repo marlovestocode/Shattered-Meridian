@@ -1374,11 +1374,13 @@ end
 -- mid-swing, then the guard held (Guarding) or a vault started (ParkourAction), threw on release or on landing --
 -- the free swing out of a guard or a traversal that both gates exist to refuse.
 --
--- ONE EXCEPTION, deliberately: a guard that is still only a PARRY WINDOW (Raising/ParryWindow). That is the
--- stun parry's counter (DefenseConstants.StunParry): a stunned defender buffers M1, presses parry, and the
--- buffered swing is the counter-hit the parry earns the moment it lands (DamageSystem.endHitstunOf frees
--- them). A window is decided within its own few tenths of a second -- it lands, whiffs, or settles into a
--- held Blocking, which DOES drop the press -- so waiting on it never turns into "fires when you let go".
+-- ONE EXCEPTION, deliberately: a guard that is still only a PARRY WINDOW (Raising/ParryWindow), whatever armed
+-- it. The case it exists for is the stun parry's counter (DefenseConstants.StunParry): a stunned defender
+-- buffers M1, presses parry, and the buffered swing is the counter-hit a landed parry earns
+-- (DamageSystem.endHitstunOf frees them). It also covers a free body's tapped parry: a whiffed window
+-- lands in ParryRecovery, which allows attacking, so the buffered press throws at the window's close --
+-- exactly what it did before this rule existed. A window is decided within its own few tenths of a second,
+-- and one that settles into a HELD Blocking drops the press, so this never becomes "fires when you let go".
 local function waitsOutGuard(model: Model, reason: string): boolean
 	if reason ~= "Guarding" then
 		return false
@@ -1674,7 +1676,8 @@ end
 -- combatant currently fights with -- WeaponVisualSystem and Main.server.lua's parry-clip hookup today,
 -- and the owner's client after them (notifyWeaponChanged). Fires on every real change -- a swap, a draw
 -- or sheathe (SetWeapon; nil for an empty hand) -- AND once per character bind, so a subscriber never has
--- to special-case what a fresh life starts holding. A re-select of the weapon already in hand fires nothing. Returns a disconnect
+-- to special-case what a fresh life starts holding. A re-select of the weapon already in hand fires
+-- nothing. Returns a disconnect
 -- function rather than a connection object, matching DamageSystem.OnApplied's own contract.
 function AttackRequestSystem.OnWeaponChanged(callback: (Model, Types.WeaponId?) -> ()): () -> ()
 	return weaponChangedListeners:Connect(callback)
