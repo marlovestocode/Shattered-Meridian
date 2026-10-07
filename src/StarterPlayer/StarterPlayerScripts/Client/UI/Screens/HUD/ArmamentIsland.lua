@@ -72,6 +72,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
 local Types = require(ReplicatedStorage.Shared.Types)
+local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local ChamferedSurface = require(script.Parent.Parent.Parent.ChamferedSurface)
@@ -487,6 +488,13 @@ function ArmamentIsland.Build(scope: Scope, state: ArmamentState): Island
 	local drawCaption = scope:Computed(function(use)
 		return if use(drawn) then "Sheathe" else "Draw"
 	end)
+	-- NO DRAW/SHEATHE FOR FISTS: they are always in hand when nothing else is drawn and cannot be put away
+	-- (WeaponInventorySystem's header, FISTS ARE ALWAYS IN HAND), so the key does nothing with them selected
+	-- -- and a key hint for a key that does nothing is worse than none (the Next hint's own rule below).
+	local canSheathe = scope:Computed(function(use)
+		local selectedId = use(selected)
+		return selectedId ~= nil and selectedId ~= WeaponRoster.FISTS_ID
+	end)
 
 	-- THE STRIP WINDOWS ONTO THE SELECTED WEAPON rather than always showing the first MAX_BEADS. A
 	-- fixed window would leave nothing lit the moment a player's selection walked past the sixth
@@ -668,7 +676,7 @@ function ArmamentIsland.Build(scope: Scope, state: ArmamentState): Island
 									AlignY = Enum.VerticalAlignment.Center,
 
 									Children = {
-										keyHint(scope, 1, "ToggleWeapon", drawCaption),
+										keyHint(scope, 1, "ToggleWeapon", drawCaption, canSheathe),
 										-- Hidden while there is nothing to cycle to, rather than
 										-- shown disabled: a key hint is an instruction, and an
 										-- instruction that does nothing is worse than none.
