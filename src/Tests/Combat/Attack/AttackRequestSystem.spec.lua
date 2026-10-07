@@ -30,6 +30,7 @@ local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageSystem = require(ServerScriptService.Server.Combat.Damage.DamageSystem)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local NetworkLatency = require(ServerScriptService.Server.Combat.NetworkLatency)
+local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
 local DefenseSystem = require(ServerScriptService.Server.Combat.Defense.DefenseSystem)
 local GuardMeter = require(ServerScriptService.Server.Combat.Defense.GuardMeter)
 local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.HitboxEngine)
@@ -58,6 +59,7 @@ local CHAIN_DELAY = AttackConstants.Sequence.ChainDelaySeconds
 -- own header documents for its Player-keyed wrappers -- so that coverage is deferred to
 -- Studio/live-server verification; there is no synthetic-dummy substitute for it here.
 local HOTBAR_MOVE = `default:{FIRST_WEAPON}:Heavy:1`
+local PARRY_ANIMATION = "rbxassetid://spec-attack-parry"
 
 type Dummy = {
 	Model: Model,
@@ -139,6 +141,7 @@ return function()
 	afterEach(function()
 		AttackRequestSystem.Reset()
 		DefenseSystem.Reset()
+		ParryWindows.Reset()
 		HitboxEngine.Reset()
 		AttackCatalog.Reset()
 		for _, model in spawned do
@@ -301,7 +304,6 @@ return function()
 			-- the player is choosing to cause" exists to prevent, reached through the flush instead.
 			local attacker = makeDummy("GuardedBuffer", Vector3.new(0, 5, 0))
 			local base = os.clock()
-			local gate = chainGateSeconds()
 			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
 
 			local seen = {}
@@ -320,13 +322,45 @@ return function()
 			expect(#seen).to.equal(1)
 			expect(seen[1].PressId).to.equal(3)
 			expect(seen[1].Reason).to.equal("Guarding")
+		end)
 
-			-- Releasing the guard inside the old buffer window throws nothing.
-			DefenseSystem.SetBlocking(attacker.Model, false, base + 0.04)
-			for frame = 3, math.ceil((gate + FRAME) / FRAME) do
-				step(base + frame * FRAME)
+		it("never throws a dropped press once that gate reopens inside the old buffer window", function()
+			-- The proof the drop matters: buffered against a short stun (transient), refused at flush by a
+			-- mount (not transient), and the mount let go of while the original buffer window is still open.
+			-- Kept waiting, the press would throw on the frame after the dismount.
+			local attacker = makeDummy("MountedBuffer", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			DamageSystem.ExtendHitstun(attacker.Model, base + 0.1, base)
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 4 }, false, base + 0.01)
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.01)).to.equal(true)
+
+			attacker.Humanoid:SetAttribute("Mounted", true)
+			step(base + 0.12)
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.12)).to.equal(false)
+
+			attacker.Humanoid:SetAttribute("Mounted", false)
+			local last = base + BUFFER - FRAME
+			for frame = 0, math.ceil((last - (base + 0.12)) / FRAME) do
+				step(base + 0.12 + frame * FRAME)
 			end
-			expect(SwingSequencer.GetStageIndex(attacker.Model, "Basic", base + gate + FRAME)).to.equal(1)
+			expect(SwingSequencer.GetStageIndex(attacker.Model, "Basic", last)).to.equal(0)
+		end)
+
+		it("keeps a press buffered through a stun parry's window, so a landed parry can counter", function()
+			-- The one guard that waits rather than drops (waitsOutGuard): a parry window is decided within its
+			-- own few tenths of a second, and the buffered M1 is the counter a landed stun parry earns.
+			local attacker = makeDummy("StunCounter", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			ParryWindows.Register(PARRY_ANIMATION, 0, 0.3)
+			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid, PARRY_ANIMATION)
+			DamageSystem.ExtendHitstun(attacker.Model, base + 0.1, base)
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic" }, false, base + 0.01)
+			-- Stunned, so the press arms at once (DefenseConstants.StunParry).
+			DefenseSystem.SetBlocking(attacker.Model, true, base + 0.02)
+			expect(DefenseSystem.GetState(attacker.Model)).to.equal("ParryWindow")
+
+			step(base + 0.11)
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.11)).to.equal(true)
 		end)
 
 		it("does not buffer a refusal the player is choosing to cause", function()
@@ -342,6 +376,49 @@ return function()
 			expect(accepted).to.equal(false)
 			expect(reason).to.equal("Guarding")
 			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.01)).to.equal(false)
+		end)
+	end)
+
+	describe("AttackRequestSystem -- weapon changes", function()
+		it("does nothing for a re-select of the weapon already in hand", function()
+			-- Y with a one-weapon inventory: no notify (the client would reset its string mirror while the
+			-- server's string carries on), no dropped press, and the string keeps its place.
+			local attacker = makeDummy("Reselect", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			local fired = 0
+			local disconnect = AttackRequestSystem.OnWeaponChanged(function()
+				fired += 1
+			end)
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic" }, false, base + 0.01)
+
+			expect(AttackRequestSystem.SetWeapon(attacker.Model, FIRST_WEAPON, base + 0.02)).to.equal(true)
+			expect(fired).to.equal(0)
+			expect(SwingSequencer.GetStageIndex(attacker.Model, "Basic", base + 0.02)).to.equal(1)
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.02)).to.equal(true)
+
+			-- A real change still notifies.
+			expect(AttackRequestSystem.SetWeapon(attacker.Model, SECOND_WEAPON, base + 0.03)).to.equal(true)
+			disconnect()
+			expect(fired).to.equal(1)
+		end)
+
+		it("seeds one template per ground stage, built exactly as the confirmation is", function()
+			local seed = AttackRequestSystem.PredictionSeedFor(FIRST_WEAPON)
+			local stages = SwingSequencer.StageMoveIds(FIRST_WEAPON)
+			expect(#seed).to.equal(#stages)
+			for index, template in seed do
+				local entry = AttackCatalog.Get(template.MoveId) :: any
+				expect(template.MoveId).to.equal(stages[index].MoveId)
+				expect(template.Kind).to.equal(stages[index].Kind)
+				expect(template.StageIndex).to.equal(stages[index].StageIndex)
+				expect(template.WindupSeconds).to.equal(entry.Definition.WindupSeconds)
+				expect(template.ActiveSeconds).to.equal(entry.Definition.ActiveSeconds)
+				expect(template.RecoverySeconds).to.equal(entry.Definition.RecoverySeconds)
+				expect(template.PlaybackSpeed).to.equal(entry.PlaybackSpeed)
+				expect(template.PressId).to.equal(nil)
+			end
+			expect(#AttackRequestSystem.PredictionSeedFor(nil)).to.equal(0)
 		end)
 	end)
 

@@ -200,11 +200,10 @@ end
 -- module for driving the inventory HUD and nothing else, and Roblox remotes support any number of
 -- independent listeners for free.
 --
--- THIS REMOTE, NOT AttackConstants' WeaponChanged, and the difference is not cosmetic: the combat
--- layer's WeaponChanged remote fires only from handleSwap (the swap key), NOT from
--- AttackRequestSystem.SetWeapon (draw/sheathe) and NOT from bindCharacter (spawn) -- so a client
--- listening to it would miss the two events that matter most here. Weapon_InventoryChanged is
--- re-pushed on every pickup/draw/sheathe/select and on every bind, which is the complete signal.
+-- THIS REMOTE, NOT AttackConstants' WeaponChanged. That one now fires on every change to what the
+-- strings come from (AttackRequestSystem.notifyWeaponChanged: swap, draw, sheathe, bind), but it carries
+-- only the weapon in hand -- setArmedWeapon also needs the inventory's own Drawn flag and Selected entry,
+-- which only Weapon_InventoryChanged has. It is re-pushed on every pickup/draw/sheathe/select and bind.
 local function onInventoryChanged(raw: unknown): ()
 	if typeof(raw) ~= "table" then
 		return

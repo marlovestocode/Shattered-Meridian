@@ -593,12 +593,9 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 		-- Only a player's own client applies a launch; a server-owned body already has it.
 		defenderFeedback.Knockback = if launchedPlayer then launch else nil
 		defenderFeedback.Push = if pushedDefender then defenderPush else nil
-		-- The stun STILL TO RUN as this leaves, not the contact's authored length: the stun was timed from the
-		-- contact (SampleTime), so a contact that waited out the rewind hold has already spent up to
-		-- Parry.RewindMaxSeconds of it, and a hit inside a longer stun ends with that one. Sending the length
-		-- had the defender's own mirror run long by both, which held their comeback swing back.
+		-- The stun STILL TO RUN as this leaves (DamageSystem.StunRemaining), not the contact's authored length.
 		defenderFeedback.HitstunSeconds = if result.HitstunSeconds > 0
-			then math.max((hitstunUntil[outcome.Defender] or 0) - os.clock(), 0)
+			then DamageSystem.StunRemaining(outcome.Defender, os.clock())
 			else nil
 		sendFeedback(outcome.Defender, defenderFeedback)
 	end
@@ -793,6 +790,17 @@ end
 -- latency refund (AttackConstants.Latency), which may not backdate a swing into a stun.
 function DamageSystem.HitstunUntil(model: Model): number
 	return hitstunUntil[model] or -math.huge
+end
+
+-- How much of `model`'s stun is still to run at `now`, 0 when none -- what the defender's Combat_Feedback
+-- carries as HitstunSeconds. The STUN STILL TO RUN, not the contact's authored length, for two reasons:
+-- the stun is timed from the contact (SampleTime), so a contact that waited out the rewind hold has already
+-- spent up to that hold's cap of it (Parry.RewindMaxSeconds on the ground, AirComboConstants.Parry.
+-- RewindMaxSeconds air-held); and a hit inside a longer stun ends with that one. Sending the length had the
+-- defender's own mirror run long by both, which held their comeback swing back.
+function DamageSystem.StunRemaining(model: Model, now: number): number
+	local until_ = hitstunUntil[model]
+	return if until_ then math.max(until_ - now, 0) else 0
 end
 
 function DamageSystem.IsHitstunned(model: Model, now: number): boolean

@@ -413,7 +413,8 @@ end
 -- THE PREDICTION SEED (AttackTypes.WeaponChangedPayload.Moves): one template per ground stage of the
 -- weapon now in hand. AttackInputClient only predicts a move it holds a server copy of, and before this
 -- it got that copy from the move's first confirmation -- so the first press of every stage of every
--- weapon, every session, waited a full round trip to show. Empty for an empty hand.
+-- weapon, every session, waited a full round trip to show. Empty for an empty hand. PUBLIC as
+-- AttackRequestSystem.PredictionSeedFor, for the spec.
 local function predictionSeedFor(weaponId: Types.WeaponId?): { AttackStartedPayload }
 	local seed: { AttackStartedPayload } = {}
 	if weaponId == nil then
@@ -1372,6 +1373,20 @@ end
 -- rememberRefused applies on arrival. Kept waiting, it would fire the moment that gate opened: a press buffered
 -- mid-swing, then the guard held (Guarding) or a vault started (ParkourAction), threw on release or on landing --
 -- the free swing out of a guard or a traversal that both gates exist to refuse.
+--
+-- ONE EXCEPTION, deliberately: a guard that is still only a PARRY WINDOW (Raising/ParryWindow). That is the
+-- stun parry's counter (DefenseConstants.StunParry): a stunned defender buffers M1, presses parry, and the
+-- buffered swing is the counter-hit the parry earns the moment it lands (DamageSystem.endHitstunOf frees
+-- them). A window is decided within its own few tenths of a second -- it lands, whiffs, or settles into a
+-- held Blocking, which DOES drop the press -- so waiting on it never turns into "fires when you let go".
+local function waitsOutGuard(model: Model, reason: string): boolean
+	if reason ~= "Guarding" then
+		return false
+	end
+	local state = DefenseSystem.GetState(model)
+	return state == "Raising" or state == "ParryWindow"
+end
+
 local function flushBuffers(now: number): ()
 	for model, entry in buffered do
 		if model.Parent == nil or now >= entry.ExpiresAt then
@@ -1382,8 +1397,11 @@ local function flushBuffers(now: number): ()
 		if accepted then
 			buffered[model] = nil
 			debugLog(AttackConstants.Debug.LogBuffer, "Buffered press flushed", { model = model.Name })
-		elseif not AttackConstants.Input.TransientRefusals[reason or "Busy"] then
-			dropBuffered(model, reason or "Busy")
+		else
+			local refusal = reason or "Busy"
+			if not AttackConstants.Input.TransientRefusals[refusal] and not waitsOutGuard(model, refusal) then
+				dropBuffered(model, refusal)
+			end
 		end
 	end
 end
@@ -1521,9 +1539,9 @@ local function bindCharacter(character: Model, humanoid: Humanoid): ()
 		return
 	end
 	combatantIds[character] = HitboxEngine.RegisterCombatant(character, rootPart, humanoid)
-	-- Reports the weapon a fresh life starts on (the roster's first, via SwingSequencer's own recordFor
-	-- default) through the same signal a later swap uses -- see notifyWeaponChanged's own header for
-	-- why this is a bind-time report rather than a separate "initial equip" path.
+	-- Reports the EMPTY hand a fresh life starts with (SwingSequencer's recordFor is empty-handed;
+	-- WeaponInventorySystem draws later, through SetWeapon) through the same signal a later change uses,
+	-- so the client's mirror and every subscriber start the life from nil rather than the last life's weapon.
 	notifyWeaponChanged(character, SwingSequencer.GetWeapon(character))
 end
 
@@ -1622,6 +1640,14 @@ end
 -- remember a second call. Returns whether the change was accepted -- false for an id the roster does
 -- not know (SwingSequencer.SetWeapon's own check), in which case nothing is notified either.
 function AttackRequestSystem.SetWeapon(model: Model, weaponId: Types.WeaponId?, now: number): boolean
+	-- NO CHANGE IS NOT A CHANGE. Re-selecting what is already in hand (Y with a one-weapon inventory) must
+	-- not drop a buffered press, re-equip the Tool, or -- worst -- tell the client, whose string mirror
+	-- resets on Attack_WeaponChanged while the server's string carries on (it would predict B1 where the
+	-- server throws B2, and hand Space back as a jump mid-launcher-window).
+	-- (The id in hand was roster-checked when it was set, so "accepted" is still the honest answer.)
+	if weaponId == SwingSequencer.GetWeapon(model) then
+		return true
+	end
 	if weaponId == nil then
 		SwingSequencer.ClearWeapon(model, now)
 		-- A swap abandons the in-progress string, so anything buffered against it is stale -- the same
@@ -1639,10 +1665,16 @@ function AttackRequestSystem.SetWeapon(model: Model, weaponId: Types.WeaponId?, 
 	return true
 end
 
--- This layer's weapon-swap signal, for anything downstream that wants to react to which weapon a
--- combatant currently fights with -- WeaponVisualSystem today. Fires on every accepted swap AND once
--- per character bind (spawn/respawn -- see bindCharacter), so a subscriber never has to special-case
--- what a fresh life starts holding separately from what a swap changes it to. Returns a disconnect
+-- The templates notifyWeaponChanged sends with a change to `weaponId` (predictionSeedFor). A pure query.
+function AttackRequestSystem.PredictionSeedFor(weaponId: Types.WeaponId?): { AttackStartedPayload }
+	return predictionSeedFor(weaponId)
+end
+
+-- This layer's weapon-change signal, for anything downstream that wants to react to which weapon a
+-- combatant currently fights with -- WeaponVisualSystem and Main.server.lua's parry-clip hookup today,
+-- and the owner's client after them (notifyWeaponChanged). Fires on every real change -- a swap, a draw
+-- or sheathe (SetWeapon; nil for an empty hand) -- AND once per character bind, so a subscriber never has
+-- to special-case what a fresh life starts holding. A re-select of the weapon already in hand fires nothing. Returns a disconnect
 -- function rather than a connection object, matching DamageSystem.OnApplied's own contract.
 function AttackRequestSystem.OnWeaponChanged(callback: (Model, Types.WeaponId?) -> ()): () -> ()
 	return weaponChangedListeners:Connect(callback)

@@ -453,9 +453,9 @@ end
 -- The engine's one output, for a swing's contact and a projectile's alike.
 --
 -- Every callback is pcall'd (CallbackList): a consumer that errors must not abort the remaining consumers,
--- and above all must not unwind out of the Heartbeat and stop the engine sampling for everyone. This is
--- the single point where foreign code runs inside the engine's loop, so it is the only place that needs
--- the guard.
+-- and above all must not unwind out of the Heartbeat and stop the engine sampling for everyone. One of
+-- the two points where foreign code runs inside the engine's loop -- flushProjectileEvents is the other,
+-- guarded the same way.
 local function emitHit(report: HitReport): ()
 	hitListeners:Fire(report)
 end

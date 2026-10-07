@@ -539,9 +539,16 @@ local bufferGeneration = 0
 -- refusal.
 local cancelRecoveredAt = -math.huge
 
--- The same count SwingSequencer probes the catalogue for. Every weapon is built from the one Baseline
--- move set (WeaponRoster), so the baseline's length IS every weapon's.
+-- How many stages each string of the weapon in hand has, from its prediction seed: the server's own probe
+-- (SwingSequencer.StageMoveIds), so a weapon whose string differs from the Baseline is mirrored exactly.
+-- nil until a seed arrives, and the Baseline length (what every weapon is built from today) stands in.
+local seededStageCounts: { [string]: number }? = nil
+
 local function stageCount(kind: AttackTypes.AttackKind): number
+	local seeded = seededStageCounts
+	if seeded then
+		return seeded[kind] or 0
+	end
 	local stages = (CombatConstants.Weapons.Baseline.Stages :: any)[kind]
 	return if typeof(stages) == "table" then #stages else 0
 end
@@ -942,13 +949,22 @@ local function onWeaponChanged(raw: unknown): ()
 	-- is predicted too (AttackTypes.WeaponChangedPayload.Moves). Later confirmations overwrite these.
 	local moves = payload.Moves
 	if typeof(moves) == "table" then
+		local counts: { [string]: number } = {}
 		for _, move in moves do
 			if isStartedPayload(move) then
 				confirmedByMoveId[move.MoveId] = move
+				if typeof(move.StageIndex) == "number" then
+					counts[move.Kind] = math.max(counts[move.Kind] or 0, move.StageIndex)
+				end
 			end
 		end
+		seededStageCounts = counts
+	else
+		seededStageCounts = nil
 	end
-	-- A swap resets the server's string (SwingSequencer.SetWeapon/SwapWeapon), so the mirror follows.
+	-- Every message is a server-side string reset, so the mirror always follows. ALWAYS, not only when the id
+	-- differs: the swap key resets the string even onto the same weapon (SwingSequencer.SwapWeapon with a
+	-- one-weapon roster), while a re-select that changes nothing is never sent (AttackRequestSystem.SetWeapon).
 	stringKind = nil
 	stringStage = 0
 	releaseJumpSuppression()

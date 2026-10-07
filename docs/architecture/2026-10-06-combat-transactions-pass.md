@@ -6,9 +6,13 @@ Scope: "find bugs, make combat transactions functionally faster, remove duplicat
 re-verified against `constants-split` source before it was changed.
 
 Not verified in play: the TestEZ suite needs Studio (`run-in-roblox`). selene and stylua pass on every touched
-file; a luau-lsp before/after diff shows no new type errors in them (net −176, almost all the pcall-loop
-noise the new `CallbackList` replaced). `CallbackList.spec` was executed under plain Luau; the combat specs
-were not run.
+file. A luau-lsp before/after diff (message level) shows no new error in any modified file; the new
+`CallbackList.lua` carries 54 lines of the two pre-existing repo-wide noise kinds (`LogFields?`, pcall's
+"only returns 1 value") that the 200 removed elsewhere were made of — net −146. `CallbackList.spec` was
+executed under plain Luau; the combat specs were not run.
+
+Reviewed by an independent agent on a 1–10 loop until it graded the work 8 or higher; the decisions it
+forced are recorded inline below.
 
 ## 1. Bugs fixed
 
@@ -20,6 +24,14 @@ weapon's clip, corrected a round trip later. The `AttackInputClient` header clai
 existed; `DefenseClient`'s header correctly said it did not. Fix: `notifyWeaponChanged` (the one function
 every change already goes through) now also tells the owner's client, and an empty hand is sent as nil.
 
+Follow-on, found in review: once the client hears every change, a *no-op* change mattered. Re-selecting the
+weapon already in hand (Y with only Fists) went through `SetWeapon` and notified, so the client reset its
+string mirror while the server's string carried on — B1 predicted where the server threw B2, and Space came
+back as a jump mid-launcher-window. `AttackRequestSystem.SetWeapon` now returns early for an unchanged weapon
+(no notify, no dropped press, no Tool re-equip). The client still resets on every message, deliberately: the
+swap key resets the server string even onto the same weapon, so a client-side "same id" guard would desync
+that path instead.
+
 **B2 — A buffered press survived a refusal that does not clear on its own.** `flushBuffers` re-throws each
 frame but only acted on success. A press buffered mid-swing (`Busy`), followed by holding block
 (`Guarding`) or a vault (`ParkourAction`), threw the moment that gate opened — within `BufferSeconds`
@@ -27,13 +39,20 @@ frame but only acted on success. A press buffered mid-swing (`Busy`), followed b
 a flush that refuses for a non-transient reason drops and answers the press, the rule `rememberRefused`
 already applies on arrival.
 
+Design decision (from review): one guard waits instead of dropping — a guard that is still only a parry
+window (`Raising`/`ParryWindow`, `waitsOutGuard`). That is the stun parry's counter: a stunned defender
+buffers M1, presses parry, and the buffered swing is the counter-hit a landed parry earns. A window resolves
+within tenths of a second (lands, whiffs, or settles into a held `Blocking`, which does drop), so it never
+becomes "fires when you let go". Pinned by a spec.
+
 **B3 — The defender's stun mirror ran long.** `Combat_Feedback.HitstunSeconds` was the contact's authored
 length, and the client started it on arrival. But the server stun is timed from the contact, a contact
 that waited out the rewind hold has already spent up to 0.12s of it, and the trip spends about half a
 round trip more. So the client thought it was stunned for up to ~0.12s + one-way latency after the server
-had freed it — its comeback swing and guard animation were held back by that much. Fix: the server sends
-the stun *still to run* at send time (which also covers a hit inside a longer stun), and the client takes
-its one-way trip off.
+had freed it — its comeback swing and guard animation were held back by that much (0.20s rather than 0.12s
+for an air-held defender, whose rewind cap is longer). Fix: the server sends the stun *still to run* at send
+time (`DamageSystem.StunRemaining`, which also covers a hit inside a longer stun), and the client takes its
+one-way trip off.
 
 **B4 (type honesty)** — `AttackRequestSystem.OnWeaponChanged` advertised a non-optional weapon but has always
 passed nil on sheathe; `AttackStartedPayload.WeaponId` likewise for an empty-handed art. Both subscribers
@@ -46,27 +65,35 @@ and it got that copy from the move's first confirmation. So the first press of *
 weapon, every session*, waited a round trip. `Attack_WeaponChanged` now carries `Moves`: one
 `Attack_Started` template per ground stage of the weapon in hand, built by the same `startedPayloadOf` the
 real confirmation uses. Cost: one message per weapon change (≈5 small tables). Later confirmations overwrite
-the templates, so a clip read mid-session self-corrects after its first throw.
+the templates, so a clip read mid-session self-corrects after its first throw. The client's stage counts now
+come from the seed too, instead of a second copy of the Baseline length.
 
 **T2 — No rewind hold where no press can matter.** `rewindHoldFor` held every Clean contact on a stunned
 defender (the stun parry made a press meaningful). But a stunned body's guard does nothing, so only a parry
 can answer — and a defender in their whiff lockout (the one who mashed parry through the string) has none.
 Those contacts now apply immediately. In a linked string against a laggy masher, each hit landed up to
-`Parry.RewindMaxSeconds` late before. Correctness argument: every rewound press time is ≤ `now`, and the
-lockout only ever lengthens, so refusing at `now` refuses at all of them.
+`Parry.RewindMaxSeconds` late before. Correctness: a press rewound to ≤ `now` meets a lockout at least as
+long (only ever raised, through `math.max`); a press rewound past `now` (a release arriving mid-hold) opens
+after the contact and cannot cover it. One behaviour change: a stun that ends inside the hold no longer lets
+a rewound plain block mitigate the contact — that press was made while stunned, and the case is unreachable
+inside a linked string (`LinkMarginSeconds > RewindMaxSeconds`).
 
 Per-hit and per-swing message counts are unchanged from the feel pass's table.
 
 ## 3. Consolidation
 
-- **`Shared/CallbackList.lua`** replaces ten hand-rolled subscriber lists: DamageSystem.OnApplied,
+- **`Shared/CallbackList.lua`** replaces fourteen hand-rolled subscriber lists: DamageSystem.OnApplied,
   DefenseSystem.OnResolved, HitboxEngine.OnHit/OnProjectileEvents, DomainSystem.OnPhaseChanged, the attack
-  layer's OnPressRefused/OnWeaponChanged/OnSwingAccepted, and AttackInputClient's OnAttackStarted/
-  OnSwingCancelled/OnSlotCooldown. The copies shared a latent bug: a disconnect was a `table.remove` from
+  layer's OnPressRefused/OnWeaponChanged/OnSwingAccepted, AttackInputClient's OnAttackStarted/
+  OnSwingCancelled/OnSlotCooldown, LocalCombatState's OnReleased/OnSwingCutRequested and LockOnController's
+  OnTargetChanged. The copies shared a latent bug: a disconnect was a `table.remove` from
   the array being iterated, so a subscriber that unsubscribed during a dispatch made that dispatch skip the
   next one. CallbackList is copy-on-write (Fire allocates nothing — OnHit fires per contact) and skips a
-  subscriber disconnected mid-dispatch. Two client lists were not pcall'd before; now one FX listener
-  erroring cannot stop the others. About ten non-combat copies remain (CLAUDE.md lists where).
+  subscriber disconnected mid-dispatch. Four client lists were not pcall'd before (including
+  `RequestSwingCut`, on the parkour evade path); now one listener erroring cannot stop the others.
+  **Log change:** HitboxEngine's two subscriber errors used to log at warn as "OnHit callback errored"
+  (`error` field); every list now logs at error as "A <Module.OnX> consumer errored" (`errorMessage` field).
+  The remaining copies are all outside combat (CLAUDE.md lists them).
 - **`startedPayloadOf`** — one builder for the confirmation and the prediction templates.
 - **`SwingSequencer.StageMoveIds`** — the seed's ids from the same `stageMoveId`/`stageCountFor` Resolve uses,
   not a third copy of the id scheme.
@@ -78,11 +105,14 @@ Per-hit and per-swing message counts are unchanged from the feel pass's table.
 - `CallbackList.spec` — order, disconnect, self/cross disconnect mid-dispatch, late connect, error isolation, Clear.
 - `AttackRequestSystem.spec` — a buffered press refused as Guarding at flush is dropped, answered, and never thrown.
 - `DefenseSystem.spec` — no hold on a stunned, locked-out defender; still a hold on a stunned one who could parry.
-- `SwingSequencer.spec` — `StageMoveIds` names exactly the stages Resolve throws.
+- `SwingSequencer.spec` — `StageMoveIds` names exactly the stages Resolve throws (walked through Resolve).
+- `AttackRequestSystem.spec` — a dropped press is never thrown when its gate reopens inside the old buffer
+  window; a press waits through a stun parry's window; a re-select changes nothing; the seed matches the catalogue.
+- `DamageSystem.spec` — `StunRemaining` is measured from now and follows the longer of two stuns.
 
 ## Still open
 
 - Run the suite in Studio before trusting any of this.
-- The ten non-combat subscriber lists.
+- The non-combat subscriber lists.
 - The client's prediction timeout uses `2 * GetNetworkPing()`, which is a round trip already — harmless (it is
   only the backstop now that refusals are answered) but twice what it needs.

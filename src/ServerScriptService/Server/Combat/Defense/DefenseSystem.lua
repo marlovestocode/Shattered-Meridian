@@ -1083,10 +1083,14 @@ end
 --     comes up as a plain block later (SetBlocking), never judged against this contact;
 --   * a HELD body (stunned on the ground, or air-held) that cannot arm a parry: its guard does nothing
 --     (parriesThroughStun), so the parry is the only answer, and a body in its whiff lockout -- the
---     defender who mashed parry through the string -- has none. Every rewound press time a held contact
---     could be judged at is at or before `now`, and the lockout only ever lengthens (a whiff extends it, a
---     release moves the MinUnguarded clock later), so refusing at `now` refuses at all of them. This is
---     the common case inside a linked M1 string, and holding it delayed every hit by up to the cap.
+--     defender who mashed parry through the string -- has none. Why refusing at `now` is enough: a press
+--     rewound to at or before `now` meets a lockout that is at least as long then (it is only ever raised,
+--     through math.max, and the MinUnguarded clock only moves later); a press rewound PAST `now` (a release
+--     that arrives during the hold) opens its window after SampleTime and cannot cover the contact at all.
+--     One case this changes: a stun that ENDS inside the hold no longer lets a rewound plain block turn the
+--     contact Blocked -- correct, since that press was made while stunned, and unreachable inside a linked
+--     string anyway (DamageConstants.Hitstun.LinkMarginSeconds > Parry.RewindMaxSeconds). This is the
+--     common case inside a linked M1 string, and holding it delayed every hit by up to the cap.
 -- Also 0 for a bot or a dummy (rewindSecondsFor), which has no round trip.
 local function rewindHoldFor(contact: PendingContact, now: number): number
 	if contact.Result.Kind ~= "Clean" then

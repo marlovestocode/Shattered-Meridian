@@ -42,6 +42,7 @@ local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local LockOnConstants = require(ReplicatedStorage.Shared.Combat.LockOnConstants)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
@@ -73,7 +74,8 @@ local marker: LockOnMarkerModule.LockOnMarkerHandle? = nil
 local viewportScale: Fusion.UsedAs<number> = 1
 local started = false
 
-local targetChangedListeners: { (Model?) -> () } = {}
+local targetChangedListeners: CallbackList.CallbackList<Model?> =
+	CallbackList.New(logger, "LockOnController.OnTargetChanged")
 
 -- One RaycastParams for the per-frame line-of-sight ray, with its exclude list rewritten in place.
 local sightParams = RaycastParams.new()
@@ -94,12 +96,7 @@ local function setTarget(newTarget: Model?): ()
 		handle.SetVisible(false)
 		handle.SetGuard(nil)
 	end
-	for _, listener in targetChangedListeners do
-		local ok, err = pcall(listener, newTarget)
-		if not ok then
-			logger:error("A LockOnController.OnTargetChanged listener errored", { errorMessage = tostring(err) })
-		end
-	end
+	targetChangedListeners:Fire(newTarget)
 	logger:debug(if newTarget then "Locked on" else "Lock released", {
 		target = if newTarget then newTarget.Name else nil,
 	})
@@ -327,13 +324,7 @@ end
 
 -- Called with the new target (or nil) on every change. Returns a disconnect function.
 function LockOnController.OnTargetChanged(listener: (Model?) -> ()): () -> ()
-	table.insert(targetChangedListeners, listener)
-	return function()
-		local index = table.find(targetChangedListeners, listener)
-		if index then
-			table.remove(targetChangedListeners, index)
-		end
-	end
+	return targetChangedListeners:Connect(listener)
 end
 
 -- `markerHandle` and `scale` are UIHandles.LockOnMarker and UIHandles.ViewportScale.

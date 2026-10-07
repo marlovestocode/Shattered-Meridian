@@ -356,8 +356,9 @@ boot("AttackRequestSystem", AttackRequestSystem)
 --     which clip to play -- two callers of one function rather than the server trusting a client-sent
 --     id, so what the player SEES and what the server TIMES cannot drift apart.
 --
---     The signal fires on every accepted swap AND once per character bind (see notifyWeaponChanged's
---     own header), so a fresh life's weapon is covered without a separate spawn hookup here. A nil
+--     The signal fires on every real weapon change -- swap, draw, sheathe -- AND once per character bind
+--     (see AttackRequestSystem.OnWeaponChanged), so a fresh life's weapon is covered without a separate
+--     spawn hookup here. A nil
 --     weaponId (sheathed) resolves to the shared baseline, which is what an unarmed player parries
 --     with. SetParryAnimation ignores an unregistered model, so a bind that beats DefenseSystem's own
 --     PlayerLifecycle registration costs nothing -- RegisterCombatant seeds the default for the new

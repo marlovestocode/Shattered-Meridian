@@ -152,6 +152,16 @@ return function()
 			end
 			expect(seen.Basic).to.equal(firstWeaponBasicCount())
 			expect((seen.Heavy or 0) > 0).to.equal(true)
+
+			-- And they ARE the moves Resolve throws: walk the real Basic string stage by stage.
+			local basicIndex = 0
+			for _, stage in stages do
+				if stage.Kind == "Basic" then
+					basicIndex += 1
+					local attacker = makeAttacker(`SeedWalk{basicIndex}`)
+					expect(throwBasic(attacker, basicIndex, 1).MoveId).to.equal(stage.MoveId)
+				end
+			end
 		end)
 	end)
 

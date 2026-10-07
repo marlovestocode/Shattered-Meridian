@@ -6,7 +6,7 @@
 	live subscriber in connection order, each inside its own pcall, and an error is logged rather than
 	thrown. The shape every combat extension point already had (DamageSystem.OnApplied,
 	DefenseSystem.OnResolved, HitboxEngine.OnHit/OnProjectileEvents, DomainSystem.OnPhaseChanged, the
-	attack layer's three signals and AttackInputClient's two), written out by hand at each one: an
+	attack layer's three signals, AttackInputClient's three, LocalCombatState's two and LockOnController's one), written out by hand at each one: an
 	array, a table.insert, a table.find + table.remove disconnect, and a pcall-and-log loop.
 
 	WHY IT EXISTS: the hand-written copies shared one latent bug. A disconnect is a table.remove from

@@ -277,6 +277,21 @@ return function()
 	end)
 
 	describe("DamageSystem -- hitstun", function()
+		it("reports the stun still to run, which is what the defender's feedback carries", function()
+			-- StunRemaining is HitstunSeconds on the Defender copy: measured from now, not the contact's length,
+			-- and the longer of two overlapping stuns.
+			local base = os.clock()
+			local defender = makeDummy("Stunned", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			expect(DamageSystem.StunRemaining(defender.Model, base)).to.equal(0)
+
+			DamageSystem.ExtendHitstun(defender.Model, base + 1, base)
+			expect(DamageSystem.StunRemaining(defender.Model, base + 0.12)).to.be.near(0.88, 1e-6)
+			-- A shorter stun inside it changes nothing; the remainder is still the longer one's.
+			DamageSystem.ExtendHitstun(defender.Model, base + 0.5, base + 0.2)
+			expect(DamageSystem.StunRemaining(defender.Model, base + 0.2)).to.be.near(0.8, 1e-6)
+			expect(DamageSystem.StunRemaining(defender.Model, base + 2)).to.equal(0)
+		end)
+
 		it("gates the defender out of attacking", function()
 			local base = os.clock()
 			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
