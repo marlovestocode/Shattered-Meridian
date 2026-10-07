@@ -1541,9 +1541,10 @@ local function bindCharacter(character: Model, humanoid: Humanoid): ()
 		return
 	end
 	combatantIds[character] = HitboxEngine.RegisterCombatant(character, rootPart, humanoid)
-	-- Reports the EMPTY hand a fresh life starts with (SwingSequencer's recordFor is empty-handed;
-	-- WeaponInventorySystem draws later, through SetWeapon) through the same signal a later change uses,
-	-- so the client's mirror and every subscriber start the life from nil rather than the last life's weapon.
+	-- Reports what a fresh life's record holds through the same signal a later change uses, so the client's
+	-- mirror and every subscriber start the life from it rather than the last life's weapon. SwingSequencer's
+	-- recordFor is empty-handed; for a player, WeaponInventorySystem's own bind puts the Fists in hand through
+	-- SetWeapon (its header, FISTS ARE ALWAYS IN HAND), before or after this -- either order ends on Fists.
 	notifyWeaponChanged(character, SwingSequencer.GetWeapon(character))
 end
 

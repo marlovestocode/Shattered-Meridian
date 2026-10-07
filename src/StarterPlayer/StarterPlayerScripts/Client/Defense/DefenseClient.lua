@@ -200,10 +200,9 @@ end
 -- module for driving the inventory HUD and nothing else, and Roblox remotes support any number of
 -- independent listeners for free.
 --
--- THIS REMOTE, NOT AttackConstants' WeaponChanged. That one now fires on every change to what the
--- strings come from (AttackRequestSystem.notifyWeaponChanged: swap, draw, sheathe, bind), but it carries
--- only the weapon in hand -- setArmedWeapon also needs the inventory's own Drawn flag and Selected entry,
--- which only Weapon_InventoryChanged has. It is re-pushed on every pickup/draw/sheathe/select and bind.
+-- THIS REMOTE, NOT AttackConstants' WeaponChanged, so the guard and CombatAnimator's idle stance arm from one
+-- push (InHand: Fists whenever nothing else is drawn). Weapon_InventoryChanged is re-pushed on every
+-- pickup/draw/sheathe/select and bind; an older server's payload without InHand falls back to Selected/Drawn.
 local function onInventoryChanged(raw: unknown): ()
 	if typeof(raw) ~= "table" then
 		return
@@ -212,7 +211,13 @@ local function onInventoryChanged(raw: unknown): ()
 	if typeof(payload.Drawn) ~= "boolean" then
 		return
 	end
-	setArmedWeapon(payload.Selected, payload.Drawn)
+	-- InHand is what the server's parry hookup times against (Fists whenever nothing else is drawn); an older
+	-- server without it falls back to Selected/Drawn.
+	if typeof(payload.InHand) == "string" then
+		setArmedWeapon(payload.InHand, true)
+	else
+		setArmedWeapon(payload.Selected, payload.Drawn)
+	end
 end
 
 -- Input --------------------------------------------------------------------------------------------

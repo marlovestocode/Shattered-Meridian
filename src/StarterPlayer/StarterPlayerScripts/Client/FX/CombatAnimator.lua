@@ -647,7 +647,12 @@ local function onInventoryChanged(raw: unknown): ()
 	if typeof(payload.Drawn) ~= "boolean" then
 		return
 	end
-	CombatAnimator.SetArmedWeapon(payload.Selected, payload.Drawn)
+	-- What is actually in hand (Fists whenever nothing else is drawn), so the idle stance matches it.
+	if typeof(payload.InHand) == "string" then
+		CombatAnimator.SetArmedWeapon(payload.InHand, true)
+	else
+		CombatAnimator.SetArmedWeapon(payload.Selected, payload.Drawn)
+	end
 end
 
 -- DEFERRED, NOT CONNECTED INLINE AT MODULE LOAD -- NetworkBridge.GetRemoteEvent WaitForChild's up to

@@ -87,18 +87,21 @@ return function()
 	end)
 
 	describe("WeaponInventorySystem -- a fresh player", function()
-		it("owns their fists and nothing else, with nothing drawn", function()
+		it("owns their fists and nothing else, already in hand", function()
+			-- Fists are always up when nothing else is drawn: nothing to equip first.
 			local player = fakePlayer()
 			local owned = WeaponInventorySystem.GetOwned(player)
 			expect(#owned).to.equal(1)
 			expect(owned[1]).to.equal(FISTS)
-			expect(WeaponInventorySystem.IsDrawn(player)).to.equal(false)
+			expect(WeaponInventorySystem.InHand(player)).to.equal(FISTS)
+			expect(WeaponInventorySystem.IsDrawn(player)).to.equal(true)
 		end)
 
-		it("can raise bare hands with nothing picked up", function()
-			local player = fakePlayer()
+		it("treats the draw key as a no-op with only fists, which cannot be sheathed", function()
+			local player = fakePlayer(true)
 			expect(WeaponInventorySystem.ToggleDraw(player)).to.equal(true)
-			expect(WeaponInventorySystem.IsDrawn(player)).to.equal(true)
+			expect(WeaponInventorySystem.ToggleDraw(player)).to.equal(true)
+			expect(WeaponInventorySystem.InHand(player)).to.equal(FISTS)
 		end)
 	end)
 
@@ -151,6 +154,8 @@ return function()
 
 			expect(WeaponInventorySystem.ToggleDraw(player)).to.equal(false)
 			expect(WeaponInventorySystem.IsDrawn(player)).to.equal(false)
+			-- Sheathed is fists up, not an empty hand.
+			expect(WeaponInventorySystem.InHand(player)).to.equal(FISTS)
 		end)
 
 		it("keeps the selection across a sheath, so re-drawing returns the same weapon", function()
@@ -204,19 +209,17 @@ return function()
 			expect(player.Character:FindFirstChild(TOOL_NAME)).to.equal(nil)
 		end)
 
-		it("arms the sequencer on draw and empties it on sheathe, so swings follow the sword", function()
+		it("arms the sequencer on draw and puts the fists back on sheathe, so swings follow the hand", function()
 			local player = fakePlayer(true)
 			WeaponInventorySystem.Pickup(player, FIRST_WEAPON)
-
-			-- Sheathed: nothing in hand, so nothing resolves -- this is what makes "you cannot swing a
-			-- weapon you put away" need no gate of its own.
-			expect(SwingSequencer.GetWeapon(player.Character)).to.equal(nil)
 
 			WeaponInventorySystem.ToggleDraw(player)
 			expect(SwingSequencer.GetWeapon(player.Character)).to.equal(FIRST_WEAPON)
 
+			-- Sheathed: the sword is away (no Tool, no sword string), and the fists are up -- the sequencer
+			-- resolves Fists stages, never nothing.
 			WeaponInventorySystem.ToggleDraw(player)
-			expect(SwingSequencer.GetWeapon(player.Character)).to.equal(nil)
+			expect(SwingSequencer.GetWeapon(player.Character)).to.equal(FISTS)
 		end)
 
 		it("swaps the held Tool when selection changes while drawn", function()

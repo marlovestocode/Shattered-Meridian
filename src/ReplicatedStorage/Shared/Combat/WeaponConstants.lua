@@ -23,8 +23,11 @@ export type InventoryPayload = {
 	Owned: { string },
 	-- Which of them the draw key will pull out. nil for an empty inventory.
 	Selected: string?,
-	-- Whether Selected is in hand right now.
+	-- Whether Selected is in hand right now (always true for Fists, which are never sheathed).
 	Drawn: boolean,
+	-- What is actually in hand: Selected while drawn, Fists otherwise (WeaponInventorySystem's header). What
+	-- the clients arm their parry clip and idle stance from, so they match what the server swings and times.
+	InHand: string?,
 }
 
 WeaponConstants.Prompt = {
