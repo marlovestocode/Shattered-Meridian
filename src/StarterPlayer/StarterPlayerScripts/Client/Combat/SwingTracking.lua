@@ -145,7 +145,11 @@ local function onAttackStarted(payload: AttackStartedPayload): ()
 	currentHumanoid.AutoRotate = false
 end
 
-local function onHeartbeat(deltaTime: number): ()
+-- Runs on PreSimulation, BEFORE this frame's physics step, not on Heartbeat after it. A Heartbeat write
+-- overwrote the pose physics had just produced and only reached the simulation a frame later, so the turn
+-- trailed the input by a frame and fought the Humanoid's own rotation for one step every frame of the
+-- windup. Written here, the turn is simulated (and replicated) in the same frame it was decided.
+local function onPreSimulation(deltaTime: number): ()
 	local current = window
 	if current == nil then
 		return
@@ -213,7 +217,7 @@ function SwingTracking.Start(): ()
 	AttackInputClient.OnSwingCancelled(function()
 		finish()
 	end)
-	RunService.Heartbeat:Connect(onHeartbeat)
+	RunService.PreSimulation:Connect(onPreSimulation)
 
 	PlayerLifecycle.BindLocalCharacter({
 		Scope = "SwingTracking",
