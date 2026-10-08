@@ -31,6 +31,15 @@
 	   hand; a life whose Humanoid never arrives inside Constants.Network.WaitForChildTimeoutSeconds
 	   is warned about once, under the caller's own logger scope, and skipped.
 
+	   THE LOCAL PLAYER'S ANIMATOR IS WAITED FOR TOO. The Humanoid arriving does not mean the Animator
+	   under it has: it replicates a beat later, and AnimatorUtil.GetOrCreateAnimator -- which every
+	   animation module calls on bind -- answers "none yet" by creating one ON THE CLIENT. That orphan sits
+	   beside the real one when it lands, the tracks every module loaded onto it never render, and the
+	   character stays unanimated until the next respawn rebinds against the right one -- "my animations
+	   disappear after I die, until I die again". So the client binder holds handlers back until the
+	   server's Animator is there (or the same timeout passes, after which creating one is correct: a rig
+	   the server never gave one). Server binders do not wait: there the Animator is made by the engine.
+
 	2. NEVER BIND ON THE BOOT THREAD. Waiting for the Humanoid YIELDS, so the already-present-
 	   character call must be task.spawn'd -- calling it inline on Main.client.lua's synchronous boot
 	   thread makes every module booted afterwards wait behind one character's assembly, up to the
@@ -58,6 +67,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
+local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
@@ -92,9 +102,14 @@ export type PlayerHandlers = {
 -- Resolves `character`'s Humanoid, waiting out the replication race in detail 1 above. Returns nil
 -- (having warned under the caller's scope) if it never arrives -- the caller skips the life rather
 -- than binding half of it.
-local function resolveHumanoid(scope: string, character: Model): Humanoid?
+local function resolveHumanoid(scope: string, character: Model, awaitAnimator: boolean?): Humanoid?
 	local humanoid = CharacterUtil.AwaitHumanoid(character)
 	if humanoid then
+		if awaitAnimator and humanoid:FindFirstChildOfClass("Animator") == nil then
+			-- The result is deliberately not checked: on a timeout the modules' own find-or-create is
+			-- the right fallback, and a rig that never gets an Animator must not be left unbound.
+			humanoid:WaitForChild("Animator", Constants.Network.WaitForChildTimeoutSeconds)
+		end
 		return humanoid
 	end
 	Logger.scope(scope):warn("No Humanoid resolved -- not bound this life", { character = character.Name })
@@ -117,7 +132,7 @@ function PlayerLifecycle.BindLocalCharacter(handlers: LocalCharacterHandlers): T
 		-- are already meaningless, and a Humanoid that never arrives must not leave them live.
 		life:Clean()
 
-		local humanoid = resolveHumanoid(handlers.Scope, character)
+		local humanoid = resolveHumanoid(handlers.Scope, character, true)
 		if not humanoid then
 			return
 		end

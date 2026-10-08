@@ -249,24 +249,31 @@ end
 local function publish(player: Player, now: number): ()
 	local inCombat = engagements[player] ~= nil
 
-	if ChangeNotifier.Update(inCombatNotifier, player, inCombat) then
-		-- THE nil-Character GUARD IS LOAD-BEARING, not defensive habit. CharacterUtil.HumanoidOf takes
-		-- a Model, not a Model?, and indexes it immediately -- so handing it a nil Character throws.
-		-- Player.Character IS legitimately nil for a real stretch of a normal session: between death
-		-- and respawn, and before the first character loads. That window overlaps this call almost
-		-- exactly, because the most common way to stop being in combat is to be killed, and the
-		-- expiry edge lands five seconds later with the body already gone. Unguarded, that threw out
-		-- of Step and took the rest of the Heartbeat's engagement sweep with it.
-		--
-		-- Nothing is lost by skipping the write: the Attribute lives on a Humanoid that no longer
-		-- exists, and the fresh character arrives without it, which is the same false this was trying
-		-- to write. The notifier has already recorded the edge, so the next real transition still
-		-- publishes correctly.
-		local character = player.Character
-		local humanoid = if character then CharacterUtil.HumanoidOf(character) else nil
-		if humanoid then
-			humanoid:SetAttribute(AttributeConstants.InCombat, inCombat)
-		end
+	local edge = ChangeNotifier.Update(inCombatNotifier, player, inCombat)
+	-- THE nil-Character GUARD IS LOAD-BEARING, not defensive habit. CharacterUtil.HumanoidOf takes
+	-- a Model, not a Model?, and indexes it immediately -- so handing it a nil Character throws.
+	-- Player.Character IS legitimately nil for a real stretch of a normal session: between death
+	-- and respawn, and before the first character loads. That window overlaps this call almost
+	-- exactly, because the most common way to stop being in combat is to be killed, and the
+	-- expiry edge lands five seconds later with the body already gone. Unguarded, that threw out
+	-- of Step and took the rest of the Heartbeat's engagement sweep with it.
+	--
+	-- Nothing is lost by skipping the write: the Attribute lives on a Humanoid that no longer
+	-- exists, and the fresh character arrives without it, which is the same false this was trying
+	-- to write. The notifier has already recorded the edge, so the next real transition still
+	-- publishes correctly.
+	local character = player.Character
+	local humanoid = if character then CharacterUtil.HumanoidOf(character) else nil
+	-- WRITTEN ON THE EDGE, AND ALSO WHENEVER THE HUMANOID DISAGREES WITH THE TAG. The edge alone is a
+	-- one-shot: if it lands on a Humanoid that is then replaced, or while the old body is still the
+	-- Character, the notifier has recorded "true" and nothing ever writes it again -- the HUD (which is
+	-- fed by the remote below, every push) says IN COMBAT while parkour, which reads only this Attribute,
+	-- refuses the evade for the rest of the fight. publish runs on every contact and every flush, so
+	-- reconciling here heals that within one exchange. It writes only on a MISMATCH, so a body that is
+	-- already right costs one read and fires no AttributeChanged. An unset Attribute reads as false, which
+	-- is why "not in combat, never written" is not a mismatch.
+	if humanoid and (edge or (humanoid:GetAttribute(AttributeConstants.InCombat) == true) ~= inCombat) then
+		humanoid:SetAttribute(AttributeConstants.InCombat, inCombat)
 	end
 
 	local remote = changedRemote

@@ -1062,6 +1062,14 @@ function AnimationManager.Bind(self: AnimationManagerInstance, character: Model)
 		humanoid.HealthChanged:Connect(guarded(function(health: number)
 			if health <= 0 then
 				markDead(self)
+			elseif self.phase == "Dead" and humanoid:GetState() ~= Enum.HumanoidStateType.Dead then
+				-- A rig that read as dead by Health alone (bound while the property had not replicated yet,
+				-- or a Health write that dipped to 0 and came back) and was never in the Dead STATE is
+				-- alive. Without this the manager refused every claim until the next Bind -- which is the
+				-- next death -- so the character stood unanimated for a whole life. A genuinely dead rig is
+				-- in the Dead state and never takes this branch.
+				self.phase = "Live"
+				logger:debug("Rig is alive again -- claims accepted", { rig = self.name })
 			end
 		end))
 	)

@@ -37,6 +37,7 @@
 	write to the character (ParkourMotor), or any validation (the server re-checks everything).
 ]]
 
+local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
@@ -609,6 +610,13 @@ function ParkourController.BindCharacter(nextCharacter: Model): ()
 	local rootInstance = CharacterUtil.AwaitRoot(nextCharacter)
 	if not rootInstance then
 		logger:warn("BindCharacter: no HumanoidRootPart")
+		return
+	end
+	-- The two waits above yield, and a fast respawn inside them makes this the PREVIOUS body. Binding it
+	-- would point `humanoid` at a corpse for the whole next life, and every Attribute this controller reads
+	-- off it -- InCombat above all -- would read as unset: the evade refused, in the middle of a fight the
+	-- HUD says you are in.
+	if Players.LocalPlayer.Character ~= nextCharacter then
 		return
 	end
 
