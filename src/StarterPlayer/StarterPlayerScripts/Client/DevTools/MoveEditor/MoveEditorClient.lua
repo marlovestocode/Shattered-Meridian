@@ -53,6 +53,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
+local FeedbackBatch = require(ReplicatedStorage.Shared.Damage.FeedbackBatch)
 local Lazy = require(ReplicatedStorage.Shared.Lazy)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local MoveEditorTypes = require(ReplicatedStorage.Shared.Authoring.MoveEditorTypes)
@@ -677,23 +678,25 @@ local function startEditor(
 
 	NetworkBridge.GetRemoteEvent(DamageConstants.Network.RemoteNames.Feedback).OnClientEvent
 		:Connect(function(raw: unknown)
-			local pending = lastTest
-			if not pending or typeof(raw) ~= "table" or os.clock() - pending.At > TEST_REPORT_WINDOW_SECONDS then
-				return
-			end
-			local feedback = raw :: DamageTypes.CombatFeedback
-			if feedback.Role ~= "Attacker" or feedback.MoveId ~= pending.MoveId then
-				return
-			end
-			logHit(feedback)
-			handle.StatusText:set(
-				string.format(
-					"Landed: %s -- %.0f damage, %.0f guard",
-					tostring(feedback.Kind),
-					feedback.Damage,
-					feedback.GuardDrain
+			-- A batch per frame (Shared/Damage/FeedbackBatch.lua); each entry is judged on its own.
+			for _, feedback in FeedbackBatch.Unpack(raw) do
+				local pending = lastTest
+				if not pending or os.clock() - pending.At > TEST_REPORT_WINDOW_SECONDS then
+					return
+				end
+				if feedback.Role ~= "Attacker" or feedback.MoveId ~= pending.MoveId then
+					continue
+				end
+				logHit(feedback)
+				handle.StatusText:set(
+					string.format(
+						"Landed: %s -- %.0f damage, %.0f guard",
+						tostring(feedback.Kind),
+						feedback.Damage,
+						feedback.GuardDrain
+					)
 				)
-			)
+			end
 		end)
 
 	-- Hotbar -------------------------------------------------------------------------------------------

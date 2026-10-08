@@ -112,6 +112,7 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
+local FeedbackBatch = require(ReplicatedStorage.Shared.Damage.FeedbackBatch)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
@@ -658,8 +659,14 @@ function CombatFeedbackClient.Start(feedbackHandle: Handle): ()
 	started = true
 	handle = feedbackHandle
 
+	-- One batch per frame (Shared/Damage/FeedbackBatch.lua), handled entry by entry in the order the server
+	-- resolved them -- each exactly as a separate event used to be.
 	local remote = NetworkBridge.GetRemoteEvent(DamageConstants.Network.RemoteNames.Feedback)
-	remote.OnClientEvent:Connect(onFeedback)
+	remote.OnClientEvent:Connect(function(raw: unknown)
+		for _, entry in FeedbackBatch.Unpack(raw) do
+			onFeedback(entry)
+		end
+	end)
 
 	logger:info("CombatFeedbackClient started")
 end

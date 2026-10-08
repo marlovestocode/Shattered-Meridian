@@ -175,16 +175,42 @@ end
 -- Tells one participant what just happened. Silently does nothing for a bot or a dummy, which have no
 -- player to tell -- the same "not every combatant is a Player" tolerance every other module in this
 -- stack keeps.
+--
+-- QUEUED, NOT SENT (2026-10-08, Shared/Damage/FeedbackBatch.lua). Each player's feedback for the frame is
+-- collected here in resolution order and leaves as ONE Combat_Feedback batch when DamageSystem.Step flushes
+-- -- the same Heartbeat the contacts were resolved in (DefenseSystem's pass 2 runs just before it), so no
+-- presentation is later than it was. A multi-target swing used to cost the attacker one remote per body.
+local feedbackOutbox: { [Player]: { CombatFeedback } } = {}
+
 local function sendFeedback(model: Model, payload: CombatFeedback): ()
-	local remote = feedbackRemote
-	if not remote then
+	if not feedbackRemote then
 		return
 	end
 	local player = Players:GetPlayerFromCharacter(model)
 	if not player then
 		return
 	end
-	remote:FireClient(player, payload)
+	local queued = feedbackOutbox[player]
+	if queued then
+		table.insert(queued, payload)
+	else
+		feedbackOutbox[player] = { payload }
+	end
+end
+
+-- Sends every queued batch and empties the outbox. Called at the end of Step; public so a spec (or a
+-- driver that steps this System itself) can flush without a frame.
+function DamageSystem.FlushFeedback(): ()
+	local remote = feedbackRemote
+	if next(feedbackOutbox) == nil then
+		return
+	end
+	for player, batch in feedbackOutbox do
+		if remote and player.Parent ~= nil then
+			remote:FireClient(player, batch)
+		end
+	end
+	table.clear(feedbackOutbox)
 end
 
 -- Application --------------------------------------------------------------------------------------
@@ -660,6 +686,10 @@ function DamageSystem.Step(_deltaTime: number, now: number): ()
 			humanoid:Move(rootPart.CFrame.LookVector, false)
 		end
 	end
+
+	-- Last, so everything this frame resolved (DefenseSystem's pass 2, and any impact applied earlier in the
+	-- frame) leaves as one batch per player.
+	DamageSystem.FlushFeedback()
 end
 
 -- Hitstun ------------------------------------------------------------------------------------------
@@ -909,6 +939,7 @@ function DamageSystem.Reset(): ()
 	end
 	table.clear(hitstunUntil)
 	table.clear(lungeUntil)
+	table.clear(feedbackOutbox)
 	hitstunReclaim:Reset()
 	appliedListeners:Clear()
 	airComboHook = nil
