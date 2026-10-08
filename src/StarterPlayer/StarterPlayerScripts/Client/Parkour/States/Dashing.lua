@@ -3,8 +3,14 @@
 	States/Dashing.lua
 
 	Owns: the dash -- an AIR-ONLY, camera-aimed, steerable launch on its own key, and the move this
-	framework's chains are meant to be reached with. ONE RULE: it sends you exactly where you are
-	looking, at full power, and you fly it with the mouse for as long as it lasts.
+	framework's chains are meant to be reached with. ONE RULE: it sends you where you are looking, at
+	full power, and you fly it with the mouse for as long as it lasts. HOLD A MOVEMENT KEY and the key's
+	direction is blended in with the camera's (ParkourMath.BlendDashDirection); hold none and it is the
+	camera alone.
+
+	THE GROUND HALF OF THE SAME KEY IS States/Evading.lua. Q on the ground is the combat evade, Q in the
+	air is this dash -- each refuses the other's situation outright (Evading: NotGrounded; Dashing:
+	MustBeAirborne), so one press can only ever start one of them.
 
 	WHAT THIS REPLACED, because all three of the old decisions were structural rather than tuning, and
 	each was a separate reason the dash read as rigid:
@@ -147,6 +153,20 @@ local function pitchBand(direction: Vector3): string
 	return "Level"
 end
 
+-- Where the player is ASKING the dash to go this frame: the camera's aim, combined with the held movement
+-- key when there is one (ParkourMath.BlendDashDirection, DASH.AimBlendWeight/MoveBlendWeight). With no key
+-- held this is exactly the camera, which is the rule the dash had before it read keys at all.
+--
+-- `fallback` is what a frame with no usable camera vector holds: the body's facing at Enter, the current
+-- travel in Update.
+local function aimDirection(context: ParkourContext, fallback: Vector3): Vector3
+	local aim = ParkourMath.SafeUnit(context.AimDirection, fallback)
+	if not StateSupport.HasMoveIntent(context) then
+		return aim
+	end
+	return ParkourMath.BlendDashDirection(aim, context.MoveIntent, DASH.AimBlendWeight, DASH.MoveBlendWeight)
+end
+
 local Dashing: ParkourTypes.StateDefinition = {
 	Id = "Dashing",
 	Priority = 130,
@@ -206,16 +226,19 @@ local Dashing: ParkourTypes.StateDefinition = {
 	Enter = function(context: ParkourContext): ()
 		InputBuffer.ConsumeDash(context.Now)
 
-		-- THE WHOLE DIRECTION RULE, in one line. The camera's own look vector, pitch included and
-		-- deliberately UNFLATTENED -- looking up 40 degrees and slightly left launches you up 40
-		-- degrees and slightly left. context.MoveIntent is not read at all any more, and the body's
-		-- facing enters only as the fallback for a frame with no camera vector to read (during bind),
-		-- where holding the current heading is the least surprising thing to do.
+		-- THE WHOLE DIRECTION RULE. The camera's own look vector, pitch included and deliberately
+		-- UNFLATTENED -- looking up 40 degrees and slightly left launches you up 40 degrees and slightly
+		-- left -- COMBINED with whichever movement key is held. With no key held the answer is the camera
+		-- alone; with one held, the key's direction and the aim are blended (aimDirection below), so
+		-- holding A while looking ahead dashes left, bent a little toward where you are looking.
+		--
+		-- The body's facing enters only as the fallback for a frame with no camera vector to read (during
+		-- bind), where holding the current heading is the least surprising thing to do.
 		--
 		-- Used unconditionally: CanEnter already refused this call entirely if the player was grounded
 		-- (see its own comment), so there is no "was looking up while standing on something" case left
 		-- to guard against here.
-		travelDirection = ParkourMath.SafeUnit(context.AimDirection, context.RootPart.CFrame.LookVector)
+		travelDirection = aimDirection(context, context.RootPart.CFrame.LookVector)
 
 		cooldownUntil = context.Now + DASH.CooldownSeconds
 		context.AirDashChain += 1
@@ -279,8 +302,10 @@ local Dashing: ParkourTypes.StateDefinition = {
 		travelDirection = ParkourMath.SteerToward(
 			travelDirection,
 			-- Falls back to the CURRENT travel rather than to facing: a frame with no camera vector
-			-- should hold the angle the dash is already flying, not bend it toward the body.
-			ParkourMath.SafeUnit(context.AimDirection, travelDirection),
+			-- should hold the angle the dash is already flying, not bend it toward the body. The held key
+			-- is blended in live, so releasing it mid-flight eases the dash back toward the camera and
+			-- pressing a different one banks it that way -- always inside the same turn-rate cap.
+			aimDirection(context, travelDirection),
 			math.rad(DASH.TurnDegreesPerSecond) * steerAuthority * context.DeltaTime
 		)
 

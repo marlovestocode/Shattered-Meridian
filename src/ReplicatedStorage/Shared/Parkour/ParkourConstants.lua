@@ -1390,6 +1390,19 @@ ParkourConstants.Dash = {
 	-- burst this rewrite replaced. 220 buys about 66 degrees of authority over a full-authority
 	-- window, which is enough to bank a dash around a corner and not enough to reverse one.
 	TurnDegreesPerSecond = 220,
+	-- THE HELD-KEY BLEND (ParkourMath.BlendDashDirection). With no movement key held the dash goes exactly
+	-- where the camera points. With one held, the key's direction and the camera's aim are COMBINED:
+	-- direction = aim * AimBlendWeight + keyDirection * MoveBlendWeight.
+	--
+	-- The weights apply to the HORIZONTAL heading only; the camera's pitch is kept as it is. The key is
+	-- weighted ABOVE the aim on purpose: equal weights make "hold back while looking forward" two vectors
+	-- that cancel, and a dash that cancels itself stalls. At 0.35 / 1.0 holding W is exactly the camera
+	-- direction, holding S is a back-dash (0.65 of back) at the camera's pitch, and holding A or D is a
+	-- strafe bent about 19 degrees toward where the camera is looking. The same two numbers also steer the
+	-- live dash each frame (see States/Dashing.lua), so the player can still bank it with the mouse AND
+	-- change it with the keys.
+	AimBlendWeight = 0.35,
+	MoveBlendWeight = 1,
 	-- Steering authority tapers linearly to exactly zero over the LAST this-many seconds of the
 	-- flight, so the dash commits to its final heading before it hands off. Without it, the exit
 	-- velocity is whatever direction the mouse happened to be sweeping through on the final frame,

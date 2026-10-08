@@ -45,10 +45,11 @@ local KeybindConstants = {
 		LockOn = { KeyCode = Enum.KeyCode.CapsLock },
 		-- Space is Roblox's default jump key, already spoken for, and LeftControl belongs to
 		-- ShiftLock below -- Q is the conventional dodge/evade key this genre has left. Read by
-		-- Client/Parkour/ParkourInput.lua, which buffers the press for States/Dashing.lua: the
-		-- four-way, facing-relative dash. (It named CombatSystem.lua's handleDashRequest for a while
-		-- after that system was deleted, with nothing reading the binding at all -- a rebind row in
-		-- the Settings panel for a key that did nothing.)
+		-- Client/Parkour/ParkourInput.lua, which buffers the press for the two halves of the combat dash:
+		-- States/Dashing.lua in the air (camera-aimed, blended with any held movement key) and
+		-- States/Evading.lua on the ground in combat (the evade, in the held direction). (It named
+		-- CombatSystem.lua's handleDashRequest for a while after that system was deleted, with nothing
+		-- reading the binding at all -- a rebind row in the Settings panel for a key that did nothing.)
 		Dash = { KeyCode = Enum.KeyCode.Q },
 		-- Sprint is a hold (press = sprint on, release = off, like Block). LeftShift is the
 		-- conventional "run" key this genre already trains players to expect.

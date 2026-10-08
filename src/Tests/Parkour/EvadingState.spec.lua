@@ -111,6 +111,35 @@ return function()
 			expect(reason).to.equal("NotInCombat")
 		end)
 
+		it("accepts a Dash-key (Q) press on the ground in combat -- Q is the combat dash", function()
+			local now = nextNow()
+			InputBuffer.PressDash(now)
+			local context = makeContext(now)
+			context.InCombat = true
+			expect((Evading.CanEnter(context))).to.equal(true)
+		end)
+
+		it("refuses a Dash-key press outside combat -- Q on the ground does nothing out of a fight", function()
+			local now = nextNow()
+			InputBuffer.PressDash(now)
+			local context = makeContext(now)
+			context.InCombat = false
+			local ok, reason = Evading.CanEnter(context)
+			expect(ok).to.equal(false)
+			expect(reason).to.equal("NotInCombat")
+		end)
+
+		it("spends BOTH presses on entry, so one Q cannot evade and then air-dash", function()
+			local now = nextNow()
+			InputBuffer.PressDash(now)
+			InputBuffer.PressEvade(now)
+			local context = makeContext(now)
+			context.InCombat = true
+			Evading.Enter(context)
+			expect(InputBuffer.PeekDash(now)).to.equal(false)
+			expect(InputBuffer.PeekEvade(now)).to.equal(false)
+		end)
+
 		it("refuses with no press", function()
 			local ok, reason = Evading.CanEnter(makeContext(nextNow()))
 			expect(ok).to.equal(false)

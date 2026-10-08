@@ -2,9 +2,14 @@
 --[[
 	States/Evading.lua
 
-	Owns: the combat evade -- a short, committed GLIDE along the ground on the Evade key. The body keeps
-	its facing, never crouches and never tumbles; it slides out of the way on a flash-step speed curve
-	(Shared/Combat/EvadeMotion.lua) and stops.
+	Owns: the combat evade -- a short, committed GLIDE along the ground on the DASH key (Q / gamepad B),
+	which is the combat dash's ground half: Q in the air is States/Dashing.lua's air dash, Q on the ground
+	in combat is this, and Q on the ground out of combat does nothing. (The old Evade key, Z / gamepad Y,
+	still buffers the same evade.) The body keeps its facing, never crouches and never tumbles; it slides
+	out of the way on a flash-step speed curve (Shared/Combat/EvadeMotion.lua) and stops.
+
+	THE DIRECTION IS THE HELD KEY. Hold a movement key and the glide goes that way (camera-relative, so
+	"hold left and press Q" goes left of the camera); hold nothing and it goes straight back from facing.
 
 	ONE MOVE, NO VARIANTS. This replaced States/Rolling.lua, which was two moves on one key -- a traversal
 	tumble and a combat snap-step -- chosen between by whether the InCombat Attribute had already arrived.
@@ -110,7 +115,8 @@ local Evading: ParkourTypes.StateDefinition = {
 		if context.Now < cooldownUntil then
 			return false, "EvadeCooldown"
 		end
-		if not InputBuffer.PeekEvade(context.Now) then
+		-- Either key's press: the Evade key's, or the Dash key's (Q), which on the ground is the evade.
+		if not InputBuffer.PeekEvadeOrDash(context.Now) then
 			return false, "NoEvadeInput"
 		end
 		if not EvadeConstants.AllowedFromStates[context.CurrentStateId] then
@@ -123,7 +129,7 @@ local Evading: ParkourTypes.StateDefinition = {
 	end,
 
 	Enter = function(context: ParkourContext): ()
-		InputBuffer.ConsumeEvade(context.Now)
+		InputBuffer.ConsumeEvadeOrDash(context.Now)
 		cooldownUntil = context.Now + EvadeConstants.CooldownSeconds
 		heldFacing = flatFacing(context)
 		travelDirection = directionFor(context, heldFacing)

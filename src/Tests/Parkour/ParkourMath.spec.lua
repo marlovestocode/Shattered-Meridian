@@ -1099,4 +1099,91 @@ return function()
 			)
 		end)
 	end)
+
+	describe("ParkourMath.BlendDashDirection", function()
+		local AIM_WEIGHT = 0.35
+		local MOVE_WEIGHT = 1
+
+		local function blend(aim: Vector3, intent: Vector3): Vector3
+			return ParkourMath.BlendDashDirection(aim, intent, AIM_WEIGHT, MOVE_WEIGHT)
+		end
+
+		local function expectSame(actual: Vector3, expected: Vector3): ()
+			expectClose(actual.X, expected.X, 1e-4)
+			expectClose(actual.Y, expected.Y, 1e-4)
+			expectClose(actual.Z, expected.Z, 1e-4)
+		end
+
+		it("is the camera alone when no key is held", function()
+			local aim = Vector3.new(0.3, 0.5, -0.8).Unit
+			expectSame(blend(aim, Vector3.zero), aim)
+		end)
+
+		it("is the camera alone for a key vector too small to be a direction", function()
+			local aim = Vector3.new(0.3, 0.5, -0.8).Unit
+			expectSame(blend(aim, Vector3.new(0, 0.5, 0)), aim)
+		end)
+
+		it("is exactly the camera when the key points along its heading, pitch included", function()
+			local aim = Vector3.new(0, 0.5, -0.866).Unit
+			expectSame(blend(aim, Vector3.new(0, 0, -1)), aim)
+		end)
+
+		it("always returns a unit vector", function()
+			local aims = {
+				Vector3.new(0, 0, -1),
+				Vector3.new(0.4, 0.7, 0.2),
+				Vector3.new(0, -1, 0),
+				Vector3.new(0, 1, 0),
+			}
+			local intents = {
+				Vector3.new(1, 0, 0),
+				Vector3.new(0, 0, 1),
+				Vector3.new(-0.7, 0, 0.7),
+				Vector3.new(0.2, 0, -0.1),
+			}
+			for _, aim in aims do
+				for _, intent in intents do
+					expectClose(blend(aim, intent).Magnitude, 1, 1e-4)
+				end
+			end
+		end)
+
+		it("strafes sideways, bent toward the camera's heading", function()
+			local result = blend(Vector3.new(0, 0, -1), Vector3.new(-1, 0, 0))
+			expectClose(result.Y, 0, 1e-6)
+			expectClose(math.deg(math.atan2(-result.Z, -result.X)), math.deg(math.atan(AIM_WEIGHT)), 0.01)
+		end)
+
+		it("goes backward when back is held while looking forward -- the two do not cancel", function()
+			local result = blend(Vector3.new(0, 0, -1), Vector3.new(0, 0, 1))
+			expectSame(result, Vector3.new(0, 0, 1))
+		end)
+
+		it("keeps the camera's pitch while the key sets the heading", function()
+			local aim = Vector3.new(0, 0.6, -0.8)
+			local result = blend(aim, Vector3.new(-1, 0, 0))
+			expectClose(result.Y, aim.Unit.Y, 1e-4)
+			expect(result.X < 0).to.equal(true)
+		end)
+
+		it("falls back to the key's direction when the two cancel exactly", function()
+			local result = ParkourMath.BlendDashDirection(Vector3.new(0, 0, -1), Vector3.new(0, 0, 1), 1, 1)
+			expect(result.Magnitude == result.Magnitude).to.equal(true, "NaN")
+			expectSame(result, Vector3.new(0, 0, 1))
+		end)
+
+		it("takes its heading from the key when the camera looks straight up or down", function()
+			expectSame(blend(Vector3.new(0, 1, 0), Vector3.new(0, 0, -1)), Vector3.new(0, 1, 0))
+			local down = blend(Vector3.new(0, -1, 0), Vector3.new(1, 0, 0))
+			expectClose(down.Magnitude, 1, 1e-4)
+			expectClose(down.Y, -1, 1e-4)
+		end)
+
+		it("survives a zero aim without a NaN", function()
+			local result = blend(Vector3.zero, Vector3.new(1, 0, 0))
+			expect(result.Magnitude == result.Magnitude).to.equal(true, "NaN")
+			expectClose(result.Magnitude, 1, 1e-4)
+		end)
+	end)
 end

@@ -24,6 +24,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterPlayer = game:GetService("StarterPlayer")
 
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
+local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 local InputBuffer = require(StarterPlayer.StarterPlayerScripts.Client.Parkour.InputBuffer)
 local States = require(StarterPlayer.StarterPlayerScripts.Client.Parkour.States)
 
@@ -67,9 +68,9 @@ local function makeContext(now: number): any
 		StateElapsed = 0,
 		CurrentStateId = "Falling",
 		PreviousStateId = "Jumping",
-		-- Present, and deliberately CROSSWISE to the default aim below. The dash does not read it at
-		-- all any more; several tests assert exactly that by checking the launch ignores it.
-		MoveIntent = Vector3.new(1, 0, 0),
+		-- NO MOVEMENT KEY HELD by default, so the launch is the camera alone -- the rule every aim test
+		-- below pins. The held-key blend has its own block ("Dashing held-key blend"), which sets this.
+		MoveIntent = Vector3.zero,
 		-- Level and forward. THE launch vector -- there is no quadrant and no pitch gate any more, so
 		-- whatever this says is where the dash goes.
 		AimDirection = Vector3.new(0, 0, -1),
@@ -254,9 +255,9 @@ return function()
 		-- THE REGRESSION GUARD FOR THIS ENTIRE REWRITE. The dash used to quantize onto one of four
 		-- vectors off the body's facing, chosen by MoveIntent, with a fifth camera-aimed one that only
 		-- unlocked past a 55-degree pitch gate. Every test in this block sets an aim that no quadrant
-		-- could have produced and asserts the body goes there anyway -- and each one sets a MoveIntent
-		-- pointing somewhere else entirely, because "the aim wins over the movement keys" is precisely
-		-- the property that was not true before.
+		-- could have produced and asserts the body goes there anyway, with NO movement key held --
+		-- "no key means the camera alone" is the half of the rule that has to stay exactly true. What a
+		-- held key does to it is the next block's job.
 		local aims = {
 			{ name = "level forward", aim = Vector3.new(0, 0, -1) },
 			{ name = "level backward", aim = Vector3.new(0, 0, 1) },
@@ -273,8 +274,7 @@ return function()
 			it(`launches exactly along the aim -- {case.name}`, function()
 				local context = makeContext(7000)
 				context.AimDirection = case.aim
-				-- Deliberately fighting the aim. A launch that reads this at all will fail below.
-				context.MoveIntent = Vector3.new(0, 0, -1)
+				context.MoveIntent = Vector3.zero
 				flyDash(context, context.DeltaTime)
 
 				local commanded = context.Motor.Velocity
@@ -288,33 +288,19 @@ return function()
 			end)
 		end
 
-		it("ignores MoveIntent completely -- the same aim launches identically from any intent", function()
-			-- Stated once directly, rather than only implied by the per-aim cases above: the four
-			-- move-intent quadrants are gone, so intent cannot change the outcome by any amount.
-			local intents = {
-				Vector3.new(0, 0, -1),
-				Vector3.new(0, 0, 1),
-				Vector3.new(1, 0, 0),
-				Vector3.new(-1, 0, 0),
-				Vector3.zero,
-			}
+		it("treats a sub-threshold MoveIntent as no key held -- the camera alone", function()
+			-- Stick drift and the tail of a released key read as a tiny non-zero vector. That must not bend
+			-- the dash: StateSupport.HasMoveIntent is the one definition of "asking to move".
 			local aim = Vector3.new(0.5, 0.5, -0.707)
-			local reference: Vector3? = nil
-			for index, intent in intents do
-				local context = makeContext(7100 + index)
-				context.AimDirection = aim
-				context.MoveIntent = intent
-				flyDash(context, context.DeltaTime)
-				local commanded = context.Motor.Velocity
-				if reference == nil then
-					reference = commanded
-				else
-					expect(angleBetween(commanded, reference :: Vector3) < 1e-4).to.equal(
-						true,
-						`intent {index} steered the launch`
-					)
-				end
-			end
+			local held = makeContext(7100)
+			held.AimDirection = aim
+			held.MoveIntent = Vector3.new(0.01, 0, 0)
+			flyDash(held, held.DeltaTime)
+			local none = makeContext(7101)
+			none.AimDirection = aim
+			none.MoveIntent = Vector3.zero
+			flyDash(none, none.DeltaTime)
+			expect(angleBetween(held.Motor.Velocity, none.Motor.Velocity) < 1e-4).to.equal(true)
 		end)
 
 		it("publishes the pitch band of the launch, not a body-relative direction", function()
@@ -345,6 +331,84 @@ return function()
 			expect(commanded.Magnitude == commanded.Magnitude).to.equal(true, "NaN velocity")
 			expect(commanded.Magnitude > 0).to.equal(true)
 			expect(angleBetween(commanded, context.RootPart.CFrame.LookVector) < 0.01).to.equal(true)
+		end)
+	end)
+
+	describe("Dashing held-key blend", function()
+		-- THE AIR DASH READS THE MOVEMENT KEYS. MoveIntent is already camera-relative (Humanoid.MoveDirection),
+		-- so "left" is left of the camera. Held key and aim are combined (ParkourMath.BlendDashDirection),
+		-- with the key weighted above the aim so that holding BACK is a back-dash, not two cancelling vectors.
+		local function launchWith(aim: Vector3, intent: Vector3, now: number): Vector3
+			local context = makeContext(now)
+			context.AimDirection = aim
+			context.MoveIntent = intent
+			flyDash(context, context.DeltaTime)
+			return context.Motor.Velocity
+		end
+
+		it("launches along the blended direction when a key is held", function()
+			local aim = Vector3.new(0, 0, -1)
+			local intent = Vector3.new(-1, 0, 0)
+			local commanded = launchWith(aim, intent, 7400)
+			local expected = ParkourMath.BlendDashDirection(aim, intent, DASH.AimBlendWeight, DASH.MoveBlendWeight)
+			expect(angleBetween(commanded, expected) < 0.01).to.equal(true)
+		end)
+
+		it("holding a strafe key dashes sideways, bent a little toward the camera", function()
+			local commanded = launchWith(Vector3.new(0, 0, -1), Vector3.new(-1, 0, 0), 7410)
+			expect(commanded.X < 0).to.equal(true, "did not go left")
+			expect(commanded.Z < 0).to.equal(true, "lost the camera's forward lean")
+			expect(math.abs(commanded.X) > math.abs(commanded.Z)).to.equal(true, "the key did not outweigh the aim")
+		end)
+
+		it("holding back while looking forward is a back-dash, not a cancelled one", function()
+			local commanded = launchWith(Vector3.new(0, 0, -1), Vector3.new(0, 0, 1), 7420)
+			expect(commanded.Magnitude == commanded.Magnitude).to.equal(true, "NaN velocity")
+			expect(commanded.Magnitude > 1).to.equal(true, "the dash cancelled itself")
+			expect(commanded.Z > 0).to.equal(true, "did not go backward")
+		end)
+
+		it("holding forward launches exactly along the camera, pitch included", function()
+			-- A key aligned with the camera's heading must not flatten the dash: the key steers the
+			-- heading and the camera keeps the pitch.
+			local aim = Vector3.new(0, 0.5, -0.866)
+			local commanded = launchWith(aim, Vector3.new(0, 0, -1), 7430)
+			expect(angleBetween(commanded, aim) < 0.01).to.equal(true)
+		end)
+
+		it("keeps the camera's pitch when a key is held", function()
+			local up = launchWith(Vector3.new(0, 0.6, -0.8), Vector3.new(-1, 0, 0), 7440)
+			local down = launchWith(Vector3.new(0, -0.6, -0.8), Vector3.new(-1, 0, 0), 7441)
+			expect(up.Y > 0).to.equal(true, "looking up and strafing did not climb")
+			expect(down.Y < 0).to.equal(true, "looking down and strafing did not dive")
+		end)
+
+		it("does not let the size of the key input change the direction", function()
+			local light = launchWith(Vector3.new(0, 0, -1), Vector3.new(-0.4, 0, 0), 7450)
+			local full = launchWith(Vector3.new(0, 0, -1), Vector3.new(-1, 0, 0), 7451)
+			expect(angleBetween(light, full) < 1e-4).to.equal(true)
+		end)
+
+		it("steers a flying dash toward the held key, inside the same turn cap", function()
+			local context = makeContext(7460)
+			context.AimDirection = Vector3.new(0, 0, -1)
+			flyDash(context, context.DeltaTime)
+			local launched = context.Motor.Velocity
+			-- Press left mid-flight with the camera unmoved: the travel rotates left, but by no more than
+			-- one frame's turn budget -- the key is steering, not teleporting.
+			context.StateElapsed = 0.05
+			context.MoveIntent = Vector3.new(-1, 0, 0)
+			dashUpdate(context)
+			local steered = context.Motor.Velocity
+			local turned = angleBetween(launched, steered)
+			expect(turned > 0).to.equal(true, "the held key did not steer")
+			expect(turned <= math.rad(DASH.TurnDegreesPerSecond) * context.DeltaTime + 1e-3).to.equal(true)
+			expect(steered.X < launched.X).to.equal(true, "steered the wrong way")
+		end)
+
+		it("keeps the blend weights ordered so that a key always outweighs the aim", function()
+			expect(DASH.MoveBlendWeight > DASH.AimBlendWeight).to.equal(true)
+			expect(DASH.AimBlendWeight > 0).to.equal(true)
 		end)
 	end)
 

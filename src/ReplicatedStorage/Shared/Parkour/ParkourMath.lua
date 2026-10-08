@@ -804,6 +804,45 @@ function ParkourMath.PrimaryReachDirection(moveDirection: Vector3, moveIntent: V
 	return ParkourMath.SafeUnit(ParkourMath.Flatten(moveIntent), Vector3.zero)
 end
 
+-- THE AIR DASH'S HELD-KEY BLEND. Where a dash goes when the player is holding a movement key as well as
+-- looking somewhere: the camera's aim and the key's (already camera-relative) direction, COMBINED.
+--
+-- THE KEY STEERS THE HEADING; THE CAMERA OWNS THE PITCH. A movement key is a horizontal push, so it is
+-- combined with the HORIZONTAL part of the aim only, and the aim's pitch is then put back on the result
+-- untouched. Summing whole vectors instead would flatten every dash taken while holding a key (looking up
+-- 30 degrees and holding forward would launch 8 degrees up, not 30).
+--
+-- The heading is a WEIGHTED sum, key above aim. Equal weights make "hold back while looking forward" two
+-- vectors that cancel, and a dash that cancels itself stalls; with the key outweighing the aim, holding a
+-- key means "that way" and the camera only bends it -- left-and-a-little-forward, back-and-a-little-up.
+--
+--   * No move intent (the zero vector, or a flat length under ZERO_EPSILON): the camera alone, returned
+--     as the aim's own unit vector. That is the rule the dash had before it read keys at all.
+--   * Key held and aligned with the camera's heading (W): exactly the camera's direction, pitch and all.
+--   * Any other key: heading = aimHeading * aimWeight + keyHeading * moveWeight, at the camera's pitch.
+--   * A heading that still cancels to nothing (aimWeight == moveWeight with the key exactly opposite the
+--     aim's heading) falls back to the key's direction -- the thing the player explicitly asked for --
+--     rather than to a NaN that would be written into a LinearVelocity. An aim pointing straight up or
+--     down has no heading of its own, so the key supplies it.
+function ParkourMath.BlendDashDirection(
+	aim: Vector3,
+	moveIntent: Vector3,
+	aimWeight: number,
+	moveWeight: number
+): Vector3
+	local aimUnit = ParkourMath.SafeUnit(aim, Vector3.new(0, 0, -1))
+	local flatIntent = ParkourMath.Flatten(moveIntent)
+	if flatIntent.Magnitude < ZERO_EPSILON then
+		return aimUnit
+	end
+	local intentUnit = flatIntent.Unit
+	local aimFlat = ParkourMath.Flatten(aimUnit)
+	local aimHeading = if aimFlat.Magnitude < ZERO_EPSILON then Vector3.zero else aimFlat.Unit
+	local heading = ParkourMath.SafeUnit(aimHeading * aimWeight + intentUnit * moveWeight, intentUnit)
+	-- heading is a unit vector and aimFlat.Magnitude is cos(pitch), so this is a unit vector at the aim's pitch.
+	return ParkourMath.SafeUnit(heading * aimFlat.Magnitude + Vector3.new(0, aimUnit.Y, 0), heading)
+end
+
 -- THE STEER -- rotates one direction toward another by a capped angle, and nothing else. The whole
 -- of "the dash is drivable" is this function plus the per-frame budget States/Dashing.lua hands it,
 -- and the CAP is the mechanic rather than a safety rail. A travel vector that snapped straight onto

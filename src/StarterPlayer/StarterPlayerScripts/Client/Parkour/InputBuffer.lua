@@ -219,6 +219,27 @@ function InputBuffer.ConsumeEvade(now: number): boolean
 	return true
 end
 
+-- THE EVADE'S TRIGGER IS EITHER KEY. The Evade key (Z / gamepad Y) buffers an evade press as it always
+-- did; the DASH key (Q / gamepad B) buffers a dash press, and on the ground in combat that press IS an
+-- evade -- Q is the combat dash, and its ground half is States/Evading.lua. So the evade reads both, the
+-- Dash press for the same EvadeConstants.BufferSeconds an evade press gets (a Q pressed a beat early, in
+-- your own recovery or cooldown, fires the moment you are free).
+--
+-- Consume clears BOTH, deliberately. Left alone, the Dash press would stay live after the evade it just
+-- produced and could start an air dash on the very next frame the body left the ground.
+function InputBuffer.PeekEvadeOrDash(now: number): boolean
+	return InputBuffer.PeekEvade(now) or ParkourMath.BufferLive(now, dashPressedAt, EvadeConstants.BufferSeconds, true)
+end
+
+function InputBuffer.ConsumeEvadeOrDash(now: number): boolean
+	if not InputBuffer.PeekEvadeOrDash(now) then
+		return false
+	end
+	evadePressedAt = 0
+	dashPressedAt = 0
+	return true
+end
+
 function InputBuffer.PeekDash(now: number): boolean
 	return ParkourMath.BufferLive(now, dashPressedAt, ParkourConstants.Assists.ActionBufferSeconds, true)
 end
