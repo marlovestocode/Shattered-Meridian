@@ -345,7 +345,10 @@ end
 -- The volume a client can reproduce for its own predicted hit cue (AttackTypes.ContactVolume), or nil. Any
 -- shape on any anchor -- the client builds it on its own rig with the engine's own HitboxAnchor and
 -- HitboxGeometry -- but only at a size it can know: a flat-scaled melee move. A combo-, power- or
--- charge-scaled volume, or a projectile, sends nil and its hit waits for the server.
+-- charge-scaled volume, or a projectile, sends nil and its hit waits for the server. So does a VOLUMELESS
+-- swing (a realm's cast): the engine samples nothing for it, so there is no hit to predict -- sending its
+-- authored box anyway made the caster's client play a full hit (thud, flash, freeze, flinch) on whoever
+-- stood in front during the cast, a hit the server never had.
 local function isFlatScaled(scaling: any): boolean
 	if typeof(scaling) ~= "table" then
 		return true
@@ -362,7 +365,7 @@ local function isFlatScaled(scaling: any): boolean
 end
 
 local function contactVolumeOf(definition: any): AttackTypes.ContactVolume?
-	if definition.Projectile ~= nil or not isFlatScaled(definition.Scaling) then
+	if definition.Volumeless == true or definition.Projectile ~= nil or not isFlatScaled(definition.Scaling) then
 		return nil
 	end
 	local dimensions = definition.BaseDimensions
@@ -1669,6 +1672,10 @@ function AttackRequestSystem.SetWeapon(model: Model, weaponId: Types.WeaponId?, 
 end
 
 -- The templates notifyWeaponChanged sends with a change to `weaponId` (predictionSeedFor). A pure query.
+-- What a swing of `definition` tells its attacker's client to predict a hit with (nil: nothing to predict).
+-- Exposed for its spec; the payload builders above are its only callers.
+AttackRequestSystem.ContactVolumeOf = contactVolumeOf
+
 function AttackRequestSystem.PredictionSeedFor(weaponId: Types.WeaponId?): { AttackStartedPayload }
 	return predictionSeedFor(weaponId)
 end

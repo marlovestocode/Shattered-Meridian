@@ -150,6 +150,33 @@ return function()
 		table.clear(spawned)
 	end)
 
+	describe("AttackRequestSystem -- the predicted contact volume", function()
+		local function melee(overrides: { [string]: any }?): { [string]: any }
+			local definition: { [string]: any } = {
+				Shape = "Box",
+				BaseDimensions = { Width = 4, Height = 5, Length = 5 },
+				Offset = CFrame.new(0, 0, -3),
+				AttachmentPart = "Root",
+			}
+			for key, value in overrides or {} do
+				definition[key] = value
+			end
+			return definition
+		end
+
+		it("gives a flat-scaled melee swing a volume its client can predict with", function()
+			expect(AttackRequestSystem.ContactVolumeOf(melee())).to.be.ok()
+		end)
+
+		it("gives a realm's volumeless cast none, so its client predicts no hit in front of the caster", function()
+			expect(AttackRequestSystem.ContactVolumeOf(melee({ Volumeless = true }))).to.equal(nil)
+		end)
+
+		it("gives a projectile none: its hit waits for the server", function()
+			expect(AttackRequestSystem.ContactVolumeOf(melee({ Projectile = {} }))).to.equal(nil)
+		end)
+	end)
+
 	describe("AttackRequestSystem -- the gates that are not about timing", function()
 		it("refuses a body the engine has never been told about", function()
 			local model = makeUnregistered("Stranger")
