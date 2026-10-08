@@ -1249,6 +1249,18 @@ local function sweepLiveness(now: number): ()
 	end
 end
 
+-- How many substeps a frame of `frameSeconds` is divided into. Pure, and public so a spec can pin the
+-- common case: an ordinary 60Hz Heartbeat (a hair over 1/60) is TWO substeps, not three -- see
+-- HitboxEngineConstants.SubstepOvershootTolerance.
+function HitboxEngine.SubstepsFor(frameSeconds: number): number
+	local exact = frameSeconds / HitboxEngineConstants.MinSubstepSeconds
+	return math.clamp(
+		math.ceil(exact - HitboxEngineConstants.SubstepOvershootTolerance),
+		1,
+		HitboxEngineConstants.MaxSubstepsPerFrame
+	)
+end
+
 -- One frame. Drives every non-idle combatant's state machine and samples every open Active window,
 -- subdivided into substeps so neither depends on the server's frame rate. `now` is the caller's clock
 -- and is treated as the END of the frame -- the frame is deemed to have started at `now - deltaTime`,
@@ -1276,11 +1288,7 @@ function HitboxEngine.Step(deltaTime: number, now: number): ()
 		return
 	end
 
-	local substeps = math.clamp(
-		math.ceil(frameSeconds / HitboxEngineConstants.MinSubstepSeconds),
-		1,
-		HitboxEngineConstants.MaxSubstepsPerFrame
-	)
+	local substeps = HitboxEngine.SubstepsFor(frameSeconds)
 	local frameStart = now - frameSeconds
 
 	-- Anchors this frame's pose interpolation before anything advances. Done in its own pass because

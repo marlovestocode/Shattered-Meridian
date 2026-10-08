@@ -1145,4 +1145,20 @@ return function()
 			expect(#hits).to.equal(0)
 		end)
 	end)
+
+	describe("HitboxEngine -- substep count", function()
+		it("divides an ordinary 60Hz Heartbeat into two substeps, not three", function()
+			-- Real Heartbeats run a hair over 1/60; a bare ceil gave 3 for every one of these.
+			for _, frame in { 1 / 60, 0.01667, 0.0168, 0.017 } do
+				expect(HitboxEngine.SubstepsFor(frame)).to.equal(2)
+			end
+		end)
+
+		it("still subdivides a genuinely long frame, up to the cap", function()
+			expect(HitboxEngine.SubstepsFor(1 / 30)).to.equal(4)
+			expect(HitboxEngine.SubstepsFor(0.25)).to.equal(HitboxEngineConstants.MaxSubstepsPerFrame)
+			expect(HitboxEngine.SubstepsFor(0)).to.equal(1)
+		end)
+	end)
+
 end

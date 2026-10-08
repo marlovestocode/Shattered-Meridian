@@ -63,6 +63,15 @@ local HitboxEngineConstants = {}
 -- realistic swing speeds.
 HitboxEngineConstants.MinSubstepSeconds = 1 / 120
 
+-- How much of one extra substep a frame may run over before it earns that substep. A real 60Hz Heartbeat
+-- is a hair LONGER than 1/60 (0.01667-0.0170s is typical), so a bare ceil(frame / MinSubstepSeconds) came
+-- out at 3 on almost every ordinary frame instead of the 2 this sample rate is sized for -- a third
+-- state-machine pass, sample and broadphase query per active swing, every frame, buying sampling ~0.2ms
+-- finer than authored. A frame must overshoot by more than this fraction of a substep to get another;
+-- 0.25 of 1/120 is ~2ms, comfortably above Heartbeat jitter and far below any gap the swept test cannot
+-- already close.
+HitboxEngineConstants.SubstepOvershootTolerance = 0.25
+
 -- Hard ceiling on subdivisions of a single Heartbeat. Eight substeps covers a frame of ~66ms (a 15fps
 -- server) at the full sample rate; beyond that the engine degrades sample density rather than
 -- amplifying the stall. See this file's header.
