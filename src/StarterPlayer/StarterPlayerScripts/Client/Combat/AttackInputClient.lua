@@ -81,6 +81,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local StarterGui = game:GetService("StarterGui")
 
 local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
@@ -99,6 +100,7 @@ local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
+local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local HotbarBindings = require(script.Parent.HotbarBindings)
 local LocalCombatState = require(script.Parent.LocalCombatState)
@@ -362,7 +364,8 @@ local function swingSecondsOf(payload: AttackStartedPayload): number
 	return payload.WindupSeconds + payload.ActiveSeconds + payload.RecoverySeconds
 end
 
-local function playSwing(payload: AttackStartedPayload): ()
+-- `startOffset` (optional): wall-clock seconds the swing is already late by -- see predictSwing's dueAt.
+local function playSwing(payload: AttackStartedPayload, startOffset: number?): ()
 	local animationId = payload.AnimationId
 	if typeof(animationId) ~= "string" or animationId == "" then
 		-- Every Default move today -- see this file's header. A blank id is an authoring gap, not an
@@ -389,6 +392,7 @@ local function playSwing(payload: AttackStartedPayload): ()
 		FadeIn = AttackConstants.Presentation.SwingFadeSeconds,
 		FadeOut = AttackConstants.Presentation.SwingFadeSeconds,
 		MaxSeconds = scheduled,
+		StartOffsetSeconds = startOffset,
 		-- Tells Client/FX/CombatAnimator.lua's armed-idle loop to stand down for every way this claim
 		-- can stop owning the layer (landed, got superseded by the next swing, got cancelled by
 		-- CancelSwing below, expired, or failed to load) -- see CombatAnimator.
@@ -429,7 +433,10 @@ end
 -- not mid-swing at all -- there is no need to check GetActiveClip first.
 -- PressId is the press the prediction answers, so a "Refused" verdict for it cuts exactly this one.
 local pendingPrediction: { MoveId: string, Generation: number, PressId: number? }? = nil
-local bufferedPress: { Kind: AttackTypes.AttackKind, Generation: number, PressId: number? }? = nil
+local bufferedPress: { Kind: AttackTypes.AttackKind, Generation: number, PressId: number?, FreeAt: number }? =
+	nil
+-- Defined with the prediction below (onBufferFrame); forward-declared so predictPress can reach it.
+local watchBufferedPress: () -> ()
 
 -- Why a swing this client was playing stopped early. "Feint" is the server's Attack_Cancelled;
 -- "Interrupted" is every other server-side cut this client infers (hitstun, parried, traded -- see
@@ -503,11 +510,14 @@ local attackStartedListeners: CallbackList.CallbackList<AttackStartedPayload> =
 -- Starts a swing locally -- the clip, the body's local commitment, and every OnAttackStarted listener
 -- (trail, lunge, swing audio) -- from a payload that is either the server's confirmation or the cached
 -- copy a prediction replays. One path for both, so a predicted swing looks exactly like a confirmed one.
-local function startSwing(payload: AttackStartedPayload, now: number): ()
+--
+-- `now` is when the swing is deemed to have STARTED, which a buffered press backdates to the instant its
+-- gate opened (predictSwing's dueAt); `startOffset` is how far behind that the clip is starting.
+local function startSwing(payload: AttackStartedPayload, now: number, startOffset: number?): ()
 	playingMoveId = payload.MoveId
 	playingPayload = payload
 	playingStartedAt = now
-	playSwing(payload)
+	playSwing(payload, startOffset)
 	LocalCombatState.SetSwing(now + swingSecondsOf(payload))
 	if AttackConstants.GuardCut.Enabled and AirComboMoves.RoleOf(payload.MoveId) == nil then
 		LocalCombatState.SetGuardCutAt(
@@ -620,9 +630,19 @@ local function cutUnconfirmedSwing(): ()
 	cutSwing("Unconfirmed")
 end
 
+-- The most a buffered swing is backdated by. One 30fps frame: enough to absorb the gap between the gate
+-- opening and the frame that notices it on any playable client, never so much that a hitch (or a client
+-- paused in the background) starts a swing visibly past its windup.
+local MAX_BUFFERED_START_OFFSET_SECONDS = 1 / 30
+
 -- Plays the predicted move now, if every local gate agrees and the move has a confirmed copy to replay.
 -- Returns whether it did.
-local function predictSwing(kind: AttackTypes.AttackKind, pressId: number?): boolean
+--
+-- `dueAt` (optional) is when a BUFFERED press's gate opened. The frame that notices it is up to a frame
+-- later, so the swing is deemed to have started at dueAt and its clip starts that far in: the local
+-- string keeps the exact rhythm the server's buffer flush throws it at, instead of drifting by a frame's
+-- worth of scheduler jitter on every link.
+local function predictSwing(kind: AttackTypes.AttackKind, pressId: number?, dueAt: number?): boolean
 	if not PREDICTION.Enabled or pendingPrediction ~= nil then
 		return false
 	end
@@ -636,10 +656,12 @@ local function predictSwing(kind: AttackTypes.AttackKind, pressId: number?): boo
 		return false
 	end
 
+	local late = if dueAt then math.clamp(now - dueAt, 0, MAX_BUFFERED_START_OFFSET_SECONDS) else 0
+
 	predictionGeneration += 1
 	local generation = predictionGeneration
 	pendingPrediction = { MoveId = cached.MoveId, Generation = generation, PressId = pressId }
-	startSwing(cached, now)
+	startSwing(cached, now - late, if late > 0 then late else nil)
 
 	-- Two round trips (Shared/PingReading) is a generous cover for the press's trip and its confirmation's;
 	-- BufferSeconds covers a press the server held before throwing. A timeout errs long on purpose.
@@ -656,6 +678,40 @@ local function predictSwing(kind: AttackTypes.AttackKind, pressId: number?): boo
 		end
 	end)
 	return true
+end
+
+-- THE BUFFERED PRESS IS WATCHED EVERY FRAME, NOT TIMED (2026-10-08). It used to fire from
+-- task.delay(freeAt - now), which resumes on the scheduler's next resumption point -- anywhere up to a frame
+-- after the gate opened, and a different amount each link, so a mashed string's local rhythm wobbled while
+-- the server's buffer flushed on its own Heartbeat exactly. PreRender runs after input and before the
+-- frame draws, so the first frame at or past FreeAt throws it, backdated to FreeAt (predictSwing's dueAt).
+-- The connection exists only while a press is buffered: every path that drops the buffer (a cut, a
+-- refusal, a respawn) leaves the next frame to find it nil and disconnect.
+local bufferWatch = Trove.New()
+local bufferWatched = false
+
+local function onBufferFrame(): ()
+	local current = bufferedPress
+	if current == nil then
+		bufferWatch:Clean()
+		bufferWatched = false
+		return
+	end
+	if os.clock() < current.FreeAt then
+		return
+	end
+	bufferedPress = nil
+	bufferWatch:Clean()
+	bufferWatched = false
+	predictSwing(current.Kind, current.PressId, current.FreeAt)
+end
+
+watchBufferedPress = function(): ()
+	if bufferWatched then
+		return
+	end
+	bufferWatched = true
+	bufferWatch:Connect(RunService.PreRender, onBufferFrame)
 end
 
 predictPress = function(kind: AttackTypes.AttackKind, pressId: number?): ()
@@ -677,15 +733,8 @@ predictPress = function(kind: AttackTypes.AttackKind, pressId: number?): ()
 		return
 	end
 	bufferGeneration += 1
-	local generation = bufferGeneration
-	bufferedPress = { Kind = kind, Generation = generation, PressId = pressId }
-	task.delay(freeAt - now, function()
-		local current = bufferedPress
-		if current and current.Generation == generation then
-			bufferedPress = nil
-			predictSwing(current.Kind, current.PressId)
-		end
-	end)
+	bufferedPress = { Kind = kind, Generation = bufferGeneration, PressId = pressId, FreeAt = freeAt }
+	watchBufferedPress()
 end
 
 -- SPACE DOES NOT JUMP WHILE THE LAUNCHER IS EARNABLE (docs/design/air-combat-and-evade.md B2, approved): once

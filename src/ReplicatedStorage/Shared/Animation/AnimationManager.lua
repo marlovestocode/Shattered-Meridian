@@ -174,6 +174,11 @@ export type ClipSpec = {
 	-- Expiry ceiling for a one-shot whose Length has not resolved yet -- see
 	-- UNKNOWN_LENGTH_MAX_SECONDS.
 	MaxSeconds: number?,
+	-- Where in the clip to start, in WALL-CLOCK seconds already elapsed since the moment it should have
+	-- begun (so at Speed 2, 0.1 here starts 0.2s into the clip). For a one-shot that was due a fraction of a
+	-- frame ago -- a buffered swing whose gate opened between two frames -- so its strike still lands where
+	-- the schedule put it. The expiry ceiling (MaxSeconds) is backdated by the same amount. Ignored when <= 0.
+	StartOffsetSeconds: number?,
 	-- For a one-shot the SERVER plays on a rig clients watch (a bot, or a player's character through
 	-- GrabSystem). AnimationTrack.Looped does not replicate -- every client plays the track with the loop
 	-- flag saved in the asset -- and a one-shot that ends by itself on the server sends clients no stop.
@@ -535,6 +540,10 @@ local function start(self: AnimationManagerInstance, claim: Claim): ()
 	local speed = spec.Speed or 1
 	local fadeIn = spec.FadeIn or DEFAULT_FADE_IN
 	local now = os.clock()
+	local startOffset = spec.StartOffsetSeconds
+	if typeof(startOffset) ~= "number" or startOffset ~= startOffset or startOffset < 0 then
+		startOffset = 0
+	end
 
 	local entry: ActiveEntry = {
 		Layer = claim.Layer,
@@ -551,7 +560,7 @@ local function start(self: AnimationManagerInstance, claim: Claim): ()
 		-- caller meant; an explicit HoldWeight still overrides in either direction.
 		HoldWeight = if spec.HoldWeight ~= nil then spec.HoldWeight else weight > 1,
 		DesiredSpeed = speed,
-		StartedAt = now,
+		StartedAt = now - startOffset,
 		Stopped = nil,
 		Repairs = 0,
 		RepairWindowStartedAt = now,
@@ -571,6 +580,11 @@ local function start(self: AnimationManagerInstance, claim: Claim): ()
 			track.Priority = spec.Priority
 		end
 		track:Play(fadeIn, weight, speed)
+		if startOffset > 0 and track.Length > 0 then
+			local position = math.min(startOffset * speed, track.Length)
+			track.TimePosition = position
+			entry.LastPosition = position
+		end
 	end)
 	if not played then
 		-- The track is broken, not the claim: drop it from the cache so a later claim reloads it
