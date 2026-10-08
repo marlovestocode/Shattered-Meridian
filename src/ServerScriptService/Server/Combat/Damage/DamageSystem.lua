@@ -46,10 +46,10 @@
 	Humanoid:TakeDamage and reads Humanoid.Health, and keeps no parallel pool. Death is therefore
 	unchanged too: Humanoid.Died still fires and PlayerDeathSystem still owns confirming it.
 
-	HEARTBEAT ORDER IS LOAD-BEARING, the same way it is for the two layers below. Roblox fires Heartbeat
-	connections in connection order, so Init must run after DefenseSystem.Init -- which must itself run
-	after HitboxEngine.Init. Main.server.lua calls them in that order and Init asserts it rather than
-	trusting the comment.
+	FRAME ORDER IS LOAD-BEARING, the same way it is for the two layers below: this Step must run after
+	DefenseSystem's, which must itself run after HitboxEngine's. Since 2026-10-08 that order is one list,
+	Server/Combat/CombatTick.lua's PHASES, rather than the boot order of three separate Heartbeats; Init
+	still asserts the layers below exist.
 
 	ALSO OWNS KNOCKBACK, as "what it does to you". A landed hit whose move authors a MoveKnockback (and no
 	Grab -- a grab replaces knockback) is resolved here to ONE world-space launch
@@ -82,7 +82,6 @@
 ]]
 
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
@@ -109,6 +108,7 @@ local DamageResolver = require(script.Parent.DamageResolver)
 local AttackCatalog = require(script.Parent.Parent.AttackCatalog)
 local DefenseSystem = require(script.Parent.Parent.Defense.DefenseSystem)
 local HitboxEngine = require(script.Parent.Parent.HitboxEngine.HitboxEngine)
+local CombatTick = require(script.Parent.Parent.CombatTick)
 
 type DefenseOutcome = DefenseTypes.DefenseOutcome
 type DamageResult = DamageTypes.DamageResult
@@ -906,11 +906,8 @@ function DamageSystem.Init(): ()
 
 	DamageSystem.Attach()
 
-	-- Connected AFTER DefenseSystem.Init has connected its own, which Main.server.lua guarantees by
-	-- calling that first.
-	heartbeatTrove:Connect(RunService.Heartbeat, function(deltaTime: number)
-		DamageSystem.Step(deltaTime, os.clock())
-	end)
+	-- Runs after DefenseSystem's phase every frame by CombatTick.PHASES, whatever the boot order.
+	heartbeatTrove:Add(CombatTick.Register("DamageSystem", DamageSystem.Step))
 
 	logger:info("DamageSystem.Init() complete")
 end

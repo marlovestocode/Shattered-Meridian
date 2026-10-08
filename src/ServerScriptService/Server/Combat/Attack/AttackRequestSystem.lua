@@ -61,11 +61,11 @@
 	change (notifyWeaponChanged) -- and Attack_Started or a "Refused" verdict is the confirmation or the
 	cut. Nothing the client does can decide a hit, so nothing it does can need undoing.
 
-	HEARTBEAT ORDER IS LOAD-BEARING, the same way it is for the three layers below. Roblox fires
-	Heartbeat connections in connection order, and this module's Step flushes buffered presses --
-	which must happen AFTER DamageSystem's Step has reclaimed expired hitstun, or a press buffered
-	against hitstun would be re-tested against the same expired hitstun for one extra frame. Main.
-	server.lua calls the four Inits in order and Init asserts it rather than trusting the comment.
+	FRAME ORDER IS LOAD-BEARING, the same way it is for the three layers below. This module's Step flushes
+	buffered presses -- which must happen AFTER DamageSystem's Step has reclaimed expired hitstun, or a press
+	buffered against hitstun would be re-tested against the same expired hitstun for one extra frame. The
+	order is Server/Combat/CombatTick.lua's PHASES (2026-10-08), not the boot order; Init still asserts the
+	layers below exist.
 
 	ALSO WARMS AttackWindows' clip cache at boot (Init's own task.spawn, mirroring DefenseSystem.Init's
 	identical treatment of ParryWindows.ValidateAll) -- collectClipEntries walks every Default and
@@ -101,7 +101,6 @@
 
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -141,6 +140,7 @@ local HitboxEngine = require(script.Parent.Parent.HitboxEngine.HitboxEngine)
 local NetworkLatency = require(script.Parent.Parent.NetworkLatency)
 local AdminConfig = require(script.Parent.Parent.Parent.Config.AdminConfig)
 local ArtSystem = require(script.Parent.Parent.Parent.Systems.ArtSystem)
+local CombatTick = require(script.Parent.Parent.CombatTick)
 
 type AttackRequest = AttackTypes.AttackRequest
 type AttackStartedPayload = AttackTypes.AttackStartedPayload
@@ -1905,11 +1905,8 @@ function AttackRequestSystem.Init(): ()
 		end,
 	})
 
-	-- Connected AFTER DamageSystem.Init has connected its own, which Main.server.lua guarantees by
-	-- calling that first.
-	heartbeatTrove:Connect(RunService.Heartbeat, function(deltaTime: number)
-		AttackRequestSystem.Step(deltaTime, os.clock())
-	end)
+	-- Runs after DamageSystem's phase every frame by CombatTick.PHASES, whatever the boot order.
+	heartbeatTrove:Add(CombatTick.Register("AttackRequestSystem", AttackRequestSystem.Step))
 
 	-- Warms AttackWindows' clip cache for every move with a clip and reports what it found -- the same
 	-- "spawned rather than awaited" reasoning DefenseSystem.Init gives ParryWindows.ValidateAll:

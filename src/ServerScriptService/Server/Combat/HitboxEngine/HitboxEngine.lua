@@ -73,7 +73,6 @@
 	swing-by-swing engine.
 ]]
 
-local RunService = game:GetService("RunService")
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -93,6 +92,7 @@ local ProjectileSimulator = require(ServerScriptService.Server.Combat.HitboxEngi
 local PoseHistory = require(ServerScriptService.Server.Combat.HitboxEngine.PoseHistory)
 local NetworkLatency = require(ServerScriptService.Server.Combat.NetworkLatency)
 local RootControl = require(ServerScriptService.Server.Combat.RootControl)
+local CombatTick = require(script.Parent.Parent.CombatTick)
 
 type AttackDefinition = HitboxTypes.AttackDefinition
 type Dimensions = HitboxTypes.Dimensions
@@ -1388,17 +1388,15 @@ function HitboxEngine.Step(deltaTime: number, now: number): ()
 	flushProjectileEvents(now)
 end
 
--- Connects the engine's own Heartbeat. The user asked for a module that handles everything itself and
--- this is that -- but it is deliberately one line wide, with all the behaviour in Step(deltaTime, now)
--- above, so the engine stays drivable from a spec with a synthetic clock. Idempotent: a second Init()
--- is a no-op rather than a second connection quietly doubling every sample rate.
+-- Puts the engine on the frame: the first phase of Server/Combat/CombatTick.lua's one combat Heartbeat
+-- (and, being the first combat System to boot, what connects it). Deliberately one line wide, with all the
+-- behaviour in Step(deltaTime, now) above, so the engine stays drivable from a spec with a synthetic
+-- clock. Idempotent: a second Init() is a no-op rather than a second registration.
 function HitboxEngine.Init(): ()
 	if heartbeatTrove:Count() > 0 then
 		return
 	end
-	heartbeatTrove:Connect(RunService.Heartbeat, function(deltaTime: number)
-		HitboxEngine.Step(deltaTime, os.clock())
-	end)
+	heartbeatTrove:Add(CombatTick.Register("HitboxEngine", HitboxEngine.Step))
 	logger:info("Hitbox engine started")
 end
 

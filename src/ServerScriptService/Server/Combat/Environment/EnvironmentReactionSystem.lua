@@ -35,7 +35,6 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
@@ -53,6 +52,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local AttackRequestSystem = require(script.Parent.Parent.Attack.AttackRequestSystem)
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
 local NetworkLatency = require(script.Parent.Parent.NetworkLatency)
+local CombatTick = require(script.Parent.Parent.CombatTick)
 
 local logger = Logger.scope("EnvironmentReactionSystem")
 
@@ -333,9 +333,9 @@ function EnvironmentReactionSystem.Init(): ()
 	fxRemote = NetworkBridge.CreateRemoteEvent(EnvironmentConstants.Network.RemoteNames.Fx)
 	cosmeticRemote = NetworkBridge.CreateUnreliableRemoteEvent(EnvironmentConstants.Network.RemoteNames.FxCosmetic)
 	EnvironmentReactionSystem.Attach()
-	trove:Connect(RunService.Heartbeat, function()
-		EnvironmentReactionSystem.Step(os.clock())
-	end)
+	trove:Add(CombatTick.Register("EnvironmentReactionSystem", function(_deltaTime: number, now: number)
+		EnvironmentReactionSystem.Step(now)
+	end))
 	logger:info("EnvironmentReactionSystem.Init() complete")
 end
 

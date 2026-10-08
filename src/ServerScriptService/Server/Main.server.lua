@@ -257,8 +257,15 @@ boot("KitAbilitySystem", KitAbilitySystem)
 --     and boots in the same slot for the same reason. It has no Init()-time dependency on anything --
 --     it owns its own Heartbeat, registers combatants on demand, and nothing currently in this
 --     sequence reads from it -- so its position here is about where a reader expects combat to start,
---     not about ordering. Init() only connects the Heartbeat; a server with nobody registered pays
+--     not about ordering. Init() only registers its phase; a server with nobody registered pays
 --     nothing for it.
+--
+--     ONE COMBAT HEARTBEAT (2026-10-08). The combat Systems from here to DomainSystem no longer connect
+--     Heartbeats of their own: each registers its Step as a phase of Server/Combat/CombatTick.lua, which
+--     runs them in its PHASES order on one connection, each under its own MicroProfiler label. The FRAME
+--     order those Systems need is that list, not the boot order below -- which still matters for the Init-
+--     time dependency asserts each one makes. The tick connects when the engine registers, here, so it
+--     fires where the first combat Heartbeat always did.
 -- 11c. WeaponRoster reads Workspace.Weapons and builds every weapon's stage tables. FIRST of the
 --      combat pieces, and that ordering IS a correctness requirement rather than a readability one:
 --      DefaultMoveRegistry enumerates this roster to build its MoveId list, and caches that list on

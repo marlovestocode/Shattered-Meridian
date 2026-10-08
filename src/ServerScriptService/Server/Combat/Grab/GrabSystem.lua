@@ -152,6 +152,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
 local RootControl = require(script.Parent.Parent.RootControl)
+local CombatTick = require(script.Parent.Parent.CombatTick)
 
 type DefenseOutcome = DefenseTypes.DefenseOutcome
 type DamageResult = DamageTypes.DamageResult
@@ -1164,9 +1165,7 @@ function GrabSystem.Init(): ()
 
 	GrabSystem.Attach()
 
-	heartbeatTrove:Connect(RunService.Heartbeat, function(deltaTime: number)
-		GrabSystem.Step(deltaTime, os.clock())
-	end)
+	heartbeatTrove:Add(CombatTick.Register("GrabSystem", GrabSystem.Step))
 	heartbeatTrove:Connect(RunService.PreSimulation, pinHolds)
 
 	-- A holding/held/thrown player disconnecting mid-hold must not leave the OTHER side stuck

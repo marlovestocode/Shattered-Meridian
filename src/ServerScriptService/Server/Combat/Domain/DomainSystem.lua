@@ -62,7 +62,6 @@
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local Allegiance = require(ReplicatedStorage.Shared.Combat.Allegiance)
@@ -94,6 +93,7 @@ local QiSystem = require(ServerScriptService.Server.Systems.QiSystem)
 local DomainEffects = require(script.Parent.DomainEffects)
 local DomainInstance = require(script.Parent.DomainInstance)
 local DomainWall = require(script.Parent.DomainWall)
+local CombatTick = require(script.Parent.Parent.CombatTick)
 
 type DomainInstance = DomainInstance.DomainInstance
 type Transition = DomainInstance.Transition
@@ -1280,9 +1280,7 @@ function DomainSystem.Init(): ()
 		DomainSystem.NoteSwingAccepted(model, swing)
 	end))
 
-	trove:Connect(RunService.Heartbeat, function(deltaTime: number)
-		DomainSystem.Step(deltaTime, os.clock())
-	end)
+	trove:Add(CombatTick.Register("DomainSystem", DomainSystem.Step))
 end
 
 -- Collapses every realm at once and stops. A realm mid-life at shutdown has its law lifted, so no body is

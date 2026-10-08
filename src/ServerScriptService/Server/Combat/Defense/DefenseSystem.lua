@@ -43,10 +43,10 @@
 	follow-up swing to the next frame for the same reason. DefenseSystem.spec asserts the bound rather
 	than the absence.
 
-	HEARTBEAT ORDER IS LOAD-BEARING. Roblox fires Heartbeat connections in connection order, so this
-	module's Step must run after HitboxEngine's or pass 2 executes before the substeps that fill its
-	buffer and every batch resolves a frame late -- invisibly, and only on some boot orders. Init
-	asserts the engine is already started rather than trusting a comment in Main.server.lua.
+	FRAME ORDER IS LOAD-BEARING. This module's Step must run after HitboxEngine's or pass 2 executes before
+	the substeps that fill its buffer and every batch resolves a frame late. Since 2026-10-08 that order is
+	Server/Combat/CombatTick.lua's PHASES -- one list, whatever the boot order -- rather than the connection
+	order of separate Heartbeats; Init still asserts the engine is available.
 
 	Does not own: contact detection (HitboxEngine), window timing (Shared/Defense/ParryWindows.lua),
 	damage of any kind, or the attack move set. Attack GATING is here rather than in the engine
@@ -54,7 +54,6 @@
 ]]
 
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
@@ -82,6 +81,7 @@ local OutcomeResolver = require(script.Parent.OutcomeResolver)
 local HitboxEngine = require(script.Parent.Parent.HitboxEngine.HitboxEngine)
 local NetworkLatency = require(script.Parent.Parent.NetworkLatency)
 local RootControl = require(script.Parent.Parent.RootControl)
+local CombatTick = require(script.Parent.Parent.CombatTick)
 
 type DefenseState = DefenseTypes.DefenseState
 type DefenseOutcome = DefenseTypes.DefenseOutcome
@@ -1524,11 +1524,8 @@ function DefenseSystem.Init(): ()
 		end,
 	})
 
-	-- Connected AFTER HitboxEngine.Init has connected its own, which Main.server.lua guarantees by
-	-- calling that first.
-	heartbeatTrove:Connect(RunService.Heartbeat, function(deltaTime: number)
-		DefenseSystem.Step(deltaTime, os.clock())
-	end)
+	-- Runs after the engine's phase every frame by CombatTick.PHASES, whatever the boot order.
+	heartbeatTrove:Add(CombatTick.Register("DefenseSystem", DefenseSystem.Step))
 
 	-- Warms every window this system might arm and warns per missing one, so an unmarked clip is a
 	-- startup warning rather than a mid-fight mystery. Spawned rather than awaited: it makes web

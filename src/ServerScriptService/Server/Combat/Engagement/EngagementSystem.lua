@@ -108,7 +108,6 @@
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local ChangeNotifier = require(ReplicatedStorage.Shared.ChangeNotifier)
@@ -125,6 +124,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
+local CombatTick = require(script.Parent.Parent.CombatTick)
 
 type DefenseOutcome = DefenseTypes.DefenseOutcome
 type DamageResult = DamageTypes.DamageResult
@@ -683,9 +683,7 @@ function EngagementSystem.Init(): ()
 
 	EngagementSystem.Attach()
 
-	heartbeatTrove:Connect(RunService.Heartbeat, function(deltaTime: number)
-		EngagementSystem.Step(deltaTime, os.clock())
-	end)
+	heartbeatTrove:Add(CombatTick.Register("EngagementSystem", EngagementSystem.Step))
 
 	-- Through Shared/PlayerLifecycle since 2026-10-08: the module now needs each new body as well (see
 	-- reassertOnCharacter), and BindAllPlayers also seeds players already present at Init, which the raw

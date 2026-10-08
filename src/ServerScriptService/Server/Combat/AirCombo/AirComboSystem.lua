@@ -37,7 +37,6 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboConstants)
@@ -57,6 +56,7 @@ local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
 local DefenseSystem = require(script.Parent.Parent.Defense.DefenseSystem)
 local NetworkLatency = require(script.Parent.Parent.NetworkLatency)
 local RootControl = require(script.Parent.Parent.RootControl)
+local CombatTick = require(script.Parent.Parent.CombatTick)
 
 type Combo = AirComboTypes.Combo
 type EndReason = AirComboTypes.EndReason
@@ -878,9 +878,7 @@ function AirComboSystem.Init(): ()
 
 	AirComboSystem.Attach()
 
-	heartbeatTrove:Connect(RunService.Heartbeat, function(deltaTime: number)
-		AirComboSystem.Step(deltaTime, os.clock())
-	end)
+	heartbeatTrove:Add(CombatTick.Register("AirComboSystem", AirComboSystem.Step))
 
 	-- A same-frame backstop for a participant leaving mid-combo; Step's own Parent==nil sweep is the
 	-- primary mechanism, the same split GrabSystem keeps.
