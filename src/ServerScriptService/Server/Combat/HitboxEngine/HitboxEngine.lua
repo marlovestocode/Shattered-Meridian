@@ -171,9 +171,8 @@ local modelToCombatant: { [Instance]: Combatant } = {}
 -- of registered players costs nothing per frame beyond the liveness sweep below.
 local engaged: { Combatant } = {}
 
--- The Include filter's backing list, rebuilt on every registration change and handed to
--- CandidateGatherer. Kept here rather than derived from `combatants` at query time because the
--- gatherer needs a plain { Model } and rebuilding one per sample would allocate on the hot path.
+-- Every registered model as a plain list, rebuilt on every registration change: the projectile world
+-- cast's Exclude filter (bodies are swept by the hurtbox index, CandidateGatherer, never by the cast).
 local registeredModels: { Model } = {}
 
 -- OnHit's and OnProjectileEvents' subscribers (Shared/CallbackList.lua): pcall'd per consumer, and Fire allocates
@@ -352,7 +351,7 @@ local function rebuildBroadphaseFilter(): ()
 	for index, combatant in combatants do
 		registeredModels[index] = combatant.Model
 	end
-	CandidateGatherer.SetRegisteredModels(registeredModels)
+	CandidateGatherer.SetBodies(combatants)
 	ProjectileSimulator.SetRegisteredModels(registeredModels)
 end
 
@@ -1435,7 +1434,7 @@ function HitboxEngine.Reset(): ()
 	-- Dropped so one spec toggling the visualiser cannot leave it on for every case after it -- the
 	-- same "no case serves another its state" contract every other line in this function keeps.
 	HitboxEngine.ClearDebugVolumesOverride()
-	CandidateGatherer.SetRegisteredModels(registeredModels)
+	CandidateGatherer.Reset()
 	ProjectileSimulator.SetRegisteredModels(registeredModels)
 end
 

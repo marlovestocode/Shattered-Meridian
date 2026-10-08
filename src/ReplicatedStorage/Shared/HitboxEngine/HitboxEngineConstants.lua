@@ -84,14 +84,14 @@ HitboxEngineConstants.MaxFrameSeconds = 0.25
 
 -- Budgets ----------------------------------------------------------------------------------------
 
--- Concurrent swings the engine will sample. Each one costs a broadphase query per substep, so this
+-- Concurrent swings the engine will sample. Each one costs a broadphase gather per frame, so this
 -- is the number that actually bounds the engine's worst-case frame cost. A refusal past it degrades
 -- one attack in a large brawl instead of everyone's frame time.
 HitboxEngineConstants.MaxActiveSwings = 64
 
--- Ceiling on parts one broadphase query may return. The query is already restricted to registered
--- combatant bodies (an Include filter, not an Exclude one), so reaching this means an implausible
--- crowd inside one hitbox rather than an ordinary busy scene.
+-- Ceiling on parts one broadphase gather may return. The gather only ever returns registered bodies' own
+-- parts -- no scenery, accessories or held weapons (CandidateGatherer) -- so reaching this means an
+-- implausible crowd inside one hitbox rather than an ordinary busy scene.
 HitboxEngineConstants.MaxCandidatesPerSample = 64
 
 -- Default when an AttackDefinition does not specify MaxTargetsPerSwing.
@@ -110,6 +110,12 @@ HitboxEngineConstants.MaxSwingSeconds = 10
 -- interpolation must still have been GATHERED this frame to be tested at all. The margin is what
 -- makes the broadphase cover the swept region rather than just its endpoint.
 HitboxEngineConstants.BroadphaseMarginStuds = 2
+
+-- Studs added to a body's measured reach (its farthest part from its root) in the hurtbox broadphase's
+-- coarse reject (CandidateGatherer). The reach is re-measured at most every half second, so this covers a
+-- limb that has swung outward since: a padded reject only costs a few extra distance checks, a tight one
+-- would drop a body whose arm had just entered the volume.
+HitboxEngineConstants.HurtboxReachPadStuds = 2
 
 -- Slack allowed in the exact narrow-phase test, in studs. Non-zero because a hit is judged against a
 -- part's CENTRE (see HitboxEngine.sampleSwing) rather than its surface: a limb whose centre sits

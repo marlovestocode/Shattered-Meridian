@@ -16,7 +16,7 @@
 	combo and knockback. There is no damage, parry or block logic in this file.
 
 	SWEPT, BOTH WAYS. Each step moves a shot from where it was to where it will be, and tests that whole
-	segment: against bodies (CandidateGatherer's include-filtered broadphase, then HitboxGeometry's own
+	segment: against bodies (CandidateGatherer's hurtbox broadphase, then HitboxGeometry's own
 	containment -- the same narrow phase a swing uses), and against the world as a Spherecast. A fast shot
 	cannot tunnel through a body or a wall between two samples, whatever the frame rate.
 
