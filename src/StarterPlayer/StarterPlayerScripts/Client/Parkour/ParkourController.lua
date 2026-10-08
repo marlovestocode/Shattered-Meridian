@@ -197,6 +197,8 @@ local function buildInitialContext(boundCharacter: Model, boundHumanoid: Humanoi
 		WallJumpChain = 0,
 		AirDashChain = 0,
 		LastWallInstance = nil,
+		LastWallPosition = nil,
+		LastWallNormal = nil,
 		LastWallLeftAt = 0,
 		WallLaunchDashBoostUntil = 0,
 		CombatOwned = false,
@@ -478,6 +480,8 @@ local function step(deltaTime: number): ()
 			context.WallJumpChain = 0
 			context.AirDashChain = 0
 			context.LastWallInstance = nil
+			context.LastWallPosition = nil
+			context.LastWallNormal = nil
 		else
 			context.LeftGroundAt = now
 		end

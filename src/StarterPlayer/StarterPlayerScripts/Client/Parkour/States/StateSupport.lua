@@ -294,6 +294,53 @@ function StateSupport.CombatBlocks(context: ParkourContext, gateKey: string): bo
 	return context.DomainSealed == true and ParkourConstants.DomainGate.BlockedStates[gateKey] == true
 end
 
+-- THE WALL COUNTERPART OF THE LEDGE REGRAB BOOKKEEPING BELOW: remembering the wall just left, and asking
+-- whether a candidate is it. Lives here for the same reason that does -- the write (WallRunning's kick and
+-- exit, WallJumping) and the read (WallRunning's two lockouts) used to be four hand-copied
+-- `Instance == LastWallInstance` tests, and a fifth would have been one more place to get wrong.
+--
+-- IDENTITY IS TWO TESTS, for the reason isBlockedLedge gives for its own pair, and the second is the new
+-- one: the Instance catches the same part, and SameSurface (the wall probes' own flush-neighbour test,
+-- ParkourConstants.Surface) catches the same physical wall built out of a DIFFERENT part. Instance alone
+-- was never enough on a wall of several blocks, and since the wall probes now follow a wall onto
+-- whichever flush part the ray hits, the part reported can change from one sample to the next with no
+-- change to the wall at all -- which would turn a lockout keyed on it into one that releases whenever the
+-- label happens to flip. The lockout windows are well under a second, so "same plane" cannot reach a
+-- different wall further along in that time.
+function StateSupport.NoteWallLeft(context: ParkourContext, wall: ParkourTypes.WallProbe): ()
+	if wall.Instance == nil then
+		return
+	end
+	context.LastWallInstance = wall.Instance
+	context.LastWallPosition = wall.Position
+	context.LastWallNormal = wall.Normal
+	context.LastWallLeftAt = context.Now
+end
+
+function StateSupport.IsLastWall(context: ParkourContext, wall: ParkourTypes.WallProbe): boolean
+	-- LastWallInstance is the gate for the whole record: ParkourController clears it on landing, and the
+	-- position and normal go stale with it.
+	if context.LastWallInstance == nil or wall.Instance == nil then
+		return false
+	end
+	if wall.Instance == context.LastWallInstance then
+		return true
+	end
+	local SURFACE = ParkourConstants.Surface
+	local position, normal = context.LastWallPosition, context.LastWallNormal
+	if not SURFACE.Enabled or position == nil or normal == nil then
+		return false
+	end
+	return ParkourMath.SameSurface(
+		position,
+		normal,
+		wall.Position,
+		wall.Normal,
+		SURFACE.SameSurfaceAngleDegrees,
+		SURFACE.SameSurfaceOffsetStuds
+	)
+end
+
 -- THE ONE ANSWER TO "IS A LEDGE GRAB AVAILABLE RIGHT NOW", and the regrab bookkeeping behind it.
 --
 -- This question was being asked in THREE places with three different answers, which is exactly the

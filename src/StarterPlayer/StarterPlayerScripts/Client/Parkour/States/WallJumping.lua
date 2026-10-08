@@ -117,9 +117,8 @@ local WallJumping: ParkourTypes.StateDefinition = {
 		-- attempted straight out of this jump. Without this, wall-jump -> immediately re-attach to the
 		-- same surface would sidestep the lockout entirely, since the run's own Exit only records the
 		-- wall when the run itself ends.
-		if wall and wall.Instance then
-			context.LastWallInstance = wall.Instance
-			context.LastWallLeftAt = context.Now
+		if wall then
+			StateSupport.NoteWallLeft(context, wall)
 		end
 	end,
 

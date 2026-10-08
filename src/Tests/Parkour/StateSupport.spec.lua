@@ -61,6 +61,84 @@ return function()
 		end)
 	end)
 
+	describe("StateSupport wall lockout identity", function()
+		-- A context with only the fields the wall lockout touches; the real one is built by ParkourController.
+		local function newContext(): any
+			return {
+				Now = 10,
+				LastWallInstance = nil,
+				LastWallPosition = nil,
+				LastWallNormal = nil,
+				LastWallLeftAt = 0,
+			}
+		end
+
+		local function wallOn(part: any, x: number, normal: Vector3?): any
+			return { Instance = part, Position = Vector3.new(x, 5, 0), Normal = normal or Vector3.new(-1, 0, 0) }
+		end
+
+		local function newPart(): BasePart
+			return Instance.new("Part")
+		end
+
+		it("recognises the same part", function()
+			local context, part = newContext(), newPart()
+			StateSupport.NoteWallLeft(context, wallOn(part, 2.5))
+			expect(StateSupport.IsLastWall(context, wallOn(part, 2.5))).to.equal(true)
+			part:Destroy()
+		end)
+
+		it("recognises the same PHYSICAL wall when it is reported on a flush neighbouring part", function()
+			-- The wall probes follow a wall onto whichever flush part the ray hits, so the part reported can change
+			-- with no change to the wall. A lockout keyed on the part alone would release whenever it did.
+			local context, first, second = newContext(), newPart(), newPart()
+			StateSupport.NoteWallLeft(context, wallOn(first, 2.5))
+			expect(StateSupport.IsLastWall(context, wallOn(second, 2.52))).to.equal(true)
+			first:Destroy()
+			second:Destroy()
+		end)
+
+		it("does not mistake a wall facing another way, or standing well off the plane, for the last one", function()
+			local context, first, second = newContext(), newPart(), newPart()
+			StateSupport.NoteWallLeft(context, wallOn(first, 2.5))
+			expect(StateSupport.IsLastWall(context, wallOn(second, 2.5, Vector3.new(0, 0, -1)))).to.equal(false)
+			expect(StateSupport.IsLastWall(context, wallOn(second, -2.5, Vector3.new(1, 0, 0)))).to.equal(false)
+			expect(StateSupport.IsLastWall(context, wallOn(second, 5))).to.equal(false)
+			first:Destroy()
+			second:Destroy()
+		end)
+
+		it("remembers nothing until a wall is left, and forgets when the record is cleared", function()
+			local context, part = newContext(), newPart()
+			expect(StateSupport.IsLastWall(context, wallOn(part, 2.5))).to.equal(false)
+			StateSupport.NoteWallLeft(context, wallOn(part, 2.5))
+			context.LastWallInstance = nil
+			expect(StateSupport.IsLastWall(context, wallOn(part, 2.5))).to.equal(false)
+			part:Destroy()
+		end)
+
+		it("ignores a wall with no part, rather than recording a lockout on nothing", function()
+			local context = newContext()
+			StateSupport.NoteWallLeft(context, wallOn(nil, 2.5))
+			expect(context.LastWallInstance).to.equal(nil)
+			expect(context.LastWallLeftAt).to.equal(0)
+		end)
+
+		it("falls back to the part alone when the surface test is switched off", function()
+			local context, first, second = newContext(), newPart(), newPart()
+			local was = ParkourConstants.Surface.Enabled
+			ParkourConstants.Surface.Enabled = false
+			StateSupport.NoteWallLeft(context, wallOn(first, 2.5))
+			local sameFlush = StateSupport.IsLastWall(context, wallOn(second, 2.5))
+			local samePart = StateSupport.IsLastWall(context, wallOn(first, 2.5))
+			ParkourConstants.Surface.Enabled = was
+			expect(sameFlush).to.equal(false)
+			expect(samePart).to.equal(true)
+			first:Destroy()
+			second:Destroy()
+		end)
+	end)
+
 	describe("ParkourConstants.Obstacle.MaxApproachAngleDegrees", function()
 		it("sits strictly between 'requires a square hit' and 'sideways still counts'", function()
 			local threshold = ParkourConstants.Obstacle.MaxApproachAngleDegrees

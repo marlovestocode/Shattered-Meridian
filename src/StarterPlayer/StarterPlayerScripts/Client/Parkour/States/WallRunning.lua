@@ -434,8 +434,7 @@ local function beginKick(context: ParkourContext, wall: WallProbe): ()
 	-- what makes the climb require alternating walls, which is the whole reason it can be allowed to
 	-- run as long as the shaft is tall. Deliberately a short window: a genuine round trip across a
 	-- corridor takes longer than this, so the legitimate return to the wall you came from is untouched.
-	local sameWallAsLastKick = wall.Instance ~= nil
-		and wall.Instance == context.LastWallInstance
+	local sameWallAsLastKick = StateSupport.IsLastWall(context, wall)
 		and (context.Now - context.LastWallLeftAt) < ASSIST.SameWallCooldownSeconds
 
 	if target.Found and target.Corridor and not sameWallAsLastKick then
@@ -516,10 +515,7 @@ local function beginKick(context: ParkourContext, wall: WallProbe): ()
 	-- Record the wall so the same-wall lockout (both this run's own SameWallLockoutSeconds and the
 	-- kick's SameWallCooldownSeconds above) also applies to a re-attach or re-kick attempted straight
 	-- out of this one.
-	if wall.Instance then
-		context.LastWallInstance = wall.Instance
-		context.LastWallLeftAt = context.Now
-	end
+	StateSupport.NoteWallLeft(context, wall)
 
 	phase = "Departing"
 end
@@ -793,8 +789,7 @@ local function evaluateEntry(context: ParkourContext): (boolean, string?)
 	-- wall is available immediately -- which is exactly the chained wall-run the design asks for,
 	-- and is why this is a per-wall lockout rather than a global cooldown.
 	if
-		context.LastWallInstance ~= nil
-		and probe.Instance == context.LastWallInstance
+		StateSupport.IsLastWall(context, probe)
 		and (context.Now - context.LastWallLeftAt) < WALLRUN.SameWallLockoutSeconds
 	then
 		return false, "SameWallLockout"
@@ -1021,9 +1016,8 @@ local WallRunning: ParkourTypes.StateDefinition = {
 		-- probe from mid-flight. A CATCHING exit records it too, and must: the lockout is what stops a
 		-- catch that expires into a fall from immediately re-catching the same face on the way down,
 		-- which would be a body stuck to a wall for as long as the wall lasted.
-		if probe and probe.Instance then
-			context.LastWallInstance = probe.Instance
-			context.LastWallLeftAt = context.Now
+		if probe then
+			StateSupport.NoteWallLeft(context, probe)
 		end
 		reattachUntil = context.Now + WALLRUN.ReattachCooldownSeconds
 

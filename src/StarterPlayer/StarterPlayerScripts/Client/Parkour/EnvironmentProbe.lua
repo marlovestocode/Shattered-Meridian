@@ -6,7 +6,7 @@
 	keeps them affordable. Fills the ParkourContext's Ground/Obstacle/WallLeft/WallRight/Ledge/
 	CeilingClear fields; nothing else in the framework is allowed to cast a ray.
 
-	THREE DESIGN DECISIONS THAT ARE THE WHOLE POINT OF THIS FILE:
+	FOUR DESIGN DECISIONS THAT ARE THE WHOLE POINT OF THIS FILE:
 
 	1. FEW RAYS, NOT MANY. The obvious way to measure an obstacle -- a vertical fan of forward rays
 	   every 0.35 studs from the ankle to head height -- costs ~20 casts per frame per player and
@@ -36,6 +36,18 @@
 	   reliably during intense multiplayer combat" a property of the code rather than a hope -- the
 	   worst case is bounded by a constant, not by what happens to be in front of the player.
 
+	4. SURFACES, NOT PARTS. A mountain is a pile of overlapping, near-touching parts, and "the nearest hit of
+	   one ray" moves between them as the character moves a fraction of a stud: a part barely poking out of
+	   the real face, or buried in it, won samples and seated the character in it, and two parts a hair
+	   apart took turns. So the wall probes, the ledge candidate and the mantle top describe a PLANE
+	   (Shared/Parkour/SurfaceLock.lua; every number is ParkourConstants.Surface), with the part as a mere
+	   label on it: a held plane is confirmed by the one centre ray, anything else is cross-checked by a few
+	   more rays whose majority decides, a challenger must be clearly better to replace what is held, and
+	   the geometry a pose would occupy (a hang's body, a mantle's end footprint) is checked as well as the
+	   surface it attaches to. The extra rays are VALIDATION casts, on their own sub-budget
+	   (Probe.MaxValidationRaysPerFrame) and mostly spent on the frame a surface is first seen.
+	   Surface.Enabled = false restores the raw nearest-hit behavior exactly.
+
 	Every result table is persistent and mutated in place -- see the RESULT TABLES block below. This
 	module allocates no tables and no Vector3s per frame beyond what the engine's own Raycast returns.
 
@@ -51,6 +63,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
+local SurfaceLock = require(ReplicatedStorage.Shared.Parkour.SurfaceLock)
 local ParkourTagging = require(ReplicatedStorage.Shared.Parkour.ParkourTagging)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
 
@@ -69,6 +82,7 @@ local OBSTACLE = ParkourConstants.Obstacle
 local WALLRUN = ParkourConstants.WallRun
 local LEDGE = ParkourConstants.Ledge
 local SLOPE = ParkourConstants.Slope
+local SURFACE = ParkourConstants.Surface
 
 --
 -- RESULT TABLES -- allocated once at module load and mutated in place forever after. The framework
@@ -139,6 +153,43 @@ local ledge: LedgeProbe = {
 
 local ceilingClear = true
 local ceilingSampledAt = 0
+
+--
+-- SURFACE STABILITY STATE -- the memory the probes did not used to have. See Shared/Parkour/SurfaceLock.lua
+-- for what a lock IS and ParkourConstants.Surface for every number; this file only owns WHERE the rays go.
+--
+-- One lock per wall side, because the two sides hold two unrelated surfaces. The sample sets and the vote
+-- result are shared scratch: each probe fills a set, votes, and reads the answer before returning, so
+-- nothing is ever retained across calls -- the same read-immediately contract the result tables above use.
+--
+local wallLockLeft = SurfaceLock.NewLock()
+local wallLockRight = SurfaceLock.NewLock()
+local WALL_CLUSTER_RAYS = 4
+local wallSamples = SurfaceLock.NewSampleSet(WALL_CLUSTER_RAYS + 1)
+local wallConsensus = SurfaceLock.NewConsensus()
+-- The ledge candidate's cross-check: a face and a lip sample from the centre of the grab plus one either side
+-- along the wall (Ledge.ConsensusSpreadStuds). Two sets and two results because the face and the lip are
+-- voted on separately and both answers are needed at once.
+local LEDGE_SIDE_RAYS = 4
+local LEDGE_BODY_RAYS = 3
+local ledgeFaceSamples = SurfaceLock.NewSampleSet(3)
+local ledgeLipSamples = SurfaceLock.NewSampleSet(3)
+local ledgeFaceConsensus = SurfaceLock.NewConsensus()
+local ledgeLipConsensus = SurfaceLock.NewConsensus()
+-- The mantle target's TOP, held like a wall is. Steady state is the old single downward ray: the held top is
+-- confirmed by the centre ray alone, and the two side scans are only paid when the centre ray lands somewhere
+-- the held top is not.
+local OBSTACLE_TOP_SIDE_RAYS = 2
+local OBSTACLE_STAND_RAYS = 4
+local obstacleTopLock = SurfaceLock.NewLock()
+-- The top is held under the same rules as a wall EXCEPT the switch cooldown. A wall can afford to be loyal for
+-- a tenth of a second after a switch (it only delays noticing a block that juts out); a top cannot, because
+-- the mantle derives where the character ENDS from it, and a stale lower top while a higher one is ahead is a
+-- pull-up that finishes inside the block. The hysteresis bands still apply -- only the backstop is dropped.
+local TOP_SURFACE: SurfaceLock.Config = table.clone(SURFACE)
+TOP_SURFACE.SwitchCooldownSeconds = 0
+local obstacleTopSamples = SurfaceLock.NewSampleSet(OBSTACLE_TOP_SIDE_RAYS + 1)
+local obstacleTopConsensus = SurfaceLock.NewConsensus()
 
 --
 -- Bound character state
@@ -262,6 +313,11 @@ function EnvironmentProbe.BindCharacter(character: Model, humanoid: Humanoid, ro
 	wallLeft.SampledAt = 0
 	wallRight.Found = false
 	wallRight.SampledAt = 0
+	-- A held surface belongs to the body that was touching it. A respawn carrying one over would merge the
+	-- new character's first contact into a wall the old one died against.
+	SurfaceLock.Reset(wallLockLeft)
+	SurfaceLock.Reset(wallLockRight)
+	SurfaceLock.Reset(obstacleTopLock)
 	ledge.Found = false
 	ledge.SampledAt = 0
 	ceilingClear = true
@@ -288,6 +344,39 @@ local function castRay(origin: Vector3, direction: Vector3): RaycastResult?
 	end
 	rayBudgetUsed += 1
 	return Workspace:Raycast(origin, direction, params)
+end
+
+-- The VALIDATION cast: the extra rays that confirm a candidate surface is real geometry before anything
+-- attaches to it (ParkourConstants.Surface). Counts against the frame ceiling like every other cast AND
+-- against its own slice of it, Probe.MaxValidationRaysPerFrame -- see that constant for why it is a
+-- sub-budget. A refusal returns nil exactly like castRay's, and every caller therefore asks
+-- validationAvailable for its whole cluster first: a vote taken over a cluster that was cut off halfway
+-- would be a vote with the wrong electorate.
+local validationUsed = 0
+
+local function validationAvailable(count: number): boolean
+	return validationUsed + count <= PROBE.MaxValidationRaysPerFrame and rayBudgetUsed + count <= PROBE.MaxRaysPerFrame
+end
+
+local function castValidationRay(origin: Vector3, direction: Vector3): RaycastResult?
+	local params = raycastParams
+	if not params then
+		return nil
+	end
+	if not validationAvailable(1) then
+		return nil
+	end
+	rayBudgetUsed += 1
+	validationUsed += 1
+	return Workspace:Raycast(origin, direction, params)
+end
+
+-- Whether a hit is geometry at all, for the purposes of a vote. A tag that marks a part Ignored removes it
+-- from the world as far as the framework is concerned, so it must not be a witness either; a part that is
+-- merely not wall-runnable IS still a surface, and voting for it is exactly how a sliver of one is outvoted
+-- by the wall behind it.
+local function isVotingHit(hit: RaycastResult, now: number): boolean
+	return not ParkourTagging.GetPermissions(hit.Instance, now).Ignored
 end
 
 -- The swept-sphere counterpart, on the same budget and with the same refusal semantics. Used by
@@ -422,6 +511,100 @@ local function clearObstacle(now: number): ()
 	obstacle.MantleAllowed = true
 end
 
+-- THE MANTLE TARGET'S TOP, as a plane. The top finder is one downward ray just past the near face, so a
+-- sliver of a part standing a little proud of the real top -- or the gap between two blocks -- used to decide
+-- the mantle height and with it where the character is pulled to. Returns the top's contact point, or nil
+-- when the ray's hit cannot be trusted this frame (never when it can).
+--
+-- Same shape as probeWall: a centre ray that lands on the held top needs nothing more (one cast, as before);
+-- anything else is checked by a scan either side along the face, the plane most of the three agree on is the
+-- candidate, and the lock's hysteresis decides whether it replaces the held top. A genuinely rough top whose
+-- three scans all disagree is NOT refused -- the centre ray's answer stands, because "this ledge is bumpy" is
+-- not a reason to take the mantle away -- and neither is a refusal on budget; both only mean no extra
+-- confidence this frame.
+local function resolveObstacleTop(
+	topHit: RaycastResult,
+	topOrigin: Vector3,
+	topDown: Vector3,
+	forward: Vector3,
+	now: number
+): Vector3
+	-- Vaulting and mantling are decisions a GROUNDED character makes (ObstacleClassifier answers "Airborne"
+	-- otherwise), and States/Falling and Jumping force this probe every frame for other reasons -- so an
+	-- airborne frame takes the raw top, spends nothing, and drops any held one rather than let it go stale.
+	if not SURFACE.Enabled or not ground.Grounded then
+		SurfaceLock.Reset(obstacleTopLock)
+		return topHit.Position
+	end
+	local candidate: SurfaceLock.Candidate = topHit
+	if
+		not SurfaceLock.Matches(obstacleTopLock, topHit.Position, topHit.Normal, now, TOP_SURFACE)
+		and validationAvailable(OBSTACLE_TOP_SIDE_RAYS)
+	then
+		SurfaceLock.Clear(obstacleTopSamples)
+		SurfaceLock.Add(obstacleTopSamples, topHit.Position, topHit.Normal, topHit.Instance, topHit.Distance)
+		local lateral = ParkourMath.SafeUnit(UP:Cross(forward), Vector3.zero)
+		for side = -1, 1, 2 do
+			local sideHit = castValidationRay(topOrigin + lateral * (side * OBSTACLE.TopConsensusSpreadStuds), topDown)
+			if sideHit and isVotingHit(sideHit, now) then
+				SurfaceLock.Add(
+					obstacleTopSamples,
+					sideHit.Position,
+					sideHit.Normal,
+					sideHit.Instance,
+					sideHit.Distance
+				)
+			end
+		end
+		if
+			obstacleTopSamples.Count > 1
+			and SurfaceLock.Vote(obstacleTopSamples, obstacleTopConsensus, SURFACE.Consensus)
+		then
+			candidate = obstacleTopConsensus
+		end
+	end
+	SurfaceLock.Observe(obstacleTopLock, candidate, topDown, now, TOP_SURFACE)
+	-- The held plane's contact point sits where the centre ray's column crosses it, so the height reported is
+	-- the held top's even when the centre ray itself hit a bump on it. Horizontal position is the ray's own:
+	-- the mantle path is pulled toward this point and it should stay where the player is heading.
+	local held = SurfaceLock.Distance(obstacleTopLock, topOrigin, topDown, topHit.Distance)
+	return topOrigin + topDown.Unit * held
+end
+
+-- Whether the spot a mantle ENDS on is free of props. The pull-up finishes with the character standing a
+-- short step in from the edge (States/Mantling's EndPosition), and the old gate asked about headroom at the
+-- edge only, so a rock, rail or lamp post standing on the top a step further in was invisible and the
+-- mantle ended inside it. Columns down the body's height over the end footprint -- centre and either side --
+-- plus one forward cast at chest height across the gap from the edge to it.
+--
+-- StepToleranceStuds keeps the column bottoms above the surface, so a rough top is walked on rather than
+-- refused, and a refusal on budget answers "not clear": declining a mantle for a frame is safe, ending one
+-- inside a prop is not.
+local function mantleFootprintClear(topPosition: Vector3, forward: Vector3, now: number): boolean
+	local CLEAR = OBSTACLE.StandClearance
+	if not validationAvailable(OBSTACLE_STAND_RAYS) then
+		return false
+	end
+	local lateral = ParkourMath.SafeUnit(UP:Cross(forward), Vector3.zero)
+	-- 1.1 is States/Mantling's own EndPosition step, which has no constant of its own to read.
+	local footprint = topPosition + forward * 1.1
+	local columnTop = footprint + UP * CLEAR.BodyHeightStuds
+	local column = Vector3.new(0, -(CLEAR.BodyHeightStuds - CLEAR.StepToleranceStuds), 0)
+	for index = 1, 3 do
+		local offset = if index == 1
+			then Vector3.zero
+			elseif index == 2 then lateral * CLEAR.HalfWidthStuds
+			else lateral * -CLEAR.HalfWidthStuds
+		local hit = castValidationRay(columnTop + offset, column)
+		if hit and isVotingHit(hit, now) then
+			return false
+		end
+	end
+	local chest = topPosition + UP * CLEAR.ChestHeightStuds
+	local across = castValidationRay(chest, forward * 1.1)
+	return not (across and isVotingHit(across, now))
+end
+
 -- Measures whatever is directly ahead along `travelDirection`. See the file header for the ray
 -- layout; the sequence below is written so that every early exit leaves `obstacle` in a coherent
 -- "nothing usable there" state rather than a half-filled one.
@@ -469,7 +652,16 @@ local function probeObstacle(rootPart: BasePart, travelDirection: Vector3, speed
 	-- past the near face so it lands ON the obstacle rather than skimming its front edge.
 	local topScanHeight = OBSTACLE.MantleMaxHeight + 1.5
 	local topOrigin = Vector3.new(nearFace.X, footPosition.Y + topScanHeight, nearFace.Z) + forward * 0.35
-	local topHit = castRay(topOrigin, Vector3.new(0, -(topScanHeight + 1), 0))
+	local topDown = Vector3.new(0, -(topScanHeight + 1), 0)
+	local topHit = castRay(topOrigin, topDown)
+	-- The top as a held PLANE rather than the raw hit of one ray: see resolveObstacleTop. Nil when there is no
+	-- top at all, exactly as topHit is.
+	local topPosition: Vector3? = nil
+	if topHit then
+		topPosition = resolveObstacleTop(topHit, topOrigin, topDown, forward, now)
+	else
+		SurfaceLock.Observe(obstacleTopLock, nil, topDown, now, TOP_SURFACE)
+	end
 
 	obstacle.SampledAt = now
 	obstacle.Found = true
@@ -485,7 +677,7 @@ local function probeObstacle(rootPart: BasePart, travelDirection: Vector3, speed
 	obstacle.VaultAllowed = permissions.Vaultable
 	obstacle.MantleAllowed = permissions.Mantleable
 
-	if not topHit then
+	if not topHit or not topPosition then
 		-- No top surface inside the scan: either taller than anything traversable, or the scan was
 		-- refused on budget. Both mean "do not traverse this," which math.huge expresses without the
 		-- classifier needing a separate unknown-height case.
@@ -497,8 +689,8 @@ local function probeObstacle(rootPart: BasePart, travelDirection: Vector3, speed
 		return
 	end
 
-	obstacle.TopPosition = topHit.Position
-	obstacle.Height = topHit.Position.Y - footPosition.Y
+	obstacle.TopPosition = topPosition
+	obstacle.Height = topPosition.Y - footPosition.Y
 
 	-- Far-side probe: one downward ray past the maximum vaultable depth. Where it lands answers both
 	-- remaining questions at once -- if it lands at roughly the obstacle's own top height the surface
@@ -508,7 +700,7 @@ local function probeObstacle(rootPart: BasePart, travelDirection: Vector3, speed
 	local farOrigin = Vector3.new(farPoint.X, footPosition.Y + topScanHeight, farPoint.Z)
 	local farHit = castRay(farOrigin, Vector3.new(0, -(topScanHeight + OBSTACLE.LandingClearanceHeight), 0))
 
-	if farHit and farHit.Position.Y >= topHit.Position.Y - 0.5 then
+	if farHit and farHit.Position.Y >= topPosition.Y - 0.5 then
 		obstacle.Depth = math.huge
 		obstacle.HasLandingSpace = false
 	elseif farHit then
@@ -527,8 +719,24 @@ local function probeObstacle(rootPart: BasePart, travelDirection: Vector3, speed
 	end
 
 	-- Standing space on top, for the mantle decision.
-	local standCheck = castRay(topHit.Position + UP * 0.3, UP * OBSTACLE.StandClearanceHeight)
+	local standCheck = castRay(topPosition + UP * 0.3, UP * OBSTACLE.StandClearanceHeight)
 	obstacle.HasStandingSpace = standCheck == nil
+
+	-- The check above is made at the EDGE; the mantle ends a step in from it. Only asked when the classifier
+	-- could actually pick Mantle for this obstacle, so a vault or hop never pays for it.
+	if obstacle.HasStandingSpace and SURFACE.Enabled and ground.Grounded and OBSTACLE.StandClearance.Enabled then
+		local needsMantle = obstacle.Height > OBSTACLE.VaultMaxHeight
+			or obstacle.Depth > OBSTACLE.VaultMaxDepth
+			or not obstacle.HasLandingSpace
+		if
+			needsMantle
+			and obstacle.MantleAllowed
+			and obstacle.Height <= OBSTACLE.MantleMaxHeight
+			and obstacle.Distance <= OBSTACLE.MantleMaxReach
+		then
+			obstacle.HasStandingSpace = mantleFootprintClear(topPosition, forward, now)
+		end
+	end
 end
 
 --
@@ -547,8 +755,46 @@ local function clearWall(probe: WallProbe, now: number): ()
 	probe.BounceScale = 1
 end
 
+-- Where the cluster's extra rays start, relative to the centre ray: the four points of a cross around it,
+-- Surface.Wall.SpreadStuds out. Along the wall (horizontal, perpendicular to the cast) and up/down it, so a
+-- narrow sliver, a seam or a one-part-deep recess has to fool a ray in each axis to win a vote.
+local function clusterOffset(index: number, lateral: Vector3, spread: number): Vector3
+	if index == 1 then
+		return lateral * spread
+	elseif index == 2 then
+		return lateral * -spread
+	elseif index == 3 then
+		return UP * spread
+	end
+	return UP * -spread
+end
+
+-- One wall side, with the surface it is describing HELD between calls.
+--
+-- WHAT CHANGED, AND WHY. This used to publish the raw nearest hit of one ray every sample. On a mountain
+-- built from many overlapping parts that hit moves from part to part as the character moves a fraction of
+-- a stud, so the wall's normal jittered, a seam between two blocks read as the wall ending, and a part
+-- poking a hair out of the real face -- or a sliver of one buried in it -- won samples and seated the
+-- character in geometry. The probe now describes a PLANE (Shared/Parkour/SurfaceLock.lua) and the part is
+-- only the label on it:
+--
+--   * FAST PATH. A held surface that the centre ray still lands on (same plane within Surface's
+--     SameSurface tolerances) needs nothing else: the label follows the ray onto whichever flush part it
+--     hit, and the normal eases. One cast, exactly the old cost.
+--   * VALIDATED PATH. Anything else -- a first contact, a bump, a corner, a ray that landed somewhere the
+--     held plane is not -- is checked by a four-ray cross around the centre ray, and the plane most of the
+--     five agree on is the candidate. A sliver or a buried part is one ray's opinion against four.
+--   * HYSTERESIS. The candidate is then offered to the lock, which decides whether it replaces what is held
+--     (SurfaceLock.Observe's decision table). Two near-coincident parts can no longer take turns.
+--
+-- A centre ray that finds nothing drops the lock on the spot, with no grace: States/WallRunning's corner
+-- turn depends on a lost wall being reported lost on the frame it goes.
+--
+-- A validation cluster the frame cannot afford keeps last sample's answer (the probe is left untouched and
+-- retried next frame) instead of guessing.
 local function probeWall(
 	probe: WallProbe,
+	lock: SurfaceLock.Lock,
 	rootPart: BasePart,
 	sideDirection: Vector3,
 	travelDirection: Vector3,
@@ -556,7 +802,9 @@ local function probeWall(
 	allowDiagonal: boolean,
 	now: number
 ): ()
-	local hit = castRay(rootPart.Position, sideDirection * WALLRUN.ProbeDistance)
+	local origin = rootPart.Position
+	local castDirection = sideDirection * WALLRUN.ProbeDistance
+	local hit = castRay(origin, castDirection)
 	-- THE DIAGONAL FALLBACK, and the case it exists for: arriving at a wall HEAD-ON.
 	--
 	-- The side casts run along the character's own right vector, which is the correct instrument for the
@@ -579,16 +827,19 @@ local function probeWall(
 	if not hit and allowDiagonal then
 		local diagonal = ParkourMath.SafeUnit(sideDirection + forwardDirection, Vector3.zero)
 		if diagonal.Magnitude > 0 then
-			hit = castRay(rootPart.Position, diagonal * (WALLRUN.ProbeDistance * WALLRUN.DiagonalProbeScale))
+			castDirection = diagonal * (WALLRUN.ProbeDistance * WALLRUN.DiagonalProbeScale)
+			hit = castRay(origin, castDirection)
 		end
 	end
 	if not hit then
+		SurfaceLock.Observe(lock, nil, castDirection, now, SURFACE)
 		clearWall(probe, now)
 		return
 	end
 
 	local permissions = ParkourTagging.GetPermissions(hit.Instance, now)
 	if permissions.Ignored or not permissions.WallRunnable then
+		SurfaceLock.Observe(lock, nil, castDirection, now, SURFACE)
 		clearWall(probe, now)
 		-- Preserved rather than reset to the permissive default: a state that reads WallRunAllowed
 		-- to explain a refusal (and the debug overlay, which shows exactly that) needs to be able to
@@ -598,14 +849,74 @@ local function probeWall(
 		return
 	end
 
+	local position = hit.Position
+	local normal = hit.Normal
+	local instance = hit.Instance
+	local distance = hit.Distance
+
+	if SURFACE.Enabled then
+		local onHeldSurface = SurfaceLock.Matches(lock, hit.Position, hit.Normal, now, SURFACE)
+		local candidate: SurfaceLock.Candidate? = hit
+		if not onHeldSurface then
+			if not validationAvailable(WALL_CLUSTER_RAYS) then
+				-- Cannot confirm this frame, so do not decide anything. The probe and the lock stay exactly as
+				-- they were; SampledAt is untouched, so the next Update retries instead of waiting out the
+				-- cache interval.
+				return
+			end
+			SurfaceLock.Clear(wallSamples)
+			SurfaceLock.Add(wallSamples, hit.Position, hit.Normal, hit.Instance, hit.Distance)
+			local lateral = ParkourMath.SafeUnit(UP:Cross(castDirection), Vector3.zero)
+			for index = 1, WALL_CLUSTER_RAYS do
+				local offset = clusterOffset(index, lateral, SURFACE.Wall.SpreadStuds)
+				local extra = castValidationRay(origin + offset, castDirection)
+				if extra and isVotingHit(extra, now) then
+					SurfaceLock.Add(wallSamples, extra.Position, extra.Normal, extra.Instance, extra.Distance)
+				end
+			end
+			if SurfaceLock.Vote(wallSamples, wallConsensus, SURFACE.Consensus) then
+				candidate = wallConsensus
+			else
+				-- No plane has a majority. A held surface that is still fresh is kept as it is (it expires on its
+				-- own if nothing confirms it); with nothing held there is nothing trustworthy to attach to.
+				if not SurfaceLock.IsFresh(lock, now, SURFACE) then
+					clearWall(probe, now)
+					return
+				end
+				candidate = nil
+			end
+		end
+		if candidate ~= nil then
+			SurfaceLock.Observe(lock, candidate, castDirection, now, SURFACE)
+		end
+		position = lock.Position
+		normal = lock.Normal
+		instance = lock.Instance or hit.Instance
+		distance = SurfaceLock.Distance(lock, origin, castDirection, hit.Distance)
+
+		-- The label may have moved to a different part than the one the centre ray hit (an outvoted sliver, a
+		-- flush neighbour), and the designer's tags are on parts. The part the plane is now credited to is
+		-- the one whose permissions apply.
+		if instance ~= hit.Instance then
+			permissions = ParkourTagging.GetPermissions(instance, now)
+			if permissions.Ignored or not permissions.WallRunnable then
+				SurfaceLock.Reset(lock)
+				clearWall(probe, now)
+				probe.WallRunAllowed = false
+				probe.Instance = instance
+				return
+			end
+		end
+	end
+
 	probe.SampledAt = now
 	probe.Found = true
-	probe.Distance = hit.Distance
-	probe.Position = hit.Position
-	probe.Normal = hit.Normal
-	probe.TiltAngle = ParkourMath.SurfaceTilt(hit.Normal)
-	probe.Tangent = ParkourMath.WallTangent(hit.Normal, travelDirection)
-	probe.Instance = hit.Instance
+	probe.Distance = distance
+	probe.Position = position
+	probe.Normal = normal
+	probe.TiltAngle = ParkourMath.SurfaceTilt(normal)
+	probe.Tangent = ParkourMath.WallTangent(normal, travelDirection)
+	probe.Instance = instance
 	-- A force-allow tag overrides the tilt check the wall-run state would otherwise apply -- reported
 	-- by zeroing the measured tilt, so the state's own threshold comparison passes without the state
 	-- needing to know tags exist.
@@ -639,6 +950,44 @@ export type LedgeHit = {
 	Instance: BasePart?,
 }
 
+-- Whether the body's footprint at a hang pose is free of geometry, for the cases the single column under the
+-- root (Ledge.HangFootClearance) cannot see. Three vertical casts from near the lip down to just above the
+-- soles: either side of the body along the face, and on the wall side of it. A CAST rather than an overlap
+-- query on purpose -- see Ledge.BodyClearance for why a bounding-box query is wrong for a MeshPart mountain.
+--
+-- Two limits, stated so nobody mistakes them for oversights. A column that STARTS inside a part reports
+-- nothing (a ray that begins inside geometry hits nothing), so geometry enclosing the whole top of a column is
+-- not seen; the lip itself is kept out of the column by TopAboveRootStuds for the same reason. And a refusal
+-- on budget answers "not clear": declining a grab for one frame is safe, hanging inside a rock is not.
+local function hangBodyClear(hangPosition: Vector3, wallNormal: Vector3, facePosition: Vector3, now: number): boolean
+	local BODY = LEDGE.BodyClearance
+	if not validationAvailable(LEDGE_BODY_RAYS) then
+		return false
+	end
+	local outward = ParkourMath.SafeUnit(ParkourMath.Flatten(wallNormal), Vector3.zero)
+	if outward.Magnitude < 1e-3 then
+		return true
+	end
+	local tangent = ParkourMath.SafeUnit(UP:Cross(outward), Vector3.zero)
+	local top = hangPosition + UP * BODY.TopAboveRootStuds
+	local column = Vector3.new(0, -(BODY.TopAboveRootStuds + footOffset - BODY.FootSkinStuds), 0)
+	-- The wall-side column stops SkinStuds short of the face, so a body hanging close to the wall is not
+	-- reported as inside the wall it is gripping.
+	local gapToFace = (hangPosition - facePosition):Dot(outward)
+	local wallSide = math.clamp(gapToFace - BODY.SkinStuds, 0, BODY.HalfDepthStuds)
+	for index = 1, LEDGE_BODY_RAYS do
+		local offset = if index == 1
+			then tangent * BODY.HalfWidthStuds
+			elseif index == 2 then tangent * -BODY.HalfWidthStuds
+			else outward * -wallSide
+		local hit = castValidationRay(top + offset, column)
+		if hit and isVotingHit(hit, now) then
+			return false
+		end
+	end
+	return true
+end
+
 -- ONE DIRECTION'S WORTH OF THE LEDGE SEARCH, as a pure function of its inputs: find a wall face along
 -- `forward`, find the lip above that face, and check the lip sits inside the (sweep-widened) grab
 -- band. Returns the hit on success; on failure returns nil so the caller can try another direction
@@ -652,11 +1001,19 @@ export type LedgeHit = {
 -- writes would mean two callers fighting over one result table within the same frame -- the ad hoc
 -- check would either stomp the scheduled probe's answer or be stomped by it, depending on which ran
 -- last. Returning values instead of mutating shared state is what makes a second caller safe at all.
+--
+-- `validate` turns on the SURFACE-STABILITY checks (ParkourConstants.Surface and Ledge.ConsensusSpreadStuds/
+-- BodyClearance): the face and the lip are each confirmed by a ray either side along the wall, so a sliver
+-- poking out of the real lip or face is outvoted rather than seated on, and the hang pose is checked for
+-- geometry in the body's own footprint. Worth up to LEDGE_SIDE_RAYS + LEDGE_BODY_RAYS validation casts, which
+-- is why the one caller that runs this at many sample points (FindLedgeLeapTarget) passes false and
+-- validates only the candidate it picks.
 local function resolveLedgeAt(
 	headPosition: Vector3,
 	forward: Vector3,
 	sweep: number,
-	now: number
+	now: number,
+	validate: boolean
 ): (LedgeHit?, BasePart?)
 	-- RAY FIRST, SPHERE SECOND, and the order is load-bearing rather than an optimization.
 	--
@@ -702,7 +1059,89 @@ local function resolveLedgeAt(
 		return nil, nil
 	end
 
-	local standCheck = castRay(lipHit.Position + UP * 0.3, UP * LEDGE.StandClearanceHeight)
+	local facePosition = faceHit.Position
+	local faceNormal = faceHit.Normal
+	local lipPosition = lipHit.Position
+	local lipInstance = lipHit.Instance
+	local validated = validate and SURFACE.Enabled
+	if validated then
+		if not validationAvailable(LEDGE_SIDE_RAYS) then
+			return nil, nil
+		end
+		-- The centre face/lip pair goes first, so a split vote keeps the old single-ray answer (SurfaceLock.Vote
+		-- breaks ties toward the earlier sample).
+		SurfaceLock.Clear(ledgeFaceSamples)
+		SurfaceLock.Add(ledgeFaceSamples, faceHit.Position, faceHit.Normal, faceHit.Instance, faceHit.Distance)
+		SurfaceLock.Clear(ledgeLipSamples)
+		SurfaceLock.Add(ledgeLipSamples, lipHit.Position, lipHit.Normal, lipHit.Instance, lipHit.Distance)
+		local lateral = ParkourMath.SafeUnit(UP:Cross(forward), Vector3.zero)
+		for side = -1, 1, 2 do
+			local shift = lateral * (side * LEDGE.ConsensusSpreadStuds)
+			local sideFace = castValidationRay(headPosition + shift, forward * LEDGE.GrabReachDistance)
+			-- A side ray that finds no face ABSTAINS, and so does its lip ray: a post or a beam narrower than
+			-- the spread has nothing at the sides, and a lip ray cast there would land on the floor far below
+			-- and vote against a perfectly good ledge.
+			if
+				sideFace
+				and isVotingHit(sideFace, now)
+				and ParkourMath.SurfaceTilt(sideFace.Normal) <= LEDGE.MaxFaceTiltDegrees
+			then
+				SurfaceLock.Add(
+					ledgeFaceSamples,
+					sideFace.Position,
+					sideFace.Normal,
+					sideFace.Instance,
+					sideFace.Distance
+				)
+				local sideScanOrigin = Vector3.new(sideFace.Position.X, scanTop, sideFace.Position.Z) + forward * 0.3
+				local sideLip = castValidationRay(sideScanOrigin, Vector3.new(0, -scanLength, 0))
+				if sideLip and isVotingHit(sideLip, now) then
+					SurfaceLock.Add(
+						ledgeLipSamples,
+						sideLip.Position,
+						sideLip.Normal,
+						sideLip.Instance,
+						sideLip.Distance
+					)
+				end
+			end
+		end
+		-- One sample is a lone witness (a post, a beam, the end of a wall): nothing disagrees, so it stands.
+		-- Two or more must produce a majority, or the candidate is refused as unconfirmed -- including two
+		-- that disagree, which an interior corner can cause within ~SpreadStuds of the seam. Refusing a grab
+		-- a step too close to a corner costs the player a sidestep; seating the hang on whichever of two
+		-- disagreeing surfaces came first is the bug this exists to remove.
+		if ledgeFaceSamples.Count > 1 then
+			if not SurfaceLock.Vote(ledgeFaceSamples, ledgeFaceConsensus, SURFACE.Consensus) then
+				return nil, nil
+			end
+			facePosition = ledgeFaceConsensus.Position
+			faceNormal = ledgeFaceConsensus.Normal
+			if ParkourMath.SurfaceTilt(faceNormal) > LEDGE.MaxFaceTiltDegrees or ledgeFaceConsensus.Instance == nil then
+				return nil, nil
+			end
+			if ledgeFaceConsensus.Instance ~= faceHit.Instance then
+				local winnerPermissions = ParkourTagging.GetPermissions(ledgeFaceConsensus.Instance, now)
+				if winnerPermissions.Ignored or not winnerPermissions.LedgeGrabbable then
+					return nil, ledgeFaceConsensus.Instance
+				end
+			end
+		end
+		if ledgeLipSamples.Count > 1 then
+			if not SurfaceLock.Vote(ledgeLipSamples, ledgeLipConsensus, SURFACE.Consensus) then
+				return nil, nil
+			end
+			lipPosition = ledgeLipConsensus.Position
+			lipInstance = ledgeLipConsensus.Instance
+			-- The band was judged on the centre ray's height; the voted lip may sit elsewhere in it.
+			local votedHeight = lipPosition.Y - headPosition.Y
+			if votedHeight > LEDGE.GrabBandAboveHead + sweep or votedHeight < -LEDGE.GrabBandBelowHead then
+				return nil, nil
+			end
+		end
+	end
+
+	local standCheck = castRay(lipPosition + UP * 0.3, UP * LEDGE.StandClearanceHeight)
 
 	-- Room to hang, measured at the pose the hang will ACTUALLY use (hence the shared
 	-- ParkourMath.HangPosition rather than an approximation): straight down from the hanging root for
@@ -710,15 +1149,22 @@ local function resolveLedgeAt(
 	-- in the floor, which is not a hang -- see Ledge.HangFootClearance for the failure that produced.
 	-- Nothing found is the common and correct case: a real ledge has open air under it.
 	local hangPosition =
-		ParkourMath.HangPosition(lipHit.Position, faceHit.Normal, LEDGE.HangVerticalOffset, LEDGE.HangHorizontalOffset)
+		ParkourMath.HangPosition(lipPosition, faceNormal, LEDGE.HangVerticalOffset, LEDGE.HangHorizontalOffset)
 	local hangCheck = castRay(hangPosition, Vector3.new(0, -(footOffset + LEDGE.HangFootClearance), 0))
+	local hasHangSpace = hangCheck == nil
+	-- The column under the root says the feet are clear. It says nothing about the shoulders, the back or the
+	-- legs, which is where a rock outcrop or a neighbouring part standing proud of the face would be. Only
+	-- worth asking once the cheap column has passed.
+	if hasHangSpace and validated and LEDGE.BodyClearance.Enabled then
+		hasHangSpace = hangBodyClear(hangPosition, faceNormal, facePosition, now)
+	end
 
 	return {
-		EdgePosition = lipHit.Position,
-		WallNormal = faceHit.Normal,
+		EdgePosition = lipPosition,
+		WallNormal = faceNormal,
 		HasStandingSpace = standCheck == nil,
-		HasHangSpace = hangCheck == nil,
-		Instance = lipHit.Instance,
+		HasHangSpace = hasHangSpace,
+		Instance = lipInstance,
 	},
 		nil
 end
@@ -733,7 +1179,7 @@ local function tryLedgeDirection(
 	sweep: number,
 	now: number
 ): (boolean, BasePart?)
-	local hit, refusedInstance = resolveLedgeAt(headPosition, forward, sweep, now)
+	local hit, refusedInstance = resolveLedgeAt(headPosition, forward, sweep, now, true)
 	if not hit then
 		return false, refusedInstance
 	end
@@ -756,7 +1202,7 @@ end
 -- with the same "moving fast between samples" problem does not have to duplicate resolveLedgeAt to get
 -- it.
 function EnvironmentProbe.ProbeLedgeAt(headPosition: Vector3, forward: Vector3, sweep: number, now: number): LedgeHit?
-	local hit = resolveLedgeAt(headPosition, forward, sweep, now)
+	local hit = resolveLedgeAt(headPosition, forward, sweep, now, true)
 	return hit
 end
 
@@ -1126,13 +1572,14 @@ function EnvironmentProbe.FindLedgeLeapTarget(
 	end
 
 	local origin = rootPart.Position
+	local bestSample = origin
 	local sampleCount = math.max(LEDGE_LEAP.RangeSamples, 1)
 	local step = if sampleCount > 1 then (LEDGE_LEAP.MaxRange - LEDGE_LEAP.MinRange) / (sampleCount - 1) else 0
 
 	for index = 0, sampleCount - 1 do
 		local distance = LEDGE_LEAP.MinRange + step * index
 		local samplePoint = origin + flatAim * distance
-		local hit, _refused = resolveLedgeAt(samplePoint, flatAim, 0, now)
+		local hit, _refused = resolveLedgeAt(samplePoint, flatAim, 0, now, false)
 		if hit and hit.HasHangSpace then
 			local landing = ParkourMath.HangPosition(
 				hit.EdgePosition,
@@ -1162,8 +1609,51 @@ function EnvironmentProbe.FindLedgeLeapTarget(
 					ledgeLeapTarget.WallNormal = hit.WallNormal
 					ledgeLeapTarget.Instance = hit.Instance
 					ledgeLeapTarget.Distance = landingDistance
+					bestSample = samplePoint
 				end
 			end
+		end
+	end
+
+	-- The scan above ran unvalidated -- it samples many points, and validating each would cost more than the
+	-- frame's validation budget -- so the ONE point it settled on is confirmed now, the way the scheduled
+	-- probe would have confirmed it. A leap aimed at a sliver, or at a hang pose with a rock in it, would
+	-- launch the character into exactly what the hang checks exist to refuse. The confirmed pose can differ
+	-- from the scanned one by a few tenths, so the landing is re-derived from it and the launch re-solved:
+	-- the target is kept only if it is still reachable.
+	if ledgeLeapTarget.Found and SURFACE.Enabled then
+		local confirmed = resolveLedgeAt(bestSample, flatAim, 0, now, true)
+		local keep = false
+		if confirmed and confirmed.HasHangSpace then
+			local landing = ParkourMath.HangPosition(
+				confirmed.EdgePosition,
+				confirmed.WallNormal,
+				LEDGE.HangVerticalOffset,
+				LEDGE.HangHorizontalOffset
+			)
+			local _velocity, reachable = ParkourMath.SolveLaunchVelocity(
+				origin,
+				landing,
+				Workspace.Gravity,
+				LEAP.ApexClearance,
+				LEAP.ReachMargin,
+				LEAP.MinUpSpeed,
+				LEAP.MaxUpSpeed,
+				LEAP.MaxPlanarSpeed
+			)
+			if reachable then
+				keep = true
+				ledgeLeapTarget.LandingPosition = landing
+				ledgeLeapTarget.EdgePosition = confirmed.EdgePosition
+				ledgeLeapTarget.WallNormal = confirmed.WallNormal
+				ledgeLeapTarget.Instance = confirmed.Instance
+				ledgeLeapTarget.Distance = ParkourMath.PlanarSpeed(landing - origin)
+			end
+		end
+		if not keep then
+			ledgeLeapTarget.Found = false
+			ledgeLeapTarget.Distance = 0
+			ledgeLeapTarget.Instance = nil
 		end
 	end
 
@@ -1403,6 +1893,7 @@ end
 -- opportunity before it loses the ability to correctly continue what it is already doing.
 function EnvironmentProbe.Update(context: ParkourContext, request: ProbeRequest): ()
 	rayBudgetUsed = 0
+	validationUsed = 0
 	local now = context.Now
 	local rootPart = context.RootPart
 
@@ -1460,11 +1951,13 @@ function EnvironmentProbe.Update(context: ParkourContext, request: ProbeRequest)
 		-- play as exactly the bounce it was built to replace. See ParkourContext.WallCatchActive.
 		local wallRunSearching = context.CurrentStateId ~= "WallRunning" or context.WallCatchActive
 		local allowDiagonal = not ground.Grounded and forward.Magnitude > 0 and wallRunSearching
-		probeWall(wallLeft, rootPart, -right, travelDirection, forward, allowDiagonal, now)
-		probeWall(wallRight, rootPart, right, travelDirection, forward, allowDiagonal, now)
+		probeWall(wallLeft, wallLockLeft, rootPart, -right, travelDirection, forward, allowDiagonal, now)
+		probeWall(wallRight, wallLockRight, rootPart, right, travelDirection, forward, allowDiagonal, now)
 	elseif tooSlowToCare and not wantWalls then
 		clearWall(wallLeft, now)
 		clearWall(wallRight, now)
+		SurfaceLock.Reset(wallLockLeft)
+		SurfaceLock.Reset(wallLockRight)
 	end
 	context.WallLeft = wallLeft
 	context.WallRight = wallRight
@@ -1512,6 +2005,18 @@ end
 -- other consumer.
 function EnvironmentProbe.GetResults(): (GroundProbe, ObstacleProbe, WallProbe, WallProbe, LedgeProbe)
 	return ground, obstacle, wallLeft, wallRight, ledge
+end
+
+-- How many of those casts were VALIDATION casts (the surface-stability cross-checks), out of
+-- Probe.MaxValidationRaysPerFrame -- read by the debug overlay beside the total.
+function EnvironmentProbe.GetLastValidationRayCount(): number
+	return validationUsed
+end
+
+-- The surfaces the wall probes are HOLDING, for the debug overlay and for specs: left, right. Returned by
+-- reference under the same read-immediately contract as GetResults.
+function EnvironmentProbe.GetWallLocks(): (SurfaceLock.Lock, SurfaceLock.Lock)
+	return wallLockLeft, wallLockRight
 end
 
 function EnvironmentProbe.GetFootOffset(): number

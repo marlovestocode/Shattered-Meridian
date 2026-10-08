@@ -398,6 +398,11 @@ export type ParkourContext = {
 	AirDashChain: number,
 	-- The last wall part attached to, and when it was left -- the SameWallLockout reference.
 	LastWallInstance: BasePart?,
+	-- Where that wall was and which way it faced when it was left, so the lockout can recognise the same
+	-- PHYSICAL wall when it is reported on a neighbouring flush part (StateSupport.IsLastWall). Optional
+	-- like the Instance, and cleared with it.
+	LastWallPosition: Vector3?,
+	LastWallNormal: Vector3?,
 	LastWallLeftAt: number,
 
 	-- os.clock() deadline until which a dash resolving to "Up" counts as CHAINED from a

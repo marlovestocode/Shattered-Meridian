@@ -545,6 +545,35 @@ ParkourConstants.Obstacle = {
 	-- somewhere to actually stand.
 	StandClearanceHeight = 5.2,
 
+	-- SURFACE STABILITY (see ParkourConstants.Surface for the idea; these are the mantle-specific numbers).
+	--
+	-- TOP CONSENSUS. The obstacle's top is found by ONE downward ray just past the near face, so a
+	-- sliver of a part standing a little proud of the real top -- or a gap between two blocks -- decided
+	-- the mantle height and with it where the character is pulled to. Two more top scans this far to
+	-- either side ALONG the face are taken once a top is found, and the top the three agree on (see
+	-- Surface.Consensus) is the one used. Disagreement among all three leaves the centre ray's answer
+	-- alone: a genuinely rough top is not something to refuse, only something not to be fooled by.
+	TopConsensusSpreadStuds = 0.5,
+	-- STANDING CLEARANCE. The mantle ends with the character standing a short step in from the edge, and
+	-- the old gate asked about headroom at the EDGE only. A rock, rail or lamp post standing on the top a
+	-- step further in was invisible to it, so the pull-up ended inside the prop. These columns check the
+	-- end footprint itself, from head height down to just above the top, plus one forward cast at chest
+	-- height across the gap between the edge and the footprint.
+	StandClearance = {
+		Enabled = true,
+		HalfWidthStuds = 0.8,
+		-- Height of the body above the top surface that must be free. Under StandClearanceHeight on
+		-- purpose: that one is the generous legality margin at the edge, this is the body itself.
+		BodyHeightStuds = 4.6,
+		-- How far above the sampled top the columns stop. A step tolerance, NOT a skin: a rough rock top
+		-- undulates by a few tenths of a stud and the character walks up that, so anything under this is
+		-- ground rather than an obstruction. Sliver parts that stand taller than this are exactly what is
+		-- being refused.
+		StepToleranceStuds = 0.8,
+		-- Height above the top of the chest-level forward cast.
+		ChestHeightStuds = 1.8,
+	},
+
 	-- Traversal durations. Short and distinct so each action reads as its own beat; every one of
 	-- these is the duration of a kinematic (CFrame-driven) traversal, so they are also literally how
 	-- long the player is not in control -- keep them tight.
@@ -743,6 +772,45 @@ ParkourConstants.Ledge = {
 	-- around to find the new face. Short of 180 on purpose: past that the peek would be searching back
 	-- toward where the character came from, which is not a corner, it is the same wall.
 	ShimmyCornerPeekDegrees = 100,
+	-- How fast a shimmy step that lands on the SAME surface as the held one (ParkourConstants.Surface's
+	-- SameSurface test) eases the held lip height and wall normal toward the new measurement, per second.
+	-- The lateral advance is always the commanded ShimmySpeed and is never eased; only the part of the
+	-- measurement the player did not ask for is. A wall built from blocks a fraction of a stud out of
+	-- line used to pop the hang pose by that fraction at every block seam; this turns the pop into a
+	-- glide, and a genuine step in the lip height into a short rise instead of a snap.
+	ShimmySurfaceBlendRate = 18,
+
+	-- SURFACE STABILITY (see ParkourConstants.Surface for the idea; these are the ledge-specific numbers).
+	--
+	-- LIP CONSENSUS. A ledge candidate that passes every cheap gate is confirmed by two more face casts
+	-- and two more lip scans, offset this far to either side ALONG the wall. All three face/lip pairs
+	-- must agree (Surface.Consensus) for the grab to be offered, and the centre pair loses to the other
+	-- two if it is the odd one out -- which is what stops the grab seating on a sliver of a part that
+	-- pokes a fraction of a stud above or out of the real lip. 0.6 is wide enough to step off a sliver
+	-- and narrow enough that the three still land on one block of an ordinary face.
+	ConsensusSpreadStuds = 0.6,
+	-- BODY CLEARANCE. Before a hang is offered, the pose it would use is checked for geometry in the
+	-- body's own footprint -- not just the one column under the root that HangFootClearance already
+	-- tests. A rock outcrop at hip height, or a neighbouring part standing proud of the face, put the
+	-- legs or back of a hanging character INSIDE it; the root is rigidly driven for the whole hang, so
+	-- there was nothing to push the body back out. Cast as columns from just under the lip down to the
+	-- soles at the centre, either side, and toward the wall, because a cast is exact against the real
+	-- collision geometry where a bounding-box overlap query is not (a MeshPart rock's box is mostly air,
+	-- and a mountain is mostly MeshPart rocks).
+	BodyClearance = {
+		Enabled = true,
+		-- Half the body's width across the face, and half its depth into it, used to place the columns.
+		HalfWidthStuds = 0.9,
+		HalfDepthStuds = 0.45,
+		-- Where the columns start, measured up from the hanging root. Kept under HangVerticalOffset's
+		-- distance to the lip (2.4) so the wall's own top surface, which the hands are on, is not in the
+		-- column.
+		TopAboveRootStuds = 1.9,
+		-- Slack at each end, so touching the surface being gripped (the sides pressed to the face, the
+		-- soles brushing the foot of the wall) is not mistaken for being inside it.
+		SkinStuds = 0.1,
+		FootSkinStuds = 0.15,
+	},
 }
 
 ParkourConstants.WallRun = {
@@ -1516,7 +1584,32 @@ ParkourConstants.Probe = {
 	-- casts, and only on a frame where both straight side casts already missed). An airborne frame's
 	-- honest worst case -- ground 1 + obstacle 6 + walls 4 + ledge 8 -- is now 19, and leaving the ceiling
 	-- at 18 would silently starve whichever probe runs last, which while airborne is the ledge search.
-	MaxRaysPerFrame = 20,
+	-- Raised to 36 when the surface-stability pass (ParkourConstants.Surface) added VALIDATION casts on top
+	-- of that 19: MaxValidationRaysPerFrame below is the slice of this ceiling they may spend, and
+	-- 19 + 16 = 35 keeps the base probes' worst case fully funded even on a frame that validates as much
+	-- as it is allowed to.
+	MaxRaysPerFrame = 36,
+	-- The most casts the surface-stability VALIDATION may make in one frame -- the extra rays that confirm
+	-- a candidate wall, ledge lip, mantle top or hang pose is real geometry rather than a sliver, a seam
+	-- or a part buried inside another. See ParkourConstants.Surface for what each one buys.
+	--
+	-- A sub-budget rather than a bare increase to the ceiling above, for the reason MaxScanRaysPerEvent
+	-- is its own number: validation is spent only when something is about to be ACCEPTED or when a held
+	-- surface is in doubt, so it is bursty by nature -- nothing for most frames, then a handful the
+	-- instant a grab or a wall contact is decided. Letting it share the base ceiling unbounded would let
+	-- one busy wall face starve the ledge search that runs after it. Casts that hit this cap are refused
+	-- exactly as base casts are: the probe keeps last frame's answer for a frame and retries.
+	--
+	-- Worst case per family: a wall side 4 (both sides 8), a ledge candidate 7 (4 side casts + 3 body
+	-- columns), a mantle target 6 (2 top scans + 3 standing columns + 1 chest cast; the columns only when the
+	-- obstacle is mantle-sized). Walls and a ledge are the airborne pair (8 + 7 = 15) and walls and a mantle
+	-- the grounded one (8 + 6 = 14); a ledge needs the character airborne and a mantle needs it grounded
+	-- (EnvironmentProbe skips the mantle validation in the air), so the three never coincide. 16 covers
+	-- either pair with a cast to spare, and is why this is 16 and not 20.
+	--
+	-- Steady state is far below any of that: a wall that is already held is confirmed by its one centre
+	-- cast, and a held mantle top likewise. The numbers above are the frame a surface is FIRST seen.
+	MaxValidationRaysPerFrame = 16,
 	-- Ceiling on a single EVENT scan -- the wall-jump target fan and the ledge-climb surface ladder.
 	-- Deliberately its own budget rather than a slice of MaxRaysPerFrame, because these are a different
 	-- kind of cost and conflating them would make both wrong: the per-frame budget bounds a cost paid
@@ -1545,6 +1638,88 @@ ParkourConstants.Probe = {
 	-- place actually defines one); see ParkourTagging.lua for the per-part opt-out that works
 	-- without any collision-group setup at all.
 	CollisionGroup = "",
+}
+
+-- SURFACE STABILITY: what makes the wall probes, the ledge search and the mantle top agree with
+-- THEMSELVES from one sample to the next on geometry built out of many parts.
+--
+-- The failure this exists for: a mountain, cliff or rock face is rarely one part. It is a pile of
+-- overlapping and near-touching blocks, wedges and meshes, some of them barely poking out of their
+-- neighbours and some buried inside them. A probe that re-picks "the nearest hit" from scratch every
+-- sample therefore flips between those parts as the character moves a fraction of a stud -- each flip
+-- hands the wall-run a slightly different normal, hands the ledge shimmy a slightly different lip, and
+-- occasionally accepts a sliver whose face is not where the surrounding wall is, which seats the
+-- character inside it. Two parts a hair apart "fight for possession" of the player, exactly as reported.
+--
+-- Shared/Parkour/SurfaceLock.lua owns the mechanism; this table is only its numbers. Four ideas, each
+-- with its own block below:
+--   1. SAME SURFACE   -- two hits on different parts that lie on one plane are one surface, not two.
+--   2. HYSTERESIS     -- once a surface is held, a challenger must be CLEARLY better to take over.
+--   3. A PLANE         -- what is held is a position and a normal, not a part; the part is a label.
+--   4. CONSENSUS      -- a new surface is accepted only when several nearby rays agree about it, so a
+--                        lone sliver is outvoted by the wall it sits on.
+-- The consensus rays are spent ONLY when something is about to be accepted or a held surface is in doubt;
+-- the steady state of holding a surface costs the same single ray it always did.
+ParkourConstants.Surface = {
+	-- The suspect-elimination switch every feature-level toggle in this file carries. False restores the
+	-- probes' previous behavior exactly: raw nearest hit, no plane held, no consensus, no body clearance.
+	-- The blocks below also carry their own switches where a piece can be told apart from the rest.
+	Enabled = true,
+
+	-- 1. SAME SURFACE. Two hits are one surface when their normals are within this many degrees AND each
+	-- sits within this many studs of the other's plane. Tight on purpose: this is the test that lets a
+	-- hit on a DIFFERENT part silently take over the label, so it should only say yes to parts that are
+	-- genuinely flush (a wall built from adjacent blocks is flush to a few hundredths of a stud; a 10
+	-- degree / 0.3 stud allowance still forgives authoring slop and a gentle curve sampled at 30Hz).
+	SameSurfaceAngleDegrees = 10,
+	SameSurfaceOffsetStuds = 0.3,
+
+	-- 2. HYSTERESIS. A held surface is only given up for a different one when the challenger is clearly
+	-- better, by ANY of:
+	--   * in front of the held plane (nearer the character) by at least SwitchDistanceStuds -- a real
+	--     new obstacle, not a bump. 0.75 sits in the 0.5-1 stud band a part-to-part misalignment never
+	--     reaches and a genuine step in a face always exceeds;
+	--   * squarer to the cast by SwitchSquarenessMargin, as a difference of cosines (0.12 is about a
+	--     7-10 degree improvement near head-on) -- the "meaningfully better normal match" case;
+	--   * turned from the held normal by at least SharpNormalDegrees -- a corner or a new wall, which is
+	--     a real transition however close it is.
+	-- Anything inside those bands is NOISE and the held plane stands.
+	SwitchDistanceStuds = 0.75,
+	SwitchSquarenessMargin = 0.12,
+	SharpNormalDegrees = 35,
+	-- After one voluntary switch, no further voluntary switch for this long. A backstop for geometry
+	-- that sits right on the edge of the bands above: without it a challenger oscillating across the
+	-- 0.75 line would still alternate every sample. Does NOT apply when the held plane has receded out
+	-- from under the character (there is nothing left to cling to), only to contested switches.
+	SwitchCooldownSeconds = 0.12,
+	-- A held surface that has not been confirmed by any sample for this long is forgotten. Probes run at
+	-- ~30Hz when cached, so this is a handful of missed samples; it exists so a lock cannot outlive the
+	-- wall it described and quietly merge a different, far-away face that happens to share its plane.
+	LockExpirySeconds = 0.25,
+	-- How fast a held plane's normal follows the measurement while samples keep agreeing (per second, the
+	-- same exponential-ease rate convention as every other rate here). High enough that a curved wall is
+	-- followed with a lag far under a degree; low enough that part-to-part jitter of a few degrees is
+	-- averaged away rather than passed to the wall-run's tangent.
+	NormalBlendRate = 30,
+
+	-- 4. CONSENSUS. A set of rays agrees about a surface when enough of them lie on one plane, judged more
+	-- loosely than SameSurface above because the rays are spread across the face and a rough or curved
+	-- face legitimately differs a little between them.
+	Consensus = {
+		AgreeAngleDegrees = 25,
+		AgreeOffsetStuds = 0.45,
+		-- At least this many rays on the winning plane, AND a strict majority of the rays that hit
+		-- anything. Two is the floor so a lone ray can never be its own witness; the majority rule is
+		-- what makes a sliver caught by the centre ray lose to the four around it.
+		MinSupport = 2,
+	},
+
+	-- The wall probes' validation cluster: four rays parallel to the centre ray, offset this far
+	-- forward/back/up/down from it. About half a torso: wide enough to step off a sliver a few tenths of
+	-- a stud across, narrow enough that all five land on the same face of a normal-sized block.
+	Wall = {
+		SpreadStuds = 0.9,
+	},
 }
 
 -- Configurable movement assists. Every one of these defaults ON (the design's "these should all be

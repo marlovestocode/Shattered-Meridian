@@ -981,4 +981,122 @@ return function()
 			expectClose(result.Magnitude, 1)
 		end)
 	end)
+
+	-- The surface-stability geometry (see Shared/Parkour/SurfaceLock.lua). A wall face lies in z = 0 with its
+	-- outward normal +Z, the same orientation SurfaceLock.spec uses.
+	describe("ParkourMath.PlaneOffset", function()
+		local WALL_NORMAL = Vector3.new(0, 0, 1)
+
+		it("is positive on the side the normal points toward and negative behind the plane", function()
+			expectClose(ParkourMath.PlaneOffset(Vector3.new(4, 9, 0.5), Vector3.zero, WALL_NORMAL), 0.5)
+			expectClose(ParkourMath.PlaneOffset(Vector3.new(4, 9, -0.5), Vector3.zero, WALL_NORMAL), -0.5)
+		end)
+
+		it("ignores movement along the plane", function()
+			expectClose(ParkourMath.PlaneOffset(Vector3.new(100, -40, 0), Vector3.zero, WALL_NORMAL), 0)
+		end)
+	end)
+
+	describe("ParkourMath.SameSurface", function()
+		local WALL_NORMAL = Vector3.new(0, 0, 1)
+		local function tilted(degrees: number): Vector3
+			local radians = math.rad(degrees)
+			return Vector3.new(math.sin(radians), 0, math.cos(radians))
+		end
+
+		it("says yes for two points flush on one plane, however far apart along it", function()
+			expect(ParkourMath.SameSurface(Vector3.zero, WALL_NORMAL, Vector3.new(30, 12, 0), WALL_NORMAL, 10, 0.3)).to.equal(
+				true
+			)
+		end)
+
+		it("forgives slop under both tolerances", function()
+			expect(ParkourMath.SameSurface(Vector3.zero, WALL_NORMAL, Vector3.new(2, 0, 0.1), tilted(6), 10, 0.3)).to.equal(
+				true
+			)
+		end)
+
+		it("says no for a bump standing proud of the plane", function()
+			expect(ParkourMath.SameSurface(Vector3.zero, WALL_NORMAL, Vector3.new(2, 0, 0.5), WALL_NORMAL, 10, 0.3)).to.equal(
+				false
+			)
+		end)
+
+		it("says no for a part sunk behind the plane", function()
+			expect(ParkourMath.SameSurface(Vector3.zero, WALL_NORMAL, Vector3.new(2, 0, -0.5), WALL_NORMAL, 10, 0.3)).to.equal(
+				false
+			)
+		end)
+
+		it("says no for a surface facing a different way even when it passes through the same point", function()
+			expect(ParkourMath.SameSurface(Vector3.zero, WALL_NORMAL, Vector3.zero, tilted(25), 10, 0.3)).to.equal(
+				false
+			)
+			expect(ParkourMath.SameSurface(Vector3.zero, WALL_NORMAL, Vector3.zero, Vector3.new(1, 0, 0), 10, 0.3)).to.equal(
+				false
+			)
+		end)
+
+		it("gives the same answer whichever sample is passed first", function()
+			-- A borderline pair, tilted so the plane offset depends on which normal it is measured along.
+			local pointA, normalA = Vector3.zero, WALL_NORMAL
+			local pointB, normalB = Vector3.new(6, 0, 0.27), tilted(9)
+			expect(ParkourMath.SameSurface(pointA, normalA, pointB, normalB, 10, 0.3)).to.equal(
+				ParkourMath.SameSurface(pointB, normalB, pointA, normalA, 10, 0.3)
+			)
+		end)
+
+		it("never calls a degenerate normal the same surface as anything", function()
+			expect(ParkourMath.SameSurface(Vector3.zero, Vector3.zero, Vector3.zero, WALL_NORMAL, 10, 0.3)).to.equal(
+				false
+			)
+			expect(ParkourMath.SameSurface(Vector3.zero, WALL_NORMAL, Vector3.zero, Vector3.zero, 10, 0.3)).to.equal(
+				false
+			)
+			expect(ParkourMath.SameSurface(Vector3.zero, Vector3.zero, Vector3.zero, Vector3.zero, 10, 0.3)).to.equal(
+				false
+			)
+		end)
+	end)
+
+	describe("ParkourMath.RayPlaneDistance", function()
+		local WALL_NORMAL = Vector3.new(0, 0, 1)
+
+		it("measures a head-on ray to the plane", function()
+			local distance =
+				ParkourMath.RayPlaneDistance(Vector3.new(0, 0, 3), Vector3.new(0, 0, -1), Vector3.zero, WALL_NORMAL)
+			expectClose(distance :: number, 3)
+		end)
+
+		it("measures an angled ray along its own length, not along the normal", function()
+			-- 45 degrees in: the ray is longer than the 3-stud perpendicular gap by sqrt(2).
+			local direction = Vector3.new(1, 0, -1).Unit
+			local distance = ParkourMath.RayPlaneDistance(Vector3.new(0, 0, 3), direction, Vector3.zero, WALL_NORMAL)
+			expectClose(distance :: number, 3 * math.sqrt(2), 1e-3)
+		end)
+
+		it("does not need the direction to be a unit vector", function()
+			local distance =
+				ParkourMath.RayPlaneDistance(Vector3.new(0, 0, 3), Vector3.new(0, 0, -7), Vector3.zero, WALL_NORMAL)
+			expectClose(distance :: number, 3)
+		end)
+
+		it("returns nil for a ray parallel to the plane", function()
+			expect(ParkourMath.RayPlaneDistance(Vector3.new(0, 0, 3), Vector3.new(1, 0, 0), Vector3.zero, WALL_NORMAL)).to.equal(
+				nil
+			)
+		end)
+
+		it("returns nil when the plane is behind the ray", function()
+			expect(ParkourMath.RayPlaneDistance(Vector3.new(0, 0, 3), Vector3.new(0, 0, 1), Vector3.zero, WALL_NORMAL)).to.equal(
+				nil
+			)
+		end)
+
+		it("returns nil for a zero direction rather than dividing by it", function()
+			expect(ParkourMath.RayPlaneDistance(Vector3.new(0, 0, 3), Vector3.zero, Vector3.zero, WALL_NORMAL)).to.equal(
+				nil
+			)
+		end)
+	end)
 end

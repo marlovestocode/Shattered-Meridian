@@ -127,6 +127,72 @@ function ParkourMath.SurfaceTilt(normal: Vector3): number
 	return 90 - ParkourMath.SlopeAngle(normal)
 end
 
+-- Signed distance from `point` to the plane through `planePoint` with outward normal `planeNormal`:
+-- positive on the side the normal points toward (for a wall, the open-air side the character is on, so a
+-- positive value is NEARER the character than the plane), negative behind it. The one place the sign
+-- convention lives -- SurfaceLock's "is this challenger in front of the held surface" and the ledge
+-- shimmy's "is this lip on the held face" both ask exactly this question and must read it the same way.
+-- `planeNormal` must already be a unit vector; both callers hold one.
+function ParkourMath.PlaneOffset(point: Vector3, planePoint: Vector3, planeNormal: Vector3): number
+	return (point - planePoint):Dot(planeNormal)
+end
+
+-- Whether two surface samples describe ONE flat face, even if they were hit on two different parts: the
+-- normals are within `maxAngleDegrees` of each other AND each point lies within `maxOffsetStuds` of the
+-- other's plane. A wall built from a row of blocks passes this between any two of its blocks; a bump
+-- standing proud of a wall, a step in a face, and a perpendicular wall all fail it.
+--
+-- The offset is measured along the MEAN of the two normals, so the answer is the same whichever sample is
+-- passed first -- a held surface and a challenger must not be able to disagree about whether they are
+-- the same surface depending on which was called A. Degenerate normals (zero length) are never the same
+-- surface as anything, rather than NaN-poisoning the comparison.
+function ParkourMath.SameSurface(
+	pointA: Vector3,
+	normalA: Vector3,
+	pointB: Vector3,
+	normalB: Vector3,
+	maxAngleDegrees: number,
+	maxOffsetStuds: number
+): boolean
+	local unitA = ParkourMath.SafeUnit(normalA, Vector3.zero)
+	local unitB = ParkourMath.SafeUnit(normalB, Vector3.zero)
+	if unitA.Magnitude < 0.5 or unitB.Magnitude < 0.5 then
+		return false
+	end
+	-- Compared as cosines: it avoids an acos per call on a function the ray-consensus calls O(n^2) times
+	-- per probe, and the ordering of cosines over 0-180 degrees is the ordering of the angles.
+	if unitA:Dot(unitB) < math.cos(math.rad(maxAngleDegrees)) then
+		return false
+	end
+	local mean = ParkourMath.SafeUnit(unitA + unitB, unitA)
+	return math.abs((pointB - pointA):Dot(mean)) <= maxOffsetStuds
+end
+
+-- Distance along a ray (`direction` need not be unit) at which it crosses the plane through
+-- `planePoint` with normal `planeNormal`, or nil when the ray is parallel to the plane or the crossing is
+-- behind the origin. What lets a probe that is HOLDING a plane report a distance to that plane, rather
+-- than to whichever bump the ray happened to hit in front of it.
+function ParkourMath.RayPlaneDistance(
+	origin: Vector3,
+	direction: Vector3,
+	planePoint: Vector3,
+	planeNormal: Vector3
+): number?
+	local length = direction.Magnitude
+	if length < ZERO_EPSILON then
+		return nil
+	end
+	local facing = (direction / length):Dot(planeNormal)
+	if math.abs(facing) < ZERO_EPSILON then
+		return nil
+	end
+	local distance = (planePoint - origin):Dot(planeNormal) / facing
+	if distance < 0 then
+		return nil
+	end
+	return distance
+end
+
 -- Where the character's ROOT sits while hanging from an edge: below the lip by `verticalOffset` and
 -- backed off from the wall face along its outward normal by `horizontalOffset`.
 --

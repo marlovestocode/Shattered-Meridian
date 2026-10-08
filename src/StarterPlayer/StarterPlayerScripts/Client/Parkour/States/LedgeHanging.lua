@@ -91,6 +91,7 @@ local logger = Logger.scope("LedgeHanging")
 
 local LEDGE = ParkourConstants.Ledge
 local LEAP = ParkourConstants.Leap
+local SURFACE = ParkourConstants.Surface
 
 -- The pose held for the duration of the hang, computed once at Enter. Recomputing it per frame from
 -- a live probe would let the pose creep as the probe's own hit point shifts by fractions of a stud.
@@ -302,9 +303,38 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 			-- does. Shared by the straight case and the corner case below it -- both end up needing to do
 			-- exactly the same thing to exactly the same file-locals once a usable edge is found; the
 			-- only difference between them is HOW that edge was found.
-			local function commitShimmyStep(hit: EnvironmentProbe.LedgeHit): ()
-				edgePosition = hit.EdgePosition
-				wallNormal = ParkourMath.SafeUnit(ParkourMath.Flatten(hit.WallNormal), wallNormal)
+			--
+			-- `advance` is the lateral distance this step was COMMANDED to cover, and is passed only by the
+			-- straight case. When it is given and the measured edge lies on the SAME surface as the held
+			-- one (ParkourConstants.Surface's test), the held lip and wall normal EASE toward the
+			-- measurement instead of snapping to it, and the commanded advance is applied in full:
+			-- the part of the measurement the player asked for is never eased, only the part they did
+			-- not. A wall built from blocks a fraction of a stud out of line used to pop the hang pose by
+			-- that fraction at every block seam, and a lip that steps up a few tenths used to jump; both
+			-- are a glide now. A measurement that is NOT the same surface (a real step in the face, and
+			-- always the corner case, which passes no advance) replaces the held pose outright, as before.
+			local function commitShimmyStep(hit: EnvironmentProbe.LedgeHit, advance: Vector3?): ()
+				local measuredNormal = ParkourMath.SafeUnit(ParkourMath.Flatten(hit.WallNormal), wallNormal)
+				if
+					advance ~= nil
+					and SURFACE.Enabled
+					and ParkourMath.SameSurface(
+						edgePosition,
+						wallNormal,
+						hit.EdgePosition,
+						measuredNormal,
+						SURFACE.SameSurfaceAngleDegrees,
+						SURFACE.SameSurfaceOffsetStuds
+					)
+				then
+					local alpha = ParkourMath.EaseAlpha(LEDGE.ShimmySurfaceBlendRate, context.DeltaTime)
+					local advanced = edgePosition + advance
+					edgePosition = advanced + (hit.EdgePosition - advanced) * alpha
+					wallNormal = ParkourMath.SafeUnit(wallNormal:Lerp(measuredNormal, alpha), measuredNormal)
+				else
+					edgePosition = hit.EdgePosition
+					wallNormal = measuredNormal
+				end
 				hasStandingSpace = hit.HasStandingSpace
 				grabbedInstance = hit.Instance
 				local position = ParkourMath.HangPosition(
@@ -332,7 +362,7 @@ local LedgeHanging: ParkourTypes.StateDefinition = {
 				and ParkourMath.ApproachAngle(wallNormal, straightHit.WallNormal)
 					<= LEDGE.ShimmyMaxNormalDivergenceDegrees
 			then
-				commitShimmyStep(straightHit)
+				commitShimmyStep(straightHit, step)
 				context.DebugShimmy = "Straight"
 				logger:debug("Shimmy stepped", { via = "Straight" })
 			else

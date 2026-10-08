@@ -77,6 +77,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
+local SurfaceLock = require(ReplicatedStorage.Shared.Parkour.SurfaceLock)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
 local ParkourTagging = require(ReplicatedStorage.Shared.Parkour.ParkourTagging)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -585,7 +586,13 @@ local function refreshReadout(context: ParkourContext, machine: Machine): ()
 	)
 	setRow(
 		state[7],
-		string.format("rays used   %d / %d", EnvironmentProbe.GetLastRayCount(), ParkourConstants.Probe.MaxRaysPerFrame),
+		string.format(
+			"rays used   %d / %d  (validation %d / %d)",
+			EnvironmentProbe.GetLastRayCount(),
+			ParkourConstants.Probe.MaxRaysPerFrame,
+			EnvironmentProbe.GetLastValidationRayCount(),
+			ParkourConstants.Probe.MaxValidationRaysPerFrame
+		),
 		Tokens.Color.TextSecondary
 	)
 	setRow(
@@ -642,17 +649,23 @@ local function refreshReadout(context: ParkourContext, machine: Machine): ()
 		setRow(surface[4], "", Tokens.Color.TextSecondary)
 	end
 
-	local function setWallRow(row: Row, label: string, probe: ParkourTypes.WallProbe): ()
+	-- The wall probes' held surface: what the lock last decided (Acquired / Merged / Held / Switched / Lost),
+	-- so "why is it attached to that" and "why did it not move to the nearer part" have an answer on screen.
+	-- Held means a nearer or better-looking candidate was seen and ignored; Switched is the only verdict that
+	-- changes which surface the character is described against.
+	local leftLock, rightLock = EnvironmentProbe.GetWallLocks()
+	local function setWallRow(row: Row, label: string, probe: ParkourTypes.WallProbe, lock: SurfaceLock.Lock): ()
 		if probe.Found then
 			setRow(
 				row,
 				string.format(
-					"wall %s      dist %.2f  tilt %.1fdeg  approach %.1fdeg  runnable=%s",
+					"wall %s      dist %.2f  tilt %.1fdeg  approach %.1fdeg  runnable=%s  lock=%s",
 					label,
 					probe.Distance,
 					probe.TiltAngle,
 					ParkourMath.ApproachAngle(context.MoveDirection, probe.Tangent),
-					tostring(probe.WallRunAllowed)
+					tostring(probe.WallRunAllowed),
+					lock.Verdict
 				),
 				foundColor(probe.WallRunAllowed)
 			)
@@ -660,8 +673,8 @@ local function refreshReadout(context: ParkourContext, machine: Machine): ()
 			setRow(row, string.format("wall %s      none", label), Tokens.Color.TextSecondary)
 		end
 	end
-	setWallRow(surface[5], "L", context.WallLeft)
-	setWallRow(surface[6], "R", context.WallRight)
+	setWallRow(surface[5], "L", context.WallLeft, leftLock)
+	setWallRow(surface[6], "R", context.WallRight, rightLock)
 
 	local ledge = context.Ledge
 	if ledge.Found then
