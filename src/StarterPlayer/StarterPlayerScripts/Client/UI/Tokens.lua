@@ -120,6 +120,20 @@ Tokens.AttributeColor = {
 	Fleetness = Color3.fromRGB(80, 136, 112),
 } :: { [string]: Color3 }
 
+-- Item rarity grades (Shared/Inventory/InventoryConstants.RarityOrder), lowest to highest. Derived
+-- from the chrome's own swatches rather than a new hue family -- the palette is locked (see the file
+-- header) -- so a grade climbs from the neutral text grey through the cool accents to bronze and
+-- celestial. Colour is NEVER the only signal: every surface that wears one also prints the grade's
+-- name. Indexed by the grade name as a string, like AttributeColor above, so a caller holding an
+-- `ItemDef.Rarity` indexes it directly.
+Tokens.Rarity = {
+	Mortal = Tokens.Color.TextSecondary,
+	Spirit = Tokens.Color.Positive,
+	Earth = Tokens.Color.AccentPrimaryBright,
+	Heaven = Tokens.Color.AccentSecondary,
+	Immortal = Tokens.Color.FactionCelestial,
+} :: { [string]: Color3 }
+
 -- Border tiers, consumed by a UIStroke (Color + Transparency). Separate table from Tokens.Wash
 -- despite the identical shape: a stroke and a background are different rendering surfaces, and a
 -- token named Border handed to a BackgroundColor3 should read as a mistake at the call site.

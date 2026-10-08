@@ -2,13 +2,15 @@
 --[[
 	WeaponInventorySystem.lua
 
-	Owns: which weapons a player has PICKED UP, which one of those is SELECTED, and whether it is
-	currently DRAWN or SHEATHED. Also owns the hold-E prompt on every weapon in the world that puts one
-	into an inventory in the first place.
+	Owns: which owned weapon is SELECTED, and whether it is currently DRAWN or SHEATHED. Also owns the hold-E
+	prompt on every weapon in the world that puts one into a player's inventory in the first place.
 
 	THE THREE STATES, kept deliberately separate because they change independently:
 
-	  * OWNED    -- the set of weapon ids this player has picked up. Grows on a prompt; never shrinks.
+	  * OWNED    -- the set of weapons this player has picked up. NOT KEPT HERE (2026-10-08): ownership is the
+	                player's INVENTORY (Server/Systems/InventorySystem, the item "Weapon/<id>"), so it persists
+	                across sessions and shows on the inventory screen. This System asks the inventory; it
+	                holds no second list that could disagree with it.
 	  * SELECTED -- which owned weapon the draw key will pull out. Survives sheathing, so drawing again
 	                gives you back the sword you just put away rather than resetting to the first one.
 	  * DRAWN    -- whether SELECTED is actually in hand right now.
@@ -40,10 +42,11 @@
 	the next player. That is a deliberate choice, not an oversight; a consumed pickup would need its own
 	respawn story and there is nothing yet asking for one.
 
-	SESSION-SCOPED, NOT PERSISTED. An inventory lives as long as the player's session and is empty again
-	on rejoin. Persisting it means a schema bump on the PlayerDataSystem profile and a decision about
-	what happens to a saved weapon whose model has since been renamed or deleted -- both real, neither
-	asked for yet, and neither cheap to undo once saved data exists in the wild.
+	OWNERSHIP PERSISTS; SELECTION AND DRAWN-NESS DO NOT. Weapons are saved with the rest of the player's
+	inventory (schema v11). A weapon whose model has since been renamed or deleted is an ORPHAN in the
+	inventory -- kept in the record, hidden here -- rather than deleted. What is selected and whether it is
+	drawn are combat state of THIS session, not facts about the player: a new session starts with the first
+	owned weapon selected and the fists up, and a new life starts sheathed.
 
 	A PLAYER'S CHANGE IS ASKED FOR, NOT MADE (2026-10-08). A draw, a sheathe or a switch that would change the
 	weapon in hand goes through AttackRequestSystem.RequestWeapon, which enforces the swap rule
@@ -68,7 +71,10 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
+local ItemCatalog = require(ReplicatedStorage.Shared.Inventory.ItemCatalog)
+
 local AttackRequestSystem = require(script.Parent.Parent.Attack.AttackRequestSystem)
+local InventorySystem = require(script.Parent.Parent.Parent.Systems.InventorySystem)
 local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
 
 type WeaponId = Types.WeaponId
@@ -83,15 +89,13 @@ local started = false
 -- outlives a life. Dying and respawning must not lose the swords you picked up; only leaving does.
 -- Cleared on PlayerRemoving, which is the only edge that ends a session.
 type Record = {
-	Owned: { [WeaponId]: true },
-	-- Insertion order, so cycling is stable and predictable rather than following a hash order that
-	-- changes between sessions.
-	Order: { WeaponId },
 	Selected: WeaponId?,
 	Drawn: boolean,
 }
 
 local records: { [Player]: Record } = {}
+-- Unsubscribes from InventorySystem.OnLoaded; held so Reset (specs) can drop it before Init re-adds it.
+local disconnectLoaded: (() -> ())? = nil
 
 local toggleLimiter = RateLimiter.New(WeaponConstants.Network.MaxTogglesPerSecondPerPlayer)
 -- Bounds the ProximityPrompt.Triggered signal itself -- see WeaponConstants.Network.
@@ -100,8 +104,8 @@ local toggleLimiter = RateLimiter.New(WeaponConstants.Network.MaxTogglesPerSecon
 local pickupLimiter = RateLimiter.New(WeaponConstants.Network.MaxPickupsPerSecondPerPlayer)
 local inventoryChangedRemote: RemoteEvent? = nil
 
--- Fists is owned and selected from the moment a record exists -- not picked up, never dropped, and
--- always the fallback a player who has picked up nothing at all can still draw and fight with. See
+-- Fists is selected from the moment a record exists -- never picked up, never an inventory item, and always
+-- the fallback a player who has picked up nothing at all can still draw and fight with. See
 -- WeaponRoster.FISTS_ID's own header for why the roster carries it with no Workspace.Weapons model.
 local function recordFor(player: Player): Record
 	local existing = records[player]
@@ -109,13 +113,35 @@ local function recordFor(player: Player): Record
 		return existing
 	end
 	local created: Record = {
-		Owned = { [WeaponRoster.FISTS_ID] = true },
-		Order = { WeaponRoster.FISTS_ID },
 		Selected = WeaponRoster.FISTS_ID,
 		Drawn = false,
 	}
 	records[player] = created
 	return created
+end
+
+-- Every weapon this player can select, in the order the draw cycle visits them: Fists first (always, they
+-- are never stored), then their inventory's weapons in the order they were picked up. Asked of the
+-- inventory each time -- see this file's header on why no copy is kept.
+local function ownedOrder(player: Player): { WeaponId }
+	local owned: { WeaponId } = { WeaponRoster.FISTS_ID }
+	for _, itemId in InventorySystem.OwnedIds(player, "Armaments") do
+		local weaponId = ItemCatalog.WeaponIdOf(itemId)
+		if weaponId ~= nil then
+			table.insert(owned, weaponId)
+		end
+	end
+	return owned
+end
+
+-- A selection that names a weapon the player no longer owns (it left the inventory, or the model was
+-- removed and it became an orphan) falls back to Fists rather than pointing at nothing.
+local function normalizeSelection(player: Player, record: Record): ()
+	local selected = record.Selected
+	if selected ~= nil and selected ~= WeaponRoster.FISTS_ID and not table.find(ownedOrder(player), selected) then
+		record.Selected = WeaponRoster.FISTS_ID
+		record.Drawn = false
+	end
 end
 
 -- What is actually in this player's hand: the selected weapon while drawn, Fists otherwise (this file's
@@ -136,13 +162,14 @@ local function pushInventory(player: Player, refused: string?): ()
 		return
 	end
 	local record = recordFor(player)
+	normalizeSelection(player, record)
 	local inHand = inHandOf(record)
 	local character = player.Character
 	local readyIn = if character then AttackRequestSystem.SwapReadyIn(character, os.clock()) else 0
 	remote:FireClient(
 		player,
 		{
-			Owned = table.clone(record.Order),
+			Owned = ownedOrder(player),
 			Selected = record.Selected,
 			-- "Is the selected weapon the one in hand" -- true for Fists whenever they are selected.
 			Drawn = record.Selected ~= nil and inHand == record.Selected,
@@ -192,20 +219,29 @@ end
 
 -- Adds `weaponId` to this player's inventory. Returns whether anything changed -- picking up a weapon
 -- you already own is a no-op, not an error: the world model is a permanent source (see this file's
--- header), so walking past a rack you already looted is an ordinary thing to do.
+-- header), so walking past a rack you already looted is an ordinary thing to do. Also refused (false) when
+-- the inventory cannot take it -- their profile has not loaded, or the Armaments section is full.
 function WeaponInventorySystem.Pickup(player: Player, weaponId: WeaponId): boolean
+	if weaponId == WeaponRoster.FISTS_ID then
+		-- Fists are always in hand and never an item; there is nothing to pick up.
+		return false
+	end
 	if not WeaponRoster.Has(weaponId) then
 		logger:warn("Refusing a pickup for a weapon the roster does not know", { weaponId = weaponId })
 		return false
 	end
 
-	local record = recordFor(player)
-	if record.Owned[weaponId] then
+	local itemId = ItemCatalog.WeaponItemId(weaponId)
+	if InventorySystem.Has(player, itemId) then
+		return false
+	end
+	local added, reason = InventorySystem.Add(player, itemId, 1)
+	if added <= 0 then
+		logger:warn("Inventory refused a weapon pickup", { player = player.Name, weaponId = weaponId, reason = reason })
 		return false
 	end
 
-	record.Owned[weaponId] = true
-	table.insert(record.Order, weaponId)
+	local record = recordFor(player)
 	-- First REAL weapon picked up becomes the selected one, so the very next draw press works without
 	-- the player having to also discover a separate "choose weapon" control. Fists (always seeded,
 	-- never nil -- see recordFor) counts the same as "nothing chosen yet" here on purpose: a fresh
@@ -224,6 +260,7 @@ end
 -- is not an error -- it is what every player starts as).
 function WeaponInventorySystem.ToggleDraw(player: Player): boolean
 	local record = recordFor(player)
+	normalizeSelection(player, record)
 	if record.Selected == nil then
 		return false
 	end
@@ -242,12 +279,11 @@ end
 -- switching mid-fight swaps what is in hand rather than waiting for a re-draw.
 function WeaponInventorySystem.SelectNext(player: Player): WeaponId?
 	local record = recordFor(player)
-	if #record.Order == 0 then
-		return nil
-	end
+	normalizeSelection(player, record)
+	local order = ownedOrder(player)
 
-	local index = if record.Selected then table.find(record.Order, record.Selected) else nil
-	local nextSelected = record.Order[((index or 0) % #record.Order) + 1]
+	local index = if record.Selected then table.find(order, record.Selected) else nil
+	local nextSelected = order[((index or 0) % #order) + 1]
 	-- Sheathed, this changes nothing in hand and RequestWeapon passes it straight through; drawn, it is a swap.
 	requestChange(player, function(target)
 		target.Selected = nextSelected
@@ -260,16 +296,19 @@ end
 -- SwingSequencer rather than as a gate) -- this exists for a HUD or a spec.
 function WeaponInventorySystem.IsDrawn(player: Player): boolean
 	local record = recordFor(player)
+	normalizeSelection(player, record)
 	return record.Selected ~= nil and inHandOf(record) == record.Selected
 end
 
 -- What is in this player's hand right now -- Fists whenever nothing else is drawn. For a HUD or a spec.
 function WeaponInventorySystem.InHand(player: Player): WeaponId
-	return inHandOf(recordFor(player))
+	local record = recordFor(player)
+	normalizeSelection(player, record)
+	return inHandOf(record)
 end
 
 function WeaponInventorySystem.GetOwned(player: Player): { WeaponId }
-	return table.clone(recordFor(player).Order)
+	return ownedOrder(player)
 end
 
 local function handleToggle(player: Player): ()
@@ -379,6 +418,19 @@ function WeaponInventorySystem.Init(): ()
 		logger:warn("Workspace.Weapons folder not found; no weapons will be pickup-able")
 	end
 
+	-- A saved inventory becomes readable when the profile loads, which can be after the first character.
+	-- Selection restores to the first weapon they own (or stays on Fists), and the client is told.
+	disconnectLoaded = InventorySystem.OnLoaded:Connect(function(player: Player)
+		local record = recordFor(player)
+		if record.Selected == nil or record.Selected == WeaponRoster.FISTS_ID then
+			local firstWeapon = ownedOrder(player)[2]
+			if firstWeapon ~= nil then
+				record.Selected = firstWeapon
+			end
+		end
+		pushInventory(player)
+	end)
+
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "WeaponInventorySystem",
 		-- Catch-up: a client that joins (or respawns) needs its inventory state, since InventoryChanged
@@ -408,6 +460,10 @@ end
 
 -- Spec-only, so one case cannot serve another its inventories.
 function WeaponInventorySystem.Reset(): ()
+	if disconnectLoaded then
+		disconnectLoaded()
+		disconnectLoaded = nil
+	end
 	table.clear(records)
 	started = false
 end

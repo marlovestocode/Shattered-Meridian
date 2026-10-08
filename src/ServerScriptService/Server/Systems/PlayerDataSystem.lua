@@ -125,6 +125,11 @@ local EmoteRegistry = require(ReplicatedStorage.Shared.Emotes.EmoteRegistry)
 -- Only for EquipSlotCount, the bound DecodeProfile validates a persisted art slot index against --
 -- this module owns no art rules of its own beyond "a slot outside the real hotbar isn't a slot."
 local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
+-- Only for decoding/encoding the persisted `inventory` record and its two decode bounds -- the rules about
+-- WHAT an item is live in ItemCatalog, which this module deliberately never reads (an id the catalog no
+-- longer knows must survive a load untouched).
+local InventoryConstants = require(ReplicatedStorage.Shared.Inventory.InventoryConstants)
+local InventoryModel = require(ReplicatedStorage.Shared.Inventory.InventoryModel)
 -- Read for exactly one purpose: CreateDefaultParkourSettings below, so the shipped defaults for the
 -- Parkour System's persisted preferences come from that feature's own constants table rather than
 -- being duplicated as literals in this file.
@@ -244,9 +249,9 @@ function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProf
 		-- join-time backfill (that backfill exists for OLDER saves, not this path).
 		unlockedEmoteIds = EmoteRegistry.GetDefaultUnlockedIds(),
 		emoteLoadout = table.clone(EmoteConstants.DefaultLoadout),
-		-- Blimp Fuel System -- a brand-new player is carrying nothing; see Types.PlayerProfile's own
-		-- header on this field.
-		blimpFuel = { Coal = 0, Water = 0 },
+		-- Inventory -- a brand-new player is carrying nothing; see Types.PlayerProfile's own header on
+		-- this field.
+		inventory = InventoryModel.New(),
 		-- Settings System (Types.PlayerSettings' own header) -- a brand-new profile starts with no
 		-- overrides at all (every action still resolves through Constants.Keybinds.Defaults/
 		-- GamepadDefaults), Autorun off, and the Parkour System's own preferences at whatever
@@ -294,7 +299,7 @@ function PlayerDataSystem.CopyProfile(profile: Types.PlayerProfile): Types.Playe
 		meridianXp = profile.meridianXp,
 		unlockedEmoteIds = table.clone(profile.unlockedEmoteIds),
 		emoteLoadout = table.clone(profile.emoteLoadout),
-		blimpFuel = table.clone(profile.blimpFuel),
+		inventory = InventoryModel.Copy(profile.inventory),
 		settings = {
 			Keybinds = table.clone(profile.settings.Keybinds),
 			GamepadKeybinds = table.clone(profile.settings.GamepadKeybinds),
@@ -694,7 +699,7 @@ function PlayerDataSystem.EncodeProfile(profile: Types.PlayerProfile): { [string
 		meridianXp = profile.meridianXp,
 		unlockedEmoteIds = profile.unlockedEmoteIds,
 		emoteLoadout = profile.emoteLoadout,
-		blimpFuel = { Coal = profile.blimpFuel.Coal, Water = profile.blimpFuel.Water },
+		inventory = InventoryModel.Encode(profile.inventory),
 		settings = PlayerDataSystem.EncodeSettings(profile.settings),
 	}
 end
@@ -840,21 +845,12 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		emoteLoadout = table.clone(EmoteConstants.DefaultLoadout)
 	end
 
-	-- blimpFuel -- two independent carried-resource counters (Types.PlayerProfile's own header), each
-	-- individually type-checked and clamped at 0 rather than trusted, the same per-field defensive
-	-- posture corruption/qiDeviationRisk below get, just nested one level under its own key. A
-	-- negative value (a hand-edited or corrupted record) clamps to 0 rather than being kept -- a
-	-- player cannot legitimately owe the game coal.
-	local blimpFuel = { Coal = 0, Water = 0 }
-	if typeof(rawTable.blimpFuel) == "table" then
-		local rawBlimpFuel = rawTable.blimpFuel :: { [string]: any }
-		if typeof(rawBlimpFuel.Coal) == "number" then
-			blimpFuel.Coal = math.max(0, rawBlimpFuel.Coal :: number)
-		end
-		if typeof(rawBlimpFuel.Water) == "number" then
-			blimpFuel.Water = math.max(0, rawBlimpFuel.Water :: number)
-		end
-	end
+	-- inventory -- InventoryModel.Decode is the whole defensive posture (counts floored and clamped, junk
+	-- keys dropped, Order rebuilt). It does NOT consult the item catalog: an id the catalog no longer
+	-- knows is an orphan and is kept, because deleting a player's data over a content rename cannot be
+	-- undone. A legacy `blimpFuel` field on a record that somehow skipped Migrations[10] is ignored here.
+	local inventory =
+		InventoryModel.Decode(rawTable.inventory, InventoryConstants.MaxItemIdLength, InventoryConstants.MaxStoredCount)
 
 	return {
 		userId = if typeof(rawTable.userId) == "number" then rawTable.userId else fallbackUserId,
@@ -879,7 +875,7 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		meridianXp = if typeof(rawTable.meridianXp) == "number" then rawTable.meridianXp else 0,
 		unlockedEmoteIds = unlockedEmoteIds,
 		emoteLoadout = emoteLoadout,
-		blimpFuel = blimpFuel,
+		inventory = inventory,
 		settings = PlayerDataSystem.DecodeSettings(rawTable.settings),
 	}
 end
@@ -1056,6 +1052,40 @@ Migrations[9] = function(raw: { [string]: any }): { [string]: any }
 		if typeof(settings) == "table" and (settings :: { [string]: any }).UI == nil then
 			(settings :: { [string]: any }).UI = PlayerDataSystem.CreateDefaultUISettings()
 		end
+	end
+	return raw
+end
+
+-- v10 -> v11: the Inventory System. A carried coal/water pair (`blimpFuel`) becomes two entries in the
+-- new `inventory` record and the old field is removed -- a carried resource is an item like any other now.
+-- Counts are floored and any non-number or non-positive value is dropped, the same posture DecodeProfile
+-- took with the old field. A record that somehow already has an `inventory` keeps it and only loses the
+-- stale `blimpFuel`; nothing is ever summed into an existing inventory, so running this twice (or on a
+-- record a rollback half-migrated) cannot duplicate coal.
+Migrations[10] = function(raw: { [string]: any }): { [string]: any }
+	local profile = raw.Profile
+	if typeof(profile) == "table" then
+		local profileTable = profile :: { [string]: any }
+		if profileTable.inventory == nil then
+			local items: { [string]: number } = {}
+			local order: { string } = {}
+			local legacy = profileTable.blimpFuel
+			if typeof(legacy) == "table" then
+				local legacyTable = legacy :: { [string]: any }
+				for _, resource in { "Coal", "Water" } do
+					local amount = legacyTable[resource]
+					if typeof(amount) == "number" then
+						local whole = math.floor(amount :: number)
+						if whole == whole and whole >= 1 then
+							items[resource] = whole
+							table.insert(order, resource)
+						end
+					end
+				end
+			end
+			profileTable.inventory = { Items = items, Order = order }
+		end
+		profileTable.blimpFuel = nil
 	end
 	return raw
 end

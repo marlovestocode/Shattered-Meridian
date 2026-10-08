@@ -151,6 +151,12 @@ local KeybindConstants = {
 		-- Unclaimed elsewhere here, and far enough from the WASD/mouse combat cluster that an
 		-- accidental mid-fight press is unlikely.
 		CharacterMenuToggle = { KeyCode = Enum.KeyCode.M },
+		-- Opens the inventory (Client/Inventory/InventoryClient.lua). J, not the conventional I: SettingsToggle's
+		-- own comment above records the I/O/P cluster not reaching UserInputService on at least one dev machine
+		-- (I and O are also the default camera's zoom keys), and an inventory that cannot be opened is worse
+		-- than one on an unfamiliar key. Unclaimed elsewhere in this table, on the home row beside K (Settings),
+		-- and rebindable like every other action here.
+		InventoryToggle = { KeyCode = Enum.KeyCode.J },
 		-- The combat evade (Client/Parkour/States/Evading.lua) -- renamed from Roll when the roll was
 		-- replaced; SettingsClient migrates a binding saved under the old name. Z: unclaimed elsewhere in
 		-- this table (the Move Editor's Ctrl+Z is a dev-tool chord, not a gameplay bind) and under the same

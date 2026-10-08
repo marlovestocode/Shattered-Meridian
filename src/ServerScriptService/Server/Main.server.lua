@@ -42,6 +42,7 @@ local ServerHopSystem = require(Systems.ServerHopSystem)
 local VersionWatchSystem = require(Systems.VersionWatchSystem)
 local PlayerDataSystem = require(Systems.PlayerDataSystem)
 local SettingsSystem = require(Systems.SettingsSystem)
+local InventorySystem = require(Systems.InventorySystem)
 local ResourceGatheringSystem = require(Systems.ResourceGatheringSystem)
 local FactionManager = require(Managers.FactionManager)
 local MeridianSystem = require(Systems.MeridianSystem)
@@ -153,11 +154,17 @@ boot("PlayerDataSystem", PlayerDataSystem)
 --     some unrelated cluster, since nothing else in this sequence needs it running sooner or later.
 boot("SettingsSystem", SettingsSystem)
 
--- 3c. ResourceGatheringSystem's only dependency is also PlayerDataSystem (Transform/GetProfile on
---     Types.PlayerProfile.blimpFuel) -- boots here for the same reason SettingsSystem does. It has no
---     dependency on BlimpSystem (step 12 below) despite feeding the same field: gathering only ever
---     writes a player's own carried total, and BlimpSystem's depositFuel is what reads it later, so
---     which one boots first between them is not a correctness requirement.
+-- 3b'. InventorySystem's only dependency is PlayerDataSystem (every write is a Transform on
+--      Types.PlayerProfile.inventory). It boots BEFORE everything that puts items into it -- gathering
+--      just below, the blimp's fuel transfers, and WeaponInventorySystem's pickups -- because those read
+--      its OnLoaded/OnChanged at their own Init.
+boot("InventorySystem", InventorySystem)
+
+-- 3c. ResourceGatheringSystem's dependency is InventorySystem immediately above (it adds gathered coal/
+--     water to it and follows its OnChanged for the HUD) -- boots here for the same reason SettingsSystem
+--     does. It has no dependency on BlimpSystem (step 12 below) despite feeding the same items:
+--     gathering only ever adds to a player's own carried total, and BlimpSystem's depositFuel is what
+--     reads it later, so which one boots first between them is not a correctness requirement.
 boot("ResourceGatheringSystem", ResourceGatheringSystem)
 
 -- 5. Meridian XP is the resource TierSystem's tier-up checks read -- the resource has to exist

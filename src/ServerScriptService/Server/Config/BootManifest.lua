@@ -58,6 +58,7 @@ local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local BlimpConstants = require(ReplicatedStorage.Shared.Blimp.BlimpConstants)
 local BoatConstants = require(ReplicatedStorage.Shared.Boat.BoatConstants)
 local BountyConstants = require(ReplicatedStorage.Shared.BountyConstants)
+local InventoryConstants = require(ReplicatedStorage.Shared.Inventory.InventoryConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local DeathConstants = require(ReplicatedStorage.Shared.Death.DeathConstants)
@@ -135,6 +136,14 @@ local ENTRIES: { BootEntry } = {
 		Name = "SettingsSystem",
 		Path = { "Systems", "SettingsSystem" },
 		Remotes = namesOf(Constants.Settings.RemoteNames),
+	},
+	-- The Inventory System (docs/design/inventory.md). Owns Inventory_Snapshot (server -> the owning player,
+	-- the whole inventory, coalesced to one push per frame) and Inventory_Action (the one client intent,
+	-- Discard). Boots straight after PlayerDataSystem and BEFORE the Systems that put things into it.
+	{
+		Name = "InventorySystem",
+		Path = { "Systems", "InventorySystem" },
+		Remotes = namesOf(InventoryConstants.RemoteNames),
 	},
 	-- Blimp Fuel System's gathering half. Owns CarriedFuelUpdated (server -> the owning player, pushed
 	-- on a successful gather, on profile load, and by BlimpSystem.depositFuel's own narrow callback in)

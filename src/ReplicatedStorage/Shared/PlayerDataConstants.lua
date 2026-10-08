@@ -65,8 +65,13 @@ local PlayerDataConstants = {
 	-- "empty is honest" shape as every migration before it. Bumped 9 -> 10 for the UI System's
 	-- `settings.UI` sub-table (Types.UISettings) -- the same "new settings group" shape Migrations[5]
 	-- used for Comfort -- PlayerDataSystem.lua's Migrations[9] backfills Scale = 1 (100%, today's only
-	-- size, unchanged for every existing player) onto any record saved before this pass.
-	SchemaVersion = 10,
+	-- size, unchanged for every existing player) onto any record saved before this pass. Bumped 10 -> 11
+	-- for the Inventory System's `inventory` field (Types.PlayerProfile), which REPLACES `blimpFuel`:
+	-- PlayerDataSystem.lua's Migrations[10] moves a carried coal/water pair into inventory items "Coal" and
+	-- "Water" and removes the old field. Weapons also persist in it from this version on (they used to be
+	-- session-only), but none is backfilled -- an existing player owns exactly what they picked up before,
+	-- which was nothing that survived a rejoin.
+	SchemaVersion = 11,
 
 	-- A brand-new profile's starting Tier -- Tier 1 is the bottom of TierSystem's nine-tier ladder
 	-- (progression-systems.md), the correct starting point for a player who has never played before.

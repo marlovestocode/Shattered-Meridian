@@ -51,6 +51,13 @@ export type AttributeBlock = {
 	Fleetness: number,
 }
 
+-- The persisted inventory record (Types.PlayerProfile.inventory). Pure data; the arithmetic over it is
+-- Shared/Inventory/InventoryModel.lua, which this type is structurally identical to.
+export type StoredInventory = {
+	Items: { [string]: number },
+	Order: { string },
+}
+
 export type PlayerProfile = {
 	userId: number,
 	faction: Faction?,
@@ -125,12 +132,15 @@ export type PlayerProfile = {
 	-- unplayable regardless, so a stale slot degrades to "does nothing when pressed," never a way to
 	-- play an emote the player doesn't actually own.
 	emoteLoadout: { EmoteId },
-	-- Blimp Fuel System (Server/Systems/ResourceGatheringSystem.lua mines/collects into this,
-	-- Server/Systems/BlimpSystem.lua's depositFuel debits out of it) -- how much coal/water THIS
-	-- PLAYER is currently carrying, not yet loaded into any blimp's own tank (that pool is
-	-- BlimpTypes.FuelState, and lives on the blimp, never here). A record, not two top-level fields,
-	-- so the two always travel and default together -- see CreateDefaultProfile/Migrations[8].
-	blimpFuel: { Coal: number, Water: number },
+	-- Inventory (Server/Systems/InventorySystem.lua is its ONLY writer; docs/design/inventory.md is the
+	-- blueprint). Everything the player is carrying: weapons they have taken up ("Weapon/<WeaponId>") and
+	-- gathered resources ("Coal", "Water"), as a count per item id plus first-acquired order. Replaces the
+	-- old `blimpFuel` pair (schema v10 -> v11, Migrations[10]) -- a carried resource is an item like any
+	-- other now, not a special case with its own field, migration, remote and readout.
+	--
+	-- An id the catalog no longer knows is KEPT here and ignored everywhere else (an orphan), never
+	-- deleted: see Shared/Inventory/InventoryModel's header.
+	inventory: StoredInventory,
 	-- Settings System (Server/Systems/SettingsSystem.lua, Client/Input/KeybindManager.lua) -- see
 	-- PlayerSettings' own header below for why this is a SPARSE override map, not a full snapshot.
 	settings: PlayerSettings,
@@ -826,6 +836,11 @@ export type KeybindAction =
 	-- to M, which is why it alone among the panels couldn't be rebound; it routes through
 	-- KeybindManager like every other action now.
 	| "CharacterMenuToggle"
+	-- Opens the player's inventory (Client/UI/Screens/Inventory via Client/Inventory/InventoryClient.lua).
+	-- The same "client-side panel toggle, fires no combat remote of its own, no authorization gate"
+	-- shape as the two above; what it shows is the server's snapshot (Server/Systems/InventorySystem.lua),
+	-- and the one thing it can ask for, a discard, is re-validated there.
+	| "InventoryToggle"
 	-- The combat evade (Client/Parkour/States/Evading.lua via Client/Parkour/
 	-- ParkourInput.lua). Fires no combat remote of its own -- the parkour framework reports the action
 	-- to Server/Systems/ParkourSystem.lua through its own remote once the evade actually starts, the

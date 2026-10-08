@@ -55,6 +55,7 @@ local CameraFollow = require(script.Parent.Camera.CameraFollow)
 local ParkourController = require(script.Parent.Parkour.ParkourController)
 local RunController = require(script.Parent.Movement.RunController)
 local CharacterMenuClient = require(script.Parent.CharacterMenu.CharacterMenuClient)
+local InventoryClient = require(script.Parent.Inventory.InventoryClient)
 local FlightController = require(script.Parent.Flight.FlightController)
 local DefenseClient = require(script.Parent.Defense.DefenseClient)
 local AttackInputClient = require(script.Parent.Combat.AttackInputClient)
@@ -489,6 +490,13 @@ end
 logger:debug("CharacterMenuClient start")
 CharacterMenuClient.Start(uiHandles.Menus, uiHandles.Chrome)
 logger:debug("CharacterMenuClient end")
+
+-- Unconditional for every client -- the inventory (J) has no whitelist gate. After SettingsClient.
+-- RestoreSettings above for the same reason AttackInputClient is: a rebound InventoryToggle must be live
+-- before the first press can reach this.
+logger:debug("InventoryClient start")
+InventoryClient.Start(uiHandles.Inventory, uiHandles.Chrome)
+logger:debug("InventoryClient end")
 
 -- Unconditional for every client, unlike DevMenuClient above -- the bug report form has no
 -- whitelist gate; every player can open and submit it.

@@ -80,6 +80,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local ClientStateModule = require(script.State.ClientState)
 local HUD = require(script.Screens.HUD)
 local Menus = require(script.Screens.Menus)
+local InventoryModule = require(script.Screens.Inventory)
 local DeathFeed = require(script.Screens.DeathFeed)
 local CombatFeedbackModule = require(script.Screens.CombatFeedback)
 local BugReportModule = require(script.Screens.BugReport)
@@ -135,6 +136,9 @@ export type UIHandles = {
 	-- gets one honest optional rather than five fields that each lie about being present.
 	DevTools: DevToolScreens?,
 	Menus: Menus.MenusHandle,
+	-- The inventory panel (Screens/Inventory/init.lua), driven by Client/Inventory/InventoryClient.lua off the
+	-- server's Inventory_Snapshot.
+	Inventory: InventoryModule.InventoryHandle,
 	BugReport: BugReportModule.BugReportHandle,
 	Announcement: AnnouncementModule.AnnouncementHandle,
 	-- The one notification channel (Shell/Notify.lua). Returned so a future producer can reach it
@@ -236,6 +240,9 @@ function UI.Mount(): UIHandles
 	-- it" split every other Screens/ handle here already follows.
 	local menus = Menus.Mount(scope, playerGui, clientState)
 	logger:debug("Menus mounted")
+
+	local inventory = InventoryModule.Mount(scope, playerGui)
+	logger:debug("Inventory mounted")
 
 	-- DEATH FEED FIRST, AND ONLY BECAUSE CHROME NEEDS ITS FACT. This screen is mounted here rather
 	-- than in the ambient cluster below because the UI mode is derived from whether the local player
@@ -448,6 +455,7 @@ function UI.Mount(): UIHandles
 		CombatFeedback = combatFeedback,
 		DevTools = devTools,
 		Menus = menus,
+		Inventory = inventory,
 		BugReport = bugReport,
 		Announcement = announcement,
 		Notify = notify,

@@ -102,8 +102,7 @@ local BlimpFlightMode = require(ServerScriptService.Server.Blimp.BlimpFlightMode
 local BlimpFuel = require(ServerScriptService.Server.Blimp.BlimpFuel)
 local VesselMount = require(ServerScriptService.Server.Vessel.VesselMount)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
-local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
-local ResourceGatheringSystem = require(script.Parent.ResourceGatheringSystem)
+local InventorySystem = require(script.Parent.InventorySystem)
 
 local logger = Logger.scope("BlimpSystem")
 
@@ -669,17 +668,13 @@ local function pushFuelTransfer(
 	remote:FireClient(player, payload)
 end
 
--- How much more of `resource` this player may carry, given what they already have. The cap belongs to
--- Shared/Blimp/BlimpConstants.Carry rather than to this System or to ResourceGatheringSystem -- see
--- that table's own header on why it lives beside the tank capacities it is tuned against. Same
--- helper shape (and the same cap) ResourceGatheringSystem.carryCapFor uses for a gather, because an
--- unload is a gather from a tank instead of from a rock and must not be able to exceed a limit a
--- mined vein already respects.
-local function carryRoomFor(profile: Types.PlayerProfile, resource: BlimpTypes.FuelResource): number
-	if resource == "Coal" then
-		return math.max(0, BlimpConstants.Carry.CoalCap - profile.blimpFuel.Coal)
-	end
-	return math.max(0, BlimpConstants.Carry.WaterCap - profile.blimpFuel.Water)
+-- How much more of `resource` this player may carry, given what they already have. The cap is the carried
+-- item's own (ItemCatalog reads it from Shared/Blimp/BlimpConstants.Carry, which lives beside the tank
+-- capacities it is tuned against -- see that table's own header), applied by the inventory together with
+-- the Resources section's slot room. An unload is a gather from a tank instead of from a rock and must not
+-- be able to exceed a limit a mined vein already respects, which is why both ask the same place.
+local function carryRoomFor(player: Player, resource: BlimpTypes.FuelResource): number
+	return InventorySystem.RoomFor(player, resource)
 end
 
 local function depositFuel(player: Player, blimp: BlimpRecord): ()
@@ -689,17 +684,16 @@ local function depositFuel(player: Player, blimp: BlimpRecord): ()
 	if fuelTransferRateLimiter:IsLimited(player) then
 		return
 	end
-	local profile = PlayerDataSystem.GetProfile(player)
-	if not profile then
+	if not InventorySystem.IsLoaded(player) then
 		-- Also silent, and for a different reason: this is not a state the player is in, it is a state
-		-- the SERVER is in (a profile that has not finished loading, or failed to). Telling them
+		-- the SERVER is in (an inventory that has not finished loading, or failed to). Telling them
 		-- "nothing to load" would be a lie about their own pockets.
-		logger:warn("Fuel deposit ignored: profile not loaded", { player = player.Name })
+		logger:warn("Fuel deposit ignored: inventory not loaded", { player = player.Name })
 		return
 	end
 
-	local carriedCoal = profile.blimpFuel.Coal
-	local carriedWater = profile.blimpFuel.Water
+	local carriedCoal = InventorySystem.Count(player, "Coal")
+	local carriedWater = InventorySystem.Count(player, "Water")
 	local afterCoal, coalAccepted = BlimpFuel.Deposit(blimp.Fuel, "Coal", carriedCoal, blimp.FuelTuning)
 	local afterWater, waterAccepted = BlimpFuel.Deposit(afterCoal, "Water", carriedWater, blimp.FuelTuning)
 	if coalAccepted <= 0 and waterAccepted <= 0 then
@@ -720,14 +714,14 @@ local function depositFuel(player: Player, blimp: BlimpRecord): ()
 	end
 	blimp.Fuel = afterWater
 
-	PlayerDataSystem.Transform(player, function(mutableProfile)
-		mutableProfile.blimpFuel.Coal = math.max(0, mutableProfile.blimpFuel.Coal - coalAccepted)
-		mutableProfile.blimpFuel.Water = math.max(0, mutableProfile.blimpFuel.Water - waterAccepted)
-	end)
-	-- The one narrow seam back into ResourceGatheringSystem -- this System has no other reason to
-	-- touch a player's carried total, only to debit it, so it calls that System's own public push
-	-- rather than resolving/firing the remote itself (which lives, and is created, over there).
-	ResourceGatheringSystem.PushCarriedFuelUpdate(player)
+	-- Debits the inventory. No HUD push here: the carried-resources readout follows the inventory's own
+	-- OnChanged (ResourceGatheringSystem.Init), so it moves when these counts do, from any source.
+	if coalAccepted > 0 then
+		InventorySystem.Remove(player, "Coal", coalAccepted)
+	end
+	if waterAccepted > 0 then
+		InventorySystem.Remove(player, "Water", waterAccepted)
+	end
 
 	-- Immediate, not left to the next Heartbeat's edge detector -- a player who just topped off the
 	-- tanks for their pilot friend deserves the gauges to move the instant they let go of the prompt,
@@ -770,16 +764,15 @@ local function unloadFuel(player: Player, blimp: BlimpRecord): ()
 	if fuelTransferRateLimiter:IsLimited(player) then
 		return
 	end
-	local profile = PlayerDataSystem.GetProfile(player)
-	if not profile then
-		logger:warn("Fuel unload ignored: profile not loaded", { player = player.Name })
+	if not InventorySystem.IsLoaded(player) then
+		logger:warn("Fuel unload ignored: inventory not loaded", { player = player.Name })
 		return
 	end
 
 	local tankCoal = blimp.Fuel.Coal
 	local tankWater = blimp.Fuel.Water
-	local afterCoal, coalTaken = BlimpFuel.Withdraw(blimp.Fuel, "Coal", carryRoomFor(profile, "Coal"))
-	local afterWater, waterTaken = BlimpFuel.Withdraw(afterCoal, "Water", carryRoomFor(profile, "Water"))
+	local afterCoal, coalTaken = BlimpFuel.Withdraw(blimp.Fuel, "Coal", carryRoomFor(player, "Coal"))
+	local afterWater, waterTaken = BlimpFuel.Withdraw(afterCoal, "Water", carryRoomFor(player, "Water"))
 	if coalTaken <= 0 and waterTaken <= 0 then
 		-- Nothing moved, and which of the two reasons it was decides what the player is told -- see
 		-- BlimpTypes.FuelTransferOutcome. An empty tank is "there is nothing in here"; a full pocket
@@ -797,14 +790,13 @@ local function unloadFuel(player: Player, blimp: BlimpRecord): ()
 	end
 	blimp.Fuel = afterWater
 
-	PlayerDataSystem.Transform(player, function(mutableProfile)
-		mutableProfile.blimpFuel.Coal += coalTaken
-		mutableProfile.blimpFuel.Water += waterTaken
-	end)
-	-- The same narrow seam back into ResourceGatheringSystem the deposit path uses, in the other
-	-- direction -- that System owns the carried total and the remote that reports it, so this one
-	-- calls its public push rather than resolving the remote itself.
-	ResourceGatheringSystem.PushCarriedFuelUpdate(player)
+	-- Credits the inventory (it was sized by carryRoomFor above, so it fits). The HUD follows OnChanged.
+	if coalTaken > 0 then
+		InventorySystem.Add(player, "Coal", coalTaken)
+	end
+	if waterTaken > 0 then
+		InventorySystem.Add(player, "Water", waterTaken)
+	end
 
 	-- Immediate, for the same reason the deposit path pushes immediately: an unload can cross a
 	-- Minimum and ground the hull, and a pilot watching their own gauges should see that on the frame

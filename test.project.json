@@ -56,6 +56,9 @@
 					"CharacterMenu": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/CharacterMenu"
 					},
+					"Inventory": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Inventory"
+					},
 					"Network": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Network"
 					},

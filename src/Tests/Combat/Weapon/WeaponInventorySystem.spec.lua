@@ -13,6 +13,11 @@
 -- as an identity to key a record by (and reads .Name only for a log line), so a table with a Name is
 -- indistinguishable from the real thing for this module's purposes -- and it is the only way to reach
 -- these paths headlessly at all.
+--
+-- OWNERSHIP LIVES IN THE INVENTORY NOW, so each fake player is also given a genuinely loaded profile
+-- (PlayerDataSystem.InstallProfileForSpec, the seam Tests/Progression/ProgressionSpine.spec.lua uses): a
+-- pickup is an InventorySystem.Add through the real Transform path, and without a loaded profile it would
+-- be refused, which is the correct production behaviour and not one these cases are about.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -25,6 +30,8 @@ local SwingSequencer = require(ServerScriptService.Server.Combat.Attack.SwingSeq
 local WeaponInventorySystem = require(ServerScriptService.Server.Combat.Weapon.WeaponInventorySystem)
 local WeaponVisualSystem = require(ServerScriptService.Server.Combat.Weapon.WeaponVisualSystem)
 local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
+local InventorySystem = require(ServerScriptService.Server.Systems.InventorySystem)
+local PlayerDataSystem = require(ServerScriptService.Server.Systems.PlayerDataSystem)
 
 local TOOL_NAME = "EquippedWeaponVisual"
 
@@ -37,6 +44,7 @@ local FISTS = WeaponRoster.FISTS_ID
 
 local nextId = 0
 local spawned: { Instance } = {}
+local installed: { any } = {}
 
 -- A minimal rig, matching AttackRequestSystem.spec.lua's own makeDummy. Deliberately without a
 -- RightHand, so these cases assert that a Tool was EQUIPPED onto the character rather than anything
@@ -68,15 +76,24 @@ end
 local function fakePlayer(withCharacter: boolean?): any
 	nextId += 1
 	local name = `Spec{nextId}`
-	return {
+	local player = {
 		Name = name,
+		UserId = 7000 + nextId,
 		Character = if withCharacter then makeCharacter(name) else nil,
 	}
+	PlayerDataSystem.InstallProfileForSpec(player :: any, PlayerDataSystem.CreateDefaultProfile(player.UserId))
+	table.insert(installed, player)
+	return player
 end
 
 return function()
 	afterEach(function()
 		WeaponInventorySystem.Reset()
+		InventorySystem.Reset()
+		for _, player in installed do
+			PlayerDataSystem.EvictProfileForSpec(player)
+		end
+		table.clear(installed)
 		WeaponVisualSystem.Reset()
 		AttackRequestSystem.Reset()
 		SwingSequencer.Reset()
@@ -141,6 +158,51 @@ return function()
 			expect(owned[1]).to.equal(FISTS)
 			expect(owned[2]).to.equal(SECOND_WEAPON)
 			expect(owned[3]).to.equal(FIRST_WEAPON)
+		end)
+	end)
+
+	describe("WeaponInventorySystem -- ownership is the inventory's", function()
+		it("stores a pickup as the item Weapon/<id> in the Armaments section", function()
+			local player = fakePlayer()
+			WeaponInventorySystem.Pickup(player, FIRST_WEAPON)
+			expect(InventorySystem.Count(player, "Weapon/" .. FIRST_WEAPON)).to.equal(1)
+			expect(#InventorySystem.OwnedIds(player, "Armaments")).to.equal(1)
+		end)
+
+		it("refuses to pick up fists, which are never an item", function()
+			local player = fakePlayer()
+			expect(WeaponInventorySystem.Pickup(player, FISTS)).to.equal(false)
+			expect(#InventorySystem.OwnedIds(player, "Armaments")).to.equal(0)
+		end)
+
+		it("refuses a pickup when the player has no loaded profile", function()
+			local player = fakePlayer()
+			PlayerDataSystem.EvictProfileForSpec(player)
+			expect(WeaponInventorySystem.Pickup(player, FIRST_WEAPON)).to.equal(false)
+		end)
+
+		it("offers weapons already in the inventory, in the order they were acquired", function()
+			local player = fakePlayer()
+			-- Put straight into the inventory, as a loaded save would: no Pickup has run for this session.
+			InventorySystem.Add(player, "Weapon/" .. SECOND_WEAPON, 1)
+			InventorySystem.Add(player, "Weapon/" .. FIRST_WEAPON, 1)
+
+			local owned = WeaponInventorySystem.GetOwned(player)
+			expect(owned[1]).to.equal(FISTS)
+			expect(owned[2]).to.equal(SECOND_WEAPON)
+			expect(owned[3]).to.equal(FIRST_WEAPON)
+		end)
+
+		it("stops offering a weapon once it has left the inventory", function()
+			local player = fakePlayer()
+			WeaponInventorySystem.Pickup(player, FIRST_WEAPON)
+			WeaponInventorySystem.ToggleDraw(player)
+			expect(WeaponInventorySystem.InHand(player)).to.equal(FIRST_WEAPON)
+
+			InventorySystem.Remove(player, "Weapon/" .. FIRST_WEAPON, 1)
+			expect(#WeaponInventorySystem.GetOwned(player)).to.equal(1)
+			-- And the hand falls back to the fists rather than holding a weapon that is gone.
+			expect(WeaponInventorySystem.InHand(player)).to.equal(FISTS)
 		end)
 	end)
 

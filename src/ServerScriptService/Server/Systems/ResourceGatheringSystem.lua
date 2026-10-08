@@ -4,8 +4,9 @@
 
 	Owns: coal mining and water collection, end to end -- discovering CollectionService-tagged
 	CoalDeposit/WaterSource parts, putting a ProximityPrompt on each, crediting the gathering player's
-	own carried coal/water (Types.PlayerProfile.blimpFuel) on a successful trigger, and (coal only)
-	putting a depleted vein on its own respawn timer.
+	own carried coal/water -- the items "Coal" and "Water" in their inventory
+	(Server/Systems/InventorySystem) -- on a successful trigger, and (coal only) putting a depleted vein on
+	its own respawn timer.
 
 	ONE SYSTEM OVER Shared/Gathering/GatheringConstants.lua's PER-RESOURCE CONFIG TABLE, not two
 	near-identical Systems. Mining and collection are the same mechanic shape -- tag a part, hold a
@@ -15,17 +16,22 @@
 	prompt-wiring code for no behavioural difference the config table couldn't already express.
 
 	FEEDS THE BLIMP FUEL SYSTEM AND OWNS NOTHING ABOUT A BLIMP. A gathered resource lands in the
-	player's own carried total, clamped at Shared/Blimp/BlimpConstants.Carry's own cap -- it is
-	Server/Systems/BlimpSystem.depositFuel that later moves it into an actual blimp's tank, at a
-	furnace/water-tank prompt this module never touches. This module has no notion of a blimp, a mount,
-	or a pilot at all.
+	player's inventory, clamped at the item's own carry cap (ItemCatalog reads it from
+	Shared/Blimp/BlimpConstants.Carry) -- it is Server/Systems/BlimpSystem.depositFuel that later moves it
+	into an actual blimp's tank, at a furnace/water-tank prompt this module never touches. This module has
+	no notion of a blimp, a mount, or a pilot at all.
+
+	THE CORNER READOUT FOLLOWS THE INVENTORY, NOT THE GATHER. The carried-resources HUD is pushed whenever
+	the inventory reports a Coal or Water count changing (InventorySystem.OnChanged), whoever changed it --
+	a gather, a blimp deposit or unload, a discard from the inventory screen -- so no caller has to
+	remember to push.
 
 	Also owns SpawnDebugNode, a dev/test-only convenience the Dev Menu's "Spawn" tab calls to place a
 	tagged Part near the requesting admin -- the same "spawn near me" shape DevMenuSystem already uses
 	for DebugDummySystem.Spawn -- for testing before a builder has placed any real world nodes.
 
 	Does not own: the tag names or per-resource tuning (Shared/Gathering/GatheringConstants.lua), the
-	carried-resource cap (Shared/Blimp/BlimpConstants.Carry), or what a deposit into a blimp's tank does
+	player may carry (the inventory and the catalog), or what a deposit into a blimp's tank does
 	with a carried resource (Server/Systems/BlimpSystem.lua).
 ]]
 
@@ -33,7 +39,6 @@ local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
-local BlimpConstants = require(ReplicatedStorage.Shared.Blimp.BlimpConstants)
 local GatheringConstants = require(ReplicatedStorage.Shared.Gathering.GatheringConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -42,7 +47,7 @@ local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
 
-local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
+local InventorySystem = require(script.Parent.InventorySystem)
 
 local logger = Logger.scope("ResourceGatheringSystem")
 
@@ -75,29 +80,21 @@ local function setPromptEnabled(prompt: ProximityPrompt, enabled: boolean): ()
 	end
 end
 
--- The cap that actually matters is the BLIMP TANK's own capacity -- see BlimpConstants.Carry's own
--- header on why the two are tuned together rather than independently.
-local function carryCapFor(kind: GatheringConstants.ResourceKind): number
-	return if kind == "Coal" then BlimpConstants.Carry.CoalCap else BlimpConstants.Carry.WaterCap
-end
-
--- Server -> `player` only. Reads the CURRENT profile rather than taking Coal/Water as arguments, so a
--- caller can never push a stale or hand-computed pair -- every caller (handleGather below, Server/
--- Systems/BlimpSystem.depositFuel, and the OnProfileLoaded catch-up in Init) just says "something
--- about this player's carried fuel changed," never what it changed to. Safe to call before the remote
--- exists or before a profile has loaded -- both are silent no-ops, not errors.
+-- Server -> `player` only. Reads the CURRENT inventory rather than taking Coal/Water as arguments, so a
+-- caller can never push a stale or hand-computed pair. Also driven by InventorySystem.OnChanged (see
+-- Init), so most callers never need it; it stays public for the catch-up on load. Safe to call before the
+-- remote exists or before an inventory has loaded -- both are silent no-ops, not errors.
 function ResourceGatheringSystem.PushCarriedFuelUpdate(player: Player): ()
 	local remote = carriedFuelUpdatedRemote
 	if not remote then
 		return
 	end
-	local profile = PlayerDataSystem.GetProfile(player)
-	if not profile then
+	if not InventorySystem.IsLoaded(player) then
 		return
 	end
 	local payload: GatheringConstants.CarriedFuelUpdatePayload = {
-		Coal = profile.blimpFuel.Coal,
-		Water = profile.blimpFuel.Water,
+		Coal = InventorySystem.Count(player, "Coal"),
+		Water = InventorySystem.Count(player, "Water"),
 	}
 	remote:FireClient(player, payload)
 end
@@ -111,25 +108,19 @@ local function handleGather(player: Player, node: NodeRecord): ()
 		return
 	end
 
-	local profile = PlayerDataSystem.GetProfile(player)
-	if not profile then
+	if not InventorySystem.IsLoaded(player) then
 		return
 	end
-	local carried = if node.Kind == "Coal" then profile.blimpFuel.Coal else profile.blimpFuel.Water
-	local room = math.max(0, carryCapFor(node.Kind) - carried)
+	-- The resource kind IS the item id ("Coal" / "Water"). RoomFor applies the item's carry cap and the
+	-- section's slot room together.
+	local room = InventorySystem.RoomFor(player, node.Kind)
 	if room <= 0 then
 		return
 	end
-	local granted = math.min(node.Config.Yield, room)
-
-	PlayerDataSystem.Transform(player, function(mutableProfile)
-		if node.Kind == "Coal" then
-			mutableProfile.blimpFuel.Coal += granted
-		else
-			mutableProfile.blimpFuel.Water += granted
-		end
-	end)
-	ResourceGatheringSystem.PushCarriedFuelUpdate(player)
+	local granted = InventorySystem.Add(player, node.Kind, math.min(node.Config.Yield, room))
+	if granted <= 0 then
+		return
+	end
 
 	logger:debug("Resource gathered", {
 		player = player.Name,
@@ -213,23 +204,23 @@ local function watchTag(tagName: string, kind: GatheringConstants.ResourceKind):
 end
 
 -- Dev/test convenience only ("Spawn" tab, Server/Systems/DevMenuSystem.handleFillCarriedFuel) --
--- sets BOTH carried pools to their cap and pushes the update, returning whether the profile was
--- actually written.
+-- tops BOTH carried pools up to whatever the inventory will take, returning whether the inventory was
+-- readable. The HUD readout follows by itself (InventorySystem.OnChanged, see Init).
 --
--- LIVES HERE RATHER THAN IN DevMenuSystem, even though nothing but the Dev Menu calls it, for the
--- same reason BlimpSystem.depositFuel calls PushCarriedFuelUpdate instead of firing the remote
--- itself: this module owns Types.PlayerProfile.blimpFuel, and a second writer reaching around it
--- would be the point at which "who is allowed to change a player's carried total" stops having an
--- answer. The Dev Menu owns the authorization; this owns the field.
+-- LIVES HERE RATHER THAN IN DevMenuSystem, even though nothing but the Dev Menu calls it, because the
+-- Dev Menu owns the AUTHORIZATION and this module owns what a gathered resource is: the two resource
+-- names and their meaning as carried items. It writes through InventorySystem like every other caller.
 function ResourceGatheringSystem.FillCarriedFuel(player: Player): boolean
-	local filled = PlayerDataSystem.Transform(player, function(profile)
-		profile.blimpFuel.Coal = carryCapFor("Coal")
-		profile.blimpFuel.Water = carryCapFor("Water")
-	end)
-	if not filled then
+	if not InventorySystem.IsLoaded(player) then
 		return false
 	end
-	ResourceGatheringSystem.PushCarriedFuelUpdate(player)
+	-- Tops each pool up to whatever the inventory will take (the item's cap, the section's room).
+	for _, resource in { "Coal", "Water" } do
+		local room = InventorySystem.RoomFor(player, resource)
+		if room > 0 then
+			InventorySystem.Add(player, resource, room)
+		end
+	end
 	logger:info("Carried fuel filled by dev tool", { player = player.Name })
 	return true
 end
@@ -303,12 +294,18 @@ function ResourceGatheringSystem.Init(): ()
 
 	-- Catch-up for a joining/rejoining player -- without this, a player who logged out mid-stockpile
 	-- would see nothing on their HUD until their NEXT gather, even though their real carried total
-	-- (persisted in Types.PlayerProfile.blimpFuel) is already sitting there. Hooked off
-	-- PlayerDataSystem.OnProfileLoaded rather than PlayerLifecycle's own OnPlayer, which fires
-	-- present-at-Init-and-future-alike with no guarantee the profile has actually finished loading yet
-	-- -- this event is PlayerDataSystem's own "the profile is now safe to read" signal.
-	PlayerDataSystem.OnProfileLoaded.Event:Connect(function(player: Player)
+	-- (persisted in their inventory) is already sitting there. Hooked off InventorySystem.OnLoaded rather
+	-- than PlayerLifecycle's own OnPlayer, which fires present-at-Init-and-future-alike with no guarantee
+	-- the profile has actually finished loading yet -- this is the inventory's own "safe to read" signal.
+	InventorySystem.OnLoaded:Connect(function(player: Player)
 		ResourceGatheringSystem.PushCarriedFuelUpdate(player)
+	end)
+	-- Whoever changes a carried count -- a gather, a blimp deposit or unload, a discard from the inventory
+	-- screen -- the corner readout follows (this file's header).
+	InventorySystem.OnChanged:Connect(function(player: Player, itemId: string, _count: number)
+		if itemId == "Coal" or itemId == "Water" then
+			ResourceGatheringSystem.PushCarriedFuelUpdate(player)
+		end
 	end)
 
 	-- No character binding needed -- gathering has no per-life state, only a per-player rate-limit

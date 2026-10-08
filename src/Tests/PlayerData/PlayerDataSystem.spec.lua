@@ -56,8 +56,8 @@ return function()
 			expect(profile.unlockedEmoteIds.VictoryPose).to.equal(nil)
 			expect(#profile.emoteLoadout).to.equal(8)
 			expect(profile.emoteLoadout[1]).to.equal("Wave")
-			expect(profile.blimpFuel.Coal).to.equal(0)
-			expect(profile.blimpFuel.Water).to.equal(0)
+			expect(next(profile.inventory.Items)).to.equal(nil)
+			expect(#profile.inventory.Order).to.equal(0)
 			expect(next(profile.settings.Keybinds)).to.equal(nil)
 			expect(next(profile.settings.GamepadKeybinds)).to.equal(nil)
 			expect(profile.settings.Autorun).to.equal(false)
@@ -219,10 +219,9 @@ return function()
 			expect(profile.bloodlineStageProgress["kept-bloodline"]).to.equal(3)
 		end)
 
-		it("migrates a pre-Blimp-Fuel v8 record to v9, backfilling an empty blimpFuel", function()
-			-- Empty, matching CreateDefaultProfile's own starting default -- an existing player has
-			-- gathered no fuel any differently than a brand-new one has, the same "empty is honest"
-			-- reasoning Migrations[3]/[6]'s own backfills already use.
+		it("migrates a pre-Blimp-Fuel v8 record forward, arriving with an empty inventory", function()
+			-- v8 -> v9 still backfills { Coal = 0, Water = 0 }; v10 -> v11 then turns that into an inventory.
+			-- Zero carried means no entries at all -- an item you do not hold is absent, not stored as 0.
 			local raw = {
 				SchemaVersion = 8,
 				Profile = { tier = 5 },
@@ -231,21 +230,54 @@ return function()
 			local profile = migrated.Profile :: any
 
 			expect(migrated.SchemaVersion).to.equal(CURRENT_SCHEMA)
-			expect(profile.blimpFuel).never.to.equal(nil)
-			expect(profile.blimpFuel.Coal).to.equal(0)
-			expect(profile.blimpFuel.Water).to.equal(0)
+			expect(profile.blimpFuel).to.equal(nil)
+			expect(profile.inventory).never.to.equal(nil)
+			expect(next(profile.inventory.Items)).to.equal(nil)
+			expect(#profile.inventory.Order).to.equal(0)
 		end)
 
-		it("does not overwrite an already-present blimpFuel field on a v8 record", function()
+		it("moves a carried coal/water pair on a v10 record into inventory items", function()
 			local raw = {
-				SchemaVersion = 8,
+				SchemaVersion = 10,
 				Profile = { tier = 2, blimpFuel = { Coal = 30, Water = 60 } },
 			}
 			local migrated = PlayerDataSystem.MigrateRecord(raw)
 			local profile = migrated.Profile :: any
 
-			expect(profile.blimpFuel.Coal).to.equal(30)
-			expect(profile.blimpFuel.Water).to.equal(60)
+			expect(migrated.SchemaVersion).to.equal(CURRENT_SCHEMA)
+			expect(profile.blimpFuel).to.equal(nil)
+			expect(profile.inventory.Items.Coal).to.equal(30)
+			expect(profile.inventory.Items.Water).to.equal(60)
+			expect(#profile.inventory.Order).to.equal(2)
+		end)
+
+		it("migrates only the resource that was actually carried, and floors a fractional amount", function()
+			local raw = {
+				SchemaVersion = 10,
+				Profile = { blimpFuel = { Coal = 0, Water = 12.9 } },
+			}
+			local profile = PlayerDataSystem.MigrateRecord(raw).Profile :: any
+
+			expect(profile.inventory.Items.Coal).to.equal(nil)
+			expect(profile.inventory.Items.Water).to.equal(12)
+			expect(#profile.inventory.Order).to.equal(1)
+			expect(profile.inventory.Order[1]).to.equal("Water")
+		end)
+
+		it("never adds the legacy carried amount into an inventory that already exists", function()
+			-- A rollback that half-migrated a record must not duplicate coal when it migrates again.
+			local raw = {
+				SchemaVersion = 10,
+				Profile = {
+					blimpFuel = { Coal = 500, Water = 500 },
+					inventory = { Items = { Coal = 7 }, Order = { "Coal" } },
+				},
+			}
+			local profile = PlayerDataSystem.MigrateRecord(raw).Profile :: any
+
+			expect(profile.inventory.Items.Coal).to.equal(7)
+			expect(profile.inventory.Items.Water).to.equal(nil)
+			expect(profile.blimpFuel).to.equal(nil)
 		end)
 
 		-- The full walk, not just the one new step: MigrateRecord chains Migrations[1..8], and a v1
@@ -266,9 +298,9 @@ return function()
 			expect(profile.settings.Comfort).never.to.equal(nil)
 			expect(profile.settings.Comfort.CameraShake).to.equal(true)
 			expect(profile.bloodlineStageProgress).never.to.equal(nil)
-			expect(profile.blimpFuel).never.to.equal(nil)
-			expect(profile.blimpFuel.Coal).to.equal(0)
-			expect(profile.blimpFuel.Water).to.equal(0)
+			expect(profile.blimpFuel).to.equal(nil)
+			expect(profile.inventory).never.to.equal(nil)
+			expect(next(profile.inventory.Items)).to.equal(nil)
 		end)
 	end)
 
@@ -599,7 +631,7 @@ return function()
 			original.hasAscended = true
 			original.unlockedEmoteIds = { Wave = true, VictoryPose = true }
 			original.emoteLoadout = { "Wave", "VictoryPose" }
-			original.blimpFuel = { Coal = 40, Water = 75 }
+			original.inventory = { Items = { Coal = 40, ["Weapon/Cutlass"] = 1 }, Order = { "Weapon/Cutlass", "Coal" } }
 			original.settings.Keybinds.Dash = { KeyCode = Enum.KeyCode.E }
 			original.settings.GamepadKeybinds.BasicAttack = { KeyCode = Enum.KeyCode.ButtonX }
 			original.settings.Autorun = true
@@ -626,8 +658,10 @@ return function()
 			expect(decodedProfile.unlockedEmoteIds.VictoryPose).to.equal(true)
 			expect(#decodedProfile.emoteLoadout).to.equal(2)
 			expect(decodedProfile.emoteLoadout[1]).to.equal("Wave")
-			expect(decodedProfile.blimpFuel.Coal).to.equal(40)
-			expect(decodedProfile.blimpFuel.Water).to.equal(75)
+			expect(decodedProfile.inventory.Items.Coal).to.equal(40)
+			expect(decodedProfile.inventory.Items["Weapon/Cutlass"]).to.equal(1)
+			expect(decodedProfile.inventory.Order[1]).to.equal("Weapon/Cutlass")
+			expect(decodedProfile.inventory.Order[2]).to.equal("Coal")
 			expect(decodedProfile.settings.Keybinds.Dash.KeyCode).to.equal(Enum.KeyCode.E)
 			expect(decodedProfile.settings.GamepadKeybinds.BasicAttack.KeyCode).to.equal(Enum.KeyCode.ButtonX)
 			expect(decodedProfile.settings.Autorun).to.equal(true)
@@ -824,8 +858,8 @@ return function()
 			expect(profile.hasAscended).to.equal(false)
 			expect(#profile.bloodlineIds).to.equal(0)
 			expect(next(profile.bloodlineStageProgress)).to.equal(nil)
-			expect(profile.blimpFuel.Coal).to.equal(0)
-			expect(profile.blimpFuel.Water).to.equal(0)
+			expect(next(profile.inventory.Items)).to.equal(nil)
+			expect(#profile.inventory.Order).to.equal(0)
 		end)
 
 		it("filters out non-string entries from a corrupt bloodlineIds array", function()
@@ -852,20 +886,24 @@ return function()
 			expect(profile.bloodlineStageProgress["bad-bloodline"]).to.equal(nil)
 		end)
 
-		it("clamps a negative carried amount to 0 rather than keeping it", function()
+		it("drops a negative or non-numeric inventory count rather than keeping it", function()
 			-- A player cannot legitimately owe the game coal -- a hand-edited or corrupted record must
-			-- not be able to express a negative carried amount.
-			local decoded = PlayerDataSystem.DecodeProfile(1, { blimpFuel = { Coal = -5, Water = 12 } })
+			-- not be able to express a negative or non-numeric held amount.
+			local decoded = PlayerDataSystem.DecodeProfile(1, {
+				inventory = { Items = { Coal = -5, Water = 12, Stone = "lots" }, Order = { "Water" } },
+			})
 			local profile = decoded :: PlayerProfile
-			expect(profile.blimpFuel.Coal).to.equal(0)
-			expect(profile.blimpFuel.Water).to.equal(12)
+			expect(profile.inventory.Items.Coal).to.equal(nil)
+			expect(profile.inventory.Items.Stone).to.equal(nil)
+			expect(profile.inventory.Items.Water).to.equal(12)
 		end)
 
-		it("defaults a non-number or missing blimpFuel field to 0 independently", function()
-			local decoded = PlayerDataSystem.DecodeProfile(1, { blimpFuel = { Coal = "lots", Water = 8 } })
+		it("keeps an item id the catalog does not know, so a content rename cannot delete a player's data", function()
+			local decoded = PlayerDataSystem.DecodeProfile(1, {
+				inventory = { Items = { ["Weapon/RetiredBlade"] = 1 }, Order = { "Weapon/RetiredBlade" } },
+			})
 			local profile = decoded :: PlayerProfile
-			expect(profile.blimpFuel.Coal).to.equal(0)
-			expect(profile.blimpFuel.Water).to.equal(8)
+			expect(profile.inventory.Items["Weapon/RetiredBlade"]).to.equal(1)
 		end)
 	end)
 

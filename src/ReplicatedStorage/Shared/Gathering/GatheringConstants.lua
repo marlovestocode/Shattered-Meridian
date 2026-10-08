@@ -3,7 +3,8 @@
 	GatheringConstants.lua
 
 	Owns: the authoring contract and tuning for world resource nodes -- coal deposits and water sources
-	-- that feed the Blimp Fuel System's carried coal/water (Types.PlayerProfile.blimpFuel). One config
+	-- that feed the Blimp Fuel System's carried coal/water (items "Coal"/"Water" in the player's inventory,
+	Server/Systems/InventorySystem.lua). One config
 	table per resource, read entirely by Server/Systems/ResourceGatheringSystem.lua, which is
 	deliberately one System over both tags rather than two near-identical Systems -- see that module's
 	own header for why.
