@@ -351,7 +351,8 @@ local function rebuildBroadphaseFilter(): ()
 	for index, combatant in combatants do
 		registeredModels[index] = combatant.Model
 	end
-	CandidateGatherer.SetBodies(combatants)
+	-- Combatant records carry the Model and RootPart a Body needs; cast because Luau arrays are invariant.
+	CandidateGatherer.SetBodies(combatants :: any)
 	ProjectileSimulator.SetRegisteredModels(registeredModels)
 end
 
