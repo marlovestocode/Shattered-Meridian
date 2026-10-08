@@ -85,11 +85,16 @@ end
 -- `worldPose` is the hitbox's live pose, already composed from the attachment part's current CFrame
 -- and the definition's Offset. It is passed in rather than derived here because resolving an
 -- attachment is a question about a combatant, and this module has never heard of one.
+--
+-- `extraMarginStuds` (optional) widens the query further, for a swing whose targets are also tested where
+-- they WERE (HitboxEngineConstants.LagCompensation): a body that has since moved out of the volume must still
+-- be gathered to be tested at its rewound position.
 function CandidateGatherer.Gather(
 	shape: ShapeKind,
 	dimensions: Dimensions,
 	worldPose: CFrame,
-	out: { BasePart }
+	out: { BasePart },
+	extraMarginStuds: number?
 ): number
 	table.clear(out)
 
@@ -97,14 +102,17 @@ function CandidateGatherer.Gather(
 	-- sample. A candidate that was only inside the hitbox at some midpoint of that interval still has
 	-- to be GATHERED here to be swept-tested at all -- without the margin the narrow phase's continuity
 	-- fix would be handed a candidate list that had already lost the contact.
-	local margin = HitboxEngineConstants.BroadphaseMarginStuds
+	local extra = if extraMarginStuds and extraMarginStuds > 0 then extraMarginStuds else 0
+	local margin = HitboxEngineConstants.BroadphaseMarginStuds + extra
 
 	local found: { Instance }
 	if shape == "Sphere" then
 		found = Workspace:GetPartBoundsInRadius(worldPose.Position, dimensions.Radius + margin, overlapParams)
 	else
 		local size, localCentre = HitboxGeometry.BoundingBox(shape, dimensions)
-		found = Workspace:GetPartBoundsInBox(worldPose * localCentre, size + BROADPHASE_MARGIN_EXPANSION, overlapParams)
+		-- The constant expansion when nothing extra is asked for, so the common sample still allocates nothing.
+		local expansion = if extra > 0 then Vector3.one * (margin * 2) else BROADPHASE_MARGIN_EXPANSION
+		found = Workspace:GetPartBoundsInBox(worldPose * localCentre, size + expansion, overlapParams)
 	end
 
 	local count = 0

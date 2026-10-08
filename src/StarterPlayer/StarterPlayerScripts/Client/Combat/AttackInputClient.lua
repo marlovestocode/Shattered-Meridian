@@ -84,6 +84,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
 
 local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
+local PingReading = require(ReplicatedStorage.Shared.PingReading)
 local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboConstants)
 local AirComboMoves = require(ReplicatedStorage.Shared.AirCombo.AirComboMoves)
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
@@ -640,8 +641,9 @@ local function predictSwing(kind: AttackTypes.AttackKind, pressId: number?): boo
 	pendingPrediction = { MoveId = cached.MoveId, Generation = generation, PressId = pressId }
 	startSwing(cached, now)
 
-	-- Two pings covers the round trip; BufferSeconds covers a press the server held before throwing.
-	local timeout = 2 * Players.LocalPlayer:GetNetworkPing()
+	-- Two round trips (Shared/PingReading) is a generous cover for the press's trip and its confirmation's;
+	-- BufferSeconds covers a press the server held before throwing. A timeout errs long on purpose.
+	local timeout = 2 * PingReading.RoundTrip(Players.LocalPlayer:GetNetworkPing())
 		+ AttackConstants.Input.BufferSeconds
 		+ PREDICTION.ConfirmGraceSeconds
 	task.delay(timeout, function()

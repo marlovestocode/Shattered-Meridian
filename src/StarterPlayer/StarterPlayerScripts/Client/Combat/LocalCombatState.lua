@@ -7,7 +7,9 @@
 	facts, each written by exactly one module and read by the others:
 
 	    swing       Client/Combat/AttackInputClient.lua   (predicted or confirmed, and cancelled)
-	    hitstun     Client/Combat/CombatFeedbackClient.lua (a stunning hit, from Combat_Feedback)
+	    hitstun     Client/Combat/CombatFeedbackClient.lua (a stunning hit, from Combat_Feedback), and
+	                Client/FX/EnvironmentFX.lua (a wall splat's stun, from Combat_EnvironmentFX) -- both
+	                only ever EXTEND the deadline (NoteHitstun), so the two cannot fight
 	    guard held  Client/Defense/DefenseClient.lua       (the key edge)
 
 	WHY A MODULE OF ITS OWN. The attack and defence clients each need the other's answer -- a swing may

@@ -33,6 +33,14 @@
 	capture ring purely to say that networking worked -- evicting a meaningful fraction of the 1000
 	entries an admin's Live Console can show. Resolution is logged the first time a name is resolved
 	(the only time it can tell anyone anything new) and never again.
+
+	UNRELIABLE REMOTES (2026-10-07) are the third kind: UnreliableRemoteEvent, Roblox's fire-and-forget
+	event -- no resend, no ordering, at most ~900 bytes a call -- through Create/GetUnreliableRemoteEvent.
+	They are for traffic that is SAFE TO LOSE: presentation where a newer message replaces an older one (a
+	shot's homing re-sync) or where nothing at all hangs on it (dust off a wall). Under loss they never stall
+	the reliable stream behind them, which is the whole point. Never one for anything an outcome, a mirror of
+	state, or an ordering depends on -- a stun, a launch, an End. Their own cache, so a name registered as
+	one kind can never be handed back as another.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -54,6 +62,7 @@ export type RemoteFunctionName = string
 -- against the live instance on first resolution, and the cache preserves that separation afterward.
 local eventCache: { [string]: RemoteEvent } = {}
 local functionCache: { [string]: RemoteFunction } = {}
+local unreliableCache: { [string]: UnreliableRemoteEvent } = {}
 
 -- How many times each name has been passed to Create* in this VM. Zero (absent) means this VM only
 -- ever resolved the remote, i.e. it is a consumer, not the owner -- which is what every client-side
@@ -187,6 +196,57 @@ function NetworkBridge.GetRemoteEvent(name: RemoteEventName): RemoteEvent
 	return remote :: RemoteEvent
 end
 
+-- Server-only, like CreateRemoteEvent: an UnreliableRemoteEvent (see this module's header for what may
+-- ride one).
+function NetworkBridge.CreateUnreliableRemoteEvent(name: RemoteEventName): UnreliableRemoteEvent
+	assert(RunService:IsServer(), `CreateUnreliableRemoteEvent("{name}") must only be called from the server`)
+	claimName(name, "UnreliableRemoteEvent")
+
+	local cached = unreliableCache[name]
+	if stillLive(cached) then
+		return cached :: UnreliableRemoteEvent
+	end
+
+	local folder = getRemotesFolder()
+	local existing = folder:FindFirstChild(name)
+	if existing then
+		assert(existing:IsA("UnreliableRemoteEvent"), `Remotes.{name} exists but is not an UnreliableRemoteEvent`)
+		unreliableCache[name] = existing
+		logger:debug("UnreliableRemoteEvent already existed -- adopting", { name = name })
+		return existing
+	end
+
+	local remote = Instance.new("UnreliableRemoteEvent")
+	remote.Name = name
+	remote.Parent = folder
+	unreliableCache[name] = remote
+	logger:debug("UnreliableRemoteEvent created", { name = name })
+	return remote
+end
+
+function NetworkBridge.GetUnreliableRemoteEvent(name: RemoteEventName): UnreliableRemoteEvent
+	local cached = unreliableCache[name]
+	if stillLive(cached) then
+		return cached :: UnreliableRemoteEvent
+	end
+
+	local folder = getRemotesFolder()
+	local remote = folder:WaitForChild(name, Constants.Network.WaitForChildTimeoutSeconds)
+	if not remote then
+		logger:error(
+			"Timed out waiting for UnreliableRemoteEvent",
+			{ name = name, timeoutSeconds = Constants.Network.WaitForChildTimeoutSeconds }
+		)
+	end
+	assert(
+		remote ~= nil and remote:IsA("UnreliableRemoteEvent"),
+		`Remotes.{name} is not a registered UnreliableRemoteEvent`
+	)
+	unreliableCache[name] = remote :: UnreliableRemoteEvent
+	logger:debug("UnreliableRemoteEvent resolved", { name = name })
+	return remote :: UnreliableRemoteEvent
+end
+
 function NetworkBridge.CreateRemoteFunction(name: RemoteFunctionName): RemoteFunction
 	assert(RunService:IsServer(), `CreateRemoteFunction("{name}") must only be called from the server`)
 	claimName(name, "RemoteFunction")
@@ -235,7 +295,7 @@ end
 
 export type RemoteSurfaceEntry = {
 	Name: string,
-	Kind: "RemoteEvent" | "RemoteFunction",
+	Kind: "RemoteEvent" | "RemoteFunction" | "UnreliableRemoteEvent",
 	-- How many times Create* was called for this name in this VM. 0 means this VM only resolved the
 	-- remote (every client-side entry, and any server-side consumer of another System's remote); 1 is
 	-- the healthy state for a remote this VM owns; 2+ is the two-owners bug claimName describes.
@@ -260,6 +320,13 @@ function NetworkBridge.DescribeSurface(): { RemoteSurfaceEntry }
 			{ Name = name, Kind = "RemoteEvent" :: "RemoteEvent", CreateCount = createCounts[name] or 0 }
 		)
 	end
+	for name in unreliableCache do
+		table.insert(entries, {
+			Name = name,
+			Kind = "UnreliableRemoteEvent" :: "UnreliableRemoteEvent",
+			CreateCount = createCounts[name] or 0,
+		})
+	end
 	for name in functionCache do
 		table.insert(
 			entries,
@@ -279,6 +346,7 @@ end
 function NetworkBridge.ResetForTesting(): ()
 	table.clear(eventCache)
 	table.clear(functionCache)
+	table.clear(unreliableCache)
 	table.clear(createCounts)
 	remotesFolder = nil
 end

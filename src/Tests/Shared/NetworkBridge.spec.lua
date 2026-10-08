@@ -30,6 +30,20 @@ return function()
 			first:Destroy()
 		end)
 
+		it("CreateUnreliableRemoteEvent makes an UnreliableRemoteEvent that GetUnreliableRemoteEvent finds", function()
+			local created = NetworkBridge.CreateUnreliableRemoteEvent("__Test_NetworkBridge_Unreliable")
+			expect(created:IsA("UnreliableRemoteEvent")).to.equal(true)
+			expect(NetworkBridge.GetUnreliableRemoteEvent("__Test_NetworkBridge_Unreliable")).to.equal(created)
+			local listed = false
+			for _, entry in NetworkBridge.DescribeSurface() do
+				if entry.Name == "__Test_NetworkBridge_Unreliable" then
+					listed = entry.Kind == "UnreliableRemoteEvent"
+				end
+			end
+			expect(listed).to.equal(true)
+			created:Destroy()
+		end)
+
 		it("GetRemoteEvent finds a remote created moments earlier by CreateRemoteEvent", function()
 			local created = NetworkBridge.CreateRemoteEvent("__Test_NetworkBridge_GetEvent")
 			local fetched = NetworkBridge.GetRemoteEvent("__Test_NetworkBridge_GetEvent")

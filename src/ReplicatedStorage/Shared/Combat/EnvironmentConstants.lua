@@ -90,8 +90,12 @@ EnvironmentConstants.SwingScuff = {
 
 EnvironmentConstants.Network = {
 	RemoteNames = {
-		-- Server -> nearby clients: a splat or a scuff happened here. EnvironmentTypes-shaped payload.
+		-- Server -> nearby clients: a body was splatted into a wall here (EnvironmentProbe.FxPayload). Reliable:
+		-- it carries the victim's stun, which their own client mirrors (LocalCombatState).
 		Fx = "Combat_EnvironmentFX",
+		-- Server -> nearby clients, UNRELIABLE (NetworkBridge's header): a swing scuffed a wall here. Dust and
+		-- chips and nothing else, so a lost one is a puff nobody misses -- and never worth a resend.
+		FxCosmetic = "Combat_EnvironmentFXCosmetic",
 	},
 }
 

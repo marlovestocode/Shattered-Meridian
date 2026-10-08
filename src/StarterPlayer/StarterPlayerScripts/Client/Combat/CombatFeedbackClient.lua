@@ -106,6 +106,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
+local PingReading = require(ReplicatedStorage.Shared.PingReading)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
@@ -354,7 +355,7 @@ local function cancelSwingFor(payload: CombatFeedback): ()
 		-- the trip here spent about half a round trip more. The shared length only covers an older server.
 		-- Ending a hair early is harmless: a press the server still refuses as Hitstun is buffered and thrown.
 		local stun = if typeof(payload.HitstunSeconds) == "number"
-			then math.max(payload.HitstunSeconds - Players.LocalPlayer:GetNetworkPing() / 2, 0)
+			then math.max(payload.HitstunSeconds - PingReading.OneWay(Players.LocalPlayer:GetNetworkPing()), 0)
 			else DamageConstants.Hitstun.Seconds
 		LocalCombatState.NoteHitstun(os.clock() + stun)
 		-- And the body cannot simply walk out of the next swing while it is stunned (HitStop's header).

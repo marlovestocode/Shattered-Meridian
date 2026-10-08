@@ -221,6 +221,8 @@ local startedRemote: RemoteEvent? = nil
 local weaponChangedRemote: RemoteEvent? = nil
 local cancelledRemote: RemoteEvent? = nil
 local projectileRemote: RemoteEvent? = nil
+-- The plain homing re-syncs, unreliable (AttackConstants.Network.RemoteNames.ProjectileSync).
+local projectileSyncRemote: UnreliableRemoteEvent? = nil
 local projectileDisconnect: (() -> ())? = nil
 -- The DamageSystem.OnApplied subscription (onDamageApplied), connected in Init.
 local appliedDisconnect: (() -> ())? = nil
@@ -597,14 +599,31 @@ local function broadcastProjectiles(events: { any }): ()
 	end
 	local sentAt = Workspace:GetServerTimeNow()
 	local routed = projectileRelevance:Route(events :: { AttackTypes.ProjectileWireEvent }, viewers, os.clock())
+	local syncRemote = projectileSyncRemote
+	local perPacket = AttackConstants.Network.ProjectileSyncEventsPerPacket
 	for player, share in routed do
-		remote:FireClient(
-			player,
-			{
-				SentAt = sentAt,
-				Events = share,
-			} :: AttackTypes.ProjectileBatchPayload
-		)
+		local reliable, sync = AttackRequestSystem.SplitProjectileEvents(share)
+		if #reliable > 0 or syncRemote == nil then
+			remote:FireClient(
+				player,
+				{
+					SentAt = sentAt,
+					Events = if syncRemote == nil then share else reliable,
+				} :: AttackTypes.ProjectileBatchPayload
+			)
+		end
+		if syncRemote and #sync > 0 then
+			-- Chunked: an unreliable send past its size cap is dropped whole (ProjectileSyncEventsPerPacket).
+			for first = 1, #sync, perPacket do
+				syncRemote:FireClient(
+					player,
+					{
+						SentAt = sentAt,
+						Events = table.move(sync, first, math.min(first + perPacket - 1, #sync), 1, {}),
+					} :: AttackTypes.ProjectileBatchPayload
+				)
+			end
+		end
 	end
 end
 
@@ -690,7 +709,7 @@ local function backdatedStartFor(
 	if not latency.Enabled or forced or resolution.AirRole ~= nil then
 		return now
 	end
-	local lead = math.min(NetworkLatency.PingSeconds(model) / 2, latency.MaxLeadSeconds)
+	local lead = math.min(NetworkLatency.OneWaySeconds(model), latency.MaxLeadSeconds)
 	if not (lead > 0) then
 		return now
 	end
@@ -1672,6 +1691,26 @@ function AttackRequestSystem.SetWeapon(model: Model, weaponId: Types.WeaponId?, 
 end
 
 -- The templates notifyWeaponChanged sends with a change to `weaponId` (predictionSeedFor). A pure query.
+-- Splits one client's share of a frame's shot events into what must arrive -- Launch, End, and an Update
+-- with a Reason (a bounce changes the path) -- and the plain homing re-syncs that may be lost, each a full
+-- snapshot the next one replaces (AttackConstants.Network.RemoteNames.ProjectileSync). Order is kept within
+-- each half. Pure, for its spec.
+function AttackRequestSystem.SplitProjectileEvents(events: { AttackTypes.ProjectileWireEvent }): (
+	{ AttackTypes.ProjectileWireEvent },
+	{ AttackTypes.ProjectileWireEvent }
+)
+	local reliable: { AttackTypes.ProjectileWireEvent } = {}
+	local sync: { AttackTypes.ProjectileWireEvent } = {}
+	for _, event in events do
+		if event.Kind == "Update" and event.Reason == nil then
+			table.insert(sync, event)
+		else
+			table.insert(reliable, event)
+		end
+	end
+	return reliable, sync
+end
+
 -- What a swing of `definition` tells its attacker's client to predict a hit with (nil: nothing to predict).
 -- Exposed for its spec; the payload builders above are its only callers.
 AttackRequestSystem.ContactVolumeOf = contactVolumeOf
@@ -1779,6 +1818,7 @@ function AttackRequestSystem.Init(): ()
 	-- Shots in flight, to the clients they concern (Client/FX/ProjectileFX.lua, ProjectileRelevance). The engine has no remote of its own
 	-- by design; this layer, which already tells clients what it threw, tells them what it launched.
 	projectileRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.Projectile)
+	projectileSyncRemote = NetworkBridge.CreateUnreliableRemoteEvent(AttackConstants.Network.RemoteNames.ProjectileSync)
 	projectileDisconnect = HitboxEngine.OnProjectileEvents(broadcastProjectiles)
 
 	-- A parried swing keeps its chain -- see KeepChainThroughParry. DamageSystem.OnApplied is that layer's

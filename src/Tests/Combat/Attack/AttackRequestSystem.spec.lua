@@ -177,6 +177,32 @@ return function()
 		end)
 	end)
 
+	describe("AttackRequestSystem -- which shot events may be lost", function()
+		local function event(kind: string, reason: string?): any
+			return {
+				Kind = kind,
+				Id = 1,
+				GroupId = 1,
+				Position = Vector3.zero,
+				Velocity = Vector3.zero,
+				Lead = 0,
+				Reason = reason,
+			}
+		end
+
+		it("sends only plain re-syncs unreliably; launches, ends and bounces must arrive", function()
+			local launch, sync, bounce, finish =
+				event("Launch"), event("Update"), event("Update", "Bounce"), event("End", "Hit")
+			local reliable, unreliable = AttackRequestSystem.SplitProjectileEvents({ launch, sync, bounce, finish })
+			expect(#reliable).to.equal(3)
+			expect(reliable[1]).to.equal(launch)
+			expect(reliable[2]).to.equal(bounce)
+			expect(reliable[3]).to.equal(finish)
+			expect(#unreliable).to.equal(1)
+			expect(unreliable[1]).to.equal(sync)
+		end)
+	end)
+
 	describe("AttackRequestSystem -- the gates that are not about timing", function()
 		it("refuses a body the engine has never been told about", function()
 			local model = makeUnregistered("Stranger")

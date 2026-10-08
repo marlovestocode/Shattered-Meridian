@@ -115,7 +115,10 @@ Per-hit and per-swing message counts are unchanged from the feel pass's table.
 
 - Run the suite in Studio before trusting any of this.
 - The non-combat subscriber lists.
-- **Is `GetNetworkPing` a round trip or one way?** This codebase assumes round trip (`NetworkLatency`'s header).
+- **Is `GetNetworkPing` a round trip or one way?** *(2026-10-07: now ONE flag, `Shared/PingReading.lua`'s
+  `REPORTS_ROUND_TRIP`, read by every refund on both sides; `Client/DevTools/PingProbe.lua` measures it in
+  Studio and logs the verdict to the Live Console. Still to do: run the probe and set the flag. The rest of
+  this item is the original note.)* This codebase assumes round trip (`NetworkLatency`'s header).
   Roblox's reference page does not say, and DevForum measurements suggest ONE WAY (about half the ping
   in the stats overlay). If one way: the swing lead (`ping/2`) and the parry rewind (`min(ping, cap)`) refund
   half of what they mean to, the stun mirror's `ping/2` subtracts half a trip too little (harmless, errs

@@ -126,6 +126,34 @@ HitboxEngineConstants.TargetTrail = {
 	MinSpeed = 2,
 }
 
+-- LAG-COMPENSATED HITS (2026-10-07) -- the measured version of the TargetTrail guess above, and what a player
+-- swing uses instead of it. Every registered body records where its root was each frame
+-- (Server/Combat/HitboxEngine/PoseHistory.lua); a candidate a PLAYER's swing misses is tested again where that
+-- attacker's screen showed it: the history rewound by the attacker's one-way latency
+-- (NetworkLatency.OneWaySeconds, Shared/PingReading) plus InterpolationSeconds, Roblox's replication buffer.
+-- That is the third piece of the latency picture beside the swing lead (AttackConstants.Latency -- a swing
+-- starts when it was pressed) and the parry rewind (DefenseConstants.Parry -- a parry counts when it was
+-- pressed): a hit lands on what was aimed at.
+--
+-- STILL THE ENGINE'S ANSWER ALONE. Nothing a client says is read: the rewind is the server's own record of the
+-- target and the server's own latency measurement, so this is not the client prediction or rollback this
+-- engine's header rules out. It only widens which positions count, and only on a miss -- a part the live test
+-- already contains never pays for it.
+--
+-- CAPPED ON THE VICTIM'S SIDE: MaxRewindSeconds is the most "I was already out of range" a target can be made
+-- to eat, whatever the attacker's ping; MaxDisplacementStuds bounds how far back a body can be tested (and how
+-- far the broadphase widens to gather one); MinDisplacementStuds skips the retest for a body that has hardly
+-- moved, where the live test already answered. A bot or dummy attacker has no latency, so it rewinds nothing.
+HitboxEngineConstants.LagCompensation = {
+	Enabled = true,
+	MaxRewindSeconds = 0.15,
+	InterpolationSeconds = 0.05,
+	-- Samples kept per body: a third of a second at 60 Hz, well past the cap above.
+	HistoryCapacity = 20,
+	MaxDisplacementStuds = 5,
+	MinDisplacementStuds = 0.25,
+}
+
 -- Ceiling on interpolation steps inside one swept narrow-phase test. Distinct from
 -- MaxSubstepsPerFrame: that bounds how often the world is QUERIED, this bounds how finely one
 -- already-gathered candidate is tested against one already-known pair of poses. Cheap enough to be

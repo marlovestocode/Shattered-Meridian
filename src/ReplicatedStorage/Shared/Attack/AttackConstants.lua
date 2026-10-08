@@ -467,6 +467,11 @@ AttackConstants.Network = {
 		-- engine frame while shots are flying: the batch of launches, bounces, retargets and ends
 		-- (AttackTypes.ProjectileBatchPayload), which Client/FX/ProjectileFX.lua draws. Presentation only.
 		Projectile = "Attack_Projectile",
+		-- Server -> the same clients, UNRELIABLE (NetworkBridge's header): the plain homing re-syncs out of
+		-- that batch -- Updates with no Reason, each one a full snapshot the next replaces, so a lost one
+		-- costs a few frames of drift and nothing else. Launches, Ends and Bounces stay on Projectile above:
+		-- each changes what is drawn, and losing one would leave a shot invisible, unending or in a wall.
+		ProjectileSync = "Attack_ProjectileSync",
 	},
 
 	-- Sized against DefenseConstants.Network.MaxCallsPerSecondPerPlayer (12) as the established
@@ -501,6 +506,10 @@ AttackConstants.Network = {
 	-- shot anywhere in the server was sent to and drawn by every client, which is how one realm's
 	-- strikes dropped frames for players nowhere near it.
 	ProjectileRelevanceStuds = 350,
+	-- Re-syncs per ProjectileSync packet. An UnreliableRemoteEvent carries at most ~900 bytes and a send past
+	-- that is DROPPED, not split, so a homing volley's re-syncs go out in chunks. One Update is about 70
+	-- bytes on the wire (two Vector3s, two ids, a lead, an optional target), so 8 sits well inside the cap.
+	ProjectileSyncEventsPerPacket = 8,
 }
 
 -- Feint ---------------------------------------------------------------------------------------------

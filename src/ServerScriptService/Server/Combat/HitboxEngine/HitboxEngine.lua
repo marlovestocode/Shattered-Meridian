@@ -45,6 +45,13 @@
 	responsiveness prediction would have -- a swing's Active window is honoured at its authored
 	timing regardless of server frame rate -- without any of the reconciliation surface.
 
+	LAG COMPENSATION IS NOT THAT (2026-10-07, owner-requested). The engine keeps a short history of where
+	every body was (PoseHistory) and tests a player's swing that MISSES a body once more where that attacker
+	saw it -- rewound by their one-way latency plus the replication buffer, capped
+	(HitboxEngineConstants.LagCompensation). Both the record and the latency are the server's own; no client
+	claims anything, nothing is rolled back, and the answer is still this engine's. It replaces, for player
+	swings, the TargetTrail velocity guess that stood in for a history while this paragraph ruled one out.
+
 	TIME COMES FROM THE CALLER on Step(deltaTime, now), the same rule ObjectStunResolver keeps, and it
 	is why this engine is testable at all: a spec drives Step with a synthetic clock and asserts on
 	tunnelling behaviour at frame rates that would be impossible to produce by waiting. Init() is a
@@ -83,6 +90,8 @@ local Trove = require(ReplicatedStorage.Shared.Trove)
 local AttackStateMachine = require(ServerScriptService.Server.Combat.HitboxEngine.AttackStateMachine)
 local CandidateGatherer = require(ServerScriptService.Server.Combat.HitboxEngine.CandidateGatherer)
 local ProjectileSimulator = require(ServerScriptService.Server.Combat.HitboxEngine.ProjectileSimulator)
+local PoseHistory = require(ServerScriptService.Server.Combat.HitboxEngine.PoseHistory)
+local NetworkLatency = require(ServerScriptService.Server.Combat.NetworkLatency)
 
 type AttackDefinition = HitboxTypes.AttackDefinition
 type Dimensions = HitboxTypes.Dimensions
@@ -116,6 +125,10 @@ type ActiveSwing = {
 	HitTargets: { [Model]: boolean },
 	HitCount: number,
 	MaxTargets: number,
+	-- How far back this swing's targets are also tested (HitboxEngineConstants.LagCompensation): the
+	-- attacker's one-way latency plus the replication buffer, capped. 0 for a bot or dummy, or with the
+	-- compensation off. Fixed when the window opens -- one latency read per swing, not per sample.
+	RewindSeconds: number,
 }
 
 type Combatant = {
@@ -132,6 +145,8 @@ type Combatant = {
 	-- True while this engine is holding the RootControlLocked Attribute for this combatant, so it is
 	-- released exactly once and only by whoever set it.
 	HoldsMovementLock: boolean,
+	-- Where this body's root has been, one sample per frame (PoseHistory) -- what other swings rewind it by.
+	History: PoseHistory.History,
 }
 
 -- Dense array walked every substep, plus the id and model indexes into it. Never a hash map with
@@ -526,6 +541,37 @@ local function trailOffsetOf(target: Combatant): Vector3?
 	return flat.Unit * studs
 end
 
+-- How far back a swing by `attacker` tests its targets (HitboxEngineConstants.LagCompensation): its one-way
+-- latency plus the replication buffer, capped; 0 for a body with no connection (a bot, a dummy) or with the
+-- compensation off.
+local function rewindFor(attacker: Combatant): number
+	local config = HitboxEngineConstants.LagCompensation
+	if not config.Enabled then
+		return 0
+	end
+	local oneWay = NetworkLatency.OneWaySeconds(attacker.Model)
+	if oneWay <= 0 then
+		return 0
+	end
+	return math.min(oneWay + config.InterpolationSeconds, config.MaxRewindSeconds)
+end
+
+-- How far `target` is to be shifted back to stand where a swing rewound by `rewindSeconds` saw it at `now`, or
+-- nil when that is too small to be worth a second test (MinDisplacementStuds). Capped at MaxDisplacementStuds,
+-- the same bound the broadphase is widened by, so a rewound body can never be tested outside what was gathered.
+local function compensationOf(target: Combatant, rewindSeconds: number, now: number): Vector3?
+	local config = HitboxEngineConstants.LagCompensation
+	local displacement = PoseHistory.DisplacementSince(target.History, now - rewindSeconds)
+	local studs = displacement.Magnitude
+	if studs < config.MinDisplacementStuds then
+		return nil
+	end
+	if studs > config.MaxDisplacementStuds then
+		return displacement.Unit * config.MaxDisplacementStuds
+	end
+	return displacement
+end
+
 -- One combatant, one substep. `alpha` is how far through the current frame this substep sits, used to
 -- interpolate the attachment pose between where it was when the frame began and where it is now.
 local function sampleSwing(combatant: Combatant, record: ActiveSwing, now: number, alpha: number): ()
@@ -554,7 +600,15 @@ local function sampleSwing(combatant: Combatant, record: ActiveSwing, now: numbe
 		showDebugVolume(combatant, record.Shape, record.Dimensions, pose)
 	end
 
-	local count = CandidateGatherer.Gather(record.Shape, record.Dimensions, pose, candidateBuffer)
+	-- A compensated swing gathers wider, so a body that has since left the volume is still a candidate.
+	local compensated = record.RewindSeconds > 0
+	local count = CandidateGatherer.Gather(
+		record.Shape,
+		record.Dimensions,
+		pose,
+		candidateBuffer,
+		if compensated then HitboxEngineConstants.LagCompensation.MaxDisplacementStuds else nil
+	)
 	if debugEnabled() and CandidateGatherer.WasSaturated(count) then
 		logger:warn("Broadphase saturated; candidates may have been dropped", {
 			attack = record.Swing.Definition.DebugName,
@@ -611,10 +665,11 @@ local function sampleSwing(combatant: Combatant, record: ActiveSwing, now: numbe
 			margin
 		)
 		if not contained then
-			-- THE MOVING-TARGET ALLOWANCE (HitboxEngineConstants.TargetTrail): tested again where the attacker
-			-- most likely SAW this body, a little behind it along its own motion. A miss only -- a part
-			-- already inside never pays for this.
-			local trail = trailOffsetOf(owner)
+			-- Tested again where the attacker SAW this body. A miss only -- a part already inside never pays
+			-- for this. A player's swing rewinds the body's own recorded history (LAG COMPENSATION, this file's
+			-- header); anything else falls back to the moving-target allowance (TargetTrail), a little behind
+			-- the body along its own motion.
+			local trail = if compensated then compensationOf(owner, record.RewindSeconds, now) else trailOffsetOf(owner)
 			if trail == nil then
 				continue
 			end
@@ -722,6 +777,7 @@ local function beginActiveWindow(combatant: Combatant, swing: Swing): ()
 	-- frames it was not yet active.
 	record.FrameStartPose = record.AttachmentPart.CFrame * definition.Offset
 	record.PreviousSamplePose = nil
+	record.RewindSeconds = rewindFor(combatant)
 
 	combatant.ActiveSwing = record
 
@@ -798,9 +854,11 @@ function HitboxEngine.RegisterCombatant(model: Model, rootPart: BasePart, humano
 			HitTargets = {},
 			HitCount = 0,
 			MaxTargets = HitboxEngineConstants.DefaultMaxTargetsPerSwing,
+			RewindSeconds = 0,
 		},
 		ActiveSwing = nil,
 		HoldsMovementLock = false,
+		History = PoseHistory.New(HitboxEngineConstants.LagCompensation.HistoryCapacity),
 	}
 
 	combatant.Machine = AttackStateMachine.New({
@@ -873,6 +931,12 @@ function HitboxEngine.UnregisterCombatant(combatantId: number): boolean
 		end
 	end
 	return false
+end
+
+-- How far back a swing by this model tests its targets (LagCompensation), for its spec and the debug readout.
+function HitboxEngine.RewindFor(model: Model): number
+	local combatant = modelToCombatant[model]
+	return if combatant then rewindFor(combatant) else 0
 end
 
 function HitboxEngine.GetCombatantId(model: Model): number?
@@ -1178,6 +1242,17 @@ end
 function HitboxEngine.Step(deltaTime: number, now: number): ()
 	local frameSeconds = math.clamp(deltaTime, 0, HitboxEngineConstants.MaxFrameSeconds)
 	sweepLiveness(now)
+
+	-- Where every body is this frame, for lag-compensated swings to rewind (PoseHistory). Before the idle
+	-- return below, so a history already exists the moment a swing opens. One Vector3 per body per frame,
+	-- written in place.
+	if HitboxEngineConstants.LagCompensation.Enabled then
+		for _, combatant in combatants do
+			if combatant.RootPart.Parent ~= nil then
+				PoseHistory.Record(combatant.History, now, combatant.RootPart.Position)
+			end
+		end
+	end
 
 	if #engaged == 0 and ProjectileSimulator.LiveCount() == 0 then
 		-- Events can still be waiting: a parry reflects or ends a shot from DefenseSystem's Step, after

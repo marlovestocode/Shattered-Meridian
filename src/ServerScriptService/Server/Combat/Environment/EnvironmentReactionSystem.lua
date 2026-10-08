@@ -85,6 +85,8 @@ local trove = Trove.New()
 local appliedDisconnect: (() -> ())? = nil
 local swingDisconnect: (() -> ())? = nil
 local fxRemote: RemoteEvent? = nil
+-- The swing scuff's own remote: unreliable, since dust is all it carries (EnvironmentConstants.Network).
+local cosmeticRemote: UnreliableRemoteEvent? = nil
 
 -- Helpers ------------------------------------------------------------------------------------------
 
@@ -117,13 +119,23 @@ local function playersNear(position: Vector3, radius: number, skip: Player?): { 
 	return near
 end
 
+-- A splat goes reliably (it carries a stun the victim mirrors); a scuff unreliably (it carries dust).
 local function broadcast(payload: EnvironmentProbe.FxPayload, skip: Player?): ()
-	local remote = fxRemote
-	if not remote then
+	local near = playersNear(payload.Position, EnvironmentConstants.SwingScuff.BroadcastRadiusStuds, skip)
+	if payload.Kind == "SwingScuff" then
+		local remote = cosmeticRemote
+		if remote then
+			for _, player in near do
+				remote:FireClient(player, payload)
+			end
+		end
 		return
 	end
-	for _, player in playersNear(payload.Position, EnvironmentConstants.SwingScuff.BroadcastRadiusStuds, skip) do
-		remote:FireClient(player, payload)
+	local remote = fxRemote
+	if remote then
+		for _, player in near do
+			remote:FireClient(player, payload)
+		end
 	end
 end
 
@@ -319,6 +331,7 @@ function EnvironmentReactionSystem.Init(): ()
 	assert(DamageSystem.ExtendHitstun ~= nil, "EnvironmentReactionSystem.Init() requires DamageSystem")
 	started = true
 	fxRemote = NetworkBridge.CreateRemoteEvent(EnvironmentConstants.Network.RemoteNames.Fx)
+	cosmeticRemote = NetworkBridge.CreateUnreliableRemoteEvent(EnvironmentConstants.Network.RemoteNames.FxCosmetic)
 	EnvironmentReactionSystem.Attach()
 	trove:Connect(RunService.Heartbeat, function()
 		EnvironmentReactionSystem.Step(os.clock())

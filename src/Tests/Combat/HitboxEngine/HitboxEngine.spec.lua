@@ -19,6 +19,7 @@ local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.Hitb
 local HitboxGeometry = require(ReplicatedStorage.Shared.HitboxEngine.HitboxGeometry)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
+local NetworkLatency = require(ServerScriptService.Server.Combat.NetworkLatency)
 
 type HitReport = HitboxTypes.HitReport
 
@@ -128,6 +129,7 @@ end
 
 return function()
 	afterEach(function()
+		NetworkLatency.SetResolver(nil)
 		HitboxEngine.Reset()
 		for _, model in spawned do
 			model:Destroy()
@@ -1056,6 +1058,88 @@ return function()
 
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
 			HitboxEngine.Step(FRAME, os.clock() + 0.01)
+			disconnect()
+
+			expect(#hits).to.equal(0)
+		end)
+	end)
+	-- HitboxEngineConstants.LagCompensation: a player's swing also tests a body where that player saw it.
+	describe("HitboxEngine -- lag-compensated hits", function()
+		local INSIDE_Z = -5
+		-- Far past the box's far edge (-7) and past anything the moving-target allowance could reach.
+		local GONE_Z = -11.5
+
+		-- Records the target inside the box for a few frames, then moves it out and records a few more, so the
+		-- history says where it was a moment ago. Returns the clock the swing is sampled at.
+		local function walkOut(target: any, base: number): number
+			for frame = 0, 5 do
+				HitboxEngine.Step(FRAME, base + frame * FRAME)
+			end
+			target.Root.CFrame = CFrame.new(0, 5, GONE_Z)
+			for frame = 6, 9 do
+				HitboxEngine.Step(FRAME, base + frame * FRAME)
+			end
+			return base + 10 * FRAME
+		end
+
+		it("hits a target where a lagged attacker saw it, though it has since moved out", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = makeDummy("Target", Vector3.new(0, 5, INSIDE_Z))
+			-- 200 ms of round trip: a 0.1 s one-way trip plus the replication buffer, capped at 0.15 s.
+			NetworkLatency.SetResolver(function(model: Model)
+				return if model == attacker.Model then 0.2 else 0
+			end)
+			local swingAt = walkOut(target, os.clock())
+			local hits, disconnect = captureHits()
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
+			HitboxEngine.Step(FRAME, swingAt)
+			disconnect()
+
+			expect(#hits).to.equal(1)
+		end)
+
+		it("rewinds nothing for an attacker with no connection (a bot, a dummy)", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = makeDummy("Target", Vector3.new(0, 5, INSIDE_Z))
+			local swingAt = walkOut(target, os.clock())
+			local hits, disconnect = captureHits()
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
+			HitboxEngine.Step(FRAME, swingAt)
+			disconnect()
+
+			expect(#hits).to.equal(0)
+			expect(HitboxEngine.RewindFor(attacker.Model)).to.equal(0)
+		end)
+
+		it("caps the rewind on the victim's side, whatever the attacker's ping", function()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			NetworkLatency.SetResolver(function()
+				return 3
+			end)
+			expect(HitboxEngine.RewindFor(attacker.Model)).to.equal(
+				HitboxEngineConstants.LagCompensation.MaxRewindSeconds
+			)
+		end)
+
+		it("does not reach a body that was never where the attacker looked", function()
+			-- Rewound 0.15 s, the target was still out of the box: it left more than the cap ago.
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = makeDummy("Target", Vector3.new(0, 5, INSIDE_Z))
+			NetworkLatency.SetResolver(function(model: Model)
+				return if model == attacker.Model then 0.2 else 0
+			end)
+			local base = os.clock()
+			HitboxEngine.Step(FRAME, base)
+			target.Root.CFrame = CFrame.new(0, 5, GONE_Z)
+			for frame = 1, 20 do
+				HitboxEngine.Step(FRAME, base + frame * FRAME)
+			end
+			local hits, disconnect = captureHits()
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
+			HitboxEngine.Step(FRAME, base + 21 * FRAME)
 			disconnect()
 
 			expect(#hits).to.equal(0)

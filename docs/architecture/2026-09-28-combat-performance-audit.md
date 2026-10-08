@@ -13,7 +13,19 @@ audit's own status block.
 Fixed: **L1** (swing animation is now client-predicted, see `AttackInputClient.lua`'s header),
 **L2** (hit-stop freezes Action-priority tracks only), **L3** (combat pins the run to walking and
 holds the gear instead of zeroing it, and a hit no longer drops the sprint key), and **N2** (the
-server lunge skips player attackers). Not yet addressed: F1–F5, N1.
+server lunge skips player attackers).
+
+**Update 2026-10-07:** F2–F5 and N1 are fixed too, and have been since the 2026-10-06 feel pass
+(`2026-10-06-combat-feel-pass.md`, top); this status line was never updated. Re-verified against source:
+`FX/HitFlash.lua` keeps one Highlight per body and only enables/tweens it (F2), `UI/Screens/CombatFeedback`
+mutates a stack's own Value (F3), `FX/AttackTrail.lua` builds its trail once and reparents it (F4), and
+`EngagementSystem.publish` pushes on an edge or an opponent change and otherwise coalesces to
+`EngagementConstants.Network.MinPushIntervalSeconds` (N1, which also retires F5). Only **F1** (the debug
+visualiser) is untouched, by design -- it is off in a real server.
+
+Same day, on top: homing re-syncs and swing scuffs moved to UnreliableRemoteEvents
+(`NetworkBridge.CreateUnreliableRemoteEvent`; `Attack_ProjectileSync`, `Combat_EnvironmentFXCosmetic`), and
+lag-compensated hits landed (`HitboxEngineConstants.LagCompensation`).
 
 The same pass closed a state hole found alongside these: a guard could be raised mid-swing, or
 during hitstun. `DefenseSystem` now holds that press until the body is free, and `DefenseClient`

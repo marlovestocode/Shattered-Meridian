@@ -79,6 +79,7 @@ local FpsCounter = require(script.Parent.Diagnostics.FpsCounter)
 local RemoteMovementFX = require(script.Parent.FX.RemoteMovementFX)
 local GrabHoldPose = require(script.Parent.FX.GrabHoldPose)
 local GuardStrainPose = require(script.Parent.FX.GuardStrainPose)
+local EnvironmentFX = require(script.Parent.FX.EnvironmentFX)
 local HitFlinchPose = require(script.Parent.FX.HitFlinchPose)
 local CombatFeedbackClient = require(script.Parent.Combat.CombatFeedbackClient)
 local HitPrediction = require(script.Parent.Combat.HitPrediction)
@@ -416,6 +417,9 @@ logger:debug("RemoteMovementFX end")
 logger:debug("GuardStrainPose start")
 GuardStrainPose.Start()
 logger:debug("GuardStrainPose end")
+logger:debug("EnvironmentFX start")
+EnvironmentFX.Start()
+logger:debug("EnvironmentFX end")
 
 -- Every body a hit stuns flinches, on every client, off the HitstunUntil Attribute DamageSystem extends on
 -- each stunning hit (no remote) -- same Transform-layer shape as the guard strain, one priority below it.

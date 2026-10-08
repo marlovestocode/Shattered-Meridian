@@ -2,7 +2,7 @@
 --[[
 	Client/DevTools/init.lua
 
-	Owns: starting the five dev-tool client modules, and being the single require Main.client.lua
+	Owns: starting the dev-tool client modules, and being the single require Main.client.lua
 	makes to reach any of them.
 
 	The pair of this and UI/Screens/DevTools/init.lua is the whole of the dev-tooling build seam --
@@ -45,6 +45,7 @@ local MoveEditorClient = require(script.MoveEditor.MoveEditorClient)
 local KitEditorClient = require(script.KitEditor.KitEditorClient)
 local LiveConsoleClient = require(script.LiveConsole.LiveConsoleClient)
 local StorybookClient = require(script.Storybook.StorybookClient)
+local PingProbe = require(script.PingProbe)
 
 local DevTools = {}
 
@@ -79,6 +80,9 @@ function DevTools.Start(screens: DevToolScreens.DevToolScreens, chrome: Chrome.C
 	-- check here.
 	logger:debug("StorybookClient start")
 	StorybookClient.Start(screens.Storybook, chrome)
+	-- Studio-only and passive, like the Storybook: logs what GetNetworkPing means (Shared/PingReading).
+	logger:debug("PingProbe start")
+	PingProbe.Start()
 
 	logger:debug("DevTools start end")
 end

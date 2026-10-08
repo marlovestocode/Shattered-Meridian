@@ -43,6 +43,12 @@
 
 	Does not own: flight, collision or anything a shot does (Server/Combat/HitboxEngine/
 	ProjectileSimulator.lua), or a hit's feedback (CombatFeedbackClient).
+
+	TWO REMOTES, ONE PATH (2026-10-07). Launches, Ends and Bounces arrive on Attack_Projectile (reliable); the
+	plain homing re-syncs on Attack_ProjectileSync, an UnreliableRemoteEvent (AttackConstants.Network). Both
+	feed onBatch. Because the two are not ordered against each other, every shot remembers the server time of
+	the newest event applied to it (Shot.LastEventAt) and an older one is dropped -- a late re-sync can never
+	pull a shot back across a bounce, and one for an ended shot finds no shot at all.
 ]]
 
 local Players = game:GetService("Players")
@@ -119,6 +125,10 @@ type Shot = {
 	Looping: boolean,
 	-- Whether this shot holds one of the MaxGlowingShots glow slots.
 	Glowing: boolean,
+	-- Server time of the newest event applied to it. Re-syncs ride an UNRELIABLE remote with no ordering
+	-- against the reliable one (AttackConstants.Network.RemoteNames.ProjectileSync), so a late one must
+	-- never overwrite a newer launch, bounce or re-sync.
+	LastEventAt: number,
 }
 
 local shots: { [number]: Shot } = {}
@@ -388,7 +398,7 @@ end
 local cuedGroups: { [number]: boolean } = {}
 
 -- `presentation` overrides the catalogue lookup -- only the Move Editor's Preview passes one.
-local function onLaunch(event: WireEvent, age: number, presentation: Presentation?): ()
+local function onLaunch(event: WireEvent, age: number, presentation: Presentation?, eventAt: number?): ()
 	local motion = event.Motion
 	if motion == nil then
 		return
@@ -421,6 +431,7 @@ local function onLaunch(event: WireEvent, age: number, presentation: Presentatio
 			Presentation = resolved,
 			Looping = false,
 			Glowing = glowingCount < MAX_GLOWING_SHOTS,
+			LastEventAt = -math.huge,
 		}
 		shots[event.Id] = shot
 		local flightCue = MovePresentation.CueFrom(resolved, "InFlight")
@@ -450,6 +461,7 @@ local function onLaunch(event: WireEvent, age: number, presentation: Presentatio
 	end
 	-- A re-launch (a parry sent it back) keeps the carrier but restarts everything else, including the
 	-- trail: the old one would draw a streak through the parrier from where the shot used to be.
+	shot.LastEventAt = math.max(shot.LastEventAt, eventAt or -math.huge)
 	shot.Position = event.Position
 	shot.Velocity = event.Velocity
 	shot.Motion = motion
@@ -476,11 +488,14 @@ local function onLaunch(event: WireEvent, age: number, presentation: Presentatio
 	end
 end
 
-local function onUpdate(event: WireEvent, age: number): ()
+local function onUpdate(event: WireEvent, age: number, eventAt: number): ()
 	local shot = shots[event.Id]
-	if shot == nil then
+	-- An unknown id is a shot this client never drew or has already ended -- including a re-sync that lost
+	-- the race to its own End. An older event than the last applied is a late re-sync: drop it.
+	if shot == nil or eventAt < shot.LastEventAt then
 		return
 	end
+	shot.LastEventAt = eventAt
 	if event.Reason == "Bounce" then
 		playPointCue(
 			MovePresentation.CueFrom(shot.Presentation, "Bounce"),
@@ -540,11 +555,14 @@ local function onBatch(payload: unknown): ()
 	local transit = math.max(Workspace:GetServerTimeNow() - batch.SentAt, 0)
 	table.clear(cuedGroups)
 	for _, event in batch.Events do
-		local age = transit + (if typeof(event.Lead) == "number" then event.Lead else 0)
+		local lead = if typeof(event.Lead) == "number" then event.Lead else 0
+		local age = transit + lead
+		-- When the event happened on the server's clock -- what orders the two remotes' events per shot.
+		local eventAt = batch.SentAt - lead
 		if event.Kind == "Launch" then
-			onLaunch(event, age)
+			onLaunch(event, age, nil, eventAt)
 		elseif event.Kind == "Update" then
-			onUpdate(event, age)
+			onUpdate(event, age, eventAt)
 		elseif event.Kind == "End" then
 			onEnd(event)
 		end
@@ -573,6 +591,9 @@ function ProjectileFX.Start(): ()
 	started = true
 	local remote = NetworkBridge.GetRemoteEvent(AttackConstants.Network.RemoteNames.Projectile)
 	trove:Connect(remote.OnClientEvent, onBatch)
+	-- The homing re-syncs, unreliable: the same batch shape, applied by the same path.
+	local sync = NetworkBridge.GetUnreliableRemoteEvent(AttackConstants.Network.RemoteNames.ProjectileSync)
+	trove:Connect(sync.OnClientEvent, onBatch)
 	trove:Connect(RunService.RenderStepped, step)
 	logger:info("ProjectileFX started")
 end
