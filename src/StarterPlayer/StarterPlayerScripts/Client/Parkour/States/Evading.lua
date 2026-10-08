@@ -4,8 +4,9 @@
 
 	Owns: the combat evade -- a short, committed GLIDE along the ground on the DASH key (Q / gamepad B),
 	which is the combat dash's ground half: Q in the air is States/Dashing.lua's air dash, Q on the ground
-	in combat is this, and Q on the ground out of combat does nothing. (The old Evade key, Z / gamepad Y,
-	still buffers the same evade.) The body keeps its facing, never crouches and never tumbles; it slides
+	in combat is this, and Q on the ground out of combat does nothing. The separate Evade action has NO
+	default key now; it is still rebindable in Settings, and a key a player gives it buffers the same
+	evade. The body keeps its facing, never crouches and never tumbles; it slides
 	out of the way on a flash-step speed curve (Shared/Combat/EvadeMotion.lua) and stops.
 
 	THE DIRECTION IS THE HELD KEY. Hold a movement key and the glide goes that way (camera-relative, so

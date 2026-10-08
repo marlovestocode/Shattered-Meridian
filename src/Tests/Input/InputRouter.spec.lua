@@ -91,20 +91,20 @@ return function()
 
 		it("only fires a Menu binding's Began while a modal panel is open", function()
 			local began = 0
-			bind("Evade", {
+			bind("Leap", {
 				Layer = "Menu",
 				Began = function()
 					began += 1
 				end,
 			})
 
-			press(keyCodeFor("Evade"))
+			press(keyCodeFor("Leap"))
 			expect(began).to.equal(0)
 
 			InputRouter.SetModalOpenPredicateForTesting(function()
 				return true
 			end)
-			press(keyCodeFor("Evade"))
+			press(keyCodeFor("Leap"))
 			expect(began).to.equal(1)
 		end)
 	end)
@@ -165,20 +165,20 @@ return function()
 			end)
 
 			local fired: { string } = {}
-			bind("Evade", {
+			bind("Leap", {
 				Layer = "Menu",
 				Began = function()
 					table.insert(fired, "Menu")
 				end,
 			})
-			bind("Evade", {
+			bind("Leap", {
 				Layer = "Modal",
 				Began = function()
 					table.insert(fired, "Modal")
 				end,
 			})
 
-			press(keyCodeFor("Evade"))
+			press(keyCodeFor("Leap"))
 
 			expect(#fired).to.equal(1)
 			expect(fired[1]).to.equal("Modal")

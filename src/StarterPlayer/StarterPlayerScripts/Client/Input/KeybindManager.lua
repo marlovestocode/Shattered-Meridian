@@ -104,8 +104,10 @@ local function keybindMatchesInput(keybind: Types.Keybind?, input: InputObject):
 	return false
 end
 
--- The KEYBOARD/mouse keybind currently assigned to `action`. Every action has one (Defaults is a
--- complete map) -- for the possibly-absent gamepad side, see GetGamepad below.
+-- The KEYBOARD/mouse keybind currently assigned to `action`. Every action has an entry (Defaults is a
+-- complete map), though an action with no default key (Evade) holds the EMPTY keybind until the player
+-- assigns one -- it never matches and Describe spells it "Unbound". For the possibly-absent gamepad
+-- side, see GetGamepad below.
 function KeybindManager.Get(action: Types.KeybindAction): Types.Keybind
 	return currentBindings[action]
 end

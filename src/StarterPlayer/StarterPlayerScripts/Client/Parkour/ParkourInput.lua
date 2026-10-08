@@ -78,9 +78,9 @@ local function bindParkourActions(): ()
 	-- step off.
 	--
 	-- IT WAS LATENT UNTIL THE HELM GOT A GAMEPAD MAP AND IS NOT LATENT NOW. On a keyboard the helm's
-	-- contextual keys (W/S/X/G) happen to miss Slide (C), Evade (Z) and Dash (Q), so only Leap --
+	-- contextual keys (W/S/X/G) happen to miss Slide (C) and Dash (Q) (Evade has no default key), so only Leap --
 	-- which genuinely shares E with Interact -- ever collided. BlimpConstants.Controls' gamepad column
-	-- overlaps all three by construction: its four face buttons are ButtonY (Evade), ButtonA, ButtonB
+	-- overlaps them by construction: its four face buttons are ButtonY, ButtonA, ButtonB
 	-- (Dash) and ButtonX (Slide), chosen BECAUSE those global meanings are inert at a helm. This gate
 	-- is the half of "inert" that was only true of the action and not yet true of its buffer.
 	--

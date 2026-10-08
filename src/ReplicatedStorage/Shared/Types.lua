@@ -871,7 +871,10 @@ export type KeybindAction =
 
 -- Exactly one of KeyCode/UserInputType is populated -- KeyCode for ordinary keyboard keys,
 -- UserInputType for inputs with no KeyCode equivalent (Roblox only reports mouse buttons via
--- UserInputType, e.g. Enum.UserInputType.MouseButton1, never a KeyCode).
+-- UserInputType, e.g. Enum.UserInputType.MouseButton1, never a KeyCode). The one exception is the
+-- EMPTY keybind (neither populated), which means "unbound": it never matches an input and is spelled
+-- "Unbound". KeybindConstants.Defaults uses it for an action that has no default key but must stay
+-- rebindable (Evade) -- that table is also the list of rebindable actions.
 export type Keybind = {
 	KeyCode: Enum.KeyCode?,
 	UserInputType: Enum.UserInputType?,

@@ -159,16 +159,21 @@ local KeybindConstants = {
 		-- and rebindable like every other action here.
 		InventoryToggle = { KeyCode = Enum.KeyCode.J },
 		-- The combat evade (Client/Parkour/States/Evading.lua) -- renamed from Roll when the roll was
-		-- replaced; SettingsClient migrates a binding saved under the old name. Z: unclaimed elsewhere in
-		-- this table (the Move Editor's Ctrl+Z is a dev-tool chord, not a gameplay bind) and under the same
-		-- hand already on WASD, which a dodge needs to be reachable without leaving the movement keys.
+		-- replaced; SettingsClient migrates a binding saved under the old name.
 		--
-		-- NOT LeftAlt, which it used to be. A bare Alt press is not the game's to own on Windows: Studio
-		-- takes it for the ribbon's key tips, and the OS can hand focus to the window's menu. Either way
-		-- the game loses input for a moment -- the locked mouse is released (the cursor flashes on
-		-- screen), held WASD stops registering (the evade comes out with no direction and the body stands
-		-- still), and the camera stops following the mouse -- then focus comes back and it all resumes.
-		Evade = { KeyCode = Enum.KeyCode.Z },
+		-- UNBOUND BY DEFAULT, ON PURPOSE, AND STILL A REAL ACTION. The evade is the Dash key's ground half
+		-- now (Q in combat on the ground), so it needs no key of its own. It stays in this table, as an
+		-- EMPTY keybind, because this table is also the list of every action a player may rebind: the
+		-- Settings panel builds its rows from it and SettingsSystem/PlayerDataSystem accept an override only
+		-- for an action named here. Deleting the entry would have deleted the rebind row with it. An empty
+		-- keybind never matches an input and KeybindManager.Describe spells it "Unbound", so until a player
+		-- assigns one this behaves exactly like a missing key -- and once they do, it is a second way to
+		-- trigger the same evade.
+		--
+		-- (If a default is ever restored: NOT LeftAlt, which it used to be. A bare Alt press is not the
+		-- game's to own on Windows -- Studio takes it for the ribbon's key tips and the OS can hand focus
+		-- to the window's menu, which releases the locked mouse and drops held WASD mid-evade.)
+		Evade = {},
 		-- Parkour committed leap (Client/Parkour/States/Leaping.lua). Used to fire on a double-tap of
 		-- jump; E is unclaimed elsewhere in this table, sits under the same hand already on WASD (same
 		-- reachability requirement as Evade's own comment above), and is the conventional "interact/use"
@@ -251,12 +256,11 @@ local KeybindConstants = {
 		-- HotbarSlot1-5 below, Settings is NOT admin-only, so it earns a real gamepad default rather
 		-- than staying keyboard-only.
 		SettingsToggle = { KeyCode = Enum.KeyCode.DPadUp },
-		-- Y (Triangle). THE DODGE GETS A FACE BUTTON. It sat on DPadLeft once, which is a thumb-off-the-
-		-- stick reach -- and an evade is pressed WHILE steering, which on a gamepad means the left thumb is on
-		-- Thumbstick1 and cannot also be on the D-pad. ShiftLock paid for it by moving to DPadLeft: a mode
-		-- toggle can afford the reach because the player picks the moment, and a dodge cannot. Dash (ButtonB)
-		-- stays put -- doubling the evade onto it would make two distinct mechanics indistinguishable.
-		Evade = { KeyCode = Enum.KeyCode.ButtonY },
+		-- NO Evade ENTRY: the evade is the Dash key's ground half now (ButtonB in combat on the ground), and
+		-- ButtonY is free again. This map is honestly partial, so an action with no entry is simply unbound
+		-- here and a player can still give it a button in Settings (KeybindManager.RebindGamepad). The old
+		-- reasoning for a FACE button -- a dodge is pressed while steering, so it cannot live on the D-pad --
+		-- still holds for whatever a player picks; Tests/Input/GamepadBindings.spec.lua pins it for Dash.
 		-- Leap, Interact, GrabThrow and HotbarSlot1-5 have no entry in THIS table and are not
 		-- unbound: they live one table down, in GamepadChords, reached by holding GamepadModifier.
 		-- This comment used to say there was "genuinely nowhere left to put" Leap without doubling up
@@ -315,11 +319,10 @@ local KeybindConstants = {
 		Leap = { KeyCode = Enum.KeyCode.ButtonB },
 		-- X is Slide; both are "engage with the ground/world in front of you".
 		Interact = { KeyCode = Enum.KeyCode.ButtonX },
-		-- Y. Its plain binding is Evade, which is a TAP; this is a modified tap, so
-		-- the two never compete for a press (the same hold-versus-tap argument HotbarSlot5 makes about
-		-- sharing L1 with Block). This comment used to justify the button by saying Y was ShiftLock,
-		-- "the least combat-critical face button" -- that is stale, ShiftLock moved to DPadLeft when
-		-- the dodge took this button, and the reasoning is now the modifier rather than what it displaces.
+		-- Y. A modified tap on a face button, reached with the modifier held, so it never competes with a
+		-- plain press (the same hold-versus-tap argument HotbarSlot5 makes about sharing L1 with Block).
+		-- Y used to be the plain Evade button; that binding is gone (see GamepadDefaults), and the chord
+		-- is unchanged.
 		GrabThrow = { KeyCode = Enum.KeyCode.ButtonY },
 		-- The D-pad is already this game's quick-select semantic (ToggleWeapon/EmoteWheel/Settings
 		-- all live there unmodified), so the modified D-pad is the natural home for the slot picker.

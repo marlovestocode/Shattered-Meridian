@@ -2,7 +2,8 @@
 --[[
 	EvadeConstants.lua
 
-	Owns: the tunables of the combat evade -- the ground glide on the Evade key (Z / gamepad Y). How fast
+	Owns: the tunables of the combat evade -- the ground glide on the Dash key (Q / gamepad B, in combat on
+	the ground; the Evade action has no default key but may be rebound). How fast
 	and how far the body glides, how long it waits before the next one, and how long the server's evade
 	frames last. Read by Client/Parkour/States/Evading.lua (the player's glide), Shared/Combat/
 	EvadeMotion.lua (the one speed curve), Server/Combat/TrainingBot/TrainingBotSystem.lua (the bot's glide)

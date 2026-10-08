@@ -28,7 +28,7 @@ return function()
 
 	-- Actions a player performs WHILE MOVING, on a reflex, where the input either lands in a narrow
 	-- window or is wasted. These are the ones that cannot live on the D-pad.
-	local REFLEX_ACTIONS = { "Evade", "Slide", "Dash" }
+	local REFLEX_ACTIONS = { "Slide", "Dash" }
 
 	describe("the movement-critical actions", function()
 		-- The regression this file exists for. The dodge once sat on DPadLeft, and it is pressed WHILE
@@ -42,9 +42,8 @@ return function()
 			end
 		end)
 
-		it("binds the evade to a button the right thumb can reach", function()
-			expect(gamepadDefaults.Evade).to.be.ok()
-			expect(gamepadDefaults.Evade.KeyCode).to.equal(Enum.KeyCode.ButtonY)
+		it("leaves the evade unbound by default -- the Dash button is its ground half", function()
+			expect(gamepadDefaults.Evade).to.equal(nil)
 		end)
 	end)
 
