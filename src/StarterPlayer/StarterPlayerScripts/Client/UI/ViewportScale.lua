@@ -72,4 +72,36 @@ function ViewportScale.Compute(scope: Scope): Fusion.Computed<number>
 	end)
 end
 
+-- Room kept clear around a fitted panel, and the top bar's band (the Roblox chrome a ScreenGui that respects
+-- the GUI inset loses).
+local FIT_MARGIN = 16
+local TOP_INSET = 58
+-- Below this a fitted panel's text stops being worth reading; past it the panel is allowed to overflow.
+local FIT_MIN_SCALE = 0.6
+
+-- Compute's multiplier, lowered as far as it must go for a `size`-pixel panel to fit the live viewport (down
+-- to FIT_MIN_SCALE). For a panel too large for the reference resolution itself, which Compute alone would
+-- clip at exactly the screen it calls 1.0 (a 780-tall panel on a 768-tall laptop).
+function ViewportScale.Fit(scope: Scope, size: Vector2): Fusion.Computed<number>
+	local curve = ViewportScale.Compute(scope)
+	local camera = Workspace.CurrentCamera
+	local viewport = scope:Value(if camera then camera.ViewportSize else Vector2.new(REFERENCE_WIDTH, REFERENCE_HEIGHT))
+	if camera then
+		table.insert(
+			scope,
+			camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+				viewport:set(camera.ViewportSize)
+			end)
+		)
+	end
+	return scope:Computed(function(use)
+		local screen = use(viewport)
+		local fit = math.min(
+			(screen.X - FIT_MARGIN * 2) / math.max(size.X, 1),
+			(screen.Y - TOP_INSET - FIT_MARGIN * 2) / math.max(size.Y, 1)
+		)
+		return math.max(math.min(use(curve), fit), FIT_MIN_SCALE)
+	end)
+end
+
 return ViewportScale

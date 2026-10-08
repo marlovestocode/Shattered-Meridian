@@ -61,6 +61,7 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 
 local AttackInputClient = require(script.Parent.Parent.Parent.Combat.AttackInputClient)
 local Chrome = require(script.Parent.Parent.Parent.UI.Shell.Chrome)
+local ClipScrubber = require(script.Parent.ClipScrubber)
 local Copy = require(script.Parent.Parent.Parent.UI.Screens.DevTools.MoveEditor.Copy)
 local HitboxWorldPreview = require(script.Parent.HitboxWorldPreview)
 local HotbarBindings = require(script.Parent.Parent.Parent.Combat.HotbarBindings)
@@ -184,7 +185,7 @@ local function startEditor(
 		-- A realm's damage lives on Effects, not Impact (it has no Impact tab): Copy says which.
 		local tab = Copy.FailureTab(failure, peek(handle.IsDomain))
 		if tab then
-			handle.CurrentTab:set(tab)
+			handle.ShowPage(tab)
 		end
 	end
 
@@ -344,12 +345,17 @@ local function startEditor(
 		local entry = answer.Entry :: MoveEntry
 		upsertEntry(entry)
 		openMove(entry)
-		handle.CurrentTab:set("Identity")
+		-- Land on the tab the type is about: its volume, or its realm. Naming it is Identity's, one tab over.
+		handle.ShowPage(if entry.Move.Domain then "Realm" else "Hitbox")
 		handle.StatusText:set(`{entry.Move.DisplayName} created -- live, not saved yet.`)
 	end
 
-	handle.NewRequested:Connect(function()
-		create(newMoveDraft(), "create the move")
+	-- The browser asks the type up front (Melee, Projectile, Domain); the draft is seeded as that type
+	-- before its first preview, so the server names a move that is already what it was asked to be.
+	handle.NewRequested:Connect(function(kind: string)
+		local draft = newMoveDraft()
+		handle.SetMoveType(draft, kind or "Melee")
+		create(draft, "create the move")
 	end)
 
 	local function duplicate(): ()
@@ -781,6 +787,17 @@ local function startEditor(
 		end
 	end)
 
+	-- Clip scrub and asset previews -------------------------------------------------------------------
+
+	local previews = ClipScrubber.Start(handle)
+	handle.PreviewAssetRequested:Connect(function(kind: string, id: string)
+		if kind == "Animation" then
+			handle.StatusText:set(previews.PreviewAnimation(id))
+		elseif kind == "Sound" then
+			handle.StatusText:set(previews.PreviewSound(id))
+		end
+	end)
+
 	-- Keys -------------------------------------------------------------------------------------------
 
 	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
@@ -795,8 +812,25 @@ local function startEditor(
 			end
 			return
 		end
-		-- Editor-scoped: Ctrl+S must not save from anywhere in the game.
-		if not peek(handle.IsOpen) or not modifierDown() then
+		if not peek(handle.IsOpen) then
+			return
+		end
+		-- Up / Down step through the move list. Not while typing (a focused box is gameProcessed above, and a
+		-- NumericField's open entry box uses the same keys to nudge its number), and not in Place mode.
+		if not modifierDown() then
+			if peek(handle.PlacementMode) then
+				return
+			end
+			if input.KeyCode == Enum.KeyCode.Up then
+				handle.StepSelection(-1)
+			elseif input.KeyCode == Enum.KeyCode.Down then
+				handle.StepSelection(1)
+			end
+			return
+		end
+		-- Ctrl+F finds a move: it takes you to the browser's filter.
+		if input.KeyCode == Enum.KeyCode.F then
+			handle.FocusFilter()
 			return
 		end
 		-- A focused text field keeps its own native undo; gameProcessed already covers most of these, this

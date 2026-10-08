@@ -90,6 +90,10 @@ export type MoveEntry = {
 	-- A draft whose own fingerprint differs has unsaved work. nil for a custom move that was previewed
 	-- into existence but never saved.
 	SavedFingerprint: string?,
+	-- The move as it is persisted, sent ONLY while it differs from Move (an unsaved edit is live) -- what the
+	-- editor's changed-field dots compare against. nil while the two agree (Move is then the saved move) and
+	-- for a never-saved move.
+	Saved: MoveTypes.MoveDefinition?,
 	-- Default moves only: an override is live, so the move differs from its CombatConstants self.
 	Overridden: boolean,
 	-- A file under Server/Combat/AuthoredMoves ships this move (or, for a Default move, its retune) in the

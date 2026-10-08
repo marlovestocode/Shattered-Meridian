@@ -329,11 +329,14 @@ end
 local function buildEntry(move: MoveDefinition, source: MoveSource): MoveEntry
 	local effective, clipMatch = effectiveTiming(move)
 	local saved = savedMove(move.MoveId, source)
+	local savedFingerprint = if saved then MoveTypes.Fingerprint(saved) else nil
 	return {
 		Move = move,
 		Source = source,
 		Group = groupOf(move, source),
-		SavedFingerprint = if saved then MoveTypes.Fingerprint(saved) else nil,
+		SavedFingerprint = savedFingerprint,
+		-- Only while it differs: a clean entry's Move already is the saved move (MoveEditorTypes).
+		Saved = if saved and savedFingerprint ~= MoveTypes.Fingerprint(move) then saved else nil,
 		Overridden = source == "Default" and DefaultMoveRegistry.IsOverridden(move.MoveId),
 		Stage = if source == "Default" then DefaultMoveRegistry.StageOf(move.MoveId) else nil,
 		Shipped = AuthoredMoveLibrary.IsShipped(move.MoveId),

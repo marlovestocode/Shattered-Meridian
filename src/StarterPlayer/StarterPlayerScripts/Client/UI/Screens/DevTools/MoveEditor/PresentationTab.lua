@@ -3,7 +3,10 @@
 	MoveEditor/PresentationTab.lua
 
 	Owns: the Presentation tab -- what the open move sounds and looks like at each of its moments
-	(MoveDefinition.Presentation, Shared/Combat/MovePresentationTypes.lua). One folding group per moment,
+	(MoveDefinition.Presentation, Shared/Combat/MovePresentationTypes.lua). One Fields.Section per moment
+	(2026-10-07; it was a bare Fold that built every moment's fields when the tab opened): folded, built on
+	first open, and summarising itself ("default", "2 set") so the closed page still says where the move
+	differs. A sound id has a Play button and a colour a swatch and palette. One folding group per moment,
 	each holding only the fields that moment's runtime reads (MovePresentationTypes.Moments[].Fields --
 	the same list Validate keeps), a Preview that plays that moment's cue on this client through the
 	runtime's own path, and a Reset that clears the moment back to its defaults.
@@ -175,126 +178,163 @@ local function PresentationTab(
 		Fields.Prose(scope, Copy.Presentation.NoRealm, 3, isNotDomain),
 	}
 
-	local order = 10
-	local function nextOrder(): number
-		order += 1
-		return order
+	-- How many of a moment's fields the move sets, for its folded heading ("default" / "2 set").
+	local function momentSummary(momentName: string): Fusion.Computed<string>
+		return scope:Computed(function(use)
+			local move = use(context.Draft)
+			local cue = if move then cueOf(move, momentName) else nil
+			local count = 0
+			if cue then
+				for _ in cue do
+					count += 1
+				end
+			end
+			return if count == 0 then "default" else `{count} set`
+		end)
 	end
 
-	for _, moment in MovePresentationTypes.Moments do
+	-- One field of one moment, by its kind (see this file's header for BLANK IS INHERIT).
+	local function momentField(momentName: string, fieldName: string, order: number): Instance
+		local field = MovePresentationTypes.Field(fieldName) :: MovePresentationTypes.Field
+		local ui = FIELD_UI[fieldName]
+		local label = if momentName == "InFlight" and fieldName == "SoundId" then "Loop sound id" else ui.Label
+		local hint = (Copy.Hints :: any)[`Presentation{fieldName}`]
+
+		local function getText(move: Move): string
+			local cue = cueOf(move, momentName)
+			local value = if cue then cue[fieldName] else nil
+			return if typeof(value) == "string" then value else ""
+		end
+		local function setText(move: Move, value: string): ()
+			local trimmed = string.match(value, "^%s*(.-)%s*$") or ""
+			setField(move, momentName, fieldName, if trimmed == "" then nil else trimmed)
+		end
+
+		if field.Kind == "Number" then
+			local unset = unsetNumber(momentName, field)
+			return Fields.Number(scope, context, {
+				Label = label,
+				Unit = ui.Unit,
+				Range = MovePresentationTypes.Limits[fieldName],
+				Steps = ui.Steps or { 0.1, 1 },
+				Decimals = ui.Decimals,
+				Hint = hint,
+				LayoutOrder = order,
+				Get = function(move)
+					local cue = cueOf(move, momentName)
+					local value = if cue then cue[fieldName] else nil
+					return if typeof(value) == "number" then value else unset
+				end,
+				Set = function(move, value)
+					setField(move, momentName, fieldName, if math.abs(value - unset) < 1e-6 then nil else value)
+				end,
+			})
+		elseif field.Kind == "Choice" then
+			return Fields.Choice(scope, context, {
+				Label = label,
+				Options = choiceOptions(field),
+				Hint = hint,
+				LayoutOrder = order,
+				Get = function(move)
+					local cue = cueOf(move, momentName)
+					local value = if cue then cue[fieldName] else nil
+					return if typeof(value) == "string" then value else ""
+				end,
+				Set = function(move, value)
+					setField(move, momentName, fieldName, if value == "" then nil else value)
+				end,
+			})
+		end
+
+		-- Asset, Color and Name are all text the server normalises (and refuses, with a reason the footer
+		-- shows, when it cannot). A colour also gets a swatch and a palette; a sound id a Play button.
+		local isColour = field.Kind == "Color"
+		local isSound = fieldName == "SoundId"
+		return Fields.Text(scope, context, {
+			Label = label,
+			Placeholder = ui.Placeholder,
+			MaxLength = if field.Kind == "Name"
+				then MovePresentationTypes.TemplateNameLength
+				else MovePresentationTypes.AssetIdLength,
+			Hint = hint,
+			LayoutOrder = order,
+			Get = getText,
+			Set = setText,
+			Action = if isSound
+				then {
+					Text = "Play",
+					Run = function(current: string)
+						context.PreviewAsset("Sound", current)
+					end,
+				}
+				else nil,
+			Extra = if isColour
+				then {
+					Fields.Palette(
+						scope,
+						context,
+						getText,
+						setText,
+						string.find(ui.Placeholder or "", "None", 1, true) ~= nil
+					),
+				}
+				else nil,
+		})
+	end
+
+	-- One Section per moment, folded and built on first open (Fields.Section): sixteen moments' worth of
+	-- fields cost nothing until an author opens the one they came for, and each heading says whether the
+	-- move sets anything there.
+	for index, moment in MovePresentationTypes.Moments do
 		local momentName = moment.Name
 		local momentVisible: UsedAs<boolean> = if moment.Group == "Projectile"
 			then isProjectile
 			elseif moment.Group == "Domain" then isDomain
 			else true
 
-		local heading, shown = Fields.Fold(scope, string.upper(moment.Label), nextOrder(), momentVisible, true)
-		table.insert(children, heading)
-		table.insert(children, Fields.Prose(scope, Copy.Presentation.Moments[momentName] or "", nextOrder(), shown))
-
-		for _, fieldName in moment.Fields do
-			local field = MovePresentationTypes.Field(fieldName) :: MovePresentationTypes.Field
-			local ui = FIELD_UI[fieldName]
-			local label = if momentName == "InFlight" and fieldName == "SoundId" then "Loop sound id" else ui.Label
-			local hint = (Copy.Hints :: any)[`Presentation{fieldName}`]
-
-			if field.Kind == "Number" then
-				local unset = unsetNumber(momentName, field)
-				table.insert(
-					children,
-					Fields.Number(scope, context, {
-						Label = label,
-						Unit = ui.Unit,
-						Range = MovePresentationTypes.Limits[fieldName],
-						Steps = ui.Steps or { 0.1, 1 },
-						Decimals = ui.Decimals,
-						Hint = hint,
-						Visible = shown,
-						LayoutOrder = nextOrder(),
-						Get = function(move)
-							local cue = cueOf(move, momentName)
-							local value = if cue then cue[fieldName] else nil
-							return if typeof(value) == "number" then value else unset
-						end,
-						Set = function(move, value)
-							setField(move, momentName, fieldName, if math.abs(value - unset) < 1e-6 then nil else value)
-						end,
-					})
-				)
-			elseif field.Kind == "Choice" then
-				table.insert(
-					children,
-					Fields.Choice(scope, context, {
-						Label = label,
-						Options = choiceOptions(field),
-						Visible = shown,
-						LayoutOrder = nextOrder(),
-						Get = function(move)
-							local cue = cueOf(move, momentName)
-							local value = if cue then cue[fieldName] else nil
-							return if typeof(value) == "string" then value else ""
-						end,
-						Set = function(move, value)
-							setField(move, momentName, fieldName, if value == "" then nil else value)
-						end,
-					})
-				)
-				if hint then
-					table.insert(children, Fields.Prose(scope, hint, nextOrder(), shown))
-				end
-			else
-				-- Asset, Color and Name are all text the server normalises (and refuses, with a reason the
-				-- footer shows, when it cannot).
-				table.insert(
-					children,
-					Fields.Text(scope, context, {
-						Label = label,
-						Placeholder = ui.Placeholder,
-						MaxLength = if field.Kind == "Name"
-							then MovePresentationTypes.TemplateNameLength
-							else MovePresentationTypes.AssetIdLength,
-						Hint = hint,
-						Visible = shown,
-						LayoutOrder = nextOrder(),
-						Get = function(move)
-							local cue = cueOf(move, momentName)
-							local value = if cue then cue[fieldName] else nil
-							return if typeof(value) == "string" then value else ""
-						end,
-						Set = function(move, value)
-							local trimmed = string.match(value, "^%s*(.-)%s*$") or ""
-							setField(move, momentName, fieldName, if trimmed == "" then nil else trimmed)
-						end,
-					})
-				)
-			end
-		end
-
 		table.insert(
 			children,
-			Fields.Pair(
-				scope,
-				nextOrder(),
-				Button(scope, {
-					Text = "Preview",
-					Variant = "Secondary",
-					Size = UDim2.new(1, 0, 0, Tokens.Control.StepButtonSize),
-					OnActivated = function()
-						props.OnPreview(momentName)
-					end,
-				}),
-				Button(scope, {
-					Text = "Reset to defaults",
-					Variant = "Secondary",
-					Size = UDim2.new(1, 0, 0, Tokens.Control.StepButtonSize),
-					OnActivated = function()
-						context.Edit(function(move)
-							clearMoment(move, momentName)
-						end)
-					end,
-				}),
-				shown
-			)
+			Fields.Section(scope, {
+				Title = string.upper(moment.Label),
+				Summary = momentSummary(momentName),
+				LayoutOrder = 10 + index,
+				Visible = momentVisible,
+				StartClosed = true,
+				Build = function()
+					local fields: { Instance } = {
+						Fields.Prose(scope, Copy.Presentation.Moments[momentName] or "", 1),
+					}
+					for fieldIndex, fieldName in moment.Fields do
+						table.insert(fields, momentField(momentName, fieldName, 1 + fieldIndex))
+					end
+					table.insert(
+						fields,
+						Fields.Pair(
+							scope,
+							100,
+							Button(scope, {
+								Text = "Preview",
+								Variant = "Secondary",
+								Size = UDim2.new(1, 0, 0, Tokens.Control.StepButtonSize),
+								OnActivated = function()
+									props.OnPreview(momentName)
+								end,
+							}),
+							Button(scope, {
+								Text = "Reset to defaults",
+								Variant = "Secondary",
+								Size = UDim2.new(1, 0, 0, Tokens.Control.StepButtonSize),
+								OnActivated = function()
+									context.Edit(function(move)
+										clearMoment(move, momentName)
+									end)
+								end,
+							})
+						)
+					)
+					return fields
+				end,
+			})
 		)
 	end
 

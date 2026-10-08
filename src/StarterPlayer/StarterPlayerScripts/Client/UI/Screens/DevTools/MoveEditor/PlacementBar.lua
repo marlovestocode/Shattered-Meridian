@@ -100,9 +100,12 @@ local function PlacementBar(scope: Scope, props: PlacementBarProps): ScreenGui
 		end
 		local position = move.Offset.Position
 		local rotation = move.OffsetRotation
-		return `X {signed(position.X)}  Y {signed(position.Y)}  Z {signed(position.Z)}   ·   yaw {math.floor(
-			rotation.Y + 0.5
-		)}°  pitch {math.floor(rotation.X + 0.5)}°  roll {math.floor(rotation.Z + 0.5)}°`
+		-- The form's names and signs: forward is plus (HitboxTab's FORWARD IS PLUS).
+		return `right {signed(position.X)}  up {signed(position.Y)}  forward {signed(
+			if position.Z == 0 then 0 else -position.Z
+		)}   ·   yaw {math.floor(rotation.Y + 0.5)}°  pitch {math.floor(rotation.X + 0.5)}°  roll {math.floor(
+			rotation.Z + 0.5
+		)}°`
 	end)
 
 	local children: { Instance } = {}

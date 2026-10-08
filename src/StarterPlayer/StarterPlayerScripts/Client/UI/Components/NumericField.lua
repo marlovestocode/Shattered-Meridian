@@ -155,6 +155,10 @@ export type NumericFieldProps = {
 	-- top-aligned, so one hinted field beside an unhinted one leaves the short cell's control
 	-- floating against a taller neighbour.
 	Hint: UsedAs<string>?,
+	-- Whether the Hint is drawn under the control (default true). A dense form that shows its hints
+	-- somewhere else on demand (the Move Editor's help strip) passes its own switch here; the hint is
+	-- still built, so flipping the switch never rebuilds the field.
+	HintVisible: UsedAs<boolean>?,
 	-- The two-line layout described in the header, with snapped values. Off by default.
 	Compact: boolean?,
 }
@@ -807,6 +811,7 @@ function NumericFieldModule.Mount(scope: Scope, props: NumericFieldProps): Frame
 			LineHeight = Tokens.Leading.Prose,
 			Size = UDim2.fromScale(1, 0),
 			LayoutOrder = 4,
+			Visible = props.HintVisible,
 		})
 	end
 

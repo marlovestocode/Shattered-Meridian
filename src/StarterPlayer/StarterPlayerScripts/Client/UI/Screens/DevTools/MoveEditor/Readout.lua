@@ -12,6 +12,12 @@
 	timeline are what an author is checking WHILE they edit any tab. A result that needed a tab switch to
 	see would be a result nobody looks at.
 
+	THE ACTION BAR IS PINNED TOO (2026-10-07). The move's name, its saved state and Save / Test / Undo / Redo sit
+	at the top of the rail and never scroll; everything else scrolls under them. Under the old layout ACTIONS
+	came after the plots, the timeline, the frame data and the notes, so a move with a few notes pushed Save
+	below the fold -- the one button every edit ends on. The rarer actions (Revert, Duplicate, Delete, Reset)
+	stay in the scroll as MORE ACTIONS.
+
 	IRREVERSIBLE ACTIONS ARM FIRST. Delete, Reset to default and Revert each need a second press inside
 	Constants.MoveEditor.ConfirmWindowSeconds; the button says so while armed. Save and Test are not
 	irreversible and fire on the first press.
@@ -76,6 +82,11 @@ export type ReadoutProps = {
 	OnClearBench: () -> (),
 	HitLog: UsedAs<{ MoveEditorScreenTypes.HitLogEntry }>,
 	OnClearHitLog: () -> (),
+	-- The screen's edit path, for the timeline's drag-to-retime.
+	Edit: (mutate: (MoveTypes.MoveDefinition) -> ()) -> (),
+	-- The clip scrub (TimelineBar).
+	ScrubTime: Fusion.Value<number?>,
+	ScrubPlaying: Fusion.Value<boolean>,
 }
 
 local BUTTON_HEIGHT = Tokens.Control.StepButtonSize
@@ -119,8 +130,8 @@ local function halfButton(
 	})
 end
 
--- Variant nil: its Disabled follows a Computed, and a Variant button reads its props once.
-local function legacyHalfButton(
+-- A quarter-width button for the pinned bar; legacy (Variant nil) so its Disabled can follow a Computed.
+local function barButton(
 	scope: Scope,
 	text: string,
 	order: number,
@@ -129,7 +140,7 @@ local function legacyHalfButton(
 ): Instance
 	return Button(scope, {
 		Text = text,
-		Size = UDim2.new(0.5, -Tokens.Space.S / 2, 0, BUTTON_HEIGHT),
+		Size = UDim2.new(0.25, -Tokens.Space.XS * 3 / 4, 1, 0),
 		LayoutOrder = order,
 		Disabled = disabled,
 		OnActivated = onActivated,
@@ -255,6 +266,77 @@ local function Readout(scope: Scope, props: ReadoutProps): Frame
 		)
 	end
 
+	-- The pinned bar (see this file's header): what the move is, whether it is saved, and the four actions
+	-- every edit session runs on.
+	local bar = Stack.New(scope, {
+		Name = "ActionBar",
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Gap = Tokens.Space.S,
+		LayoutOrder = 1,
+		BackgroundColor3 = Tokens.Wash.FooterScrim.Color,
+		BackgroundTransparency = Tokens.Wash.FooterScrim.Transparency,
+		Children = {
+			Inset(scope, { Top = Tokens.Space.M, Bottom = Tokens.Space.M, X = Tokens.Space.M }),
+			-- Identity.
+			Stack.New(scope, {
+				Name = "Title",
+				Size = UDim2.fromScale(1, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				Gap = Tokens.Space.XS,
+				LayoutOrder = 1,
+				Children = {
+					Label(scope, {
+						Text = nameText,
+						Scale = "CardTitle",
+						Color = Tokens.Color.TextPrimary,
+						Size = UDim2.new(1, 0, 0, Tokens.Type.CardTitle.Size + Tokens.Space.XS),
+						TextTruncate = Enum.TextTruncate.AtEnd,
+						LayoutOrder = 10,
+					}),
+					Stack.Row(scope, {
+						Size = UDim2.new(1, 0, 0, CHIP_ROW_HEIGHT),
+						Gap = Tokens.Space.S,
+						LayoutOrder = 20,
+						Visible = hasEntry,
+						Children = {
+							StatusTag(
+								scope,
+								{ Label = kindText, Color = Tokens.Color.AccentPrimary, LayoutOrder = 10 }
+							),
+							StatusTag(scope, { Label = stateText, Color = stateColor, LayoutOrder = 20 }),
+							scope:New "Frame" {
+								Name = "InSource",
+								Size = UDim2.fromScale(0, 1),
+								AutomaticSize = Enum.AutomaticSize.X,
+								BackgroundTransparency = 1,
+								LayoutOrder = 30,
+								Visible = isShipped,
+								[Fusion.Children] = StatusTag(scope, {
+									Label = "IN SOURCE",
+									Color = Tokens.Color.AccentSecondary,
+								}),
+							},
+						},
+					}),
+				},
+			}),
+			Stack.Row(scope, {
+				Name = "Actions",
+				Size = UDim2.new(1, 0, 0, BUTTON_HEIGHT),
+				Gap = Tokens.Space.XS,
+				LayoutOrder = 2,
+				Visible = hasEntry,
+				Children = {
+					barButton(scope, "Save", 1, notDirty, props.OnSave),
+					barButton(scope, "Test", 2, nil, props.OnTest),
+					barButton(scope, "Undo", 3, notUndoable, props.OnUndo),
+					barButton(scope, "Redo", 4, notRedoable, props.OnRedo),
+				},
+			}),
+		},
+	})
+
 	local content: { Instance } = {
 		scope:New "UIListLayout" {
 			FillDirection = Enum.FillDirection.Vertical,
@@ -262,47 +344,6 @@ local function Readout(scope: Scope, props: ReadoutProps): Frame
 			Padding = UDim.new(0, Tokens.Space.M),
 		},
 		Inset(scope, { Top = Tokens.Space.M, Bottom = Tokens.Space.XL, X = Tokens.Space.M }),
-
-		-- Identity.
-		Stack.New(scope, {
-			Name = "Title",
-			Size = UDim2.fromScale(1, 0),
-			AutomaticSize = Enum.AutomaticSize.Y,
-			Gap = Tokens.Space.XS,
-			LayoutOrder = 10,
-			Children = {
-				Label(scope, {
-					Text = nameText,
-					Scale = "CardTitle",
-					Color = Tokens.Color.TextPrimary,
-					Size = UDim2.new(1, 0, 0, Tokens.Type.CardTitle.Size + Tokens.Space.XS),
-					TextTruncate = Enum.TextTruncate.AtEnd,
-					LayoutOrder = 10,
-				}),
-				Stack.Row(scope, {
-					Size = UDim2.new(1, 0, 0, CHIP_ROW_HEIGHT),
-					Gap = Tokens.Space.S,
-					LayoutOrder = 20,
-					Visible = hasEntry,
-					Children = {
-						StatusTag(scope, { Label = kindText, Color = Tokens.Color.AccentPrimary, LayoutOrder = 10 }),
-						StatusTag(scope, { Label = stateText, Color = stateColor, LayoutOrder = 20 }),
-						scope:New "Frame" {
-							Name = "InSource",
-							Size = UDim2.fromScale(0, 1),
-							AutomaticSize = Enum.AutomaticSize.X,
-							BackgroundTransparency = 1,
-							LayoutOrder = 30,
-							Visible = isShipped,
-							[Fusion.Children] = StatusTag(scope, {
-								Label = "IN SOURCE",
-								Color = Tokens.Color.AccentSecondary,
-							}),
-						},
-					},
-				}),
-			},
-		}),
 
 		-- Where the volume is.
 		Stack.Row(scope, {
@@ -319,7 +360,14 @@ local function Readout(scope: Scope, props: ReadoutProps): Frame
 
 		-- When it happens.
 		SectionHeading(scope, { Text = "EFFECTIVE TIMELINE", LayoutOrder = 30, Visible = hasEntry }),
-		TimelineBar(scope, { Entry = props.Entry, Draft = props.Draft, LayoutOrder = 40 }),
+		TimelineBar(scope, {
+			Entry = props.Entry,
+			Draft = props.Draft,
+			LayoutOrder = 40,
+			Edit = props.Edit,
+			ScrubTime = props.ScrubTime,
+			ScrubPlaying = props.ScrubPlaying,
+		}),
 
 		-- What it is worth: frames, advantage, and how many of it a fight takes.
 		SectionHeading(scope, { Text = "FRAME DATA", LayoutOrder = 50, Visible = hasBalance }),
@@ -337,19 +385,11 @@ local function Readout(scope: Scope, props: ReadoutProps): Frame
 			Children = { noteRows :: any },
 		}),
 
-		-- Commit, test, throw away.
-		SectionHeading(scope, { Text = "ACTIONS", LayoutOrder = 90, Visible = hasEntry }),
-		row(scope, 100, {
-			halfButton(scope, "Save", "Primary", 1, notDirty, props.OnSave),
-			halfButton(scope, "Test", "Secondary", 2, nil, props.OnTest),
-		}, hasEntry),
+		-- Throw away, copy, remove (Save, Test, Undo and Redo are the pinned bar's).
+		SectionHeading(scope, { Text = "MORE ACTIONS", LayoutOrder = 90, Visible = hasEntry }),
 		row(scope, 110, {
 			armedButton(scope, "Revert", "Revert? Again", 1, notDirty, nil, props.OnRevert),
 			halfButton(scope, "Duplicate", "Secondary", 2, nil, props.OnDuplicate),
-		}, hasEntry),
-		row(scope, 115, {
-			legacyHalfButton(scope, "Undo  (Ctrl+Z)", 1, notUndoable, props.OnUndo),
-			legacyHalfButton(scope, "Redo  (Ctrl+Y)", 2, notRedoable, props.OnRedo),
 		}, hasEntry),
 		row(scope, 120, {
 			armedButton(scope, "Delete", "Delete? Again", 1, nil, isCustom, props.OnDelete),
@@ -389,13 +429,24 @@ local function Readout(scope: Scope, props: ReadoutProps): Frame
 		}),
 	}
 
-	return ScrollArea(scope, {
+	return Stack.New(scope, {
 		Name = "Readout",
 		Size = UDim2.new(0, props.Width, 1, 0),
 		LayoutOrder = props.LayoutOrder,
 		BackgroundColor3 = Tokens.Wash.RailScrim.Color,
 		BackgroundTransparency = Tokens.Wash.RailScrim.Transparency,
-		Children = content,
+		Children = {
+			bar,
+			Stack.Fill(
+				scope,
+				ScrollArea(scope, {
+					Name = "ReadoutScroll",
+					Size = UDim2.fromScale(1, 0),
+					LayoutOrder = 2,
+					Children = content,
+				})
+			),
+		},
 	}) :: any
 end
 

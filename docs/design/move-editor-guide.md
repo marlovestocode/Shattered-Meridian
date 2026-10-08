@@ -28,11 +28,12 @@ A ScreenFrame modal with three columns:
 
 | Column | What it is for |
 |---|---|
-| **Moves** (left rail) | Every move the game knows, grouped: Arts, your categories, Custom, one group per roster weapon (collapsed), Standalone. Filter by name, id or group. A bronze chip says `NEW`, `UNSAVED` or `TUNED`. |
+| **Moves** (left rail) | Every move the game knows, grouped: Arts, your categories, Custom, one group per roster weapon (collapsed), Standalone. Each row says its type (`MELEE`, `SHOT`, `REALM`). Filter by name, id or group (`Ctrl+F`; **Clear** empties it); `↑` / `↓` step through the rows on show. A bronze chip says `NEW`, `UNSAVED` or `TUNED`. **+ New** asks the type first (Melee, Projectile, Domain) and opens the new move on its Hitbox or Realm tab. |
 | **Form** (tabs) | The **move type bar** (`Melee` · `Projectile` · `Domain Expansion`), then the inputs, one concern per tab. Which tabs there are depends on the type (below). Only fields that do something for this move are shown. `Tools` holds what acts on more than one move's inputs: bulk edit, version history, and (Studio) source. |
-| **Readout** (right rail) | The results: top and side hitbox plots, the **effective** timeline, frame data, the server's notes, every action, the test bench and the hit log. |
+| **Readout** (right rail) | A pinned bar on top -- the move's name, its saved state, **Save · Test · Undo · Redo** -- that never scrolls; under it the results: top and side hitbox plots, the **effective** timeline (draggable, and a clip scrub), frame data, the server's notes, MORE ACTIONS (Revert, Duplicate, Delete / Reset), the test bench and the hit log. |
 
-The rails are pinned so a result is never a tab switch away from the input that caused it.
+The rails are pinned so a result is never a tab switch away from the input that caused it. The panel scales
+with the screen and shrinks to fit one smaller than it (a 1366×768 laptop) rather than running off it.
 
 ### The move type, and the tabs it gives you (2026-10-01)
 
@@ -45,7 +46,11 @@ always melee and shows no bar.
 | Type | Tabs |
 |---|---|
 | Melee, Projectile | `Hitbox` · `Timing` · `Impact` · `Presentation` · `Identity` · `Tools` |
-| Domain Expansion | `Realm` · `Boundary` · `Effects` · `Law` · `Clash` · `Timing` · `Presentation` · `Identity` · `Tools` |
+| Domain Expansion | `Realm` · `Timing` · `Presentation` · `Identity` · `Tools` |
+
+The **Realm** tab has its own sub-tab bar: `Core` (clock, cost, governs) · `Boundary` · `Effects` · `Law` ·
+`Clash` (2026-10-07; these were five top-level tabs, which left nine labels sharing the strip). A refusal
+still lands you on the page its field is on.
 
 A tab the type does not have is not offered; if you were on it, the editor shows the first tab that is,
 and brings you back to it if the move changes back.
@@ -62,7 +67,22 @@ line, the step buttons and a full-width slider on the next (click the value to t
 snapped to the field's own precision.
 
 **Nothing is built before you look at it.** A tab is built the first time you open it, and a section the
-first time it is open and showing — a realm with two effects has built two effects' fields, not six.
+first time it is open and showing — a realm with two effects has built two effects' fields, not six. The
+Presentation tab is sixteen such sections, one per moment, folded, each saying `default` or `N set`.
+
+**Hints are on demand.** The line under the form (the help strip) shows what the field under your pointer
+does — or the one a gamepad has selected, or the text box you are typing in. **Show hints** (right of the
+strip) draws every hint under its field instead.
+
+**Changed fields are marked.** A bronze dot left of a field means it differs from the saved move. Press the
+dot to put the saved value back — one ordinary edit, so Undo brings yours back. A never-saved move has no
+dots.
+
+**Ids are picked, not typed.** An art's prerequisite, a realm effect's move and a clash override's realm
+are chosen from the move list (a search by name or id; a Volley only offers projectile moves, an override
+only realms). An id that names nothing the editor knows shows in the warning colour. Category offers the
+categories already in use under its box. A colour field has a swatch and a palette (Default, and None where
+the field allows it); a sound id and the clip's animation id have **Play**.
 
 ## Custom moves vs. weapon (Default) moves
 
@@ -89,8 +109,12 @@ The Hitbox tab, for a melee move, is three sections:
   under the name that shape gives them (a Crescent's *Bite radius* and *Bite offset*, a Cross's *Bar
   half-width*, a Frustum's *Near* and *Far radius*) — and a *Scale* row (×0.5 ×0.8 ×1.25 ×2, every
   measurement but the angle, clamped to the limits).
-- **PLACEMENT** — the anchor (Body / Right hand / Left hand / Weapon), the offset and rotation, *Place in
-  world* and *Show on my character*.
+- **PLACEMENT** — the anchor (Body / Right hand / Left hand / Weapon), the offset (**Right**, **Up**,
+  **Forward** — forward is plus; the engine's CFrame stores it as −Z, the form flips it) and rotation,
+  *Place in world* and *Show on my character*.
+
+Each *Start from* chip says what the preset is (its label and note) on a line under the row while the
+pointer is on it.
 - **TARGETS** — how many bodies one swing may hit.
 
 What the thrower is held to is the Timing tab's **COMMITMENT** (lock movement while winding up / while
@@ -118,7 +142,8 @@ The differences the layers above apply, each one line:
 | DamageSystem | Damage and posture × the shot's `DamageScale` (reflected multipliers). Knockback pushes along the flight. No melee spacing push. |
 | AttackRequestSystem | A shot's contact does not hit-confirm-cancel or keep-the-chain on the thrower's *swing*. Replicates shots on `Attack_Projectile` to the clients within `AttackConstants.Network.ProjectileRelevanceStuds` of their path (`ProjectileRelevance`). |
 
-The Hitbox tab, for a projectile move, is seven sections:
+The Hitbox tab, for a projectile move, is seven sections, in this order (BODY, SPAWN, VOLLEY, FLIGHT,
+then HOMING, COLLISION and PARRY, which start folded):
 
 - **BODY** — what flies. *Start from* a weapon preset (Orb, Fireball, Arrow, Spear, Kunai, Shuriken,
   SwordWave, Cutter, Boulder, Log, Wall, Drill, Blade, Tide — each sets only the shape and its size), the
@@ -164,8 +189,8 @@ the art binding and its Qi cost are **Identity**'s, its look and sound are **Pre
 moments, and undo, save, Test and the readout work as for any move. What it does **not** have is a volume: a
 domain move casts *volumeless* (`HitboxTypes.AttackDefinition.Volumeless`, set by
 `MoveTypes.ToEngineAttackDefinition`), so the swing keeps its whole lifecycle and movement locks but samples
-nothing in front of you. That is why it has no Hitbox or Impact tab. Its five tabs are what the swing does
-not say:
+nothing in front of you. That is why it has no Hitbox or Impact tab. Its Realm tab's five pages are what the swing
+does not say:
 
 - **Realm** — CLOCK (unfurl / held / fold seconds), COST (Qi cost — the art binding's; bind the move to a tree
   on Identity to have one — and Qi upkeep per second), GOVERNS (how many bodies, nearest first).
@@ -205,7 +230,7 @@ valid targets).
 Saving a weapon move whose values equal its built self **clears** the override instead of storing a
 copy, so a later rebuild of that weapon is not pinned to today's numbers.
 
-**Undo / redo** (Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z, or the ACTIONS row) step through your edits to the open
+**Undo / redo** (Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z, or the readout's pinned bar) step through your edits to the open
 move — per move, 50 deep, a held stepper or a gizmo drag counting as one step. It is an edit like any
 other (live after the debounce). A focused text field keeps its own undo. Revert, Reset to default,
 Delete, restoring a version and a bulk scale that touches the open move all clear its undo history.
@@ -217,6 +242,12 @@ Delete, restoring a version and a bulk scale that touches the open move all clea
   function the server runs on every contact — so a Cone's taper, an Arc's hub and sector and any rotation
   are drawn exactly as they hit. The volume is plotted relative to the root; a hand- or weapon-anchored
   move rides that part through the animation.
+- **Drag the timeline.** The three handles on the bar's edges retime windup, active and recovery (snapped
+  to 0.01 s, or to one frame with Shift); the bar shows the numbers you are setting until the server answers.
+  Where the clip's strike marker sets the windup, dragging it changes only the typed number — the caption
+  says so. **Press or drag the bar itself to scrub:** your character is held at that instant of the clip (a
+  green playhead marks it), so a hand- or weapon-anchored hitbox drawn on you sits where it really is then.
+  **Play clip** runs it forward and loops; **Release** lets your character go.
 - **Effective timeline.** What `AttackCatalog` actually throws once the clip has had its say: a strike
   marker replaces the windup, the clip's length decides the recovery, weapon speed and string tempo
   rescale both. Where a number differs from what you typed, your number is in brackets. Bronze marker =
@@ -315,6 +346,8 @@ the editor. Outside Studio the SOURCE section is absent and its remotes refuse `
 | Key | Does |
 |---|---|
 | `-` | open / close |
+| `↑` `↓` | step through the move list (not while typing, not in Place mode) |
+| `Ctrl+F` | focus the move filter |
 | `Esc` | close (a second press if there is unsaved work) |
 | `Ctrl+S` | save |
 | `Ctrl+D` | duplicate (a copy of a weapon move keeps its clip and becomes a custom move) |
@@ -347,7 +380,8 @@ the editor. Outside Studio the SOURCE section is absent and its remotes refuse `
 | Remotes, persistence, notes, bulk, history, source remotes | `Server/Systems/MoveEditorSystem.lua` |
 | DataStore records + legacy upgrade | `Server/Systems/Support/MoveRecordCodec.lua` |
 | Client driver | `Client/DevTools/MoveEditor/MoveEditorClient.lua` |
-| Screen | `Client/UI/Screens/DevTools/MoveEditor/` — `init.lua` (type bar, tab availability, lazy pages), `Fields.lua` (Section, Chips, Segmented, Lazy), `HitboxTab` / `DomainTab` (Realm, Boundary, Effects, Law, Clash) / `TimingTab` / `ImpactTab` / `PriceFields` (cost + knockback, shared by Impact and STRIKE PRICE) |
+| Screen | `Client/UI/Screens/DevTools/MoveEditor/` — `init.lua` (type bar, tab availability, the Realm sub-tabs, lazy pages, help strip), `Fields.lua` (Section, Chips, Segmented, Lazy, changed-field dots, MovePicker, Suggestions, Palette), `HitboxTab` / `DomainTab` (Realm, Boundary, Effects, Law, Clash) / `TimingTab` / `ImpactTab` / `PriceFields` (cost + knockback, shared by Impact and STRIKE PRICE), `TimelineBar` (drag-to-retime, scrub) |
+| Clip scrub, asset previews | `Client/DevTools/MoveEditor/ClipScrubber.lua` |
 
 **Adding a field** means: the type in `MoveTypes.MoveDefinition`, `Clone`, `ToWire`, `Validate` (with its
 bound in `Constants.MoveEditor.Limits`), the engine or damage projection if a runtime reads it, and a

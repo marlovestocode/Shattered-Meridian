@@ -20,7 +20,15 @@
 	because it decides which tabs there ARE (ScreenFrame.NewTabState's availability):
 
 	    Melee, Projectile    Hitbox  Timing  Impact  Presentation  Identity  Tools
-	    Domain Expansion     Realm  Boundary  Effects  Law  Clash  Timing  Presentation  Identity  Tools
+	    Domain Expansion     Realm  Timing  Presentation  Identity  Tools
+	                         (Realm's own sub-tab bar: Core  Boundary  Effects  Law  Clash -- REALM_PAGES)
+
+	THE 2026-10-07 PASS, for ease of use: the Realm sub-tabs above (nine top-level labels were too many for the
+	strip); a help strip under the form showing the hint of the field you are on, with a "Show hints" switch
+	to draw them all inline (Fields.lua's HINTS ARE ON DEMAND); a dot on every field that differs from the
+	saved move (CHANGED FIELDS, compared against SavedMove); the readout's pinned action bar; a timeline you
+	can drag and scrub (TimelineBar); typed New, type tags and arrow keys in the browser; and FitToViewport,
+	so the panel shrinks onto a screen smaller than itself.
 
 	A domain expansion shows only what a realm reads -- no volume to place, no Impact tab (its own strike's
 	price is on Effects) -- and still everything a move has: Timing (its cast), Presentation, Identity, Tools,
@@ -70,6 +78,7 @@ local Inset = require(script.Parent.Parent.Parent.Components.Inset)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
 local ScreenFrame = require(script.Parent.Parent.Parent.Components.ScreenFrame)
 local Stack = require(script.Parent.Parent.Parent.Components.Stack)
+local Tab = require(script.Parent.Parent.Parent.Components.Tab)
 
 local Browser = require(script.Browser)
 local Copy = require(script.Copy)
@@ -103,10 +112,6 @@ local READOUT_WIDTH = 344
 local TAB_NAMES: { string } = {
 	"Hitbox",
 	"Realm",
-	"Boundary",
-	"Effects",
-	"Law",
-	"Clash",
 	"Timing",
 	"Impact",
 	"Presentation",
@@ -114,9 +119,24 @@ local TAB_NAMES: { string } = {
 	"Tools",
 }
 
--- The tabs only a domain expansion has, and the two it does not.
-local DOMAIN_TABS = { "Realm", "Boundary", "Effects", "Law", "Clash" }
+-- A domain expansion's one tab, and the two it does not have.
+local DOMAIN_TABS = { "Realm" }
 local VOLUME_TABS = { "Hitbox", "Impact" }
+
+-- The Realm tab's own pages, under its sub-tab bar (2026-10-07: these were five top-level tabs, which left
+-- nine labels sharing the strip). The keys are the page names the rest of the editor uses -- Copy's refusal
+-- routing, ShowPage -- and "Realm" is the clock/cost page, shown as "Core" so the bar does not repeat its
+-- own tab's name.
+local REALM_PAGES: { string } = { "Realm", "Boundary", "Effects", "Law", "Clash" }
+local REALM_PAGE_TEXT: { [string]: string } = {
+	Realm = "Core",
+	Boundary = "Boundary",
+	Effects = "Effects",
+	Law = "Law",
+	Clash = "Clash",
+}
+local HELP_HEIGHT = 50
+local HELP_IDLE = "Point at a field -- or select it with a gamepad -- to see what it does here."
 
 local MOVE_TYPE_OPTIONS = {
 	{ Value = "Melee", Text = "Melee" },
@@ -171,6 +191,17 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 	local exportText = scope:Value(nil :: string?)
 	local selectedId = scope:Value(nil :: string?)
 	local draft = scope:Value(nil :: MoveTypes.MoveDefinition?)
+	-- The form's "Show hints" switch (Fields.lua's HINTS ARE ON DEMAND). Off: the help strip carries them.
+	local hintsShown = scope:Value(false)
+	-- Which of the Realm tab's pages is shown (REALM_PAGES).
+	local realmPage = scope:Value(REALM_PAGES[1])
+	-- The clip scrub (TimelineBar, driven by the client): a swing time the clip is held at on your own
+	-- character, or nil while nothing is scrubbed; Playing runs it forward at real speed.
+	local scrubTime = scope:Value(nil :: number?)
+	local scrubPlaying = scope:Value(false)
+	-- The move rows the browser shows, in order -- what the arrow keys step through.
+	local browserOrder = scope:Value({} :: { string })
+	local filterBox = scope:Value(nil :: TextBox?)
 	local isDomain = scope:Computed(function(use)
 		local current = use(draft)
 		return current ~= nil and current.Domain ~= nil
@@ -215,6 +246,18 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 	local hasDraft = scope:Computed(function(use)
 		return use(draft) ~= nil
 	end)
+	-- The open move as it is SAVED, for the changed-field dots: the entry carries it whenever the live move
+	-- differs (MoveEditorTypes.MoveEntry.Saved); when it does not, the live move IS the saved one.
+	local savedMove = scope:Computed(function(use): MoveTypes.MoveDefinition?
+		local entry = use(selectedEntry)
+		if entry == nil or entry.SavedFingerprint == nil then
+			return nil
+		end
+		if entry.Saved then
+			return entry.Saved
+		end
+		return if entry.SavedFingerprint == MoveTypes.Fingerprint(entry.Move) then entry.Move else nil
+	end)
 
 	-- Raw BindableEvents need registering with the scope to be cleaned up with it (Studio hot reload
 	-- re-runs Mount) -- see Screens/Menus/init.lua.
@@ -247,6 +290,7 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 	local removeFromSourceRequested = signal()
 	local exportSourceRequested = signal()
 	local previewCueRequested = signal()
+	local previewAssetRequested = signal()
 
 	local history = DraftHistory.new(Constants.MoveEditor.UndoDepth, Constants.MoveEditor.UndoCoalesceSeconds)
 	-- DraftHistory is plain data; this bumps whenever it changes so CanUndo/CanRedo recompute.
@@ -285,10 +329,87 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 		step(DraftHistory.Redo)
 	end
 
+	-- The help strip (Fields.lua's HINTS ARE ON DEMAND): every registered field frame says what it is when the
+	-- pointer is on it, a control inside it is selected, or a text box inside it has focus. Weak keys: a frame
+	-- a scope destroys drops out with it.
+	local helpTitle = scope:Value("")
+	local helpText = scope:Value("")
+	local helpOwner: Instance? = nil
+	local helpOf: { [Instance]: { Title: string, Hint: Fusion.UsedAs<string>? } } = setmetatable({}, { __mode = "k" }) :: any
+	local function showHelp(owner: Instance): ()
+		local help = helpOf[owner]
+		if not help then
+			return
+		end
+		helpOwner = owner
+		helpTitle:set(help.Title)
+		local hint = if help.Hint == nil then "" else peek(help.Hint)
+		helpText:set(if hint ~= "" then hint else "No notes for this one -- its label is the whole story.")
+	end
+	local function hideHelp(owner: Instance): ()
+		if helpOwner == owner then
+			helpOwner = nil
+			helpTitle:set("")
+			helpText:set("")
+		end
+	end
+	-- The nearest registered frame at or above `instance`.
+	local function helpAt(instance: Instance?): Instance?
+		local cursor = instance
+		while cursor do
+			if helpOf[cursor] then
+				return cursor
+			end
+			cursor = cursor.Parent
+		end
+		return nil
+	end
+	local function followFocus(instance: Instance?): ()
+		local owner = helpAt(instance)
+		if owner then
+			showHelp(owner)
+		end
+	end
+	-- Selection and text focus are not on every client (and not in a headless spec), so each is optional.
+	pcall(function()
+		local GuiService = game:GetService("GuiService")
+		table.insert(
+			scope,
+			GuiService:GetPropertyChangedSignal("SelectedObject"):Connect(function()
+				followFocus(GuiService.SelectedObject)
+			end)
+		)
+	end)
+	pcall(function()
+		local UserInputService = game:GetService("UserInputService")
+		table.insert(scope, UserInputService.TextBoxFocused:Connect(followFocus))
+	end)
+
 	local context: Fields.FormContext = {
 		Draft = draft,
 		IsDefault = isDefault,
 		Entry = selectedEntry,
+		Saved = savedMove,
+		Entries = entries,
+		Hints = hintsShown,
+		RegisterHelp = function(holder: GuiObject, title: string, hint: Fusion.UsedAs<string>?)
+			helpOf[holder] = { Title = title, Hint = hint }
+			table.insert(
+				scope,
+				holder.MouseEnter:Connect(function()
+					showHelp(holder)
+				end)
+			)
+			table.insert(
+				scope,
+				holder.MouseLeave:Connect(function()
+					hideHelp(holder)
+				end)
+			)
+		end,
+		PreviewAsset = function(kind: string, id: string)
+			previewAssetRequested:Fire(kind, id)
+		end,
 		Edit = function(mutate)
 			local current = peek(draft)
 			if not current then
@@ -360,6 +481,94 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 		Children = typeBarChildren,
 	})
 
+	-- The Realm tab: its sub-tab bar over five pages, each built on its first visit like a top-level page.
+	local function realmTab(visible: Fusion.Computed<boolean>): Instance
+		local builders: { [string]: (Fusion.Computed<boolean>) -> Instance } = {
+			Realm = function(shown)
+				return DomainTab.Realm(scope, context, shown)
+			end,
+			Boundary = function(shown)
+				return DomainTab.Boundary(scope, context, shown, { ShowOnCharacter = showOnCharacter })
+			end,
+			Effects = function(shown)
+				return DomainTab.Effects(scope, context, shown)
+			end,
+			Law = function(shown)
+				return DomainTab.Law(scope, context, shown)
+			end,
+			Clash = function(shown)
+				return DomainTab.Clash(scope, context, shown)
+			end,
+		}
+		local subPages: { Instance } = {}
+		local options: { Fields.Option } = {}
+		for _, name in REALM_PAGES do
+			table.insert(options, { Value = name, Text = REALM_PAGE_TEXT[name] })
+			local shown = scope:Computed(function(use)
+				return use(visible) and use(realmPage) == name
+			end)
+			table.insert(
+				subPages,
+				Fields.Lazy(scope, {
+					Name = `{name}Page`,
+					Visible = shown,
+					Build = function()
+						return { builders[name](shown) }
+					end,
+				})
+			)
+		end
+		return Stack.New(scope, {
+			Name = "RealmPages",
+			Size = UDim2.fromScale(1, 1),
+			Gap = Tokens.Space.S,
+			Children = {
+				Fields.Segmented(scope, {
+					Options = options,
+					Value = realmPage,
+					LayoutOrder = 1,
+					OnChanged = function(name: string)
+						realmPage:set(name)
+					end,
+				}),
+				Stack.Fill(
+					scope,
+					scope:New "Frame" {
+						Name = "RealmPageHolder",
+						Size = UDim2.fromScale(1, 0),
+						BackgroundTransparency = 1,
+						LayoutOrder = 2,
+						[Fusion.Children] = subPages,
+					}
+				),
+			},
+		})
+	end
+
+	-- Shows a page by the name the editor files it under: a top-level tab, or one of the Realm tab's pages.
+	local function showPage(name: string): ()
+		if table.find(REALM_PAGES, name) then
+			tabs.Current:set("Realm")
+			realmPage:set(name)
+		else
+			tabs.Current:set(name)
+		end
+	end
+
+	-- Steps the open move through the browser's visible rows (the arrow keys).
+	local function stepSelection(delta: number): ()
+		local order = peek(browserOrder)
+		if #order == 0 then
+			return
+		end
+		local index = table.find(order, peek(selectedId) or "")
+		local nextIndex = if index then math.clamp(index + delta, 1, #order) elseif delta > 0 then 1 else #order
+		local target = order[nextIndex]
+		if target and target ~= peek(selectedId) then
+			selectRequested:Fire(target)
+		end
+	end
+
 	local placeInWorld = function()
 		if peek(draft) then
 			placementMode:set(true)
@@ -375,19 +584,7 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 			})
 		end),
 		page("Realm", function(visible)
-			return DomainTab.Realm(scope, context, visible)
-		end),
-		page("Boundary", function(visible)
-			return DomainTab.Boundary(scope, context, visible, { ShowOnCharacter = showOnCharacter })
-		end),
-		page("Effects", function(visible)
-			return DomainTab.Effects(scope, context, visible)
-		end),
-		page("Law", function(visible)
-			return DomainTab.Law(scope, context, visible)
-		end),
-		page("Clash", function(visible)
-			return DomainTab.Clash(scope, context, visible)
+			return realmTab(visible)
 		end),
 		page("Timing", function(visible)
 			return TimingTab(scope, context, visible)
@@ -450,11 +647,67 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 		[Fusion.Children] = pageList,
 	} :: Frame
 
+	-- Under the pages: the hint of the field you are on, and the switch that draws every hint inline instead.
+	local helpStrip = Stack.Row(scope, {
+		Name = "HelpStrip",
+		Size = UDim2.new(1, 0, 0, HELP_HEIGHT),
+		Gap = Tokens.Space.M,
+		AlignY = Enum.VerticalAlignment.Center,
+		LayoutOrder = 3,
+		Visible = hasDraft,
+		Children = {
+			Stack.Fill(
+				scope,
+				Stack.New(scope, {
+					Name = "Help",
+					Size = UDim2.fromScale(0, 1),
+					Gap = 2,
+					LayoutOrder = 1,
+					Children = {
+						Label(scope, {
+							Text = helpTitle,
+							Scale = "Body",
+							Color = Tokens.Color.TextPrimary,
+							Size = UDim2.new(1, 0, 0, Tokens.Type.Body.Size + 2),
+							TextTruncate = Enum.TextTruncate.AtEnd,
+							LayoutOrder = 1,
+							Visible = scope:Computed(function(use)
+								return use(helpTitle) ~= ""
+							end),
+						}),
+						Label(scope, {
+							Text = scope:Computed(function(use)
+								local text = use(helpText)
+								return if text ~= "" then text else HELP_IDLE
+							end),
+							Scale = "Detail",
+							Color = Tokens.Color.TextSecondary,
+							Size = UDim2.new(1, 0, 1, -(Tokens.Type.Body.Size + 4)),
+							TextWrapped = true,
+							TextTruncate = Enum.TextTruncate.AtEnd,
+							LayoutOrder = 2,
+						}),
+					},
+				})
+			),
+			Tab(scope, {
+				Text = "Show hints",
+				Selected = hintsShown,
+				Size = UDim2.fromOffset(104, Tokens.Control.StepButtonSize - 4),
+				LayoutOrder = 2,
+				OnActivated = function()
+					hintsShown:set(not peek(hintsShown))
+				end,
+			}),
+		},
+	})
+
 	local formChildren: { Instance } = {
-		Inset(scope, { Top = Tokens.Space.M, X = Tokens.Space.L }),
+		Inset(scope, { Top = Tokens.Space.M, Bottom = Tokens.Space.S, X = Tokens.Space.L }),
 		typeBar,
-		-- The pages take whatever the type bar leaves.
+		-- The pages take whatever the type bar and the help strip leave.
 		Stack.Fill(scope, pages),
+		helpStrip,
 	}
 	local form = Stack.New(scope, {
 		Name = "Form",
@@ -467,6 +720,8 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 	ScreenFrame.Mount(scope, playerGui, {
 		Name = "MoveEditor",
 		Size = UDim2.fromOffset(ROOT_WIDTH, ROOT_HEIGHT),
+		-- Shrinks to fit a screen smaller than the panel (a 1366x768 laptop) and grows on a big one.
+		FitToViewport = true,
 		-- Place mode steps the modal aside -- the SESSION stays open (IsOpen, and the character's freeze),
 		-- only the frame goes, so the cursor and camera are free to work the gizmo.
 		IsOpen = scope:Computed(function(use)
@@ -493,9 +748,11 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 					OnSelect = function(moveId: string)
 						selectRequested:Fire(moveId)
 					end,
-					OnNew = function()
-						newRequested:Fire()
+					OnNew = function(kind: string)
+						newRequested:Fire(kind)
 					end,
+					Order = browserOrder,
+					FilterBox = filterBox,
 				}),
 				Stack.Fill(scope, form),
 				Readout(scope, {
@@ -553,6 +810,9 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 					OnClearHitLog = function()
 						clearHitLogRequested:Fire()
 					end,
+					Edit = context.Edit,
+					ScrubTime = scrubTime,
+					ScrubPlaying = scrubPlaying,
 				}),
 			},
 		}),
@@ -583,6 +843,21 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 		IsDirty = isDirty,
 		CurrentTab = tabs.Current,
 		ShownTab = tabs.Shown,
+		RealmPage = realmPage,
+		ShowPage = showPage,
+		StepSelection = stepSelection,
+		FocusFilter = function()
+			local box = peek(filterBox)
+			if box then
+				box:CaptureFocus()
+			end
+		end,
+		SetMoveType = setMoveType,
+		HintsShown = hintsShown,
+		SavedMove = savedMove,
+		ScrubTime = scrubTime,
+		ScrubPlaying = scrubPlaying,
+		PreviewAssetRequested = previewAssetRequested.Event,
 		IsDomain = isDomain,
 		CanUndo = canUndo,
 		CanRedo = canRedo,

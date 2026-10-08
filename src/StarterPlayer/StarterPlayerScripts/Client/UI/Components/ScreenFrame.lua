@@ -133,6 +133,9 @@ export type ScreenFrameProps = {
 	-- component's own default -- a screen sized against its own content is not automatically safe to
 	-- scale, so it stays a per-screen opt-in.
 	AutoScale: boolean?,
+	-- AutoScale that also shrinks the panel to stay on screen (ModalScreen.FitSize), for a panel larger than
+	-- the reference resolution leaves room for. Size must then be an offset UDim2.
+	FitToViewport: boolean?,
 	-- The tab strip's contents. Exactly one of Tabs/Title -- see this file's header.
 	Tabs: TabState?,
 	-- The panel's name, for a screen with no tabs.
@@ -342,11 +345,14 @@ local function footer(scope: Scope, props: ScreenFrameProps): Frame
 end
 
 function ScreenFrame.Mount(scope: Scope, playerGui: PlayerGui, props: ScreenFrameProps): Frame
+	local authored = Fusion.peek(props.Size)
+	local fitSize = if props.FitToViewport then Vector2.new(authored.X.Offset, authored.Y.Offset) else nil
 	return ModalScreen(scope, playerGui, {
 		Name = props.Name,
 		Size = props.Size,
 		IsOpen = props.IsOpen,
 		AutoScale = props.AutoScale,
+		FitSize = fitSize,
 		-- Flush bands: a band with a 16px margin around it is not a band, it's a card.
 		Padding = 0,
 		Gap = 0,

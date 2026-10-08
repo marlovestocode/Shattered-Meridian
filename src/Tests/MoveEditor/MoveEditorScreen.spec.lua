@@ -59,10 +59,13 @@ local function realm(): DomainTypes.DomainSpec
 	return spec
 end
 
-local DOMAIN_ONLY = { "Realm", "Boundary", "Effects", "Law", "Clash" }
+local DOMAIN_ONLY = { "Realm" }
 local VOLUME_ONLY = { "Hitbox", "Impact" }
 local SHARED = { "Timing", "Presentation", "Identity", "Tools" }
--- The ScrollArea each tab's page is named (its module's Fields.Page call).
+-- The Realm tab's own pages, under its sub-tab bar.
+local REALM_PAGES = { "Realm", "Boundary", "Effects", "Law", "Clash" }
+-- The ScrollArea each page is named (its module's Fields.Page call). The Realm tab's own frame is
+-- RealmPages; "Realm" here is its first page, the clock and cost.
 local PAGE_NAMES: { [string]: string } = {
 	Hitbox = "HitboxTab",
 	Realm = "RealmTab",
@@ -76,6 +79,7 @@ local PAGE_NAMES: { [string]: string } = {
 	Identity = "IdentityTab",
 	Tools = "ToolsTab",
 }
+local TOP_TABS = { "Hitbox", "Realm", "Timing", "Impact", "Presentation", "Identity", "Tools" }
 
 return function()
 	local function mount(): (any, Folder)
@@ -153,7 +157,7 @@ return function()
 			end
 		end)
 
-		it("gives a domain expansion its five tabs instead of Hitbox and Impact, and keeps the rest", function()
+		it("gives a domain expansion its Realm tab instead of Hitbox and Impact, and keeps the rest", function()
 			local handle = mount()
 			handle.Draft:set(move({ Domain = realm() }))
 			expect(peek(handle.IsDomain)).to.equal(true)
@@ -205,18 +209,35 @@ return function()
 			for _, subject in subjects do
 				local handle, parent = mount()
 				handle.Draft:set(subject)
-				for tab in PAGE_NAMES do
+				for _, tab in TOP_TABS do
 					if offers(handle, tab) then
-						expect(pageOf(parent, tab)).to.be.ok()
+						if tab == "Realm" then
+							for _, page in REALM_PAGES do
+								handle.ShowPage(page)
+								expect(pageOf(parent, page)).to.be.ok()
+							end
+						else
+							expect(pageOf(parent, tab)).to.be.ok()
+						end
 					end
 				end
 			end
 		end)
 
+		it("folds a realm's five pages under the Realm tab, built on first visit", function()
+			local handle, parent = mount()
+			handle.Draft:set(move({ Domain = realm() }))
+			handle.ShowPage("Law")
+			expect(peek(handle.ShownTab)).to.equal("Realm")
+			expect(peek(handle.RealmPage)).to.equal("Law")
+			expect(pageOf(parent, "Law")).to.be.ok()
+			expect(pageOf(parent, "Clash")).to.equal(nil)
+		end)
+
 		it("builds a realm's effect slot only once the slot exists", function()
 			local handle, parent = mount()
 			handle.Draft:set(move({ Domain = realm() }))
-			handle.CurrentTab:set("Effects")
+			handle.ShowPage("Effects")
 			local page = pageOf(parent, "Effects") :: Instance
 			local function bodyOf(index: number): Instance
 				local section = page:FindFirstChild(`Section_EFFECT {index}`, true) :: Instance
@@ -259,6 +280,100 @@ return function()
 				expect(failure.Tab).never.to.equal("Domain")
 				expect(PAGE_NAMES[Copy.FailureTab(failure, true) :: string]).to.be.ok()
 			end
+		end)
+	end)
+	describe("changed fields", function()
+		local function openSaved(handle: any, saved: MoveTypes.MoveDefinition)
+			handle.Entries:set({
+				{
+					Move = saved,
+					Source = "Custom",
+					Group = "Custom",
+					SavedFingerprint = MoveTypes.Fingerprint(saved),
+					Overridden = false,
+					Shipped = false,
+					Notes = {},
+				},
+			})
+			handle.SelectedId:set(saved.MoveId)
+			handle.Draft:set(MoveTypes.Clone(saved))
+		end
+
+		local function dotOf(parent: Instance, title: string): Instance
+			local holder = parent:FindFirstChild(`Field_{title}`, true) :: Instance
+			return holder:FindFirstChild("Changed") :: Instance
+		end
+
+		it("marks a field that differs from the saved move, and its dot puts the saved value back", function()
+			local handle, parent = mount()
+			openSaved(handle, move())
+			handle.CurrentTab:set("Impact")
+			local dot = dotOf(parent, "Damage") :: any
+			expect(dot.Visible).to.equal(false)
+
+			handle.EditDraft(function(draft)
+				draft.Damage = 25
+			end)
+			expect(dot.Visible).to.equal(true)
+
+			dot.Activated:Fire()
+			expect((peek(handle.Draft) :: any).Damage).to.equal(10)
+			expect(dot.Visible).to.equal(false)
+		end)
+
+		it("shows no dots for a move that was never saved", function()
+			local handle = mount()
+			handle.Draft:set(move())
+			expect(peek(handle.SavedMove)).to.equal(nil)
+		end)
+	end)
+
+	describe("hints", function()
+		it("leaves hints to the help strip until Show hints is on", function()
+			local handle, parent = mount()
+			handle.Draft:set(move())
+			handle.CurrentTab:set("Timing")
+			local holder = parent:FindFirstChild("Field_Windup", true) :: Instance
+			local function hintShown(): boolean
+				for _, child in holder:GetDescendants() do
+					if child:IsA("TextLabel") and (child :: any).Text == Copy.Hints.Windup then
+						return (child :: any).Visible
+					end
+				end
+				return false
+			end
+			expect(hintShown()).to.equal(false)
+			handle.HintsShown:set(true)
+			expect(hintShown()).to.equal(true)
+		end)
+	end)
+
+	describe("the move list", function()
+		it("steps the open move through the rows on show", function()
+			local handle = mount()
+			local first, second =
+				move({ MoveId = "spec-a", DisplayName = "A" }), move({ MoveId = "spec-b", DisplayName = "B" })
+			local function entry(subject: MoveTypes.MoveDefinition)
+				return {
+					Move = subject,
+					Source = "Custom",
+					Group = "Custom",
+					SavedFingerprint = nil,
+					Overridden = false,
+					Shipped = false,
+					Notes = {},
+				}
+			end
+			handle.Entries:set({ entry(first), entry(second) })
+			local asked: { string } = {}
+			handle.SelectRequested:Connect(function(id: string)
+				table.insert(asked, id)
+			end)
+			handle.StepSelection(1)
+			expect(asked[1]).to.equal("spec-a")
+			handle.SelectedId:set("spec-a")
+			handle.StepSelection(1)
+			expect(asked[2]).to.equal("spec-b")
 		end)
 	end)
 end

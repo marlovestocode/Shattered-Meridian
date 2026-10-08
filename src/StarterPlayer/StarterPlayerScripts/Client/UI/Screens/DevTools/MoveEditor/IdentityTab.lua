@@ -11,6 +11,10 @@
 	next to the move's name, rather than buried in a tab of mechanics.
 
 	A Default move's identity is fixed by its place in the roster, so everything here is a fact for it.
+
+	NOTHING HERE IS TYPED THAT COULD BE PICKED (2026-10-07). The prerequisite is chosen from the arts the
+	editor knows (Fields.MovePicker), and the category offers every category already in use under its box, so
+	a typo cannot quietly create a second browser group.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -46,6 +50,20 @@ local function IdentityTab(scope: Scope, context: Fields.FormContext, visible: U
 			return if move then read(move) else "-"
 		end)
 	end
+	-- Every category a custom move files under, alphabetised -- the Category field's suggestions.
+	local categories = scope:Computed(function(use): { string }
+		local seen: { [string]: boolean } = {}
+		local list: { string } = {}
+		for _, entry in use(context.Entries) do
+			local category = entry.Move.Category
+			if entry.Source == "Custom" and category ~= "" and not seen[category] then
+				seen[category] = true
+				table.insert(list, category)
+			end
+		end
+		table.sort(list)
+		return list
+	end)
 
 	local function artNumber(
 		label: string,
@@ -99,6 +117,15 @@ local function IdentityTab(scope: Scope, context: Fields.FormContext, visible: U
 			Set = function(move, value)
 				move.Category = value
 			end,
+			-- The categories other custom moves already file under, one press each -- so "Signature" and
+			-- "signature " do not become two groups in the browser.
+			Extra = {
+				Fields.Suggestions(scope, context, categories, function(move)
+					return move.Category
+				end, function(move, value)
+					move.Category = value
+				end),
+			},
 		}),
 		Fields.Text(scope, context, {
 			Label = "Intent",
@@ -183,10 +210,12 @@ local function IdentityTab(scope: Scope, context: Fields.FormContext, visible: U
 		artNumber("Node  (depth in the tree)", 14, "Node", ArtConstants.Limits.Node, 0),
 		artNumber("Qi cost", 15, "QiCost", ArtConstants.Limits.QiCost, 0),
 		artNumber("Required tier", 16, "RequiredTier", ArtConstants.Limits.RequiredTier, 0),
-		Fields.Text(scope, context, {
+		Fields.MovePicker(scope, context, {
 			Label = "Prerequisite",
-			Placeholder = "the art's move id, or blank",
-			MaxLength = 64,
+			BlankText = "No prerequisite",
+			Accepts = function(entry)
+				return entry.Move.Art ~= nil
+			end,
 			Hint = Copy.Hints.Prerequisite,
 			LayoutOrder = 17,
 			Visible = isArt,

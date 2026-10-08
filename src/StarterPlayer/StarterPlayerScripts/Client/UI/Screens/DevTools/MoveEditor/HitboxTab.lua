@@ -35,6 +35,15 @@
 	PLACEMENT ends with the in-world tools -- "Place in world" (Place mode: drag the volume with handles
 	on your own character) and "Show on my character" -- beside the offset and rotation fields they edit:
 	they are a way of TYPING those numbers, by hand in the world. For a projectile they place its spawn.
+
+	FORWARD IS PLUS (2026-10-07). The engine's offset is a CFrame, where forward is -Z; the form shows that
+	axis as "Forward" and flips the sign on the way in and out, because it is the axis an author edits most
+	and "Back (forward is minus)" made every one of those edits a sign to get right. Only the display flips:
+	the stored offset, the presets and Place mode are unchanged.
+
+	A PROJECTILE'S SPAWN SITS UNDER ITS BODY, the same second place a melee move's PLACEMENT has, and the
+	three groups an author tunes least -- HOMING, COLLISION, PARRY -- start folded (each says what it is set
+	to in its heading, so folded still reads). The "Start from" presets describe themselves on hover.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -79,6 +88,24 @@ local function presetOptions(presets: { { Id: string } }): { Fields.Option }
 end
 local VOLUME_PRESET_OPTIONS = presetOptions(HitboxTypes.Presets :: any)
 local BODY_PRESET_OPTIONS = presetOptions(ProjectileTypes.Presets :: any)
+
+-- What each preset is, for its chip's hover line: the preset's own Label and Note.
+local function presetDescriptions(presets: { { Id: string, Label: string?, Note: string? } }): { [string]: string }
+	local described: { [string]: string } = {}
+	for _, preset in presets do
+		local parts = {}
+		if preset.Label then
+			table.insert(parts, preset.Label)
+		end
+		if preset.Note then
+			table.insert(parts, preset.Note)
+		end
+		described[preset.Id] = if #parts > 0 then table.concat(parts, ". ") else preset.Id
+	end
+	return described
+end
+local VOLUME_PRESET_TEXT = presetDescriptions(HitboxTypes.Presets :: any)
+local BODY_PRESET_TEXT = presetDescriptions(ProjectileTypes.Presets :: any)
 
 -- Display text for every projectile option, keyed by the option itself; the ORDER is ProjectileTypes'
 -- own list, so an option added there is offered here with its raw name until it is given words.
@@ -174,11 +201,12 @@ end
 
 local SCALE_FACTORS = { 0.5, 0.8, 1.25, 2 }
 
--- Placement axes: label, and which component of the offset / rotation it is.
+-- Placement axes: label, which component of the offset it is, and the sign the form shows it with -- Z is
+-- shown as Forward, plus ahead (see this file's header).
 local OFFSET_AXES = {
-	{ Axis = "X", Label = "Right" },
-	{ Axis = "Y", Label = "Up" },
-	{ Axis = "Z", Label = "Back  (forward is minus)" },
+	{ Axis = "X", Label = "Offset  ·  Right", Sign = 1 },
+	{ Axis = "Y", Label = "Offset  ·  Up", Sign = 1 },
+	{ Axis = "Z", Label = "Offset  ·  Forward", Sign = -1 },
 }
 
 local function setOffset(move: Move, axis: string, value: number): ()
@@ -405,7 +433,7 @@ local function HitboxTab(
 				end,
 			})
 		end
-		return Fields.ButtonRow(scope, {
+		return Fields.ButtonRow(scope, context, {
 			Label = "Scale",
 			Buttons = buttons,
 			Hint = Copy.Hints.ScaleVolume,
@@ -474,16 +502,18 @@ local function HitboxTab(
 			table.insert(
 				fields,
 				Fields.Number(scope, context, {
-					Label = `Offset {axis.Axis}  ·  {axis.Label}`,
+					Label = axis.Label,
 					Unit = "studs",
 					Range = LIMITS.OffsetStuds,
 					Steps = { 0.25, 1 },
 					LayoutOrder = 2 + index,
 					Get = function(move)
-						return (move.Offset.Position :: any)[axis.Axis]
+						local value = (move.Offset.Position :: any)[axis.Axis] * axis.Sign
+						-- Never a negative zero: the readout would print "-0.00".
+						return if value == 0 then 0 else value
 					end,
 					Set = function(move, value)
-						setOffset(move, axis.Axis, value)
+						setOffset(move, axis.Axis, value * axis.Sign)
 					end,
 				})
 			)
@@ -539,6 +569,7 @@ local function HitboxTab(
 			Toggle(scope, {
 				Label = "Show on my character",
 				Hint = "Draws the volume where the engine anchors it, live -- only you see it.",
+				HintVisible = context.Hints,
 				Value = world.ShowOnCharacter,
 				LayoutOrder = 21,
 				OnChanged = function(on: boolean)
@@ -550,7 +581,7 @@ local function HitboxTab(
 	end
 	local function placementSummary(move: Move): string
 		local position = move.Offset.Position
-		return string.format("%s  ·  %g, %g, %g", move.AttachmentPart, position.X, position.Y, position.Z)
+		return string.format("%s  ·  R %g  U %g  F %g", move.AttachmentPart, position.X, position.Y, -position.Z)
 	end
 
 	local children: { Instance } = {
@@ -569,6 +600,7 @@ local function HitboxTab(
 					Fields.ActionChips(scope, context, {
 						Label = "Start from",
 						Options = VOLUME_PRESET_OPTIONS,
+						Describe = VOLUME_PRESET_TEXT,
 						Hint = Copy.Hints.ShapePresets,
 						LayoutOrder = 1,
 						Visible = isCustom,
@@ -673,6 +705,7 @@ local function HitboxTab(
 					Fields.ActionChips(scope, context, {
 						Label = "Start from",
 						Options = BODY_PRESET_OPTIONS,
+						Describe = BODY_PRESET_TEXT,
 						Hint = Copy.Hints.BodyPresets,
 						LayoutOrder = 1,
 						Apply = function(move, id)
@@ -705,7 +738,7 @@ local function HitboxTab(
 					then "one shot"
 					else `{OPTION_TEXT[spec.SpreadPattern] or spec.SpreadPattern}  ·  {spec.Count} shots`
 			end),
-			LayoutOrder = 11,
+			LayoutOrder = 12,
 			Visible = customProjectile,
 			Build = function()
 				return {
@@ -767,7 +800,7 @@ local function HitboxTab(
 					)
 					else ""
 			end),
-			LayoutOrder = 12,
+			LayoutOrder = 13,
 			Visible = customProjectile,
 			Build = function()
 				return {
@@ -788,7 +821,8 @@ local function HitboxTab(
 				end
 				return if spec.Homing then string.format("%g°/s turn", spec.HomingStrength) else "Off"
 			end),
-			LayoutOrder = 13,
+			LayoutOrder = 14,
+			StartClosed = true,
 			Visible = customProjectile,
 			Build = function()
 				local homes = whenSpec(function(spec)
@@ -824,7 +858,8 @@ local function HitboxTab(
 				local line = `walls: {OPTION_TEXT[spec.CollisionBehavior] or spec.CollisionBehavior}`
 				return if spec.Piercing then `{line}  ·  pierces {spec.MaxPierces}` else line
 			end),
-			LayoutOrder = 14,
+			LayoutOrder = 15,
+			StartClosed = true,
 			Visible = customProjectile,
 			Build = function()
 				return {
@@ -868,7 +903,8 @@ local function HitboxTab(
 					then behavior
 					else `{behavior}  ·  {OPTION_TEXT[spec.ParryResponse] or spec.ParryResponse}`
 			end),
-			LayoutOrder = 15,
+			LayoutOrder = 16,
+			StartClosed = true,
 			Visible = customProjectile,
 			Build = function()
 				local parryable = whenSpec(function(spec)
@@ -909,7 +945,8 @@ local function HitboxTab(
 		Fields.Section(scope, {
 			Title = "SPAWN",
 			Summary = summary(placementSummary),
-			LayoutOrder = 16,
+			-- Second, under BODY: where it comes from, as PLACEMENT is a melee move's second question.
+			LayoutOrder = 11,
 			Visible = both(isCustom, isProjectile),
 			Build = function()
 				return placementBody(true)

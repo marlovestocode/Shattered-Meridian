@@ -27,6 +27,18 @@
 	600px over the fields below. Dropdowns stay for the long lists (fifteen rule kinds). Segmented is the
 	same chip, filling a row, for the one choice that reshapes the whole editor (the move type bar).
 
+	CHANGED FIELDS (2026-10-07). Every bound field (Number, Toggle, Choice, Chips, Text, the pickers) reads its
+	value off the draft AND off the context's Saved move with the same Get, and while the two differ a bronze
+	dot sits in the gutter to its left. Pressing the dot writes the saved value back through the field's own
+	Set -- one ordinary edit, so it previews and undoes like any other. There is no per-field "reset to
+	DEFAULT" (NumericField's header says why: no single source of defaults); the SAVED move is a single
+	source, which is what makes this one possible. A never-saved move has no Saved and shows no dots.
+
+	HINTS ARE ON DEMAND (2026-10-07). A field's hint is still built under it, but drawn only while the form's
+	"Show hints" switch is on (context.Hints). Otherwise the help strip under the form shows the hint of the
+	one field under the pointer, the gamepad selection or the focused text box (context.RegisterHelp), so a
+	page reads as its controls and the prose is one glance away.
+
 	Does not own: which fields exist or what they are called (the tab modules), the bounds (Constants
 	.MoveEditor.Limits and the runtime tables it defers to), or the primitives' own look.
 ]]
@@ -52,6 +64,8 @@ local Tab = require(script.Parent.Parent.Parent.Parent.Components.Tab)
 local TextField = require(script.Parent.Parent.Parent.Parent.Components.TextField)
 local Toggle = require(script.Parent.Parent.Parent.Parent.Components.Toggle)
 
+local Copy = require(script.Parent.Copy)
+
 local peek = Fusion.peek
 
 type Scope = Fusion.Scope<typeof(Fusion)>
@@ -69,6 +83,19 @@ export type FormContext = {
 	-- Timing tab's clip match). nil until the server has answered for a brand-new move.
 	Entry: UsedAs<MoveEditorTypes.MoveEntry?>,
 	Edit: Edit,
+	-- The open move as it is SAVED (what a restart would load), or nil when it never was. Every bound field
+	-- compares its own value against this one and marks itself when they differ (see CHANGED FIELDS).
+	Saved: UsedAs<Move?>,
+	-- Every move the editor knows, for the pickers that name another move by id.
+	Entries: UsedAs<{ MoveEditorTypes.MoveEntry }>,
+	-- The form's "Show hints" switch: true draws every field's hint under it; false leaves the hints to
+	-- the help strip, which shows the one field under the pointer or the gamepad selection.
+	Hints: UsedAs<boolean>,
+	-- Registers `holder` (a field's outer frame) with the help strip: hovering it, selecting a control
+	-- inside it or focusing a text box inside it shows `title` and `hint` there.
+	RegisterHelp: (holder: GuiObject, title: string, hint: UsedAs<string>?) -> (),
+	-- Plays an asset id on this client: "Sound" through a local Sound, "Animation" on your own character.
+	PreviewAsset: (kind: string, id: string) -> (),
 }
 
 local Fields = {}
@@ -93,9 +120,115 @@ export type NumberSpec = {
 	LayoutOrder: number,
 }
 
+-- Changed fields ------------------------------------------------------------------------------------------
+
+-- The gutter a field's changed-dot sits in, left of the field (Fields.Page pads its content by this much).
+local GUTTER = 14
+local DOT_SIZE = 6
+
+local function sameValue(a: any, b: any): boolean
+	if typeof(a) == "number" and typeof(b) == "number" then
+		return math.abs(a - b) < 1e-4
+	end
+	return a == b
+end
+
+export type Tracking = {
+	-- The help strip's title for this field.
+	Title: string,
+	Hint: UsedAs<string>?,
+	-- The field's own read and write; nil for a field with no value of its own (it gets no dot).
+	Get: ((Move) -> any)?,
+	Set: ((Move, any) -> ())?,
+	LayoutOrder: number?,
+	Visible: UsedAs<boolean>?,
+}
+
+-- Wraps a built field in its holder: the changed-dot in the gutter and the help-strip registration (see
+-- this file's header). The holder takes over the field's LayoutOrder and Visible, so the field keeps its own
+-- conditions and the holder is what its parent lays out.
+local function tracked(scope: Scope, context: FormContext, field: GuiObject, tracking: Tracking): Frame
+	local children: { Instance } = { field }
+	local get, set = tracking.Get, tracking.Set
+	if get and set then
+		local changed = scope:Computed(function(use): boolean
+			local saved = use(context.Saved)
+			local move = use(context.Draft)
+			if saved == nil or move == nil then
+				return false
+			end
+			return not sameValue(get(move), get(saved))
+		end)
+		local engagement = Selection.New(scope)
+		local dot = scope:New "TextButton" {
+			Name = "Changed",
+			AnchorPoint = Vector2.new(0.5, 0),
+			Position = UDim2.fromOffset(-GUTTER / 2, 2),
+			Size = UDim2.fromOffset(GUTTER, 18),
+			BackgroundTransparency = 1,
+			AutoButtonColor = false,
+			Text = "",
+			Visible = changed,
+			ZIndex = 2,
+			[Fusion.OnEvent "MouseEnter"] = engagement.OnPointerEnter,
+			[Fusion.OnEvent "MouseLeave"] = engagement.OnPointerLeave,
+			[Fusion.OnEvent "SelectionGained"] = engagement.OnSelectionGained,
+			[Fusion.OnEvent "SelectionLost"] = engagement.OnSelectionLost,
+			[Fusion.OnEvent "Activated"] = function()
+				local saved = peek(context.Saved)
+				if saved == nil then
+					return
+				end
+				local value = get(saved)
+				context.Edit(function(move)
+					set(move, value)
+				end)
+			end,
+			[Fusion.Children] = scope:New "Frame" {
+				Name = "Dot",
+				AnchorPoint = Vector2.new(0.5, 0.5),
+				Position = UDim2.fromScale(0.5, 0.5),
+				Size = scope:Computed(function(use)
+					local size = if use(engagement.Active) then DOT_SIZE + 4 else DOT_SIZE
+					return UDim2.fromOffset(size, size)
+				end),
+				BackgroundColor3 = Tokens.Color.AccentSecondary,
+				BorderSizePixel = 0,
+				[Fusion.Children] = scope:New "UICorner" { CornerRadius = UDim.new(1, 0) },
+			},
+		} :: TextButton
+		table.insert(children, dot)
+		context.RegisterHelp(dot, `{tracking.Title} -- changed`, Copy.Hints.ChangedDot)
+	end
+	local holder = scope:New "Frame" {
+		Name = `Field_{tracking.Title}`,
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		LayoutOrder = tracking.LayoutOrder,
+		Visible = tracking.Visible,
+		[Fusion.Children] = children,
+	} :: Frame
+	context.RegisterHelp(holder, tracking.Title, tracking.Hint)
+	return holder
+end
+Fields.Tracked = tracked
+
 -- Every Move Editor number is a COMPACT NumericField (2026-10-01): two lines instead of four, a full-row
 -- slider, and a value snapped to the field's own Decimals -- see that component's header.
 function Fields.Number(scope: Scope, context: FormContext, spec: NumberSpec): Frame
+	return tracked(scope, context, Fields.RawNumber(scope, context, spec), {
+		Title = spec.Label,
+		Hint = spec.Hint,
+		Get = spec.Get,
+		Set = spec.Set :: any,
+		LayoutOrder = spec.LayoutOrder,
+		Visible = spec.Visible,
+	})
+end
+
+-- The NumericField alone, untracked -- for a caller that tracks a group of them itself.
+function Fields.RawNumber(scope: Scope, context: FormContext, spec: NumberSpec): Frame
 	return NumericFieldModule.Mount(scope, {
 		Label = spec.Label,
 		Value = scope:Computed(function(use)
@@ -108,6 +241,7 @@ function Fields.Number(scope: Scope, context: FormContext, spec: NumberSpec): Fr
 		Decimals = spec.Decimals,
 		Unit = spec.Unit,
 		Hint = spec.Hint,
+		HintVisible = context.Hints,
 		Compact = true,
 		Visible = spec.Visible,
 		LayoutOrder = spec.LayoutOrder,
@@ -129,13 +263,14 @@ export type ToggleSpec = {
 }
 
 function Fields.Toggle(scope: Scope, context: FormContext, spec: ToggleSpec): Frame
-	return Toggle(scope, {
+	local toggle = Toggle(scope, {
 		Label = spec.Label,
 		Value = scope:Computed(function(use)
 			local move = use(context.Draft)
 			return if move then spec.Get(move) else false
 		end),
 		Hint = spec.Hint,
+		HintVisible = context.Hints,
 		Visible = spec.Visible,
 		LayoutOrder = spec.LayoutOrder,
 		OnChanged = function(value: boolean)
@@ -144,6 +279,14 @@ function Fields.Toggle(scope: Scope, context: FormContext, spec: ToggleSpec): Fr
 			end)
 		end,
 	})
+	return tracked(scope, context, toggle, {
+		Title = spec.Label,
+		Hint = spec.Hint,
+		Get = spec.Get,
+		Set = spec.Set :: any,
+		LayoutOrder = spec.LayoutOrder,
+		Visible = spec.Visible,
+	})
 end
 
 export type ChoiceSpec = {
@@ -151,23 +294,19 @@ export type ChoiceSpec = {
 	Options: { DropdownModule.DropdownOption },
 	Get: (Move) -> string,
 	Set: (Move, string) -> (),
+	-- Drawn under the dropdown while hints are shown, and on the help strip.
+	Hint: UsedAs<string>?,
 	Visible: UsedAs<boolean>?,
 	LayoutOrder: number,
 }
 
--- Dropdown has no Visible of its own, so a conditional choice is wrapped in a holder that does.
+-- Dropdown has no Visible of its own; the tracking holder carries it.
 function Fields.Choice(scope: Scope, context: FormContext, spec: ChoiceSpec): Frame
-	return scope:New "Frame" {
-		Name = `Choice_{spec.Label}`,
-		Size = UDim2.fromScale(1, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundTransparency = 1,
-		Visible = spec.Visible,
-		LayoutOrder = spec.LayoutOrder,
-
-		[Fusion.Children] = DropdownModule.Mount(scope, {
+	local parts: { Instance } = {
+		DropdownModule.Mount(scope, {
 			Label = spec.Label,
 			Options = spec.Options,
+			LayoutOrder = 1,
 			Value = scope:Computed(function(use)
 				local move = use(context.Draft)
 				return if move then spec.Get(move) else ""
@@ -178,7 +317,25 @@ function Fields.Choice(scope: Scope, context: FormContext, spec: ChoiceSpec): Fr
 				end)
 			end,
 		}),
-	} :: Frame
+	}
+	if spec.Hint then
+		table.insert(parts, Fields.Hint(scope, context, spec.Hint, 2))
+	end
+	local inner = Stack.New(scope, {
+		Name = `Choice_{spec.Label}`,
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Gap = Tokens.Space.XS,
+		Children = parts,
+	})
+	return tracked(scope, context, inner, {
+		Title = spec.Label,
+		Hint = spec.Hint,
+		Get = spec.Get,
+		Set = spec.Set :: any,
+		LayoutOrder = spec.LayoutOrder,
+		Visible = spec.Visible,
+	})
 end
 
 export type TextSpec = {
@@ -191,7 +348,36 @@ export type TextSpec = {
 	Hint: string?,
 	Visible: UsedAs<boolean>?,
 	LayoutOrder: number,
+	-- A small button at the box's right end, handed what the box holds now (typed, not yet committed) --
+	-- an asset's preview ("Play").
+	Action: { Text: string, Run: (current: string) -> () }?,
+	-- Extra rows under the box (a colour's palette, a category's suggestions), laid out with it.
+	Extra: { Instance }?,
 }
+
+-- A hint line: drawn while the form's hints are shown (and `visible`, if given), and otherwise left to the
+-- help strip -- see this file's header.
+function Fields.Hint(
+	scope: Scope,
+	context: FormContext,
+	text: UsedAs<string>,
+	layoutOrder: number,
+	visible: UsedAs<boolean>?
+): Frame
+	return Label(scope, {
+		Text = text,
+		Scale = "Detail",
+		Color = Tokens.Color.TextSecondary,
+		Size = UDim2.fromScale(1, 0),
+		AutoHeight = true,
+		TextWrapped = true,
+		LineHeight = Tokens.Leading.Prose,
+		LayoutOrder = layoutOrder,
+		Visible = scope:Computed(function(use)
+			return use(context.Hints) == true and (visible == nil or use(visible) == true)
+		end),
+	}) :: any
+end
 
 -- A labelled text box that follows the draft while unfocused and commits on focus lost -- see this
 -- file's header.
@@ -218,47 +404,72 @@ function Fields.Text(scope: Scope, context: FormContext, spec: TextSpec): Frame
 			Size = UDim2.new(1, 0, 0, Tokens.Type.Body.Size + Tokens.Space.XS),
 			LayoutOrder = 1,
 		}),
-		TextField(scope, {
-			Text = text,
-			PlaceholderText = spec.Placeholder,
-			MaxLength = spec.MaxLength,
-			Multiline = spec.Multiline,
-			Size = UDim2.new(1, 0, 0, if spec.Multiline then 72 else Tokens.Control.StepButtonSize),
-			LayoutOrder = 2,
-			OnFocusLost = function(value: string)
-				local move = peek(context.Draft)
-				if move and spec.Get(move) ~= value then
-					context.Edit(function(target)
-						spec.Set(target, value)
-					end)
-				end
-			end,
-		}),
 	}
-	if spec.Hint then
+	local boxHeight = if spec.Multiline then 72 else Tokens.Control.StepButtonSize
+	local box = TextField(scope, {
+		Text = text,
+		PlaceholderText = spec.Placeholder,
+		MaxLength = spec.MaxLength,
+		Multiline = spec.Multiline,
+		Size = UDim2.new(1, 0, 0, boxHeight),
+		LayoutOrder = 1,
+		OnFocusLost = function(value: string)
+			local move = peek(context.Draft)
+			if move and spec.Get(move) ~= value then
+				context.Edit(function(target)
+					spec.Set(target, value)
+				end)
+			end
+		end,
+	})
+	local action = spec.Action
+	if action then
 		table.insert(
 			children,
-			Label(scope, {
-				Text = spec.Hint,
-				Scale = "Detail",
-				Color = Tokens.Color.TextDisabled,
-				Size = UDim2.fromScale(1, 0),
-				AutoHeight = true,
-				TextWrapped = true,
-				LineHeight = Tokens.Leading.Prose,
-				LayoutOrder = 3,
+			Stack.Row(scope, {
+				Name = "Box",
+				Size = UDim2.new(1, 0, 0, boxHeight),
+				Gap = Tokens.Space.XS,
+				LayoutOrder = 2,
+				Children = {
+					Stack.Fill(scope, box),
+					Button(scope, {
+						Text = action.Text,
+						Size = UDim2.new(0, 64, 1, 0),
+						LayoutOrder = 2,
+						OnActivated = function()
+							action.Run(peek(text))
+						end,
+					}),
+				},
 			})
 		)
+	else
+		box.LayoutOrder = 2
+		table.insert(children, box)
+	end
+	for index, extra in spec.Extra or {} do
+		(extra :: any).LayoutOrder = 2 + index
+		table.insert(children, extra)
+	end
+	if spec.Hint then
+		table.insert(children, Fields.Hint(scope, context, spec.Hint, 20))
 	end
 
-	return Stack.New(scope, {
+	local field = Stack.New(scope, {
 		Name = `Text_{spec.Label}`,
 		Size = UDim2.fromScale(1, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		Gap = Tokens.Space.XS,
-		Visible = spec.Visible,
-		LayoutOrder = spec.LayoutOrder,
 		Children = children,
+	})
+	return tracked(scope, context, field, {
+		Title = spec.Label,
+		Hint = spec.Hint,
+		Get = spec.Get,
+		Set = spec.Set :: any,
+		LayoutOrder = spec.LayoutOrder,
+		Visible = spec.Visible,
 	})
 end
 
@@ -288,61 +499,6 @@ function Fields.Heading(scope: Scope, text: string, layoutOrder: number, visible
 	})
 end
 
--- A group heading that FOLDS: the same bronze SectionHeading, pressable, with Hide/Show opposite it.
--- Returns the heading and a Computed that is true while the group is both visible and open -- every field
--- in the group takes that as (part of) its Visible, so a folded group costs its fields nothing but
--- their hidden frames. Open on first mount; the state is per screen session, not saved.
---
--- For the long, optional groups a mode adds (the projectile groups): an author tuning one of them does
--- not have to scroll past four others to reach it, and a group they are done with gets out of the way.
--- A group that is always relevant stays a plain Fields.Heading.
---
--- `startClosed` is for a page made of many such groups (the Presentation tab's sixteen moments), where an
--- author opens the one they came for rather than scrolling past the fifteen they did not.
-function Fields.Fold(
-	scope: Scope,
-	text: string,
-	layoutOrder: number,
-	visible: UsedAs<boolean>?,
-	startClosed: boolean?
-): (Frame, Fusion.Computed<boolean>)
-	local open = scope:Value(not startClosed)
-	local engagement = Selection.New(scope)
-	local shown = scope:Computed(function(use): boolean
-		local isVisible = if visible == nil then true else use(visible)
-		return isVisible and use(open)
-	end)
-	local heading = scope:New "TextButton" {
-		Name = `Fold_{text}`,
-		Size = UDim2.new(1, 0, 0, FOLD_HEIGHT),
-		BackgroundTransparency = 1,
-		AutoButtonColor = false,
-		Text = "",
-		LayoutOrder = layoutOrder,
-		Visible = visible,
-
-		[Fusion.OnEvent "SelectionGained"] = engagement.OnSelectionGained,
-		[Fusion.OnEvent "SelectionLost"] = engagement.OnSelectionLost,
-		[Fusion.OnEvent "MouseEnter"] = engagement.OnPointerEnter,
-		[Fusion.OnEvent "MouseLeave"] = engagement.OnPointerLeave,
-		[Fusion.OnEvent "Activated"] = function()
-			open:set(not peek(open))
-		end,
-
-		[Fusion.Children] = SectionHeading(scope, {
-			Text = text,
-			Note = scope:Computed(function(use)
-				return if use(open) then "Hide" else "Show"
-			end),
-			NoteColor = scope:Computed(function(use)
-				return if use(engagement.Active) then Tokens.Color.TextPrimary else Tokens.Color.TextSecondary
-			end),
-			Size = UDim2.fromScale(1, 1),
-		}),
-	} :: TextButton
-	return heading :: any, shown
-end
-
 -- One wrapped sentence of context under a heading.
 function Fields.Prose(scope: Scope, text: UsedAs<string>, layoutOrder: number, visible: UsedAs<boolean>?): Frame
 	return Label(scope, {
@@ -368,7 +524,9 @@ function Fields.Page(scope: Scope, name: string, visible: UsedAs<boolean>, child
 			Padding = UDim.new(0, Tokens.Space.M),
 		},
 		scope:New "UIPadding" {
-			-- Clears the scroll bar on the right, and lets the last field breathe above the band.
+			-- Clears the scroll bar on the right, and lets the last field breathe above the band. The left
+			-- pad is the gutter each field's changed-dot sits in (see CHANGED FIELDS).
+			PaddingLeft = UDim.new(0, GUTTER),
 			PaddingRight = UDim.new(0, Tokens.Space.M),
 			PaddingBottom = UDim.new(0, Tokens.Space.XL),
 		},
@@ -605,35 +763,52 @@ local function chipWidth(text: string): number
 end
 
 -- A labelled, wrapping run of chips. `selected` says which value is lit (nil lights none); `onPick` is told
--- the value pressed.
+-- the value pressed. With `describe`, the chip under the pointer (or the gamepad selection) says what it is
+-- on a line under the row -- the preset rows' tooltip, kept in the flow rather than floating, so it can
+-- never be clipped by the page or painted over by the next chip.
 local function chipRow(
 	scope: Scope,
+	context: FormContext,
 	label: string?,
 	options: { Option },
 	selected: Fusion.Computed<string>?,
 	onPick: (string) -> (),
 	hint: UsedAs<string>?,
 	visible: UsedAs<boolean>?,
-	layoutOrder: number
+	layoutOrder: number,
+	describe: { [string]: string }?
 ): Frame
+	local hovered = scope:Value(nil :: string?)
 	local chips: { Instance } = {}
 	for index, option in options do
-		table.insert(
-			chips,
-			Tab(scope, {
-				Text = option.Text,
-				Size = UDim2.fromOffset(chipWidth(option.Text), CHIP_HEIGHT),
-				LayoutOrder = index,
-				Selected = if selected
-					then scope:Computed(function(use)
-						return use(selected) == option.Value
-					end)
-					else false,
-				OnActivated = function()
-					onPick(option.Value)
-				end,
-			})
-		)
+		local chip = Tab(scope, {
+			Text = option.Text,
+			Size = UDim2.fromOffset(chipWidth(option.Text), CHIP_HEIGHT),
+			LayoutOrder = index,
+			Selected = if selected
+				then scope:Computed(function(use)
+					return use(selected) == option.Value
+				end)
+				else false,
+			OnActivated = function()
+				onPick(option.Value)
+			end,
+		})
+		if describe then
+			local function enter()
+				hovered:set(option.Value)
+			end
+			local function leave()
+				if peek(hovered) == option.Value then
+					hovered:set(nil)
+				end
+			end
+			table.insert(scope, chip.MouseEnter:Connect(enter))
+			table.insert(scope, chip.MouseLeave:Connect(leave))
+			table.insert(scope, chip.SelectionGained:Connect(enter))
+			table.insert(scope, chip.SelectionLost:Connect(leave))
+		end
+		table.insert(chips, chip)
 	end
 
 	local children: { Instance } = {}
@@ -661,20 +836,29 @@ local function chipRow(
 			Children = chips,
 		})
 	)
-	if hint then
+	if describe then
 		table.insert(
 			children,
 			Label(scope, {
-				Text = hint,
+				Text = scope:Computed(function(use)
+					local value = use(hovered)
+					return if value then describe[value] or value else ""
+				end),
 				Scale = "Detail",
-				Color = Tokens.Color.TextSecondary,
+				Color = Tokens.Color.TextPrimary,
 				Size = UDim2.fromScale(1, 0),
 				AutoHeight = true,
 				TextWrapped = true,
 				LineHeight = Tokens.Leading.Prose,
 				LayoutOrder = 3,
+				Visible = scope:Computed(function(use)
+					return use(hovered) ~= nil
+				end),
 			})
 		)
+	end
+	if hint then
+		table.insert(children, Fields.Hint(scope, context, hint, 4))
 	end
 
 	return Stack.New(scope, {
@@ -704,14 +888,22 @@ function Fields.Chips(scope: Scope, context: FormContext, spec: ChipsSpec): Fram
 		local move = use(context.Draft)
 		return if move then spec.Get(move) else ""
 	end)
-	return chipRow(scope, spec.Label, spec.Options, current, function(value: string)
+	local row = chipRow(scope, context, spec.Label, spec.Options, current, function(value: string)
 		if peek(current) == value then
 			return
 		end
 		context.Edit(function(move)
 			spec.Set(move, value)
 		end)
-	end, spec.Hint, spec.Visible, spec.LayoutOrder)
+	end, spec.Hint, nil, 1)
+	return tracked(scope, context, row, {
+		Title = spec.Label or "Choice",
+		Hint = spec.Hint,
+		Get = spec.Get,
+		Set = spec.Set :: any,
+		LayoutOrder = spec.LayoutOrder,
+		Visible = spec.Visible,
+	})
 end
 
 export type ActionChipsSpec = {
@@ -720,6 +912,8 @@ export type ActionChipsSpec = {
 	-- Applies the option pressed to the clone the edit hands it.
 	Apply: (Move, string) -> (),
 	Hint: UsedAs<string>?,
+	-- What each option is, by value, shown under the row while the pointer is on its chip.
+	Describe: { [string]: string }?,
 	Visible: UsedAs<boolean>?,
 	LayoutOrder: number,
 }
@@ -727,11 +921,13 @@ export type ActionChipsSpec = {
 -- A run of chips that each DO something rather than select something -- the "Start from" presets. Nothing
 -- stays lit: a preset is a starting point an author then edits away from.
 function Fields.ActionChips(scope: Scope, context: FormContext, spec: ActionChipsSpec): Frame
-	return chipRow(scope, spec.Label, spec.Options, nil, function(value: string)
+	local row = chipRow(scope, context, spec.Label, spec.Options, nil, function(value: string)
 		context.Edit(function(move)
 			spec.Apply(move, value)
 		end)
-	end, spec.Hint, spec.Visible, spec.LayoutOrder)
+	end, spec.Hint, spec.Visible, spec.LayoutOrder, spec.Describe)
+	context.RegisterHelp(row, spec.Label or "Presets", spec.Hint)
+	return row
 end
 
 export type SegmentedSpec = {
@@ -787,7 +983,7 @@ export type ButtonRowSpec = {
 local ROW_BUTTON_WIDTH = 58
 
 -- A caption and a run of small action buttons on one line ("Scale  x0.5 x0.8 x1.25 x2").
-function Fields.ButtonRow(scope: Scope, spec: ButtonRowSpec): Frame
+function Fields.ButtonRow(scope: Scope, context: FormContext, spec: ButtonRowSpec): Frame
 	local cells: { Instance } = {
 		Stack.Fill(
 			scope,
@@ -821,21 +1017,9 @@ function Fields.ButtonRow(scope: Scope, spec: ButtonRowSpec): Frame
 	})
 	local children: { Instance } = { row }
 	if spec.Hint then
-		table.insert(
-			children,
-			Label(scope, {
-				Text = spec.Hint,
-				Scale = "Detail",
-				Color = Tokens.Color.TextSecondary,
-				Size = UDim2.fromScale(1, 0),
-				AutoHeight = true,
-				TextWrapped = true,
-				LineHeight = Tokens.Leading.Prose,
-				LayoutOrder = 2,
-			})
-		)
+		table.insert(children, Fields.Hint(scope, context, spec.Hint, 2))
 	end
-	return Stack.New(scope, {
+	local built = Stack.New(scope, {
 		Name = `ButtonRow_{spec.Label}`,
 		Size = UDim2.fromScale(1, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
@@ -844,6 +1028,8 @@ function Fields.ButtonRow(scope: Scope, spec: ButtonRowSpec): Frame
 		LayoutOrder = spec.LayoutOrder,
 		Children = children,
 	})
+	context.RegisterHelp(built, spec.Label, spec.Hint)
+	return built
 end
 
 -- A plain vertical group, for fields that must move or hide together inside a page or a section (a
@@ -869,6 +1055,434 @@ function Fields.OptionsOf(values: { any }, text: { [string]: string }?): { Optio
 		table.insert(result, { Value = value, Text = if text and text[value] then text[value] else value })
 	end
 	return result
+end
+
+-- Pickers ------------------------------------------------------------------------------------------------
+
+local PICKER_ROWS = 8
+
+export type MovePickerSpec = {
+	Label: string,
+	-- The id the field holds; "" is "none".
+	Get: (Move) -> string,
+	Set: (Move, string) -> (),
+	-- Which moves may be named (an art, a projectile move, a realm); nil offers every move.
+	Accepts: ((MoveEditorTypes.MoveEntry) -> boolean)?,
+	-- What "" means for this field, shown on the button and as the clear option ("The realm's own strike").
+	BlankText: string?,
+	Hint: UsedAs<string>?,
+	Visible: UsedAs<boolean>?,
+	LayoutOrder: number,
+}
+
+-- Names another move, picked from the move list rather than typed: a button saying which move it holds now,
+-- which opens a search over every move the field accepts (never the open move itself). An id that names
+-- nothing the editor knows is shown as that id, in the warning colour, so an old record's typo is visible.
+function Fields.MovePicker(scope: Scope, context: FormContext, spec: MovePickerSpec): Frame
+	local open = scope:Value(false)
+	local query = scope:Value("")
+	local blankText = spec.BlankText or "None"
+
+	local function entryById(id: string): MoveEditorTypes.MoveEntry?
+		for _, entry in peek(context.Entries) do
+			if entry.Move.MoveId == id then
+				return entry
+			end
+		end
+		return nil
+	end
+
+	local current = scope:Computed(function(use): string
+		local move = use(context.Draft)
+		return if move then spec.Get(move) else ""
+	end)
+	local currentText = scope:Computed(function(use): string
+		local id = use(current)
+		if id == "" then
+			return blankText
+		end
+		use(context.Entries)
+		local entry = entryById(id)
+		return if entry then `{entry.Move.DisplayName}   ·   {id}` else `{id}   ·   not found`
+	end)
+	local missing = scope:Computed(function(use): boolean
+		local id = use(current)
+		use(context.Entries)
+		return id ~= "" and entryById(id) == nil
+	end)
+
+	local results = scope:Computed(function(use): { MoveEditorTypes.MoveEntry }
+		if not use(open) then
+			return {}
+		end
+		local needle = string.lower(use(query))
+		local self = use(context.Draft)
+		local selfId = if self then self.MoveId else ""
+		local found: { MoveEditorTypes.MoveEntry } = {}
+		for _, entry in use(context.Entries) do
+			local move = entry.Move
+			if move.MoveId == selfId or (spec.Accepts and not spec.Accepts(entry)) then
+				continue
+			end
+			if
+				needle == ""
+				or string.find(string.lower(move.DisplayName), needle, 1, true)
+				or string.find(string.lower(move.MoveId), needle, 1, true)
+			then
+				table.insert(found, entry)
+				if #found >= PICKER_ROWS then
+					break
+				end
+			end
+		end
+		return found
+	end)
+
+	local function pick(id: string): ()
+		open:set(false)
+		query:set("")
+		if peek(current) == id then
+			return
+		end
+		context.Edit(function(move)
+			spec.Set(move, id)
+		end)
+	end
+
+	local rows = scope:ForPairs(results, function(_use, inner: Scope, index: number, entry: MoveEditorTypes.MoveEntry)
+		return index,
+			Button(inner, {
+				Text = `{entry.Move.DisplayName}   ·   {entry.Move.MoveId}   ·   {entry.Group}`,
+				Size = UDim2.new(1, 0, 0, CHIP_HEIGHT),
+				LayoutOrder = index,
+				OnActivated = function()
+					pick(entry.Move.MoveId)
+				end,
+			})
+	end)
+	local nothing = scope:Computed(function(use)
+		return use(open) and #use(results) == 0
+	end)
+
+	local children: { Instance } = {
+		Label(scope, {
+			Text = spec.Label,
+			Scale = "Body",
+			Color = Tokens.Color.TextSecondary,
+			Size = UDim2.new(1, 0, 0, Tokens.Type.Body.Size + Tokens.Space.XS),
+			LayoutOrder = 1,
+		}),
+		Stack.Row(scope, {
+			Name = "Current",
+			Size = UDim2.new(1, 0, 0, Tokens.Control.StepButtonSize),
+			Gap = Tokens.Space.XS,
+			LayoutOrder = 2,
+			Children = {
+				Stack.Fill(
+					scope,
+					Tab(scope, {
+						Text = currentText,
+						Selected = open,
+						Size = UDim2.fromScale(0, 1),
+						OnActivated = function()
+							open:set(not peek(open))
+						end,
+					})
+				),
+				Button(scope, {
+					Text = "Clear",
+					Size = UDim2.new(0, 64, 1, 0),
+					LayoutOrder = 2,
+					Disabled = scope:Computed(function(use)
+						return use(current) == ""
+					end),
+					OnActivated = function()
+						pick("")
+					end,
+				}),
+			},
+		}),
+		Label(scope, {
+			Text = "That id names no move the editor knows -- pick one, or clear it.",
+			Scale = "Detail",
+			Color = Tokens.Color.Warning,
+			Size = UDim2.fromScale(1, 0),
+			AutoHeight = true,
+			TextWrapped = true,
+			LayoutOrder = 3,
+			Visible = missing,
+		}),
+		Stack.New(scope, {
+			Name = "Search",
+			Size = UDim2.fromScale(1, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			Gap = Tokens.Space.XS,
+			LayoutOrder = 4,
+			Visible = open,
+			Children = {
+				TextField(scope, {
+					Text = query,
+					PlaceholderText = "Search by name or id",
+					MaxLength = 40,
+					Size = UDim2.new(1, 0, 0, Tokens.Control.StepButtonSize),
+					LayoutOrder = 0,
+				}),
+				Button(scope, {
+					Text = blankText,
+					Size = UDim2.new(1, 0, 0, CHIP_HEIGHT),
+					LayoutOrder = 1,
+					OnActivated = function()
+						pick("")
+					end,
+				}),
+				Stack.New(scope, {
+					Name = "Results",
+					Size = UDim2.fromScale(1, 0),
+					AutomaticSize = Enum.AutomaticSize.Y,
+					Gap = Tokens.Space.XS,
+					LayoutOrder = 2,
+					Children = { rows :: any },
+				}),
+				Label(scope, {
+					Text = "No move matches.",
+					Scale = "Detail",
+					Color = Tokens.Color.TextDisabled,
+					Size = UDim2.new(1, 0, 0, CHIP_HEIGHT),
+					LayoutOrder = 3,
+					Visible = nothing,
+				}),
+			},
+		}),
+	}
+	if spec.Hint then
+		table.insert(children, Fields.Hint(scope, context, spec.Hint, 5))
+	end
+
+	local field = Stack.New(scope, {
+		Name = `Picker_{spec.Label}`,
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Gap = Tokens.Space.XS,
+		Children = children,
+	})
+	return tracked(scope, context, field, {
+		Title = spec.Label,
+		Hint = spec.Hint,
+		Get = spec.Get,
+		Set = spec.Set :: any,
+		LayoutOrder = spec.LayoutOrder,
+		Visible = spec.Visible,
+	})
+end
+
+-- A wrapping run of chips offering values a free-text field already holds elsewhere (a category other moves
+-- use): pressing one sets it. `values` is live; the chip that matches the field's own value is lit. Meant
+-- as a Fields.Text spec's Extra.
+function Fields.Suggestions(
+	scope: Scope,
+	context: FormContext,
+	values: UsedAs<{ string }>,
+	get: (Move) -> string,
+	set: (Move, string) -> ()
+): Frame
+	local current = scope:Computed(function(use): string
+		local move = use(context.Draft)
+		return if move then get(move) else ""
+	end)
+	local chips = scope:ForPairs(values, function(_use, inner: Scope, index: number, value: string)
+		return index,
+			Tab(inner, {
+				Text = value,
+				Size = UDim2.fromOffset(chipWidth(value), CHIP_HEIGHT - 4),
+				LayoutOrder = index,
+				Selected = inner:Computed(function(use)
+					return use(current) == value
+				end),
+				OnActivated = function()
+					if peek(current) ~= value then
+						context.Edit(function(move)
+							set(move, value)
+						end)
+					end
+				end,
+			})
+	end)
+	return Stack.Row(scope, {
+		Name = "Suggestions",
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Gap = Tokens.Space.XS,
+		Wraps = true,
+		Visible = scope:Computed(function(use)
+			return #use(values) > 0
+		end),
+		Children = { chips :: any },
+	})
+end
+
+-- The palette a colour field offers beside its text box: the game's own accents and a few plain tones.
+local PALETTE: { { Name: string, Hex: string } } = {
+	{ Name = "White", Hex = "#FFFFFF" },
+	{ Name = "Ash", Hex = "#9E96B0" },
+	{ Name = "Void", Hex = "#141020" },
+	{ Name = "Crimson", Hex = "#C43038" },
+	{ Name = "Ember", Hex = "#E2643A" },
+	{ Name = "Gold", Hex = "#C79522" },
+	{ Name = "Bronze", Hex = "#C4A46E" },
+	{ Name = "Jade", Hex = "#508870" },
+	{ Name = "Frost", Hex = "#A3E0EB" },
+	{ Name = "Azure", Hex = "#4A86E8" },
+	{ Name = "Violet", Hex = "#9A88C8" },
+	{ Name = "Magenta", Hex = "#B4489C" },
+}
+local SWATCH = 22
+
+local function sameColor(a: Color3, b: Color3): boolean
+	local function byte(x: number): number
+		return math.floor(x * 255 + 0.5)
+	end
+	return byte(a.R) == byte(b.R) and byte(a.G) == byte(b.G) and byte(a.B) == byte(b.B)
+end
+
+-- "#RRGGBB" (or "RRGGBB") as a Color3, or nil for anything else -- blank, "None", a typo.
+function Fields.ParseHex(text: string): Color3?
+	local hex = string.match(text, "^%s*#?(%x%x%x%x%x%x)%s*$")
+	if not hex then
+		return nil
+	end
+	return Color3.fromRGB(
+		tonumber(string.sub(hex, 1, 2), 16) :: number,
+		tonumber(string.sub(hex, 3, 4), 16) :: number,
+		tonumber(string.sub(hex, 5, 6), 16) :: number
+	)
+end
+
+-- A colour field's Extra (see Fields.Text): a swatch of what the field holds now, then one press per palette
+-- tone, then Default (blank) and -- where the field allows it -- None.
+function Fields.Palette(
+	scope: Scope,
+	context: FormContext,
+	get: (Move) -> string,
+	set: (Move, string) -> (),
+	allowNone: boolean
+): Frame
+	local current = scope:Computed(function(use): string
+		local move = use(context.Draft)
+		return if move then get(move) else ""
+	end)
+	local parsed = scope:Computed(function(use): Color3?
+		return Fields.ParseHex(use(current))
+	end)
+	local function write(value: string)
+		if peek(current) ~= value then
+			context.Edit(function(move)
+				set(move, value)
+			end)
+		end
+	end
+
+	local cells: { Instance } = {
+		-- The swatch: the colour itself, or a word for "no colour of its own".
+		scope:New "Frame" {
+			Name = "Swatch",
+			Size = UDim2.fromOffset(SWATCH * 2, SWATCH),
+			LayoutOrder = 0,
+			BackgroundColor3 = scope:Computed(function(use)
+				return use(parsed) or Tokens.Color.Surface
+			end),
+			BorderSizePixel = 0,
+			[Fusion.Children] = {
+				scope:New "UIStroke" {
+					Color = Tokens.Border.Lit.Color,
+					Transparency = Tokens.Border.Lit.Transparency,
+					Thickness = 1,
+				},
+				Label(scope, {
+					Text = scope:Computed(function(use)
+						if use(parsed) then
+							return ""
+						end
+						local text = use(current)
+						return if string.lower(text) == "none" then "none" elseif text == "" then "default" else "?"
+					end),
+					Scale = "NumeralSmall",
+					Color = Tokens.Color.TextDisabled,
+					Size = UDim2.fromScale(1, 1),
+					TextXAlignment = Enum.TextXAlignment.Center,
+				}),
+			},
+		},
+	}
+	for index, tone in PALETTE do
+		local engagement = Selection.New(scope)
+		local color = Fields.ParseHex(tone.Hex) :: Color3
+		table.insert(
+			cells,
+			scope:New "TextButton" {
+				Name = `Tone_{tone.Name}`,
+				Size = UDim2.fromOffset(SWATCH, SWATCH),
+				LayoutOrder = index,
+				AutoButtonColor = false,
+				Text = "",
+				BackgroundColor3 = color,
+				BorderSizePixel = 0,
+				[Fusion.OnEvent "MouseEnter"] = engagement.OnPointerEnter,
+				[Fusion.OnEvent "MouseLeave"] = engagement.OnPointerLeave,
+				[Fusion.OnEvent "SelectionGained"] = engagement.OnSelectionGained,
+				[Fusion.OnEvent "SelectionLost"] = engagement.OnSelectionLost,
+				[Fusion.OnEvent "Activated"] = function()
+					write(tone.Hex)
+				end,
+				[Fusion.Children] = scope:New "UIStroke" {
+					Color = Tokens.Color.TextPrimary,
+					Thickness = scope:Computed(function(use)
+						local held = use(parsed)
+						local lit = held ~= nil and sameColor(held, color)
+						return if lit then 2 elseif use(engagement.Active) then 1 else 0
+					end),
+				},
+			}
+		)
+	end
+	table.insert(
+		cells,
+		Tab(scope, {
+			Text = "Default",
+			Size = UDim2.fromOffset(chipWidth("Default"), SWATCH),
+			LayoutOrder = 50,
+			Selected = scope:Computed(function(use)
+				return use(current) == ""
+			end),
+			OnActivated = function()
+				write("")
+			end,
+		})
+	)
+	if allowNone then
+		table.insert(
+			cells,
+			Tab(scope, {
+				Text = "None",
+				Size = UDim2.fromOffset(chipWidth("None"), SWATCH),
+				LayoutOrder = 51,
+				Selected = scope:Computed(function(use)
+					return string.lower(use(current)) == "none"
+				end),
+				OnActivated = function()
+					write("None")
+				end,
+			})
+		)
+	end
+	return Stack.Row(scope, {
+		Name = "Palette",
+		Size = UDim2.fromScale(1, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Gap = Tokens.Space.XS,
+		Wraps = true,
+		AlignY = Enum.VerticalAlignment.Center,
+		Children = cells,
+	})
 end
 
 return Fields

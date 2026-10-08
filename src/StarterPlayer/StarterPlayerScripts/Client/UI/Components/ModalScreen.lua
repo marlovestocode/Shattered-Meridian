@@ -96,6 +96,10 @@ export type ModalScreenProps = {
 	-- each sized by hand against their own content and are not re-measured for this, so they keep
 	-- rendering at their literal pixel size until someone opts them in deliberately.
 	AutoScale: boolean?,
+	-- AutoScale that also SHRINKS to fit: the panel's authored pixel size, scaled by the smaller of the
+	-- viewport curve and whatever keeps it on screen (ViewportScale.Fit). For a panel too big for the
+	-- reference resolution itself. Takes precedence over AutoScale.
+	FitSize: Vector2?,
 	-- Which control a gamepad focuses when this panel opens. Defaults to the first selectable
 	-- control in reading order -- see Shell/Focus.lua. Ignored on keyboard/mouse, where no selection
 	-- is claimed at all.
@@ -188,7 +192,10 @@ local function ModalScreen(scope: Scope, playerGui: PlayerGui, props: ModalScree
 		-- See this file header, point 1: without this the whole panel is a picture the input system
 		-- looks straight through.
 		Active = true,
-		Scale = if props.AutoScale then ViewportScale.Compute(scope) else nil,
+		Scale = if props.FitSize
+			then ViewportScale.Fit(scope, props.FitSize)
+			elseif props.AutoScale then ViewportScale.Compute(scope)
+			else nil,
 		Elevated = if props.Elevated == nil then true else props.Elevated,
 		CornerAccent = true,
 		BracketArmLength = props.BracketArmLength,

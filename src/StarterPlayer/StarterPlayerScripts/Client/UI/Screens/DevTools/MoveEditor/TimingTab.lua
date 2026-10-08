@@ -154,7 +154,7 @@ local function TimingTab(scope: Scope, context: Fields.FormContext, visible: Use
 							end)
 						end,
 					}),
-					Fields.Prose(scope, Copy.Hints.MatchTiming, 6),
+					Fields.Hint(scope, context, Copy.Hints.MatchTiming, 6),
 				}
 			end,
 		}),
@@ -184,6 +184,13 @@ local function TimingTab(scope: Scope, context: Fields.FormContext, visible: Use
 						Set = function(move, value)
 							move.AnimationId = value
 						end,
+						-- Plays what is in the box now, typed or not (Copy.Hints.PlayAnimation).
+						Action = {
+							Text = "Play",
+							Run = function(current: string)
+								context.PreviewAsset("Animation", current)
+							end,
+						},
 					}),
 					Fields.Prose(
 						scope,

@@ -152,3 +152,33 @@ As of 2026-10-07:
   Run `selene src/` and the full TestEZ suite in Studio before merging.
 - Tooling used (downloaded to a scratch dir, not committed): luau, stylua 2.5.2, lune 0.10.4, rojo, selene 0.27.1.
   `scripts/dev/lune-spec-harness.luau` is the headless runner (pure modules only).
+
+## Ease-of-use pass (2026-10-07, after the restructure)
+
+Asked for after a review of the restructured editor. All in; Studio still has to look at it (nothing headless renders).
+
+- **Readout:** a pinned action bar (name, saved state, Save / Test / Undo / Redo) over a scrolling rest; Revert,
+  Duplicate, Delete / Reset are MORE ACTIONS in the scroll.
+- **Panel size:** `ScreenFrame.FitToViewport` -> `ModalScreen.FitSize` -> `ViewportScale.Fit`: the viewport curve,
+  lowered as far as it takes for 1240x780 to fit (floor 0.6).
+- **Hints on demand:** `NumericField`/`Toggle` `HintVisible`; `Fields.Hint`; `context.Hints` (the "Show hints"
+  switch) and `context.RegisterHelp` feeding the help strip (pointer, gamepad selection, focused text box).
+- **Changed-field dots:** every bound field is wrapped by `Fields.Tracked`; it compares `Get(draft)` with
+  `Get(context.Saved)`, and the dot writes the saved value back through the field's own `Set`. The saved move
+  comes from the new `MoveEntry.Saved` (sent by `MoveEditorSystem.buildEntry` only while it differs).
+- **Timeline:** edge handles retime (throttled commits, Shift = frames); the bar scrubs `ScrubTime`, which
+  `Client/DevTools/MoveEditor/ClipScrubber.lua` turns into the local character held at that clip instant.
+  ClipScrubber also plays an animation id / sound id once (`PreviewAssetRequested`).
+- **Pickers:** `Fields.MovePicker` (Prerequisite, effect Move id, clash override), `Fields.Suggestions`
+  (Category), `Fields.Palette` (colours), `Fields.Text` `Action` (Play) and `Extra`.
+- **Presentation:** one lazy, summarised `Fields.Section` per moment; `Fields.Fold` is gone (no callers left).
+- **Hitbox:** Offset shown Right / Up / Forward (Z flipped in the form and Place mode's bar only); projectile
+  SPAWN under BODY; HOMING, COLLISION, PARRY start folded; preset chips describe themselves on hover.
+- **Browser / New:** type tags, Clear, `Ctrl+F`, Up/Down (`StepSelection` over the browser's `Order`); New asks
+  Melee / Projectile / Domain and lands on Hitbox or Realm.
+- **Realm tab:** Realm, Boundary, Effects, Law, Clash are one top-level tab with a sub-tab bar;
+  `handle.ShowPage(name)` routes a refusal to either kind of page.
+- Verified: selene 0.31.0 0/0 on src/; stylua clean on touched files; `MoveEditorScreen.spec` 17/17 headless
+  (new: dots, hints, arrow keys, Realm sub-pages). The harness now models Workspace's camera at the reference
+  size, which also lets `ScreenFrameScreens`' Settings case pass. Other headless failures are unchanged from
+  the base commit.

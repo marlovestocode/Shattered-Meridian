@@ -58,6 +58,11 @@ export type MoveEditorHandle = {
 	-- that is -- so the driver asks Copy.FailureTab, which knows a realm's fields live on other tabs.
 	CurrentTab: Fusion.Value<string>,
 	ShownTab: Fusion.Computed<string>,
+	-- Which of the Realm tab's pages (Realm, Boundary, Effects, Law, Clash) is shown under its sub-tab bar.
+	RealmPage: Fusion.Value<string>,
+	-- Shows a page by the name the editor files it under -- a top-level tab or a Realm page. What a refusal
+	-- routes through (Copy.FailureTab names either kind).
+	ShowPage: (name: string) -> (),
 	-- Whether the open move is a domain expansion -- what decides which tabs are on offer.
 	IsDomain: Fusion.Computed<boolean>,
 
@@ -72,7 +77,22 @@ export type MoveEditorHandle = {
 	CloseRequested: RBXScriptSignal<>,
 	-- (moveId)
 	SelectRequested: RBXScriptSignal<string>,
-	NewRequested: RBXScriptSignal<>,
+	-- (kind) -- "Melee", "Projectile" or "Domain": the browser's New asks the type up front.
+	NewRequested: RBXScriptSignal<string>,
+	-- Makes a move the given type (init.lua's setMoveType) -- for the driver building a typed new move.
+	SetMoveType: (move: MoveTypes.MoveDefinition, kind: string) -> (),
+	-- The browser's keys: step the open move through the visible rows (-1 up, +1 down), focus the filter.
+	StepSelection: (delta: number) -> (),
+	FocusFilter: () -> (),
+	-- The form's "Show hints" switch, and the open move as saved (the changed-field dots compare against it).
+	HintsShown: Fusion.Value<boolean>,
+	SavedMove: Fusion.Computed<MoveTypes.MoveDefinition?>,
+	-- The clip scrub (TimelineBar): the swing time the clip is held at on your character, nil while not
+	-- scrubbing; ScrubPlaying runs it forward. The driver poses the character from both.
+	ScrubTime: Fusion.Value<number?>,
+	ScrubPlaying: Fusion.Value<boolean>,
+	-- (kind, id) -- "Sound" or "Animation": play an asset id a field holds, on this client only.
+	PreviewAssetRequested: RBXScriptSignal<string, string>,
 	DuplicateRequested: RBXScriptSignal<>,
 	-- (draft) -- fired after the screen has already set Draft to it.
 	DraftEdited: RBXScriptSignal<MoveTypes.MoveDefinition>,

@@ -459,6 +459,18 @@ env.game = {
 			services[name] = proxyOf(root)
 			return services[name]
 		end
+		-- Workspace's camera, at the reference resolution (Client/UI/ViewportScale), so a screen that scales
+		-- itself to the viewport mounts at scale 1 rather than reading a stub as a size. Everything else on the
+		-- camera stays inert.
+		if name == "Workspace" then
+			local camera = setmetatable({ ViewportSize = env.Vector2.new(1366, 768) }, {
+				__index = function()
+					return STUB
+				end,
+			})
+			services[name] = setmetatable({ CurrentCamera = camera }, { __index = function() return STUB end })
+			return services[name]
+		end
 		local guid = 0
 		services[name] = setmetatable({
 			-- Fusion keys its listeners by these.

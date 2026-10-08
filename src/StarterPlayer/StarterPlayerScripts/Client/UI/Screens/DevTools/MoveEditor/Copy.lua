@@ -187,6 +187,11 @@ end
 
 -- Field hints. Only for fields whose meaning is not obvious from the label and unit.
 Copy.Hints = {
+	-- The bronze dot beside a field (Fields.lua's CHANGED FIELDS).
+	ChangedDot = "This field differs from the saved move. Press the dot to put the saved value back -- one edit, so Undo brings yours back.",
+	PlayAnimation = "Play runs the clip once on your own character, before it is saved or previewed.",
+	PlaySound = "Play sounds the id once, for you only. Blank (the moment's default) and None have nothing of their own to play -- the moment's Preview plays those.",
+	MovePicker = "Pick from the moves the editor knows; the search matches a name or an id.",
 	Anchor = "What the hitbox rides on. Root follows the body; a hand or the weapon follows the animation.",
 	LocksWindup = "Holds the attacker in place -- no walking, no jumping -- from the moment the move starts until its windup ends, then lets go. Turn on 'while active' as well to hold them through the whole move.",
 	LocksMovement = "Holds the attacker in place -- no walking, no jumping -- from the start of the active window through recovery. For committed strikes; a locked swing does not lunge.",

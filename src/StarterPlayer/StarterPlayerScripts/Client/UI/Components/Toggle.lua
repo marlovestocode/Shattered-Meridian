@@ -57,6 +57,8 @@ export type ToggleProps = {
 	-- the shape, the default path is untouched" structure `Label` above and Section.lua's own `icon`
 	-- parameter already use.
 	Hint: string?,
+	-- Whether the Hint is drawn (default true) -- NumericField's HintVisible, for the same forms.
+	HintVisible: UsedAs<boolean>?,
 }
 
 local TRACK_SIZE = Vector2.new(44, 22)
@@ -210,6 +212,7 @@ local function Toggle(scope: Scope, props: ToggleProps): Frame
 				LineHeight = Tokens.Leading.Prose,
 				Size = UDim2.fromScale(1, 0),
 				LayoutOrder = 2,
+				Visible = props.HintVisible,
 			}),
 		},
 	} :: Frame

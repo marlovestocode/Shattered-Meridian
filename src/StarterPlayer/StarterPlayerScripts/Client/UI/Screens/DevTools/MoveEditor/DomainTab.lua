@@ -3,7 +3,10 @@
 	MoveEditor/DomainTab.lua
 
 	Owns: the five pages a DOMAIN EXPANSION gets instead of Hitbox and Impact -- authoring the
-	MoveDefinition.Domain block that makes a move open a realm (Shared/Domain/DomainTypes.lua):
+	MoveDefinition.Domain block that makes a move open a realm (Shared/Domain/DomainTypes.lua). Since
+	2026-10-07 they are one top-level Realm tab with a sub-tab bar over these five (init.lua), not five tabs.
+	The move ids its effects and overrides name are picked from the move list (Fields.MovePicker): a Volley's
+	from the projectile moves, an override's from the other realms. The five:
 
 	    Realm     the realm's own clock (unfurl, hold, fold), its cost (Qi, upkeep) and how many it governs
 	    Boundary  its shape and size, where it sits, who may cross it and how, what collapses it
@@ -211,26 +214,14 @@ local function binder(scope: Scope, context: Fields.FormContext)
 		end
 		local hintText: UsedAs<string>? = hint or (if entryOf then nil else HINTS[field])
 		if dropdown then
-			if not hintText then
-				return Fields.Choice(scope, context, {
-					Label = label,
-					Options = choices,
-					Visible = shown,
-					LayoutOrder = order,
-					Get = get,
-					Set = set,
-				})
-			end
-			-- A dropdown carries no hint of its own: stack one under it.
-			return Fields.Pile(scope, order, shown, {
-				Fields.Choice(scope, context, {
-					Label = label,
-					Options = choices,
-					LayoutOrder = 1,
-					Get = get,
-					Set = set,
-				}),
-				Fields.Prose(scope, hintText, 2),
+			return Fields.Choice(scope, context, {
+				Label = label,
+				Options = choices,
+				Hint = hintText,
+				Visible = shown,
+				LayoutOrder = order,
+				Get = get,
+				Set = set,
 			})
 		end
 		return Fields.Chips(scope, context, {
@@ -251,12 +242,19 @@ local function binder(scope: Scope, context: Fields.FormContext)
 		shown: UsedAs<boolean>?,
 		entryOf: (DomainSpec) -> any,
 		hint: string?,
-		placeholder: string?
+		blankText: string?,
+		accepts: ((entry: any, domain: DomainSpec?) -> boolean)?
 	): Frame
-		return Fields.Text(scope, context, {
+		-- Picked from the move list, never typed (Fields.MovePicker).
+		return Fields.MovePicker(scope, context, {
 			Label = label,
-			Placeholder = placeholder,
-			MaxLength = DomainTypes.MoveIdLength,
+			BlankText = blankText,
+			Accepts = if accepts
+				then function(entry)
+					local move = Fusion.peek(context.Draft)
+					return accepts(entry, if move then move.Domain else nil)
+				end
+				else nil,
 			Hint = hint,
 			Visible = shown,
 			LayoutOrder = order,
@@ -486,6 +484,7 @@ function DomainTab.Boundary(
 					Toggle(scope, {
 						Label = "Show on my character",
 						Hint = "Draws the realm's boundary where it would open from you, live -- only you see it.",
+						HintVisible = context.Hints,
 						Value = world.ShowOnCharacter,
 						LayoutOrder = 3,
 						OnChanged = function(on: boolean)
@@ -611,7 +610,15 @@ function DomainTab.Effects(scope: Scope, context: Fields.FormContext, visible: U
 				needsMove,
 				entryOf,
 				HINTS.EffectMoveId,
-				"blank: the realm's own strike"
+				"The realm's own strike",
+				function(entry, domain)
+					-- A Volley launches a projectile move; a realm never names another realm.
+					local effect = if domain then domain.Effects[index] else nil
+					if entry.Move.Domain ~= nil then
+						return false
+					end
+					return effect == nil or effect.Kind ~= "Volley" or entry.Move.Projectile ~= nil
+				end
 			),
 			bind.Number("Every", "IntervalSeconds", "seconds", { 0.25, 1 }, 2, 3, nil, entryOf),
 			bind.Number(
@@ -843,7 +850,18 @@ function DomainTab.Clash(scope: Scope, context: Fields.FormContext, visible: Use
 			return if override then Copy.Domain.ClashBehaviors[override.Behavior] or "" else ""
 		end)
 		return {
-			bind.MoveId("Against realm move id", "OpponentMoveId", 1, nil, entryOf, HINTS.OpponentMoveId),
+			bind.MoveId(
+				"Against realm",
+				"OpponentMoveId",
+				1,
+				nil,
+				entryOf,
+				HINTS.OpponentMoveId,
+				"No realm picked",
+				function(entry)
+					return entry.Move.Domain ~= nil
+				end
+			),
 			bind.Choice("Behaviour", "Behavior", CLASH_OPTIONS, 2, nil, entryOf, behaviorHint),
 			bind.Action(`Remove override {index}`, 3, nil, function(domain)
 				if domain.ClashOverrides[index] then
