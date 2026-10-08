@@ -125,6 +125,22 @@ function CandidateGatherer.Gather(
 	return count
 end
 
+-- Fills `out` with the parts whose bounds overlap a sphere and returns how many were written. The shape a
+-- swing's once-per-frame gather asks for (HitboxEngine's frameCandidates): a bound around the frame's whole
+-- sweep rather than the volume at one sample, so it is already padded and takes no margin of its own.
+function CandidateGatherer.GatherSphere(centre: Vector3, radius: number, out: { BasePart }): number
+	table.clear(out)
+	local found = Workspace:GetPartBoundsInRadius(centre, math.max(radius, 0), overlapParams)
+	local count = 0
+	for _, instance in ipairs(found) do
+		if instance:IsA("BasePart") then
+			count += 1
+			out[count] = instance
+		end
+	end
+	return count
+end
+
 -- True when the last Gather saturated its result budget, meaning the broadphase may have dropped
 -- candidates. Read by the engine only for its debug logging: there is no correct recovery from it at
 -- sample time (re-querying without a cap is exactly the cost the cap exists to avoid), so it is

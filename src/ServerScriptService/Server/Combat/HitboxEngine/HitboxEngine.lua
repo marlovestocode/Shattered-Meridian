@@ -130,6 +130,13 @@ type ActiveSwing = {
 	-- attacker's one-way latency plus the replication buffer, capped. 0 for a bot or dummy, or with the
 	-- compensation off. Fixed when the window opens -- one latency read per swing, not per sample.
 	RewindSeconds: number,
+	-- The broadphase's answer for THIS FRAME, gathered once at the swing's first sample of the frame and
+	-- narrow-phased by every substep after it (see frameCandidates). Owned per record, never shared: two
+	-- swings sampled in the same substep must not overwrite each other's list. CandidateFrame is the
+	-- frameIndex it was gathered on; any other value means "gather again".
+	Candidates: { BasePart },
+	CandidateCount: number,
+	CandidateFrame: number,
 }
 
 type Combatant = {
@@ -181,15 +188,14 @@ local projectileListeners: CallbackList.CallbackList<{ ProjectileSimulator.Proje
 -- Update) record the time they are driving it at, here, immediately before.
 local hookNow = 0
 
--- Reused across every sample of every swing. The gatherer fills it, the narrow phase drains it, and
--- nothing outside one sampleSwing call ever reads it.
-local candidateBuffer: { BasePart } = {}
+-- Bumped once per Step. What a record's CandidateFrame is compared against.
+local frameIndex = 0
 
 -- What sampleSwing collects a sample's NEW (not yet hit this swing), CONTAINED owners into, so they
 -- can be sorted nearest-attacker-first before MaxTargets is applied rather than reported in whatever
 -- order the broadphase happened to return them -- "nearest" is what a real swing catching several
 -- people at once should mean; broadphase order is an implementation detail with no gameplay meaning.
--- NOT pooled, unlike candidateBuffer above: a sample that finds a genuine contact is rare relative to
+-- NOT pooled, unlike each record's Candidates list: a sample that finds a genuine contact is rare relative to
 -- the 120Hz substep rate (the same reasoning reportHit's own HitReport allocation already rests on in
 -- this file), so allocating only on that rare path is the right trade, not a hot-path concern.
 type ContactCandidate = { Part: BasePart, Owner: Combatant, Distance: number }
@@ -576,6 +582,35 @@ local function compensationOf(target: Combatant, rewindSeconds: number, now: num
 	return displacement
 end
 
+-- The candidates every remaining substep of THIS FRAME will narrow-phase, gathered once.
+--
+-- ONE BROADPHASE PER FRAME, NOT PER SUBSTEP (2026-10-08). Bodies move once per physics step, so every
+-- substep of a frame queried the very same target positions -- only the attacker's pose is interpolated
+-- between substeps -- and a swing paid two or three identical broadphase queries a frame for one answer.
+-- The query now covers the whole of what is left of the frame's sweep at once: a sphere around the segment
+-- from the previous sample's pose to this frame's end pose, padded by the volume's circumradius (so any
+-- rotation of it along the way is inside), the broadphase margin and, for a compensated swing, the rewind
+-- allowance. Every substep pose lies on that segment (CFrame:Lerp interpolates position linearly), so the
+-- superset is exact for the narrow phase, which still makes the answer exact.
+--
+-- A CHARGING volume (Scaling.ChargeSeconds > 0) changes size between substeps, so it keeps gathering per
+-- substep rather than guessing the frame's largest size.
+local function frameCandidates(record: ActiveSwing, previousPose: CFrame, endPose: CFrame, extra: number): number
+	local charging = record.Swing.Definition.Scaling.ChargeSeconds > 0
+	if not charging and record.CandidateFrame == frameIndex then
+		return record.CandidateCount
+	end
+	local size, localCentre = HitboxGeometry.BoundingBox(record.Shape, record.Dimensions)
+	local reach = localCentre.Magnitude + size.Magnitude / 2
+	local from = previousPose.Position
+	local to = endPose.Position
+	local radius = (to - from).Magnitude / 2 + reach + HitboxEngineConstants.BroadphaseMarginStuds + extra
+	local count = CandidateGatherer.GatherSphere((from + to) / 2, radius, record.Candidates)
+	record.CandidateCount = count
+	record.CandidateFrame = frameIndex
+	return count
+end
+
 -- One combatant, one substep. `alpha` is how far through the current frame this substep sits, used to
 -- interpolate the attachment pose between where it was when the frame began and where it is now.
 local function sampleSwing(combatant: Combatant, record: ActiveSwing, now: number, alpha: number): ()
@@ -606,13 +641,13 @@ local function sampleSwing(combatant: Combatant, record: ActiveSwing, now: numbe
 
 	-- A compensated swing gathers wider, so a body that has since left the volume is still a candidate.
 	local compensated = record.RewindSeconds > 0
-	local count = CandidateGatherer.Gather(
-		record.Shape,
-		record.Dimensions,
-		pose,
-		candidateBuffer,
-		if compensated then HitboxEngineConstants.LagCompensation.MaxDisplacementStuds else nil
+	local count = frameCandidates(
+		record,
+		previousPose,
+		livePose,
+		if compensated then HitboxEngineConstants.LagCompensation.MaxDisplacementStuds else 0
 	)
+	local candidates = record.Candidates
 	if debugEnabled() and CandidateGatherer.WasSaturated(count) then
 		logger:warn("Broadphase saturated; candidates may have been dropped", {
 			attack = record.Swing.Definition.DebugName,
@@ -625,7 +660,7 @@ local function sampleSwing(combatant: Combatant, record: ActiveSwing, now: numbe
 	-- Pass 1: find every NEW, CONTAINED owner this sample, without reporting anything yet.
 	local contacts: { ContactCandidate }? = nil
 	for index = 1, count do
-		local part = candidateBuffer[index]
+		local part = candidates[index]
 		local owner = livingOwnerOf(part)
 		-- An unowned part cannot happen while the Include filter holds only registered models, but the
 		-- check is not free to omit: the filter is rebuilt from a registry this loop does not lock, and
@@ -782,6 +817,7 @@ local function beginActiveWindow(combatant: Combatant, swing: Swing): ()
 	record.FrameStartPose = record.AttachmentPart.CFrame * definition.Offset
 	record.PreviousSamplePose = nil
 	record.RewindSeconds = rewindFor(combatant, hookNow)
+	record.CandidateFrame = -1
 
 	combatant.ActiveSwing = record
 
@@ -859,6 +895,9 @@ function HitboxEngine.RegisterCombatant(model: Model, rootPart: BasePart, humano
 			HitCount = 0,
 			MaxTargets = HitboxEngineConstants.DefaultMaxTargetsPerSwing,
 			RewindSeconds = 0,
+			Candidates = {},
+			CandidateCount = 0,
+			CandidateFrame = -1,
 		},
 		ActiveSwing = nil,
 		HoldsMovementLock = false,
@@ -1267,6 +1306,7 @@ end
 -- which is what makes an interpolated substep time meaningful.
 function HitboxEngine.Step(deltaTime: number, now: number): ()
 	local frameSeconds = math.clamp(deltaTime, 0, HitboxEngineConstants.MaxFrameSeconds)
+	frameIndex += 1
 	sweepLiveness(now)
 
 	-- Where every body is this frame, for lag-compensated swings to rewind (PoseHistory). Before the idle
