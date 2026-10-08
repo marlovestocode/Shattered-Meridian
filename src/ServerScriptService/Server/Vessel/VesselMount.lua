@@ -49,12 +49,16 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
 
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local VesselSafety = require(ReplicatedStorage.Shared.Vessel.VesselSafety)
 local VesselTypes = require(ReplicatedStorage.Shared.Vessel.VesselTypes)
+-- The one cross-folder require here: a mount is the same "who drives this body" claim the combat writers hold,
+-- and a second copy of the claim logic is how the overlapping-writer bug it fixes would come back.
+local RootControl = require(ServerScriptService.Server.Combat.RootControl)
 
 local VesselMount = {}
 
@@ -148,7 +152,7 @@ function VesselMount.New(config: Config): Mounter
 		end
 
 		humanoid.PlatformStand = true
-		humanoid:SetAttribute(AttributeConstants.RootControlLocked, true)
+		RootControl.Claim(humanoid, RootControl.Owners.Vessel)
 		humanoid:SetAttribute(AttributeConstants.Mounted, true)
 
 		-- Anchored is checked rather than assumed: a character anchored by an admin freeze would
@@ -246,9 +250,9 @@ function VesselMount.New(config: Config): Mounter
 			humanoid.PlatformStand = false
 			-- nil rather than false, clearing the Attribute entirely -- the convention every sibling read
 			-- in RunSystem.isMovementLocked uses (`== true`), which treats absent and false identically.
-			humanoid:SetAttribute(AttributeConstants.RootControlLocked, nil)
 			humanoid:SetAttribute(AttributeConstants.Mounted, nil)
 		end
+		RootControl.Release(humanoid, RootControl.Owners.Vessel)
 	end
 
 	return mounter

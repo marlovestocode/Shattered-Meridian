@@ -550,6 +550,58 @@ return function()
 		end)
 	end)
 
+	describe("EngagementSystem -- realm pressure and death", function()
+		it("tags both sides of a pressure pulse without dealing damage or naming an outcome", function()
+			local base = os.clock()
+			local owner, target = facingPair()
+			local ownerPlayer = fakePlayer("Owner", owner.Model)
+			local targetPlayer = fakePlayer("Target", target.Model)
+
+			EngagementSystem.RecordPressure(
+				{ Model = owner.Model, Player = ownerPlayer },
+				{ Model = target.Model, Player = targetPlayer },
+				base
+			)
+
+			expect(EngagementSystem.IsInCombat(ownerPlayer)).to.equal(true)
+			expect(EngagementSystem.IsInCombat(targetPlayer)).to.equal(true)
+			local view = EngagementSystem.GetEngagement(targetPlayer, base) :: any
+			expect(view.DamageTaken).to.equal(0)
+			expect(view.LastOutcomeKind).to.equal(nil)
+			expect(target.Humanoid:GetAttribute(AttributeConstants.InCombat)).to.equal(true)
+		end)
+
+		it("keeps the last real outcome when pressure refreshes a live tag", function()
+			local base = os.clock()
+			local owner, target = facingPair()
+			local ownerPlayer = fakePlayer("Owner")
+			local targetPlayer = fakePlayer("Target")
+			record(owner, ownerPlayer, target, targetPlayer, base)
+			EngagementSystem.RecordPressure(
+				{ Model = owner.Model, Player = ownerPlayer },
+				{ Model = target.Model, Player = targetPlayer },
+				base + 1
+			)
+			local view = EngagementSystem.GetEngagement(targetPlayer, base + 1) :: any
+			expect(view.LastOutcomeKind).to.equal("Clean")
+			expect(view.DamageTaken).to.equal(SYNTHETIC_DAMAGE)
+		end)
+
+		it("ends the victim's fight on death and leaves the killer's running", function()
+			local base = os.clock()
+			local attacker, defender = facingPair()
+			local attackerPlayer = fakePlayer("Attacker")
+			local defenderPlayer = fakePlayer("Defender", defender.Model)
+			record(attacker, attackerPlayer, defender, defenderPlayer, base)
+
+			EngagementSystem.ClearPlayer(defenderPlayer, base + 0.5, "Died")
+
+			expect(EngagementSystem.IsInCombat(defenderPlayer)).to.equal(false)
+			expect(EngagementSystem.IsInCombat(attackerPlayer)).to.equal(true)
+			expect(defender.Humanoid:GetAttribute(AttributeConstants.InCombat)).to.equal(false)
+		end)
+	end)
+
 	describe("EngagementSystem.ReleasePlayer", function()
 		it("drops the leaver's own row", function()
 			local base = os.clock()

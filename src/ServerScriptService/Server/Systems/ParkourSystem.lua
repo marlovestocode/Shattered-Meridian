@@ -53,7 +53,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 
-local ModerationSystem = require(script.Parent.ModerationSystem)
+local SuspicionLedger = require(script.Parent.Support.SuspicionLedger)
 
 type ActionKind = ParkourTypes.ActionKind
 type ActionReport = ParkourTypes.ActionReport
@@ -90,14 +90,20 @@ type PlayerParkourState = {
 	-- Wall-clock deadline after which the ownership window is force-closed regardless of the client.
 	OpenExpiresAt: number,
 	LastPerKind: { [string]: number },
-	-- Timestamps of recent rejections, pruned to VALIDATION.RejectionWindowSeconds.
-	Rejections: { number },
-	-- True once this player has been flagged this session, so a sustained stream of bad reports
-	-- produces one flag rather than one per report past the threshold.
-	Flagged: boolean,
 }
 
 local playerStates: { [Player]: PlayerParkourState } = {}
+
+-- Rejections per player, counted and flagged ONCE per session through the shared SuspicionLedger (2026-10-08) --
+-- the window and latch this System used to keep on each player's state, now shared with KnockbackAudit and
+-- MovementGuard.
+local rejections = SuspicionLedger.New({
+	Name = "Parkour",
+	ReasonCode = "ParkourImplausible",
+	Summary = "implausible movement reports",
+	Strikes = VALIDATION.RejectionsBeforeFlag,
+	WindowSeconds = VALIDATION.RejectionWindowSeconds,
+})
 
 -- Subscribers to OnActionStarted. See that function's own header.
 local actionStartedCallbacks: { (player: Player, kind: ActionKind, now: number) -> () } = {}
@@ -124,8 +130,6 @@ local function getState(player: Player): PlayerParkourState
 		OpenStartPosition = nil,
 		OpenExpiresAt = 0,
 		LastPerKind = {},
-		Rejections = {},
-		Flagged = false,
 	}
 	playerStates[player] = created
 	return created
@@ -156,10 +160,8 @@ local function notifyRejected(
 	remote:FireClient(player, { Kind = kind, Phase = phase, Reason = reason } :: ParkourTypes.ActionRejectedPayload)
 end
 
--- Records a rejection and flags the player if they have produced enough of them inside the window.
--- Flagging is deliberately one-way per session (state.Flagged) -- a player who trips the threshold
--- once has already generated the record a human moderator needs, and re-flagging every subsequent
--- report would spam the suspicion DataStore for no additional information.
+-- Records a rejection; the shared ledger flags the player once, if they have produced enough of them inside the
+-- window (SuspicionLedger -- one flag per session, never one per report past the threshold).
 -- The two rejections an honest knockback launch can cause: the body moved faster, or further, than a
 -- parkour action alone could have carried it. Every other reason is about the report itself.
 local KNOCKBACK_DISTORTABLE: { [RejectionReason]: boolean } = {
@@ -167,7 +169,7 @@ local KNOCKBACK_DISTORTABLE: { [RejectionReason]: boolean } = {
 	ImplausibleTravel = true,
 }
 
-local function noteRejection(player: Player, state: PlayerParkourState, reason: RejectionReason, now: number): ()
+local function noteRejection(player: Player, _state: PlayerParkourState, reason: RejectionReason, now: number): ()
 	-- Inside a knockback allowance (Attributes.KnockbackUntil, stamped by DamageSystem on every launch it
 	-- hands this player), a speed/travel rejection is still a rejection -- nothing is granted -- but it
 	-- is not EVIDENCE: the combat layer moved this body, not the client. Counting it would flag the
@@ -179,26 +181,7 @@ local function noteRejection(player: Player, state: PlayerParkourState, reason: 
 			return
 		end
 	end
-	table.insert(state.Rejections, now)
-	local count = ParkourValidation.PruneRejections(state.Rejections, now, VALIDATION.RejectionWindowSeconds)
-	if state.Flagged or not ParkourValidation.ShouldFlag(count, VALIDATION.RejectionsBeforeFlag) then
-		return
-	end
-	state.Flagged = true
-	logger:warn("Flagging player for sustained implausible parkour reports", {
-		player = player.Name,
-		userId = player.UserId,
-		rejectionsInWindow = count,
-		lastReason = reason,
-	})
-	-- "System", not "Manual" -- Types.SuspicionSource reserves that member for exactly this: an
-	-- automated detector with no individual admin behind it, hence the nil flaggedByUserId.
-	ModerationSystem.FlagSuspectedCheater(
-		player.UserId,
-		nil,
-		`Parkour: {count} implausible movement reports within {VALIDATION.RejectionWindowSeconds}s (last: {reason})`,
-		"System" :: Types.SuspicionSource
-	)
+	rejections:Strike(player, now, reason)
 end
 
 -- Grants velocity ownership for an accepted Start report.
@@ -481,6 +464,7 @@ function ParkourSystem.Init(): ()
 		end,
 		OnPlayerRemoving = function(player: Player)
 			playerStates[player] = nil
+			rejections:Release(player)
 			rateLimiter:Clear(player)
 		end,
 		OnCharacter = function(player: Player)

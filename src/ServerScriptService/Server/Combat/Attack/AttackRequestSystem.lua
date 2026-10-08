@@ -126,6 +126,7 @@ local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnersh
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
+local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 
 local ProjectileRelevance = require(script.Parent.ProjectileRelevance)
 local SwingSequencer = require(script.Parent.SwingSequencer)
@@ -154,6 +155,11 @@ local combatantIds: { [Model]: number } = {}
 -- When each combatant may throw each move again. Nested per model so a whole character's cooldowns
 -- drop in one assignment when their life ends, rather than needing a sweep over a flat composite key.
 local cooldownUntil: { [Model]: { [string]: number } } = {}
+
+-- When each body may next change the weapon in its hand (WeaponConstants.Swap), on the os.clock() clock. Absent
+-- means now. Reclaimed with the body (unbindCharacter, the reclaim sweep).
+local swapReadyAt: { [Model]: number } = {}
+local swapReadyReclaim = AmortizedReclaim.New()
 
 -- One round-robin reclaim cursor per table above -- see Shared/AmortizedReclaim.lua for why these are
 -- separate instances rather than one shared cursor, and Step below for what they replaced.
@@ -227,7 +233,6 @@ local projectileDisconnect: (() -> ())? = nil
 -- The DamageSystem.OnApplied subscription (onDamageApplied), connected in Init.
 local appliedDisconnect: (() -> ())? = nil
 local requestLimiter = RateLimiter.New(AttackConstants.Network.MaxCallsPerSecondPerPlayer)
-local swapLimiter = RateLimiter.New(AttackConstants.Network.MaxSwapsPerSecondPerPlayer)
 local feintLimiter = RateLimiter.New(AttackConstants.Network.MaxFeintsPerSecondPerPlayer)
 
 -- This layer's three extension points (Shared/CallbackList.lua: each consumer pcall'd, safe to disconnect
@@ -454,10 +459,10 @@ end
 
 -- Every OnWeaponChanged subscriber, in registration order, then the owner's client. pcall'd per subscriber
 -- (CallbackList): one erroring (WeaponVisualSystem today) must not abort the rest and above all must not
--- unwind out of handleSwap/bindCharacter into this System's own Heartbeat/PlayerAdded plumbing.
+-- unwind out of RequestWeapon/SetWeapon/bindCharacter into this System's own Heartbeat/PlayerAdded plumbing.
 --
 -- THE CLIENT IS TOLD HERE, ON EVERY CHANGE -- a swap, a draw or sheathe (SetWeapon), and a fresh life
--- (bindCharacter). It used to be told from handleSwap alone, so a player who drew a weapon instead of
+-- (bindCharacter). It used to be told from the retired swap key alone, so a player who drew a weapon instead of
 -- pressing the swap key never learned what they held: AttackInputClient could not name the move a press
 -- meant and predicted no swing at all, and after a draw it could predict the PREVIOUS weapon's clip.
 local function notifyWeaponChanged(character: Model, weaponId: Types.WeaponId?): ()
@@ -724,30 +729,12 @@ local function backdatedStartFor(
 	return math.min(startedAt, now)
 end
 
--- Runs every gate and, if they all pass, actually throws. Returns (accepted, reason) -- a refusal is
--- normal and never an error, matching HitboxEngine.RequestAttack's own contract. Throw and ThrowMove
--- below are its two public faces.
---
--- `forced` is ThrowMove's pre-resolved move (see that function): when present it replaces resolveRequest
--- and nothing else -- every gate, the cooldown, the engine call and every commit below run exactly as
--- for a press.
-local function throw(
-	model: Model,
-	request: AttackRequest,
-	now: number,
-	forced: SwingSequencer.Resolution?
-): (boolean, string?)
-	if not isAlive(model) then
-		return false, "NoCharacter"
-	end
-
-	local combatantId = combatantIds[model] or HitboxEngine.GetCombatantId(model)
-	if not combatantId then
-		return false, "NotRegistered"
-	end
-
-	-- Asked BEFORE the catalogue lookup and the engine call, because both of those cost more than a
-	-- table read and neither can succeed while these refuse.
+-- THE BODY GATES (consolidated 2026-10-08): whether this body may act at all right now -- every refusal that is
+-- about the BODY rather than about a move. Throw asks it before anything that costs more than a table read, and
+-- RequestWeapon asks it before letting the weapon in hand change, so "you cannot swing" and "you cannot swap"
+-- are one answer and cannot drift apart. Public as AttackRequestSystem.CanAct (with the alive/registered checks
+-- in front) for anything else that needs the same question -- a bot, a future item use.
+local function bodyGate(model: Model, now: number): (boolean, string?)
 	local defenceAllows, defenceReason = DefenseSystem.CanAttack(model)
 	if not defenceAllows then
 		return false, defenceReason or "Defending"
@@ -807,6 +794,38 @@ local function throw(
 	if humanoid and humanoid:GetAttribute(AttributeConstants.Mounted) == true then
 		return false, "Mounted"
 	end
+	return true, nil
+end
+
+-- Runs every gate and, if they all pass, actually throws. Returns (accepted, reason) -- a refusal is
+-- normal and never an error, matching HitboxEngine.RequestAttack's own contract. Throw and ThrowMove
+-- below are its two public faces.
+--
+-- `forced` is ThrowMove's pre-resolved move (see that function): when present it replaces resolveRequest
+-- and nothing else -- every gate, the cooldown, the engine call and every commit below run exactly as
+-- for a press.
+local function throw(
+	model: Model,
+	request: AttackRequest,
+	now: number,
+	forced: SwingSequencer.Resolution?
+): (boolean, string?)
+	if not isAlive(model) then
+		return false, "NoCharacter"
+	end
+
+	local combatantId = combatantIds[model] or HitboxEngine.GetCombatantId(model)
+	if not combatantId then
+		return false, "NotRegistered"
+	end
+
+	-- Asked BEFORE the catalogue lookup and the engine call, because both of those cost more than a
+	-- table read and neither can succeed while these refuse.
+	local bodyAllows, bodyReason = bodyGate(model, now)
+	if not bodyAllows then
+		return false, bodyReason
+	end
+	local humanoid = CharacterUtil.HumanoidOf(model)
 
 	local resolution, resolveReason
 	if forced then
@@ -1531,26 +1550,6 @@ local function handleFeint(player: Player): ()
 	end
 end
 
-local function handleSwap(player: Player): ()
-	if swapLimiter:IsLimited(player) then
-		return
-	end
-	local character = player.Character
-	if not character then
-		return
-	end
-	local weaponId = SwingSequencer.SwapWeapon(character, os.clock())
-	if not weaponId then
-		-- An empty roster (nothing in Workspace.Weapons). Nothing to swap TO, so the press is a no-op
-		-- rather than an un-equip -- taking a player's weapon away on a swap they can't complete is a
-		-- worse answer than ignoring the key.
-		return
-	end
-	-- A swap abandons the in-progress string, so anything buffered against it is stale by definition.
-	dropBuffered(character, "Dropped")
-	notifyWeaponChanged(character, weaponId)
-end
-
 -- Registry -----------------------------------------------------------------------------------------
 
 -- `humanoid` is resolved by Shared/PlayerLifecycle.lua before this is reached; the HumanoidRootPart
@@ -1579,6 +1578,7 @@ local function unbindCharacter(character: Model): ()
 	-- A new life inherits none of the previous one's string, cooldowns or buffered press. Dropped here
 	-- rather than left to the Step sweep so a respawn is immediate rather than up-to-a-frame stale.
 	cooldownUntil[character] = nil
+	swapReadyAt[character] = nil
 	lastPressId[character] = nil
 	dropBuffered(character, "Dropped")
 	inFlight[character] = nil
@@ -1676,7 +1676,7 @@ function AttackRequestSystem.SetWeapon(model: Model, weaponId: Types.WeaponId?, 
 	if weaponId == nil then
 		SwingSequencer.ClearWeapon(model, now)
 		-- A swap abandons the in-progress string, so anything buffered against it is stale -- the same
-		-- reasoning handleSwap's own buffer clear gives.
+		-- reasoning the retired swap key's own buffer clear gave.
 		dropBuffered(model, "Dropped")
 		notifyWeaponChanged(model, nil)
 		return true
@@ -1688,6 +1688,61 @@ function AttackRequestSystem.SetWeapon(model: Model, weaponId: Types.WeaponId?, 
 	dropBuffered(model, "Dropped")
 	notifyWeaponChanged(model, weaponId)
 	return true
+end
+
+-- Whether `model` may act right now (THE BODY GATES, bodyGate above), with the alive and registered checks in
+-- front -- the same answer Throw gives before it looks at any move. (allowed, reason).
+function AttackRequestSystem.CanAct(model: Model, now: number): (boolean, string?)
+	if not isAlive(model) then
+		return false, "NoCharacter"
+	end
+	if not (combatantIds[model] or HitboxEngine.GetCombatantId(model)) then
+		return false, "NotRegistered"
+	end
+	return bodyGate(model, now)
+end
+
+-- Seconds until `model` may change the weapon in its hand again (WeaponConstants.Swap); 0 when it may.
+function AttackRequestSystem.SwapReadyIn(model: Model, now: number): number
+	local readyAt = swapReadyAt[model]
+	return if readyAt then math.max(readyAt - now, 0) else 0
+end
+
+local function isEngaged(model: Model): boolean
+	local humanoid = CharacterUtil.HumanoidOf(model)
+	return humanoid ~= nil and humanoid:GetAttribute(AttributeConstants.InCombat) == true
+end
+
+-- A PLAYER asking to change the weapon in hand -- a draw, a sheathe, a switch (WeaponInventorySystem). The swap
+-- rule (WeaponConstants.Swap) is enforced here, and only here: refused while the body cannot act (CanAct), while
+-- any swing is still playing ("Busy" -- a string must not be carried into a second moveset mid-swing), and, while
+-- engaged, inside CooldownSeconds of the last change ("SwapCooldown"). No change at all is not a swap and always
+-- succeeds without starting a cooldown. Everything else -- a fresh life, a bot's loadout, an admin -- calls
+-- SetWeapon, which is never gated.
+--
+-- (accepted, reason). On success the change is made exactly as SetWeapon makes it.
+function AttackRequestSystem.RequestWeapon(model: Model, weaponId: Types.WeaponId?, now: number): (boolean, string?)
+	if weaponId == SwingSequencer.GetWeapon(model) then
+		return true, nil
+	end
+	local allowed, reason = AttackRequestSystem.CanAct(model, now)
+	if not allowed then
+		return false, reason
+	end
+	local combatantId = combatantIds[model] or HitboxEngine.GetCombatantId(model)
+	local engineState = if combatantId then HitboxEngine.GetAttackState(combatantId) else nil
+	if engineState ~= nil and engineState ~= "Idle" then
+		return false, "Busy"
+	end
+	local rule = WeaponConstants.Swap
+	if (not rule.OnlyWhileEngaged or isEngaged(model)) and AttackRequestSystem.SwapReadyIn(model, now) > 0 then
+		return false, "SwapCooldown"
+	end
+	if not AttackRequestSystem.SetWeapon(model, weaponId, now) then
+		return false, "UnknownWeapon"
+	end
+	swapReadyAt[model] = now + rule.CooldownSeconds
+	return true, nil
 end
 
 -- The templates notifyWeaponChanged sends with a change to `weaponId` (predictionSeedFor). A pure query.
@@ -1754,6 +1809,7 @@ function AttackRequestSystem.Step(_deltaTime: number, now: number): ()
 	-- Same reclaim-only shape: both are read-on-demand and timestamp- or engine-checked, never walked.
 	inFlightReclaim:Step(inFlight)
 	feintReadyReclaim:Step(feintReadyAt)
+	swapReadyReclaim:Step(swapReadyAt)
 	SwingSequencer.Sweep()
 
 	-- THE GUARD CUT (AttackConstants.GuardCut): a guard held against this body's own swing cuts the tail of
@@ -1807,8 +1863,9 @@ function AttackRequestSystem.Init(): ()
 	requestRemote.OnServerEvent:Connect(handleRequest)
 	startedRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.Started)
 
-	local swapRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.SwapWeapon)
-	swapRemote.OnServerEvent:Connect(handleSwap)
+	-- (Attack_SwapWeapon, the roster-cycling swap key, is gone -- 2026-10-08. No client had sent it since weapons
+	-- became an inventory, and it was still live: an exploited client could cycle into ANY roster weapon, owned or
+	-- not, with no cooldown. Every weapon change a player makes now goes through RequestWeapon.)
 	weaponChangedRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.WeaponChanged)
 
 	local feintRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.Feint)
@@ -1834,7 +1891,6 @@ function AttackRequestSystem.Init(): ()
 		Scope = "AttackRequestSystem",
 		OnPlayerRemoving = function(player: Player)
 			requestLimiter:Clear(player)
-			swapLimiter:Clear(player)
 			feintLimiter:Clear(player)
 			local character = player.Character
 			if character then
@@ -1895,6 +1951,8 @@ function AttackRequestSystem.Reset(): ()
 	table.clear(lastPressId)
 	table.clear(inFlight)
 	table.clear(feintReadyAt)
+	table.clear(swapReadyAt)
+	swapReadyReclaim:Reset()
 	for model in tellEndsAt do
 		clearTell(model)
 	end

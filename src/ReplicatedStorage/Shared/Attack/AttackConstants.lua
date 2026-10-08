@@ -451,8 +451,6 @@ AttackConstants.Network = {
 		-- for whatever the client guessed locally -- never a rollback of a hit, because the client
 		-- never claimed one.
 		Started = "Attack_Started",
-		-- Client -> server, the weapon swap press.
-		SwapWeapon = "Attack_SwapWeapon",
 		-- Server -> owner, on every accepted swap.
 		WeaponChanged = "Attack_WeaponChanged",
 		-- Client -> server, the feint press (AttackRequestSystem.Feint). No payload at all: the server
@@ -489,11 +487,6 @@ AttackConstants.Network = {
 	-- played it and then cut it as unconfirmed. Every press past the gate costs one table write (the
 	-- one-slot buffer), so 30 still bounds a spammer at trivial cost while no human mash reaches it.
 	MaxCallsPerSecondPerPlayer = 30,
-
-	-- The swap key gets its own, much tighter bucket. Swapping is a deliberate act, not a combat
-	-- rhythm, and a swap costs a registry lookup plus a string reset -- there is no legitimate reason
-	-- to send more than a couple a second.
-	MaxSwapsPerSecondPerPlayer = 4,
 
 	-- The feint key's own bucket. A legal feint needs a swing in its windup first, which is itself
 	-- gated by the request bucket above, so more than a few a second is never legitimate.

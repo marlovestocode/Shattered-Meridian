@@ -151,6 +151,7 @@ local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
+local RootControl = require(script.Parent.Parent.RootControl)
 
 type DefenseOutcome = DefenseTypes.DefenseOutcome
 type DamageResult = DamageTypes.DamageResult
@@ -428,9 +429,11 @@ local function restoreControl(victim: Model, humanoid: Humanoid, root: BasePart)
 	end
 	if humanoid.Parent ~= nil then
 		humanoid.PlatformStand = false
-		humanoid:SetAttribute(AttributeConstants.RootControlLocked, nil)
 		humanoid:SetAttribute(AttributeConstants.Grabbed, nil)
 	end
+	-- The victim's claim only (Server/Combat/RootControl.lua): a stagger or an air combo holding the same body
+	-- keeps it held. Released even for an unparented Humanoid so the claim set cannot outlive the grab.
+	RootControl.Release(humanoid, RootControl.Owners.GrabVictim)
 end
 
 -- Loops an authored hold clip (MoveGrabConfig.VictimAnimation/AttackerAnimation) on `model` for the
@@ -605,7 +608,7 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 
 	attackerHumanoid:SetAttribute(AttributeConstants.Grabbing, true)
 	victimHumanoid:SetAttribute(AttributeConstants.Grabbed, true)
-	victimHumanoid:SetAttribute(AttributeConstants.RootControlLocked, true)
+	RootControl.Claim(victimHumanoid, RootControl.Owners.GrabVictim)
 
 	-- What every client's Client/FX/GrabHoldPose.lua needs: which of the holder's arms to pin (so no
 	-- animation swings the hand the victim is welded to), the victim's mode, whether an authored clip
@@ -802,7 +805,7 @@ local function beginThrowClip(attackerModel: Model, hold: Hold, clip: string, no
 	-- own OnFinished, which every ending of it reaches -- finish, release, death, teardown.
 	local attackerHumanoid = hold.AttackerHumanoid
 	attackerHumanoid:SetAttribute(AttributeConstants.GrabThrowing, true)
-	attackerHumanoid:SetAttribute(AttributeConstants.RootControlLocked, true)
+	RootControl.Claim(attackerHumanoid, RootControl.Owners.GrabThrower)
 
 	-- Same layer and source as the hold clip, so this replaces it rather than layering over it.
 	local animation = GrabConstants.Animation
@@ -825,12 +828,11 @@ local function beginThrowClip(attackerModel: Model, hold: Hold, clip: string, no
 			end
 			if attackerHumanoid.Parent ~= nil then
 				attackerHumanoid:SetAttribute(AttributeConstants.GrabThrowing, nil)
-				-- Not if a grab has taken this body since (thrown or held mid-follow-through): that lock is
-				-- the new grab's, and it clears its own.
-				if heldBy[attackerModel] == nil and flights[attackerModel] == nil then
-					attackerHumanoid:SetAttribute(AttributeConstants.RootControlLocked, nil)
-				end
 			end
+			-- The thrower's claim only. A grab that has taken this body since (thrown or held mid-follow-through)
+			-- holds its own GrabVictim claim, so this can no longer clear it -- the check that used to guard that
+			-- here is now the claim set's job (Server/Combat/RootControl.lua).
+			RootControl.Release(attackerHumanoid, RootControl.Owners.GrabThrower)
 			-- Handed to the follow-through by launch (just now, or earlier at the release point): the clip
 			-- is over, so is its manager -- faded and destroyed on stopHoldClip's delay, never destroyed in
 			-- the same frame as the stop, which would race the stop's replication. A released hold still

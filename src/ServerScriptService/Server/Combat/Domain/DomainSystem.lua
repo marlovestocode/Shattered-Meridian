@@ -86,6 +86,7 @@ local AttackCatalog = require(CombatRoot.AttackCatalog)
 local AttackRequestSystem = require(CombatRoot.Attack.AttackRequestSystem)
 local DamageSystem = require(CombatRoot.Damage.DamageSystem)
 local DefenseSystem = require(CombatRoot.Defense.DefenseSystem)
+local EngagementSystem = require(CombatRoot.Engagement.EngagementSystem)
 local HitboxEngine = require(CombatRoot.HitboxEngine.HitboxEngine)
 local MoveRegistryManager = require(CombatRoot.MoveRegistryManager)
 local QiSystem = require(ServerScriptService.Server.Systems.QiSystem)
@@ -100,6 +101,10 @@ type DomainMessage = DomainTypes.DomainMessage
 type DomainView = DomainTypes.DomainView
 
 local logger = Logger.scope("DomainSystem")
+
+-- Effect kinds that touch a body without resolving a hit, so the damage layer never tags the pair as engaged;
+-- the Pressure port does it instead (EngagementSystem.RecordPressure).
+local PRESSURE_KINDS: { [string]: true } = { Hitstun = true, GuardDrain = true, Pull = true, Push = true }
 
 local DomainSystem = {}
 
@@ -202,6 +207,9 @@ export type Ports = DomainEffects.Ports & {
 	IsRegistered: (model: Model) -> boolean,
 	SetBarrier: (callback: ((Model, string?, Vector3, Vector3) -> boolean)?) -> (),
 	GetMove: (moveId: string) -> DomainTypes.DomainSpec?,
+	-- Tags owner and target as engaged for a pulse that reached a body without resolving a hit (Hitstun,
+	-- GuardDrain, Pull, Push). A Strike/Volley is tagged by the damage layer like any hit.
+	Pressure: (owner: Model, target: Model, now: number) -> (),
 }
 
 local function applyImpulse(model: Model, velocity: Vector3, _now: number): ()
@@ -259,6 +267,7 @@ local defaultPorts: Ports = {
 	SetBarrier = function(callback)
 		HitboxEngine.SetProjectileBarrier(callback)
 	end,
+	Pressure = EngagementSystem.RecordPressureBetween,
 	GetMove = function(moveId: string): DomainTypes.DomainSpec?
 		local move = MoveRegistryManager.Get(moveId)
 		return if move then move.Domain else nil
@@ -872,6 +881,11 @@ local function runEffects(instance: DomainInstance, now: number): ()
 		end
 		if budget then
 			budget.Tokens -= spent
+		end
+		if PRESSURE_KINDS[effect.Kind] then
+			for _, target in reached do
+				ports.Pressure(instance.Owner, target, now)
+			end
 		end
 		if #reached > 0 then
 			broadcast({

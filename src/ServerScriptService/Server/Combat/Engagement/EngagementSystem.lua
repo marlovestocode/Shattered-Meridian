@@ -119,6 +119,7 @@ local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local EngagementConstants = require(ReplicatedStorage.Shared.Engagement.EngagementConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
 
@@ -148,7 +149,8 @@ export type Engagement = {
 	-- nil when the opponent is not a Player (a future bot or NPC boss). Kept alongside opponentName
 	-- rather than derived from it at read time -- a name is not a stable identity.
 	opponentUserId: number?,
-	lastOutcomeKind: DefenseTypes.OutcomeKind,
+	-- nil while the fight so far is only realm pressure (RecordPressure), which resolves no outcome.
+	lastOutcomeKind: DefenseTypes.OutcomeKind?,
 	damageDealt: number,
 	damageTaken: number,
 	-- Stamped at each exchange, capped at EngagementConstants.MaxTrackedOpponents. Nothing reads this
@@ -314,11 +316,12 @@ end
 
 -- Refreshes (or opens) `player`'s engagement against `opponent`. `dealt`/`taken` are this one
 -- contact's contribution from THIS player's point of view -- the caller decides which side of the
--- exchange they were on, so this function never has to know.
+-- exchange they were on, so this function never has to know. A nil `kind` (realm pressure, which resolves
+-- no outcome) refreshes the tag and keeps whatever outcome the row last recorded.
 local function tag(
 	player: Player,
 	opponent: Combatant,
-	kind: DefenseTypes.OutcomeKind,
+	kind: DefenseTypes.OutcomeKind?,
 	dealt: number,
 	taken: number,
 	now: number
@@ -350,7 +353,9 @@ local function tag(
 	row.inCombatUntil = now + EngagementConstants.TagDurationSeconds
 	row.opponentName = if opponentPlayer then opponentPlayer.Name else opponent.Model.Name
 	row.opponentUserId = if opponentPlayer then opponentPlayer.UserId else nil
-	row.lastOutcomeKind = kind
+	if kind ~= nil then
+		row.lastOutcomeKind = kind
+	end
 	row.damageDealt += dealt
 	row.damageTaken += taken
 
@@ -376,6 +381,25 @@ local function clear(player: Player, now: number, reason: string): ()
 	engagements[player] = nil
 	debugLog(EngagementConstants.Debug.LogExpired, "Engagement cleared", { player = player.Name, reason = reason })
 	publish(player, now)
+end
+
+-- Ends `player`'s engagement now. Bound to GameplayEvents.OnPlayerKilled for the victim: a death ends that
+-- player's fight. Before this, a killed player's tag ran out its full duration across the respawn -- the HUD
+-- still said "in combat" on a fresh body that had no InCombat Attribute at all, so the panel and every
+-- Attribute reader (parkour's gate, MovementGuard) disagreed about the same player. The killer keeps their tag:
+-- they are still standing where the fight was.
+function EngagementSystem.ClearPlayer(player: Player, now: number, reason: string?): ()
+	clear(player, now, reason or "Cleared")
+end
+
+-- A new body for a player whose tag is still live (an admin respawn, a LoadCharacter mid-fight) carries the
+-- InCombat Attribute from its first frame. publish() writes the Attribute only on an EDGE, onto whichever
+-- Humanoid exists at that moment; a body that arrives mid-tag saw no edge and would read as out of combat
+-- until the tag lapsed and came back.
+local function reassertOnCharacter(player: Player, _character: Model, humanoid: Humanoid): ()
+	if engagements[player] ~= nil then
+		humanoid:SetAttribute(AttributeConstants.InCombat, true)
+	end
 end
 
 -- Public read surface ----------------------------------------------------------------------------------
@@ -506,7 +530,7 @@ end
 function EngagementSystem.RecordExchange(
 	attacker: Combatant,
 	defender: Combatant,
-	kind: DefenseTypes.OutcomeKind,
+	kind: DefenseTypes.OutcomeKind?,
 	damage: number,
 	now: number
 ): ()
@@ -530,6 +554,25 @@ function EngagementSystem.RecordExchange(
 		tag(defenderPlayer, attacker, kind, 0, damage, now)
 		publish(defenderPlayer, now)
 	end
+end
+
+-- PRESSURE THAT IS NOT A HIT. A realm's Hitstun, GuardDrain, Pull and Push pulses stun, drain and move a body
+-- without ever resolving a DefenseOutcome, so DamageSystem.OnApplied never hears them -- and before this, a
+-- player held in a realm's stun field was not "in combat": parkour's combat gate let them leave, MovementGuard
+-- did not watch them, and the realm's owner could keep a victim locked without either of them being tagged.
+-- DomainSystem calls this once per body a non-damaging pulse reached (its Pressure port). Tags both sides like
+-- an exchange, deals no damage, and leaves lastOutcomeKind alone (nothing was resolved).
+function EngagementSystem.RecordPressure(attacker: Combatant, target: Combatant, now: number): ()
+	EngagementSystem.RecordExchange(attacker, target, nil, 0, now)
+end
+
+-- The model-keyed form, for callers holding characters rather than resolved Combatants (DomainSystem's port).
+function EngagementSystem.RecordPressureBetween(attackerModel: Model, targetModel: Model, now: number): ()
+	EngagementSystem.RecordPressure(
+		{ Model = attackerModel, Player = Players:GetPlayerFromCharacter(attackerModel) },
+		{ Model = targetModel, Player = Players:GetPlayerFromCharacter(targetModel) },
+		now
+	)
 end
 
 -- The adapter, and deliberately nothing more than one: resolve both characters to Players, hand the
@@ -644,15 +687,23 @@ function EngagementSystem.Init(): ()
 		EngagementSystem.Step(deltaTime, os.clock())
 	end)
 
-	-- Through Shared/PlayerLifecycle rather than raw Players wiring? No, and deliberately -- one of
-	-- that module's own five documented exemptions. Its value is resolving a Humanoid per life and
-	-- handing over a per-life Trove; this module wants neither. It never touches a character except
-	-- inside publish (which resolves the Humanoid itself, at the moment of an edge, and correctly does
-	-- nothing when there is not one yet), and it holds no per-life state to tear down. What it needs
-	-- is two player-scoped moments, and PlayerRemoving is the one carrying real weight.
-	lifecycleTrove:Connect(Players.PlayerAdded, EngagementSystem.TrackPlayer)
+	-- Through Shared/PlayerLifecycle since 2026-10-08: the module now needs each new body as well (see
+	-- reassertOnCharacter), and BindAllPlayers also seeds players already present at Init, which the raw
+	-- PlayerAdded wiring missed.
+	lifecycleTrove:Add(PlayerLifecycle.BindAllPlayers({
+		Scope = "EngagementSystem",
+		OnPlayer = function(player: Player, _session)
+			EngagementSystem.TrackPlayer(player)
+		end,
+		OnCharacter = function(player: Player, character: Model, humanoid: Humanoid, _life)
+			reassertOnCharacter(player, character, humanoid)
+		end,
+		OnPlayerRemoving = EngagementSystem.ReleasePlayer,
+	}))
 
-	lifecycleTrove:Connect(Players.PlayerRemoving, EngagementSystem.ReleasePlayer)
+	lifecycleTrove:Add(GameplayEvents.OnPlayerKilled(function(victim: Player, _killer: Player?, _deathId: number)
+		EngagementSystem.ClearPlayer(victim, os.clock(), "Died")
+	end))
 
 	logger:info("EngagementSystem.Init() complete")
 end

@@ -405,6 +405,10 @@ end
 -- rather than snapping orientation to identity, so a teleported player doesn't visibly spin in place.
 -- Returns false if the target has no live character/rootPart -- there is nothing meaningful to
 -- teleport otherwise, same "requires a currently-live Humanoid/rootPart" contract as SetFlying above.
+-- How long after an admin teleport the target's movement may look like one (AttributeConstants.KnockbackUntil):
+-- a frame to replicate the jump, with a wide margin for a slow client.
+local TELEPORT_MOVEMENT_ALLOWANCE_SECONDS = 2
+
 function AdminActionSystem.TeleportToPosition(targetPlayer: Player, position: Vector3): boolean
 	local character = targetPlayer.Character
 	if not character then
@@ -415,6 +419,13 @@ function AdminActionSystem.TeleportToPosition(targetPlayer: Player, position: Ve
 		return false
 	end
 	rootPart.CFrame = CFrame.new(position, position + rootPart.CFrame.LookVector)
+	-- The server moved this body: stamp the movement allowance every server-side reposition uses
+	-- (AttributeConstants.KnockbackUntil -- a launch, a realm's containment), so the movement checks
+	-- (Server/Combat/MovementGuard, ParkourSystem's travel check) read the jump as the server's, not the client's.
+	local humanoid = CharacterUtil.HumanoidOf(character)
+	if humanoid then
+		humanoid:SetAttribute(AttributeConstants.KnockbackUntil, os.clock() + TELEPORT_MOVEMENT_ALLOWANCE_SECONDS)
+	end
 	return true
 end
 

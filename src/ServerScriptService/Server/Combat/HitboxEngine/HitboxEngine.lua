@@ -92,6 +92,7 @@ local CandidateGatherer = require(ServerScriptService.Server.Combat.HitboxEngine
 local ProjectileSimulator = require(ServerScriptService.Server.Combat.HitboxEngine.ProjectileSimulator)
 local PoseHistory = require(ServerScriptService.Server.Combat.HitboxEngine.PoseHistory)
 local NetworkLatency = require(ServerScriptService.Server.Combat.NetworkLatency)
+local RootControl = require(ServerScriptService.Server.Combat.RootControl)
 
 type AttackDefinition = HitboxTypes.AttackDefinition
 type Dimensions = HitboxTypes.Dimensions
@@ -147,6 +148,9 @@ type Combatant = {
 	HoldsMovementLock: boolean,
 	-- Where this body's root has been, one sample per frame (PoseHistory) -- what other swings rewind it by.
 	History: PoseHistory.History,
+	-- Until when this body's OWN swings get no lag compensation (SuspendCompensation): MovementGuard saw it move
+	-- implausibly, and a body whose positions cannot be trusted is not handed the rewind.
+	CompensationSuspendedUntil: number,
 }
 
 -- Dense array walked every substep, plus the id and model indexes into it. Never a hash map with
@@ -364,13 +368,13 @@ local function setMovementLock(combatant: Combatant, locked: boolean): ()
 	end
 	combatant.HoldsMovementLock = locked
 	local humanoid = combatant.Humanoid
+	-- A CLAIM, not a write (Server/Combat/RootControl.lua): a stagger, a grab or an air combo may hold the same
+	-- body, and ending this swing must not hand it back to the client while one of them still does. Released
+	-- even for an unparented Humanoid, so the claim set never outlives the swing.
+	RootControl.Set(humanoid, RootControl.Owners.Swing, locked)
 	if humanoid.Parent == nil then
 		return
 	end
-	-- An Attribute, not a property or a BindableEvent, because Client/Parkour/ParkourController.lua's
-	-- resolveCombatOwned polls exactly this. See HitboxEngineConstants.RootControlLockedAttribute --
-	-- that constant's header is where the contract is documented.
-	humanoid:SetAttribute(HitboxEngineConstants.RootControlLockedAttribute, if locked then true else nil)
 	-- The body is HELD, not just handed over: RunSystem pins WalkSpeed to 0 off this one (a move's "Locks
 	-- movement" used to set only the Attribute above, which nothing zeroes speed for, so it slowed the
 	-- attacker to committed pace instead of stopping them).
@@ -544,9 +548,9 @@ end
 -- How far back a swing by `attacker` tests its targets (HitboxEngineConstants.LagCompensation): its one-way
 -- latency plus the replication buffer, capped; 0 for a body with no connection (a bot, a dummy) or with the
 -- compensation off.
-local function rewindFor(attacker: Combatant): number
+local function rewindFor(attacker: Combatant, now: number): number
 	local config = HitboxEngineConstants.LagCompensation
-	if not config.Enabled then
+	if not config.Enabled or now < attacker.CompensationSuspendedUntil then
 		return 0
 	end
 	local oneWay = NetworkLatency.OneWaySeconds(attacker.Model)
@@ -777,7 +781,7 @@ local function beginActiveWindow(combatant: Combatant, swing: Swing): ()
 	-- frames it was not yet active.
 	record.FrameStartPose = record.AttachmentPart.CFrame * definition.Offset
 	record.PreviousSamplePose = nil
-	record.RewindSeconds = rewindFor(combatant)
+	record.RewindSeconds = rewindFor(combatant, hookNow)
 
 	combatant.ActiveSwing = record
 
@@ -859,6 +863,7 @@ function HitboxEngine.RegisterCombatant(model: Model, rootPart: BasePart, humano
 		ActiveSwing = nil,
 		HoldsMovementLock = false,
 		History = PoseHistory.New(HitboxEngineConstants.LagCompensation.HistoryCapacity),
+		CompensationSuspendedUntil = 0,
 	}
 
 	combatant.Machine = AttackStateMachine.New({
@@ -933,10 +938,19 @@ function HitboxEngine.UnregisterCombatant(combatantId: number): boolean
 	return false
 end
 
--- How far back a swing by this model tests its targets (LagCompensation), for its spec and the debug readout.
-function HitboxEngine.RewindFor(model: Model): number
+-- Stops lag compensation for `model`'s own swings until `untilAt` (os.clock()) -- Server/Combat/MovementGuard.lua's
+-- answer to a body that moved implausibly. Only ever extends; a swing already open keeps the rewind it opened with.
+function HitboxEngine.SuspendCompensation(model: Model, untilAt: number): ()
 	local combatant = modelToCombatant[model]
-	return if combatant then rewindFor(combatant) else 0
+	if combatant then
+		combatant.CompensationSuspendedUntil = math.max(combatant.CompensationSuspendedUntil, untilAt)
+	end
+end
+
+-- How far back a swing by this model tests its targets (LagCompensation), for its spec and the debug readout.
+function HitboxEngine.RewindFor(model: Model, now: number?): number
+	local combatant = modelToCombatant[model]
+	return if combatant then rewindFor(combatant, now or os.clock()) else 0
 end
 
 function HitboxEngine.GetCombatantId(model: Model): number?

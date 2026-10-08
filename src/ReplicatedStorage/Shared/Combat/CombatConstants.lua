@@ -636,11 +636,8 @@ local CombatConstants = {
 	-- Cooldown <= the timeline means attackEndsAt (the commitment lock, always exactly the timeline)
 	-- is the true binding constraint, never Cooldown layering extra wait time on top of it.
 	Weapons = {
-		-- Minimum seconds between accepted RequestSwapWeapon calls -- long enough that swap-spamming
-		-- can't be used as an exploit or evasive tool, short enough to be a real mid-fight option,
-		-- matching combat-philosophy.md's framing of the swap cooldown's purpose ("prevents instant
-		-- weapon-cycling as a combo exploit").
-		SwapCooldownSeconds = 4,
+		-- (SwapCooldownSeconds lived here with no reader for months; the swap rule is now enforced, and lives
+		-- in WeaponConstants.Swap -- 2026-10-08.)
 
 		-- BARE FISTS -- the one weapon every combatant owns without ever picking anything up
 		-- (Server/Combat/Weapon/WeaponInventorySystem.lua seeds it into a fresh record's Owned/Order,

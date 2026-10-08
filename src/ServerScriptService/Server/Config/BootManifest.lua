@@ -255,6 +255,8 @@ local ENTRIES: { BootEntry } = {
 	-- The anti-knockback detector, a third OnApplied sibling. Owns no remote: the launch itself rides
 	-- DamageSystem's existing Combat_Feedback, and a flag goes through ModerationSystem.
 	{ Name = "KnockbackAudit", Path = { "Combat", "Damage", "KnockbackAudit" }, Remotes = {} },
+	-- The speed and teleport check on engaged players. No remote: a flag goes through the shared SuspicionLedger.
+	{ Name = "MovementGuard", Path = { "Combat", "MovementGuard" }, Remotes = {} },
 	-- The wall splat and the swing scuff, a sibling on OnApplied and OnSwingAccepted. Owns the one
 	-- server-to-nearby-clients remote both ride on.
 	{

@@ -45,6 +45,13 @@
 	what happens to a saved weapon whose model has since been renamed or deleted -- both real, neither
 	asked for yet, and neither cheap to undo once saved data exists in the wild.
 
+	A PLAYER'S CHANGE IS ASKED FOR, NOT MADE (2026-10-08). A draw, a sheathe or a switch that would change the
+	weapon in hand goes through AttackRequestSystem.RequestWeapon, which enforces the swap rule
+	(WeaponConstants.Swap: no change while the body cannot act or a swing is playing, and a cooldown while
+	engaged). A refusal leaves this record exactly as it was and pushes it back with Refused and SwapReadyIn, so
+	the client's HUD never shows a change that did not happen. A new life's Fists are put in hand directly
+	(applyToCharacter) -- that is not a swap.
+
 	Does not own: what a weapon looks like (WeaponModelRegistry/WeaponVisualSystem, reached only
 	indirectly -- this System changes the SwingSequencer record and the existing OnWeaponChanged signal
 	does the rest), what it hits for (WeaponRoster), or the string a swing resolves to (SwingSequencer).
@@ -123,13 +130,15 @@ end
 -- Server -> owner only. The whole inventory every time rather than a delta: it is at most a handful of
 -- short strings, and a client that missed one delta (joined late, hit a dropped packet) would otherwise
 -- be wrong until the next pickup with nothing to correct it.
-local function pushInventory(player: Player): ()
+local function pushInventory(player: Player, refused: string?): ()
 	local remote = inventoryChangedRemote
 	if not remote then
 		return
 	end
 	local record = recordFor(player)
 	local inHand = inHandOf(record)
+	local character = player.Character
+	local readyIn = if character then AttackRequestSystem.SwapReadyIn(character, os.clock()) else 0
 	remote:FireClient(
 		player,
 		{
@@ -138,6 +147,8 @@ local function pushInventory(player: Player): ()
 			-- "Is the selected weapon the one in hand" -- true for Fists whenever they are selected.
 			Drawn = record.Selected ~= nil and inHand == record.Selected,
 			InHand = inHand,
+			Refused = refused,
+			SwapReadyIn = if readyIn > 0 then readyIn else nil,
 		} :: WeaponConstants.InventoryPayload
 	)
 end
@@ -156,6 +167,27 @@ local function applyToCharacter(player: Player): ()
 		return
 	end
 	AttackRequestSystem.SetWeapon(character, inHandOf(recordFor(player)), os.clock())
+end
+
+-- A player's own change to the record (`mutate`), asked of the attack layer before it is kept (this file's
+-- header). With no character there is no hand to change, so the record change simply stands. Returns whether it
+-- was kept; a refusal restores the record and pushes it back with the reason.
+local function requestChange(player: Player, mutate: (Record) -> ()): boolean
+	local record = recordFor(player)
+	local before = { Selected = record.Selected, Drawn = record.Drawn }
+	mutate(record)
+	local character = player.Character
+	if character then
+		local ok, reason = AttackRequestSystem.RequestWeapon(character, inHandOf(record), os.clock())
+		if not ok then
+			record.Selected = before.Selected
+			record.Drawn = before.Drawn
+			pushInventory(player, reason or "Refused")
+			return false
+		end
+	end
+	pushInventory(player)
+	return true
 end
 
 -- Adds `weaponId` to this player's inventory. Returns whether anything changed -- picking up a weapon
@@ -200,9 +232,9 @@ function WeaponInventorySystem.ToggleDraw(player: Player): boolean
 		return true
 	end
 
-	record.Drawn = not record.Drawn
-	applyToCharacter(player)
-	pushInventory(player)
+	requestChange(player, function(target)
+		target.Drawn = not target.Drawn
+	end)
 	return record.Drawn
 end
 
@@ -215,9 +247,11 @@ function WeaponInventorySystem.SelectNext(player: Player): WeaponId?
 	end
 
 	local index = if record.Selected then table.find(record.Order, record.Selected) else nil
-	record.Selected = record.Order[((index or 0) % #record.Order) + 1]
-	applyToCharacter(player)
-	pushInventory(player)
+	local nextSelected = record.Order[((index or 0) % #record.Order) + 1]
+	-- Sheathed, this changes nothing in hand and RequestWeapon passes it straight through; drawn, it is a swap.
+	requestChange(player, function(target)
+		target.Selected = nextSelected
+	end)
 	return record.Selected
 end
 

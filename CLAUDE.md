@@ -47,6 +47,9 @@ stop and use the module on the right instead.
 | expose an extension point other modules subscribe to (`OnX(callback) -> disconnect`) | [`Shared/CallbackList.lua`](src/ReplicatedStorage/Shared/CallbackList.lua) — `CallbackList.New(logger, "Module.OnX")` once at module scope, `:Connect(fn)` returns the disconnect, `:Fire(...)` pcall's each subscriber, `:Clear()` in a spec Reset | an array + `table.insert` + a `table.find`/`table.remove` disconnect + a pcall loop — those copies skipped the next subscriber whenever one disconnected mid-dispatch. Synchronous on purpose (not a BindableEvent): DamageSystem announces a hit before the health write. Every combat module uses it (server layers, `AttackInputClient`, `LocalCombatState`, `LockOnController`); the remaining copies are outside combat (Parkour, Input, HotbarBindings, MoveRegistryManager, DefaultMoveRegistry, MovePresentationCatalog) |
 | put a numeric value in a dense authoring form (forty sliders on one page) | [`UI/Components/NumericField.lua`](src/StarterPlayer/StarterPlayerScripts/Client/UI/Components/NumericField.lua) with `Compact = true` -- two lines, a full-row slider, gamepad DPad nudge, values snapped to `Decimals`; `Hint` may be a state object, and `HintVisible` (Toggle has it too) lets a form show hints on demand | the default four-line layout in a long form, or a hand-built slider |
 | size, pose or draw a SHAPED projectile body (anything but the plain sphere) | [`Shared/HitboxEngine/ProjectileBody.lua`](src/ReplicatedStorage/Shared/HitboxEngine/ProjectileBody.lua) -- `Of(spec)` once per volley, `PoseAt`, `Look` | reading `ProjectileSpec.Size` as "the radius of the shot": it is only the sphere's, and a Capsule/Cone/Crescent body reads the measurements `HitboxTypes.FieldsFor` lists |
+| lock or unlock a body's movement from the server (a swing lock, a stagger, a grab, a mount) | [`Server/Combat/RootControl.lua`](src/ServerScriptService/Server/Combat/RootControl.lua) -- `RootControl.Set(humanoid, RootControl.Owners.X, locked)` (or `Claim`/`Release`); `RootControlLocked` is true while ANY owner holds a claim. A new owner is a new `Owners` entry | a bare `humanoid:SetAttribute("RootControlLocked", ...)` -- five writers did, and the first release unlocked a body another system still held |
+| count suspicious events against a player and flag them for review (an automated cheat detector) | [`Server/Systems/Support/SuspicionLedger.lua`](src/ServerScriptService/Server/Systems/Support/SuspicionLedger.lua) -- `SuspicionLedger.New({ Name, ReasonCode, Summary, Strikes, WindowSeconds })`, `:Strike(player, now, detail?, weight?)`, `:Release(player)` on leave; flags once per session through `ModerationSystem.ReportAutomated`, which never overwrites a manual flag | a fourth hand-rolled timestamp list + prune + `FlagSuspectedCheater` |
+| tag two bodies as engaged for something that is not a resolved hit (a realm pulse, a future hazard) | `EngagementSystem.RecordPressure` / `RecordPressureBetween(attackerModel, targetModel, now)` | leaving it untagged -- the InCombat gate, MovementGuard and the HUD all key off the tag |
 | log inside a module | [`Shared/Logger.lua`](src/ReplicatedStorage/Shared/Logger.lua) — `Logger.scope("ModuleName")`, then `:info/:warn/:error/:debug` | `print`/`warn` directly — scoped logs feed the Live Console (F5) capture ring |
 
 Full rationale for each module (why it exists, what it deliberately does NOT own, the specific bugs
@@ -139,6 +142,13 @@ body's root each frame (`Server/Combat/HitboxEngine/PoseHistory.lua`); a PLAYER'
 again rewound by that attacker's one-way latency plus the replication buffer, capped at 0.15 s and 5 studs. The
 third latency refund beside the swing lead and the parry rewind; server-side and authoritative, not prediction. A bot
 or dummy attacker rewinds nothing and keeps the `TargetTrail` guess.
+
+**Weapon swaps and movement checks** (2026-10-08, `docs/architecture/2026-10-08-combat-state-audit.md`). A player
+changes the weapon in hand only through `AttackRequestSystem.RequestWeapon` (refused while the body cannot act --
+`CanAct` -- or mid-swing, and inside `WeaponConstants.Swap.CooldownSeconds` while engaged); `SetWeapon` is the ungated
+path for spawns, bots and admins. `Server/Combat/MovementGuard.lua` judges engaged players' speed, climb and teleports
+(pure maths in `Shared/Combat/MovementJudge.lua`); anything the SERVER does to move a body must either hold it
+(`RootControl`) or stamp `KnockbackUntil`, or it will read as a cheat.
 
 `TrainingBotSystem` (`Server/Combat/TrainingBot/`, the AI sparring partner) is the same sibling shape
 from the other direction: it only ever acts through the public player entry points

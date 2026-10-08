@@ -67,7 +67,6 @@ local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnership)
-local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
@@ -82,6 +81,7 @@ local GuardMeter = require(script.Parent.GuardMeter)
 local OutcomeResolver = require(script.Parent.OutcomeResolver)
 local HitboxEngine = require(script.Parent.Parent.HitboxEngine.HitboxEngine)
 local NetworkLatency = require(script.Parent.Parent.NetworkLatency)
+local RootControl = require(script.Parent.Parent.RootControl)
 
 type DefenseState = DefenseTypes.DefenseState
 type DefenseOutcome = DefenseTypes.DefenseOutcome
@@ -222,12 +222,10 @@ local isAirComboIntangible = AirComboAttributes.IsIntangible
 -- system used to do exactly that on every Humanoid it manages. PublishedState is what makes a re-
 -- assertion of the same state a no-op instead of a property write.
 --
--- ROOTCONTROLLOCKED HAS TWO WRITERS -- this system and HitboxEngine, which holds it for the duration
--- of a locking swing's Active window. They are kept from fighting by ordering rather than by locking:
--- in pass 2 an attacker's swing is CANCELLED before they are staggered, so the engine has already
--- released before this takes it. Step re-asserts every frame while the condition lasts, so even if
--- the engine clears it out from under us the gap is one frame, and this only ever CLEARS the
--- Attribute when it is the holder.
+-- ROOTCONTROLLOCKED IS A CLAIM (Server/Combat/RootControl.lua, 2026-10-08). This system holds the Defense
+-- claim while the body is staggered or guard-broken; the engine, a grab or an air combo may hold their own
+-- on the same body at the same time, and releasing this one only clears the Attribute when nobody else
+-- holds one. (It used to be a bare write kept from fighting the engine's by ordering alone.)
 local function publishState(registration: Registration, state: DefenseState): ()
 	local humanoid = registration.Humanoid
 	if humanoid.Parent == nil then
@@ -245,13 +243,7 @@ local function publishState(registration: Registration, state: DefenseState): ()
 		return
 	end
 	registration.HoldsMovementLock = wantsLock
-	if wantsLock then
-		humanoid:SetAttribute(HitboxEngineConstants.RootControlLockedAttribute, true)
-	else
-		-- Only cleared because this system is the holder. If the engine is mid-swing on this body it
-		-- will have set the Attribute itself and will clear it through its own exit path.
-		humanoid:SetAttribute(HitboxEngineConstants.RootControlLockedAttribute, nil)
-	end
+	RootControl.Set(humanoid, RootControl.Owners.Defense, wantsLock)
 end
 
 -- Whether a guard at `guard` of `max` reads as cracking, given whether it already did. The hysteresis
@@ -453,8 +445,8 @@ function DefenseSystem.UnregisterCombatant(model: Model): ()
 	-- Released explicitly rather than left to the Humanoid being destroyed: a character that is
 	-- unregistered but not destroyed (a spectator handoff, a spec reset) must not be left with this
 	-- system's movement lock set on it forever.
-	if registration.HoldsMovementLock and registration.Humanoid.Parent ~= nil then
-		registration.Humanoid:SetAttribute(HitboxEngineConstants.RootControlLockedAttribute, nil)
+	if registration.HoldsMovementLock then
+		RootControl.Release(registration.Humanoid, RootControl.Owners.Defense)
 	end
 	if registration.Humanoid.Parent ~= nil then
 		registration.Humanoid:SetAttribute(DefenseConstants.DefenseStateAttribute, nil)

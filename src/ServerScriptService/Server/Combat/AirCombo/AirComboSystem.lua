@@ -56,6 +56,7 @@ local AirComboMachine = require(script.Parent.AirComboMachine)
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
 local DefenseSystem = require(script.Parent.Parent.Defense.DefenseSystem)
 local NetworkLatency = require(script.Parent.Parent.NetworkLatency)
+local RootControl = require(script.Parent.Parent.RootControl)
 
 type Combo = AirComboTypes.Combo
 type EndReason = AirComboTypes.EndReason
@@ -205,7 +206,8 @@ end
 -- simulated here, and parked for the parkour framework. Everything it changes is undone by `trove`.
 local function takeBody(humanoid: Humanoid, root: BasePart, isPlayer: boolean, trove: Trove.TroveInstance): ()
 	humanoid.PlatformStand = true
-	humanoid:SetAttribute(ATTRIBUTES.RootControlLocked, true)
+	-- A claim (Server/Combat/RootControl.lua): a stagger or a grab on the same body is held independently.
+	RootControl.Claim(humanoid, RootControl.Owners.AirCombo)
 	if isPlayer then
 		-- pcall-guarded the way GrabSystem's own call is: SetNetworkOwner throws on an anchored part.
 		pcall(function()
@@ -215,8 +217,8 @@ local function takeBody(humanoid: Humanoid, root: BasePart, isPlayer: boolean, t
 	trove:Add(function()
 		if humanoid.Parent ~= nil then
 			humanoid.PlatformStand = false
-			humanoid:SetAttribute(ATTRIBUTES.RootControlLocked, nil)
 		end
+		RootControl.Release(humanoid, RootControl.Owners.AirCombo)
 		if isPlayer and root.Parent ~= nil then
 			pcall(function()
 				root:SetNetworkOwnershipAuto()

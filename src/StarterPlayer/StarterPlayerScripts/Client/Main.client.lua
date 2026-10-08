@@ -291,7 +291,7 @@ logger:debug("AttackInputClient end")
 -- adjacent rather than about ordering -- the server re-pushes the whole inventory on every character
 -- bind, so a listener connected late still gets the current state rather than missing an edge.
 logger:debug("WeaponInventoryClient start")
-WeaponInventoryClient.Start(uiHandles.WeaponInventory)
+WeaponInventoryClient.Start(uiHandles.WeaponInventory, uiHandles.Notify)
 logger:debug("WeaponInventoryClient end")
 
 -- Grab-throw input, alongside AttackInputClient above -- same "AFTER SettingsClient.RestoreSettings so

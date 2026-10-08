@@ -328,6 +328,36 @@ function ModerationSystem.FlagSuspectedCheater(
 	return true
 end
 
+-- An AUTOMATED detector's flag (Server/Systems/Support/SuspicionLedger.lua is the only caller): a "System" record
+-- carrying the detector's machine-readable ReasonCode -- the field Types.SuspicionRecord reserved for exactly this.
+--
+-- NEVER OVERWRITES. A player already flagged -- by an admin, or by another detector earlier this session -- keeps
+-- the record they have: an admin's manual note is worth more than a detector's line, and a second detector adds
+-- nothing a human needs to see the first. Returns whether a record was written.
+function ModerationSystem.ReportAutomated(targetUserId: number, reasonCode: string, reason: string): boolean
+	if not suspicionStore or suspectedCheaterUserIds[targetUserId] == true then
+		return false
+	end
+	local record: Types.SuspicionRecord = {
+		UserId = targetUserId,
+		FlaggedAt = os.time(),
+		FlaggedByUserId = nil,
+		Reason = reason,
+		Source = "System",
+		Confidence = nil,
+		ReasonCode = reasonCode,
+	}
+	local ok = withRetry("Moderation ReportAutomated SetAsync", function()
+		(suspicionStore :: DataStore):SetAsync(tostring(targetUserId), encodeSuspicionRecord(record))
+	end)
+	if not ok then
+		return false
+	end
+	suspectedCheaterUserIds[targetUserId] = true
+	suspectedCheaterCount += ModerationSystem.ComputeSuspicionCountDelta(false, true)
+	return true
+end
+
 -- Removes targetUserId's suspicion record entirely (RemoveAsync, not an "inactive" overwrite) -- a
 -- later re-flag creates a fresh record via SetAsync above, matching this feature's "overwritten on
 -- re-flag" contract with no accumulated history to reconcile.

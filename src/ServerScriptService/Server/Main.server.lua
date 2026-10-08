@@ -74,6 +74,7 @@ local GrabSystem = require(Combat.Grab.GrabSystem)
 local AirComboSystem = require(Combat.AirCombo.AirComboSystem)
 local EngagementSystem = require(Combat.Engagement.EngagementSystem)
 local KnockbackAudit = require(Combat.Damage.KnockbackAudit)
+local MovementGuard = require(Combat.MovementGuard)
 local EnvironmentReactionSystem = require(Combat.Environment.EnvironmentReactionSystem)
 local CombatTrace = require(Combat.CombatTrace)
 local DomainSystem = require(Combat.Domain.DomainSystem)
@@ -405,6 +406,13 @@ boot("EngagementSystem", EngagementSystem)
 --     here). Readability order, not correctness: it samples on GameplayEvents' shared tick rather than
 --     a Heartbeat of its own, so it has no place in the combat layers' connection-order requirement.
 boot("KnockbackAudit", KnockbackAudit)
+
+--     MovementGuard -- the speed and teleport check on ENGAGED players (MovementGuardConstants' header: lag-
+--     compensated hits test swings against recorded positions, so a client moving itself impossibly would bend
+--     hit registration). After EngagementSystem, whose InCombat tag is what it watches, and after HitboxEngine,
+--     whose compensation a strike suspends. Samples on GameplayEvents' shared tick, so it has no place in the
+--     combat layers' connection-order requirement.
+boot("MovementGuard", MovementGuard)
 
 --     EnvironmentReactionSystem -- the wall splat and the swing scuff. A sibling on TWO extension points,
 --     DamageSystem.OnApplied (the resolved launch, like KnockbackAudit) and AttackRequestSystem.

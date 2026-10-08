@@ -28,6 +28,27 @@ export type InventoryPayload = {
 	-- What is actually in hand: Selected while drawn, Fists otherwise (WeaponInventorySystem's header). What
 	-- the clients arm their parry clip and idle stance from, so they match what the server swings and times.
 	InHand: string?,
+	-- Set only on the push that answers a REFUSED draw, sheathe or switch (WeaponConstants.Swap): why
+	-- ("SwapCooldown", "Busy", "Hitstun", ...), so the client can say so. Everything else in the payload is the
+	-- unchanged state the refusal left in place.
+	Refused: string?,
+	-- Seconds until the in-hand weapon may change again, at the moment this was sent; 0 or nil when it may.
+	SwapReadyIn: number?,
+}
+
+-- THE SWAP RULE (combat-philosophy.md: "weapon switching with swap cooldown -- prevents instant weapon-cycling
+-- as a combo exploit"). Enforced by AttackRequestSystem.RequestWeapon, which every PLAYER-initiated change of
+-- the weapon in hand goes through (a draw, a sheathe, a switch); a fresh life, a bot's loadout and an admin
+-- grant set the weapon directly and are never gated.
+--
+-- A change is refused while the body cannot act at all (AttackRequestSystem.CanAct: stunned, staggered,
+-- guard-broken, grabbed, air-held, mounted, mid-traversal), while any swing is still playing (windup, active
+-- or recovery -- "Busy"), and, WHILE ENGAGED (the InCombat tag), until CooldownSeconds after the last change.
+-- Out of combat a player may browse their weapons freely: the cooldown exists to stop a string being carried
+-- across two movesets, and there is no string to carry outside a fight.
+WeaponConstants.Swap = {
+	CooldownSeconds = 4,
+	OnlyWhileEngaged = true,
 }
 
 WeaponConstants.Prompt = {

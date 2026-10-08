@@ -72,7 +72,10 @@ local ACTION_DISPLAY_ORDER = {
 	"Dash",
 	"Slide",
 	"Sprint",
-	"SwapWeapon",
+	-- The two weapon keys (KeybindConstants: SwapWeapon was retired for these when weapons became an inventory;
+	-- until 2026-10-08 this list still named it, and the two real actions fell to the unlabelled tail).
+	"ToggleWeapon",
+	"SelectNextWeapon",
 	"ShiftLock",
 	"EmoteWheel",
 	"OpenBugReport",
@@ -91,7 +94,8 @@ local ACTION_LABELS: { [string]: string } = {
 	Dash = "Dash",
 	Slide = "Slide",
 	Sprint = "Sprint",
-	SwapWeapon = "Swap Weapon",
+	ToggleWeapon = "Draw / Sheathe Weapon",
+	SelectNextWeapon = "Next Weapon",
 	ShiftLock = "Shift Lock Camera",
 	EmoteWheel = "Emote Wheel",
 	OpenBugReport = "Report a Bug",

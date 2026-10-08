@@ -25,7 +25,7 @@
 	    judging a body being thrown two ways at once;
 	  * a death or a despawn mid-sample drops the audit rather than failing it;
 	  * one failure is nothing. FailuresBeforeFlag failures inside WindowSeconds flag the player ONCE per
-	    session through ModerationSystem's "System" source -- the same path ParkourSystem's sustained-
+	    session through the shared SuspicionLedger (ModerationSystem.ReportAutomated) -- the same path ParkourSystem's sustained-
 	    implausible-report detector uses -- for an admin to look at, never an automatic punishment.
 
 	A SIBLING OF THE ATTACK LAYER, like GrabSystem and EngagementSystem: it subscribes to
@@ -54,7 +54,7 @@ local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
-local ModerationSystem = require(ServerScriptService.Server.Systems.ModerationSystem)
+local SuspicionLedger = require(ServerScriptService.Server.Systems.Support.SuspicionLedger)
 
 local DamageSystem = require(script.Parent.DamageSystem)
 
@@ -71,9 +71,16 @@ type Pending = {
 
 -- The one audit per player currently sampling. See this file's header on why a new launch replaces it.
 local pending: { [Player]: Pending } = {}
--- Timestamps of failed audits, pruned to the window.
-local failures: { [Player]: { number } } = {}
-local flagged: { [Player]: boolean } = {}
+
+-- Failed audits per player, counted and flagged through the shared SuspicionLedger (2026-10-08): the same window
+-- and once-per-session flag this file used to hand-roll, now shared with ParkourSystem and MovementGuard.
+local failures = SuspicionLedger.New({
+	Name = "Knockback",
+	ReasonCode = "KnockbackIgnored",
+	Summary = "launches not honoured",
+	Strikes = DamageConstants.Knockback.Audit.FailuresBeforeFlag,
+	WindowSeconds = DamageConstants.Knockback.Audit.WindowSeconds,
+})
 
 local appliedDisconnect: (() -> ())? = nil
 local tickDisconnect: (() -> ())? = nil
@@ -116,21 +123,7 @@ end
 -- Records one failed audit. Returns true exactly once per session per player: the moment the count
 -- inside the window first reaches FailuresBeforeFlag.
 function KnockbackAudit.RecordFailure(player: Player, now: number): boolean
-	local config = DamageConstants.Knockback.Audit
-	local stamps = failures[player]
-	if stamps == nil then
-		stamps = {}
-		failures[player] = stamps
-	end
-	table.insert(stamps, now)
-	while stamps[1] ~= nil and now - stamps[1] > config.WindowSeconds do
-		table.remove(stamps, 1)
-	end
-	if flagged[player] or #stamps < config.FailuresBeforeFlag then
-		return false
-	end
-	flagged[player] = true
-	return true
+	return failures:Strike(player, now)
 end
 
 function KnockbackAudit.IsPending(player: Player): boolean
@@ -140,23 +133,7 @@ end
 -- Drops every trace of `player`. Bound to PlayerRemoving by Init.
 function KnockbackAudit.ReleasePlayer(player: Player): ()
 	pending[player] = nil
-	failures[player] = nil
-	flagged[player] = nil
-end
-
-local function flag(player: Player, count: number): ()
-	local config = DamageConstants.Knockback.Audit
-	logger:warn("Flagging player for ignoring knockback", {
-		player = player.Name,
-		userId = player.UserId,
-		failuresInWindow = count,
-	})
-	ModerationSystem.FlagSuspectedCheater(
-		player.UserId,
-		nil,
-		`Knockback: {count} launches not honoured within {config.WindowSeconds}s`,
-		"System" :: Types.SuspicionSource
-	)
+	failures:Release(player)
 end
 
 -- One server frame over the (tiny) set of open audits. Only ever non-empty for a second or so after a
@@ -175,9 +152,8 @@ local function step(): ()
 			continue
 		end
 		local verdict = KnockbackAudit.Sample(player, audit.Root.AssemblyLinearVelocity, now)
-		if verdict == "Failed" and KnockbackAudit.RecordFailure(player, now) then
-			local stamps = failures[player]
-			flag(player, if stamps then #stamps else 0)
+		if verdict == "Failed" then
+			KnockbackAudit.RecordFailure(player, now)
 		end
 	end
 end
@@ -247,8 +223,7 @@ function KnockbackAudit.Reset(): ()
 		lifecycle = nil
 	end
 	table.clear(pending)
-	table.clear(failures)
-	table.clear(flagged)
+	failures:Reset()
 	started = false
 end
 
