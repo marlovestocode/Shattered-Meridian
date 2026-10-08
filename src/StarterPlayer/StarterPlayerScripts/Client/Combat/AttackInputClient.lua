@@ -433,8 +433,7 @@ end
 -- not mid-swing at all -- there is no need to check GetActiveClip first.
 -- PressId is the press the prediction answers, so a "Refused" verdict for it cuts exactly this one.
 local pendingPrediction: { MoveId: string, Generation: number, PressId: number? }? = nil
-local bufferedPress: { Kind: AttackTypes.AttackKind, Generation: number, PressId: number?, FreeAt: number }? =
-	nil
+local bufferedPress: { Kind: AttackTypes.AttackKind, Generation: number, PressId: number?, FreeAt: number }? = nil
 -- Defined with the prediction below (onBufferFrame); forward-declared so predictPress can reach it.
 local watchBufferedPress: () -> ()
 

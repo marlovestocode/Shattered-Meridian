@@ -150,6 +150,14 @@ path for spawns, bots and admins. `Server/Combat/MovementGuard.lua` judges engag
 (pure maths in `Shared/Combat/MovementJudge.lua`); anything the SERVER does to move a body must either hold it
 (`RootControl`) or stamp `KnockbackUntil`, or it will read as a cheat.
 
+**One combat Heartbeat; hurtboxes, not Workspace queries** (2026-10-08, `docs/architecture/2026-10-08-combat-pipeline-pass.md`).
+Combat Systems step as phases of `Server/Combat/CombatTick.lua` -- frame order is its `PHASES` list, not the
+boot order; a new per-frame combat System registers a phase there instead of connecting `RunService.Heartbeat`.
+The hitbox broadphase (`CandidateGatherer`) indexes registered bodies' own parts (root + direct-child BaseParts):
+accessories and held weapons are never hit candidates. Each swing gathers once per frame, not per substep.
+`Combat_Feedback` is one batch per player per frame (`Shared/Damage/FeedbackBatch.lua`) -- unpack it, never read
+the payload as a single hit.
+
 `TrainingBotSystem` (`Server/Combat/TrainingBot/`, the AI sparring partner) is the same sibling shape
 from the other direction: it only ever acts through the public player entry points
 (`AttackRequestSystem.Throw/Feint`, `DefenseSystem.SetBlocking/BeginEvade`) and reads through queries

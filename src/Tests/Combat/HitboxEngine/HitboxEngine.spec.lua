@@ -1160,5 +1160,4 @@ return function()
 			expect(HitboxEngine.SubstepsFor(0)).to.equal(1)
 		end)
 	end)
-
 end
