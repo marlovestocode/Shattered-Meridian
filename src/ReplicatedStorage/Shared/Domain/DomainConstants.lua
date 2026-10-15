@@ -26,6 +26,19 @@ local DomainConstants = {
 	-- owner cannot cover the next chunk collapses as it always did, up to one chunk's worth sooner.
 	UpkeepChunkSeconds = 1,
 
+	-- CANCELLING A REALM (2026-10-09): its owner may end it early by pressing the domain move again, once this
+	-- fraction of the realm's own STANDING TIME (ActivationSeconds + ActiveSeconds) has run since it opened. Measured
+	-- against the realm, not the move's cooldown: a cooldown may be as short as a swing ("However short, a second
+	-- realm of yours cannot open while the first still holds" -- the editor's own hint), so half of it is open the
+	-- instant the realm is, and a long one would open its window after the realm had already ended. The cooldown is
+	-- NOT refunded -- it keeps running, so cancelling is stopping early, never a way to recast. Nothing authorable:
+	-- one rule for every domain.
+	Cancel = {
+		WindowFraction = 0.5,
+		-- The Reason the realm collapses with (DomainInstance.CollapseReason, and the Phase message to clients).
+		Reason = "Cancelled",
+	},
+
 	-- Hard ceiling on concurrent realms server-wide. A realm is an ultimate on a long cooldown, so this is
 	-- a runaway guard (a bot loop, an admin test), never a gameplay limit anyone should meet.
 	MaxLiveDomains = 8,

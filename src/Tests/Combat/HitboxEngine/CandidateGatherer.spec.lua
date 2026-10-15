@@ -9,6 +9,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local CandidateGatherer = require(ServerScriptService.Server.Combat.HitboxEngine.CandidateGatherer)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
+local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 
 local spawned: { Instance } = {}
 
@@ -99,6 +100,37 @@ return function()
 			local count = #gathered(Vector3.new(0, 5, 0), 10)
 			expect(count).to.equal(HitboxEngineConstants.MaxCandidatesPerSample)
 			expect(CandidateGatherer.WasSaturated(count)).to.equal(true)
+		end)
+
+		-- Gather takes a SHAPE and a pose and works out the sphere itself. HitboxGeometry.BoundingBox hands back the
+		-- box's centre as a CFrame, and a reach shape's is not the identity -- it once reached GatherSphere as a
+		-- CFrame, which threw on every swing (2026-10-09) and left nothing able to hit anything.
+		describe("Gather -- a shape at a pose", function()
+			it("finds a body inside a cone's reach, which sits forward of the pose", function()
+				local model, root = makeBody("InFront", Vector3.new(0, 5, -6))
+				CandidateGatherer.SetBodies({ { Model = model, RootPart = root } })
+
+				local dimensions = HitboxTypes.DefaultDimensions()
+				dimensions.Length = 10
+				dimensions.AngleDegrees = 60
+				local out: { BasePart } = {}
+				local count = CandidateGatherer.Gather("Cone", dimensions, CFrame.new(0, 5, 0), out)
+
+				expect(count > 0).to.equal(true)
+				expect(table.find(out, root)).to.be.ok()
+			end)
+
+			it("finds nothing behind a cone, and does not throw for a centred shape", function()
+				local model, root = makeBody("Behind", Vector3.new(0, 5, 60))
+				CandidateGatherer.SetBodies({ { Model = model, RootPart = root } })
+
+				local dimensions = HitboxTypes.DefaultDimensions()
+				dimensions.Length = 10
+				dimensions.AngleDegrees = 60
+				local out: { BasePart } = {}
+				expect(CandidateGatherer.Gather("Cone", dimensions, CFrame.new(0, 5, 0), out)).to.equal(0)
+				expect(CandidateGatherer.Gather("Sphere", dimensions, CFrame.new(0, 5, 0), out)).to.equal(0)
+			end)
 		end)
 	end)
 end

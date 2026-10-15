@@ -30,6 +30,12 @@
 	can drag and scrub (TimelineBar); typed New, type tags and arrow keys in the browser; and FitToViewport,
 	so the panel shrinks onto a screen smaller than itself.
 
+THE 2026-10-08 LEGIBILITY PASS. That shrink was the problem: FitToViewport scaled the whole 1240x780 panel
+down to 0.6x on a small window, which took 12-13px Regular labels to 7-8px and left the editor unreadable.
+Now a smaller screen gets a smaller PANEL at full type size (ReflowMin: the columns re-divide the room, the
+form and readout scroll), and every text instance is set a step bolder and a pixel larger (LegibleText). The
+body's height is therefore not a constant -- nothing here may be sized against ROOT_HEIGHT.
+
 	A domain expansion shows only what a realm reads -- no volume to place, no Impact tab (its own strike's
 	price is on Effects) -- and still everything a move has: Timing (its cast), Presentation, Identity, Tools,
 	the readout. The type IS the blocks: Projectile seeds MoveDefinition.Projectile, Domain Expansion seeds
@@ -76,6 +82,7 @@ local TrainingBotConstants = require(ReplicatedStorage.Shared.TrainingBot.Traini
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local Inset = require(script.Parent.Parent.Parent.Components.Inset)
 local Label = require(script.Parent.Parent.Parent.Components.Label)
+local LegibleText = require(script.Parent.Parent.Parent.Components.LegibleText)
 local ScreenFrame = require(script.Parent.Parent.Parent.Components.ScreenFrame)
 local Stack = require(script.Parent.Parent.Parent.Components.Stack)
 local Tab = require(script.Parent.Parent.Parent.Components.Tab)
@@ -103,8 +110,12 @@ export type MoveEditorHandle = MoveEditorScreenTypes.MoveEditorHandle
 
 local MoveEditor = {}
 
+-- The panel at its most generous, and the smallest layout the three columns still work in. A screen between
+-- the two gets a panel of that size at full type size (ScreenFrame.ReflowMin); only a window smaller than
+-- ROOT_MIN itself shrinks the type.
 local ROOT_WIDTH = 1240
-local ROOT_HEIGHT = 780
+local ROOT_HEIGHT = 860
+local ROOT_MIN = Vector2.new(1060, 600)
 local BROWSER_WIDTH = 272
 local READOUT_WIDTH = 344
 
@@ -135,7 +146,7 @@ local REALM_PAGE_TEXT: { [string]: string } = {
 	Law = "Law",
 	Clash = "Clash",
 }
-local HELP_HEIGHT = 50
+local HELP_HEIGHT = 62
 local HELP_IDLE = "Point at a field -- or select it with a gamepad -- to see what it does here."
 
 local MOVE_TYPE_OPTIONS = {
@@ -717,11 +728,12 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 		Children = formChildren,
 	})
 
-	ScreenFrame.Mount(scope, playerGui, {
+	local frame = ScreenFrame.Mount(scope, playerGui, {
 		Name = "MoveEditor",
 		Size = UDim2.fromOffset(ROOT_WIDTH, ROOT_HEIGHT),
-		-- Shrinks to fit a screen smaller than the panel (a 1366x768 laptop) and grows on a big one.
-		FitToViewport = true,
+		-- A smaller screen (a 1366x768 laptop, a small window) gets a SMALLER PANEL, not the same panel shrunk:
+		-- FitToViewport took this one to 0.6x and its 13px labels to 8px.
+		ReflowMin = ROOT_MIN,
 		-- Place mode steps the modal aside -- the SESSION stays open (IsOpen, and the character's freeze),
 		-- only the frame goes, so the cursor and camera are free to work the gizmo.
 		IsOpen = scope:Computed(function(use)
@@ -817,6 +829,10 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 			},
 		}),
 	})
+
+	-- Every label, number and button in the editor a step bolder and a pixel larger (LegibleText's header: why a
+	-- pass, and what it leaves alone). The lazily built pages are covered as they arrive.
+	LegibleText.Apply(scope, frame)
 
 	PlacementBar(scope, {
 		PlayerGui = playerGui,

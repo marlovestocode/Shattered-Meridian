@@ -46,10 +46,9 @@
 	opaque in practice -- confirmed live in Studio, 2026-07-27. Blank avoids that outright; a future
 	pass wanting gamepad/screen-reader text back under a Variant needs a mechanism that doesn't
 	re-render the same caption a second time (e.g. reading it off the TrackedLabel's own glyphs).
-	Per TrackedLabel's own header this means the text is read ONCE via peek at construction time, not
-	reactively -- every current Primary/Secondary caller (onboarding's Continue/Confirm/Back) passes
-	static copy. A future caller that needs LIVE button text under a Variant should stay on the legacy
-	(Variant = nil) path instead, or extend this file deliberately.
+	A plain string is composed once. A STATE OBJECT passed as Text is followed (2026-10-09): the label
+	is rebuilt inside a Computed whenever it changes -- the Arts row's Slot N / Unequip / Unlock action
+	needs that, and used to freeze at its construction value.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -247,18 +246,38 @@ local function Button(scope: Scope, props: ButtonProps): TextButton
 				Transparency = borderTransparency,
 			}
 		)
-		table.insert(
-			children,
-			TrackedLabel(scope, {
-				-- Peek'd once, not reactive -- see file header.
-				Text = string.upper(peek(props.Text)),
-				Scale = "Action",
-				Color = textColor,
-				AnchorPoint = Vector2.new(0.5, 0.5),
-				Position = UDim2.fromScale(0.5, 0.5),
-				ZIndex = 2,
-			})
-		)
+		if typeof(props.Text) == "string" then
+			table.insert(
+				children,
+				TrackedLabel(scope, {
+					Text = string.upper(props.Text),
+					Scale = "Action",
+					Color = textColor,
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					Position = UDim2.fromScale(0.5, 0.5),
+					ZIndex = 2,
+				})
+			)
+		else
+			-- LIVE caption. TrackedLabel composes its glyph run once from a plain string, so a state
+			-- object is followed by rebuilding the whole label when it changes: the Computed's inner
+			-- scope owns the label and is cleaned (instances destroyed) on every re-evaluation. Without
+			-- this the caption froze at its construction value -- an Arts row kept saying "Slot 1" after
+			-- the art was equipped, until the menu was reopened and the row rebuilt.
+			table.insert(
+				children,
+				scope:Computed(function(use, innerScope)
+					return TrackedLabel(innerScope, {
+						Text = string.upper(use(props.Text)),
+						Scale = "Action",
+						Color = textColor,
+						AnchorPoint = Vector2.new(0.5, 0.5),
+						Position = UDim2.fromScale(0.5, 0.5),
+						ZIndex = 2,
+					})
+				end)
+			)
+		end
 	end
 
 	return scope:New "TextButton" {

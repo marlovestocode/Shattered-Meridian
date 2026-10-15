@@ -66,6 +66,16 @@ export type Press = {
 	-- The two clocks as they stood before this press settled, so a late verdict can re-settle it.
 	BaseGuardDownAt: number,
 	BaseLockedUntil: number,
+	BaseLockStartedAt: number,
+	BaseLockTotalSeconds: number,
+}
+
+-- Read-only projection of the exact clocks CanArm checks. The HUD uses this to explain the two
+-- short intentional gaps between parry attempts without inventing a second cooldown.
+export type Readiness = {
+	Kind: "Recovery" | "GuardRelease",
+	RemainingSeconds: number,
+	TotalSeconds: number,
 }
 
 export type Predictor = typeof(setmetatable(
@@ -74,6 +84,8 @@ export type Predictor = typeof(setmetatable(
 		_serverState: string,
 		_guardDownAt: number,
 		_lockedUntil: number,
+		_lockedStartedAt: number,
+		_lockedTotalSeconds: number,
 		_press: Press?,
 		_nextId: number,
 	},
@@ -86,6 +98,8 @@ function ParryPrediction.New(): Predictor
 		_serverState = "Neutral",
 		_guardDownAt = -math.huge,
 		_lockedUntil = -math.huge,
+		_lockedStartedAt = -math.huge,
+		_lockedTotalSeconds = 0,
 		_press = nil,
 		_nextId = 0,
 	}, ParryPrediction) :: any
@@ -103,6 +117,8 @@ local function settle(self: Predictor, press: Press): ()
 	end
 	self._guardDownAt = press.BaseGuardDownAt
 	self._lockedUntil = press.BaseLockedUntil
+	self._lockedStartedAt = press.BaseLockStartedAt
+	self._lockedTotalSeconds = press.BaseLockTotalSeconds
 
 	local window = press.Window
 	if not press.Armed then
@@ -123,7 +139,14 @@ local function settle(self: Predictor, press: Press): ()
 		-- Let go inside the window with nothing parried: the whiff's lockout, stamped from the window's
 		-- own recovery exactly as DefenseStateMachine.Update does.
 		local recoveryEnd = if window then window.RecoveryEnd else DefenseConstants.Parry.RecoverySeconds
-		self._lockedUntil = math.max(self._lockedUntil, press.At + recoveryEnd)
+		local lockedUntil = press.At + recoveryEnd
+		if lockedUntil > self._lockedUntil then
+			self._lockedUntil = lockedUntil
+			-- The mechanical timer begins at the press, but a player first needs this feedback when
+			-- they release and try to parry again.
+			self._lockedStartedAt = releasedAt
+			self._lockedTotalSeconds = math.max(lockedUntil - releasedAt, 0)
+		end
 	end
 end
 
@@ -195,6 +218,28 @@ function ParryPrediction.CanArm(self: Predictor, now: number, bodyFree: boolean)
 	return (now - self._guardDownAt) >= DefenseConstants.Parry.MinUnguardedSeconds
 end
 
+function ParryPrediction.GetReadiness(self: Predictor, now: number): Readiness?
+	local recoveryLeft = self._lockedUntil - now
+	if recoveryLeft > 0 then
+		return {
+			Kind = "Recovery",
+			RemainingSeconds = recoveryLeft,
+			TotalSeconds = math.max(self._lockedTotalSeconds, recoveryLeft),
+		}
+	end
+
+	local guardLeft = DefenseConstants.Parry.MinUnguardedSeconds - (now - self._guardDownAt)
+	if guardLeft > 0 then
+		return {
+			Kind = "GuardRelease",
+			RemainingSeconds = guardLeft,
+			TotalSeconds = DefenseConstants.Parry.MinUnguardedSeconds,
+		}
+	end
+
+	return nil
+end
+
 -- The key went down. Returns the id to send with the press and whether it is predicted to arm.
 function ParryPrediction.Press(self: Predictor, now: number, bodyFree: boolean): (number, boolean)
 	local armed = ParryPrediction.CanArm(self, now, bodyFree)
@@ -211,6 +256,8 @@ function ParryPrediction.Press(self: Predictor, now: number, bodyFree: boolean):
 		LandedWhileHeld = false,
 		BaseGuardDownAt = self._guardDownAt,
 		BaseLockedUntil = self._lockedUntil,
+		BaseLockStartedAt = self._lockedStartedAt,
+		BaseLockTotalSeconds = self._lockedTotalSeconds,
 	}
 	return self._nextId, armed
 end
@@ -248,6 +295,8 @@ function ParryPrediction.Reset(self: Predictor): ()
 	self._serverState = "Neutral"
 	self._guardDownAt = -math.huge
 	self._lockedUntil = -math.huge
+	self._lockedStartedAt = -math.huge
+	self._lockedTotalSeconds = 0
 	self._press = nil
 end
 

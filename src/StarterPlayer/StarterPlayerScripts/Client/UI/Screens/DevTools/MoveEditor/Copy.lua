@@ -261,6 +261,7 @@ Copy.Hints = {
 	PresentationFovPunch = "A quick field-of-view kick. Respects the player's comfort setting.",
 	PresentationFlashColor = "#RRGGBB, or None for no flash on the target.",
 	PresentationHitStopSeconds = "The freeze both bodies hold on contact. Presentation only: the target's real hitstun is not changed.",
+	PresentationShowTrail = "Off draws no trail for this move (stores None in Trail colour). On uses the default, or the colour set below.",
 	PresentationTrailColor = "#RRGGBB, or None for no trail.",
 	PresentationTemplate = "The name of an effect in ReplicatedStorage.MoveFX, played here.",
 	PresentationCoreColor = "#RRGGBB. On a realm: its tint. On a shot: its core.",

@@ -50,6 +50,31 @@ Phases end at their scheduled time, not the frame that noticed (a hitch never st
 runtime instance has a unique id (`D1`, `D2`, …) and tracks owner, times, centre, radius, members, effect
 timers, clash state and erosion (`DomainSystem.Get(id)` returns a snapshot).
 
+**Cancelling (2026-10-09).** The owner ends a live realm early by pressing the domain move again, once half of
+the realm's standing time (`ActivationSeconds + ActiveSeconds`) has run since it opened
+(`DomainConstants.Cancel.WindowFraction`). It is measured against the realm, not the move's `Cooldown`: a
+cooldown may be as short as a swing, so half of it is open the moment the realm is, and a long one would open its
+window after the realm had ended. Only `Activating`/`Active` realms can be cancelled; the realm collapses with
+reason `Cancelled`, takes the ordinary `Ending` fold, and the cooldown is **not** refunded -- it keeps running, so
+this is stopping early, never a free recast. An earlier press is not claimed: it is refused as a normal cooldown
+press and does nothing.
+
+**The timer.** The server publishes the moment the window opens as `DomainView.CancelableAt` (shared server
+clock; 0 for a realm with no cast, which cannot be cancelled this way). `DomainFX` mirrors the local player's own
+realm into `Client/Combat/OwnRealm.lua`, and `Screens/HUD` hands it to the hotbar slot holding that move
+(`Components/AbilitySlot`'s `CancelSeconds`/`CancelFraction`/`CancelReady`): a violet number in the tile's top-right
+corner counting down to the window, a violet bar along the top edge that **fills** toward it, and then a bronze
+"END" with the bar full. It sits beside the cooldown, never in place of it (the centred number and the dark sweep
+that drains). It moves with the move if the slot is rebound mid-realm. The server alone decides whether a press
+cancels; a wrong timer can only be cosmetically wrong.
+
+The seam: `AttackRequestSystem.SetPressClaimer` lets one sibling claim a *hotbar* press by its `MoveId` before any
+gate runs (a claimed press is neither thrown nor buffered -- left to the gates it would be a buffered Cooldown
+refusal that recasts the domain the instant the cooldown clears). `DomainSystem.TryCancel` is the claimer; it can
+only act on the presser's own realm, so the client-supplied `MoveId` cannot reach anyone else's. The client side:
+`AttackInputClient` normally drops a hotbar press on a slot it is counting down, but lets it through while the
+local humanoid owns a live realm (`DomainRules.OwnsLiveDomain`) so the server can decide.
+
 ## Boundary
 
 Server-owned geometry (`Shared/Domain/DomainGeometry.lua`) — the same math drives the server's enforcement,

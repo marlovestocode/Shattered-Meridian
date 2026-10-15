@@ -94,6 +94,7 @@ local RunService = game:GetService("RunService")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
+local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 
 local Tokens = require(script.Parent.Parent.Tokens)
 local ChamferedSurface = require(script.Parent.Parent.ChamferedSurface)
@@ -112,8 +113,11 @@ local ClientStateModule = require(script.Parent.Parent.State.ClientState)
 local EngagementLine = require(script.EngagementLine)
 local EngagementDetail = require(script.EngagementDetail)
 local ArmamentIsland = require(script.ArmamentIsland)
+local ParryTimer = require(script.ParryTimer)
 local HotbarBindings = require(script.Parent.Parent.Parent.Combat.HotbarBindings)
 local AttackInputClient = require(script.Parent.Parent.Parent.Combat.AttackInputClient)
+local OwnRealm = require(script.Parent.Parent.Parent.Combat.OwnRealm)
+local DefenseClient = require(script.Parent.Parent.Parent.Defense.DefenseClient)
 
 local Children = Fusion.Children
 
@@ -266,11 +270,28 @@ function HUD.Mount(
 	-- props -- the sweep overlay reads a 1..0 fraction, the countdown label reads seconds.
 	local cooldownSeconds: { Fusion.Value<number> } = {}
 	local cooldownFractions: { Fusion.Value<number> } = {}
+	-- The SECOND timer, on the slot holding the domain move whose realm is standing: seconds until the owner may end
+	-- it by pressing the move again, how far through that wait, and whether it is open (AbilitySlot's CancelSeconds
+	-- family). Driven from Combat/OwnRealm.lua, and entirely separate from the cooldown above.
+	local cancelSeconds: { Fusion.Value<number> } = {}
+	local cancelFractions: { Fusion.Value<number> } = {}
+	local cancelReady: { Fusion.Value<boolean> } = {}
+	-- The slot currently showing it (at most one: a player owns one realm), and the last tenth published.
+	local cancelSlot: number? = nil
+	local cancelPublishedTenths = -1
 	-- Plain (non-reactive) mirrors of the two facts stateForSlot needs, so recomputing a slot's state
 	-- never has to peek at a Fusion Value or ask another module a question it already answered.
 	local boundMoveIds: { [number]: string? } = {}
 	local cooldownTotals: { [number]: number } = {}
 	local cooldownEndsAt: { [number]: number } = {}
+	-- Parry recovery and the short guard-release delay are local prediction timers, just like a
+	-- hotbar cooldown's visual decay. DefenseClient owns their clocks; this screen only renders them.
+	local parrySeconds: Fusion.Value<number> = scope:Value(0)
+	local parryFraction: Fusion.Value<number> = scope:Value(0)
+	local parryVisible: Fusion.Value<boolean> = scope:Value(false)
+	local parryEndsAt: number? = nil
+	local parryTotalSeconds = 0
+	local parryPublishedTenths = -1
 	-- The countdown's last PUBLISHED tenth, per slot -- the whole point of the quantisation below.
 	local publishedTenths: { [number]: number } = {}
 	-- What each slot is HOLDING, as the two strings a tile can render. Until 2026-08-25 neither
@@ -308,6 +329,9 @@ function HUD.Mount(
 		boundMoveIds[index] = HotbarBindings.Get(index)
 		cooldownSeconds[index] = scope:Value(0)
 		cooldownFractions[index] = scope:Value(0)
+		cancelSeconds[index] = scope:Value(0)
+		cancelFractions[index] = scope:Value(0)
+		cancelReady[index] = scope:Value(false)
 		abilityNames[index] = scope:Value("")
 		resourceLabels[index] = scope:Value("")
 		-- Seeded from what is already mirrored, for the same reason the State Value below is: a player
@@ -325,6 +349,9 @@ function HUD.Mount(
 			ResourceLabel = resourceLabels[index],
 			CooldownFraction = cooldownFractions[index],
 			CooldownSeconds = cooldownSeconds[index],
+			CancelSeconds = cancelSeconds[index],
+			CancelFraction = cancelFractions[index],
+			CancelReady = cancelReady[index],
 			-- Routed through the same function the number keys reach, so the button and the keybind
 			-- cannot drift apart; that function owns the binding lookup, the local cooldown check and
 			-- the request payload, and this screen owns none of them.
@@ -333,6 +360,35 @@ function HUD.Mount(
 			end,
 		})
 	end
+
+	-- Which slot shows the cancel timer: the one bound to the move of the player's own standing realm, if any. Run on
+	-- every change to either fact -- the realm opening or ending, and a slot being rebound -- and it zeroes the slot
+	-- it leaves, so a rebind mid-realm moves the timer rather than leaving it behind on the old tile.
+	local function refreshCancelSlot(): ()
+		local realm = OwnRealm.Get()
+		local slot: number? = nil
+		if realm then
+			for index in ipairs(ABILITY_KEYBINDS) do
+				if boundMoveIds[index] == realm.MoveId then
+					slot = index
+					break
+				end
+			end
+		end
+		if slot == cancelSlot then
+			return
+		end
+		local previous = cancelSlot
+		if previous then
+			cancelSeconds[previous]:set(0)
+			cancelFractions[previous]:set(0)
+			cancelReady[previous]:set(false)
+		end
+		cancelSlot = slot
+		cancelPublishedTenths = -1
+	end
+	OwnRealm.OnChanged(refreshCancelSlot)
+	refreshCancelSlot()
 
 	-- Never unsubscribed -- HUD is mounted once for the life of the client session (see this file's
 	-- own header on Mount()'s return shape), the same "connect once, never disconnect" lifetime every
@@ -347,6 +403,7 @@ function HUD.Mount(
 		end
 		boundMoveIds[slot] = moveId
 		refreshSlotState(slot)
+		refreshCancelSlot()
 	end)
 
 	-- Fires with (slot, seconds) when the server puts a slot on cooldown and (slot, 0) when it comes
@@ -368,6 +425,31 @@ function HUD.Mount(
 		end
 		refreshSlotState(slot)
 	end)
+
+	-- DefenseClient publishes only when an input edge or a server correction changes the answer.
+	-- Between those edges this HUD does the inexpensive local countdown, rather than turning a
+	-- short-lived readiness meter into a network stream.
+	local function setParryReadiness(readiness: typeof(DefenseClient.GetParryReadiness())): ()
+		if readiness == nil then
+			parryEndsAt = nil
+			parryTotalSeconds = 0
+			parryPublishedTenths = -1
+			parrySeconds:set(0)
+			parryFraction:set(0)
+			parryVisible:set(false)
+			return
+		end
+
+		local remaining = math.max(readiness.RemainingSeconds, 0)
+		parryEndsAt = os.clock() + remaining
+		parryTotalSeconds = math.max(readiness.TotalSeconds, remaining, 1e-4)
+		parryPublishedTenths = math.ceil(remaining * COUNTDOWN_STEPS_PER_SECOND)
+		parrySeconds:set(remaining)
+		parryFraction:set(math.clamp(1 - remaining / parryTotalSeconds, 0, 1))
+		parryVisible:set(remaining > 0)
+	end
+	DefenseClient.OnParryReadiness(setParryReadiness)
+	setParryReadiness(DefenseClient.GetParryReadiness())
 
 	-- The combat tag's remaining seconds, decayed locally. The server sends a DURATION and not a
 	-- deadline (Types.EngagementPayload's own header: os.clock() epochs differ between machines, so a
@@ -415,10 +497,46 @@ function HUD.Mount(
 	-- already identical five frames in six.
 	RunService.Heartbeat:Connect(function()
 		local cooling = next(cooldownEndsAt) ~= nil
-		if not cooling and engagementEndsAt == nil then
+		local cancelling = cancelSlot
+		if not cooling and engagementEndsAt == nil and cancelling == nil and parryEndsAt == nil then
 			return
 		end
 		local now = os.clock()
+		local parryDeadline = parryEndsAt
+		if parryDeadline then
+			local remaining = math.max(parryDeadline - now, 0)
+			if remaining <= 0 then
+				parryEndsAt = nil
+				parryVisible:set(false)
+				parryFraction:set(1)
+				parrySeconds:set(0)
+			else
+				parryFraction:set(math.clamp(1 - remaining / parryTotalSeconds, 0, 1))
+				local tenths = math.ceil(remaining * COUNTDOWN_STEPS_PER_SECOND)
+				if parryPublishedTenths ~= tenths then
+					parryPublishedTenths = tenths
+					parrySeconds:set(tenths / COUNTDOWN_STEPS_PER_SECOND)
+				end
+			end
+		end
+
+		-- The cancel timer, on the shared server clock the realm's times are stated in. The bar moves every frame (it is
+		-- the continuous thing the eye follows); the number only when its tenth changes, as the cooldowns do.
+		local realm = OwnRealm.Get()
+		if cancelling and realm then
+			local left = math.max(realm.CancelableAt - DomainRules.ServerNow(), 0)
+			local span = math.max(realm.CancelableAt - realm.OpenedAt, 1e-4)
+			cancelFractions[cancelling]:set(math.clamp(1 - left / span, 0, 1))
+			local isReady = left <= 0
+			if Fusion.peek(cancelReady[cancelling]) ~= isReady then
+				cancelReady[cancelling]:set(isReady)
+			end
+			local tenths = math.ceil(left * COUNTDOWN_STEPS_PER_SECOND)
+			if tenths ~= cancelPublishedTenths then
+				cancelPublishedTenths = tenths
+				cancelSeconds[cancelling]:set(tenths / COUNTDOWN_STEPS_PER_SECOND)
+			end
+		end
 
 		-- Quantised to tenths on exactly the same grounds as the slot countdowns below, and it matters
 		-- slightly more here: this one formats `%.1fs` inside a Fusion Computed, so an unquantised
@@ -518,7 +636,7 @@ function HUD.Mount(
 
 	local dock = Panel(scope, {
 		Name = "HotbarDock",
-		LayoutOrder = 4,
+		LayoutOrder = 5,
 		AutomaticSize = Enum.AutomaticSize.XY,
 		Elevated = false,
 		Chamfered = true,
@@ -726,7 +844,7 @@ function HUD.Mount(
 
 		dockBand = scope:New "Frame" {
 			Name = "DockBand",
-			LayoutOrder = 4,
+		LayoutOrder = 5,
 			Size = UDim2.fromOffset(0, 0),
 			AutomaticSize = Enum.AutomaticSize.XY,
 			BackgroundTransparency = 1,
@@ -785,13 +903,18 @@ function HUD.Mount(
 				Marked = clientState.BountyMarked,
 				Reward = clientState.BountyReward,
 			}),
+			ParryTimer(scope, {
+				Visible = parryVisible,
+				Fraction = parryFraction,
+				RemainingSeconds = parrySeconds,
+			}),
 			dockBand,
 			-- The legend's own clearance from the dock, as padding on a holder rather than baked
 			-- into KeyLegend: that component is generic (Components/, not Screens/HUD/) and has no
 			-- business knowing what it happens to sit under here.
 			scope:New("Frame")({
 				Name = "LegendBand",
-				LayoutOrder = 5,
+				LayoutOrder = 6,
 				Size = UDim2.fromOffset(0, 0),
 				AutomaticSize = Enum.AutomaticSize.XY,
 				BackgroundTransparency = 1,

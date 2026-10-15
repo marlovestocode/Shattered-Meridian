@@ -95,6 +95,7 @@ local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
+local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -287,8 +288,11 @@ local function requestHotbar(slot: number): ()
 		-- player and nothing worth a remote call.
 		return
 	end
-	if slotCooldownRemaining(slot, os.clock()) > 0 then
-		-- The one place a local drop is honest: this cooldown is the server's own number, echoed back.
+	-- The one place a local drop is honest: this cooldown is the server's own number, echoed back. EXCEPT while the
+	-- player's own realm is standing: pressing a domain move again is how it is ended early (DomainSystem.TryCancel),
+	-- and by then the move is on cooldown. Whether this press is that one, and whether enough of the cooldown has
+	-- run, is the server's to say -- an early press is just refused there, like any other cooldown press.
+	if slotCooldownRemaining(slot, os.clock()) > 0 and not DomainRules.OwnsLiveDomain(boundHumanoid) then
 		return
 	end
 	playPressCue("Hotbar")

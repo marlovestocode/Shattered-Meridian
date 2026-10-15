@@ -290,6 +290,12 @@ local function broadcast(message: DomainMessage): ()
 	end
 end
 
+-- Seconds after a realm opens before its owner may end it by pressing the move again: DomainConstants.Cancel's
+-- fraction of the realm's standing time (the unfurl and the hold, not the fold -- the fold is already the end).
+local function cancelWindowOf(spec: DomainTypes.DomainSpec): number
+	return DomainConstants.Cancel.WindowFraction * (spec.ActivationSeconds + spec.ActiveSeconds)
+end
+
 local function viewOf(instance: DomainInstance): DomainView
 	local spec = instance.Spec
 	return {
@@ -311,6 +317,10 @@ local function viewOf(instance: DomainInstance): DomainView
 		ActivationSeconds = spec.ActivationSeconds,
 		EndSeconds = spec.EndSeconds,
 		ClashState = instance.ClashState,
+		-- A realm with no cast behind it has no press that could end it (TryCancel says the same).
+		CancelableAt = if castSwings[instance.Id] == nil
+			then 0
+			else serverTimeOf(instance.OpenedAt + cancelWindowOf(spec), instance.Id),
 	}
 end
 
@@ -1135,6 +1145,41 @@ function DomainSystem.Collapse(id: string, reason: string?, now: number?): boole
 	return true
 end
 
+-- Cancelling ------------------------------------------------------------------------------------------------
+
+-- Ends `owner`'s own realm of `moveId` early, because they pressed that move again. Returns whether the press was
+-- CLAIMED -- AttackRequestSystem.SetPressClaimer's contract: true consumes it, false lets it run as an ordinary
+-- (cooldown-refused) press.
+--
+-- THE RULE: the realm is the owner's, was cast by this move, is still LIVE (Activating or Active -- one already
+-- folding has nothing left to cancel), and DomainConstants.Cancel.WindowFraction of its standing time has run since
+-- it opened (cancelWindowOf; the same moment the client's timer counts down to). An earlier press is NOT claimed:
+-- it falls through to the cooldown refusal like any other, so a press that is simply too soon says nothing and
+-- ends nothing. A realm with no cast behind it (an NPC's, an admin's) is not cancellable this way.
+--
+-- The MoveId is the client's word, and that is safe: all it can name is a realm the presser owns.
+function DomainSystem.TryCancel(owner: Model, moveId: string, now: number): boolean
+	if not domainMoves[moveId] then
+		return false
+	end
+	for _, instance in instances do
+		if instance.Owner ~= owner or instance.MoveId ~= moveId or not DomainInstance.IsLive(instance) then
+			continue
+		end
+		if castSwings[instance.Id] == nil or now - instance.OpenedAt < cancelWindowOf(instance.Spec) then
+			return false
+		end
+		debugLog(
+			DomainConstants.Debug.LogLifecycle,
+			"Realm cancelled by its owner",
+			{ moveId = moveId, id = instance.Id }
+		)
+		collapse(instance, now, DomainConstants.Cancel.Reason)
+		return true
+	end
+	return false
+end
+
 -- Queries ---------------------------------------------------------------------------------------------------
 
 export type Snapshot = {
@@ -1279,6 +1324,11 @@ function DomainSystem.Init(): ()
 	trove:Add(AttackRequestSystem.OnSwingAccepted(function(model: Model, swing)
 		DomainSystem.NoteSwingAccepted(model, swing)
 	end))
+	-- A domain move pressed again ends its realm (TryCancel). Released with the rest of this System's wiring.
+	AttackRequestSystem.SetPressClaimer(DomainSystem.TryCancel)
+	trove:Add(function()
+		AttackRequestSystem.SetPressClaimer(nil)
+	end)
 
 	trove:Add(CombatTick.Register("DomainSystem", DomainSystem.Step))
 end

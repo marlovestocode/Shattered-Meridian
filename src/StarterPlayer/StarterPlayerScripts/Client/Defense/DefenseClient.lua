@@ -57,6 +57,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -104,6 +105,22 @@ local manager = AnimationManager.new({ Name = "DefenseClient" })
 -- Whether the next press arms a parry, predicted from this client's own key edges and corrected by the
 -- server -- see ParryPrediction's header. One for the player's whole session, Reset per life.
 local predictor = ParryPrediction.New()
+
+-- The hotbar renders these short, local lockouts from the same clocks that decide whether this
+-- press plays a parry or goes straight to block. The server remains authoritative for every hit.
+local parryReadinessChanged = CallbackList.New(logger, "DefenseClient.OnParryReadiness")
+
+function DefenseClient.GetParryReadiness(): ParryPrediction.Readiness?
+	return predictor:GetReadiness(os.clock())
+end
+
+function DefenseClient.OnParryReadiness(callback: (ParryPrediction.Readiness?) -> ()): () -> ()
+	return parryReadinessChanged:Connect(callback)
+end
+
+local function publishParryReadiness(): ()
+	parryReadinessChanged:Fire(DefenseClient.GetParryReadiness())
+end
 
 -- Registered once, at module load, under manager-local keys rather than the raw asset ids -- lets
 -- ParryAnimationId/BlockHoldAnimationId change (or land blank, pre-asset) with nothing here needing
@@ -426,11 +443,13 @@ local function setBlockHeld(held: boolean): ()
 	if held then
 		-- Predicted BEFORE the claim below reads it: the prediction is what picks the clip.
 		local pressId = predictor:Press(now, bodyIsFree(now))
+		publishParryReadiness()
 		sendBlocking(true, pressId)
 		guardAnimationDeferred = true
 		raiseGuardWhenFree()
 	else
 		predictor:Release(now)
+		publishParryReadiness()
 		sendBlocking(false)
 		guardAnimationDeferred = false
 		guardGeneration += 1
@@ -535,6 +554,9 @@ local function onStateChanged(rawPayload: unknown): ()
 			correctPressPresentation()
 		end
 	end
+	-- A late verdict can replace a predicted whiff recovery with the shorter guard-release delay,
+	-- or clear it altogether after a landed parry.
+	publishParryReadiness()
 end
 
 -- Lifecycle -----------------------------------------------------------------------------------------
@@ -572,6 +594,7 @@ local function bindCharacter(nextCharacter: Model, humanoid: Humanoid, life: Tro
 	end
 	-- The server's fresh machine has no lockout and no recent guard; neither does the prediction.
 	predictor:Reset()
+	publishParryReadiness()
 
 	-- AnimationManager.Bind() drops the previous life's claims/tracks itself (Unbind() runs first
 	-- thing inside Bind()) -- nothing here needs to clear DEFENSE_LAYER separately.

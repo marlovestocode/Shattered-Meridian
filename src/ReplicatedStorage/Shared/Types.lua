@@ -327,6 +327,9 @@ export type ArtCatalogueResult = {
 	Success: boolean,
 	Reason: string?,
 	Trees: { ArtCatalogueTree }?,
+	-- The same payload Art_StateUpdated carries, attached so a client can PULL it: the push is sent once at
+	-- profile load, before a client's listener may exist, and nothing else re-sends it until an art is used.
+	State: ArtStatePayload?,
 }
 
 export type ArtActionResult = {

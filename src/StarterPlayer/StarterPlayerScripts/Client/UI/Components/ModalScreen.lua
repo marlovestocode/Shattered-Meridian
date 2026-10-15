@@ -100,6 +100,10 @@ export type ModalScreenProps = {
 	-- viewport curve and whatever keeps it on screen (ViewportScale.Fit). For a panel too big for the
 	-- reference resolution itself. Takes precedence over AutoScale.
 	FitSize: Vector2?,
+	-- The panel's `Size` is the LARGEST it gets; on a smaller screen the panel itself shrinks (down to `Min`)
+	-- and the type keeps its size -- ViewportScale.Reflow. For a panel dense with small text, where FitSize's
+	-- shrink-everything leaves the text unreadable. Overrides Size, and takes precedence over FitSize/AutoScale.
+	ReflowMin: Vector2?,
 	-- Which control a gamepad focuses when this panel opens. Defaults to the first selectable
 	-- control in reading order -- see Shell/Focus.lua. Ignored on keyboard/mouse, where no selection
 	-- is claimed at all.
@@ -183,17 +187,25 @@ local function ModalScreen(scope: Scope, playerGui: PlayerGui, props: ModalScree
 	local padding = props.Padding or Tokens.Space.L
 	local gap = props.Gap or Tokens.Space.M
 
+	-- The authored Size is the ceiling the panel reflows from (an offset UDim2, like FitSize's).
+	local reflow: ViewportScale.Reflow? = nil
+	if props.ReflowMin then
+		local authored = Fusion.peek(props.Size) :: UDim2
+		reflow = ViewportScale.Reflow(scope, Vector2.new(authored.X.Offset, authored.Y.Offset), props.ReflowMin)
+	end
+
 	local root = Panel(scope, {
 		Name = "Root",
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
-		Size = props.Size,
+		Size = if reflow then reflow.Size else props.Size,
 		AutomaticSize = props.AutomaticSize,
 		-- See this file header, point 1: without this the whole panel is a picture the input system
 		-- looks straight through.
 		Active = true,
-		Scale = if props.FitSize
-			then ViewportScale.Fit(scope, props.FitSize)
+		Scale = if reflow
+			then reflow.Scale
+			elseif props.FitSize then ViewportScale.Fit(scope, props.FitSize)
 			elseif props.AutoScale then ViewportScale.Compute(scope)
 			else nil,
 		Elevated = if props.Elevated == nil then true else props.Elevated,

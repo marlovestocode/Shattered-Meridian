@@ -183,6 +183,9 @@ local buffered: { [Model]: Buffered } = {}
 local lastPressId: { [Model]: number } = {}
 
 -- OnPressRefused's subscribers -- see answerRefused, and the extension-point note further down.
+-- A sibling's CLAIM on a hotbar press (see SetPressClaimer). ONE owner, not a list: it is a question with a yes/no
+-- answer, which CallbackList's fire-and-forget dispatch cannot return, and two claimants for one press would be a bug.
+local pressClaimer: ((model: Model, moveId: string, now: number) -> boolean)? = nil
 local pressRefusedListeners: CallbackList.CallbackList<Model, number, string> =
 	CallbackList.New(logger, "AttackRequestSystem.OnPressRefused")
 
@@ -1384,12 +1387,32 @@ function AttackRequestSystem.Press(
 		end
 		lastPressId[model] = pressId
 	end
+	-- A sibling may claim a hotbar press before any gate sees it -- the domain's "press it again to end it". A
+	-- claimed press is neither thrown NOR remembered: left to run the gates it would be refused as a Cooldown, which
+	-- is a "not yet" the buffer would hold and then throw as a second cast the moment the cooldown cleared.
+	local claimer = pressClaimer
+	if claimer and request.Kind == "Hotbar" and request.MoveId then
+		local ok, claimed = pcall(claimer, model, request.MoveId, now)
+		if not ok then
+			logger:warn("Press claimer errored", { error = tostring(claimed) })
+		elseif claimed == true then
+			return false, "Claimed"
+		end
+	end
 	local accepted, reason = AttackRequestSystem.Throw(model, request, authorized, now)
 	if accepted then
 		return true, nil
 	end
 	rememberRefused(model, request, authorized, reason or "Busy", now)
 	return false, reason
+end
+
+-- Lets ONE sibling claim a hotbar press by its MoveId before the gates run: `claimer(model, moveId, now)` returns
+-- true to consume the press (Press then returns false, "Claimed"; nothing is thrown, buffered or answered), false
+-- to let it run as normal. The seam DomainSystem uses so a domain's own move can end its realm. Pass nil to
+-- release it. A claimer may only ever act on the PRESSER's own state -- the MoveId is the client's word.
+function AttackRequestSystem.SetPressClaimer(claimer: ((model: Model, moveId: string, now: number) -> boolean)?): ()
+	pressClaimer = claimer
 end
 
 -- Fires when a press that carried an id (AttackRequest.PressId) will not throw: refused on arrival, or buffered
@@ -1958,6 +1981,7 @@ function AttackRequestSystem.Reset(): ()
 	weaponChangedListeners:Clear()
 	swingAcceptedListeners:Clear()
 	pressRefusedListeners:Clear()
+	pressClaimer = nil
 	projectileRelevance:Reset()
 	SwingSequencer.Reset()
 end

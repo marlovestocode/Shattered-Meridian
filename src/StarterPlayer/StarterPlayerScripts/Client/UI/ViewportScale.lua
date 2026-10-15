@@ -104,4 +104,48 @@ function ViewportScale.Fit(scope: Scope, size: Vector2): Fusion.Computed<number>
 	end)
 end
 
+export type Reflow = {
+	Scale: Fusion.Computed<number>,
+	Size: Fusion.Computed<UDim2>,
+}
+
+-- Fit's alternative for a panel whose text has to stay readable: instead of shrinking a fixed-size panel until
+-- it fits (Fit takes a 1240x780 panel to 0.6 on a small window, and a 13px label to 8px with it), the PANEL
+-- gets smaller and the type does not. `maxSize` is the panel at its most generous (what a big screen gets);
+-- `minSize` is the smallest layout that still works, and the only thing that ever lowers the scale below
+-- Compute's curve -- a window too small even for that falls back to shrinking, down to FIT_MIN_SCALE, exactly
+-- as Fit does. Room the panel does not need is not wasted: the authored size grows back toward `maxSize` as
+-- the scale allows, so a 1366x768 laptop gets scale 1.0 and a 1240x678 panel, not scale 0.87 and 1240x780.
+function ViewportScale.Reflow(scope: Scope, maxSize: Vector2, minSize: Vector2): Reflow
+	local curve = ViewportScale.Compute(scope)
+	local camera = Workspace.CurrentCamera
+	local viewport = scope:Value(if camera then camera.ViewportSize else Vector2.new(REFERENCE_WIDTH, REFERENCE_HEIGHT))
+	if camera then
+		table.insert(
+			scope,
+			camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+				viewport:set(camera.ViewportSize)
+			end)
+		)
+	end
+	local room = scope:Computed(function(use): Vector2
+		local screen = use(viewport)
+		return Vector2.new(screen.X - FIT_MARGIN * 2, screen.Y - TOP_INSET - FIT_MARGIN * 2)
+	end)
+	local scale = scope:Computed(function(use): number
+		local space = use(room)
+		local fit = math.min(space.X / math.max(minSize.X, 1), space.Y / math.max(minSize.Y, 1))
+		return math.max(math.min(use(curve), fit), FIT_MIN_SCALE)
+	end)
+	local size = scope:Computed(function(use): UDim2
+		local space = use(room)
+		local current = use(scale)
+		return UDim2.fromOffset(
+			math.floor(math.max(minSize.X, math.min(maxSize.X, space.X / current))),
+			math.floor(math.max(minSize.Y, math.min(maxSize.Y, space.Y / current)))
+		)
+	end)
+	return { Scale = scale, Size = size }
+end
+
 return ViewportScale

@@ -101,6 +101,7 @@ local CombatAudio = require(script.Parent.CombatAudio)
 local ImpactSparks = require(script.Parent.ImpactSparks)
 local MovePresentation = require(script.Parent.MovePresentation)
 local KnockbackClient = require(script.Parent.Parent.Combat.KnockbackClient)
+local OwnRealm = require(script.Parent.Parent.Combat.OwnRealm)
 
 type Cue = MovePresentationTypes.Cue
 type DomainMessage = DomainTypes.DomainMessage
@@ -480,6 +481,7 @@ local function dropRealm(id: string): ()
 		realm.Interior:Destroy()
 		realms[id] = nil
 	end
+	OwnRealm.Close(id)
 end
 
 -- How unfurled the realm is right now, 0..1, from the phase times the server stated.
@@ -508,6 +510,10 @@ local function onOpen(view: DomainView, playCue: boolean): ()
 	dropRealm(view.Id)
 	local realm = buildRealm(view)
 	realms[view.Id] = realm
+	-- The local player's own realm is what the cancel timer counts for (Combat/OwnRealm.lua).
+	if view.Owner ~= nil and view.Owner == localCharacter() then
+		OwnRealm.Open(view)
+	end
 	if view.Phase == "Active" then
 		noteEstablished(realm)
 	end
@@ -527,6 +533,7 @@ local function onPhase(message: DomainMessage): ()
 	view.Phase = message.Phase or view.Phase
 	view.PhaseStartedAt = message.PhaseStartedAt or view.PhaseStartedAt
 	view.PhaseEndsAt = message.PhaseEndsAt or view.PhaseEndsAt
+	OwnRealm.Phase(view.Id, view.Phase, view.PhaseEndsAt)
 	if previous == view.Phase then
 		-- The same phase with a new end (an erosion shortened it): re-place the moment it is heading for.
 		scheduleKnownMoments(realm)
@@ -889,6 +896,7 @@ function DomainFX.Preview(
 		ActivationSeconds = activation,
 		EndSeconds = ending,
 		ClashState = "None",
+		CancelableAt = 0,
 	}
 	dropRealm(PREVIEW_ID)
 	local activeCue = MovePresentation.CueFrom(presentation, "DomainActive")

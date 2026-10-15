@@ -755,8 +755,9 @@ local CHIP_HEIGHT = 28
 local CHIP_MIN_WIDTH = 52
 -- An estimate of the chip font's average advance. A chip is sized from its text once, at mount (the text is
 -- static); a few pixels of slack either way is the whole cost of not measuring.
-local CHIP_CHAR_WIDTH = 7.4
-local CHIP_PADDING = 22
+-- Budgeted for the bolder, one-pixel-larger text LegibleText gives the editor (was 7.4 and 22 before it).
+local CHIP_CHAR_WIDTH = 8.4
+local CHIP_PADDING = 26
 
 local function chipWidth(text: string): number
 	return math.max(CHIP_MIN_WIDTH, math.ceil(utf8.len(text) or #text) * CHIP_CHAR_WIDTH + CHIP_PADDING)

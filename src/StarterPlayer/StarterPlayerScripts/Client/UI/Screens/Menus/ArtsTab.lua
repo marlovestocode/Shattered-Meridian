@@ -195,7 +195,8 @@ local function artRow(
 	-- LockedReason is a property of the CATALOGUE SNAPSHOT, not live state -- the whole catalogue is
 	-- refetched (and every row rebuilt) after any unlock -- so branching on it at construction is
 	-- safe here in a way that branching on isUnlocked/isEquipped would not be.
-	local isGated = entry.LockedReason ~= nil
+	-- An owned art is never gated, whatever reason rides with it ("AlreadyUnlocked" is not a gate).
+	local isGated = entry.LockedReason ~= nil and entry.LockedReason ~= "AlreadyUnlocked" and not entry.Unlocked
 
 	local nameColor = scope:Computed(function(use)
 		if isGated and not use(isUnlocked) then
@@ -261,8 +262,9 @@ local function artRow(
 					-- in would silently do nothing.
 					for slot, artId in pairs(peek(props.Equipped)) do
 						if artId == entry.ArtId then
+							-- Every slot holding it, not the first found: a profile saved before an art was
+							-- limited to one slot can still hold it twice.
 							props.OnEquip(slot, nil)
-							return
 						end
 					end
 					return

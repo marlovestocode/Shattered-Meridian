@@ -601,7 +601,8 @@ local function frameCandidates(record: ActiveSwing, previousPose: CFrame, endPos
 		return record.CandidateCount
 	end
 	local size, localCentre = HitboxGeometry.BoundingBox(record.Shape, record.Dimensions)
-	local reach = localCentre.Magnitude + size.Magnitude / 2
+	-- BoundingBox's centre is a CFrame (a reach shape's box sits forward of its origin); its Position is the offset.
+	local reach = localCentre.Position.Magnitude + size.Magnitude / 2
 	local from = previousPose.Position
 	local to = endPose.Position
 	local radius = (to - from).Magnitude / 2 + reach + HitboxEngineConstants.BroadphaseMarginStuds + extra

@@ -408,7 +408,7 @@ DefenseConstants.Evade = {
 -- Main.server.lua) warns at boot if the asset carries no marker pair, per the fail-closed rule in
 -- docs/design/parry-block-system-plan.md: a press still blocks, it just never arms a parry window
 -- until the markers exist.
-DefenseConstants.ParryAnimationId = "rbxassetid://94883396723007"
+DefenseConstants.ParryAnimationId = "rbxassetid://136786601080156"
 
 -- THE PARRY WAS NEVER ARMED IN PLAY, and this table is the fix (2026-09-28). ParryWindows fails closed:
 -- an animation id with no ParryStart/ParryClose markers and no registration gets NO window, so every

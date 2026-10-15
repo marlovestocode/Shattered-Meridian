@@ -609,4 +609,87 @@ return function()
 			expect(calls.SetBarrier[2][1]).to.equal(nil)
 		end)
 	end)
+
+	-- Pressing the domain move again ends its realm, once half of the realm's standing time has run since it opened.
+	describe("DomainSystem cancelling", function()
+		local MOVE = "spec-domain-move"
+		-- Activation 1s + Active 19s: a 20s standing realm, so the window opens 10s in.
+		local STANDING = 20
+		local WINDOW = STANDING * DomainConstants.Cancel.WindowFraction
+
+		-- A realm cast by MOVE at t=0.
+		local function castRealm(owner: Rig): string
+			DomainSystem.MarkDomainMoveForTesting(MOVE)
+			local id, reason = DomainSystem.Open(
+				owner.Model,
+				MOVE,
+				spec({ ActiveSeconds = STANDING - 1 }),
+				clock,
+				{ StartedAt = clock, WindupSeconds = 0 }
+			)
+			assert(id, `the spec's realm was refused: {reason}`)
+			return id :: string
+		end
+
+		-- The runner adds 0.1s a step, so "exactly half" is a float away from the threshold: the cases that must
+		-- be past the window run half a second beyond it, and the too-early case a full second short.
+		it("claims the press and collapses the realm once half its standing time has elapsed", function()
+			stubPorts()
+			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local id = castRealm(owner)
+			run(WINDOW + 0.5)
+
+			expect(DomainSystem.TryCancel(owner.Model, MOVE, clock)).to.equal(true)
+			local snapshot = DomainSystem.Get(id) :: any
+			expect(snapshot.Phase).to.equal("Ending")
+			expect(snapshot.CollapseReason).to.equal(DomainConstants.Cancel.Reason)
+		end)
+
+		it("does not claim an earlier press, so it is just an ordinary cooldown press", function()
+			stubPorts()
+			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local id = castRealm(owner)
+			run(WINDOW - 1)
+
+			expect(DomainSystem.TryCancel(owner.Model, MOVE, clock)).to.equal(false)
+			expect((DomainSystem.Get(id) :: any).Phase).to.equal("Active")
+		end)
+
+		it("does not depend on the move's cooldown, however short it is", function()
+			-- Nothing about the cooldown is consulted at all: a realm and a one-second cooldown still wait for
+			-- half of the realm.
+			stubPorts()
+			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			castRealm(owner)
+			run(2)
+			expect(DomainSystem.TryCancel(owner.Model, MOVE, clock)).to.equal(false)
+		end)
+
+		it("cancels only the presser's own realm, of the move they pressed", function()
+			stubPorts()
+			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local other = makeRig("Other", Vector3.new(100, 5, 0))
+			local id = castRealm(owner)
+			run(WINDOW + 0.5)
+
+			expect(DomainSystem.TryCancel(other.Model, MOVE, clock)).to.equal(false)
+			expect(DomainSystem.TryCancel(owner.Model, "some-other-move", clock)).to.equal(false)
+			expect((DomainSystem.Get(id) :: any).Phase).to.equal("Active")
+		end)
+
+		it("cannot cancel a realm already folding, or one with no cast behind it", function()
+			stubPorts()
+			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			castRealm(owner)
+			run(WINDOW + 0.5)
+			expect(DomainSystem.TryCancel(owner.Model, MOVE, clock)).to.equal(true)
+			expect(DomainSystem.TryCancel(owner.Model, MOVE, clock)).to.equal(false)
+
+			-- Opened without a swing (an NPC's, an admin's): nothing to measure from, and no press to answer.
+			local npc = makeRig("Npc", Vector3.new(200, 5, 0))
+			open(npc, spec({ ActiveSeconds = STANDING }), MOVE)
+			run(STANDING)
+			expect(DomainSystem.TryCancel(npc.Model, MOVE, clock)).to.equal(false)
+		end)
+	end)
 end

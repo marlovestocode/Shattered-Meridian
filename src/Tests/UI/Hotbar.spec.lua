@@ -74,6 +74,7 @@ return function()
 
 			expect(find(hotbar, "EngagementLine")).to.be.ok()
 			expect(find(hotbar, "BountyMarkedBadgeSlot")).to.be.ok()
+			expect(find(hotbar, "ParryTimer")).to.be.ok()
 			expect(find(hotbar, "HotbarDock")).to.be.ok()
 			expect(find(hotbar, "LegendBand")).to.be.ok()
 		end)

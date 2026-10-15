@@ -198,7 +198,8 @@ function CandidateGatherer.Gather(
 	local extra = if extraMarginStuds and extraMarginStuds > 0 then extraMarginStuds else 0
 	local size, localCentre = HitboxGeometry.BoundingBox(shape, dimensions)
 	local radius = size.Magnitude / 2 + HitboxEngineConstants.BroadphaseMarginStuds + extra
-	return CandidateGatherer.GatherSphere(worldPose * localCentre, radius, out)
+	-- BoundingBox's centre is a CFrame, and GatherSphere wants where it lands in the world.
+	return CandidateGatherer.GatherSphere((worldPose * localCentre).Position, radius, out)
 end
 
 -- True when a gather filled its result budget, meaning candidates may have been dropped. Read by the engine

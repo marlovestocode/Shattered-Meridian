@@ -256,6 +256,18 @@ function ArtSystem.Unlock(player: Player, artId: string): string?
 	return nil
 end
 
+-- An art sits in ONE slot. Removes `artId` from every slot except `keepSlot`, so equipping it somewhere new
+-- MOVES it rather than copying it. (It used to be allowed in several slots at once -- "harmless, just
+-- redundant" -- but a player who equips one art and finds it on two keys has been given something they did
+-- not ask for, and an Unequip that cleared only one of the two left the other behind.)
+local function clearArtFromOtherSlots(equippedArts: { [number]: string }, artId: string, keepSlot: number): ()
+	for otherSlot, otherArtId in equippedArts do
+		if otherArtId == artId and otherSlot ~= keepSlot then
+			equippedArts[otherSlot] = nil
+		end
+	end
+end
+
 -- Binds `artId` to `slot` for `player`, or clears the slot when artId is nil. Returns nil on
 -- success, a reason string otherwise.
 --
@@ -264,9 +276,8 @@ end
 -- become a back door to holding an art the player never unlocked. Clearing a slot needs no such
 -- check: removing something is always legal.
 --
--- Last write wins, with no cross-slot conflict rejection: the same art in two slots is harmless
--- (just redundant), which is the identical contract Client/Combat/HotbarBindings.lua already
--- documents for the client-side binding this mirrors into.
+-- Last write wins, and an art already in another slot MOVES here (see clearArtFromOtherSlots) -- one art,
+-- one slot. Whatever was in `slot` before is simply replaced.
 function ArtSystem.Equip(player: Player, slot: number, artId: string?): string?
 	if not ArtSystem.IsValidSlot(slot) then
 		return "InvalidSlot"
@@ -276,6 +287,9 @@ function ArtSystem.Equip(player: Player, slot: number, artId: string?): string?
 	end
 
 	local committed = PlayerDataSystem.Transform(player, function(profile)
+		if artId ~= nil then
+			clearArtFromOtherSlots(profile.equippedArts, artId, slot)
+		end
 		profile.equippedArts[slot] = artId
 	end)
 	if not committed then
@@ -334,6 +348,7 @@ function ArtSystem.DevGrantAndEquip(player: Player, slot: number, artId: string?
 		if profile.artMastery[artId] == nil then
 			profile.artMastery[artId] = 0
 		end
+		clearArtFromOtherSlots(profile.equippedArts, artId, slot)
 		profile.equippedArts[slot] = artId
 	end)
 	if not committed then
@@ -422,7 +437,12 @@ local function handleGetCatalogue(player: Player): Types.ArtCatalogueResult
 				Unlocked = ArtSystem.IsUnlocked(player, move.MoveId),
 				-- The refusal reason travels with the row so the UI never has to re-derive the rules
 				-- -- and so the client's rendering can't drift from the server's actual gate.
-				LockedReason = ArtSystem.CanUnlock(player, move.MoveId),
+				-- nil for an OWNED art: CanUnlock answers "AlreadyUnlocked" there, which is a refusal to
+				-- unlock rather than a gate, and the Arts tab renders any LockedReason as a dead "LOCKED"
+				-- row with no Equip control -- that made every owned art unequippable for non-admins.
+				LockedReason = if ArtSystem.IsUnlocked(player, move.MoveId)
+					then nil
+					else ArtSystem.CanUnlock(player, move.MoveId),
 			})
 		end
 		table.insert(trees, {
@@ -434,7 +454,9 @@ local function handleGetCatalogue(player: Player): Types.ArtCatalogueResult
 		})
 	end
 
-	return { Success = true, Trees = trees }
+	-- State rides along so a client that connected after the profile-load push (the usual case) still
+	-- learns what is equipped without waiting for an art to be used.
+	return { Success = true, Trees = trees, State = buildStatePayload(player) }
 end
 
 local function handleUnlockArt(player: Player, rawArtId: unknown): Types.ArtActionResult
@@ -471,7 +493,46 @@ local function handleEquipArt(player: Player, rawSlot: unknown, rawArtId: unknow
 	return { Success = true }
 end
 
+-- One art, one slot, for a profile saved before that was the rule: where an art sits in several slots the
+-- LOWEST keeps it and the rest are cleared. Without this the duplicate lives on until the player happens to
+-- touch that art, and in the meantime the hotbar shows it twice.
+local function dedupeEquipped(player: Player): ()
+	local function hasDuplicate(equipped: { [number]: string }): boolean
+		local seen: { [string]: boolean } = {}
+		for slot = 1, ArtConstants.EquipSlotCount do
+			local artId = equipped[slot]
+			if artId ~= nil then
+				if seen[artId] then
+					return true
+				end
+				seen[artId] = true
+			end
+		end
+		return false
+	end
+
+	local profile = PlayerDataSystem.GetProfile(player)
+	if not profile or not hasDuplicate(profile.equippedArts) then
+		return
+	end
+	PlayerDataSystem.Transform(player, function(live)
+		local seen: { [string]: boolean } = {}
+		for slot = 1, ArtConstants.EquipSlotCount do
+			local artId = live.equippedArts[slot]
+			if artId ~= nil then
+				if seen[artId] then
+					live.equippedArts[slot] = nil
+				else
+					seen[artId] = true
+				end
+			end
+		end
+	end)
+	logger:info("Cleared duplicate equipped arts", { player = player.Name })
+end
+
 local function onProfileLoaded(player: Player): ()
+	dedupeEquipped(player)
 	sendArtState(player)
 end
 

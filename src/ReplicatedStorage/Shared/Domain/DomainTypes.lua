@@ -359,6 +359,10 @@ export type DomainView = {
 	ActivationSeconds: number,
 	EndSeconds: number,
 	ClashState: string,
+	-- WHEN the owner may end this realm by pressing its move again, on the shared server clock (DomainRules.ServerNow),
+	-- or 0 for a realm that cannot be ended that way (one with no cast of its own). Fixed at open: erosion shortens the
+	-- realm but does not move this. The client's cancel timer counts down to it (Combat/OwnRealm.lua).
+	CancelableAt: number,
 }
 
 export type MessageKind = "Open" | "Phase" | "Clash" | "Pulse" | "Snapshot" | "Impulse"

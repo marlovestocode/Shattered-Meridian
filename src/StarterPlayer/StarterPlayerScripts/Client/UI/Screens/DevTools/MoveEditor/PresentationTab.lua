@@ -282,6 +282,33 @@ local function PresentationTab(
 		})
 	end
 
+	-- "Show trail": the on/off face of TrailColor's None, so turning a move's trail off is a switch rather than
+	-- a word typed into the colour field. Off stores None; on removes it (back to the default trail), and a
+	-- custom colour counts as on and is left alone. Same field, same record, same server check -- no second
+	-- value to keep in step.
+	local function trailToggle(momentName: string, order: number): Instance
+		return Fields.Toggle(scope, context, {
+			Label = "Show trail",
+			Hint = (Copy.Hints :: any).PresentationShowTrail,
+			LayoutOrder = order,
+			Get = function(move)
+				local cue = cueOf(move, momentName)
+				local value = if cue then cue.TrailColor else nil
+				return not (typeof(value) == "string" and string.lower(value) == "none")
+			end,
+			Set = function(move, shown)
+				local cue = cueOf(move, momentName)
+				local value = if cue then cue.TrailColor else nil
+				local isOff = typeof(value) == "string" and string.lower(value) == "none"
+				if shown and isOff then
+					setField(move, momentName, "TrailColor", nil)
+				elseif not shown then
+					setField(move, momentName, "TrailColor", MovePresentationTypes.None)
+				end
+			end,
+		})
+	end
+
 	-- One Section per moment, folded and built on first open (Fields.Section): sixteen moments' worth of
 	-- fields cost nothing until an author opens the one they came for, and each heading says whether the
 	-- move sets anything there.
@@ -304,8 +331,14 @@ local function PresentationTab(
 					local fields: { Instance } = {
 						Fields.Prose(scope, Copy.Presentation.Moments[momentName] or "", 1),
 					}
-					for fieldIndex, fieldName in moment.Fields do
-						table.insert(fields, momentField(momentName, fieldName, 1 + fieldIndex))
+					local nextOrder = 2
+					for _, fieldName in moment.Fields do
+						if fieldName == "TrailColor" then
+							table.insert(fields, trailToggle(momentName, nextOrder))
+							nextOrder += 1
+						end
+						table.insert(fields, momentField(momentName, fieldName, nextOrder))
+						nextOrder += 1
 					end
 					table.insert(
 						fields,

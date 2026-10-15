@@ -148,8 +148,10 @@ local function sanitizeArtState(
 	end
 	if typeof(table_.Equipped) == "table" then
 		for slot, artId in pairs(table_.Equipped :: { [any]: any }) do
-			if typeof(slot) == "number" and typeof(artId) == "string" then
-				equipped[slot] = artId
+			-- A sparse slot table can arrive string-keyed ({ ["3"] = ... }); normalise rather than drop it.
+			local slotNumber = if typeof(slot) == "number" then slot else tonumber(slot)
+			if slotNumber ~= nil and typeof(artId) == "string" then
+				equipped[slotNumber] = artId
 			end
 		end
 	end
@@ -219,7 +221,13 @@ function CharacterMenuClient.Start(handle: MenusHandle, chrome: Chrome.ChromeHan
 		end)
 	)
 
+	-- Whether any Art_StateUpdated push has been applied. The catalogue reply carries the same state (see
+	-- refreshCatalogue), but only to cover the push the client missed at boot; once a push has landed the
+	-- reply could be OLDER than it, so it must not overwrite.
+	local artStateReceived = false
+
 	artStateUpdated.OnClientEvent:Connect(function(payload: Types.ArtStatePayload)
+		artStateReceived = true
 		local mastery, equipped, info = sanitizeArtState(payload)
 		handle.ArtMastery:set(mastery)
 		handle.EquippedArts:set(equipped)
@@ -260,6 +268,15 @@ function CharacterMenuClient.Start(handle: MenusHandle, chrome: Chrome.ChromeHan
 				return
 			end
 			handle.ArtTrees:set(catalogue.Trees :: { Types.ArtCatalogueTree })
+			-- The profile-load push is sent once, usually before this client is listening, so without
+			-- this the hotbar stays on its empty slots until the first art use re-sends the state.
+			if not artStateReceived and typeof(catalogue.State) == "table" then
+				artStateReceived = true
+				local mastery, equipped, info = sanitizeArtState(catalogue.State)
+				handle.ArtMastery:set(mastery)
+				handle.EquippedArts:set(equipped)
+				mirrorToHotbar(equipped, info)
+			end
 		end)
 	end
 

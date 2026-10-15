@@ -120,6 +120,15 @@ export type AbilitySlotProps = {
 	CooldownFraction: UsedAs<number>?,
 	-- Remaining time, for the on-tile countdown. Meaningful only while State is "Cooldown".
 	CooldownSeconds: UsedAs<number>?,
+	-- THE SECOND TIMER (2026-10-09), for a slot holding a domain move whose realm is standing: how long until the
+	-- owner may END the realm by pressing the move again. Separate from the cooldown on purpose -- a number in the
+	-- tile's top-right corner and a bar along its top edge, both violet, where the cooldown is the centred
+	-- numeral and the dark sweep -- and the bar FILLS toward the moment where the cooldown sweep EMPTIES.
+	-- All three are driven together by the caller and mean nothing without each other: seconds until the window
+	-- opens (0 once it has), how far through the wait (0..1), and whether it is open now.
+	CancelSeconds: UsedAs<number>?,
+	CancelFraction: UsedAs<number>?,
+	CancelReady: UsedAs<boolean>?,
 	-- e.g. "20 Qi" -- the resource cost docs/ui-ux-philosophy.md's Ability System UI section calls
 	-- for. Rendered whenever provided, independent of State.
 	ResourceLabel: UsedAs<string>?,
@@ -146,6 +155,9 @@ local SIGIL_HEIGHT = 26
 -- The lit edge under an Available/Active tile -- the reference design's `h-1` accent rule, and the
 -- surface the ready flash plays on (see header).
 local EDGE_BAR_HEIGHT = 2
+-- The cancel timer's bar along the TOP edge -- a touch thicker than the lit edge below, so the two read as
+-- different things at a glance.
+local CANCEL_BAR_HEIGHT = 3
 
 -- Eases the edge highlight in and out on a state change instead of snapping, per
 -- docs/ui-ux-philosophy.md's Animation Philosophy ("controlled... not excessive"). Every value the
@@ -644,6 +656,58 @@ local function AbilitySlot(scope: Scope, props: AbilitySlotProps): TextButton
 					return use(cooldownSeconds) > 0
 				end),
 				ZIndex = Z_COUNTDOWN,
+			})
+		)
+	end
+
+	-- The cancel timer (see CancelSeconds): a corner number and a top-edge bar, drawn only while there is something
+	-- to wait for or something ready to press. Violet while waiting, bronze once ready -- never the cooldown's look.
+	if props.CancelSeconds ~= nil and props.CancelReady ~= nil then
+		local cancelSeconds = props.CancelSeconds :: UsedAs<number>
+		local cancelReady = props.CancelReady :: UsedAs<boolean>
+		local cancelFraction: UsedAs<number> = props.CancelFraction or 0
+		local cancelShown = scope:Computed(function(use)
+			return use(cancelReady) or use(cancelSeconds) > 0
+		end)
+		local cancelColor = scope:Computed(function(use)
+			return if use(cancelReady) then Tokens.Color.AccentSecondary else Tokens.Color.AccentPrimaryBright
+		end)
+
+		table.insert(
+			tileChildren,
+			scope:New "Frame" {
+				Name = "CancelBar",
+				Size = scope:Computed(function(use)
+					local fraction = if use(cancelReady) then 1 else math.clamp(use(cancelFraction), 0, 1)
+					return UDim2.new(fraction, 0, 0, CANCEL_BAR_HEIGHT)
+				end),
+				BackgroundColor3 = cancelColor,
+				BorderSizePixel = 0,
+				Visible = cancelShown,
+				ZIndex = Z_CHROME,
+			} :: Frame
+		)
+		table.insert(
+			tileChildren,
+			Label(scope, {
+				Text = scope:Computed(function(use)
+					if use(cancelReady) then
+						return "END"
+					end
+					local seconds = use(cancelSeconds)
+					-- Whole seconds from ten up: four characters of mono do not fit the corner.
+					return if seconds >= 10
+						then string.format("%d", math.ceil(seconds))
+						else string.format("%.1f", seconds)
+				end),
+				Scale = "NumeralSmall",
+				Color = cancelColor,
+				AnchorPoint = Vector2.new(1, 0),
+				Position = UDim2.new(1, -4, 0, 4),
+				Size = UDim2.fromOffset(28, 12),
+				TextXAlignment = Enum.TextXAlignment.Right,
+				Visible = cancelShown,
+				ZIndex = Z_CORNER_TEXT,
 			})
 		)
 	end

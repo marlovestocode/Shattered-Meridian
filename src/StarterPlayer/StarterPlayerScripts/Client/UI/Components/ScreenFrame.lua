@@ -136,6 +136,11 @@ export type ScreenFrameProps = {
 	-- AutoScale that also shrinks the panel to stay on screen (ModalScreen.FitSize), for a panel larger than
 	-- the reference resolution leaves room for. Size must then be an offset UDim2.
 	FitToViewport: boolean?,
+	-- The smallest panel the screen can lay itself out in. Size is then the LARGEST the panel gets, and a
+	-- smaller screen gets a smaller panel at full type size (ModalScreen.ReflowMin) instead of FitToViewport's
+	-- same panel shrunk. Takes precedence over FitToViewport. The body must be built from Stack, not from
+	-- BodySize -- its height is no longer a constant.
+	ReflowMin: Vector2?,
 	-- The tab strip's contents. Exactly one of Tabs/Title -- see this file's header.
 	Tabs: TabState?,
 	-- The panel's name, for a screen with no tabs.
@@ -353,6 +358,7 @@ function ScreenFrame.Mount(scope: Scope, playerGui: PlayerGui, props: ScreenFram
 		IsOpen = props.IsOpen,
 		AutoScale = props.AutoScale,
 		FitSize = fitSize,
+		ReflowMin = props.ReflowMin,
 		-- Flush bands: a band with a 16px margin around it is not a band, it's a card.
 		Padding = 0,
 		Gap = 0,
