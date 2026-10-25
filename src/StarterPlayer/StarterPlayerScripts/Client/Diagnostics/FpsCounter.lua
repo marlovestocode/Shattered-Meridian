@@ -39,6 +39,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local Layers = require(script.Parent.Parent.UI.Shell.Layers)
 
 local logger = Logger.scope("FpsCounter")
 
@@ -97,8 +98,9 @@ local function buildGui(): (ScreenGui, TextLabel, TextLabel, TextLabel)
 	gui.Name = "FpsCounter"
 	gui.ResetOnSpawn = false
 	gui.IgnoreGuiInset = true
-	-- Above every game surface, so a full-screen panel cannot hide the number being measured.
-	gui.DisplayOrder = 10000
+	-- Above every game surface, so a full-screen panel cannot hide the number being measured: the Debug band is
+	-- above every modal (UI/Shell/Layers.lua). Boot surfaces sit over it, and while one is up it IS the screen.
+	gui.DisplayOrder = Layers.Debug
 	gui.Enabled = Config.VisibleByDefault
 
 	local frame = Instance.new("Frame")
