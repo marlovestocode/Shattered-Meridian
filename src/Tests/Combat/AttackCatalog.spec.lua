@@ -113,7 +113,7 @@ return function()
 		it("times a synced M1 against its clip played at the tempo", function()
 			AttackConstants.Tempo.ByStage.Basic = 0.75
 			serveClip(0.6, 0.3)
-			AttackWindows.Prefetch("rbxassetid://104588315151150")
+			AttackWindows.Prefetch(AttackAnimations.Get(DEFAULT_MOVE_ID))
 			local entry = AttackCatalog.Get(DEFAULT_MOVE_ID) :: any
 			expect(entry.Definition.WindupSeconds).to.be.near(0.3 / 0.75, 1e-6)
 			expect(total(entry)).to.be.near(0.6 / 0.75, 1e-6)
@@ -216,7 +216,7 @@ return function()
 		-- The bound only exists while the clip's LENGTH is unknown -- with it known, the swing is the
 		-- clip's length whatever the marker says (see the next describe). A read clip always has a
 		-- length, so these cases switch clip syncing off to reach the unknown-length path.
-		local ANIMATION_ID = "rbxassetid://104588315151150" -- AttackAnimations' baseline Basic:1 clip
+		local ANIMATION_ID = AttackAnimations.Get(DEFAULT_MOVE_ID) -- resolved, not pasted: see BASIC_CLIP below
 
 		local function withoutClipSync(body: () -> ()): ()
 			LiveTuningContract.withRestore(function()
@@ -251,9 +251,9 @@ return function()
 	describe("AttackCatalog.Get -- the swing ends when its clip does", function()
 		-- Basic[1]: Windup 0.31, Active 0.22, Recovery 0.14 (total 0.67), Cooldown 0.44.
 		-- Heavy[1]: Windup 0.600, Active 0.22, Recovery 0.55 (total 1.37), Cooldown 1.37.
-		local BASIC_CLIP = "rbxassetid://104588315151150"
-		-- Resolved, not pasted: the baseline Heavy clip was re-authored (a new asset id), and a literal here
-		-- silently prefetched a clip no move uses, so every Heavy case below tested the unsynced timeline.
+		local BASIC_CLIP = AttackAnimations.Get(DEFAULT_MOVE_ID)
+		-- Resolved, not pasted: a baseline clip is re-authored (a new asset id) from time to time, and a literal
+		-- here silently prefetched a clip no move uses, so every case below tested the unsynced timeline.
 		local HEAVY_CLIP = AttackAnimations.Get(HEAVY_MOVE_ID)
 
 		afterEach(clearClips)

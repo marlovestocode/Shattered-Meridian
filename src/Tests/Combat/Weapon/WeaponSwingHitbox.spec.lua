@@ -13,6 +13,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local AttackAnimations = require(ReplicatedStorage.Shared.Attack.AttackAnimations)
 local AttackCatalog = require(ServerScriptService.Server.Combat.AttackCatalog)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttackWindows = require(ReplicatedStorage.Shared.Attack.AttackWindows)
@@ -207,7 +208,9 @@ return function()
 
 	describe("SpawnDelay", function()
 		-- Baseline Basic[1]: WindupSeconds 0.31, ActiveSeconds 0.22, RecoverySeconds 0.14, Cooldown 0.44.
-		local ANIMATION_ID = "rbxassetid://104588315151150" -- AttackAnimations' baseline Basic:1 clip
+		-- Resolved, not pasted: baseline clips are re-authored (a new asset id), and a literal here silently
+		-- prefetched a clip no move uses, so the marker below was never read.
+		local ANIMATION_ID = AttackAnimations.Get(BASIC_1)
 
 		local function serveMarker(time: number): ()
 			AttackWindows.SetExtractor(function(): KeyframeSequence?

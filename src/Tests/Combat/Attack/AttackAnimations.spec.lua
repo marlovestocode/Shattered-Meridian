@@ -25,6 +25,15 @@ local ROSTER = WeaponFixture.Install()
 local weaponId = ROSTER[1]
 local otherWeaponId = ROSTER[2]
 
+-- The shared baseline clips, READ from the module for a weapon that has authored nothing -- never pasted
+-- here. The baseline ids are re-authored whenever a clip is re-exported, and a literal copy in this file
+-- turned each of those into a red suite that said nothing about the module (the 2026-10-25 audit's A8).
+local UNAUTHORED = "default:NoSuchWeapon"
+local BASELINE_BASIC_1 = AttackAnimations.Get(`{UNAUTHORED}:Basic:1`)
+local BASELINE_BASIC_2 = AttackAnimations.Get(`{UNAUTHORED}:Basic:2`)
+local BASELINE_HEAVY = AttackAnimations.Get(`{UNAUTHORED}:Heavy:1`)
+local BASELINE_FINISHER = AttackAnimations.Get(`{UNAUTHORED}:Finisher`)
+
 local OVERRIDE_SLOTS = { "M1", "M2", "M3", "HEAVY", "FINISHER" }
 
 local function stageAnimation(id: string, slot: string): Animation
@@ -42,9 +51,13 @@ return function()
 
 	describe("AttackAnimations.Get -- shared baseline (unauthored weapon)", function()
 		it("resolves a weapon-stage MoveId to the shared baseline clip", function()
-			expect(AttackAnimations.Get(`default:{weaponId}:Basic:1`)).to.equal("rbxassetid://104588315151150")
-			expect(AttackAnimations.Get(`default:{weaponId}:Heavy:1`)).to.equal("rbxassetid://83363364108102")
-			expect(AttackAnimations.Get(`default:{weaponId}:Finisher`)).to.equal("rbxassetid://138196103225171")
+			-- The baselines are authored (non-empty), and a weapon with nothing of its own gets exactly them.
+			for _, baseline in { BASELINE_BASIC_1, BASELINE_BASIC_2, BASELINE_HEAVY, BASELINE_FINISHER } do
+				expect(string.match(baseline, "^rbxassetid://%d+$")).to.be.ok()
+			end
+			expect(AttackAnimations.Get(`default:{weaponId}:Basic:1`)).to.equal(BASELINE_BASIC_1)
+			expect(AttackAnimations.Get(`default:{weaponId}:Heavy:1`)).to.equal(BASELINE_HEAVY)
+			expect(AttackAnimations.Get(`default:{weaponId}:Finisher`)).to.equal(BASELINE_FINISHER)
 		end)
 
 		it("resolves the same baseline for any weapon that hasn't overridden it", function()
@@ -99,20 +112,20 @@ return function()
 			stageAnimation(weaponId, "M1").AnimationId = "rbxassetid://111111"
 
 			expect(AttackAnimations.Get(`default:{weaponId}:Basic:1`)).to.equal("rbxassetid://111111")
-			expect(AttackAnimations.Get(`default:{weaponId}:Basic:2`)).to.equal("rbxassetid://78226937952673")
-			expect(AttackAnimations.Get(`default:{weaponId}:Heavy:1`)).to.equal("rbxassetid://83363364108102")
+			expect(AttackAnimations.Get(`default:{weaponId}:Basic:2`)).to.equal(BASELINE_BASIC_2)
+			expect(AttackAnimations.Get(`default:{weaponId}:Heavy:1`)).to.equal(BASELINE_HEAVY)
 		end)
 
 		it("does not leak one weapon's override onto another weapon's stages", function()
 			stageAnimation(weaponId, "M1").AnimationId = "rbxassetid://111111"
 
 			expect(AttackAnimations.Get(`default:{weaponId}:Basic:1`)).to.equal("rbxassetid://111111")
-			expect(AttackAnimations.Get(`default:{otherWeaponId}:Basic:1`)).to.equal("rbxassetid://104588315151150")
+			expect(AttackAnimations.Get(`default:{otherWeaponId}:Basic:1`)).to.equal(BASELINE_BASIC_1)
 		end)
 
 		it("ignores a blank override clip, falling back to the shared baseline", function()
 			stageAnimation(weaponId, "M1").AnimationId = ""
-			expect(AttackAnimations.Get(`default:{weaponId}:Basic:1`)).to.equal("rbxassetid://104588315151150")
+			expect(AttackAnimations.Get(`default:{weaponId}:Basic:1`)).to.equal(BASELINE_BASIC_1)
 		end)
 
 		it("normalizes a bare-digit override the same way the shared baseline is normalized", function()
@@ -126,7 +139,12 @@ return function()
 		end)
 
 		it("resolves nothing for a weapon that isn't in the roster", function()
-			expect(AttackAnimations.Get("default:NoSuchWeapon:Basic:1")).to.equal("rbxassetid://104588315151150")
+			-- Reaches the shared table, not an empty string: an unknown weapon is unauthored, not absent -- the
+			-- same clip a rostered weapon with no override of its own plays.
+			expect(AttackAnimations.Get("default:NoSuchWeapon:Basic:1")).to.equal(
+				AttackAnimations.Get(`default:{weaponId}:Basic:1`)
+			)
+			expect(BASELINE_BASIC_1).never.to.equal("")
 		end)
 	end)
 
@@ -139,11 +157,11 @@ return function()
 			end
 			expect(ids["rbxassetid://111111"]).to.equal(true)
 			-- The shared baseline's own ids are still present -- this is additive, not a replacement.
-			expect(ids["rbxassetid://104588315151150"]).to.equal(true)
+			expect(ids[BASELINE_BASIC_1]).to.equal(true)
 		end)
 
 		it("deduplicates a weapon override that happens to match the shared baseline", function()
-			stageAnimation(weaponId, "M1").AnimationId = "rbxassetid://104588315151150"
+			stageAnimation(weaponId, "M1").AnimationId = BASELINE_BASIC_1
 			local seen: { [string]: boolean } = {}
 			for _, id in AttackAnimations.GetPreloadIds() do
 				expect(seen[id]).to.equal(nil)
