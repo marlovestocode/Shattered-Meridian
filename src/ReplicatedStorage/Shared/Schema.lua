@@ -39,7 +39,7 @@
 	remote, which profile -- lives in Server/Network/Endpoint and Server/Data/ProfileSlice, never here.
 
 	LENIENT READS. A few decoders do not validate, they tolerate -- a legacy record's field is read if it is a number
-	and otherwise ignored (MoveRecordCodec). `Schema.IsTable/IsString/IsNumber/IsBoolean` and `NumberOr/StringOr` are
+	and otherwise ignored (MoveRecordCodec). `Schema.IsTable/IsString/IsNumber/IsBoolean/IsVector3` and `NumberOr/StringOr` are
 	those reads, named once so the server's `typeof` checks live here and nowhere else. They do not exclude NaN
 	(`IsNumber` is `typeof(v) == "number"`); a caller that must should use `Number(...)`.
 
@@ -99,6 +99,10 @@ end
 
 function Schema.IsBoolean(value: unknown): boolean
 	return typeof(value) == "boolean"
+end
+
+function Schema.IsVector3(value: unknown): boolean
+	return typeof(value) == "Vector3"
 end
 
 function Schema.NumberOr(value: unknown, fallback: number): number
@@ -203,6 +207,30 @@ function Schema.WithReason<T>(code: string, shape: Shape<T>): Shape<T>
 		local value, reason = shape(raw)
 		if reason ~= nil then
 			return nil, fixed
+		end
+		return value, nil
+	end
+end
+
+-- The refusal a `Custom` shape returns when it defers to a validator that has its own stable error codes: carried up
+-- unchanged (never path-prefixed) and surfaced by Decode as the code itself.
+function Schema.Failure(code: string): Reason
+	return { Code = code }
+end
+
+-- A Record for the validators whose answer to "this is not even a table" is a code of their own (`InvalidShape`,
+-- `InvalidAbility`, ...) rather than a path: that refusal, and a metatabled table's, are reported as `code`; a field's
+-- own fixed code passes through; anything else keeps its path. The shape of nearly every hand-written `Validate` here.
+function Schema.CodedRecord(code: string, fields: { { any } }): Shape<{ [string]: any }>
+	local record = Schema.Record(fields)
+	local fixed: Fixed = { Code = code }
+	return function(raw: unknown): ({ [string]: any }?, Reason?)
+		if not Schema.IsTable(raw) then
+			return nil, fixed
+		end
+		local value, reason = record(raw)
+		if reason ~= nil then
+			return nil, if reason == "expected table" then fixed else reason
 		end
 		return value, nil
 	end

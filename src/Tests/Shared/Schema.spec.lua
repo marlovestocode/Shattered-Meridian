@@ -223,6 +223,40 @@ return function()
 		end)
 	end)
 
+	describe("Schema.CodedRecord and Failure", function()
+		local shape = Schema.CodedRecord("InvalidThing", {
+			{ "Name", Schema.WithReason("InvalidName", Schema.NonEmptyString()) },
+			{ "Level", Schema.Number(1, 5) },
+			{
+				"Inner",
+				Schema.Custom(function(raw: unknown)
+					if raw == "bad" then
+						return nil, Schema.Failure("InnerWentBad")
+					end
+					return raw, nil
+				end),
+			},
+		})
+
+		it("reports a non-table, and a metatabled table, as the record's own code", function()
+			expect(select(2, decode(shape, nil))).to.equal("InvalidThing")
+			expect(select(2, decode(shape, "x"))).to.equal("InvalidThing")
+			expect(select(2, decode(shape, setmetatable({ Name = "a", Level = 1 }, {})))).to.equal("InvalidThing")
+		end)
+
+		it("passes a field's fixed code through, and keeps a path for a field without one", function()
+			expect(select(2, decode(shape, { Name = "", Level = 1 }))).to.equal("InvalidName")
+			expect(select(2, decode(shape, { Name = "a", Level = "x" }))).to.equal("Level.expected a real number")
+			expect(select(2, decode(shape, { Name = "a", Level = 1, Inner = "bad" }))).to.equal("InnerWentBad")
+		end)
+
+		it("decodes a valid record", function()
+			local value = decode(shape, { Name = "a", Level = 9, Inner = 3 })
+			expect(value.Level).to.equal(5)
+			expect(value.Inner).to.equal(3)
+		end)
+	end)
+
 	describe("Schema.Custom and the lenient reads", function()
 		it("Custom is the shape as written", function()
 			local shape = Schema.Custom(function(raw: unknown)
@@ -244,6 +278,8 @@ return function()
 			expect(Schema.IsNumber("1")).to.equal(false)
 			expect(Schema.IsBoolean(false)).to.equal(true)
 			expect(Schema.IsBoolean(nil)).to.equal(false)
+			expect(Schema.IsVector3(Vector3.zero)).to.equal(true)
+			expect(Schema.IsVector3({ X = 1, Y = 2, Z = 3 })).to.equal(false)
 		end)
 
 		it("NumberOr and StringOr tolerate rather than validate", function()
