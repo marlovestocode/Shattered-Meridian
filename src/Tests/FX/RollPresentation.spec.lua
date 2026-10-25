@@ -9,31 +9,20 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterPlayer = game:GetService("StarterPlayer")
 local Workspace = game:GetService("Workspace")
+local ServerScriptService = game:GetService("ServerScriptService")
 
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local ImpactSparks = require(StarterPlayer.StarterPlayerScripts.Client.FX.ImpactSparks)
 local RemoteMovementFX = require(StarterPlayer.StarterPlayerScripts.Client.FX.RemoteMovementFX)
 local RollAfterimage = require(StarterPlayer.StarterPlayerScripts.Client.FX.RollAfterimage)
-
-local R6_LIMBS = { "Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg" }
-
-local function makeRig(): Model
-	local model = Instance.new("Model")
-	model.Name = "RollRig"
-	for index, name in R6_LIMBS do
-		local part = Instance.new("Part")
-		part.Name = name
-		part.Anchored = true
-		part.Size = Vector3.new(1, 2, 1)
-		part.CFrame = CFrame.new(index * 2, 50, 0)
-		part.Parent = model
-	end
-	model.Parent = Workspace
-	return model
-end
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 return function()
+	afterEach(function()
+		Rig.DestroyAll()
+	end)
+
 	describe("RollAfterimage", function()
 		afterEach(function()
 			RollAfterimage.Stop()
@@ -41,7 +30,7 @@ return function()
 
 		it("stamps an inert, limb-for-limb ghost and releases it on Stop", function()
 			RollAfterimage.Start()
-			local rig = makeRig()
+			local rig = Rig.Limbs("RollRig")
 			RollAfterimage.FlashEvade(rig)
 			expect(RollAfterimage.CountLive()).to.equal(1)
 
@@ -49,7 +38,7 @@ return function()
 			expect(holder).never.to.equal(nil)
 			local ghost = (holder :: Instance):FindFirstChildOfClass("Model")
 			expect(ghost).never.to.equal(nil)
-			for _, name in R6_LIMBS do
+			for _, name in Rig.LIMB_NAMES do
 				local part = (ghost :: Model):FindFirstChild(name) :: Part
 				expect(part).never.to.equal(nil)
 				expect(part.Anchored).to.equal(true)
@@ -65,7 +54,7 @@ return function()
 		end)
 
 		it("does nothing before Start", function()
-			local rig = makeRig()
+			local rig = Rig.Limbs("RollRig")
 			RollAfterimage.FlashEvade(rig)
 			RollAfterimage.PlayRoll(rig)
 			expect(RollAfterimage.CountLive()).to.equal(0)
@@ -75,7 +64,7 @@ return function()
 
 		it("schedules a roll's stamps rather than drawing them all at once", function()
 			RollAfterimage.Start()
-			local rig = makeRig()
+			local rig = Rig.Limbs("RollRig")
 			RollAfterimage.PlayRoll(rig)
 			expect(RollAfterimage.IsPending(rig)).to.equal(true)
 			expect(RollAfterimage.CountLive()).to.equal(0)
@@ -84,7 +73,7 @@ return function()
 
 		it("never draws more ghosts than its pool", function()
 			RollAfterimage.Start()
-			local rig = makeRig()
+			local rig = Rig.Limbs("RollRig")
 			for _ = 1, FXConstants.RollAfterimage.PoolMaxSize + 5 do
 				RollAfterimage.FlashEvade(rig)
 			end

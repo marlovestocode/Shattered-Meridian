@@ -6,11 +6,11 @@
 --
 -- Same fake-track seam as AnimationManagerReplicatedOneShot.spec: no asset loads in the test place.
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
+local ServerScriptService = game:GetService("ServerScriptService")
 
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 local CLIP = "rbxassetid://spec-freeze-for"
 local LENGTH = 1
@@ -64,18 +64,6 @@ local function newFakeTrack(): FakeTrack
 	return track
 end
 
-local rigs: { Model } = {}
-
-local function makeRig(): Model
-	local model =
-		Players:CreateHumanoidModelFromDescription(Instance.new("HumanoidDescription"), Enum.HumanoidRigType.R6)
-	model.Name = "FreezeForRig"
-	(model.PrimaryPart :: BasePart).Anchored = true
-	model.Parent = Workspace
-	table.insert(rigs, model)
-	return model
-end
-
 -- A manager on a real rig whose only track is `track`, stepped by hand.
 local function makeManager(track: FakeTrack): AnimationManager.AnimationManagerInstance
 	local manager = AnimationManager.new({
@@ -85,16 +73,13 @@ local function makeManager(track: FakeTrack): AnimationManager.AnimationManagerI
 			return track :: any
 		end,
 	})
-	assert(manager:Bind(makeRig()), "the spec rig must bind")
+	assert(manager:Bind(Rig.R6("FreezeForRig").Model), "the spec rig must bind")
 	return manager
 end
 
 return function()
 	afterEach(function()
-		for _, rig in rigs do
-			rig:Destroy()
-		end
-		table.clear(rigs)
+		Rig.DestroyAll()
 	end)
 
 	local ACTION = { [Enum.AnimationPriority.Action] = true }
@@ -153,7 +138,7 @@ return function()
 			local manager = makeManager(track)
 			manager:Claim("Attack", "Spec", { Clip = CLIP, Looped = false, Priority = Enum.AnimationPriority.Action })
 
-			local other = makeRig()
+			local other = Rig.R6("FreezeForRig").Model
 			local handled = AnimationManager.FreezeFor(other, 5, ACTION, nil)
 			expect(next(handled)).to.equal(nil)
 			expect(track.Speed).to.equal(1)
