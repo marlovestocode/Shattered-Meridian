@@ -201,3 +201,46 @@ numbered, commented step in `Main.server.lua`, a `BootManifest` entry declaring 
 in the ownership table above. It must have a non-zero inbound use from outside its own folder before
 it is called wired. A new top-level `Server/` or `Client/` folder needs a `test.project.json` mapping.
 See `future-expansion.md` for when a new System earns its own module versus extending one.
+
+
+## Who owns what
+
+The System ownership map above answers "what does this System own". This section answers the question a change
+starts from: **"I need to know / decide X -- who answers it, and how do I ask?"** Check it, and CLAUDE.md's
+pattern table, before creating a module. Built from what the code does on 2026-10-25 (cohesion pass W0), not from
+header claims. A row marked `(migrating: Wn)` has an owner that is not yet the only path;
+`docs/architecture/2026-10-25-coworking-systems-plan.md` says what finishes it.
+
+| Question | Owner | How a consumer asks |
+|---|---|---|
+| Who killed whom, and who gets credit? | `PlayerDeathSystem` | Subscribe `GameplayEvents.PlayerKilled(victim, killer?, deathId)`; never publish it |
+| Which reward kinds does a kill earn, and who pays them? | `RewardSystem` (manifest) -> `ProgressionSystem` (gate, routes) -> the component owner | Add a reward kind and a route, never a direct `PlayerKilled` subscription |
+| What does a player hold? | `InventorySystem` | `Add`/`Remove`/`Count`/`Has`/`RoomFor`; only it writes `profile.inventory` |
+| Who saves and loads a profile? | `PlayerDataSystem` | Its public API; DataStore writes go through `DataStoreRetry.Scoped` |
+| How do I create or reach a remote? | `NetworkBridge` (owning System creates in `Init`) | `Get*` at point of use; rate-limit with `RateLimiter`; wrap invokes with `RemoteHandler` |
+| May this body swing / evade / be hit right now? | The combat stack, each layer's `CanAttack`-shaped gate, plus `FrozenBody` and bare Attribute reads in `AttackRequestSystem.bodyGate`, `DefenseSystem.evadeBodyRefusal`, `RunSystem.isMovementLocked`, `AttackInputClient`, `ParkourController`, `ShiftLockCamera`, `EmoteSystem` `(migrating: W3)` | Today: per-consumer Attribute subsets (see plan §1.2). Target: one `BodyRestraint` |
+| Is a body's movement locked by the server? | `RootControl` (`Claim`/`Release`/`Set` per owner) | `RootControl.Set(humanoid, Owners.X, locked)`; read `RootControlLocked` |
+| Is a body's displacement legitimate (not a cheat)? | `MovementAllowance` | `MovementAllowance.Stamp(humanoid, deadline)`; judged by `MovementGuard` |
+| Who writes `WalkSpeed`? | `RunSystem` (sole writer) | Publish an Attribute it already resolves (Frozen, Flying, Grabbed, Mounted, SwingRooted...), never set `WalkSpeed` |
+| What order do combat Systems run each server frame? | `CombatTick.PHASES` | Register a phase; do not connect `Heartbeat` |
+| What other server per-frame work exists? | `GameplayEvents.HeartbeatTick` (13 subscribers), and `RunSystem`/`ParkourSystem`, which each connect their own `Heartbeat` | Order against `CombatTick` is connection order, not declared `(not owned)` |
+| How does a module announce a change? | Three mechanisms today: `GameplayEvents` (deferred, cross-System), `CallbackList` (synchronous extension point), a Humanoid Attribute (crosses client/server or a layer boundary) `(migrating: W1)` | See "Choosing an event mechanism" below |
+| Is this a realm rule on this body? | `DomainRules` | `Scale`/`Has`/`IsSealed`; never require `DomainSystem` from a combat layer |
+| How much latency to refund? | `NetworkLatency` (server), `PingReading` (shared) | `RoundTripSeconds`/`OneWaySeconds` |
+| Are two combatants on the same side? | `Allegiance` | `AreAllies`, `Matches` |
+| Which animation owns this body? | Nobody: `AnimationManager` claims layers for Parkour, AttackInput, Defense, HitStop, Grab and the bot, while `CombatAnimator`, `EmoteAnimator` and `FlightAnimator` still call `LoadAnimation` themselves `(migrating: W5)` | `AnimationManager` for new work; the three animators are the known exceptions |
+| Who writes a joint's `Transform`? | `TransformLayer` composes additive layers (`GuardStrainPose`, `HitFlinchPose`); `GrabHoldPose`, `VesselArmPose`, `VesselPilotPose` write absolute Transforms around it `(migrating: W4)` | Additive effects go through `TransformLayer` |
+| What order do client frame callbacks run in? | No owner: 21 `BindToRenderStep` bindings, 8 modules sharing 3 priorities, plus 28 bare frame callbacks `(migrating: W4)` | Choose a distinct priority and say why in your header |
+| Who writes `Camera.FieldOfView` / camera offset? | `FOVOffset` / `CameraOffsetComposer` | Contribute to the composer, never write the property |
+| Who writes `Camera.CFrame`? | Six writers (Blimp, Flight, LockOn, CameraShake, Intro, Placement), mutually exclusive by flags `(migrating: W4)` | Read the other writers' flags; there is no arbiter yet |
+| Where does a crewed vehicle's bookkeeping live? | `Shared/Vessel` + `Server/Vessel` for tagging, assembly, mount, pose, motion, speed ladder, safety. Mount registry, hull touch and mount broadcast still live in both `BlimpSystem` and `BoatSystem` `(migrating: W2)` | Bind the Vessel factories; do not add a third copy |
+| Which weapon asset does a weapon use? | `WeaponAssets` | `Container`, `ResolveAnimation`, `NormalizeAssetId` |
+| Which surface is a parkour probe describing? | `SurfaceLock` (judges), `EnvironmentProbe` (the only caster) | `Vote`/`Observe`/`Matches` |
+
+### Choosing an event mechanism
+
+- `GameplayEvents`: a deferred, server-wide fact several Systems react to (kill, tier change, XP awarded).
+- `CallbackList`: one module's own synchronous extension point, `OnX(fn) -> disconnect`, where a subscriber must
+  run before the publisher's next line (DamageSystem announces a hit before the health write).
+- A Humanoid Attribute: state that crosses the client/server boundary, or that a layer which may not `require`
+  its neighbour needs to read.
