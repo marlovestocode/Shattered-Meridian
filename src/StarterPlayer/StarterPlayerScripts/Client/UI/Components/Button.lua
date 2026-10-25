@@ -23,8 +23,8 @@
 	  this exact button's spec, see that file's header). Press does NOT turn the background
 	  AccentPrimary the way the legacy path does -- it's already AccentPrimary at rest, so that cue
 	  would be invisible here. Press instead thickens the border (1px -> 2px), the same
-	  brightness/thickness-over-color-alone language ActionIcon's Armed state and Bar's critical
-	  stroke already use elsewhere in this UI.
+	  brightness/thickness-over-color-alone language ArmedButton's armed state and Bar's critical
+	  stroke use elsewhere in this UI.
 	- "Secondary": a filled, bordered control -- Tokens.Color.SurfaceElevated behind
 	  Tokens.Border.Standard, going fully opaque with an AccentPrimary edge and a halo on hover, and
 	  flashing an AccentPrimary wash under the press.
@@ -40,7 +40,7 @@
 
 	Primary/Secondary render their visible text through Components/TrackedLabel.lua (tracked caps)
 	instead of this TextButton's own Text property, which is left blank under a Variant -- an earlier
-	version kept it set-but-transparent for gamepad/screen-reader nav (ActionIcon.lua's convention),
+	version kept it set-but-transparent for gamepad/screen-reader nav (the old ActionIcon's convention),
 	but a same-caption native Text still visibly double-rendered against TrackedLabel's own, WIDER,
 	letter-spaced run (both centered on the same point) the instant TextTransparency wasn't perfectly
 	opaque in practice -- confirmed live in Studio, 2026-07-27. Blank avoids that outright; a future

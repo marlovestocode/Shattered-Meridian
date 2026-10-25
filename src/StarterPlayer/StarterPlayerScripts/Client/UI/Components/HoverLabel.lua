@@ -2,28 +2,29 @@
 --[[
 	HoverLabel.lua
 
-	Owns: a small, text-only hover label for icon-only controls -- ActionIcon.lua's Kick/Ban/Mute/
-	FlagSuspected/Overflow buttons already carry a real accessible `Text` label (see that file's own
-	header) that renders fully transparent for screen-reader/gamepad-nav purposes only. Nothing ever
-	showed that text to a sighted mouse user on hover -- this is the fix, and it's deliberately a
+	Owns: a small, text-only hover label for icon-only controls. It was written for the admin roster's
+	ActionIcon (Kick/Ban/Mute/FlagSuspected/Overflow), whose accessible `Text` label rendered fully
+	transparent for screen-reader/gamepad-nav purposes only, so a sighted mouse user never saw it on
+	hover. ActionIcon.lua lost its last caller in the admin-panel rebuild and was deleted (2026-10-25 audit, A1): THIS
+	COMPONENT HAS NO CALLER IN THE TREE TODAY. It is kept as the tooltip for the next icon-only control,
+	and the anchor-wiring notes below describe how ActionIcon used it. It's deliberately a
 	SCOPED-DOWN tooltip: a plain Surface tile with a Tokens.Border.Standard edge + Caption text,
 	faded in with the same one-shot entrance convention StatusBanner/PostureBreakBanner already use
 	(Tokens.Motion.FadeSpring). No rich styling, no elaborate transitions, no premium visual treatment.
 
-	Does not own hover-tracking -- callers pass their own existing hover Value (e.g. ActionIcon.lua's
-	isHovering) as Visible. This file never starts its own MouseEnter/MouseLeave listeners; reusing
-	an existing Value is the whole point (ActionIcon.lua already had isHovering going unused outside
-	its own background/border color Computeds).
+	Does not own hover-tracking -- callers pass their own existing hover Value (a control's Selection.Active
+	is the natural one) as Visible. This file never starts its own MouseEnter/MouseLeave listeners;
+	reusing an existing Value is the whole point.
 
 	Positioning: parented as a CHILD of the anchor control (this codebase has no shared overlay/root
 	layer to parent a floating tooltip into, and building one would be exactly the kind of
 	viewport-aware-positioning infrastructure the scoped-down version of this component was asked to
-	skip -- see ActionIcon.lua's own header for the same tradeoff made for its overflow reveal).
+	skip).
 	Anchored above the control's top edge (AnchorPoint (0, 1), a fixed gap up) per the "above the
 	anchor point, not below" requirement. Horizontal placement is nudged so the label doesn't render
 	off the left/right edge of the viewport: the caller supplies AnchorPosition/AnchorSize (the
-	anchor's own AbsolutePosition/AbsoluteSize -- wired via Fusion.Out in ActionIcon.lua, a real
-	existing Fusion 0.3 API this codebase just hadn't needed before), this tile sizes itself to its
+	anchor's own AbsolutePosition/AbsoluteSize -- wired with Fusion.Out on the anchor, a real
+	existing Fusion 0.3 API), this tile sizes itself to its
 	own text via AutomaticSize, reports its resolved width back through [Out "AbsoluteSize"], and
 	math.clamps that against workspace.CurrentCamera.ViewportSize. This is the "basic math.clamp
 	against viewport bounds" version, not a fully general tooltip-positioning system.
@@ -38,10 +39,9 @@
 	transparent.
 
 	Known gap, not a design deviation: because this UI runs every ScreenGui at the default
-	ZIndexBehavior.Sibling (see ActionIcon.lua's header for the same constraint), a label wide enough
-	to spill sideways into a neighboring ActionIcon that comes later in that row's child order can be
-	painted over by that neighbor. Every current caller's text (Kick/Ban/Mute/Flag Suspected Cheater/
-	overflow) is short enough that this is a rare edge case, not a common one -- fixing it for good
+	ZIndexBehavior.Sibling, a label wide enough to spill sideways into a neighboring control that comes
+	later in that row's child order can be painted over by that neighbor. Short text (Kick/Ban/Mute/Flag
+	Suspected Cheater/overflow, the labels it was written for) makes this a rare edge case -- fixing it for good
 	would need the same shared-overlay-layer or ZIndexBehavior.Global change this file's positioning
 	section already ruled out as over-scope.
 ]]
@@ -63,11 +63,10 @@ type UsedAs<T> = Fusion.UsedAs<T>
 export type HoverLabelProps = {
 	-- Reuses the caller's own hover state -- see this file's header.
 	Visible: UsedAs<boolean>,
-	-- Plain string, not reactive -- matches ActionIconProps.Text's own (non-reactive) shape, the
-	-- only current caller.
+	-- Plain string, not reactive -- matching the (deleted) ActionIcon's own non-reactive Text.
 	Text: string,
 	-- The anchor's own AbsolutePosition/AbsoluteSize in screen space -- see this file's header on
-	-- how ActionIcon.lua wires these via Fusion.Out.
+	-- how an anchor wires these via Fusion.Out.
 	AnchorPosition: UsedAs<Vector2>,
 	AnchorSize: UsedAs<Vector2>,
 }
