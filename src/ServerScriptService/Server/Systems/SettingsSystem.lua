@@ -35,6 +35,7 @@ local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
+local Schema = require(ReplicatedStorage.Shared.Schema)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 
 local logger = Logger.scope("SettingsSystem")
@@ -60,52 +61,74 @@ local DEFAULT_SETTINGS: Types.PlayerSettings = {
 	UI = PlayerDataSystem.CreateDefaultUISettings(),
 }
 
--- The closed set of Types.ParkourSettings fields a client may write, and the value type each one
--- accepts. A single remote carries a field name (see Constants.Settings.RemoteNames.UpdateParkour's
--- own header for why one remote rather than eight), which makes the field name untrusted input --
--- so it is validated against this table exactly the way isRebindableAction below validates a keybind
--- action. A field absent from here cannot be written no matter what a client sends, which also means
--- retiring a preference is a deletion here rather than a hole in the validation.
-local PARKOUR_SETTING_TYPES: { [string]: "boolean" | "SprintMode" } = {
-	Enabled = "boolean",
-	CameraEffects = "boolean",
-	CoyoteTime = "boolean",
-	JumpBuffer = "boolean",
-	AutoVault = "boolean",
-	LedgeAssist = "boolean",
-	StepAssist = "boolean",
-	SprintMode = "SprintMode",
+-- The closed set of fields a client may write in each settings group, and the shape each value is judged by. A
+-- single remote carries a field NAME (see Constants.Settings.RemoteNames.UpdateParkour's own header for why one
+-- remote rather than eight), which makes the name untrusted input, so it is looked up here: a field absent from a
+-- group's table cannot be written no matter what a client sends, and retiring a preference is a deletion here
+-- rather than a hole in the validation.
+--
+-- A boolean field is REJECTED when it is not a boolean. A NUMBER is CLAMPED into its bound and rejected only when
+-- it is not a real number (NaN included): a rejected write leaves the server holding a different value than the
+-- client already applied locally, and the two only reconcile on next login, so a slider dragged one pixel too far
+-- would appear to work all session and silently revert. Constants.Settings.Gamepad.Bounds / UI.Bounds are the
+-- shared source of the numbers -- PlayerDataSystem's own decoder clamps to the same tables on read.
+local GamepadBounds = Constants.Settings.Gamepad.Bounds :: { [string]: any }
+local UIBounds = Constants.Settings.UI.Bounds :: { [string]: any }
+
+type Group = {
+	-- The key under Types.PlayerSettings.
+	Key: string,
+	Write: (rawField: unknown, rawValue: unknown) -> (string?, any?, string?),
+	Default: () -> { [string]: any },
 }
 
--- The closed set of Types.ComfortSettings fields a client may write. Same role, same reasoning and
--- same untrusted-field-name posture as PARKOUR_SETTING_TYPES above; every entry is a plain boolean, so
--- this one needs no value-type column at all.
-local COMFORT_SETTING_FIELDS: { [string]: true } = {
-	CameraShake = true,
-	FieldOfViewEffects = true,
-	VehicleCameraMotion = true,
+local GROUPS: { [string]: Group } = {
+	Parkour = {
+		Key = "Parkour",
+		Write = Schema.FieldValue({
+			Enabled = Schema.Boolean,
+			CameraEffects = Schema.Boolean,
+			CoyoteTime = Schema.Boolean,
+			JumpBuffer = Schema.Boolean,
+			AutoVault = Schema.Boolean,
+			LedgeAssist = Schema.Boolean,
+			StepAssist = Schema.Boolean,
+			SprintMode = Schema.Enum({ "Hold", "Toggle" }),
+		}),
+		Default = PlayerDataSystem.CreateDefaultParkourSettings,
+	},
+	Comfort = {
+		Key = "Comfort",
+		Write = Schema.FieldValue({
+			CameraShake = Schema.Boolean,
+			FieldOfViewEffects = Schema.Boolean,
+			VehicleCameraMotion = Schema.Boolean,
+		}),
+		Default = PlayerDataSystem.CreateDefaultComfortSettings,
+	},
+	Gamepad = {
+		Key = "Gamepad",
+		Write = Schema.FieldValue({
+			LookSensitivity = Schema.Number(GamepadBounds.LookSensitivity.Min, GamepadBounds.LookSensitivity.Max),
+			MoveDeadzone = Schema.Number(GamepadBounds.Deadzone.Min, GamepadBounds.Deadzone.Max),
+			LookDeadzone = Schema.Number(GamepadBounds.Deadzone.Min, GamepadBounds.Deadzone.Max),
+			InvertLookY = Schema.Boolean,
+			Vibration = Schema.Boolean,
+		}),
+		Default = PlayerDataSystem.CreateDefaultGamepadSettings,
+	},
+	UI = {
+		Key = "UI",
+		Write = Schema.FieldValue({
+			Scale = Schema.Number(UIBounds.Scale.Min, UIBounds.Scale.Max),
+		}),
+		Default = PlayerDataSystem.CreateDefaultUISettings,
+	},
 }
 
--- The closed set of Types.GamepadSettings fields a client may write. Same role and same
--- untrusted-field-name posture as the two tables above, but this one needs a value-type column that
--- COMFORT_SETTING_FIELDS did not: three of the five fields are numbers, and a number field needs the
--- bounds it is clamped into as well as its type. Constants.Settings.Gamepad.Bounds is the shared
--- source of those numbers -- Server/Systems/PlayerDataSystem.lua's own decoder clamps to the same
--- table on read, so a value can only be out of range if it never went through either path.
-local GAMEPAD_SETTING_TYPES: { [string]: "boolean" | "LookSensitivity" | "Deadzone" } = {
-	LookSensitivity = "LookSensitivity",
-	MoveDeadzone = "Deadzone",
-	LookDeadzone = "Deadzone",
-	InvertLookY = "boolean",
-	Vibration = "boolean",
-}
-
--- The closed set of Types.UISettings fields a client may write. One field today; a closed set anyway,
--- matching every other group's untrusted-field-name posture, so a second interface preference is a
--- table entry rather than a reason to invent a new validation shape.
-local UI_SETTING_FIELDS: { [string]: true } = {
-	Scale = true,
-}
+local KEYBIND_DEVICE = Schema.Enum({ "Keyboard", "Gamepad" })
+local KEY_CODE = Schema.EnumItem(Enum.KeyCode)
+local USER_INPUT_TYPE = Schema.EnumItem(Enum.UserInputType)
 
 -- See file header -- structurally valid AND not a hotbar slot. Constants.Keybinds.Defaults is a
 -- complete map of every currently-known KeybindAction (KeybindManager.lua's own header), so
@@ -114,33 +137,62 @@ local function isRebindableAction(action: string): boolean
 	return (Constants.Keybinds.Defaults :: { [string]: any })[action] ~= nil and not string.match(action, "^HotbarSlot")
 end
 
-local function isKeybindDevice(value: unknown): boolean
-	return value == "Keyboard" or value == "Gamepad"
-end
-
 -- Exactly one of KeyCode/UserInputType, both real EnumItems of the right EnumType -- mirrors
 -- Types.Keybind's own "exactly one populated" contract. A RemoteEvent argument can carry a real
 -- EnumItem natively (unlike a DataStore write -- see PlayerDataSystem.lua's own encode/decode pair
 -- for why THAT boundary has to stringify), so no pcall/string-lookup is needed here, just a type
--- check.
+-- check. A field of the wrong kind counts as absent (it does not veto the other), as it always did.
 local function validateKeybind(raw: unknown): Types.Keybind?
-	if typeof(raw) ~= "table" then
+	if not Schema.IsTable(raw) then
 		return nil
 	end
 	local rawTable = raw :: { [string]: any }
-	local keyCode = rawTable.KeyCode
-	local userInputType = rawTable.UserInputType
-	local hasKeyCode = typeof(keyCode) == "EnumItem" and (keyCode :: EnumItem).EnumType == Enum.KeyCode
-	local hasUserInputType = typeof(userInputType) == "EnumItem"
-		and (userInputType :: EnumItem).EnumType == Enum.UserInputType
+	local keyCode = Schema.Decode(KEY_CODE, rawTable.KeyCode)
+	local userInputType = Schema.Decode(USER_INPUT_TYPE, rawTable.UserInputType)
 
-	if hasKeyCode and not hasUserInputType then
+	if keyCode and not userInputType then
 		return { KeyCode = keyCode :: Enum.KeyCode }
 	end
-	if hasUserInputType and not hasKeyCode then
+	if userInputType and not keyCode then
 		return { UserInputType = userInputType :: Enum.UserInputType }
 	end
 	return nil
+end
+
+-- The pure halves of the handlers below, public so the old-vs-new corpus spec (and anything that wants to ask
+-- "would this write be accepted") can call them without a Player or a profile.
+
+-- (device, action, keybind) for an UpdateKeybind payload, or nil when any part is refused.
+function SettingsSystem.DecodeKeybindUpdate(
+	rawDevice: unknown,
+	rawAction: unknown,
+	rawKeybind: unknown
+): (Types.KeybindDevice?, Types.KeybindAction?, Types.Keybind?)
+	local device = Schema.Decode(KEYBIND_DEVICE, rawDevice)
+	if device == nil then
+		return nil
+	end
+	if not Schema.IsString(rawAction) or not isRebindableAction(rawAction :: string) then
+		return nil
+	end
+	local keybind = validateKeybind(rawKeybind)
+	if not keybind then
+		return nil
+	end
+	return device :: Types.KeybindDevice, rawAction :: Types.KeybindAction, keybind
+end
+
+function SettingsSystem.DecodeDevice(rawDevice: unknown): Types.KeybindDevice?
+	return Schema.Decode(KEYBIND_DEVICE, rawDevice) :: Types.KeybindDevice?
+end
+
+-- (field, value) for a write into `groupName` ("Parkour"/"Comfort"/"Gamepad"/"UI"), or (nil, nil, reason).
+function SettingsSystem.DecodeGroupWrite(
+	groupName: string,
+	rawField: unknown,
+	rawValue: unknown
+): (string?, any?, string?)
+	return GROUPS[groupName].Write(rawField, rawValue)
 end
 
 local function handleGetSettings(player: Player): Types.PlayerSettings
@@ -163,22 +215,11 @@ local function handleUpdateKeybind(player: Player, rawDevice: unknown, rawAction
 	if rateLimiter:IsLimited(player) then
 		return
 	end
-	if not isKeybindDevice(rawDevice) then
-		logger:debug("UpdateKeybind rejected: invalid device", { player = player.Name })
+	local device, action, keybind = SettingsSystem.DecodeKeybindUpdate(rawDevice, rawAction, rawKeybind)
+	if device == nil or action == nil or keybind == nil then
+		logger:debug("UpdateKeybind rejected: invalid device, action or keybind", { player = player.Name })
 		return
 	end
-	if typeof(rawAction) ~= "string" or not isRebindableAction(rawAction) then
-		logger:debug("UpdateKeybind rejected: invalid action", { player = player.Name, action = tostring(rawAction) })
-		return
-	end
-	local keybind = validateKeybind(rawKeybind)
-	if not keybind then
-		logger:debug("UpdateKeybind rejected: invalid keybind shape", { player = player.Name })
-		return
-	end
-
-	local device = rawDevice :: Types.KeybindDevice
-	local action = rawAction :: Types.KeybindAction
 
 	local transformed = PlayerDataSystem.Transform(player, function(profile)
 		if device == "Keyboard" then
@@ -199,11 +240,11 @@ local function handleResetKeybinds(player: Player, rawDevice: unknown): ()
 	if rateLimiter:IsLimited(player) then
 		return
 	end
-	if not isKeybindDevice(rawDevice) then
+	local device = SettingsSystem.DecodeDevice(rawDevice)
+	if device == nil then
 		logger:debug("ResetKeybinds rejected: invalid device", { player = player.Name })
 		return
 	end
-	local device = rawDevice :: Types.KeybindDevice
 
 	local transformed = PlayerDataSystem.Transform(player, function(profile)
 		if device == "Keyboard" then
@@ -224,216 +265,63 @@ local function handleUpdateAutorun(player: Player, rawEnabled: unknown): ()
 	if rateLimiter:IsLimited(player) then
 		return
 	end
-	if typeof(rawEnabled) ~= "boolean" then
+	local enabled = Schema.Decode(Schema.Boolean, rawEnabled)
+	if enabled == nil then
 		logger:debug("UpdateAutorun rejected: non-boolean value", { player = player.Name })
 		return
 	end
 
 	local transformed = PlayerDataSystem.Transform(player, function(profile)
-		profile.settings.Autorun = rawEnabled
+		profile.settings.Autorun = enabled
 	end)
 	if not transformed then
 		logger:warn("UpdateAutorun: Transform failed (profile not loaded)", { player = player.Name })
 		return
 	end
 
-	logger:debug("Autorun persisted", { player = player.Name, enabled = rawEnabled })
+	logger:debug("Autorun persisted", { player = player.Name, enabled = enabled })
 end
 
--- Parkour preference write. Same shape as handleUpdateAutorun above -- validate, persist through
--- PlayerDataSystem.Transform, log -- with the extra step of validating the field NAME against
--- PARKOUR_SETTING_TYPES first, since this remote's payload includes which field to write.
+-- One handler per settings group (Parkour, Comfort, Gamepad, UI): rate limit, closed-set field + typed value
+-- validation through the group's own table, then persist through PlayerDataSystem.Transform with a defensive
+-- backfill. The four used to be four copies of this body; they differed only in the table they wrote, the closed
+-- set they validated against and the log label. They stay SEPARATE REMOTES (each group's field names are only
+-- valid for its own group -- one shared handler would accept a Comfort field name for Parkour).
 --
--- Note what this handler deliberately does NOT do: it never tells any other System that movement
--- preferences changed. The client has already applied the change locally (SettingsClient pushes it
--- straight into ParkourController) before firing this, exactly as it does for a rebind, so this
--- exists purely to make the change durable. The server has no behavior keyed off these preferences --
--- every one of them is client-side feel -- which is why persisting them is the whole job.
-local function handleUpdateParkour(player: Player, rawField: unknown, rawValue: unknown): ()
-	if rateLimiter:IsLimited(player) then
-		return
-	end
-	if typeof(rawField) ~= "string" then
-		logger:debug("UpdateParkour rejected: non-string field", { player = player.Name })
-		return
-	end
-	local field = rawField :: string
-	local expectedType = PARKOUR_SETTING_TYPES[field]
-	if not expectedType then
-		logger:debug("UpdateParkour rejected: unknown field", { player = player.Name, field = field })
-		return
-	end
-
-	local value: any
-	if expectedType == "boolean" then
-		if typeof(rawValue) ~= "boolean" then
-			logger:debug("UpdateParkour rejected: expected boolean", { player = player.Name, field = field })
-			return
-		end
-		value = rawValue
-	else
-		if rawValue ~= "Hold" and rawValue ~= "Toggle" then
-			logger:debug("UpdateParkour rejected: invalid SprintMode", { player = player.Name })
-			return
-		end
-		value = rawValue
-	end
-
-	local transformed = PlayerDataSystem.Transform(player, function(profile)
-		-- Defensive: a profile loaded from a record that predates the Parkour block and somehow missed
-		-- Migrations[4] would have no table to write into. Backfilling here rather than erroring keeps
-		-- one stale record from making the whole Settings panel non-functional for that player.
-		if typeof(profile.settings.Parkour) ~= "table" then
-			profile.settings.Parkour = PlayerDataSystem.CreateDefaultParkourSettings()
-		end
-		(profile.settings.Parkour :: { [string]: any })[field] = value
-	end)
-	if not transformed then
-		logger:warn("UpdateParkour: Transform failed (profile not loaded)", { player = player.Name })
-		return
-	end
-
-	logger:debug("Parkour setting persisted", { player = player.Name, field = field })
-end
-
--- Camera-comfort preferences. Mirrors handleUpdateParkour above exactly -- rate limit, closed-set
--- field validation, typed value check, Transform-with-defensive-backfill -- and is a separate handler
--- rather than a branch inside it because the two write different sub-tables and validate against
--- different closed sets; sharing one handler would mean a field name from either group being accepted
--- for the other.
-local function handleUpdateComfort(player: Player, rawField: unknown, rawValue: unknown): ()
-	if rateLimiter:IsLimited(player) then
-		return
-	end
-	if typeof(rawField) ~= "string" then
-		logger:debug("UpdateComfort rejected: non-string field", { player = player.Name })
-		return
-	end
-	local field = rawField :: string
-	if not COMFORT_SETTING_FIELDS[field] then
-		logger:debug("UpdateComfort rejected: unknown field", { player = player.Name, field = field })
-		return
-	end
-	if typeof(rawValue) ~= "boolean" then
-		logger:debug("UpdateComfort rejected: expected boolean", { player = player.Name, field = field })
-		return
-	end
-	local value = rawValue :: boolean
-
-	local transformed = PlayerDataSystem.Transform(player, function(profile)
-		-- Defensive, for the same reason handleUpdateParkour's own backfill is: a profile that somehow
-		-- missed Migrations[5] would have no table to write into, and one stale record must not make
-		-- the whole Settings panel non-functional for that player.
-		if typeof(profile.settings.Comfort) ~= "table" then
-			profile.settings.Comfort = PlayerDataSystem.CreateDefaultComfortSettings()
-		end
-		(profile.settings.Comfort :: { [string]: any })[field] = value
-	end)
-	if not transformed then
-		logger:warn("UpdateComfort: Transform failed (profile not loaded)", { player = player.Name })
-		return
-	end
-
-	logger:debug("Comfort setting persisted", { player = player.Name, field = field })
-end
-
--- Gamepad stick preferences. Mirrors handleUpdateComfort above -- rate limit, closed-set field
--- validation, Transform-with-defensive-backfill -- and differs in exactly one place: a numeric field
--- is CLAMPED rather than rejected when it arrives out of range.
+-- The backfill is defensive: a profile loaded from a record that missed the group's migration (Parkour [4],
+-- Comfort [5], UI [9]) or that predates a group which ships with none (Gamepad) has no table to write into, and
+-- one stale record must not make the whole Settings panel non-functional for that player.
 --
--- CLAMP, DON'T DROP, and the reason is the player rather than the protocol. A rejected write leaves
--- the server holding a different value than the client already applied locally, and the two only
--- reconcile on next login -- so a slider dragged one pixel too far would appear to work all session
--- and silently revert. Clamping keeps the two ends agreeing on a value that is always usable. A
--- non-numeric or NaN value IS dropped, because there is nothing sensible to clamp it to.
-local function handleUpdateGamepad(player: Player, rawField: unknown, rawValue: unknown): ()
-	if rateLimiter:IsLimited(player) then
-		return
-	end
-	if typeof(rawField) ~= "string" then
-		logger:debug("UpdateGamepad rejected: non-string field", { player = player.Name })
-		return
-	end
-	local field = rawField :: string
-	local expected = GAMEPAD_SETTING_TYPES[field]
-	if not expected then
-		logger:debug("UpdateGamepad rejected: unknown field", { player = player.Name, field = field })
-		return
-	end
-
-	local value: any
-	if expected == "boolean" then
-		if typeof(rawValue) ~= "boolean" then
-			logger:debug("UpdateGamepad rejected: expected boolean", { player = player.Name, field = field })
+-- Note what this deliberately does NOT do: it never tells any other System that a preference changed. The client
+-- has already applied the change locally (SettingsClient pushes it straight into the consumer) before firing
+-- this, exactly as it does for a rebind, so this exists purely to make the change durable. The server has no
+-- behaviour keyed off these preferences -- every one is client-side feel.
+local function makeGroupHandler(groupName: string): (Player, unknown, unknown) -> ()
+	local group = GROUPS[groupName]
+	return function(player: Player, rawField: unknown, rawValue: unknown): ()
+		if rateLimiter:IsLimited(player) then
 			return
 		end
-		value = rawValue
-	else
-		-- `value ~= value` is the NaN test: NaN is the one number math.clamp cannot rescue, since it
-		-- compares false against every bound and would propagate straight through to Analog.ApplyStick.
-		if typeof(rawValue) ~= "number" or rawValue ~= rawValue then
-			logger:debug("UpdateGamepad rejected: expected a real number", { player = player.Name, field = field })
+		local field, value, reason = group.Write(rawField, rawValue)
+		if field == nil then
+			logger:debug(`Update{groupName} rejected: {reason}`, { player = player.Name })
 			return
 		end
-		local bounds = (Constants.Settings.Gamepad.Bounds :: { [string]: any })[expected]
-		value = math.clamp(rawValue :: number, bounds.Min, bounds.Max)
-	end
 
-	local transformed = PlayerDataSystem.Transform(player, function(profile)
-		-- Defensive backfill, same reasoning as handleUpdateComfort's: this group ships with no
-		-- migration of its own (see PlayerDataSystem.DecodeSettings' note on why), so an in-memory
-		-- profile loaded from a pre-Gamepad record legitimately has no table here yet.
-		if typeof(profile.settings.Gamepad) ~= "table" then
-			profile.settings.Gamepad = PlayerDataSystem.CreateDefaultGamepadSettings()
+		local transformed = PlayerDataSystem.Transform(player, function(profile)
+			local settings = profile.settings :: { [string]: any }
+			if not Schema.IsTable(settings[group.Key]) then
+				settings[group.Key] = group.Default()
+			end
+			settings[group.Key][field] = value
+		end)
+		if not transformed then
+			logger:warn(`Update{groupName}: Transform failed (profile not loaded)`, { player = player.Name })
+			return
 		end
-		(profile.settings.Gamepad :: { [string]: any })[field] = value
-	end)
-	if not transformed then
-		logger:warn("UpdateGamepad: Transform failed (profile not loaded)", { player = player.Name })
-		return
-	end
 
-	logger:debug("Gamepad setting persisted", { player = player.Name, field = field })
-end
-
--- Interface preferences. Mirrors handleUpdateGamepad's numeric branch exactly (clamp rather than
--- reject, for the same "the client already applied this locally" reason) simplified to the one
--- always-numeric field this group has today.
-local function handleUpdateUI(player: Player, rawField: unknown, rawValue: unknown): ()
-	if rateLimiter:IsLimited(player) then
-		return
+		logger:debug(`{groupName} setting persisted`, { player = player.Name, field = field })
 	end
-	if typeof(rawField) ~= "string" then
-		logger:debug("UpdateUI rejected: non-string field", { player = player.Name })
-		return
-	end
-	local field = rawField :: string
-	if not UI_SETTING_FIELDS[field] then
-		logger:debug("UpdateUI rejected: unknown field", { player = player.Name, field = field })
-		return
-	end
-	if typeof(rawValue) ~= "number" or rawValue ~= rawValue then
-		logger:debug("UpdateUI rejected: expected a real number", { player = player.Name, field = field })
-		return
-	end
-	local bounds = (Constants.Settings.UI.Bounds :: { [string]: any })[field]
-	local value = math.clamp(rawValue :: number, bounds.Min, bounds.Max)
-
-	local transformed = PlayerDataSystem.Transform(player, function(profile)
-		-- Defensive backfill, same reasoning as handleUpdateComfort's own: a profile that somehow missed
-		-- Migrations[9] would have no table to write into, and one stale record must not make the whole
-		-- Settings panel non-functional for that player.
-		if typeof(profile.settings.UI) ~= "table" then
-			profile.settings.UI = PlayerDataSystem.CreateDefaultUISettings()
-		end
-		(profile.settings.UI :: { [string]: any })[field] = value
-	end)
-	if not transformed then
-		logger:warn("UpdateUI: Transform failed (profile not loaded)", { player = player.Name })
-		return
-	end
-
-	logger:debug("UI setting persisted", { player = player.Name, field = field })
 end
 
 local function onPlayerRemoving(player: Player): ()
@@ -456,16 +344,16 @@ function SettingsSystem.Init(): ()
 	updateAutorunRemote.OnServerEvent:Connect(handleUpdateAutorun)
 
 	local updateParkourRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateParkour)
-	updateParkourRemote.OnServerEvent:Connect(handleUpdateParkour)
+	updateParkourRemote.OnServerEvent:Connect(makeGroupHandler("Parkour"))
 
 	local updateComfortRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateComfort)
-	updateComfortRemote.OnServerEvent:Connect(handleUpdateComfort)
+	updateComfortRemote.OnServerEvent:Connect(makeGroupHandler("Comfort"))
 
 	local updateGamepadRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateGamepad)
-	updateGamepadRemote.OnServerEvent:Connect(handleUpdateGamepad)
+	updateGamepadRemote.OnServerEvent:Connect(makeGroupHandler("Gamepad"))
 
 	local updateUIRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateUI)
-	updateUIRemote.OnServerEvent:Connect(handleUpdateUI)
+	updateUIRemote.OnServerEvent:Connect(makeGroupHandler("UI"))
 
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "SettingsSystem",
