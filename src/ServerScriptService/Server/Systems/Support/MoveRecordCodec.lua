@@ -49,6 +49,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local Schema = require(ReplicatedStorage.Shared.Schema)
 
 local MoveRecordCodec = {}
 
@@ -78,33 +79,29 @@ local LEGACY_SHAPE: { [string]: MoveTypes.MoveShape } = {
 	Pyramid = "Box",
 }
 
-local function numberOr(value: unknown, fallback: number): number
-	return if typeof(value) == "number" then value :: number else fallback
-end
-
 -- The old eight-field bag (Width/Height/Depth/Length/Thickness/Radius/InnerRadius/AngleDegrees),
 -- reconstructed from a v1 record's Size/Radius when it has none, projected per AUTHORED shape.
 local function legacyDimensions(record: Record, legacyShape: string): MoveTypes.MoveDimensions
-	local source: { [string]: any } = if typeof(record.Dimensions) == "table" then record.Dimensions else {}
-	if typeof(record.Dimensions) ~= "table" then
+	local source: { [string]: any } = if Schema.IsTable(record.Dimensions) then record.Dimensions else {}
+	if not Schema.IsTable(record.Dimensions) then
 		-- A stored v1 Size is a plain {X, Y, Z} table (JSON carries no Vector3); a live one is a Vector3.
 		-- Both index the same way.
 		local size = record.Size
-		if typeof(size) == "table" or typeof(size) == "Vector3" then
+		if Schema.IsTable(size) or Schema.IsVector3(size) then
 			source = { Width = size.X, Height = size.Y, Depth = size.Z }
 		end
-		if typeof(record.Radius) == "number" then
+		if Schema.IsNumber(record.Radius) then
 			source.Radius = record.Radius
 		end
 	end
 
 	local out = HitboxTypes.DefaultDimensions()
 	local function read(field: string): number
-		return numberOr(source[field], (out :: any)[field] or 0)
+		return Schema.NumberOr(source[field], (out :: any)[field] or 0)
 	end
 
 	if legacyShape == "Box" or legacyShape == "Wedge" then
-		out.Width, out.Height, out.Length = read("Width"), read("Height"), numberOr(source.Depth, out.Length)
+		out.Width, out.Height, out.Length = read("Width"), read("Height"), Schema.NumberOr(source.Depth, out.Length)
 	elseif legacyShape == "Sphere" then
 		out.Radius = read("Radius")
 	elseif legacyShape == "Cone" then
@@ -117,13 +114,13 @@ local function legacyDimensions(record: Record, legacyShape: string): MoveTypes.
 	elseif legacyShape == "Disc" then
 		-- Thickness IS the cylinder's length; an authored ring becomes a filled disc -- larger, never
 		-- smaller, so a hit that landed still lands.
-		out.Radius, out.Length = read("Radius"), numberOr(source.Thickness, out.Length)
+		out.Radius, out.Length = read("Radius"), Schema.NumberOr(source.Thickness, out.Length)
 	elseif legacyShape == "Blade" then
 		-- A tapering blade in a box that cannot taper: the widest measurement in each axis.
-		out.Width = math.max(read("Width"), numberOr(source.Thickness, 0))
+		out.Width = math.max(read("Width"), Schema.NumberOr(source.Thickness, 0))
 		out.Height, out.Length = read("Height"), read("Length")
 	elseif legacyShape == "Slice" then
-		out.Width, out.Height, out.Length = read("Width"), read("Height"), numberOr(source.Thickness, out.Length)
+		out.Width, out.Height, out.Length = read("Width"), read("Height"), Schema.NumberOr(source.Thickness, out.Length)
 	elseif legacyShape == "Pyramid" then
 		out.Width, out.Height, out.Length = read("Width"), read("Height"), read("Length")
 	end
@@ -132,14 +129,14 @@ end
 
 -- The first enabled clip's id from the old timeline, or "" -- see this file's header.
 local function legacyClipId(record: Record): string
-	if typeof(record.AnimationId) == "string" and record.AnimationId ~= "" then
+	if Schema.IsString(record.AnimationId) and record.AnimationId ~= "" then
 		return record.AnimationId
 	end
-	if typeof(record.Animations) ~= "table" then
+	if not Schema.IsTable(record.Animations) then
 		return ""
 	end
 	for _, clip in ipairs(record.Animations) do
-		if typeof(clip) == "table" and clip.Enabled ~= false and typeof(clip.AnimationId) == "string" then
+		if Schema.IsTable(clip) and clip.Enabled ~= false and Schema.IsString(clip.AnimationId) then
 			if clip.AnimationId ~= "" then
 				return clip.AnimationId
 			end
@@ -157,10 +154,10 @@ local function upgradeLegacy(record: Record): (Record, { string })
 			table.insert(dropped, field)
 		end
 	end
-	if typeof(record.Animations) == "table" and #record.Animations > 1 then
+	if Schema.IsTable(record.Animations) and #record.Animations > 1 then
 		table.insert(dropped, "Animations")
 	end
-	if typeof(record.Knockback) == "table" and numberOr(record.Knockback.RagdollSeconds, 0) > 0 then
+	if Schema.IsTable(record.Knockback) and Schema.NumberOr(record.Knockback.RagdollSeconds, 0) > 0 then
 		table.insert(dropped, "Knockback.RagdollSeconds")
 	end
 
@@ -195,7 +192,7 @@ local function upgradeLegacy(record: Record): (Record, { string })
 
 	local geometryAuthored = record.Shape ~= nil or record.Dimensions ~= nil or record.Size ~= nil
 	if geometryAuthored then
-		local legacyShape = if typeof(record.Shape) == "string" then record.Shape else "Box"
+		local legacyShape = if Schema.IsString(record.Shape) then record.Shape else "Box"
 		local shape = LEGACY_SHAPE[legacyShape]
 		if shape then
 			upgraded.Shape = shape
@@ -215,7 +212,7 @@ local function upgradeLegacy(record: Record): (Record, { string })
 		upgraded.AnimationId = legacyClipId(record)
 	end
 
-	if typeof(record.Knockback) == "table" then
+	if Schema.IsTable(record.Knockback) then
 		upgraded.Knockback = {
 			UpVelocity = record.Knockback.UpVelocity,
 			HorizontalVelocity = record.Knockback.HorizontalVelocity,
@@ -252,11 +249,11 @@ end
 -- A stored custom-move record as a Validate candidate, plus the retired fields it lost in the upgrade
 -- (always empty for a v3 record). nil for anything that is not even table-shaped.
 function MoveRecordCodec.Decode(raw: unknown): (Record?, { string })
-	if typeof(raw) ~= "table" then
+	if not Schema.IsTable(raw) then
 		return nil, {}
 	end
 	local record = raw :: Record
-	local version = numberOr(record.SchemaVersion, 1)
+	local version = Schema.NumberOr(record.SchemaVersion, 1)
 	if version >= 3 then
 		local candidate = table.clone(record)
 		candidate.SchemaVersion = nil
@@ -269,13 +266,13 @@ end
 -- whatever the record carries laid over it. Starting from the built move is what lets an old override
 -- that only ever stored some fields (no rotation, say) still produce a whole candidate.
 function MoveRecordCodec.DecodeOverride(built: MoveTypes.MoveDefinition, raw: unknown): (Record?, { string })
-	if typeof(raw) ~= "table" then
+	if not Schema.IsTable(raw) then
 		return nil, {}
 	end
 	local record = raw :: Record
 	local overlay: Record
 	local dropped: { string } = {}
-	if numberOr(record.SchemaVersion, 1) >= 3 then
+	if Schema.NumberOr(record.SchemaVersion, 1) >= 3 then
 		overlay = record
 	else
 		overlay, dropped = upgradeLegacy(record)
@@ -290,7 +287,7 @@ function MoveRecordCodec.DecodeOverride(built: MoveTypes.MoveDefinition, raw: un
 	-- Optional, so the overlay above cannot say "none": a v3 override record is the whole overridable
 	-- set as saved, and a save with no presentation must not inherit a shipped one it replaced -- the
 	-- same "the live override wins wholesale" rule every numeric field already follows.
-	if numberOr(record.SchemaVersion, 1) >= 3 then
+	if Schema.NumberOr(record.SchemaVersion, 1) >= 3 then
 		candidate.Presentation = record.Presentation
 	end
 	return candidate, dropped
