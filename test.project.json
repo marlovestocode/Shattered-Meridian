@@ -104,6 +104,9 @@
 				"Config": {
 					"$path": "src/ServerScriptService/Server/Config"
 				},
+				"Data": {
+					"$path": "src/ServerScriptService/Server/Data"
+				},
 				"Events": {
 					"$path": "src/ServerScriptService/Server/Events"
 				},

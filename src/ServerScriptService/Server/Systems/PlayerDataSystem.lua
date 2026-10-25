@@ -135,6 +135,7 @@ local InventoryModel = require(ReplicatedStorage.Shared.Inventory.InventoryModel
 -- being duplicated as literals in this file.
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
+local ProfileSlices = require(script.Parent.Parent.Data.ProfileSlices)
 
 local PlayerDataSystem = {}
 
@@ -218,7 +219,7 @@ local withRetry = DataStoreRetry.Scoped(logger, Constants.Storage.RetryPolicy)
 -- A brand-new player's starting profile -- the ONLY place a default profile is legitimately
 -- constructed (see this file's header, design decision 5: a FAILED load must never reach here).
 function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProfile
-	return {
+	local profile: Types.PlayerProfile = {
 		userId = userId,
 		faction = nil,
 		raceId = nil,
@@ -266,6 +267,11 @@ function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProf
 			UI = PlayerDataSystem.CreateDefaultUISettings(),
 		},
 	}
+	-- Fields owned by a ProfileSlice (Server/Data/ProfileSlices.lua) are merged in; see ProfileSlice.lua.
+	for key, value in ProfileSlices.Default(userId) do
+		(profile :: any)[key] = value
+	end
+	return profile
 end
 
 -- Deep-enough copy of a PlayerProfile -- every field is either a primitive, a flat array of
@@ -276,7 +282,7 @@ end
 -- header, design decision 3, for why that's load-bearing for Transform being the only mutation
 -- path.
 function PlayerDataSystem.CopyProfile(profile: Types.PlayerProfile): Types.PlayerProfile
-	return {
+	local copy: Types.PlayerProfile = {
 		userId = profile.userId,
 		faction = profile.faction,
 		raceId = profile.raceId,
@@ -310,6 +316,10 @@ function PlayerDataSystem.CopyProfile(profile: Types.PlayerProfile): Types.Playe
 			Parkour = table.clone(profile.settings.Parkour),
 		},
 	}
+	for key, value in ProfileSlices.Copy(profile) do
+		(copy :: any)[key] = value
+	end
+	return copy
 end
 
 -- Settings System encode/decode helpers (Types.PlayerSettings) -- module-local since nothing
@@ -680,7 +690,7 @@ end
 -- needing its own encode step; settings goes through EncodeSettings above for its own EnumItem ->
 -- string conversion.
 function PlayerDataSystem.EncodeProfile(profile: Types.PlayerProfile): { [string]: any }
-	return {
+	local encoded: { [string]: any } = {
 		userId = profile.userId,
 		faction = profile.faction,
 		raceId = profile.raceId,
@@ -702,6 +712,10 @@ function PlayerDataSystem.EncodeProfile(profile: Types.PlayerProfile): { [string
 		inventory = InventoryModel.Encode(profile.inventory),
 		settings = PlayerDataSystem.EncodeSettings(profile.settings),
 	}
+	for key, value in ProfileSlices.Encode(profile) do
+		encoded[key] = value
+	end
+	return encoded
 end
 
 -- Defensive decode -- `raw` is untrusted the instant it comes back from a DataStore (engineering-
@@ -852,7 +866,7 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 	local inventory =
 		InventoryModel.Decode(rawTable.inventory, InventoryConstants.MaxItemIdLength, InventoryConstants.MaxStoredCount)
 
-	return {
+	local decoded: Types.PlayerProfile = {
 		userId = if typeof(rawTable.userId) == "number" then rawTable.userId else fallbackUserId,
 		faction = if typeof(rawTable.faction) == "string" then rawTable.faction :: Types.Faction else nil,
 		raceId = if typeof(rawTable.raceId) == "string" then rawTable.raceId :: Types.RaceId else nil,
@@ -878,6 +892,10 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		inventory = inventory,
 		settings = PlayerDataSystem.DecodeSettings(rawTable.settings),
 	}
+	for key, value in ProfileSlices.Decode(rawTable, fallbackUserId) do
+		(decoded :: any)[key] = value
+	end
+	return decoded
 end
 
 -- Schema migration skeleton (this file's header, design decision 4). Keyed by the version a
@@ -1088,6 +1106,13 @@ Migrations[10] = function(raw: { [string]: any }): { [string]: any }
 		profileTable.blimpFuel = nil
 	end
 	return raw
+end
+
+-- A slice contributes the steps for the versions it backfilled (ProfileSlice.lua); the chain stays ONE table keyed by
+-- the version a step migrates FROM. A version both this file and a slice claim is a mistake, not a merge.
+for version, step in ProfileSlices.Migrations do
+	assert(Migrations[version] == nil, `Migrations[{version}] is defined both here and by a ProfileSlice`)
+	Migrations[version] = step
 end
 
 function PlayerDataSystem.MigrateRecord(raw: { [string]: any }): { [string]: any }
