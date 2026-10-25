@@ -42,7 +42,6 @@
 -- Nothing here sleeps.
 
 local CollectionService = game:GetService("CollectionService")
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
@@ -58,6 +57,8 @@ local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
 local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
 local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
+local CombatHarness = require(ServerScriptService.Tests.TestHelpers.CombatHarness)
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 -- A real roster weapon, for the same reason GrabSystem.spec installs one: the MoveId below has to
 -- RESOLVE through AttackCatalog, and a spec that installs no weapon gets a catalogue with no weapon
@@ -73,14 +74,7 @@ local MOVE_ID = `default:{WEAPON}:Basic:1`
 
 local TAG = EngagementConstants.TagDurationSeconds
 
-type Dummy = {
-	Model: Model,
-	Root: BasePart,
-	Humanoid: Humanoid,
-	Id: number,
-}
-
-local spawned: { Model } = {}
+type Dummy = CombatHarness.Dummy
 
 -- The stand-in identity -- see this file's header. Cast through `any` exactly as RateLimiter.spec and
 -- ChangeNotifier.spec do; UserId is distinct per call so the leaver scrub, which matches ON UserId,
@@ -91,38 +85,13 @@ local spawned: { Model } = {}
 -- ChangeNotifier.Update reports "no change" for a player it has never seen (that module's own header
 -- -- establishing a baseline is not a change), so an unseeded stand-in never gets the InCombat
 -- Attribute written on its rising edge.
-local nextUserId = 0
 local function fakePlayer(name: string, character: Model?): Player
-	nextUserId += 1
-	local player = { Name = name, UserId = nextUserId, Character = character } :: any
+	local player = Rig.FakePlayer(name, character)
 	EngagementSystem.TrackPlayer(player)
 	return player
 end
 
-local function makeDummy(name: string, position: Vector3, lookAt: Vector3?): Dummy
-	local model = Instance.new("Model")
-	model.Name = name
-
-	local root = Instance.new("Part")
-	root.Name = "HumanoidRootPart"
-	root.Size = Vector3.new(2, 2, 1)
-	root.Anchored = true
-	root.CanCollide = false
-	root.CFrame = if lookAt then CFrame.lookAt(position, lookAt) else CFrame.new(position)
-	root.Parent = model
-
-	local humanoid = Instance.new("Humanoid")
-	humanoid.RequiresNeck = false
-	humanoid.Parent = model
-
-	model.PrimaryPart = root
-	model.Parent = Workspace
-	table.insert(spawned, model)
-
-	local id = HitboxEngine.RegisterCombatant(model, root, humanoid)
-	DefenseSystem.RegisterCombatant(model, root, humanoid, PARRY_ANIMATION)
-	return { Model = model, Root = root, Humanoid = humanoid, Id = id }
-end
+local spawnDummy = CombatHarness.Spawner({ ParryAnimation = PARRY_ANIMATION })
 
 local function makeDefinition(): HitboxTypes.AttackDefinition
 	return (
@@ -218,8 +187,8 @@ end
 
 -- Two dummies facing each other at a distance the definition above comfortably reaches.
 local function facingPair(): (Dummy, Dummy)
-	local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-	local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+	local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+	local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 	return attacker, defender
 end
 
@@ -242,16 +211,9 @@ return function()
 			captureDisconnect = nil
 		end
 		captured = nil
-		EngagementSystem.Reset()
-		DamageSystem.Reset()
-		DefenseSystem.Reset()
-		HitboxEngine.Reset()
-		ParryWindows.Reset()
+		CombatHarness.Reset()
 		MoveRegistryManager.Init()
-		for _, model in spawned do
-			model:Destroy()
-		end
-		table.clear(spawned)
+		Rig.DestroyAll()
 	end)
 
 	describe("EngagementSystem -- what opens a tag", function()
@@ -358,7 +320,7 @@ return function()
 
 		it("never tags a combatant for hitting itself", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
 			local attackerPlayer = fakePlayer("Attacker")
 
 			EngagementSystem.RecordExchange(
