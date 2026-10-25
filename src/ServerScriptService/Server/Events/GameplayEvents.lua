@@ -83,6 +83,7 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local GameplayEvents = {}
@@ -313,13 +314,11 @@ end
 -- is six deferred resumptions enqueued and drained every frame for handlers that between them do a few
 -- hundred table reads. A plain table walked in a loop does the same work with none of the scheduling.
 --
--- Keyed by a fresh throwaway table rather than an array, the same idiom Shared/Logger.lua's own
--- entryListeners uses and for the same two reasons: the key is an unforgeable token to unsubscribe by,
--- and `pairs` traversal stays well-defined when a handler unsubscribes itself mid-tick (Lua permits
--- setting an EXISTING field to nil during traversal, which is exactly what unsubscribing does). Adding
--- a subscriber from inside a tick is the case that would not be well-defined -- no subscriber does,
--- they all connect once from their own Init().
-local heartbeatHandlers: { [{}]: (deltaTime: number) -> () } = {}
+-- A CallbackList (Shared/CallbackList.lua), not a bare table: it was a table keyed by throwaway tokens and walked
+-- with `pairs`, whose order is unspecified, so the "registration (i.e. boot) order" below was not actually
+-- promised, and a subscriber added mid-tick was undefined. The list's copy-on-write array fixes both, and Fire
+-- allocates nothing, so the per-frame cost is the same plain walk.
+local heartbeatTick: CallbackList.CallbackList<number> = CallbackList.New(logger, "GameplayEvents.OnHeartbeatTick")
 
 -- Individually pcall-wrapped, which is not defensive padding -- it is what preserves the one property
 -- the BindableEvent was giving for free. Each connection used to run on its own deferred thread, so a
@@ -335,23 +334,14 @@ local heartbeatHandlers: { [{}]: (deltaTime: number) -> () } = {}
 -- thing to re-check before adding a seventh. A handler that yields would stall every subscriber
 -- behind it AND the Heartbeat step itself.
 function GameplayEvents.FireHeartbeatTick(deltaTime: number): ()
-	for _, handler in pairs(heartbeatHandlers) do
-		local ok, errorMessage = pcall(handler, deltaTime)
-		if not ok then
-			logger:error("Heartbeat tick subscriber errored", { errorMessage = tostring(errorMessage) })
-		end
-	end
+	heartbeatTick:Fire(deltaTime)
 end
 
 -- Returns an unsubscribe function rather than an RBXScriptConnection, since there is no longer a
 -- connection to hand back. Idempotent, so a caller that tears down twice (an idempotent re-Init, say)
 -- does not have to track whether it already has.
 function GameplayEvents.OnHeartbeatTick(handler: (deltaTime: number) -> ()): () -> ()
-	local token = {}
-	heartbeatHandlers[token] = handler
-	return function()
-		heartbeatHandlers[token] = nil
-	end
+	return heartbeatTick:Connect(handler)
 end
 
 game:GetService("RunService").Heartbeat:Connect(function(deltaTime: number)
