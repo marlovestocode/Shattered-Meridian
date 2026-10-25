@@ -19,7 +19,6 @@
 -- is exactly the surface Init() wires the remote to.
 
 local CollectionService = game:GetService("CollectionService")
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
@@ -38,6 +37,8 @@ local GuardMeter = require(ServerScriptService.Server.Combat.Defense.GuardMeter)
 local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.HitboxEngine)
 local SwingSequencer = require(ServerScriptService.Server.Combat.Attack.SwingSequencer)
 local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
+local CombatHarness = require(ServerScriptService.Tests.TestHelpers.CombatHarness)
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 -- The real roster this file asserts against -- weapons are models in Workspace.Weapons now, so a spec
 -- that installs none has an empty roster and every throw resolves to nothing.
@@ -63,60 +64,14 @@ local CHAIN_DELAY = AttackConstants.Sequence.ChainDelaySeconds
 local HOTBAR_MOVE = `default:{FIRST_WEAPON}:Heavy:1`
 local PARRY_ANIMATION = "rbxassetid://spec-attack-parry"
 
-type Dummy = {
-	Model: Model,
-	Root: BasePart,
-	Humanoid: Humanoid,
-	Id: number,
-}
-
-local spawned: { Model } = {}
+type Dummy = CombatHarness.Dummy
 
 -- Anchored, so nothing here is a race against gravity. Registered with the ENGINE only by default --
 -- DefenseSystem.CanAttack permits an unregistered model (its own documented contract), so a case that
--- needs a real defensive state registers for itself.
-local function makeDummy(name: string, position: Vector3): Dummy
-	local model = Instance.new("Model")
-	model.Name = name
-
-	local root = Instance.new("Part")
-	root.Name = "HumanoidRootPart"
-	root.Size = Vector3.new(2, 2, 1)
-	root.Anchored = true
-	root.CanCollide = false
-	root.CFrame = CFrame.new(position)
-	root.Parent = model
-
-	local humanoid = Instance.new("Humanoid")
-	humanoid.RequiresNeck = false
-	humanoid.Parent = model
-
-	model.PrimaryPart = root
-	model.Parent = Workspace
-	table.insert(spawned, model)
-
-	local id = HitboxEngine.RegisterCombatant(model, root, humanoid)
-	-- ARMED, because a fresh SwingSequencer record is now EMPTY-HANDED and an unarmed combatant
-	-- resolves no swings at all (see that module's own recordFor). Every case in this file is about
-	-- the REQUEST path rather than about being armed, so this is fixture work rather than something
-	-- each case restates.
-	SwingSequencer.SetWeapon(model, FIRST_WEAPON, os.clock())
-	return { Model = model, Root = root, Humanoid = humanoid, Id = id }
-end
-
--- A body the engine has never heard of, for the NotRegistered gate.
-local function makeUnregistered(name: string): Model
-	local model = Instance.new("Model")
-	model.Name = name
-
-	local humanoid = Instance.new("Humanoid")
-	humanoid.RequiresNeck = false
-	humanoid.Parent = model
-
-	model.Parent = Workspace
-	table.insert(spawned, model)
-	return model
-end
+-- needs a real defensive state registers for itself. ARMED, because a fresh SwingSequencer record is
+-- EMPTY-HANDED and an unarmed combatant resolves no swings at all: every case here is about the REQUEST
+-- path, not about being armed.
+local spawnDummy = CombatHarness.Spawner({ Defense = false, Weapon = FIRST_WEAPON })
 
 -- One frame, in the order Main.server.lua guarantees at runtime: engine first, attack layer last.
 local function step(now: number): ()
@@ -141,15 +96,9 @@ end
 
 return function()
 	afterEach(function()
-		AttackRequestSystem.Reset()
-		DefenseSystem.Reset()
-		ParryWindows.Reset()
-		HitboxEngine.Reset()
+		CombatHarness.Reset()
 		AttackCatalog.Reset()
-		for _, model in spawned do
-			model:Destroy()
-		end
-		table.clear(spawned)
+		Rig.DestroyAll()
 	end)
 
 	describe("AttackRequestSystem -- the predicted contact volume", function()
@@ -208,7 +157,7 @@ return function()
 	-- WeaponConstants.Swap, enforced by RequestWeapon (the one door a player's weapon change goes through).
 	describe("AttackRequestSystem -- the swap rule", function()
 		it("lets an idle body change weapons, and treats no change as no swap", function()
-			local fighter = makeDummy("Swapper", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Swapper", Vector3.new(0, 5, 0))
 			local now = os.clock()
 			expect((AttackRequestSystem.RequestWeapon(fighter.Model, FIRST_WEAPON, now))).to.equal(true)
 			expect(AttackRequestSystem.SwapReadyIn(fighter.Model, now)).to.equal(0)
@@ -217,7 +166,7 @@ return function()
 		end)
 
 		it("refuses mid-swing", function()
-			local fighter = makeDummy("Swapper", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Swapper", Vector3.new(0, 5, 0))
 			local now = os.clock()
 			expect((AttackRequestSystem.Throw(fighter.Model, { Kind = "Basic" }, false, now))).to.equal(true)
 			local accepted, reason = AttackRequestSystem.RequestWeapon(fighter.Model, SECOND_WEAPON, now)
@@ -227,7 +176,7 @@ return function()
 		end)
 
 		it("refuses while stunned, through the same body gate a swing asks", function()
-			local fighter = makeDummy("Swapper", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Swapper", Vector3.new(0, 5, 0))
 			local now = os.clock()
 			DamageSystem.ExtendHitstun(fighter.Model, now + 0.5, now)
 			local accepted, reason = AttackRequestSystem.RequestWeapon(fighter.Model, SECOND_WEAPON, now)
@@ -237,7 +186,7 @@ return function()
 		end)
 
 		it("refuses a swing and a swap while frozen, with its own reason, and lifts with the freeze", function()
-			local fighter = makeDummy("Frozen", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Frozen", Vector3.new(0, 5, 0))
 			local now = os.clock()
 			fighter.Humanoid:SetAttribute(AttributeConstants.Frozen, true)
 
@@ -254,7 +203,7 @@ return function()
 		end)
 
 		it("holds a cooldown between changes while engaged", function()
-			local fighter = makeDummy("Swapper", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Swapper", Vector3.new(0, 5, 0))
 			fighter.Humanoid:SetAttribute(AttributeConstants.InCombat, true)
 			local now = os.clock()
 			expect((AttackRequestSystem.RequestWeapon(fighter.Model, SECOND_WEAPON, now))).to.equal(true)
@@ -266,7 +215,7 @@ return function()
 		end)
 
 		it("does not hold the cooldown out of combat", function()
-			local fighter = makeDummy("Swapper", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Swapper", Vector3.new(0, 5, 0))
 			local now = os.clock()
 			expect((AttackRequestSystem.RequestWeapon(fighter.Model, SECOND_WEAPON, now))).to.equal(true)
 			expect((AttackRequestSystem.RequestWeapon(fighter.Model, FIRST_WEAPON, now + 0.1))).to.equal(true)
@@ -275,14 +224,14 @@ return function()
 
 	describe("AttackRequestSystem -- the gates that are not about timing", function()
 		it("refuses a body the engine has never been told about", function()
-			local model = makeUnregistered("Stranger")
+			local model = Rig.Dummy("Stranger").Model
 			local accepted, reason = AttackRequestSystem.Throw(model, { Kind = "Basic" }, false, os.clock())
 			expect(accepted).to.equal(false)
 			expect(reason).to.equal("NotRegistered")
 		end)
 
 		it("refuses a dead combatant", function()
-			local attacker = makeDummy("Corpse", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Corpse", Vector3.new(0, 5, 0))
 			attacker.Humanoid.Health = 0
 			local accepted, reason = AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, os.clock())
 			expect(accepted).to.equal(false)
@@ -296,7 +245,7 @@ return function()
 			-- can reach instead. Asserted for BOTH authorized values on purpose, to prove that flag no
 			-- longer changes Hotbar resolution at all -- exactly the class of bug ("an admin's press
 			-- takes a different, less-checked path") this module's own header describes fixing.
-			local attacker = makeDummy("Civilian", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Civilian", Vector3.new(0, 5, 0))
 			for _, authorized in { false, true } do
 				local accepted, reason = AttackRequestSystem.Throw(
 					attacker.Model,
@@ -312,14 +261,14 @@ return function()
 
 	describe("AttackRequestSystem -- throwing", function()
 		it("accepts a Basic press and puts the engine to work", function()
-			local attacker = makeDummy("Swinger", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Swinger", Vector3.new(0, 5, 0))
 			local accepted = AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, os.clock())
 			expect(accepted).to.equal(true)
 			expect(HitboxEngine.GetAttackState(attacker.Id)).never.to.equal("Idle")
 		end)
 
 		it("advances the string only on an accepted throw", function()
-			local attacker = makeDummy("Stringing", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Stringing", Vector3.new(0, 5, 0))
 			local base = os.clock()
 
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
@@ -340,7 +289,7 @@ return function()
 
 	describe("AttackRequestSystem -- the input buffer", function()
 		it("remembers a press refused for being mid-swing", function()
-			local attacker = makeDummy("Early", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Early", Vector3.new(0, 5, 0))
 			local base = os.clock()
 
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
@@ -351,7 +300,7 @@ return function()
 
 		it("throws the buffered press the moment the gate opens", function()
 			-- The whole point of the buffer: a press made slightly early is simply a press.
-			local attacker = makeDummy("Forgiven", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Forgiven", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			local gate = chainGateSeconds()
 
@@ -373,7 +322,7 @@ return function()
 		end)
 
 		it("drops a buffered press that outlives its own window", function()
-			local attacker = makeDummy("Forgotten", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Forgotten", Vector3.new(0, 5, 0))
 			local base = os.clock()
 
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
@@ -389,7 +338,7 @@ return function()
 		it("re-validates at flush time rather than replaying blindly", function()
 			-- A press buffered a moment ago may have become illegal since. Firing it anyway is exactly
 			-- the bug the re-validation exists to prevent.
-			local attacker = makeDummy("Interrupted", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Interrupted", Vector3.new(0, 5, 0))
 			local base = os.clock()
 
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
@@ -404,7 +353,7 @@ return function()
 
 		it("keeps only the newest press, never a backlog", function()
 			-- Mashing must not build a queue that fires as a burst once the gate opens.
-			local attacker = makeDummy("Masher", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Masher", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			local gate = chainGateSeconds()
 
@@ -425,7 +374,7 @@ return function()
 			-- Buffered mid-swing (Busy), then the guard is held. Kept waiting, the press would throw the
 			-- instant the guard came back down -- the free swing out of a guard "does not buffer a refusal
 			-- the player is choosing to cause" exists to prevent, reached through the flush instead.
-			local attacker = makeDummy("GuardedBuffer", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("GuardedBuffer", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
 
@@ -451,7 +400,7 @@ return function()
 			-- The proof the drop matters: buffered against a short stun (transient), refused at flush by a
 			-- mount (not transient), and the mount let go of while the original buffer window is still open.
 			-- Kept waiting, the press would throw on the frame after the dismount.
-			local attacker = makeDummy("MountedBuffer", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("MountedBuffer", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			DamageSystem.ExtendHitstun(attacker.Model, base + 0.1, base)
 			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 4 }, false, base + 0.01)
@@ -472,7 +421,7 @@ return function()
 		it("keeps a press buffered through a stun parry's window, so a landed parry can counter", function()
 			-- The one guard that waits rather than drops (waitsOutGuard): a parry window is decided within its
 			-- own few tenths of a second, and the buffered M1 is the counter a landed stun parry earns.
-			local attacker = makeDummy("StunCounter", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("StunCounter", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			ParryWindows.Register(PARRY_ANIMATION, 0, 0.3)
 			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid, PARRY_ANIMATION)
@@ -490,7 +439,7 @@ return function()
 			-- Holding a guard refuses an attack, and that refusal is NOT transient in the sense the
 			-- buffer means: firing a queued swing the instant a player lets go of a block they were
 			-- holding on purpose is a worse answer than doing nothing.
-			local attacker = makeDummy("Guarding", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Guarding", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
 			DefenseSystem.SetBlocking(attacker.Model, true, base)
@@ -506,7 +455,7 @@ return function()
 		it("does nothing for a re-select of the weapon already in hand", function()
 			-- Y with a one-weapon inventory: no notify (the client would reset its string mirror while the
 			-- server's string carries on), no dropped press, and the string keeps its place.
-			local attacker = makeDummy("Reselect", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Reselect", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			local fired = 0
 			local disconnect = AttackRequestSystem.OnWeaponChanged(function()
@@ -549,7 +498,7 @@ return function()
 		-- A respawn is a new character Model: none of the previous life's stun, buffered press or string carries.
 		it("starts the next body clean after a death mid-string", function()
 			local base = os.clock()
-			local first = makeDummy("Life1", Vector3.new(0, 5, 0))
+			local first = spawnDummy("Life1", Vector3.new(0, 5, 0))
 			AttackRequestSystem.Throw(first.Model, { Kind = "Basic" }, false, base)
 			AttackRequestSystem.Press(first.Model, { Kind = "Basic", PressId = 1 }, false, base + 0.01)
 			DamageSystem.ExtendHitstun(first.Model, base + 1, base + 0.01)
@@ -557,7 +506,7 @@ return function()
 			first.Model:Destroy()
 			step(base + 0.02)
 
-			local second = makeDummy("Life2", Vector3.new(0, 5, 0))
+			local second = spawnDummy("Life2", Vector3.new(0, 5, 0))
 			expect(DamageSystem.CanAttack(second.Model, base + 0.03)).to.equal(true)
 			expect(AttackRequestSystem.HasBufferedPress(second.Model, base + 0.03)).to.equal(false)
 			expect(SwingSequencer.GetStageIndex(second.Model, "Basic", base + 0.03)).to.equal(0)
@@ -580,7 +529,7 @@ return function()
 		end
 
 		it("answers a press refused on arrival", function()
-			local attacker = makeDummy("Refused", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Refused", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
 			DefenseSystem.SetBlocking(attacker.Model, true, base)
@@ -595,7 +544,7 @@ return function()
 		end)
 
 		it("answers a buffered press that expires, and says so", function()
-			local attacker = makeDummy("Expired", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Expired", Vector3.new(0, 5, 0))
 			local base = os.clock()
 
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
@@ -611,7 +560,7 @@ return function()
 		end)
 
 		it("answers the buffered press a newer one replaces", function()
-			local attacker = makeDummy("Superseded", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Superseded", Vector3.new(0, 5, 0))
 			local base = os.clock()
 
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
@@ -627,7 +576,7 @@ return function()
 		end)
 
 		it("does not answer a press that throws", function()
-			local attacker = makeDummy("Thrown", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Thrown", Vector3.new(0, 5, 0))
 			local base = os.clock()
 
 			local seen, disconnect = captureRefusals()
@@ -639,7 +588,7 @@ return function()
 		end)
 
 		it("drops a press id it has already seen, without throwing or answering", function()
-			local attacker = makeDummy("Duplicate", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Duplicate", Vector3.new(0, 5, 0))
 			local base = os.clock()
 
 			expect((AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 5 }, false, base))).to.equal(
@@ -670,7 +619,7 @@ return function()
 		end
 
 		it("cuts the swing's recovery for a guard held against it, at the cut point", function()
-			local attacker = makeDummy("GuardCut", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("GuardCut", Vector3.new(0, 5, 0))
 			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
 			local base = os.clock()
 			expect((AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base))).to.equal(true)
@@ -684,7 +633,7 @@ return function()
 		end)
 
 		it("does not cut before the cut point", function()
-			local attacker = makeDummy("GuardTooSoon", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("GuardTooSoon", Vector3.new(0, 5, 0))
 			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
 			local base = os.clock()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
@@ -699,7 +648,7 @@ return function()
 		end)
 
 		it("leaves a swing alone when no guard is waiting on it", function()
-			local attacker = makeDummy("NoGuard", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("NoGuard", Vector3.new(0, 5, 0))
 			DefenseSystem.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
 			local base = os.clock()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
@@ -716,7 +665,7 @@ return function()
 		it("refuses the next stage during the chain delay, even with the engine idle", function()
 			-- The engine is explicitly free here (the swing was cancelled), so "Busy" cannot be the
 			-- reason -- this is the deliberate pause and nothing else.
-			local attacker = makeDummy("Chaining", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Chaining", Vector3.new(0, 5, 0))
 			local base = os.clock()
 
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
@@ -729,7 +678,7 @@ return function()
 		end)
 
 		it("allows the next stage once the beat has passed", function()
-			local attacker = makeDummy("Chained", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Chained", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			local gate = chainGateSeconds()
 
@@ -766,7 +715,7 @@ return function()
 		end
 
 		it("cancels a Heavy early in its windup and frees the engine", function()
-			local attacker = makeDummy("Feinter", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Feinter", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			expect(AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)).to.equal(true)
 			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Windup")
@@ -780,7 +729,7 @@ return function()
 		-- Right-click during an M1 has to feint on every weapon, not only during a Heavy.
 		it("feints a Basic too, on every weapon in the roster", function()
 			for index, weaponId in ROSTER do
-				local attacker = makeDummy(`Jabber{index}`, Vector3.new(index * 20, 5, 0))
+				local attacker = spawnDummy(`Jabber{index}`, Vector3.new(index * 20, 5, 0))
 				local base = os.clock()
 				AttackRequestSystem.SetWeapon(attacker.Model, weaponId, base)
 				expect(AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)).to.equal(true)
@@ -792,14 +741,14 @@ return function()
 		end)
 
 		it("refuses with no swing in flight", function()
-			local attacker = makeDummy("Idle", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Idle", Vector3.new(0, 5, 0))
 			local accepted, reason = AttackRequestSystem.Feint(attacker.Model, os.clock())
 			expect(accepted).to.equal(false)
 			expect(reason).to.equal("NotInWindup")
 		end)
 
 		it("refuses past the window fraction, so a feint cannot answer a visible parry", function()
-			local attacker = makeDummy("Late", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Late", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
 			-- Past the fraction but still inside the windup -- the engine is deliberately not stepped, so
@@ -811,7 +760,7 @@ return function()
 		end)
 
 		it("rewrites CombatBusyUntil BACKWARDS to the feint's own recovery", function()
-			local attacker = makeDummy("Busy", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Busy", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
 			local swingBusy = attacker.Humanoid:GetAttribute("CombatBusyUntil") :: number
@@ -823,7 +772,7 @@ return function()
 		end)
 
 		it("abandons the string and allows a fresh Heavy once the recovery ends", function()
-			local attacker = makeDummy("Reset", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Reset", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
 			AttackRequestSystem.Feint(attacker.Model, base + 0.01)
@@ -843,7 +792,7 @@ return function()
 		end)
 
 		it("will not feint again inside the feint cooldown", function()
-			local attacker = makeDummy("Twice", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Twice", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
 			AttackRequestSystem.Feint(attacker.Model, base + 0.01)
@@ -857,7 +806,7 @@ return function()
 		end)
 
 		it("drops a press buffered against the swing it cancelled", function()
-			local attacker = makeDummy("Buffered", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Buffered", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
 			AttackRequestSystem.Press(attacker.Model, { Kind = "Heavy" }, false, base + 0.005)
@@ -881,8 +830,8 @@ return function()
 		end)
 
 		it("hands the engine the move's own power level, not a flat 1", function()
-			local attacker = makeDummy("Heavyweight", Vector3.new(0, 5, 0))
-			local target = makeDummy("Anvil", Vector3.new(0, 5, -3))
+			local attacker = spawnDummy("Heavyweight", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Anvil", Vector3.new(0, 5, -3))
 			local reports: { any } = {}
 			local disconnect = HitboxEngine.OnHit(function(report)
 				if report.Target == target.Model then
@@ -1032,7 +981,7 @@ return function()
 
 	describe("AttackRequestSystem -- weapons", function()
 		it("reports the weapon the sequencer is holding", function()
-			local attacker = makeDummy("Armed", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Armed", Vector3.new(0, 5, 0))
 			SwingSequencer.SetWeapon(attacker.Model, FIRST_WEAPON, os.clock())
 			expect(AttackRequestSystem.GetWeapon(attacker.Model)).to.equal(FIRST_WEAPON)
 			SwingSequencer.SwapWeapon(attacker.Model, os.clock())
@@ -1053,7 +1002,7 @@ return function()
 		end
 
 		it("cuts a LANDED Basic's recovery into a Heavy at the cut point", function()
-			local attacker = makeDummy("Confirmed", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Confirmed", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			expect((AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base))).to.equal(true)
 			AttackRequestSystem.NoteHitConfirmed(attacker.Model, `default:{FIRST_WEAPON}:Basic:1`)
@@ -1066,7 +1015,7 @@ return function()
 		end)
 
 		it("does not cut a swing that did not land", function()
-			local attacker = makeDummy("Whiffed", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Whiffed", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
 
@@ -1078,7 +1027,7 @@ return function()
 		end)
 
 		it("does not cut before the cut point", function()
-			local attacker = makeDummy("TooSoon", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("TooSoon", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
 			AttackRequestSystem.NoteHitConfirmed(attacker.Model, `default:{FIRST_WEAPON}:Basic:1`)
@@ -1091,7 +1040,7 @@ return function()
 
 		it("keeps M1 into M1 at its full rhythm -- Basic does not take the cut", function()
 			expect(AttackConstants.HitConfirm.CancelInto.Basic).to.equal(false)
-			local attacker = makeDummy("Rhythm", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Rhythm", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
 			AttackRequestSystem.NoteHitConfirmed(attacker.Model, `default:{FIRST_WEAPON}:Basic:1`)
@@ -1103,7 +1052,7 @@ return function()
 		end)
 
 		it("cuts a landed recovery for an accepted evade, and only then", function()
-			local attacker = makeDummy("EvadeOut", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("EvadeOut", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
 
@@ -1120,7 +1069,7 @@ return function()
 		end)
 
 		it("ignores a landing reported for a swing that is not the one in flight", function()
-			local attacker = makeDummy("Stale", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Stale", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
 			AttackRequestSystem.NoteHitConfirmed(attacker.Model, `default:{FIRST_WEAPON}:Basic:2`)
@@ -1135,7 +1084,7 @@ return function()
 		local TELL = AttackConstants.Tell
 
 		it("tags a Heavy's thrower for its windup, with the windup's end stamped", function()
-			local attacker = makeDummy("Telegraph", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Telegraph", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			expect((AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base))).to.equal(true)
 			expect(CollectionService:HasTag(attacker.Model, TELL.Tag)).to.equal(true)
@@ -1147,13 +1096,13 @@ return function()
 		end)
 
 		it("does not tag a Basic", function()
-			local attacker = makeDummy("Quiet", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Quiet", Vector3.new(0, 5, 0))
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, os.clock())
 			expect(CollectionService:HasTag(attacker.Model, TELL.Tag)).to.equal(false)
 		end)
 
 		it("drops the tell the moment the Heavy is feinted", function()
-			local attacker = makeDummy("Bluff", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Bluff", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
 			expect((AttackRequestSystem.Feint(attacker.Model, base + 0.01))).to.equal(true)
@@ -1169,7 +1118,7 @@ return function()
 		end)
 
 		it("starts a player's swing half a round trip before the press arrived", function()
-			local attacker = makeDummy("Remote", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Remote", Vector3.new(0, 5, 0))
 			NetworkLatency.SetResolver(function()
 				return 0.1
 			end)
@@ -1181,7 +1130,7 @@ return function()
 		end)
 
 		it("caps the refund", function()
-			local attacker = makeDummy("FarAway", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("FarAway", Vector3.new(0, 5, 0))
 			NetworkLatency.SetResolver(function()
 				return 2
 			end)
@@ -1193,7 +1142,7 @@ return function()
 		end)
 
 		it("never reaches back into a stun", function()
-			local attacker = makeDummy("JustFreed", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("JustFreed", Vector3.new(0, 5, 0))
 			NetworkLatency.SetResolver(function()
 				return 0.1
 			end)
@@ -1207,7 +1156,7 @@ return function()
 		end)
 
 		it("refunds nothing to a body with no connection", function()
-			local attacker = makeDummy("Bot", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Bot", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
 			local swing = AttackRequestSystem.GetInFlight(attacker.Model)
@@ -1222,7 +1171,7 @@ return function()
 		end
 
 		it("judges a feint on the swing's own clock, not its arrival", function()
-			local attacker = makeDummy("LaggyFeinter", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("LaggyFeinter", Vector3.new(0, 5, 0))
 			NetworkLatency.SetResolver(function()
 				return 0.1
 			end)
@@ -1238,7 +1187,7 @@ return function()
 		end)
 
 		it("refunds a feint no more than its swing was refunded", function()
-			local attacker = makeDummy("OnArrival", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("OnArrival", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			-- Thrown with no lead (no connection at the time), so the swing's clock is its arrival.
 			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
@@ -1254,7 +1203,7 @@ return function()
 	-- DefenseConstants.Clash: two swings that met cost each side its swing, not its place in the string.
 	describe("AttackRequestSystem -- a trade keeps the chain", function()
 		it("puts the string back and frees it after the shared recovery", function()
-			local attacker = makeDummy("Trader", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Trader", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			local gate = chainGateSeconds()
 
