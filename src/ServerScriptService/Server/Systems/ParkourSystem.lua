@@ -50,6 +50,7 @@ local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
 local ParkourValidation = require(ReplicatedStorage.Shared.Parkour.ParkourValidation)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Types = require(ReplicatedStorage.Shared.Types)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 
@@ -106,7 +107,8 @@ local rejections = SuspicionLedger.New({
 })
 
 -- Subscribers to OnActionStarted. See that function's own header.
-local actionStartedCallbacks: { (player: Player, kind: ActionKind, now: number) -> () } = {}
+local actionStarted: CallbackList.CallbackList<Player, ActionKind, number> =
+	CallbackList.New(logger, "ParkourSystem.OnActionStarted")
 
 -- Only the rejection remote is held: this System FIRES that one (notifyRejected), where the report
 -- remote is purely subscribed to in Init and never referenced again, so keeping a local for it would
@@ -210,14 +212,9 @@ local function beginAction(player: Player, state: PlayerParkourState, report: Ac
 
 	-- Announced last, once every Attribute above is already written, so a subscriber reading them sees
 	-- the action it is being told about rather than the one before it.
-	for _, callback in actionStartedCallbacks do
-		-- pcall'd for the reason DefenseSystem's own emit gives: one subscriber erroring must not abort
-		-- the rest, and above all must not unwind out of the remote handler with the window half-opened.
-		local ok, err = pcall(callback, player, report.Kind, now)
-		if not ok then
-			logger:error("A ParkourSystem.OnActionStarted consumer errored", { errorMessage = tostring(err) })
-		end
-	end
+	-- CallbackList pcalls each subscriber: one erroring must not abort the rest, and above all must not unwind
+	-- out of the remote handler with the window half-opened.
+	actionStarted:Fire(player, report.Kind, now)
 end
 
 -- Closes an ownership window and stamps the momentum carry the action ended with. `reportedSpeed` is
@@ -440,13 +437,7 @@ end
 -- decides whether the evade's velocity ownership is granted, so a report the server refused as
 -- implausible can never open a window.
 function ParkourSystem.OnActionStarted(callback: (player: Player, kind: ActionKind, now: number) -> ()): () -> ()
-	table.insert(actionStartedCallbacks, callback)
-	return function()
-		local index = table.find(actionStartedCallbacks, callback)
-		if index then
-			table.remove(actionStartedCallbacks, index)
-		end
-	end
+	return actionStarted:Connect(callback)
 end
 
 function ParkourSystem.Init(): ()
