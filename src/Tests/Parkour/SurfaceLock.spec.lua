@@ -108,7 +108,9 @@ return function()
 			expect(SurfaceLock.Vote(set, out, CONFIG.Consensus)).to.equal(true)
 			expect(out.Support).to.equal(5)
 			-- One of the two real heights, not 0.24.
-			expect(out.Position.Z == 0.4 or out.Position.Z == 0).to.equal(true)
+			-- Compared with a tolerance: a Vector3 stores single-precision floats, so its Z is never exactly the
+			-- double 0.4 the fixture wrote, and an exact test could not pass however correct the vote was.
+			expect(math.abs(out.Position.Z - 0.4) < 1e-4 or math.abs(out.Position.Z) < 1e-4).to.equal(true)
 			expect(out.Instance).to.equal(bump)
 		end)
 

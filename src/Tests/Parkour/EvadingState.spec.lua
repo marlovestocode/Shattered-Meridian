@@ -141,7 +141,10 @@ return function()
 		end)
 
 		it("refuses with no press", function()
-			local ok, reason = Evading.CanEnter(makeContext(nextNow()))
+			-- In combat, so it is the missing press that refuses: the combat-only gate answers first outside a fight.
+			local context = makeContext(nextNow())
+			context.InCombat = true
+			local ok, reason = Evading.CanEnter(context)
 			expect(ok).to.equal(false)
 			expect(reason).to.equal("NoEvadeInput")
 		end)
