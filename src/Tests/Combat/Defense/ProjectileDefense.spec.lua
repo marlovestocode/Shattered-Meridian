@@ -7,7 +7,6 @@
 -- four studs apart, both Stepped in Main.server.lua's order on a synthetic clock. A shot spawns two studs
 -- in front of the thrower and reaches the defender inside the first frame.
 
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
@@ -17,36 +16,16 @@ local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.Hitb
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
 local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
+local CombatHarness = require(ServerScriptService.Tests.TestHelpers.CombatHarness)
 
 type DefenseOutcome = DefenseTypes.DefenseOutcome
 
 local FRAME = 1 / 60
 local PARRY_ANIMATION = "rbxassetid://spec-projectile-parry"
 
-type Dummy = { Model: Model, Root: BasePart, Humanoid: Humanoid, Id: number }
+type Dummy = CombatHarness.Dummy
 
-local spawned: { Model } = {}
-
-local function makeDummy(name: string, position: Vector3, lookAt: Vector3): Dummy
-	local model = Instance.new("Model")
-	model.Name = name
-	local root = Instance.new("Part")
-	root.Name = "HumanoidRootPart"
-	root.Size = Vector3.new(2, 2, 1)
-	root.Anchored = true
-	root.CanCollide = false
-	root.CFrame = CFrame.lookAt(position, lookAt)
-	root.Parent = model
-	local humanoid = Instance.new("Humanoid")
-	humanoid.RequiresNeck = false
-	humanoid.Parent = model
-	model.PrimaryPart = root
-	model.Parent = Workspace
-	table.insert(spawned, model)
-	local id = HitboxEngine.RegisterCombatant(model, root, humanoid)
-	DefenseSystem.RegisterCombatant(model, root, humanoid, PARRY_ANIMATION)
-	return { Model = model, Root = root, Humanoid = humanoid, Id = id }
-end
+local spawnDummy = CombatHarness.Spawner({ ParryAnimation = PARRY_ANIMATION })
 
 local function shot(spec: { [string]: any }): HitboxTypes.AttackDefinition
 	local projectile = ProjectileTypes.Defaults() :: any
@@ -91,21 +70,15 @@ return function()
 	end)
 
 	afterEach(function()
-		DefenseSystem.Reset()
-		HitboxEngine.Reset()
-		ParryWindows.Reset()
-		for _, model in spawned do
-			model:Destroy()
-		end
-		table.clear(spawned)
+		CombatHarness.Teardown()
 	end)
 
 	-- The pair every case uses: the thrower at the origin facing -Z, the defender four studs ahead facing
 	-- back at them, guard raised on the first frame so a parry window is live.
 	local function standOff(): (Dummy, Dummy, number)
 		local base = os.clock()
-		local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-		local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+		local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+		local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 		DefenseSystem.SetBlocking(defender.Model, true, base)
 		return attacker, defender, base
 	end
@@ -180,8 +153,8 @@ return function()
 		it("never makes a projectile contact a Trade", function()
 			-- Both fire at each other and both guard: two parried shots, each answered on its shot.
 			local base = os.clock()
-			local alpha = makeDummy("Alpha", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local beta = makeDummy("Beta", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local alpha = spawnDummy("Alpha", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local beta = spawnDummy("Beta", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			DefenseSystem.SetBlocking(alpha.Model, true, base)
 			DefenseSystem.SetBlocking(beta.Model, true, base)
 			local outcomes, disconnect = captureOutcomes()

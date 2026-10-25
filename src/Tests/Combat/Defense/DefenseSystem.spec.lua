@@ -16,12 +16,14 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local CombatHarness = require(ServerScriptService.Tests.TestHelpers.CombatHarness)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseSystem = require(ServerScriptService.Server.Combat.Defense.DefenseSystem)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.HitboxEngine)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 type DefenseOutcome = DefenseTypes.DefenseOutcome
 
@@ -32,40 +34,8 @@ local PARRY_ANIMATION = "rbxassetid://spec-parry"
 local WINDOW_OPEN = 0
 local WINDOW_CLOSE = 0.3
 
-type Dummy = {
-	Model: Model,
-	Root: BasePart,
-	Humanoid: Humanoid,
-	Id: number,
-}
-
-local spawned: { Model } = {}
-
 -- Anchored, so every positional assertion here is not a race against gravity.
-local function makeDummy(name: string, position: Vector3, lookAt: Vector3?): Dummy
-	local model = Instance.new("Model")
-	model.Name = name
-
-	local root = Instance.new("Part")
-	root.Name = "HumanoidRootPart"
-	root.Size = Vector3.new(2, 2, 1)
-	root.Anchored = true
-	root.CanCollide = false
-	root.CFrame = if lookAt then CFrame.lookAt(position, lookAt) else CFrame.new(position)
-	root.Parent = model
-
-	local humanoid = Instance.new("Humanoid")
-	humanoid.RequiresNeck = false
-	humanoid.Parent = model
-
-	model.PrimaryPart = root
-	model.Parent = Workspace
-	table.insert(spawned, model)
-
-	local id = HitboxEngine.RegisterCombatant(model, root, humanoid)
-	DefenseSystem.RegisterCombatant(model, root, humanoid, PARRY_ANIMATION)
-	return { Model = model, Root = root, Humanoid = humanoid, Id = id }
-end
+local spawnDummy = CombatHarness.Spawner({ ParryAnimation = PARRY_ANIMATION })
 
 local function makeDefinition(overrides: { [string]: any }?): HitboxTypes.AttackDefinition
 	local base: { [string]: any } = {
@@ -109,20 +79,14 @@ return function()
 	end)
 
 	afterEach(function()
-		DefenseSystem.Reset()
-		HitboxEngine.Reset()
-		ParryWindows.Reset()
-		for _, model in spawned do
-			model:Destroy()
-		end
-		table.clear(spawned)
+		CombatHarness.Teardown()
 	end)
 
 	describe("DefenseSystem -- parrying", function()
 		it("cancels the attacker's swing and staggers them", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			DefenseSystem.SetBlocking(defender.Model, true, base)
@@ -139,8 +103,8 @@ return function()
 
 		it("restores the defender's guard", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			DefenseSystem.SetBlocking(defender.Model, true, base)
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -154,8 +118,8 @@ return function()
 
 		it("forbids the staggered attacker from attacking again", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			DefenseSystem.SetBlocking(defender.Model, true, base)
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -170,7 +134,7 @@ return function()
 	describe("DefenseSystem -- blocking", function()
 		it("raises no guard or parry for a frozen body, and does not hold the press for later", function()
 			local base = os.clock()
-			local fighter = makeDummy("Frozen", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Frozen", Vector3.new(0, 5, 0))
 			fighter.Humanoid:SetAttribute("Frozen", true)
 
 			expect(DefenseSystem.SetBlocking(fighter.Model, true, base)).to.equal(false)
@@ -185,8 +149,8 @@ return function()
 
 		it("drains guard on a blocked hit", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			DefenseSystem.SetBlocking(defender.Model, true, base)
@@ -204,9 +168,9 @@ return function()
 
 		it("reports a hit to a blocking defender's back as a Backstab", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
 			-- Facing AWAY from the attacker -- the block covers nothing behind it.
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, -20))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, -20))
 
 			local outcomes, disconnect = captureOutcomes()
 			DefenseSystem.SetBlocking(defender.Model, true, base)
@@ -223,8 +187,8 @@ return function()
 
 		it("reports an unguarded hit as Clean", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -242,9 +206,9 @@ return function()
 			-- ParryWindow does not mitigate -- while the identical hit a frame later was Blocked, once pass 2
 			-- had dropped the defender into Blocking. Whether it got through depended on a frame boundary.
 			local base = os.clock()
-			local first = makeDummy("First", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local second = makeDummy("Second", Vector3.new(1, 5, 0), Vector3.new(1, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local first = spawnDummy("First", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local second = spawnDummy("Second", Vector3.new(1, 5, 0), Vector3.new(1, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			DefenseSystem.DrainGuard(defender.Model, 50, base)
 
 			local outcomes, disconnect = captureOutcomes()
@@ -271,9 +235,9 @@ return function()
 
 		it("drains a guard once per blocked hit when two land in the same batch", function()
 			local base = os.clock()
-			local first = makeDummy("First", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local second = makeDummy("Second", Vector3.new(1, 5, 0), Vector3.new(1, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local first = spawnDummy("First", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local second = spawnDummy("Second", Vector3.new(1, 5, 0), Vector3.new(1, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			DefenseSystem.SetBlocking(defender.Model, true, base)
 			step(FRAME, base + WINDOW_CLOSE + FRAME)
@@ -294,7 +258,7 @@ return function()
 			-- Every clean hit drains posture (DamageSystem -> DrainGuard). On the emptied pool that used to read as
 			-- another break, restarting the opening on each hit of the punish.
 			local base = os.clock()
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			local _, _, broke = DefenseSystem.DrainGuard(defender.Model, DefenseConstants.Guard.Max, base)
 			expect(broke).to.equal(true)
 
@@ -307,7 +271,7 @@ return function()
 
 		it("ends with a whole guard, so the next hit does not break it again", function()
 			local base = os.clock()
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			DefenseSystem.DrainGuard(defender.Model, DefenseConstants.Guard.Max, base)
 			step(FRAME, base + BROKEN + FRAME)
 
@@ -333,8 +297,8 @@ return function()
 
 		it("holds a Clean hit on a defender with a round trip, then applies it when no press comes", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -351,8 +315,8 @@ return function()
 
 		it("parries a hit that landed while the press was still in flight", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -369,9 +333,9 @@ return function()
 
 		it("does not parry twice -- the rewound parry spends the window the press armed", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local other = makeDummy("Other", Vector3.new(1, 5, 0), Vector3.new(1, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local other = spawnDummy("Other", Vector3.new(1, 5, 0), Vector3.new(1, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -392,8 +356,8 @@ return function()
 			local base = os.clock()
 			-- No window anywhere: every press is a plain block.
 			ParryWindows.Reset()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -409,8 +373,8 @@ return function()
 
 		it("leaves a hit Clean when the press arrives later than the rewind reaches", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -429,8 +393,8 @@ return function()
 			-- A stunned body's guard does nothing, so only a parry could answer the hit -- and a whiffed parry's
 			-- lockout means none can. Holding the contact would only delay the next link of the string.
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			defender.Humanoid:SetAttribute("HitstunUntil", base + 2)
 
 			-- The mashed parry: pressed, released, and its window closes on nothing.
@@ -451,8 +415,8 @@ return function()
 		it("still holds a hit on a stunned defender who could parry it", function()
 			-- The other half: a stunned body with its parry free is exactly who the rewind is for.
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			defender.Humanoid:SetAttribute("HitstunUntil", base + 2)
 
 			local outcomes, disconnect = captureOutcomes()
@@ -471,8 +435,8 @@ return function()
 				return 1
 			end)
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -489,8 +453,8 @@ return function()
 			local base = os.clock()
 			-- Off the defender's shoulder, past the block arc but short of the rear hemisphere: no guard covers it,
 			-- and the evade that could is still cooling down from one that has already ended.
-			local attacker = makeDummy("Attacker", Vector3.new(4, 5, -3), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(4, 5, -3), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			-- In combat, so the cooldown -- not the missing tag -- is what leaves no evade to wait for.
 			defender.Humanoid:SetAttribute("InCombat", true)
 			local EVADE = DefenseConstants.Evade
@@ -511,8 +475,8 @@ return function()
 			-- the hit was judged Clean, and only the parry and the block were rewound. From behind, to show the
 			-- evade holds what no guard rule would.
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, -20))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, -20))
 			defender.Humanoid:SetAttribute("InCombat", true)
 
 			local outcomes, disconnect = captureOutcomes()
@@ -530,8 +494,8 @@ return function()
 
 		it("evades a Backstab on a raised guard the same way -- the dodge is positional", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, -20))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, -20))
 			defender.Humanoid:SetAttribute("InCombat", true)
 			DefenseSystem.SetBlocking(defender.Model, true, base - WINDOW_CLOSE - FRAME)
 			step(FRAME, base)
@@ -551,8 +515,8 @@ return function()
 			-- The evade is combat-only (Main.server.lua drops the report otherwise), and the tag is written when a hit
 			-- applies. Holding the opener for an evade that cannot come would only delay it.
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, -20))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, -20))
 
 			local outcomes, disconnect = captureOutcomes()
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -566,8 +530,8 @@ return function()
 		it("does not hold a hit on a broken guard -- nothing could answer it", function()
 			-- Held past the break's end it would also drain the pool the break's end just refilled.
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			defender.Humanoid:SetAttribute("InCombat", true)
 			DefenseSystem.DrainGuard(defender.Model, DefenseConstants.Guard.Max, base)
 
@@ -582,8 +546,8 @@ return function()
 
 		it("leaves a hit Clean when the evade really was late", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			defender.Humanoid:SetAttribute("InCombat", true)
 
 			local outcomes, disconnect = captureOutcomes()
@@ -600,8 +564,8 @@ return function()
 
 		it("does not rewind an evade onto a cooldown that had not run out", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			defender.Humanoid:SetAttribute("InCombat", true)
 			local EVADE = DefenseConstants.Evade
 			-- This evade's cooldown runs out after the contact but before the second press arrives: that press is
@@ -622,8 +586,8 @@ return function()
 
 		it("does not hold a hit on a defender committed to their own swing", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			-- The defender's own swing sits far behind them, so it hits nothing -- it only commits the body.
@@ -643,7 +607,7 @@ return function()
 		-- the body is free, provided the key is still down.
 		it("holds a guard pressed mid-swing and raises it once the swing is over", function()
 			local base = os.clock()
-			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Fighter", Vector3.new(0, 5, 0))
 
 			HitboxEngine.RequestAttack(fighter.Id, makeDefinition({ ActiveSeconds = 0.2 }), 1, 1)
 			DefenseSystem.SetBlocking(fighter.Model, true, base)
@@ -658,7 +622,7 @@ return function()
 			-- The key is down: the swing that ends the commitment must not be followed by another one
 			-- ahead of the guard the player is still asking for.
 			local base = os.clock()
-			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Fighter", Vector3.new(0, 5, 0))
 
 			HitboxEngine.RequestAttack(fighter.Id, makeDefinition({ ActiveSeconds = 0.2 }), 1, 1)
 			DefenseSystem.SetBlocking(fighter.Model, true, base)
@@ -670,7 +634,7 @@ return function()
 
 		it("forgets a held guard whose key came up before the swing ended", function()
 			local base = os.clock()
-			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Fighter", Vector3.new(0, 5, 0))
 
 			HitboxEngine.RequestAttack(fighter.Id, makeDefinition({ ActiveSeconds = 0.2 }), 1, 1)
 			DefenseSystem.SetBlocking(fighter.Model, true, base)
@@ -698,7 +662,7 @@ return function()
 			-- reads because it may not require the layer above it.
 			withoutStunParry(function()
 				local base = os.clock()
-				local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+				local fighter = spawnDummy("Fighter", Vector3.new(0, 5, 0))
 				fighter.Humanoid:SetAttribute("HitstunUntil", base + 0.5)
 
 				DefenseSystem.SetBlocking(fighter.Model, true, base)
@@ -716,7 +680,7 @@ return function()
 			-- string with no timing at all.
 			withoutStunParry(function()
 				local base = os.clock()
-				local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+				local fighter = spawnDummy("Fighter", Vector3.new(0, 5, 0))
 				fighter.Humanoid:SetAttribute("HitstunUntil", base + 0.5)
 
 				DefenseSystem.SetBlocking(fighter.Model, true, base)
@@ -727,7 +691,7 @@ return function()
 
 		it("raises a guard HELD through a swing as a block, never a parry window", function()
 			local base = os.clock()
-			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Fighter", Vector3.new(0, 5, 0))
 
 			HitboxEngine.RequestAttack(fighter.Id, makeDefinition({ ActiveSeconds = 0.2 }), 1, 1)
 			DefenseSystem.SetBlocking(fighter.Model, true, base)
@@ -737,7 +701,7 @@ return function()
 
 		it("raises the guard at once for a body nothing commits", function()
 			local base = os.clock()
-			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Fighter", Vector3.new(0, 5, 0))
 
 			DefenseSystem.SetBlocking(fighter.Model, true, base)
 			expect(DefenseSystem.GetState(fighter.Model)).never.to.equal("Neutral")
@@ -749,7 +713,7 @@ return function()
 		-- (DefenseConstants.StunParry): the press arms at once, the guard blocks nothing, a timed parry counts.
 		it("arms a parry the moment a stunned body presses", function()
 			local base = os.clock()
-			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Fighter", Vector3.new(0, 5, 0))
 			fighter.Humanoid:SetAttribute("HitstunUntil", base + 0.5)
 
 			expect(DefenseSystem.SetBlocking(fighter.Model, true, base)).to.equal(true)
@@ -758,8 +722,8 @@ return function()
 
 		it("parries the next hit of a string from inside the stun", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			defender.Humanoid:SetAttribute("HitstunUntil", base + 0.5)
 
 			local outcomes, disconnect = captureOutcomes()
@@ -775,8 +739,8 @@ return function()
 
 		it("blocks nothing with a guard held through the stun", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			defender.Humanoid:SetAttribute("HitstunUntil", base + 1)
 
 			local outcomes, disconnect = captureOutcomes()
@@ -795,8 +759,8 @@ return function()
 			local scale = DefenseConstants.StunParry.WindowScale
 			expect(scale < 1).to.equal(true)
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			defender.Humanoid:SetAttribute("HitstunUntil", base + 1)
 
 			local outcomes, disconnect = captureOutcomes()
@@ -814,7 +778,7 @@ return function()
 
 		it("still refuses an evade out of the stun", function()
 			local base = os.clock()
-			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Fighter", Vector3.new(0, 5, 0))
 			fighter.Humanoid:SetAttribute("HitstunUntil", base + 0.5)
 
 			local ok, reason = DefenseSystem.BeginEvade(fighter.Model, base)
@@ -828,8 +792,8 @@ return function()
 
 		it("resolves a contact inside the window as Evaded, costing nothing and cancelling nothing", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			-- Opened far enough back that the contact below lands mid-window, clear of the startup.
@@ -850,8 +814,8 @@ return function()
 
 		it("does not let the same swing re-hit once the window has closed", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			DefenseSystem.BeginEvade(defender.Model, base - EVADE.StartupSeconds - 0.02)
@@ -874,8 +838,8 @@ return function()
 			EVADE.StartupSeconds = startup
 			local ok, kind = pcall(function()
 				local base = os.clock()
-				local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-				local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+				local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+				local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 				local outcomes, disconnect = captureOutcomes()
 				DefenseSystem.BeginEvade(defender.Model, base + FRAME * 0.5)
@@ -902,7 +866,7 @@ return function()
 
 		it("refuses mid-swing -- no rolling out of your own attack", function()
 			local base = os.clock()
-			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Fighter", Vector3.new(0, 5, 0))
 			HitboxEngine.RequestAttack(fighter.Id, makeDefinition({ ActiveSeconds = 0.2 }), 1, 1)
 
 			local ok, reason = DefenseSystem.BeginEvade(fighter.Model, base)
@@ -912,7 +876,7 @@ return function()
 
 		it("refuses while stunned", function()
 			local base = os.clock()
-			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Fighter", Vector3.new(0, 5, 0))
 			fighter.Humanoid:SetAttribute("HitstunUntil", base + 0.5)
 
 			local ok, reason = DefenseSystem.BeginEvade(fighter.Model, base)
@@ -923,8 +887,8 @@ return function()
 
 		it("refuses while staggered", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			DefenseSystem.SetBlocking(defender.Model, true, base)
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -938,19 +902,19 @@ return function()
 
 		it("refuses while grabbed or mounted", function()
 			local base = os.clock()
-			local grabbed = makeDummy("Grabbed", Vector3.new(0, 5, 0))
+			local grabbed = spawnDummy("Grabbed", Vector3.new(0, 5, 0))
 			grabbed.Humanoid:SetAttribute("Grabbed", true)
 			local ok, reason = DefenseSystem.BeginEvade(grabbed.Model, base)
 			expect(ok).to.equal(false)
 			expect(reason).to.equal("Restrained")
 
-			local mounted = makeDummy("Mounted", Vector3.new(10, 5, 0))
+			local mounted = spawnDummy("Mounted", Vector3.new(10, 5, 0))
 			mounted.Humanoid:SetAttribute("Mounted", true)
 			expect((DefenseSystem.BeginEvade(mounted.Model, base))).to.equal(false)
 		end)
 
 		it("refuses while frozen", function()
-			local frozen = makeDummy("Frozen", Vector3.new(0, 5, 0))
+			local frozen = spawnDummy("Frozen", Vector3.new(0, 5, 0))
 			frozen.Humanoid:SetAttribute("Frozen", true)
 			local ok, reason = DefenseSystem.BeginEvade(frozen.Model, os.clock())
 			expect(ok).to.equal(false)
@@ -959,7 +923,7 @@ return function()
 
 		it("refuses inside its own cooldown", function()
 			local base = os.clock()
-			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Fighter", Vector3.new(0, 5, 0))
 			expect(DefenseSystem.BeginEvade(fighter.Model, base)).to.equal(true)
 			local ok, reason = DefenseSystem.BeginEvade(fighter.Model, base + 0.1)
 			expect(ok).to.equal(false)
@@ -968,7 +932,7 @@ return function()
 
 		it("drops a raised guard and a deferred one", function()
 			local base = os.clock()
-			local fighter = makeDummy("Fighter", Vector3.new(0, 5, 0))
+			local fighter = spawnDummy("Fighter", Vector3.new(0, 5, 0))
 			DefenseSystem.SetBlocking(fighter.Model, true, base)
 			step(FRAME, base + WINDOW_CLOSE + FRAME)
 			expect(DefenseSystem.GetState(fighter.Model)).to.equal("Blocking")
@@ -990,8 +954,8 @@ return function()
 	describe("DefenseSystem -- trading", function()
 		it("collapses mutual parries in one Step into a single Trade on each side", function()
 			local base = os.clock()
-			local alpha = makeDummy("Alpha", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local beta = makeDummy("Beta", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local alpha = spawnDummy("Alpha", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local beta = spawnDummy("Beta", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			DefenseSystem.SetBlocking(alpha.Model, true, base)
@@ -1011,8 +975,8 @@ return function()
 
 		it("moves neither guard, so a trade cannot be farmed to refill", function()
 			local base = os.clock()
-			local alpha = makeDummy("Alpha", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local beta = makeDummy("Beta", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local alpha = spawnDummy("Alpha", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local beta = spawnDummy("Beta", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			DefenseSystem.SetBlocking(alpha.Model, true, base)
@@ -1036,8 +1000,8 @@ return function()
 			ParryWindows.Reset()
 			ParryWindows.Register(PARRY_ANIMATION, 0.05, 0.3)
 
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -1054,8 +1018,8 @@ return function()
 
 		it("bounds the cancel residual at the frame the parry landed in", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			DefenseSystem.SetBlocking(defender.Model, true, base)
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -1079,8 +1043,8 @@ return function()
 			local base = os.clock()
 			ParryWindows.Reset()
 
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			DefenseSystem.SetBlocking(defender.Model, true, base)
@@ -1099,8 +1063,8 @@ return function()
 			local base = os.clock()
 			DefenseSystem.SetDefaultParryAnimation(PARRY_ANIMATION)
 
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			DefenseSystem.SetParryAnimation(defender.Model, "rbxassetid://spec-unmarked-weapon-parry")
 
 			local outcomes, disconnect = captureOutcomes()
@@ -1118,8 +1082,8 @@ return function()
 			ParryWindows.Reset()
 			DefenseSystem.SetDefaultParryAnimation(PARRY_ANIMATION)
 
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			local outcomes, disconnect = captureOutcomes()
 			DefenseSystem.SetBlocking(defender.Model, true, base)
@@ -1160,7 +1124,7 @@ return function()
 		-- guarding" early return and report the first window's state, proving nothing about the swap.
 		it("arms the spawn-time clip's window when nothing has re-pointed it", function()
 			local base = os.clock()
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			-- PARRY_ANIMATION's window opens at 0, so the press chains through Raising within the call.
 			DefenseSystem.SetBlocking(defender.Model, true, base)
@@ -1170,7 +1134,7 @@ return function()
 		it("arms the window of the clip it was pointed at, not the one it registered with", function()
 			local base = os.clock()
 			ParryWindows.Register(LATE_ANIMATION, 0.2, 0.5)
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			-- Same press, same instant, on a body re-pointed at a clip whose window opens 0.2s in: still
 			-- Raising rather than live. The ONLY difference from the case above is the swapped clip.
@@ -1183,7 +1147,7 @@ return function()
 		-- is a real argument the boot wiring can pass, not a defensive check against a caller mistake.
 		it("fail-closes on a blank id -- the guard still raises, no window opens", function()
 			local base = os.clock()
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			DefenseSystem.SetParryAnimation(defender.Model, "")
 			DefenseSystem.SetBlocking(defender.Model, true, base)
@@ -1197,7 +1161,7 @@ return function()
 			local stray = Instance.new("Model")
 			stray.Name = "Unregistered"
 			stray.Parent = Workspace
-			table.insert(spawned, stray)
+			Rig.Track(stray)
 
 			expect(function()
 				DefenseSystem.SetParryAnimation(stray, PARRY_ANIMATION)
@@ -1208,8 +1172,8 @@ return function()
 	describe("DefenseSystem -- registration", function()
 		it("reports an unregistered target's contacts as Clean rather than dropping them", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 			DefenseSystem.UnregisterCombatant(defender.Model)
 
 			local outcomes, disconnect = captureOutcomes()
