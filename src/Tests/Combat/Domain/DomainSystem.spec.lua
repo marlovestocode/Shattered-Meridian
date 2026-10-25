@@ -9,7 +9,6 @@
 -- moves only through Step. Every Step is a full membership tick (0.1s), so membership, clashes and the law
 -- are re-evaluated on every call.
 
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
@@ -18,34 +17,18 @@ local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local DomainSystem = require(ServerScriptService.Server.Combat.Domain.DomainSystem)
 local DomainTypes = require(ReplicatedStorage.Shared.Domain.DomainTypes)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
+local CombatHarness = require(ServerScriptService.Tests.TestHelpers.CombatHarness)
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 local SERVER_OFFSET = 1000
 local TICK = 0.1
 
-type Rig = { Model: Model, Root: BasePart, Humanoid: Humanoid }
+type Body = CombatHarness.Dummy
 
-local spawned: { Instance } = {}
 local clock = 0
 
-local function makeRig(name: string, position: Vector3): Rig
-	local model = Instance.new("Model")
-	model.Name = name
-	local root = Instance.new("Part")
-	root.Name = "HumanoidRootPart"
-	root.Size = Vector3.new(2, 2, 1)
-	root.Anchored = true
-	root.CanCollide = false
-	root.CFrame = CFrame.new(position)
-	root.Parent = model
-	local humanoid = Instance.new("Humanoid")
-	humanoid.RequiresNeck = false
-	humanoid.Parent = model
-	model.PrimaryPart = root
-	model.Parent = Workspace
-	table.insert(spawned, model)
-	DomainSystem.TrackCombatantForTesting(model)
-	return { Model = model, Root = root, Humanoid = humanoid }
-end
+-- A realm tracks a body, not a fighter: no engine or defense registration.
+local spawnRig = CombatHarness.Spawner({ Engine = false, Defense = false, Domain = true })
 
 local function spec(overrides: { [string]: any }?): DomainTypes.DomainSpec
 	local result = DomainTypes.Defaults() :: any
@@ -155,7 +138,7 @@ local function stubPorts(overrides: { [string]: any }?): Calls
 	return calls
 end
 
-local function open(owner: Rig, realmSpec: DomainTypes.DomainSpec, moveId: string?): string
+local function open(owner: Body, realmSpec: DomainTypes.DomainSpec, moveId: string?): string
 	local id, reason = DomainSystem.Open(owner.Model, moveId or "spec-realm", realmSpec, clock)
 	assert(id, `the spec's realm was refused: {reason}`)
 	return id :: string
@@ -184,16 +167,13 @@ return function()
 
 	afterEach(function()
 		DomainSystem.Reset()
-		for _, instance in spawned do
-			instance:Destroy()
-		end
-		table.clear(spawned)
+		Rig.DestroyAll()
 	end)
 
 	describe("DomainSystem lifecycle", function()
 		it("opens Activating, establishes on time, folds on time, and is gone after its fold", function()
 			stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			local seen: { string } = {}
 			DomainSystem.OnPhaseChanged(function(_, transition)
 				table.insert(seen, transition.To)
@@ -222,7 +202,7 @@ return function()
 				end,
 			})
 			DomainSystem.MarkDomainMoveForTesting("spec-realm")
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			DomainSystem.NoteSwingAccepted(
 				owner.Model,
 				{ MoveId = "spec-realm", StartedAt = clock, WindupSeconds = 0.5 }
@@ -253,7 +233,7 @@ return function()
 				end,
 			})
 			DomainSystem.MarkDomainMoveForTesting("spec-realm")
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			DomainSystem.NoteSwingAccepted(
 				owner.Model,
 				{ MoveId = "spec-realm", StartedAt = clock, WindupSeconds = 0.5 }
@@ -275,7 +255,7 @@ return function()
 				end,
 			})
 			DomainSystem.MarkDomainMoveForTesting("spec-realm")
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			DomainSystem.NoteSwingAccepted(
 				owner.Model,
 				{ MoveId = "spec-realm", StartedAt = clock, WindupSeconds = 0.5 }
@@ -287,7 +267,7 @@ return function()
 
 		it("refuses a second realm for an owner whose first is still up", function()
 			stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			open(owner, spec())
 			local id, reason = DomainSystem.Open(owner.Model, "spec-realm", spec(), clock)
 			expect(id).to.equal(nil)
@@ -300,7 +280,7 @@ return function()
 					return nil
 				end,
 			})
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			local id =
 				DomainSystem.Open(owner.Model, "spec-realm", spec(), clock, { StartedAt = clock, WindupSeconds = 0.5 })
 			run(TICK)
@@ -316,7 +296,7 @@ return function()
 					return struck
 				end,
 			})
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			local id = open(owner, spec({ CancelOnOwnerHit = true }))
 			run(0.3)
 			expect((DomainSystem.Get(id) :: any).Phase).to.equal("Activating")
@@ -327,7 +307,7 @@ return function()
 
 		it("collapses when its owner dies", function()
 			stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			local id = open(owner, spec())
 			run(1.2)
 			owner.Humanoid.Health = 0
@@ -339,10 +319,10 @@ return function()
 	describe("DomainSystem membership and law", function()
 		it("admits whoever is inside when it is established, nearest first up to MaxTargets", function()
 			stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
-			local near = makeRig("Near", Vector3.new(5, 5, 0))
-			local far = makeRig("Far", Vector3.new(15, 5, 0))
-			local outside = makeRig("Outside", Vector3.new(60, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
+			local near = spawnRig("Near", Vector3.new(5, 5, 0))
+			local far = spawnRig("Far", Vector3.new(15, 5, 0))
+			local outside = spawnRig("Outside", Vector3.new(60, 5, 0))
 			local id = open(owner, spec({ MaxTargets = 2 }))
 			run(1.1)
 			local members = membersOf(id)
@@ -354,8 +334,8 @@ return function()
 
 		it("lays its rules on the bodies they name and lifts them when it folds", function()
 			stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
-			local enemy = makeRig("Enemy", Vector3.new(5, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
+			local enemy = spawnRig("Enemy", Vector3.new(5, 5, 0))
 			local realmSpec = spec({
 				Rules = {
 					rule("DamageTaken", 1.5, "Enemies"),
@@ -387,8 +367,8 @@ return function()
 					return clock + SERVER_OFFSET + jitter:NextNumber(-1e-4, 1e-4)
 				end)
 				stubPorts()
-				local owner = makeRig("Owner", Vector3.new(0, 5, 0))
-				local enemy = makeRig("Enemy", Vector3.new(5, 5, 0))
+				local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
+				local enemy = spawnRig("Enemy", Vector3.new(5, 5, 0))
 				open(owner, spec({ Rules = { rule("DamageTaken", 1.5) } }))
 				run(1.2)
 				local writes = 0
@@ -403,8 +383,8 @@ return function()
 
 		it("releases a member who walks out of an open exit, after its linger", function()
 			stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
-			local enemy = makeRig("Enemy", Vector3.new(5, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
+			local enemy = spawnRig("Enemy", Vector3.new(5, 5, 0))
 			local id = open(owner, spec({ ExitLingerSeconds = 0.5, Rules = { rule("MoveSpeed", 0.5) } }))
 			run(1.2)
 			enemy.Root.CFrame = CFrame.new(60, 5, 0)
@@ -418,8 +398,8 @@ return function()
 
 		it("sets a held member back inside a barred exit", function()
 			stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
-			local enemy = makeRig("Enemy", Vector3.new(5, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
+			local enemy = spawnRig("Enemy", Vector3.new(5, 5, 0))
 			local id = open(owner, spec({ ExitRule = "Barred" }))
 			run(1.2)
 			enemy.Root.CFrame = CFrame.new(40, 5, 0)
@@ -430,10 +410,10 @@ return function()
 
 		it("repels a newcomer at a barred entry", function()
 			stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			local id = open(owner, spec({ EntryRule = "Barred" }))
 			run(1.2)
-			local newcomer = makeRig("Newcomer", Vector3.new(8, 5, 0))
+			local newcomer = spawnRig("Newcomer", Vector3.new(8, 5, 0))
 			run(TICK)
 			expect(newcomer.Root.Position.X > 20).to.equal(true)
 			expect(membersOf(id)[newcomer.Model]).to.equal(nil)
@@ -443,8 +423,8 @@ return function()
 	describe("DomainSystem effects", function()
 		it("delivers a Strike to each enemy member on its interval, pinned to that body, as the realm", function()
 			local calls = stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
-			local enemy = makeRig("Enemy", Vector3.new(5, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
+			local enemy = spawnRig("Enemy", Vector3.new(5, 5, 0))
 			local id = open(owner, spec({ Effects = { effect({ Kind = "Strike", IntervalSeconds = 1 }) } }))
 			run(1.05)
 			expect(#calls.LaunchVolley).to.equal(1)
@@ -464,10 +444,10 @@ return function()
 
 		it("spends a shot budget, so a realm at the schema's ceilings cannot flood strikes", function()
 			local calls = stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			for index = 1, 24 do
 				local angle = index * 2 * math.pi / 24
-				makeRig(`Enemy{index}`, Vector3.new(math.cos(angle) * 10, 5, math.sin(angle) * 10))
+				spawnRig(`Enemy{index}`, Vector3.new(math.cos(angle) * 10, 5, math.sin(angle) * 10))
 			end
 			open(
 				owner,
@@ -489,7 +469,7 @@ return function()
 
 		it("books Qi upkeep in whole-second chunks, draining exactly rate x seconds", function()
 			local calls = stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			open(owner, spec({ UpkeepQiPerSecond = 2, ActiveSeconds = 6 }))
 			run(1) -- Activating
 			expect(#calls.SpendQi).to.equal(0)
@@ -505,8 +485,8 @@ return function()
 
 		it("hands out a stun through the damage layer's own hitstun, capped", function()
 			local calls = stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
-			local enemy = makeRig("Enemy", Vector3.new(5, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
+			local enemy = spawnRig("Enemy", Vector3.new(5, 5, 0))
 			open(owner, spec({ Effects = { effect({ Kind = "Hitstun", MoveId = "", Magnitude = 50 }) } }))
 			run(1.05)
 			expect(#calls.ExtendHitstun).to.equal(1)
@@ -517,10 +497,10 @@ return function()
 
 		it("does not target the owner with an Enemies effect, or anyone during the entry grace", function()
 			local calls = stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			open(owner, spec({ EntryGraceSeconds = 2, Effects = { effect({ Kind = "GuardDrain", MoveId = "" }) } }))
 			run(1.2)
-			local newcomer = makeRig("Newcomer", Vector3.new(4, 5, 0))
+			local newcomer = spawnRig("Newcomer", Vector3.new(4, 5, 0))
 			run(1)
 			expect(#calls.DrainGuard).to.equal(0)
 			run(2.5)
@@ -530,7 +510,7 @@ return function()
 
 		it("has the owner cast through the attack layer on an OwnerCast pulse", function()
 			local calls = stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			open(owner, spec({ Effects = { effect({ Kind = "OwnerCast", MoveId = "spec-cast" }) } }))
 			run(1.05)
 			expect(#calls.ThrowMove).to.equal(1)
@@ -542,9 +522,9 @@ return function()
 	describe("DomainSystem clashes", function()
 		it("keeps a suppressed realm's law out of a body both realms hold", function()
 			stubPorts()
-			local strong = makeRig("Strong", Vector3.new(0, 5, 0))
-			local weak = makeRig("Weak", Vector3.new(25, 5, 0))
-			local between = makeRig("Between", Vector3.new(12, 5, 0))
+			local strong = spawnRig("Strong", Vector3.new(0, 5, 0))
+			local weak = spawnRig("Weak", Vector3.new(25, 5, 0))
+			local between = spawnRig("Between", Vector3.new(12, 5, 0))
 			local strongId =
 				open(strong, spec({ Priority = 50, Rules = { rule("DamageTaken", 2, "EveryoneButOwner") } }))
 			local weakId = open(weak, spec({ Priority = 5, Rules = { rule("MoveSpeed", 0.5, "EveryoneButOwner") } }))
@@ -560,8 +540,8 @@ return function()
 
 		it("collapses the weaker realm outright under Dominate", function()
 			stubPorts()
-			local strong = makeRig("Strong", Vector3.new(0, 5, 0))
-			local weak = makeRig("Weak", Vector3.new(25, 5, 0))
+			local strong = spawnRig("Strong", Vector3.new(0, 5, 0))
+			local weak = spawnRig("Weak", Vector3.new(25, 5, 0))
 			open(strong, spec({ Priority = 50, ClashBehavior = "Dominate" }))
 			local weakId = open(weak, spec({ Priority = 5 }))
 			run(1.2)
@@ -570,8 +550,8 @@ return function()
 
 		it("wears the loser's time away under Erode", function()
 			stubPorts()
-			local strong = makeRig("Strong", Vector3.new(0, 5, 0))
-			local weak = makeRig("Weak", Vector3.new(25, 5, 0))
+			local strong = spawnRig("Strong", Vector3.new(0, 5, 0))
+			local weak = spawnRig("Weak", Vector3.new(25, 5, 0))
 			open(strong, spec({ Priority = 50, ClashBehavior = "Erode", ErodeRate = 2 }))
 			local weakId = open(weak, spec({ Priority = 5 }))
 			run(2)
@@ -581,8 +561,8 @@ return function()
 
 		it("leaves realms that do not overlap alone", function()
 			stubPorts()
-			local a = makeRig("A", Vector3.new(0, 5, 0))
-			local b = makeRig("B", Vector3.new(200, 5, 0))
+			local a = spawnRig("A", Vector3.new(0, 5, 0))
+			local b = spawnRig("B", Vector3.new(200, 5, 0))
 			local aId = open(a, spec({ Priority = 50, ClashBehavior = "Dominate" }))
 			local bId = open(b, spec({ Priority = 5 }))
 			run(1.2)
@@ -594,7 +574,7 @@ return function()
 	describe("DomainSystem projectile edge", function()
 		it("holds the barrier slot only while a realm with a closed edge is established", function()
 			local calls = stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			open(owner, spec({ ProjectilesLeave = false }))
 			run(1.1)
 			expect(#calls.SetBarrier).to.equal(1)
@@ -618,7 +598,7 @@ return function()
 		local WINDOW = STANDING * DomainConstants.Cancel.WindowFraction
 
 		-- A realm cast by MOVE at t=0.
-		local function castRealm(owner: Rig): string
+		local function castRealm(owner: Body): string
 			DomainSystem.MarkDomainMoveForTesting(MOVE)
 			local id, reason = DomainSystem.Open(
 				owner.Model,
@@ -635,7 +615,7 @@ return function()
 		-- be past the window run half a second beyond it, and the too-early case a full second short.
 		it("claims the press and collapses the realm once half its standing time has elapsed", function()
 			stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			local id = castRealm(owner)
 			run(WINDOW + 0.5)
 
@@ -647,7 +627,7 @@ return function()
 
 		it("does not claim an earlier press, so it is just an ordinary cooldown press", function()
 			stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			local id = castRealm(owner)
 			run(WINDOW - 1)
 
@@ -659,7 +639,7 @@ return function()
 			-- Nothing about the cooldown is consulted at all: a realm and a one-second cooldown still wait for
 			-- half of the realm.
 			stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			castRealm(owner)
 			run(2)
 			expect(DomainSystem.TryCancel(owner.Model, MOVE, clock)).to.equal(false)
@@ -667,8 +647,8 @@ return function()
 
 		it("cancels only the presser's own realm, of the move they pressed", function()
 			stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
-			local other = makeRig("Other", Vector3.new(100, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
+			local other = spawnRig("Other", Vector3.new(100, 5, 0))
 			local id = castRealm(owner)
 			run(WINDOW + 0.5)
 
@@ -679,14 +659,14 @@ return function()
 
 		it("cannot cancel a realm already folding, or one with no cast behind it", function()
 			stubPorts()
-			local owner = makeRig("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnRig("Owner", Vector3.new(0, 5, 0))
 			castRealm(owner)
 			run(WINDOW + 0.5)
 			expect(DomainSystem.TryCancel(owner.Model, MOVE, clock)).to.equal(true)
 			expect(DomainSystem.TryCancel(owner.Model, MOVE, clock)).to.equal(false)
 
 			-- Opened without a swing (an NPC's, an admin's): nothing to measure from, and no press to answer.
-			local npc = makeRig("Npc", Vector3.new(200, 5, 0))
+			local npc = spawnRig("Npc", Vector3.new(200, 5, 0))
 			open(npc, spec({ ActiveSeconds = STANDING }), MOVE)
 			run(STANDING)
 			expect(DomainSystem.TryCancel(npc.Model, MOVE, clock)).to.equal(false)

@@ -8,7 +8,6 @@
 -- Harness is DamageSystem.spec's: rigs built with Instance.new, the three layers stepped in boot order on
 -- a synthetic clock, Init never called.
 
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
@@ -24,36 +23,17 @@ local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
 local ProjectileSimulator = require(ServerScriptService.Server.Combat.HitboxEngine.ProjectileSimulator)
 local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
 local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
+local CombatHarness = require(ServerScriptService.Tests.TestHelpers.CombatHarness)
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 local WEAPON = WeaponFixture.Install()[1]
 local MOVE_ID = `default:{WEAPON}:Basic:1`
 local FRAME = 1 / 60
 local PARRY_ANIMATION = "rbxassetid://spec-domain-parry"
 
-type Dummy = { Model: Model, Root: BasePart, Humanoid: Humanoid, Id: number }
+type Dummy = CombatHarness.Dummy
 
-local spawned: { Model } = {}
-
-local function makeDummy(name: string, position: Vector3): Dummy
-	local model = Instance.new("Model")
-	model.Name = name
-	local root = Instance.new("Part")
-	root.Name = "HumanoidRootPart"
-	root.Size = Vector3.new(2, 2, 1)
-	root.Anchored = true
-	root.CanCollide = false
-	root.CFrame = CFrame.new(position)
-	root.Parent = model
-	local humanoid = Instance.new("Humanoid")
-	humanoid.RequiresNeck = false
-	humanoid.Parent = model
-	model.PrimaryPart = root
-	model.Parent = Workspace
-	table.insert(spawned, model)
-	local id = HitboxEngine.RegisterCombatant(model, root, humanoid)
-	DefenseSystem.RegisterCombatant(model, root, humanoid, PARRY_ANIMATION)
-	return { Model = model, Root = root, Humanoid = humanoid, Id = id }
-end
+local spawnDummy = CombatHarness.Spawner({ ParryAnimation = PARRY_ANIMATION })
 
 local function step(deltaTime: number, now: number): ()
 	HitboxEngine.Step(deltaTime, now)
@@ -124,21 +104,15 @@ return function()
 	end)
 
 	afterEach(function()
-		DamageSystem.Reset()
-		DefenseSystem.Reset()
-		HitboxEngine.Reset()
-		ParryWindows.Reset()
+		CombatHarness.Reset()
 		DomainEffects.ResetForTesting()
-		for _, model in spawned do
-			model:Destroy()
-		end
-		table.clear(spawned)
+		Rig.DestroyAll()
 	end)
 
 	describe("A realm's strike, through the whole combat stack", function()
 		it("lands the referenced move's own damage on its target, as the realm's owner", function()
-			local owner = makeDummy("Owner", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, -15))
+			local owner = spawnDummy("Owner", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, -15))
 			local before = target.Humanoid.Health
 			local applied: { any } = {}
 			local disconnect = DamageSystem.OnApplied(function(outcome, _result)
@@ -160,10 +134,10 @@ return function()
 		end)
 
 		it("is pinned to its target: a body standing in the line is not struck", function()
-			local owner = makeDummy("Owner", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, -15))
+			local owner = spawnDummy("Owner", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, -15))
 			-- Directly under the strike's origin, between it and the target.
-			local bystander = makeDummy("Bystander", Vector3.new(0, 11, -15))
+			local bystander = spawnDummy("Bystander", Vector3.new(0, 11, -15))
 			local bystanderBefore = bystander.Humanoid.Health
 
 			local clock = os.clock()
@@ -175,8 +149,8 @@ return function()
 		end)
 
 		it("lands lighter from a contested realm", function()
-			local owner = makeDummy("Owner", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, -15))
+			local owner = spawnDummy("Owner", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, -15))
 			local before = target.Humanoid.Health
 			local clock = os.clock()
 			DomainEffects.Deliver(strikeEffect(), source(owner), { target.Model }, clock, 0.5, realPorts())
@@ -187,8 +161,8 @@ return function()
 
 	describe("A realm's OWN strike (a Strike that names no move)", function()
 		it("is priced by the move that opened the realm", function()
-			local owner = makeDummy("Owner", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, -15))
+			local owner = spawnDummy("Owner", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, -15))
 			local before = target.Humanoid.Health
 			local clock = os.clock()
 			local reached = DomainEffects.Deliver(
@@ -206,8 +180,8 @@ return function()
 		end)
 
 		it("multiplies that price by the effect's Power, and by a contest's scale on top", function()
-			local owner = makeDummy("Owner", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, -15))
+			local owner = spawnDummy("Owner", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, -15))
 			local before = target.Humanoid.Health
 			local clock = os.clock()
 			DomainEffects.Deliver(
@@ -223,8 +197,8 @@ return function()
 		end)
 
 		it("is skipped, not thrown, when the realm's own move cannot be resolved", function()
-			local owner = makeDummy("Owner", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, -15))
+			local owner = spawnDummy("Owner", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, -15))
 			local lost = source(owner)
 			lost.MoveId = "no-such-move"
 			local reached =
@@ -235,8 +209,8 @@ return function()
 
 	describe("DamageSystem reading a realm's rules", function()
 		it("scales damage by the defender's DamageTaken rule while its lease holds", function()
-			local owner = makeDummy("Owner", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, -15))
+			local owner = spawnDummy("Owner", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, -15))
 			local set = DomainRules.Empty()
 			DomainRules.Apply(set, "DamageTaken", 2, nil)
 			DomainRules.Publish(target.Humanoid, set, DomainRules.ServerNow() + 60, "D-spec")
@@ -249,8 +223,8 @@ return function()
 		end)
 
 		it("ignores a rule whose lease has already passed", function()
-			local owner = makeDummy("Owner", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, -15))
+			local owner = spawnDummy("Owner", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, -15))
 			local set = DomainRules.Empty()
 			DomainRules.Apply(set, "DamageTaken", 2, nil)
 			DomainRules.Publish(target.Humanoid, set, DomainRules.ServerNow() - 1, "D-spec")
@@ -265,7 +239,7 @@ return function()
 
 	describe("HitboxEngine's realm seam", function()
 		it("ends a shot at the barrier slot's closed edge", function()
-			local owner = makeDummy("Owner", Vector3.new(0, 5, 0))
+			local owner = spawnDummy("Owner", Vector3.new(0, 5, 0))
 			local projectile = ProjectileTypes.Defaults() :: any
 			projectile.Speed = 60
 			local definition = HitboxTypes.SanitizeDefinition({
@@ -301,7 +275,7 @@ return function()
 
 		it("refuses to launch for an owner the engine does not know", function()
 			local stranger = Instance.new("Model")
-			table.insert(spawned, stranger)
+			Rig.Track(stranger)
 			local definition = HitboxTypes.SanitizeDefinition({ Projectile = ProjectileTypes.Defaults() })
 			local _, launched = HitboxEngine.LaunchVolley(stranger, definition, CFrame.identity, 1, os.clock(), nil)
 			expect(launched).to.equal(0)
