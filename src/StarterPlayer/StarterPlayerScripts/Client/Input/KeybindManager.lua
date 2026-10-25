@@ -49,6 +49,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -68,12 +69,10 @@ local currentGamepadBindings: { [Types.KeybindAction]: Types.Keybind? } =
 	table.clone(Constants.Keybinds.GamepadDefaults)
 
 -- Subscribers to any binding change, in either device category -- see file header.
-local changedListeners: { () -> () } = {}
+local changed: CallbackList.CallbackList<> = CallbackList.New(logger, "KeybindManager.OnChanged")
 
 local function notifyChanged(): ()
-	for _, listener in ipairs(changedListeners) do
-		listener()
-	end
+	changed:Fire()
 end
 
 local function isSameKeybind(a: Types.Keybind, b: Types.Keybind): boolean
@@ -251,13 +250,7 @@ end
 -- own OnChanged: today's consumers subscribe once for the life of the client session and never
 -- disconnect, but it is returned anyway rather than assumed away.
 function KeybindManager.OnChanged(listener: () -> ()): () -> ()
-	table.insert(changedListeners, listener)
-	return function()
-		local index = table.find(changedListeners, listener)
-		if index then
-			table.remove(changedListeners, index)
-		end
-	end
+	return changed:Connect(listener)
 end
 
 return KeybindManager
