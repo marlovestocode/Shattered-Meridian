@@ -30,6 +30,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
+local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
@@ -65,6 +66,9 @@ type Flinch = {
 	-- +1 or -1: which way this hit twists the torso, so consecutive hits do not all rock the same way.
 	TwistSign: number,
 	Joints: { Motor6D }?,
+	-- Set when the hit that started this flinch was reversed: the strength it had then, and how long it has been
+	-- easing out. The envelope no longer drives the weight while it is set.
+	Cancel: { Start: number, Elapsed: number }?,
 }
 
 local flinching: { [Humanoid]: Flinch } = {}
@@ -74,7 +78,7 @@ local watchers: { [Model]: Trove.TroveInstance } = {}
 -- When this client last flinched a body AHEAD of the server (Predict), so the stun that confirms it a
 -- round trip later does not flinch it a second time.
 local predictedAt: { [Humanoid]: number } = {}
-local PREDICTION_MATCH_SECONDS = 0.8
+local PREDICTION_MATCH_SECONDS = AttackConstants.Presentation.HitPrediction.MatchSeconds
 local started = false
 local bound = false
 local trove = Trove.New()
@@ -130,6 +134,15 @@ function HitFlinchPose.RetriggerElapsed(currentElapsed: number): number
 	return CONFIG.RiseSeconds * HitFlinchPose.Envelope(currentElapsed)
 end
 
+-- The strength a flinch has right now: its envelope, or the linear ease-out of a cancelled one.
+local function weightOf(flinch: Flinch): number
+	local cancel = flinch.Cancel
+	if cancel then
+		return cancel.Start * (1 - math.min(cancel.Elapsed / CONFIG.CancelBlendSeconds, 1))
+	end
+	return HitFlinchPose.Envelope(flinch.Elapsed)
+end
+
 -- Joints ---------------------------------------------------------------------------------------------
 
 local function resolveJoints(humanoid: Humanoid): { Motor6D }?
@@ -183,7 +196,11 @@ local function step(deltaTime: number): ()
 	local cameraPosition = if camera then camera.CFrame.Position else nil
 	for humanoid, flinch in flinching do
 		flinch.Elapsed += deltaTime
-		local weight = HitFlinchPose.Envelope(flinch.Elapsed)
+		local cancel = flinch.Cancel
+		if cancel then
+			cancel.Elapsed += deltaTime
+		end
+		local weight = weightOf(flinch)
 		local model = humanoid.Parent
 		local root = if model then model:FindFirstChild("HumanoidRootPart") else nil
 		local visible = root ~= nil
@@ -205,7 +222,9 @@ end
 local function flinch(humanoid: Humanoid): ()
 	local existing = flinching[humanoid]
 	if existing then
-		existing.Elapsed = HitFlinchPose.RetriggerElapsed(existing.Elapsed)
+		-- From wherever the body is now (an easing-out one included), so the new hit drives it further.
+		existing.Elapsed = CONFIG.RiseSeconds * weightOf(existing)
+		existing.Cancel = nil
 		existing.TwistSign = -existing.TwistSign
 	else
 		flinching[humanoid] = {
@@ -288,6 +307,18 @@ end
 function HitFlinchPose.Predict(humanoid: Humanoid): ()
 	predictedAt[humanoid] = os.clock()
 	flinch(humanoid)
+end
+
+-- Ends the flinch `humanoid` is in -- or only its prediction record -- because the hit that started it did not
+-- happen: the server answered a predicted hit with a block, a parry or an evade, or never answered it. Eases out
+-- over CancelBlendSeconds rather than snapping upright. A no-op for a body that is not flinching.
+function HitFlinchPose.Cancel(humanoid: Humanoid): ()
+	predictedAt[humanoid] = nil
+	local active = flinching[humanoid]
+	if active == nil or active.Cancel ~= nil then
+		return
+	end
+	active.Cancel = { Start = HitFlinchPose.Envelope(active.Elapsed), Elapsed = 0 }
 end
 
 -- Lifecycle ------------------------------------------------------------------------------------------

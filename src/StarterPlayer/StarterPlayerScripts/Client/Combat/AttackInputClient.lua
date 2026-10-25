@@ -95,7 +95,6 @@ local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
-local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -105,6 +104,7 @@ local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local HotbarBindings = require(script.Parent.HotbarBindings)
 local LocalCombatState = require(script.Parent.LocalCombatState)
+local OwnRealm = require(script.Parent.OwnRealm)
 local CombatAnimator = require(script.Parent.Parent.FX.CombatAnimator)
 local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
 local InputRouter = require(script.Parent.Parent.Input.InputRouter)
@@ -288,12 +288,18 @@ local function requestHotbar(slot: number): ()
 		-- player and nothing worth a remote call.
 		return
 	end
-	-- The one place a local drop is honest: this cooldown is the server's own number, echoed back. EXCEPT while the
-	-- player's own realm is standing: pressing a domain move again is how it is ended early (DomainSystem.TryCancel),
-	-- and by then the move is on cooldown. Whether this press is that one, and whether enough of the cooldown has
-	-- run, is the server's to say -- an early press is just refused there, like any other cooldown press.
-	if slotCooldownRemaining(slot, os.clock()) > 0 and not DomainRules.OwnsLiveDomain(boundHumanoid) then
-		return
+	-- The one place a local drop is honest: this cooldown is the server's own number, echoed back. EXCEPT for the
+	-- slot holding the player's own standing realm's move: pressing a domain move again is how it is ended early
+	-- (DomainSystem.TryCancel), and by then the move is on cooldown. Whether this press is that one, and whether
+	-- enough of the cooldown has run, is the server's to say -- an early press is just refused there. NARROWED TO
+	-- THAT MOVE: any other cooling slot pressed during a realm used to reach the server, be refused as a transient
+	-- Cooldown, and supersede a legitimately buffered press (an M1 queued mid-swing). The same fact the HUD's
+	-- cancel bar keys on (OwnRealm.Get().MoveId).
+	if slotCooldownRemaining(slot, os.clock()) > 0 then
+		local realm = OwnRealm.Get()
+		if not (realm ~= nil and realm.MoveId == moveId) then
+			return
+		end
 	end
 	playPressCue("Hotbar")
 	sendRequest({ Kind = "Hotbar", Slot = slot, MoveId = moveId })
@@ -545,6 +551,15 @@ local stringKind: AttackTypes.AttackKind? = nil
 local stringStage = 0
 local stringLapsesAt = -math.huge
 
+-- The mirror of SwingSequencer's Record.LockedUntil: when a COMPLETED string's end-of-string lockout
+-- (AttackConstants.Sequence.EndOfStringCooldownSeconds) ends, or -math.huge when none is running.
+-- nextSwingAt below is otherwise blind to it -- the one server gate between swings this client did not
+-- mirror -- so the press after a finished string was predicted as a fresh stage 1 and played a swing
+-- the server refuses "ChainDelay", buffered past its own expiry, and never threw (the ghost M1 of
+-- 2026-10-25). Written from the confirmation of the stage that completes the string; a launcher or air
+-- confirmation clears it, exactly as SwingSequencer.Advance does server-side.
+local stringLockedUntil = -math.huge
+
 local predictionGeneration = 0
 local bufferGeneration = 0
 
@@ -607,7 +622,10 @@ local function nextSwingAt(now: number, kind: AttackTypes.AttackKind?): number
 			and cancelAt < swingEnd
 		then cancelAt
 		else swingEnd + AttackConstants.Sequence.ChainDelaySeconds
-	return math.max(LocalCombatState.FreeAt(now, cancelable), swingGate, cancelRecoveredAt)
+	-- The end-of-string lockout binds every predicted press the way the server's ChainDelayRemaining
+	-- binds it. The launcher is exempt server-side, but a Space-modifier press is never predicted here
+	-- (skipsPrediction), so nothing this gate judges can be that exempt press.
+	return math.max(LocalCombatState.FreeAt(now, cancelable), swingGate, cancelRecoveredAt, stringLockedUntil)
 end
 
 -- Every other server gate this client can see the answer to: the guard (DefenseSystem "Guarding"), the
@@ -843,6 +861,26 @@ local function onAttackStarted(raw: unknown): ()
 		stringKind = payload.Kind
 		stringStage = payload.StageIndex
 		stringLapsesAt = now + swingSecondsOf(payload) + AttackConstants.Sequence.ResetSeconds
+		-- The mirror of SwingSequencer.Advance's LockedUntil write, on the same condition. Only a real
+		-- final stage (StageIndex >= that string's count) arms it; a launcher or air confirmation clears
+		-- it -- those carry StageIndex 0, so the clear sits outside the arm guard -- and a Hotbar cast
+		-- never touches either, matching ChainDelayRemaining exactly. Server lateness on the swing end is
+		-- the usual prediction-phase drift, erring conservative: a press just past this deadline is the
+		-- server's own next-throw window, and a press just before it is buffered here rather than
+		-- ghost-predicted.
+		if AirComboMoves.RoleOf(payload.MoveId) ~= nil or AirComboMoves.IsLauncher(payload.MoveId) then
+			stringLockedUntil = -math.huge
+		elseif
+			typeof(payload.StageIndex) == "number"
+			and payload.StageIndex > 0
+			and (payload.Kind == "Basic" or payload.Kind == "Heavy")
+			and payload.StageIndex >= stageCount(payload.Kind)
+		then
+			stringLockedUntil = math.max(
+				stringLockedUntil,
+				now + swingSecondsOf(payload) + AttackConstants.Sequence.EndOfStringCooldownSeconds
+			)
+		end
 		local minStage = AirComboConstants.Launcher.MinStringStage
 		-- An EARLIER stage's confirmation (B2's, arriving after the B3 click) must not cancel the suppression
 		-- that click started -- which is still true only while the local count is at B3 or past it.
@@ -1049,6 +1087,7 @@ local function bindCharacter(character: Model, humanoid: Humanoid): ()
 	cancelRecoveredAt = -math.huge
 	stringKind = nil
 	stringStage = 0
+	stringLockedUntil = -math.huge
 	-- A fresh Humanoid jumps; a suppression scheduled against the last life must not reach this one.
 	jumpSuppressGeneration += 1
 	LocalCombatState.ResetForNewLife()

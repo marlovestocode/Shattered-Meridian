@@ -244,4 +244,17 @@ function FreezeGuard.FreezeTracks(
 	end)
 end
 
+-- Gives every track this guard holds its speed back NOW, with no catch-up, and orphans the pending restore timer.
+-- For a freeze whose reason is gone (a predicted hit the server reversed). Idle when nothing is held.
+function FreezeGuard.Release(self: FreezeGuardInstance): ()
+	if next(self.frozenSpeeds) == nil then
+		return
+	end
+	self.generation += 1
+	for track, speed in self.frozenSpeeds do
+		track:AdjustSpeed(speed)
+	end
+	table.clear(self.frozenSpeeds)
+end
+
 return AnimationTrackUtil

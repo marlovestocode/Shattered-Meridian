@@ -679,6 +679,10 @@ AttackConstants.Presentation = {
 		-- How long a predicted hit waits to be matched by the server's verdict for the same target and
 		-- move before it is forgotten (a prediction the server never confirmed: a miss it called a hit).
 		MatchSeconds = 0.8,
+		-- Added to the round trip and DefenseConstants.Parry.RewindMaxSeconds to make the grace a verdict is
+		-- given to arrive in (CombatFeedbackClient.graceSeconds): past it, a prediction nothing confirmed is
+		-- retracted (its flinch ends, its record is dropped). A small margin, not a tuned feel number.
+		GraceEpsilonSeconds = 0.05,
 	},
 
 	-- The forward step a confirmed swing carries the LOCAL player's own body through

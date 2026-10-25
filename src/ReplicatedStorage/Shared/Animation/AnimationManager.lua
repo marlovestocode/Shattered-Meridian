@@ -267,6 +267,12 @@ export type AnimationManagerInstance = typeof(setmetatable(
 		-- overlapping freezes cannot record the 0 an earlier freeze already wrote.
 		frozen: { [AnimationTrack]: number },
 		freezeGeneration: number,
+		-- os.clock() when the current freeze chain began (for the catch-up), and the tracks playing FAST
+		-- after a freeze to win its time back, mapped to the speed they return to. The generation lets a
+		-- stale catch-up timer see that a newer one owns the tracks.
+		freezeChainStartedAt: number,
+		catchingUp: { [AnimationTrack]: number },
+		catchUpGeneration: number,
 		loadTrack: (animator: Animator, clip: string, assetId: string) -> AnimationTrack?,
 	},
 	AnimationManager
@@ -344,6 +350,12 @@ local function adjustTrackSpeed(track: AnimationTrack, speed: number): ()
 	track:AdjustSpeed(speed)
 end
 
+-- Every manager that has been constructed and not collected, so a caller that does not OWN a rig's manager
+-- (Client/FX/HitStop freezing a swing the attack client plays) can still freeze its tracks THROUGH the
+-- manager. A raw AdjustSpeed(0) on a manager-owned track is undone by Step's stranded-speed repair on the
+-- next frame -- the freeze lasted one frame. Weak keys: a dropped manager is not kept alive by this.
+local liveManagers: { [any]: boolean } = setmetatable({}, { __mode = "k" }) :: any
+
 --[[
 	Creates a manager for one rig. Nothing is bound yet -- call Bind(character) for that, once per
 	life. Constructing a manager is cheap and allocation-free beyond the instance itself, so a caller
@@ -367,8 +379,12 @@ function AnimationManager.new(options: ManagerOptions?): AnimationManagerInstanc
 		stepConnection = nil,
 		frozen = {},
 		freezeGeneration = 0,
+		freezeChainStartedAt = 0,
+		catchingUp = {},
+		catchUpGeneration = 0,
 		loadTrack = resolved.LoadTrack or defaultLoadTrack,
 	}, AnimationManager) :: AnimationManagerInstance
+	liveManagers[self] = true
 
 	if (resolved.Stepping or "Heartbeat") == "Heartbeat" then
 		self.stepConnection = RunService.Heartbeat:Connect(function(deltaTime: number)
@@ -808,12 +824,65 @@ end
 	     restore, stranding its tracks at 0. A freeze that holds nothing returns without touching the
 	     generation.
 ]]
-function AnimationManager.Freeze(self: AnimationManagerInstance, seconds: number, layers: { string }?): ()
+-- Gives back every track this manager holds frozen. With `catchUp` (> 1), a track still playing runs at that
+-- multiple of its speed until the time the freeze cost is won back, then settles -- the server's swing never
+-- paused, so without it every landed hit left the clip behind the swing it was drawing.
+local function release(self: AnimationManagerInstance, catchUp: number?): ()
+	local boost = if typeof(catchUp) == "number" and catchUp > 1 then catchUp else nil
+	local heldFor = os.clock() - self.freezeChainStartedAt
+	local boosted = false
+	for track, speed in self.frozen do
+		protectedCall("<frozen>", "Thaw", function()
+			if boost ~= nil and track.IsPlaying and speed > 0 then
+				self.catchingUp[track] = speed
+				boosted = true
+				track:AdjustSpeed(speed * boost)
+			else
+				track:AdjustSpeed(speed)
+			end
+		end)
+	end
+	table.clear(self.frozen)
+	if boost == nil or not boosted then
+		return
+	end
+
+	-- Held for heldFor at speed 0; playing at boost x speed wins back (boost - 1) x speed each second.
+	self.catchUpGeneration += 1
+	local catchUpGeneration = self.catchUpGeneration
 	local generation = self.generation
+	task.delay(heldFor / (boost - 1), function()
+		if self.catchUpGeneration ~= catchUpGeneration or self.generation ~= generation then
+			return
+		end
+		for track, speed in self.catchingUp do
+			-- Only a track still at the speed this freeze set: a SetSpeed since (a new swing, a confirmation)
+			-- owns it now. A tolerance, because Speed is stored at lower precision than the product written.
+			if math.abs(track.Speed - speed * boost) < 1e-3 then
+				protectedCall("<frozen>", "CatchUp", function()
+					track:AdjustSpeed(speed)
+				end)
+			end
+		end
+		table.clear(self.catchingUp)
+	end)
+end
+
+-- The freeze itself. `accept` picks which active entries are held; returns the tracks it holds (including ones
+-- an earlier, unfinished freeze already held), so a caller that also freezes tracks it does not own can skip these.
+local function freezeEntries(
+	self: AnimationManagerInstance,
+	seconds: number,
+	accept: (layer: string, entry: ActiveEntry) -> boolean,
+	catchUp: number?
+): { [AnimationTrack]: boolean }
+	local generation = self.generation
+	local handled: { [AnimationTrack]: boolean } = {}
 	local held = false
+	local chainWasIdle = next(self.frozen) == nil
 
 	for layer, entry in self.active do
-		if layers and not table.find(layers, layer) then
+		if not accept(layer, entry) then
 			continue
 		end
 		local track = entry.Track
@@ -822,16 +891,26 @@ function AnimationManager.Freeze(self: AnimationManagerInstance, seconds: number
 			-- is already recorded, so do NOT re-sample it -- just let this newer freeze take ownership
 			-- of the restore below, which extends the hold rather than resuming mid-freeze.
 			held = true
-		elseif entry.Track.IsPlaying then
+			handled[track] = true
+		elseif track.IsPlaying then
+			-- Mid-catch-up, DesiredSpeed is still the speed it returns to; the boost is simply forgotten.
+			self.catchingUp[track] = nil
 			self.frozen[track] = entry.DesiredSpeed
-			held = protectedCall(entry.Clip, "Freeze", function()
+			local ok = protectedCall(entry.Clip, "Freeze", function()
 				track:AdjustSpeed(0)
-			end) or held
+			end)
+			if ok then
+				held = true
+				handled[track] = true
+			end
 		end
 	end
 
 	if not held then
-		return
+		return handled
+	end
+	if chainWasIdle then
+		self.freezeChainStartedAt = os.clock()
 	end
 
 	self.freezeGeneration += 1
@@ -842,20 +921,59 @@ function AnimationManager.Freeze(self: AnimationManagerInstance, seconds: number
 		if self.freezeGeneration ~= freezeGeneration or self.generation ~= generation then
 			return
 		end
-		self:Thaw()
+		release(self, catchUp)
 	end)
+	return handled
+end
+
+function AnimationManager.Freeze(self: AnimationManagerInstance, seconds: number, layers: { string }?): ()
+	freezeEntries(self, seconds, function(layer: string, _entry: ActiveEntry): boolean
+		return layers == nil or table.find(layers, layer) ~= nil
+	end, nil)
+end
+
+-- Freezes `character`'s tracks at the given priorities in EVERY live manager bound to it, whoever owns them --
+-- the combat hit-stop (Client/FX/HitStop). A raw AdjustSpeed(0) on a manager-owned track is undone by Step's
+-- stranded-speed repair on the next frame, so a freeze of a swing or a guard has to go through the manager that
+-- owns the track. Returns the tracks held, so the caller can freeze the rest (a rig no manager owns) itself.
+function AnimationManager.FreezeFor(
+	character: Model,
+	seconds: number,
+	priorities: { [Enum.AnimationPriority]: boolean },
+	catchUp: number?
+): { [AnimationTrack]: boolean }
+	local handled: { [AnimationTrack]: boolean } = {}
+	for manager in liveManagers do
+		local live = manager :: AnimationManagerInstance
+		if live.character == character and live.phase == "Live" then
+			local held = freezeEntries(live, seconds, function(_layer: string, entry: ActiveEntry): boolean
+				return priorities[entry.Track.Priority] == true
+			end, catchUp)
+			for track in held do
+				handled[track] = true
+			end
+		end
+	end
+	return handled
 end
 
 -- Restores every track this manager currently holds frozen. Public because a teardown, a death, or a
 -- caller that wants to cancel a hold early all need it, and because it is the one operation that must
 -- be idempotent -- calling it with nothing frozen is a no-op, not an error.
 function AnimationManager.Thaw(self: AnimationManagerInstance): ()
-	for track, speed in self.frozen do
-		protectedCall("<frozen>", "Thaw", function()
-			track:AdjustSpeed(speed)
-		end)
+	-- A pending freeze timer is stale from here: it must not release (or catch up) tracks a newer freeze holds.
+	self.freezeGeneration += 1
+	release(self, nil)
+end
+
+-- Ends the hit-stop early on every manager bound to `character` -- a predicted impact the server reversed.
+function AnimationManager.ThawFor(character: Model): ()
+	for manager in liveManagers do
+		local live = manager :: AnimationManagerInstance
+		if live.character == character then
+			live:Thaw()
+		end
 	end
-	table.clear(self.frozen)
 end
 
 --[[

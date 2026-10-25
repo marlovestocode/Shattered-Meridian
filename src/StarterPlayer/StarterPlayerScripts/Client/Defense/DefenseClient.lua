@@ -480,6 +480,32 @@ end
 -- Yaw only: pitching the whole body toward an attacker on a ledge above would look like a glitch,
 -- not a parry. Falls back to doing nothing rather than to an arbitrary facing if the two positions
 -- are stacked, which is the one case where "which way" has no answer.
+--
+-- HELD, NOT JUST WRITTEN. Under shift lock the camera owns the body's yaw and springs it back every frame, so a
+-- one-off write was undone within a few frames: the body flipped toward the attacker and whipped back while the
+-- camera stayed put. CombatFacingOwned (the same truce SwingTracking uses) stands that write down for
+-- Presentation.ParryFacingHoldSeconds, then shift lock's spring hands the body back smoothly from rest.
+local facingHoldGeneration = 0
+
+local function holdFacing(): ()
+	local humanoid = boundHumanoid
+	if humanoid == nil then
+		return
+	end
+	facingHoldGeneration += 1
+	local generation = facingHoldGeneration
+	humanoid:SetAttribute(AttributeConstants.CombatFacingOwned, true)
+	task.delay(DefenseConstants.Presentation.ParryFacingHoldSeconds, function()
+		-- A newer parry owns the hold now; and a swing's tracking window owns the Attribute while it runs.
+		if generation ~= facingHoldGeneration or LocalCombatState.SwingEndsAt() > os.clock() then
+			return
+		end
+		if humanoid.Parent ~= nil then
+			humanoid:SetAttribute(AttributeConstants.CombatFacingOwned, nil)
+		end
+	end)
+end
+
 local function faceTowards(position: Vector3): ()
 	local root = rootPart
 	if not root or root.Parent == nil then
@@ -491,6 +517,7 @@ local function faceTowards(position: Vector3): ()
 		return
 	end
 	root.CFrame = CFrame.lookAt(origin, origin + flattened.Unit)
+	holdFacing()
 end
 
 -- The server's verdict disagreed with the press's prediction. Puts the right clip on the layer -- but only

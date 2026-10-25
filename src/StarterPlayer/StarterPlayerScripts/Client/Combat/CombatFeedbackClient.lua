@@ -106,6 +106,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
+local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local PingReading = require(ReplicatedStorage.Shared.PingReading)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
@@ -126,6 +127,7 @@ local CameraShake = require(script.Parent.Parent.FX.CameraShake)
 local CombatAudio = require(script.Parent.Parent.FX.CombatAudio)
 local CombatFeedbackModule = require(script.Parent.Parent.UI.Screens.CombatFeedback)
 local HitFlash = require(script.Parent.Parent.FX.HitFlash)
+local HitFlinchPose = require(script.Parent.Parent.FX.HitFlinchPose)
 local HitStop = require(script.Parent.Parent.FX.HitStop)
 local ImpactSparks = require(script.Parent.Parent.FX.ImpactSparks)
 local MovePresentation = require(script.Parent.Parent.FX.MovePresentation)
@@ -271,7 +273,7 @@ local EXCHANGE_SECONDS_BY_KIND: { [string]: number } = {
 	Trade = FXConstants.HitStop.ParrySeconds,
 }
 
-local function freezeExchangeFor(payload: CombatFeedback, cue: Cue?): ()
+local function freezeExchangeFor(payload: CombatFeedback, cue: Cue?): boolean
 	local seconds = EXCHANGE_SECONDS_BY_KIND[payload.Kind]
 	if seconds then
 		if variantOf(payload) == "ParriedPerfect" then
@@ -289,9 +291,9 @@ local function freezeExchangeFor(payload: CombatFeedback, cue: Cue?): ()
 	-- movement freeze below mirrors real server hitstun and no cue reaches it.
 	local resolved = MovePresentation.HitStopSeconds(cue, seconds)
 	if not resolved or resolved <= 0 then
-		return
+		return false
 	end
-	HitStop.FreezeExchange(payload.Attacker, payload.Defender, resolved)
+	return HitStop.FreezeExchange(payload.Attacker, payload.Defender, resolved)
 end
 
 -- Victim-only, like the freeze above, and deliberately sequenced AFTER it: the launch the server put on
@@ -451,11 +453,20 @@ end
 -- The COSMETIC half of a resolved contact -- shake, stinger, flash, sparks, the exchange freeze and a
 -- move's template -- with `cue` laid over each step's default (this file's header). Everything that
 -- mirrors a server decision stays in onFeedback.
-local function presentHit(payload: CombatFeedback, cue: Cue?): ()
+--
+-- `skip` drops the beats a prediction already played (see consumePrediction): a Delta verdict over a predicted
+-- Clean impact is the same hit, only heavier, so it needs neither a second thud nor a second freeze. Returns
+-- whether the exchange freeze started, which the prediction's record keeps.
+type SkipBeats = { Audio: boolean?, Freeze: boolean? }
+
+local function presentHit(payload: CombatFeedback, cue: Cue?, skip: SkipBeats?): boolean
 	timed("Hit.Shake", function()
 		shakeFor(payload, cue)
 	end)
 	timed("Hit.Audio", function()
+		if skip and skip.Audio then
+			return
+		end
 		if payload.Kind == "Evaded" then
 			-- A contact that never happened: no impact stinger, no hit-flash, no number (Damage is 0). The
 			-- dodger hears the bright whiff and the attacker the muted one (CombatAudio.PlayEvaded), and
@@ -501,9 +512,13 @@ local function presentHit(payload: CombatFeedback, cue: Cue?): ()
 			)
 		end
 	end)
+	local froze = false
 	timed("Hit.FreezeExchange", function()
-		freezeExchangeFor(payload, cue)
+		if not (skip and skip.Freeze) then
+			froze = freezeExchangeFor(payload, cue)
+		end
 	end)
+	return froze
 end
 
 -- presentHit for the Move Editor's Preview, which hands it a local payload and the DRAFT's cue, so a
@@ -523,7 +538,9 @@ end
 
 local HIT_PREDICTION = AttackConstants.Presentation.HitPrediction
 
-type ContactRecord = { MoveId: string, At: number }
+-- `Froze`: the predicted impact's exchange freeze actually started (it can be throttled), so a reversal knows
+-- whether there is a hold to end.
+type ContactRecord = { MoveId: string, At: number, Froze: boolean? }
 
 local predictedContacts: { [Model]: ContactRecord } = {}
 local confirmedContacts: { [Model]: ContactRecord } = {}
@@ -545,12 +562,16 @@ end
 -- exchange freeze, the shake -- and records it so the server's matching verdict does not play it twice.
 -- Returns whether it played (false when this contact was already presented, predicted or confirmed).
 -- Client/Combat/HitPrediction.lua is the caller.
+--
+-- `windowRemainingSeconds` is how much of the swing's Active window is left: the server may make this contact
+-- up to that much later than this client first saw the overlap, so the prediction is not given up on before then.
 function CombatFeedbackClient.PresentPredictedHit(
 	attacker: Model,
 	defender: Model,
 	contactPosition: Vector3,
 	moveId: string,
-	stringEnd: boolean?
+	stringEnd: boolean?,
+	windowRemainingSeconds: number?
 ): boolean
 	local now = os.clock()
 	if
@@ -560,7 +581,8 @@ function CombatFeedbackClient.PresentPredictedHit(
 		return false
 	end
 	pruneContacts(predictedContacts, now)
-	predictedContacts[defender] = { MoveId = moveId, At = now }
+	local record: ContactRecord = { MoveId = moveId, At = now }
+	predictedContacts[defender] = record
 	local payload: CombatFeedback = {
 		Kind = "Clean",
 		Role = "Attacker",
@@ -573,26 +595,85 @@ function CombatFeedbackClient.PresentPredictedHit(
 		ContactPosition = contactPosition,
 		StringEnd = if stringEnd then true else nil,
 	}
-	presentHit(payload, CombatFeedbackClient.CueFor(payload))
+	record.Froze = presentHit(payload, CombatFeedbackClient.CueFor(payload))
+
+	-- A prediction nothing ever answers is a miss the server called a hit-on-screen: the server sends no verdict
+	-- for a whiff. Once a verdict could no longer be on its way, it is retracted -- its record dropped (so it
+	-- cannot swallow the flinch of a real hit) and its flinch eased out. The sound, shake and freeze are
+	-- already spent; this only stops the lie from lingering.
+	task.delay((windowRemainingSeconds or 0) + CombatFeedbackClient.GraceSeconds(), function()
+		if predictedContacts[defender] ~= record then
+			return
+		end
+		predictedContacts[defender] = nil
+		local humanoid = CharacterUtil.HumanoidOf(defender)
+		if humanoid then
+			HitFlinchPose.Cancel(humanoid)
+		end
+	end)
 	return true
 end
 
--- Whether this verdict's impact presentation was already played by a prediction. Only a Clean verdict
--- is skipped: a Backstab or GuardBroken is heavier than what was predicted, and a Blocked/Parried/Evaded
--- verdict contradicts it -- both play in full, which is what tells the attacker what really happened.
-local function consumePrediction(payload: CombatFeedback): boolean
+-- How long a verdict is given to arrive after a predicted contact: the round trip, plus the rewind hold the
+-- server may keep a Clean contact for in case a parry press is still in flight (DefenseConstants.Parry.
+-- RewindMaxSeconds), plus a small margin. Derived, not tuned.
+function CombatFeedbackClient.GraceSeconds(): number
+	return PingReading.RoundTrip(Players.LocalPlayer:GetNetworkPing())
+		+ DefenseConstants.Parry.RewindMaxSeconds
+		+ HIT_PREDICTION.GraceEpsilonSeconds
+end
+
+-- What a verdict does to the impact a prediction already played. Matched on defender and move within MatchSeconds.
+--   Skip      a Clean verdict: the same hit, nothing left to play.
+--   Delta     a Backstab or GuardBroken verdict: the same contact, heavier. Plays only what differs -- the heavier
+--             shake, the recolour, the sparks -- not a second thud or a second freeze.
+--   Reversal  Blocked, Parried, Trade or Evaded: the hit did not happen. The predicted freeze is ended and the
+--             defender's flinch eased out, then the verdict plays in full, so the attacker is told what really
+--             happened rather than shown a hit and then a clang over it.
+-- nil: no prediction to reconcile (or a kind this module has no rule for), and the verdict plays in full.
+type PredictionMode = "Skip" | "Delta" | "Reversal"
+
+local DELTA_KINDS: { [string]: boolean } = { Backstab = true, GuardBroken = true }
+local REVERSAL_KINDS: { [string]: boolean } = { Blocked = true, Parried = true, Trade = true, Evaded = true }
+
+local function consumePrediction(payload: CombatFeedback): (PredictionMode?, ContactRecord?)
 	if payload.Role ~= "Attacker" or typeof(payload.Defender) ~= "Instance" then
-		return false
+		return nil, nil
 	end
 	local defender = payload.Defender
 	local now = os.clock()
-	local predicted = matchesContact(predictedContacts[defender], payload.MoveId, now)
+	local record = predictedContacts[defender]
+	local predicted = matchesContact(record, payload.MoveId, now)
 	if predicted then
 		predictedContacts[defender] = nil
 	end
 	pruneContacts(confirmedContacts, now)
 	confirmedContacts[defender] = { MoveId = payload.MoveId, At = now }
-	return predicted and payload.Kind == "Clean"
+	if not predicted then
+		return nil, nil
+	end
+	if payload.Kind == "Clean" then
+		return "Skip", record
+	elseif DELTA_KINDS[payload.Kind] then
+		return "Delta", record
+	elseif REVERSAL_KINDS[payload.Kind] then
+		return "Reversal", record
+	end
+	return nil, record
+end
+
+-- Takes back what a reversed prediction can still be taken back from: the freeze it started, and the flinch it
+-- put on the defender. The impact's sound and shake are spent and stay spent.
+local function retractPrediction(payload: CombatFeedback, record: ContactRecord?): ()
+	if typeof(payload.Defender) == "Instance" then
+		local humanoid = CharacterUtil.HumanoidOf(payload.Defender)
+		if humanoid then
+			HitFlinchPose.Cancel(humanoid)
+		end
+	end
+	if record and record.Froze == true then
+		HitStop.EndExchange(payload.Attacker, payload.Defender)
+	end
 end
 
 local function onFeedback(raw: unknown): ()
@@ -606,7 +687,13 @@ local function onFeedback(raw: unknown): ()
 
 	debug.profilebegin("CombatFeedback")
 	local cue = CombatFeedbackClient.CueFor(payload)
-	if not consumePrediction(payload) then
+	local mode, record = consumePrediction(payload)
+	if mode == "Delta" then
+		presentHit(payload, cue, { Audio = true, Freeze = true })
+	elseif mode ~= "Skip" then
+		if mode == "Reversal" then
+			retractPrediction(payload, record)
+		end
 		presentHit(payload, cue)
 	end
 	-- The air combo's weight on top of the ordinary hit presentation: a camera punch per air hit, the

@@ -30,7 +30,14 @@ export type DamageNumberLabelProps = {
 	-- Where the number starts, in the parent's scale-space. Defaults to dead center so a caller
 	-- without a real hit-location yet still gets a sane on-screen position.
 	Position: UDim2?,
+	-- A STACK's re-arm signal: bumped each time another hit lands on the same label. The rise-and-fade is a
+	-- one-shot, so without it a total that keeps growing sat on a label that had already faded out.
+	Bump: Fusion.UsedAs<number>?,
 }
+
+-- Where a bump puts the fade: just past its fade-in, so the label is fully opaque and has its whole plateau
+-- (about a quarter second) before it begins to melt again. Only ever pulls the fade BACK, never forward.
+local BUMP_FADE_PROGRESS = 0.2
 
 local RISE_OFFSET = Tokens.Motion.RiseSpring.RiseOffset
 local RISE_SPRING_SPEED = Tokens.Motion.RiseSpring.Speed
@@ -62,8 +69,24 @@ local function DamageNumberLabel(scope: Scope, props: DamageNumberLabelProps): T
 		progressGoal:set(1)
 	end)
 
+	-- The fade has its own spring so a bump can re-arm it without moving the label: the rise keeps its
+	-- course, and only the opacity comes back.
+	local fadeGoal = scope:Value(0)
+	local fadeProgress = scope:Spring(fadeGoal, RISE_SPRING_SPEED, RISE_SPRING_DAMPING)
+	task.defer(function()
+		fadeGoal:set(1)
+	end)
+	if props.Bump ~= nil then
+		scope:Observer(props.Bump):onChange(function()
+			if Fusion.peek(fadeProgress) > BUMP_FADE_PROGRESS then
+				fadeProgress:setPosition(BUMP_FADE_PROGRESS)
+				fadeProgress:setVelocity(0)
+			end
+		end)
+	end
+
 	local fadeTransparency = scope:Computed(function(use)
-		local t = use(progress)
+		local t = use(fadeProgress)
 		if t < 0.15 then
 			return 1 - (t / 0.15)
 		end

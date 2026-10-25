@@ -58,6 +58,8 @@ export type DamageNumberSpawnProps = {
 	Text: Fusion.UsedAs<string>,
 	Kind: DamageNumberLabel.DamageKind?,
 	Position: UDim2?,
+	-- Bumped by each stacked hit so the label re-arms its fade (DamageNumberLabel.Bump).
+	Bump: Fusion.UsedAs<number>?,
 }
 
 -- One landed hit's contribution to the current stack -- see AddDamageHit below.
@@ -128,6 +130,7 @@ function CombatFeedback.Mount(
 	-- every hit of a combo. Now the keyed table changes only when a stack opens or closes; a hit in between
 	-- only sets this. Each stack gets its own small scope so its Value is released with it.
 	local currentStackText: Fusion.Value<string>? = nil
+	local currentStackBump: Fusion.Value<number>? = nil
 	local stackScopes: { [string]: Scope } = {}
 	-- Any stack still open when this surface unmounts goes with it.
 	table.insert(scope, function()
@@ -161,6 +164,7 @@ function CombatFeedback.Mount(
 			end
 			currentStackId = nil
 			currentStackText = nil
+			currentStackBump = nil
 			closeStack(id)
 		end)
 	end
@@ -178,6 +182,10 @@ function CombatFeedback.Mount(
 			id = currentStackId :: string
 			currentStackTotal += props.Amount
 			text:set(tostring(math.floor(currentStackTotal + 0.5)))
+			local bump = currentStackBump
+			if bump then
+				bump:set(Fusion.peek(bump) + 1)
+			end
 		else
 			nextId += 1
 			id = tostring(nextId)
@@ -187,11 +195,14 @@ function CombatFeedback.Mount(
 			stackScopes[id] = stackScope
 			local newText = stackScope:Value(tostring(math.floor(currentStackTotal + 0.5)))
 			currentStackText = newText
+			local newBump = stackScope:Value(0)
+			currentStackBump = newBump
 			local updated = table.clone(Fusion.peek(damageNumbers))
 			updated[id] = {
 				Text = newText,
 				Kind = props.Kind,
 				Position = props.Position,
+				Bump = newBump,
 			}
 			damageNumbers:set(updated)
 		end
@@ -206,6 +217,7 @@ function CombatFeedback.Mount(
 		if activeId ~= nil then
 			currentStackId = nil
 			currentStackText = nil
+			currentStackBump = nil
 			closeStack(activeId)
 		end
 	end
@@ -254,6 +266,7 @@ function CombatFeedback.Mount(
 							Text = entry.Text,
 							Kind = entry.Kind,
 							Position = entry.Position,
+							Bump = entry.Bump,
 						})
 				end),
 			},

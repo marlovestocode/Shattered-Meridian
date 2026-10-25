@@ -513,6 +513,9 @@ local FXConstants = {
 		-- on a Fists jab) so the body is upright again by the time it can act.
 		RiseSeconds = 0.04,
 		SettleSeconds = 0.28,
+		-- A flinch the server then reversed (a predicted hit that came back Blocked/Parried/Evaded, or never
+		-- confirmed) eases out over this instead of running its envelope on a body that was not hit.
+		CancelBlendSeconds = 0.06,
 		MaxDistanceStuds = 150,
 	},
 

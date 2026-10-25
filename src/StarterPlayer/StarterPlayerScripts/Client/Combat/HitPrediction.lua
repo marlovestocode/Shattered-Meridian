@@ -190,7 +190,8 @@ local function step(): ()
 				model,
 				target.Root.Position,
 				swing.MoveId,
-				swing.StringEnd
+				swing.StringEnd,
+				math.max(swing.ClosesAt - now, 0)
 			)
 		then
 			HitFlinchPose.Predict(humanoid)

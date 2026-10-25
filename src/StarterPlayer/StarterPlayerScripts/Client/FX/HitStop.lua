@@ -73,6 +73,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -134,14 +135,15 @@ local FROZEN_PRIORITIES: { [Enum.AnimationPriority]: boolean } = {
 	[Enum.AnimationPriority.Action4] = true,
 }
 
-local function appendPlayingTracks(model: Model, into: { AnimationTrack }): ()
+-- Tracks no manager owns, appended for the guard to freeze. `skip` is what the managers already hold.
+local function appendPlayingTracks(model: Model, into: { AnimationTrack }, skip: { [AnimationTrack]: boolean }): ()
 	local humanoid = CharacterUtil.HumanoidOf(model)
 	local animator = if humanoid then humanoid:FindFirstChildOfClass("Animator") else nil
 	if animator == nil then
 		return
 	end
 	for _, track in animator:GetPlayingAnimationTracks() do
-		if FROZEN_PRIORITIES[track.Priority] then
+		if FROZEN_PRIORITIES[track.Priority] and not skip[track] then
 			table.insert(into, track)
 		end
 	end
@@ -151,26 +153,56 @@ end
 -- hit, and freezes the OTHER body locally too, so both participants see one shared stop rather than
 -- each only their own half. Throttled like the other freezes, so a fast multi-hit string reads as a
 -- series of stingers, not one long slow-motion hold.
-function HitStop.FreezeExchange(attacker: Model?, defender: Model?, seconds: number): ()
+--
+-- TWO ROUTES, because two kinds of track exist. A track an AnimationManager owns (the local player's swing and
+-- guard) is frozen THROUGH its manager (AnimationManager.FreezeFor): a raw AdjustSpeed(0) on one is undone by the
+-- manager's stranded-speed repair on the next frame, which made the attacker's hit-stop one frame long. Every
+-- other track (a remote rig's replicated clips) is frozen directly by the generation-guarded guard below.
+-- Returns whether a freeze was started (false when throttled or empty).
+function HitStop.FreezeExchange(attacker: Model?, defender: Model?, seconds: number): boolean
 	if seconds <= 0 then
-		return
+		return false
 	end
 	local now = os.clock()
 	if now - lastExchangeClock < CONFIG.MinIntervalSeconds then
-		return
+		return false
 	end
 	lastExchangeClock = now
 
+	local catchUp = CONFIG.CatchUpSpeedMultiplier
+	local owned: { [AnimationTrack]: boolean } = {}
+	for _, model in { attacker, defender } do
+		if model then
+			for track in AnimationManager.FreezeFor(model, seconds, FROZEN_PRIORITIES, catchUp) do
+				owned[track] = true
+			end
+		end
+	end
+
 	local tracks: { AnimationTrack } = {}
 	if attacker then
-		appendPlayingTracks(attacker, tracks)
+		appendPlayingTracks(attacker, tracks, owned)
 	end
 	if defender and defender ~= attacker then
-		appendPlayingTracks(defender, tracks)
+		appendPlayingTracks(defender, tracks, owned)
 	end
 	-- Caught up afterwards: the server's swing kept running through the freeze (CatchUpSpeedMultiplier).
-	exchangeGuard:FreezeTracks(tracks, seconds, CONFIG.CatchUpSpeedMultiplier)
+	exchangeGuard:FreezeTracks(tracks, seconds, catchUp)
 	logger:debug("Combat exchange hit-stop", { seconds = seconds, tracks = #tracks })
+	return true
+end
+
+-- Ends the exchange freeze now on both bodies -- a predicted impact the server then reversed (a block, a
+-- parry, an evade), whose hold would otherwise run on over a hit that did not happen. The throttle is reset so
+-- the verdict's own beat (a parry's clash) is not refused as a repeat.
+function HitStop.EndExchange(attacker: Model?, defender: Model?): ()
+	lastExchangeClock = 0
+	for _, model in { attacker, defender } do
+		if model then
+			AnimationManager.ThawFor(model)
+		end
+	end
+	exchangeGuard:Release()
 end
 
 -- Victim movement freeze -----------------------------------------------------------------------------
