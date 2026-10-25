@@ -236,7 +236,7 @@ rather than rewriting them. W5 goes last because it shares `HitStop`, the pose F
 
 | Measure | Now | Target |
 |---|---|---|
-| Hand-rolled listener lists | 6 (+3 to judge) | 0, or each one justified in its header |
+| Hand-rolled listener lists | 6 (+3 to judge) -> **0 unjustified after W1** (3 justified in headers) | 0, or each one justified in its header |
 | Blimp/Boat shared code lines | 370 server / 204 client | under 40 each |
 | Modules at a shared RenderStep priority | 8 (in 3 slots) | 0 |
 | Consumers reading restraint Attributes directly | 7+ | `BodyRestraint` plus listed exemptions |
@@ -244,3 +244,60 @@ rather than rewriting them. W5 goes last because it shares `HitStop`, the pose F
 | Headers citing a module that does not exist | at least 1 (`LocalAnimator`) | 0, gated |
 | Suite | 3538 / 7 (re-measured W0: 3538 / 7, same) | no new failures; the 7 unchanged unless fixed on purpose |
 | Gates | 7 scripts | +3 to 4 ratchets (duplicates, orphans, render order, header claims) |
+
+
+## Status (pass of 2026-10-25)
+
+Scope of this session: W0 and W1 only. W2-W6 are **not started**.
+
+| Workstream | State | Commits |
+|---|---|---|
+| W0 | done | `851df76` re-measure and correct the plan; `f67e5ca` "Who owns what" in `software-architecture.md` |
+| W1 | done | `b33aecd` DefaultMoveRegistry; `68ebfaf` MoveRegistryManager; `4304e6e` HotbarBindings; `3e69cfd` InputDevice; `4f0473f` KeybindManager; `3e46878` ParkourSystem; `d0173ef` GameplayEvents; `4f929c8` Logger + CombatAnimator header notes; `965ad45` CLAUDE.md row + MovePresentationCatalog note |
+| W2-W6 | not started | |
+
+**W1 detail (read from source, then ran the suite).**
+- Converted to `CallbackList` (6 planned + 1 judged): `DefaultMoveRegistry.OnChanged`, `MoveRegistryManager.OnChanged`,
+  `HotbarBindings.OnChanged`, `InputDevice.OnChanged`, `KeybindManager.OnChanged`, `ParkourSystem.OnActionStarted`, and
+  `GameplayEvents.OnHeartbeatTick`. Every public signature is unchanged.
+- Kept hand-rolled, each now justified in its own header: `Logger.entryListeners` (CallbackList requires Logger, and its
+  error path would re-enter `emit`), `CombatAnimator.perLifeResetHandlers` (private closers, not an extension point,
+  deliberately unguarded), and `MovePresentationCatalog`'s `listeners` (found by grep, not in the plan: dispatches with
+  `task.spawn`, CallbackList is synchronous).
+- `:Clear()` wired only into `DefaultMoveRegistry.ResetCache`, the one spec-only reset that exists. Not wired elsewhere on
+  purpose: `MoveRegistryManager.Init` is the boot entry and every spec's reset, and its subscribers (DomainSystem,
+  MovePresentationSystem) live for the VM; the others (HotbarBindings, InputDevice, KeybindManager, ParkourSystem) have no
+  reset to hook.
+- Behaviour differences, all deliberate and small: a throwing subscriber to DefaultMoveRegistry/HotbarBindings/InputDevice/
+  KeybindManager was silently swallowed or aborted the dispatch and is now caught and logged by CallbackList;
+  `MoveRegistryManager`'s "OnChanged listener failed" warning is now CallbackList's `error` line; `GameplayEvents` heartbeat
+  subscribers now run in connection order (before: `pairs` over token keys, unspecified, though the header claimed boot
+  order); the "Heartbeat tick subscriber errored" log line now reads "A GameplayEvents.OnHeartbeatTick consumer errored".
+- Three logger scopes added to `DebugConstants` (`DefaultMoveRegistry`, `HotbarBindings`, `InputDevice`).
+
+**Measured.** CallbackList inbound requires 11 -> 18. Duplicate-body `TOTAL` 11 -> 10 (the five identical `OnChanged`
+bodies are gone; one group, of 5, fell away). Hand-rolled lists: 0 unjustified.
+
+**Suite.** Baseline (W0, before any change): 3538 passed / 7 failed. After W1: 3538 / 7. The failing set is identical by
+assertion fingerprint (1x `"Cooldown"` vs `"NotInWindup"`, 1x `nil` vs `"ChainDelay"`, 5x `true` vs `false`). Names: the printed
+tree truncates after `Combat`, so only the two `AttackRequestSystem -- feint` specs are named by the tree
+("abandons the string and allows a fresh Heavy once the recovery ends", "will not feint again inside the feint cooldown");
+the other five match the previously recorded TrainingBot failures by count and shape, not by name read in this run.
+
+**Gates.** `selene src/` 0 errors / 2 warnings (the known pair). `check-logger-scopes` ok (181 scopes), `check-live-project` ok,
+`check-single-writers` ok, `check-spec-literals` ok, `check-stale-refs` ok. `stylua`: no formatting difference on any touched
+file once CR is ignored (plain `--check` fails on the CRLF checkout, as CLAUDE.md warns). Not run: the planned new gates
+(they belong to W6).
+
+**Files created:** none. **Files deleted:** none. **Headers corrected as false:** none in W1. Plan §1 numbers corrected in W0
+(see the W0 note at the top).
+
+**Not verified.** Nothing from W1 needs a playtest beyond the suite, but these were not exercised by it: a HUD/hotbar rebuild
+and a glyph refresh after a rebind or device switch (listener plumbing only; confirm in Studio that rebinding a key updates
+the on-screen glyph), and the Move Editor's catalogue push after an edit (MovePresentationSystem listens to both registries).
+
+## Escalations
+
+None raised in W0-W1. Observations that W3 should treat as candidate escalations when it gets there (not changed here):
+`RunSystem` honours `Hitstun`, `GrabThrowing` and realm rooting while `bodyGate` does not read them directly (they arrive
+through the record-backed gates); `ParkourController` does not read `Mounted` or `Grabbed` and relies on `RootControlLocked`.

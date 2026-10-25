@@ -224,7 +224,7 @@ header claims. A row marked `(migrating: Wn)` has an owner that is not yet the o
 | Who writes `WalkSpeed`? | `RunSystem` (sole writer) | Publish an Attribute it already resolves (Frozen, Flying, Grabbed, Mounted, SwingRooted...), never set `WalkSpeed` |
 | What order do combat Systems run each server frame? | `CombatTick.PHASES` | Register a phase; do not connect `Heartbeat` |
 | What other server per-frame work exists? | `GameplayEvents.HeartbeatTick` (13 subscribers), and `RunSystem`/`ParkourSystem`, which each connect their own `Heartbeat` | Order against `CombatTick` is connection order, not declared `(not owned)` |
-| How does a module announce a change? | Three mechanisms today: `GameplayEvents` (deferred, cross-System), `CallbackList` (synchronous extension point), a Humanoid Attribute (crosses client/server or a layer boundary) `(migrating: W1)` | See "Choosing an event mechanism" below |
+| How does a module announce a change? | `GameplayEvents` (deferred, cross-System), `CallbackList` (synchronous extension point; every `OnX` outside the three documented exceptions), a Humanoid Attribute (crosses client/server or a layer boundary) | See "Choosing an event mechanism" below |
 | Is this a realm rule on this body? | `DomainRules` | `Scale`/`Has`/`IsSealed`; never require `DomainSystem` from a combat layer |
 | How much latency to refund? | `NetworkLatency` (server), `PingReading` (shared) | `RoundTripSeconds`/`OneWaySeconds` |
 | Are two combatants on the same side? | `Allegiance` | `AreAllies`, `Matches` |
