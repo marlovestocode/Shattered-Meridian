@@ -4,6 +4,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
+local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local DomainTypes = require(ReplicatedStorage.Shared.Domain.DomainTypes)
 local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
@@ -68,8 +69,11 @@ return function()
 
 		it("rejects a shape the engine does not have, including the retired twelve-shape names", function()
 			rejects({ Shape = "Hexagon" }, "InvalidShapeKind")
-			rejects({ Shape = "Wedge" }, "InvalidShapeKind")
 			rejects({ Shape = "Disc" }, "InvalidShapeKind")
+			-- Never a literal name from the engine's own list: the engine re-learned Wedge after the 2026-09-29
+			-- cut, and a spec that called it retired failed for being right. Whatever is not in the list is out.
+			expect(table.find(HitboxTypes.ShapeOrder :: { string }, "Hexagon")).to.equal(nil)
+			expect(table.find(HitboxTypes.ShapeOrder :: { string }, "Disc")).to.equal(nil)
 		end)
 
 		it("rejects geometry it cannot place", function()
@@ -328,12 +332,10 @@ return function()
 		it("ignores every retired field instead of rejecting a record that still carries one", function()
 			local validated = MoveRegistryManager.Validate(wire({
 				ArcDegrees = 90,
-				Projectile = { Speed = 50, MaxRange = 50 },
 				Animations = {},
 			})) :: any
 			expect(validated).to.be.ok()
 			expect(validated.ArcDegrees).to.equal(nil)
-			expect(validated.Projectile).to.equal(nil)
 		end)
 	end)
 

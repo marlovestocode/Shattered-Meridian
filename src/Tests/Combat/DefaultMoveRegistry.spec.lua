@@ -147,7 +147,7 @@ return function()
 			local result, reason = DefaultMoveRegistry.ApplyEdit(
 				BASIC_ONE,
 				candidateFor(BASIC_ONE, function(wire)
-					wire.Shape = "Wedge"
+					wire.Shape = "Hexagon"
 				end)
 			)
 			expect(result).to.equal(nil)
