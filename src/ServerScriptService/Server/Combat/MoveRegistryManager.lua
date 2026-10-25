@@ -31,6 +31,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
@@ -54,16 +55,13 @@ local moves: { [string]: MoveTypes.MoveDefinition } = {}
 
 -- Called with a MoveId after every Upsert/Delete -- the one seam Server/Combat/MovePresentationSystem.lua
 -- reads to keep the client catalogue in step, whichever writer (the editor, the source library, a spec)
--- changed the registry. pcall'd per listener: a publisher erroring must never fail a registry write.
-local changedListeners: { (moveId: string) -> () } = {}
+-- changed the registry. pcall'd per listener (CallbackList): a publisher erroring must never fail a registry write.
+-- Never Cleared: Init is both the boot entry and every spec's reset, and DomainSystem and MovePresentationSystem
+-- subscribe once for the life of the VM, so wiping subscribers there would silence them.
+local changed: CallbackList.CallbackList<string> = CallbackList.New(logger, "MoveRegistryManager.OnChanged")
 
 local function notifyChanged(moveId: string): ()
-	for _, listener in changedListeners do
-		local ok, err = pcall(listener, moveId)
-		if not ok then
-			logger:warn("OnChanged listener failed", { moveId = moveId, error = tostring(err) })
-		end
-	end
+	changed:Fire(moveId)
 end
 
 local function isNonEmptyString(value: unknown): boolean
@@ -478,15 +476,9 @@ function MoveRegistryManager.Delete(moveId: string): ()
 	notifyChanged(moveId)
 end
 
--- Subscribes to every Upsert/Delete; returns the unsubscribe. See changedListeners.
+-- Subscribes to every Upsert/Delete; returns the unsubscribe. See `changed`.
 function MoveRegistryManager.OnChanged(listener: (moveId: string) -> ()): () -> ()
-	table.insert(changedListeners, listener)
-	return function()
-		local index = table.find(changedListeners, listener)
-		if index then
-			table.remove(changedListeners, index)
-		end
-	end
+	return changed:Connect(listener)
 end
 
 -- Server-generated, never client-chosen, so two admins creating moves at once can never collide. The
