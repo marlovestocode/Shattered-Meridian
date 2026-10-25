@@ -18,10 +18,11 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterPlayer = game:GetService("StarterPlayer")
-local Workspace = game:GetService("Workspace")
+local ServerScriptService = game:GetService("ServerScriptService")
 
 local ParkourMotor = require(StarterPlayer.StarterPlayerScripts.Client.Parkour.ParkourMotor)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 local ATTACHMENT_NAME = "ParkourAttachment"
 local VELOCITY_DRIVE_NAME = "ParkourVelocityDrive"
@@ -29,31 +30,9 @@ local POSITION_DRIVE_NAME = "ParkourPositionDrive"
 local ORIENTATION_DRIVE_NAME = "ParkourOrientationDrive"
 local GRAVITY_CANCEL_NAME = "ParkourGravityCancel"
 
-type Rig = { Character: Model, Humanoid: Humanoid, RootPart: BasePart }
-
-local function makeRig(): Rig
-	local character = Instance.new("Model")
-	character.Name = "ParkourMotorSpecCharacter"
-
-	local rootPart = Instance.new("Part")
-	rootPart.Name = "HumanoidRootPart"
-	rootPart.Size = Vector3.new(2, 2, 1)
-	rootPart.CFrame = CFrame.new(0, 50, 0)
-	rootPart.Anchored = false
-	rootPart.Parent = character
-
-	local humanoid = Instance.new("Humanoid")
-	humanoid.HipHeight = 2
-	humanoid.Parent = character
-
-	character.PrimaryPart = rootPart
-	character.Parent = Workspace
-	return { Character = character, Humanoid = humanoid, RootPart = rootPart }
-end
-
-local function destroyRig(rig: Rig): ()
+local function destroyRig(rig: Rig.Body): ()
 	ParkourMotor.Unbind()
-	rig.Character:Destroy()
+	rig.Model:Destroy()
 end
 
 return function()
@@ -62,8 +41,8 @@ return function()
 			-- The regression test for the playtest bug. Every property the rig sets is assigned by the
 			-- real engine here, so a name that does not exist throws inside this test rather than inside
 			-- a movement frame.
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
@@ -74,23 +53,23 @@ return function()
 			expect(ParkourMotor.Apply()).to.equal(true)
 			expect(ParkourMotor.GetActiveMode()).to.equal("Velocity")
 
-			expect(rig.RootPart:FindFirstChild(ATTACHMENT_NAME)).never.to.equal(nil)
-			expect(rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME)).never.to.equal(nil)
-			expect(rig.RootPart:FindFirstChild(ORIENTATION_DRIVE_NAME)).never.to.equal(nil)
+			expect(rig.Root:FindFirstChild(ATTACHMENT_NAME)).never.to.equal(nil)
+			expect(rig.Root:FindFirstChild(VELOCITY_DRIVE_NAME)).never.to.equal(nil)
+			expect(rig.Root:FindFirstChild(ORIENTATION_DRIVE_NAME)).never.to.equal(nil)
 
 			destroyRig(rig)
 		end)
 
 		it("commands the velocity it was given", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
 			command.Velocity = Vector3.new(3, 0, 26)
 			ParkourMotor.Apply()
 
-			local drive = rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME) :: LinearVelocity
+			local drive = rig.Root:FindFirstChild(VELOCITY_DRIVE_NAME) :: LinearVelocity
 			expect(drive.VectorVelocity.Z).to.equal(26)
 			expect(drive.VectorVelocity.X).to.equal(3)
 
@@ -98,14 +77,14 @@ return function()
 		end)
 
 		it("creates the gravity cancel only while asked for it", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
 			command.CancelGravity = true
 			ParkourMotor.Apply()
-			expect(rig.RootPart:FindFirstChild(GRAVITY_CANCEL_NAME)).never.to.equal(nil)
+			expect(rig.Root:FindFirstChild(GRAVITY_CANCEL_NAME)).never.to.equal(nil)
 
 			command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
@@ -113,15 +92,15 @@ return function()
 			ParkourMotor.Apply()
 			-- Destroyed rather than zeroed, so a state that exits abnormally cannot leave a force behind
 			-- holding the character up -- see setGravityCancel's own header.
-			expect(rig.RootPart:FindFirstChild(GRAVITY_CANCEL_NAME)).to.equal(nil)
+			expect(rig.Root:FindFirstChild(GRAVITY_CANCEL_NAME)).to.equal(nil)
 
 			destroyRig(rig)
 		end)
 
 		it("lowers HipHeight for a crouch and restores it on release", function()
-			local rig = makeRig()
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
 			local originalHipHeight = rig.Humanoid.HipHeight
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
@@ -136,8 +115,8 @@ return function()
 		end)
 
 		it("never inverts HipHeight even for an absurd crouch depth", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
@@ -151,9 +130,9 @@ return function()
 		it("captures and restores AutoRotate rather than assuming it was true", function()
 			-- Shift lock owns AutoRotate while engaged (Client/Camera/ShiftLockCamera.lua writes it
 			-- false); restoring a hardcoded true would silently break shift lock for the rest of the life.
-			local rig = makeRig()
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
 			rig.Humanoid.AutoRotate = false
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
@@ -174,8 +153,8 @@ return function()
 			-- constraint's own properties are also spot-checked here for the same reason the file
 			-- header describes -- a bad property name (RigidityEnabled, Mode, Position) throws inside
 			-- rig creation, which this catches immediately rather than in a playtest.
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local target = CFrame.new(10, 60, -4)
 			local command = ParkourMotor.BeginFrame()
@@ -184,13 +163,13 @@ return function()
 
 			expect(ParkourMotor.Apply()).to.equal(true)
 			expect(ParkourMotor.GetActiveMode()).to.equal("Kinematic")
-			expect(rig.RootPart.Anchored).to.equal(false)
+			expect(rig.Root.Anchored).to.equal(false)
 
-			local drive = rig.RootPart:FindFirstChild(POSITION_DRIVE_NAME)
+			local drive = rig.Root:FindFirstChild(POSITION_DRIVE_NAME)
 			expect(drive).never.to.equal(nil)
 			expect((drive :: AlignPosition).RigidityEnabled).to.equal(true)
 			expect((drive :: AlignPosition).Position).to.equal(target.Position)
-			expect(rig.RootPart:FindFirstChild(ORIENTATION_DRIVE_NAME)).never.to.equal(nil)
+			expect(rig.Root:FindFirstChild(ORIENTATION_DRIVE_NAME)).never.to.equal(nil)
 
 			destroyRig(rig)
 		end)
@@ -220,36 +199,36 @@ return function()
 		-- ever anchoring it, and the rig tears down and rebuilds correctly across every mode transition.
 
 		it("switching from Velocity to Kinematic drops the velocity rig and builds a position rig", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
 			ParkourMotor.Apply()
-			expect(rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME)).never.to.equal(nil)
+			expect(rig.Root:FindFirstChild(VELOCITY_DRIVE_NAME)).never.to.equal(nil)
 
 			command = ParkourMotor.BeginFrame()
 			command.Mode = "Kinematic"
 			command.TargetCFrame = CFrame.new(0, 60, 0)
 			ParkourMotor.Apply()
 
-			expect(rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME)).to.equal(nil)
-			expect(rig.RootPart:FindFirstChild(POSITION_DRIVE_NAME)).never.to.equal(nil)
+			expect(rig.Root:FindFirstChild(VELOCITY_DRIVE_NAME)).to.equal(nil)
+			expect(rig.Root:FindFirstChild(POSITION_DRIVE_NAME)).never.to.equal(nil)
 
 			destroyRig(rig)
 		end)
 
 		it("refuses a kinematic frame with no target rather than driving toward nowhere", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Kinematic"
 			command.TargetCFrame = nil
 
 			expect(ParkourMotor.Apply()).to.equal(false)
-			expect(rig.RootPart.Anchored).to.equal(false)
-			expect(rig.RootPart:FindFirstChild(POSITION_DRIVE_NAME)).to.equal(nil)
+			expect(rig.Root.Anchored).to.equal(false)
+			expect(rig.Root:FindFirstChild(POSITION_DRIVE_NAME)).to.equal(nil)
 
 			destroyRig(rig)
 		end)
@@ -261,32 +240,32 @@ return function()
 			-- lands before the rig that could otherwise fight it is gone. Kinematic mode no longer
 			-- anchors, so this no longer depends on an unanchor-before-write ordering the way it used to
 			-- -- see ParkourMotor.lua's own header on why that specific failure mode no longer applies.
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Kinematic"
 			command.TargetCFrame = CFrame.new(0, 60, 0)
 			ParkourMotor.Apply()
-			expect(rig.RootPart.Anchored).to.equal(false)
+			expect(rig.Root.Anchored).to.equal(false)
 
 			command = ParkourMotor.BeginFrame()
 			command.Mode = "Humanoid"
 			command.Velocity = Vector3.new(0, 0, 30)
 			ParkourMotor.Apply()
 
-			expect(rig.RootPart.Anchored).to.equal(false)
-			expect(rig.RootPart.AssemblyLinearVelocity.Z).to.equal(30)
-			expect(rig.RootPart:FindFirstChild(POSITION_DRIVE_NAME)).to.equal(nil)
+			expect(rig.Root.Anchored).to.equal(false)
+			expect(rig.Root.AssemblyLinearVelocity.Z).to.equal(30)
+			expect(rig.Root:FindFirstChild(POSITION_DRIVE_NAME)).to.equal(nil)
 			expect(ParkourMotor.GetActiveMode()).to.equal("Humanoid")
 
 			destroyRig(rig)
 		end)
 
 		it("Release clears the rig and every restorable, and leaves the root unanchored", function()
-			local rig = makeRig()
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
 			local originalHipHeight = rig.Humanoid.HipHeight
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Kinematic"
@@ -296,11 +275,11 @@ return function()
 
 			ParkourMotor.Release()
 
-			expect(rig.RootPart.Anchored).to.equal(false)
-			expect(rig.RootPart:FindFirstChild(ATTACHMENT_NAME)).to.equal(nil)
-			expect(rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME)).to.equal(nil)
-			expect(rig.RootPart:FindFirstChild(POSITION_DRIVE_NAME)).to.equal(nil)
-			expect(rig.RootPart:FindFirstChild(ORIENTATION_DRIVE_NAME)).to.equal(nil)
+			expect(rig.Root.Anchored).to.equal(false)
+			expect(rig.Root:FindFirstChild(ATTACHMENT_NAME)).to.equal(nil)
+			expect(rig.Root:FindFirstChild(VELOCITY_DRIVE_NAME)).to.equal(nil)
+			expect(rig.Root:FindFirstChild(POSITION_DRIVE_NAME)).to.equal(nil)
+			expect(rig.Root:FindFirstChild(ORIENTATION_DRIVE_NAME)).to.equal(nil)
 			expect(rig.Humanoid.HipHeight).to.equal(originalHipHeight)
 			expect(ParkourMotor.GetActiveMode()).to.equal("Humanoid")
 
@@ -319,42 +298,42 @@ return function()
 		it("refuses to drive the body while the server holds it", function()
 			-- RootControlLocked is set by CombatSystem while a ragdoll or an air-combo hold owns the
 			-- character; writing velocity underneath either is the exact fight this framework avoids.
-			local rig = makeRig()
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
 			rig.Humanoid:SetAttribute(AttributeConstants.RootControlLocked, true)
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
 			command.Velocity = Vector3.new(0, 0, 26)
 
 			expect(ParkourMotor.Apply()).to.equal(false)
-			expect(rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME)).to.equal(nil)
+			expect(rig.Root:FindFirstChild(VELOCITY_DRIVE_NAME)).to.equal(nil)
 
 			destroyRig(rig)
 		end)
 
 		it("releases an already-owned body the moment the lock appears", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
 			ParkourMotor.Apply()
-			expect(rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME)).never.to.equal(nil)
+			expect(rig.Root:FindFirstChild(VELOCITY_DRIVE_NAME)).never.to.equal(nil)
 
 			rig.Humanoid:SetAttribute(AttributeConstants.RootControlLocked, true)
 			command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
 			expect(ParkourMotor.Apply()).to.equal(false)
-			expect(rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME)).to.equal(nil)
+			expect(rig.Root:FindFirstChild(VELOCITY_DRIVE_NAME)).to.equal(nil)
 
 			destroyRig(rig)
 		end)
 
 		it("refuses an impulse while the server holds the body", function()
-			local rig = makeRig()
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
 			rig.Humanoid:SetAttribute(AttributeConstants.RootControlLocked, true)
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			expect(ParkourMotor.ApplyImpulse(Vector3.new(0, 50, 0))).to.equal(false)
 
@@ -364,11 +343,11 @@ return function()
 
 	describe("ParkourMotor -- impulses and jump", function()
 		it("writes an impulse straight onto the assembly", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			expect(ParkourMotor.ApplyImpulse(Vector3.new(0, 50, 12))).to.equal(true)
-			expect(rig.RootPart.AssemblyLinearVelocity.Y).to.equal(50)
+			expect(rig.Root.AssemblyLinearVelocity.Y).to.equal(50)
 
 			destroyRig(rig)
 		end)
@@ -378,14 +357,14 @@ return function()
 			-- Anchored -- see ParkourMotor.ApplyImpulse's own header for why the contract (a kinematic
 			-- traversal's ownership cannot be fought by a stray impulse) still has to hold exactly, not
 			-- just "usually".
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Kinematic"
 			command.TargetCFrame = CFrame.new(0, 60, 0)
 			ParkourMotor.Apply()
-			expect(rig.RootPart.Anchored).to.equal(false)
+			expect(rig.Root.Anchored).to.equal(false)
 			expect(ParkourMotor.GetActiveMode()).to.equal("Kinematic")
 
 			expect(ParkourMotor.ApplyImpulse(Vector3.new(0, 50, 0))).to.equal(false)
@@ -397,8 +376,8 @@ return function()
 			-- This is how CombatClient's finisher jump-suppression reaches the parkour system: it
 			-- disables the Jumping state, and every parkour jump path has to honor that rather than
 			-- jumping anyway through a velocity write.
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			rig.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
 			expect(ParkourMotor.IsJumpEnabled()).to.equal(false)
@@ -415,8 +394,8 @@ return function()
 		it("drives only the horizontal plane when asked, leaving the vertical to gravity", function()
 			-- A real engine assignment of every Plane-mode property, for the same reason this file exists:
 			-- a hallucinated name (PlaneVelocity, PrimaryTangentAxis, SecondaryTangentAxis) throws here.
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
@@ -424,7 +403,7 @@ return function()
 			command.PlanarOnly = true
 			expect(ParkourMotor.Apply()).to.equal(true)
 
-			local drive = rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME) :: LinearVelocity
+			local drive = rig.Root:FindFirstChild(VELOCITY_DRIVE_NAME) :: LinearVelocity
 			expect(drive.VelocityConstraintMode).to.equal(Enum.VelocityConstraintMode.Plane)
 			expect(drive.PlaneVelocity.X).to.equal(4)
 			expect(drive.PlaneVelocity.Y).to.equal(20)
@@ -436,8 +415,8 @@ return function()
 		end)
 
 		it("returns to a full vector drive the frame planar is no longer asked for", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
@@ -450,7 +429,7 @@ return function()
 			command.Velocity = Vector3.new(0, -8, 20)
 			ParkourMotor.Apply()
 
-			local drive = rig.RootPart:FindFirstChild(VELOCITY_DRIVE_NAME) :: LinearVelocity
+			local drive = rig.Root:FindFirstChild(VELOCITY_DRIVE_NAME) :: LinearVelocity
 			expect(drive.VelocityConstraintMode).to.equal(Enum.VelocityConstraintMode.Vector)
 			expect(drive.VectorVelocity.Y).to.equal(-8)
 
@@ -466,8 +445,8 @@ return function()
 
 	describe("ParkourMotor -- external impulses interrupt a body-owning state", function()
 		it("records an interrupt for an external impulse while a Velocity state owns the body", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
 			command.Velocity = Vector3.new(0, 0, 30)
@@ -483,8 +462,8 @@ return function()
 		end)
 
 		it("records nothing for a state's own impulse, or while the engine drives", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 			ParkourMotor.BeginFrame()
 			ParkourMotor.Apply()
 			expect(ParkourMotor.ApplyExternalImpulse(Vector3.new(10, 0, 0))).to.equal(true)
@@ -501,8 +480,8 @@ return function()
 		end)
 
 		it("drops an unread interrupt when the body is handed back", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
 			command.Velocity = Vector3.new(0, 0, 30)
@@ -520,8 +499,8 @@ return function()
 			-- A knock mid-vault used to be refused outright and lost. The rigid position drive would erase a
 			-- direct write before a physics step, so the write is skipped and the interrupt carries it to
 			-- ParkourController, which ends the traversal and hands the body off with it.
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Kinematic"
 			command.TargetCFrame = CFrame.new(0, 52, 0)
@@ -535,8 +514,8 @@ return function()
 		end)
 
 		it("still refuses an external impulse while the server holds the body", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
 			command.Velocity = Vector3.new(0, 0, 30)
@@ -552,9 +531,9 @@ return function()
 
 	describe("ParkourMotor.IsFacingHeldElsewhere", function()
 		it("reads the AutoRotate the rest of the game left, not the one this module wrote", function()
-			local rig = makeRig()
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
 			rig.Humanoid.AutoRotate = true
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 			expect(ParkourMotor.IsFacingHeldElsewhere()).to.equal(false)
 
 			-- Owning the body writes AutoRotate false itself; that must not read as shift lock.
@@ -568,9 +547,9 @@ return function()
 		end)
 
 		it("says yes when shift lock had AutoRotate off before the body was taken", function()
-			local rig = makeRig()
+			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
 			rig.Humanoid.AutoRotate = false
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 			expect(ParkourMotor.IsFacingHeldElsewhere()).to.equal(true)
 
 			local command = ParkourMotor.BeginFrame()

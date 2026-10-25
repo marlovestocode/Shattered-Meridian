@@ -10,12 +10,13 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterPlayer = game:GetService("StarterPlayer")
-local Workspace = game:GetService("Workspace")
+local ServerScriptService = game:GetService("ServerScriptService")
 
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourMotor = require(StarterPlayer.StarterPlayerScripts.Client.Parkour.ParkourMotor)
 local InputBuffer = require(StarterPlayer.StarterPlayerScripts.Client.Parkour.InputBuffer)
 local States = require(StarterPlayer.StarterPlayerScripts.Client.Parkour.States)
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 local WALL_LAUNCH = ParkourConstants.WallLaunch
 
@@ -32,31 +33,9 @@ local WallLaunching = findDefinition("WallLaunching")
 local canEnter = WallLaunching.CanEnter
 local wallLaunchingEnter = assert(WallLaunching.Enter, "States/WallLaunching.lua must define Enter")
 
-type Rig = { Character: Model, Humanoid: Humanoid, RootPart: BasePart }
-
-local function makeRig(): Rig
-	local character = Instance.new("Model")
-	character.Name = "WallLaunchingSpecCharacter"
-
-	local rootPart = Instance.new("Part")
-	rootPart.Name = "HumanoidRootPart"
-	rootPart.Size = Vector3.new(2, 2, 1)
-	rootPart.CFrame = CFrame.lookAt(Vector3.new(0, 50, 0), Vector3.new(0, 50, -1))
-	rootPart.Anchored = false
-	rootPart.Parent = character
-
-	local humanoid = Instance.new("Humanoid")
-	humanoid.HipHeight = 2
-	humanoid.Parent = character
-
-	character.PrimaryPart = rootPart
-	character.Parent = Workspace
-	return { Character = character, Humanoid = humanoid, RootPart = rootPart }
-end
-
-local function destroyRig(rig: Rig): ()
+local function destroyRig(rig: Rig.Body): ()
 	ParkourMotor.Unbind()
-	rig.Character:Destroy()
+	rig.Model:Destroy()
 end
 
 local TALL_WALL = { Found = true, Height = math.huge }
@@ -97,8 +76,8 @@ return function()
 		end
 
 		it("accepts grounded, facing a wall too tall to vault or mantle, with jump pressed", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("WallLaunchingSpecCharacter", Vector3.new(0, 50, 0), Vector3.new(0, 50, -1))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 			local now = nextNow()
 			local context = makeContext(now)
 			InputBuffer.PressJump(now)
@@ -108,8 +87,8 @@ return function()
 		end)
 
 		it("refuses with no wall ahead at all", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("WallLaunchingSpecCharacter", Vector3.new(0, 50, 0), Vector3.new(0, 50, -1))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 			local now = nextNow()
 			local context = makeContext(now)
 			context.Obstacle = NO_OBSTACLE
@@ -122,8 +101,8 @@ return function()
 		end)
 
 		it("refuses a wall short enough to vault or mantle -- that is a different move entirely", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("WallLaunchingSpecCharacter", Vector3.new(0, 50, 0), Vector3.new(0, 50, -1))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 			local now = nextNow()
 			local context = makeContext(now)
 			context.Obstacle = MANTLEABLE
@@ -136,8 +115,8 @@ return function()
 		end)
 
 		it("refuses while airborne -- deliberately unlike Jumping, this move has no coyote window", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("WallLaunchingSpecCharacter", Vector3.new(0, 50, 0), Vector3.new(0, 50, -1))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 			local now = nextNow()
 			local context = makeContext(now)
 			context.Ground.Grounded = false
@@ -150,8 +129,8 @@ return function()
 		end)
 
 		it("refuses with no buffered jump", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("WallLaunchingSpecCharacter", Vector3.new(0, 50, 0), Vector3.new(0, 50, -1))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 			InputBuffer.Clear()
 			local allowed, reason = canEnter(makeContext(nextNow()))
 			expect(allowed).to.equal(false)
@@ -163,8 +142,8 @@ return function()
 			-- ParkourConstants.CombatGate.BlockedStates has no "WallLaunching" entry, matching
 			-- States/Jumping.lua's own precedent (that file does not call StateSupport.CombatBlocks
 			-- either). This is the record of that being a decision, not an omission.
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("WallLaunchingSpecCharacter", Vector3.new(0, 50, 0), Vector3.new(0, 50, -1))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 			local now = nextNow()
 			local context = makeContext(now)
 			context.InCombat = true
@@ -177,19 +156,19 @@ return function()
 
 	describe("WallLaunching.Enter", function()
 		it("launches up and backward, and opens the dash-chain boost window", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("WallLaunchingSpecCharacter", Vector3.new(0, 50, 0), Vector3.new(0, 50, -1))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local context = makeContext(3000)
-			context.RootPart = rig.RootPart
+			context.RootPart = rig.Root
 			InputBuffer.PressJump(3000)
 
 			wallLaunchingEnter(context)
 
-			expect(rig.RootPart.AssemblyLinearVelocity.Y).to.equal(WALL_LAUNCH.VerticalVelocity)
+			expect(rig.Root.AssemblyLinearVelocity.Y).to.equal(WALL_LAUNCH.VerticalVelocity)
 			-- Facing -Z (see makeRig), so away-from-the-wall is +Z.
-			expect(rig.RootPart.AssemblyLinearVelocity.Z > 0).to.equal(true)
-			expect(rig.RootPart.AssemblyLinearVelocity.Magnitude).to.equal(
+			expect(rig.Root.AssemblyLinearVelocity.Z > 0).to.equal(true)
+			expect(rig.Root.AssemblyLinearVelocity.Magnitude).to.equal(
 				Vector3.new(0, WALL_LAUNCH.VerticalVelocity, WALL_LAUNCH.BackwardSpeed).Magnitude
 			)
 			expect(context.WallLaunchDashBoostUntil).to.equal(3000 + WALL_LAUNCH.DashBoostWindowSeconds)
@@ -199,11 +178,11 @@ return function()
 		end)
 
 		it("cancels a stale fall's landing cost, same courtesy every launch in this framework performs", function()
-			local rig = makeRig()
-			ParkourMotor.BindCharacter(rig.Character, rig.Humanoid, rig.RootPart)
+			local rig = Rig.Character("WallLaunchingSpecCharacter", Vector3.new(0, 50, 0), Vector3.new(0, 50, -1))
+			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local context = makeContext(3100)
-			context.RootPart = rig.RootPart
+			context.RootPart = rig.Root
 			context.LandingSeverity = "Hard"
 			context.FallHeight = 40
 			InputBuffer.PressJump(3100)
