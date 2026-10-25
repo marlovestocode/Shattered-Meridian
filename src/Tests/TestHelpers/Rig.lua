@@ -152,12 +152,16 @@ function Rig.Character(name: string, position: Vector3?, lookAt: Vector3?): Body
 	return { Model = model, Root = root, Humanoid = humanoid }
 end
 
-function Rig.R6(name: string): Body
+-- Placed at position (facing lookAt) when given one; left where the description puts it otherwise.
+function Rig.R6(name: string, position: Vector3?, lookAt: Vector3?, anchored: boolean?): Body
 	local model =
 		Players:CreateHumanoidModelFromDescription(Instance.new("HumanoidDescription"), Enum.HumanoidRigType.R6)
 	model.Name = name
+	if position then
+		model:PivotTo(if lookAt then CFrame.lookAt(position, lookAt) else CFrame.new(position))
+	end
 	local root = model.PrimaryPart :: BasePart
-	root.Anchored = true
+	root.Anchored = anchored ~= false
 	model.Parent = Workspace
 	Rig.Track(model)
 	return { Model = model, Root = root, Humanoid = model:FindFirstChildOfClass("Humanoid") :: Humanoid }

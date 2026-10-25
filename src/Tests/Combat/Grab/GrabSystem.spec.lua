@@ -14,8 +14,6 @@
 -- reasoning applied one layer down.
 
 local CollectionService = game:GetService("CollectionService")
-local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
@@ -32,6 +30,8 @@ local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegist
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
 local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
+local CombatHarness = require(ServerScriptService.Tests.TestHelpers.CombatHarness)
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 -- A real roster weapon, because the ids below have to RESOLVE through AttackCatalog -- weapons are
 -- models in Workspace.Weapons now (Shared/Combat/WeaponRoster.lua), so a spec that installs none gets
@@ -59,42 +59,12 @@ local GRAB_CONFIG: MoveTypes.MoveGrabConfig = {
 	ThrowSelfDamage = 5,
 }
 
-type Dummy = {
-	Model: Model,
-	Root: BasePart,
-	Humanoid: Humanoid,
-	Id: number,
-}
-
-local spawned: { Model } = {}
+type Dummy = CombatHarness.Dummy
 
 -- Anchored by default so a rig with no floor under it stays put. A would-be grab VICTIM must be built
 -- unanchored (`anchored = false`): GrabSystem refuses to weld a grounded body into an attacker's
 -- assembly, since that would pin the attacker rather than lift the victim.
-local function makeDummy(name: string, position: Vector3, lookAt: Vector3?, anchored: boolean?): Dummy
-	local model = Instance.new("Model")
-	model.Name = name
-
-	local root = Instance.new("Part")
-	root.Name = "HumanoidRootPart"
-	root.Size = Vector3.new(2, 2, 1)
-	root.Anchored = anchored ~= false
-	root.CanCollide = false
-	root.CFrame = if lookAt then CFrame.lookAt(position, lookAt) else CFrame.new(position)
-	root.Parent = model
-
-	local humanoid = Instance.new("Humanoid")
-	humanoid.RequiresNeck = false
-	humanoid.Parent = model
-
-	model.PrimaryPart = root
-	model.Parent = Workspace
-	table.insert(spawned, model)
-
-	local id = HitboxEngine.RegisterCombatant(model, root, humanoid)
-	DefenseSystem.RegisterCombatant(model, root, humanoid, PARRY_ANIMATION)
-	return { Model = model, Root = root, Humanoid = humanoid, Id = id }
-end
+local spawnDummy = CombatHarness.Spawner({ ParryAnimation = PARRY_ANIMATION })
 
 -- Same "spec's own big, long-lived, easy-to-land geometry against a real MoveId" split
 -- DamageSystem.spec's makeDefinition uses, for the identical reason: the engine runs whatever volume
@@ -135,8 +105,8 @@ end
 -- A Clean hit against two dummies facing each other, with the Grab-carrying move already live.
 local function throwGrabHit(base: number, config: MoveTypes.MoveGrabConfig?): (Dummy, Dummy)
 	overrideMoveWithGrab(config)
-	local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-	local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
+	local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+	local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
 	HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
 	step(FRAME, base + FRAME)
 	return attacker, defender
@@ -149,20 +119,7 @@ end
 -- A real R6 body (Torso, arms, head, Motor6Ds) for the cases that are about the rig rather than the
 -- state machine -- the bare root-only dummies above deliberately exercise GrabRig's fallback instead.
 -- Anchored root for the holder only, so neither falls while a case runs; the victim must be unanchored.
-local function makeR6(name: string, position: Vector3, lookAt: Vector3, anchored: boolean): Dummy
-	local model =
-		Players:CreateHumanoidModelFromDescription(Instance.new("HumanoidDescription"), Enum.HumanoidRigType.R6)
-	model.Name = name
-	model:PivotTo(CFrame.lookAt(position, lookAt))
-	local root = model.PrimaryPart :: BasePart
-	root.Anchored = anchored
-	local humanoid = model:FindFirstChildOfClass("Humanoid") :: Humanoid
-	model.Parent = Workspace
-	table.insert(spawned, model)
-	local id = HitboxEngine.RegisterCombatant(model, root, humanoid)
-	DefenseSystem.RegisterCombatant(model, root, humanoid, PARRY_ANIMATION)
-	return { Model = model, Root = root, Humanoid = humanoid, Id = id }
-end
+local spawnR6 = CombatHarness.Spawner({ ParryAnimation = PARRY_ANIMATION, R6 = true })
 
 return function()
 	beforeEach(function()
@@ -173,16 +130,9 @@ return function()
 	end)
 
 	afterEach(function()
-		GrabSystem.Reset()
-		DamageSystem.Reset()
-		DefenseSystem.Reset()
-		HitboxEngine.Reset()
-		ParryWindows.Reset()
+		CombatHarness.Reset()
 		MoveRegistryManager.Init()
-		for _, model in spawned do
-			model:Destroy()
-		end
-		table.clear(spawned)
+		Rig.DestroyAll()
 	end)
 
 	describe("GrabSystem -- beginning a hold", function()
@@ -207,8 +157,8 @@ return function()
 			-- No overrideMoveWithGrab call -- the shipped Default move's own Grab is nil, so this is
 			-- the ordinary case every ordinary Basic hit already goes through.
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
 			step(FRAME, base + FRAME)
@@ -220,7 +170,7 @@ return function()
 		it("does not begin a second hold for an attacker who is already holding someone", function()
 			local base = os.clock()
 			local attacker, firstVictim = throwGrabHit(base)
-			local secondVictim = makeDummy("SecondDefender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
+			local secondVictim = spawnDummy("SecondDefender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
 
 			-- The same attacker lands a second Grab-carrying hit while still holding the first victim.
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
@@ -252,8 +202,8 @@ return function()
 		it("welds a real rig's torso to the holder's HAND, with the hand pointed along the mode's arm", function()
 			overrideMoveWithGrab()
 			local base = os.clock()
-			local attacker = makeR6("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
-			local defender = makeR6("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
+			local attacker = spawnR6("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
+			local defender = spawnR6("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
 			local shoulder = (attacker.Model:FindFirstChild("Torso") :: BasePart):FindFirstChild(
 					"Right Shoulder"
 				) :: Motor6D
@@ -353,8 +303,8 @@ return function()
 		it("never grabs a victim that is anchored", function()
 			overrideMoveWithGrab()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
 			step(FRAME, base + FRAME)
@@ -402,7 +352,7 @@ return function()
 		it("leaves an uninvolved third party free to attack", function()
 			local base = os.clock()
 			throwGrabHit(base)
-			local bystander = makeDummy("Bystander", Vector3.new(20, 5, 0), Vector3.new(20, 5, -4))
+			local bystander = spawnDummy("Bystander", Vector3.new(20, 5, 0), Vector3.new(20, 5, -4))
 
 			expect(GrabSystem.CanAttack(bystander.Model, base + FRAME)).to.equal(true)
 		end)
@@ -473,7 +423,7 @@ return function()
 			-- does not simulate physics, so it may still be at its own spawn or already on its mark --
 			-- and a clear stud outside makeDefinition's still-active 4-wide box, so the attacker's own
 			-- swing cannot land on it first.
-			local bystander = makeDummy("Bystander", Vector3.new(4, 5, -2), Vector3.new(0, 5, -2))
+			local bystander = spawnDummy("Bystander", Vector3.new(4, 5, -2), Vector3.new(0, 5, -2))
 			local healthBefore = bystander.Humanoid.Health
 
 			GrabSystem.Throw(attacker.Model, base + 2 * FRAME)
@@ -506,7 +456,7 @@ return function()
 
 		it("refuses a Throw from a combatant who is not holding anyone", function()
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
 
 			local accepted, reason = GrabSystem.Throw(attacker.Model, base)
 
@@ -525,8 +475,8 @@ return function()
 
 		local function throwGrabHitR6(base: number): (Dummy, Dummy)
 			overrideMoveWithGrab(THROW_CONFIG)
-			local attacker = makeR6("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
-			local defender = makeR6("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
+			local attacker = spawnR6("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
+			local defender = spawnR6("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
 			step(FRAME, base + FRAME)
 			return attacker, defender
@@ -559,8 +509,8 @@ return function()
 		it("hands the holder's arm to the clip but keeps the victim's hold pose", function()
 			overrideMoveWithGrab(THROW_CONFIG)
 			local base = os.clock()
-			local attacker = makeR6("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
-			local defender = makeR6("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
+			local attacker = spawnR6("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
+			local defender = spawnR6("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
 			local shoulder = (attacker.Model:FindFirstChild("Torso") :: BasePart):FindFirstChild(
 					"Right Shoulder"
 				) :: Motor6D
@@ -607,8 +557,8 @@ return function()
 			config.VictimThrowAnimation = "rbxassetid://2"
 			overrideMoveWithGrab(config)
 			local base = os.clock()
-			local attacker = makeR6("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
-			local defender = makeR6("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
+			local attacker = spawnR6("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
+			local defender = spawnR6("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
 			step(FRAME, base + FRAME)
 			-- No held clip authored, so the client pose owns the victim's hands during the hold.

@@ -71,6 +71,8 @@ export type Layers = {
 	Weapon: string?,
 	-- DomainSystem.TrackCombatantForTesting. Default false.
 	Domain: boolean?,
+	-- Build a real R6 rig (Rig.R6) instead of the bare Dummy. Default false.
+	R6: boolean?,
 }
 
 -- One reset per CombatTick phase. Keyed by phase NAME so PHASES order, not this table's, decides the order.
@@ -130,7 +132,9 @@ end
 -- every spec's private makeDummy used.
 function CombatHarness.Spawner(layers: Layers?): (string, Vector3?, Vector3?, boolean?) -> Dummy
 	return function(name: string, position: Vector3?, lookAt: Vector3?, anchored: boolean?): Dummy
-		local body = Rig.Dummy(name, position, lookAt, if anchored == nil then nil else { Anchored = anchored })
+		local body = if layers and layers.R6
+			then Rig.R6(name, position, lookAt, anchored)
+			else Rig.Dummy(name, position, lookAt, if anchored == nil then nil else { Anchored = anchored })
 		local id = CombatHarness.Combatant(body, layers)
 		return { Model = body.Model, Root = body.Root, Humanoid = body.Humanoid, Id = id }
 	end
