@@ -309,6 +309,8 @@ local function describeFinalizeFailure(reason: string?): (string, Stage?)
 		return "Your name isn't valid -- go back and try a different one.", "NameEntry"
 	elseif reason == "Denylisted" then
 		return "That name isn't allowed -- please choose another.", "NameEntry"
+	elseif reason == "NameFiltered" then
+		return "That name was censored by Roblox's filter -- please choose another.", "NameEntry"
 	elseif reason == "FilterFailed" then
 		return "Couldn't process your name -- please try again.", nil
 	elseif reason == "AlreadyOnboarded" then

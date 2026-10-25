@@ -51,13 +51,19 @@
 	comment for this System.
 
 	Failure-handling contract (non-negotiable, per this feature's own design review):
+	  - Everything that can fail WITHOUT touching the profile is resolved BEFORE the Transform: the live
+	    character and the race's arrival CFrame. A failure there leaves the profile un-onboarded, so the
+	    player's retry is still legitimate (a failure after the commit used to return AlreadyOnboarded on
+	    every retry and strand them frozen in the Threshold for the session).
 	  - Transform must succeed before any teleport is attempted. A Transform failure returns
 	    Success = false immediately -- no teleport, no isolation change, so a rare Transform failure
 	    can never silently strand a player half-onboarded (raceId written but never actually
 	    moved/unfrozen).
-	  - Once Transform succeeds, the real-spawn Workspace lookup (keyed by the validated raceId)
+	  - The real-spawn Workspace lookup (keyed by the validated raceId)
 	    retries via WaitForChild, then falls back to any SpawnLocation already in the game rather than
 	    ever returning Success = true without completing SOME teleport out of the Threshold.
+	  - A display name the text filter changes is refused (NameFiltered), never saved: the filtered form is
+	    "####", there is no rename path, and the name would be permanent.
 	  - Success = true is never returned while the player is still physically stuck in the Threshold.
 	  - Isolation is never cleared by Finalize itself anymore -- only by a validated
 	    CharacterCreation_AwakeningComplete, so Success = true no longer implies "no longer isolated."
@@ -364,6 +370,20 @@ local function resolveArrivalCFrame(raceId: Types.RaceId): CFrame?
 	return nil
 end
 
+-- Points the player's future respawns at their race's arrival SpawnLocation. Only assigned if the arrival
+-- instance is itself a SpawnLocation; otherwise cleared to nil so Roblox's own default spawn-selection takes
+-- over, rather than leaving a stale Threshold RespawnLocation in place. The one lookup behind both Finalize
+-- (a player who just chose a race) and a returning player's first spawn of the session: RespawnLocation is a
+-- per-session property, so without the second a returning player respawns wherever the engine picks.
+local function pointRespawnAtArrival(player: Player, raceId: Types.RaceId): ()
+	local arrivalNamed = resolveNamedInstance(CharacterCreationSystem.ResolveArrivalSpawnPath(raceId))
+	if arrivalNamed and arrivalNamed:IsA("SpawnLocation") then
+		player.RespawnLocation = arrivalNamed :: SpawnLocation
+	else
+		player.RespawnLocation = nil :: any
+	end
+end
+
 -- CharacterCreation_GetOnboardingState handler -- see this file's header for the full contract. Also
 -- this SESSION's first Player:LoadCharacter() call for every player (onboarding or not), since
 -- Players.CharacterAutoLoads = false (default.project.json) means nothing else in this codebase spawns anyone.
@@ -412,6 +432,7 @@ local function handleGetOnboardingState(player: Player): Types.CharacterCreation
 		AdminActionSystem.SetInvisible(player, true)
 		logger:info("First-time player spawned into onboarding", { player = player.Name })
 	else
+		pointRespawnAtArrival(player, profile.raceId :: Types.RaceId)
 		player:LoadCharacterAsync()
 		logger:info("Returning player spawned", { player = player.Name })
 	end
@@ -421,8 +442,8 @@ end
 
 -- CharacterCreation_Finalize handler -- see this file's header for the non-negotiable
 -- failure-handling contract. Order: re-check onboarding is still legitimate -> validate every field
--- server-side regardless of client checks -> filter the display name -> ONE atomic Transform ->
--- resolve the race-keyed arrival spawn -> PivotTo -> grant awaitingAwakeningPlayers (isolation stays
+-- server-side regardless of client checks -> filter the display name (refuse if it changed) -> resolve the
+-- character and the race-keyed arrival spawn -> ONE atomic Transform -> PivotTo -> grant awaitingAwakeningPlayers (isolation stays
 -- on) -> only then Success = true.
 local function handleFinalize(player: Player, payload: unknown): Types.CharacterCreationFinalizeResult
 	logger:debug("Finalize received", { player = player.Name, userId = player.UserId })
@@ -491,6 +512,36 @@ local function handleFinalize(player: Player, payload: unknown): Types.Character
 		return finishFinalize({ Success = false, Reason = "FilterFailed" })
 	end
 	local finalDisplayName = filteredOrError :: string
+	if finalDisplayName ~= validatedName then
+		-- Saved as-is, a censored name ("########") would be the player's name for the life of the account.
+		logger:info("Finalize rejected: display name was altered by the text filter", { player = player.Name })
+		return finishFinalize({ Success = false, Reason = "NameFiltered" })
+	end
+
+	-- Both of these can fail, and neither depends on the profile write, so they come first: a failure leaves
+	-- the profile un-onboarded and Finalize retryable (this file's header). No yield sits between here and
+	-- the PivotTo below, so the character checked now is the one moved.
+	local character = player.Character
+	if not character then
+		logger:error("Finalize: player has no live character to teleport -- nothing committed", {
+			player = player.Name,
+		})
+		return finishFinalize({ Success = false, Reason = "NoCharacter" })
+	end
+
+	local arrivalCFrame = resolveArrivalCFrame(raceId)
+	if not arrivalCFrame then
+		-- A genuine map-configuration problem, not a per-player failure. Honestly reports Success = false
+		-- rather than claiming a teleport that didn't happen, and commits nothing.
+		logger:error(
+			"Finalize: no arrival spawn available anywhere -- nothing committed, player stays in the Threshold",
+			{
+				player = player.Name,
+				raceId = raceId,
+			}
+		)
+		return finishFinalize({ Success = false, Reason = "NoSpawnAvailable" })
+	end
 
 	local transformed = PlayerDataSystem.Transform(player, function(mutableProfile)
 		mutableProfile.raceId = raceId
@@ -506,27 +557,6 @@ local function handleFinalize(player: Player, payload: unknown): Types.Character
 		return finishFinalize({ Success = false, Reason = "TransformFailed" })
 	end
 
-	local character = player.Character
-	if not character then
-		logger:error("Finalize: Transform succeeded but player has no live character to teleport", {
-			player = player.Name,
-		})
-		return finishFinalize({ Success = false, Reason = "NoCharacter" })
-	end
-
-	local arrivalCFrame = resolveArrivalCFrame(raceId)
-	if not arrivalCFrame then
-		-- Transform already succeeded -- the player IS onboarded on their next join even if this
-		-- particular teleport can't complete right now (a genuine map-configuration problem, not a
-		-- per-player failure). Still honestly reports Success = false rather than claiming a teleport
-		-- that didn't happen, per this file's header.
-		logger:error("Finalize: no arrival spawn available anywhere -- player stays in the Threshold", {
-			player = player.Name,
-			raceId = raceId,
-		})
-		return finishFinalize({ Success = false, Reason = "NoSpawnAvailable" })
-	end
-
 	character:PivotTo(arrivalCFrame)
 
 	-- Isolation (Frozen + Godmode + Invisible) deliberately stays ON here -- per this file's header,
@@ -538,15 +568,8 @@ local function handleFinalize(player: Player, payload: unknown): Types.Character
 
 	-- Points future natural respawns (death in normal gameplay) at the real world instead of back into
 	-- the Threshold -- player.RespawnLocation was pointed at the Threshold's own SpawnLocation earlier
-	-- this session (handleGetOnboardingState). Only reassigned if the arrival instance is itself a
-	-- SpawnLocation; otherwise cleared to nil so Roblox's own default spawn-selection takes over,
-	-- rather than leaving the stale Threshold RespawnLocation in place.
-	local arrivalNamed = resolveNamedInstance(CharacterCreationSystem.ResolveArrivalSpawnPath(raceId))
-	if arrivalNamed and arrivalNamed:IsA("SpawnLocation") then
-		player.RespawnLocation = arrivalNamed :: SpawnLocation
-	else
-		player.RespawnLocation = nil :: any
-	end
+	-- this session (handleGetOnboardingState).
+	pointRespawnAtArrival(player, raceId)
 
 	logger:info("Finalize accepted -- player onboarded, isolation held through the awakening beat", {
 		player = player.Name,

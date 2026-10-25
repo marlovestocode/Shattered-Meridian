@@ -1348,7 +1348,7 @@ export type CharacterCreationFinalizePayload = {
 }
 
 -- Result of CharacterCreation_Finalize. Reason is populated only when Success is false (e.g.
--- "InvalidRaceId", "AttributeBudgetInvalid", "InvalidDisplayName", "TransformFailed") -- see
+-- "InvalidRaceId", "AttributeBudgetInvalid", "InvalidDisplayName", "NameFiltered", "TransformFailed") -- see
 -- CharacterCreationSystem.lua's handleFinalize for the full set. The client's Confirmation screen
 -- loops/retries on Success = false rather than stranding the player (OnboardingClient.lua), the same
 -- reject-and-retry UX BugReportClient.lua already establishes for BugReport_Submit.
