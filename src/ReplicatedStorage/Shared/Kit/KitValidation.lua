@@ -17,6 +17,11 @@
 	in-range numeric field clamps instead -- the identical "hard-reject on structure, clamp on
 	numbers" split MoveRegistryManager.Validate already establishes for moves.
 
+	BUILT ON Shared/Schema (2026-10-25, W4): the ability and each modifier spec are declared as Record shapes, in the
+	same field order the hand-written checks ran in, each field carrying the stable error code its callers switch on
+	(`InvalidAbilityId`, `InvalidEffectKind`, ...). The answers are unchanged; the old validators are frozen in
+	Tests/Fixtures/KitValidationLegacy.lua and Tests/Kit/KitValidatorsEquivalence.spec.lua runs both over one corpus.
+
 	Does not own: which content type (Race trait, Bloodline stage) an ability belongs to, or any
 	identity field outside the ability itself (TraitId, BloodlineId, RaceId, RequiredTier, StageIndex
 	-- each owned by its own Manager's own Validate).
@@ -28,26 +33,17 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local KitTypes = require(ReplicatedStorage.Shared.Kit.KitTypes)
 local Sanitize = require(ReplicatedStorage.Shared.Sanitize)
+local Schema = require(ReplicatedStorage.Shared.Schema)
 
 local KitValidation = {}
 
 local KitLimits = Constants.Kit.Limits
-
-local ABILITY_KINDS: { [string]: boolean } = { Passive = true, Active = true }
-local MODIFIER_KINDS: { [string]: boolean } = { AttributeDelta = true, Tag = true, QiRestore = true }
-local MODIFIER_LIFETIMES: { [string]: boolean } = { Instant = true, Timed = true, Bound = true }
-local ATTRIBUTE_KEYS: { [string]: boolean } =
-	{ Vitality = true, Fortitude = true, MeridianFlow = true, Might = true, Pressure = true, Fleetness = true }
 
 -- Long enough for a real ability name/description, short enough that a pasted essay can't bloat a
 -- future DataStore record -- same reasoning MoveRegistryManager's own MAX_DESCRIPTION_LENGTH gives.
 local MAX_NAME_LENGTH = 64
 local MAX_DESCRIPTION_LENGTH = 400
 local MAX_TAG_LENGTH = 64
-
-local function isNonEmptyString(value: unknown): boolean
-	return typeof(value) == "string" and (value :: string) ~= ""
-end
 
 -- Re-exported rather than reimplemented: Shared/Sanitize.lua owns both primitives now (see its own
 -- header on why the NaN branch is what earned them a module). Kept as KitValidation members because
@@ -56,79 +52,82 @@ end
 KitValidation.ClampedNumber = Sanitize.ClampNumber
 KitValidation.BoundedString = Sanitize.BoundedString
 
+-- Each field fails with the STABLE CODE its callers (KitEditorSystem's replies, the specs) switch on, so every field
+-- shape is wrapped in WithReason; the declared order is the order the first refusal is found in.
+local function field(code: string, shape: Schema.Shape<any>): Schema.Shape<any>
+	return Schema.WithReason(code, shape)
+end
+
+local function limited(limit: { Min: number, Max: number }): Schema.Shape<number>
+	return Schema.Number(limit.Min, limit.Max)
+end
+
+-- A modifier spec is `{ Kind, Lifetime }` plus the fields its Kind needs plus, for a Timed lifetime, a duration. Which
+-- OTHER fields are required is determined by Kind, matching Types.ActiveModifierSpec's own "only the fields meaningful
+-- for the chosen Kind are populated" contract -- a spec missing the field its own Kind needs is a structural error, not
+-- a numeric one, so it rejects rather than silently clamping into something else.
+local MODIFIER_BASE = Schema.CodedRecord("InvalidEffect", {
+	{ "Kind", field("InvalidEffectKind", Schema.Enum({ "AttributeDelta", "Tag", "QiRestore" })) },
+	{ "Lifetime", field("InvalidEffectLifetime", Schema.Enum({ "Instant", "Timed", "Bound" })) },
+})
+
+local MODIFIER_BY_KIND: { [string]: Schema.Shape<{ [string]: any }> } = {
+	AttributeDelta = Schema.CodedRecord("InvalidEffect", {
+		{
+			"AttributeKey",
+			field(
+				"InvalidEffectAttributeKey",
+				Schema.Enum({ "Vitality", "Fortitude", "MeridianFlow", "Might", "Pressure", "Fleetness" })
+			),
+		},
+		{ "Delta", field("InvalidEffectDelta", limited(KitLimits.Delta)) },
+	}),
+	Tag = Schema.CodedRecord("InvalidEffect", {
+		{ "Tag", field("InvalidEffectTag", Schema.NonEmptyString(MAX_TAG_LENGTH)) },
+		{ "Magnitude", field("InvalidEffectMagnitude", limited(KitLimits.Magnitude)) },
+	}),
+	QiRestore = Schema.CodedRecord("InvalidEffect", {
+		{ "QiRestoreAmount", field("InvalidEffectQiRestoreAmount", limited(KitLimits.QiRestoreAmount)) },
+	}),
+}
+
+local MODIFIER_TIMED = Schema.CodedRecord("InvalidEffect", {
+	{ "DurationSeconds", field("InvalidEffectDuration", limited(KitLimits.DurationSeconds)) },
+})
+
 -- Validates+clamps one Types.ActiveModifierSpec. Kind/Lifetime must be one of the closed sets above
--- (hard reject); which OTHER fields are required is determined by Kind, matching
--- Types.ActiveModifierSpec's own "only the fields meaningful for the chosen Kind are populated"
--- contract -- a spec missing the field its own Kind needs is a structural error, not a numeric one,
--- so it rejects rather than silently clamping into something else.
+-- (hard reject).
 function KitValidation.ValidateModifierSpec(raw: unknown): (Types.ActiveModifierSpec?, string?)
-	if typeof(raw) ~= "table" then
+	if not Schema.IsTable(raw) then
 		return nil, "InvalidEffect"
 	end
-	local candidate = raw :: { [string]: unknown }
-
-	if typeof(candidate.Kind) ~= "string" or not MODIFIER_KINDS[candidate.Kind :: string] then
-		return nil, "InvalidEffectKind"
+	local base, baseReason = Schema.Decode(MODIFIER_BASE, raw)
+	if base == nil then
+		return nil, baseReason
 	end
-	local kind = candidate.Kind :: Types.ActiveModifierKind
+	local spec: { [string]: any } = base
 
-	if typeof(candidate.Lifetime) ~= "string" or not MODIFIER_LIFETIMES[candidate.Lifetime :: string] then
-		return nil, "InvalidEffectLifetime"
+	local byKind, kindReason = Schema.Decode(MODIFIER_BY_KIND[spec.Kind], raw)
+	if byKind == nil then
+		return nil, kindReason
 	end
-	local lifetime = candidate.Lifetime :: Types.ActiveModifierLifetime
-
-	local spec: Types.ActiveModifierSpec = { Kind = kind, Lifetime = lifetime }
-
-	if kind == "AttributeDelta" then
-		if typeof(candidate.AttributeKey) ~= "string" or not ATTRIBUTE_KEYS[candidate.AttributeKey :: string] then
-			return nil, "InvalidEffectAttributeKey"
-		end
-		local delta = KitValidation.ClampedNumber(candidate.Delta, KitLimits.Delta.Min, KitLimits.Delta.Max)
-		if delta == nil then
-			return nil, "InvalidEffectDelta"
-		end
-		spec.AttributeKey = candidate.AttributeKey :: Types.ActiveModifierAttributeKey
-		spec.Delta = delta
-	elseif kind == "Tag" then
-		if not isNonEmptyString(candidate.Tag) then
-			return nil, "InvalidEffectTag"
-		end
-		local magnitude =
-			KitValidation.ClampedNumber(candidate.Magnitude, KitLimits.Magnitude.Min, KitLimits.Magnitude.Max)
-		if magnitude == nil then
-			return nil, "InvalidEffectMagnitude"
-		end
-		spec.Tag = KitValidation.BoundedString(candidate.Tag, MAX_TAG_LENGTH)
-		spec.Magnitude = magnitude
-	elseif kind == "QiRestore" then
-		local amount = KitValidation.ClampedNumber(
-			candidate.QiRestoreAmount,
-			KitLimits.QiRestoreAmount.Min,
-			KitLimits.QiRestoreAmount.Max
-		)
-		if amount == nil then
-			return nil, "InvalidEffectQiRestoreAmount"
-		end
-		spec.QiRestoreAmount = amount
+	for key, value in byKind do
+		spec[key] = value
 	end
 
-	if lifetime == "Timed" then
-		local duration = KitValidation.ClampedNumber(
-			candidate.DurationSeconds,
-			KitLimits.DurationSeconds.Min,
-			KitLimits.DurationSeconds.Max
-		)
-		if duration == nil then
-			return nil, "InvalidEffectDuration"
+	if spec.Lifetime == "Timed" then
+		local timed, timedReason = Schema.Decode(MODIFIER_TIMED, raw)
+		if timed == nil then
+			return nil, timedReason
 		end
-		spec.DurationSeconds = duration
+		spec.DurationSeconds = timed.DurationSeconds
 	end
 
-	return spec, nil
+	return spec :: Types.ActiveModifierSpec, nil
 end
 
 function KitValidation.ValidateEffects(raw: unknown): ({ Types.ActiveModifierSpec }?, string?)
-	if typeof(raw) ~= "table" then
+	if not Schema.IsTable(raw) then
 		return nil, "InvalidEffects"
 	end
 	local effects: { Types.ActiveModifierSpec } = {}
@@ -142,49 +141,39 @@ function KitValidation.ValidateEffects(raw: unknown): ({ Types.ActiveModifierSpe
 	return effects, nil
 end
 
--- Validates+clamps one KitTypes.KitAbilityDefinition. CooldownSeconds/QiCost are validated and
--- clamped regardless of Kind -- see KitAbilityDefinition's own header on why a Passive entry is not
--- required to author them as 0; the owning System (RaceSystem/BloodlineSystem) simply ignores both at
--- use time for a Passive.
+-- A shape that defers to a validator with its own stable error codes.
+local EFFECTS = Schema.Custom(function(raw: unknown)
+	local effects, err = KitValidation.ValidateEffects(raw)
+	if err then
+		return nil, Schema.Failure(err)
+	end
+	return effects, nil
+end)
+
+-- CooldownSeconds/QiCost are validated and clamped regardless of Kind -- see KitAbilityDefinition's own header on why a
+-- Passive entry is not required to author them as 0; the owning System (RaceSystem/BloodlineSystem) simply ignores both
+-- at use time for a Passive. Either cost failing is the one code, InvalidAbilityCost.
+local ABILITY = Schema.CodedRecord("InvalidAbility", {
+	{ "Id", field("InvalidAbilityId", Schema.NonEmptyString()) },
+	{ "DisplayName", field("InvalidAbilityDisplayName", Schema.String(MAX_NAME_LENGTH)) },
+	{ "Kind", field("InvalidAbilityKind", Schema.Enum({ "Passive", "Active" })) },
+	{ "CooldownSeconds", field("InvalidAbilityCost", limited(KitLimits.CooldownSeconds)) },
+	{ "QiCost", field("InvalidAbilityCost", limited(KitLimits.QiCost)) },
+	{ "Effects", EFFECTS },
+	-- Last, because it cannot fail: a missing or non-string description is "" (the one NORMALISED field).
+	{ "Description", Schema.Default(Schema.String(MAX_DESCRIPTION_LENGTH), "") },
+})
+
+-- Validates+clamps one KitTypes.KitAbilityDefinition.
 function KitValidation.ValidateAbility(raw: unknown): (KitTypes.KitAbilityDefinition?, string?)
-	if typeof(raw) ~= "table" then
+	if not Schema.IsTable(raw) then
 		return nil, "InvalidAbility"
 	end
-	local candidate = raw :: { [string]: unknown }
-
-	if not isNonEmptyString(candidate.Id) then
-		return nil, "InvalidAbilityId"
+	local ability, reason = Schema.Decode(ABILITY, raw)
+	if ability == nil then
+		return nil, reason
 	end
-	if typeof(candidate.DisplayName) ~= "string" then
-		return nil, "InvalidAbilityDisplayName"
-	end
-	if typeof(candidate.Kind) ~= "string" or not ABILITY_KINDS[candidate.Kind :: string] then
-		return nil, "InvalidAbilityKind"
-	end
-	local cooldownSeconds = KitValidation.ClampedNumber(
-		candidate.CooldownSeconds,
-		KitLimits.CooldownSeconds.Min,
-		KitLimits.CooldownSeconds.Max
-	)
-	local qiCost = KitValidation.ClampedNumber(candidate.QiCost, KitLimits.QiCost.Min, KitLimits.QiCost.Max)
-	if cooldownSeconds == nil or qiCost == nil then
-		return nil, "InvalidAbilityCost"
-	end
-	local effects, effectsError = KitValidation.ValidateEffects(candidate.Effects)
-	if effectsError then
-		return nil, effectsError
-	end
-
-	return {
-		Id = candidate.Id :: string,
-		DisplayName = KitValidation.BoundedString(candidate.DisplayName, MAX_NAME_LENGTH),
-		Description = KitValidation.BoundedString(candidate.Description, MAX_DESCRIPTION_LENGTH),
-		Kind = candidate.Kind :: KitTypes.KitAbilityKind,
-		CooldownSeconds = cooldownSeconds,
-		QiCost = qiCost,
-		Effects = effects :: { Types.ActiveModifierSpec },
-	},
-		nil
+	return ability :: KitTypes.KitAbilityDefinition, nil
 end
 
 return KitValidation

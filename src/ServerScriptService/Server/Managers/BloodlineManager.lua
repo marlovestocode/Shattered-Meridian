@@ -49,8 +49,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local BloodlineTypes = require(ReplicatedStorage.Shared.Bloodline.BloodlineTypes)
-local KitTypes = require(ReplicatedStorage.Shared.Kit.KitTypes)
 local KitValidation = require(ReplicatedStorage.Shared.Kit.KitValidation)
+local Schema = require(ReplicatedStorage.Shared.Schema)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local logger = Logger.scope("BloodlineManager")
@@ -58,8 +58,6 @@ local logger = Logger.scope("BloodlineManager")
 local BloodlineManager = {}
 
 local KitLimits = Constants.Kit.Limits
-
-local RACE_IDS: { [string]: boolean } = { Human = true, Firmborn = true, Rivenkin = true, Hollowborn = true }
 
 -- Long enough for a real name/flavor paragraph, short enough that a pasted essay can't bloat a future
 -- DataStore record -- same reasoning MoveRegistryManager's own MAX_DESCRIPTION_LENGTH gives.
@@ -69,145 +67,108 @@ local MAX_CONDITION_KIND_LENGTH = 64
 
 local bloodlines: { [string]: BloodlineTypes.BloodlineDefinition } = {}
 
-local function isNonEmptyString(value: unknown): boolean
-	return typeof(value) == "string" and (value :: string) ~= ""
-end
-
 -- Open string Kind (BloodlineAwakeningCondition's own header) -- only its PRESENCE is validated here,
 -- never membership in a closed set, since a per-content trigger kind is a content decision, not a
 -- structural one. Params entries are individually filtered (string key, number value) rather than
 -- hard-rejecting the whole condition on one bad entry -- the same per-entry defensive posture
 -- PlayerDataSystem.DecodeProfile already takes for an open dict it can't fully validate the shape of.
-local function validateAwakeningCondition(raw: unknown): (BloodlineTypes.BloodlineAwakeningCondition?, string?)
-	if typeof(raw) ~= "table" then
-		return nil, "InvalidAwakeningCondition"
-	end
-	local candidate = raw :: { [string]: unknown }
-
-	if not isNonEmptyString(candidate.Kind) then
-		return nil, "InvalidAwakeningConditionKind"
-	end
-	local kind = KitValidation.BoundedString(candidate.Kind, MAX_CONDITION_KIND_LENGTH)
-
+-- (A NaN value is a number and is kept, as it always was; the consumers clamp.)
+--
+-- The whole of Validate is declared below as Schema shapes in the order the hand-written checks ran in, each field
+-- carrying the stable error code its callers (KitEditorSystem's replies, the specs) switch on.
+local PARAMS = Schema.Custom(function(raw: unknown)
 	local params: { [string]: number } = {}
-	if candidate.Params ~= nil then
-		if typeof(candidate.Params) ~= "table" then
-			return nil, "InvalidAwakeningConditionParams"
+	if raw == nil then
+		return params, nil
+	end
+	if not Schema.IsTable(raw) then
+		return nil, Schema.Failure("InvalidAwakeningConditionParams")
+	end
+	for key, value in pairs(raw :: { [string]: unknown }) do
+		if Schema.IsString(key) and Schema.IsNumber(value) then
+			params[key] = value :: number
 		end
-		for key, value in pairs(candidate.Params :: { [string]: unknown }) do
-			if typeof(key) == "string" and typeof(value) == "number" then
-				params[key] = value :: number
-			end
-		end
 	end
+	return params, nil
+end)
 
-	return { Kind = kind, Params = params }, nil
-end
+local AWAKENING_CONDITION = Schema.CodedRecord("InvalidAwakeningCondition", {
+	{ "Kind", Schema.WithReason("InvalidAwakeningConditionKind", Schema.NonEmptyString(MAX_CONDITION_KIND_LENGTH)) },
+	{ "Params", PARAMS },
+})
 
--- Validates+clamps one BloodlineStageDefinition. GrantedAbility is optional -- nil means a pure
--- stat-passive stage with no Active ability of its own (BloodlineStageDefinition's own header).
-local function validateStage(raw: unknown): (BloodlineTypes.BloodlineStageDefinition?, string?)
-	if typeof(raw) ~= "table" then
-		return nil, "InvalidStage"
+-- GrantedAbility is optional -- nil means a pure stat-passive stage with no Active ability of its own
+-- (BloodlineStageDefinition's own header).
+local GRANTED_ABILITY = Schema.Custom(function(raw: unknown)
+	if raw == nil then
+		return nil, nil
 	end
-	local candidate = raw :: { [string]: unknown }
+	local ability, err = KitValidation.ValidateAbility(raw)
+	if err then
+		return nil, Schema.Failure(err)
+	end
+	return ability, nil
+end)
 
-	local stageIndex =
-		KitValidation.ClampedNumber(candidate.StageIndex, KitLimits.StageIndex.Min, KitLimits.StageIndex.Max)
-	if stageIndex == nil then
-		return nil, "InvalidStageIndex"
+local PASSIVE_EFFECTS = Schema.Custom(function(raw: unknown)
+	local effects, err = KitValidation.ValidateEffects(raw)
+	if err then
+		return nil, Schema.Failure(err)
 	end
-	if typeof(candidate.DisplayName) ~= "string" then
-		return nil, "InvalidStageDisplayName"
-	end
-	local passiveEffects, effectsError = KitValidation.ValidateEffects(candidate.PassiveEffects)
-	if effectsError then
-		return nil, effectsError
-	end
+	return effects, nil
+end)
 
-	local grantedAbility: KitTypes.KitAbilityDefinition? = nil
-	if candidate.GrantedAbility ~= nil then
-		local ability, abilityError = KitValidation.ValidateAbility(candidate.GrantedAbility)
-		if abilityError then
-			return nil, abilityError
-		end
-		grantedAbility = ability
-	end
-
-	return {
-		StageIndex = math.floor(stageIndex),
-		DisplayName = KitValidation.BoundedString(candidate.DisplayName, MAX_NAME_LENGTH),
-		PassiveEffects = passiveEffects :: { Types.ActiveModifierSpec },
-		GrantedAbility = grantedAbility,
+local STAGE = Schema.CodedRecord("InvalidStage", {
+	{
+		"StageIndex",
+		Schema.WithReason("InvalidStageIndex", Schema.Number(KitLimits.StageIndex.Min, KitLimits.StageIndex.Max)),
 	},
-		nil
-end
+	{ "DisplayName", Schema.WithReason("InvalidStageDisplayName", Schema.String(MAX_NAME_LENGTH)) },
+	{ "PassiveEffects", PASSIVE_EFFECTS },
+	{ "GrantedAbility", GRANTED_ABILITY },
+})
 
-local function validateStages(raw: unknown): ({ BloodlineTypes.BloodlineStageDefinition }?, string?)
-	if typeof(raw) ~= "table" then
-		return nil, "InvalidStages"
+local STAGES = Schema.Custom(function(raw: unknown)
+	if not Schema.IsTable(raw) then
+		return nil, Schema.Failure("InvalidStages")
 	end
 	local stages: { BloodlineTypes.BloodlineStageDefinition } = {}
 	for _, rawStage in ipairs(raw :: { unknown }) do
-		local stage, err = validateStage(rawStage)
-		if err then
-			return nil, err
+		local stage, reason = Schema.Decode(STAGE, rawStage)
+		if stage == nil then
+			return nil, Schema.Failure(reason or "InvalidStage")
 		end
-		table.insert(stages, stage :: BloodlineTypes.BloodlineStageDefinition)
+		stage.StageIndex = math.floor(stage.StageIndex)
+		table.insert(stages, stage :: any)
 	end
 	return stages, nil
-end
+end)
+
+local BLOODLINE = Schema.CodedRecord("InvalidShape", {
+	{ "BloodlineId", Schema.WithReason("InvalidBloodlineId", Schema.NonEmptyString()) },
+	{ "DisplayName", Schema.WithReason("InvalidDisplayName", Schema.String(MAX_NAME_LENGTH)) },
+	{ "RarityTier", Schema.WithReason("InvalidRarityTier", Schema.String(MAX_NAME_LENGTH)) },
+	{ "FlavorText", Schema.WithReason("InvalidFlavorText", Schema.String(MAX_FLAVOR_LENGTH)) },
+	{
+		"NativeRaceId",
+		Schema.WithReason(
+			"InvalidNativeRaceId",
+			Schema.Optional(Schema.Enum({ "Human", "Firmborn", "Rivenkin", "Hollowborn" }))
+		),
+	},
+	{ "AwakeningCondition", AWAKENING_CONDITION },
+	{ "Stages", STAGES },
+})
 
 -- The one strict allow-list gate every BloodlineDefinition-shaped table passes through -- see this
 -- file's header. `candidate` is `unknown` deliberately, same reasoning as MoveRegistryManager.
 -- Validate/RaceManager.Validate.
 function BloodlineManager.Validate(candidate: unknown): (BloodlineTypes.BloodlineDefinition?, string?)
-	if typeof(candidate) ~= "table" then
-		return nil, "InvalidShape"
+	local bloodline, reason = Schema.Decode(BLOODLINE, candidate)
+	if bloodline == nil then
+		return nil, reason
 	end
-	local raw = candidate :: { [string]: unknown }
-
-	if not isNonEmptyString(raw.BloodlineId) then
-		return nil, "InvalidBloodlineId"
-	end
-	if typeof(raw.DisplayName) ~= "string" then
-		return nil, "InvalidDisplayName"
-	end
-	if typeof(raw.RarityTier) ~= "string" then
-		return nil, "InvalidRarityTier"
-	end
-	if typeof(raw.FlavorText) ~= "string" then
-		return nil, "InvalidFlavorText"
-	end
-
-	local nativeRaceId: Types.RaceId? = nil
-	if raw.NativeRaceId ~= nil then
-		if typeof(raw.NativeRaceId) ~= "string" or not RACE_IDS[raw.NativeRaceId :: string] then
-			return nil, "InvalidNativeRaceId"
-		end
-		nativeRaceId = raw.NativeRaceId :: Types.RaceId
-	end
-
-	local awakeningCondition, conditionError = validateAwakeningCondition(raw.AwakeningCondition)
-	if conditionError then
-		return nil, conditionError
-	end
-
-	local stages, stagesError = validateStages(raw.Stages)
-	if stagesError then
-		return nil, stagesError
-	end
-
-	return {
-		BloodlineId = raw.BloodlineId :: string,
-		DisplayName = KitValidation.BoundedString(raw.DisplayName, MAX_NAME_LENGTH),
-		RarityTier = KitValidation.BoundedString(raw.RarityTier, MAX_NAME_LENGTH),
-		FlavorText = KitValidation.BoundedString(raw.FlavorText, MAX_FLAVOR_LENGTH),
-		NativeRaceId = nativeRaceId,
-		AwakeningCondition = awakeningCondition :: BloodlineTypes.BloodlineAwakeningCondition,
-		Stages = stages :: { BloodlineTypes.BloodlineStageDefinition },
-	},
-		nil
+	return bloodline :: BloodlineTypes.BloodlineDefinition, nil
 end
 
 -- Deep-enough copy for a caller to freely mutate without corrupting the registry -- same "return a
