@@ -218,9 +218,6 @@ function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProf
 	local profile: Types.PlayerProfile = {
 		userId = userId,
 		faction = nil,
-		raceId = nil,
-		displayName = nil,
-		attributes = nil,
 		tier = Config.DefaultTier,
 		corruption = 0,
 		qiDeviationRisk = 0,
@@ -262,13 +259,6 @@ function PlayerDataSystem.CopyProfile(profile: Types.PlayerProfile): Types.Playe
 	local copy: Types.PlayerProfile = {
 		userId = profile.userId,
 		faction = profile.faction,
-		raceId = profile.raceId,
-		displayName = profile.displayName,
-		-- table.clone is nil-safe to call conditionally, not unconditionally -- attributes stays nil
-		-- for any player who hasn't been through chargen yet (Types.PlayerProfile's own contract:
-		-- displayName/attributes are both nil exactly when raceId is nil), and table.clone(nil) would
-		-- throw.
-		attributes = if profile.attributes then table.clone(profile.attributes) else nil,
 		tier = profile.tier,
 		corruption = profile.corruption,
 		qiDeviationRisk = profile.qiDeviationRisk,
@@ -663,9 +653,6 @@ function PlayerDataSystem.EncodeProfile(profile: Types.PlayerProfile): { [string
 	local encoded: { [string]: any } = {
 		userId = profile.userId,
 		faction = profile.faction,
-		raceId = profile.raceId,
-		displayName = profile.displayName,
-		attributes = profile.attributes,
 		tier = profile.tier,
 		corruption = profile.corruption,
 		qiDeviationRisk = profile.qiDeviationRisk,
@@ -697,41 +684,6 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 	end
 	local rawTable = raw :: { [string]: any }
 
-	-- AttributeBlock is a fixed six-field RECORD, not an open dict like bloodlineIds/artMastery above
-	-- -- there is no safe "partial" default for a stat block (a record missing e.g. Fleetness isn't a
-	-- meaningfully degraded-but-usable profile the way a bloodlineIds entry with one bad id is). Every
-	-- field is individually type-checked, but a single missing/wrong-typed field discards the WHOLE
-	-- unit back to nil rather than inventing a value for the missing one -- the same reasoning this
-	-- file's header already applies to raceId/displayName themselves (a malformed field degrades to a
-	-- safe default, it never fabricates plausible-looking data).
-	local attributes: Types.AttributeBlock? = nil
-	if typeof(rawTable.attributes) == "table" then
-		local rawAttributes = rawTable.attributes :: { [string]: any }
-		local vitality = rawAttributes.Vitality
-		local fortitude = rawAttributes.Fortitude
-		local meridianFlow = rawAttributes.MeridianFlow
-		local might = rawAttributes.Might
-		local pressure = rawAttributes.Pressure
-		local fleetness = rawAttributes.Fleetness
-		if
-			typeof(vitality) == "number"
-			and typeof(fortitude) == "number"
-			and typeof(meridianFlow) == "number"
-			and typeof(might) == "number"
-			and typeof(pressure) == "number"
-			and typeof(fleetness) == "number"
-		then
-			attributes = {
-				Vitality = vitality,
-				Fortitude = fortitude,
-				MeridianFlow = meridianFlow,
-				Might = might,
-				Pressure = pressure,
-				Fleetness = fleetness,
-			}
-		end
-	end
-
 	-- inventory -- InventoryModel.Decode is the whole defensive posture (counts floored and clamped, junk
 	-- keys dropped, Order rebuilt). It does NOT consult the item catalog: an id the catalog no longer
 	-- knows is an orphan and is kept, because deleting a player's data over a content rename cannot be
@@ -742,9 +694,6 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 	local decoded: Types.PlayerProfile = {
 		userId = if typeof(rawTable.userId) == "number" then rawTable.userId else fallbackUserId,
 		faction = if typeof(rawTable.faction) == "string" then rawTable.faction :: Types.Faction else nil,
-		raceId = if typeof(rawTable.raceId) == "string" then rawTable.raceId :: Types.RaceId else nil,
-		displayName = if typeof(rawTable.displayName) == "string" then rawTable.displayName :: string else nil,
-		attributes = attributes,
 		tier = if typeof(rawTable.tier) == "number" then rawTable.tier else Config.DefaultTier,
 		corruption = if typeof(rawTable.corruption) == "number" then rawTable.corruption else 0,
 		qiDeviationRisk = if typeof(rawTable.qiDeviationRisk) == "number" then rawTable.qiDeviationRisk else 0,
