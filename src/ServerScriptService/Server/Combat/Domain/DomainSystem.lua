@@ -65,7 +65,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local Allegiance = require(ReplicatedStorage.Shared.Combat.Allegiance)
-local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DomainClash = require(ReplicatedStorage.Shared.Domain.DomainClash)
@@ -94,6 +93,7 @@ local DomainEffects = require(script.Parent.DomainEffects)
 local DomainInstance = require(script.Parent.DomainInstance)
 local DomainWall = require(script.Parent.DomainWall)
 local CombatTick = require(script.Parent.Parent.CombatTick)
+local MovementAllowance = require(script.Parent.Parent.MovementAllowance)
 
 type DomainInstance = DomainInstance.DomainInstance
 type Transition = DomainInstance.Transition
@@ -219,10 +219,7 @@ local function applyImpulse(model: Model, velocity: Vector3, _now: number): ()
 	if player then
 		local humanoid = CharacterUtil.HumanoidOf(model)
 		if humanoid then
-			humanoid:SetAttribute(
-				AttributeConstants.KnockbackUntil,
-				os.clock() + DomainConstants.ContainmentAllowanceSeconds
-			)
+			MovementAllowance.Stamp(humanoid, os.clock() + DomainConstants.ContainmentAllowanceSeconds)
 		end
 		local remote = stateRemote
 		if remote then
@@ -413,10 +410,7 @@ local function setBack(body: Model, root: BasePart, position: Vector3): ()
 	if Players:GetPlayerFromCharacter(body) then
 		local humanoid = CharacterUtil.HumanoidOf(body)
 		if humanoid then
-			humanoid:SetAttribute(
-				AttributeConstants.KnockbackUntil,
-				os.clock() + DomainConstants.ContainmentAllowanceSeconds
-			)
+			MovementAllowance.Stamp(humanoid, os.clock() + DomainConstants.ContainmentAllowanceSeconds)
 		end
 	end
 end
