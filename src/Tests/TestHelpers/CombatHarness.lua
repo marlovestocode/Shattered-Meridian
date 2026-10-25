@@ -128,13 +128,25 @@ function CombatHarness.Combatant(body: Rig.Body, layers: Layers?): number?
 	return id
 end
 
--- `layers` bound once. The returned function builds a Rig.Dummy and registers it, with the argument order
--- every spec's private makeDummy used.
-function CombatHarness.Spawner(layers: Layers?): (string, Vector3?, Vector3?, boolean?) -> Dummy
+-- `layers` bound once, plus `bodyOptions` for every Rig.Dummy it builds (a spec whose opponents all carry
+-- 1000 health says so here, once). The returned function builds the body and registers it, with the
+-- argument order every spec's private makeDummy used; a per-call `anchored` overrides the bound option.
+function CombatHarness.Spawner(
+	layers: Layers?,
+	bodyOptions: Rig.DummyOptions?
+): (string, Vector3?, Vector3?, boolean?) -> Dummy
 	return function(name: string, position: Vector3?, lookAt: Vector3?, anchored: boolean?): Dummy
-		local body = if layers and layers.R6
-			then Rig.R6(name, position, lookAt, anchored)
-			else Rig.Dummy(name, position, lookAt, if anchored == nil then nil else { Anchored = anchored })
+		local body
+		if layers and layers.R6 then
+			body = Rig.R6(name, position, lookAt, anchored)
+		else
+			local options = if bodyOptions then table.clone(bodyOptions) else nil
+			if anchored ~= nil then
+				options = options or {}
+				options.Anchored = anchored
+			end
+			body = Rig.Dummy(name, position, lookAt, options)
+		end
 		local id = CombatHarness.Combatant(body, layers)
 		return { Model = body.Model, Root = body.Root, Humanoid = body.Humanoid, Id = id }
 	end

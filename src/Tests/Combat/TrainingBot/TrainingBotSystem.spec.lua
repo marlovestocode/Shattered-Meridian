@@ -18,7 +18,6 @@
 -- The harness has no Players, so every fight is pointed with SetTarget -- the same seam that lets two
 -- bots be pointed at each other.
 
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
@@ -33,6 +32,7 @@ local TrainingBotConstants = require(ReplicatedStorage.Shared.TrainingBot.Traini
 local TrainingBotSystem = require(ServerScriptService.Server.Combat.TrainingBot.TrainingBotSystem)
 local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
+local CombatHarness = require(ServerScriptService.Tests.TestHelpers.CombatHarness)
 
 -- Installed once for the whole VM and never removed -- see WeaponFixture's own header on why a per-spec
 -- Remove tears the roster out from under other files.
@@ -41,37 +41,13 @@ WeaponFixture.Install()
 local FRAME = 1 / 60
 local ORIGIN = Vector3.new(0, 500, 0)
 
-local opponents: { Model } = {}
+-- A plain opponent, the same shape every combat spec stands on: an anchored root, a Humanoid with a
+-- thousand health, registered with the engine and the defence layer.
+local spawnOpponent = CombatHarness.Spawner({ ParryAnimation = DefenseConstants.ParryAnimationId }, { Health = 1000 })
 
--- A plain hand-built opponent, the same shape every combat spec's makeDummy uses: an anchored root, a
--- Humanoid, registered with the engine and the defence layer. Stands `distance` studs in front of the
--- bot, facing it.
-local function makeOpponent(distance: number): Model
-	local model = Instance.new("Model")
-	model.Name = "Opponent"
-
-	local position = ORIGIN + Vector3.new(0, 0, -distance)
-	local root = Instance.new("Part")
-	root.Name = "HumanoidRootPart"
-	root.Size = Vector3.new(2, 2, 1)
-	root.Anchored = true
-	root.CanCollide = false
-	root.CFrame = CFrame.lookAt(position, ORIGIN)
-	root.Parent = model
-
-	local humanoid = Instance.new("Humanoid")
-	humanoid.RequiresNeck = false
-	humanoid.MaxHealth = 1000
-	humanoid.Health = 1000
-	humanoid.Parent = model
-
-	model.PrimaryPart = root
-	model.Parent = Workspace
-	table.insert(opponents, model)
-
-	HitboxEngine.RegisterCombatant(model, root, humanoid)
-	DefenseSystem.RegisterCombatant(model, root, humanoid, DefenseConstants.ParryAnimationId)
-	return model
+-- Stands `distance` studs in front of the bot, facing it.
+local function opponentAt(distance: number): Model
+	return spawnOpponent("Opponent", ORIGIN + Vector3.new(0, 0, -distance), ORIGIN).Model
 end
 
 -- Spawns a bot at ORIGIN facing -Z (toward every opponent above), anchored and seeded.
@@ -120,15 +96,7 @@ return function()
 			disconnect = nil
 		end
 		TrainingBotSystem.Reset()
-		AttackRequestSystem.Reset()
-		DamageSystem.Reset()
-		DefenseSystem.Reset()
-		HitboxEngine.Reset()
-		ParryWindows.Reset()
-		for _, model in opponents do
-			model:Destroy()
-		end
-		table.clear(opponents)
+		CombatHarness.Teardown()
 	end)
 
 	describe("TrainingBotSystem -- spawning", function()
@@ -178,7 +146,7 @@ return function()
 	describe("TrainingBotSystem -- fighting through the real stack", function()
 		it("lands its swings on a target in reach", function()
 			local bot = spawnBot("AttackOnly", "Master", 21)
-			local opponent = makeOpponent(4)
+			local opponent = opponentAt(4)
 			TrainingBotSystem.SetTarget(bot, opponent)
 
 			local now = 100
@@ -200,7 +168,7 @@ return function()
 
 		it("reads a real Heavy off the attack layer and parries it", function()
 			local bot = spawnBot("ParryOnly", "Master", 5)
-			local opponent = makeOpponent(4)
+			local opponent = opponentAt(4)
 			TrainingBotSystem.SetTarget(bot, opponent)
 
 			local now = 200
@@ -232,7 +200,7 @@ return function()
 
 		it("a BlockOnly bot blocks the same Heavy instead", function()
 			local bot = spawnBot("BlockOnly", "Master", 5)
-			local opponent = makeOpponent(4)
+			local opponent = opponentAt(4)
 			TrainingBotSystem.SetTarget(bot, opponent)
 
 			local now = 300
@@ -257,7 +225,7 @@ return function()
 
 		it("learns from the contacts its own swings make", function()
 			local bot = spawnBot("AttackOnly", "Master", 33)
-			local opponent = makeOpponent(4)
+			local opponent = opponentAt(4)
 			TrainingBotSystem.SetTarget(bot, opponent)
 			-- The opponent holds its guard the whole time: every contact is Blocked.
 			DefenseSystem.SetBlocking(opponent, true, 400)
@@ -275,12 +243,12 @@ return function()
 
 	describe("AttackRequestSystem.GetInFlight", function()
 		it("is nil for a combatant that is not swinging", function()
-			local opponent = makeOpponent(4)
+			local opponent = opponentAt(4)
 			expect(AttackRequestSystem.GetInFlight(opponent)).to.equal(nil)
 		end)
 
 		it("goes nil again once the swing is over", function()
-			local opponent = makeOpponent(4)
+			local opponent = opponentAt(4)
 			local now = 500
 			expect(AttackRequestSystem.Throw(opponent, { Kind = "Basic" }, false, now)).to.equal(true)
 			local view = AttackRequestSystem.GetInFlight(opponent)
