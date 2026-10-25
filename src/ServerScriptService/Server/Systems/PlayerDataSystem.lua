@@ -122,7 +122,6 @@ local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
 local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
 -- Only for EquipSlotCount, the bound DecodeProfile validates a persisted art slot index against --
 -- this module owns no art rules of its own beyond "a slot outside the real hotbar isn't a slot."
-local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
 -- Only for decoding/encoding the persisted `inventory` record and its two decode bounds -- the rules about
 -- WHAT an item is live in ItemCatalog, which this module deliberately never reads (an id the catalog no
 -- longer knows must survive a load untouched).
@@ -232,11 +231,6 @@ function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProf
 		-- arrive holding their rerolls, so the onboarding spin has something to offer past the first
 		-- free roll. See BloodlineConstants.StartingRerolls.
 		bloodlineRerolls = BloodlineConstants.StartingRerolls,
-		artMastery = {},
-		-- Art System (Types.PlayerProfile's own header) -- empty, not a seeded starter slot, for the
-		-- same reason ArtConstants.StartingArtIds is empty: an art is earned, and there is nothing to
-		-- equip until the player unlocks one.
-		equippedArts = {},
 		corruption = 0,
 		qiDeviationRisk = 0,
 		factionStanding = 0,
@@ -288,8 +282,6 @@ function PlayerDataSystem.CopyProfile(profile: Types.PlayerProfile): Types.Playe
 		bloodlineIds = table.clone(profile.bloodlineIds),
 		bloodlineStageProgress = table.clone(profile.bloodlineStageProgress),
 		bloodlineRerolls = profile.bloodlineRerolls,
-		artMastery = table.clone(profile.artMastery),
-		equippedArts = table.clone(profile.equippedArts),
 		corruption = profile.corruption,
 		qiDeviationRisk = profile.qiDeviationRisk,
 		factionStanding = profile.factionStanding,
@@ -690,8 +682,6 @@ function PlayerDataSystem.EncodeProfile(profile: Types.PlayerProfile): { [string
 		bloodlineIds = profile.bloodlineIds,
 		bloodlineStageProgress = profile.bloodlineStageProgress,
 		bloodlineRerolls = profile.bloodlineRerolls,
-		artMastery = profile.artMastery,
-		equippedArts = profile.equippedArts,
 		corruption = profile.corruption,
 		qiDeviationRisk = profile.qiDeviationRisk,
 		factionStanding = profile.factionStanding,
@@ -731,15 +721,6 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		end
 	end
 
-	local artMastery: { [Types.ArtId]: number } = {}
-	if typeof(rawTable.artMastery) == "table" then
-		for artId, rank in pairs(rawTable.artMastery) do
-			if typeof(artId) == "string" and typeof(rank) == "number" then
-				artMastery[artId] = rank
-			end
-		end
-	end
-
 	-- Race Traits + Bloodline Abilities plan -- same per-entry defensive filtering as artMastery
 	-- above, byte-for-byte: a dict keyed by BloodlineId with a numeric stage value, drop any entry
 	-- whose key or value doesn't match rather than discarding the whole field.
@@ -748,30 +729,6 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		for bloodlineId, stage in pairs(rawTable.bloodlineStageProgress) do
 			if typeof(bloodlineId) == "string" and typeof(stage) == "number" then
 				bloodlineStageProgress[bloodlineId] = stage
-			end
-		end
-	end
-
-	-- equippedArts is a dict keyed by SLOT INDEX (Types.PlayerProfile's own header), and this decode
-	-- carries the one genuinely non-obvious step in this whole function: a DataStore round trip is a
-	-- JSON round trip, and JSON has no integer keys -- `{ [4] = "art" }` comes back as
-	-- `{ ["4"] = "art" }`. So both forms are accepted and normalized back to a number here, rather
-	-- than trusting typeof(slot) == "number" (which would silently drop every slot on the first
-	-- reload and hand the player an empty hotbar with no error anywhere). Out-of-range and
-	-- non-integer slots are dropped per-entry, the same way bloodlineIds/artMastery above drop a
-	-- single bad entry instead of discarding the whole field.
-	local equippedArts: { [number]: Types.ArtId } = {}
-	if typeof(rawTable.equippedArts) == "table" then
-		for slot, artId in pairs(rawTable.equippedArts :: { [any]: any }) do
-			local slotNumber = if typeof(slot) == "number" then slot else tonumber(slot)
-			if
-				typeof(artId) == "string"
-				and slotNumber ~= nil
-				and slotNumber == math.floor(slotNumber)
-				and slotNumber >= 1
-				and slotNumber <= ArtConstants.EquipSlotCount
-			then
-				equippedArts[slotNumber] = artId
 			end
 		end
 	end
@@ -832,8 +789,6 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		bloodlineRerolls = if typeof(rawTable.bloodlineRerolls) == "number"
 			then math.max(0, math.floor(rawTable.bloodlineRerolls :: number))
 			else BloodlineConstants.StartingRerolls,
-		artMastery = artMastery,
-		equippedArts = equippedArts,
 		corruption = if typeof(rawTable.corruption) == "number" then rawTable.corruption else 0,
 		qiDeviationRisk = if typeof(rawTable.qiDeviationRisk) == "number" then rawTable.qiDeviationRisk else 0,
 		factionStanding = if typeof(rawTable.factionStanding) == "number" then rawTable.factionStanding else 0,
@@ -870,22 +825,6 @@ Migrations[2] = function(raw: { [string]: any }): { [string]: any }
 		local profileTable = profile :: { [string]: any }
 		if profileTable.settings == nil then
 			profileTable.settings = { Keybinds = {}, GamepadKeybinds = {}, Autorun = false }
-		end
-	end
-	return raw
-end
-
--- v3 -> v4: backfills Types.PlayerProfile's `equippedArts` (which art sits in each hotbar slot) onto
--- any record saved before this pass -- same "only touch an already-table Profile, only fill in a
--- genuinely missing field" shape as Migrations[1]/[2] above. An empty table is the honest backfill
--- rather than an auto-equip of whatever the player already has unlocked: which art goes in which
--- slot is a player decision this System has no basis to make for them.
-Migrations[3] = function(raw: { [string]: any }): { [string]: any }
-	local profile = raw.Profile
-	if typeof(profile) == "table" then
-		local profileTable = profile :: { [string]: any }
-		if profileTable.equippedArts == nil then
-			profileTable.equippedArts = {}
 		end
 	end
 	return raw
