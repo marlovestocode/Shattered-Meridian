@@ -16,7 +16,7 @@
 	against a fixed per-instance ceiling. The one thing it does on a rejection is SAY SO: a dropped call
 	used to leave no trace anywhere (44 of the 50 call sites just `return`), so a client that flooded a
 	remote, or a legitimate burst that lost its last value, was invisible. The first drop in each window
-	logs one line naming the limiter's creating script and the player, so a flood is one line a second per
+	logs one line naming where the limiter was made and the player, so a flood is one line a second per
 	player per limiter, not one per call. Does not own deciding which actions should be exempt from
 	limiting entirely (e.g. a "stop"/release action, where a dropped request could strand a player
 	mid-state) -- a caller that wants an action unlimited simply never calls IsLimited for it,
@@ -50,10 +50,12 @@ export type RateLimiterInstance = typeof(setmetatable(
 
 -- One independent per-player bucket set, capped at maxPerSecond calls/sec/player.
 function RateLimiter.New(maxPerSecond: number): RateLimiterInstance
+	-- Where this limiter was made (the caller of New: script and line), so a drop can name WHICH budget it hit
+	-- -- a System with several limiters (BlimpSystem has five) is otherwise one ambiguous line.
+	local source, line = debug.info(2, "sl")
 	return setmetatable({
 		maxPerSecond = maxPerSecond,
-		-- The script that made this limiter (the caller of New), so a drop can name which budget it hit.
-		origin = debug.info(2, "s") or "unknown",
+		origin = `{source or "unknown"}:{line or 0}`,
 		buckets = {},
 	}, RateLimiter)
 end

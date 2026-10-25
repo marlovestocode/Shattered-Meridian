@@ -74,6 +74,9 @@ return function()
 		end)
 
 		it("says so when it drops a call -- once per player per window, never for a call it allowed", function()
+			-- Logger caps identical (scope, level, message) lines per second across EVERY limiter in the run, so let
+			-- the window clear: another spec's drops a moment ago must not swallow the line this case looks for.
+			task.wait(1.1)
 			local limiter = RateLimiter.New(2)
 			local player = { Name = "SpecDropper" } :: any
 			local baseline = currentSequence()
@@ -88,8 +91,8 @@ return function()
 			expect(first[1].Level).to.equal("Warn")
 			expect((first[1].Fields :: any).player).to.equal("SpecDropper")
 			expect((first[1].Fields :: any).maxPerSecond).to.equal(2)
-			-- It names the script that built the limiter, so "which budget" is answerable.
-			expect(string.find((first[1].Fields :: any).limiter, "RateLimiter.spec", 1, true) ~= nil).to.equal(true)
+			-- It says where the limiter was made (script:line), so "which budget" is answerable.
+			expect(string.match((first[1].Fields :: any).limiter, ":%d+$") ~= nil).to.equal(true)
 
 			-- A flood is still one line for this window.
 			expect(limiter:IsLimited(player)).to.equal(true)
