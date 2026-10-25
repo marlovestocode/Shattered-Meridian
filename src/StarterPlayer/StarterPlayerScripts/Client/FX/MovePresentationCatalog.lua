@@ -45,6 +45,8 @@ local RESYNC_SECONDS = 2
 
 local state: MovePresentationTypes.CatalogState = { Version = 0, Entries = {} }
 local preloaded: { [string]: boolean } = {}
+-- NOT a CallbackList: each listener is started with task.spawn, so a slow or yielding subscriber can neither delay
+-- the message handler nor the next listener. CallbackList.Fire is synchronous by design, which would change that.
 local listeners: { (moveIds: { string }) -> () } = {}
 local preloader: (({ PreloadEntry }) -> ())? = nil
 local awaitingSnapshot = false
