@@ -15,6 +15,8 @@ local ProjectileSimulator = require(ServerScriptService.Server.Combat.HitboxEngi
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local ProjectileMotion = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileMotion)
 local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
+local CombatHarness = require(ServerScriptService.Tests.TestHelpers.CombatHarness)
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 type HitReport = HitboxTypes.HitReport
 type ProjectileEvent = ProjectileSimulator.ProjectileEvent
@@ -22,33 +24,9 @@ type ProjectileEvent = ProjectileSimulator.ProjectileEvent
 local FRAME = 1 / 60
 local EPSILON = 1e-3
 
-type Dummy = { Model: Model, Root: BasePart, Humanoid: Humanoid, Id: number }
+type Dummy = CombatHarness.Dummy
 
-local spawned: { Instance } = {}
-
-local function makeDummy(name: string, position: Vector3): Dummy
-	local model = Instance.new("Model")
-	model.Name = name
-	local root = Instance.new("Part")
-	root.Name = "HumanoidRootPart"
-	root.Size = Vector3.new(2, 2, 1)
-	root.Anchored = true
-	root.CanCollide = false
-	root.CFrame = CFrame.new(position)
-	root.Parent = model
-	local humanoid = Instance.new("Humanoid")
-	humanoid.RequiresNeck = false
-	humanoid.Parent = model
-	model.PrimaryPart = root
-	model.Parent = Workspace
-	table.insert(spawned, model)
-	return {
-		Model = model,
-		Root = root,
-		Humanoid = humanoid,
-		Id = HitboxEngine.RegisterCombatant(model, root, humanoid),
-	}
-end
+local spawnDummy = CombatHarness.Spawner({ Defense = false })
 
 local function makeWall(position: Vector3): Part
 	local wall = Instance.new("Part")
@@ -58,7 +36,7 @@ local function makeWall(position: Vector3): Part
 	wall.CanCollide = true
 	wall.CFrame = CFrame.new(position)
 	wall.Parent = Workspace
-	table.insert(spawned, wall)
+	Rig.Track(wall)
 	return wall
 end
 
@@ -129,15 +107,12 @@ end
 return function()
 	afterEach(function()
 		HitboxEngine.Reset()
-		for _, instance in spawned do
-			instance:Destroy()
-		end
-		table.clear(spawned)
+		Rig.DestroyAll()
 	end)
 
 	describe("HitboxEngine -- projectile launch", function()
 		it("launches the volley when the active window opens, not when the attack is requested", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local clock = throw(attacker, projectileAttack({}, { WindupSeconds = 0.2 }))
 			expect(HitboxEngine.LiveProjectileCount()).to.equal(0)
 
@@ -148,7 +123,7 @@ return function()
 		end)
 
 		it("flies a five-shot 30 degree fan at evenly spaced headings", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local events, disconnect = captureEvents()
 			local clock = throw(attacker, projectileAttack({ SpreadPattern = "Fan", Count = 5, SpreadAngle = 30 }))
 			run(clock, FRAME)
@@ -170,10 +145,10 @@ return function()
 		end)
 
 		it("gives every shot of one volley its own id and the volley's shared group id", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local events, disconnect = captureEvents()
 			throw(attacker, projectileAttack({ SpreadPattern = "Fan", Count = 3 }))
-			local second = makeDummy("Second", Vector3.new(50, 5, 0))
+			local second = spawnDummy("Second", Vector3.new(50, 5, 0))
 			throw(second, projectileAttack({ SpreadPattern = "Fan", Count = 2 }))
 			run(os.clock(), FRAME)
 			disconnect()
@@ -195,8 +170,8 @@ return function()
 
 	describe("HitboxEngine -- projectile bodies (Shape)", function()
 		it("reports a plain sphere's contact as a Sphere of its Size", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Target", Vector3.new(0, 5, -20))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, -20))
 			local hits, disconnect = captureHits()
 			run(throw(attacker, projectileAttack({ Size = 1.5 })), 0.4)
 			disconnect()
@@ -206,8 +181,8 @@ return function()
 		end)
 
 		it("sweeps a wide slab through a target a sphere of the same Size would miss", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Beside", Vector3.new(4, 5, -20))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Beside", Vector3.new(4, 5, -20))
 
 			local hits, disconnect = captureHits()
 			run(throw(attacker, projectileAttack({ Size = 1 })), 0.4)
@@ -215,8 +190,8 @@ return function()
 			expect(#hits).to.equal(0)
 
 			HitboxEngine.Reset()
-			local again = makeDummy("Attacker2", Vector3.new(0, 5, 0))
-			makeDummy("Beside2", Vector3.new(4, 5, -20))
+			local again = spawnDummy("Attacker2", Vector3.new(0, 5, 0))
+			spawnDummy("Beside2", Vector3.new(4, 5, -20))
 			local slabHits, disconnectSlab = captureHits()
 			run(throw(again, projectileAttack({ Shape = "Box", Width = 12, Height = 6, Length = 1.5 })), 0.4)
 			disconnectSlab()
@@ -226,8 +201,8 @@ return function()
 		end)
 
 		it("does not tunnel a thin shaped shot through a body between two steps", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Target", Vector3.new(0, 5, -30))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, -30))
 			local hits, disconnect = captureHits()
 			-- 400 studs/s is more than six studs a frame against a 0.6-stud body.
 			run(throw(attacker, projectileAttack({ Shape = "Capsule", Size = 0.3, Length = 2, Speed = 400 })), 0.4)
@@ -236,12 +211,12 @@ return function()
 		end)
 
 		it("sends a body only for a shot that is not a plain sphere", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local events, disconnect = captureEvents()
 			run(throw(attacker, projectileAttack({ Shape = "Wedge", Width = 3, Height = 1, Length = 5 })), 0.1)
 			disconnect()
 			HitboxEngine.Reset()
-			local again = makeDummy("Attacker2", Vector3.new(0, 5, 0))
+			local again = spawnDummy("Attacker2", Vector3.new(0, 5, 0))
 			-- Reset clears the engine's listeners, so the second volley is heard through a subscription of its own.
 			local sphereEvents, disconnectSphere = captureEvents()
 			run(throw(again, projectileAttack({})), 0.1)
@@ -265,7 +240,7 @@ return function()
 		end)
 
 		it("meets a wall with its tip, not its middle", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			makeWall(Vector3.new(0, 5, -20))
 			local events, disconnect = captureEvents()
 			run(throw(attacker, projectileAttack({ Shape = "Capsule", Size = 0.5, Length = 10 })), 0.5)
@@ -285,8 +260,8 @@ return function()
 
 	describe("HitboxEngine -- projectile contacts", function()
 		it("reports a contact as an ordinary HitReport with the shot attached", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, -20))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, -20))
 			local hits, disconnect = captureHits()
 			run(throw(attacker, projectileAttack()), 0.4)
 			disconnect()
@@ -309,7 +284,7 @@ return function()
 		end)
 
 		it("never hits its own thrower, even spawned inside the body", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local hits, disconnect = captureHits()
 			run(throw(attacker, projectileAttack({}, { Offset = CFrame.identity })), 0.3)
 			disconnect()
@@ -317,9 +292,9 @@ return function()
 		end)
 
 		it("passes through MaxPierces targets when piercing, and stops at the first when not", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Near", Vector3.new(0, 5, -10))
-			makeDummy("Far", Vector3.new(0, 5, -20))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Near", Vector3.new(0, 5, -10))
+			spawnDummy("Far", Vector3.new(0, 5, -20))
 
 			local hits, disconnect = captureHits()
 			run(throw(attacker, projectileAttack({ Piercing = true, MaxPierces = 1 })), 0.4)
@@ -329,12 +304,12 @@ return function()
 			expect(hits[2].Target.Name).to.equal("Far")
 
 			HitboxEngine.Reset()
-			local again = makeDummy("Attacker2", Vector3.new(0, 5, 0))
+			local again = spawnDummy("Attacker2", Vector3.new(0, 5, 0))
 			local hitsAgain, disconnectAgain = captureHits()
 			-- The two targets from the first half are still in Workspace but no longer registered, so a
 			-- fresh pair stands in for them.
-			makeDummy("Near2", Vector3.new(0, 5, -10))
-			makeDummy("Far2", Vector3.new(0, 5, -20))
+			spawnDummy("Near2", Vector3.new(0, 5, -10))
+			spawnDummy("Far2", Vector3.new(0, 5, -20))
 			run(throw(again, projectileAttack({ Piercing = false })), 0.4)
 			disconnectAgain()
 			expect(#hitsAgain).to.equal(1)
@@ -342,8 +317,8 @@ return function()
 		end)
 
 		it("reports a CannotParry shot as unparryable", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Target", Vector3.new(0, 5, -10))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, -10))
 			local hits, disconnect = captureHits()
 			run(throw(attacker, projectileAttack({ ParryBehavior = "CannotParry" })), 0.3)
 			disconnect()
@@ -352,8 +327,8 @@ return function()
 		end)
 
 		it("homes onto a target its straight line would miss", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Aside", Vector3.new(8, 5, -20))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Aside", Vector3.new(8, 5, -20))
 
 			local hits, disconnect = captureHits()
 			local clock = run(throw(attacker, projectileAttack({ Homing = false })), 0.5)
@@ -374,7 +349,7 @@ return function()
 
 	describe("HitboxEngine -- projectiles and the world", function()
 		it("ends a Destroy shot on a wall", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			makeWall(Vector3.new(0, 5, -15))
 			local events, disconnect = captureEvents()
 			run(throw(attacker, projectileAttack({ CollisionBehavior = "Destroy" })), 0.3)
@@ -392,7 +367,7 @@ return function()
 		end)
 
 		it("bounces a Bounce shot back off a wall, MaxBounces times", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			makeWall(Vector3.new(0, 5, -15))
 			local clock = throw(attacker, projectileAttack({ CollisionBehavior = "Bounce", MaxBounces = 1 }))
 			local id = ProjectileSimulator.LiveIds()[1]
@@ -405,9 +380,9 @@ return function()
 		end)
 
 		it("passes a Continue shot straight through a wall", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			makeWall(Vector3.new(0, 5, -10))
-			local target = makeDummy("Behind", Vector3.new(0, 5, -20))
+			local target = spawnDummy("Behind", Vector3.new(0, 5, -20))
 			local hits, disconnect = captureHits()
 			run(throw(attacker, projectileAttack({ CollisionBehavior = "Continue" })), 0.4)
 			disconnect()
@@ -416,7 +391,7 @@ return function()
 		end)
 
 		it("ends at its lifetime and at its range", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local events, disconnect = captureEvents()
 			-- Past the first attack's active window, so the second is not refused as Busy.
 			local clock = run(throw(attacker, projectileAttack({ LifetimeSeconds = 0.1 })), 0.3)
@@ -437,8 +412,8 @@ return function()
 
 	describe("HitboxEngine.ParryProjectile / PassProjectile", function()
 		it("Reflect hands a parried shot to the parrier and sends it back at the thrower, scaled", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, -20))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, -20))
 			local hits, disconnect = captureHits()
 			local clock = run(
 				throw(
@@ -465,8 +440,8 @@ return function()
 		end)
 
 		it("Reverse retraces the shot's path, owned by the parrier", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, -20))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, -20))
 			local hits, disconnect = captureHits()
 			local clock = run(throw(attacker, projectileAttack({ ParryResponse = "Reverse" })), 0.3)
 			local shot = hits[1].Projectile :: ProjectileTypes.ProjectileContact
@@ -480,17 +455,17 @@ return function()
 		end)
 
 		it("Destroy ends a shot still in flight", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local clock = throw(attacker, projectileAttack({ ParryResponse = "Destroy", Piercing = true }))
 			local id = ProjectileSimulator.LiveIds()[1]
-			local parrier = makeDummy("Parrier", Vector3.new(0, 5, -30))
+			local parrier = spawnDummy("Parrier", Vector3.new(0, 5, -30))
 			HitboxEngine.ParryProjectile(id, parrier.Model, clock)
 			expect((ProjectileSimulator.Inspect(id) :: any).Alive).to.equal(false)
 		end)
 
 		it("ParryAll ends every shot of the volley still flying; ParryOne only the one parried", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			local parrier = makeDummy("Parrier", Vector3.new(0, 5, -60))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			local parrier = spawnDummy("Parrier", Vector3.new(0, 5, -60))
 			local clock = throw(
 				attacker,
 				projectileAttack({
@@ -525,9 +500,9 @@ return function()
 		end)
 
 		it("PassProjectile lets an evaded shot fly on through to the next body", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			local near = makeDummy("Near", Vector3.new(0, 5, -10))
-			local far = makeDummy("Far", Vector3.new(0, 5, -20))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			local near = spawnDummy("Near", Vector3.new(0, 5, -10))
+			local far = spawnDummy("Far", Vector3.new(0, 5, -20))
 			local hits, disconnect = captureHits()
 			local clock = run(throw(attacker, projectileAttack()), 0.15)
 			expect(#hits).to.equal(1)
@@ -541,7 +516,7 @@ return function()
 		end)
 
 		it("forgets nothing it was asked about too early, and answers false for an unknown id", function()
-			local parrier = makeDummy("Parrier", Vector3.new(0, 5, 0))
+			local parrier = spawnDummy("Parrier", Vector3.new(0, 5, 0))
 			expect(HitboxEngine.ParryProjectile(424242, parrier.Model, os.clock())).to.equal(false)
 			expect(HitboxEngine.PassProjectile(424242, parrier.Model, os.clock())).to.equal(false)
 		end)
@@ -549,7 +524,7 @@ return function()
 
 	describe("ProjectileMotion agrees with the engine", function()
 		it("launches exactly the shots Volley computes for the same aim", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local definition = projectileAttack({ SpreadPattern = "Radial", Count = 6, SpreadAngle = 40 })
 			local events, disconnect = captureEvents()
 			run(throw(attacker, definition), FRAME)

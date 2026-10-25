@@ -11,7 +11,6 @@
 -- tunnelling case at the bottom reproduces a frame rate that would be impractical to produce for real.
 -- The clock base comes from os.clock() because RequestAttack stamps the swing with it.
 
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
@@ -20,45 +19,19 @@ local HitboxGeometry = require(ReplicatedStorage.Shared.HitboxEngine.HitboxGeome
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
 local NetworkLatency = require(ServerScriptService.Server.Combat.NetworkLatency)
+local CombatHarness = require(ServerScriptService.Tests.TestHelpers.CombatHarness)
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 type HitReport = HitboxTypes.HitReport
 
 local FRAME = 1 / 60
 
-type Dummy = {
-	Model: Model,
-	Root: BasePart,
-	Humanoid: Humanoid,
-	Id: number,
-}
-
-local spawned: { Model } = {}
+type Dummy = CombatHarness.Dummy
 
 -- Anchored on purpose: these bodies must stay exactly where a case puts them, and a falling dummy
--- would make every positional assertion here a race against gravity.
-local function makeDummy(name: string, position: Vector3): Dummy
-	local model = Instance.new("Model")
-	model.Name = name
-
-	local root = Instance.new("Part")
-	root.Name = "HumanoidRootPart"
-	root.Size = Vector3.new(2, 2, 1)
-	root.Anchored = true
-	root.CanCollide = false
-	root.CFrame = CFrame.new(position)
-	root.Parent = model
-
-	local humanoid = Instance.new("Humanoid")
-	humanoid.RequiresNeck = false
-	humanoid.Parent = model
-
-	model.PrimaryPart = root
-	model.Parent = Workspace
-	table.insert(spawned, model)
-
-	local id = HitboxEngine.RegisterCombatant(model, root, humanoid)
-	return { Model = model, Root = root, Humanoid = humanoid, Id = id }
-end
+-- would make every positional assertion here a race against gravity. Engine only -- this spec is the
+-- engine's own, below the defense layer.
+local spawnDummy = CombatHarness.Spawner({ Defense = false })
 
 -- Parents a Tool onto a dummy's Model the same way Humanoid:EquipTool does for a real player -- a
 -- direct child of the character -- so resolveAttachmentPart's "Weapon" case (model:
@@ -131,22 +104,19 @@ return function()
 	afterEach(function()
 		NetworkLatency.SetResolver(nil)
 		HitboxEngine.Reset()
-		for _, model in spawned do
-			model:Destroy()
-		end
-		table.clear(spawned)
+		Rig.DestroyAll()
 	end)
 
 	describe("HitboxEngine -- registration", function()
 		it("registers anything with a model, a root and a humanoid", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			expect(attacker.Id).to.be.ok()
 			expect(HitboxEngine.RegisteredCount()).to.equal(1)
 			expect(HitboxEngine.GetCombatantId(attacker.Model)).to.equal(attacker.Id)
 		end)
 
 		it("returns the same id when the same model registers twice", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local again = HitboxEngine.RegisterCombatant(attacker.Model, attacker.Root, attacker.Humanoid)
 			expect(again).to.equal(attacker.Id)
 			expect(HitboxEngine.RegisteredCount()).to.equal(1)
@@ -154,7 +124,7 @@ return function()
 
 		it("tags the model so other systems can positively identify a fighter", function()
 			local CollectionService = game:GetService("CollectionService")
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			expect(CollectionService:HasTag(attacker.Model, HitboxEngineConstants.CombatantTag)).to.equal(true)
 
 			HitboxEngine.UnregisterCombatant(attacker.Id)
@@ -171,7 +141,7 @@ return function()
 		end)
 
 		it("refuses a second attack while one is in flight", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			expect(HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)).to.equal(true)
 
 			local accepted, reason = HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
@@ -180,7 +150,7 @@ return function()
 		end)
 
 		it("puts the combatant into the engaged set", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
 			expect(HitboxEngine.EngagedCount()).to.equal(1)
 			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Active")
@@ -189,8 +159,8 @@ return function()
 
 	describe("HitboxEngine -- hit detection", function()
 		it("reports a hit on an overlapping target", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, -4))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, -4))
 			local hits, disconnect = captureHits()
 
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 2, 0)
@@ -207,8 +177,8 @@ return function()
 		end)
 
 		it("does not report a target out of range", function()
-			makeDummy("Target", Vector3.new(0, 5, -40))
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, -40))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local hits, disconnect = captureHits()
 
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
@@ -219,8 +189,8 @@ return function()
 		end)
 
 		it("does not report a target BEHIND the attacker, since the volume is offset forward", function()
-			makeDummy("Target", Vector3.new(0, 5, 4))
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, 4))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local hits, disconnect = captureHits()
 
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
@@ -232,7 +202,7 @@ return function()
 
 		it("never reports the attacker hitting itself", function()
 			-- The volume is centred on the attacker's own root, so every sample gathers their own body.
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local hits, disconnect = captureHits()
 
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ Offset = CFrame.identity }), 1, 0)
@@ -243,8 +213,8 @@ return function()
 		end)
 
 		it("reports a target only once however many samples it stays inside for", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Target", Vector3.new(0, 5, -4))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, -4))
 			local hits, disconnect = captureHits()
 
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
@@ -258,9 +228,9 @@ return function()
 		end)
 
 		it("honours MaxTargetsPerSwing", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("TargetA", Vector3.new(-2, 5, -4))
-			makeDummy("TargetB", Vector3.new(2, 5, -4))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("TargetA", Vector3.new(-2, 5, -4))
+			spawnDummy("TargetB", Vector3.new(2, 5, -4))
 			local hits, disconnect = captureHits()
 
 			HitboxEngine.RequestAttack(
@@ -276,14 +246,14 @@ return function()
 		end)
 
 		it("stops reporting once the Active window has closed", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local hits, disconnect = captureHits()
 
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ ActiveSeconds = 0.05 }), 1, 0)
 			local base = os.clock()
 			-- Well past the window, so the swing is finished before the target ever appears.
 			HitboxEngine.Step(FRAME, base + 0.5)
-			makeDummy("Target", Vector3.new(0, 5, -4))
+			spawnDummy("Target", Vector3.new(0, 5, -4))
 			HitboxEngine.Step(FRAME, base + 0.6)
 			disconnect()
 
@@ -294,8 +264,8 @@ return function()
 
 	describe("HitboxEngine -- a Volumeless swing", function()
 		it("hits nothing in front of the attacker, where an ordinary swing of the same shape would", function()
-			makeDummy("Target", Vector3.new(0, 5, -4))
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, -4))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local hits, disconnect = captureHits()
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ Volumeless = true }), 1, 0)
 			local base = os.clock()
@@ -305,8 +275,8 @@ return function()
 			expect(#hits).to.equal(0)
 
 			HitboxEngine.Reset()
-			local again = makeDummy("Attacker2", Vector3.new(0, 5, 0))
-			makeDummy("Target2", Vector3.new(0, 5, -4))
+			local again = spawnDummy("Attacker2", Vector3.new(0, 5, 0))
+			spawnDummy("Target2", Vector3.new(0, 5, -4))
 			local controlHits, disconnectControl = captureHits()
 			HitboxEngine.RequestAttack(again.Id, makeDefinition({}), 1, 0)
 			HitboxEngine.Step(FRAME, os.clock() + 0.01)
@@ -315,7 +285,7 @@ return function()
 		end)
 
 		it("still runs the whole swing: it is accepted, active, and ends", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local accepted = HitboxEngine.RequestAttack(
 				attacker.Id,
 				makeDefinition({ Volumeless = true, ActiveSeconds = 0.1, RecoverySeconds = 0.05 }),
@@ -332,7 +302,7 @@ return function()
 
 		it("keeps the movement lock a locking cast asks for, and releases it when the swing ends", function()
 			local LOCK = HitboxEngineConstants.RootControlLockedAttribute
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			HitboxEngine.RequestAttack(
 				attacker.Id,
 				makeDefinition({ Volumeless = true, LocksMovement = true, ActiveSeconds = 0.1, RecoverySeconds = 0.05 }),
@@ -363,8 +333,8 @@ return function()
 		end
 
 		it("reports the LIVE post-scaling dimensions, not the authored ones", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Target", Vector3.new(0, 5, -3))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, -3))
 			local hits, disconnect = captureHits()
 
 			HitboxEngine.RequestAttack(attacker.Id, scalingDefinition(), 3, 0)
@@ -378,8 +348,8 @@ return function()
 		end)
 
 		it("reaches further at a higher combo stage -- the same attack misses at stage 1", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Target", Vector3.new(0, 5, -3))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, -3))
 			local hits, disconnect = captureHits()
 
 			-- Stage 1: a 2-stud box reaches 1 stud forward plus the narrow-phase margin. The target's
@@ -399,8 +369,8 @@ return function()
 		end)
 
 		it("scales with power level as well as combo stage", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Target", Vector3.new(0, 5, -3))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, -3))
 			local hits, disconnect = captureHits()
 
 			HitboxEngine.RequestAttack(
@@ -426,8 +396,8 @@ return function()
 		end)
 
 		it("clamps at MaxScaleMultiplier so an unbounded power level cannot produce an absurd volume", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Target", Vector3.new(0, 5, -3))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, -3))
 			local hits, disconnect = captureHits()
 
 			HitboxEngine.RequestAttack(
@@ -456,7 +426,7 @@ return function()
 		local LOCK = HitboxEngineConstants.RootControlLockedAttribute
 
 		it("sets the Attribute for a locking swing and clears it when the swing ends", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(nil)
 
 			HitboxEngine.RequestAttack(
@@ -478,7 +448,7 @@ return function()
 			-- RootControlLocked parks parkour and the camera; it never zeroed anyone's speed. SwingRooted is what
 			-- RunSystem pins WalkSpeed to 0 off, so a move's "Locks movement" actually stops the attacker.
 			local ROOTED = HitboxEngineConstants.SwingRootedAttribute
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			expect(attacker.Humanoid:GetAttribute(ROOTED)).to.equal(nil)
 
 			HitboxEngine.RequestAttack(
@@ -497,7 +467,7 @@ return function()
 		end)
 
 		it("never roots a body for a non-locking swing", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ LocksMovement = false }), 1, 0)
 			HitboxEngine.Step(FRAME, os.clock() + 0.01)
 			expect(attacker.Humanoid:GetAttribute(HitboxEngineConstants.SwingRootedAttribute)).to.equal(nil)
@@ -505,7 +475,7 @@ return function()
 
 		it("locks the WINDUP: held from the swing's first instant, released as the Active window opens", function()
 			local ROOTED = HitboxEngineConstants.SwingRootedAttribute
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			HitboxEngine.RequestAttack(
 				attacker.Id,
 				makeDefinition({ LocksWindup = true, WindupSeconds = 0.3, ActiveSeconds = 0.2, RecoverySeconds = 0.5 }),
@@ -531,7 +501,7 @@ return function()
 		it(
 			"carries one unbroken lock through the whole swing when it locks the windup AND the active window",
 			function()
-				local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+				local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 				HitboxEngine.RequestAttack(
 					attacker.Id,
 					makeDefinition({
@@ -558,7 +528,7 @@ return function()
 		)
 
 		it("releases a windup lock when the swing is cut in the windup", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			HitboxEngine.RequestAttack(
 				attacker.Id,
 				makeDefinition({ LocksWindup = true, WindupSeconds = 0.5, ActiveSeconds = 0.2 }),
@@ -571,13 +541,13 @@ return function()
 		end)
 
 		it("never holds the body in a windup that does not ask for it", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ WindupSeconds = 0.3 }), 1, 0)
 			expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(nil)
 		end)
 
 		it("holds the lock through recovery, so a heavy attack cannot be cancelled by moving", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			HitboxEngine.RequestAttack(
 				attacker.Id,
 				makeDefinition({ LocksMovement = true, ActiveSeconds = 0.05, RecoverySeconds = 1 }),
@@ -592,14 +562,14 @@ return function()
 		end)
 
 		it("never sets the Attribute for a non-locking swing", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ LocksMovement = false }), 1, 0)
 			HitboxEngine.Step(FRAME, os.clock() + 0.01)
 			expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(nil)
 		end)
 
 		it("releases the lock when the swing is cancelled mid-Active", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ LocksMovement = true }), 1, 0)
 			HitboxEngine.Step(FRAME, os.clock() + 0.01)
 			expect(attacker.Humanoid:GetAttribute(LOCK)).to.equal(true)
@@ -612,7 +582,7 @@ return function()
 		it("releases the lock when the combatant is unregistered mid-swing", function()
 			-- A character despawning must not leave RootControlLocked set: on a respawn that reuses the
 			-- Humanoid, that would park the new character's parkour permanently.
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ LocksMovement = true }), 1, 0)
 			HitboxEngine.Step(FRAME, os.clock() + 0.01)
 
@@ -634,8 +604,8 @@ return function()
 			-- 2-stud-wide box plus a 0.5-stud margin covers [-3.5,-0.5] and [1.5,4.5], and the target
 			-- sits at 0. So substepping ALONE is not enough here either; it is SweptContainsPoint,
 			-- interpolating within that final 5-stud substep, that finds the contact.
-			local attacker = makeDummy("Attacker", Vector3.new(-22, 5, 0))
-			makeDummy("Target", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(-22, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, 0))
 			local hits, disconnect = captureHits()
 
 			local definition = makeDefinition({
@@ -672,7 +642,7 @@ return function()
 		end)
 
 		it("clamps an absurd frame time instead of fast-forwarding a whole attack", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ ActiveSeconds = 5 }), 1, 0)
 			-- A resumed Studio session can deliver a frame of minutes. The swing must still be running.
 			HitboxEngine.Step(600, os.clock() + 0.05)
@@ -682,8 +652,8 @@ return function()
 
 	describe("HitboxTypes.SourceOf", function()
 		it("stamps a swing's contact as Melee", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Target", Vector3.new(0, 5, -4))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, -4))
 			local hits, disconnect = captureHits()
 
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
@@ -711,8 +681,8 @@ return function()
 
 	describe("HitboxEngine -- death", function()
 		it("reports no contact on a dead body", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, -4))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, -4))
 			target.Humanoid.Health = 0
 			local hits, disconnect = captureHits()
 
@@ -724,7 +694,7 @@ return function()
 		end)
 
 		it("ends the swing of an attacker killed mid-swing, with nothing more landing", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local hits, disconnect = captureHits()
 			local base = os.clock()
 
@@ -734,7 +704,7 @@ return function()
 
 			attacker.Humanoid.Health = 0
 			-- A body walks into the still-open volume after the death: it must not be struck.
-			makeDummy("Late", Vector3.new(0, 5, -4))
+			spawnDummy("Late", Vector3.new(0, 5, -4))
 			HitboxEngine.Step(FRAME, base + 2 * FRAME)
 			disconnect()
 
@@ -744,7 +714,7 @@ return function()
 		end)
 
 		it("refuses a swing from a dead body", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			attacker.Humanoid.Health = 0
 
 			local accepted, reason = HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
@@ -757,8 +727,8 @@ return function()
 		-- A frame far longer than one sample (HitboxEngineConstants' header): the substeps must still make a short
 		-- Active window real -- one hit, not none and not two.
 		it("lands a short Active window inside one long frame, exactly once", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Target", Vector3.new(0, 5, -4))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, -4))
 			local hits, disconnect = captureHits()
 
 			local base = os.clock()
@@ -777,7 +747,7 @@ return function()
 
 		it("does not fast-forward past the frame cap", function()
 			-- A stall longer than MaxFrameSeconds is clamped: the swing advances at most that much this frame.
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local base = os.clock()
 			local cap = HitboxEngineConstants.MaxFrameSeconds
 			HitboxEngine.RequestAttack(
@@ -793,7 +763,7 @@ return function()
 
 	describe("HitboxEngine -- lifecycle housekeeping", function()
 		it("retires a combatant whose character has been destroyed", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			expect(HitboxEngine.RegisteredCount()).to.equal(1)
 
 			attacker.Model.Parent = nil
@@ -802,7 +772,7 @@ return function()
 		end)
 
 		it("leaves the engaged set empty once a swing completes", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ ActiveSeconds = 0.05 }), 1, 0)
 			expect(HitboxEngine.EngagedCount()).to.equal(1)
 
@@ -811,8 +781,8 @@ return function()
 		end)
 
 		it("stops delivering to a disconnected OnHit subscriber", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Target", Vector3.new(0, 5, -4))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, -4))
 			local hits, disconnect = captureHits()
 			disconnect()
 
@@ -823,8 +793,8 @@ return function()
 		end)
 
 		it("keeps sampling for other subscribers when one of them errors", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Target", Vector3.new(0, 5, -4))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, -4))
 
 			local disconnectBad = HitboxEngine.OnHit(function()
 				error("consumer blew up")
@@ -842,11 +812,11 @@ return function()
 
 	describe("HitboxEngine -- Weapon attachment resolves onto the equipped Blade", function()
 		it("anchors on the weapon's Blade part, not its Handle, when both exist", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			-- Handle sits at the attacker's own position (where a naive "just grip" resolution would
 			-- anchor); Blade sits 4 studs out in front, matching this file's usual reach convention.
 			equipWeapon(attacker, { HandlePosition = attacker.Root.Position, BladePosition = Vector3.new(0, 5, -4) })
-			makeDummy("Target", Vector3.new(0, 5, -4))
+			spawnDummy("Target", Vector3.new(0, 5, -4))
 			local hits = captureHits()
 
 			HitboxEngine.RequestAttack(
@@ -864,7 +834,7 @@ return function()
 		end)
 
 		it("falls back to Handle when the weapon has no part named Blade", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local tool = Instance.new("Tool")
 			tool.Name = "HandleOnlySword"
 			local handle = Instance.new("Part")
@@ -874,7 +844,7 @@ return function()
 			handle.Parent = tool
 			tool.Parent = attacker.Model
 
-			makeDummy("Target", Vector3.new(0, 5, -4))
+			spawnDummy("Target", Vector3.new(0, 5, -4))
 			local hits = captureHits()
 
 			HitboxEngine.RequestAttack(
@@ -889,9 +859,9 @@ return function()
 		end)
 
 		it("derives Box dimensions from the Blade's own live Size, ignoring BaseDimensions", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			equipWeapon(attacker, { BladePosition = Vector3.new(0, 5, -5), BladeSize = Vector3.new(2, 4, 10) })
-			makeDummy("Target", Vector3.new(0, 5, -5))
+			spawnDummy("Target", Vector3.new(0, 5, -5))
 			local hits = captureHits()
 
 			HitboxEngine.RequestAttack(
@@ -916,9 +886,9 @@ return function()
 		end)
 
 		it("scales the Blade-derived size by SizeMultiplier, the WeaponReach carrier", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			equipWeapon(attacker, { BladePosition = Vector3.new(0, 5, -5), BladeSize = Vector3.new(2, 4, 10) })
-			makeDummy("Target", Vector3.new(0, 5, -5))
+			spawnDummy("Target", Vector3.new(0, 5, -5))
 			local hits = captureHits()
 
 			HitboxEngine.RequestAttack(
@@ -943,9 +913,9 @@ return function()
 		end)
 
 		it("leaves BaseDimensions in full control when SizeFromAttachmentPart is unset", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			equipWeapon(attacker, { BladePosition = Vector3.new(0, 5, -5), BladeSize = Vector3.new(2, 4, 10) })
-			makeDummy("Target", Vector3.new(0, 5, -5))
+			spawnDummy("Target", Vector3.new(0, 5, -5))
 			local hits = captureHits()
 
 			HitboxEngine.RequestAttack(
@@ -972,7 +942,7 @@ return function()
 	-- the two limits that are about the swing itself.
 	describe("HitboxEngine.RequestAttack -- a backdated start", function()
 		it("starts the swing at the requested moment and says so", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local requested = os.clock() - 0.05
 			local accepted, _, begunAt =
 				HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ WindupSeconds = 0.4 }), 1, 0, requested)
@@ -983,7 +953,7 @@ return function()
 
 		it("never backdates so far that the Active window would already be due", function()
 			-- Only the windup shortens: a backdated swing can never hit on the frame it arrives.
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local before = os.clock()
 			local _, _, begunAt =
 				HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ WindupSeconds = 0.1 }), 1, 0, before - 5)
@@ -993,7 +963,7 @@ return function()
 		end)
 
 		it("never backdates into the combatant's previous swing", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local _, _, firstBegun =
 				HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ ActiveSeconds = 0.05 }), 1, 0)
 			assert(firstBegun, "an accepted swing reports its start")
@@ -1011,7 +981,7 @@ return function()
 		end)
 
 		it("ignores a start in the future and starts now", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			local before = os.clock()
 			local _, _, begunAt = HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0, before + 10)
 			assert(begunAt, "an accepted swing reports its start")
@@ -1027,8 +997,8 @@ return function()
 		local EDGE_Z = -8.5
 
 		it("still misses a target standing just past the edge", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			makeDummy("Target", Vector3.new(0, 5, EDGE_Z))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			spawnDummy("Target", Vector3.new(0, 5, EDGE_Z))
 			local hits, disconnect = captureHits()
 
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({}), 1, 0)
@@ -1039,8 +1009,8 @@ return function()
 		end)
 
 		it("catches a target backing away just past the edge", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, EDGE_Z))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, EDGE_Z))
 			-- Walking away at 18 studs/s: the attacker was looking at it ~1.8 studs closer.
 			target.Root.AssemblyLinearVelocity = Vector3.new(0, 0, -18)
 			local hits, disconnect = captureHits()
@@ -1055,8 +1025,8 @@ return function()
 		it("does not reach AHEAD of a target that is closing in", function()
 			-- The trail is only ever behind a body, along its own motion: one walking toward the attacker was
 			-- further away a moment ago, not closer.
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, EDGE_Z))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, EDGE_Z))
 			target.Root.AssemblyLinearVelocity = Vector3.new(0, 0, 18)
 			local hits, disconnect = captureHits()
 
@@ -1087,8 +1057,8 @@ return function()
 		end
 
 		it("hits a target where a lagged attacker saw it, though it has since moved out", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, INSIDE_Z))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, INSIDE_Z))
 			-- 200 ms of round trip: a 0.1 s one-way trip plus the replication buffer, capped at 0.15 s.
 			NetworkLatency.SetResolver(function(model: Model)
 				return if model == attacker.Model then 0.2 else 0
@@ -1104,8 +1074,8 @@ return function()
 		end)
 
 		it("rewinds nothing for an attacker with no connection (a bot, a dummy)", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, INSIDE_Z))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, INSIDE_Z))
 			local swingAt = walkOut(target, os.clock())
 			local hits, disconnect = captureHits()
 
@@ -1118,7 +1088,7 @@ return function()
 		end)
 
 		it("caps the rewind on the victim's side, whatever the attacker's ping", function()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
 			NetworkLatency.SetResolver(function()
 				return 3
 			end)
@@ -1129,8 +1099,8 @@ return function()
 
 		it("does not reach a body that was never where the attacker looked", function()
 			-- Rewound 0.15 s, the target was still out of the box: it left more than the cap ago.
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
-			local target = makeDummy("Target", Vector3.new(0, 5, INSIDE_Z))
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0))
+			local target = spawnDummy("Target", Vector3.new(0, 5, INSIDE_Z))
 			NetworkLatency.SetResolver(function(model: Model)
 				return if model == attacker.Model then 0.2 else 0
 			end)
