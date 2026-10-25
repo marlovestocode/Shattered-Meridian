@@ -290,6 +290,7 @@ local DebugConstants = {
 			GuardStrainPose = true,
 			HitFlinchPose = true,
 			HitPrediction = true,
+			HotbarBindings = true,
 			ImpactSparks = true,
 			InputRouter = true,
 			InventoryClient = true,

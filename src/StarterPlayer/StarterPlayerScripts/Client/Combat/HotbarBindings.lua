@@ -44,6 +44,8 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
+local Logger = require(ReplicatedStorage.Shared.Logger)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local HotbarBindings = {}
@@ -62,7 +64,8 @@ local bindings: { [number]: string? } = {}
 -- drift-free way to SEND it, but every consumer here asks "what is in slot N", and re-joining the two
 -- tables at each call site would be the same lookup written four times.
 local slotInfo: { [number]: SlotInfo? } = {}
-local changedListeners: { (slot: number, moveId: string?, info: SlotInfo?) -> () } = {}
+local changed: CallbackList.CallbackList<number, string?, SlotInfo?> =
+	CallbackList.New(Logger.scope("HotbarBindings"), "HotbarBindings.OnChanged")
 
 local function isValidSlot(slot: number): boolean
 	return slot == math.floor(slot) and slot >= 1 and slot <= SLOT_COUNT
@@ -88,9 +91,7 @@ local function setSlot(slot: number, moveId: string?, info: SlotInfo?): ()
 	end
 	bindings[slot] = moveId
 	slotInfo[slot] = info
-	for _, listener in ipairs(changedListeners) do
-		listener(slot, moveId, info)
-	end
+	changed:Fire(slot, moveId, info)
 end
 
 -- The ArtId currently equipped in `slot`, or nil if that slot is empty. Never errors on an
@@ -145,13 +146,7 @@ end
 -- already use -- but it's returned anyway rather than assumed away, the cheap-and-correct default
 -- for any listener-registration API.
 function HotbarBindings.OnChanged(listener: (slot: number, moveId: string?, info: SlotInfo?) -> ()): () -> ()
-	table.insert(changedListeners, listener)
-	return function()
-		local index = table.find(changedListeners, listener)
-		if index then
-			table.remove(changedListeners, index)
-		end
-	end
+	return changed:Connect(listener)
 end
 
 return HotbarBindings
