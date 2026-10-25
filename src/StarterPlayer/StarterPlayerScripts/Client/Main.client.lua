@@ -91,6 +91,22 @@ local SettingsClient = require(script.Parent.Settings.SettingsClient)
 
 local logger = Logger.scope("Main")
 
+-- Starts one module and keeps going if it throws, the client's counterpart of Main.server.lua's boot(). Every
+-- Start() below used to be a bare call, so ONE throw (an index on a WaitForChild that timed out, say) aborted
+-- every later Start: a broken FOVOffset took parkour, combat input and the HUD with it, and nothing in the Live
+-- Console named the cause. Now the failure is logged under its own name, with a traceback, and the rest of the
+-- client comes up; a partial client the console can explain beats a dead one it cannot. Extra arguments are
+-- handed to Start. The name is explicit for the reason the server's is: a module table has no runtime name.
+local function boot(name: string, module: { Start: any }, ...: any): ()
+	local ok, err = xpcall(module.Start, debug.traceback, ...)
+	if not ok then
+		logger:error("Client module failed to start -- continuing without it", {
+			module = name,
+			errorMessage = tostring(err),
+		})
+	end
+end
+
 logger:info("Client boot start")
 
 -- BEFORE anything builds a Computed (the onboarding flow and UI.Mount both do): see that module's header.
@@ -128,7 +144,7 @@ logger:debug("StartMenuClient run end")
 -- BEFORE the loading pass, so its asset ids start preloading in parallel with it rather than after. Its
 -- preloads go through AssetPreloader.PreloadLabelled -- injected, so the require graph stays one-way
 -- (AssetPreloader reads the catalogue for its boot manifest).
-MovePresentationCatalog.Start(AssetPreloader.PreloadLabelled)
+boot("MovePresentationCatalog", MovePresentationCatalog, AssetPreloader.PreloadLabelled)
 
 logger:debug("LoadingClient run start")
 LoadingClient.Run()
@@ -192,7 +208,7 @@ logger:debug("Character-bind hookup end")
 -- cluster after UI.Mount() matches this file's own boot position above for the same "gameplay
 -- input modules start once the UI they might eventually surface through exists" reasoning.
 logger:debug("EmoteController start")
-EmoteController.Start()
+boot("EmoteController", EmoteController)
 logger:debug("EmoteController end")
 
 -- After EmoteController above (this module's own RequestPlay is the only thing EmoteWheelClient is
@@ -200,44 +216,44 @@ logger:debug("EmoteController end")
 -- the Screen's own IsOpen/SelectedIndex handle, and uiHandles.ClientState, to read the live loadout
 -- -- neither exists before UI.Mount() returns).
 logger:debug("EmoteWheelClient start")
-EmoteWheelClient.Start(uiHandles.EmoteWheel, uiHandles.ClientState, uiHandles.Chrome)
+boot("EmoteWheelClient", EmoteWheelClient, uiHandles.EmoteWheel, uiHandles.ClientState, uiHandles.Chrome)
 logger:debug("EmoteWheelClient end")
 
 -- Before ShiftLockCamera/FlightCamera/CameraShake below: FOVOffset is the single canonical writer
 -- of camera.FieldOfView that FlightCamera (started below) composes through -- see that module's own
 -- header.
 logger:debug("FOVOffset start")
-FOVOffset.Start()
+boot("FOVOffset", FOVOffset)
 logger:debug("FOVOffset end")
 
 -- Same reasoning as FOVOffset above, for Humanoid.CameraOffset instead of FieldOfView -- the single
 -- canonical writer ShiftLockCamera/FlightCamera below both compose through. See that module's header.
 logger:debug("CameraOffsetComposer start")
-CameraOffsetComposer.Start()
+boot("CameraOffsetComposer", CameraOffsetComposer)
 logger:debug("CameraOffsetComposer end")
 
 -- After CameraOffsetComposer: the smoothed follow writes its trail as one of that composer's slots. See
 -- Client/Camera/CameraFollow.lua.
 logger:debug("CameraFollow start")
-CameraFollow.Start()
+boot("CameraFollow", CameraFollow)
 logger:debug("CameraFollow end")
 
 logger:debug("ShiftLockCamera start")
-ShiftLockCamera.Start(uiHandles.ShiftLockEngaged)
+boot("ShiftLockCamera", ShiftLockCamera, uiHandles.ShiftLockEngaged)
 logger:debug("ShiftLockCamera end")
 
 -- Same RenderPriority.Camera + 1 slot as ShiftLockCamera above -- mutually exclusive at runtime
 -- (ShiftLockCamera skips its own CameraOffset/yaw writes while Flying is true), never both driving
 -- the same frame. See FlightCamera.lua's own header.
 logger:debug("FlightCamera start")
-FlightCamera.Start()
+boot("FlightCamera", FlightCamera)
 logger:debug("FlightCamera end")
 
 -- After ShiftLockCamera/FlightCamera: CameraShake composes on top of the final camera pose at
 -- RenderPriority.Camera + 2 (after ShiftLock's Camera + 1) -- see CameraShake's header. Both bind at
 -- their own priority regardless of call order; keeping the boot order aligned mirrors that intent.
 logger:debug("CameraShake start")
-CameraShake.Start()
+boot("CameraShake", CameraShake)
 logger:debug("CameraShake end")
 
 -- After FOVOffset/CameraOffsetComposer/CameraShake above, whose named slots
@@ -251,7 +267,7 @@ logger:debug("CameraShake end")
 -- the master Parkour toggle -- so a player who has switched parkour off gets a controller that starts
 -- and immediately does nothing, rather than this boot line needing to know about the setting.
 logger:debug("ParkourController start")
-ParkourController.Start()
+boot("ParkourController", ParkourController)
 logger:debug("ParkourController end")
 
 -- After ParkourController (the live movement state id RunController.SetParkourState reads) and this
@@ -260,7 +276,7 @@ logger:debug("ParkourController end")
 -- is kept explicit here for the same reason every other entry in this file is. Also after FOVOffset,
 -- whose named-slot composer this module's stage-2 zoom writes into.
 logger:debug("RunController start")
-RunController.Start()
+boot("RunController", RunController)
 logger:debug("RunController end")
 
 -- Block and parry input. Unconditional for every client, and deliberately AFTER
@@ -270,7 +286,7 @@ logger:debug("RunController end")
 -- so starting it earlier would simply mean sending presses to a server that answers them the same
 -- way.
 logger:debug("DefenseClient start")
-DefenseClient.Start()
+boot("DefenseClient", DefenseClient)
 logger:debug("DefenseClient end")
 
 -- Attack input -- the light/heavy strings, the feint, the five hotbar slots and the weapon swap.
@@ -284,7 +300,7 @@ logger:debug("DefenseClient end")
 -- to this module's OnSlotCooldown at mount time, and a subscription made before Start() is fine (the
 -- listener list outlives Start), so this ordering is documented rather than load-bearing.
 logger:debug("AttackInputClient start")
-AttackInputClient.Start()
+boot("AttackInputClient", AttackInputClient)
 logger:debug("AttackInputClient end")
 
 -- Drives the inventory HUD off Weapon_InventoryChanged. Receive-only (the T/Y keys belong to
@@ -292,25 +308,25 @@ logger:debug("AttackInputClient end")
 -- adjacent rather than about ordering -- the server re-pushes the whole inventory on every character
 -- bind, so a listener connected late still gets the current state rather than missing an edge.
 logger:debug("WeaponInventoryClient start")
-WeaponInventoryClient.Start(uiHandles.WeaponInventory, uiHandles.Notify)
+boot("WeaponInventoryClient", WeaponInventoryClient, uiHandles.WeaponInventory, uiHandles.Notify)
 logger:debug("WeaponInventoryClient end")
 
 -- Grab-throw input, alongside AttackInputClient above -- same "AFTER SettingsClient.RestoreSettings so
 -- a rebound GrabThrow key is live before the first press" reasoning that module's own comment gives.
 logger:debug("GrabInputClient start")
-GrabInputClient.Start()
+boot("GrabInputClient", GrabInputClient)
 logger:debug("GrabInputClient end")
 
 logger:debug("SwingRootClient start")
-SwingRootClient.Start()
+boot("SwingRootClient", SwingRootClient)
 logger:debug("SwingRootClient end")
 
 -- The air combo (docs/design/air-combat-and-evade.md, Part B): the local attacker's follow, and every
 -- combatant's phase readability. Both read only replicated Attributes, so neither depends on the other or on
 -- anything started above beyond the parkour controller, which parks itself off the same Attributes.
 logger:debug("AirComboClient start")
-AirComboClient.Start()
-AirComboFX.Start()
+boot("AirComboClient", AirComboClient)
+boot("AirComboFX", AirComboFX)
 logger:debug("AirComboClient end")
 
 -- Blimp mount input, the mounted-body pose and the pilot's helm. AFTER SettingsClient.RestoreSettings
@@ -323,7 +339,14 @@ logger:debug("AirComboClient end")
 -- binds its own render step only while somebody is actually aboard rather than for the session -- see
 -- its own header on why that differs from FlightCamera/ShiftLockCamera immediately above.
 logger:debug("BlimpController start")
-BlimpController.Start(uiHandles.BlimpHelm, uiHandles.BlimpFuel, uiHandles.CarriedResources, uiHandles.Notify)
+boot(
+	"BlimpController",
+	BlimpController,
+	uiHandles.BlimpHelm,
+	uiHandles.BlimpFuel,
+	uiHandles.CarriedResources,
+	uiHandles.Notify
+)
 
 -- The furnace's custom prompt. A SIBLING of BlimpController rather than part of it -- see
 -- Client/Blimp/FurnacePromptClient.lua's own header: this serves anyone standing next to a hull,
@@ -331,7 +354,7 @@ BlimpController.Start(uiHandles.BlimpHelm, uiHandles.BlimpFuel, uiHandles.Carrie
 -- module owns. Order relative to it does not matter (they share no state and no remote); it is
 -- started here because this is where the blimp client cluster lives.
 logger:debug("FurnacePromptClient start")
-FurnacePromptClient.Start(uiHandles.FurnacePrompt, uiHandles.ViewportScale)
+boot("FurnacePromptClient", FurnacePromptClient, uiHandles.FurnacePrompt, uiHandles.ViewportScale)
 logger:debug("FurnacePromptClient end")
 logger:debug("BlimpController end")
 
@@ -344,7 +367,7 @@ logger:debug("BlimpController end")
 -- header, which names that omission and the seam a future one plugs into. Everything a player needs to
 -- actually sail one (prompts, the mount, the rudder, the sail rungs, the release) is here.
 logger:debug("BoatController start")
-BoatController.Start()
+boot("BoatController", BoatController)
 logger:debug("BoatController end")
 
 -- Next to AttackInputClient above because its only input is that module's OnAttackStarted seam --
@@ -355,36 +378,36 @@ logger:debug("BoatController end")
 -- velocity through -- already satisfied by boot position, and self-correcting anyway (an unbound
 -- motor refuses the impulse rather than erroring, and rebinds on the next life).
 logger:debug("SwingLunge start")
-SwingLunge.Start()
+boot("SwingLunge", SwingLunge)
 
 -- Lock-on (CapsLock / R3): the target, the soft camera pull and the marker with its guard bar -- see
 -- Client/Combat/LockOnController.lua. Then swing tracking, which turns the body toward that target (or the
 -- soft assist's pick) during a windup. Both after AttackInputClient.Start above, whose swing signals
 -- SwingTracking listens to.
-LockOnController.Start(uiHandles.LockOnMarker, uiHandles.ViewportScale)
-SwingTracking.Start()
+boot("LockOnController", LockOnController, uiHandles.LockOnMarker, uiHandles.ViewportScale)
+boot("SwingTracking", SwingTracking)
 
 -- The heavy tell on other combatants (AttackConstants.Tell) -- a server-published tag, drawn here.
-SwingTellFX.Start()
+boot("SwingTellFX", SwingTellFX)
 logger:debug("SwingLunge end")
 
 -- Same one real dependency as SwingLunge directly above -- AttackInputClient.OnAttackStarted -- and
 -- the same reason for sitting next to it: read as one unit, not because the order is load-bearing.
 logger:debug("AttackTrail start")
-AttackTrail.Start()
+boot("AttackTrail", AttackTrail)
 logger:debug("AttackTrail end")
 
 -- Projectile moves' shots in flight, drawn off Attack_Projectile (AttackRequestSystem creates it at boot,
 -- like every other attack remote). No dependency on anything above; every client draws every shot.
 logger:debug("ProjectileFX start")
-ProjectileFX.Start()
+boot("ProjectileFX", ProjectileFX)
 logger:debug("ProjectileFX end")
 
 -- Realms (Client/FX/DomainFX.lua), drawn off Domain_State (DomainSystem creates it at boot). No dependency on
 -- anything above but the presentation catalogue (MovePresentationCatalog.Start, earlier) for each realm's
 -- look; a realm open when this client joins arrives on the snapshot it asks for at start.
 logger:debug("DomainFX start")
-DomainFX.Start()
+boot("DomainFX", DomainFX)
 logger:debug("DomainFX end")
 
 -- Same one real dependency as SwingLunge directly above -- AttackInputClient.OnAttackStarted, which
@@ -393,22 +416,22 @@ logger:debug("DomainFX end")
 -- earlier, at LoadingClient.Run()'s AssetPreloader pass (Client/Loading/AssetPreloader.lua's own
 -- require(CombatAudio) for exactly that side effect) -- Start() here only arms the listener.
 logger:debug("CombatAudio start")
-CombatAudio.Start()
+boot("CombatAudio", CombatAudio)
 logger:debug("CombatAudio end")
 
 -- A move's own Windup/Active/Recovery cues (Client/FX/SwingPresentation.lua) -- the same one dependency,
 -- AttackInputClient.OnAttackStarted, read as one unit with the whoosh and the trail above.
-SwingPresentation.Start()
+boot("SwingPresentation", SwingPresentation)
 
 -- The roll's afterimage (the ghosts' fade loop), then the watcher that draws OTHER players' rolls off
 -- the replicated ParkourState Attribute. The local player's own roll reaches RollAfterimage through
 -- MovementVFX's state hook, which ParkourController (started above) drives. RollAfterimage first: a
 -- remote roll that replicates the instant the watcher binds must find the fade loop running.
 logger:debug("RollAfterimage start")
-RollAfterimage.Start()
+boot("RollAfterimage", RollAfterimage)
 logger:debug("RollAfterimage end")
 logger:debug("RemoteMovementFX start")
-RemoteMovementFX.Start()
+boot("RemoteMovementFX", RemoteMovementFX)
 logger:debug("RemoteMovementFX end")
 
 -- Every body whose guard is cracking strains its guard pose, on every client, off the GuardCrack tag
@@ -416,36 +439,36 @@ logger:debug("RemoteMovementFX end")
 -- a wall and a body splatted into one -- off Combat_EnvironmentFX, plus this player's own swing scuff,
 -- predicted locally off AttackInputClient.OnAttackStarted (started above). Neither depends on the other.
 logger:debug("GuardStrainPose start")
-GuardStrainPose.Start()
+boot("GuardStrainPose", GuardStrainPose)
 logger:debug("GuardStrainPose end")
 logger:debug("EnvironmentFX start")
-EnvironmentFX.Start()
+boot("EnvironmentFX", EnvironmentFX)
 logger:debug("EnvironmentFX end")
 
 -- Every body a hit stuns flinches, on every client, off the HitstunUntil Attribute DamageSystem extends on
 -- each stunning hit (no remote) -- same Transform-layer shape as the guard strain, one priority below it.
 logger:debug("HitFlinchPose start")
-HitFlinchPose.Start()
+boot("HitFlinchPose", HitFlinchPose)
 logger:debug("HitFlinchPose end")
 
 -- Every grab being held puts the holder's right hand on the victim's collar (and the victim's hands on
 -- that arm), on every client, off the tags GrabSystem publishes (no remote) -- same shape as the guard
 -- strain above, bound one render priority after it.
 logger:debug("GrabHoldPose start")
-GrabHoldPose.Start()
+boot("GrabHoldPose", GrabHoldPose)
 logger:debug("GrabHoldPose end")
 
 -- Hit presentation -- damage numbers, the outcome banner and the camera shake, driven off the damage
 -- layer's Combat_Feedback event. AFTER UI.Mount(), and that IS load-bearing: it is handed the
 -- CombatFeedback screen's own handle, which does not exist until UI.Mount() returns.
 logger:debug("CombatFeedbackClient start")
-CombatFeedbackClient.Start(uiHandles.CombatFeedback)
+boot("CombatFeedbackClient", CombatFeedbackClient, uiHandles.CombatFeedback)
 
 -- The attacker's own hits, played the frame their swing overlaps a target on this screen instead of a
 -- round trip later (AttackConstants.Presentation.HitPrediction). After CombatFeedbackClient, which it
 -- presents through, and AttackInputClient, whose swings it watches.
 logger:debug("HitPrediction start")
-HitPrediction.Start()
+boot("HitPrediction", HitPrediction)
 logger:debug("HitPrediction end")
 logger:debug("CombatFeedbackClient end")
 
@@ -453,13 +476,13 @@ logger:debug("CombatFeedbackClient end")
 -- PlayerDeathSystem's Death_Notice broadcast. After UI.Mount() for the same reason as the line above:
 -- it is handed the DeathFeed screen's handle.
 logger:debug("DeathNoticeClient start")
-DeathNoticeClient.Start(uiHandles.DeathFeed)
+boot("DeathNoticeClient", DeathNoticeClient, uiHandles.DeathFeed)
 logger:debug("DeathNoticeClient end")
 
 -- The frame-rate overlay (F3). Needs nothing from UI.Mount() -- it builds its own plain ScreenGui so it
 -- keeps working if the UI layer is what is misbehaving -- and is not dev-gated: see
 -- Constants.Debug.FpsCounter.
-FpsCounter.Start()
+boot("FpsCounter", FpsCounter)
 
 -- THE ONE DEV-TOOLING CALL. Dev Menu, Move Editor, Kit Editor, Live Console and the Storybook are
 -- started together by Client/DevTools/init.lua, and this file reaches that module by FindFirstChild
@@ -477,7 +500,7 @@ local devToolsModule = script.Parent:FindFirstChild("DevTools")
 if devToolsModule and uiHandles.DevTools then
 	local DevTools = require(devToolsModule :: ModuleScript) :: any
 	logger:debug("DevTools start")
-	DevTools.Start(uiHandles.DevTools, uiHandles.Chrome)
+	boot("DevTools", DevTools, uiHandles.DevTools, uiHandles.Chrome)
 	logger:debug("DevTools end")
 else
 	logger:info("DevTools absent -- this build does not ship dev tooling")
@@ -488,26 +511,26 @@ end
 -- discard outright, which left CharacterMenuClient.Start with no caller anywhere and the whole
 -- panel unreachable -- M did nothing, and there was no way to unlock or equip an Art in play.
 logger:debug("CharacterMenuClient start")
-CharacterMenuClient.Start(uiHandles.Menus, uiHandles.Chrome)
+boot("CharacterMenuClient", CharacterMenuClient, uiHandles.Menus, uiHandles.Chrome)
 logger:debug("CharacterMenuClient end")
 
 -- Unconditional for every client -- the inventory (J) has no whitelist gate. After SettingsClient.
 -- RestoreSettings above for the same reason AttackInputClient is: a rebound InventoryToggle must be live
 -- before the first press can reach this.
 logger:debug("InventoryClient start")
-InventoryClient.Start(uiHandles.Inventory, uiHandles.Chrome)
+boot("InventoryClient", InventoryClient, uiHandles.Inventory, uiHandles.Chrome)
 logger:debug("InventoryClient end")
 
 -- Unconditional for every client, unlike DevMenuClient above -- the bug report form has no
 -- whitelist gate; every player can open and submit it.
 logger:debug("BugReportClient start")
-BugReportClient.Start(uiHandles.BugReport, uiHandles.Chrome)
+boot("BugReportClient", BugReportClient, uiHandles.BugReport, uiHandles.Chrome)
 logger:debug("BugReportClient end")
 
 -- Unconditional for every client, same reasoning as BugReportClient above -- an admin broadcast (or
 -- a shutdown-countdown warning) is meant for the whole server, not just other admins.
 logger:debug("AnnouncementClient start")
-AnnouncementClient.Start(uiHandles.Announcement)
+boot("AnnouncementClient", AnnouncementClient, uiHandles.Announcement)
 logger:debug("AnnouncementClient end")
 
 -- Unconditional for every client, same "no whitelist gate" reasoning as BugReportClient above --
@@ -515,7 +538,7 @@ logger:debug("AnnouncementClient end")
 -- KeybindManager restore already happened earlier (see SettingsClient.RestoreSettings' own call
 -- site above).
 logger:debug("SettingsClient start")
-SettingsClient.Start(uiHandles.Settings, uiHandles.Chrome)
+boot("SettingsClient", SettingsClient, uiHandles.Settings, uiHandles.Chrome)
 logger:debug("SettingsClient end")
 
 -- Unconditional for every client, not just admins -- see FlightController.lua's own header for
@@ -525,7 +548,7 @@ logger:debug("SettingsClient end")
 -- of Client/DevTools/DevMenu/ to Client/Flight/ when the dev tooling was put behind an omittable path: flight
 -- is a shipped feature that was misfiled, not tooling.
 logger:debug("FlightController start")
-FlightController.Start()
+boot("FlightController", FlightController)
 logger:debug("FlightController end")
 
 logger:info("Client boot end")
