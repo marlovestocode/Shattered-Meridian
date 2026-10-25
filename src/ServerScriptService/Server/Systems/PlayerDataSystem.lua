@@ -119,7 +119,6 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
-local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
 -- Only for EquipSlotCount, the bound DecodeProfile validates a persisted art slot index against --
 -- this module owns no art rules of its own beyond "a slot outside the real hotbar isn't a slot."
 -- Only for decoding/encoding the persisted `inventory` record and its two decode bounds -- the rules about
@@ -223,14 +222,6 @@ function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProf
 		displayName = nil,
 		attributes = nil,
 		tier = Config.DefaultTier,
-		bloodlineIds = {},
-		-- Race Traits + Bloodline Abilities plan -- empty, matching bloodlineIds: a brand-new profile
-		-- has awakened nothing, so there is no stage to record for anything.
-		bloodlineStageProgress = {},
-		-- The one field here that is NOT empty/zero on a fresh profile: a new player is meant to
-		-- arrive holding their rerolls, so the onboarding spin has something to offer past the first
-		-- free roll. See BloodlineConstants.StartingRerolls.
-		bloodlineRerolls = BloodlineConstants.StartingRerolls,
 		corruption = 0,
 		qiDeviationRisk = 0,
 		factionStanding = 0,
@@ -279,9 +270,6 @@ function PlayerDataSystem.CopyProfile(profile: Types.PlayerProfile): Types.Playe
 		-- throw.
 		attributes = if profile.attributes then table.clone(profile.attributes) else nil,
 		tier = profile.tier,
-		bloodlineIds = table.clone(profile.bloodlineIds),
-		bloodlineStageProgress = table.clone(profile.bloodlineStageProgress),
-		bloodlineRerolls = profile.bloodlineRerolls,
 		corruption = profile.corruption,
 		qiDeviationRisk = profile.qiDeviationRisk,
 		factionStanding = profile.factionStanding,
@@ -679,9 +667,6 @@ function PlayerDataSystem.EncodeProfile(profile: Types.PlayerProfile): { [string
 		displayName = profile.displayName,
 		attributes = profile.attributes,
 		tier = profile.tier,
-		bloodlineIds = profile.bloodlineIds,
-		bloodlineStageProgress = profile.bloodlineStageProgress,
-		bloodlineRerolls = profile.bloodlineRerolls,
 		corruption = profile.corruption,
 		qiDeviationRisk = profile.qiDeviationRisk,
 		factionStanding = profile.factionStanding,
@@ -711,27 +696,6 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		return nil
 	end
 	local rawTable = raw :: { [string]: any }
-
-	local bloodlineIds: { Types.BloodlineId } = {}
-	if typeof(rawTable.bloodlineIds) == "table" then
-		for _, id in ipairs(rawTable.bloodlineIds) do
-			if typeof(id) == "string" then
-				table.insert(bloodlineIds, id)
-			end
-		end
-	end
-
-	-- Race Traits + Bloodline Abilities plan -- same per-entry defensive filtering as artMastery
-	-- above, byte-for-byte: a dict keyed by BloodlineId with a numeric stage value, drop any entry
-	-- whose key or value doesn't match rather than discarding the whole field.
-	local bloodlineStageProgress: { [Types.BloodlineId]: number } = {}
-	if typeof(rawTable.bloodlineStageProgress) == "table" then
-		for bloodlineId, stage in pairs(rawTable.bloodlineStageProgress) do
-			if typeof(bloodlineId) == "string" and typeof(stage) == "number" then
-				bloodlineStageProgress[bloodlineId] = stage
-			end
-		end
-	end
 
 	-- AttributeBlock is a fixed six-field RECORD, not an open dict like bloodlineIds/artMastery above
 	-- -- there is no safe "partial" default for a stat block (a record missing e.g. Fleetness isn't a
@@ -782,13 +746,6 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		displayName = if typeof(rawTable.displayName) == "string" then rawTable.displayName :: string else nil,
 		attributes = attributes,
 		tier = if typeof(rawTable.tier) == "number" then rawTable.tier else Config.DefaultTier,
-		bloodlineIds = bloodlineIds,
-		bloodlineStageProgress = bloodlineStageProgress,
-		-- Clamped at 0 rather than trusted: a negative reroll count from a corrupted or rolled-back
-		-- record would make the spin button look available forever while every press refused.
-		bloodlineRerolls = if typeof(rawTable.bloodlineRerolls) == "number"
-			then math.max(0, math.floor(rawTable.bloodlineRerolls :: number))
-			else BloodlineConstants.StartingRerolls,
 		corruption = if typeof(rawTable.corruption) == "number" then rawTable.corruption else 0,
 		qiDeviationRisk = if typeof(rawTable.qiDeviationRisk) == "number" then rawTable.qiDeviationRisk else 0,
 		factionStanding = if typeof(rawTable.factionStanding) == "number" then rawTable.factionStanding else 0,
@@ -870,40 +827,6 @@ Migrations[5] = function(raw: { [string]: any }): { [string]: any }
 		local settings = profileTable.settings
 		if typeof(settings) == "table" and (settings :: { [string]: any }).Comfort == nil then
 			(settings :: { [string]: any }).Comfort = PlayerDataSystem.CreateDefaultComfortSettings()
-		end
-	end
-	return raw
-end
-
--- v6 -> v7: backfills Types.PlayerProfile's `bloodlineStageProgress` (Race Traits + Bloodline
--- Abilities plan) onto any record saved before this pass -- same "only touch an already-table
--- Profile, only fill in a genuinely missing field" shape as every migration above, and the same
--- "empty is honest" backfill Migrations[3] uses for equippedArts: an existing player has awakened no
--- bloodline any differently than a brand-new one has, so there is nothing to fabricate here.
-Migrations[6] = function(raw: { [string]: any }): { [string]: any }
-	local profile = raw.Profile
-	if typeof(profile) == "table" then
-		local profileTable = profile :: { [string]: any }
-		if profileTable.bloodlineStageProgress == nil then
-			profileTable.bloodlineStageProgress = {}
-		end
-	end
-	return raw
-end
-
--- v7 -> v8: backfills Types.PlayerProfile's `bloodlineRerolls` (the bloodline spin) onto any
--- record saved before this pass -- same "only touch an already-table Profile, only fill in a
--- genuinely missing field" shape as every migration above.
---
--- Backfilled to the FULL StartingRerolls, unlike Migrations[3]/[6]'s empty-table backfills. An
--- existing player has never been offered a spin, so they have spent nothing -- handing them 0
--- would silently punish them for having played before the feature existed.
-Migrations[7] = function(raw: { [string]: any }): { [string]: any }
-	local profile = raw.Profile
-	if typeof(profile) == "table" then
-		local profileTable = profile :: { [string]: any }
-		if profileTable.bloodlineRerolls == nil then
-			profileTable.bloodlineRerolls = BloodlineConstants.StartingRerolls
 		end
 	end
 	return raw
