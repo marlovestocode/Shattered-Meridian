@@ -2,6 +2,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 local DefaultMoveRegistry = require(ServerScriptService.Server.Combat.DefaultMoveRegistry)
@@ -147,9 +148,11 @@ return function()
 			local result, reason = DefaultMoveRegistry.ApplyEdit(
 				BASIC_ONE,
 				candidateFor(BASIC_ONE, function(wire)
+					-- Not a literal the engine could re-learn: the guard below fails loudly if it ever does.
 					wire.Shape = "Hexagon"
 				end)
 			)
+			expect(table.find(HitboxTypes.ShapeOrder :: { string }, "Hexagon")).to.equal(nil)
 			expect(result).to.equal(nil)
 			expect(reason).to.equal("InvalidShapeKind")
 			expect(DefaultMoveRegistry.IsOverridden(BASIC_ONE)).to.equal(false)
