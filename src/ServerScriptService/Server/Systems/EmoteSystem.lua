@@ -144,6 +144,9 @@ local activeEmotes: { [Player]: ActiveEmote } = {}
 -- to silently eat a RequestSetLoadoutSlot press sharing the same bucket, and vice versa.
 local playRateLimiter = RateLimiter.New(EmoteConstants.MaxRequestsPerSecondPerPlayer)
 local loadoutRateLimiter = RateLimiter.New(EmoteConstants.MaxRequestsPerSecondPerPlayer)
+-- RequestStop's own bucket: a stop shared the play bucket, so a burst of stops (the gamepad stick) ate the
+-- budget of the next RequestPlay.
+local stopRateLimiter = RateLimiter.New(EmoteConstants.MaxStopRequestsPerSecondPerPlayer)
 
 local startedRemote: RemoteEvent? = nil
 local stoppedRemote: RemoteEvent? = nil
@@ -372,11 +375,11 @@ end
 -- nothing running. There is no state a player can reach with it that they cannot already reach by
 -- playing a different emote.
 --
--- Shares playRateLimiter with RequestPlay/NotifyFinished for the same reason NotifyFinished does:
--- starting and ending your own pose is one budget, and a stop is only ever reachable after a start
--- that already spent from it.
+-- Its OWN bucket (stopRateLimiter), not the play one: it shared playRateLimiter once, and a gamepad stick
+-- past its threshold fires a stop every frame until the echo arrives, which emptied the bucket and silently
+-- dropped the next RequestPlay. A stop is idempotent, so the ceiling is loose and only there for hygiene.
 local function handleRequestStop(player: Player): ()
-	if playRateLimiter:IsLimited(player) then
+	if stopRateLimiter:IsLimited(player) then
 		return
 	end
 	EmoteSystem.StopEmote(player)
@@ -462,6 +465,7 @@ local function onPlayerRemoving(player: Player): ()
 	activeEmotes[player] = nil
 	playRateLimiter:Clear(player)
 	loadoutRateLimiter:Clear(player)
+	stopRateLimiter:Clear(player)
 end
 
 function EmoteSystem.Init(): ()

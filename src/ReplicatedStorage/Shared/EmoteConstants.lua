@@ -79,6 +79,10 @@ EmoteConstants.RemoteNames = {
 -- the same reasoning Constants.Rivalry.QueryMaxCallsPerSecond already documents for a different
 -- non-combat-critical remote pair.
 EmoteConstants.MaxRequestsPerSecondPerPlayer = 4
+-- RequestStop's own, much looser budget. A stop is idempotent and must never be the call a full play bucket
+-- drops (RateLimiter's header names a stop as the action that should not be limited), but a public remote
+-- still gets a ceiling. The client latches one stop per emote, so a legitimate player never nears it.
+EmoteConstants.MaxStopRequestsPerSecondPerPlayer = 20
 
 -- Hard ceiling on how long a CLIP-BEARING one-shot emote may stay active server-side before
 -- EmoteSystem force-stops it regardless of what the client reported. NOT a gameplay number and NOT a

@@ -61,6 +61,11 @@ local requestStopRemote: RemoteEvent? = nil
 -- much still running and still holding a movement lock.
 local activeEmoteId: string? = nil
 
+-- The emote a stop request has already been sent for. The gamepad stick calls RequestStop every frame it is
+-- past its threshold, and activeEmoteId stays set until the server's Emote_Stopped arrives, so without this a
+-- round trip's worth of frames each fired a remote. Reset by setActiveEmote when the active emote changes.
+local stopSentFor: string? = nil
+
 -- One slot, one owner -- exactly the shape EmoteAnimator.SetFinishedCallback already uses, and set
 -- for the same reason: the module that OWNS the fact publishes it, and whoever needs to react
 -- registers rather than polling. Client/Emotes/EmoteWheelClient.lua is the only registrant today
@@ -76,6 +81,7 @@ local function setActiveEmote(emoteId: string?): ()
 		return
 	end
 	activeEmoteId = emoteId
+	stopSentFor = nil
 	if activeChangedCallback then
 		activeChangedCallback(emoteId)
 	end
@@ -126,11 +132,13 @@ end
 -- nothing running -- the server would treat it as a no-op anyway (EmoteSystem.handleRequestStop),
 -- but a remote call that can never accomplish anything should not spend the shared play budget that
 -- gates the NEXT real RequestPlay. Does not clear activeEmoteId itself: like RequestPlay, this is a
--- request, and the Emote_Stopped echo is what makes it true here.
+-- request, and the Emote_Stopped echo is what makes it true here. Sent once per emote (stopSentFor): the
+-- caller may be a per-frame input watch.
 function EmoteController.RequestStop(): ()
-	if not requestStopRemote or activeEmoteId == nil then
+	if not requestStopRemote or activeEmoteId == nil or stopSentFor == activeEmoteId then
 		return
 	end
+	stopSentFor = activeEmoteId
 	requestStopRemote:FireServer()
 end
 
