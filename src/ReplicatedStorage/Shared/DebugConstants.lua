@@ -48,6 +48,7 @@ local DebugConstants = {
 			CombatClient = true,
 			CombatSystem = true,
 			NetworkBridge = true,
+			RateLimiter = true,
 			ClientState = true,
 			UI = true,
 			Main = true,
