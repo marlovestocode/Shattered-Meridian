@@ -121,6 +121,15 @@ local SettingsConstants = {
 	-- Same call-budget reasoning as Constants.Rivalry.QueryMaxCallsPerSecond -- a rebind/toggle write
 	-- costs nothing gameplay-wise but should still never be free spam.
 	MaxCallsPerSecondPerPlayer = 4,
+	-- GetSettings is a read the client makes once at boot, so it has a budget of its own: sharing the writes'
+	-- bucket meant a burst of toggles in the first second could make the boot read look rate-limited.
+	GetMaxCallsPerSecondPerPlayer = 2,
+	-- Client/Settings/SettingsWriteCoalescer.lua: a write waits this long after the LAST change to the same
+	-- field before it is sent, so a burst (five Stepper clicks, a slider drag) becomes one write of the final
+	-- value. The server's bucket drops a call it has no budget for with no reply and no retry, so sending every
+	-- click left the saved value at whichever click happened to land. Short enough that closing the panel right
+	-- after a change still persists it.
+	WriteCoalesceSeconds = 0.3,
 	-- Same "named duration, not a magic number at the call site" convention as
 	-- Constants.Debug.DevMenu.StatusClearDelaySeconds/Constants.BugReport.ConfirmationClearDelaySeconds
 	-- -- Client/Settings/SettingsClient.lua's own status line (e.g. "Keybinds reset to defaults.").

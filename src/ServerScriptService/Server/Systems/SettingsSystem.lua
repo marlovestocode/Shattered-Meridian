@@ -47,6 +47,8 @@ local RemoteNames = Constants.Settings.RemoteNames
 -- all the same "cheap, gameplay-inert settings write" category, the same reasoning
 -- Constants.Rivalry.QueryMaxCallsPerSecond gives for its own single shared limiter.
 local rateLimiter = RateLimiter.New(Constants.Settings.MaxCallsPerSecondPerPlayer)
+-- GetSettings' own bucket (see SettingsConstants.GetMaxCallsPerSecondPerPlayer).
+local getRateLimiter = RateLimiter.New(Constants.Settings.GetMaxCallsPerSecondPerPlayer)
 
 local DEFAULT_SETTINGS: Types.PlayerSettings = {
 	Keybinds = {},
@@ -142,8 +144,12 @@ local function validateKeybind(raw: unknown): Types.Keybind?
 end
 
 local function handleGetSettings(player: Player): Types.PlayerSettings
-	if rateLimiter:IsLimited(player) then
-		return DEFAULT_SETTINGS
+	if getRateLimiter:IsLimited(player) then
+		-- NOT the defaults: the client applies whatever table it is handed as the player's real settings, and
+		-- cannot tell defaults from a saved profile. nil is its existing "the fetch failed" path, which keeps
+		-- the session's own defaults and says so in the log. A legitimate boot read never gets here.
+		logger:warn("GetSettings rejected: rate limited", { player = player.Name })
+		return nil :: any
 	end
 	local profile = PlayerDataSystem.GetProfile(player)
 	if not profile then
@@ -432,6 +438,7 @@ end
 
 local function onPlayerRemoving(player: Player): ()
 	rateLimiter:Clear(player)
+	getRateLimiter:Clear(player)
 end
 
 function SettingsSystem.Init(): ()

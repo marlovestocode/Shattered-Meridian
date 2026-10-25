@@ -70,6 +70,24 @@
 					},
 					"Diagnostics": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Diagnostics"
+					},
+					"Announcement": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Announcement"
+					},
+					"BugReport": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/BugReport"
+					},
+					"Intro": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Intro"
+					},
+					"Onboarding": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Onboarding"
+					},
+					"Settings": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Settings"
+					},
+					"StartMenu": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/StartMenu"
 					}
 				}
 			}

@@ -53,6 +53,7 @@ local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
 local BlimpCamera = require(script.Parent.Parent.Camera.BlimpCamera)
 local Chrome = require(script.Parent.Parent.UI.Shell.Chrome)
 local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
+local SettingsWriteCoalescer = require(script.Parent.SettingsWriteCoalescer)
 
 type SettingsHandle = SettingsModule.SettingsHandle
 type ListeningState = { Device: Types.KeybindDevice, Action: Types.KeybindAction }
@@ -65,6 +66,20 @@ local RemoteNames = Constants.Settings.RemoteNames
 local STATUS_CLEAR_DELAY = Constants.Settings.StatusClearDelaySeconds
 
 local SettingsClient = {}
+
+-- Every "set this field to X" write goes through here, not straight to FireServer: the server's 4/s bucket
+-- drops a limited call silently, so a burst of changes has to become one write of the final value (see
+-- SettingsWriteCoalescer). Apply-locally-first is unchanged -- only the send is deferred. Rebinds and resets
+-- are discrete events and still fire directly.
+local writes = SettingsWriteCoalescer.New(function(remoteName: string, field: string, value: unknown)
+	local remote = NetworkBridge.GetRemoteEvent(remoteName)
+	if remoteName == RemoteNames.UpdateAutorun then
+		-- The one write with no field name: the remote takes the bare boolean.
+		remote:FireServer(value)
+	else
+		remote:FireServer(field, value)
+	end
+end, Constants.Settings.WriteCoalesceSeconds)
 
 -- Set by RestoreSettings and by the panel's own toggle, read back by Start to seed the screen, and
 -- pushed to Client/Movement/RunController.lua, which is what Autorun actually drives.
@@ -571,8 +586,7 @@ function SettingsClient.Start(handle: SettingsHandle, chrome: Chrome.ChromeHandl
 		-- Apply-then-persist, the same order every other control in this module uses.
 		applyAutorun()
 
-		local updateAutorunRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateAutorun)
-		updateAutorunRemote:FireServer(enabled)
+		writes:Queue(RemoteNames.UpdateAutorun, "Autorun", enabled)
 	end)
 
 	-- Apply-then-persist, the same order every control in this module uses (see the file header): the
@@ -584,8 +598,7 @@ function SettingsClient.Start(handle: SettingsHandle, chrome: Chrome.ChromeHandl
 		handle.Parkour:set(table.clone(parkourSettings))
 		applyParkourSettings()
 
-		local updateParkourRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateParkour)
-		updateParkourRemote:FireServer(field, enabled)
+		writes:Queue(RemoteNames.UpdateParkour, field, enabled)
 	end)
 
 	-- Apply-then-persist, same order and same reasoning as ParkourToggled directly above. The server
@@ -596,8 +609,7 @@ function SettingsClient.Start(handle: SettingsHandle, chrome: Chrome.ChromeHandl
 		handle.Comfort:set(table.clone(comfortSettings))
 		applyComfortSettings()
 
-		local updateComfortRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateComfort)
-		updateComfortRemote:FireServer(field, enabled)
+		writes:Queue(RemoteNames.UpdateComfort, field, enabled)
 	end)
 
 	-- Apply-then-persist, same order and same reasoning as ComfortToggled directly above. Split into
@@ -610,8 +622,7 @@ function SettingsClient.Start(handle: SettingsHandle, chrome: Chrome.ChromeHandl
 		handle.Gamepad:set(table.clone(gamepadSettings))
 		applyGamepadSettings()
 
-		local updateGamepadRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateGamepad)
-		updateGamepadRemote:FireServer(field, value)
+		writes:Queue(RemoteNames.UpdateGamepad, field, value)
 	end)
 
 	handle.GamepadToggled:Connect(function(field: string, enabled: boolean)
@@ -619,8 +630,7 @@ function SettingsClient.Start(handle: SettingsHandle, chrome: Chrome.ChromeHandl
 		handle.Gamepad:set(table.clone(gamepadSettings))
 		applyGamepadSettings()
 
-		local updateGamepadRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateGamepad)
-		updateGamepadRemote:FireServer(field, enabled)
+		writes:Queue(RemoteNames.UpdateGamepad, field, enabled)
 	end)
 
 	handle.SprintModeChanged:Connect(function(mode: Types.SprintMode)
@@ -628,8 +638,7 @@ function SettingsClient.Start(handle: SettingsHandle, chrome: Chrome.ChromeHandl
 		handle.Parkour:set(table.clone(parkourSettings))
 		applyParkourSettings()
 
-		local updateParkourRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateParkour)
-		updateParkourRemote:FireServer("SprintMode", mode)
+		writes:Queue(RemoteNames.UpdateParkour, "SprintMode", mode)
 	end)
 
 	-- Apply-then-persist, same order and same reasoning as GamepadNumberChanged above. The server
@@ -639,8 +648,7 @@ function SettingsClient.Start(handle: SettingsHandle, chrome: Chrome.ChromeHandl
 		handle.UI:set(table.clone(uiSettings))
 		applyUISettings()
 
-		local updateUIRemote = NetworkBridge.GetRemoteEvent(RemoteNames.UpdateUI)
-		updateUIRemote:FireServer("Scale", value)
+		writes:Queue(RemoteNames.UpdateUI, "Scale", value)
 	end)
 
 	logger:debug("SettingsClient bindings connected")
