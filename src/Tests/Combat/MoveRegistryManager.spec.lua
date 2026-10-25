@@ -158,7 +158,15 @@ return function()
 		it("refuses a malformed block, a self-referencing effect, and a realm that grabs", function()
 			rejects({ Domain = "vast" }, "InvalidDomain")
 			rejects({ Domain = { Shape = "Torus" } }, "InvalidDomain")
-			rejects({ Domain = { Effects = { { Kind = "Strike", MoveId = "spec-move" } } } }, "DomainSelfReference")
+			-- Only a kind that must name ANOTHER move can refuse a self-reference: a Strike naming the realm's own
+			-- move is the realm's own strike, and Validate stores it as the blank it means (checked below).
+			rejects({ Domain = { Effects = { { Kind = "Volley", MoveId = "spec-move" } } } }, "DomainSelfReference")
+			expect(DomainTypes.EffectNeedsMove.Volley).to.equal(true)
+			local own = MoveRegistryManager.Validate(
+				wire({ Domain = { Effects = { { Kind = "Strike", MoveId = "spec-move" } } } })
+			) :: any
+			expect(own).to.be.ok()
+			expect(own.Domain.Effects[1].MoveId).to.equal("")
 			rejects({
 				Domain = {},
 				Grab = {

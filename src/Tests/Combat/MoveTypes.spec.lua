@@ -49,6 +49,16 @@ local function move(overrides: { [string]: any }?): MoveTypes.MoveDefinition
 	return validated
 end
 
+-- ToWire is what a client sends, so it carries no identity: the server stamps Author/CreatedAt/UpdatedAt from
+-- trusted context before Validate (MoveRegistryManager.Validate's header). A round trip does the same.
+local function roundTrip(source: MoveTypes.MoveDefinition): MoveTypes.MoveDefinition?
+	local wired = MoveTypes.ToWire(source)
+	wired.Author = source.Author
+	wired.CreatedAt = source.CreatedAt
+	wired.UpdatedAt = source.UpdatedAt
+	return MoveRegistryManager.Validate(wired)
+end
+
 return function()
 	describe("MoveTypes vocabulary", function()
 		it("offers exactly the engine's shapes, once each", function()
@@ -137,7 +147,7 @@ return function()
 			expect(locked.LocksWindup).to.equal(true)
 			-- The two locks are independent.
 			expect(locked.LocksMovement).to.equal(false)
-			local again = MoveRegistryManager.Validate(MoveTypes.ToWire(locked)) :: MoveTypes.MoveDefinition
+			local again = roundTrip(locked) :: MoveTypes.MoveDefinition
 			expect(again.LocksWindup).to.equal(true)
 			expect(MoveTypes.Clone(locked).LocksWindup).to.equal(true)
 			expect(MoveTypes.ToEngineAttackDefinition(locked).LocksWindup).to.equal(true)
@@ -356,7 +366,7 @@ return function()
 
 		it("round-trips every projectile field through ToWire and Validate", function()
 			local source = move({ Projectile = projectileWire() })
-			local again = MoveRegistryManager.Validate(MoveTypes.ToWire(source) :: any) :: MoveTypes.MoveDefinition
+			local again = roundTrip(source) :: MoveTypes.MoveDefinition
 			expect(again).to.be.ok()
 			for _, field in ProjectileTypes.Fields do
 				expect((again.Projectile :: any)[field.Name]).to.equal((source.Projectile :: any)[field.Name])

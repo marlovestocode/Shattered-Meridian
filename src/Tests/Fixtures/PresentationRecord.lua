@@ -25,6 +25,7 @@ return {
 	},
 	DisplayName = "Presented",
 	LocksMovement = false,
+	LocksWindup = false,
 	MoveId = "fixture-presented-move",
 	OffsetPitch = 0,
 	OffsetRoll = 0,
