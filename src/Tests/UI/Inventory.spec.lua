@@ -203,7 +203,15 @@ return function()
 			)
 			local detail = gui:FindFirstChild("Detail", true) :: Instance
 			expect(hasText(detail, "Cutlass")).to.equal(true)
-			expect(hasText(detail, "Select an item to see it here.")).to.equal(false)
+			-- The placeholder label always exists and is toggled by Visible, so "gone" means "not shown": a text
+			-- search finds a hidden label too.
+			local placeholder: Instance? = nil
+			for _, descendant in detail:GetDescendants() do
+				if descendant:IsA("TextLabel") and descendant.Text == "Select an item to see it here." then
+					placeholder = descendant
+				end
+			end
+			expect(placeholder == nil or not isShown(placeholder :: Instance, detail)).to.equal(true)
 		end)
 
 		it("explains why a weapon has no discard", function()

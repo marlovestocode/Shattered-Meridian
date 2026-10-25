@@ -35,9 +35,21 @@ local KILL_XP = Constants.Meridian.BaseXPPerKill
 
 local nextUserId = 9100
 
+-- Carries the Instance surface TierSystem publishes through (CultivationTier is an Attribute on the Player,
+-- written on every Evaluate edge), so the stand-in keeps up with the System instead of throwing in it.
 local function fakePlayer(name: string): any
 	nextUserId += 1
-	return { Name = name, UserId = nextUserId }
+	local attributes: { [string]: any } = {}
+	return {
+		Name = name,
+		UserId = nextUserId,
+		SetAttribute = function(_self: any, key: string, value: any)
+			attributes[key] = value
+		end,
+		GetAttribute = function(_self: any, key: string)
+			return attributes[key]
+		end,
+	}
 end
 
 -- Counts MeridianXPAwarded facts for one recipient name while `body` runs. The signal deep-copies the
