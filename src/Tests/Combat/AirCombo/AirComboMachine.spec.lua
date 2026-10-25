@@ -96,7 +96,10 @@ return function()
 
 		it("never extends past the hard cap", function()
 			local combo = AirComboMachine.Launch(T)
-			AirComboMachine.NoteSwingAccepted(combo, { Role = "Air", Beat = 1 }, T + 0.2, 0, 10, 10)
+			-- An IN-TIME swing (it lands inside the first deadline, or it extends nothing) whose active window runs
+			-- far past the cap: the hold is the cap, not the swing's end. A 10 s windup used to be "long"; it is now
+			-- late on its own screen, which is a different case.
+			AirComboMachine.NoteSwingAccepted(combo, { Role = "Air", Beat = 1 }, T + 0.2, 0, W, TIMING.MaxComboSeconds)
 			expect(AirComboMachine.HoldUntil(combo)).to.equal(T + TIMING.MaxComboSeconds)
 		end)
 	end)

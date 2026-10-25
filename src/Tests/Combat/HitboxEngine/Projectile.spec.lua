@@ -239,12 +239,17 @@ return function()
 			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0))
 			local events, disconnect = captureEvents()
 			run(throw(attacker, projectileAttack({ Shape = "Wedge", Width = 3, Height = 1, Length = 5 })), 0.1)
+			disconnect()
 			HitboxEngine.Reset()
 			local again = makeDummy("Attacker2", Vector3.new(0, 5, 0))
+			-- Reset clears the engine's listeners, so the second volley is heard through a subscription of its own.
+			local sphereEvents, disconnectSphere = captureEvents()
 			run(throw(again, projectileAttack({})), 0.1)
-			disconnect()
+			disconnectSphere()
 			local wedgeLaunch, sphereLaunch
-			for _, event in events do
+			local launches = table.clone(events)
+			table.move(sphereEvents, 1, #sphereEvents, #launches + 1, launches)
+			for _, event in launches do
 				if event.Kind == "Launch" then
 					if event.Body ~= nil then
 						wedgeLaunch = event

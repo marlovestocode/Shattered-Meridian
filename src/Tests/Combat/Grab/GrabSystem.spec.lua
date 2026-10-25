@@ -287,7 +287,9 @@ return function()
 			-- What gets pinned against the run/walk cycle is the torso joint as well as the arm: a pinned arm
 			-- on an animated torso still swings the hand.
 			local pinned = GrabRig.HoldJoints(attacker.Model, attacker.Root, "Right") :: { Motor6D }
-			local rootJoint = attacker.Root:FindFirstChild("RootJoint")
+			-- Searched through the whole rig: the joint hangs off whichever part this fixture rig parents it to
+			-- (the real R6 one sits in the HumanoidRootPart), and HoldJoints finds it by walking the Motor6Ds.
+			local rootJoint = attacker.Model:FindFirstChild("RootJoint", true)
 			expect(table.find(pinned, shoulder)).to.be.ok()
 			expect(table.find(pinned, rootJoint :: any)).to.be.ok()
 			expect(#pinned).to.equal(2)

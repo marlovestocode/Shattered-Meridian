@@ -25,6 +25,8 @@ local Workspace = game:GetService("Workspace")
 
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
+local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.HitboxEngine)
+
 local AttackRequestSystem = require(ServerScriptService.Server.Combat.Attack.AttackRequestSystem)
 local SwingSequencer = require(ServerScriptService.Server.Combat.Attack.SwingSequencer)
 local WeaponInventorySystem = require(ServerScriptService.Server.Combat.Weapon.WeaponInventorySystem)
@@ -45,6 +47,7 @@ local FISTS = WeaponRoster.FISTS_ID
 local nextId = 0
 local spawned: { Instance } = {}
 local installed: { any } = {}
+local registered: { number } = {}
 
 -- A minimal rig, matching AttackRequestSystem.spec.lua's own makeDummy. Deliberately without a
 -- RightHand, so these cases assert that a Tool was EQUIPPED onto the character rather than anything
@@ -67,6 +70,10 @@ local function makeCharacter(name: string): Model
 	model.PrimaryPart = root
 	model.Parent = Workspace
 	table.insert(spawned, model)
+	-- A registered combatant, as a live character is: a player's draw goes through
+	-- AttackRequestSystem.RequestWeapon, which refuses a body the engine has never heard of (CanAct's
+	-- "NotRegistered"), so an unregistered stand-in could never be handed a weapon.
+	table.insert(registered, HitboxEngine.RegisterCombatant(model, root, humanoid))
 	return model
 end
 
@@ -97,6 +104,10 @@ return function()
 		WeaponVisualSystem.Reset()
 		AttackRequestSystem.Reset()
 		SwingSequencer.Reset()
+		for _, combatantId in registered do
+			HitboxEngine.UnregisterCombatant(combatantId)
+		end
+		table.clear(registered)
 		for _, instance in spawned do
 			instance:Destroy()
 		end

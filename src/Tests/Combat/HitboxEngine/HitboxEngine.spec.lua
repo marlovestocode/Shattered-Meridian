@@ -1000,6 +1000,10 @@ return function()
 			HitboxEngine.Step(FRAME, firstBegun + 0.2)
 			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Idle")
 
+			-- The engine never starts a swing in the future (begin <= os.clock()), and the Step above ran on a
+			-- clock 0.2 s ahead of it, so let the real clock pass the first swing's end before asking: otherwise
+			-- "not before the previous swing ended" is unreachable and the case measures only how fast it ran.
+			task.wait(0.06)
 			local _, _, secondBegun =
 				HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ WindupSeconds = 10 }), 1, 0, firstBegun - 5)
 			assert(secondBegun, "an accepted swing reports its start")
