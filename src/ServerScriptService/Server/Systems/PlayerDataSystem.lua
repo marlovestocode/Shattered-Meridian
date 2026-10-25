@@ -119,9 +119,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
-local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
 local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
-local EmoteRegistry = require(ReplicatedStorage.Shared.Emotes.EmoteRegistry)
 -- Only for EquipSlotCount, the bound DecodeProfile validates a persisted art slot index against --
 -- this module owns no art rules of its own beyond "a slot outside the real hotbar isn't a slot."
 local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
@@ -244,12 +242,6 @@ function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProf
 		factionStanding = 0,
 		hasAscended = false,
 		meridianXp = 0,
-		-- Emote System (Types.PlayerProfile's own header) -- a brand-new profile starts with every
-		-- Default-unlock emote already granted and the 8-emote starter loadout in place, so a
-		-- first-time player never sees an empty wheel while waiting on EmoteUnlockService's own
-		-- join-time backfill (that backfill exists for OLDER saves, not this path).
-		unlockedEmoteIds = EmoteRegistry.GetDefaultUnlockedIds(),
-		emoteLoadout = table.clone(EmoteConstants.DefaultLoadout),
 		-- Inventory -- a brand-new player is carrying nothing; see Types.PlayerProfile's own header on
 		-- this field.
 		inventory = InventoryModel.New(),
@@ -303,8 +295,6 @@ function PlayerDataSystem.CopyProfile(profile: Types.PlayerProfile): Types.Playe
 		factionStanding = profile.factionStanding,
 		hasAscended = profile.hasAscended,
 		meridianXp = profile.meridianXp,
-		unlockedEmoteIds = table.clone(profile.unlockedEmoteIds),
-		emoteLoadout = table.clone(profile.emoteLoadout),
 		inventory = InventoryModel.Copy(profile.inventory),
 		settings = {
 			Keybinds = table.clone(profile.settings.Keybinds),
@@ -707,8 +697,6 @@ function PlayerDataSystem.EncodeProfile(profile: Types.PlayerProfile): { [string
 		factionStanding = profile.factionStanding,
 		hasAscended = profile.hasAscended,
 		meridianXp = profile.meridianXp,
-		unlockedEmoteIds = profile.unlockedEmoteIds,
-		emoteLoadout = profile.emoteLoadout,
 		inventory = InventoryModel.Encode(profile.inventory),
 		settings = PlayerDataSystem.EncodeSettings(profile.settings),
 	}
@@ -823,42 +811,6 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		end
 	end
 
-	-- unlockedEmoteIds is a SET ({ [EmoteId]: true }, Types.PlayerProfile's own header) -- every key
-	-- must be a string and every value must literally be `true` (never just truthy) before it's kept,
-	-- the same per-entry defensive filtering bloodlineIds/artMastery above already apply to their own
-	-- shapes. A missing/wrong-shaped field falls back to EmoteRegistry.GetDefaultUnlockedIds() rather
-	-- than an empty table -- the same "a new/legacy record still gets every Default emote" contract
-	-- CreateDefaultProfile and Migrations[1] below both already guarantee; DecodeProfile is a second,
-	-- independent line of defense for the same invariant, not a place that should ever hand back a
-	-- player with zero emotes over a merely-corrupt field.
-	local unlockedEmoteIds: { [Types.EmoteId]: true } = {}
-	if typeof(rawTable.unlockedEmoteIds) == "table" then
-		for id, value in pairs(rawTable.unlockedEmoteIds :: { [string]: any }) do
-			if typeof(id) == "string" and value == true then
-				unlockedEmoteIds[id] = true
-			end
-		end
-	end
-	if next(unlockedEmoteIds) == nil then
-		unlockedEmoteIds = EmoteRegistry.GetDefaultUnlockedIds()
-	end
-
-	-- emoteLoadout is an ORDERED array (Types.PlayerProfile's own header) -- filtered the same way
-	-- bloodlineIds is above (drop any non-string entry rather than discarding the whole array), and
-	-- falls back to the same starter loadout CreateDefaultProfile grants a brand-new profile when
-	-- missing/wrong-shaped entirely.
-	local emoteLoadout: { Types.EmoteId } = {}
-	if typeof(rawTable.emoteLoadout) == "table" then
-		for _, id in ipairs(rawTable.emoteLoadout :: { any }) do
-			if typeof(id) == "string" then
-				table.insert(emoteLoadout, id)
-			end
-		end
-	end
-	if #emoteLoadout == 0 then
-		emoteLoadout = table.clone(EmoteConstants.DefaultLoadout)
-	end
-
 	-- inventory -- InventoryModel.Decode is the whole defensive posture (counts floored and clamped, junk
 	-- keys dropped, Order rebuilt). It does NOT consult the item catalog: an id the catalog no longer
 	-- knows is an orphan and is kept, because deleting a player's data over a content rename cannot be
@@ -887,8 +839,6 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 		factionStanding = if typeof(rawTable.factionStanding) == "number" then rawTable.factionStanding else 0,
 		hasAscended = if typeof(rawTable.hasAscended) == "boolean" then rawTable.hasAscended else false,
 		meridianXp = if typeof(rawTable.meridianXp) == "number" then rawTable.meridianXp else 0,
-		unlockedEmoteIds = unlockedEmoteIds,
-		emoteLoadout = emoteLoadout,
 		inventory = inventory,
 		settings = PlayerDataSystem.DecodeSettings(rawTable.settings),
 	}
@@ -907,27 +857,6 @@ end
 -- degrades missing/wrong-shaped fields to safe defaults per DecodeProfile's own contract, instead
 -- of this function crashing or fabricating data it has no real migration for.
 local Migrations: { [number]: (raw: { [string]: any }) -> { [string]: any } } = {}
-
--- v1 -> v2: backfills Types.PlayerProfile's unlockedEmoteIds/emoteLoadout (the Emote System's
--- persisted fields) onto any record saved before this pass -- the first real entry this table has
--- ever needed (schema version 1 was the only version that existed until this bump). Mutates and
--- returns `raw` in place -- MigrateRecord's own loop only ever forwards whatever a migration
--- function returns, so there's nothing else this needs to do. Only touches raw.Profile when it's
--- actually a table -- an already-malformed Profile is DecodeProfile's problem to degrade safely, not
--- this function's to fix up.
-Migrations[1] = function(raw: { [string]: any }): { [string]: any }
-	local profile = raw.Profile
-	if typeof(profile) == "table" then
-		local profileTable = profile :: { [string]: any }
-		if profileTable.unlockedEmoteIds == nil then
-			profileTable.unlockedEmoteIds = EmoteRegistry.GetDefaultUnlockedIds()
-		end
-		if profileTable.emoteLoadout == nil then
-			profileTable.emoteLoadout = table.clone(EmoteConstants.DefaultLoadout)
-		end
-	end
-	return raw
-end
 
 -- v2 -> v3: backfills Types.PlayerProfile's `settings` field (the Settings System's persisted
 -- keybind overrides + Autorun) onto any record saved before this pass -- same "only touch an

@@ -11,5 +11,8 @@
 ]]
 
 local ProfileSlice = require(script.Parent.ProfileSlice)
+local EmoteSlice = require(script.Parent.Slices.EmoteSlice)
 
-return ProfileSlice.Compose({})
+return ProfileSlice.Compose({
+	EmoteSlice,
+})
