@@ -269,6 +269,7 @@ local DebugConstants = {
 			DeathNoticeClient = true,
 			DebugDummySystem = true,
 			DefaultBloodlineRegistry = true,
+			DefaultMoveRegistry = true,
 			DevMenuWorldTab = true,
 			DevToolScreens = true,
 			DevTools = true,

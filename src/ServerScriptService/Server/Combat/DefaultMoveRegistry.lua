@@ -61,7 +61,11 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 local AirComboMoves = require(ReplicatedStorage.Shared.AirCombo.AirComboMoves)
 
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
+local Logger = require(ReplicatedStorage.Shared.Logger)
 local MoveRegistryManager = require(script.Parent.MoveRegistryManager)
+
+local logger = Logger.scope("DefaultMoveRegistry")
 
 local DefaultMoveRegistry = {}
 
@@ -112,12 +116,10 @@ local shipped: { [string]: Override } = {}
 
 -- Called with a MoveId whenever what Get returns for it may have changed -- MoveRegistryManager.OnChanged's
 -- twin, for the same reader (Server/Combat/MovePresentationSystem.lua).
-local changedListeners: { (moveId: string) -> () } = {}
+local changed: CallbackList.CallbackList<string> = CallbackList.New(logger, "DefaultMoveRegistry.OnChanged")
 
 local function notifyChanged(moveId: string): ()
-	for _, listener in changedListeners do
-		pcall(listener, moveId)
-	end
+	changed:Fire(moveId)
 end
 
 -- A Blade-mode weapon's swings are anchored to the weapon (and a Box takes the blade's size); a BodyBox
@@ -440,22 +442,17 @@ end
 
 -- Subscribes to every change of what Get returns for a move; returns the unsubscribe.
 function DefaultMoveRegistry.OnChanged(listener: (moveId: string) -> ()): () -> ()
-	table.insert(changedListeners, listener)
-	return function()
-		local index = table.find(changedListeners, listener)
-		if index then
-			table.remove(changedListeners, index)
-		end
-	end
+	return changed:Connect(listener)
 end
 
 -- Spec-only: drops the cached descriptor list (built from whichever roster a previous case stood up) and
--- every override. Production never needs it -- the roster is fixed at boot.
+-- every override and subscriber. Production never needs it -- the roster is fixed at boot.
 function DefaultMoveRegistry.ResetCache(): ()
 	cachedDescriptors = nil
 	table.clear(descriptorById)
 	table.clear(overrides)
 	table.clear(shipped)
+	changed:Clear()
 end
 
 return DefaultMoveRegistry
