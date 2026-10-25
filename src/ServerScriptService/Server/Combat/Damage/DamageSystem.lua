@@ -97,6 +97,7 @@ local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstan
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
+local Invulnerability = require(ReplicatedStorage.Shared.Combat.Invulnerability)
 local Knockback = require(ReplicatedStorage.Shared.Damage.Knockback)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
@@ -109,6 +110,7 @@ local AttackCatalog = require(script.Parent.Parent.AttackCatalog)
 local DefenseSystem = require(script.Parent.Parent.Defense.DefenseSystem)
 local HitboxEngine = require(script.Parent.Parent.HitboxEngine.HitboxEngine)
 local CombatTick = require(script.Parent.Parent.CombatTick)
+local MovementAllowance = require(script.Parent.Parent.MovementAllowance)
 
 type DefenseOutcome = DefenseTypes.DefenseOutcome
 type DamageResult = DamageTypes.DamageResult
@@ -286,10 +288,7 @@ local function applyLaunch(defender: Model, launch: Vector3, at: number): Player
 	if player then
 		local humanoid = CharacterUtil.HumanoidOf(defender)
 		if humanoid then
-			humanoid:SetAttribute(
-				AttributeConstants.KnockbackUntil,
-				at + DamageConstants.Knockback.MovementAllowanceSeconds
-			)
+			MovementAllowance.Stamp(humanoid, at + DamageConstants.Knockback.MovementAllowanceSeconds)
 		end
 		return player
 	end
@@ -440,6 +439,19 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 		return
 	end
 
+	-- A CORPSE TAKES NOTHING (2026-10-25). The engine never reports a dead body, but a contact classified while it
+	-- lived can apply after the blow that killed it: a second hit in the lethal hit's own batch, or one waiting out
+	-- DefenseSystem's rewind hold. It used to run in full -- hitstun and a push on the corpse, a combo stage for the
+	-- attacker, and OnApplied, where EngagementSystem re-tagged a victim PlayerKilled had just cleared, so they
+	-- respawned "in combat". Only the kinds that act on the DEFENDER are dropped: a parry, a trade or an evade by
+	-- someone who then died still settled the attacker's swing, and the attacker's client is still told.
+	if DamageResolver.AdvancesCombo(outcome.Kind) or outcome.Kind == "Blocked" then
+		local defenderHumanoidNow = CharacterUtil.HumanoidOf(outcome.Defender)
+		if defenderHumanoidNow ~= nil and defenderHumanoidNow.Health <= 0 then
+			return
+		end
+	end
+
 	local at = outcome.SampleTime
 	local projectile = outcome.Report.Projectile
 	-- A realm's strike or volley (see this file's header): flat-priced, and not a link in the owner's string.
@@ -494,6 +506,7 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 		DamageTaken = DomainRules.Scale(defenderHumanoid, "DamageTaken", realmNow),
 		GuardDamageTaken = DomainRules.Scale(defenderHumanoid, "GuardDamageTaken", realmNow),
 		HitstunTaken = DomainRules.Scale(defenderHumanoid, "HitstunTaken", realmNow),
+		Invulnerable = Invulnerability.Invulnerable(defenderHumanoid),
 	})
 
 	-- The air combo's scaling and presentation tag, before any reader sees the result (see airComboHook).
@@ -751,6 +764,7 @@ function DamageSystem.ApplyImpact(attacker: Model, target: Model, amount: number
 		PowerDamage = powerDamage,
 		DamageDealt = DomainRules.Scale(CharacterUtil.HumanoidOf(attacker), "DamageDealt", realmNow),
 		DamageTaken = DomainRules.Scale(humanoid, "DamageTaken", realmNow),
+		Invulnerable = Invulnerability.Invulnerable(humanoid),
 	})
 	local damage = result.Damage
 	if not (damage > 0) then

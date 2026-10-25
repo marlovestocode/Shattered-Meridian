@@ -270,6 +270,77 @@ return function()
 			expect(humanoid:GetAttribute(AttributeConstants.Invisible)).to.equal(false)
 			expect(torso.Transparency).to.equal(0)
 		end)
+
+		it("restores what each part was, not a blanket 0 (an authored-invisible part stays invisible)", function()
+			local state = AdminActionSystem.CreateOverrideState()
+			local character, humanoid, torso = makeCharacter()
+			local helper = Instance.new("Part")
+			helper.Transparency = 1
+			helper.Parent = character
+			local tinted = Instance.new("Part")
+			tinted.Transparency = 0.4
+			tinted.Parent = character
+
+			AdminActionSystem.ApplyInvisible(state, character, humanoid, true)
+			AdminActionSystem.ApplyInvisible(state, character, humanoid, false)
+
+			expect(torso.Transparency).to.equal(0)
+			expect(helper.Transparency).to.equal(1)
+			expect(tinted.Transparency).to.be.near(0.4, 1e-6)
+		end)
+
+		it("hides a part parented while invisible, and restores it to its own original", function()
+			local state = AdminActionSystem.CreateOverrideState()
+			local character, humanoid = makeCharacter()
+			AdminActionSystem.ApplyInvisible(state, character, humanoid, true)
+
+			local weapon = Instance.new("Part")
+			weapon.Transparency = 0.25
+			weapon.Parent = character
+			task.wait()
+			expect(weapon.Transparency).to.equal(1)
+
+			AdminActionSystem.ApplyInvisible(state, character, humanoid, false)
+			expect(weapon.Transparency).to.be.near(0.25, 1e-6)
+
+			-- And the connection is gone with the override: a later part is left alone.
+			local later = Instance.new("Part")
+			later.Transparency = 0
+			later.Parent = character
+			task.wait()
+			expect(later.Transparency).to.equal(0)
+		end)
+
+		it("does not record a hidden part's 1 as its original when enabled twice", function()
+			local state = AdminActionSystem.CreateOverrideState()
+			local character, humanoid, torso = makeCharacter()
+
+			AdminActionSystem.ApplyInvisible(state, character, humanoid, true)
+			AdminActionSystem.ApplyInvisible(state, character, humanoid, true)
+			AdminActionSystem.ApplyInvisible(state, character, humanoid, false)
+
+			expect(torso.Transparency).to.equal(0)
+		end)
+
+		it("drops the old body's bookkeeping on respawn and hides the new one", function()
+			local state = AdminActionSystem.CreateOverrideState()
+			local oldCharacter, oldHumanoid, oldTorso = makeCharacter()
+			AdminActionSystem.ApplyInvisible(state, oldCharacter, oldHumanoid, true)
+
+			local newCharacter, newHumanoid, newTorso = makeCharacter()
+			AdminActionSystem.ReapplyRespawnOverrides(state, newCharacter, newHumanoid)
+			expect(newTorso.Transparency).to.equal(1)
+
+			-- The old body's connection is cleaned: a part added there is no longer hidden.
+			local stray = Instance.new("Part")
+			stray.Parent = oldCharacter
+			task.wait()
+			expect(stray.Transparency).to.equal(0)
+			expect(oldTorso.Transparency).to.equal(1)
+
+			AdminActionSystem.ApplyInvisible(state, newCharacter, newHumanoid, false)
+			expect(newTorso.Transparency).to.equal(0)
+		end)
 	end)
 
 	describe("AdminActionSystem.ApplySpeedMultiplier", function()

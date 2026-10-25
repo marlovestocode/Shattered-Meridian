@@ -47,6 +47,7 @@ local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
+local Invulnerability = require(ReplicatedStorage.Shared.Combat.Invulnerability)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
@@ -288,10 +289,9 @@ local function publishSession(session: Session, now: number): ()
 		setPhase(session.VictimHumanoid, phase, now, false)
 		setPhase(session.AttackerHumanoid, phase, now, false)
 	end
-	-- Re-asserted, not trusted: RootControlLocked has other writers (HitboxEngine's swing lock, DefenseSystem's
-	-- stagger lock) that each CLEAR it when their own hold ends -- a victim launched mid-swing would otherwise
-	-- have the engine hand their parkour back the frame its cancelled swing exits.
-	setAttribute(session.VictimHumanoid, ATTRIBUTES.RootControlLocked, true)
+	-- No re-assert of RootControlLocked here any more: it was a second writer, kept because the swing lock and the
+	-- stagger lock each CLEARED the flag when their own hold ended. They hold CLAIMS now (Server/Combat/
+	-- RootControl.lua), so the flag stays up for as long as this System's own claim (takeBody) does.
 end
 
 -- Ending -------------------------------------------------------------------------------------------
@@ -412,6 +412,10 @@ local function isRestrained(humanoid: Humanoid): boolean
 end
 
 local function isLaunchImmune(humanoid: Humanoid): boolean
+	-- Godmode is immune to being launched too: a combo is damage by another name (Shared/Combat/Invulnerability.lua).
+	if Invulnerability.Invulnerable(humanoid) then
+		return true
+	end
 	local untilTime = humanoid:GetAttribute(ATTRIBUTES.LaunchImmuneUntil)
 	return typeof(untilTime) == "number" and Workspace:GetServerTimeNow() < untilTime
 end

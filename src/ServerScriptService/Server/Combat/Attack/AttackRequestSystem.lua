@@ -125,6 +125,7 @@ local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnersh
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
+local FrozenBody = require(ReplicatedStorage.Shared.Combat.FrozenBody)
 local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 
 local ProjectileRelevance = require(script.Parent.ProjectileRelevance)
@@ -200,6 +201,9 @@ type InFlight = {
 	MoveId: string,
 	Feintable: boolean,
 	StartedAt: number,
+	-- How far StartedAt was backdated from the press's arrival (AttackConstants.Latency): 0 for a swing that
+	-- began on arrival. The most a feint on this swing may be refunded -- see Feint.
+	LeadSeconds: number,
 	WindupSeconds: number,
 	-- Whether the move's Cooldown is a swing-length one (it stands for "until this swing is over"),
 	-- which a feint shortens along with the swing; a real, longer cooldown is left alone.
@@ -797,6 +801,14 @@ local function bodyGate(model: Model, now: number): (boolean, string?)
 	if humanoid and humanoid:GetAttribute(AttributeConstants.Mounted) == true then
 		return false, "Mounted"
 	end
+
+	-- A FROZEN BODY (an admin freeze, or the onboarding isolation) CANNOT ACT. Frozen only pinned WalkSpeed and the
+	-- parkour client before, so a frozen player could still swing -- the freeze did not hold. Read as an
+	-- Attribute through Shared/Combat/FrozenBody, never a require of AdminActionSystem. Not a transient refusal,
+	-- for the reason Mounted is not: a buffered press would fire the frame the freeze lifted.
+	if FrozenBody.IsFrozen(humanoid) then
+		return false, "Frozen"
+	end
 	return true, nil
 end
 
@@ -984,6 +996,7 @@ local function throw(
 		MoveId = resolution.MoveId,
 		Feintable = entry.Feintable,
 		StartedAt = startedAt,
+		LeadSeconds = now - startedAt,
 		WindupSeconds = entry.Definition.WindupSeconds,
 		SwingLengthCooldown = entry.Cooldown <= commitment + 1e-6,
 		PowerLevel = entry.PowerLevel,
@@ -1149,7 +1162,14 @@ function AttackRequestSystem.Feint(model: Model, now: number): (boolean, string?
 	if not swing.Feintable then
 		return false, "NotFeintable"
 	end
-	if now - swing.StartedAt > swing.WindupSeconds * AttackConstants.Feint.WindowFraction then
+	-- JUDGED ON THE SWING'S OWN CLOCK (2026-10-25). The swing was started a one-way trip before its press arrived
+	-- (AttackConstants.Latency), so the windup it is measured against began when the player pressed. The feint
+	-- press makes the same trip, and judging it on arrival charged that trip against the window: at 100 ms one way
+	-- a quarter-second feint window lost 40% of itself. Refunded the same way, never by more than the swing itself
+	-- was (LeadSeconds) -- so a swing that started on arrival refunds nothing -- and the engine must still be in
+	-- the windup NOW, above: a hitbox that has already opened is never cancelled retroactively.
+	local pressedAt = now - math.min(NetworkLatency.OneWaySeconds(model), swing.LeadSeconds)
+	if pressedAt - swing.StartedAt > swing.WindupSeconds * AttackConstants.Feint.WindowFraction then
 		return false, "TooLate"
 	end
 	local readyAt = feintReadyAt[model]
@@ -1332,6 +1352,16 @@ function AttackRequestSystem.CancelRecoveryForEvade(model: Model, now: number): 
 	end
 	-- A press buffered against the swing just cut was aimed at what came after it, not at an evade.
 	dropBuffered(model, "Dropped")
+	-- The swing's deadline goes with the swing -- a bare write, the same exception Feint makes. Left standing, it
+	-- also told DefenseSystem's evade rewind (evadeNotBefore) the body was still committed, so the very evade this
+	-- cut exists for was never rewound for a laggy player. Never below a stun still running (that deadline shares it).
+	local humanoid = CharacterUtil.HumanoidOf(model)
+	if humanoid then
+		local busy = humanoid:GetAttribute(AttributeConstants.CombatBusyUntil)
+		if typeof(busy) == "number" and busy > now then
+			humanoid:SetAttribute(AttributeConstants.CombatBusyUntil, math.max(now, DamageSystem.HitstunUntil(model)))
+		end
+	end
 	return true
 end
 

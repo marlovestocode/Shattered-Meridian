@@ -64,6 +64,7 @@ local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboCons
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
+local FrozenBody = require(ReplicatedStorage.Shared.Combat.FrozenBody)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnership)
 local Logger = require(ReplicatedStorage.Shared.Logger)
@@ -148,10 +149,10 @@ local parryConsumedThisBatch: { [Model]: boolean } = {}
 local batchGuard: { [Model]: number } = {}
 
 -- THE REWIND HOLD. A Clean contact on a player-backed defender with a real round trip is not applied at the
--- end of its frame: it waits here for up to min(round trip, cap), so a parry or block pressed in time on the
--- defender's own screen -- whose press is still in flight to the server -- is not eaten by lag. A press
--- arriving in the hold is judged at its rewound time (see rewoundPressAt and resolveHeldContactsFor);
--- otherwise the contact applies as the Clean it was when the hold runs out.
+-- end of its frame: it waits here for up to min(round trip, cap), so a parry, block or evade pressed in time on
+-- the defender's own screen -- whose press is still in flight to the server -- is not eaten by lag. A press
+-- arriving in the hold is judged at its rewound time (see rewoundPressAt and resolveHeldContactsFor; for the
+-- evade, resolveHeldEvadesFor, since 2026-10-25); otherwise the contact applies as it was when the hold runs out.
 --
 -- Born as the air parry's rewind (docs/design/air-combat-and-evade.md B5, cap AirComboConstants.Parry.
 -- RewindMaxSeconds) and extended to the ground (2026-09-29, cap DefenseConstants.Parry.RewindMaxSeconds),
@@ -384,6 +385,20 @@ local function syncGuard(registration: Registration, now: number): ()
 	notifyClient(registration, registration.Machine:GetState(), nil)
 end
 
+-- THE BREAK SPENDS THE POOL, AND THE BODY COMES OUT OF IT WITH A WHOLE GUARD (2026-10-25). Before this the pool
+-- left the break still empty (every punish hit had pushed its regen delay out), so the first hit after it --
+-- blocked or clean -- broke it again, and pressure alone could chain breaks for as long as it lasted. The opening
+-- was the reward; a second one for free was a lock. The same reset a fresh life gets (GuardMeter.Reset). Run from
+-- the machine's transition out of GuardBroken, before that transition is published, so the client's push carries
+-- the refilled pool.
+--
+-- The batch's running guard goes with it: a contact classified earlier this frame, inside the break, must not have
+-- a later one judged against the empty pool it saw.
+local function onGuardBreakEnded(registration: Registration): ()
+	registration.Guard:Reset()
+	batchGuard[registration.Model] = nil
+end
+
 -- Registry -----------------------------------------------------------------------------------------
 
 -- Registers a combatant. Mirrors HitboxEngine.RegisterCombatant's shape (model, root, humanoid) on
@@ -421,7 +436,10 @@ function DefenseSystem.RegisterCombatant(
 		GuardSentAt = -math.huge,
 	}
 	registration.Machine = DefenseStateMachine.New({
-		OnTransition = function(_from: DefenseState, to: DefenseState, _at: number)
+		OnTransition = function(from: DefenseState, to: DefenseState, _at: number)
+			if from == "GuardBroken" then
+				onGuardBreakEnded(registration)
+			end
 			publishState(registration, to)
 			notifyClient(registration, to, nil)
 			if DefenseConstants.Debug.Enabled and DefenseConstants.Debug.LogTransitions then
@@ -661,6 +679,12 @@ function DefenseSystem.SetBlocking(model: Model, blocking: boolean, now: number)
 		if ParkourOwnership.OwnsBody(registration.Humanoid) then
 			return false
 		end
+		-- A frozen body (admin freeze, onboarding isolation) cannot raise a guard or a parry, and the press is
+		-- not held for later either: it would arm the instant the freeze lifted. Press only -- the release above
+		-- still goes through for a guard that was already up. Shared/Combat/FrozenBody.
+		if FrozenBody.IsFrozen(registration.Humanoid) then
+			return false
+		end
 		-- HELD, NOT REFUSED. A player who presses guard a moment before their swing ends -- or while
 		-- still reeling -- gets the guard the instant they are free (Step), as long as the key is still
 		-- down. Refusing it outright would make the guard feel dropped at exactly the moment it matters.
@@ -701,13 +725,11 @@ end
 -- refuses the evade frames, so an evade the server would not honour is a glide that gets hit. That is the
 -- correct failure for a client that skipped its own gates, and an honest client never reaches it: the
 -- same conditions are checked locally in States/Evading.CanEnter.
-function DefenseSystem.BeginEvade(model: Model, now: number): (boolean, string?)
-	local registration = registrations[model]
-	if not registration then
-		return false, "NotRegistered"
-	end
+-- The BODY half of the evade's gate, or nil when the body may evade. Shared by BeginEvade and the rewind hold
+-- (rewindHoldFor), which holds a contact for an evade press in flight only when such a press could be accepted.
+local function evadeBodyRefusal(registration: Registration, now: number): string?
 	if bodyCommitted(registration, now) then
-		return false, "Committed"
+		return "Committed"
 	end
 	local humanoid = registration.Humanoid
 	if
@@ -715,19 +737,59 @@ function DefenseSystem.BeginEvade(model: Model, now: number): (boolean, string?)
 		or humanoid:GetAttribute(AttributeConstants.Grabbing) == true
 		or humanoid:GetAttribute(AttributeConstants.Mounted) == true
 	then
-		return false, "Restrained"
+		return "Restrained"
+	end
+	-- A frozen body (admin freeze, onboarding isolation) does not evade; see SetBlocking.
+	if FrozenBody.IsFrozen(humanoid) then
+		return "Frozen"
 	end
 	-- Held in an air combo: the parry is the one way out, never an evade.
 	if isAirHeld(humanoid) then
-		return false, "AirHeld"
+		return "AirHeld"
 	end
 	-- A realm that forbids the evade (a NoEvade rule, Shared/Domain/DomainRules.lua): read as an Attribute
 	-- on the defender, like the air combo's own holds above, never through the realm runtime above this layer.
 	if DomainRules.Has(humanoid, "NoEvade") then
-		return false, "DomainSealed"
+		return "DomainSealed"
 	end
-	local ok, reason = registration.Machine:BeginEvade(now, pingSecondsFor(model))
+	return nil
+end
+
+-- The earliest moment an evade press from this body could have been made, as far as the body gates with a RECORD
+-- can say: the end of its hitstun, and of the swing it was committed to (CombatBusyUntil -- the attack layer's
+-- swing deadline, which a stun also raises). The machine clamps a rewound press to it (DefenseStateMachine.
+-- BeginEvade). The gates with no record (grabbed, mounted, frozen, air-held, a realm's NoEvade) answer only for
+-- now, which the arriving press has already passed -- the same residual the attack layer's swing lead accepts.
+local function evadeNotBefore(registration: Registration): number
+	local humanoid = registration.Humanoid
+	local stunnedUntil = humanoid:GetAttribute(AttributeConstants.HitstunUntil)
+	local busyUntil = humanoid:GetAttribute(AttributeConstants.CombatBusyUntil)
+	return math.max(
+		if typeof(stunnedUntil) == "number" then stunnedUntil else -math.huge,
+		if typeof(busyUntil) == "number" then busyUntil else -math.huge
+	)
+end
+
+-- Re-judges this defender's held contacts against the evade just accepted, whose window the machine anchored at the
+-- rewound press -- defined in pass 2 below (it needs applyContact and the hold), like resolveHeldContactsFor.
+local resolveHeldEvadesFor: (registration: Registration, now: number) -> ()
+
+function DefenseSystem.BeginEvade(model: Model, now: number): (boolean, string?)
+	local registration = registrations[model]
+	if not registration then
+		return false, "NotRegistered"
+	end
+	local refusal = evadeBodyRefusal(registration, now)
+	if refusal then
+		return false, refusal
+	end
+	local ok, reason = registration.Machine:BeginEvade(now, pingSecondsFor(model), evadeNotBefore(registration))
 	if ok then
+		-- The press was made a round trip ago on the defender's screen, and the window opens there; a hit it dodged
+		-- may be sitting in the rewind hold as Clean, and is judged against that window now.
+		if #heldContacts > 0 then
+			resolveHeldEvadesFor(registration, now)
+		end
 		-- A guard press held for later (SetBlocking's deferral) is dropped along with the raised guard the
 		-- machine just released: the player chose to roll instead, and raising the guard the moment the
 		-- roll ends would be a posture they never asked for on this press. Only on success -- a refused
@@ -1084,12 +1146,44 @@ end
 --     string anyway (DamageConstants.Hitstun.LinkMarginSeconds > Parry.RewindMaxSeconds). This is the
 --     common case inside a linked M1 string, and holding it delayed every hit by up to the cap.
 -- Also 0 for a bot or a dummy (rewindSecondsFor), which has no round trip.
+--
+-- AN EVADE CAN ANSWER IT TOO (2026-10-25), from any side and whatever the key: the dodge is positional. So a contact
+-- the guard rules above would not hold -- a flank or rear hit, or a Backstab on a raised guard -- is still held while
+-- this body could have an evade accepted right now: in combat (the evade is combat-only -- Main.server.lua drops the
+-- report otherwise, read here through the InCombat Attribute EngagementSystem publishes), evadeBodyRefusal, and the
+-- machine's own posture gate. A body that could not evade (untagged, stunned, mid-swing, on cooldown) holds nothing
+-- for it, so the delay is still only spent where a press in flight could change the result. That still widens the
+-- hold, deliberately: against a laggy, free, tagged defender, hits from the flank and rear now wait the hold out the
+-- way frontal ones already did.
+--
+-- A BROKEN GUARD HOLDS NOTHING: no press can parry, block or evade out of it, and a hit held past the break's end
+-- would drain the pool it just refilled.
 local function rewindHoldFor(contact: PendingContact, now: number): number
-	if contact.Result.Kind ~= "Clean" then
+	local kind = contact.Result.Kind
+	if kind ~= "Clean" and kind ~= "Backstab" then
 		return 0
 	end
 	local registration = registrations[contact.Defender]
 	if not registration then
+		return 0
+	end
+	-- No round trip (a bot, a dummy, a zero-ping body): nothing is in flight, so none of the gates below can matter.
+	local rewind = rewindSecondsFor(registration)
+	if rewind <= 0 then
+		return 0
+	end
+	if registration.Machine:GetState() == "GuardBroken" then
+		return 0
+	end
+	if
+		registration.Humanoid:GetAttribute(AttributeConstants.InCombat) == true
+		and evadeBodyRefusal(registration, now) == nil
+		and registration.Machine:CanEvadeAt(now)
+	then
+		return rewind
+	end
+	-- Only the evade answers a Backstab: the guard rules below are what made it one.
+	if kind == "Backstab" then
 		return 0
 	end
 	if not OutcomeResolver.IsWithinBlockArc(contact.BearingDegrees) then
@@ -1105,7 +1199,7 @@ local function rewindHoldFor(contact: PendingContact, now: number): number
 	if held and not registration.Machine:CanArmParryAt(now) then
 		return 0
 	end
-	return rewindSecondsFor(registration)
+	return rewind
 end
 
 -- Takes one held contact out of the hold, re-classified, and applies it now.
@@ -1240,6 +1334,39 @@ resolveHeldContactsFor = function(
 		releaseHeld(held, result, stateThen)
 		applyContact(held.Contact, now)
 		debugLog("Guard judged on the rewind", { defender = registration.Model.Name, kind = result.Kind })
+	end
+end
+
+-- Every held contact on this defender inside the window the evade just opened -- anchored at its rewound press,
+-- already clamped by the machine and evadeNotBefore -- applies now as Evaded. ALL of them, unlike the parry's one:
+-- an evade is never consumed (DefenseStateMachine.IsEvadingAt).
+resolveHeldEvadesFor = function(registration: Registration, now: number): ()
+	local machine = registration.Machine
+	local covered: { HeldContact } = {}
+	for _, held in heldContacts do
+		local contact = held.Contact
+		if
+			contact.Defender == registration.Model
+			and contact.SampleTime < now
+			and machine:IsEvadingAt(contact.SampleTime)
+		then
+			table.insert(covered, held)
+		end
+	end
+	-- Oldest first, the order they landed in, so outcomes leave in the order the parry's rewind would emit them.
+	table.sort(covered, function(a: HeldContact, b: HeldContact): boolean
+		return a.Contact.SampleTime < b.Contact.SampleTime
+	end)
+	for _, held in covered do
+		local contact = held.Contact
+		releaseHeld(held, {
+			Kind = "Evaded" :: DefenseTypes.OutcomeKind,
+			Guard = registration.Guard:Get(),
+			GuardDelta = 0,
+			ConsumesParry = false,
+		}, machine:StateAt(contact.SampleTime))
+		applyContact(contact, now)
+		debugLog("Evade judged on the rewind", { defender = registration.Model.Name })
 	end
 end
 
@@ -1430,6 +1557,12 @@ function DefenseSystem.DrainGuard(model: Model, amount: number, now: number): (n
 		return nil, nil, false
 	end
 	if typeof(amount) ~= "number" or amount ~= amount or amount <= 0 then
+		return registration.Guard:Get(), 0, false
+	end
+	-- A BROKEN GUARD HAS NOTHING LEFT TO SPEND. The punish hits that land in a break still drain posture, and on an
+	-- empty pool GuardMeter.ApplyDrain answers "broke" -- which re-broke the guard and restarted the opening on every
+	-- hit (see DefenseStateMachine.BreakGuard). Absorbed here instead: no drain, no regen delay pushed out, no break.
+	if registration.Machine:GetState() == "GuardBroken" then
 		return registration.Guard:Get(), 0, false
 	end
 

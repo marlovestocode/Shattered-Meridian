@@ -342,6 +342,29 @@ return function()
 			machine:Update(T + DefenseConstants.GuardBrokenSeconds)
 			expect(machine:GetState()).to.equal("Blocking")
 		end)
+
+		it("is not restarted by a second break inside it", function()
+			-- The punish hits land inside the break; if each re-broke it, pressure alone would hold the opening open
+			-- for as long as the attacker kept landing one a second.
+			local machine = DefenseStateMachine.New()
+			machine:BreakGuard(T)
+			machine:BreakGuard(T + DefenseConstants.GuardBrokenSeconds * 0.9)
+			machine:Update(T + DefenseConstants.GuardBrokenSeconds)
+			expect(machine:GetState()).to.equal("Neutral")
+		end)
+
+		it("is not cut short by a stagger landing inside it", function()
+			-- A broken body whose own shot is parried: the stagger must not hand it its guard back early.
+			local machine = DefenseStateMachine.New()
+			machine:BreakGuard(T)
+			machine:Stagger(T + 0.5, 0.9)
+			expect(machine:GetState()).to.equal("GuardBroken")
+			machine:Update(T + DefenseConstants.GuardBrokenSeconds + 0.01)
+			-- Lasts as long as the stagger would have, the harsher state throughout.
+			expect(machine:GetState()).to.equal("GuardBroken")
+			machine:Update(T + 1.4 + 0.01)
+			expect(machine:GetState()).to.equal("Neutral")
+		end)
 	end)
 
 	describe("DefenseStateMachine -- the roll's evade window", function()
@@ -365,17 +388,36 @@ return function()
 			expect(machine:IsEvadingAt(T)).to.equal(false)
 		end)
 
-		it("refunds latency on the END only, capped", function()
+		it("anchors the window at the rewound press, capped, and never lengthens it", function()
 			local machine = DefenseStateMachine.New()
-			machine:BeginEvade(T, 10) -- an absurd ping
-			local activeEnd = T + EVADE.StartupSeconds + EVADE.ActiveSeconds
-			-- The start is not pulled earlier by any ping.
-			expect(machine:IsEvadingAt(T - 0.01)).to.equal(false)
-			if EVADE.StartupSeconds > 0 then
-				expect(machine:IsEvadingAt(T + EVADE.StartupSeconds * 0.5)).to.equal(false)
-			end
-			expect(machine:IsEvadingAt(activeEnd + EVADE.PingCompensationMaxSeconds)).to.equal(true)
-			expect(machine:IsEvadingAt(activeEnd + EVADE.PingCompensationMaxSeconds + 0.01)).to.equal(false)
+			machine:BeginEvade(T, 10) -- an absurd round trip
+			local opensAt = T - EVADE.RewindMaxSeconds + EVADE.StartupSeconds
+			expect(machine:IsEvadingAt(opensAt - 0.01)).to.equal(false)
+			expect(machine:IsEvadingAt(opensAt)).to.equal(true)
+			expect(machine:IsEvadingAt(opensAt + EVADE.ActiveSeconds)).to.equal(true)
+			-- Shifted, not stretched: a padded ping buys no extra invulnerability past the authored length.
+			expect(machine:IsEvadingAt(opensAt + EVADE.ActiveSeconds + 0.01)).to.equal(false)
+		end)
+
+		it("never rewinds the press before the evade cooldown, a stagger or the caller's clamp", function()
+			local cooled = DefenseStateMachine.New()
+			cooled:BeginEvade(T, 0)
+			local again = T + EVADE.CooldownSeconds + 0.05
+			cooled:BeginEvade(again, 0.1)
+			-- Rewound 0.1, but the previous evade's cooldown ran out only 0.05 before arrival.
+			expect(cooled:IsEvadingAt(again - 0.06)).to.equal(false)
+			expect(cooled:IsEvadingAt(again - 0.05 + EVADE.StartupSeconds)).to.equal(true)
+
+			local staggered = DefenseStateMachine.New()
+			staggered:Stagger(T, 0.5)
+			staggered:Update(T + 0.5)
+			staggered:BeginEvade(T + 0.55, 0.1)
+			expect(staggered:IsEvadingAt(T + 0.49)).to.equal(false)
+
+			local clamped = DefenseStateMachine.New()
+			clamped:BeginEvade(T, 0.1, T - 0.02)
+			expect(clamped:IsEvadingAt(T - 0.05)).to.equal(false)
+			expect(clamped:IsEvadingAt(T - 0.02 + EVADE.StartupSeconds)).to.equal(true)
 		end)
 
 		it("refuses a second evade inside the cooldown", function()

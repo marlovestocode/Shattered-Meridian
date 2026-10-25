@@ -211,6 +211,13 @@ return function()
 			expect(result.HitstunSeconds).to.equal(0.5)
 		end)
 
+		it("zeroes health, posture and stun for an invulnerable defender, whatever else scales", function()
+			local result = DamageResolver.ApplyScales(priced(), { Shot = 3, DamageDealt = 2, Invulnerable = true })
+			expect(result.Damage).to.equal(0)
+			expect(result.GuardDrain).to.equal(0)
+			expect(result.HitstunSeconds).to.equal(0)
+		end)
+
 		it("scales health and posture by the shot, health only by dealt and taken", function()
 			local result = DamageResolver.ApplyScales(priced(), { Shot = 2, DamageDealt = 1.5, DamageTaken = 0.5 })
 			expect(result.Damage).to.be.near(10 * 2 * 1.5 * 0.5, 1e-9)

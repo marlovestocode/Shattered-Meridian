@@ -168,6 +168,21 @@ return function()
 	end)
 
 	describe("DefenseSystem -- blocking", function()
+		it("raises no guard or parry for a frozen body, and does not hold the press for later", function()
+			local base = os.clock()
+			local fighter = makeDummy("Frozen", Vector3.new(0, 5, 0))
+			fighter.Humanoid:SetAttribute("Frozen", true)
+
+			expect(DefenseSystem.SetBlocking(fighter.Model, true, base)).to.equal(false)
+			step(FRAME, base + WINDOW_CLOSE + FRAME)
+			expect(DefenseSystem.GetState(fighter.Model)).to.equal("Neutral")
+
+			-- Thawed with the key still "down": nothing was deferred, so nothing arms by itself.
+			fighter.Humanoid:SetAttribute("Frozen", false)
+			step(FRAME, base + WINDOW_CLOSE + 2 * FRAME)
+			expect(DefenseSystem.GetState(fighter.Model)).to.equal("Neutral")
+		end)
+
 		it("drains guard on a blocked hit", function()
 			local base = os.clock()
 			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
@@ -269,6 +284,38 @@ return function()
 			local guard = DefenseSystem.GetGuard(defender.Model)
 			local GUARD = DefenseConstants.Guard
 			expect(guard).to.be.near(GUARD.Max - 2 * GUARD.DrainPerPowerLevel, 1e-3)
+		end)
+	end)
+
+	describe("DefenseSystem -- the guard break is an opening, not a lock", function()
+		local BROKEN = DefenseConstants.GuardBrokenSeconds
+
+		it("is not extended by the posture the punish hits drain", function()
+			-- Every clean hit drains posture (DamageSystem -> DrainGuard). On the emptied pool that used to read as
+			-- another break, restarting the opening on each hit of the punish.
+			local base = os.clock()
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local _, _, broke = DefenseSystem.DrainGuard(defender.Model, DefenseConstants.Guard.Max, base)
+			expect(broke).to.equal(true)
+
+			local _, delta, brokeAgain = DefenseSystem.DrainGuard(defender.Model, 10, base + BROKEN * 0.9)
+			expect(delta).to.equal(0)
+			expect(brokeAgain).to.equal(false)
+			step(FRAME, base + BROKEN + FRAME)
+			expect(DefenseSystem.GetState(defender.Model)).to.equal("Neutral")
+		end)
+
+		it("ends with a whole guard, so the next hit does not break it again", function()
+			local base = os.clock()
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			DefenseSystem.DrainGuard(defender.Model, DefenseConstants.Guard.Max, base)
+			step(FRAME, base + BROKEN + FRAME)
+
+			local guard, guardMax = DefenseSystem.GetGuard(defender.Model)
+			expect(guard).to.equal(guardMax)
+			DefenseSystem.DrainGuard(defender.Model, 10, base + BROKEN + 2 * FRAME)
+			expect(DefenseSystem.GetState(defender.Model)).to.equal("Neutral")
+			expect(DefenseSystem.GetGuard(defender.Model)).to.be.near(guardMax - 10, 1e-3)
 		end)
 	end)
 
@@ -438,15 +485,135 @@ return function()
 			expect(outcomes[1].Kind).to.equal("Clean")
 		end)
 
-		it("does not hold a hit from the flank -- no press could have turned it", function()
+		it("does not hold a hit from the flank when no press could have turned it", function()
 			local base = os.clock()
-			-- Off the defender's shoulder, past the block arc but short of the rear hemisphere.
+			-- Off the defender's shoulder, past the block arc but short of the rear hemisphere: no guard covers it,
+			-- and the evade that could is still cooling down from one that has already ended.
 			local attacker = makeDummy("Attacker", Vector3.new(4, 5, -3), Vector3.new(0, 5, -4))
-			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			-- In combat, so the cooldown -- not the missing tag -- is what leaves no evade to wait for.
+			defender.Humanoid:SetAttribute("InCombat", true)
+			local EVADE = DefenseConstants.Evade
+			local endedBy = EVADE.StartupSeconds + EVADE.ActiveSeconds + 0.05
+			expect(DefenseSystem.BeginEvade(defender.Model, base - endedBy)).to.equal(true)
 
 			local outcomes, disconnect = captureOutcomes()
 			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
 			step(FRAME, base + FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Clean")
+		end)
+
+		it("evades a hit that landed while the evade was in flight, from any side", function()
+			-- The dodge's own lag rewind: before it, a dodge timed to the hit on the defender's screen arrived after
+			-- the hit was judged Clean, and only the parry and the block were rewound. From behind, to show the
+			-- evade holds what no guard rule would.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, -20))
+			defender.Humanoid:SetAttribute("InCombat", true)
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			expect(#outcomes).to.equal(0)
+			expect(DefenseSystem.BeginEvade(defender.Model, base + FRAME + PING * 0.5)).to.equal(true)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Evaded")
+			local guard, guardMax = DefenseSystem.GetGuard(defender.Model)
+			expect(guard).to.equal(guardMax)
+		end)
+
+		it("evades a Backstab on a raised guard the same way -- the dodge is positional", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, -20))
+			defender.Humanoid:SetAttribute("InCombat", true)
+			DefenseSystem.SetBlocking(defender.Model, true, base - WINDOW_CLOSE - FRAME)
+			step(FRAME, base)
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			expect(#outcomes).to.equal(0)
+			expect(DefenseSystem.BeginEvade(defender.Model, base + FRAME + PING * 0.5)).to.equal(true)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Evaded")
+		end)
+
+		it("does not hold a rear hit on a defender who is not in combat -- no evade could be accepted", function()
+			-- The evade is combat-only (Main.server.lua drops the report otherwise), and the tag is written when a hit
+			-- applies. Holding the opener for an evade that cannot come would only delay it.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, -20))
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Clean")
+		end)
+
+		it("does not hold a hit on a broken guard -- nothing could answer it", function()
+			-- Held past the break's end it would also drain the pool the break's end just refilled.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			defender.Humanoid:SetAttribute("InCombat", true)
+			DefenseSystem.DrainGuard(defender.Model, DefenseConstants.Guard.Max, base)
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Clean")
+		end)
+
+		it("leaves a hit Clean when the evade really was late", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			defender.Humanoid:SetAttribute("InCombat", true)
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			-- Inside the hold, but rewound only to after the contact.
+			DefenseSystem.BeginEvade(defender.Model, base + FRAME + PING + 0.5 * FRAME)
+			step(FRAME, base + FRAME + PING + FRAME)
+			disconnect()
+
+			expect(#outcomes).to.equal(1)
+			expect(outcomes[1].Kind).to.equal("Clean")
+		end)
+
+		it("does not rewind an evade onto a cooldown that had not run out", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			defender.Humanoid:SetAttribute("InCombat", true)
+			local EVADE = DefenseConstants.Evade
+			-- This evade's cooldown runs out after the contact but before the second press arrives: that press is
+			-- accepted, but rewound no earlier than the cooldown's end, which the contact precedes.
+			local firstAt = base + FRAME * 1.5 - EVADE.CooldownSeconds
+			expect(DefenseSystem.BeginEvade(defender.Model, firstAt)).to.equal(true)
+
+			local outcomes, disconnect = captureOutcomes()
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			expect(DefenseSystem.BeginEvade(defender.Model, base + FRAME + PING * 0.5)).to.equal(true)
+			step(FRAME, base + FRAME + PING + FRAME)
 			disconnect()
 
 			expect(#outcomes).to.equal(1)
@@ -698,19 +865,39 @@ return function()
 			expect(outcomes[1].Kind).to.equal("Evaded")
 		end)
 
-		it("is hit during the startup -- pressing roll as the swing lands is too late", function()
-			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+		-- THE STARTUP RULE, stated with the startup SET rather than read: the window opens `StartupSeconds` after
+		-- the press. The authored value was 0.07 when this case was written and is 0 now ("a press anywhere in a
+		-- windup covers the hit"), so a case that read it would test whichever branch the design happened to be on.
+		-- The press below lands half a frame before the contact.
+		local function evadeThenSwing(startup: number): string
+			local original = EVADE.StartupSeconds
+			EVADE.StartupSeconds = startup
+			local ok, kind = pcall(function()
+				local base = os.clock()
+				local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+				local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
 
-			local outcomes, disconnect = captureOutcomes()
-			DefenseSystem.BeginEvade(defender.Model, base + FRAME * 0.5)
-			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
-			step(FRAME, base + FRAME)
-			disconnect()
+				local outcomes, disconnect = captureOutcomes()
+				DefenseSystem.BeginEvade(defender.Model, base + FRAME * 0.5)
+				HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+				step(FRAME, base + FRAME)
+				disconnect()
+				expect(#outcomes).to.equal(1)
+				return outcomes[1].Kind
+			end)
+			EVADE.StartupSeconds = original
+			if not ok then
+				error(kind, 0)
+			end
+			return kind
+		end
 
-			expect(#outcomes).to.equal(1)
-			expect(outcomes[1].Kind).to.equal("Clean")
+		it("is hit during a startup that outlasts the press -- pressing as the swing lands is too late", function()
+			expect(evadeThenSwing(FRAME)).to.equal("Clean")
+		end)
+
+		it("covers the hit when there is no startup -- a press anywhere in the windup is in time", function()
+			expect(evadeThenSwing(0)).to.equal("Evaded")
 		end)
 
 		it("refuses mid-swing -- no rolling out of your own attack", function()
@@ -760,6 +947,14 @@ return function()
 			local mounted = makeDummy("Mounted", Vector3.new(10, 5, 0))
 			mounted.Humanoid:SetAttribute("Mounted", true)
 			expect((DefenseSystem.BeginEvade(mounted.Model, base))).to.equal(false)
+		end)
+
+		it("refuses while frozen", function()
+			local frozen = makeDummy("Frozen", Vector3.new(0, 5, 0))
+			frozen.Humanoid:SetAttribute("Frozen", true)
+			local ok, reason = DefenseSystem.BeginEvade(frozen.Model, os.clock())
+			expect(ok).to.equal(false)
+			expect(reason).to.equal("Frozen")
 		end)
 
 		it("refuses inside its own cooldown", function()

@@ -236,6 +236,23 @@ return function()
 			expect((AttackRequestSystem.CanAct(fighter.Model, now))).to.equal(false)
 		end)
 
+		it("refuses a swing and a swap while frozen, with its own reason, and lifts with the freeze", function()
+			local fighter = makeDummy("Frozen", Vector3.new(0, 5, 0))
+			local now = os.clock()
+			fighter.Humanoid:SetAttribute(AttributeConstants.Frozen, true)
+
+			local allowed, reason = AttackRequestSystem.CanAct(fighter.Model, now)
+			expect(allowed).to.equal(false)
+			expect(reason).to.equal("Frozen")
+			expect((AttackRequestSystem.Throw(fighter.Model, { Kind = "Basic" }, false, now))).to.equal(false)
+			local accepted, swapReason = AttackRequestSystem.RequestWeapon(fighter.Model, SECOND_WEAPON, now)
+			expect(accepted).to.equal(false)
+			expect(swapReason).to.equal("Frozen")
+
+			fighter.Humanoid:SetAttribute(AttributeConstants.Frozen, false)
+			expect((AttackRequestSystem.CanAct(fighter.Model, now))).to.equal(true)
+		end)
+
 		it("holds a cooldown between changes while engaged", function()
 			local fighter = makeDummy("Swapper", Vector3.new(0, 5, 0))
 			fighter.Humanoid:SetAttribute(AttributeConstants.InCombat, true)
@@ -1097,6 +1114,9 @@ return function()
 			AttackRequestSystem.NoteHitConfirmed(attacker.Model, `default:{FIRST_WEAPON}:Basic:1`)
 			expect(AttackRequestSystem.CancelRecoveryForEvade(attacker.Model, cutAt)).to.equal(true)
 			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Idle")
+			-- The cut swing no longer holds the body: its deadline ends at the cut, so the evade it was cut for can be
+			-- rewound (DefenseSystem.evadeNotBefore) and the run is not held down for a swing that is over.
+			expect(attacker.Humanoid:GetAttribute("CombatBusyUntil")).to.be.near(cutAt, 1e-6)
 		end)
 
 		it("ignores a landing reported for a swing that is not the one in flight", function()
@@ -1193,6 +1213,41 @@ return function()
 			local swing = AttackRequestSystem.GetInFlight(attacker.Model)
 			assert(swing, "an accepted swing is in flight")
 			expect(swing.StartedAt).to.equal(base)
+		end)
+
+		-- The feint press makes the same trip the swing's press did, so its window is judged on the swing's clock.
+		local function heavyFeintWindow(): number
+			local entry = AttackCatalog.Get(`default:{FIRST_WEAPON}:Heavy:1`) :: any
+			return entry.Definition.WindupSeconds * AttackConstants.Feint.WindowFraction
+		end
+
+		it("judges a feint on the swing's own clock, not its arrival", function()
+			local attacker = makeDummy("LaggyFeinter", Vector3.new(0, 5, 0))
+			NetworkLatency.SetResolver(function()
+				return 0.1
+			end)
+			local base = os.clock()
+			expect((AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base))).to.equal(true)
+			local swing = AttackRequestSystem.GetInFlight(attacker.Model)
+			assert(swing, "an accepted swing is in flight")
+			-- Arrives 0.03s past the window on arrival time, but was pressed 0.02s inside it (one way is 0.05s).
+			local arrivesAt = swing.StartedAt + heavyFeintWindow() + 0.03
+			local accepted, reason = AttackRequestSystem.Feint(attacker.Model, arrivesAt)
+			expect(reason).to.equal(nil)
+			expect(accepted).to.equal(true)
+		end)
+
+		it("refunds a feint no more than its swing was refunded", function()
+			local attacker = makeDummy("OnArrival", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			-- Thrown with no lead (no connection at the time), so the swing's clock is its arrival.
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Heavy" }, false, base)
+			NetworkLatency.SetResolver(function()
+				return 0.1
+			end)
+			local accepted, reason = AttackRequestSystem.Feint(attacker.Model, base + heavyFeintWindow() + 0.01)
+			expect(accepted).to.equal(false)
+			expect(reason).to.equal("TooLate")
 		end)
 	end)
 

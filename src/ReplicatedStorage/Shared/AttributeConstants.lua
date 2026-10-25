@@ -48,18 +48,19 @@ local AttributeConstants = {
 	-- DefenseConstants.
 	DefenseState = "DefenseState",
 	BonusWalkSpeed = "BonusWalkSpeed",
-	-- Admin-only movement lock (DevMenuSystem.lua's SetTargetFrozen) -- Movement.
+	-- Movement lock (Server/Systems/AdminActionSystem.lua's SetFrozen -- an admin's freeze, and the onboarding
+	-- isolation) -- Movement.
 	-- ComputeDesiredWalkSpeed reads this directly (same "external override, read as an Attribute"
 	-- shape as Flying above), pinned to top priority, above even Flying.
 	Frozen = "Frozen",
-	-- Admin-only WalkSpeed scale (DevMenuSystem.lua's SetTargetSpeedMultiplier) -- read by Movement.
+	-- Admin-only WalkSpeed scale (AdminActionSystem.lua's SetSpeedMultiplier) -- read by Movement.
 	-- ComputeDesiredWalkSpeed as a multiplier on `base`, same "per-player Humanoid Attribute" shape
 	-- BonusWalkSpeed already uses, defaulting to 1 (no change) when unset.
 	SpeedMultiplier = "SpeedMultiplier",
-	-- Admin-only invisibility (DevMenuSystem.lua's SetTargetInvisible) -- mirrored here purely so
+	-- Invisibility (AdminActionSystem.lua's SetInvisible) -- mirrored here purely so
 	-- DevMenuClient.lua can reflect live state in the Admin tab UI, same as Godmode; the actual
-	-- effect is a direct Transparency write on every BasePart/Decal (CombatSystem.
-	-- SetPlayerInvisible), not something Server/Systems/RunSystem.lua or any per-frame resolver reads.
+	-- effect is a direct Transparency write on every BasePart/Decal (AdminActionSystem.
+	-- ApplyInvisible), not something Server/Systems/RunSystem.lua or any per-frame resolver reads.
 	Invisible = "Invisible",
 	-- Emote System (Server/Systems/EmoteSystem.lua) -- set/cleared directly on the emoting
 	-- character's Humanoid while a MovementLocked emote (Types.EmoteDefinition.MovementLocked) is
@@ -68,8 +69,8 @@ local AttributeConstants = {
 	-- at the same top priority tier, rather than EmoteSystem reaching into the run state (which it has
 	-- no ownership of).
 	EmoteMovementLocked = "EmoteMovementLocked",
-	-- Whether this player is currently IN COMBAT (CombatState.inCombatUntil still live) -- written by
-	-- CombatSystem's inCombatNotifier on each true/false edge, alongside the Combat_InCombatChanged
+	-- Whether this player is currently IN COMBAT (EngagementSystem's tag still live) -- written by
+	-- Server/Combat/Engagement/EngagementSystem.lua on each true/false edge, alongside the Combat_InCombatChanged
 	-- remote it already fires for the HUD badge. Same "one Attribute the server publishes, read
 	-- directly by whoever needs it" shape as RootControlLocked above.
 	--
@@ -141,7 +142,7 @@ local AttributeConstants = {
 	-- reason: something other than the ordinary ground controller is driving this body, and a raised
 	-- WalkSpeed underneath it fights the drive instead of riding along with it. Same "external system,
 	-- read as an Attribute" shape those three already use, which is what
-	-- lets ParkourSystem stay entirely outside CombatSystem's private state.
+	-- lets ParkourSystem stay entirely outside the combat layers' private state.
 	ParkourVelocityOwned = "ParkourVelocityOwned",
 	-- The COMBAT-GATE counterpart to ParkourVelocityOwned above, and like ParkourFacingOwned below it
 	-- is written by the CLIENT rather than the server: Client/Parkour/ParkourController.lua raises it
@@ -262,11 +263,14 @@ local AttributeConstants = {
 	-- never meant "WalkSpeed is zero" -- so a move's "Locks movement" toggle, which only ever set that
 	-- one, parked parkour and the camera and left the body walking at committed pace.
 	SwingRooted = "SwingRooted",
-	-- Server os.clock() deadline until which this body's movement may legitimately include a knockback
-	-- launch. Written by Server/Combat/Damage/DamageSystem.lua on every launch it hands a player's client
-	-- (DamageConstants.Knockback.MovementAllowanceSeconds after the hit); read by
-	-- Server/Systems/ParkourSystem.lua so a parkour report distorted by an honest launch is still
-	-- rejected but not counted toward the suspected-cheater flag. A DEADLINE, not a boolean, for the
+	-- Server os.clock() deadline until which this body's movement may legitimately include a server-caused
+	-- displacement. Written ONLY through Server/Combat/MovementAllowance.Stamp (which extends and never
+	-- shortens), by three causes: DamageSystem on every launch it hands a player's client
+	-- (DamageConstants.Knockback.MovementAllowanceSeconds after the hit), DomainSystem on a realm's pull or
+	-- containment correction, and AdminActionSystem on a teleport; read by Server/Combat/MovementGuard and
+	-- Server/Systems/ParkourSystem.lua so a parkour report distorted by an honest server move is still
+	-- rejected but not counted toward the suspected-cheater flag. scripts/check-single-writers.py fails the
+	-- build if anything else writes it. A DEADLINE, not a boolean, for the
 	-- CombatBusyUntil reason above: nothing has to remember to clear it. Server-only in meaning -- the
 	-- client's os.clock() is a different clock, so no client reads this.
 	KnockbackUntil = "KnockbackUntil",

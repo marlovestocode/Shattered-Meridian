@@ -211,6 +211,75 @@ return function()
 		end)
 	end)
 
+	describe("DamageSystem -- godmode", function()
+		-- The Attribute is written by AdminActionSystem / CharacterCreationSystem and READ here (via
+		-- Shared/Combat/Invulnerability.lua). Asserting the Attribute alone proved two components agreeing with
+		-- each other while nothing acted on it, so these land real hits and read Health and guard.
+		it("takes no health and no guard from a landed swing", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			defender.Humanoid:SetAttribute("Godmode", true)
+			local healthBefore = defender.Humanoid.Health
+			local guardBefore = DefenseSystem.GetGuard(defender.Model)
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(defender.Humanoid.Health).to.equal(healthBefore)
+			expect(DefenseSystem.GetGuard(defender.Model)).to.equal(guardBefore)
+			expect(defender.Humanoid:GetAttribute("HitstunUntil")).to.equal(nil)
+		end)
+
+		it("hurts again as soon as godmode is switched off", function()
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			defender.Humanoid:SetAttribute("Godmode", true)
+			defender.Humanoid:SetAttribute("Godmode", false)
+			local damage = authored()
+			local before = defender.Humanoid.Health
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(defender.Humanoid.Health).to.be.near(before - damage, 1e-3)
+		end)
+
+		it("does nothing to a body that died between the contact and its application", function()
+			-- A second hit in the lethal hit's batch: classified while the body lived (pass 1, inside the engine's
+			-- Step), applied after it died. Nothing may act on the corpse, and OnApplied must not hear it -- that is
+			-- where EngagementSystem used to re-tag a victim PlayerKilled had just cleared.
+			local base = os.clock()
+			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local heard = 0
+			local disconnect = DamageSystem.OnApplied(function()
+				heard += 1
+			end)
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			HitboxEngine.Step(FRAME, base + FRAME)
+			defender.Humanoid.Health = 0
+			DefenseSystem.Step(FRAME, base + FRAME)
+			DamageSystem.Step(FRAME, base + FRAME)
+			disconnect()
+
+			expect(heard).to.equal(0)
+			expect(defender.Humanoid:GetAttribute("HitstunUntil")).to.equal(nil)
+		end)
+
+		it("takes no health from ApplyImpact", function()
+			local thrower = makeDummy("Thrower", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local bystander = makeDummy("Bystander", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			bystander.Humanoid:SetAttribute("Godmode", true)
+			local before = bystander.Humanoid.Health
+
+			expect(DamageSystem.ApplyImpact(thrower.Model, bystander.Model, 15, os.clock())).to.equal(0)
+			expect(bystander.Humanoid.Health).to.equal(before)
+		end)
+	end)
+
 	describe("DamageSystem -- guard as the posture pool", function()
 		it("drains guard from a defender who never blocked at all", function()
 			-- THE WHOLE POINT OF GUARD DOUBLING AS POSTURE. DefenseSystem alone only ever moves guard

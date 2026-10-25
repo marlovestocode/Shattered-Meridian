@@ -64,15 +64,15 @@ EvadeConstants.AllowedFromStates = {
 	Landing = true,
 } :: { [string]: boolean }
 
--- THE SERVER'S EVADE FRAMES, counted from the moment the server accepts the Evade report. Startup 0: a
--- press anywhere in an opponent's windup covers the hit. Active outlasts the glide (0.30 against 0.24) so
--- the whole move is covered, and by the time the window closes the glide has carried the body out of reach.
--- The ping refund extends the END only, under the same cap the parry uses (DefenseConstants.Parry.
--- PingCompensationMaxSeconds), because a client-influenced number is exactly as untrustworthy here.
+-- THE SERVER'S EVADE FRAMES, counted from the PRESS: the server accepts the Evade report on arrival and anchors
+-- the window that player's round trip earlier (DefenseStateMachine.BeginEvade). Startup 0: a press anywhere in an
+-- opponent's windup covers the hit. Active outlasts the glide (0.30 against 0.24) so the whole move is covered,
+-- and by the time the window closes the glide has carried the body out of reach. The rewind's cap is the parry
+-- rewind's own (DefenseConstants.Evade.RewindMaxSeconds is derived from it there), because the two share one hold.
+-- A rewind SHIFTS the window; it never lengthens it.
 EvadeConstants.Frames = {
 	StartupSeconds = 0,
 	ActiveSeconds = 0.30,
-	PingCompensationMaxSeconds = 0.12,
 }
 
 -- How long the server treats a reported evade as owning the body (ParkourController's ACTION_DURATIONS).

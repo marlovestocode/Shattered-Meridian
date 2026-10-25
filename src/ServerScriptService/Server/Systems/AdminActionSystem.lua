@@ -20,8 +20,9 @@
 	there is no dependency in either direction between the two Systems. A player's Humanoid Attributes
 	are the only respawn-persistence any consumer ever needs to see -- Server/Systems/RunSystem.lua's
 	resolver reads Frozen/SpeedMultiplier directly off the Humanoid rather than reaching into this
-	module's state, and the combat layer's own godmode check reads the Godmode Attribute the exact same
-	way, so this module never needs either of them to require it back and neither needs this module's
+	module's state, and the combat layers read the Godmode Attribute the exact same way, through
+	Shared/Combat/Invulnerability.lua (DamageSystem's ApplyScales stage and ApplyImpact, and AirComboSystem's
+	launch eligibility), so this module never needs either of them to require it back and neither needs this module's
 	internals -- one-way, no cycle.
 
 	Flying/FlightCollide resolve their target's live Humanoid directly off Player.Character rather
@@ -45,6 +46,9 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local Trove = require(ReplicatedStorage.Shared.Trove)
+
+local MovementAllowance = require(script.Parent.Parent.Combat.MovementAllowance)
 
 local logger = Logger.scope("AdminActionSystem")
 
@@ -75,6 +79,14 @@ export type AdminOverrideState = {
 	-- mode's physics constraints (see applyFlying's own header) -- nil until flight has been toggled
 	-- at least once this session; restored verbatim on flight-off rather than assuming true.
 	SavedFlightAutoRotate: boolean?,
+	-- Invisibility bookkeeping, all created lazily the first time a character is hidden (so a bare state
+	-- table built by hand still works): the Transparency every hidden part/decal had BEFORE it was hidden,
+	-- which is what un-invisible restores (a blind sweep to 0 made originally-invisible parts visible), the
+	-- character those belong to, and the Trove holding the DescendantAdded connection that hides parts
+	-- parented while invisible (a drawn weapon). Cleaned on un-invisible, on respawn and on leave.
+	OriginalTransparency: { [Instance]: number }?,
+	InvisibleCharacter: Model?,
+	InvisibleTrove: Trove.TroveInstance?,
 }
 
 local overrideStates: { [Player]: AdminOverrideState } = {}
@@ -90,30 +102,68 @@ function AdminActionSystem.CreateOverrideState(): AdminOverrideState
 	}
 end
 
--- Applies Transparency to every BasePart/Decal of `character` -- shared by ReapplyRespawnOverrides
--- (re-applies on a fresh respawn) and ApplyInvisible/SetInvisible below (the first real,
--- reachable SetInvisible action -- this function was dead code until that pair was wired up; see the
--- decomposition audit notes this module's header references for the history).
+-- Invisibility hides every BasePart/Decal of a character and, crucially, REMEMBERS what each one was: a blind
+-- sweep back to 0 made parts that were authored invisible (weapon helper parts, transparent accessory parts, VFX
+-- anchors) visible when invisibility ended, and every new player passes through SetInvisible(false) at awakening.
+-- A part parented while invisible (drawing a weapon) is hidden by a DescendantAdded connection held in the
+-- state's Trove.
 --
--- Skips HumanoidRootPart deliberately: it's invisible by design on every rig (Transparency = 1 from
--- the moment the character loads, R6 or R15), independent of this toggle entirely. Without this
--- exclusion, clearing Invisible (transparency = 0) force-sets it VISIBLE along with everything else,
--- and nothing ever puts it back to 1 afterward -- there's no "restore original per-part transparency"
--- step here, just a blind sweep to 0/1, so the root part is left permanently showing as a solid block
--- at the character's torso for the rest of the session. Found via the Awakening rework's own
--- Invisible(true) -> Invisible(false) cycle (Client/Intro/IntroClient.lua's AwakeningComplete signal
--- is the first real caller to exercise a full round trip on a live player and look closely at the
--- result) but the bug lives here, not in that feature -- every other SetInvisible caller (DevMenu's
--- manual toggle) hits the exact same thing.
-local function setCharacterTransparency(character: Model, transparency: number): ()
-	for _, descendant in ipairs(character:GetDescendants()) do
-		if descendant:IsA("BasePart") then
-			if descendant.Name ~= "HumanoidRootPart" then
-				(descendant :: BasePart).Transparency = transparency
+-- Skips HumanoidRootPart deliberately: it's invisible by design on every rig (Transparency = 1 from the moment
+-- the character loads), independent of this toggle entirely, and is never touched in either direction.
+local function isHideable(instance: Instance): boolean
+	if instance:IsA("BasePart") then
+		return instance.Name ~= "HumanoidRootPart"
+	end
+	return instance:IsA("Decal")
+end
+
+local function hideInstance(originals: { [Instance]: number }, instance: Instance): ()
+	if not isHideable(instance) then
+		return
+	end
+	-- First sight only: re-hiding an already-hidden part must not record its hidden 1 as its "original".
+	if originals[instance] == nil then
+		originals[instance] = (instance :: any).Transparency
+	end
+	(instance :: any).Transparency = 1
+end
+
+-- Ends the state's invisibility bookkeeping. With `restore`, puts every part back to the value it was found at.
+local function releaseInvisibility(state: AdminOverrideState, restore: boolean): ()
+	if state.InvisibleTrove then
+		state.InvisibleTrove:Clean()
+	end
+	local originals = state.OriginalTransparency
+	if originals then
+		if restore then
+			for instance, original in originals do
+				if instance.Parent then
+					(instance :: any).Transparency = original
+				end
 			end
-		elseif descendant:IsA("Decal") then
-			(descendant :: Decal).Transparency = transparency
 		end
+		table.clear(originals)
+	end
+	state.InvisibleCharacter = nil
+end
+
+local function hideCharacter(state: AdminOverrideState, character: Model): ()
+	-- A different body than the one hidden before: those originals describe parts that are gone.
+	if state.InvisibleCharacter ~= character then
+		releaseInvisibility(state, false)
+	end
+	local trove = state.InvisibleTrove or Trove.New()
+	state.InvisibleTrove = trove
+	trove:Clean()
+	local originals = state.OriginalTransparency or {}
+	state.OriginalTransparency = originals
+	state.InvisibleCharacter = character
+
+	trove:Connect(character.DescendantAdded, function(descendant: Instance)
+		hideInstance(originals, descendant)
+	end)
+	for _, descendant in character:GetDescendants() do
+		hideInstance(originals, descendant)
 	end
 end
 
@@ -130,8 +180,8 @@ for _, preset in ipairs(Constants.Debug.DevMenu.SpeedMultiplierPresets) do
 end
 
 -- Toggles godmode (see AdminOverrideState.Godmode's own header) -- zeroes damage/posture on every
--- future hit against this player until toggled off again (CombatSystem.lua's hit-resolution reads
--- the mirrored Attribute directly, the same pattern Server/Systems/RunSystem.lua follows for Frozen/
+-- future hit against this player until toggled off again (DamageSystem reads the mirrored Attribute through
+-- Shared/Combat/Invulnerability.lua, the same pattern Server/Systems/RunSystem.lua follows for Frozen/
 -- SpeedMultiplier/Flying). Pure with respect to Roblox state beyond the Humanoid Attribute write, so
 -- it's exercised directly in AdminActionSystem.spec.lua against a bare Instance.new("Humanoid") --
 -- no live Player required, the fixture pattern every Instance-only spec in this suite uses.
@@ -197,7 +247,7 @@ function AdminActionSystem.ApplyFrozen(state: AdminOverrideState, humanoid: Huma
 end
 
 -- Toggles admin-only invisibility (see AdminOverrideState.Invisible's own header) -- mirrors the
--- Attribute purely for DevMenuClient.lua's live UI, and calls setCharacterTransparency (this
+-- Attribute purely for DevMenuClient.lua's live UI, and calls hideCharacter/releaseInvisibility (this
 -- module's header explains why that helper was unreachable dead code until now) for the actual
 -- visual effect. Same Instance-only testability as ApplyGodmode/ApplyFlying/ApplyFrozen above.
 function AdminActionSystem.ApplyInvisible(
@@ -208,7 +258,11 @@ function AdminActionSystem.ApplyInvisible(
 ): ()
 	state.Invisible = enabled
 	humanoid:SetAttribute(AttributeConstants.Invisible, enabled)
-	setCharacterTransparency(character, if enabled then 1 else 0)
+	if enabled then
+		hideCharacter(state, character)
+	else
+		releaseInvisibility(state, true)
+	end
 end
 
 -- Sets the admin-only WalkSpeed scale (see AdminOverrideState.SpeedMultiplier's own header) --
@@ -247,8 +301,10 @@ function AdminActionSystem.ReapplyRespawnOverrides(state: AdminOverrideState, ch
 	end
 
 	humanoid:SetAttribute(AttributeConstants.Invisible, state.Invisible)
+	-- The previous body is gone, so its connection and remembered values go with it (nothing to restore onto).
+	releaseInvisibility(state, false)
 	if state.Invisible then
-		setCharacterTransparency(character, 1)
+		hideCharacter(state, character)
 	end
 end
 
@@ -424,7 +480,7 @@ function AdminActionSystem.TeleportToPosition(targetPlayer: Player, position: Ve
 	-- (Server/Combat/MovementGuard, ParkourSystem's travel check) read the jump as the server's, not the client's.
 	local humanoid = CharacterUtil.HumanoidOf(character)
 	if humanoid then
-		humanoid:SetAttribute(AttributeConstants.KnockbackUntil, os.clock() + TELEPORT_MOVEMENT_ALLOWANCE_SECONDS)
+		MovementAllowance.Stamp(humanoid, os.clock() + TELEPORT_MOVEMENT_ALLOWANCE_SECONDS)
 	end
 	return true
 end
@@ -440,6 +496,10 @@ function AdminActionSystem.Init(): ()
 			overrideStates[player] = AdminActionSystem.CreateOverrideState()
 		end,
 		OnPlayerRemoving = function(player: Player)
+			local state = overrideStates[player]
+			if state then
+				releaseInvisibility(state, false)
+			end
 			overrideStates[player] = nil
 		end,
 		OnCharacter = function(player: Player, character: Model, humanoid: Humanoid)

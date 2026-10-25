@@ -181,6 +181,8 @@ export type ResultScales = {
 	DamageTaken: number?,
 	GuardDamageTaken: number?,
 	HitstunTaken: number?,
+	-- The defender has Godmode (Shared/Combat/Invulnerability.lua): nothing lands, whatever the other scales say.
+	Invulnerable: boolean?,
 }
 
 local function scaleOf(value: number?): number
@@ -195,12 +197,17 @@ end
 -- (dealt x taken on health, its own scale on posture and on stun). It used to be inline in
 -- DamageSystem.applyOutcome, the one caller, which made the full arithmetic for a hit live in two files.
 -- Mutates and returns `result`. New stages (a status, an item) belong here, in order, when a real input exists
--- for them.
+-- for them. The invulnerability stage runs LAST so no multiplier above can bring a zeroed field back.
 function DamageResolver.ApplyScales(result: DamageResult, scales: ResultScales): DamageResult
 	local shot = scaleOf(scales.Shot)
 	result.Damage *= shot * scaleOf(scales.PowerDamage) * scaleOf(scales.DamageDealt) * scaleOf(scales.DamageTaken)
 	result.GuardDrain *= shot * scaleOf(scales.PowerGuard) * scaleOf(scales.GuardDamageTaken)
 	result.HitstunSeconds *= scaleOf(scales.HitstunTaken)
+	if scales.Invulnerable == true then
+		result.Damage = 0
+		result.GuardDrain = 0
+		result.HitstunSeconds = 0
+	end
 	return result
 end
 

@@ -34,9 +34,8 @@
 	    than the transition to Blocking, because ping compensation refunds latency without delaying
 	    the guard coming up -- see ParryWindows.ParryEndFor. One marker, two derived times, so the
 	    membership test cannot be "is the state ParryWindow".
-	  * EVADE LIVENESS (_evadeOpensAt/_evadeEndsAt). The evade's frames, same shape as the parry's
-	    for the same reason: a ping-refunded window that a contact is tested against at its own
-	    SampleTime. Not a state because an evade changes nothing else about the defender's posture --
+	  * EVADE LIVENESS (_evadeOpensAt/_evadeEndsAt). The evade's frames: a window anchored at the
+	    rewound press (see BeginEvade) that a contact is tested against at its own SampleTime. Not a state because an evade changes nothing else about the defender's posture --
 	    evading out of a guard releases it through the ordinary Release path, and an evade in any other
 	    posture leaves that posture exactly as it was.
 
@@ -412,6 +411,14 @@ function DefenseStateMachine.Stagger(self: Machine, now: number, seconds: number
 	self._window = nil
 	self._parryOpensAt = 0
 	self._parryEndsAt = 0
+	-- A STAGGER NEVER SHORTENS A BREAK -- BreakGuard's max rule from the other side (2026-10-25). A broken body staggered
+	-- (its own shot parried, StaggersOwner) used to drop out of GuardBroken into Staggered, able to block again part-way
+	-- through the opening, and since the break's end now refills the guard, with a whole one. GuardBroken is the
+	-- harsher of the two, so it stays, lasting at least as long as the stagger would have.
+	if self._state == "GuardBroken" then
+		self._guardBrokenUntil = math.max(self._guardBrokenUntil, self._staggerUntil)
+		return
+	end
 	applyTransition(self, "Staggered", now)
 end
 
@@ -430,7 +437,16 @@ end
 -- Taking the later of the two is the honest reading rather than a patch: both states mean "cannot
 -- attack, cannot parry," and GuardBroken only ADDS "cannot block," so a break landing mid-stagger is
 -- strictly the harsher punish and should last at least as long as what it replaced.
+--
+-- A BREAK IS NEVER RE-STAMPED BY ANOTHER ONE (2026-10-25). The opening is GuardBrokenSeconds from the hit that
+-- broke the guard, however many hits land inside it. It used to restart on every one: the punish hits drain the
+-- (already empty) posture pool, and each drain re-broke it, so an attacker landing one hit a second kept the
+-- defender unable to block, parry, evade or swing for as long as the pressure lasted. A break is an opening,
+-- not a lock.
 function DefenseStateMachine.BreakGuard(self: Machine, now: number): ()
+	if self._state == "GuardBroken" then
+		return
+	end
 	self._guardBrokenUntil = now + DefenseConstants.GuardBrokenSeconds
 	if self._state == "Staggered" then
 		self._guardBrokenUntil = math.max(self._guardBrokenUntil, self._staggerUntil)
@@ -470,28 +486,47 @@ end
 -- ordinary Release so the anti-turtle clock and the segment trail record it exactly as a key release
 -- would. A parry window already armed is NOT cancelled -- it runs to its close, per Release's own rule --
 -- but a contact inside both resolves Evaded first (OutcomeResolver rule 0) and never spends it.
-function DefenseStateMachine.BeginEvade(self: Machine, now: number, pingSeconds: number): (boolean, string?)
-	local state = self._state
-	if state == "Staggered" or DefenseStateMachine.IsStaggerHeld(self) then
-		return false, "Staggered"
-	end
-	if state == "GuardBroken" then
-		return false, "GuardBroken"
+--
+-- THE WINDOW IS ANCHORED AT THE PRESS, NOT THE ARRIVAL (2026-10-25). `rewindSeconds` is how long ago the press was
+-- made on the defender's own screen -- their round trip, capped at Evade.RewindMaxSeconds -- and the window opens
+-- that far back, keeping its authored length. It used to open on arrival with the latency added to its END, which
+-- forgave an early press but never a late-looking one: a dodge timed to the hit on a laggy screen arrived after the
+-- hit was judged. Anchoring it instead of stretching it means a high round trip SHIFTS the window and never
+-- LENGTHENS it, so inflating your ping buys no extra invulnerability.
+--
+-- The press is never placed before a moment this machine knows it could not have been accepted: the cooldown from
+-- the evade before it, the end of a stagger, the end of a guard break. `notBefore` is the caller's half of the same
+-- clamp (the body gates this machine has no record of -- a stun, a swing). A window that opens before `now` only
+-- matters to contacts already judged: DefenseSystem re-judges the ones in its rewind hold through IsEvadingAt.
+function DefenseStateMachine.BeginEvade(
+	self: Machine,
+	now: number,
+	rewindSeconds: number,
+	notBefore: number?
+): (boolean, string?)
+	local ok, reason = DefenseStateMachine.CanEvadeAt(self, now)
+	if not ok then
+		return false, reason
 	end
 	local EVADE = DefenseConstants.Evade
-	if (now - self._lastEvadeAt) < EVADE.CooldownSeconds then
-		return false, "EvadeCooldown"
-	end
 
 	DefenseStateMachine.Release(self, now)
 
-	local refund = 0
-	if pingSeconds == pingSeconds and pingSeconds > 0 then
-		refund = math.min(pingSeconds, EVADE.PingCompensationMaxSeconds)
+	local rewind = 0
+	if rewindSeconds == rewindSeconds and rewindSeconds > 0 then
+		rewind = math.min(rewindSeconds, EVADE.RewindMaxSeconds)
 	end
+	local pressAt = math.max(
+		now - rewind,
+		notBefore or -math.huge,
+		self._lastEvadeAt + EVADE.CooldownSeconds,
+		self._staggerUntil,
+		self._guardBrokenUntil
+	)
+	pressAt = math.min(pressAt, now)
 	self._lastEvadeAt = now
-	self._evadeOpensAt = now + EVADE.StartupSeconds
-	self._evadeEndsAt = self._evadeOpensAt + EVADE.ActiveSeconds + refund
+	self._evadeOpensAt = pressAt + EVADE.StartupSeconds
+	self._evadeEndsAt = self._evadeOpensAt + EVADE.ActiveSeconds
 	return true, nil
 end
 
@@ -604,8 +639,9 @@ end
 -- opening and (rally-scaled) length from then. NO END REFUND: the rewind replaces the ping refund, it does
 -- not stack with it. Returns whether it covers, and whether it would have been PERFECT.
 --
--- A pure query. DefenseSystem only ever asks it for an AIR-HELD defender's held Clean contact, and applies
--- the answer itself (the window the arriving press armed is spent through the ordinary ConsumeParry).
+-- A pure query. DefenseSystem asks it for any held Clean contact in its rewind hold (air-held since B5, on the ground
+-- since 2026-09-29), and applies the answer itself (the window the arriving press armed is spent through the
+-- ordinary ConsumeParry).
 function DefenseStateMachine.RewoundParryCovers(
 	self: Machine,
 	pressAt: number,
@@ -636,6 +672,23 @@ function DefenseStateMachine.RewoundParryCovers(
 		return false, false
 	end
 	return true, (contactAt - opensAt) <= DefenseConstants.PerfectParry.WindowSeconds * scale
+end
+
+-- Whether an evade could be accepted at `at`, and why not -- the POSTURE half of the evade's gate (BeginEvade asks it;
+-- DefenseSystem asks it too, to know whether a held contact could still be evaded by a press in flight). Staggered and
+-- GuardBroken are punishes an evade may not end early; the cooldown is the gap from the last accepted evade.
+function DefenseStateMachine.CanEvadeAt(self: Machine, at: number): (boolean, string?)
+	local state = self._state
+	if state == "Staggered" or DefenseStateMachine.IsStaggerHeld(self) then
+		return false, "Staggered"
+	end
+	if state == "GuardBroken" then
+		return false, "GuardBroken"
+	end
+	if (at - self._lastEvadeAt) < DefenseConstants.Evade.CooldownSeconds then
+		return false, "EvadeCooldown"
+	end
+	return true, nil
 end
 
 -- Whether a stagger is still running underneath the current state -- true in Staggered itself, and in a

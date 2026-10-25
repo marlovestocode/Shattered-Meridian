@@ -384,10 +384,13 @@ DefenseConstants.Clash = {
 DefenseConstants.Evade = {
 	StartupSeconds = EvadeConstants.Frames.StartupSeconds,
 	ActiveSeconds = EvadeConstants.Frames.ActiveSeconds,
-	-- The server opens the window when the report ARRIVES, one-way latency after the player pressed -- the
-	-- same double charge the parry refunds, refunded the same way and under the same cap. Extends the END
-	-- only; a refund that also opened the window early would let a high-ping evade start before it began.
-	PingCompensationMaxSeconds = EvadeConstants.Frames.PingCompensationMaxSeconds,
+	-- The report ARRIVES a round trip after the press was made against what the defender saw, so the window is
+	-- anchored that far back (capped here) instead of at the arrival. Shifted, never stretched: the old end-only
+	-- refund forgave an early press but never a late-looking one, and stacking it on a rewind would let a padded
+	-- ping buy a longer window (DefenseStateMachine.BeginEvade). DERIVED from the ground parry's rewind, never set on
+	-- its own: both are answered out of DefenseSystem's one rewind hold, whose length is that cap, so a window
+	-- reaching further back than the hold would rescue nothing and a shorter one would leave held hits it should.
+	RewindMaxSeconds = DefenseConstants.Parry.RewindMaxSeconds,
 	-- Minimum gap between two accepted evades: the client's cooldown minus a jitter tolerance.
 	CooldownSeconds = math.max(EvadeConstants.CooldownSeconds - EvadeConstants.ServerCooldownToleranceSeconds, 0),
 }
@@ -454,6 +457,11 @@ DefenseConstants.Presentation = {
 	-- late even when the server had the guard up on arrival. Short enough to read as instant, long enough
 	-- not to pop.
 	PressFadeInSeconds = 0.05,
+	-- How long the body keeps the facing a landed parry snapped it to (DefenseClient.faceTowards) before shift
+	-- lock may spring it back to the camera's yaw. Without the hold the snap was undone within a few frames,
+	-- so a shift-locked parry whipped the body toward the attacker and straight back while the camera stayed
+	-- put. About the parry's own recovery: long enough to read, short enough that the camera regains the body.
+	ParryFacingHoldSeconds = 0.3,
 }
 
 -- Budgets ------------------------------------------------------------------------------------------
