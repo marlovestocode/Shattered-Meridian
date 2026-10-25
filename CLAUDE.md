@@ -50,6 +50,7 @@ stop and use the module on the right instead.
 | put a numeric value in a dense authoring form (forty sliders on one page) | [`UI/Components/NumericField.lua`](src/StarterPlayer/StarterPlayerScripts/Client/UI/Components/NumericField.lua) with `Compact = true` -- two lines, a full-row slider, gamepad DPad nudge, values snapped to `Decimals`; `Hint` may be a state object, and `HintVisible` (Toggle has it too) lets a form show hints on demand | the default four-line layout in a long form, or a hand-built slider |
 | size, pose or draw a SHAPED projectile body (anything but the plain sphere) | [`Shared/HitboxEngine/ProjectileBody.lua`](src/ReplicatedStorage/Shared/HitboxEngine/ProjectileBody.lua) -- `Of(spec)` once per volley, `PoseAt`, `Look` | reading `ProjectileSpec.Size` as "the radius of the shot": it is only the sphere's, and a Capsule/Cone/Crescent body reads the measurements `HitboxTypes.FieldsFor` lists |
 | lock or unlock a body's movement from the server (a swing lock, a stagger, a grab, a mount) | [`Server/Combat/RootControl.lua`](src/ServerScriptService/Server/Combat/RootControl.lua) -- `RootControl.Set(humanoid, RootControl.Owners.X, locked)` (or `Claim`/`Release`); `RootControlLocked` is true while ANY owner holds a claim. A new owner is a new `Owners` entry | a bare `humanoid:SetAttribute("RootControlLocked", ...)` -- five writers did, and the first release unlocked a body another system still held |
+| mark a body's movement as legitimately server-displaced (a launch, a realm's pull, a teleport -- so MovementGuard and ParkourSystem do not read it as a cheat) | [`Server/Combat/MovementAllowance.lua`](src/ServerScriptService/Server/Combat/MovementAllowance.lua) -- `MovementAllowance.Stamp(humanoid, os.clock() + seconds)`; it only ever extends. `scripts/check-single-writers.py` fails if anything else writes `KnockbackUntil` (or `RootControlLocked`, `HitstunUntil`) | a bare `humanoid:SetAttribute(AttributeConstants.KnockbackUntil, now + n)` -- four sites did, and a realm's 0.6 s correction overwrote a launch's 2 s allowance |
 | count suspicious events against a player and flag them for review (an automated cheat detector) | [`Server/Systems/Support/SuspicionLedger.lua`](src/ServerScriptService/Server/Systems/Support/SuspicionLedger.lua) -- `SuspicionLedger.New({ Name, ReasonCode, Summary, Strikes, WindowSeconds })`, `:Strike(player, now, detail?, weight?)`, `:Release(player)` on leave; flags once per session through `ModerationSystem.ReportAutomated`, which never overwrites a manual flag | a fourth hand-rolled timestamp list + prune + `FlagSuspectedCheater` |
 | tag two bodies as engaged for something that is not a resolved hit (a realm pulse, a future hazard) | `EngagementSystem.RecordPressure` / `RecordPressureBetween(attackerModel, targetModel, now)` | leaving it untagged -- the InCombat gate, MovementGuard and the HUD all key off the tag |
 | log inside a module | [`Shared/Logger.lua`](src/ReplicatedStorage/Shared/Logger.lua) — `Logger.scope("ModuleName")`, then `:info/:warn/:error/:debug` | `print`/`warn` directly — scoped logs feed the Live Console (F5) capture ring |
@@ -145,6 +146,12 @@ again rewound by that attacker's one-way latency plus the replication buffer, ca
 third latency refund beside the swing lead and the parry rewind; server-side and authoritative, not prediction. A bot
 or dummy attacker rewinds nothing and keeps the `TargetTrail` guess.
 
+**Every defensive press is rewound, and a rewind shifts a window, never stretches it** (2026-10-25,
+`docs/architecture/2026-10-25-deepwoken-combat-pass.md`). The evade's window is anchored at the press (arrival less the
+round trip, capped at `Evade.RewindMaxSeconds`, never before a cooldown/stagger/break/stun/swing end), with no end
+refund; held contacts it covers resolve `Evaded`. A feint is judged on its swing's own clock (`InFlight.LeadSeconds`).
+A guard break is one opening: it is never re-stamped (by a drain or a stagger), and the body leaves it with a full guard.
+
 **Weapon swaps and movement checks** (2026-10-08, `docs/architecture/2026-10-08-combat-state-audit.md`). A player
 changes the weapon in hand only through `AttackRequestSystem.RequestWeapon` (refused while the body cannot act --
 `CanAct` -- or mid-swing, and inside `WeaponConstants.Swap.CooldownSeconds` while engaged); `SetWeapon` is the ungated
@@ -238,6 +245,7 @@ is what this omission removes. Place file: 6.44 MB → 5.69 MB.
   Windows CRLF checkout). Prefer `stylua --check` on just the files you touched. If a plain
   `stylua src/` leaves far more files `M` than you edited, diff `git diff --name-only` against your
   edit set and `git checkout --` the rest rather than assuming you broke something.
+- **Single writers:** `python scripts/check-single-writers.py` -- an Attribute with one owner (`RootControlLocked`, `KnockbackUntil`, `HitstunUntil`) written anywhere else fails. A new owned Attribute is a new row in that script.
 - **Test:** TestEZ specs under `src/Tests/**/*.spec.lua`. The suite runs on this machine — try it
   before assuming it can't:
   ```
