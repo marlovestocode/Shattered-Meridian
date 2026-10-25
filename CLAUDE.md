@@ -267,3 +267,38 @@ is what this omission removes. Place file: 6.44 MB → 5.69 MB.
   ```
 - If `run-in-roblox` panics instantly, it's almost always environment/registry skew, not your change
   — see the toolchain notes rather than re-running blind more than once.
+
+
+## Extend, migrate, never fork (DRAFT -- W20, drafted by the Spine 1 session; Spine 9 owns the final wording)
+
+This codebase was rebuilt rather than migrated again and again: a canonical module is written beside the old
+ones, its header says it replaces them, the two easiest consumers move, and the session ends. The next session
+finds two mechanisms for one job and writes a third. The rules that stop that:
+
+- **Before you create a module, look for the one that owns the job.** Check the table above, then "Who owns what" in
+  [`docs/software-architecture.md`](docs/software-architecture.md), then the foundations table in
+  [`docs/architecture/2026-10-25-coworking-systems-plan.md`](docs/architecture/2026-10-25-coworking-systems-plan.md) §2.
+  Extend what exists. A new file needs a reason that "the old one is awkward" does not cover.
+- **A replacement moves every consumer and deletes the old one in the same branch.** If a consumer cannot move, either
+  revert so nothing is half-converted, or narrow the foundation's header so it names the exception and why. Never
+  leave two live mechanisms for one job behind a header that says there is one. Verify a header's claims against the
+  code before you build on them: several were false.
+- **A from-scratch rebuild of an existing feature needs the user's go-ahead and a written migration list** (every
+  consumer, what happens to each, what is deleted).
+- **A foundation assembles the parts that exist; it does not replace them.** Keep every guarantee the parts' headers
+  document. Wire names, payload shapes, DataStore keys, persisted field names and `SchemaVersion` stay byte-identical
+  unless the user decides otherwise.
+- **Prove an equivalence conversion, don't assert it.** A decoder, codec, gate or registry conversion lands with a spec
+  that runs the old and new code over one corpus (valid, each single-field corruption, `nil`, NaN, +-inf, oversize).
+- One concern per commit; a rename never rides along with structure.
+
+### Specs build bodies through `Rig` and `CombatHarness` (landed 2026-10-25, W2-W3)
+
+| If you're about to... | Use | Not... |
+|---|---|---|
+| build a model with a Humanoid and a root in a spec | [`Tests/TestHelpers/Rig.lua`](src/Tests/TestHelpers/Rig.lua) -- `Rig.Dummy` (anchored combat target), `Rig.Character` (unanchored, parkour-shaped), `Rig.R6` (a real rig with a real RootJoint), `Rig.Limbs`, `Rig.Bare`, `Rig.FakePlayer`; `Rig.Track`/`Rig.DestroyAll` for cleanup | a `local function makeDummy`/`makeRig`/`makeCharacter` -- 22 specs wrote their own and drifted apart; `scripts/check-spec-literals.py` fails a new one (and any spec that names a `HumanoidRootPart` and instances a Humanoid) |
+| register a body with the combat layers, or reset them between cases | [`Tests/TestHelpers/CombatHarness.lua`](src/Tests/TestHelpers/CombatHarness.lua) -- `Spawner(layers, bodyOptions?)` once at the top of the spec, `Combatant(body, layers)`, and `Reset()`/`Teardown()` in `afterEach`. `Reset` walks `CombatTick.PHASES`, so a new phase cannot be forgotten, and it never touches `WeaponFixture` | a hand-ordered `X.Reset()` chain per spec. A layer a spec's bodies should NOT be registered with is an opt-out in `layers` (`Defense = false`), never a reason to build the body by hand |
+
+`WeaponFixture` stays install-once at file scope and is never removed: `CombatHarness` reads a weapon id you took from
+`WeaponFixture.Install()`, it does not install one. Extras a spec owns (`AttackCatalog.Reset`, `MoveRegistryManager.Init`,
+`DomainEffects.ResetForTesting`) stay in that spec's `afterEach`, between `CombatHarness.Reset()` and `Rig.DestroyAll()`.
