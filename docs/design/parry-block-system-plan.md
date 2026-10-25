@@ -1,6 +1,9 @@
 # Parry & Block System — Implementation Plan
 
-Status: proposed, not built. Written against `progression-spine` after the standalone
+Status: **built** (corrected 2026-10-25; this line said "proposed, not built"). The defence layer lives in
+`Server/Combat/Defense/` (`DefenseStateMachine`, `OutcomeResolver`, `DefenseSystem`) and has been extended since --
+see `docs/architecture/2026-10-06-combat-feel-pass.md` and `docs/architecture/2026-10-25-deepwoken-combat-pass.md`.
+The plan below is kept as originally written. Written against `progression-spine` after the standalone
 `HitboxEngine` landed.
 
 ## Revision 2

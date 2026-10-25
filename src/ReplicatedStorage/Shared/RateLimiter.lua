@@ -6,7 +6,7 @@
 	instance. Generic networking hygiene, not combat-specific -- belongs in Shared/ the same reason
 	Logger.lua does (a small utility more than one system wants, without being one of the three
 	canonical Shared files). A caller that owns more than one remote-budget category (e.g.
-	CombatSystem.lua's combat-critical vs. utility split -- see performance-optimization.md's
+	AttackRequestSystem.lua's request vs. feint split -- see performance-optimization.md's
 	"combat-critical remotes... take priority... over cosmetic/UI-sync remotes, which should be
 	throttled first") constructs one instance per category, so a burst against one category's
 	budget can never exhaust another's.
