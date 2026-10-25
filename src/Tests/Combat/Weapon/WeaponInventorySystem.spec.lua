@@ -21,19 +21,16 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
-local Workspace = game:GetService("Workspace")
 
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
-local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.HitboxEngine)
-
-local AttackRequestSystem = require(ServerScriptService.Server.Combat.Attack.AttackRequestSystem)
 local SwingSequencer = require(ServerScriptService.Server.Combat.Attack.SwingSequencer)
 local WeaponInventorySystem = require(ServerScriptService.Server.Combat.Weapon.WeaponInventorySystem)
 local WeaponVisualSystem = require(ServerScriptService.Server.Combat.Weapon.WeaponVisualSystem)
 local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
 local InventorySystem = require(ServerScriptService.Server.Systems.InventorySystem)
 local PlayerDataSystem = require(ServerScriptService.Server.Systems.PlayerDataSystem)
+local CombatHarness = require(ServerScriptService.Tests.TestHelpers.CombatHarness)
 
 local TOOL_NAME = "EquippedWeaponVisual"
 
@@ -45,37 +42,15 @@ local SECOND_WEAPON = ROSTER[2]
 local FISTS = WeaponRoster.FISTS_ID
 
 local nextId = 0
-local spawned: { Instance } = {}
 local installed: { any } = {}
-local registered: { number } = {}
 
--- A minimal rig, matching AttackRequestSystem.spec.lua's own makeDummy. Deliberately without a
+-- A minimal rig, matching AttackRequestSystem.spec.lua's own dummy. Deliberately without a
 -- RightHand, so these cases assert that a Tool was EQUIPPED onto the character rather than anything
 -- about the grip Motor6D -- that is Roblox's own mechanism, not this stack's to re-prove.
-local function makeCharacter(name: string): Model
-	local model = Instance.new("Model")
-	model.Name = name
-
-	local root = Instance.new("Part")
-	root.Name = "HumanoidRootPart"
-	root.Size = Vector3.new(2, 2, 1)
-	root.Anchored = true
-	root.CanCollide = false
-	root.Parent = model
-
-	local humanoid = Instance.new("Humanoid")
-	humanoid.RequiresNeck = false
-	humanoid.Parent = model
-
-	model.PrimaryPart = root
-	model.Parent = Workspace
-	table.insert(spawned, model)
-	-- A registered combatant, as a live character is: a player's draw goes through
-	-- AttackRequestSystem.RequestWeapon, which refuses a body the engine has never heard of (CanAct's
-	-- "NotRegistered"), so an unregistered stand-in could never be handed a weapon.
-	table.insert(registered, HitboxEngine.RegisterCombatant(model, root, humanoid))
-	return model
-end
+-- A registered combatant, as a live character is: a player's draw goes through
+-- AttackRequestSystem.RequestWeapon, which refuses a body the engine has never heard of (CanAct's
+-- "NotRegistered"), so an unregistered stand-in could never be handed a weapon.
+local spawnCharacter = CombatHarness.Spawner({ Defense = false })
 
 -- See this file's header on why a table is a sufficient stand-in. Fresh per case so no two share a
 -- record. `withCharacter` gives it a real rig, which is what the end-to-end draw cases need --
@@ -86,7 +61,7 @@ local function fakePlayer(withCharacter: boolean?): any
 	local player = {
 		Name = name,
 		UserId = 7000 + nextId,
-		Character = if withCharacter then makeCharacter(name) else nil,
+		Character = if withCharacter then spawnCharacter(name).Model else nil,
 	}
 	PlayerDataSystem.InstallProfileForSpec(player :: any, PlayerDataSystem.CreateDefaultProfile(player.UserId))
 	table.insert(installed, player)
@@ -102,16 +77,7 @@ return function()
 		end
 		table.clear(installed)
 		WeaponVisualSystem.Reset()
-		AttackRequestSystem.Reset()
-		SwingSequencer.Reset()
-		for _, combatantId in registered do
-			HitboxEngine.UnregisterCombatant(combatantId)
-		end
-		table.clear(registered)
-		for _, instance in spawned do
-			instance:Destroy()
-		end
-		table.clear(spawned)
+		CombatHarness.Teardown()
 	end)
 
 	describe("WeaponInventorySystem -- a fresh player", function()

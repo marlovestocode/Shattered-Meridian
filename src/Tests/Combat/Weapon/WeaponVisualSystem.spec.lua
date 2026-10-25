@@ -32,10 +32,9 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local AttackRequestSystem = require(ServerScriptService.Server.Combat.Attack.AttackRequestSystem)
 local WeaponModelRegistry = require(ReplicatedStorage.Shared.Combat.WeaponModelRegistry)
 local WeaponVisualSystem = require(ServerScriptService.Server.Combat.Weapon.WeaponVisualSystem)
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 local TOOL_NAME = "EquippedWeaponVisual"
-
-local spawned: { Instance } = {}
 
 -- Workspace.Weapons itself -- created on first use if this headless place doesn't already have one,
 -- reused otherwise, matching WeaponModelRegistry.spec.lua's own container().
@@ -50,27 +49,6 @@ local function container(): Folder
 	return folder
 end
 
-local function makeDummy(name: string): Model
-	local model = Instance.new("Model")
-	model.Name = name
-
-	local root = Instance.new("Part")
-	root.Name = "HumanoidRootPart"
-	root.Size = Vector3.new(2, 2, 1)
-	root.Anchored = true
-	root.CanCollide = false
-	root.Parent = model
-
-	local humanoid = Instance.new("Humanoid")
-	humanoid.RequiresNeck = false
-	humanoid.Parent = model
-
-	model.PrimaryPart = root
-	model.Parent = Workspace
-	table.insert(spawned, model)
-	return model
-end
-
 -- EquipVisual only ever produces a Tool once a WeaponModelRegistry template is registered for that
 -- weapon id (there is no procedural fallback -- WeaponModels.lua's own header), so every case here
 -- that exercises a real equip places one first. The model's Name IS the weapon id. Uses
@@ -83,7 +61,7 @@ local function registerLongswordTemplate(): ()
 	handle.Name = "Handle"
 	handle.Parent = tool
 	tool.Parent = container()
-	table.insert(spawned, tool)
+	Rig.Track(tool)
 	WeaponModelRegistry.Start()
 end
 
@@ -94,16 +72,13 @@ return function()
 		-- see its own header. This file registers its own templates, so this file cleans them up.
 		WeaponModelRegistry.Reset()
 		AttackRequestSystem.Reset()
-		for _, model in spawned do
-			model:Destroy()
-		end
-		table.clear(spawned)
+		Rig.DestroyAll()
 	end)
 
 	describe("WeaponVisualSystem.EquipVisual", function()
 		it("equips a Tool named for the current weapon", function()
 			registerLongswordTemplate()
-			local character = makeDummy("Swordsman")
+			local character = Rig.Dummy("Swordsman").Model
 			WeaponVisualSystem.EquipVisual(character, "Longsword")
 
 			local tool = character:FindFirstChild(TOOL_NAME)
@@ -114,7 +89,7 @@ return function()
 
 		it("swaps the grip Weld for a Motor6D, preserving Part0/Part1/C0/C1", function()
 			registerLongswordTemplate()
-			local character = makeDummy("Rigged")
+			local character = Rig.Dummy("Rigged").Model
 			-- "Right Arm", because this game is R6-locked -- that is the part Humanoid:EquipTool hangs
 			-- the grip off on the rig players actually arrive on. MotorizeGrip never reads the name
 			-- (it matches on what the joint CONNECTS), so this is fidelity to the shipping rig rather
@@ -169,7 +144,7 @@ return function()
 
 		it("ignores a weapon's OWN RightGrip Weld and converts the real one", function()
 			registerLongswordTemplate()
-			local character = makeDummy("Decoyed")
+			local character = Rig.Dummy("Decoyed").Model
 			local arm = Instance.new("Part")
 			arm.Name = "Right Arm"
 			arm.Anchored = true
@@ -209,7 +184,7 @@ return function()
 
 		it("leaves a character with no grip joint alone rather than throwing", function()
 			registerLongswordTemplate()
-			local character = makeDummy("Armless")
+			local character = Rig.Dummy("Armless").Model
 			WeaponVisualSystem.EquipVisual(character, "Longsword")
 			local tool = character:FindFirstChild(TOOL_NAME)
 			assert(tool and tool:IsA("Tool"), "must equip a Tool")
@@ -221,7 +196,7 @@ return function()
 
 		it("replaces the previous visual on a re-equip rather than stacking two", function()
 			registerLongswordTemplate()
-			local character = makeDummy("Rearmed")
+			local character = Rig.Dummy("Rearmed").Model
 			WeaponVisualSystem.EquipVisual(character, "Longsword")
 			local first = character:FindFirstChild(TOOL_NAME)
 			assert(first, "first equip must produce a Tool")
@@ -244,7 +219,7 @@ return function()
 
 		it("un-equips rather than equipping an empty Tool for a weapon with no template", function()
 			registerLongswordTemplate()
-			local character = makeDummy("Dagger-user")
+			local character = Rig.Dummy("Dagger-user").Model
 			WeaponVisualSystem.EquipVisual(character, "Longsword")
 			expect(character:FindFirstChild(TOOL_NAME)).to.be.ok()
 
@@ -256,7 +231,7 @@ return function()
 			local model = Instance.new("Model")
 			model.Name = "Headless"
 			model.Parent = Workspace
-			table.insert(spawned, model)
+			Rig.Track(model)
 
 			expect(function()
 				WeaponVisualSystem.EquipVisual(model, "Longsword")
