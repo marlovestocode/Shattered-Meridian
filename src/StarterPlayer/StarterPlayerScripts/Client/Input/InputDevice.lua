@@ -47,7 +47,9 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
+local Logger = require(ReplicatedStorage.Shared.Logger)
 
 type Scope = Fusion.Scope<typeof(Fusion)>
 
@@ -150,12 +152,10 @@ local function initialDevice(): Device
 end
 
 local currentDevice: Device = initialDevice()
-local changedListeners: { () -> () } = {}
+local changed: CallbackList.CallbackList<> = CallbackList.New(Logger.scope("InputDevice"), "InputDevice.OnChanged")
 
 local function notifyChanged(): ()
-	for _, listener in ipairs(changedListeners) do
-		listener()
-	end
+	changed:Fire()
 end
 
 local function setDevice(next: Device): ()
@@ -214,13 +214,7 @@ end
 -- reasoning as KeybindManager.OnChanged: every consumer re-reads Current() rather than being handed
 -- the new value directly. Returns an unsubscribe function.
 function InputDevice.OnChanged(listener: () -> ()): () -> ()
-	table.insert(changedListeners, listener)
-	return function()
-		local index = table.find(changedListeners, listener)
-		if index then
-			table.remove(changedListeners, index)
-		end
-	end
+	return changed:Connect(listener)
 end
 
 -- TEST-ONLY: forces Current() to `device` and fires OnChanged exactly as a real switch would,

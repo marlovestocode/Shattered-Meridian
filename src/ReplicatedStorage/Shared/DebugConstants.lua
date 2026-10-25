@@ -292,6 +292,7 @@ local DebugConstants = {
 			HitPrediction = true,
 			HotbarBindings = true,
 			ImpactSparks = true,
+			InputDevice = true,
 			InputRouter = true,
 			InventoryClient = true,
 			InventorySystem = true,
