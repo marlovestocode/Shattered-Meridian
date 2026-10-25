@@ -7,7 +7,6 @@
 --   * Server/Combat/Damage/DamageSystem.lua -- that a real landed hit resolves DamageResult.Launch and
 --     launches a server-owned body, driven through the real HitboxEngine and DefenseSystem.
 
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 local StarterPlayer = game:GetService("StarterPlayer")
@@ -25,6 +24,8 @@ local KnockbackAudit = require(ServerScriptService.Server.Combat.Damage.Knockbac
 local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegistryManager)
 local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
 local KnockbackClient = require(StarterPlayer.StarterPlayerScripts.Client.Combat.KnockbackClient)
+local CombatHarness = require(ServerScriptService.Tests.TestHelpers.CombatHarness)
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 local BOUNDS = DamageConstants.Knockback
 local AUDIT = BOUNDS.Audit
@@ -203,30 +204,10 @@ return function()
 	end)
 
 	describe("DamageSystem resolves and applies the launch", function()
-		local spawned: { Model } = {}
 		local captured: { any } = {}
 		local disconnect: (() -> ())? = nil
 
-		local function makeDummy(name: string, position: Vector3, lookAt: Vector3, anchored: boolean)
-			local model = Instance.new("Model")
-			model.Name = name
-			local root = Instance.new("Part")
-			root.Name = "HumanoidRootPart"
-			root.Size = Vector3.new(2, 2, 1)
-			root.Anchored = anchored
-			root.CanCollide = false
-			root.CFrame = CFrame.lookAt(position, lookAt)
-			root.Parent = model
-			local humanoid = Instance.new("Humanoid")
-			humanoid.RequiresNeck = false
-			humanoid.Parent = model
-			model.PrimaryPart = root
-			model.Parent = Workspace
-			table.insert(spawned, model)
-			local id = HitboxEngine.RegisterCombatant(model, root, humanoid)
-			DefenseSystem.RegisterCombatant(model, root, humanoid, PARRY_ANIMATION)
-			return { Model = model, Root = root, Humanoid = humanoid, Id = id }
-		end
+		local spawnDummy = CombatHarness.Spawner({ ParryAnimation = PARRY_ANIMATION })
 
 		local function definition(): HitboxTypes.AttackDefinition
 			return (
@@ -272,21 +253,15 @@ return function()
 				disconnect()
 				disconnect = nil
 			end
-			DamageSystem.Reset()
-			DefenseSystem.Reset()
-			HitboxEngine.Reset()
-			ParryWindows.Reset()
+			CombatHarness.Reset()
 			MoveRegistryManager.Init()
-			for _, model in spawned do
-				model:Destroy()
-			end
-			table.clear(spawned)
+			Rig.DestroyAll()
 		end)
 
 		it("puts the launch on DamageResult before OnApplied subscribers see it", function()
 			authorKnock(knock(40, 15))
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
-			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), true)
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
+			spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), true)
 
 			HitboxEngine.RequestAttack(attacker.Id, definition(), 1, 1)
 			step(os.clock() + FRAME)
@@ -300,8 +275,8 @@ return function()
 
 		it("launches a server-owned body on the server", function()
 			authorKnock(knock(40, 15))
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), false)
 
 			HitboxEngine.RequestAttack(attacker.Id, definition(), 1, 1)
 			step(os.clock() + FRAME)
@@ -312,8 +287,8 @@ return function()
 
 		it("resolves no launch for a move that authors none", function()
 			authorKnock(nil)
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
-			makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), true)
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
+			spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), true)
 
 			HitboxEngine.RequestAttack(attacker.Id, definition(), 1, 1)
 			step(os.clock() + FRAME)
@@ -325,8 +300,8 @@ return function()
 		it("resolves no launch for a hit the defender's guard held", function()
 			authorKnock(knock(40, 15))
 			local base = os.clock()
-			local attacker = makeDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
-			local defender = makeDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), true)
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4), true)
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0), true)
 
 			DefenseSystem.SetBlocking(defender.Model, true, base)
 			step(base + 0.3 + FRAME)
