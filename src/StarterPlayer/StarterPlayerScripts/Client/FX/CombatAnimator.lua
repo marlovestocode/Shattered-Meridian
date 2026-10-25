@@ -147,6 +147,10 @@ local currentHumanoid: Humanoid? = nil
 -- BindCharacter otherwise builds wholesale.
 local currentAnimator: Animator? = nil
 
+-- NOT a CallbackList: this is not an extension point. It is private to this file, nothing outside can subscribe,
+-- nothing ever disconnects, and BindCharacter runs every closer unguarded so a broken reset fails loudly at the
+-- respawn instead of being logged and skipped. Nothing here to Fire, Count or Clear.
+--
 -- Reset hooks for per-life module state declared further down this file -- none of that state is
 -- tied to the `tracks` table BindCharacter already rebuilds below, so left alone it survives a
 -- respawn. BindCharacter (below) only actually runs at CALL time -- well after this whole module has

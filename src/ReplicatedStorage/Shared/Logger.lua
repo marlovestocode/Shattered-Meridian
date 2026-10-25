@@ -197,6 +197,10 @@ local CONSOLE_BUFFER_CAPACITY = math.max(1, Constants.Debug.Logging.ConsoleBuffe
 local consoleBuffer: { [number]: LogEntry } = table.create(CONSOLE_BUFFER_CAPACITY)
 local consoleSequence = 0
 
+-- NOT a CallbackList, on purpose: CallbackList requires this module (a require cycle), and its error path logs
+-- through a Logger scope -- a listener that threw would re-enter emit, fan out to the same listener, and throw
+-- again. The pcall below swallows silently for that reason. It is also the hottest fan-out in the codebase.
+--
 -- Keyed by a fresh throwaway table (not a name/counter) purely as a unique, unforgeable token to
 -- disconnect by -- same idiom a :Connect() RBXScriptConnection object serves elsewhere, just
 -- without pulling in a real Connection type for what is otherwise a plain callback list.
