@@ -12,7 +12,6 @@
 -- Players:CreateHumanoidModelFromDescription with an empty HumanoidDescription needs no asset upload
 -- or network round trip (see that function's own header), so it is safe to call from a headless spec.
 
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
@@ -25,6 +24,7 @@ local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local LiveTuningContract = require(ServerScriptService.Tests.TestHelpers.LiveTuningContract)
 local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
 local WeaponFixture = require(ServerScriptService.Tests.TestHelpers.WeaponFixture)
+local CombatHarness = require(ServerScriptService.Tests.TestHelpers.CombatHarness)
 
 -- A real roster weapon, because the ids below have to RESOLVE through AttackCatalog -- weapons are
 -- models in Workspace.Weapons now (Shared/Combat/WeaponRoster.lua), so a spec that installs none gets
@@ -41,32 +41,7 @@ local MOVE_ID = `default:{WEAPON}:Basic:1`
 -- DamageSystem.spec's own makeDummy uses -- the thing under test is the VICTIM (a real
 -- DebugDummySystem.Spawn result), not the attacker, so the attacker only needs to be a legal
 -- HitboxEngine/DefenseSystem combatant, not one of this module's own.
-local spawnedAttackers: { Model } = {}
-
-local function makeAttacker(position: Vector3, lookAt: Vector3): (Model, number)
-	local model = Instance.new("Model")
-	model.Name = "Attacker"
-
-	local root = Instance.new("Part")
-	root.Name = "HumanoidRootPart"
-	root.Size = Vector3.new(2, 2, 1)
-	root.Anchored = true
-	root.CanCollide = false
-	root.CFrame = CFrame.lookAt(position, lookAt)
-	root.Parent = model
-
-	local humanoid = Instance.new("Humanoid")
-	humanoid.RequiresNeck = false
-	humanoid.Parent = model
-
-	model.PrimaryPart = root
-	model.Parent = Workspace
-	table.insert(spawnedAttackers, model)
-
-	local id = HitboxEngine.RegisterCombatant(model, root, humanoid)
-	DefenseSystem.RegisterCombatant(model, root, humanoid, PARRY_ANIMATION)
-	return model, id
-end
+local spawnAttacker = CombatHarness.Spawner({ ParryAnimation = PARRY_ANIMATION })
 
 local function makeDefinition(): HitboxTypes.AttackDefinition
 	return (
@@ -101,14 +76,7 @@ return function()
 
 	afterEach(function()
 		DebugDummySystem.Reset()
-		DamageSystem.Reset()
-		DefenseSystem.Reset()
-		HitboxEngine.Reset()
-		ParryWindows.Reset()
-		for _, model in spawnedAttackers do
-			model:Destroy()
-		end
-		table.clear(spawnedAttackers)
+		CombatHarness.Teardown()
 	end)
 
 	describe("DebugDummySystem.Spawn", function()
@@ -206,7 +174,7 @@ return function()
 		it("records a resolved Clean hit against a spawned dummy on its own billboard", function()
 			local base = os.clock()
 			local victim = DebugDummySystem.Spawn(CFrame.new(0, 5, -4)) :: Model
-			local _attacker, attackerId = makeAttacker(Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local attackerId = spawnAttacker("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4)).Id :: number
 
 			HitboxEngine.RequestAttack(attackerId, makeDefinition(), 1, 1)
 			step(FRAME, base + FRAME)
@@ -220,7 +188,7 @@ return function()
 		it("reflects live HP on the billboard once damage lands", function()
 			local base = os.clock()
 			local victim = DebugDummySystem.Spawn(CFrame.new(0, 5, -4)) :: Model
-			local _attacker, attackerId = makeAttacker(Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local attackerId = spawnAttacker("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4)).Id :: number
 			local humanoid = victim:FindFirstChildOfClass("Humanoid") :: Humanoid
 
 			HitboxEngine.RequestAttack(attackerId, makeDefinition(), 1, 1)

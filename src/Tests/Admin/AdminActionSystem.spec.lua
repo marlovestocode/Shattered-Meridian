@@ -5,6 +5,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local AdminActionSystem = require(ServerScriptService.Server.Systems.AdminActionSystem)
+local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
 
 type AdminOverrideState = AdminActionSystem.AdminOverrideState
 
@@ -97,15 +98,8 @@ return function()
 	end)
 
 	describe("AdminActionSystem.ReapplyRespawnOverrides", function()
-		local function makeCharacter(): (Model, Humanoid)
-			local character = Instance.new("Model")
-			local humanoid = Instance.new("Humanoid")
-			humanoid.Parent = character
-			return character, humanoid
-		end
-
 		it("mirrors Godmode/Frozen/SpeedMultiplier onto a fresh Humanoid's Attributes", function()
-			local character, humanoid = makeCharacter()
+			local character, humanoid = Rig.Bare()
 			local state: AdminOverrideState = {
 				Godmode = true,
 				Frozen = false,
@@ -123,7 +117,7 @@ return function()
 		end)
 
 		it("zeroes JumpPower and captures the pre-freeze value when Frozen is persisted true", function()
-			local character, humanoid = makeCharacter()
+			local character, humanoid = Rig.Bare()
 			humanoid.JumpPower = 42
 			local state: AdminOverrideState = {
 				Godmode = false,
@@ -141,7 +135,7 @@ return function()
 		end)
 
 		it("leaves JumpPower untouched when Frozen is persisted false", function()
-			local character, humanoid = makeCharacter()
+			local character, humanoid = Rig.Bare()
 			humanoid.JumpPower = 42
 			local state: AdminOverrideState = {
 				Godmode = false,
@@ -159,7 +153,7 @@ return function()
 		end)
 
 		it("re-applies Transparency = 1 to every BasePart when Invisible is persisted true", function()
-			local character, humanoid = makeCharacter()
+			local character, humanoid = Rig.Bare()
 			local torso = Instance.new("Part")
 			torso.Transparency = 0
 			torso.Parent = character
@@ -179,7 +173,7 @@ return function()
 		end)
 
 		it("leaves part Transparency untouched when Invisible is persisted false", function()
-			local character, humanoid = makeCharacter()
+			local character, humanoid = Rig.Bare()
 			local torso = Instance.new("Part")
 			torso.Transparency = 0
 			torso.Parent = character
@@ -238,19 +232,9 @@ return function()
 	end)
 
 	describe("AdminActionSystem.ApplyInvisible", function()
-		local function makeCharacter(): (Model, Humanoid, BasePart)
-			local character = Instance.new("Model")
-			local humanoid = Instance.new("Humanoid")
-			humanoid.Parent = character
-			local torso = Instance.new("Part")
-			torso.Transparency = 0
-			torso.Parent = character
-			return character, humanoid, torso
-		end
-
 		it("enabling sets the Invisible Attribute and makes every part transparent", function()
 			local state = AdminActionSystem.CreateOverrideState()
-			local character, humanoid, torso = makeCharacter()
+			local character, humanoid, torso = Rig.Bare(true)
 
 			AdminActionSystem.ApplyInvisible(state, character, humanoid, true)
 
@@ -261,7 +245,7 @@ return function()
 
 		it("disabling restores full opacity", function()
 			local state = AdminActionSystem.CreateOverrideState()
-			local character, humanoid, torso = makeCharacter()
+			local character, humanoid, torso = Rig.Bare(true)
 
 			AdminActionSystem.ApplyInvisible(state, character, humanoid, true)
 			AdminActionSystem.ApplyInvisible(state, character, humanoid, false)
@@ -273,7 +257,7 @@ return function()
 
 		it("restores what each part was, not a blanket 0 (an authored-invisible part stays invisible)", function()
 			local state = AdminActionSystem.CreateOverrideState()
-			local character, humanoid, torso = makeCharacter()
+			local character, humanoid, torso = Rig.Bare(true)
 			local helper = Instance.new("Part")
 			helper.Transparency = 1
 			helper.Parent = character
@@ -291,7 +275,7 @@ return function()
 
 		it("hides a part parented while invisible, and restores it to its own original", function()
 			local state = AdminActionSystem.CreateOverrideState()
-			local character, humanoid = makeCharacter()
+			local character, humanoid = Rig.Bare(true)
 			AdminActionSystem.ApplyInvisible(state, character, humanoid, true)
 
 			local weapon = Instance.new("Part")
@@ -313,7 +297,7 @@ return function()
 
 		it("does not record a hidden part's 1 as its original when enabled twice", function()
 			local state = AdminActionSystem.CreateOverrideState()
-			local character, humanoid, torso = makeCharacter()
+			local character, humanoid, torso = Rig.Bare(true)
 
 			AdminActionSystem.ApplyInvisible(state, character, humanoid, true)
 			AdminActionSystem.ApplyInvisible(state, character, humanoid, true)
@@ -324,10 +308,10 @@ return function()
 
 		it("drops the old body's bookkeeping on respawn and hides the new one", function()
 			local state = AdminActionSystem.CreateOverrideState()
-			local oldCharacter, oldHumanoid, oldTorso = makeCharacter()
+			local oldCharacter, oldHumanoid, oldTorso = Rig.Bare(true)
 			AdminActionSystem.ApplyInvisible(state, oldCharacter, oldHumanoid, true)
 
-			local newCharacter, newHumanoid, newTorso = makeCharacter()
+			local newCharacter, newHumanoid, newTorso = Rig.Bare(true)
 			AdminActionSystem.ReapplyRespawnOverrides(state, newCharacter, newHumanoid)
 			expect(newTorso.Transparency).to.equal(1)
 
