@@ -129,6 +129,7 @@ local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
 -- being duplicated as literals in this file.
 local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
 local ProfileSlices = require(script.Parent.Parent.Data.ProfileSlices)
+local Schema = require(ReplicatedStorage.Shared.Schema)
 
 local PlayerDataSystem = {}
 
@@ -212,73 +213,27 @@ local withRetry = DataStoreRetry.Scoped(logger, Constants.Storage.RetryPolicy)
 -- A brand-new player's starting profile -- the ONLY place a default profile is legitimately
 -- constructed (see this file's header, design decision 5: a FAILED load must never reach here).
 function PlayerDataSystem.CreateDefaultProfile(userId: number): Types.PlayerProfile
-	local profile: Types.PlayerProfile = {
-		userId = userId,
-		faction = nil,
-		tier = Config.DefaultTier,
-		corruption = 0,
-		qiDeviationRisk = 0,
-		factionStanding = 0,
-		hasAscended = false,
-		meridianXp = 0,
-		-- Settings System (Types.PlayerSettings' own header) -- a brand-new profile starts with no
-		-- overrides at all (every action still resolves through Constants.Keybinds.Defaults/
-		-- GamepadDefaults), Autorun off, and the Parkour System's own preferences at whatever
-		-- Shared/Parkour/ParkourConstants.lua currently ships as the defaults.
-	}
-	-- Fields owned by a ProfileSlice (Server/Data/ProfileSlices.lua) are merged in; see ProfileSlice.lua.
-	for key, value in ProfileSlices.Default(userId) do
-		(profile :: any)[key] = value
-	end
-	return profile
+	-- Every field has an owner: each ProfileSlice (Server/Data/ProfileSlices.lua) supplies its own keys. This file knows none.
+	return ProfileSlices.Default(userId) :: any
 end
 
--- Deep-enough copy of a PlayerProfile -- every field is either a primitive, a flat array of
--- strings (bloodlineIds), or a flat dict (artMastery's id -> number, equippedArts' slot -> id), so a
--- one-level table.clone on each nested container is sufficient; there is no third level of nesting
--- anywhere in this shape.
+-- Deep-enough copy of a PlayerProfile -- each slice copies its own keys (every field is a primitive, a flat
+-- array or a flat dict, so a one-level table.clone per container is sufficient; there is no third level of nesting
+-- anywhere in this shape).
 -- This is what GetProfile/WaitForProfile hand back instead of the live table -- see this file's
 -- header, design decision 3, for why that's load-bearing for Transform being the only mutation
 -- path.
 function PlayerDataSystem.CopyProfile(profile: Types.PlayerProfile): Types.PlayerProfile
-	local copy: Types.PlayerProfile = {
-		userId = profile.userId,
-		faction = profile.faction,
-		tier = profile.tier,
-		corruption = profile.corruption,
-		qiDeviationRisk = profile.qiDeviationRisk,
-		factionStanding = profile.factionStanding,
-		hasAscended = profile.hasAscended,
-		meridianXp = profile.meridianXp,
-	}
-	for key, value in ProfileSlices.Copy(profile) do
-		(copy :: any)[key] = value
-	end
-	return copy
+	return ProfileSlices.Copy(profile) :: any
 end
 
--- DataStore/JSON-safe encoding of a live PlayerProfile -- explicit field list (never a raw
--- pass-through of the live table) so an accidental extra field on the in-memory shape can never
--- leak into a persisted record unnoticed, same defensive posture BugReportSystem.encodeRecord/
--- ModerationSystem.encodeBanRecord already take. Every field here is already a DataStore-safe
--- primitive/array/dict -- unlike BugReportRecord's Position, PlayerProfile has no Vector3/CFrame
--- needing its own encode step; settings goes through EncodeSettings above for its own EnumItem ->
--- string conversion.
+-- DataStore/JSON-safe encoding of a live PlayerProfile -- each slice writes an explicit field list of its own keys
+-- (never a raw pass-through of the live table) so an accidental extra field on the in-memory shape can never leak into
+-- a persisted record unnoticed, same defensive posture BugReportSystem.encodeRecord/ModerationSystem.encodeBanRecord
+-- already take. Every field is a DataStore-safe primitive/array/dict -- unlike BugReportRecord's Position, PlayerProfile
+-- has no Vector3/CFrame needing its own encode step; the settings slice does its own EnumItem -> string conversion.
 function PlayerDataSystem.EncodeProfile(profile: Types.PlayerProfile): { [string]: any }
-	local encoded: { [string]: any } = {
-		userId = profile.userId,
-		faction = profile.faction,
-		tier = profile.tier,
-		corruption = profile.corruption,
-		qiDeviationRisk = profile.qiDeviationRisk,
-		factionStanding = profile.factionStanding,
-		hasAscended = profile.hasAscended,
-		meridianXp = profile.meridianXp,
-	}
-	for key, value in ProfileSlices.Encode(profile) do
-		encoded[key] = value
-	end
-	return encoded
+	return ProfileSlices.Encode(profile)
 end
 
 -- Defensive decode -- `raw` is untrusted the instant it comes back from a DataStore (engineering-
@@ -292,25 +247,10 @@ end
 -- whole decode, since a single bad field (e.g. a hand-edited corruption value) shouldn't cost a
 -- player their entire tier/bloodline/art progress.
 function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): Types.PlayerProfile?
-	if typeof(raw) ~= "table" then
+	if not Schema.IsTable(raw) then
 		return nil
 	end
-	local rawTable = raw :: { [string]: any }
-
-	local decoded: Types.PlayerProfile = {
-		userId = if typeof(rawTable.userId) == "number" then rawTable.userId else fallbackUserId,
-		faction = if typeof(rawTable.faction) == "string" then rawTable.faction :: Types.Faction else nil,
-		tier = if typeof(rawTable.tier) == "number" then rawTable.tier else Config.DefaultTier,
-		corruption = if typeof(rawTable.corruption) == "number" then rawTable.corruption else 0,
-		qiDeviationRisk = if typeof(rawTable.qiDeviationRisk) == "number" then rawTable.qiDeviationRisk else 0,
-		factionStanding = if typeof(rawTable.factionStanding) == "number" then rawTable.factionStanding else 0,
-		hasAscended = if typeof(rawTable.hasAscended) == "boolean" then rawTable.hasAscended else false,
-		meridianXp = if typeof(rawTable.meridianXp) == "number" then rawTable.meridianXp else 0,
-	}
-	for key, value in ProfileSlices.Decode(rawTable, fallbackUserId) do
-		(decoded :: any)[key] = value
-	end
-	return decoded
+	return ProfileSlices.Decode(raw :: { [string]: any }, fallbackUserId) :: any
 end
 
 -- Schema migration skeleton (this file's header, design decision 4). Keyed by the version a

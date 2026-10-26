@@ -15,10 +15,12 @@ local ArtSlice = require(script.Parent.Slices.ArtSlice)
 local BloodlineSlice = require(script.Parent.Slices.BloodlineSlice)
 local CharacterSlice = require(script.Parent.Slices.CharacterSlice)
 local EmoteSlice = require(script.Parent.Slices.EmoteSlice)
+local CoreSlice = require(script.Parent.Slices.CoreSlice)
 local InventorySlice = require(script.Parent.Slices.InventorySlice)
 local SettingsSlice = require(script.Parent.Slices.SettingsSlice)
 
 return ProfileSlice.Compose({
+	CoreSlice,
 	EmoteSlice,
 	ArtSlice,
 	BloodlineSlice,
