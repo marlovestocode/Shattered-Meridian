@@ -30,13 +30,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local Schema = require(ReplicatedStorage.Shared.Schema)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 local SettingsSlice = require(script.Parent.Parent.Data.Slices.SettingsSlice)
 
 local logger = Logger.scope("SettingsSystem")
@@ -197,13 +196,6 @@ function SettingsSystem.DecodeGroupWrite(
 end
 
 local function handleGetSettings(player: Player): Types.PlayerSettings
-	if getRateLimiter:IsLimited(player) then
-		-- NOT the defaults: the client applies whatever table it is handed as the player's real settings, and
-		-- cannot tell defaults from a saved profile. nil is its existing "the fetch failed" path, which keeps
-		-- the session's own defaults and says so in the log. A legitimate boot read never gets here.
-		logger:warn("GetSettings rejected: rate limited", { player = player.Name })
-		return nil :: any
-	end
 	local profile = PlayerDataSystem.GetProfile(player)
 	if not profile then
 		logger:warn("GetSettings called before profile loaded -- returning inert defaults", { player = player.Name })
@@ -213,9 +205,6 @@ local function handleGetSettings(player: Player): Types.PlayerSettings
 end
 
 local function handleUpdateKeybind(player: Player, rawDevice: unknown, rawAction: unknown, rawKeybind: unknown): ()
-	if rateLimiter:IsLimited(player) then
-		return
-	end
 	local device, action, keybind = SettingsSystem.DecodeKeybindUpdate(rawDevice, rawAction, rawKeybind)
 	if device == nil or action == nil or keybind == nil then
 		logger:debug("UpdateKeybind rejected: invalid device, action or keybind", { player = player.Name })
@@ -238,9 +227,6 @@ local function handleUpdateKeybind(player: Player, rawDevice: unknown, rawAction
 end
 
 local function handleResetKeybinds(player: Player, rawDevice: unknown): ()
-	if rateLimiter:IsLimited(player) then
-		return
-	end
 	local device = SettingsSystem.DecodeDevice(rawDevice)
 	if device == nil then
 		logger:debug("ResetKeybinds rejected: invalid device", { player = player.Name })
@@ -263,9 +249,6 @@ local function handleResetKeybinds(player: Player, rawDevice: unknown): ()
 end
 
 local function handleUpdateAutorun(player: Player, rawEnabled: unknown): ()
-	if rateLimiter:IsLimited(player) then
-		return
-	end
 	local enabled = Schema.Decode(Schema.Boolean, rawEnabled)
 	if enabled == nil then
 		logger:debug("UpdateAutorun rejected: non-boolean value", { player = player.Name })
@@ -300,9 +283,6 @@ end
 local function makeGroupHandler(groupName: string): (Player, unknown, unknown) -> ()
 	local group = GROUPS[groupName]
 	return function(player: Player, rawField: unknown, rawValue: unknown): ()
-		if rateLimiter:IsLimited(player) then
-			return
-		end
 		local field, value, reason = group.Write(rawField, rawValue)
 		if field == nil then
 			logger:debug(`Update{groupName} rejected: {reason}`, { player = player.Name })
@@ -331,30 +311,30 @@ local function onPlayerRemoving(player: Player): ()
 end
 
 function SettingsSystem.Init(): ()
-	local getSettingsRemote = NetworkBridge.CreateRemoteFunction(RemoteNames.GetSettings)
-	getSettingsRemote.OnServerInvoke =
-		RemoteHandler.WrapInvoke(logger, "GetSettings", DEFAULT_SETTINGS, handleGetSettings)
+	local endpoint = Endpoint.Scope("SettingsSystem", logger)
 
-	local updateKeybindRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateKeybind)
-	updateKeybindRemote.OnServerEvent:Connect(handleUpdateKeybind)
+	endpoint.Function({
+		Name = RemoteNames.GetSettings,
+		Limiter = getRateLimiter,
+		ErrorResult = DEFAULT_SETTINGS,
+		-- NOT the defaults: the client applies whatever table it is handed as the player's real settings, and cannot
+		-- tell defaults from a saved profile. nil is its existing "the fetch failed" path, which keeps the session's own
+		-- defaults and says so in the log. A legitimate boot read never gets here.
+		OnLimited = function(player: Player): any
+			logger:warn("GetSettings rejected: rate limited", { player = player.Name })
+			return nil
+		end,
+		Handler = handleGetSettings,
+	})
 
-	local resetKeybindsRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.ResetKeybinds)
-	resetKeybindsRemote.OnServerEvent:Connect(handleResetKeybinds)
-
-	local updateAutorunRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateAutorun)
-	updateAutorunRemote.OnServerEvent:Connect(handleUpdateAutorun)
-
-	local updateParkourRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateParkour)
-	updateParkourRemote.OnServerEvent:Connect(makeGroupHandler("Parkour"))
-
-	local updateComfortRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateComfort)
-	updateComfortRemote.OnServerEvent:Connect(makeGroupHandler("Comfort"))
-
-	local updateGamepadRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateGamepad)
-	updateGamepadRemote.OnServerEvent:Connect(makeGroupHandler("Gamepad"))
-
-	local updateUIRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.UpdateUI)
-	updateUIRemote.OnServerEvent:Connect(makeGroupHandler("UI"))
+	-- One shared budget across every mutating remote (see rateLimiter above).
+	endpoint.Event({ Name = RemoteNames.UpdateKeybind, Limiter = rateLimiter, Handler = handleUpdateKeybind })
+	endpoint.Event({ Name = RemoteNames.ResetKeybinds, Limiter = rateLimiter, Handler = handleResetKeybinds })
+	endpoint.Event({ Name = RemoteNames.UpdateAutorun, Limiter = rateLimiter, Handler = handleUpdateAutorun })
+	endpoint.Event({ Name = RemoteNames.UpdateParkour, Limiter = rateLimiter, Handler = makeGroupHandler("Parkour") })
+	endpoint.Event({ Name = RemoteNames.UpdateComfort, Limiter = rateLimiter, Handler = makeGroupHandler("Comfort") })
+	endpoint.Event({ Name = RemoteNames.UpdateGamepad, Limiter = rateLimiter, Handler = makeGroupHandler("Gamepad") })
+	endpoint.Event({ Name = RemoteNames.UpdateUI, Limiter = rateLimiter, Handler = makeGroupHandler("UI") })
 
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "SettingsSystem",
