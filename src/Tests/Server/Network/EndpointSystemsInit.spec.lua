@@ -15,6 +15,7 @@ local SYSTEMS: { string } = {
 	"SettingsSystem",
 	"EmoteSystem",
 	"ArtSystem",
+	"InventorySystem",
 }
 
 local function systemModule(name: string): any

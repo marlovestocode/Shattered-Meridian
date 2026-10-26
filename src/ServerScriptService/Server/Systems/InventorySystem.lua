@@ -48,14 +48,14 @@ local InventoryConstants = require(ReplicatedStorage.Shared.Inventory.InventoryC
 local InventoryModel = require(ReplicatedStorage.Shared.Inventory.InventoryModel)
 local ItemCatalog = require(ReplicatedStorage.Shared.Inventory.ItemCatalog)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local Schema = require(ReplicatedStorage.Shared.Schema)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local Types = require(ReplicatedStorage.Shared.Types)
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local logger = Logger.scope("InventorySystem")
 
@@ -279,9 +279,6 @@ end
 -- Remote --------------------------------------------------------------------------------------------
 
 local function handleAction(player: Player, action: unknown, itemId: unknown, count: unknown): ActionResult
-	if actionLimiter:IsLimited(player) then
-		return { Success = false, Reason = "RateLimited" }
-	end
 	if action == "Sync" then
 		if not PlayerDataSystem.IsLoaded(player) then
 			return { Success = false, Reason = "ProfileNotLoaded" }
@@ -289,10 +286,10 @@ local function handleAction(player: Player, action: unknown, itemId: unknown, co
 		schedulePush(player)
 		return { Success = true }
 	end
-	if action ~= "Discard" or typeof(itemId) ~= "string" or typeof(count) ~= "number" then
+	if action ~= "Discard" or not Schema.IsString(itemId) or not Schema.IsNumber(count) then
 		return { Success = false, Reason = "BadRequest" }
 	end
-	return InventorySystem.Discard(player, itemId, count)
+	return InventorySystem.Discard(player, itemId :: string, count :: number)
 end
 
 local function onProfileLoaded(player: Player): ()
@@ -306,14 +303,17 @@ function InventorySystem.Init(): ()
 	end
 	started = true
 
-	snapshotRemote = NetworkBridge.CreateRemoteEvent(InventoryConstants.RemoteNames.Snapshot)
-	local actionRemote = NetworkBridge.CreateRemoteFunction(InventoryConstants.RemoteNames.Action)
-	actionRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
-		logger,
-		InventoryConstants.RemoteNames.Action,
-		{ Success = false, Reason = "InternalError" } :: ActionResult,
-		handleAction
-	)
+	local endpoint = Endpoint.Scope("InventorySystem", logger)
+	snapshotRemote = endpoint.Push(InventoryConstants.RemoteNames.Snapshot)
+	endpoint.Function({
+		Name = InventoryConstants.RemoteNames.Action,
+		Limiter = actionLimiter,
+		ErrorResult = { Success = false, Reason = "InternalError" } :: ActionResult,
+		OnLimited = function(): any
+			return { Success = false, Reason = "RateLimited" }
+		end,
+		Handler = handleAction,
+	})
 
 	-- The profile-loaded edge is PlayerDataSystem's own "safe to read" signal; a player whose profile
 	-- finished loading before this Init ran is caught by the sweep below.
