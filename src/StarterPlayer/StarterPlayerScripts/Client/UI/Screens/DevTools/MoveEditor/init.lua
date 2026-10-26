@@ -89,6 +89,7 @@ local Tab = require(script.Parent.Parent.Parent.Components.Tab)
 
 local Browser = require(script.Browser)
 local Copy = require(script.Copy)
+local DomainInsight = require(script.DomainInsight)
 local DomainTab = require(script.DomainTab)
 local Fields = require(script.Fields)
 local HitboxTab = require(script.HitboxTab)
@@ -492,23 +493,47 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 		Children = typeBarChildren,
 	})
 
+	-- Shows a page by the name the editor files it under: a top-level tab, or one of the Realm tab's pages.
+	-- Declared ahead of the Realm tab, whose checks navigate with it.
+	local function showPage(name: string): ()
+		if table.find(REALM_PAGES, name) then
+			tabs.Current:set("Realm")
+			realmPage:set(name)
+		else
+			tabs.Current:set(name)
+		end
+	end
+
 	-- The Realm tab: its sub-tab bar over five pages, each built on its first visit like a top-level page.
+	-- The pages share one move map and one run of the realm's checks (DomainTab's header), built with the tab.
 	local function realmTab(visible: Fusion.Computed<boolean>): Instance
+		local movesById = scope:Computed(function(use)
+			return DomainInsight.MovesById(use(entries))
+		end)
+		local tools: DomainTab.Tools = {
+			ShowOnCharacter = showOnCharacter,
+			MovesById = movesById,
+			Diagnostics = scope:Computed(function(use): { DomainInsight.Diagnostic }
+				local current = use(draft)
+				return if current then DomainInsight.Diagnostics(current, use(movesById)) else {}
+			end),
+			ShowPage = showPage,
+		}
 		local builders: { [string]: (Fusion.Computed<boolean>) -> Instance } = {
 			Realm = function(shown)
-				return DomainTab.Realm(scope, context, shown)
+				return DomainTab.Realm(scope, context, shown, tools)
 			end,
 			Boundary = function(shown)
-				return DomainTab.Boundary(scope, context, shown, { ShowOnCharacter = showOnCharacter })
+				return DomainTab.Boundary(scope, context, shown, tools)
 			end,
 			Effects = function(shown)
-				return DomainTab.Effects(scope, context, shown)
+				return DomainTab.Effects(scope, context, shown, tools)
 			end,
 			Law = function(shown)
-				return DomainTab.Law(scope, context, shown)
+				return DomainTab.Law(scope, context, shown, tools)
 			end,
 			Clash = function(shown)
-				return DomainTab.Clash(scope, context, shown)
+				return DomainTab.Clash(scope, context, shown, tools)
 			end,
 		}
 		local subPages: { Instance } = {}
@@ -554,16 +579,6 @@ function MoveEditor.Mount(scope: Scope, playerGui: PlayerGui): MoveEditorHandle
 				),
 			},
 		})
-	end
-
-	-- Shows a page by the name the editor files it under: a top-level tab, or one of the Realm tab's pages.
-	local function showPage(name: string): ()
-		if table.find(REALM_PAGES, name) then
-			tabs.Current:set("Realm")
-			realmPage:set(name)
-		else
-			tabs.Current:set(name)
-		end
 	end
 
 	-- Steps the open move through the browser's visible rows (the arrow keys).

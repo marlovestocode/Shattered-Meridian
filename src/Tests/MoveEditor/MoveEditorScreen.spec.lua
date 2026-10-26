@@ -12,6 +12,7 @@ local MoveRegistryManager = require(ServerScriptService.Server.Combat.MoveRegist
 local Screens = StarterPlayer.StarterPlayerScripts.Client.UI.Screens
 local MoveEditor = require(Screens.DevTools.MoveEditor)
 local Copy = require(Screens.DevTools.MoveEditor.Copy)
+local DomainInsight = require(Screens.DevTools.MoveEditor.DomainInsight)
 
 local peek = Fusion.peek
 
@@ -232,6 +233,36 @@ return function()
 			expect(peek(handle.RealmPage)).to.equal("Law")
 			expect(pageOf(parent, "Law")).to.be.ok()
 			expect(pageOf(parent, "Clash")).to.equal(nil)
+		end)
+
+		it("opens a realm's Core page on its lifecycle and its checks", function()
+			local handle, parent = mount()
+			handle.Draft:set(move({ Domain = realm() }))
+			handle.ShowPage("Realm")
+			local page = pageOf(parent, "Realm") :: Instance
+			expect(page:FindFirstChild("Lifecycle", true)).to.be.ok()
+			local checks = page:FindFirstChild("Checks", true) :: Instance
+			expect(checks).to.be.ok()
+			-- realm()'s override names a realm the (empty) move list does not know: no reference check runs,
+			-- but the Presentation note does, so at least one row shows.
+			local first = checks:FindFirstChild("Check_1") :: GuiObject
+			expect(first.Visible).to.equal(true)
+		end)
+
+		it("applies an archetype as one edit that Undo takes back whole", function()
+			local handle = mount()
+			local subject = move({ Domain = realm() })
+			handle.Draft:set(subject)
+			local before = MoveTypes.Fingerprint(subject)
+			handle.EditDraft(function(draft)
+				(DomainInsight.ArchetypeById("Arena") :: any).Apply(draft.Domain)
+			end)
+			local applied = peek(handle.Draft)
+			expect((applied.Domain :: any).BoundaryCollision).to.equal(true)
+			-- The override survives the archetype.
+			expect(#(applied.Domain :: any).ClashOverrides).to.equal(1)
+			handle.Undo()
+			expect(MoveTypes.Fingerprint(peek(handle.Draft))).to.equal(before)
 		end)
 
 		it("builds a realm's effect slot only once the slot exists", function()

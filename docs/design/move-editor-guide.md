@@ -192,9 +192,25 @@ domain move casts *volumeless* (`HitboxTypes.AttackDefinition.Volumeless`, set b
 nothing in front of you. That is why it has no Hitbox or Impact tab. Its Realm tab's five pages are what the swing
 does not say:
 
-- **Realm** — CLOCK (unfurl / held / fold seconds), COST (Qi cost — the art binding's; bind the move to a tree
-  on Identity to have one — and Qi upkeep per second), GOVERNS (how many bodies, nearest first).
-- **Boundary** — SHAPE (Sphere / Cylinder / Box, radius, height), PLACEMENT (fixed / follow owner, centre
+**CHECKS (2026-10-26)** read the realm the way the runtime will (`MoveEditor/DomainInsight.lua`): an **error** is
+something Save will refuse (a Volley or Owner cast with no move, a seal with no move, an override with no
+realm); a **warning** saves but will not do what it reads as (an effect whose first pulse is after the hold, a
+move that no longer exists, a Volley naming a melee move, a stun past the 1.5 s cap, strikes asking for more
+than the realm's 12 shots/s, an owner who opens a collapse-on-leave realm standing outside it); a **note** is
+legal but inert (a wall on a follow-owner realm, an override that repeats the default). Each has **Go** to the
+page holding the field, and every page opens with its own errors and warnings. The law and matchup read-outs
+are the runtime's own composition (`DomainRules.Apply`) and arbitration (`DomainClash.Resolve`), not a model of
+them.
+
+- **Realm** (sub-tab *Core*) — AT A GLANCE (the cast laid end to end: a proportional strip of windup → unfurl →
+  held → fold, the clip's windup when the server knows it, with the cancel window marked violet and the cooldown
+  bronze, plus press-to-gone, Qi cost and upkeep over the hold), CHECKS (below), START FROM (six archetypes —
+  sealed arena, mobile aura, pressure field, sanctuary, suppression, realm breaker: one edit that rewrites the
+  realm but keeps its clash overrides; Undo takes it back; nothing saves until Save), CLOCK (unfurl / held / fold
+  seconds), COST (Qi cost — the art binding's; bind the move to a tree on Identity to have one — and Qi upkeep
+  per second), GOVERNS (how many bodies, nearest first).
+- **Boundary** — SHAPE (Sphere / Cylinder / Box, Close / Mid / Wide / Vast size steps, radius, height),
+  FOOTPRINT (span, clash reach, whether the owner opens it inside or outside), PLACEMENT (fixed / follow owner, centre
   forward, *Show on my character* to see the realm's boundary on you), CROSSING (entry and exit rules — Open /
   Barred — entry grace, exit linger, physical wall), SHOTS (may enter / may leave), COLLAPSE (owner hit while
   unfurling, owner leaves).
@@ -204,13 +220,17 @@ does not say:
   to 6 periodic effects: *Strike* (a guaranteed, homing, parryable-if-you-say-so shot at each target),
   *Volley* (launch a projectile move at each target), *Stun*, *Drain posture*, *Pull*, *Push*, *Owner cast* —
   each with its interval, first delay, target filter and per-pulse cap. Volley and Owner cast name a **move
-  id** (that move's damage, knockback and hit cues are what lands); a Strike may name one too.
+  id** (that move's damage, knockback and hit cues are what lands); a Strike may name one too. Add by kind
+  (each arrives with a magnitude that suits it); every slot says whose price a hit pays and how many times it
+  fires over a full hold, and has *Up* / *Down* / *Copy* / *Remove*.
 - **Law** — up to 10 continuous rules on a filter: damage dealt/taken, posture taken, hitstun taken, movement
   speed, cooldowns (multipliers), seal a move / arts / projectile moves / realms, no blocking / parrying /
-  evading / escape mobility, rooted.
+  evading / escape mobility, rooted. UNDER THIS LAW composes them per kind of body (enemies — split into
+  players and bots only when a rule's target types differ — allies, the owner); each rule reads as a sentence.
 - **Clash** — whether it interacts with other realms at all, priority, the behaviour toward a weaker realm
   (Coexist / Suppress / Erode / Dominate / Shatter), the tie-break, erode rate, contest strength, and
-  per-opponent overrides keyed by the other realm's move id.
+  per-opponent overrides keyed by the other realm's move id. MATCHUPS reads how this realm meets every other
+  realm, both opening orders; *Erode rate* shows whenever the default or any override erodes.
 
 A realm move cannot grab (`DomainCannotGrab` — re-pick *Domain Expansion* in the type bar to clear an old
 record's grab), and a weapon stage cannot open one. Test fires it like any move (bench bots and dummies are
