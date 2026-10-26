@@ -54,11 +54,12 @@
 
 	4. SCHEMA VERSIONING. Every persisted record is a Types.StoredPlayerProfile
 	   ({ SchemaVersion, Profile, WriteGeneration, Lock }), not a bare PlayerProfile. MigrateRecord
-	   walks a loaded record forward through the (currently empty) Migrations table toward
-	   Constants.PlayerData.SchemaVersion before DecodeProfile ever sees it -- see MigrateRecord's
-	   own comment for why an empty table today is a real, tested skeleton and not a TODO.
+	   walks a loaded record forward through the migration chain toward
+	   Constants.PlayerData.SchemaVersion before DecodeProfile ever sees it. The chain is ONE table
+	   keyed by the version a step migrates FROM, assembled from the steps each ProfileSlice
+	   contributes (decision 8); this file owns the version number and the walk, not any step.
 	   WriteGeneration/Lock are deliberately NOT part of this versioned Profile payload or the
-	   Migrations table -- see Types.StoredPlayerProfile's own header for why.
+	   migration chain -- see Types.StoredPlayerProfile's own header for why.
 
 	5. LOAD-FAILURE HANDLING. A load-claim UpdateAsync failure (exhausted retries) or an undecodable
 	   stored record NEVER falls back to a fresh/default profile -- doing so would let a subsequent
@@ -108,6 +109,13 @@
 	   against. leaveSaveInFlight (keyed by UserId, not Player) closes this third gap: loadProfile
 	   waits it out before claiming, so the rejoining session's WriteGeneration baseline is always read
 	   after the leaving session's own write lands, not racing it.
+
+	8. THE PROFILE IS ASSEMBLED, NOT HAND-WRITTEN HERE (coworking plan W5, 2026-10-25). Every persisted field belongs to a
+	   ProfileSlice (Server/Data/Slices/*) that owns its default, copy, encode, decode and migration steps; the list is
+	   Server/Data/ProfileSlices.lua, and CreateDefaultProfile/CopyProfile/EncodeProfile/DecodeProfile below are pure
+	   composition of it. This file therefore knows NO field: adding one is a slice file and one line in that manifest, and
+	   nothing here changes. What it still owns is everything about WHEN a profile loads and saves (decisions 1-7). The persisted
+	   bytes did not change in the move: Tests/PlayerData/ProfileRoundTrip.spec.lua pins 1,161 stored records through it.
 ]]
 
 local Players = game:GetService("Players")
@@ -253,18 +261,18 @@ function PlayerDataSystem.DecodeProfile(fallbackUserId: number, raw: unknown): T
 	return ProfileSlices.Decode(raw :: { [string]: any }, fallbackUserId) :: any
 end
 
--- Schema migration skeleton (this file's header, design decision 4). Keyed by the version a
+-- Schema migration chain (this file's header, design decisions 4 and 8). Keyed by the version a
 -- migration function migrates FROM (Migrations[1] turns a v1 record into a v2 record, and so on) --
--- MigrateRecord itself already walks this table forward, so registering Migrations[N] = function(raw)
--- ... end is the ONLY change a real schema bump needs; nothing about the load path itself has to
--- change. A version with no registered migration function stops the walk where it is (rather than
+-- MigrateRecord itself walks this table forward, so a real schema bump is a step declared in the owning
+-- slice's `Migrations` plus raising Constants.PlayerData.SchemaVersion; nothing about the load path itself
+-- has to change. A version with no registered migration function stops the walk where it is (rather than
 -- guessing) and logs loudly -- an under-migrated record is handed to DecodeProfile as-is, which
 -- degrades missing/wrong-shaped fields to safe defaults per DecodeProfile's own contract, instead
 -- of this function crashing or fabricating data it has no real migration for.
 local Migrations = ProfileSlices.Migrations
 
 function PlayerDataSystem.MigrateRecord(raw: { [string]: any }): { [string]: any }
-	local version = if typeof(raw.SchemaVersion) == "number" then raw.SchemaVersion :: number else 1
+	local version = if Schema.IsNumber(raw.SchemaVersion) then raw.SchemaVersion :: number else 1
 	local migrated = raw
 
 	while version < Config.SchemaVersion do
@@ -332,14 +340,14 @@ function PlayerDataSystem.IsLockHeldByOther(
 	now: number,
 	staleAfterSeconds: number
 ): boolean
-	if typeof(rawLock) ~= "table" then
+	if not Schema.IsTable(rawLock) then
 		return false
 	end
 	local lock = rawLock :: { [string]: any }
-	if typeof(lock.JobId) ~= "string" or lock.JobId == thisJobId then
+	if not Schema.IsString(lock.JobId) or lock.JobId == thisJobId then
 		return false
 	end
-	if typeof(lock.LockedAt) ~= "number" then
+	if not Schema.IsNumber(lock.LockedAt) then
 		return false
 	end
 	return now - lock.LockedAt < staleAfterSeconds
@@ -373,7 +381,7 @@ function PlayerDataSystem.ComputeLoadClaim(
 	if old == nil then
 		return { Lock = { JobId = thisJobId, LockedAt = now } }
 	end
-	if typeof(old) ~= "table" then
+	if not Schema.IsTable(old) then
 		return old
 	end
 	local record = old :: { [string]: any }
@@ -392,12 +400,12 @@ end
 -- (the same staleness handling every abandoned lock gets), so this is a best-effort UX improvement
 -- for a quick rejoin, not a correctness requirement.
 function PlayerDataSystem.ComputeLockRelease(old: unknown, thisJobId: string): unknown
-	if typeof(old) ~= "table" then
+	if not Schema.IsTable(old) then
 		return old
 	end
 	local record = old :: { [string]: any }
 	local lock = record.Lock
-	if typeof(lock) == "table" and (lock :: { [string]: any }).JobId == thisJobId then
+	if Schema.IsTable(lock) and (lock :: { [string]: any }).JobId == thisJobId then
 		record.Lock = nil
 	end
 	return record
@@ -422,8 +430,8 @@ function PlayerDataSystem.ComputeSaveWrite(
 	schemaVersion: number,
 	releaseLock: boolean
 ): ({ [string]: any }, string)
-	local record: { [string]: any } = if typeof(old) == "table" then old :: { [string]: any } else {}
-	local currentGeneration = if typeof(record.WriteGeneration) == "number" then record.WriteGeneration else 0
+	local record: { [string]: any } = if Schema.IsTable(old) then old :: { [string]: any } else {}
+	local currentGeneration = if Schema.IsNumber(record.WriteGeneration) then record.WriteGeneration else 0
 	if currentGeneration > loadedGeneration then
 		return record, "Rejected"
 	end
@@ -784,7 +792,7 @@ local function loadProfile(player: Player): ()
 
 		local record = raw :: { [string]: any }
 		local lock = record.Lock
-		local wonClaim = typeof(lock) == "table" and (lock :: { [string]: any }).JobId == thisJobId
+		local wonClaim = Schema.IsTable(lock) and (lock :: { [string]: any }).JobId == thisJobId
 		if wonClaim then
 			claimedRecord = record
 			break
@@ -793,7 +801,7 @@ local function loadProfile(player: Player): ()
 		logger:warn("loadProfile: data lock held by another server", {
 			userId = userId,
 			attempt = attempt,
-			heldByJobId = if typeof(lock) == "table" then (lock :: { [string]: any }).JobId else nil,
+			heldByJobId = if Schema.IsTable(lock) then (lock :: { [string]: any }).JobId else nil,
 		})
 		if attempt < Config.LockClaimMaxAttempts then
 			task.wait(Config.LockClaimRetryBackoffSeconds)
@@ -837,9 +845,7 @@ local function loadProfile(player: Player): ()
 		profile = decoded
 	end
 
-	local writeGeneration = if typeof(claimedRecord.WriteGeneration) == "number"
-		then claimedRecord.WriteGeneration
-		else 0
+	local writeGeneration = if Schema.IsNumber(claimedRecord.WriteGeneration) then claimedRecord.WriteGeneration else 0
 
 	if not player.Parent then
 		-- Left while their own load was still in flight -- PlayerRemoving already ran and found
