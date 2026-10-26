@@ -39,11 +39,11 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 
 local DefaultMoveRegistry = require(script.Parent.DefaultMoveRegistry)
 local MoveRegistryManager = require(script.Parent.MoveRegistryManager)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 type Presentation = MovePresentationTypes.Presentation
 type CatalogMessage = MovePresentationTypes.CatalogMessage
@@ -147,9 +147,6 @@ local function snapshot(): CatalogMessage
 end
 
 local function onRequest(player: Player): ()
-	if limiter:IsLimited(player) then
-		return
-	end
 	local remote = catalogRemote
 	if remote then
 		remote:FireClient(player, snapshot())
@@ -183,10 +180,9 @@ function MovePresentationSystem.Init(): ()
 	end
 	initialized = true
 
-	local remote = NetworkBridge.CreateRemoteEvent(NETWORK.RemoteNames.Catalog)
-	catalogRemote = remote
-	local request = NetworkBridge.CreateRemoteEvent(NETWORK.RemoteNames.Request)
-	request.OnServerEvent:Connect(onRequest)
+	local endpoint = Endpoint.Scope("MovePresentationSystem", logger)
+	catalogRemote = endpoint.Push(NETWORK.RemoteNames.Catalog)
+	endpoint.Event({ Name = NETWORK.RemoteNames.Request, Limiter = limiter, Handler = onRequest })
 	Players.PlayerRemoving:Connect(function(player: Player)
 		limiter:Clear(player)
 	end)

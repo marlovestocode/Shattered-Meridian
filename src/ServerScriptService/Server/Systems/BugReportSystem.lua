@@ -27,7 +27,6 @@ local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
 local TextService = game:GetService("TextService")
 
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Types = require(ReplicatedStorage.Shared.Types)
@@ -35,8 +34,8 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local BugReportSystem = {}
 
@@ -297,11 +296,6 @@ function BugReportSystem.Submit(
 	rawDescription: unknown
 ): Types.BugReportSubmitResult
 	logger:debug("Submit received", { player = player.Name, userId = player.UserId })
-
-	if submitRateLimiter:IsLimited(player) then
-		logger:debug("Submit rejected: rate limited", { player = player.Name })
-		return { Success = false, Reason = "RateLimited" }
-	end
 
 	local now = os.clock()
 	local lastAt = lastSubmitAt[player]
@@ -782,15 +776,16 @@ function BugReportSystem.Init(): ()
 	-- admin's client calls well after boot, never during or immediately after Init().
 	task.spawn(seedOpenReportCount)
 
-	local submitRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.Submit)
-	logger:debug("Remote created", { name = Config.RemoteNames.Submit })
-	submitRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
-		logger,
-		"Submit",
-		{ Success = false, Reason = "InternalError" } :: Types.BugReportSubmitResult,
-		BugReportSystem.Submit
-	)
-	logger:debug("Handler connected", { remote = Config.RemoteNames.Submit })
+	Endpoint.Scope("BugReportSystem", logger).Function({
+		Name = Config.RemoteNames.Submit,
+		Limiter = submitRateLimiter,
+		ErrorResult = { Success = false, Reason = "InternalError" } :: Types.BugReportSubmitResult,
+		OnLimited = function(player: Player): any
+			logger:debug("Submit rejected: rate limited", { player = player.Name })
+			return { Success = false, Reason = "RateLimited" }
+		end,
+		Handler = BugReportSystem.Submit,
+	})
 
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "BugReportSystem",

@@ -64,7 +64,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Types = require(ReplicatedStorage.Shared.Types)
@@ -76,6 +75,7 @@ local ItemCatalog = require(ReplicatedStorage.Shared.Inventory.ItemCatalog)
 local AttackRequestSystem = require(script.Parent.Parent.Attack.AttackRequestSystem)
 local InventorySystem = require(script.Parent.Parent.Parent.Systems.InventorySystem)
 local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
+local Endpoint = require(script.Parent.Parent.Parent.Network.Endpoint)
 
 type WeaponId = Types.WeaponId
 
@@ -312,16 +312,10 @@ function WeaponInventorySystem.GetOwned(player: Player): { WeaponId }
 end
 
 local function handleToggle(player: Player): ()
-	if toggleLimiter:IsLimited(player) then
-		return
-	end
 	WeaponInventorySystem.ToggleDraw(player)
 end
 
 local function handleSelectNext(player: Player): ()
-	if toggleLimiter:IsLimited(player) then
-		return
-	end
 	WeaponInventorySystem.SelectNext(player)
 end
 
@@ -397,13 +391,12 @@ function WeaponInventorySystem.Init(): ()
 	end
 	started = true
 
-	inventoryChangedRemote = NetworkBridge.CreateRemoteEvent(WeaponConstants.Network.RemoteNames.InventoryChanged)
-
-	local toggleRemote = NetworkBridge.CreateRemoteEvent(WeaponConstants.Network.RemoteNames.ToggleDraw)
-	toggleRemote.OnServerEvent:Connect(handleToggle)
-
-	local selectRemote = NetworkBridge.CreateRemoteEvent(WeaponConstants.Network.RemoteNames.SelectNext)
-	selectRemote.OnServerEvent:Connect(handleSelectNext)
+	local endpoint = Endpoint.Scope("WeaponInventorySystem", logger)
+	local RemoteNames = WeaponConstants.Network.RemoteNames
+	inventoryChangedRemote = endpoint.Push(RemoteNames.InventoryChanged)
+	-- Draw/sheathe and cycle share the one toggle budget, as they always did.
+	endpoint.Event({ Name = RemoteNames.ToggleDraw, Limiter = toggleLimiter, Handler = handleToggle })
+	endpoint.Event({ Name = RemoteNames.SelectNext, Limiter = toggleLimiter, Handler = handleSelectNext })
 
 	-- Through Shared/Combat/WeaponAssets.Container rather than a seventh hand-written
 	-- Workspace:FindFirstChild("Weapons") -- this was the one copy that wrote the folder name as a

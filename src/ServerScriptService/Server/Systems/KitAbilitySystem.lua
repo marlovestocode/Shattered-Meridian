@@ -38,13 +38,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local RaceSystem = require(script.Parent.RaceSystem)
 local BloodlineSystem = require(script.Parent.BloodlineSystem)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local logger = Logger.scope("KitAbilitySystem")
 
@@ -106,9 +105,6 @@ local function sendAbilityUsed(player: Player, request: Types.KitAbilityRequest)
 end
 
 local function handleRequestAbility(player: Player, raw: unknown): Types.KitActionResult
-	if requestLimiter:IsLimited(player) then
-		return { Success = false, Reason = "RateLimited" }
-	end
 	local request = KitAbilitySystem.SanitizeRequest(raw)
 	if not request then
 		return { Success = false, Reason = "InvalidRequest" }
@@ -124,15 +120,18 @@ local function handleRequestAbility(player: Player, raw: unknown): Types.KitActi
 end
 
 function KitAbilitySystem.Init(): ()
-	local requestRemote = NetworkBridge.CreateRemoteFunction(Constants.Kit.RemoteNames.RequestAbility)
-	requestRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
-		logger,
-		"RequestAbility",
-		{ Success = false, Reason = "InternalError" } :: Types.KitActionResult,
-		handleRequestAbility
-	)
+	local endpoint = Endpoint.Scope("KitAbilitySystem", logger)
+	endpoint.Function({
+		Name = Constants.Kit.RemoteNames.RequestAbility,
+		Limiter = requestLimiter,
+		ErrorResult = { Success = false, Reason = "InternalError" } :: Types.KitActionResult,
+		OnLimited = function(): any
+			return { Success = false, Reason = "RateLimited" }
+		end,
+		Handler = handleRequestAbility,
+	})
 
-	abilityUsedRemote = NetworkBridge.CreateRemoteEvent(Constants.Kit.RemoteNames.AbilityUsed)
+	abilityUsedRemote = endpoint.Push(Constants.Kit.RemoteNames.AbilityUsed)
 
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "KitAbilitySystem",

@@ -44,7 +44,6 @@ local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
 local ParkourValidation = require(ReplicatedStorage.Shared.Parkour.ParkourValidation)
@@ -55,6 +54,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 
 local SuspicionLedger = require(script.Parent.Support.SuspicionLedger)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 type ActionKind = ParkourTypes.ActionKind
 type ActionReport = ParkourTypes.ActionReport
@@ -286,14 +286,10 @@ local function handleReport(player: Player, rawPayload: unknown): ()
 	local now = os.clock()
 	local state = getState(player)
 
-	if rateLimiter:IsLimited(player) then
-		-- Deliberately NOT counted as a rejection toward the cheater flag: hitting a rate limit is
-		-- something a laggy or momentarily-thrashing honest client does, and conflating "too many
-		-- reports" with "physically impossible reports" would flag exactly the players least able to
-		-- do anything about it.
-		logger:debug("Parkour report rate limited", { player = player.Name })
-		return
-	end
+	-- (A rate-limited report never reaches this handler: Endpoint drops it before. It is deliberately NOT counted as a rejection
+	-- toward the cheater flag -- hitting a rate limit is something a laggy or momentarily-thrashing honest client does, and
+	-- conflating "too many reports" with "physically impossible reports" would flag exactly the players least able to do
+	-- anything about it.)
 
 	local report, parseError = ParkourValidation.Parse(rawPayload)
 	if not report then
@@ -441,10 +437,9 @@ function ParkourSystem.OnActionStarted(callback: (player: Player, kind: ActionKi
 end
 
 function ParkourSystem.Init(): ()
-	local report = NetworkBridge.CreateRemoteEvent(RemoteNames.ReportAction)
-	report.OnServerEvent:Connect(handleReport)
-
-	rejectedRemote = NetworkBridge.CreateRemoteEvent(RemoteNames.ActionRejected)
+	local endpoint = Endpoint.Scope("ParkourSystem", logger)
+	endpoint.Event({ Name = RemoteNames.ReportAction, Limiter = rateLimiter, Handler = handleReport })
+	rejectedRemote = endpoint.Push(RemoteNames.ActionRejected)
 
 	-- See Shared/PlayerLifecycle.lua -- the add/sweep/remove triple plus the per-player character
 	-- hookup, in one call instead of four places that all had to agree.

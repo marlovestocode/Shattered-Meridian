@@ -87,7 +87,6 @@ local Workspace = game:GetService("Workspace")
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local CombatConstants = require(ReplicatedStorage.Shared.Combat.CombatConstants)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
@@ -98,6 +97,8 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
+local Schema = require(ReplicatedStorage.Shared.Schema)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local logger = Logger.scope("RunSystem")
 
@@ -606,19 +607,12 @@ end
 -- Sprint intent from the client. The ONE thing a client tells this System, and it is a boolean, which
 -- bounds what a lying client can achieve: claiming to be sprinting forever still only earns a gear if
 -- the SERVER also sees the character genuinely moving, tick after tick, on the server's own clock.
-local function handleSetSprinting(player: Player, sprinting: unknown): ()
-	if typeof(sprinting) ~= "boolean" then
-		logger:debug("Run intent rejected -- non-boolean payload", { player = player.Name })
-		return
-	end
-	if rateLimiter:IsLimited(player) then
-		return
-	end
+local function handleSetSprinting(player: Player, sprinting: boolean): ()
 	local state = getState(player)
 	if state.Sprinting == sprinting then
 		return
 	end
-	state.Sprinting = sprinting :: boolean
+	state.Sprinting = sprinting
 end
 
 local function onCharacterAdded(player: Player, character: Model): ()
@@ -668,8 +662,13 @@ local function onCharacterAdded(player: Player, character: Model): ()
 end
 
 function RunSystem.Init(): ()
-	local setSprinting = NetworkBridge.CreateRemoteEvent(REMOTE_NAMES.SetSprinting)
-	setSprinting.OnServerEvent:Connect(handleSetSprinting)
+	-- The payload is a boolean or the call is dropped (Schema.Boolean), as it always was.
+	Endpoint.Scope("RunSystem", logger).Event({
+		Name = REMOTE_NAMES.SetSprinting,
+		Limiter = rateLimiter,
+		Args = { Schema.Boolean },
+		Handler = handleSetSprinting,
+	})
 
 	-- Shared/PlayerLifecycle.lua owns the PlayerAdded / PlayerRemoving / Init-time-GetPlayers-sweep
 	-- triple that used to be written out here, and the per-player CharacterAdded hookup inside it. The
