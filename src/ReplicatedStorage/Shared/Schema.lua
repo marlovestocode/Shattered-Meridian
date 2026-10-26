@@ -13,7 +13,7 @@
 	the same decisions (reject or clamp? first error or all? what is the error called?). Here they are the shape.
 
 	THE COMBINATORS.
-	  Boolean, Number(min, max), String(maxLength), NonEmptyString(maxLength?), Enum({ "A", "B" }),
+	  Boolean, Number(min, max), String(maxLength), RawString, NonEmptyString(maxLength?), Enum({ "A", "B" }),
 	  EnumItem(Enum.KeyCode), Optional(shape), Default(shape, fallback), Array(shape, maxLength?),
 	  Map(keyShape, valueShape, maxEntries?), Record({ { "Field", shape }, ... }), WithReason("Code", shape),
 	  Custom(function(raw) -> (value, reason?)), and FieldValue({ Name = shape, ... }) for the one-remote-many-fields
@@ -128,6 +128,15 @@ function Schema.Boolean(raw: unknown): (boolean?, Reason?)
 		return nil, "expected boolean"
 	end
 	return raw :: boolean, nil
+end
+
+-- Any string, with NO bound. For an identifier that is only compared against a registry (and so can never reach storage); a string
+-- that will be stored must be a Schema.String(maxLength), which truncates.
+function Schema.RawString(raw: unknown): (string?, Reason?)
+	if typeof(raw) ~= "string" then
+		return nil, "expected string"
+	end
+	return raw :: string, nil
 end
 
 function Schema.Number(min: number, max: number): Shape<number>

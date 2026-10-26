@@ -104,12 +104,13 @@ local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local EmoteConstants = require(ReplicatedStorage.Shared.EmoteConstants)
 local EmoteRegistry = require(ReplicatedStorage.Shared.Emotes.EmoteRegistry)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local Schema = require(ReplicatedStorage.Shared.Schema)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 local EmoteUnlockService = require(script.Parent.EmoteUnlockService)
 
 local logger = Logger.scope("EmoteSystem")
@@ -239,16 +240,7 @@ local function isInCombat(humanoid: Humanoid): boolean
 	return humanoid:GetAttribute(AttributeConstants.InCombat) == true
 end
 
-local function handleRequestPlay(player: Player, rawEmoteId: unknown): ()
-	if playRateLimiter:IsLimited(player) then
-		return
-	end
-	if typeof(rawEmoteId) ~= "string" then
-		logger:debug("RequestPlay: non-string emoteId ignored", { player = player.Name })
-		return
-	end
-	local emoteId = rawEmoteId :: string
-
+local function handleRequestPlay(player: Player, emoteId: string): ()
 	if not EmoteRegistry.Exists(emoteId) then
 		logger:debug("RequestPlay rejected: UnknownEmote", { player = player.Name, emoteId = emoteId })
 		return
@@ -321,16 +313,7 @@ end
 -- RequestPlay/RequestSetLoadoutSlot split (two genuinely independent player actions that must not
 -- starve each other), this fires at most once per accepted RequestPlay and is bounded by the same
 -- budget that gates those starts in the first place.
-local function handleNotifyFinished(player: Player, rawEmoteId: unknown): ()
-	if playRateLimiter:IsLimited(player) then
-		return
-	end
-	if typeof(rawEmoteId) ~= "string" then
-		logger:debug("NotifyFinished: non-string emoteId ignored", { player = player.Name })
-		return
-	end
-	local emoteId = rawEmoteId :: string
-
+local function handleNotifyFinished(player: Player, emoteId: string): ()
 	local active = activeEmotes[player]
 	if not active then
 		-- Routine, not suspicious: the server may already have stopped this emote (death, the
@@ -379,33 +362,19 @@ end
 -- past its threshold fires a stop every frame until the echo arrives, which emptied the bucket and silently
 -- dropped the next RequestPlay. A stop is idempotent, so the ceiling is loose and only there for hygiene.
 local function handleRequestStop(player: Player): ()
-	if stopRateLimiter:IsLimited(player) then
-		return
-	end
 	EmoteSystem.StopEmote(player)
 end
 
-local function handleRequestSetLoadoutSlot(player: Player, rawSlotIndex: unknown, rawEmoteId: unknown): ()
-	if loadoutRateLimiter:IsLimited(player) then
-		return
-	end
-	-- rawSlotIndex ~= rawSlotIndex is the standard NaN test (NaN is the only Luau value unequal to
-	-- itself) -- without it, a NaN slot index passes typeof/math.floor/range checks unrejected (NaN
-	-- compares false against both < 1 and > LoadoutSize) and reaches `profile.emoteLoadout[slotIndex]
-	-- = emoteId` below, which errors ("table index is NaN") inside PlayerDataSystem.Transform's
-	-- mutator instead of being cleanly rejected here.
-	if typeof(rawSlotIndex) ~= "number" or rawSlotIndex ~= rawSlotIndex or typeof(rawEmoteId) ~= "string" then
-		logger:debug("RequestSetLoadoutSlot: malformed arguments ignored", { player = player.Name })
-		return
-	end
-
-	local slotIndex = math.floor(rawSlotIndex :: number)
+-- The slot index arrives through Schema.Number, which refuses NaN: a NaN slot index would otherwise pass the range checks below
+-- (NaN compares false against both < 1 and > LoadoutSize) and reach `profile.emoteLoadout[slotIndex] = emoteId`, which errors
+-- ("table index is NaN") inside PlayerDataSystem.Transform's mutator instead of being cleanly rejected.
+local function handleRequestSetLoadoutSlot(player: Player, rawSlotIndex: number, emoteId: string): ()
+	local slotIndex = math.floor(rawSlotIndex)
 	if slotIndex < 1 or slotIndex > EmoteConstants.LoadoutSize then
 		logger:debug("RequestSetLoadoutSlot rejected: OutOfRange", { player = player.Name, slotIndex = slotIndex })
 		return
 	end
 
-	local emoteId = rawEmoteId :: string
 	if not EmoteUnlockService.HasUnlocked(player, emoteId) then
 		logger:debug("RequestSetLoadoutSlot rejected: NotUnlocked", { player = player.Name, emoteId = emoteId })
 		return
@@ -469,23 +438,33 @@ local function onPlayerRemoving(player: Player): ()
 end
 
 function EmoteSystem.Init(): ()
-	startedRemote = NetworkBridge.CreateRemoteEvent(EmoteConstants.RemoteNames.Started)
-	stoppedRemote = NetworkBridge.CreateRemoteEvent(EmoteConstants.RemoteNames.Stopped)
-	loadoutUpdatedRemote = NetworkBridge.CreateRemoteEvent(EmoteConstants.RemoteNames.LoadoutUpdated)
-	unlockedUpdatedRemote = NetworkBridge.CreateRemoteEvent(EmoteConstants.RemoteNames.UnlockedUpdated)
+	local endpoint = Endpoint.Scope("EmoteSystem", logger)
+	local RemoteNames = EmoteConstants.RemoteNames
 
-	local requestPlayRemote = NetworkBridge.CreateRemoteEvent(EmoteConstants.RemoteNames.RequestPlay)
-	requestPlayRemote.OnServerEvent:Connect(handleRequestPlay)
+	startedRemote = endpoint.Push(RemoteNames.Started)
+	stoppedRemote = endpoint.Push(RemoteNames.Stopped)
+	loadoutUpdatedRemote = endpoint.Push(RemoteNames.LoadoutUpdated)
+	unlockedUpdatedRemote = endpoint.Push(RemoteNames.UnlockedUpdated)
 
-	local notifyFinishedRemote = NetworkBridge.CreateRemoteEvent(EmoteConstants.RemoteNames.NotifyFinished)
-	notifyFinishedRemote.OnServerEvent:Connect(handleNotifyFinished)
-
-	local requestStopRemote = NetworkBridge.CreateRemoteEvent(EmoteConstants.RemoteNames.RequestStop)
-	requestStopRemote.OnServerEvent:Connect(handleRequestStop)
-
-	local requestSetLoadoutSlotRemote =
-		NetworkBridge.CreateRemoteEvent(EmoteConstants.RemoteNames.RequestSetLoadoutSlot)
-	requestSetLoadoutSlotRemote.OnServerEvent:Connect(handleRequestSetLoadoutSlot)
+	endpoint.Event({
+		Name = RemoteNames.RequestPlay,
+		Limiter = playRateLimiter,
+		Args = { Schema.RawString },
+		Handler = handleRequestPlay,
+	})
+	endpoint.Event({
+		Name = RemoteNames.NotifyFinished,
+		Limiter = playRateLimiter,
+		Args = { Schema.RawString },
+		Handler = handleNotifyFinished,
+	})
+	endpoint.Event({ Name = RemoteNames.RequestStop, Limiter = stopRateLimiter, Handler = handleRequestStop })
+	endpoint.Event({
+		Name = RemoteNames.RequestSetLoadoutSlot,
+		Limiter = loadoutRateLimiter,
+		Args = { Schema.Number(-1e9, 1e9), Schema.RawString },
+		Handler = handleRequestSetLoadoutSlot,
+	})
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(onProfileLoaded)
 	EmoteUnlockService.OnEmoteGranted.Event:Connect(function(player: Player, _emoteId: string)
