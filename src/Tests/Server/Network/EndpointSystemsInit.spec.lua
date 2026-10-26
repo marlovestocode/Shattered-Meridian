@@ -16,6 +16,11 @@ local SYSTEMS: { string } = {
 	"EmoteSystem",
 	"ArtSystem",
 	"InventorySystem",
+	"BountySystem",
+	"CharacterSheetSystem",
+	"CharacterCreationSystem",
+	"BloodlineSystem",
+	"RivalrySystem",
 }
 
 local function systemModule(name: string): any

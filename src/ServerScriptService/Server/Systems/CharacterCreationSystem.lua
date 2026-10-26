@@ -75,16 +75,16 @@ local TextService = game:GetService("TextService")
 
 local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 
 local ServerScriptService = game:GetService("ServerScriptService")
 local Systems = ServerScriptService.Server.Systems
 local PlayerDataSystem = require(Systems.PlayerDataSystem)
 local AdminActionSystem = require(Systems.AdminActionSystem)
+local Schema = require(ReplicatedStorage.Shared.Schema)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local CharacterCreationSystem = {}
 
@@ -304,6 +304,7 @@ local awaitingAwakeningPlayers: { [Player]: boolean } = {}
 -- public remote's own rateLimiter (BugReportSystem.submitRateLimiter, SettingsSystem's own).
 local getOnboardingStateRateLimiter = RateLimiter.New(Config.GetOnboardingStateMaxCallsPerSecond)
 local finalizeRateLimiter = RateLimiter.New(Config.FinalizeMaxCallsPerSecond)
+local awakeningCompleteRateLimiter = RateLimiter.New(Config.AwakeningCompleteMaxCallsPerSecond)
 
 -- Walks `path` (a list of instance names) down from Workspace via WaitForChild, honoring
 -- Constants.Network.WaitForChildTimeoutSeconds at each step -- returns nil (logged loudly, never
@@ -390,11 +391,6 @@ end
 local function handleGetOnboardingState(player: Player): Types.CharacterCreationOnboardingStateResult
 	logger:debug("GetOnboardingState received", { player = player.Name, userId = player.UserId })
 
-	if getOnboardingStateRateLimiter:IsLimited(player) then
-		logger:warn("GetOnboardingState rejected: rate limited", { player = player.Name })
-		return { NeedsOnboarding = false }
-	end
-
 	local profile = PlayerDataSystem.WaitForProfile(player)
 	if not profile then
 		logger:error("GetOnboardingState: profile never loaded -- cannot determine onboarding state", {
@@ -448,12 +444,7 @@ end
 local function handleFinalize(player: Player, payload: unknown): Types.CharacterCreationFinalizeResult
 	logger:debug("Finalize received", { player = player.Name, userId = player.UserId })
 
-	if finalizeRateLimiter:IsLimited(player) then
-		logger:warn("Finalize rejected: rate limited", { player = player.Name })
-		return { Success = false, Reason = "RateLimited" }
-	end
-
-	if typeof(payload) ~= "table" then
+	if not Schema.IsTable(payload) then
 		return { Success = false, Reason = "InvalidRequest" }
 	end
 	local rawPayload = payload :: { [string]: unknown }
@@ -604,41 +595,39 @@ local function onPlayerRemoving(player: Player): ()
 	awaitingAwakeningPlayers[player] = nil
 	getOnboardingStateRateLimiter:Clear(player)
 	finalizeRateLimiter:Clear(player)
+	awakeningCompleteRateLimiter:Clear(player)
 end
 
 function CharacterCreationSystem.Init(): ()
-	local onboardingStateRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.GetOnboardingState)
-	logger:debug("Remote created", { name = Config.RemoteNames.GetOnboardingState })
-	onboardingStateRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
-		logger,
-		"GetOnboardingState",
-		{ NeedsOnboarding = false } :: Types.CharacterCreationOnboardingStateResult,
-		handleGetOnboardingState
-	)
-	logger:debug("Handler connected", { remote = Config.RemoteNames.GetOnboardingState })
+	local endpoint = Endpoint.Scope("CharacterCreationSystem", logger)
 
-	local finalizeRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.Finalize)
-	logger:debug("Remote created", { name = Config.RemoteNames.Finalize })
-	finalizeRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
-		logger,
-		"Finalize",
-		{ Success = false, Reason = "InternalError" } :: Types.CharacterCreationFinalizeResult,
-		handleFinalize
-	)
-	logger:debug("Handler connected", { remote = Config.RemoteNames.Finalize })
+	endpoint.Function({
+		Name = Config.RemoteNames.GetOnboardingState,
+		Limiter = getOnboardingStateRateLimiter,
+		ErrorResult = { NeedsOnboarding = false } :: Types.CharacterCreationOnboardingStateResult,
+		OnLimited = function(player: Player): any
+			logger:warn("GetOnboardingState rejected: rate limited", { player = player.Name })
+			return { NeedsOnboarding = false }
+		end,
+		Handler = handleGetOnboardingState,
+	})
 
-	local awakeningCompleteRemote = NetworkBridge.CreateRemoteEvent(Config.RemoteNames.AwakeningComplete)
-	logger:debug("Remote created", { name = Config.RemoteNames.AwakeningComplete })
-	awakeningCompleteRemote.OnServerEvent:Connect(function(player: Player)
-		local ok, errorMessage = pcall(handleAwakeningComplete, player)
-		if not ok then
-			logger:error(
-				"AwakeningComplete handler errored",
-				{ player = player.Name, errorMessage = tostring(errorMessage) }
-			)
-		end
-	end)
-	logger:debug("Handler connected", { remote = Config.RemoteNames.AwakeningComplete })
+	endpoint.Function({
+		Name = Config.RemoteNames.Finalize,
+		Limiter = finalizeRateLimiter,
+		ErrorResult = { Success = false, Reason = "InternalError" } :: Types.CharacterCreationFinalizeResult,
+		OnLimited = function(player: Player): any
+			logger:warn("Finalize rejected: rate limited", { player = player.Name })
+			return { Success = false, Reason = "RateLimited" }
+		end,
+		Handler = handleFinalize,
+	})
+
+	endpoint.Event({
+		Name = Config.RemoteNames.AwakeningComplete,
+		Limiter = awakeningCompleteRateLimiter,
+		Handler = handleAwakeningComplete,
+	})
 
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "CharacterCreationSystem",

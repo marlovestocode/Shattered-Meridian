@@ -61,9 +61,8 @@ local EffectSystem = require(script.Parent.EffectSystem)
 local CharacterSheetSystem = require(script.Parent.CharacterSheetSystem)
 local BloodlineManager = require(script.Parent.Parent.Managers.BloodlineManager)
 local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local logger = Logger.scope("BloodlineSystem")
 
@@ -633,9 +632,6 @@ local function rerollsRemaining(player: Player): number
 end
 
 local function handleSpin(player: Player): BloodlineTypes.BloodlineSpinResult
-	if spinRateLimiter:IsLimited(player) then
-		return { Success = false, Reason = "RateLimited", RerollsRemaining = rerollsRemaining(player) }
-	end
 	local bloodlineId, reason = BloodlineSystem.Spin(player)
 	if not bloodlineId then
 		return { Success = false, Reason = reason, RerollsRemaining = rerollsRemaining(player) }
@@ -670,13 +666,15 @@ function BloodlineSystem.Init(): ()
 	-- The first and only remote this System exposes -- everything else here is a server-side API
 	-- other Systems call directly. A RemoteFunction because the creator has to render what was
 	-- rolled; see BloodlineTypes.BloodlineSpinResult.
-	local spinRemote = NetworkBridge.CreateRemoteFunction(BloodlineConstants.RemoteNames.Spin)
-	spinRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
-		logger,
-		"Spin",
-		{ Success = false, Reason = "InternalError", RerollsRemaining = 0 } :: BloodlineTypes.BloodlineSpinResult,
-		handleSpin
-	)
+	Endpoint.Scope("BloodlineSystem", logger).Function({
+		Name = BloodlineConstants.RemoteNames.Spin,
+		Limiter = spinRateLimiter,
+		ErrorResult = { Success = false, Reason = "InternalError", RerollsRemaining = 0 } :: BloodlineTypes.BloodlineSpinResult,
+		OnLimited = function(player: Player): any
+			return { Success = false, Reason = "RateLimited", RerollsRemaining = rerollsRemaining(player) }
+		end,
+		Handler = handleSpin,
+	})
 
 	logger:info("BloodlineSystem.Init() complete")
 end

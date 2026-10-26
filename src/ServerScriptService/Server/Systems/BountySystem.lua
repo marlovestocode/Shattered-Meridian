@@ -59,15 +59,14 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local Types = require(ReplicatedStorage.Shared.Types)
 local BountyConstants = require(ReplicatedStorage.Shared.BountyConstants)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local MeridianSystem = require(script.Parent.MeridianSystem)
 local TierSystem = require(script.Parent.TierSystem)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local logger = Logger.scope("BountySystem")
 
@@ -480,10 +479,7 @@ end
 
 -- Takes no arguments at all -- there is nothing a client could pass that would be honored, which is
 -- the cheapest possible validation story for a public remote.
-local function handleGetActiveBounties(player: Player): { Types.BountyBoardEntry }
-	if queryRateLimiter:IsLimited(player) then
-		return {}
-	end
+local function handleGetActiveBounties(_player: Player): { Types.BountyBoardEntry }
 	return BountySystem.ListActiveBounties()
 end
 
@@ -502,12 +498,17 @@ function BountySystem.Init(): ()
 
 	BountySystem.ResetState()
 
-	boardUpdatedRemote = NetworkBridge.CreateRemoteEvent(BountyConstants.RemoteNames.BoardUpdated)
-	markedChangedRemote = NetworkBridge.CreateRemoteEvent(BountyConstants.RemoteNames.MarkedChanged)
+	local endpoint = Endpoint.Scope("BountySystem", logger)
+	boardUpdatedRemote = endpoint.Push(BountyConstants.RemoteNames.BoardUpdated)
+	markedChangedRemote = endpoint.Push(BountyConstants.RemoteNames.MarkedChanged)
 
-	local getActiveRemote = NetworkBridge.CreateRemoteFunction(BountyConstants.RemoteNames.GetActiveBounties)
-	getActiveRemote.OnServerInvoke =
-		RemoteHandler.WrapInvoke(logger, "GetActiveBounties", {} :: { Types.BountyBoardEntry }, handleGetActiveBounties)
+	-- A rate-limited or failed query answers the empty board, as it always did (ErrorResult).
+	endpoint.Function({
+		Name = BountyConstants.RemoteNames.GetActiveBounties,
+		Limiter = queryRateLimiter,
+		ErrorResult = {} :: { Types.BountyBoardEntry },
+		Handler = handleGetActiveBounties,
+	})
 
 	table.insert(
 		connections,

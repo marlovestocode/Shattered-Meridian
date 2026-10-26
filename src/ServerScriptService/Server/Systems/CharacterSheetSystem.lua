@@ -40,12 +40,11 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local logger = Logger.scope("CharacterSheetSystem")
 
@@ -148,18 +147,19 @@ function CharacterSheetSystem.Refresh(player: Player): ()
 end
 
 local function handleGetSheet(player: Player): Types.CharacterSheetPayload?
-	if requestRateLimiter:IsLimited(player) then
-		return nil
-	end
 	return CharacterSheetSystem.GetSheet(player)
 end
 
 function CharacterSheetSystem.Init(): ()
-	sheetRemote = NetworkBridge.CreateRemoteEvent(Constants.CharacterSheet.RemoteNames.SheetUpdated)
+	local endpoint = Endpoint.Scope("CharacterSheetSystem", logger)
+	sheetRemote = endpoint.Push(Constants.CharacterSheet.RemoteNames.SheetUpdated)
 
-	local getSheetRemote = NetworkBridge.CreateRemoteFunction(Constants.CharacterSheet.RemoteNames.GetSheet)
-	getSheetRemote.OnServerInvoke =
-		RemoteHandler.WrapInvoke(logger, "GetSheet", nil :: Types.CharacterSheetPayload?, handleGetSheet)
+	-- nil is the answer to a rate-limited or failed request (ErrorResult is absent on purpose): the client treats it as "no sheet yet".
+	endpoint.Function({
+		Name = Constants.CharacterSheet.RemoteNames.GetSheet,
+		Limiter = requestRateLimiter,
+		Handler = handleGetSheet,
+	} :: any)
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(function(player: Player)
 		CharacterSheetSystem.Refresh(player)

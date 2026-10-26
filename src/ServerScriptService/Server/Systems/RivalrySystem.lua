@@ -27,14 +27,14 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
+local Schema = require(ReplicatedStorage.Shared.Schema)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local logger = Logger.scope("RivalrySystem")
 
@@ -161,12 +161,8 @@ function RivalrySystem.ClearPlayerReferences(departingPlayer: Player): ()
 	queryRateLimiter:Clear(departingPlayer)
 end
 
-local function handleGetTopRivals(player: Player, rawLimit: unknown): { RivalLeaderboardEntry }
-	if queryRateLimiter:IsLimited(player) then
-		return {}
-	end
-
-	local limit = if typeof(rawLimit) == "number" then rawLimit else Constants.Rivalry.DefaultLeaderboardLimit
+local function handleGetTopRivals(_player: Player, rawLimit: unknown): { RivalLeaderboardEntry }
+	local limit = if Schema.IsNumber(rawLimit) then rawLimit :: number else Constants.Rivalry.DefaultLeaderboardLimit
 	local topPlayers = RivalrySystem.GetTopPlayers(limit)
 
 	local result: { RivalLeaderboardEntry } = {}
@@ -181,10 +177,7 @@ local function handleGetTopRivals(player: Player, rawLimit: unknown): { RivalLea
 end
 
 local function handleGetStanding(player: Player, rawTargetUserId: unknown): number?
-	if queryRateLimiter:IsLimited(player) then
-		return nil
-	end
-	if typeof(rawTargetUserId) ~= "number" then
+	if not Schema.IsNumber(rawTargetUserId) then
 		return nil
 	end
 
@@ -220,13 +213,19 @@ function RivalrySystem.Init(): ()
 		OnPlayerRemoving = RivalrySystem.ClearPlayerReferences,
 	}))
 
-	local getTopRivalsRemote = NetworkBridge.CreateRemoteFunction(Constants.Rivalry.RemoteNames.GetTopRivals)
-	getTopRivalsRemote.OnServerInvoke =
-		RemoteHandler.WrapInvoke(logger, "GetTopRivals", {} :: { RivalLeaderboardEntry }, handleGetTopRivals)
-
-	local getStandingRemote = NetworkBridge.CreateRemoteFunction(Constants.Rivalry.RemoteNames.GetStandingAgainst)
-	getStandingRemote.OnServerInvoke =
-		RemoteHandler.WrapInvoke(logger, "GetStandingAgainst", nil :: number?, handleGetStanding)
+	local endpoint = Endpoint.Scope("RivalrySystem", logger)
+	endpoint.Function({
+		Name = Constants.Rivalry.RemoteNames.GetTopRivals,
+		Limiter = queryRateLimiter,
+		ErrorResult = {} :: { RivalLeaderboardEntry },
+		Handler = handleGetTopRivals,
+	})
+	-- nil (no standing) is also the answer to a rate-limited or failed request: ErrorResult is absent on purpose.
+	endpoint.Function({
+		Name = Constants.Rivalry.RemoteNames.GetStandingAgainst,
+		Limiter = queryRateLimiter,
+		Handler = handleGetStanding,
+	} :: any)
 
 	logger:info("RivalrySystem.Init() complete")
 end

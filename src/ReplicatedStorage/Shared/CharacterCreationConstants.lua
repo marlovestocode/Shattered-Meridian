@@ -309,6 +309,10 @@ local CharacterCreationConstants = {
 	-- finalizingPlayers in-flight guards.
 	GetOnboardingStateMaxCallsPerSecond = 2,
 	FinalizeMaxCallsPerSecond = 2,
+	-- AwakeningComplete was the one public remote with no budget at all (found by the Endpoint conversion, 2026-10-25, which
+	-- requires one). It is a once-per-onboarding report already guarded by awaitingAwakeningPlayers, so the ceiling is loose and
+	-- exists only so a flood costs a dropped call instead of one warn log line per call.
+	AwakeningCompleteMaxCallsPerSecond = 2,
 }
 
 -- Precomputed per-race, per-field allocation floor -- see AttributeBudget's own comment above for
