@@ -403,9 +403,29 @@ function BootManifest.MarkBooted(name: string): ()
 	booted[name] = true
 end
 
--- Every declared remote name mapped to the System that claims it. Asserts as it builds: two entries
--- declaring one name is the ownership bug NetworkBridge.claimName can only warn about at runtime,
--- caught here at the one moment it is a static fact rather than a race.
+-- Remotes a System DECLARED by creating them through Server/Network/Endpoint (Endpoint.Scope(owner).Event/Function/Push), name ->
+-- owning System. This is the half of the surface that needs no hand-kept list: the declaration IS the creation, so it cannot drift
+-- from it. Filled during Init; empty until a System boots.
+local declared: { [string]: string } = {}
+
+-- Called by Endpoint when a System creates a remote through it. Idempotent for the same owner (a System may also still list the name
+-- in its ENTRIES `Remotes` while it is being converted); a second OWNER is the ownership bug, and fails here at the moment it is made.
+function BootManifest.DeclareRemote(owner: string, remoteName: string): ()
+	local existing = declared[remoteName]
+	if existing ~= nil and existing ~= owner then
+		error(`Remote "{remoteName}" is declared by both {existing} and {owner} -- one remote, one owner`)
+	end
+	declared[remoteName] = owner
+end
+
+-- A spec that declares remotes of its own calls this in its afterEach, so test names never reach the boot check.
+function BootManifest.ResetDeclaredForTesting(): ()
+	table.clear(declared)
+end
+
+-- Every declared remote name mapped to the System that claims it, from the hand lists above AND from Endpoint declarations. Asserts as
+-- it builds: two entries declaring one name is the ownership bug NetworkBridge.claimName can only warn about at runtime, caught here
+-- at the one moment it is a static fact rather than a race.
 function BootManifest.RemoteOwners(): { [string]: string }
 	local owners: { [string]: string } = {}
 	for _, entry in ENTRIES do
@@ -418,6 +438,13 @@ function BootManifest.RemoteOwners(): { [string]: string }
 			end
 			owners[remoteName] = entry.Name
 		end
+	end
+	for remoteName, owner in declared do
+		local existing = owners[remoteName]
+		if existing ~= nil and existing ~= owner then
+			error(`BootManifest lists "{remoteName}" for {existing} but {owner} declared it -- one remote, one owner`)
+		end
+		owners[remoteName] = owner
 	end
 	return owners
 end
