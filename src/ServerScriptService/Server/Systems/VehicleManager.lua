@@ -66,19 +66,17 @@ local Workspace = game:GetService("Workspace")
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local VehicleCatalog = require(ReplicatedStorage.Shared.Vehicle.VehicleCatalog)
 local VehicleConstants = require(ReplicatedStorage.Shared.Vehicle.VehicleConstants)
 local VehicleTypes = require(ReplicatedStorage.Shared.Vehicle.VehicleTypes)
 
-local AdminGate = require(ServerScriptService.Server.Network.AdminGate)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local VehicleBerths = require(ServerScriptService.Server.Vehicles.VehicleBerths)
 local VehiclePlacement = require(ServerScriptService.Server.Vehicles.VehiclePlacement)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local logger = Logger.scope("VehicleManager")
 
@@ -634,11 +632,7 @@ end
 
 local INTERNAL_ERROR_RESULT = { Success = false, Reason = "InternalError" }
 
-local function handleGetState(player: Player): VehicleTypes.VehicleStateResult
-	local allowed, reason = AdminGate.Check(player, "VehicleGetState", rateLimiter)
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
+local function handleGetState(_player: Player): VehicleTypes.VehicleStateResult
 	return VehicleManager.Snapshot()
 end
 
@@ -647,10 +641,6 @@ local function handleSpawn(
 	rawVehicleId: unknown,
 	rawBerthName: unknown
 ): VehicleTypes.VehicleSpawnResult
-	local allowed, reason = AdminGate.Check(player, "VehicleSpawn", rateLimiter)
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
 	if typeof(rawVehicleId) ~= "string" then
 		return { Success = false, Reason = "InvalidRequest" }
 	end
@@ -686,11 +676,7 @@ local function handleSpawn(
 	}
 end
 
-local function handleDespawn(player: Player, rawInstanceId: unknown): VehicleTypes.VehicleActionResult
-	local allowed, reason = AdminGate.Check(player, "VehicleDespawn", rateLimiter)
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
+local function handleDespawn(_player: Player, rawInstanceId: unknown): VehicleTypes.VehicleActionResult
 	if typeof(rawInstanceId) ~= "string" then
 		return { Success = false, Reason = "InvalidRequest" }
 	end
@@ -700,20 +686,12 @@ local function handleDespawn(player: Player, rawInstanceId: unknown): VehicleTyp
 	return { Success = true }
 end
 
-local function handleDespawnAll(player: Player): VehicleTypes.VehicleActionResult
-	local allowed, reason = AdminGate.Check(player, "VehicleDespawnAll", rateLimiter)
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
+local function handleDespawnAll(_player: Player): VehicleTypes.VehicleActionResult
 	VehicleManager.DespawnAll(nil)
 	return { Success = true }
 end
 
-local function handleReloadRegistry(player: Player): VehicleTypes.VehicleStateResult
-	local allowed, reason = AdminGate.Check(player, "VehicleReloadRegistry", rateLimiter)
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
+local function handleReloadRegistry(_player: Player): VehicleTypes.VehicleStateResult
 	VehicleManager.LoadRegistry()
 	return VehicleManager.Snapshot()
 end
@@ -736,10 +714,18 @@ local REMOTE_HANDLERS: { RemoteHandlerSpec } = {
 function VehicleManager.Init(): ()
 	VehicleManager.LoadRegistry()
 
+	local endpoint = Endpoint.Scope("VehicleManager", logger)
 	for _, spec in REMOTE_HANDLERS do
-		local remoteName = VehicleConstants.RemoteNames[spec.RemoteKey]
-		local remote = NetworkBridge.CreateRemoteFunction(remoteName)
-		remote.OnServerInvoke = RemoteHandler.WrapInvoke(logger, spec.RemoteKey, INTERNAL_ERROR_RESULT, spec.Handler)
+		endpoint.Function({
+			Name = VehicleConstants.RemoteNames[spec.RemoteKey],
+			Limiter = rateLimiter,
+			Admin = true,
+			ErrorResult = INTERNAL_ERROR_RESULT,
+			Denied = function(reason: string): any
+				return { Success = false, Reason = reason }
+			end,
+			Handler = spec.Handler,
+		})
 	end
 
 	PlayerLifecycle.BindAllPlayers({

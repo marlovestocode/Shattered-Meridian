@@ -51,16 +51,13 @@ local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local TrainingBotConstants = require(ReplicatedStorage.Shared.TrainingBot.TrainingBotConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 
 local AdminActionSystem = require(script.Parent.AdminActionSystem)
-local AdminGate = require(script.Parent.Parent.Network.AdminGate)
 local BloodlineManager = require(script.Parent.Parent.Managers.BloodlineManager)
 local BloodlineSystem = require(script.Parent.BloodlineSystem)
 local BountySystem = require(script.Parent.BountySystem)
@@ -80,6 +77,7 @@ local ServerFrameStats = require(script.Parent.Parent.Diagnostics.ServerFrameSta
 local TierSystem = require(script.Parent.TierSystem)
 local TrainingBotSystem = require(script.Parent.Parent.Combat.TrainingBot.TrainingBotSystem)
 local VersionWatchSystem = require(script.Parent.VersionWatchSystem)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local DevMenuSystem = {}
 
@@ -94,10 +92,6 @@ type ActionResult = Types.DevMenuActionResult
 -- Constants.Debug.DevMenu.PollRemoteCallsPerSecond on why the polls earn their own.
 local rateLimiter = RateLimiter.New(Constants.NetworkBudget.MaxRemoteCallsPerSecondPerPlayer)
 local pollLimiter = RateLimiter.New(DevMenuConfig.PollRemoteCallsPerSecond)
-
-local function checkPreconditions(player: Player, actionName: string): (boolean, string?)
-	return AdminGate.Check(player, actionName, rateLimiter)
-end
 
 local function refuse(reason: string?): any
 	return { Success = false, Reason = reason or "InternalError" }
@@ -243,11 +237,6 @@ end
 
 -- Polled. Also the panel's authorization probe -- see this file's header.
 local function handleGetOverview(player: Player): AdminTypes.OverviewResult
-	local allowed, reason = AdminGate.Check(player, "GetOverview", pollLimiter)
-	if not allowed then
-		return refuse(reason)
-	end
-
 	local roster: { AdminTypes.RosterEntry } = {}
 	for _, target in Players:GetPlayers() do
 		table.insert(roster, buildRosterEntry(player, target))
@@ -340,10 +329,6 @@ end
 
 -- Polled while a player is selected.
 local function handleInspectPlayer(player: Player, rawTargetUserId: unknown): AdminTypes.InspectResult
-	local allowed, reason = AdminGate.Check(player, "InspectPlayer", pollLimiter)
-	if not allowed then
-		return refuse(reason)
-	end
 	local target, targetReason = resolveTarget(player, rawTargetUserId)
 	if not target then
 		return refuse(targetReason)
@@ -362,10 +347,6 @@ local function overrideHandler(
 	failure: string
 ): (Player, unknown, unknown) -> ActionResult
 	return function(player: Player, rawEnabled: unknown, rawTargetUserId: unknown): ActionResult
-		local allowed, reason = checkPreconditions(player, actionName)
-		if not allowed then
-			return refuse(reason)
-		end
 		if typeof(rawEnabled) ~= "boolean" then
 			return refuse("InvalidRequest")
 		end
@@ -399,10 +380,6 @@ local function handleSetTargetSpeedMultiplier(
 	rawMultiplier: unknown,
 	rawTargetUserId: unknown
 ): ActionResult
-	local allowed, reason = checkPreconditions(player, "SetTargetSpeedMultiplier")
-	if not allowed then
-		return refuse(reason)
-	end
 	if typeof(rawMultiplier) ~= "number" or not SPEED_MULTIPLIER_PRESETS[rawMultiplier] then
 		return refuse("InvalidRequest")
 	end
@@ -425,10 +402,6 @@ end
 
 -- The admin goes to the target.
 local function handleTeleportToTarget(player: Player, rawTargetUserId: unknown): ActionResult
-	local allowed, reason = checkPreconditions(player, "TeleportToTarget")
-	if not allowed then
-		return refuse(reason)
-	end
 	local target, targetReason = resolveTarget(player, rawTargetUserId)
 	if not target then
 		return refuse(targetReason)
@@ -449,10 +422,6 @@ end
 
 -- The target comes to the admin.
 local function handleBringTarget(player: Player, rawTargetUserId: unknown): ActionResult
-	local allowed, reason = checkPreconditions(player, "BringTarget")
-	if not allowed then
-		return refuse(reason)
-	end
 	local target, targetReason = resolveTarget(player, rawTargetUserId)
 	if not target then
 		return refuse(targetReason)
@@ -475,10 +444,6 @@ end
 
 -- Moves the calling admin. No target: typed coordinates are already the most explicit request there is.
 local function handleTeleportToCoordinates(player: Player, rawX: unknown, rawY: unknown, rawZ: unknown): ActionResult
-	local allowed, reason = checkPreconditions(player, "TeleportToCoordinates")
-	if not allowed then
-		return refuse(reason)
-	end
 	-- Finite only: a NaN or infinite coordinate is a character dropped out of the world. Checked one by
 	-- one rather than by iterating { rawX, rawY, rawZ }, which would silently skip a nil component.
 	local function finite(component: unknown): boolean
@@ -496,10 +461,6 @@ local function handleTeleportToCoordinates(player: Player, rawX: unknown, rawY: 
 end
 
 local function handleForceRespawnTarget(player: Player, rawTargetUserId: unknown): ActionResult
-	local allowed, reason = checkPreconditions(player, "ForceRespawnTarget")
-	if not allowed then
-		return refuse(reason)
-	end
 	local target, targetReason = resolveTarget(player, rawTargetUserId)
 	if not target then
 		return refuse(targetReason)
@@ -513,10 +474,6 @@ end
 
 -- Full Health and full Qi. Needs a living body: restoring a corpse is a respawn, which has its own button.
 local function handleRestoreTarget(player: Player, rawTargetUserId: unknown): ActionResult
-	local allowed, reason = checkPreconditions(player, "RestoreTarget")
-	if not allowed then
-		return refuse(reason)
-	end
 	local target, targetReason = resolveTarget(player, rawTargetUserId)
 	if not target then
 		return refuse(targetReason)
@@ -536,10 +493,6 @@ end
 
 -- Health to zero through the ordinary death path -- see the remote's own comment in DebugConstants.
 local function handleKillTarget(player: Player, rawTargetUserId: unknown): ActionResult
-	local allowed, reason = checkPreconditions(player, "KillTarget")
-	if not allowed then
-		return refuse(reason)
-	end
 	local target, targetReason = resolveTarget(player, rawTargetUserId)
 	if not target then
 		return refuse(targetReason)
@@ -566,10 +519,6 @@ local function handleGrantMeridianXP(
 	rawKey: unknown,
 	rawTargetUserId: unknown
 ): AdminTypes.GrantXPResult
-	local allowed, reason = checkPreconditions(player, "GrantMeridianXP")
-	if not allowed then
-		return refuse(reason)
-	end
 	local grant = resolveEnum(rawKey, XP_GRANTS)
 	if not grant then
 		return refuse("InvalidRequest")
@@ -604,10 +553,6 @@ end
 -- The amount is fixed by BloodlineConstants rather than sent by the client: there is no case where an
 -- admin wants a specific odd number of rerolls rather than "some more".
 local function handleGrantBloodlineRerolls(player: Player, rawTargetUserId: unknown): Types.DevMenuGrantRerollsResult
-	local allowed, reason = checkPreconditions(player, "GrantBloodlineRerolls")
-	if not allowed then
-		return refuse(reason)
-	end
 	local target, targetReason = resolveTarget(player, rawTargetUserId)
 	if not target then
 		return refuse(targetReason)
@@ -623,10 +568,6 @@ end
 -- Always the "RareEmotes" pool: this is a test trigger for the roll path, not a general "roll any
 -- pool" remote.
 local function handleRollEmote(player: Player, rawTargetUserId: unknown): Types.DevMenuRollEmoteResult
-	local allowed, reason = checkPreconditions(player, "RollEmote")
-	if not allowed then
-		return refuse(reason)
-	end
 	local target, targetReason = resolveTarget(player, rawTargetUserId)
 	if not target then
 		return refuse(targetReason)
@@ -651,10 +592,6 @@ for _, duration in DevMenuConfig.BanDurations :: { BanDuration } do
 end
 
 local function handleKickPlayer(player: Player, rawTargetUserId: unknown, rawReason: unknown): ActionResult
-	local allowed, reason = checkPreconditions(player, "KickPlayer")
-	if not allowed then
-		return refuse(reason)
-	end
 	if typeof(rawReason) ~= "string" then
 		return refuse("InvalidRequest")
 	end
@@ -686,10 +623,6 @@ local function handleBanPlayer(
 	rawReason: unknown,
 	rawDurationKey: unknown
 ): ActionResult
-	local allowed, reason = checkPreconditions(player, "BanPlayer")
-	if not allowed then
-		return refuse(reason)
-	end
 	if not isPlausibleUserId(rawTargetUserId) or typeof(rawReason) ~= "string" then
 		return refuse("InvalidRequest")
 	end
@@ -729,10 +662,6 @@ local function handleBanPlayer(
 end
 
 local function handleUnbanPlayer(player: Player, rawTargetUserId: unknown): ActionResult
-	local allowed, reason = checkPreconditions(player, "UnbanPlayer")
-	if not allowed then
-		return refuse(reason)
-	end
 	if not isPlausibleUserId(rawTargetUserId) then
 		return refuse("InvalidRequest")
 	end
@@ -743,11 +672,7 @@ local function handleUnbanPlayer(player: Player, rawTargetUserId: unknown): Acti
 	return { Success = true }
 end
 
-local function handleLookupBan(player: Player, rawTargetUserId: unknown): AdminTypes.BanLookupResult
-	local allowed, reason = checkPreconditions(player, "LookupBan")
-	if not allowed then
-		return refuse(reason)
-	end
+local function handleLookupBan(_player: Player, rawTargetUserId: unknown): AdminTypes.BanLookupResult
 	if not isPlausibleUserId(rawTargetUserId) then
 		return refuse("InvalidRequest")
 	end
@@ -771,10 +696,6 @@ local function handleLookupBan(player: Player, rawTargetUserId: unknown): AdminT
 end
 
 local function handleMutePlayer(player: Player, rawTargetUserId: unknown, rawEnabled: unknown): ActionResult
-	local allowed, reason = checkPreconditions(player, "MutePlayer")
-	if not allowed then
-		return refuse(reason)
-	end
 	if not isPlausibleUserId(rawTargetUserId) or typeof(rawEnabled) ~= "boolean" then
 		return refuse("InvalidRequest")
 	end
@@ -791,10 +712,6 @@ local function handleSetSuspectedCheater(
 	rawEnabled: unknown,
 	rawReason: unknown
 ): ActionResult
-	local allowed, reason = checkPreconditions(player, "SetSuspectedCheater")
-	if not allowed then
-		return refuse(reason)
-	end
 	if not isPlausibleUserId(rawTargetUserId) or typeof(rawEnabled) ~= "boolean" or typeof(rawReason) ~= "string" then
 		return refuse("InvalidRequest")
 	end
@@ -823,10 +740,6 @@ end
 -- only (never the nil-means-me fallback) and online only -- see ResetTargetPlayerData's own comment.
 -- An admin MAY wipe themselves: resetting your own test profile is the commonest use.
 local function handleResetTargetPlayerData(player: Player, rawTargetUserId: unknown): ActionResult
-	local allowed, reason = checkPreconditions(player, "ResetTargetPlayerData")
-	if not allowed then
-		return refuse(reason)
-	end
 	local target, targetReason = resolveExplicitTarget(rawTargetUserId)
 	if not target then
 		return refuse(targetReason)
@@ -845,10 +758,6 @@ end
 -- World: sparring ----------------------------------------------------------------------------------
 
 local function handleSpawnDebugDummy(player: Player): ActionResult
-	local allowed, reason = checkPreconditions(player, "SpawnDebugDummy")
-	if not allowed then
-		return refuse(reason)
-	end
 	local rootPart, rootReason = getRootPart(player)
 	if not rootPart then
 		return refuse(rootReason)
@@ -863,10 +772,6 @@ local function handleSpawnDebugDummy(player: Player): ActionResult
 end
 
 local function handleDespawnAllDebugDummies(player: Player): ActionResult
-	local allowed, reason = checkPreconditions(player, "DespawnAllDebugDummies")
-	if not allowed then
-		return refuse(reason)
-	end
 	local count = DebugDummySystem.DespawnAll()
 	logger:info("DespawnAllDebugDummies accepted", { player = player.Name, count = count })
 	return { Success = true }
@@ -874,10 +779,6 @@ end
 
 -- Server-wide: every active (and future) dummy. Returns what actually took effect.
 local function handleSetDummyGuard(player: Player, rawEnabled: unknown): Types.DevMenuDebugDummyStateResult
-	local allowed, reason = checkPreconditions(player, "SetDummyGuard")
-	if not allowed then
-		return refuse(reason)
-	end
 	if typeof(rawEnabled) ~= "boolean" then
 		return refuse("InvalidRequest")
 	end
@@ -887,11 +788,7 @@ local function handleSetDummyGuard(player: Player, rawEnabled: unknown): Types.D
 end
 
 -- Read by the Move Editor's test bench on open; the panel reads the same facts off the overview.
-local function handleGetDebugDummyState(player: Player): Types.DevMenuDebugDummyStateResult
-	local allowed, reason = checkPreconditions(player, "GetDebugDummyState")
-	if not allowed then
-		return refuse(reason)
-	end
+local function handleGetDebugDummyState(_player: Player): Types.DevMenuDebugDummyStateResult
 	return {
 		Success = true,
 		GuardEnabled = DebugDummySystem.IsGuardEnabled(),
@@ -908,10 +805,6 @@ local function handleSpawnTrainingBot(
 	rawDifficulty: unknown,
 	rawWeapon: unknown
 ): Types.DevMenuSpawnBotResult
-	local allowed, reason = checkPreconditions(player, "SpawnTrainingBot")
-	if not allowed then
-		return refuse(reason)
-	end
 	if not TrainingBotConstants.IsStyle(rawStyle) or not TrainingBotConstants.IsDifficulty(rawDifficulty) then
 		return refuse("InvalidPreset")
 	end
@@ -949,29 +842,17 @@ local function handleSpawnTrainingBot(
 end
 
 local function handleDespawnTrainingBots(player: Player): Types.DevMenuSpawnBotResult
-	local allowed, reason = checkPreconditions(player, "DespawnTrainingBots")
-	if not allowed then
-		return refuse(reason)
-	end
 	local count = TrainingBotSystem.DespawnAll()
 	logger:info("DespawnTrainingBots accepted", { player = player.Name, count = count })
 	return { Success = true, ActiveCount = 0 }
 end
 
 -- SERVER-WIDE AND VISIBLE TO EVERYONE: the engine draws its volumes as real replicated Parts.
-local function handleGetHitboxDebug(player: Player): Types.DevMenuHitboxDebugResult
-	local allowed, reason = checkPreconditions(player, "GetHitboxDebug")
-	if not allowed then
-		return refuse(reason)
-	end
+local function handleGetHitboxDebug(_player: Player): Types.DevMenuHitboxDebugResult
 	return { Success = true, Enabled = HitboxEngine.IsDebugVolumesEnabled() }
 end
 
 local function handleSetHitboxDebug(player: Player, rawEnabled: unknown): Types.DevMenuHitboxDebugResult
-	local allowed, reason = checkPreconditions(player, "SetHitboxDebug")
-	if not allowed then
-		return refuse(reason)
-	end
 	if typeof(rawEnabled) ~= "boolean" then
 		return refuse("InvalidRequest")
 	end
@@ -984,10 +865,6 @@ end
 
 local function spawnNodeHandler(actionName: string, kind: "Coal" | "Water"): (Player) -> ActionResult
 	return function(player: Player): ActionResult
-		local allowed, reason = checkPreconditions(player, actionName)
-		if not allowed then
-			return refuse(reason)
-		end
 		local rootPart, rootReason = getRootPart(player)
 		if not rootPart then
 			return refuse(rootReason)
@@ -1004,10 +881,6 @@ local handleSpawnWaterSource = spawnNodeHandler("SpawnWaterSource", "Water")
 -- The admin's OWN carried coal and water to the cap. Touches a profile, not the world, so it needs no
 -- body -- it works before the admin has spawned.
 local function handleFillCarriedFuel(player: Player): ActionResult
-	local allowed, reason = checkPreconditions(player, "FillCarriedFuel")
-	if not allowed then
-		return refuse(reason)
-	end
 	if not ResourceGatheringSystem.FillCarriedFuel(player) then
 		return refuse("NotLoaded")
 	end
@@ -1029,10 +902,6 @@ local function broadcastAnnouncement(kind: Types.DevMenuAnnouncementKind, messag
 end
 
 local function handleBroadcastAnnouncement(player: Player, rawMessage: unknown): ActionResult
-	local allowed, reason = checkPreconditions(player, "BroadcastAnnouncement")
-	if not allowed then
-		return refuse(reason)
-	end
 	if typeof(rawMessage) ~= "string" then
 		return refuse("InvalidRequest")
 	end
@@ -1062,10 +931,6 @@ local function needsConfirmation(armedUntil: { [number]: number }, player: Playe
 end
 
 local function handleShutdownServer(player: Player): ActionResult
-	local allowed, reason = checkPreconditions(player, "ShutdownServer")
-	if not allowed then
-		return refuse(reason)
-	end
 	if needsConfirmation(shutdownArmedUntil, player, DevMenuConfig.ShutdownConfirmWindowSeconds) then
 		logger:warn("ShutdownServer armed", { player = player.Name, userId = player.UserId })
 		return refuse("ConfirmationRequired")
@@ -1087,10 +952,6 @@ end
 -- Same server-armed two-press shape as Shutdown, no countdown once confirmed -- for cycling THIS
 -- server onto a version just published.
 local function handleInstantRestartServer(player: Player): ActionResult
-	local allowed, reason = checkPreconditions(player, "InstantRestartServer")
-	if not allowed then
-		return refuse(reason)
-	end
 	if needsConfirmation(instantRestartArmedUntil, player, DevMenuConfig.InstantRestartConfirmWindowSeconds) then
 		logger:warn("InstantRestartServer armed", { player = player.Name, userId = player.UserId })
 		return refuse("ConfirmationRequired")
@@ -1114,11 +975,7 @@ for _, info in FlightTuning.ListFields() do
 	FLIGHT_TUNING_FIELDS[info.Field] = info.Field
 end
 
-local function handleListFlightTuning(player: Player): Types.DevMenuListFlightTuningResult
-	local allowed, reason = checkPreconditions(player, "ListFlightTuning")
-	if not allowed then
-		return refuse(reason)
-	end
+local function handleListFlightTuning(_player: Player): Types.DevMenuListFlightTuningResult
 	return { Success = true, Fields = FlightTuning.ListFields() }
 end
 
@@ -1127,10 +984,6 @@ local function handleSetFlightTuning(
 	rawField: unknown,
 	rawValue: unknown
 ): Types.DevMenuFlightTuningResult
-	local allowed, reason = checkPreconditions(player, "SetFlightTuning")
-	if not allowed then
-		return refuse(reason)
-	end
 	local field = resolveEnum(rawField, FLIGHT_TUNING_FIELDS)
 	-- `rawValue ~= rawValue` is the NaN test: see FlightTuning.SetField on why NaN must never land.
 	if not field or typeof(rawValue) ~= "number" or rawValue ~= rawValue then
@@ -1145,10 +998,6 @@ local function handleSetFlightTuning(
 end
 
 local function handleResetFlightTuning(player: Player, rawField: unknown): Types.DevMenuFlightTuningResult
-	local allowed, reason = checkPreconditions(player, "ResetFlightTuning")
-	if not allowed then
-		return refuse(reason)
-	end
 	local field = resolveEnum(rawField, FLIGHT_TUNING_FIELDS)
 	if not field then
 		return refuse("InvalidRequest")
@@ -1166,10 +1015,6 @@ end
 -- Gate here, compute in BugReportSystem, which has no authorization notion of its own.
 
 local function handleListBugReports(player: Player, rawCursorMode: unknown): Types.DevMenuListBugReportsResult
-	local allowed, reason = checkPreconditions(player, "ListBugReports")
-	if not allowed then
-		return refuse(reason)
-	end
 	local cursorMode: Types.BugReportListCursorMode = if rawCursorMode == "Next" then "Next" else "First"
 	local reports, hasMore, failReason = BugReportSystem.ListReports(player, cursorMode)
 	if not reports then
@@ -1183,10 +1028,6 @@ local function handleUpdateBugReportStatus(
 	rawReportId: unknown,
 	rawStatus: unknown
 ): Types.DevMenuUpdateBugReportStatusResult
-	local allowed, reason = checkPreconditions(player, "UpdateBugReportStatus")
-	if not allowed then
-		return refuse(reason)
-	end
 	if typeof(rawReportId) ~= "string" or not BugReportSystem.IsValidStatus(rawStatus) then
 		return refuse("InvalidRequest")
 	end
@@ -1203,10 +1044,6 @@ local function handleAddBugReportNote(
 	rawReportId: unknown,
 	rawText: unknown
 ): Types.DevMenuBugReportMutationResult
-	local allowed, reason = checkPreconditions(player, "AddBugReportNote")
-	if not allowed then
-		return refuse(reason)
-	end
 	if typeof(rawReportId) ~= "string" then
 		return refuse("InvalidRequest")
 	end
@@ -1223,10 +1060,6 @@ local function handleSetBugReportPriority(
 	rawReportId: unknown,
 	rawPriority: unknown
 ): Types.DevMenuBugReportMutationResult
-	local allowed, reason = checkPreconditions(player, "SetBugReportPriority")
-	if not allowed then
-		return refuse(reason)
-	end
 	if typeof(rawReportId) ~= "string" or not BugReportSystem.IsValidPriority(rawPriority) then
 		return refuse("InvalidRequest")
 	end
@@ -1243,10 +1076,6 @@ local function handleAssignBugReport(
 	rawReportId: unknown,
 	rawAssign: unknown
 ): Types.DevMenuBugReportMutationResult
-	local allowed, reason = checkPreconditions(player, "AssignBugReport")
-	if not allowed then
-		return refuse(reason)
-	end
 	if typeof(rawReportId) ~= "string" or typeof(rawAssign) ~= "boolean" then
 		return refuse("InvalidRequest")
 	end
@@ -1260,10 +1089,6 @@ end
 
 -- The reporter must be in THIS server: GetPlayerByUserId never returns a player elsewhere.
 local function handleJumpToReporter(player: Player, rawReportId: unknown): ActionResult
-	local allowed, reason = checkPreconditions(player, "JumpToReporter")
-	if not allowed then
-		return refuse(reason)
-	end
 	if typeof(rawReportId) ~= "string" then
 		return refuse("InvalidRequest")
 	end
@@ -1298,11 +1123,18 @@ local DEV_MENU_INTERNAL_ERROR_RESULT = { Success = false, Reason = "InternalErro
 type RemoteHandlerSpec = {
 	RemoteKey: string,
 	Name: string,
+	-- The bucket this remote is limited against: `rateLimiter` unless the spec names the polling one.
+	Limiter: RateLimiter.RateLimiterInstance?,
 	Handler: (Player, ...any) -> any,
 }
 local REMOTE_HANDLERS: { RemoteHandlerSpec } = {
-	{ RemoteKey = "GetOverview", Name = "GetOverview", Handler = handleGetOverview :: any },
-	{ RemoteKey = "InspectPlayer", Name = "InspectPlayer", Handler = handleInspectPlayer :: any },
+	{ RemoteKey = "GetOverview", Name = "GetOverview", Limiter = pollLimiter, Handler = handleGetOverview :: any },
+	{
+		RemoteKey = "InspectPlayer",
+		Name = "InspectPlayer",
+		Limiter = pollLimiter,
+		Handler = handleInspectPlayer :: any,
+	},
 
 	{ RemoteKey = "SetTargetGodmode", Name = "SetTargetGodmode", Handler = handleSetTargetGodmode :: any },
 	{ RemoteKey = "SetTargetFlight", Name = "SetTargetFlight", Handler = handleSetTargetFlight :: any },
@@ -1389,16 +1221,24 @@ local REMOTE_HANDLERS: { RemoteHandlerSpec } = {
 }
 
 function DevMenuSystem.Init(): ()
+	local endpoint = Endpoint.Scope("DevMenuSystem", logger)
+
 	for _, spec in REMOTE_HANDLERS do
 		local remoteName = DevMenuConfig.RemoteNames[spec.RemoteKey]
 		assert(remoteName, `DevMenuSystem: no remote name for {spec.RemoteKey}`)
-		local remote = NetworkBridge.CreateRemoteFunction(remoteName)
-		remote.OnServerInvoke =
-			RemoteHandler.WrapInvoke(logger, spec.Name, DEV_MENU_INTERNAL_ERROR_RESULT, spec.Handler)
+		-- Every action is admin-gated (AdminGate: whitelist, then the bucket); a refusal is the standard Success/Reason pair.
+		endpoint.Function({
+			Name = remoteName,
+			Limiter = spec.Limiter or rateLimiter,
+			Admin = true,
+			ErrorResult = DEV_MENU_INTERNAL_ERROR_RESULT,
+			Denied = refuse,
+			Handler = spec.Handler,
+		})
 	end
 
 	-- The one RemoteEvent: broadcast to every client (Client/Announcement/AnnouncementClient.lua).
-	announcementRemote = NetworkBridge.CreateRemoteEvent(DevMenuConfig.RemoteNames.Announcement)
+	announcementRemote = endpoint.Push(DevMenuConfig.RemoteNames.Announcement)
 
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "DevMenuSystem",

@@ -24,6 +24,8 @@ local SYSTEMS: { string } = {
 	"KitAbilitySystem",
 	"MovePresentationSystem",
 	"WeaponInventorySystem",
+	"DevMenuSystem",
+	"VehicleManager",
 }
 
 local function systemModule(name: string): any
