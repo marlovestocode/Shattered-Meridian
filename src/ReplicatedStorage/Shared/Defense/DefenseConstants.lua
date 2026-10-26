@@ -360,6 +360,20 @@ DefenseConstants.Clash = {
 	-- Seconds after the contact until either side may swing again. Longer than the push apart lasts
 	-- (DamageConstants.Knockback.HoldSeconds), so the next swing is thrown from the new spacing.
 	RecoverySeconds = 0.25,
+	-- Posture (guard) each side loses to a clash, in Guard.Max units. The ONLY cost: no health, no stun.
+	-- Under one blocked hit's DrainPerPowerLevel (18), so trading blades is cheaper than turtling but a
+	-- player who clashes every exchange still wears their guard down.
+	GuardDamage = 12,
+
+	-- THE CLOSE-TIME RULE (2026-10-26). A hit also clashes when the defender's own swing was a beat from
+	-- opening: still in its windup, WindowSeconds or less from Active, with the attacker within RangeStuds.
+	-- That is the "both pressed together, one packet arrived first" case the Active-only rule missed.
+	-- MASH-OUT SAFE, which the paragraph above demands of any time-based rule: a defender who took a Clean
+	-- hit in the last RecentHitGraceSeconds is mid-string, and their swing never clashes -- it loses, as
+	-- before. The grace outlasts the longest link stun, so an escape swing thrown out of hitstun is not one.
+	WindowSeconds = 0.08,
+	RangeStuds = 6,
+	RecentHitGraceSeconds = 0.6,
 }
 
 -- Evade ---------------------------------------------------------------------------------------------
@@ -411,7 +425,11 @@ DefenseConstants.Evade = {
 -- Main.server.lua) warns at boot if the asset carries no marker pair, per the fail-closed rule in
 -- docs/design/parry-block-system-plan.md: a press still blocks, it just never arms a parry window
 -- until the markers exist.
-DefenseConstants.ParryAnimationId = "rbxassetid://136786601080156"
+-- The clip a weapon with no Animations/CLASH folder plays when its swing clashes. Blank until one is authored:
+-- a blank id plays nothing (WeaponDefenseAnimations.GetClash). Client presentation only.
+DefenseConstants.ClashAnimationId = ""
+
+DefenseConstants.ParryAnimationId ="rbxassetid://136786601080156"
 
 -- THE PARRY WAS NEVER ARMED IN PLAY, and this table is the fix (2026-09-28). ParryWindows fails closed:
 -- an animation id with no ParryStart/ParryClose markers and no registration gets NO window, so every
@@ -462,6 +480,13 @@ DefenseConstants.Presentation = {
 	-- so a shift-locked parry whipped the body toward the attacker and straight back while the camera stayed
 	-- put. About the parry's own recovery: long enough to read, short enough that the camera regains the body.
 	ParryFacingHoldSeconds = 0.3,
+	-- Limits on the parry snap, because the attacker position it turns toward is the server's, a round trip
+	-- stale, and in a parry trade both bodies sit nearly on top of each other and swap sides. Without them the
+	-- snap could point the whole body (and under shift lock, away from the camera) the wrong way. Inside the
+	-- distance there is no meaningful "toward them", so the body is left alone; past the turn cap the snap is
+	-- clamped, so a parry corrects aim and never spins you around.
+	ParryFacingMinDistanceStuds = 2.5,
+	ParryFacingMaxTurnDegrees = 80,
 }
 
 -- Budgets ------------------------------------------------------------------------------------------

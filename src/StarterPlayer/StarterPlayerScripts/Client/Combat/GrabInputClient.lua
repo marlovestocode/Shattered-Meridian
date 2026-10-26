@@ -62,6 +62,7 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Glyph = require(script.Parent.Parent.Input.Glyph)
 local InputDevice = require(script.Parent.Parent.Input.InputDevice)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local JumpGate = require(script.Parent.Parent.Movement.JumpGate)
 local Layers = require(script.Parent.Parent.UI.Shell.Layers)
 
 local logger = Logger.scope("GrabInputClient")
@@ -203,10 +204,9 @@ end
 
 -- The client half of rooting a thrower for their throw clip (AttributeConstants.GrabThrowing, written
 -- by GrabSystem). The server pins WalkSpeed and parks parkour and shift lock's yaw; what only the client
--- that simulates this body can stop is the engine's own jump and its turn-to-face-movement. Jump goes
--- through the Humanoid's Jumping state, the switch AttackInputClient already uses for the launcher
--- window; AutoRotate is captured and put back only if nothing else changed it meanwhile, SwingTracking's
--- rule.
+-- that simulates this body can stop is the engine's own jump and its turn-to-face-movement. Jump is a
+-- Client/Movement/JumpGate claim, beside the launcher window's and a locked swing's; AutoRotate is captured
+-- and put back only if nothing else changed it meanwhile, SwingTracking's rule.
 local restoreAutoRotate: boolean? = nil
 
 local function setThrowRooted(humanoid: Humanoid, rooted: boolean): ()
@@ -215,14 +215,14 @@ local function setThrowRooted(humanoid: Humanoid, rooted: boolean): ()
 			restoreAutoRotate = humanoid.AutoRotate
 		end
 		humanoid.AutoRotate = false
-		humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+		JumpGate.Set(humanoid, JumpGate.Owners.GrabThrow, true)
 		return
 	end
 	if restoreAutoRotate == true and humanoid.AutoRotate == false then
 		humanoid.AutoRotate = true
 	end
 	restoreAutoRotate = nil
-	humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+	JumpGate.Set(humanoid, JumpGate.Owners.GrabThrow, false)
 end
 
 -- Lifecycle ------------------------------------------------------------------------------------------

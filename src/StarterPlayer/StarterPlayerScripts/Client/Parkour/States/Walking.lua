@@ -50,9 +50,8 @@ local Walking: ParkourTypes.StateDefinition = {
 		if not context.Ground.Grounded then
 			return "Falling"
 		end
-		if context.Ground.SlopeAngle >= ParkourConstants.Slope.ForcedSlideAngleDegrees then
-			return "Sliding"
-		end
+		-- No forced-slide hand-off here: Sliding (120) pre-empts this state on a too-steep slope through its
+		-- own CanEnter, cooldown and combat gates included (see Sliding's FORCED SLIDES note).
 		local resolved = StateSupport.ResolveGroundedState(context)
 		if resolved ~= "Walking" then
 			return resolved

@@ -51,13 +51,8 @@ local Idle: ParkourTypes.StateDefinition = {
 		if not context.Ground.Grounded then
 			return "Falling"
 		end
-		-- A slope too steep to stand on takes the character whether they asked or not -- the design's
-		-- "prevent players from ... climbing surfaces that are too steep" applied to standing as well
-		-- as climbing. Routed through Sliding rather than a bespoke "sliding down a cliff" behavior so
-		-- the player still has the slide's steering and can still jump or roll out of it.
-		if context.Ground.SlopeAngle >= ParkourConstants.Slope.ForcedSlideAngleDegrees then
-			return "Sliding"
-		end
+		-- No forced-slide hand-off here: Sliding (120) pre-empts this state on a too-steep slope through its
+		-- own CanEnter, cooldown and combat gates included (see Sliding's FORCED SLIDES note).
 		if StateSupport.HasMoveIntent(context) then
 			return StateSupport.ResolveGroundedState(context)
 		end

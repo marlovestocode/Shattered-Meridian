@@ -39,12 +39,12 @@
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
 local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
+local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnership)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
 local ParkourValidation = require(ReplicatedStorage.Shared.Parkour.ParkourValidation)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
@@ -310,34 +310,22 @@ local function handleReport(player: Player, rawPayload: unknown): ()
 		return
 	end
 
-	-- The combat layer's own hold on the body outranks any movement claim. A client reporting a
-	-- wall-run while the server has it ragdolled or air-combo-held is either desynced or lying; either
-	-- way granting velocity ownership would put the parkour framework and RagdollController's
-	-- AlignPosition pin on the same body at once. The client's own controller independently parks in
-	-- its CombatHeld state for the same signal, so an honest client never reaches this branch.
-	if humanoid and humanoid:GetAttribute(AttributeConstants.RootControlLocked) == true then
-		notifyRejected(player, report.Kind, report.Phase, "CombatRestricted")
-		return
-	end
-	-- Either side of a live air combo, for the same reason: the victim's body is the server's, and the
-	-- attacker's is committed to the follow. Both clients park for the same Attributes (ParkourController's
-	-- resolveCombatOwned), so this is the server not trusting that (docs/design/air-combat-and-evade.md B5).
-	if humanoid and AirComboAttributes.IsParticipant(humanoid) then
-		notifyRejected(player, report.Kind, report.Phase, "CombatRestricted")
-		return
-	end
-	-- A realm that forbids the escape (Shared/Domain/DomainRules.lua): NoParkour closes the mobility a
-	-- player would leave a fight with (ParkourConstants.DomainGate.BlockedKinds), NoEvade the evade. Only
-	-- a START is refused -- an End report closes an action that was already legitimately open. The client
-	-- gates the same kinds itself (StateSupport.CombatBlocks reads the same flags), so an honest client
-	-- never reaches this; it is the server not trusting that.
+	-- Another System's hold on the body outranks any movement claim: combat, a mount, flight, a freeze, an
+	-- emote lock, an air combo (either side, docs/design/air-combat-and-evade.md B5) or a realm's Rooted
+	-- rule (ParkourOwnership.HeldElsewhere -- the same predicate the client parks in CombatHeld on, so an
+	-- honest client never reaches this), and a realm that forbids the escape (NoParkour over
+	-- ParkourConstants.DomainGate.BlockedKinds, NoEvade over the evade). Granting ownership of a held body
+	-- would put the parkour framework and the holder's pin on it at once. START ONLY -- an End is a
+	-- release (see ParkourValidation.Restrict's header for the stranded-WalkSpeed bug refusing one caused).
 	if humanoid and report.Phase == "Start" then
-		local now_ = DomainRules.ServerNow()
-		local sealedEscape = ParkourConstants.DomainGate.BlockedKinds[report.Kind] == true
-			and DomainRules.Has(humanoid, "NoParkour", now_)
-		local sealedEvade = report.Kind == "Evade" and DomainRules.Has(humanoid, "NoEvade", now_)
-		if sealedEscape or sealedEvade then
-			notifyRejected(player, report.Kind, report.Phase, "CombatRestricted")
+		local serverNow = DomainRules.ServerNow()
+		local restriction = ParkourValidation.Restrict(report, {
+			BodyHeld = ParkourOwnership.HeldElsewhere(humanoid, serverNow),
+			NoParkour = DomainRules.Has(humanoid, "NoParkour", serverNow),
+			NoEvade = DomainRules.Has(humanoid, "NoEvade", serverNow),
+		}, ParkourConstants.DomainGate.BlockedKinds)
+		if restriction then
+			notifyRejected(player, report.Kind, report.Phase, restriction)
 			return
 		end
 	end

@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnership)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
+local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 
 return function()
 	describe("IsActionState", function()
@@ -79,6 +80,64 @@ return function()
 			-- fighting for a whole life.
 			expect(ParkourOwnership.OwnsBody(humanoidWith("yes"))).to.equal(false)
 			expect(ParkourOwnership.OwnsBody(humanoidWith(1))).to.equal(false)
+		end)
+	end)
+
+	describe("HeldElsewhere", function()
+		local NOW = 1000
+		local created: { Humanoid } = {}
+
+		local function freeHumanoid(): Humanoid
+			local humanoid = Instance.new("Humanoid")
+			table.insert(created, humanoid)
+			return humanoid
+		end
+
+		afterEach(function()
+			for _, humanoid in created do
+				humanoid:Destroy()
+			end
+			table.clear(created)
+		end)
+
+		it("reads a free body as free", function()
+			expect(ParkourOwnership.HeldElsewhere(freeHumanoid(), NOW)).to.equal(false)
+		end)
+
+		it("reads every published hold", function()
+			for _, attribute in {
+				AttributeConstants.RootControlLocked,
+				AttributeConstants.Flying,
+				AttributeConstants.Frozen,
+				AttributeConstants.EmoteMovementLocked,
+			} do
+				local humanoid = freeHumanoid()
+				humanoid:SetAttribute(attribute, true)
+				expect(ParkourOwnership.HeldElsewhere(humanoid, NOW)).to.equal(true, attribute)
+			end
+		end)
+
+		it("reads a realm's Rooted rule, but only inside the realm's lease", function()
+			-- The hold nobody in parkour read before: RunSystem zeroed WalkSpeed, and a dash or a leap
+			-- (which never read WalkSpeed) carried the body out anyway.
+			local humanoid = freeHumanoid()
+			humanoid:SetAttribute(AttributeConstants.DomainFlags, DomainRules.FlagBits.Rooted)
+			humanoid:SetAttribute(AttributeConstants.DomainUntil, NOW + 5)
+			expect(ParkourOwnership.HeldElsewhere(humanoid, NOW)).to.equal(true)
+			expect(ParkourOwnership.HeldElsewhere(humanoid, NOW + 6)).to.equal(false)
+		end)
+
+		it("does not read a realm's other flags as a hold", function()
+			local humanoid = freeHumanoid()
+			humanoid:SetAttribute(AttributeConstants.DomainFlags, DomainRules.FlagBits.NoParkour)
+			humanoid:SetAttribute(AttributeConstants.DomainUntil, NOW + 5)
+			expect(ParkourOwnership.HeldElsewhere(humanoid, NOW)).to.equal(false)
+		end)
+
+		it("reads a dead body as held", function()
+			local humanoid = freeHumanoid()
+			humanoid.Health = 0
+			expect(ParkourOwnership.HeldElsewhere(humanoid, NOW)).to.equal(true)
 		end)
 	end)
 

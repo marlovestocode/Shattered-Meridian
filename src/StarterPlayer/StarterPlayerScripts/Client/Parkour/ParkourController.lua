@@ -44,7 +44,6 @@ local Workspace = game:GetService("Workspace")
 
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
-local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local EvadeConstants = require(ReplicatedStorage.Shared.Combat.EvadeConstants)
@@ -218,28 +217,11 @@ local function buildInitialContext(boundCharacter: Model, boundHumanoid: Humanoi
 	}
 end
 
--- Whether some other system currently owns this character's body. Every one of these is an Attribute
--- the SERVER already publishes for its own reasons -- this framework introduces no new signal for it,
--- it just reads the ones that already exist:
---   * RootControlLocked   -- CombatSystem.syncRootControlLocked: a finisher/DashPunch ragdoll is
---                            tumbling this body, or RagdollController.HoldAloft has an AlignPosition
---                            pin on it (an air-combo juggle, from either side).
---   * Flying              -- AdminActionSystem.SetFlying, driven by Client/Flight/FlightController.
---   * Frozen              -- DevMenuSystem.SetTargetFrozen, an absolute admin lockdown.
---   * EmoteMovementLocked -- EmoteSystem, a MovementLocked emote.
--- Reading rather than inventing is the point: these four are already the definitive answer to "is
--- someone else driving," they are already replicated, and a fifth signal would be one more thing to
--- keep in sync.
+-- Whether some other system currently owns this character's body. The list lives in
+-- Shared/Parkour/ParkourOwnership.HeldElsewhere, because ParkourSystem refuses a Start on the same
+-- rule and the two copies had drifted apart (see that function's header).
 local function resolveCombatOwned(boundHumanoid: Humanoid): boolean
-	return boundHumanoid:GetAttribute(AttributeConstants.RootControlLocked) == true
-		or boundHumanoid:GetAttribute(AttributeConstants.Flying) == true
-		or boundHumanoid:GetAttribute(AttributeConstants.Frozen) == true
-		or boundHumanoid:GetAttribute(AttributeConstants.EmoteMovementLocked) == true
-		-- Either side of a live air combo (docs/design/air-combat-and-evade.md B6): the victim's body is the
-		-- server's, the attacker's is Client/Combat/AirComboClient's follow. Read off the deadlines rather
-		-- than trusting RootControlLocked alone, which has other writers that clear it on their own schedule.
-		or AirComboAttributes.IsParticipant(boundHumanoid)
-		or boundHumanoid.Health <= 0
+	return ParkourOwnership.HeldElsewhere(boundHumanoid)
 end
 
 -- The action kind the SERVER currently believes is open, as last claimed by a Start report from here.

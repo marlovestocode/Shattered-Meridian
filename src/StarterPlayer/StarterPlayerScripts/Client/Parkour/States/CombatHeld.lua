@@ -6,9 +6,9 @@
 
 	This is the state the framework parks in whenever something else has taken control of the character
 	-- a combat stagger or swing lock, a grab, an AIR COMBO (either side of one: the victim's body is the
-	server's, the attacker's is Client/Combat/AirComboClient's follow), the Emote System, admin flight or
-	an admin freeze -- signalled by the Humanoid Attributes those systems already publish and resolved into
-	ParkourContext.CombatOwned by ParkourController.resolveCombatOwned.
+	server's, the attacker's is Client/Combat/AirComboClient's follow), the Emote System, admin flight, an
+	admin freeze or a realm's Rooted rule -- signalled by the Humanoid Attributes those systems already
+	publish and resolved into ParkourContext.CombatOwned by Shared/Parkour/ParkourOwnership.HeldElsewhere.
 
 	RENAMED FROM AerialCombat (docs/design/air-combat-and-evade.md B6). It was never specific to the air:
 	it is the one generic "combat owns this body" park, and the old name described a juggle system that

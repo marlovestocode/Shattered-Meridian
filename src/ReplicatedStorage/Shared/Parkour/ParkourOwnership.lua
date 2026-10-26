@@ -38,11 +38,20 @@
 	it would mean a combat action refusing itself: the first swing hands the body to combat, parkour
 	parks in CombatHeld, and every following swing is refused for being "in a parkour action" --
 	which would take aerial combat out of the game entirely.
+
+	THE OTHER DIRECTION -- HeldElsewhere (2026-10-26). "Someone else is holding this body, so parkour may
+	not drive it" is the same kind of shared rule, asked by the client (ParkourController parks in
+	CombatHeld) and by the server (ParkourSystem refuses a Start). The two used to keep their own lists,
+	and they had drifted: the client parked for six holds, the server refused for two, and neither read a
+	realm's Rooted rule -- so a rooted player whose WalkSpeed RunSystem had pinned to 0 could still dash,
+	leap or vault out of the realm. One predicate, both callers.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
 
 type MovementStateId = ParkourTypes.MovementStateId
@@ -88,6 +97,30 @@ end
 -- and is not an action.
 function ParkourOwnership.IsActionState(stateId: MovementStateId?): boolean
 	return stateId ~= nil and ACTION_STATES[stateId] == true
+end
+
+-- Whether another System holds this body, so parkour must neither drive it (client) nor be granted
+-- velocity ownership of it (server). Every input is an Attribute its owner already publishes:
+--   * RootControlLocked   -- Server/Combat/RootControl: a swing lock, a stagger, a grab (either end),
+--                            an air-combo pin, a vessel mount.
+--   * Flying              -- AdminActionSystem, driven by Client/Flight/FlightController.
+--   * Frozen              -- an admin freeze.
+--   * EmoteMovementLocked -- EmoteSystem, a MovementLocked emote.
+--   * air combo           -- either side, off its own deadlines (AirComboAttributes), since
+--                            RootControlLocked has other writers that clear it on their own schedule.
+--   * realm Rooted        -- Shared/Domain/DomainRules, through the realm's lease. RunSystem zeroes
+--                            WalkSpeed for it; this is what stops a Velocity- or Kinematic-driven state
+--                            carrying the body out anyway, since neither reads WalkSpeed.
+--   * dead                -- nothing drives a corpse.
+-- `now` is the shared server clock DomainRules reads; omit it outside a spec.
+function ParkourOwnership.HeldElsewhere(humanoid: Humanoid, now: number?): boolean
+	return humanoid:GetAttribute(AttributeConstants.RootControlLocked) == true
+		or humanoid:GetAttribute(AttributeConstants.Flying) == true
+		or humanoid:GetAttribute(AttributeConstants.Frozen) == true
+		or humanoid:GetAttribute(AttributeConstants.EmoteMovementLocked) == true
+		or AirComboAttributes.IsParticipant(humanoid)
+		or DomainRules.Has(humanoid, "Rooted", now)
+		or humanoid.Health <= 0
 end
 
 return ParkourOwnership

@@ -1166,6 +1166,21 @@ function HitboxEngine.GetAttackState(combatantId: number): AttackStateMachine.At
 	return if combatant then combatant.Machine:GetState() else nil
 end
 
+-- Seconds until this combatant's swing opens its Active window, or nil unless it is winding up a melee
+-- swing (a projectile attack's volume is the shot). A query only; the defence layer's close-time clash rule
+-- (DefenseConstants.Clash.WindowSeconds) decides what it means.
+function HitboxEngine.WindupRemaining(combatantId: number, now: number): number?
+	local combatant = combatantById[combatantId]
+	if combatant == nil then
+		return nil
+	end
+	local swing = combatant.Machine:GetSwing()
+	if swing == nil or swing.Definition.Projectile ~= nil then
+		return nil
+	end
+	return combatant.Machine:GetWindupRemaining(now)
+end
+
 -- Whether this combatant's swing is in its Active window RIGHT NOW with a volume that reaches `target`'s
 -- root, within `marginStuds` on top of the engine's own narrow-phase margin. False for a swing winding up
 -- or recovering, a projectile attack (its volume is the shot, not the body), and a target this swing has

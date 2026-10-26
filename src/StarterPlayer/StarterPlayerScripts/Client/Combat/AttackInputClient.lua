@@ -109,6 +109,7 @@ local CombatAnimator = require(script.Parent.Parent.FX.CombatAnimator)
 local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
 local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local JumpGate = require(script.Parent.Parent.Movement.JumpGate)
 
 type AttackStartedPayload = AttackTypes.AttackStartedPayload
 
@@ -765,7 +766,8 @@ end
 --
 -- Done by standing the Humanoid's own Jumping state down until the string lapses: that one switch covers the
 -- engine's default jump and every parkour path that goes through Humanoid:ChangeState, with no second
--- input interception to keep in step with the first.
+-- input interception to keep in step with the first. Through Client/Movement/JumpGate, as one claim among
+-- several: the window lapsing must not hand the jump back while a locked swing or a throw still holds it.
 local jumpSuppressGeneration = 0
 
 -- THE CLICK, NOT THE CONFIRMATION, STARTS IT. The 3rd M1 is usually clicked while B2 is still swinging, and
@@ -780,7 +782,7 @@ local localStringLapsesAt = -math.huge
 local function setJumpSuppressed(suppressed: boolean): ()
 	local humanoid = boundHumanoid
 	if humanoid and humanoid.Parent ~= nil then
-		humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, not suppressed)
+		JumpGate.Set(humanoid, JumpGate.Owners.LauncherWindow, suppressed)
 	end
 end
 

@@ -104,10 +104,11 @@ LockOnConstants.StepIn = {
 	StandoffStuds = 3.4,
 	-- The furthest a step will ever carry, whatever the gap. A target further than StandoffStuds plus this
 	-- is simply out of range, and the swing whiffs where the player threw it.
-	MaxStepStuds = 2.4,
+	MaxStepStuds = 1.6,
 	-- Anything smaller is not worth a step.
 	MinStepStuds = 0.4,
 	DurationSeconds = 0.16,
+	-- (MaxStepStuds was 2.4 until 2026-10-26: an M1 pulled the player too far toward the target.)
 	-- For a kind with no authored step (Basic), the step STARTS this long before the windup ends, so the
 	-- body arrives as the hit window opens rather than stepping into it afterwards. A kind with its own
 	-- authored step keeps that step's DelaySeconds.

@@ -26,6 +26,14 @@
 	Runs in Velocity drive mode: a LinearVelocity constraint at the integrated speed, projected onto
 	the ground plane so the slide follows terrain instead of launching off the crest of a ramp. Real
 	collision still applies, so sliding into a wall stops at the wall rather than through it.
+
+	FORCED SLIDES (a slope at or above Slope.ForcedSlideAngleDegrees) are entered ONLY by pre-emption,
+	through CanEnter below, which accepts them without a press. Idle, Walking and Sprinting used to return
+	"Sliding" from their own Update on a steep slope -- a route-1 hand-off, which never asks CanEnter -- so
+	a forced slide skipped the cooldown, the combat gate and a realm's NoParkour. Inside a sealed realm that
+	was a loop: the server refused the Start, the client fell back to Idle, and Idle forced the slide again
+	the next frame. Gravity owning you is still a slide, and still gated like one; and a forced slide ends
+	only past Slope.ForcedSlideExitHysteresisDegrees, so a surface at the threshold cannot cycle it.
 ]]
 
 -- Workspace is imported for Gravity ONLY -- the slope-pull term in ParkourMath.IntegrateSlideSpeed,
@@ -271,8 +279,10 @@ local Sliding: ParkourTypes.StateDefinition = {
 			return nil
 		end
 		if forced then
-			-- A forced slide ends when the ground is standable again, not on a key release.
-			if context.Ground.SlopeAngle < ParkourConstants.Slope.ForcedSlideAngleDegrees then
+			-- A forced slide ends when the ground is standable again, not on a key release -- and only once
+			-- it is clearly shallower than the angle that started it (see ForcedSlideExitHysteresisDegrees).
+			local slope = ParkourConstants.Slope
+			if context.Ground.SlopeAngle < slope.ForcedSlideAngleDegrees - slope.ForcedSlideExitHysteresisDegrees then
 				return StateSupport.ResolveGroundedState(context)
 			end
 			return nil

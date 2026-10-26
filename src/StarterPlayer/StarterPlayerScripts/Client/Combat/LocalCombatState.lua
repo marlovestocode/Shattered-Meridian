@@ -29,6 +29,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
@@ -156,12 +157,38 @@ function LocalCombatState.OnReleased(listener: () -> ()): () -> ()
 	return releasedListeners:Connect(listener)
 end
 
+-- WHO IS HOLDING THE BODY'S FACING. CombatFacingOwned stands shift lock's yaw write down, and two modules
+-- raise it -- a swing's tracking window (SwingTracking) and a parry's facing snap (DefenseClient). Each
+-- used to write the Attribute bare, so one's release cleared the other's hold, and a release skipped on the
+-- assumption "the other owner has it" left it up forever. A claim per owner, one publisher: the Attribute is
+-- true while ANY owner holds, the same shape RootControl gives RootControlLocked on the server.
+LocalCombatState.FacingOwners = table.freeze({
+	Swing = "Swing",
+	Parry = "Parry",
+})
+
+local facingClaims: { [string]: boolean } = {}
+
+local function publishFacing(humanoid: Humanoid): ()
+	if humanoid.Parent == nil then
+		return
+	end
+	humanoid:SetAttribute(AttributeConstants.CombatFacingOwned, if next(facingClaims) ~= nil then true else nil)
+end
+
+-- `humanoid` is the body whose Attribute is published. Releasing an owner that holds nothing is a no-op.
+function LocalCombatState.SetFacingHeld(humanoid: Humanoid, owner: string, held: boolean): ()
+	facingClaims[owner] = if held then true else nil
+	publishFacing(humanoid)
+end
+
 -- A new life carries no commitments over. The guard key is deliberately NOT reset: it describes a key
 -- the player is physically holding, which a respawn does not release.
 function LocalCombatState.ResetForNewLife(): ()
 	swingEndsAt = 0
 	stunEndsAt = 0
 	cancelAt = 0
+	table.clear(facingClaims)
 end
 
 return LocalCombatState

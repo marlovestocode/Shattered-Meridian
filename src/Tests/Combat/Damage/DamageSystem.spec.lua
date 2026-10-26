@@ -492,6 +492,85 @@ return function()
 			expect(HitboxEngine.ActiveSwingReaches(bystander.Id, attacker.Model, 0)).to.equal(false)
 			expect(HitboxEngine.ActiveSwingReaches(attacker.Id, defender.Model, 0)).to.equal(false)
 		end)
+
+		-- DefenseConstants.Clash.WindowSeconds: a defender a beat from opening their blade clashes too.
+		local clash = DefenseConstants.Clash
+
+		it("clashes a defender whose blade opens inside the window, charging BOTH sides posture only", function()
+			local base = os.clock()
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+			local guardBefore = DefenseSystem.GetGuard(defender.Model)
+
+			HitboxEngine.RequestAttack(defender.Id, makeDefinition({ WindupSeconds = clash.WindowSeconds }), 1, 1)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(HitboxEngine.GetAttackState(attacker.Id)).to.equal("Idle")
+			expect(HitboxEngine.GetAttackState(defender.Id)).to.equal("Idle")
+			expect(defender.Humanoid.Health).to.be.near(100, 1e-3)
+			expect(DamageSystem.IsHitstunned(defender.Model, base + FRAME)).to.equal(false)
+			expect(DefenseSystem.GetGuard(defender.Model)).to.be.near((guardBefore :: number) - clash.GuardDamage, 1e-3)
+			expect(DefenseSystem.GetGuard(attacker.Model)).to.be.near((guardBefore :: number) - clash.GuardDamage, 1e-3)
+		end)
+
+		it("does not clash a defender whose blade is further from opening than the window", function()
+			local base = os.clock()
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(defender.Id, makeDefinition({ WindupSeconds = clash.WindowSeconds + 0.5 }), 1, 1)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(defender.Humanoid.Health < 100).to.equal(true)
+		end)
+
+		it("does not clash a defender who is mid-string, however close their blade is", function()
+			-- The mash-out guard: a body that just took a Clean hit swings out of it and loses.
+			local base = os.clock()
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			local afterFirst = defender.Humanoid.Health
+			expect(afterFirst < 100).to.equal(true)
+
+			HitboxEngine.CancelAttack(attacker.Id, "Spec", base + FRAME)
+			HitboxEngine.RequestAttack(defender.Id, makeDefinition({ WindupSeconds = clash.WindowSeconds }), 1, 1)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + 2 * FRAME)
+
+			expect(defender.Humanoid.Health < afterFirst).to.equal(true)
+		end)
+
+		it("does not clash a defender a beat from opening whose back is to the attacker", function()
+			-- The close-time rule has no volume to test, so it reads facing: a body winding up at someone ELSE
+			-- and hit from behind inside the range is struck, not clashed with.
+			local base = os.clock()
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -4), Vector3.new(0, 5, -8))
+
+			HitboxEngine.RequestAttack(defender.Id, makeDefinition({ WindupSeconds = clash.WindowSeconds }), 1, 1)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(defender.Humanoid.Health < 100).to.equal(true)
+		end)
+
+		it("does not clash a defender standing outside the clash range", function()
+			local base = os.clock()
+			local attacker = spawnDummy("Attacker", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local far = clash.RangeStuds + 4
+			local defender = spawnDummy("Defender", Vector3.new(0, 5, -far), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(defender.Id, makeDefinition({ WindupSeconds = clash.WindowSeconds }), 1, 1)
+			HitboxEngine.RequestAttack(attacker.Id, makeDefinition({ Offset = CFrame.new(0, 0, -far) }), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(defender.Humanoid.Health < 100).to.equal(true)
+		end)
 	end)
 
 	describe("DamageSystem -- combo escalation", function()

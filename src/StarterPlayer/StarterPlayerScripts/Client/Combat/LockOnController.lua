@@ -169,12 +169,18 @@ end
 -- The spring's VALUE is re-read off the camera every frame rather than kept here, so the player's own
 -- mouse or stick input (applied by the camera scripts between two calls) is simply where the spring
 -- resumes from; only the velocity is this module's memory.
-local function pullCamera(camera: Camera, aim: Vector3, deltaTime: number): ()
+local function pullCamera(camera: Camera, aim: Vector3, bodyPosition: Vector3, deltaTime: number): ()
 	local tuning = LockOnConstants.Camera
 	local focus = camera.Focus.Position
 	local direction = aim - focus
 	local flat = Vector3.new(direction.X, 0, direction.Z)
-	if flat.Magnitude < tuning.MinDistanceStuds then
+	-- HOW CLOSE THE FIGHT IS is a fact about the BODY, so the stand-down and the close-range softening below
+	-- both read the distance from the root. The focus carries the shoulder offset and CameraFollow's trail, so
+	-- measured from it the gate moved with the camera and could cut out and restart from rest mid-exchange.
+	-- The LOOK still aims from the focus: that is the point the camera scripts orbit.
+	local bodyOffset = aim - bodyPosition
+	local bodyDistance = Vector3.new(bodyOffset.X, 0, bodyOffset.Z).Magnitude
+	if bodyDistance < tuning.MinDistanceStuds then
 		-- Stood down, so the next frame back in range starts the pull from rest.
 		yawVelocity = 0
 		pitchVelocity = 0
@@ -193,7 +199,7 @@ local function pullCamera(camera: Camera, aim: Vector3, deltaTime: number): ()
 	-- Softer at arm's length, where small movements are big angles. 1 at CloseRangeStuds and beyond, down to
 	-- CloseRangeScale at MinDistanceStuds.
 	local closeness = math.clamp(
-		(flat.Magnitude - tuning.MinDistanceStuds) / math.max(tuning.CloseRangeStuds - tuning.MinDistanceStuds, 1e-3),
+		(bodyDistance - tuning.MinDistanceStuds) / math.max(tuning.CloseRangeStuds - tuning.MinDistanceStuds, 1e-3),
 		0,
 		1
 	)
@@ -277,7 +283,7 @@ local function lockStep(deltaTime: number): ()
 	end
 
 	if camera.CameraType == Enum.CameraType.Custom then
-		pullCamera(camera, aim, deltaTime)
+		pullCamera(camera, aim, root.Position, deltaTime)
 	end
 	updateMarker(camera, current, targetRoot)
 end

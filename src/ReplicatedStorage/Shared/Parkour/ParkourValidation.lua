@@ -250,6 +250,44 @@ function ParkourValidation.Validate(
 	return true, nil
 end
 
+-- What else holds this body, as ParkourSystem reads it off the Humanoid (no Instance in here).
+export type Restrictions = {
+	-- Shared/Parkour/ParkourOwnership.HeldElsewhere: combat, a mount, flight, a freeze, an emote lock,
+	-- an air combo or a realm's Rooted rule owns the body.
+	BodyHeld: boolean,
+	-- A realm's NoParkour / NoEvade rules (Shared/Domain/DomainRules).
+	NoParkour: boolean,
+	NoEvade: boolean,
+}
+
+-- Whether another System's hold on the body refuses this report, and why. nil means no refusal.
+--
+-- ONLY A START IS EVER REFUSED HERE, for the reason Validate's End branch gives at length: an End is a
+-- release, and refusing one can only strand the ownership window it would have closed. These gates used
+-- to run before the phase split in ParkourSystem, so a slide's End arriving during the stagger that
+-- interrupted the slide was refused for "CombatRestricted": ParkourVelocityOwned stayed up and RunSystem
+-- held WalkSpeed at 0 after the stagger ended, until the client watchdog's next retry or the window's
+-- own expiry. A hit landed mid-slide read as "the stun lasts longer if I was sliding".
+function ParkourValidation.Restrict(
+	report: ActionReport,
+	restrictions: Restrictions,
+	blockedKinds: { [string]: boolean }
+): RejectionReason?
+	if report.Phase ~= "Start" then
+		return nil
+	end
+	if restrictions.BodyHeld then
+		return "CombatRestricted"
+	end
+	if restrictions.NoParkour and blockedKinds[report.Kind] == true then
+		return "CombatRestricted"
+	end
+	if restrictions.NoEvade and report.Kind == "Evade" then
+		return "CombatRestricted"
+	end
+	return nil
+end
+
 -- Drops rejection timestamps older than the window, in place, and returns how many remain. The
 -- rejection counter has to decay or a player who trips the validator twice a month across a long
 -- session would eventually be flagged for nothing -- see ParkourConstants.Validation.

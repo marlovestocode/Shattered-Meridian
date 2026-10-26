@@ -452,6 +452,59 @@ return function()
 		end)
 	end)
 
+	describe("Restrict", function()
+		local FREE: ParkourValidation.Restrictions = { BodyHeld = false, NoParkour = false, NoEvade = false }
+		local BLOCKED = { Slide = true, Dash = true }
+
+		local function with(overrides: { [string]: boolean }): ParkourValidation.Restrictions
+			local built = table.clone(FREE) :: { [string]: boolean }
+			for key, value in overrides do
+				built[key] = value
+			end
+			return built :: any
+		end
+
+		it("refuses nothing on a free body", function()
+			expect(ParkourValidation.Restrict(report(), FREE, BLOCKED)).to.equal(nil)
+		end)
+
+		it("refuses every Start kind while the body is held elsewhere", function()
+			for _, kind in { "Slide", "Vault", "Mantle", "WallRun", "LedgeClimb", "Leap", "Evade", "Dash" } do
+				expect(ParkourValidation.Restrict(report({ Kind = kind }), with({ BodyHeld = true }), BLOCKED)).to.equal(
+					"CombatRestricted",
+					kind
+				)
+			end
+		end)
+
+		it("never refuses an End, whatever holds the body", function()
+			-- The bug this function's header names: a slide's End refused during the stagger that cut the
+			-- slide left ParkourVelocityOwned up, and RunSystem held WalkSpeed at 0 past the stagger.
+			local everything = with({ BodyHeld = true, NoParkour = true, NoEvade = true })
+			for _, kind in { "Slide", "Evade", "Dash", "Vault" } do
+				expect(ParkourValidation.Restrict(report({ Kind = kind, Phase = "End" }), everything, BLOCKED)).to.equal(
+					nil,
+					kind
+				)
+			end
+		end)
+
+		it("refuses only the blocked kinds under NoParkour", function()
+			local sealed = with({ NoParkour = true })
+			expect(ParkourValidation.Restrict(report({ Kind = "Slide" }), sealed, BLOCKED)).to.equal("CombatRestricted")
+			expect(ParkourValidation.Restrict(report({ Kind = "Dash" }), sealed, BLOCKED)).to.equal("CombatRestricted")
+			-- Vault and mantle stay open in a sealed realm: they cross the arena, they don't leave it.
+			expect(ParkourValidation.Restrict(report({ Kind = "Vault" }), sealed, BLOCKED)).to.equal(nil)
+			expect(ParkourValidation.Restrict(report({ Kind = "Evade" }), sealed, BLOCKED)).to.equal(nil)
+		end)
+
+		it("refuses only the evade under NoEvade", function()
+			local sealed = with({ NoEvade = true })
+			expect(ParkourValidation.Restrict(report({ Kind = "Evade" }), sealed, BLOCKED)).to.equal("CombatRestricted")
+			expect(ParkourValidation.Restrict(report({ Kind = "Slide" }), sealed, BLOCKED)).to.equal(nil)
+		end)
+	end)
+
 	describe("ParkourTypes -- reportable kinds", function()
 		it("only exposes velocity-owning actions as reportable", function()
 			-- Ordinary locomotion generates no network traffic at all; if a future change adds Walking or

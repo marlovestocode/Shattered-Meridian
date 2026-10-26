@@ -1561,7 +1561,7 @@ ParkourConstants.Slope = {
 	-- character controller and this system agree about what "ground" is.
 	MaxWalkableAngleDegrees = 55,
 	-- At or above this angle, gravity takes over: a grounded character transitions into Sliding whether
-	-- they asked to or not (States/Idle, Walking and Sprinting all hand off on it).
+	-- they asked to or not (Sliding.CanEnter accepts it without a press and pre-empts the ground states).
 	--
 	-- Was 48, which was too steep to ever fire on the ramps people actually build -- a big, obviously
 	-- steep wedge sits around 35-40 degrees, so running down one did nothing at all and the whole
@@ -1572,6 +1572,12 @@ ParkourConstants.Slope = {
 	-- THE knob for how eagerly slopes take control. Raise it if ordinary terrain starts sliding you;
 	-- lower it if ramps still feel inert.
 	ForcedSlideAngleDegrees = 38,
+	-- A FORCED slide ends only once the ground is this much shallower than ForcedSlideAngleDegrees. Without
+	-- the band, a surface sitting at the threshold (a ramp built at 38, terrain whose normal wobbles by a
+	-- degree frame to frame) ended the slide and started it again every cooldown, each cycle a Start and an
+	-- End report to the server. Four degrees is well above per-frame normal noise and well short of
+	-- flattening the threshold into something a player could notice.
+	ForcedSlideExitHysteresisDegrees = 4,
 	-- Speed scaling walking up/down a slope, per degree.
 	UphillSpeedPenaltyPerDegree = 0.011,
 	DownhillSpeedBonusPerDegree = 0.019,

@@ -165,6 +165,15 @@ function AttackStateMachine.GetStateElapsed(self: Machine, now: number): number
 	return math.max(now - self._enteredAt, 0)
 end
 
+-- Seconds until the Active window opens, or nil unless the swing is winding up.
+function AttackStateMachine.GetWindupRemaining(self: Machine, now: number): number?
+	local swing = self._swing
+	if self._state ~= "Windup" or swing == nil then
+		return nil
+	end
+	return math.max(swing.Definition.WindupSeconds - (now - self._enteredAt), 0)
+end
+
 -- Seconds the CURRENT swing has been in its Active window, or 0 outside one. This is what a charge
 -- attack's growth is measured against -- see HitboxEngine's scaling evaluation.
 function AttackStateMachine.GetActiveElapsed(self: Machine, now: number): number

@@ -149,7 +149,7 @@ local IDS: { [string]: string } = {
 	-- sequence and are worth authoring as one: a clip that ends where the next begins.
 	["Basic:1"] = "121830343644533",
 	["Basic:2"] = "129293930504184",
-	["Basic:3"] = "78948500267117",
+	["Basic:3"] = "121830343644533",
 	-- The heavy swing. A single stage, much longer windup (0.6s) -- a clip here has real room to
 	-- telegraph, which is the whole point of a heavy in this game's defence model: the windup IS the
 	-- tell a defender parries off.

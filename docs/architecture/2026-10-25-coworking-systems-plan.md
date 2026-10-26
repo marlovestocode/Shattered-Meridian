@@ -1,254 +1,405 @@
-# Coworking systems: finish the arbiters, stop the rebuilds (2026-10-25)
+# Coworking systems: one mechanism per job, across the whole game (2026-10-25)
 
-Scope: all of `src/` (772 Lua files) and `scripts/`. This is a plan, not a pass. Nothing was changed. The agent prompt
-that executes it is [`2026-10-25-coworking-systems-agent-prompt.md`](2026-10-25-coworking-systems-agent-prompt.md).
+Scope: all of `src/` (772 Lua files, 204 specs) and `scripts/`. The agent prompt that executes this plan is
+[`2026-10-25-coworking-systems-agent-prompt.md`](2026-10-25-coworking-systems-agent-prompt.md). Each session takes **one spine**
+(§3), and a kickoff prompt per spine is at the end of that file.
 
-It builds on `2026-10-25-cohesion-audit.md` and `2026-10-25-codebase-audit.md` and does not restate their open
-items unless the item belongs to a workstream here (then it is cited, not re-argued).
+Builds on `2026-10-25-cohesion-audit.md` and `2026-10-25-codebase-audit.md`. It does not restate their open items, except where an
+item belongs to a workstream here; those are cited, not re-argued.
+
+**Revision 2 (2026-10-25).** Revision 1 covered only the arbiters: who owns the body, the camera, the frame and the animation.
+A second, wider dive found that most of the game's systems also **hand-assemble the same four or five mechanics** each time they
+are built: decoding untrusted data, declaring a remote, pushing a player's state to their client, routing input, registering
+content, scoping per-player tables and building a test rig. Revision 2 adds a shared foundation for each of those. That is
+where most of the "every feature is rebuilt from scratch" cost actually lives.
 
 W0 re-measure (2026-10-25, branch `cohesion/coworking-systems`): render priorities (8 modules in 3 slots), listener-list lines,
-animator bypasses (3), `LocalAnimator` missing, inbound-require counts and duplicate-body count all reproduced. Moved: Blimp/Boat
-shared lines, bare frame callbacks (18 -> 28), the RunSystem restraint row. Corrected in place below.
+animator bypasses (3), `LocalAnimator` missing, inbound-require counts and the duplicate-body count all reproduced. Moved since
+revision 1: Blimp/Boat shared lines, bare frame callbacks (18 -> 28) and the RunSystem restraint row. Corrected in place below.
 
-**Evidence level.** Every count and line reference below was measured from source on 2026-10-25 by grep, a
-require-graph count, or a function-body hash (the script is in the agent prompt's appendix and becomes
-`scripts/check-duplicate-bodies.py` in W6). Nothing was run
-in Studio or played. "Inferred" marks a conclusion reached by reading.
+**Evidence level.** Every count and line reference was measured from source on 2026-10-25, by grep, a require-graph count, a
+function-body hash (the agent prompt's appendix) or difflib. Nothing was run in Studio or played. "Inferred" marks a conclusion
+reached by reading.
+
+---
 
 ## 1. Diagnosis
 
-### 1.1 The small patterns are consolidated. The arbiters are not.
+### 1.1 The small helpers are shared. Everything above them is assembled by hand.
 
-The CLAUDE.md shared-module table works. Its modules are widely adopted, and only a few hand-rolled copies remain:
+The CLAUDE.md shared-module table works at the level it was written for:
 
 | Shared module | Inbound requires (non-spec) | Residual hand-rolled sites |
 |---|---|---|
-| `CharacterUtil` | 61 | 2 `FindFirstChild("HumanoidRootPart")` in pose FX (GuardStrainPose:182, HitFlinchPose:205), 2 in bot/dummy adornee lookups; the 5th grep hit is CharacterUtil itself |
-| `PlayerLifecycle` | 55 | 4 raw `CharacterAdded` (Blimp/Boat controllers, FurnacePrompt, EnvironmentProbe); IntroClient and SpectateController also touch it, for other reasons |
+| `CharacterUtil` | 61 | 2 `FindFirstChild("HumanoidRootPart")` in pose FX (GuardStrainPose:182, HitFlinchPose:205), 2 in bot/dummy adornee lookups |
+| `PlayerLifecycle` | 55 | 4 raw `CharacterAdded` (Blimp/Boat controllers, FurnacePrompt, EnvironmentProbe) |
 | `Trove` | 53 | — |
 | `Inset` / `Stack` | 49 / 42 | 4 bare `UIPadding` (KeyCap, NumericField, two DevTools) |
 | `RateLimiter` | 29 | none: every public remote has one |
-| `CallbackList` | 11 | **6 hand-rolled `OnChanged` lists** (§2, W1) |
+| `CallbackList` | 11 -> **18 (W1 done)** | 0 unjustified |
 
-Only 11 function bodies are byte-identical across files (re-measured W0: `TOTAL 11`; 5 of them are the `OnChanged` bodies W1 removes). So copy-paste is **not** the problem.
+Only 10 function bodies are byte-identical across files (W1 removed one group). Copy-paste is not the problem.
 
-The problem is one level up. Several questions that more than one system has to answer have **no single owner**,
-or have an owner that was half-built and then abandoned:
+**The problem is that each shared helper is a part, not an assembly.** Anyone building a remote, a profile field, a replicated
+value, an input or a test reaches for the right parts and then wires them together by hand, slightly differently each time.
+§1.2 to §1.10 measure each such assembly.
+
+### 1.2 Arbiters that are missing or half-built (revision 1, re-measured in W0)
 
 | Question | Today | Evidence |
 |---|---|---|
-| **Which animation owns this body?** | `Shared/Animation/AnimationManager.lua` says "nothing else in the codebase touches an AnimationTrack directly", and that it *replaced* CombatAnimator/FlightAnimator/EmoteAnimator. **All three still exist.** They still `LoadAnimation` on their own and run their own Heartbeat with `DOMINANT_WEIGHT` peepholes. The header cites `Client/FX/LocalAnimator.lua`, **which does not exist.** | `CombatAnimator.lua:270,386,520`, `EmoteAnimator.lua:151,214`, `FlightAnimator.lua:105,189`; AnimationManager is used only by Parkour, AttackInput, Defense, HitStop, Grab and the bot |
-| **May this body act (attack / evade / block / sprint / vault / emote / rotate)?** | Each consumer reads its own hand-picked subset of ~12 Humanoid Attributes. The subsets differ. | §1.2 |
-| **What order do per-frame client systems run in?** | 37 independent frame callbacks (re-measured W0: 21 `BindToRenderStep` bindings plus 28 bare `Heartbeat`/`RenderStepped`/`PreRender` `:Connect` callbacks in 24 client files). **4 modules bind at `RenderPriority.Camera + 1`** (BlimpCamera, FlightCamera, ShiftLockCamera, FOVOffset), 2 at `Camera - 2` and 2 at `Camera - 1`. Roblox does not define the order within one priority. | §1.3 |
-| **Who writes the camera's CFrame?** | 6 writers (Blimp, Flight, LockOn, CameraShake, Intro, Placement). Mutual exclusion is done with flags each one reads from the others. FieldOfView and CameraOffset each already have a composer (`FOVOffset`, `CameraOffsetComposer`) that was built to end exactly this pattern. CFrame has none. | `grep "Camera.CFrame ="` |
-| **Who writes a joint's `Transform`?** | `TransformLayer` composes the *additive* layers (GuardStrain, HitFlinch). `GrabHoldPose`, `VesselArmPose` and `VesselPilotPose` write *absolute* Transforms around it. `VesselPilotPose.lua:156` writes `RootJoint.Transform`, which is the joint HitFlinchPose composes onto (inferred conflict on a pilot who gets hit). | `grep ".Transform ="` |
-| **What order do server per-frame systems run in?** | `CombatTick` owns combat. `GameplayEvents.HeartbeatTick` (13 subscribers) is a second ticker. `RunSystem` and `ParkourSystem` connect their own Heartbeat. Order between the three is connection order, and the CombatTick header itself has to explain it. | `CombatTick.lua:20-25`, `RunSystem.lua:698`, `ParkourSystem.lua:477` |
-| **How does a module announce a change?** | Three mechanisms: `GameplayEvents` (deferred BindableEvent), `CallbackList` (synchronous), and 6 hand-rolled listener arrays. No document says which one to use when. | `grep "changedListeners"` |
-| **Where does vehicle-mount bookkeeping live?** | CLAUDE.md says the vehicles "differ in exactly two files each". BlimpSystem and BoatSystem share **370 identical code lines**, and the two controllers share **204** (W0 re-measure with the same difflib method; was 374 / 208). `Server/Vessel` holds only `VesselAssembly` and `VesselMount`. | difflib over comment-stripped code |
+| **Which animation owns this body?** | `AnimationManager`'s header says "nothing else touches an AnimationTrack directly" and that it *replaced* CombatAnimator/FlightAnimator/EmoteAnimator. **All three still exist**, with their own `LoadAnimation`, their own Heartbeat and `DOMINANT_WEIGHT` peepholes. The header also cites `Client/FX/LocalAnimator.lua`, **which does not exist**. | `CombatAnimator.lua:270,386,520`, `EmoteAnimator.lua:151,214`, `FlightAnimator.lua:105,189` |
+| **May this body act?** | Each of at least 7 consumers reads its own subset of about 12 Humanoid Attributes, and the subsets differ. | §1.3 |
+| **What order do client frame systems run in?** | 21 `BindToRenderStep` bindings plus 28 bare `:Connect` callbacks. **4 modules share `Camera + 1`**, and 2 more pairs share a slot. | §1.4 |
+| **Who writes the camera's CFrame?** | 6 writers that exclude each other through flags. FOV and CameraOffset each have a composer; CFrame has none. | `grep "Camera.CFrame ="` |
+| **Who writes a joint's `Transform`?** | `TransformLayer` composes the additive layers. GrabHoldPose, VesselArmPose and VesselPilotPose write absolute values around it. `VesselPilotPose.lua:156` writes `RootJoint`, the joint HitFlinch composes onto (inferred conflict). | `grep ".Transform ="` |
+| **What order do server frame systems run in?** | Three tickers: `CombatTick`, `GameplayEvents.HeartbeatTick` (13 subscribers), and RunSystem/ParkourSystem each with their own Heartbeat. Their relative order is connection order. | `CombatTick.lua:20-25`, `RunSystem.lua:698`, `ParkourSystem.lua:477` |
+| **Where does vehicle-mount bookkeeping live?** | CLAUDE.md says the vehicles "differ in exactly two files". In fact BlimpSystem and BoatSystem share **370 identical code lines**, and the two controllers share **204**. | difflib |
 
-### 1.2 The restraint matrix nobody owns
-
-Read from source. Each row is a consumer; each column is an Attribute it consults.
+### 1.3 The restraint matrix nobody owns
 
 | Consumer | Frozen | Grabbed | Grabbing | Mounted | Flying | RootLocked | SwingRooted | Hitstun | Busy | EmoteLock | AirHeld | Domain |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `AttackRequestSystem.bodyGate` (server) | ✓ | via Grab | via Grab | ✓ | | | | via Damage | via Defense | | via AirCombo | |
 | `DefenseSystem.evadeBodyRefusal` (server) | ✓ | ✓ | ✓ | ✓ | | | | ✓ | ✓ | | ✓ | NoEvade |
-| `RunSystem` live sample (server) | ✓ | ✓ (+`GrabThrowing`) | | ✓ | ✓ | | ✓ | ✓ (`live.HitstunUntil`, `RunSystem.lua:398`) | ✓ | ✓ | | Rooted + speed scale |
+| `RunSystem` live sample (server) | ✓ | ✓ (+`GrabThrowing`) | | ✓ | ✓ | | ✓ | ✓ (`RunSystem.lua:398`) | ✓ | ✓ | | Rooted + speed scale |
 | `AttackInputClient` local gate | | ✓ | ✓ | ✓ | | | | | | | | |
 | `ParkourController` restraint (client) | ✓ | | | | ✓ | ✓ | | | | ✓ | | |
 | `ShiftLockCamera` (client) | | ✓ | | ✓ | ✓ | ✓ | | | | | | |
 | `EmoteSystem` (server) | | | | ✓ | | | | | | | | |
 
-W0 re-check (read from source): the attack, evade, AttackInputClient, ParkourController, ShiftLockCamera and EmoteSystem rows
-match (`AttackRequestSystem.lua:801,809`, `DefenseSystem.lua:736-743`, `AttackInputClient.lua:645-647`, `ParkourController.lua:234-237`,
-`ShiftLockCamera.lua:474-511`, `EmoteSystem.lua:268`). The RunSystem row was wrong in three cells (Hitstun, `GrabThrowing`, Domain), now fixed above
-(`RunSystem.lua:296-304,344-365`). Order differs by consumer: `bodyGate` checks Mounted then Frozen; `evadeBodyRefusal` checks
-Committed, then Grabbed/Grabbing/Mounted ("Restrained"), then Frozen.
+Source lines: `AttackRequestSystem.lua:801,809`, `DefenseSystem.lua:736-743`, `AttackInputClient.lua:645-647`,
+`ParkourController.lua:234-237`, `ShiftLockCamera.lua:474-511`, `EmoteSystem.lua:268`, `RunSystem.lua:296-304,344-365`. The consumers
+also check in different orders: `bodyGate` checks Mounted before Frozen, while `evadeBodyRefusal` checks Committed, then
+Restrained, then Frozen.
 
-Some of these gaps are deliberate. For example, the server is the authority for Frozen, so the client attack gate
-does not need it. Others look accidental. For example, the parkour client does not consult Mounted or Grabbed
-directly and relies on RootControlLocked covering both (inferred). **Nobody can tell which is which without reading
-seven files.** Every new restraint (Frozen landed this week) has to be threaded through each consumer by hand, and
-the 2026-10-25 audit's finding 11 ("Frozen doesn't stop combat") is exactly that thread being missed.
-
-### 1.3 Client frame order
+### 1.4 Client frame order
 
 ```
 Character+1   BlimpController, BoatController (pose)
 Camera-3      CameraFollow
-Camera-2      ShiftLockCamera.offset, CameraShake.undo          <- 2 at one slot
-Camera-1      LockOnController, CameraOffsetComposer            <- 2 at one slot
+Camera-2      ShiftLockCamera.offset, CameraShake.undo               <- 2 at one slot
+Camera-1      LockOnController, CameraOffsetComposer                 <- 2 at one slot
 Camera+1      BlimpCamera, FlightCamera, ShiftLockCamera, FOVOffset  <- 4 at one slot
 Camera+2      CameraShake
 Camera+3      ParkourCamera
-First         TransformLayer;  RENDER_PRIORITY (local) x3 pose FX; INPUT_HOLD_PRIORITY HitStop
-+ 28 Heartbeat/RenderStepped:Connect callbacks (24 client files, W0 count; was 18) with no stated order
+First         TransformLayer; RENDER_PRIORITY (local) x3 pose FX; INPUT_HOLD_PRIORITY HitStop
++ 28 bare Heartbeat/RenderStepped/PreRender callbacks in 24 client files, with no stated order
 ```
 
-### 1.4 Why things get recreated
+### 1.5 Untrusted data is decoded by hand, everywhere (NEW)
 
-From git history (168 commits, 83 deleted `src` files) and the memory log, the project's large features have
-repeatedly been **rebuilt instead of migrated**: combat (`cc05003`), the Move Editor (deleted and rebuilt
-2026-09-29), the admin panel, the character menu, the hotbar dock, the furnace gauge, and four animators (per
-AnimationManager's own header). The recurring shape:
+Every boundary where data arrives untrusted decodes it with inline `typeof` checks: remote arguments, DataStore records,
+settings and authored content.
 
-1. A new canonical module is written next to the old ones, with a header saying it replaces them.
+| Measure | Count |
+|---|---|
+| `typeof(x) ==/~= "..."` checks in server code | **~290** (PlayerDataSystem 79, MoveEditorSystem 32, DevMenuSystem 23, SettingsSystem 18, MoveRecordCodec 14, MoveRegistryManager 13, BugReportSystem 12, BloodlineManager 12, KitEditorSystem 10, AttackRequestSystem 10, ...) |
+| Hand-written NaN checks (`x ~= x`) | **68** |
+| Modules using `Shared/Sanitize.lua`, which exists *because* five modules each rediscovered the NaN trap | **6** |
+| `PlayerDataSystem.DecodeProfile` plus the migration chain, hand-decoding every domain's slice | lines **717-1093** |
+| Domains that own their own codec | **1** (`InventoryModel.Decode`, `PlayerDataSystem.lua:~857`) |
+
+Adding a profile field means editing `Types`, `CreateDefaultProfile`, `CopyProfile`, `EncodeProfile`, `DecodeProfile` and
+`Migrations`, all inside one 1878-line file that its own domain does not own. Inventory is the one domain that does it the
+cohesive way: it owns its own decoder.
+
+### 1.6 Every remote is assembled from four parts by hand (NEW)
+
+There are 132 `NetworkBridge.Create*` calls and **73 server handlers** (30 `OnServerEvent`, 43 `OnServerInvoke`). Each one
+hand-assembles the same parts: get the remote, check a `RateLimiter` (51 sites), check `typeof`/NaN per argument, wrap it in
+`RemoteHandler` (33 sites) or `AdminGate` (16 sites), and log the refusal. `BootManifest`'s `Remotes` list is a **second,
+hand-maintained copy** of which remotes each System creates. The result shape is mostly consistent: 224 `Success = ...` sites.
+
+### 1.7 A player's own state reaches their client through about 10 private channels (NEW)
+
+`CharacterSheetSystem`'s header describes the pattern and calls it the norm: *"Every other progression System that a UI needs
+already solved this the same way, by owning its own narrow remote."* Each channel has its own push on profile load, its own pull
+for a late-opening UI ("nothing caches an unheard RemoteEvent"), its own payload type and its own client mirror:
+
+| Slice | Server push | Client mirror |
+|---|---|---|
+| Qi, Meridian XP, Tier | `QiSystem:150`, `MeridianSystem:52`, `TierSystem:175` (+ Player Attribute `:164`) | `UI/State/ClientState` |
+| Emote unlocks + loadout | `EmoteSystem:176,186` | `ClientState` |
+| Bounty "marked" | `BountySystem:218` | `ClientState` |
+| Engagement | `EngagementSystem:295` | `ClientState` |
+| Character sheet (push + `GetSheet` pull) | `CharacterSheetSystem:147` | `CharacterMenuClient` (private) |
+| Art state (push + catalogue pull) | `ArtSystem:231` | `CharacterMenuClient` (private) |
+| Inventory snapshot | `InventorySystem:164` | `InventoryClient` (private) |
+| Weapon selection | `WeaponInventorySystem:169` | `WeaponInventoryClient` (private) |
+| Bounty board (push + pull) | `BountySystem:202` | **`BountyTab` screen, subscribing to a remote directly**, which ClientState's header forbids |
+
+`ChangeNotifier`, the module built for "push only when the value changed", has **one** consumer file outside its own. `ClientState`'s
+header is also stale: it says "ArtSystem ... remain empty `Init()`s", which is false.
+
+### 1.8 Input has a router, and most input bypasses it (NEW)
+
+`InputRouter`'s header: *"the ONE UserInputService.InputBegan/InputEnded connection for action dispatch."* Only **5 modules** bind
+through it (AttackInput, LockOn, Defense, ParkourInput, Settings). **About 20 still connect raw `UserInputService` events**: Blimp,
+Boat, GrabInput, RunController, ShiftLockCamera, CharacterMenu, Inventory, BugReport, EmoteWheel, Onboarding, FpsCounter,
+ParkourDebug and the DevTools. Each of those re-solves `gameProcessed`, the modal block and gamepad chords, or doesn't.
+
+- **`FlightController.lua:247-263` hard-codes W/A/S/D/Space/LeftControl with `IsKeyDown` and has no gamepad path at all.** Flight
+  ignores rebinds and, inferred from source, cannot be flown on a controller. That is a real player-facing gap; see the escalation
+  in W12.
+- Debug keys are declared in three places: `DebugConstants` (F3, F7), `KeybindConstants` (F5, F8) and `ParkourConstants` (F6). No
+  check catches a clash.
+- Settings flow **outward from a hub**. `SettingsClient` requires the consumers it configures (ParkourController, RunController,
+  CameraShake, FOVOffset, BlimpCamera, Chrome) and pushes values into each through `apply*Settings`. A new setting means editing
+  the hub and the consumer, and the hub's require list grows with every feature.
+
+### 1.9 Content registries share a shape nobody wrote down (NEW)
+
+`MoveRegistryManager`, `RaceManager` and `BloodlineManager` each expose `Validate / List / Get / Upsert / Delete`, and each sits on a
+default layer (`DefaultMoveRegistry`, `DefaultBloodlineRegistry`), an authored DataStore layer (`MoveEditorSystem`, `KitEditorSystem`,
+which share `AuthoredContentStore`) and, for moves, a shipped-source layer (`AuthoredMoveLibrary`). `EmoteRegistry` (`Exists / Get / GetAll
+/ Validate`), `ItemCatalog` and `ArtTreeManager` are a third and fourth shape. Each layer stack is resolved by hand in its own module.
+Only moves have `OnChanged`.
+
+### 1.10 Per-player lifecycle and tests are re-scaffolded each time (NEW)
+
+- **46 `[Player]`-keyed tables in 28 server files**, cleared by **47 hand-written `PlayerRemoving`/`BindAllPlayers` handlers**. The
+  codebase audit found no leak, but every new System writes this scaffold again. **18** Systems subscribe to
+  `PlayerDataSystem.OnProfileLoaded` and **12** poll `IsLoaded`, each with its own "not loaded yet" branch.
+- **Client boot has no manifest.** `Main.client.lua` has 47 `boot()` calls in a hand-ordered list. The server has `BootManifest` plus
+  `AssertBootComplete`.
+- **Tests: 20 specs each define their own `makeDummy` (11) / `makeRig` (7) / `makeCharacter` (3).** 9 specs chain 4-6 `X.Reset()` calls
+  in their own order. `TestHelpers/Fixtures.lua` has **0** users. The cohesion audit found that **34 of the 43 red tests were fixture
+  drift**: stand-ins missing an API, combatants never registered, identity-less round trips. That is exactly what duplicated rig
+  builders produce.
+- **Engine-capped resource with no budget:** three modules create their own `Highlight` instances (HitFlash, SwingTellFX,
+  AirComboFX). Roblox caps visible Highlights at 31 (inferred risk in a crowded fight, not measured).
+
+### 1.11 Why things get recreated
+
+From git history (168 commits, 83 deleted `src` files) and the memory log, combat, the Move Editor, the admin panel, the character
+menu, the hotbar dock, the furnace gauge and four animators were each **rebuilt rather than migrated**. The recurring shape:
+
+1. A canonical module is written beside the old ones, with a header saying it replaces them.
 2. The two or three easiest consumers move to it.
-3. The session ends. The hard consumers stay on the old path. The header is now false.
+3. The session ends. The hard consumers stay on the old path, and the header is now false.
 4. The next session finds two systems for one job, trusts neither, and writes a third.
 
-AnimationManager (3 of 6 animators never moved, a cited file that does not exist), CallbackList (6 copies left), the
-Vessel layer (≈580 shared lines left), and `CombatSystem` (162 stale comment references) are all stuck at step 3.
-The fix is **finishing**, plus a rule and a gate that make step 3 an unfinished change rather than a stopping point.
+Stuck at step 3 today: AnimationManager, InputRouter, ClientState, Sanitize, ChangeNotifier, the Vessel layer, and `CombatSystem`
+(162 stale comment references). §1.5-1.10 add the second cause: **when the shared parts are only parts, building a feature from
+scratch is cheaper than finding and assembling them.** The foundations in §2 make "declare it" cheaper than "build it".
 
-## 2. Workstreams
+---
 
-Ordered by leverage ÷ risk. Each one ends with every consumer moved, the old path deleted, headers true, and a gate
-that stops it regressing. A workstream that cannot reach that end stops and escalates. It must not leave a fourth
-half-migration behind.
+## 2. The target: ten foundations
 
-### W0. Baseline and the ownership map (no behaviour change)
+Every new feature should be made of **declarations against these**, not new plumbing. Each row names the one module that owns the
+job and the existing modules it composes. Nothing here replaces a module that works; each foundation *assembles* the parts that
+already exist.
 
-1. Run the full gate list and the suite. Record pass/fail. The last known baseline is **3538 / 7**: feint ×2 and
-   TrainingBot ×5, all pre-existing. Re-measure it; do not trust this number.
-2. Re-run every count in §1 against the current tree (the branch moves). Correct this doc wherever a count changed.
-3. Add a **"Who owns what"** section to `docs/software-architecture.md`. It is a table of *question → owning module →
-   how a consumer asks*, covering the rows in §1.1 plus remotes, profile writes, kill credit and the frame phases.
-   CLAUDE.md's table maps *pattern → module*. This one maps *question → owner*, and it is the first thing a future
-   agent reads before creating a module. Mark rows that this plan has not finished yet as `(migrating: Wn)`.
+| # | Foundation | Owns | Composes (existing) | Replaces (hand-assembly) |
+|---|---|---|---|---|
+| F1 | `Shared/Schema.lua` | Declarative decode + validate of untrusted data: `String(max)`, `Number(min,max)`, `Int`, `Enum`, `Array`, `Map`, `Record`, `Optional`, `Default`. `Schema.Decode(shape, raw) -> (value?, reason?)`. NaN-safe by construction. | `Sanitize` (becomes its primitive layer) | ~290 `typeof` checks, 68 NaN checks, per-module `Validate` bodies |
+| F2 | `Server/Network/Endpoint.lua` | `Endpoint.Event{ Name, PerSecond, Args = Schema, Admin?, Handler }` / `Endpoint.Function{ ..., ErrorResult }`: creates the remote, rate-limits, decodes args, applies AdminGate, pcall-wraps, logs refusals, and **registers itself with BootManifest** | `NetworkBridge`, `RateLimiter`, `RemoteHandler`, `AdminGate`, F1 | 73 hand-assembled handlers; the hand-kept `BootManifest.Remotes` lists |
+| F3 | `Server/Data/ProfileSlice.lua` | Each domain declares its slice: `ProfileSlice.Define{ Key, Schema, Default, Migrations }`. PlayerDataSystem composes the slices for default/copy/encode/decode/migrate, and keeps locking, saving and generations. | F1, `InventoryModel` (the precedent) | `DecodeProfile`'s per-field blocks; edits to PlayerDataSystem for every new field |
+| F4 | `Server/Net/PlayerState.lua` + `Client/State/ClientState` | One reliable channel for **a player's own state**. A server domain calls `PlayerState.Publish(player, slice, value)`, deduped by ChangeNotifier. A snapshot goes out on join and on request, so the late-UI pull is solved once. The client mirror is `ClientState.Observe(slice)`. | `ChangeNotifier`, `NetworkBridge`, F1 (client-side decode) | ~10 push+pull channel pairs (§1.7), three private client mirrors, BountyTab's direct remote |
+| F5 | `Shared/Combat/BodyRestraint.lua` | "May this body *verb* now", for Attribute-only restraints, from one policy table | `AttributeConstants`, `FrozenBody`, `Invulnerability`, `ParkourOwnership`, `DomainRules` | 7+ consumers' private restraint subsets (§1.3) |
+| F6 | `Client/FrameOrder.lua` + `Server/ServerTick.lua` | One named, ordered list of frame slots per side; no two share a value | `CombatTick` (becomes one phase group of ServerTick, or ServerTick's model) | 3 server tickers; 8 clashing client priorities |
+| F7 | Body presentation owners: `AnimationManager` (+ `LocalAnimator`), `TransformLayer` (+ absolute claims), `CameraRig` | One owner each for tracks, joint Transforms and camera CFrame, all using claims, the same shape as `RootControl` | existing modules | 3 rogue animators, 3 absolute pose writers, 6 camera writers with flag peepholes |
+| F8 | `InputRouter` (finished) + `Client/Settings/SettingsStore.lua` | All input through router layers (`Gameplay`, `Vehicle`, `Menu`, `Debug`, `TextEntry`); debug keys in one table, with a clash check; settings as an observable store that consumers subscribe to | `KeybindManager`, `Chord`, `Analog`, `InputDevice` | ~20 raw input connections, hard-coded flight keys, the settings push-hub |
+| F9 | `Server/Content/ContentRegistry.lua` | `ContentRegistry.New{ Kind, Schema, Layers }` with ordered layer resolution (authored > shipped > default), `OnChanged`, `List/Get/Upsert/Delete` | F1, `AuthoredContentStore`, `CallbackList` | Per-kind hand-resolved layer stacks (moves, races, bloodlines; emotes/items later) |
+| F10 | `Shared/PlayerScoped.lua` + `Client/Config/ClientBootManifest.lua` + `Tests/TestHelpers/{Rig,CombatHarness}.lua` | Per-player tables that clear themselves on leave and expose a profile-ready gate; a declared client boot order; one rig builder and one ordered combat reset for specs | `PlayerLifecycle`, `BootManifest` (as the model), `WeaponFixture` | 46 tables + 47 leave handlers; 47 hand-ordered client boots; 20 private rig builders and 9 private reset chains |
 
-### W1. Finish CallbackList (mechanical; low risk)
+**Layering rules for the foundations.** `Shared/*` foundations require nothing in `Server/` or `Client/`. F2/F3/F4 server halves
+live under `Server/` (F2 needs `AdminConfig`). F5 reads Attributes only and never requires a System. F4 carries **state**, never
+**events**: hits, swings, cues and realm messages stay on their existing remotes, reliable or unreliable as they are today.
 
-Move the six hand-rolled lists onto `CallbackList`: `DefaultMoveRegistry.lua:115`, `MoveRegistryManager.lua:58`,
-`HotbarBindings.lua:65`, `InputDevice.lua:153`, `KeybindManager.lua:71`, and `ParkourSystem.lua:109`
-(`actionStartedCallbacks`). Keep each public `OnX(fn) -> disconnect` signature identical. Add a `:Clear()` call
-wherever a spec resets one. `Logger.entryListeners`, `GameplayEvents.heartbeatHandlers` and
-`CombatAnimator.perLifeResetHandlers` are keyed differently: inspect each, and either convert it or note in its
-header why it stays. Afterwards, update the CallbackList row in CLAUDE.md, which currently lists the remaining copies.
+**Wire and storage compatibility is absolute.** Every existing remote name, payload shape, DataStore key, persisted field name
+and `SchemaVersion` stays byte-identical unless an escalation decides otherwise. A foundation that cannot express an existing shape
+takes an explicit escape hatch for it (documented in the foundation's header). Never change the shape to fit the foundation.
 
-### W2. Finish the Vessel layer (medium; server + client)
+---
 
-1. Server: create `Server/Vessel/VesselMountRegistry.lua` (`New(config)`, same shape as its siblings). It owns
-   `sweepStaleMounts`, `onHullTouched`, `clearInheritedInstances`, `cancelPendingWorldEntry`,
-   `broadcastMountChanged`, `sendExistingMounts` and `mount`, with the 2-7-line differences passed in as config
-   or callbacks. BlimpSystem and BoatSystem bind it. Also: `BlimpDrive.ClampLead`/`BoatDrive.ClampLead`.
-2. Client: move `matchesControl`, `refreshPoseBinding` and the raw `CharacterAdded` rebind (via `PlayerLifecycle`)
-   from Blimp/BoatController into a shared `Client/Vessel/` helper. **A new top-level `Client/Vessel` folder needs a
-   `test.project.json` entry.**
-3. Done when the comment-stripped shared-line count between each pair is near zero, apart from the drive
-   integrator and the mode machine, which really are vehicle-specific. CLAUDE.md's "exactly two files" claim is then
-   true again.
+## 3. Spines and workstreams
 
-### W3. One body-restraint vocabulary (high leverage; design-sensitive)
+A **spine** is one session's worth of work. Each workstream inside one ends with every consumer moved, the old path deleted, headers
+true, and a gate. A workstream that cannot reach that point is reverted or narrowed, then escalated. It is never left half-converted.
 
-Goal: "may this body do *verb* right now" for **Attribute-only** restraints has one answer per verb, in one place.
+### Spine 0. Baseline and the ownership map (DONE: W0, W1)
 
-1. **Tabulate first, code second.** Extend §1.2 into the full verb × restraint matrix for every consumer, with a
-   `file:line` per cell. Mark each blank cell as *deliberate* (cite the comment or reason) or *unexplained*.
-2. Create `Shared/Combat/BodyRestraint.lua`: a pure module that reads Attributes and never requires a System (the
-   same rule `DomainRules` and `ParkourOwnership` follow). It exposes `Of(humanoid, now) -> RestraintSet` and
-   `Refusal(humanoid, verb, now) -> string?`. The verb → refused-restraints policy is one table in one Constants
-   module. Fold `FrozenBody`, and possibly `Invulnerability`, into it, or have them delegate to it.
-3. Migrate consumers so that **every current answer is preserved bit-for-bit**, including the gaps that look wrong.
-   Each *unexplained* gap becomes an escalation: a binary choice with the consequence of each option. Do not change
-   it silently.
-4. **Leave alone:** the record-backed server gates (`DefenseSystem.CanAttack`, `DamageSystem.CanAttack`,
-   `GrabSystem.CanAttack`, `AirComboSystem.CanAttack`). They own state with timestamps and are the documented seams.
-   `BodyRestraint` sits beside them for the attribute-only part; it does not replace them. `bodyGate`'s order of
-   refusals must not change, because the refusal reason reaches the client and `TransientRefusals`.
-5. Gate: a spec that pins the policy table, and an extension to `check-single-writers.py`, or a new check, that
-   fails on a new `GetAttribute(AttributeConstants.<restraint>)` outside `BodyRestraint` and its listed exemptions.
+- **W0 (done).** Baseline, re-measure, "Who owns what" in `software-architecture.md`.
+- **W1 (done).** CallbackList finished (7 converted, 3 justified).
 
-### W4. Client frame order and camera arbitration (medium; REQUIRES PLAYTEST)
+### Spine 1. Safe ground: the test harness (do first; makes every later spine cheaper to verify)
 
-1. Create `Client/FrameOrder.lua` (or a constants table in `Client/Camera`): one ordered, named list of every
-   RenderStep slot, as `{ Name, Priority }`. Every `BindToRenderStep` reads its slot from that list. **Two modules
-   never share a priority value.** Where four share `Camera + 1` today, read each module to work out the order
-   that is actually *required* (who reads whose write), and assign distinct values. Record the reasoning in the
-   list, the same way `CombatTick.PHASES` does.
-2. Do the same for the 28 bare `Heartbeat`/`RenderStepped:Connect` callbacks only where one reads state another
-   writes in the same frame. Leave independent ones where they are.
-3. Camera CFrame: write the arbitration down before writing code. The three follow-style writers (Blimp, Flight,
-   ShiftLock) are mutually exclusive modes. Shake is additive. LockOn pre-aims. Intro and Placement are Scriptable
-   takeovers. If a mode arbiter (`CameraMode.Claim(owner)`, the same shape as `RootControl`) replaces the flag
-   peepholes with no behaviour change, build it. If it does not, stop at the priority table and escalate.
-4. Gate: `scripts/check-render-order.py` fails on a `BindToRenderStep` whose priority does not come from the list,
-   and on two entries with one value.
+- **W2. `TestHelpers/Rig.lua`.** One R6 rig builder (`Rig.Dummy{ Health?, Attributes?, Parent? }`, `Rig.Character`, `Rig.FakePlayer`
+  where the harness allows it), with an Attribute surface and a real `RootJoint` under `HumanoidRootPart`. The cohesion audit found
+  one spec looking for it under the wrong part. Migrate the 20 specs' private builders, one folder per commit. Delete
+  `TestHelpers/Fixtures.lua`, or give it a user.
+- **W3. `TestHelpers/CombatHarness.lua`.** `CombatHarness.Reset()` resets every combat layer **in `CombatTick.PHASES` order**, plus
+  WeaponFixture's install-once rule. `CombatHarness.Combatant(rig, weaponId?)` registers a body with every layer that needs it,
+  ending the "unregistered combatant" fixture class. Migrate the 9 reset chains.
+- Gate: `check-spec-literals.py` gains a rule that fails on a new `local function make(Dummy|Rig|Character)` in a spec.
+- Done when the suite's failure set is unchanged (7) and no spec builds its own rig.
 
-### W5. Finish AnimationManager (highest risk; REQUIRES PLAYTEST; do last)
+### Spine 2. Data contracts: Schema, profile slices, endpoints (highest leverage; strictly in this order)
 
-1. **Spike, no commit:** read AnimationManager's layer/claim model and its six consumers. Then decide, and write the
-   decision down: either (a) locomotion, armed idle, emotes and flight become claims on named layers, or (b) one of
-   them has a real reason to stay outside (for example, CombatAnimator's beat-the-default-Animate-script weight
-   trick needs something AnimationManager lacks).
-2. If (a): create the `LocalAnimator` the header promises, as the local rig's single AnimationManager instance plus
-   its layer names. Migrate Emote, then Flight, then CombatAnimator locomotion and armed idle, one commit each.
-   Delete `AnimationTrackUtil`'s evaluator once nothing uses it. Remove every cross-module peephole (the `Flying`
-   read in CombatAnimator, `SetLocomotionSuppressed`). `HitStop` freezes through the manager.
-3. If (b) for any of them: correct AnimationManager's header so it states the exception and its reason. A header
-   that is true and narrower beats a header that is broad and false.
-4. Read `docs/animation-systems.md`, and the memories on Core priority, `toolnone`, and server one-shots, before
-   touching priorities.
-5. Playtest checklist: walk, run, armed run, armed idle with a drawn weapon, each emote (loop and one-shot), take
-   off / cruise / boost / land, hit-stop during each, die during each, respawn.
+- **W4. F1 `Schema`.** Build it with `Sanitize` as its number/string primitives, and a spec per combinator, including NaN, ±inf,
+  oversize strings, wrong-key maps and metatable'd tables. Convert **`SettingsSystem`'s decoders first** (18 checks, self-contained),
+  then `MoveRecordCodec`, then `BloodlineManager`/`RaceManager`/`KitValidation`'s `Validate`. Each conversion has a spec showing
+  the old and new decoders give identical results on a corpus (valid record, every single-field corruption, and `nil`).
+- **W5. F3 `ProfileSlice`.** Move one slice at a time out of `DecodeProfile`/`CreateDefaultProfile`/`CopyProfile`/`EncodeProfile`
+  into its domain: emotes → `EmoteSystem`, arts → `ArtSystem`, bloodlines → `BloodlineSystem`, attributes → `CharacterCreationSystem`,
+  settings → `SettingsSystem`, inventory (already a codec) → `InventorySystem`. **Migrations stay keyed by version in one ordered
+  chain**: a slice contributes steps; it does not own the version number. Gate: a round-trip spec over a frozen corpus of real-shaped
+  v1..vN records (write the corpus *before* the first move), asserting byte-identical `EncodeProfile` output before and after each
+  commit.
+- **W6. F2 `Endpoint`.** Convert the Systems with the most handlers first (Settings, Emote, Art, Inventory, Bounty,
+  CharacterCreation, then combat's `AttackRequestSystem`/`DefenseSystem`/`GrabSystem`, then the dev tools). Endpoint registers
+  each remote with `BootManifest`, and the manifest's hand list is deleted once every System is converted; `AssertBootComplete`
+  keeps its job. Keep `ServerHopSystem`'s documented `(boolean, string?)` exemption, or give `Endpoint.Function` a multi-return
+  form. Gate: `scripts/check-endpoints.py` fails on a bare `OnServerEvent:Connect` / `OnServerInvoke =` outside `Endpoint`.
+- Done means: `typeof` checks in server code drop by at least 70%, `x ~= x` checks drop to under 5 (all inside `Sanitize`/`Schema`),
+  and no new profile field needs a PlayerDataSystem edit.
 
-### W6. Guardrails against the next rebuild (process; do alongside W0, finish last)
+### Spine 3. One replicated player state (after Spine 2's W4; needs F1 on the client)
 
-1. **CLAUDE.md, new short section "Extend, migrate, never fork".** Before creating a module, check the ownership map
-   (W0) and CLAUDE.md's table. A new module that *replaces* an existing one is one change: every consumer moves and
-   the old module is deleted in the same branch, or the new one is not started. A from-scratch rebuild of an existing
-   feature needs the user's explicit go-ahead and a written migration list.
-2. `scripts/check-duplicate-bodies.py`: the function-body hash used for §1.1, run as a ratchet. Its current count is
-   the ceiling, and it may only go down. Ignore bodies under 6 statements.
-3. `scripts/check-orphans.py`: the A5 orphan scan from the cohesion audit, which is still not a script. It fails on a
-   module with no non-spec inbound require, except for a listed allowlist (`Main` entry points, `AuthoredMoves/`).
-4. `scripts/check-header-claims.py` (optional, only if cheap): fails when a header cites a `Client/...`/`Server/...`/
-   `Shared/...` `.lua` path that does not exist. That is how `LocalAnimator` went unnoticed.
-5. In `software-architecture.md`, state which event mechanism to use when: `GameplayEvents` for deferred,
-   cross-System, server-wide facts; `CallbackList` for a module's synchronous extension point; a Humanoid Attribute
-   for state that crosses the client/server boundary or a layer that may not require the other.
+- **W7. F4 `PlayerState` + `ClientState.Observe`.** First write the slice table (§1.7) with each slice's current cadence, size and
+  pull path. Then convert one slice per commit, **keeping the old remote alive and firing in parallel** until the client side of that
+  slice reads from `ClientState`. Then delete the old remote and its `BootManifest` entry. Order: Qi → MeridianXP → Tier (keep the
+  `CultivationTier` Player Attribute: combat reads it), Emote, Bounty marked, Engagement, then the private mirrors (CharacterSheet,
+  ArtState, Inventory, WeaponInventory) and BountyTab's board. Each slice keeps its payload type.
+- **W8. Client consumers read `ClientState` only.** `CharacterMenuClient`, `InventoryClient`, `WeaponInventoryClient` and `BountyTab`
+  stop holding mirrors. Their *actions* (UnlockArt, EquipArt, inventory actions) stay as `Endpoint.Function`s, and the result
+  arrives as a state update rather than a bespoke reply where that is already how the UI behaves. Correct `ClientState`'s header.
+- Gate: `scripts/check-player-state.py` fails on a `:FireClient(player, ...)` whose remote is declared as a state slice anywhere
+  but `PlayerState`.
+- **REQUIRES PLAYTEST:** join, open each menu late, die and respawn, rejoin a different server, and watch the bars for one frame of
+  defaults.
+
+### Spine 4. Body arbitration (revision 1's W3; parallel with Spine 2 and Spine 3)
+
+- **W9. F5 `BodyRestraint`.** Unchanged from revision 1. **Tabulate first** (verb × restraint, `file:line` per cell, each blank
+  marked *deliberate* or *unexplained*), then the pure module plus a policy table, then one consumer per commit, preserving every
+  answer and `bodyGate`'s refusal order and reason strings. The record-backed gates (`DefenseSystem.CanAttack`,
+  `DamageSystem.CanAttack`, `GrabSystem.CanAttack`, `AirComboSystem.CanAttack`) stay as they are. Each *unexplained* gap becomes an
+  escalation. The two candidates already noted are at the end of this doc.
+
+### Spine 5. Frame, camera, pose and animation (revision 1's W4 + W5; REQUIRES PLAYTEST)
+
+- **W10. F6 frame order, both sides.** Client: `FrameOrder` (named slots, no shared values, a "reads what X wrote" line per entry),
+  then every `BindToRenderStep` reads its slot from it; bare callbacks move only where a same-frame dependency exists. Server:
+  `ServerTick` with phase groups `Movement` (RunSystem, ParkourSystem), `Combat` (CombatTick's PHASES, unchanged) and `World`
+  (today's `GameplayEvents.HeartbeatTick` subscribers), preserving today's connection order exactly. Then delete the two bare
+  Heartbeats. Gate: `scripts/check-render-order.py`, plus a `ServerTick.Register` assert like CombatTick's.
+- **W11. F7 presentation owners.** (a) `CameraRig` with mode claims (`Follow`, `ShiftLock`, `Flight`, `Blimp`, `Scriptable`) and
+  additive layers (shake), built only if it removes the flag peepholes with no behaviour change; otherwise stop at the priority
+  table and escalate. (b) `TransformLayer` gains *absolute* claims ranked above additive layers, so Grab/Vessel poses and HitFlinch
+  stop fighting over `RootJoint`. (c) AnimationManager finished: run the revision-1 spike, then (a) migrate Emote → Flight →
+  CombatAnimator into `LocalAnimator` layers, or (b) narrow the header per exception. Delete `AnimationTrackUtil`'s evaluator once
+  nothing uses it.
+- Playtest checklist: walk, run, armed run, armed idle with a drawn weapon, each emote, take off / cruise / boost / land, hit-stop
+  during each, die during each, respawn, lock-on while shift-locked, a blimp pilot taking a hit, an intro camera after respawn.
+
+### Spine 6. Input and settings (parallel with Spines 2-5)
+
+- **W12. F8 InputRouter finished.** Add router layers where they are missing (`Vehicle`, `Menu`, `Debug`, `TextEntry`), then move
+  every raw `UserInputService` dispatch onto the router: Grab, Run, ShiftLock, CharacterMenu, Inventory, BugReport, EmoteWheel,
+  Onboarding, then Blimp/Boat (shared with W15). **Continuous axis reads** (vehicle throttle, flight) go through `Analog` plus
+  `KeybindManager`, not `IsKeyDown`. Text-field focus, drag and scrub inside DevTools/NumericField/TimelineBar are *UI gestures*, not
+  actions: they stay raw, listed as exemptions in the router header. **Escalation (default: fix):** flight's hard-coded keys become
+  bound actions with a gamepad path. That is a behaviour change, so it is a player decision; see Escalations.
+- **W13. One debug-key table.** Move F3/F5/F6/F7/F8 into one `DebugKeys` table with a clash check against `Constants.Keybinds` and
+  the gamepad chords. This makes the F6 memory note obsolete.
+- **W14. `SettingsStore`.** `SettingsStore.Observe(path, fn)` / `Get(path)`. Consumers subscribe to their own settings, and
+  `SettingsClient` keeps persistence, the coalescer and the screen. Its `apply*Settings` functions and its consumer requires are
+  deleted. Gate: `SettingsClient` may not require a gameplay module.
+
+### Spine 7. Vehicles finished (revision 1's W2)
+
+- **W15.** `Server/Vessel/VesselMountRegistry` plus a shared `Client/Vessel` helper (new top-level folder → `test.project.json`);
+  `ClampLead` shared. Done when each pair's shared-line count is under 40, outside the drive integrator and the mode machine. Vehicle
+  input lands on W12's `Vehicle` router layer.
+
+### Spine 8. Content, lifecycle, boot (after Spine 2)
+
+- **W16. F9 `ContentRegistry`.** Write the layer model down first (default / shipped / authored, and which wins, per kind, read from
+  source). Then bind moves (`DefaultMoveRegistry` + `AuthoredMoveLibrary` + `MoveRegistryManager` behind one `Get`, the lookup order
+  `AttackCatalog` and `MovePresentationSystem` already use), then races and bloodlines. **Persistence is untouched**: the same
+  `AuthoredContentStore` fields and DataStore keys. Emotes and items are converted only if the shape fits without an escape hatch.
+- **W17. F10 `PlayerScoped`.** `PlayerScoped.New(name)` → a table that clears itself on leave, plus `PlayerScoped.WhenProfileReady(fn)`
+  wrapping `OnProfileLoaded`/`IsLoaded` with one "not loaded yet" policy. Convert the 46 tables, one System per commit. Each System's
+  leave handler is deleted when it only cleared tables, and kept when it does other work (saves, releases, broadcasts).
+- **W18. `ClientBootManifest`.** Declare the client's 47 boots as data (`Name`, `Module`, `After`), and boot it through the existing
+  `boot()` wrapper. The order is today's exactly. Add a spec that fails on a client module with a `Start` that is neither in the
+  manifest nor listed as manual.
+- **W19. Highlight budget.** HitFlash, SwingTellFX and AirComboFX take Highlights from one owner (an `FXPool` lease) with a cap below
+  the engine's.
+
+### Spine 9. Guardrails and the cohesion ratchet (draft alongside Spine 1; finish last)
+
+- **W20.** CLAUDE.md, new section **"Extend, migrate, never fork"**. Before creating a module, check the ownership map and the
+  foundations table (§2). A replacement module moves every consumer and deletes the old one in the same branch. A from-scratch
+  rebuild of an existing feature needs the user's go-ahead and a written migration list. Add the ten foundations as rows in
+  CLAUDE.md's shared-module table, as they land.
+- **W21. `scripts/cohesion-report.py`.** One script, one table, every ratchet below. Each measure has a stored ceiling and fails if
+  it rises. The existing checks stay as they are.
+
+| Ratchet | Now | Target |
+|---|---|---|
+| Duplicate function bodies (≥6 statements) | 10 | ≤ 4 |
+| `typeof` checks in server code | ~290 | ≤ 90 |
+| `x ~= x` outside Sanitize/Schema | 68 | 0 |
+| Bare `OnServerEvent:Connect` / `OnServerInvoke =` outside Endpoint | 73 | 0 |
+| Player-state slices on private remotes | ~10 | 0 |
+| Raw `UserInputService` dispatch outside InputRouter + exemptions | ~20 files | 0 |
+| Direct restraint-Attribute reads outside BodyRestraint + exemptions | 7+ consumers | 0 |
+| Modules sharing a RenderStep priority | 8 | 0 |
+| Animators bypassing AnimationManager | 3 | 0, or documented exceptions |
+| `[Player]` tables outside PlayerScoped | 46 | 0, or documented exceptions |
+| Spec-private rig builders | 20 specs | 0 |
+| Headers citing a non-existent module | ≥1 | 0 |
+| Modules with no non-spec inbound require | 1 (`HoverLabel`) | 0 |
+| Blimp/Boat shared code lines | 370 / 204 | < 40 each |
 
 ### Deliberately out of scope
 
-- Every design escalation still open from the 2026-10-25 audits: faction assignment, `CombatPowerConstants.Enabled`,
-  the held-hit body gate, blockcounter, feint lockout, server boot isolation. These are decisions for the user, not
-  cohesion work.
-- The progression stubs (Absorb, Awakening, Achievement, Territory, World, Faction). Those are features.
-- The frozen combat feel skeleton (timings, windows, rewind caps). No workstream here may change a number.
-- Splitting big files (A5), except `AttackRequestSystem`'s `PressBuffer`, and only if W3 is already editing that
-  region.
-- Renames such as `Roll` → `Evade` in FX. A rename gets its own commit, never mixed into a migration.
+- Every open design escalation from the 2026-10-25 audits (faction, `CombatPowerConstants.Enabled`, the held-hit gate,
+  blockcounter, feint lockout, server boot isolation). These are the user's decisions.
+- New features, including the progression stubs (Absorb, Awakening, Achievement, Territory, World, Faction). The foundations make
+  them cheaper to build later; building them is not this plan.
+- The frozen combat feel skeleton. No workstream changes a timing, window, cap or cooldown.
+- Changing any wire name, payload shape, DataStore key or persisted field name (§2).
+- Mixing renames with structure. A rename (`Roll` → `Evade`) gets its own commit.
 
-## 3. Order and dependencies
+---
+
+## 4. Order and parallelism
 
 ```
-W0 ─┬─ W1 ─┐
-    ├─ W2 ─┼─ W6 (finish)
-    ├─ W3 ─┤
-    └─ W4 ─┴─ W5
+Spine 0 (done)
+   │
+Spine 1 (harness) ──┬── Spine 2 (Schema → ProfileSlice → Endpoint) ── Spine 3 (PlayerState) ── Spine 8 (content, lifecycle, boot)
+                    ├── Spine 4 (BodyRestraint)
+                    ├── Spine 6 (input, settings) ── Spine 7 (vehicles)
+                    └── Spine 5 (frame, camera, pose, animation; last of the client spines; playtest)
+Spine 9 drafted with Spine 1, finished after everything else.
 ```
 
-W1-W4 touch disjoint files, apart from CLAUDE.md and `software-architecture.md`, which W0 and W6 own; append to those
-rather than rewriting them. W5 goes last because it shares `HitStop`, the pose FX and the frame order with W4.
+Spines 2, 4 and 6 touch disjoint files and can run as **parallel sessions in separate worktrees**. Spine 3 needs W4's `Schema` on the
+client. Spine 7 needs W12's `Vehicle` layer. Spine 5 goes last on the client, because it shares HitStop, the pose FX, ShiftLock and the
+frame order with Spines 4 and 6. CLAUDE.md and `software-architecture.md` are append-only for every session. Spine 9 owns their
+final wording.
 
-## 4. Done means
+## 5. Done means
 
-| Measure | Now | Target |
-|---|---|---|
-| Hand-rolled listener lists | 6 (+3 to judge) -> **0 unjustified after W1** (3 justified in headers) | 0, or each one justified in its header |
-| Blimp/Boat shared code lines | 370 server / 204 client | under 40 each |
-| Modules at a shared RenderStep priority | 8 (in 3 slots) | 0 |
-| Consumers reading restraint Attributes directly | 7+ | `BodyRestraint` plus listed exemptions |
-| Animators that bypass AnimationManager | 3 | 0, or each one documented as an exception |
-| Headers citing a module that does not exist | at least 1 (`LocalAnimator`) | 0, gated |
-| Suite | 3538 / 7 (re-measured W0: 3538 / 7, same) | no new failures; the 7 unchanged unless fixed on purpose |
-| Gates | 7 scripts | +3 to 4 ratchets (duplicates, orphans, render order, header claims) |
+The game is cohesive in this sense when **adding a typical feature is only declarations**. Take an "Absorb" feature: its profile
+field is a `ProfileSlice`, its requests are `Endpoint`s with a `Schema`, its HUD value is a `PlayerState` slice the UI `Observe`s, its
+gates are a `BodyRestraint` verb, its per-player bookkeeping is `PlayerScoped`, its frame work is a `ServerTick` phase, its input is a
+router binding, and its specs build rigs through `Rig`. The feature should need **no edit** to PlayerDataSystem, BootManifest,
+SettingsClient, ClientState's bootstrap or any other domain's file. Every ratchet in W21 is at or below target.
 
+---
 
 ## Status (pass of 2026-10-25)
 
-Scope of this session: W0 and W1 only. W2-W6 are **not started**.
+Scope of this session: W0 and W1 only. W2-W6 are **not started**. (Revision-1 numbering: revision 1's W2-W6 are revision 2's W15,
+W9, W10-W11 and W20-W21.)
 
 | Workstream | State | Commits |
 |---|---|---|
@@ -296,8 +447,89 @@ file once CR is ignored (plain `--check` fails on the CRLF checkout, as CLAUDE.m
 and a glyph refresh after a rebind or device switch (listener plumbing only; confirm in Studio that rebinding a key updates
 the on-screen glyph), and the Move Editor's catalogue push after an edit (MovePresentationSystem listens to both registries).
 
+## Status (Spine 1, 2026-10-25)
+
+Scope of this session: Spine 1 (W2, W3) only. Studio was closed (`tasklist | findstr RobloxStudio` empty). Nothing pushed.
+
+**Baseline re-measured before any change (ran):** 3538 passed / 7 failed, identical to the W1 number. Failing set, by assertion
+fingerprint and by the tree's named failing nodes: the two `AttackRequestSystem -- feint` specs, plus five `true` vs `false`
+(the TrainingBot ones, matched by shape; the tree truncates after `Combat`).
+
+| Workstream | State | Commits |
+|---|---|---|
+| W2 `Rig.lua` + spec migration | done | `5710987` Rig + CombatHarness + specs; `76012c2` Defense, `3705b4f` Damage, `cbd24b6` Domain, `4791bca` Engagement, `4f88e8e` Grab, `f88080c` HitboxEngine, `da03ab5` Attack, `c3a3d04` TrainingBot, `8b6f5a3` Weapon, `3d1482e` Admin, `3587ef7` FX, `215dd09` Parkour; `a7645f7` delete `Fixtures.lua` |
+| W3 `CombatHarness.lua` + reset chains | done | same commits; the gate is `f20027c` |
+| W20 draft | done (draft, for Spine 9 to finalise) | `e93f158` appended to CLAUDE.md |
+
+**What moved (read from source, then ran the suite).**
+- **22 specs, not 20, had a private rig builder.** The plan's grep (`makeDummy`/`makeRig`/`makeCharacter`) missed two that did the
+  same job under other names: `TrainingBotSystem.spec` `makeOpponent` and `DebugDummySystem.spec` `makeAttacker`. Both moved.
+  `GrabSystem.spec` also had a second builder (`makeR6`). Counted by the gate's rule at `7810df6`: 22 files; now 0.
+- **Reset chains: 11, not 9.** DefenseSystem, Knockback, Grab, Engagement, DomainStrike, AttackRequestSystem, DamageSystem,
+  ProjectileDefense, TrainingBot, DebugDummy now use `CombatHarness.Reset`/`Teardown`. WeaponInventory's chain moved too. The
+  engine-only specs (HitboxEngine, Projectile), DomainSystem and WeaponVisual keep a single layer reset on purpose (they never
+  touched the others) and use `Rig.DestroyAll` only.
+- `Rig`: `Dummy`, `Character`, `R6`, `Limbs`, `Bare`, `FakePlayer`, `Track`, `DestroyAll`. `CombatHarness`: `Reset`, `Teardown`,
+  `Combatant`, `Spawner(layers, bodyOptions?)`. `Reset` walks `CombatTick.PHASES` and asserts every phase has a reset, so a new phase
+  fails loudly. It resets `ParryWindows` with the defense layer and never calls `WeaponFixture.Install/Remove/Rebuild`.
+- The old chains reset top-down (Damage, Defense, Engine); the harness resets in frame order (Engine first). Safe because every
+  cross-layer subscription is a `CallbackList` disconnect, idempotent after the owner's `:Clear()` (read from `CallbackList.lua`), and
+  the suite confirms it.
+- Deleted from the specs: every private builder in those 22 files, about 20 `spawned`/`rigs`/`registered` tables with their destroy loops, 11 reset chains,
+  `Parkour`'s private `Rig` type, `R6_LIMBS`. Parkour specs now read `rig.Model`/`rig.Root` (were `rig.Character`/`rig.RootPart`); every
+  assertion is unchanged.
+- Left alone on purpose, not rigs: `SwingSequencer`/`ComboEscalation` `makeAttacker` (a bare Model a module keys by),
+  `CandidateGatherer` `makeBody` (a hurtbox-gather fixture with accessory and weapon), `AttackWindows` (Poses), and the lone-`Humanoid`
+  fixtures in `RootControl`, `MovementAllowance`, `DomainRules`, `ParkourOwnership`. None has both a `HumanoidRootPart` and a Humanoid
+  built in the spec, which is the gate's second rule.
+- **Gate.** `check-spec-literals.py`: no `local [function] make(Dummy|Rig|Character|R6|Opponent)` in a spec, and no spec that names a
+  `HumanoidRootPart` and instances a `Humanoid`. Both skip `TestHelpers`. Verified red on a planted builder and green on the tree. (My
+  first version of the edit wrote a literal backspace for `` and passed vacuously; the plant caught it and it is fixed in `f20027c`.)
+- `TestHelpers/Fixtures.lua` deleted: zero requirers in `src`, `scripts` and the specs (the `Tests/Fixtures/` data folder is a different
+  thing and untouched).
+
+**W21 ratchet moved (measured, `7810df6` to `HEAD`).** Spec-private rig builders: **22 specs -> 0**. Inbound requires (grep over `src`): `Rig` is
+required by 18 specs plus `CombatHarness`; `CombatHarness` by 14 specs.
+
+**Suite (ran).** Baseline 3538 passed / 7 failed. Final 3554 passed / 7 failed. The +16 are the two new helper specs (`Rig.spec`,
+`CombatHarness.spec`). The failing assertions are the same 7 in the same order, and the tree's `[-]` nodes diff identical to the
+baseline's. No spec lost or gained an assertion through conversion. One transient: a run taken while I ran selene/stylua showed an
+extra `AnimationFreezeGuard.spec:197` failure (`1` vs `1.25`, a wall-clock `task.wait` window); it did not recur in the next four
+runs, and that spec was not touched.
+
+**Gates (ran).** `selene src/` 0 errors / 2 warnings (the known `UDim2.fromScale` pair). `stylua`, CR ignored, on every touched file:
+clean. `check-logger-scopes` ok (181), `check-live-project` ok, `check-single-writers` ok, `check-spec-literals` ok, `check-stale-refs`
+ok. No new `Logger.scope`. `rewrite detector`: the largest per-file change is `DefenseSystem.spec` (+108/-144 of ~1300 lines,
+mostly the 104 `makeDummy(` -> `spawnDummy(` call-site renames the deletion forces); nothing lost 60%.
+
+**Files created:** `Tests/TestHelpers/Rig.lua`, `Rig.spec.lua`, `CombatHarness.lua`, `CombatHarness.spec.lua`. **Files deleted:**
+`Tests/TestHelpers/Fixtures.lua`. **Docs appended:** CLAUDE.md (draft W20 section and the two helper rows).
+
+**Headers corrected as false:** none. Rig's and CombatHarness's headers were written to match the code, including the opt-in root joint
+(E2).
+
+**Not verified.** (1) Order-independence beyond the one fixed spec order TestEZ uses: to check, re-run the suite once with a
+spec renamed so it sorts first (for example the `CombatHarness` spec), since `CombatHarness.Reset` now clears layers some specs
+used to leave. (2) The `AnimationFreezeGuard` timing spec under load: run the suite twice on an idle machine. (3) `Rig.Bare` and
+`Rig.Dummy` in `Admin`/`WeaponVisual` specs replaced unparented/one-off models with tracked ones; nothing a player sees. No gameplay
+code changed, so no playtest is needed for this spine.
+
 ## Escalations
 
-None raised in W0-W1. Observations that W3 should treat as candidate escalations when it gets there (not changed here):
-`RunSystem` honours `Hitstun`, `GrabThrowing` and realm rooting while `bodyGate` does not read them directly (they arrive
-through the record-backed gates); `ParkourController` does not read `Mounted` or `Grabbed` and relies on `RootControlLocked`.
+### E1. Flight ignores rebinds and has no gamepad path  (W12)
+Found: `FlightController.lua:247-263` reads `IsKeyDown(W/A/S/D/Space/LeftControl)` directly; the file has no `Analog`/gamepad reference.
+Option A: bind flight to router actions with a gamepad axis. Consequence: rebinds apply to flight; a controller player can fly. Effort: M.
+Option B: keep it. Consequence: flight stays keyboard-only, on the default keys only.
+Blocks: W12's "0 raw dispatch" target for `FlightController`.
+
+Candidate escalations for W9, carried from the W0-W1 session (not changed there): `RunSystem` honours `Hitstun`, `GrabThrowing`
+and realm rooting while `bodyGate` does not read them directly (they arrive through the record-backed gates); `ParkourController`
+does not read `Mounted` or `Grabbed` and relies on `RootControlLocked`.
+
+### E2. `Rig` does not give every Dummy a RootJoint by default  (W2)
+Found: the plan says `Rig` builds a Dummy "with a real `RootJoint` under `HumanoidRootPart`". `HitboxEngine`'s hurtbox gather indexes
+a body's root plus its direct-child BaseParts (`CandidateGatherer`), so a default Torso would add a second hurtbox to every dummy in
+the 22 migrated specs and change what their hit assertions see. `Rig.lua` header; `Rig.Dummy` option `RootJoint`.
+Option A: make `RootJoint = true` the default — consequence: every combat spec's dummy gains a Torso hurtbox, so contact counts and some positional assertions may shift; each would need re-baselining against the 7 red; effort: M.
+Option B: keep it opt-in; `Rig.R6` is the default real-joint body (the joint sits under `HumanoidRootPart`, checked by `Rig.spec`) — consequence: a spec that needs a joint asks for `RootJoint = true` or `Rig.R6`; effort: S (done).
+Blocks: nothing.

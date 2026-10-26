@@ -505,7 +505,9 @@ return function()
 			expect(contacts[2].Result.Kind).to.equal("Trade")
 			expect(contacts[1].Clash).to.equal(true)
 			expect(contacts[2].Clash).to.equal(true)
-			expect(contacts[1].Result.GuardDelta).to.equal(0)
+			-- Posture is the only cost of a clash.
+			expect(contacts[1].Result.GuardDelta).to.equal(-DefenseConstants.Clash.GuardDamage)
+			expect(contacts[2].Result.GuardDelta).to.equal(-DefenseConstants.Clash.GuardDamage)
 		end)
 
 		it("clashes a hit on a defender whose own blade is out and reaching", function()
@@ -513,6 +515,16 @@ return function()
 			expect(OutcomeResolver.ArbitrateClashes(contacts)).to.equal(1)
 			expect(contacts[1].Result.Kind).to.equal("Trade")
 			expect(contacts[1].Clash).to.equal(true)
+		end)
+
+		it("charges the attacker too on a lone clash, but not when a mirror contact will", function()
+			local lone = { makeClean(alpha, beta, true) }
+			OutcomeResolver.ArbitrateClashes(lone)
+			expect(lone[1].ClashChargesAttacker).to.equal(true)
+
+			local pair = { makeClean(alpha, beta, true), makeClean(beta, alpha, false) }
+			OutcomeResolver.ArbitrateClashes(pair)
+			expect(pair[1].ClashChargesAttacker).to.equal(false)
 		end)
 
 		it("clashes the mirror of a reaching contact that comes later in the batch", function()

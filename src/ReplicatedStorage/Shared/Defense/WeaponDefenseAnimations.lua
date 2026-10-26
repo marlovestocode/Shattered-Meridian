@@ -72,10 +72,14 @@ local WeaponDefenseAnimations = {}
 -- two folders without a second copy of the literals drifting from this one.
 local PARRY_FOLDER = "PARRY"
 local BLOCK_FOLDER = "BLOCK"
+-- Slot nine (2026-10-26): the clip played once on each body when two swings clash (DefenseConstants.Clash).
+-- Cosmetic like BLOCK -- no markers are read off it.
+local CLASH_FOLDER = "CLASH"
 
 WeaponDefenseAnimations.Slots = {
 	Parry = PARRY_FOLDER,
 	Block = BLOCK_FOLDER,
+	Clash = CLASH_FOLDER,
 }
 
 -- Workspace.Weapons itself, or nil if nobody has made it yet -- mirrors WeaponRoster.findContainer,
@@ -133,7 +137,14 @@ function WeaponDefenseAnimations.GetBlock(weaponId: string?): string
 	return resolve(weaponId, BLOCK_FOLDER, DefenseConstants.BlockHoldAnimationId)
 end
 
--- Visits every non-blank per-weapon override across both slots. Shared by the three sweeps below so
+-- The clip this weapon plays when its swing clashes with another: its own Animations/CLASH clip, else the
+-- shared DefenseConstants.ClashAnimationId, which may be blank (pre-asset) -- in which case a clash plays
+-- no clip and keeps its hit-stop, sparks and bounce.
+function WeaponDefenseAnimations.GetClash(weaponId: string?): string
+	return resolve(weaponId, CLASH_FOLDER, DefenseConstants.ClashAnimationId)
+end
+
+-- Visits every non-blank per-weapon override across all three slots. Shared by the three sweeps below so
 -- they cannot disagree about what counts as authored.
 local function eachWeaponOverride(visit: (weaponId: string, folderName: string, resolved: string) -> ()): ()
 	local container = WeaponAssets.Container(logger)
@@ -141,7 +152,7 @@ local function eachWeaponOverride(visit: (weaponId: string, folderName: string, 
 		return
 	end
 	for _, model in container:GetChildren() do
-		for _, folderName in { PARRY_FOLDER, BLOCK_FOLDER } do
+		for _, folderName in { PARRY_FOLDER, BLOCK_FOLDER, CLASH_FOLDER } do
 			local animation = WeaponAssets.SlotAnimation(model, folderName)
 			if animation and animation.AnimationId ~= "" then
 				local resolved = WeaponAssets.NormalizeAssetId(animation.AnimationId)
@@ -213,7 +224,10 @@ end
 function WeaponDefenseAnimations.GetPreloadLabels(): { [string]: string }
 	local labels: { [string]: string } = {}
 	eachWeaponOverride(function(weaponId: string, folderName: string, resolved: string)
-		local slotLabel = if folderName == PARRY_FOLDER then "Parry" else "Block"
+		local slotLabel = if folderName == PARRY_FOLDER
+			then "Parry"
+			elseif folderName == CLASH_FOLDER then "Clash"
+			else "Block"
 		labels[resolved] = `{weaponId}:{slotLabel}`
 	end)
 	return labels

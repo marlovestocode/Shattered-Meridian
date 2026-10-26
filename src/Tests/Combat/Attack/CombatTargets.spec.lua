@@ -56,4 +56,53 @@ return function()
 			expect(LocalCombatState.FreeAt(5, true)).to.equal(20)
 		end)
 	end)
+
+	describe("LocalCombatState -- facing claims", function()
+		local AttributeConstants = require(game:GetService("ReplicatedStorage").Shared.AttributeConstants)
+		local owners = LocalCombatState.FacingOwners
+		local humanoid: Humanoid
+
+		beforeEach(function()
+			local model = Instance.new("Model")
+			humanoid = Instance.new("Humanoid")
+			humanoid.Parent = model
+			model.Parent = workspace
+			LocalCombatState.ResetForNewLife()
+		end)
+
+		afterEach(function()
+			LocalCombatState.ResetForNewLife()
+			if humanoid.Parent then
+				humanoid.Parent:Destroy()
+			end
+		end)
+
+		local function owned(): boolean
+			return humanoid:GetAttribute(AttributeConstants.CombatFacingOwned) == true
+		end
+
+		it("stays held until BOTH owners release, swing first", function()
+			LocalCombatState.SetFacingHeld(humanoid, owners.Parry, true)
+			LocalCombatState.SetFacingHeld(humanoid, owners.Swing, true)
+			LocalCombatState.SetFacingHeld(humanoid, owners.Swing, false)
+			expect(owned()).to.equal(true)
+			LocalCombatState.SetFacingHeld(humanoid, owners.Parry, false)
+			expect(owned()).to.equal(false)
+		end)
+
+		it("stays held until BOTH owners release, parry first", function()
+			LocalCombatState.SetFacingHeld(humanoid, owners.Swing, true)
+			LocalCombatState.SetFacingHeld(humanoid, owners.Parry, true)
+			LocalCombatState.SetFacingHeld(humanoid, owners.Parry, false)
+			expect(owned()).to.equal(true)
+			LocalCombatState.SetFacingHeld(humanoid, owners.Swing, false)
+			expect(owned()).to.equal(false)
+		end)
+
+		it("treats releasing an owner that holds nothing as a no-op", function()
+			LocalCombatState.SetFacingHeld(humanoid, owners.Swing, true)
+			LocalCombatState.SetFacingHeld(humanoid, owners.Parry, false)
+			expect(owned()).to.equal(true)
+		end)
+	end)
 end

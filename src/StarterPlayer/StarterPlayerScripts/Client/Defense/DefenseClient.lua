@@ -205,8 +205,19 @@ local function clipKeyFor(baselineKey: string, armed: string?, resolved: string,
 	return key
 end
 
+-- The clash clip for the drawn weapon (WeaponDefenseAnimations.GetClash), resolved with the other two in
+-- setArmedWeapon. Blank when neither the weapon nor DefenseConstants authors one: a clash then plays no clip.
+local CLASH_CLIP = "Clash"
+local CLASH_SOURCE = "Clash"
+local baselineClashId = WeaponDefenseAnimations.GetClash(nil)
+manager:Register(CLASH_CLIP, baselineClashId)
+local clashClipKey = CLASH_CLIP
+local clashClipId = baselineClashId
+
 local function setArmedWeapon(weaponId: string?, drawn: boolean): ()
 	local armed = if drawn then weaponId else nil
+	clashClipId = WeaponDefenseAnimations.GetClash(armed)
+	clashClipKey = clipKeyFor(CLASH_CLIP, armed, clashClipId, baselineClashId)
 	parryClipKey = clipKeyFor(BLOCK_CLIP, armed, WeaponDefenseAnimations.GetParry(armed), baselineParryId)
 	blockClipKey = clipKeyFor(BLOCK_HOLD_CLIP, armed, WeaponDefenseAnimations.GetBlock(armed), baselineBlockId)
 end
@@ -494,15 +505,14 @@ local function holdFacing(): ()
 	end
 	facingHoldGeneration += 1
 	local generation = facingHoldGeneration
-	humanoid:SetAttribute(AttributeConstants.CombatFacingOwned, true)
+	LocalCombatState.SetFacingHeld(humanoid, LocalCombatState.FacingOwners.Parry, true)
 	task.delay(DefenseConstants.Presentation.ParryFacingHoldSeconds, function()
-		-- A newer parry owns the hold now; and a swing's tracking window owns the Attribute while it runs.
-		if generation ~= facingHoldGeneration or LocalCombatState.SwingEndsAt() > os.clock() then
+		-- A newer parry owns the hold now. A swing's tracking window holds its own claim, so releasing this
+		-- one neither waits on it nor clears it.
+		if generation ~= facingHoldGeneration then
 			return
 		end
-		if humanoid.Parent ~= nil then
-			humanoid:SetAttribute(AttributeConstants.CombatFacingOwned, nil)
-		end
+		LocalCombatState.SetFacingHeld(humanoid, LocalCombatState.FacingOwners.Parry, false)
 	end)
 end
 
@@ -513,10 +523,17 @@ local function faceTowards(position: Vector3): ()
 	end
 	local origin = root.Position
 	local flattened = Vector3.new(position.X - origin.X, 0, position.Z - origin.Z)
-	if flattened.Magnitude <= 0 then
+	local presentation = DefenseConstants.Presentation
+	if flattened.Magnitude <= presentation.ParryFacingMinDistanceStuds then
 		return
 	end
-	root.CFrame = CFrame.lookAt(origin, origin + flattened.Unit)
+	local look = root.CFrame.LookVector
+	local currentYaw = math.atan2(-look.X, -look.Z)
+	local wantedYaw = math.atan2(-flattened.X, -flattened.Z)
+	local delta = (wantedYaw - currentYaw + math.pi) % (2 * math.pi) - math.pi
+	local maxTurn = math.rad(presentation.ParryFacingMaxTurnDegrees)
+	local yaw = currentYaw + math.clamp(delta, -maxTurn, maxTurn)
+	root.CFrame = CFrame.new(origin) * CFrame.Angles(0, yaw, 0)
 	holdFacing()
 end
 
@@ -568,6 +585,20 @@ local function onStateChanged(rawPayload: unknown): ()
 	end
 
 	-- Sent only on a parry: the snap, and the prediction learning its press landed.
+	-- Two swings clashed: play the drawn weapon's clash clip once (none authored, none played).
+	if payload.Clash == true and clashClipId ~= "" then
+		manager:SetClaim(DEFENSE_LAYER, CLASH_SOURCE, {
+			Clip = clashClipKey,
+			Looped = false,
+			Priority = Enum.AnimationPriority.Action,
+			FadeIn = 0.04,
+			FadeOut = DefenseConstants.Presentation.BlockAnimationFadeSeconds,
+			OnFinished = function(): ()
+				manager:SetClaim(DEFENSE_LAYER, CLASH_SOURCE, nil)
+			end,
+		})
+	end
+
 	if typeof(payload.FaceTowards) == "Vector3" then
 		faceTowards(payload.FaceTowards :: Vector3)
 		predictor:NoteParryLanded()

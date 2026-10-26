@@ -951,6 +951,34 @@ return function()
 		end)
 	end)
 
+	describe("DefenseSystem.ParryFacingTarget", function()
+		it("aims a melee parry at the attacker's root, not the contact point on the parrier", function()
+			local attacker = spawnDummy("Attacker", Vector3.new(10, 5, 0), Vector3.new(0, 5, 0))
+			local onParrierBody = Vector3.new(0, 5, 0.5)
+
+			local target = DefenseSystem.ParryFacingTarget(attacker.Model, onParrierBody, nil)
+
+			expect(target).to.equal(attacker.Root.Position)
+		end)
+
+		it("falls back to the contact point when the attacker has no root", function()
+			local rootless = Instance.new("Model")
+			local contact = Vector3.new(1, 2, 3)
+
+			expect(DefenseSystem.ParryFacingTarget(rootless, contact, nil)).to.equal(contact)
+			rootless:Destroy()
+		end)
+
+		it("keeps a shot's source", function()
+			local attacker = spawnDummy("Attacker", Vector3.new(10, 5, 0), Vector3.new(0, 5, 0))
+			local source = Vector3.new(0, 5, -30)
+
+			local target = DefenseSystem.ParryFacingTarget(attacker.Model, Vector3.zero, { SourcePosition = source })
+
+			expect(target).to.equal(source)
+		end)
+	end)
+
 	describe("DefenseSystem -- trading", function()
 		it("collapses mutual parries in one Step into a single Trade on each side", function()
 			local base = os.clock()

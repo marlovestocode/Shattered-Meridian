@@ -269,8 +269,9 @@ end
 --     The one contact becomes a Trade; applyContact cancels the defender's swing along with the
 --     attacker's, since a clash costs both sides their swing.
 --
--- A trade of this kind changes no guard, exactly like a mutual parry's (see ArbitrateTrades on why the
--- only non-exploitable neutral is to grant nothing). A contact that is anything but Clean -- a block, a
+-- A clash costs both sides posture (DefenseConstants.Clash.GuardDamage) and nothing else -- no health, no
+-- stun. A mutual PARRY's trade still changes no guard (see ArbitrateTrades on why the only non-exploitable
+-- neutral is to grant nothing). A contact that is anything but Clean -- a block, a
 -- parry, a backstab, an evade -- is already answered and never clashes: a guarded body is not swinging.
 function OutcomeResolver.ArbitrateClashes(contacts: { PendingContact }): number
 	if not DefenseConstants.Clash.Enabled then
@@ -278,7 +279,10 @@ function OutcomeResolver.ArbitrateClashes(contacts: { PendingContact }): number
 	end
 	local clashed = 0
 	local function turn(contact: PendingContact): ()
-		contact.Result.GuardDelta = DefenseConstants.Guard.TradeRestore
+		-- The one cost of a clash: posture. Rolled back to the pre-contact pool first, as ArbitrateTrades
+		-- does, so nothing Resolve folded in (a restore) survives into the clash.
+		contact.Result.Guard -= contact.Result.GuardDelta
+		contact.Result.GuardDelta = -DefenseConstants.Clash.GuardDamage
 		contact.Result.Kind = "Trade"
 		contact.Result.ConsumesParry = false
 		contact.Clash = true
@@ -291,6 +295,15 @@ function OutcomeResolver.ArbitrateClashes(contacts: { PendingContact }): number
 		end
 		if first.DefenderSwingReaches == true then
 			turn(first)
+			-- A lone contact charges only its defender; the attacker pays unless a mirror contact will.
+			local mirrored = false
+			for _, other in contacts do
+				if other ~= first and other.Attacker == first.Defender and other.Defender == first.Attacker then
+					mirrored = true
+					break
+				end
+			end
+			first.ClashChargesAttacker = not mirrored
 			continue
 		end
 		for j = i + 1, #contacts do

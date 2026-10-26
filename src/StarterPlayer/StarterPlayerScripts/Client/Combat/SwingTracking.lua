@@ -45,6 +45,7 @@ local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local AttackInputClient = require(script.Parent.AttackInputClient)
 local CombatTargets = require(script.Parent.CombatTargets)
+local LocalCombatState = require(script.Parent.LocalCombatState)
 local LockOnController = require(script.Parent.LockOnController)
 
 type AttackStartedPayload = AttackTypes.AttackStartedPayload
@@ -88,7 +89,7 @@ local function finish(): ()
 	if current == nil or currentHumanoid == nil or currentHumanoid.Parent == nil then
 		return
 	end
-	currentHumanoid:SetAttribute(AttributeConstants.CombatFacingOwned, nil)
+	LocalCombatState.SetFacingHeld(currentHumanoid, LocalCombatState.FacingOwners.Swing, false)
 	-- Only put AutoRotate back if nothing changed it while this window held it (a shift-lock toggle).
 	if current.RestoreAutoRotate and currentHumanoid.AutoRotate == false then
 		currentHumanoid.AutoRotate = true
@@ -141,7 +142,7 @@ local function onAttackStarted(payload: AttackStartedPayload): ()
 		HoldEndsAt = now + windup + active,
 		RestoreAutoRotate = currentHumanoid.AutoRotate,
 	}
-	currentHumanoid:SetAttribute(AttributeConstants.CombatFacingOwned, true)
+	LocalCombatState.SetFacingHeld(currentHumanoid, LocalCombatState.FacingOwners.Swing, true)
 	currentHumanoid.AutoRotate = false
 end
 

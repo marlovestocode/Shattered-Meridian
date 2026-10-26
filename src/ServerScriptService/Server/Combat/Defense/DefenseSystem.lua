@@ -142,6 +142,11 @@ local pending: { PendingContact } = {}
 -- is supposed to be dangerous: one window stops one attack. Kept here rather than by consuming the
 -- machine's own flag in pass 1, so pass 1 genuinely applies nothing.
 local parryConsumedThisBatch: { [Model]: boolean } = {}
+
+-- When each body last took a Clean hit (the contact's SampleTime). The close-time clash rule reads it to keep
+-- a defender mid-string from clashing their way out (DefenseConstants.Clash.RecentHitGraceSeconds). Weak, so a
+-- despawned body is not kept alive by it.
+local lastCleanHitAt: { [Model]: number } = setmetatable({}, { __mode = "k" }) :: any
 -- Each defender's guard as the contacts classified so far in THIS batch leave it. Pass 1 resolves every
 -- contact before pass 2 applies any, so reading the pool fresh per contact classified each one against
 -- the pool as it stood before the batch: two blocked hits drained it once, and a parry's restore was
@@ -322,7 +327,8 @@ local function notifyClient(
 	registration: Registration,
 	state: DefenseState,
 	attackerPosition: Vector3?,
-	verdict: DefenseTypes.PressVerdict?
+	verdict: DefenseTypes.PressVerdict?,
+	clash: boolean?
 ): ()
 	local remote = stateChangedRemote
 	if not remote then
@@ -348,6 +354,7 @@ local function notifyClient(
 		-- character's physics, so a server rotation write would be fought and then overwritten. Feel
 		-- belongs on the client; the decision that a parry happened stays here.
 		FaceTowards = attackerPosition,
+		Clash = if clash == true then true else nil,
 		-- The client predicts whether its next press arms a parry, so it can play the parry swing-up or
 		-- go straight to the guard on the key edge (Client/Defense/DefenseClient.lua). That prediction
 		-- needs the window this press would be judged with, and only the server has it: a per-weapon
@@ -962,6 +969,28 @@ local function onHit(report: HitReport): ()
 		local defenderId = HitboxEngine.GetCombatantId(report.Target)
 		defenderSwingReaches = defenderId ~= nil
 			and HitboxEngine.ActiveSwingReaches(defenderId, report.Attacker, DefenseConstants.Clash.ReachMarginStuds)
+		-- THE CLOSE-TIME RULE (DefenseConstants.Clash.WindowSeconds): a blade a beat from opening, close
+		-- enough to matter, on a defender who is not mid-string.
+		if defenderId ~= nil and defenderSwingReaches ~= true then
+			local clash = DefenseConstants.Clash
+			local opensIn = HitboxEngine.WindupRemaining(defenderId, at)
+			local lastHit = lastCleanHitAt[report.Target]
+			local midString = lastHit ~= nil and at - lastHit < clash.RecentHitGraceSeconds
+			-- FACING TOO: the Active-window rule above is directional because it tests the defender's real
+			-- volume, and this one has no volume yet. Without the arc, a body winding up at a teammate and
+			-- hit in the back inside RangeStuds "clashed" -- no damage, both swings cancelled.
+			local facingAttacker = OutcomeResolver.IsWithinBlockArc(bearing)
+			if
+				opensIn ~= nil
+				and opensIn <= clash.WindowSeconds
+				and not midString
+				and facingAttacker
+				and attackerRoot
+			then
+				local offset = registration.RootPart.Position - attackerRoot.Position
+				defenderSwingReaches = Vector3.new(offset.X, 0, offset.Z).Magnitude <= clash.RangeStuds
+			end
+		end
 	end
 
 	if result.ConsumesParry then
@@ -1023,7 +1052,7 @@ local function applyContact(contact: PendingContact, now: number): ()
 		-- so a held Clean hit silently refunded the posture drain of the hit before it. A trade's
 		-- rollback (ArbitrateTrades) zeroes its delta, so it composes here too. A break is pinned to
 		-- empty whatever regenerated since classification -- it was judged to empty the pool.
-		local spendsGuard = kind == "Blocked" or kind == "GuardBroken"
+		local spendsGuard = kind == "Blocked" or kind == "GuardBroken" or (kind == "Trade" and contact.Clash == true)
 		local applied = if kind == "GuardBroken" then 0 else guard:Get() + contact.Result.GuardDelta
 		guard:Set(applied, now, spendsGuard)
 		-- The emitted outcome carries the pool as it actually is now, not as pass 1 predicted it.
@@ -1068,6 +1097,25 @@ local function applyContact(contact: PendingContact, now: number): ()
 		if defenderId then
 			HitboxEngine.CancelAttack(defenderId, "Traded", contact.SampleTime)
 		end
+		if contact.ClashChargesAttacker == true then
+			local attackerRegistration = registrations[contact.Attacker]
+			if attackerRegistration then
+				attackerRegistration.Guard:Set(
+					attackerRegistration.Guard:Get() + contact.Result.GuardDelta,
+					now,
+					true
+				)
+			end
+		end
+		-- Each player's client plays its own drawn weapon's clash clip (DefenseConstants.ClashAnimationId).
+		-- Both bodies are told, once per contact: a mutual pair sends each side two pushes, and the
+		-- client's claim is idempotent within the beat.
+		for _, model in { contact.Attacker, contact.Defender } do
+			local registration = registrations[model]
+			if registration then
+				notifyClient(registration, registration.Machine:GetState(), nil, nil, true)
+			end
+		end
 	end
 
 	if kind == "Parried" then
@@ -1084,13 +1132,14 @@ local function applyContact(contact: PendingContact, now: number): ()
 			notifyClient(
 				defenderRegistration,
 				defenderRegistration.Machine:GetState(),
-				if projectile then projectile.SourcePosition else contact.Report.ContactPosition
+				DefenseSystem.ParryFacingTarget(contact.Attacker, contact.Report.ContactPosition, projectile)
 			)
 		end
 		noteRallyParry(contact.Defender, contact.Attacker, now)
 	elseif kind == "Clean" or kind == "Backstab" or kind == "GuardBroken" then
 		-- A hit that actually got through ends the trade for both sides.
 		endRally(contact.Defender)
+		lastCleanHitAt[contact.Defender] = contact.SampleTime
 	end
 
 	emit({
@@ -1484,6 +1533,22 @@ function DefenseSystem.AttackFreeSince(model: Model, now: number): number
 	return math.max(enteredAt, registration.ReleasedAt)
 end
 
+-- Where a parrier should turn to face. A shot: its source. A melee blow: the ATTACKER's root -- never the
+-- report's ContactPosition, which is a point on the DEFENDER's own hurtbox (HitboxEngine measures it on the
+-- target), so turning toward it aimed the parrier at itself and the client's min-distance gate swallowed it.
+-- ContactPosition is only the fallback for an attacker with no root.
+function DefenseSystem.ParryFacingTarget(
+	attacker: Model,
+	contactPosition: Vector3,
+	projectile: { SourcePosition: Vector3 }?
+): Vector3
+	if projectile then
+		return projectile.SourcePosition
+	end
+	local root = CharacterUtil.RootOf(attacker)
+	return if root then root.Position else contactPosition
+end
+
 -- How long a Parried outcome staggers its attacker, from the outcome's own Perfect flag. A pure query on
 -- the rule applyContact staggers with, so the attack layer never restates the two stagger lengths. A
 -- rally parry out of a stagger can END a stagger early; this is the length it was stamped with.
@@ -1725,6 +1790,7 @@ function DefenseSystem.Reset(): ()
 	table.clear(pending)
 	table.clear(heldContacts)
 	table.clear(parryConsumedThisBatch)
+	table.clear(lastCleanHitAt)
 	table.clear(batchGuard)
 	resolvedListeners:Clear()
 	defaultParryAnimationId = ""

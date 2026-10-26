@@ -177,6 +177,9 @@ export type PendingContact = {
 	DefenderSwingReaches: boolean?,
 	-- Set by ArbitrateClashes on a contact it turned into a clash. See DefenseOutcome.Clash.
 	Clash: boolean?,
+	-- Set with Clash on a lone contact (no mirror in the batch): the ATTACKER pays the clash's posture too,
+	-- since no second contact exists to charge them as its defender.
+	ClashChargesAttacker: boolean?,
 	-- What pass 1 handed the resolver for this contact, kept so the outcome can say WHY it resolved as it did
 	-- (Server/Combat/CombatTrace.lua). Absent for a contact built by hand.
 	Inputs: ResolveInput?,
@@ -210,6 +213,8 @@ export type StatePayload = {
 	Guard: number,
 	GuardMax: number,
 	FaceTowards: Vector3?,
+	-- True on the push to BOTH bodies of a clash: the cue to play the drawn weapon's clash clip.
+	Clash: boolean?,
 	Window: WindowShape?,
 	Press: PressVerdict?,
 }
