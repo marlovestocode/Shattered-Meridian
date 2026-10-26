@@ -14,6 +14,7 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local SYSTEMS: { string } = {
 	"SettingsSystem",
 	"EmoteSystem",
+	"ArtSystem",
 }
 
 local function systemModule(name: string): any

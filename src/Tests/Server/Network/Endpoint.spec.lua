@@ -195,6 +195,25 @@ return function()
 			expect(without.Handle(Rig.FakePlayer("A"), 5)).to.equal("error")
 		end)
 
+		it("lets Invalid be a function of the argument that failed", function()
+			local bound = scope.Function({
+				Name = uniqueName(),
+				Limiter = RateLimiter.New(10),
+				ErrorResult = "error",
+				Invalid = function(_player: Player, index: number)
+					return `bad{index}`
+				end,
+				Args = { Schema.Number(0, 1), Schema.Optional(Schema.RawString) },
+				Handler = function()
+					return "ok"
+				end,
+			})
+			expect(bound.Handle(Rig.FakePlayer("A"), "x")).to.equal("bad1")
+			expect(bound.Handle(Rig.FakePlayer("A"), 1, 5)).to.equal("bad2")
+			expect(bound.Handle(Rig.FakePlayer("A"), 1)).to.equal("ok")
+			expect(bound.Handle(Rig.FakePlayer("A"), 1, "id")).to.equal("ok")
+		end)
+
 		it("answers OnLimited (which may be nil) or ErrorResult when rate limited", function()
 			local custom = scope.Function({
 				Name = uniqueName(),

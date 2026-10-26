@@ -53,12 +53,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Types = require(ReplicatedStorage.Shared.Types)
 local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
+local Schema = require(ReplicatedStorage.Shared.Schema)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 local QiSystem = require(script.Parent.QiSystem)
 local TierSystem = require(script.Parent.TierSystem)
 local QiDeviationSystem = require(script.Parent.QiDeviationSystem)
@@ -105,7 +105,7 @@ end
 -- both the equip path and the fire path need the identical bound, and a slot index arrives from a
 -- client in both cases.
 function ArtSystem.IsValidSlot(slot: number): boolean
-	return typeof(slot) == "number" and slot == math.floor(slot) and slot >= 1 and slot <= ArtConstants.EquipSlotCount
+	return Schema.IsNumber(slot) and slot == math.floor(slot) and slot >= 1 and slot <= ArtConstants.EquipSlotCount
 end
 
 -- Why `player` can't throw `artId` right now, or nil if they can. Deliberately does NOT spend
@@ -418,10 +418,6 @@ end
 --
 
 local function handleGetCatalogue(player: Player): Types.ArtCatalogueResult
-	if requestRateLimiter:IsLimited(player) then
-		return { Success = false, Reason = "RateLimited" }
-	end
-
 	local trees: { Types.ArtCatalogueTree } = {}
 	for _, tree in ipairs(ArtTreeManager.GetTrees()) do
 		local arts: { Types.ArtCatalogueEntry } = {}
@@ -459,34 +455,18 @@ local function handleGetCatalogue(player: Player): Types.ArtCatalogueResult
 	return { Success = true, Trees = trees, State = buildStatePayload(player) }
 end
 
-local function handleUnlockArt(player: Player, rawArtId: unknown): Types.ArtActionResult
-	if requestRateLimiter:IsLimited(player) then
-		return { Success = false, Reason = "RateLimited" }
-	end
-	if typeof(rawArtId) ~= "string" then
-		return { Success = false, Reason = "InvalidArtId" }
-	end
-
-	local refusal = ArtSystem.Unlock(player, rawArtId :: string)
+local function handleUnlockArt(player: Player, artId: string): Types.ArtActionResult
+	local refusal = ArtSystem.Unlock(player, artId)
 	if refusal then
 		return { Success = false, Reason = refusal }
 	end
 	return { Success = true }
 end
 
-local function handleEquipArt(player: Player, rawSlot: unknown, rawArtId: unknown): Types.ArtActionResult
-	if requestRateLimiter:IsLimited(player) then
-		return { Success = false, Reason = "RateLimited" }
-	end
-	if typeof(rawSlot) ~= "number" then
-		return { Success = false, Reason = "InvalidSlot" }
-	end
-	-- nil is the legitimate "clear this slot" payload; anything else non-string is malformed.
-	if rawArtId ~= nil and typeof(rawArtId) ~= "string" then
-		return { Success = false, Reason = "InvalidArtId" }
-	end
-
-	local refusal = ArtSystem.Equip(player, rawSlot :: number, rawArtId :: string?)
+-- The slot arrives through Schema.Number (so NaN is refused as InvalidSlot, and +-inf clamps to a slot IsValidSlot rejects), and the
+-- art id is Optional: nil is the legitimate "clear this slot" payload; anything else non-string is malformed.
+local function handleEquipArt(player: Player, slot: number, artId: string?): Types.ArtActionResult
+	local refusal = ArtSystem.Equip(player, slot, artId)
 	if refusal then
 		return { Success = false, Reason = refusal }
 	end
@@ -537,34 +517,50 @@ local function onProfileLoaded(player: Player): ()
 end
 
 function ArtSystem.Init(): ()
-	artStateRemote = NetworkBridge.CreateRemoteEvent(ArtConstants.RemoteNames.ArtStateUpdated)
+	local endpoint = Endpoint.Scope("ArtSystem", logger)
+	local RemoteNames = ArtConstants.RemoteNames
+	local rateLimited = { Success = false, Reason = "RateLimited" }
 
-	local catalogueRemote = NetworkBridge.CreateRemoteFunction(ArtConstants.RemoteNames.GetArtCatalogue)
-	catalogueRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
-		logger,
-		"GetArtCatalogue",
-		{ Success = false, Reason = "InternalError" } :: Types.ArtCatalogueResult,
-		handleGetCatalogue
-	)
+	artStateRemote = endpoint.Push(RemoteNames.ArtStateUpdated)
 
-	local unlockRemote = NetworkBridge.CreateRemoteFunction(ArtConstants.RemoteNames.UnlockArt)
-	unlockRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
-		logger,
-		"UnlockArt",
-		{ Success = false, Reason = "InternalError" } :: Types.ArtActionResult,
-		handleUnlockArt
-	)
+	endpoint.Function({
+		Name = RemoteNames.GetArtCatalogue,
+		Limiter = requestRateLimiter,
+		ErrorResult = { Success = false, Reason = "InternalError" } :: Types.ArtCatalogueResult,
+		OnLimited = function(): any
+			return rateLimited
+		end,
+		Handler = handleGetCatalogue,
+	})
 
-	-- A RemoteFunction, not a fire-and-forget RemoteEvent, for the same reason UnlockArt is one: the
-	-- panel has to be able to say WHY an equip was refused. A silently-ignored equip would leave the
-	-- client showing an art in a slot the server never accepted.
-	local equipRemote = NetworkBridge.CreateRemoteFunction(ArtConstants.RemoteNames.EquipArt)
-	equipRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
-		logger,
-		"EquipArt",
-		{ Success = false, Reason = "InternalError" } :: Types.ArtActionResult,
-		handleEquipArt
-	)
+	endpoint.Function({
+		Name = RemoteNames.UnlockArt,
+		Limiter = requestRateLimiter,
+		ErrorResult = { Success = false, Reason = "InternalError" } :: Types.ArtActionResult,
+		OnLimited = function(): any
+			return rateLimited
+		end,
+		Args = { Schema.RawString },
+		Invalid = { Success = false, Reason = "InvalidArtId" },
+		Handler = handleUnlockArt,
+	})
+
+	-- A RemoteFunction, not a fire-and-forget RemoteEvent, for the same reason UnlockArt is one: the panel has to be able to
+	-- say WHY an equip was refused. A silently-ignored equip would leave the client showing an art in a slot the server never
+	-- accepted.
+	endpoint.Function({
+		Name = RemoteNames.EquipArt,
+		Limiter = requestRateLimiter,
+		ErrorResult = { Success = false, Reason = "InternalError" } :: Types.ArtActionResult,
+		OnLimited = function(): any
+			return rateLimited
+		end,
+		Args = { Schema.Number(-1e9, 1e9), Schema.Optional(Schema.RawString) },
+		Invalid = function(_player: Player, argumentIndex: number): any
+			return { Success = false, Reason = if argumentIndex == 1 then "InvalidSlot" else "InvalidArtId" }
+		end,
+		Handler = handleEquipArt,
+	})
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(onProfileLoaded)
 	PlayerLifecycle.BindAllPlayers({

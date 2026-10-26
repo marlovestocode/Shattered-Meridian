@@ -40,7 +40,7 @@
 
 	ORDER OF REFUSAL, fixed so every System answers the same way: rate limit (admin: auth first, then rate limit, AdminGate's order),
 	then argument decode, then the handler. A refused Event is silently dropped (logged at debug); a refused Function answers:
-	`OnLimited(player)` when rate limited (default `ErrorResult`), `Invalid` when arguments fail decode (default `ErrorResult`), and
+	`OnLimited(player)` when rate limited (default `ErrorResult`), `Invalid` when arguments fail decode (a value, or a function of the failing argument's index; default `ErrorResult`), and
 	for an admin Function `Denied(reason)` with AdminGate's "NotAuthorized"/"RateLimited". A handler that throws answers
 	`ErrorResult` (Function) or is logged (Event) -- it never throws across the remote boundary.
 
@@ -90,7 +90,8 @@ export type FunctionSpec = {
 	ErrorResult: any,
 	-- Called instead of answering ErrorResult when the player is rate limited. May return nil.
 	OnLimited: ((player: Player) -> any)?,
-	-- The answer when `Args` fails to decode.
+	-- The answer when `Args` fails to decode: a value, or a function of the player and the 1-based index of the argument that
+	-- failed, for a remote whose callers are told WHICH argument was wrong (ArtSystem's InvalidSlot / InvalidArtId).
 	Invalid: any?,
 	-- For an admin Function: the answer for AdminGate's "NotAuthorized" / "RateLimited".
 	Denied: ((reason: string) -> any)?,
@@ -110,19 +111,19 @@ export type Scope = {
 	Push: (name: string, options: { Unreliable: boolean? }?) -> RemoteEvent,
 }
 
--- Decodes `raw` against `shapes`. Returns the decoded list and its length, or nil and the reason.
-local function decodeArgs(shapes: { Schema.Shape<any> }, ...: any): ({ any }?, string?)
+-- Decodes `raw` against `shapes`. Returns the decoded list, or nil with the reason and the index of the argument that failed.
+local function decodeArgs(shapes: { Schema.Shape<any> }, ...: any): ({ any }?, string?, number?)
 	local decoded: { any } = {}
 	local raw = { ... }
 	for index, shape in shapes do
 		local value, reason = shape(raw[index])
 		if reason ~= nil then
-			return nil,
-				`argument {index}: {tostring(if typeof(reason) == "table" then (reason :: any).Code else reason)}`
+			local text = tostring(if Schema.IsTable(reason) then (reason :: any).Code else reason)
+			return nil, `argument {index}: {text}`, index
 		end
 		decoded[index] = value
 	end
-	return decoded, nil
+	return decoded, nil, nil
 end
 
 -- AdminGate (auth, then limiter) or the limiter alone. Returns nil when the call may proceed, else the refusal reason.
@@ -200,9 +201,12 @@ function Endpoint.Scope(owner: string, logger: Logger.LoggerScope): Scope
 					return spec.ErrorResult
 				end
 				if spec.Args then
-					local decoded, why = decodeArgs(spec.Args, ...)
+					local decoded, why, argumentIndex = decodeArgs(spec.Args, ...)
 					if decoded == nil then
 						logger:debug(`{spec.Name} rejected: {why}`, { player = player.Name })
+						if Schema.IsFunction(spec.Invalid) then
+							return (spec.Invalid :: any)(player, argumentIndex)
+						end
 						if spec.Invalid ~= nil then
 							return spec.Invalid
 						end
