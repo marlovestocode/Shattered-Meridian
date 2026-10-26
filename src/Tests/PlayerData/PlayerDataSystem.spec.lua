@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local PlayerDataSystem = require(ServerScriptService.Server.Systems.PlayerDataSystem)
+local SettingsSlice = require(ServerScriptService.Server.Data.Slices.SettingsSlice)
 local Types = require(ReplicatedStorage.Shared.Types)
 -- Read for one purpose: the migration tests below assert that a stale record reaches the CURRENT
 -- schema version, not a hardcoded number. Those assertions used to spell the version out, which meant
@@ -111,7 +112,7 @@ return function()
 
 			expect(migrated.SchemaVersion).to.equal(CURRENT_SCHEMA)
 			expect(profile.settings.Parkour).never.to.equal(nil)
-			expect(profile.settings.Parkour.Enabled).to.equal(PlayerDataSystem.CreateDefaultParkourSettings().Enabled)
+			expect(profile.settings.Parkour.Enabled).to.equal(SettingsSlice.CreateDefaultParkourSettings().Enabled)
 			expect(profile.settings.Parkour.SprintMode).to.equal("Hold")
 			-- The pre-existing preference must survive the step untouched.
 			expect(profile.settings.Autorun).to.equal(true)
@@ -151,7 +152,7 @@ return function()
 						Keybinds = {},
 						GamepadKeybinds = {},
 						Autorun = false,
-						Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
+						Parkour = SettingsSlice.CreateDefaultParkourSettings(),
 					},
 				},
 			}
@@ -175,7 +176,7 @@ return function()
 						Keybinds = {},
 						GamepadKeybinds = {},
 						Autorun = false,
-						Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
+						Parkour = SettingsSlice.CreateDefaultParkourSettings(),
 						Comfort = { CameraShake = false, FieldOfViewEffects = false },
 					},
 				},
@@ -310,13 +311,13 @@ return function()
 				Keybinds = {},
 				GamepadKeybinds = {},
 				Autorun = false,
-				Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
+				Parkour = SettingsSlice.CreateDefaultParkourSettings(),
 				Comfort = {
 					CameraShake = false,
 					FieldOfViewEffects = true,
 				},
 			}
-			local decoded = PlayerDataSystem.DecodeSettings(PlayerDataSystem.EncodeSettings(settings))
+			local decoded = SettingsSlice.DecodeSettings(SettingsSlice.EncodeSettings(settings))
 
 			expect(decoded.Comfort.CameraShake).to.equal(false)
 			expect(decoded.Comfort.FieldOfViewEffects).to.equal(true)
@@ -332,7 +333,7 @@ return function()
 		-- A renamed KeybindAction. The client cannot migrate this itself: the decode below drops any action
 		-- no longer in Keybinds.Defaults, so a binding saved as "Roll" would be silently reset to Z.
 		it("carries a binding saved under the retired Roll action over to Evade", function()
-			local decoded = PlayerDataSystem.DecodeSettings({
+			local decoded = SettingsSlice.DecodeSettings({
 				Keybinds = { Roll = { KeyCode = "X" } },
 				GamepadKeybinds = { Roll = { KeyCode = "ButtonX" } },
 				Autorun = false,
@@ -344,7 +345,7 @@ return function()
 		end)
 
 		it("prefers a binding saved under Evade over a stale Roll one in the same record", function()
-			local decoded = PlayerDataSystem.DecodeSettings({
+			local decoded = SettingsSlice.DecodeSettings({
 				Keybinds = { Roll = { KeyCode = "X" }, Evade = { KeyCode = "V" } },
 				GamepadKeybinds = {},
 				Autorun = false,
@@ -354,7 +355,7 @@ return function()
 		end)
 
 		it("falls back to the shipped stick defaults for a missing Gamepad block", function()
-			local decoded = PlayerDataSystem.DecodeSettings({
+			local decoded = SettingsSlice.DecodeSettings({
 				Keybinds = {},
 				GamepadKeybinds = {},
 				Autorun = false,
@@ -371,7 +372,7 @@ return function()
 		-- older build, a hand-edited test profile or a future bug can all produce one, and the failure
 		-- is a stick that does nothing with no way for the player to see why.
 		it("clamps a stored deadzone that would leave the stick inert", function()
-			local decoded = PlayerDataSystem.DecodeSettings({
+			local decoded = SettingsSlice.DecodeSettings({
 				Keybinds = {},
 				GamepadKeybinds = {},
 				Autorun = false,
@@ -387,7 +388,7 @@ return function()
 		-- NaN is the one number math.clamp cannot rescue: it compares false against every bound and
 		-- would propagate straight through to Analog.ApplyStick, where it fails every magnitude test.
 		it("rejects a NaN stick value rather than clamping it", function()
-			local decoded = PlayerDataSystem.DecodeSettings({
+			local decoded = SettingsSlice.DecodeSettings({
 				Keybinds = {},
 				GamepadKeybinds = {},
 				Autorun = false,
@@ -400,7 +401,7 @@ return function()
 		end)
 
 		it("keeps an in-range stored stick block exactly as written", function()
-			local decoded = PlayerDataSystem.DecodeSettings({
+			local decoded = SettingsSlice.DecodeSettings({
 				Keybinds = {},
 				GamepadKeybinds = {},
 				Autorun = false,
@@ -421,7 +422,7 @@ return function()
 		end)
 
 		it("falls back to effects-ON for a missing Comfort block", function()
-			local decoded = PlayerDataSystem.DecodeSettings({
+			local decoded = SettingsSlice.DecodeSettings({
 				Keybinds = {},
 				GamepadKeybinds = {},
 				Autorun = false,
@@ -443,7 +444,7 @@ return function()
 				Autorun = true,
 			} :: any
 
-			local encoded = PlayerDataSystem.EncodeSettings(partial)
+			local encoded = SettingsSlice.EncodeSettings(partial)
 
 			expect(encoded.Autorun).to.equal(true)
 			expect(encoded.Parkour).never.to.equal(nil)
@@ -452,7 +453,7 @@ return function()
 		end)
 
 		it("keeps an explicitly disabled effect disabled rather than treating it as missing", function()
-			local decoded = PlayerDataSystem.DecodeSettings({
+			local decoded = SettingsSlice.DecodeSettings({
 				Keybinds = {},
 				GamepadKeybinds = {},
 				Autorun = false,
@@ -480,9 +481,9 @@ return function()
 					StepAssist = false,
 					SprintMode = "Toggle",
 				},
-				Comfort = PlayerDataSystem.CreateDefaultComfortSettings(),
+				Comfort = SettingsSlice.CreateDefaultComfortSettings(),
 			}
-			local decoded = PlayerDataSystem.DecodeSettings(PlayerDataSystem.EncodeSettings(settings))
+			local decoded = SettingsSlice.DecodeSettings(SettingsSlice.EncodeSettings(settings))
 
 			expect(decoded.Parkour.Enabled).to.equal(false)
 			expect(decoded.Parkour.CameraEffects).to.equal(false)
@@ -497,8 +498,8 @@ return function()
 		it("falls back to the shipped defaults for a missing Parkour block", function()
 			-- Not to `false` for every boolean, which is what a naive decode would produce -- and which
 			-- would read to a returning player as the game having silently switched their assists off.
-			local defaults = PlayerDataSystem.CreateDefaultParkourSettings()
-			local decoded = PlayerDataSystem.DecodeSettings({ Keybinds = {}, GamepadKeybinds = {}, Autorun = false })
+			local defaults = SettingsSlice.CreateDefaultParkourSettings()
+			local decoded = SettingsSlice.DecodeSettings({ Keybinds = {}, GamepadKeybinds = {}, Autorun = false })
 
 			expect(decoded.Parkour.Enabled).to.equal(defaults.Enabled)
 			expect(decoded.Parkour.CoyoteTime).to.equal(defaults.CoyoteTime)
@@ -506,8 +507,8 @@ return function()
 		end)
 
 		it("falls back per-field for a partially-populated Parkour block", function()
-			local defaults = PlayerDataSystem.CreateDefaultParkourSettings()
-			local decoded = PlayerDataSystem.DecodeSettings({
+			local defaults = SettingsSlice.CreateDefaultParkourSettings()
+			local decoded = SettingsSlice.DecodeSettings({
 				Keybinds = {},
 				GamepadKeybinds = {},
 				Autorun = false,
@@ -519,7 +520,7 @@ return function()
 		end)
 
 		it("rejects a non-string SprintMode rather than storing it", function()
-			local decoded = PlayerDataSystem.DecodeSettings({
+			local decoded = SettingsSlice.DecodeSettings({
 				Keybinds = {},
 				GamepadKeybinds = {},
 				Autorun = false,
@@ -529,7 +530,7 @@ return function()
 		end)
 
 		it("survives a wholly non-table Parkour field", function()
-			local decoded = PlayerDataSystem.DecodeSettings({
+			local decoded = SettingsSlice.DecodeSettings({
 				Keybinds = {},
 				GamepadKeybinds = {},
 				Autorun = false,

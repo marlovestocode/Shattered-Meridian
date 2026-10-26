@@ -892,7 +892,7 @@ export type KeybindDevice = "Keyboard" | "Gamepad"
 -- SPARSE override maps, not a full snapshot of every KeybindAction -- an action absent from either
 -- map simply stays at its Constants.Keybinds.Defaults/GamepadDefaults value, the same "only store
 -- what actually differs" contract that keeps a stale/renamed/retired KeybindAction from ever
--- corrupting a saved profile (PlayerDataSystem.DecodeSettings drops any key that isn't a live,
+-- corrupting a saved profile (SettingsSlice.DecodeSettings drops any key that isn't a live,
 -- rebindable KeybindAction rather than trusting the stored shape). Flat and open to new keys by
 -- construction -- a future toggle (e.g. a camera-shake or gore-filter preference) is just one more
 -- field here, never a reason to introduce a second settings table.

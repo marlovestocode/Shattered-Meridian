@@ -39,7 +39,7 @@
 	remote, which profile -- lives in Server/Network/Endpoint and Server/Data/ProfileSlice, never here.
 
 	LENIENT READS. A few decoders do not validate, they tolerate -- a legacy record's field is read if it is a number
-	and otherwise ignored (MoveRecordCodec). `Schema.IsTable/IsString/IsNumber/IsBoolean/IsFunction/IsVector3` and `NumberOr/StringOr` are
+	and otherwise ignored (MoveRecordCodec). `Schema.IsTable/IsString/IsNumber/IsBoolean/IsEnumItem/IsFunction/IsVector3` and `NumberOr/StringOr` are
 	those reads, named once so the server's `typeof` checks live here and nowhere else. They do not exclude NaN
 	(`IsNumber` is `typeof(v) == "number"`); a caller that must should use `Number(...)`.
 
@@ -99,6 +99,10 @@ end
 
 function Schema.IsBoolean(value: unknown): boolean
 	return typeof(value) == "boolean"
+end
+
+function Schema.IsEnumItem(value: unknown): boolean
+	return typeof(value) == "EnumItem"
 end
 
 function Schema.IsFunction(value: unknown): boolean

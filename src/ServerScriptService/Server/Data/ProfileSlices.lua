@@ -16,6 +16,7 @@ local BloodlineSlice = require(script.Parent.Slices.BloodlineSlice)
 local CharacterSlice = require(script.Parent.Slices.CharacterSlice)
 local EmoteSlice = require(script.Parent.Slices.EmoteSlice)
 local InventorySlice = require(script.Parent.Slices.InventorySlice)
+local SettingsSlice = require(script.Parent.Slices.SettingsSlice)
 
 return ProfileSlice.Compose({
 	EmoteSlice,
@@ -23,4 +24,5 @@ return ProfileSlice.Compose({
 	BloodlineSlice,
 	CharacterSlice,
 	InventorySlice,
+	SettingsSlice,
 })

@@ -37,6 +37,7 @@ local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local Schema = require(ReplicatedStorage.Shared.Schema)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
+local SettingsSlice = require(script.Parent.Parent.Data.Slices.SettingsSlice)
 
 local logger = Logger.scope("SettingsSystem")
 
@@ -55,10 +56,10 @@ local DEFAULT_SETTINGS: Types.PlayerSettings = {
 	Keybinds = {},
 	GamepadKeybinds = {},
 	Autorun = false,
-	Parkour = PlayerDataSystem.CreateDefaultParkourSettings(),
-	Comfort = PlayerDataSystem.CreateDefaultComfortSettings(),
-	Gamepad = PlayerDataSystem.CreateDefaultGamepadSettings(),
-	UI = PlayerDataSystem.CreateDefaultUISettings(),
+	Parkour = SettingsSlice.CreateDefaultParkourSettings(),
+	Comfort = SettingsSlice.CreateDefaultComfortSettings(),
+	Gamepad = SettingsSlice.CreateDefaultGamepadSettings(),
+	UI = SettingsSlice.CreateDefaultUISettings(),
 }
 
 -- The closed set of fields a client may write in each settings group, and the shape each value is judged by. A
@@ -95,7 +96,7 @@ local GROUPS: { [string]: Group } = {
 			StepAssist = Schema.Boolean,
 			SprintMode = Schema.Enum({ "Hold", "Toggle" }),
 		}),
-		Default = PlayerDataSystem.CreateDefaultParkourSettings,
+		Default = SettingsSlice.CreateDefaultParkourSettings,
 	},
 	Comfort = {
 		Key = "Comfort",
@@ -104,7 +105,7 @@ local GROUPS: { [string]: Group } = {
 			FieldOfViewEffects = Schema.Boolean,
 			VehicleCameraMotion = Schema.Boolean,
 		}),
-		Default = PlayerDataSystem.CreateDefaultComfortSettings,
+		Default = SettingsSlice.CreateDefaultComfortSettings,
 	},
 	Gamepad = {
 		Key = "Gamepad",
@@ -115,14 +116,14 @@ local GROUPS: { [string]: Group } = {
 			InvertLookY = Schema.Boolean,
 			Vibration = Schema.Boolean,
 		}),
-		Default = PlayerDataSystem.CreateDefaultGamepadSettings,
+		Default = SettingsSlice.CreateDefaultGamepadSettings,
 	},
 	UI = {
 		Key = "UI",
 		Write = Schema.FieldValue({
 			Scale = Schema.Number(UIBounds.Scale.Min, UIBounds.Scale.Max),
 		}),
-		Default = PlayerDataSystem.CreateDefaultUISettings,
+		Default = SettingsSlice.CreateDefaultUISettings,
 	},
 }
 
